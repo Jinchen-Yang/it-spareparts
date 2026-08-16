@@ -330,3 +330,53 @@ def test_line_evidence_carries_pool_and_never_asserts_for_unknown_pn(db, tmp_pat
     rows = facts.line_evidence(db, source_order_id=orders[0].raw_order_id)
     assert rows[0]["pool"] == {"in_pool": None, "pool_name": None,
                                "pool_status": None}
+
+
+def test_pool_membership_keeps_source_pool_after_merge(db):
+    """并档不搬 part_pool_member（复合主键），成员行还挂在源 part 上。
+
+    只查主档会把源 PN 已有的池归属抹成「不在池」——那是把「已知在池」讲成
+    「已知不在池」，比不知道更糟。回归锁死：源在池、主档不在池时仍能读到。
+    """
+    from app.models.dimensions import DimPart
+
+    src, tgt = DimPart(pn_std="PN-MERGE-SRC"), DimPart(pn_std="PN-MERGE-TGT")
+    db.add_all([src, tgt])
+    db.commit()
+    _pool(db, "源在的池", pns=["PN-MERGE-SRC"])   # 入池时源还是 active
+    src.status, src.merged_into_id = "merged", tgt.id
+    db.commit()
+    hit = facts.pool_membership(db, {"PN-MERGE-SRC"})["PN-MERGE-SRC"]
+    assert hit["in_pool"] is True and hit["pool_name"] == "源在的池"
+
+
+def test_pool_membership_prefers_active_target_pool_over_archived_source_pool(db):
+    """源挂归档池、主档在有效池 → 取有效池（跨两条线共用同一套排序）。"""
+    from app.models.dimensions import DimPart
+
+    src, tgt = DimPart(pn_std="PN-MERGE-SRC2"), DimPart(pn_std="PN-MERGE-TGT2")
+    db.add_all([src, tgt])
+    db.commit()
+    _pool(db, "源的归档池", status="archived", pns=["PN-MERGE-SRC2"])
+    _pool(db, "主档有效池", pns=["PN-MERGE-TGT2"])
+    src.status, src.merged_into_id = "merged", tgt.id
+    db.commit()
+    hit = facts.pool_membership(db, {"PN-MERGE-SRC2"})["PN-MERGE-SRC2"]
+    assert hit["pool_name"] == "主档有效池" and hit["pool_status"] == "active"
+
+
+def test_pool_membership_archived_recency_tiebreak(db):
+    """同为归档池时取最近更新的那个，不被别的归档行盖掉。"""
+    import datetime as dt
+
+    from app.models.inventory import PartPool
+
+    old = _pool(db, "旧归档池", status="archived", pns=["PN-ARCH-TIE"])
+    new = _pool(db, "新归档池", status="archived", pns=["PN-ARCH-TIE"])
+    db.execute(PartPool.__table__.update().where(PartPool.group_id == old)
+               .values(updated_at=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)))
+    db.execute(PartPool.__table__.update().where(PartPool.group_id == new)
+               .values(updated_at=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)))
+    db.commit()
+    assert facts.pool_membership(db, {"PN-ARCH-TIE"})["PN-ARCH-TIE"]["pool_name"] \
+        == "新归档池"

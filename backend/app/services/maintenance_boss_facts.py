@@ -242,7 +242,11 @@ def pool_membership(db: Session, pn_stds: set[str]) -> dict[str, dict]:
     一个 PN 只能属于一个**有效**池，但归档池保留成员集合，所以同一 PN 可能同时
     出现在若干归档池行里（models/inventory.py:123 注释）。取值优先有效池，其次
     最近更新的归档池——归档池在前端是黄色警示，不能被别的归档行盖掉。
-    并入他档的 PN（status='merged'）跟随主档一跳，否则改名后池归属会凭空消失。
+
+    并入他档的 PN（status='merged'）要同时看**自己**和**主档**两条线：
+    services/merge.py 只 repoint 事实表与别名，**不搬 part_pool_member**（该表是
+    复合主键 (group_id, part_id)），所以并档后成员行还挂在源 part 上。只查主档会
+    把源 PN 已有的池归属抹成「不在池」，只查源又会漏掉并档后才建的池。
     """
     if not pn_stds:
         return {}
@@ -252,29 +256,36 @@ def pool_membership(db: Session, pn_stds: set[str]) -> dict[str, dict]:
     ).all()
     if not parts:
         return {}
-    lookup_ids = {
-        (p.merged_into_id if p.status == "merged" and p.merged_into_id else p.id)
-        for p in parts
-    }
+
+    def _targets(part) -> tuple[int, ...]:
+        if part.status == "merged" and part.merged_into_id:
+            return (part.id, part.merged_into_id)
+        return (part.id,)
+
+    lookup_ids = {pid for part in parts for pid in _targets(part)}
     memberships = db.execute(
         select(PartPoolMember.part_id, PartPool.name, PartPool.status,
                PartPool.updated_at)
         .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
         .where(PartPoolMember.part_id.in_(lookup_ids))
     ).all()
+
+    def _rank(row) -> tuple:
+        # 有效池优先；同档次内取最近更新的（时间戳取负，越新排越前）
+        return (0 if row.status == "active" else 1,
+                -(row.updated_at.timestamp() if row.updated_at else 0))
+
     best: dict[int, tuple] = {}
     for row in memberships:
-        rank = (0 if row.status == "active" else 1)
-        key = (rank, -(row.updated_at.timestamp() if row.updated_at else 0))
+        key = _rank(row)
         if row.part_id not in best or key < best[row.part_id][0]:
             best[row.part_id] = (key, row)
     out: dict[str, dict] = {}
     for part in parts:
-        target = (part.merged_into_id
-                  if part.status == "merged" and part.merged_into_id else part.id)
-        hit = best.get(target)
+        hits = [best[pid] for pid in _targets(part) if pid in best]
+        hit = min(hits, key=lambda item: item[0])[1] if hits else None
         out[part.pn_std] = (
-            {"in_pool": True, "pool_name": hit[1].name, "pool_status": hit[1].status}
+            {"in_pool": True, "pool_name": hit.name, "pool_status": hit.status}
             if hit else {"in_pool": False, "pool_name": None, "pool_status": None}
         )
     return out
