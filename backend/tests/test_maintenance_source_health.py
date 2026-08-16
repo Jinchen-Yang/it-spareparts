@@ -5,6 +5,8 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from sqlalchemy import select
+
 from app.business_time import business_today
 from app.etl import pipeline
 from app.models.maintenance_ckd_import import (
@@ -196,3 +198,47 @@ def test_voided_ckd_head_not_counted_as_unlinked(db):
     source = health.source_health(db)["sources"]["ckd"]
     assert source["unlinked_rows"] == 0
     assert source["readiness"] == "ready"
+
+
+def test_ignored_heads_do_not_count_as_unlinked(db):
+    """导入 apply 主动忽略的头行不算「未关联」，否则 partial 永不消退。
+
+    RKD 导出里绝大多数是采购入库/销售退货（非返件类），apply 记为 ignored_heads
+    并按设计不解析项目。把它们算进 unlinked，一份完全正常的导出会永久停在
+    partial + 一个很大的计数——这种不会消退的假警报会把 readiness 训练成噪音，
+    真正的 partial 就没人看了。作废/草稿头同理。
+    """
+    _doc_batch(db, "rkd_inbound", project_id=None)          # 返件类未解析 → 真未关联
+    batch = db.execute(
+        select(MaintenanceDocImportBatch).where(
+            MaintenanceDocImportBatch.doc_type == "rkd_inbound")
+    ).scalars().one()
+    db.add_all([
+        # 非返件类：apply 直接 ignored_heads
+        MaintenanceDocHeadRow(
+            row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=2,
+            raw_json={}, head_no="RKD-BUY", head_date=date(2026, 7, 25),
+            category="采购入库", data_status="已生效", project_id=None),
+        # 作废头：apply 同样 ignored_heads
+        MaintenanceDocHeadRow(
+            row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=3,
+            raw_json={}, head_no="RKD-VOID", head_date=date(2026, 7, 25),
+            category="维保拆旧返件", data_status="已取消", project_id=None),
+    ])
+    db.commit()
+    source = health.source_health(db)["sources"]["rkd_inbound"]
+    assert source["unlinked_rows"] == 1, "只有返件类且已生效的未解析头才算未关联"
+
+
+def test_return_order_voided_head_not_counted_as_unlinked(db):
+    _doc_batch(db, "return_order", project_id=None)
+    batch = db.execute(
+        select(MaintenanceDocImportBatch).where(
+            MaintenanceDocImportBatch.doc_type == "return_order")
+    ).scalars().one()
+    db.add(MaintenanceDocHeadRow(
+        row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=2, raw_json={},
+        head_no="RT-VOID", head_date=date(2026, 7, 25), category="维保拆旧返件",
+        data_status="草稿", project_id=None))
+    db.commit()
+    assert health.source_health(db)["sources"]["return_order"]["unlinked_rows"] == 1

@@ -19,6 +19,8 @@ from decimal import Decimal
 from sqlalchemy import Select, String, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.dimensions import DimPart
+from app.models.inventory import PartPool, PartPoolMember
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_ckd_import import (
     MaintenanceCkdHeadRow,
@@ -234,6 +236,50 @@ def order_self_report_and_facts(db: Session, *, source_order_id: str) -> dict:
     }
 
 
+def pool_membership(db: Session, pn_stds: set[str]) -> dict[str, dict]:
+    """PN → 互通池归属（plan §4.5 pool 列）。一次批量查询，无 N+1。
+
+    一个 PN 只能属于一个**有效**池，但归档池保留成员集合，所以同一 PN 可能同时
+    出现在若干归档池行里（models/inventory.py:123 注释）。取值优先有效池，其次
+    最近更新的归档池——归档池在前端是黄色警示，不能被别的归档行盖掉。
+    并入他档的 PN（status='merged'）跟随主档一跳，否则改名后池归属会凭空消失。
+    """
+    if not pn_stds:
+        return {}
+    parts = db.execute(
+        select(DimPart.id, DimPart.pn_std, DimPart.status, DimPart.merged_into_id)
+        .where(DimPart.pn_std.in_(pn_stds))
+    ).all()
+    if not parts:
+        return {}
+    lookup_ids = {
+        (p.merged_into_id if p.status == "merged" and p.merged_into_id else p.id)
+        for p in parts
+    }
+    memberships = db.execute(
+        select(PartPoolMember.part_id, PartPool.name, PartPool.status,
+               PartPool.updated_at)
+        .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+        .where(PartPoolMember.part_id.in_(lookup_ids))
+    ).all()
+    best: dict[int, tuple] = {}
+    for row in memberships:
+        rank = (0 if row.status == "active" else 1)
+        key = (rank, -(row.updated_at.timestamp() if row.updated_at else 0))
+        if row.part_id not in best or key < best[row.part_id][0]:
+            best[row.part_id] = (key, row)
+    out: dict[str, dict] = {}
+    for part in parts:
+        target = (part.merged_into_id
+                  if part.status == "merged" and part.merged_into_id else part.id)
+        hit = best.get(target)
+        out[part.pn_std] = (
+            {"in_pool": True, "pool_name": hit[1].name, "pool_status": hit[1].status}
+            if hit else {"in_pool": False, "pool_name": None, "pool_status": None}
+        )
+    return out
+
+
 def line_evidence(db: Session, *, source_order_id: str) -> list[dict]:
     """PN 证据行：需求明细 + 全部流转状态列**原样**（铁律 3：不计算、不标注）。"""
     rows = db.execute(
@@ -242,8 +288,15 @@ def line_evidence(db: Session, *, source_order_id: str) -> list[dict]:
         .where(FMaintenanceOrder.raw_order_id == source_order_id)
         .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
     ).scalars().all()
+    pools = pool_membership(db, {ln.pn_std for ln in rows if ln.pn_std})
+    # 未标准化的 PN 认不出型号，"不在任何池"是句没有依据的断言（铁律 5）：
+    # in_pool 留 None 表示「无法判断」，与"确实不在池"（False）区分开。
+    unknown_pool = {"in_pool": None, "pool_name": None, "pool_status": None}
     return [
         {
+            "pool": (pools.get(ln.pn_std, {"in_pool": False, "pool_name": None,
+                                           "pool_status": None})
+                     if ln.pn_std else dict(unknown_pool)),
             "raw_line_id": ln.raw_line_id,
             "pn_std": ln.pn_std, "pn_raw": ln.pn_raw,
             "description": ln.description,

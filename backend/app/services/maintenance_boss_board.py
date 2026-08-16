@@ -376,7 +376,19 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         raise BoardSortNotPermitted()
     window = resolve_window(date_from, date_to)
 
-    filters = [MaintenanceProject.is_active.is_(True)]
+    # 归档项目（is_active=False）**仍带着单**时必须留在列表里：它既不在项目行、
+    # 也进不了未归属桶（归属还是活跃的），一旦滤掉，那些单就从看板上凭空消失，
+    # §6.2 的母集恒等式跟着不成立——老板看到的总数会因为有人归档了一个项目而
+    # 无声变小。已经空掉的归档项目照旧隐藏，不给列表添乱。
+    carries_orders = (
+        select(1)
+        .select_from(MaintenanceSourceOrderAssignment)
+        .where(MaintenanceSourceOrderAssignment.project_id
+               == MaintenanceProject.project_id,
+               MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .exists()
+    )
+    filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
     if lifecycle in ("ongoing", "ended", "missing"):
         filters.append(MaintenanceProject.lifecycle_status == lifecycle)
     if allowed_project_ids is not None:
@@ -463,6 +475,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": proj.project_code,
             "display_name": proj.display_name,
             "lifecycle": proj.lifecycle_status,
+            # 归档但仍带单：留在列表里保住母集恒等式，用标记让老板知道它已归档
+            "is_archived": not proj.is_active,
             "has_activity_in_window": bool(orders_n),
             "pre_delivery_order_count": pre_delivery.get(proj.project_id, 0),
             "orders_ytd": ready(orders_n) if wbdd_ready else not_imported(),
@@ -483,6 +497,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
             "lifecycle": "missing",
+            "is_archived": False,      # 键集与项目行保持一致
             "has_activity_in_window": bool(u_orders),
             "pre_delivery_order_count": 0,
             "orders_ytd": ready(u_orders) if wbdd_ready else not_imported(),
@@ -661,11 +676,19 @@ def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
         .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
         .offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()
+    pools = maintenance_boss_facts.pool_membership(
+        db, {ln.pn_std for ln in rows if ln.pn_std})
+    # 认不出型号时不断言「不在池」（铁律 5）：in_pool=None 表示无法判断
+    no_pool = {"in_pool": False, "pool_name": None, "pool_status": None}
+    unknown_pool = {"in_pool": None, "pool_name": None, "pool_status": None}
     out = []
     for ln in rows:
         out.append({
             "raw_line_id": ln.raw_line_id,
             "pn_std": ln.pn_std, "pn_raw": ln.pn_raw,
+            # 归档池在前端是黄色警示（plan §4.5）
+            "pool": (pools.get(ln.pn_std, dict(no_pool)) if ln.pn_std
+                     else dict(unknown_pool)),
             "description": ln.description,
             "qty": ln.qty, "return_qty": ln.return_qty,
             # 14 个流转状态列原样（铁律 3：不计算、不标注）

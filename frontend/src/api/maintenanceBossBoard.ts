@@ -90,6 +90,8 @@ export interface BoardProjectRow {
   project_code: string;
   display_name: string;
   lifecycle: "ongoing" | "ended" | "missing";
+  /** 已归档但仍带单：留在列表里保住母集恒等式，不让单据凭空消失。 */
+  is_archived: boolean;
   has_activity_in_window: boolean;
   pre_delivery_order_count: number;
   orders_ytd: Stat<number>;
@@ -141,11 +143,19 @@ export interface BoardOrders {
   page_size: number;
 }
 
+/** 互通池归属：in_pool=null 表示 PN 未标准化、无法判断（不等于「不在池」）。 */
+export interface PoolMembership {
+  in_pool: boolean | null;
+  pool_name: string | null;
+  pool_status: "active" | "archived" | null;
+}
+
 /** PN 证据行：14 个流转状态列**原样**展示，不参与任何计算（铁律 3）。 */
 export interface BoardLineRow {
   raw_line_id: string;
   pn_std: string | null;
   pn_raw: string | null;
+  pool: PoolMembership;
   description: string | null;
   qty: string | number | null;
   return_qty: string | number | null;

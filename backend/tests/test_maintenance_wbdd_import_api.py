@@ -225,3 +225,78 @@ def test_latest_health_before_and_after_upload(db, tmp_path):
     assert after["readiness"] == "ready"
     assert after["as_of"] == "2026-07-15"
     assert after["layout"] == "91"
+
+
+def test_replay_after_recompute_busy_finishes_the_cost_backfill(db, tmp_path):
+    """回放必须把首次 409 时没跑完的成本回填补上（否则成本永远停在导入前）。
+
+    首调用在 recompute 处撞上「另一重算进行中」→ API 返回 409，但回执已经提交。
+    若回放只把原报告读回来，这批单的成本就永久停在旧口径，而报告看起来是成功的
+    ——静默的错，最难发现。回放时必须补跑重算。
+    """
+    from app.services.maintenance_cost import MaintenanceCostRecomputeBusy
+    from app.services import maintenance_wbdd_import as wbdd
+
+    client = _client(db, username="wbdd-replay",
+                     overrides={"page_maintenance": True,
+                                "action_maintenance_wbdd_import": True})
+    path = _wbdd_file(tmp_path)
+    key = f"idem-{uuid.uuid4()}"
+
+    calls = {"n": 0}
+    real = wbdd.maintenance_cost.recompute
+
+    def flaky(session):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MaintenanceCostRecomputeBusy("另一重算进行中")
+        return real(session)
+
+    wbdd.maintenance_cost.recompute = flaky
+    try:
+        first = _upload(client, path, key=key)
+        assert first.status_code == 409
+        assert first.json()["detail"]["code"] == "recompute_busy"
+        # 回执已落库，但重算没跑完
+        receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
+        db.refresh(receipt)
+        assert receipt.report_json.get("recompute") is None
+
+        second = _upload(client, path, key=key)
+        assert second.status_code == 200, second.text
+        body = second.json()
+        assert body["replayed"] is True
+        assert body["recompute"] is not None, "回放没有补跑成本回填"
+        assert calls["n"] == 2, "回放应当再调一次 recompute"
+        db.expire_all()
+        receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
+        assert receipt.report_json["recompute"] is not None
+    finally:
+        wbdd.maintenance_cost.recompute = real
+
+
+def test_replay_does_not_rerun_recompute_when_already_done(db, tmp_path):
+    """正常回放仍是纯读：不得重复触发重算（幂等）。"""
+    from app.services import maintenance_wbdd_import as wbdd
+
+    client = _client(db, username="wbdd-replay2",
+                     overrides={"page_maintenance": True,
+                                "action_maintenance_wbdd_import": True})
+    path = _wbdd_file(tmp_path)
+    key = f"idem-{uuid.uuid4()}"
+    assert _upload(client, path, key=key).status_code == 200
+
+    calls = {"n": 0}
+    real = wbdd.maintenance_cost.recompute
+
+    def counted(session):
+        calls["n"] += 1
+        return real(session)
+
+    wbdd.maintenance_cost.recompute = counted
+    try:
+        again = _upload(client, path, key=key)
+        assert again.status_code == 200 and again.json()["replayed"] is True
+        assert calls["n"] == 0
+    finally:
+        wbdd.maintenance_cost.recompute = real

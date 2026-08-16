@@ -121,6 +121,22 @@ export function OrderEvidenceTable({
 }
 
 /**
+ * 互通池归属（plan v1.3 §4.5）：归档池黄色警示。
+ *
+ * in_pool=null 表示 PN 未标准化、**判断不了**——显示「—」而不是「不在池」，
+ * 与「确实不属于任何池」区分开（铁律 5：不知道不等于否定）。
+ */
+function PoolCell({ pool }: { pool: BoardLineRow["pool"] }) {
+  if (!pool || pool.in_pool === null || pool.in_pool === undefined) return <>—</>;
+  if (!pool.in_pool) return <Text type="secondary">不在池</Text>;
+  return pool.pool_status === "archived" ? (
+    <Tag color="warning">{pool.pool_name}（已归档）</Tag>
+  ) : (
+    <Tag color="blue">{pool.pool_name}</Tag>
+  );
+}
+
+/**
  * PN 证据行（plan v1.3 §4.5）：14 个流转状态列**原样展示**，
  * 不参与任何计算、不标注可信度（铁律 3）。
  */
@@ -147,6 +163,12 @@ export function LineEvidenceTable({
       render: (value: string | null, row) => raw(value || row.pn_raw),
     },
     { title: "描述", dataIndex: "description", width: 200, render: raw },
+    {
+      title: "互通池",
+      dataIndex: "pool",
+      width: 150,
+      render: (_: unknown, row) => <PoolCell pool={row.pool} />,
+    },
     { title: "需求", dataIndex: "qty", width: 80, render: raw },
     { title: "需采", dataIndex: "purchase_qty", width: 80, render: raw },
     { title: "已采", dataIndex: "purchased_qty", width: 80, render: raw },
@@ -186,7 +208,7 @@ export function LineEvidenceTable({
         loading={loading}
         dataSource={rows}
         columns={columns}
-        scroll={{ x: 2100 }}
+        scroll={{ x: 2250 }}
         pagination={{
           current: page,
           pageSize,

@@ -162,3 +162,59 @@ def test_cost_aggregation_sql_never_references_status_columns(db):
                                compile_kwargs={"literal_binds": True}))
         for column in board.STATUS_ONLY_COLUMNS:
             assert column not in sql, f"成本聚合引用了流转状态列 {column}"
+
+
+def test_archived_project_with_orders_stays_in_mother_set(db, tmp_path):
+    """归档项目仍带单时不得从列表消失，否则母集恒等式无声崩掉。
+
+    归档（is_active=False）是业务动作，并不会顺带停用单据归属。此前列表按
+    is_active 过滤，于是这些单既不在项目行、也进不了未归属桶（归属还是活跃的）
+    ——总数会因为有人归档了一个项目而凭空变小，正是 §6.2 恒等式要防的事。
+    """
+    from app.models.maintenance_project import MaintenanceProject
+
+    live, archived = make_project(db, "在营项目"), make_project(db, "归档项目")
+    orders = import_wbdd(db, tmp_path, orders=3, lines_per_order=1)
+    assign(db, orders[0], live)
+    assign(db, orders[1], archived)
+    # orders[2] 未归属
+    db.get(MaintenanceProject, archived.project_id).is_active = False
+    db.commit()
+
+    client = boss_client(db, username="archive-boss")
+    body = client.get("/api/maintenance/boss-board/projects",
+                      params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    rows = {r["project_id"]: r for r in body["rows"]}
+    assert archived.project_id in rows, "归档但仍带单的项目被滤掉了"
+    assert rows[archived.project_id]["is_archived"] is True
+    assert rows[live.project_id]["is_archived"] is False
+    # 恒等式：Σ项目 + 未归属桶 = 全局母集
+    total_orders = sum(r["orders_ytd"]["value"] for r in body["rows"])
+    summary = client.get("/api/maintenance/boss-board/summary",
+                         params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    assert total_orders == summary["orders_ytd"]["value"] == 3
+
+
+def test_empty_archived_project_stays_hidden(db, tmp_path):
+    """已经空掉的归档项目照旧隐藏——恒等式不需要它，列表也不该被它撑乱。"""
+    from app.models.maintenance_project import MaintenanceProject
+
+    empty = make_project(db, "空归档项目")
+    db.get(MaintenanceProject, empty.project_id).is_active = False
+    db.commit()
+    rows = boss_client(db, username="archive-boss2").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    assert empty.project_id not in {r["project_id"] for r in rows}
+
+
+def test_project_row_keyset_is_identical_for_bucket_and_projects(db, tmp_path):
+    """桶行与项目行键集必须一致（新增 is_archived 后的形状回归）。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2)
+    assign(db, orders[0], proj)
+    rows = boss_client(db, username="shape-boss").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
+    real = next(r for r in rows if r["project_id"] == proj.project_id)
+    assert set(bucket) == set(real)
+    assert "is_archived" in real

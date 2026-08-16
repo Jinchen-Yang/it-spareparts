@@ -56,6 +56,7 @@ export function BossProjectTable({
                   {LIFECYCLE_TEXT[row.lifecycle]?.text ?? row.lifecycle}
                 </Tag>
               )}
+              {row.is_archived ? <Tag color="default">已归档</Tag> : null}
               {row.pre_delivery_order_count > 0 ? (
                 <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>
               ) : null}

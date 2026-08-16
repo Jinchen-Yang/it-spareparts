@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.etl import pipeline
 from app.models.maintenance import FMaintenanceOrder
@@ -262,3 +262,71 @@ def test_same_shipment_in_two_applied_batches_is_not_double_counted(db, tmp_path
     _ckd(db, wbdd_no=order.order_no, qty="5", ckd_no="CKD-DUP", line_id="L-1")
     _ckd(db, wbdd_no=order.order_no, qty="5", ckd_no="CKD-DUP", line_id="L-1")
     assert facts.project_totals(db)[proj.project_id]["shipped"] == Decimal("5.000")
+
+
+# ---------- 互通池归属（plan §4.5 pool 列） ----------
+
+def _pool(db, name, *, status="active", pns=()):
+    from app.models.dimensions import DimPart
+    from app.models.inventory import PartPool, PartPoolMember
+
+    gid = db.execute(select(func.coalesce(func.max(PartPool.group_id), 0))).scalar_one() + 1
+    db.add(PartPool(group_id=gid, name=name, status=status, source="manual",
+                    member_count=len(pns)))
+    db.flush()
+    for pn in pns:
+        part_id = db.execute(
+            select(DimPart.id).where(DimPart.pn_std == pn)).scalar_one_or_none()
+        if part_id is None:
+            part = DimPart(pn_std=pn)
+            db.add(part)
+            db.flush()
+            part_id = part.id
+        db.add(PartPoolMember(group_id=gid, part_id=part_id))
+    db.commit()
+    return gid
+
+
+def test_pool_membership_prefers_active_over_archived(db):
+    """归档池保留成员集合，同一 PN 可同时躺在多个归档池里 —— 取值必须优先有效池。"""
+    _pool(db, "归档池", status="archived", pns=["PN-POOL-1"])
+    _pool(db, "有效池", status="active", pns=["PN-POOL-1"])
+    hit = facts.pool_membership(db, {"PN-POOL-1"})["PN-POOL-1"]
+    assert hit == {"in_pool": True, "pool_name": "有效池", "pool_status": "active"}
+
+
+def test_pool_membership_reports_archived_when_only_archived(db):
+    _pool(db, "只剩归档池", status="archived", pns=["PN-POOL-2"])
+    hit = facts.pool_membership(db, {"PN-POOL-2"})["PN-POOL-2"]
+    assert hit["in_pool"] is True and hit["pool_status"] == "archived"
+
+
+def test_pool_membership_follows_merged_parts(db):
+    """并入他档的 PN 跟随主档一跳，否则改名后池归属会凭空消失。"""
+    from app.models.dimensions import DimPart
+
+    _pool(db, "主档池", pns=["PN-POOL-MAIN"])
+    main_id = db.execute(
+        select(DimPart.id).where(DimPart.pn_std == "PN-POOL-MAIN")).scalar_one()
+    db.add(DimPart(pn_std="PN-POOL-OLD", status="merged", merged_into_id=main_id))
+    db.commit()
+    hit = facts.pool_membership(db, {"PN-POOL-OLD"})["PN-POOL-OLD"]
+    assert hit["in_pool"] is True and hit["pool_name"] == "主档池"
+
+
+def test_line_evidence_carries_pool_and_never_asserts_for_unknown_pn(db, tmp_path):
+    """铁律 5：PN 认不出来时「不在任何池」是没有依据的断言 → in_pool 留 None。"""
+    from app.models.maintenance import FMaintenanceLine
+
+    orders = _wbdd(db, tmp_path, orders=1)
+    line = db.execute(select(FMaintenanceLine)).scalars().first()
+    _pool(db, "证据池", pns=[line.pn_std])
+    rows = facts.line_evidence(db, source_order_id=orders[0].raw_order_id)
+    assert rows[0]["pool"]["in_pool"] is True
+    assert rows[0]["pool"]["pool_name"] == "证据池"
+
+    line.pn_std = None
+    db.commit()
+    rows = facts.line_evidence(db, source_order_id=orders[0].raw_order_id)
+    assert rows[0]["pool"] == {"in_pool": None, "pool_name": None,
+                               "pool_status": None}

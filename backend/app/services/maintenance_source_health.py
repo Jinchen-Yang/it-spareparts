@@ -15,10 +15,11 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
+from app.config import RKD_RETURN_CATEGORIES
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_ckd_import import (
     MaintenanceCkdHeadRow,
@@ -150,9 +151,22 @@ def _doc_source(db: Session, doc_type: str) -> dict:
         .subquery()
     )
     as_of = db.execute(select(func.max(applied_heads.c.head_date))).scalar_one()
+    # 「未关联」只数**本该关联而没关联**的头行。导入 apply 主动忽略的头行
+    # （services/maintenance_doc_import.py:521/609 的 ignored_heads：作废/草稿，
+    # 以及非返件类入库）按设计就没有 project_id——把它们算进来，一份含大量采购
+    # 入库的正常 RKD 导出会永久停在 partial + 一个很大的 unlinked。这种永不消退
+    # 的假警报会把 readiness 训练成噪音，真正的 partial 就没人看了。
+    # 判定与 apply 逐条同形：空串/NULL 视为「未填」而非作废（Python 侧 falsy 分支）
+    ignored = and_(applied_heads.c.data_status.is_not(None),
+                   applied_heads.c.data_status != "",
+                   applied_heads.c.data_status != "已生效")
+    if doc_type == "rkd_inbound":
+        ignored = or_(ignored,
+                      applied_heads.c.category.is_(None),
+                      applied_heads.c.category.notin_(RKD_RETURN_CATEGORIES))
     unlinked = db.execute(
         select(func.count(applied_heads.c.row_id))
-        .where(applied_heads.c.project_id.is_(None))
+        .where(applied_heads.c.project_id.is_(None), ~ignored)
     ).scalar_one()
     readiness = "partial" if (batch.issue_rows or unlinked) else "ready"
     return _envelope(readiness, as_of=as_of, batch_id=batch.batch_id,

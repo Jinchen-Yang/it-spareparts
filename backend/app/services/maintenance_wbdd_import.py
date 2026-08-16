@@ -153,7 +153,15 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     """
     existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key)
     if existing is not None:
-        return dict(existing.report_json), True
+        report = dict(existing.report_json or {})
+        if report.get("recompute") is None:
+            # 首次调用在 recompute 处 409（重算忙）时，回执已提交但成本回填未完成。
+            # 若重放只回放报告，这批单的成本会永远停在导入前的口径——报告看起来还
+            # 是成功的（静默）。重放时补跑重算（导入本身仍幂等，不会重复入库）。
+            report["recompute"] = maintenance_cost.recompute(db)
+            existing.report_json = report
+            db.commit()
+        return report, True
 
     layout = precheck_wbdd_file(file_path)  # 零写入门：非 WBDD / 布局不符在此拒绝
 
