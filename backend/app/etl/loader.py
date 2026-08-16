@@ -343,12 +343,15 @@ _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
                     "anomaly_flags", "import_batch_id"]
 # 维保：legacy 成本、双税成本及 reference_* provenance 均由
 # maintenance_cost.recompute 独占回填；导入修复不得覆盖。
+# 展示补全列（plan v1.3 §3）加入白名单：快照重传可刷新展示列，成本列继续排除。
 _MAINT_ORDER_UPD = ["order_no", "order_date", "linked_sales_order_no", "project_raw",
                      "project_std", "customer_id", "end_customer", "demand_type",
                      "business_type", "salesperson", "warehouse", "maint_start", "maint_end",
-                     "data_status", "import_batch_id"]
+                     "data_status", "import_batch_id",
+                     *mapping.MAINTENANCE_HEAD_DISPLAY_FIELDS]
 _MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
-                    "qty", "return_qty", "serial_numbers", "anomaly_flags", "import_batch_id"]
+                    "qty", "return_qty", "serial_numbers", "anomaly_flags", "import_batch_id",
+                    *mapping.MAINTENANCE_LINE_DISPLAY_FIELDS]
 
 
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
@@ -505,6 +508,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "salesperson": o.get("salesperson"), "warehouse": o.get("warehouse"),
         "maint_start": o.get("maint_start"), "maint_end": o.get("maint_end"),
         "data_status": o["data_status"], "import_batch_id": batch_id,
+        **{f: o.get(f) for f in mapping.MAINTENANCE_HEAD_DISPLAY_FIELDS},
     } for o in orders.values()]
     order_stats = _upsert_facts(session, FMaintenanceOrder, order_rows,
                                 FMaintenanceOrder.raw_order_id,
@@ -524,6 +528,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "qty": ln["qty"], "return_qty": ln["return_qty"],
         "serial_numbers": ln["serial_numbers"],
         "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
+        **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
     } for ln in result.lines]
     line_stats = _upsert_facts(session, FMaintenanceLine, line_rows,
                                FMaintenanceLine.raw_line_id,
@@ -540,6 +545,10 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "orders_updated": order_stats["updated"],
         "import_mode": mode,
         "new_parts": new_parts,
+        # plan v1.3 M1-2/M1-3：无明细单头保留计数（样例 ≤50）与展示列坏值计数
+        "headless_orders": len(result.headless_order_ids),
+        "headless_order_ids_sample": result.headless_order_ids[:50],
+        "rows_display_issue": result.rows_display_issue,
     }
 
 

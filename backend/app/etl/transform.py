@@ -36,6 +36,9 @@ class TransformResult:
     rows_inactive: int = 0
     rows_excluded_warehouse: int = 0   # 排除仓（坏品仓等）跳过的库存行，进导入报告
     rows_skipped_no_data: int = 0      # 报销页缺 日期/金额 跳过的行（合计行/空行，非错误，§17.3）
+    # WBDD 专用（plan v1.3 M1-2/M1-3）：
+    rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
+    headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
 
 
 def _row_dict(row, field_map) -> dict:
@@ -197,6 +200,77 @@ def _safe_money(x):
 # 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）。
 # 横线必需（半/全角/长横容差）：只剥「预交付-X」，不动恰好以「预交付」开头的正常项目名。
 _PROJECT_PREFIX = re.compile(r"^预交付[-—－]")
+
+# ---- WBDD 展示补全列解析规格（plan v1.3 §3；只展示，坏值不阻断行，计 rows_display_issue）----
+# 值 = (解析类别, 字符列截断长度 None=Text 不截断)。字段集与 mapping.MAINTENANCE_*_DISPLAY 一一对应。
+_WBDD_HEAD_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
+    "head_demand_qty": ("qty", None), "head_purchase_qty": ("qty", None),
+    "head_shipped_qty": ("qty", None), "head_returned_qty": ("qty", None),
+    "maintainer_raw": ("str", 64), "work_order_no": ("str", 64),
+    "created_by_raw": ("str", 64), "purchaser_raw": ("str", 64),
+    "purchaser2_raw": ("str", 64), "project_manager_raw": ("str", 64),
+    "project_manager_staff_raw": ("str", 64), "co_salesperson_raw": ("str", 64),
+    "partner_raw": ("str", 64), "sales_dept_raw": ("str", 64),
+    "warehouse_keeper_raw": ("str", 64), "storage_center": ("str", 64),
+    "warehouse_raw": ("str", 64), "change_warehouse_flag": ("bool", None),
+    "change_warehouse": ("str", 64), "change_warehouse_handler": ("str", 64),
+    "warehouse_handler": ("str", 64), "supply_deadline": ("date", None),
+    "delivery_address_option": ("str", 128), "receiver": ("str", 64),
+    "receiver_phone": ("str", 32), "receiver_address": ("str", None),
+    "express_no": ("str", 128), "express_no2": ("str", 128),
+    "image_urls": ("str", None), "attachments": ("str", None),
+    "whole_machine_check": ("str", 16), "accept_generic_flag": ("bool", None),
+    "created_at_raw": ("str", 32), "modified_at_raw": ("str", 32),
+}
+_WBDD_LINE_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
+    "purchase_qty": ("qty", None), "change_warehouse_purchase_qty": ("qty", None),
+    "purchased_qty": ("qty", None), "pending_purchase_qty": ("qty", None),
+    "direct_ship_qty": ("qty", None), "warehouse_need_qty": ("qty", None),
+    "warehouse_shipped_qty": ("qty", None), "supplied_qty": ("qty", None),
+    "pending_supply_qty": ("qty", None), "returned_qty": ("qty", None),
+    "pending_return_qty": ("qty", None), "consumed_qty": ("qty", None),
+    "demand_pending_return_qty": ("qty", None), "return_old_part": ("str", 16),
+    "whole_or_part": ("str", 8), "whole_machine_purchase_part": ("str", None),
+    "whole_machine_part_purchased": ("str", 16), "purchase_note": ("str", None),
+    "line_note": ("str", None), "line_image_urls": ("str", None),
+    "warehouse_stock_raw": ("str", None), "adjust_warehouse_flag": ("bool", None),
+    "adjust_warehouse": ("str", 64), "adjust_storage_center": ("str", 64),
+    "adjust_keeper": ("str", 64), "ship_warehouse": ("str", 64),
+    "ship_warehouse_object_id": ("str", 64), "ship_stock": ("qty", None),
+}
+
+
+def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -> dict:
+    """按规格解析展示补全列：坏值 → NULL＋rows_display_issue+=1，绝不阻断行（只展示用途）。"""
+    out: dict = {}
+    for field_name, (kind, clip) in spec.items():
+        source_col = inv_map.get(field_name)
+        raw = row.get(source_col) if source_col else None
+        if kind == "qty":
+            try:
+                out[field_name] = cleaner.parse_qty(raw)
+            except ValueError:
+                out[field_name] = None
+                res.rows_display_issue += 1
+        elif kind == "bool":
+            s = cleaner.clean_str(raw)
+            if not s:
+                out[field_name] = None
+            elif s in ("是", "否"):
+                out[field_name] = (s == "是")
+            else:
+                out[field_name] = None
+                res.rows_display_issue += 1
+        elif kind == "date":
+            try:
+                out[field_name] = cleaner.parse_date(raw)
+            except ValueError:
+                out[field_name] = None
+                res.rows_display_issue += 1
+        else:
+            s = cleaner.clean_str(raw)
+            out[field_name] = (s[:clip] if (s and clip) else s)
+    return out
 # 预建单容忍窗：制单日期晚于导入日超过此天数 → 记 future_date 异常（不拦截，实测存在预建单）
 _FUTURE_TOLERANCE_DAYS = 30
 
@@ -217,15 +291,21 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
 
         raw_order_id = cleaner.clean_str(row.get(inv_head["raw_order_id"]))
         raw_line_id = cleaner.clean_str(row.get(inv_line["raw_line_id"]))
-        if not raw_line_id or not raw_order_id:
+        if not raw_order_id:
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
-                                       "缺少维保单/明细数据ID", _row_dict(row, full_map)))
+                                       "缺少维保单数据ID", _row_dict(row, full_map)))
             continue
         # 需求单号(WBDD)为空：无法关联专属采购，且 ffill 可能把上一单单号串下来错配成本 → 整行跳过
         order_no = cleaner.clean_str(row.get(inv_head["order_no"]))
         if not order_no:
             res.errors.append(ErrorRec(row_no, "missing_order_no",
                                        "需求单号为空（无法关联成本，整行跳过）", _row_dict(row, full_map)))
+            continue
+        # 「有单头、无明细」订单保留（plan v1.3 M1-2）：单头照常注册入库、明细 0 行，
+        # 不再记 missing_raw_id 错误。ffill 使空白间隔行携带上一单头值——它们落到
+        # 已注册订单的 no-op 分支，不会虚增订单。
+        if not raw_line_id:
+            _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
             continue
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
@@ -251,46 +331,10 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
             "qty": qty, "return_qty": return_qty,
             "serial_numbers": cleaner.clean_str(row.get(inv_line["serial_numbers"])),
             "anomaly_flags": [],
+            **_wbdd_display_extras(row, inv_line, _WBDD_LINE_DISPLAY_SPEC, res),
         })
 
-        if raw_order_id not in res.orders:
-            def g(internal):
-                return row.get(inv_head[internal]) if internal in inv_head else None
-
-            order_date = maint_start = maint_end = None
-            try:
-                order_date = cleaner.parse_date(g("order_date"))
-            except ValueError as exc:
-                res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
-                                           {"order_date": str(g("order_date"))}))
-            # 维保起止仅展示用，坏值不阻断；两列各自独立 try，一个坏值不连累另一个
-            try:
-                maint_start = cleaner.parse_date(g("maint_start"))
-            except ValueError:
-                pass
-            try:
-                maint_end = cleaner.parse_date(g("maint_end"))
-            except ValueError:
-                pass
-            project_raw = cleaner.clean_str(g("project_raw"))
-            res.orders[raw_order_id] = {
-                "raw_order_id": raw_order_id,
-                "order_no": cleaner.clean_str(g("order_no")),
-                "order_date": order_date,
-                "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
-                "project_raw": project_raw,
-                "project_std": (_PROJECT_PREFIX.sub("", project_raw).strip() or project_raw)
-                                if project_raw else None,
-                "customer_name": cleaner.clean_str(g("customer_name")),
-                "end_customer": cleaner.clean_str(g("end_customer")),
-                "demand_type": cleaner.clean_str(g("demand_type")),
-                "business_type": cleaner.clean_str(g("business_type")),
-                "salesperson": cleaner.clean_str(g("salesperson")),
-                "warehouse": cleaner.clean_str(g("warehouse")),
-                "maint_start": maint_start, "maint_end": maint_end,
-                "data_status": cleaner.clean_str(g("data_status")),
-                "_future_date": bool(order_date and order_date > future_cutoff),
-            }
+        _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
         if res.orders[raw_order_id].get("_future_date"):
             res.lines[-1]["anomaly_flags"] = ["future_date"]
 
@@ -298,7 +342,58 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
         1 for ln in res.lines
         if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
     )
+    line_order_ids = {ln["_order_raw_id"] for ln in res.lines}
+    res.headless_order_ids = sorted(
+        oid for oid in res.orders if oid not in line_order_ids
+    )
     return res
+
+
+def _register_wbdd_order(res: TransformResult, row, row_no: int,
+                         inv_head: dict, future_cutoff: date) -> None:
+    """按 raw_order_id 首次出现注册 WBDD 单头（幂等；有/无明细行共用同一路径）。"""
+    raw_order_id = cleaner.clean_str(row.get(inv_head["raw_order_id"]))
+    if raw_order_id in res.orders:
+        return
+
+    def g(internal):
+        return row.get(inv_head[internal]) if internal in inv_head else None
+
+    order_date = maint_start = maint_end = None
+    try:
+        order_date = cleaner.parse_date(g("order_date"))
+    except ValueError as exc:
+        res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
+                                   {"order_date": str(g("order_date"))}))
+    # 维保起止仅展示用，坏值不阻断；两列各自独立 try，一个坏值不连累另一个
+    try:
+        maint_start = cleaner.parse_date(g("maint_start"))
+    except ValueError:
+        pass
+    try:
+        maint_end = cleaner.parse_date(g("maint_end"))
+    except ValueError:
+        pass
+    project_raw = cleaner.clean_str(g("project_raw"))
+    res.orders[raw_order_id] = {
+        "raw_order_id": raw_order_id,
+        "order_no": cleaner.clean_str(g("order_no")),
+        "order_date": order_date,
+        "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
+        "project_raw": project_raw,
+        "project_std": (_PROJECT_PREFIX.sub("", project_raw).strip() or project_raw)
+                        if project_raw else None,
+        "customer_name": cleaner.clean_str(g("customer_name")),
+        "end_customer": cleaner.clean_str(g("end_customer")),
+        "demand_type": cleaner.clean_str(g("demand_type")),
+        "business_type": cleaner.clean_str(g("business_type")),
+        "salesperson": cleaner.clean_str(g("salesperson")),
+        "warehouse": cleaner.clean_str(g("warehouse")),
+        "maint_start": maint_start, "maint_end": maint_end,
+        "data_status": cleaner.clean_str(g("data_status")),
+        "_future_date": bool(order_date and order_date > future_cutoff),
+        **_wbdd_display_extras(row, inv_head, _WBDD_HEAD_DISPLAY_SPEC, res),
+    }
 
 
 _BXD_RX = re.compile(r"BXD-\d{8}-\d+")

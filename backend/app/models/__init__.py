@@ -93,6 +93,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocLineRow,
     MaintenanceRkdReturnLine,
 )
+from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
 from app.models.maintenance_collection_evidence import (
     MaintenanceCollectionEvidence,
@@ -207,6 +208,7 @@ __all__ = [
     "MaintenanceCkdHeadRow",
     "MaintenanceCkdLineRow",
     "MaintenanceDocImportBatch",
+    "MaintenanceWbddImportReceipt",
     "MaintenanceDocHeadRow",
     "MaintenanceDocLineRow",
     "MaintenanceAiMappingProposal",
