@@ -429,6 +429,11 @@ def assign_source_orders(
         reason=clean_reason,
         source_order_ids=set(source_ids),
     )
+    # plan v1.3 M4-3：新归属立刻让先前无法解析的已应用单据头补上项目
+    # （上传顺序无关）。同事务、幂等、不覆盖既有归属。
+    from app.services import maintenance_doc_import
+
+    maintenance_doc_import.relink_projects(db, commit=False)
     return [assignment_dict(resulting[source_id]) for source_id in source_ids]
 
 

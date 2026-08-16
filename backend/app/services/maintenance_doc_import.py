@@ -707,3 +707,46 @@ def apply_batch(
     batch.applied_at = datetime.now(timezone.utc)
     db.commit()
     return summary
+
+
+def relink_projects(db: Session, *, allowed_project_ids: set[str] | None = None,
+                    commit: bool = True) -> dict:
+    """已应用头行的项目重解析（plan v1.3 M4-3：上传顺序无关）。
+
+    背景：RKD/返库先传、WBDD 或人工归属后建时，head.project_id 停在 NULL。
+    本函数对 project_id IS NULL 的**已应用**头行重跑 _resolve_project_id；
+    幂等（已解析行不动），只补不改：既有非空 project_id 一律不覆盖。
+    allowed_project_ids 非空时，只写入落在范围内的解析结果（范围外保持 NULL）。
+    """
+    heads = db.execute(
+        select(MaintenanceDocHeadRow)
+        .join(MaintenanceDocImportBatch,
+              MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id)
+        .where(MaintenanceDocImportBatch.status == "applied",
+               MaintenanceDocHeadRow.project_id.is_(None))
+    ).scalars().all()
+    relinked = 0
+    out_of_scope = 0
+    for head in heads:
+        project_id = _resolve_project_id(db, head)
+        if not project_id:
+            continue
+        if allowed_project_ids is not None and project_id not in allowed_project_ids:
+            out_of_scope += 1
+            continue
+        head.project_id = project_id
+        relinked += 1
+    if commit:
+        db.commit()
+    still_unlinked = db.execute(
+        select(func.count(MaintenanceDocHeadRow.row_id))
+        .join(MaintenanceDocImportBatch,
+              MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id)
+        .where(MaintenanceDocImportBatch.status == "applied",
+               MaintenanceDocHeadRow.project_id.is_(None))
+    ).scalar_one()
+    return {
+        "relinked": relinked,
+        "still_unlinked": int(still_unlinked),
+        "out_of_scope": out_of_scope,
+    }
