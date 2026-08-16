@@ -508,8 +508,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                 else (restricted() if not can_cost else not_imported())),
             # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
             # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
-            **{k: not_imported() for k in
-               ("shipped_qty", "returned_good_qty", "returned_bad_qty")},
+            **{k: fact_not_imported() for k in FACT_FIELDS},
         })
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
@@ -517,6 +516,21 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "sort_applied": ("orders" if sort == "attention" else sort),
             "sort_pending_decision": ("M0-A" if sort == "attention" else None),
             "window": {"from": window[0].isoformat(), "to": window[1].isoformat()}}
+
+
+FACT_FIELDS = ("shipped_qty", "returned_good_qty", "returned_bad_qty")
+
+
+def fact_not_imported() -> dict:
+    """三源事实位的 not_imported 信封。
+
+    键集与 `partial` 对齐（带 `unlinked`）：`rows` 是一个同构数组，桶行与项目行
+    的同名字段不能一个有 `unlinked` 一个没有，否则按数组统一取数的调用方在桶行
+    上拿到 undefined。
+    """
+    env = not_imported()
+    env["unlinked"] = None
+    return env
 
 
 def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
@@ -528,7 +542,7 @@ def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
     for field, source_key, fact_key in mapping_:
         state = source_states[source_key]["readiness"]
         if state == "not_imported":
-            out[field] = not_imported()
+            out[field] = fact_not_imported()
             continue
         value = (totals or {}).get(fact_key)
         value = value if value is not None else Decimal(0)
@@ -639,8 +653,7 @@ def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
             # 「这张单发了 800 件」；未归属桶没有项目口径事实，返回 not_imported。
             "facts": (_fact_envelopes(fact_totals.get(project_id), source_states)
                       if not unassigned
-                      else {k: not_imported() for k in
-                            ("shipped_qty", "returned_good_qty", "returned_bad_qty")}),
+                      else {k: fact_not_imported() for k in FACT_FIELDS}),
             "facts_scope": None if unassigned else "project",
         })
     return {"rows": out, "total": total, "page": page, "page_size": page_size}

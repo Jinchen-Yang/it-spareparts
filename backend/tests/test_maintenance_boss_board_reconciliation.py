@@ -218,3 +218,44 @@ def test_project_row_keyset_is_identical_for_bucket_and_projects(db, tmp_path):
     real = next(r for r in rows if r["project_id"] == proj.project_id)
     assert set(bucket) == set(real)
     assert "is_archived" in real
+    # 只比顶层键不够：rows 是同构数组，同名字段的**信封内部**键集也得一致，
+    # 否则按数组统一取数的调用方会在桶行上拿到 undefined（partial 带 unlinked，
+    # not_imported 不带，就是此前的差异）。
+    for field in board.FACT_FIELDS:
+        assert set(bucket[field]) == set(real[field]), field
+        assert "unlinked" in bucket[field], field
+
+
+def test_fact_envelope_keyset_is_uniform_across_states(db, tmp_path):
+    """源为 partial 时，项目行带 unlinked、桶行也必须带（同构数组）。"""
+    import uuid
+    from datetime import datetime, timezone
+
+    from app.models.maintenance_doc_import import (
+        MaintenanceDocHeadRow,
+        MaintenanceDocImportBatch,
+    )
+
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2)
+    assign(db, orders[0], proj)
+    # 造一个「已应用但项目未解析」的返库单头 → return_order 进 partial
+    batch = MaintenanceDocImportBatch(
+        batch_id=str(uuid.uuid4()), doc_type="return_order", file_hash="h" * 64,
+        filename="rt.xlsx", idempotency_key=str(uuid.uuid4()), uploaded_by="t",
+        head_rows=1, line_rows=1, issue_rows=0, status="applied",
+        applied_by="t", applied_at=datetime.now(timezone.utc))
+    db.add(batch)
+    db.flush()
+    db.add(MaintenanceDocHeadRow(
+        row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=1, raw_json={},
+        head_no="RT-1", head_date=date(2026, 7, 25), category="维保拆旧返件",
+        data_status="已生效", project_id=None))
+    db.commit()
+
+    rows = boss_client(db, username="uniform-boss").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
+    real = next(r for r in rows if r["project_id"] == proj.project_id)
+    assert real["returned_good_qty"]["state"] == "partial"
+    assert set(bucket["returned_good_qty"]) == set(real["returned_good_qty"])

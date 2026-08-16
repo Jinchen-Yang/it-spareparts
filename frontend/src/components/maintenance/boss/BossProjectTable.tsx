@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Space, Tag, Typography } from "antd";
+import { Pagination, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../../ResizableTable";
 import type { BoardProjectRow } from "../../../api/maintenanceBossBoard";
@@ -104,27 +104,40 @@ export function BossProjectTable({
       render: (_: unknown, row) => <StatCell stat={row.returned_bad_qty} />,
     },
   ];
+  // 未归属桶是后端额外置顶的一行，不计入 total，且只在「第 1 页 + 全范围 +
+  // 无搜索 + lifecycle=all」时才注入——文案不能无条件承诺它在。
+  const hasBucket = rows.some((row) => row.project_id === UNASSIGNED_BUCKET);
   return (
-    <ResizableTable<BoardProjectRow>
-      storageKey="boss-projects"
-      rowKey="project_id"
-      size="small"
-      loading={loading}
-      dataSource={rows}
-      columns={columns}
-      // 未归属桶是后端额外置顶的一行，不计入 total。若交给 antd 客户端分页，
-      // 21 行遇 pageSize=20 会被切掉最后一个真实项目（页面文案却承诺「不静默丢失」）。
-      // 因此显式关闭客户端分页：dataSource 已经是服务端切好的当页数据。
-      pagination={{
-        current: page,
-        pageSize: rows.length || pageSize,
-        total,
-        showSizeChanger: true,
-        pageSizeOptions: ["20", "50", "100", "200"],
-        showTotal: () => `共 ${total} 个项目（未归属单另置顶一行）`,
-        onChange: (nextPage, nextSize) => onChange(nextPage, nextSize ?? pageSize),
-      }}
-    />
+    <>
+      <ResizableTable<BoardProjectRow>
+        storageKey="boss-projects"
+        rowKey="project_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        columns={columns}
+        // dataSource 已是服务端切好的当页数据，分页器另置于表下：交给 antd 内置
+        // 分页的话，为了躲开客户端切片得把 pageSize 谎报成 rows.length，而
+        // rc-pagination 会把这个假值原样回吐给 onChange，页码一翻就带着
+        // pageSize=21 去请求下一页，offset 算成 21，第 21 个真实项目哪一页都不出现。
+        pagination={false}
+      />
+      <Pagination
+        style={{ marginTop: 12, textAlign: "right" }}
+        align="end"
+        current={page}
+        pageSize={pageSize}
+        total={total}
+        showSizeChanger
+        pageSizeOptions={["20", "50", "100", "200"]}
+        showTotal={() =>
+          hasBucket
+            ? `共 ${total} 个项目（未归属单另置顶一行）`
+            : `共 ${total} 个项目`
+        }
+        onChange={(nextPage, nextSize) => onChange(nextPage, nextSize ?? pageSize)}
+      />
+    </>
   );
 }
 
