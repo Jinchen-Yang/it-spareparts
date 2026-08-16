@@ -20,7 +20,6 @@ vi.mock("../../api", () => ({
 import GovernancePage from "../GovernancePage";
 import InventoryPage from "../InventoryPage";
 import ProfitPage from "../ProfitPage";
-import ProjectCostPage from "../ProjectCostPage";
 
 const never = new Promise<never>(() => {});
 
@@ -36,9 +35,10 @@ afterEach(() => {
   message.destroy();
 });
 
+// 项目成本页随 2026-08-16 维保页面重设计删除（22 页 → 2 页），本表随之去掉该行；
+// 利润页/治理页的管理员动作看守不变。
 const adminActions: Array<[string, ComponentType, string | RegExp]> = [
   ["利润页", ProfitPage, /重\s*算$/],
-  ["项目成本页", ProjectCostPage, "重算成本"],
   ["数据治理页", GovernancePage, "重算利润"],
 ];
 

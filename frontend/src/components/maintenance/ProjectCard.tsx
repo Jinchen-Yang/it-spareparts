@@ -1,0 +1,143 @@
+import { Link } from "react-router-dom";
+import { Button, Card, Progress, Space, Tag, Typography } from "antd";
+import type {
+  BoardProjectRow,
+  CardStatus,
+  KnownCostStat,
+  Stat,
+} from "../../api/maintenanceBossBoard";
+import { UNASSIGNED_BUCKET } from "../../api/maintenanceBossBoard";
+
+const { Text, Title } = Typography;
+
+/** 三态语义（#35/#43）：正常=绿、提醒=黄（成本≥80% 合同额）、报警=红（>100%）。 */
+const STATUS_META: Record<CardStatus, { color: string; label: string }> = {
+  normal: { color: "#52c41a", label: "正常" },
+  warning: { color: "#faad14", label: "提醒" },
+  alert: { color: "#ff4d4f", label: "报警" },
+};
+
+/**
+ * 数值渲染唯一出口：**任何非 ready 状态都不渲染 0 或数字**（铁律 5）。
+ * 「未导入」「无权限」「算不出」各说各的，绝不合并成一个空字符串或 0。
+ */
+function statText(stat: Stat<string | number> | undefined, unit = ""): string {
+  if (!stat) return "—";
+  switch (stat.state) {
+    case "ready":
+    case "partial":
+    case "stale":
+      return stat.value === null || stat.value === "" ? "—" : `${stat.value}${unit}`;
+    case "not_imported":
+      return "尚未导入";
+    case "restricted":
+      return "无权限";
+    default:
+      return "暂不可用";
+  }
+}
+
+function money(stat: Stat<string | number> | undefined): string {
+  return statText(stat, " 元");
+}
+
+/** 成本五件套：ready 时取指定字段，其余状态照六态语义说话（不落回 0）。 */
+function fromCostBundle(
+  stat: KnownCostStat | undefined,
+  pick: (value: NonNullable<KnownCostStat["value"]>) => string,
+): string {
+  if (!stat) return "—";
+  if (stat.state !== "ready" || stat.value === null) {
+    // 只借它的 state 说话，值一律置空——非 ready 状态本来就没有数字可显示
+    return statText({ state: stat.state, value: null, as_of: stat.as_of });
+  }
+  return pick(stat.value);
+}
+
+const costAmount = (stat: KnownCostStat | undefined) =>
+  fromCostBundle(stat, (value) => `${value.known_amount} 元`);
+
+const missingLines = (stat: KnownCostStat | undefined) =>
+  fromCostBundle(stat, (value) => `${value.missing_lines} 行无参照价`);
+
+export interface ProjectCardProps {
+  row: BoardProjectRow;
+}
+
+export function ProjectCard({ row }: ProjectCardProps) {
+  const isBucket = row.project_id === UNASSIGNED_BUCKET;
+  const status = row.card_status ? STATUS_META[row.card_status] : null;
+  const ratioRaw = row.cost_ratio_pct;
+  const ratio =
+    ratioRaw?.state === "ready" && ratioRaw.value !== null
+      ? Number(ratioRaw.value)
+      : null;
+
+  return (
+    <Card
+      size="small"
+      data-testid={`project-card-${row.project_id}`}
+      styles={{ body: { padding: 14 } }}
+      style={{ height: "100%", borderTop: `3px solid ${status?.color ?? "#d9d9d9"}` }}
+    >
+      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+        <Title level={5} style={{ margin: 0 }} ellipsis={{ tooltip: row.display_name }}>
+          {row.display_name}
+        </Title>
+        <Space size={4} wrap>
+          {status ? <Tag color={status.color}>{status.label}</Tag> : null}
+          {row.is_archived ? <Tag>已归档</Tag> : null}
+          {row.pre_delivery_order_count > 0 ? (
+            <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>
+          ) : null}
+        </Space>
+
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {row.contract_nos.length ? row.contract_nos.join("、") : "无合同号"}
+        </Text>
+        <Space size={12} wrap style={{ fontSize: 12 }}>
+          <Text>项目经理：{row.project_manager || "—"}</Text>
+          <Text>合同总额：{money(row.contract_amount_inc_tax)}</Text>
+        </Space>
+
+        <div style={{ fontSize: 11.5, lineHeight: 1.9, color: "rgba(0,0,0,.55)" }}>
+          <div>
+            备件成本：含税 {costAmount(row.known_apply_cost_inc_tax)}
+            {" / "}未税 {money(row.known_apply_cost_ex_tax)}
+          </div>
+          <div>缺失成本：{missingLines(row.known_apply_cost_inc_tax)}</div>
+          <div>维保备件采购数：{statText(row.procured_qty)}</div>
+          <div>回款预览：{money(row.collection_preview_inc_tax)}</div>
+        </div>
+
+        {ratio === null ? (
+          <Text type="secondary" style={{ fontSize: 11.5 }} data-testid="ratio-unknown">
+            {/* 铁律 5：算不出来就说算不出来，不画一条 0% 的绿条 */}
+            成本率：数据不足（缺合同额或成本）
+          </Text>
+        ) : (
+          <Progress
+            percent={Math.min(ratio, 100)}
+            strokeColor={status?.color}
+            size="small"
+            format={() => `${ratio}%`}
+          />
+        )}
+
+        {isBucket ? (
+          <Text type="secondary" style={{ fontSize: 11.5 }}>
+            未归属单据：需在项目面板确认挂靠
+          </Text>
+        ) : (
+          <Link to={`/maintenance/projects/${encodeURIComponent(row.project_id)}`}>
+            <Button type="primary" size="small" block>
+              进入面板
+            </Button>
+          </Link>
+        )}
+      </Space>
+    </Card>
+  );
+}
+
+export default ProjectCard;

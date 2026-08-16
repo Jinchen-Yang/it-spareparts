@@ -85,6 +85,9 @@ export interface BoardAttention {
   pending_decision: string | null;
 }
 
+/** 卡片三态（#35/#43）：<80% 正常 / 80–100% 提醒 / >100% 报警。 */
+export type CardStatus = "normal" | "warning" | "alert";
+
 export interface BoardProjectRow {
   project_id: string;
   project_code: string;
@@ -92,6 +95,17 @@ export interface BoardProjectRow {
   lifecycle: "ongoing" | "ended" | "missing";
   /** 已归档但仍带单：留在列表里保住母集恒等式，不让单据凭空消失。 */
   is_archived: boolean;
+  /** XSDD 销售订单号＝归属判定依据（#45）；多合同项目返回多个。 */
+  contract_nos: string[];
+  project_manager: string | null;
+  contract_amount_inc_tax: Stat<string | number>;
+  known_apply_cost_ex_tax: Stat<string | number>;
+  /** 维保备件采购数＝库房发货＋直采直发（#41 业务指定公式）。 */
+  procured_qty: Stat<string | number>;
+  collection_preview_inc_tax: Stat<string | number>;
+  cost_ratio_pct: Stat<string | number>;
+  /** 三态＝进度条颜色（#43）；算不出来是 null，不拿绿色冒充健康。 */
+  card_status: CardStatus | null;
   has_activity_in_window: boolean;
   pre_delivery_order_count: number;
   orders_ytd: Stat<number>;
@@ -201,6 +215,7 @@ export const getBoardProjects = (params?: {
   page_size?: number;
   lifecycle?: string;
   sort?: string;
+  card_status?: CardStatus;
   from?: string;
   to?: string;
 }) => api.get<BoardProjects>(`${BASE}/projects`, { params });
@@ -211,6 +226,7 @@ export const searchBoardProjects = (body: {
   page_size?: number;
   lifecycle?: string;
   sort?: string;
+  card_status?: CardStatus;
 }) => api.post<BoardProjects>(`${BASE}/projects/search`, body);
 
 export const getBoardProjectOrders = (

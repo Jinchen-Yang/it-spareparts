@@ -25,7 +25,7 @@ import {
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
 
 /** 读登录时写入的权限快照（与 App.tsx readPerms 同源），供 visibleWhen 判断动作键。 */
-function readPermissionMap(): Record<string, boolean> {
+export function readPermissionMap(): Record<string, boolean> {
   try {
     return JSON.parse(localStorage.getItem("permissions") || "{}");
   } catch {
@@ -79,30 +79,10 @@ const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
-const loadProjectCost = () => import("./pages/ProjectCostPage");
-const loadProjectDownloads = () => import("./pages/ProjectDownloadsPage");
-const loadProjectReminders = () => import("./pages/ProjectRemindersPage");
-const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
-// 维保展示板（plan v1.3 §5.1）：flag maintenance_boss 关闭时整组隐藏（后端同时 404）
-const loadBossOverview = () => import("./pages/maintenance/boss/BossOverviewPage");
-const loadBossProjectList = () => import("./pages/maintenance/boss/BossProjectListPage");
-const loadBossProjectDrill = () => import("./pages/maintenance/boss/BossProjectDrillPage");
-const loadBossUploadConsole = () => import("./pages/maintenance/boss/BossUploadConsolePage");
-const loadBossProjectMaster = () => import("./pages/maintenance/boss/BossProjectMasterPage");
-const loadMaintenanceWorkbench = () => import("./pages/maintenance/MaintenanceWorkbenchPage");
-const loadMaintenanceSalesDashboard = () => import("./pages/maintenance/MaintenanceSalesDashboardPage");
-const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDemandManagementPage");
-const loadMaintenanceWarehouse = () => import("./pages/maintenance/MaintenanceWarehouseWorkbenchPage");
-const loadMaintenanceSourceOrderAssignments = () => import("./pages/maintenance/MaintenanceSourceOrderAssignmentsPage");
-const loadMaintenanceProjects = () => import("./pages/maintenance/MaintenanceProjectsPage");
-const loadMaintenanceProjectWorkspace = () => import("./pages/maintenance/MaintenanceProjectWorkspacePage");
-const loadMaintenanceProjectUpdates = () => import("./pages/maintenance/MaintenanceProjectUpdatesPage");
-const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/MaintenanceManagerWorkbookPage");
-const loadMaintenanceAcceptance = () => import("./pages/maintenance/MaintenanceAcceptancePage");
-const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
-const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
-const loadMaintenanceCollectionReminders = () => import("./pages/maintenance/MaintenanceCollectionRemindersPage");
-const loadMaintenanceBetaCompat = () => import("./pages/maintenance/MaintenanceBetaCompatRedirect");
+// 维保两页（2026-08-16 定稿）：主页项目卡墙 + 项目面板。
+const loadMaintenanceHome = () => import("./pages/maintenance/MaintenanceHomePage");
+const loadMaintenanceProjectPanel = () =>
+  import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadMasterData = () => import("./pages/MasterDataPage");
@@ -121,29 +101,8 @@ const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
-const ProjectCostPage = lazy(loadProjectCost);
-const ProjectDownloadsPage = lazy(loadProjectDownloads);
-const ProjectRemindersPage = lazy(loadProjectReminders);
-const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
-const BossOverviewPage = lazy(loadBossOverview);
-const BossProjectListPage = lazy(loadBossProjectList);
-const BossProjectDrillPage = lazy(loadBossProjectDrill);
-const BossUploadConsolePage = lazy(loadBossUploadConsole);
-const BossProjectMasterPage = lazy(loadBossProjectMaster);
-const MaintenanceWorkbenchPage = lazy(loadMaintenanceWorkbench);
-const MaintenanceSalesDashboardPage = lazy(loadMaintenanceSalesDashboard);
-const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
-const MaintenanceWarehouseWorkbenchPage = lazy(loadMaintenanceWarehouse);
-const MaintenanceSourceOrderAssignmentsPage = lazy(loadMaintenanceSourceOrderAssignments);
-const MaintenanceProjectsPage = lazy(loadMaintenanceProjects);
-const MaintenanceProjectWorkspacePage = lazy(loadMaintenanceProjectWorkspace);
-const MaintenanceProjectUpdatesPage = lazy(loadMaintenanceProjectUpdates);
-const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
-const MaintenanceAcceptancePage = lazy(loadMaintenanceAcceptance);
-const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
-const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
-const MaintenanceCollectionRemindersPage = lazy(loadMaintenanceCollectionReminders);
-const MaintenanceBetaCompatRedirect = lazy(loadMaintenanceBetaCompat);
+const MaintenanceHomePage = lazy(loadMaintenanceHome);
+const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
 const MasterDataPage = lazy(loadMasterData);
@@ -195,62 +154,23 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // 维保只有两页（2026-08-16 定稿，REQUIREMENTS #33/#44）：
+    // ①维保主页（项目卡墙）②项目面板。旧的三代页面（旧版 3 / 工作台 9 /
+    // 展示板 5）已随本次重设计删除，不再保留导航项。
+    // 原始单据上传仍走 admin「数据中心 → 数据导入」（#42），不在本组。
     key: "grp-maintenance",
-    label: "维保项目（旧版）",
+    label: "维保项目",
     items: [
-      { key: "maintenance", path: "/maintenance", label: "项目数据", icon: <ToolOutlined />, perm: "page_maintenance", page: ProjectCostPage, load: loadProjectCost },
-      { key: "maintenance-downloads", path: "/maintenance/downloads", label: "下载中心", icon: <CloudUploadOutlined />, perm: "page_maintenance", page: ProjectDownloadsPage, load: loadProjectDownloads },
-      { key: "maintenance-reminders", path: "/maintenance/reminders", label: "项目提醒", icon: <WarningOutlined />, perm: "page_maintenance", page: ProjectRemindersPage, load: loadProjectReminders },
-    ],
-  },
-  {
-    key: "grp-maintenance-beta",
-    label: "维保工作台",
-    items: [
-      // 维保模块第一入口：登录后的维保落地页（我的维保）。
-      { key: "maintenance-workbench", path: "/maintenance/beta/workbench", label: "我的维保", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceWorkbenchPage, load: loadMaintenanceWorkbench },
-      // 销售看板：仅 admin/boss 可见（visibleWhen 按角色判断，不绑定可委派权限键）。
-      { key: "maintenance-sales-dashboard", path: "/maintenance/beta/sales-dashboard", label: "销售看板", icon: <LineChartOutlined />, visibleWhen: () => {
-        const role = localStorage.getItem("role") || "";
-        return role === "admin" || role === "boss";
-      }, page: MaintenanceSalesDashboardPage, load: loadMaintenanceSalesDashboard },
-      { key: "maintenance-projects", path: "/maintenance/beta/projects", label: "项目总览", icon: <DashboardOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
-      { key: "maintenance-updates", path: "/maintenance/beta/updates", label: "月度项目更新", icon: <CloudUploadOutlined />, betaFeature: "maintenance", visibleWhen: () => {
-        const capabilities = readMaintenanceCapabilities();
-        return capabilities.canUseBeta && capabilities.canApplyRoundtrip;
-      }, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
-      { key: "maintenance-manager-workbook", path: "/maintenance/beta/project-manager/monthly-workbook", label: "经理月报", icon: <CloudUploadOutlined />, betaFeature: "maintenance", visibleWhen: () => readMaintenanceCapabilities().canUseManagerWorkbook, page: MaintenanceManagerWorkbookPage, load: loadMaintenanceManagerWorkbook },
-      { key: "maintenance-acceptance", path: "/maintenance/beta/acceptance", label: "验收与结项", icon: <FileDoneOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceAcceptancePage, load: loadMaintenanceAcceptance },
-      { key: "maintenance-collection-reminders", path: "/maintenance/beta/collection-reminders", label: "回款提醒", icon: <ScheduleOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceCollectionRemindersPage, load: loadMaintenanceCollectionReminders },
-    ],
-  },
-  {
-    // 维保展示板（plan v1.3）：老板/管理层看数决策入口。整组受服务端总闸
-    // maintenance_boss_dashboard_enabled 控制（关闭时前端隐藏 + 后端 404 双保险）。
-    key: "grp-maintenance-boss",
-    label: "维保展示板",
-    items: [
-      { key: "maintenance-boss-overview", path: "/maintenance/boss", label: "展示板首屏", icon: <DashboardOutlined />, anyPerm: ["page_maintenance_boss", "page_maintenance"], betaFeature: "maintenance_boss", page: BossOverviewPage, load: loadBossOverview },
-      { key: "maintenance-boss-projects", path: "/maintenance/boss/projects", label: "全部项目", icon: <ProfileOutlined />, anyPerm: ["page_maintenance_boss", "page_maintenance"], betaFeature: "maintenance_boss", page: BossProjectListPage, load: loadBossProjectList },
-      { key: "maintenance-boss-uploads", path: "/maintenance/boss/uploads", label: "数据上传", icon: <CloudUploadOutlined />, betaFeature: "maintenance_boss", visibleWhen: () => {
-        const perms = readPermissionMap();
-        return !!perms.action_maintenance_wbdd_import || !!perms.action_maintenance_doc_import;
-      }, page: BossUploadConsolePage, load: loadBossUploadConsole },
-      { key: "maintenance-boss-master", path: "/maintenance/boss/master", label: "项目归属确认", icon: <DeploymentUnitOutlined />, betaFeature: "maintenance_boss", visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: BossProjectMasterPage, load: loadBossProjectMaster },
-    ],
-  },
-  {
-    key: "grp-maintenance-admin",
-    label: "维保数据维护",
-    items: [
-      // 后端 require_admin：无 perm + 无 visibleWhen → 仅 admin 可见入口
-      // （App 层过滤：admin 恒短路通过，非 admin 无权限键则为 false）
-
-      { key: "maintenance-project-master", path: "/maintenance/beta/project-master", label: "项目主档维护", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
-      { key: "maintenance-demands", path: "/maintenance/beta/demands", label: "异常维保单处理", icon: <FileSearchOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
-      { key: "maintenance-warehouse", path: "/maintenance/beta/warehouse", label: "仓库单据核对", icon: <InboxOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
-      { key: "maintenance-cost-refill", path: "/maintenance/beta/cost-refill", label: "领用缺价补录", icon: <DollarOutlined />, betaFeature: "maintenance", visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
-      { key: "maintenance-migration", path: "/maintenance/beta/migration", label: "历史数据迁移核对", icon: <SafetyCertificateOutlined />, betaFeature: "maintenance", visibleWhen: () => readMaintenanceCapabilities().canReviewMigration, page: MaintenanceMigrationPage, load: loadMaintenanceMigration },
+      {
+        key: "maintenance-home",
+        path: "/maintenance",
+        label: "维保主页",
+        icon: <DashboardOutlined />,
+        anyPerm: ["page_maintenance_boss", "page_maintenance"],
+        betaFeature: "maintenance_boss",
+        page: MaintenanceHomePage,
+        load: loadMaintenanceHome,
+      },
     ],
   },
   {
@@ -311,26 +231,16 @@ export interface DetailRoute {
 
 export const DETAIL_ROUTES: DetailRoute[] = [
   {
-    key: "maintenance-source-order-assignments",
-    path: "/maintenance/beta/project-master/source-orders",
-    pattern: /^\/maintenance\/beta\/project-master\/source-orders$/,
-    label: "历史维保单归属",
-    perm: "page_maintenance_beta",
-    betaFeature: "maintenance",
-    menuKey: "maintenance-project-master",
-    page: MaintenanceSourceOrderAssignmentsPage,
-    load: loadMaintenanceSourceOrderAssignments,
-  },
-  {
-    key: "maintenance-boss-project-drill",
-    path: "/maintenance/boss/projects/:projectId",
-    pattern: /^\/maintenance\/boss\/projects\/[^/]+$/,
-    label: "项目单据证据",
+    // 项目面板：从项目卡「进入面板」进来，不占导航项（页面定稿只有两页）
+    key: "maintenance-project-panel",
+    path: "/maintenance/projects/:projectId",
+    pattern: /^\/maintenance\/projects\/[^/]+$/,
+    label: "项目面板",
     anyPerm: ["page_maintenance_boss", "page_maintenance"],
     betaFeature: "maintenance_boss",
-    menuKey: "maintenance-boss-projects",
-    page: BossProjectDrillPage,
-    load: loadBossProjectDrill,
+    menuKey: "maintenance-home",
+    page: MaintenanceProjectPanelPage,
+    load: loadMaintenanceProjectPanel,
   },
   {
     key: "pool-analysis",
@@ -342,39 +252,6 @@ export const DETAIL_ROUTES: DetailRoute[] = [
     page: PoolAnalysisPage,
     load: loadPoolAnalysis,
   },
-  {
-    key: "maintenance-project-workspace",
-    path: "/maintenance/beta/projects/:projectId",
-    pattern: /^\/maintenance\/beta\/projects\/[^/]+$/,
-    label: "维保项目详情",
-    perm: "page_maintenance_beta",
-    betaFeature: "maintenance",
-    menuKey: "maintenance-projects",
-    page: MaintenanceProjectWorkspacePage,
-    load: loadMaintenanceProjectWorkspace,
-  },
-  ...[
-    ["maintenance-projects-compat", "/maintenance/projects", /^\/maintenance\/projects$/],
-    ["maintenance-project-workspace-compat", "/maintenance/projects/:projectId", /^\/maintenance\/projects\/[^/]+$/],
-    ["maintenance-project-master-compat", "/maintenance/project-master", /^\/maintenance\/project-master$/],
-    ["maintenance-source-orders-compat", "/maintenance/project-master/source-orders", /^\/maintenance\/project-master\/source-orders$/],
-    ["maintenance-demands-compat", "/maintenance/demands", /^\/maintenance\/demands$/],
-    ["maintenance-warehouse-compat", "/maintenance/warehouse", /^\/maintenance\/warehouse$/],
-    ["maintenance-manager-workbook-compat", "/maintenance/project-manager/monthly-workbook", /^\/maintenance\/project-manager\/monthly-workbook$/],
-    ["maintenance-acceptance-compat", "/maintenance/acceptance", /^\/maintenance\/acceptance$/],
-    ["maintenance-updates-compat", "/maintenance/updates", /^\/maintenance\/updates$/],
-    ["maintenance-cost-refill-compat", "/maintenance/cost-refill", /^\/maintenance\/cost-refill$/],
-    ["maintenance-migration-compat", "/maintenance/migration", /^\/maintenance\/migration$/],
-  ].map(([key, path, pattern]) => ({
-    key: key as string,
-    path: path as string,
-    pattern: pattern as RegExp,
-    label: "维保版本兼容入口",
-    perm: "page_maintenance",
-    menuKey: "maintenance",
-    page: MaintenanceBetaCompatRedirect,
-    load: loadMaintenanceBetaCompat,
-  })),
 ];
 
 /** 找到 path 对应的详情路由（正则匹配参数段） */
@@ -392,6 +269,24 @@ export const NAV_REDIRECTS: NavRedirect[] = [
   { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
   // 集成期曾使用 /maintenance/legacy；发布 Beta 后恢复 /maintenance 为稳定版默认入口。
   { from: "/maintenance/legacy", to: "/maintenance", perm: "page_maintenance" },
+  // 2026-08-16 页面重设计：22 页收敛为 2 页，旧页面代码已删除。老收藏/老外链
+  // 一律回维保主页，不留空白页（#44 直接替换上线）。
+  ...[
+    "/maintenance/downloads", "/maintenance/reminders",
+    "/maintenance/boss", "/maintenance/boss/projects", "/maintenance/boss/uploads",
+    "/maintenance/boss/master",
+    "/maintenance/beta/workbench", "/maintenance/beta/sales-dashboard",
+    "/maintenance/beta/projects", "/maintenance/beta/updates",
+    "/maintenance/beta/project-manager/monthly-workbook",
+    "/maintenance/beta/acceptance", "/maintenance/beta/collection-reminders",
+    "/maintenance/beta/project-master", "/maintenance/beta/project-master/source-orders",
+    "/maintenance/beta/demands", "/maintenance/beta/warehouse",
+    "/maintenance/beta/cost-refill", "/maintenance/beta/migration",
+    "/maintenance/project-master", "/maintenance/project-master/source-orders",
+    "/maintenance/demands", "/maintenance/warehouse",
+    "/maintenance/project-manager/monthly-workbook", "/maintenance/acceptance",
+    "/maintenance/updates", "/maintenance/cost-refill", "/maintenance/migration",
+  ].map((from) => ({ from, to: "/maintenance", perm: "page_maintenance" })),
 ];
 
 /** 找到 path 对应的导航项（精确匹配；路由也按精确注册，加子路由时两处一起改） */
