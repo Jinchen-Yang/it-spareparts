@@ -336,15 +336,182 @@ def summary(db: Session, *, user_ctx: UserContext,
 
 
 # 需关注事项 kind 注册表（M3-6）：M0-A 拍板前只搭框架，不预置内容。
-ATTENTION_KINDS: tuple[str, ...] = ()
+# M0-A 已于 2026-08-16 拍板（签署清单 / 增补包 AB-2）：只注册这两类。
+# ②归档池件仍在流转、④无参照价占比高、⑤未归属单、⑥快照差异单 **未获选**，不得自行加。
+ATTENTION_KINDS: tuple[str, ...] = ("budget_remaining", "pending_return")
+
+# 「多」不设业务阈值——业务只指定了口径，没有指定分界线。因此本队列是**排序取前
+# N**（多的排前面），不是「超过某阈值才报警」。响应里显式回传 ranking/threshold，
+# 免得下游把它当成阈值告警。预算侧的红黄语义另有出处（budget_decision），沿用。
+ATTENTION_RANKING = "budget_status_desc,pending_return_qty_desc"
+
+
+def _attention_demand(db: Session) -> dict[str, dict]:
+    """逐项目的需求侧数量：Σ需求数量 与 Σ退货（应返）数量。
+
+    两列都在 AGGREGATE_SOURCE_COLUMNS 白名单内。**不碰**「已返/待返」这两个
+    流转状态列（铁律 3：状态列只展示、不进聚合）——所以"已回收"一律取三源事实，
+    不取单据自报。
+    """
+    active = and_(
+        MaintenanceSourceOrderAssignment.source_order_id
+        == FMaintenanceOrder.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )
+    rows = db.execute(
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.coalesce(func.sum(FMaintenanceLine.qty), 0),
+            func.coalesce(func.sum(FMaintenanceLine.return_qty), 0),
+        )
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+    ).all()
+    return {pid: {"demand_qty": Decimal(d or 0), "demand_return_qty": Decimal(r or 0)}
+            for pid, d, r in rows}
+
+
+def _attention_budget(db: Session) -> dict[str, Decimal]:
+    """逐项目的台账合同额（含税）：只认 included_in_total 的合同行。
+
+    口径出处 REQUIREMENTS #8/#31：正式金额列 = amount_inc_tax；是否计入总额由
+    台账 included_in_total 明示，**不从 contract_status 文本猜**。
+    """
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    rows = db.execute(
+        select(MaintenanceProjectContract.project_id,
+               func.coalesce(func.sum(MaintenanceProjectContract.amount_inc_tax), 0))
+        .where(MaintenanceProjectContract.included_in_total.is_(True),
+               MaintenanceProjectContract.amount_inc_tax.is_not(None))
+        .group_by(MaintenanceProjectContract.project_id)
+    ).all()
+    return {pid: Decimal(amount or 0) for pid, amount in rows}
+
+
+def _budget_item(project, budget: Decimal, bundle: dict) -> dict | None:
+    """①超预算/预算余量。仅红/黄进队列；成本不完整时给 incomplete_cost，不报绿。"""
+    from app import config
+
+    value = bundle.get("value") or {}
+    summary = {"known_cost_total": Decimal(str(value.get("known_amount") or 0)),
+               "cost_quality": value.get("quality") or "incomplete"}
+    decision = maintenance_cost_quality.budget_decision(
+        summary, budget=budget,
+        warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)))
+    status = decision["decision_status"]
+    if status not in ("red", "yellow", "incomplete_cost"):
+        return None
+    return {
+        "kind": "budget_remaining",
+        "project_id": project.project_id,
+        "project_code": project.project_code,
+        "display_name": project.display_name,
+        "evidence_link": f"/maintenance/boss-board/projects/{project.project_id}/orders",
+        "value": {
+            "status": status,
+            "budget_inc_tax": budget,
+            "known_spend_inc_tax": decision["known_spend_total"],
+            "remaining": decision["remaining"],
+            "remaining_pct": decision["remaining_pct"],
+            # 成本不完整时余量是「已知下限」，不是结论（M0-C/铁律 5）
+            "cost_quality": summary["cost_quality"],
+        },
+    }
+
+
+def _pending_return_item(project, demand: dict, facts: dict | None,
+                         rkd_ready: bool) -> dict | None:
+    """③待返件多。
+
+    返件率分子 = **返件类**回收（维保拆旧返件＋旧库退返 → RKD 事实 returned_bad），
+    分母 = 需求单「需求」数量（业务 2026-08-16 指定，不是领用列）。
+    RKD 未导入 → 回收量「无法知道」，返件率与待返件给 not_imported 信封，
+    **不按 0 算**（铁律 5）。
+    """
+    demand_return = demand.get("demand_return_qty") or Decimal(0)
+    demand_qty = demand.get("demand_qty") or Decimal(0)
+    if demand_return <= 0:
+        return None
+    recovered = (facts or {}).get("returned_bad") if rkd_ready else None
+    if not rkd_ready:
+        pending, rate = not_imported(), not_imported()
+    else:
+        recovered = recovered or Decimal(0)
+        pending = ready(demand_return - recovered)
+        rate = ready(round(recovered / demand_qty * 100, 1)
+                     if demand_qty > 0 else None)
+    return {
+        "kind": "pending_return",
+        "project_id": project.project_id,
+        "project_code": project.project_code,
+        "display_name": project.display_name,
+        "evidence_link": f"/maintenance/boss-board/projects/{project.project_id}/orders",
+        "value": {
+            "demand_return_qty": demand_return,
+            "recovered_return_qty": ready(recovered) if rkd_ready else not_imported(),
+            "pending_return_qty": pending,
+            "return_rate_pct": rate,
+        },
+        "_rank": demand_return,
+    }
 
 
 def attention(db: Session, *, user_ctx: UserContext, limit: int = 10) -> dict:
-    """需关注队列 ≤10 条。M0-A 未拍板 → 空队列 + 明示待确认（不自行编造决策口径）。"""
+    """需关注队列 ≤10 条（M0-A 已拍板：只有 ①超预算 与 ③待返件多）。
+
+    无成本权限的账号看不到 ①——预算条目本身就是金额派生物，「它在不在队列里」
+    已经泄露成本排名，所以整条略去而不是包 restricted 信封（无侧信道）。
+    """
+    can_cost = can_view_cost(user_ctx)
+    projects = db.execute(
+        select(MaintenanceProject).where(MaintenanceProject.is_active.is_(True))
+    ).scalars().all()
+    if not projects:
+        return {"items": [], "registered_kinds": list(ATTENTION_KINDS),
+                "ranking": ATTENTION_RANKING, "threshold": None}
+    project_ids = [p.project_id for p in projects]
+    demand = _attention_demand(db)
+    facts = maintenance_boss_facts.project_totals(db, project_ids=project_ids)
+    rkd_ready = (maintenance_source_health.source_health(db)["sources"]
+                 ["rkd_inbound"]["readiness"] != "not_imported")
+
+    budget_items: list[dict] = []
+    if can_cost:
+        budgets = _attention_budget(db)
+        bundles = _cost_bundles_by_project(
+            db, window=resolve_window(None, None),
+            project_ids=project_ids, can_cost=True)
+        for project in projects:
+            budget = budgets.get(project.project_id)
+            if budget is None or budget <= 0:
+                continue           # 无台账合同额 → 谈不上预算余量，不编造
+            item = _budget_item(project, budget,
+                                bundles.get(project.project_id, {}))
+            if item is not None:
+                budget_items.append(item)
+    _STATUS_WEIGHT = {"red": 0, "yellow": 1, "incomplete_cost": 2}
+    budget_items.sort(key=lambda i: (_STATUS_WEIGHT[i["value"]["status"]],
+                                     i["project_code"]))
+
+    return_items = [
+        item for item in (
+            _pending_return_item(p, demand.get(p.project_id, {}),
+                                 facts.get(p.project_id), rkd_ready)
+            for p in projects)
+        if item is not None
+    ]
+    return_items.sort(key=lambda i: (-i.pop("_rank"), i["project_code"]))
+
+    items = (budget_items + return_items)[:limit]
     return {
-        "items": [],
+        "items": items,
         "registered_kinds": list(ATTENTION_KINDS),
-        "pending_decision": "M0-A",
+        "ranking": ATTENTION_RANKING,
+        # 显式为 null：业务只给了口径没给分界线，这是排序取前 N，不是阈值告警
+        "threshold": None,
     }
 
 
@@ -425,9 +592,27 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         .group_by(MaintenanceSourceOrderAssignment.project_id)
         .subquery()
     )
+    # sort=attention 的两个注册口径（AB-2）。都做成子查询，排序才是**全量**排序，
+    # 而不是「先取一页再排」那种只在当页内成立的假排序。
+    return_stats = (
+        select(MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+               func.coalesce(func.sum(FMaintenanceLine.return_qty), 0)
+               .label("demand_return_qty"))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+        .subquery()
+    )
+    budget_stats = _budget_overspend_stats()
+
     base = (select(MaintenanceProject)
             .outerjoin(window_stats,
                        window_stats.c.project_id == MaintenanceProject.project_id)
+            .outerjoin(return_stats,
+                       return_stats.c.project_id == MaintenanceProject.project_id)
+            .outerjoin(budget_stats,
+                       budget_stats.c.project_id == MaintenanceProject.project_id)
             .where(*filters))
     if has_activity is True:
         base = base.where(func.coalesce(window_stats.c.orders_n, 0) > 0)
@@ -444,9 +629,14 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         order_by = (func.coalesce(window_stats.c.known_cost, 0).desc(),
                     MaintenanceProject.project_code)
     elif sort == "attention":
-        # 需关注排序的口径由 M0-A 拍板（plan §2.1）；未拍板前按「本期活动量」代理，
-        # 并在响应里如实回显 sort_applied，不假装已按最终口径排序。
-        order_by = (func.coalesce(window_stats.c.orders_n, 0).desc(),
+        # M0-A 已拍板（AB-2）：注册口径 = ①超预算 ③待返件多。这里按注册口径中
+        # **可在 SQL 表达**的两项排序：应返数量（Σ退货列，白名单内）优先，其次本期
+        # 单量。预算红黄是成本派生物——无成本权限的账号若让它参与排序，顺序本身
+        # 就泄露了金额排名（§6.2 无侧信道），故只有有成本权限时才计入。
+        attn = [func.coalesce(return_stats.c.demand_return_qty, 0).desc()]
+        if can_cost:
+            attn.insert(0, func.coalesce(budget_stats.c.overspend, 0).desc())
+        order_by = (*attn, func.coalesce(window_stats.c.orders_n, 0).desc(),
                     MaintenanceProject.project_code)
     else:
         order_by = (MaintenanceProject.project_code,)
@@ -512,9 +702,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         })
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
-            # attention 的最终口径待 M0-A；当前按本期活动量代理，如实回显
-            "sort_applied": ("orders" if sort == "attention" else sort),
-            "sort_pending_decision": ("M0-A" if sort == "attention" else None),
+            "sort_applied": sort,
             "window": {"from": window[0].isoformat(), "to": window[1].isoformat()}}
 
 
@@ -531,6 +719,45 @@ def fact_not_imported() -> dict:
     env = not_imported()
     env["unlinked"] = None
     return env
+
+
+def _budget_overspend_stats():
+    """逐项目「已知支出 − 台账合同额(含税)」子查询，供 sort=attention 排序用。
+
+    正数=已超；负数=尚有余量。取值口径与 attention() 的 ①一致（合同额只认
+    included_in_total，成本取回填含税列），差别只是这里要能进 ORDER BY。
+    """
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    contract = (
+        select(MaintenanceProjectContract.project_id.label("project_id"),
+               func.coalesce(func.sum(MaintenanceProjectContract.amount_inc_tax), 0)
+               .label("budget"))
+        .where(MaintenanceProjectContract.included_in_total.is_(True))
+        .group_by(MaintenanceProjectContract.project_id)
+        .subquery()
+    )
+    spend = (
+        select(MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+               func.coalesce(func.sum(FMaintenanceLine.cost_amount_inc_tax), 0)
+               .label("spend"))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .join(MaintenanceSourceOrderAssignment,
+              and_(MaintenanceSourceOrderAssignment.source_order_id
+                   == FMaintenanceOrder.raw_order_id,
+                   MaintenanceSourceOrderAssignment.is_active.is_(True)))
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+        .subquery()
+    )
+    return (
+        select(contract.c.project_id.label("project_id"),
+               (func.coalesce(spend.c.spend, 0) - contract.c.budget)
+               .label("overspend"))
+        .select_from(contract)
+        .outerjoin(spend, spend.c.project_id == contract.c.project_id)
+        .subquery()
+    )
 
 
 def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
@@ -657,6 +884,21 @@ def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
             "facts_scope": None if unassigned else "project",
         })
     return {"rows": out, "total": total, "page": page, "page_size": page_size}
+
+
+def project_exists(db: Session, *, project_id: str) -> bool:
+    """项目主档是否存在（含归档）。不存在的 id 一律 404，不返回空列表冒充成功。"""
+    return db.execute(
+        select(func.count(MaintenanceProject.project_id))
+        .where(MaintenanceProject.project_id == project_id)
+    ).scalar_one() > 0
+
+
+def order_exists(db: Session, *, source_order_id: str) -> bool:
+    return db.execute(
+        select(func.count(FMaintenanceOrder.id))
+        .where(FMaintenanceOrder.raw_order_id == source_order_id)
+    ).scalar_one() > 0
 
 
 def order_project_id(db: Session, *, source_order_id: str) -> str | None:

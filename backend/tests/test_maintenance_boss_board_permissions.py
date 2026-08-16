@@ -75,21 +75,26 @@ def test_boss_sees_all_endpoints(db, tmp_path):
         assert client.get(path).status_code == 200, path
 
 
-def test_manager_scope_limited_to_own_projects(db, tmp_path):
-    """M0-B「本人项目」案：经理只见自身范围；未归属桶不可见（无本人范围可言）。"""
-    proj = make_project(db)
-    orders = import_wbdd(db, tmp_path, orders=2)
-    assign(db, orders[0], proj)
+def test_manager_sees_all_projects(db, tmp_path):
+    """M0-B 已改判为①全部可见（AB-1，业务 2026-08-16 签署）。
+
+    展示板查看权限本身即勾选名单制：能进页面的账号就是获授整套可见的账号
+    （REQUIREMENTS #2/#14）。此前按 resolve_visible_project_ids 逐项目收敛，
+    经理只见「被指派」的项目——与业务口径不符。
+    """
+    mine, theirs = make_project(db, "我的项目"), make_project(db, "别人的项目")
+    orders = import_wbdd(db, tmp_path, orders=3)
+    assign(db, orders[0], mine)
+    assign(db, orders[1], theirs)
     client = manager_client(db)
-    body = client.get("/api/maintenance/boss-board/projects").json()
-    ids = {r["project_id"] for r in body["rows"]}
-    assert board.UNASSIGNED_BUCKET not in ids
-    # 未分配给该经理的项目也不在范围内
-    assert ids <= {proj.project_id}
-    # 桶下钻 404（不暴露存在性）
+    ids = {r["project_id"]
+           for r in client.get("/api/maintenance/boss-board/projects").json()["rows"]}
+    assert {mine.project_id, theirs.project_id} <= ids
+    # 未归属桶对经理同样可见（全范围口径下没有「本人范围」这一说）
+    assert board.UNASSIGNED_BUCKET in ids
     assert client.get(
         f"/api/maintenance/boss-board/projects/{board.UNASSIGNED_BUCKET}/orders"
-    ).status_code == 404
+    ).status_code == 200
 
 
 def test_boss_sees_unassigned_bucket(db, tmp_path):
@@ -183,10 +188,12 @@ def test_rule3_response_shape_identical_with_and_without_cost(db, tmp_path):
 
 
 def test_attention_has_no_cost_derived_items_without_permission(db):
-    """M0-A 未拍板时队列为空；无成本账号同样不得出现成本派生条目。"""
+    """无成本账号不得出现成本派生条目（M0-A 拍板后队列不再恒空，见 AB-2）。"""
     no_cost = manager_client(db, username="no-cost-mgr7", with_cost=False)
     body = no_cost.get("/api/maintenance/boss-board/attention").json()
-    assert body["items"] == []
+    assert all(i["kind"] != "budget_remaining" for i in body["items"])
+    # 非成本派生的 kind 仍然注册着——「队列为空」不再是本用例的断言点
+    assert body["registered_kinds"] == ["budget_remaining", "pending_return"]
 
 
 def test_line_drilldown_enforces_project_scope_idor(db, tmp_path):
@@ -209,21 +216,26 @@ def test_line_drilldown_enforces_project_scope_idor(db, tmp_path):
         ).status_code == 200, order.raw_order_id
 
     manager = manager_client(db, username="idor-manager")
-    # 本人范围账号：他人项目单据与未归属单据均 404
-    assert manager.get(
-        f"/api/maintenance/boss-board/orders/{orders[1].raw_order_id}/lines"
-    ).status_code == 404
-    assert manager.get(
-        f"/api/maintenance/boss-board/orders/{orders[2].raw_order_id}/lines"
-    ).status_code == 404
-    # 不存在的单据同样 404（与越权不可区分）
+    # M0-B 改判后经理同为全范围：他人项目与未归属单据均可读
+    for order in orders:
+        assert manager.get(
+            f"/api/maintenance/boss-board/orders/{order.raw_order_id}/lines"
+        ).status_code == 200, order.raw_order_id
+    # 不存在的单据仍须 404——不得用空列表冒充「这张单没有明细」（AB-1 验收点）
     assert manager.get(
         "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
     ).status_code == 404
+    assert boss.get(
+        "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
+    ).status_code == 404
+    # 不存在的项目同理
+    assert boss.get(
+        "/api/maintenance/boss-board/projects/no-such-project/orders"
+    ).status_code == 404
 
 
-def test_summary_is_scoped_for_manager_accounts(db, tmp_path):
-    """§6.2「经理 200（范围聚合）」：/summary 必须收敛到本人范围。
+def test_summary_matches_project_list_totals(db, tmp_path):
+    """§6.2：/summary 与 /projects 必须同源同范围（恒等式前提）。
 
     此前 summary 不做范围收敛，只有 page_maintenance 的项目经理会拿到全公司的
     单量/行数与成本合计，且与 /projects 的范围口径不一致（恒等式必然对不上）。
@@ -234,19 +246,20 @@ def test_summary_is_scoped_for_manager_accounts(db, tmp_path):
     set_costs(db, amount="100.00")
 
     boss = boss_client(db, username="scope-boss")
-    manager = manager_client(db, username="scope-mgr")   # 无任何可见项目
+    manager = manager_client(db, username="scope-mgr")
 
     boss_body = boss.get("/api/maintenance/boss-board/summary",
                          params={"from": "2026-01-01", "to": "2026-12-31"}).json()
     mgr_body = manager.get("/api/maintenance/boss-board/summary",
                            params={"from": "2026-01-01", "to": "2026-12-31"}).json()
-    assert boss_body["orders_ytd"]["value"] == 3
-    # 范围为空的经理不得看到全公司数字
-    assert mgr_body["orders_ytd"]["value"] == 0
-    assert Decimal(str(mgr_body["known_apply_cost_inc_tax"]["value"]["known_amount"])) \
-        == Decimal("0")
+    # M0-B 改判①：两类账号口径一致；关键不变量是 summary 与 /projects 同源，
+    # 否则恒等式必然对不上（这条才是本用例真正看守的东西）。
+    assert boss_body["orders_ytd"]["value"] == mgr_body["orders_ytd"]["value"] == 3
     assert Decimal(str(boss_body["known_apply_cost_inc_tax"]["value"]["known_amount"])) \
         == Decimal("300.00")
+    rows = manager.get("/api/maintenance/boss-board/projects",
+                       params={"from": "2026-01-01", "to": "2026-12-31"}).json()["rows"]
+    assert sum(r["orders_ytd"]["value"] for r in rows) == mgr_body["orders_ytd"]["value"]
 
 
 def test_unassigned_bucket_facts_are_not_imported_not_zero(db, tmp_path):

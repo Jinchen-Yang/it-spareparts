@@ -11,7 +11,6 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, st
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.auth import current_role
 from app.db import get_db
 from app.maintenance_boss import require_maintenance_boss
@@ -28,9 +27,6 @@ router = APIRouter(
     tags=["maintenance"],
     dependencies=[Depends(require_maintenance_boss)],
 )
-
-_FULL_SCOPE_ROLES = ("admin", "boss")
-
 
 def require_board_view(
     ctx: UserContext = Depends(get_current_user_context),
@@ -50,15 +46,18 @@ def require_board_view(
 
 
 def _allowed_scope(db: Session, ctx: UserContext) -> set[str] | None:
-    """None = 全范围（老板/管理员/持 page_maintenance_boss）；否则收敛到本人项目。"""
-    from app import permissions as perm
+    """None = 全范围。
 
-    perms = ctx.permissions or perm.template_for(ctx.role)
-    if ctx.role in _FULL_SCOPE_ROLES or perm.runtime_safe(perms).get(
-        "page_maintenance_boss"
-    ):
-        return None
-    return set(resolve_visible_project_ids(db, ctx) or set())
+    M0-B 已于 2026-08-16 改判为**①全部可见**（签署清单 / 增补包 AB-1）：
+    展示板的查看权限本身就是勾选名单制——能进这个页面的账号（`page_maintenance`
+    或 `page_maintenance_boss`）即视为获授全部项目可见，与既有「老板＋被勾选项目
+    经理整套可见」口径一致（REQUIREMENTS #2/#14）。因此不再按 `resolve_visible_
+    project_ids` 逐项目收敛。
+
+    保留本函数而非删掉调用点：改判是权限口径而非架构决定，若日后回到②仅本人项目，
+    只需在此恢复收敛，七个端点与 summary/下钻的调用方无需改动。
+    """
+    return None
 
 
 class ProjectSearch(BaseModel):
@@ -188,7 +187,11 @@ def board_project_orders(
         # 未归属单没有「本人范围」可言：仅全范围账号可见，其余 404（不暴露存在性）
         if allowed is not None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在")
-    elif allowed is not None and project_id not in allowed:
+    elif (allowed is not None and project_id not in allowed) or not (
+        board.project_exists(db, project_id=project_id)
+    ):
+        # 不存在的 id 与越权 id 返回同一个 404：既不暴露存在性，也不用空列表
+        # 冒充「这个项目没有单」（M0-B 改判后范围不再收敛，存在性校验必须自己做）
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在")
     return board.project_orders(db, user_ctx=ctx, project_id=project_id,
                                 page=page, page_size=page_size)
@@ -205,6 +208,8 @@ def board_order_lines(
     ctx: UserContext = Depends(require_board_view),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if not board.order_exists(db, source_order_id=source_order_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "单据不存在")
     allowed = _allowed_scope(db, ctx)
     if allowed is not None:
         # 本人范围账号：单据必须归属于其可见项目，否则 404（不暴露存在性）。

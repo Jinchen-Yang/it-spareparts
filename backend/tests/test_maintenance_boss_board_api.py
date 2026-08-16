@@ -1,5 +1,6 @@
 """M3-2：看板七端点契约、六态信封、未归属桶（plan v1.3 §4.4/§4.5）。"""
 import pytest
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.services import maintenance_boss_board as board
@@ -75,12 +76,14 @@ def test_cost_bundle_incomplete_when_missing_prices(db, tmp_path):
     assert value["coverage_pct"] == 0.0
 
 
-def test_attention_is_empty_pending_m0a(db):
-    """M0-A 未拍板：只搭框架，不预置内容（不替业务拍板）。"""
-    client = boss_client(db)
-    body = client.get("/api/maintenance/boss-board/attention").json()
-    assert body["items"] == []
-    assert body["pending_decision"] == "M0-A"
+def test_attention_registers_only_the_two_signed_kinds(db):
+    """M0-A 已拍板（AB-2）：只注册 ①超预算 ③待返件多，未获选的四类不得自行加。"""
+    body = boss_client(db).get("/api/maintenance/boss-board/attention").json()
+    assert body["registered_kinds"] == ["budget_remaining", "pending_return"]
+    # 业务只给口径没给分界线 → 这是排序取前 N，不是阈值告警，显式回传避免误读
+    assert body["threshold"] is None
+    assert body["ranking"]
+    assert "pending_decision" not in body
 
 
 def test_projects_list_includes_unassigned_bucket(db, tmp_path):
@@ -184,3 +187,108 @@ def test_flag_off_hides_all_board_endpoints(db):
         assert client.get("/api/maintenance/projects").status_code == 200
     finally:
         settings.maintenance_boss_dashboard_enabled = True
+
+
+# ---------- AB-2：需关注队列两个注册 kind ----------
+
+def _contract(db, project, amount_inc_tax, *, included=True):
+    """台账合同行（金额口径 REQUIREMENTS #8：正式列=amount_inc_tax）。"""
+    import uuid
+    from datetime import date as _date
+    from decimal import Decimal as _D
+
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    db.add(MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()), project_id=project.project_id,
+        contract_id=f"C-{uuid.uuid4().hex[:8]}", contract_no="HT-001",
+        amount_inc_tax=_D(amount_inc_tax), included_in_total=included,
+        status_mapping_state="mapped", status_mapping_version="v1",
+        effective_from=_date(2026, 1, 1), source="ledger", version=1))
+    db.commit()
+
+
+def test_attention_budget_item_red_when_spend_exceeds_contract(db, tmp_path):
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="500.00")          # 2 行 × 500 = 1000 已知支出
+    _contract(db, proj, "600.00")           # 预算 600 → 超支
+    body = boss_client(db, username="attn-boss").get(
+        "/api/maintenance/boss-board/attention").json()
+    item = next(i for i in body["items"] if i["kind"] == "budget_remaining")
+    assert item["project_id"] == proj.project_id
+    assert item["value"]["status"] == "red"
+    assert item["evidence_link"].endswith(f"/projects/{proj.project_id}/orders")
+
+
+def test_attention_budget_ignores_contracts_not_included_in_total(db, tmp_path):
+    """included_in_total=false 的合同不进预算——不从状态文本猜（REQUIREMENTS #31）。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="500.00")
+    _contract(db, proj, "600.00", included=False)
+    body = boss_client(db, username="attn-boss2").get(
+        "/api/maintenance/boss-board/attention").json()
+    assert not [i for i in body["items"] if i["kind"] == "budget_remaining"]
+
+
+def test_attention_budget_item_hidden_without_cost_permission(db, tmp_path):
+    """预算条目是金额派生物：「它在不在队列里」本身就泄露成本排名 → 整条略去。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="500.00")
+    _contract(db, proj, "600.00")
+    body = boss_client(db, username="attn-nocost", with_cost=False).get(
+        "/api/maintenance/boss-board/attention").json()
+    assert not [i for i in body["items"] if i["kind"] == "budget_remaining"]
+    assert 600 not in _all_numbers(body) and 1000 not in _all_numbers(body)
+
+
+def _all_numbers(payload) -> list:
+    out = []
+    if isinstance(payload, dict):
+        for v in payload.values():
+            out.extend(_all_numbers(v))
+    elif isinstance(payload, list):
+        for v in payload:
+            out.extend(_all_numbers(v))
+    elif isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        out.append(payload)
+    return out
+
+
+def test_attention_pending_return_is_not_imported_when_rkd_absent(db, tmp_path):
+    """铁律 5：RKD 未导入 → 回收量无法知道，返件率不得按 0 算。"""
+    from decimal import Decimal
+
+    from app.models.maintenance import FMaintenanceLine
+
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    for ln in db.execute(select(FMaintenanceLine)).scalars():
+        ln.return_qty = Decimal("5")        # 应返 5（退货列在聚合白名单内）
+    db.commit()
+    body = boss_client(db, username="attn-ret").get(
+        "/api/maintenance/boss-board/attention").json()
+    item = next(i for i in body["items"] if i["kind"] == "pending_return")
+    assert item["value"]["demand_return_qty"] == "5.000"
+    for field in ("recovered_return_qty", "pending_return_qty", "return_rate_pct"):
+        assert item["value"][field]["state"] == "not_imported", field
+        assert item["value"][field]["value"] is None, field
+
+
+def test_attention_never_aggregates_status_columns(db):
+    """铁律 3 回归：待返/已返是流转状态列，队列口径只能用白名单列与三源事实。"""
+    from sqlalchemy.dialects import postgresql
+
+    from app.services import maintenance_boss_board as b
+
+    for stmt in (b._budget_overspend_stats(),):
+        sql = str(stmt.compile(dialect=postgresql.dialect(),
+                               compile_kwargs={"literal_binds": True}))
+        for column in b.STATUS_ONLY_COLUMNS:
+            assert column not in sql, column
