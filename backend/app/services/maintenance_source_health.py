@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -28,6 +28,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocHeadRow,
     MaintenanceDocImportBatch,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 
 # F2 建议默认：周/月上传节奏的 1.5 倍
@@ -98,14 +99,31 @@ def _ckd_source(db: Session) -> dict:
               MaintenanceCkdImportBatch.batch_id == MaintenanceCkdHeadRow.batch_id)
         .where(MaintenanceCkdImportBatch.status == "applied")
     ).scalar_one()
-    # CKD 无项目列：未命中 WBDD 单号即无法归属（事实档案 §2.1）
+    # CKD 无项目列：能否落到项目取决于「wbdd_no → f_maintenance_order → 活跃归属」
+    # 这条完整链路（事实档案 §2.1）。只数 wbdd_no IS NULL 会漏掉「有单号但尚未人工
+    # 确认归属」的绝大多数行——那会让 readiness 误判为 ready，看板把未关联的实发
+    # 渲染成一个自信的 0（违反铁律 5）。判定条件与 boss_facts._applied_ckd_lines
+    # 的 join 同源。
+    linked_wbdd = (
+        select(FMaintenanceOrder.order_no)
+        .join(MaintenanceSourceOrderAssignment,
+              (MaintenanceSourceOrderAssignment.source_order_id
+               == FMaintenanceOrder.raw_order_id)
+              & MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .group_by(FMaintenanceOrder.order_no)
+        .having(func.count(func.distinct(
+            MaintenanceSourceOrderAssignment.project_id)) == 1)
+    )
     unlinked = db.execute(
         select(func.count(MaintenanceCkdHeadRow.row_id))
         .join(MaintenanceCkdImportBatch,
               MaintenanceCkdImportBatch.batch_id == MaintenanceCkdHeadRow.batch_id)
         .where(MaintenanceCkdImportBatch.status == "applied",
                MaintenanceCkdHeadRow.category == "维保供货",
-               MaintenanceCkdHeadRow.wbdd_no.is_(None))
+               or_(MaintenanceCkdHeadRow.data_status_raw.is_(None),
+                   MaintenanceCkdHeadRow.data_status_raw == "已生效"),
+               or_(MaintenanceCkdHeadRow.wbdd_no.is_(None),
+                   MaintenanceCkdHeadRow.wbdd_no.notin_(linked_wbdd)))
     ).scalar_one()
     readiness = "partial" if (batch.issue_rows or unlinked) else "ready"
     return _envelope(readiness, as_of=as_of, batch_id=batch.batch_id,

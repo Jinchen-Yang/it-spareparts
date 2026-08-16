@@ -130,6 +130,8 @@ export interface BoardOrderRow {
     returned_good_qty: Stat<string | number>;
     returned_bad_qty: Stat<string | number>;
   };
+  /** facts 的口径：'project' = 项目级卷积（非本单数量）；null = 无项目口径（未归属桶）。 */
+  facts_scope: "project" | null;
 }
 
 export interface BoardOrders {

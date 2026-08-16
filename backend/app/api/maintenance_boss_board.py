@@ -204,5 +204,12 @@ def board_order_lines(
     ctx: UserContext = Depends(require_board_view),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    allowed = _allowed_scope(db, ctx)
+    if allowed is not None:
+        # 本人范围账号：单据必须归属于其可见项目，否则 404（不暴露存在性）。
+        # 未归属单没有「本人范围」可言，同样 404——与 /projects/{id}/orders 口径一致。
+        owner_project = board.order_project_id(db, source_order_id=source_order_id)
+        if owner_project is None or owner_project not in allowed:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "单据不存在")
     return board.order_lines(db, user_ctx=ctx, source_order_id=source_order_id,
                              page=page, page_size=page_size)

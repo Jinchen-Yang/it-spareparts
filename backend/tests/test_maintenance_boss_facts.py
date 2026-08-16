@@ -49,7 +49,8 @@ def _assign(db, order, project):
     db.commit()
 
 
-def _ckd(db, *, wbdd_no, pn="PN-SYN-0011", qty="4", category="维保供货"):
+def _ckd(db, *, wbdd_no, pn="PN-SYN-0011", qty="4", category="维保供货",
+         data_status="已生效", ckd_no="CKD-1", line_id=None, row_no=1):
     batch = MaintenanceCkdImportBatch(
         batch_id=str(uuid.uuid4()), file_hash="h" * 64, filename="ckd.xlsx",
         idempotency_key=str(uuid.uuid4()), uploaded_by="tester",
@@ -59,13 +60,13 @@ def _ckd(db, *, wbdd_no, pn="PN-SYN-0011", qty="4", category="维保供货"):
     db.flush()
     head = MaintenanceCkdHeadRow(
         row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=1,
-        order_no="CKD-1", order_date=date(2026, 7, 20), category=category,
-        wbdd_no=wbdd_no, data_status_raw="已生效")
+        order_no=ckd_no, order_date=date(2026, 7, 20), category=category,
+        wbdd_no=wbdd_no, data_status_raw=data_status)
     db.add(head)
     db.flush()
     db.add(MaintenanceCkdLineRow(
         row_id=str(uuid.uuid4()), batch_id=batch.batch_id, head_row_id=head.row_id,
-        row_no=1, pn_raw=pn, out_qty=Decimal(qty)))
+        row_no=row_no, pn_raw=pn, out_qty=Decimal(qty), data_id_raw=line_id))
     db.commit()
 
 
@@ -159,8 +160,10 @@ def test_project_totals_roll_up_pn_level(db, tmp_path):
     proj = _project(db)
     order = _wbdd(db, tmp_path)[0]
     _assign(db, order, proj)
-    _ckd(db, wbdd_no=order.order_no, pn="PN-A", qty="3")
-    _ckd(db, wbdd_no=order.order_no, pn="PN-B", qty="2")
+    # 同一出库单的两行：序号必须不同（真实导出如此），否则按业务键 (单号,序号)
+    # 会被正确地判为同一行的重传
+    _ckd(db, wbdd_no=order.order_no, pn="PN-A", qty="3", row_no=1)
+    _ckd(db, wbdd_no=order.order_no, pn="PN-B", qty="2", ckd_no="CKD-2", row_no=1)
     totals = facts.project_totals(db)
     assert totals[proj.project_id]["shipped"] == Decimal("5.000")
     assert totals[proj.project_id]["returned_good"] is None   # 未导入不是 0
@@ -190,3 +193,72 @@ def test_line_evidence_returns_status_columns_verbatim(db, tmp_path):
     assert row["pending_supply_qty"] == Decimal("1.000")
     assert row["consumed_qty"] is None          # fixture 中「领用数量」为空
     assert row["return_old_part"] == "是"
+
+
+def test_duplicate_order_no_does_not_double_count_shipments(db, tmp_path):
+    """扇出防回归：order_no 无唯一约束，同号双单不得让实发翻倍。
+
+    f_maintenance_order.order_no 只有普通索引（幂等键是 raw_order_id）。若氚云导出
+    出现同一需求单号的两个数据ID 且都有活跃归属，朴素 join 会把 CKD 明细数量重复
+    计入——「精确对平不允许 ±2%」下这是硬缺陷。
+    """
+    proj = _project(db)
+    order = _wbdd(db, tmp_path)[0]
+    _assign(db, order, proj)
+    # 同一 order_no 的第二个数据ID（更正单/重复导出），同样归属该项目
+    twin = FMaintenanceOrder(
+        raw_order_id="SYN-O001-TWIN", order_no=order.order_no,
+        order_date=order.order_date, project_raw=order.project_raw,
+        project_std=order.project_std, data_status="已生效",
+        import_batch_id=order.import_batch_id,
+    )
+    db.add(twin)
+    db.commit()
+    _assign(db, twin, proj)
+
+    _ckd(db, wbdd_no=order.order_no, qty="4")
+    totals = facts.project_totals(db)
+    # 实发必须仍是 4，而不是 8
+    assert totals[proj.project_id]["shipped"] == Decimal("4.000")
+
+
+def test_ambiguous_order_no_across_projects_is_excluded_not_guessed(db, tmp_path):
+    """歧义 fail-closed：同号映射到两个不同项目时整体排除，绝不静默挑一个摊数。"""
+    proj_a, proj_b = _project(db, "项目A"), _project(db, "项目B")
+    order = _wbdd(db, tmp_path)[0]
+    _assign(db, order, proj_a)
+    twin = FMaintenanceOrder(
+        raw_order_id="SYN-O001-TWIN2", order_no=order.order_no,
+        order_date=order.order_date, project_raw=order.project_raw,
+        project_std=order.project_std, data_status="已生效",
+        import_batch_id=order.import_batch_id,
+    )
+    db.add(twin)
+    db.commit()
+    _assign(db, twin, proj_b)
+
+    _ckd(db, wbdd_no=order.order_no, qty="9")
+    totals = facts.project_totals(db)
+    # 两个项目都不得拿到这 9（宁可计未关联，也不猜）
+    assert totals.get(proj_a.project_id, {}).get("shipped") is None
+    assert totals.get(proj_b.project_id, {}).get("shipped") is None
+
+
+def test_voided_shipment_is_not_counted_as_actual_delivery(db, tmp_path):
+    """作废/草稿发货单不是实发事实——与导入 apply 的「只放行已生效」判定同形。"""
+    proj = _project(db)
+    order = _wbdd(db, tmp_path)[0]
+    _assign(db, order, proj)
+    _ckd(db, wbdd_no=order.order_no, qty="6", data_status="已取消")
+    assert facts.project_totals(db).get(proj.project_id, {}).get("shipped") is None
+
+
+def test_same_shipment_in_two_applied_batches_is_not_double_counted(db, tmp_path):
+    """跨批次去重：同一发货明细出现在两个 applied 批次（换幂等键重传/周期重叠）
+    时不得翻倍——front_stock 账本按 source_ref 幂等，读侧必须与之一致。"""
+    proj = _project(db)
+    order = _wbdd(db, tmp_path)[0]
+    _assign(db, order, proj)
+    _ckd(db, wbdd_no=order.order_no, qty="5", ckd_no="CKD-DUP", line_id="L-1")
+    _ckd(db, wbdd_no=order.order_no, qty="5", ckd_no="CKD-DUP", line_id="L-1")
+    assert facts.project_totals(db)[proj.project_id]["shipped"] == Decimal("5.000")

@@ -266,12 +266,37 @@ def _window_counts(db: Session, window: tuple[date, date], *,
         db.execute(lines_stmt).scalar_one())
 
 
+def wbdd_imported(db: Session) -> bool:
+    """WBDD 源是否已导入。
+
+    未导入时首屏三个指标槽必须显示「尚未导入」而不是 0——「本期需求单 0」会被
+    老板读成「本期没人提申请」，与「数据没传」是两件完全不同的事（铁律 5）。
+    """
+    return (maintenance_source_health.source_health(db)["sources"]["wbdd"]
+            ["readiness"] != "not_imported")
+
+
 def summary(db: Session, *, user_ctx: UserContext,
             date_from: date | None = None, date_to: date | None = None) -> dict:
     """本期变化：orders_ytd / lines_ytd / 成本五件套 + 环比基期（§4.4）。"""
     window = resolve_window(date_from, date_to)
     prev = previous_window(window)
     can_cost = can_view_cost(user_ctx)
+    if not wbdd_imported(db):
+        empty = {
+            "orders_ytd": not_imported(),
+            "lines_ytd": not_imported(),
+            "known_apply_cost_inc_tax": (
+                restricted() if not can_cost else not_imported()),
+        }
+        return {
+            "window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
+            **empty,
+            "prev_window": {
+                "window": {"from": prev[0].isoformat(), "to": prev[1].isoformat()},
+                **empty,
+            },
+        }
     orders, lines = _window_counts(db, window)
     prev_orders, prev_lines = _window_counts(db, prev)
     return {
@@ -343,25 +368,66 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             MaintenanceProject.display_name.icontains(needle, autoescape=True),
         ))
 
-    total = int(db.execute(
-        select(func.count(MaintenanceProject.project_id)).where(*filters)
-    ).scalar_one())
+    # 窗口内的每项目计数/成本子查询：既用于 has_activity 过滤，也用于真实排序。
+    # 不这么做的话 sort/has_activity 会变成「接收但静默忽略」的假参数——调用方
+    # 以为已排序/已筛选，实际拿到的是 project_code 字典序全集。
+    active = and_(
+        MaintenanceSourceOrderAssignment.source_order_id
+        == FMaintenanceOrder.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )
+    win_start, win_end = window
+    window_stats = (
+        select(
+            MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+            func.count(func.distinct(FMaintenanceOrder.id)).label("orders_n"),
+            func.coalesce(func.sum(
+                FMaintenanceLine.cost_amount_inc_tax), 0).label("known_cost"),
+        )
+        .select_from(FMaintenanceOrder)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .outerjoin(FMaintenanceLine,
+                   FMaintenanceLine.order_id == FMaintenanceOrder.id)
+        .where(FMaintenanceOrder.order_date >= win_start,
+               FMaintenanceOrder.order_date <= win_end)
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+        .subquery()
+    )
+    base = (select(MaintenanceProject)
+            .outerjoin(window_stats,
+                       window_stats.c.project_id == MaintenanceProject.project_id)
+            .where(*filters))
+    if has_activity is True:
+        base = base.where(func.coalesce(window_stats.c.orders_n, 0) > 0)
+    elif has_activity is False:
+        base = base.where(func.coalesce(window_stats.c.orders_n, 0) == 0)
 
-    order_by = {
-        "name": (MaintenanceProject.project_code,),
-        "orders": (MaintenanceProject.project_code,),
-        "attention": (MaintenanceProject.project_code,),
-        "known_cost": (MaintenanceProject.project_code,),
-    }[sort]
+    total = int(db.execute(
+        select(func.count()).select_from(base.subquery())).scalar_one())
+
+    if sort == "orders":
+        order_by = (func.coalesce(window_stats.c.orders_n, 0).desc(),
+                    MaintenanceProject.project_code)
+    elif sort == "known_cost":
+        order_by = (func.coalesce(window_stats.c.known_cost, 0).desc(),
+                    MaintenanceProject.project_code)
+    elif sort == "attention":
+        # 需关注排序的口径由 M0-A 拍板（plan §2.1）；未拍板前按「本期活动量」代理，
+        # 并在响应里如实回显 sort_applied，不假装已按最终口径排序。
+        order_by = (func.coalesce(window_stats.c.orders_n, 0).desc(),
+                    MaintenanceProject.project_code)
+    else:
+        order_by = (MaintenanceProject.project_code,)
     rows = db.execute(
-        select(MaintenanceProject).where(*filters)
-        .order_by(*order_by)
+        base.order_by(*order_by)
         .offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()
 
     project_ids = [p.project_id for p in rows]
     # 一次性取本页项目的窗口计数、成本五件套与三源事实（M3-4：查询数与页大小无关）
     counts = _project_window_counts(db, window, project_ids)
+    # WBDD 未导入时，需求单/明细/成本一律 not_imported——不得用 0 冒充「没有申请」
+    wbdd_ready = wbdd_imported(db)
     cost_bundles = _cost_bundles_by_project(
         db, window=window, project_ids=project_ids, can_cost=can_cost)
     fact_totals = (maintenance_boss_facts.project_totals(db, project_ids=project_ids)
@@ -379,9 +445,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "lifecycle": proj.lifecycle_status,
             "has_activity_in_window": bool(orders_n),
             "pre_delivery_order_count": pre_delivery.get(proj.project_id, 0),
-            "orders_ytd": ready(orders_n),
-            "lines_ytd": ready(lines_n),
-            "known_apply_cost_inc_tax": cost_bundles[proj.project_id],
+            "orders_ytd": ready(orders_n) if wbdd_ready else not_imported(),
+            "lines_ytd": ready(lines_n) if wbdd_ready else not_imported(),
+            "known_apply_cost_inc_tax": (
+                cost_bundles[proj.project_id] if wbdd_ready
+                else (restricted() if not can_cost else not_imported())),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
         })
 
@@ -397,14 +465,19 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "lifecycle": "missing",
             "has_activity_in_window": bool(u_orders),
             "pre_delivery_order_count": 0,
-            "orders_ytd": ready(u_orders),
-            "lines_ytd": ready(u_lines),
-            "known_apply_cost_inc_tax": _cost_bundle(
-                db, window=window, unassigned_only=True, can_cost=can_cost),
+            "orders_ytd": ready(u_orders) if wbdd_ready else not_imported(),
+            "lines_ytd": ready(u_lines) if wbdd_ready else not_imported(),
+            "known_apply_cost_inc_tax": (
+                _cost_bundle(db, window=window, unassigned_only=True,
+                             can_cost=can_cost) if wbdd_ready
+                else (restricted() if not can_cost else not_imported())),
             **_fact_envelopes(None, source_states),
         })
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
+            # attention 的最终口径待 M0-A；当前按本期活动量代理，如实回显
+            "sort_applied": ("orders" if sort == "attention" else sort),
+            "sort_pending_decision": ("M0-A" if sort == "attention" else None),
             "window": {"from": window[0].isoformat(), "to": window[1].isoformat()}}
 
 
@@ -523,9 +596,28 @@ def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
                 "head_shipped_qty": order.head_shipped_qty,
                 "head_returned_qty": order.head_returned_qty,
             },
-            "facts": _fact_envelopes(fact_totals.get(project_id), source_states),
+            # facts 是**项目级**卷积（M0-D 粒度下 CKD/RKD 无单据行级键，无法分摊到
+            # 单张需求单）。必须显式标注口径，否则与单据级自报列并排会被读成
+            # 「这张单发了 800 件」；未归属桶没有项目口径事实，返回 not_imported。
+            "facts": (_fact_envelopes(fact_totals.get(project_id), source_states)
+                      if not unassigned
+                      else {k: not_imported() for k in
+                            ("shipped_qty", "returned_good_qty", "returned_bad_qty")}),
+            "facts_scope": None if unassigned else "project",
         })
     return {"rows": out, "total": total, "page": page, "page_size": page_size}
+
+
+def order_project_id(db: Session, *, source_order_id: str) -> str | None:
+    """单据当前的活跃归属项目；未归属返回 None（供 API 层做范围校验）。"""
+    return db.execute(
+        select(MaintenanceSourceOrderAssignment.project_id)
+        .join(FMaintenanceOrder,
+              FMaintenanceOrder.raw_order_id
+              == MaintenanceSourceOrderAssignment.source_order_id)
+        .where(FMaintenanceOrder.raw_order_id == source_order_id,
+               MaintenanceSourceOrderAssignment.is_active.is_(True))
+    ).scalar_one_or_none()
 
 
 def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,

@@ -17,6 +17,10 @@ function raw(value: string | number | null | undefined) {
 /**
  * 单据证据表（plan v1.3 §5.1）。自报四列与三源事实**纯并排**，
  * 无任何差异高亮/徽标——服务端亦不产出 mismatch（铁律 3 / M4-4 / F5 未豁免）。
+ *
+ * 口径警告：自报列是**本单**头级汇总，事实列是**项目级**卷积（M0-D 粒度下
+ * CKD/RKD 无单据行级键，无法分摊到单张需求单）。两者不可直接相减，列标题已分别
+ * 标注「（本单）」与「（项目口径）」，表尾另有一句说明。
  */
 export function OrderEvidenceTable({
   rows,
@@ -63,31 +67,31 @@ export function OrderEvidenceTable({
       ),
     },
     {
-      title: "自报·已发货",
+      title: "自报·已发货（本单）",
       dataIndex: ["self_report", "head_shipped_qty"],
       width: 110,
       render: (_: unknown, row) => raw(row.self_report.head_shipped_qty),
     },
     {
-      title: "事实·实发",
+      title: "实发（项目口径）",
       dataIndex: ["facts", "shipped_qty"],
       width: 120,
       render: (_: unknown, row) => <StatCell stat={row.facts.shipped_qty} />,
     },
     {
-      title: "自报·已返货",
+      title: "自报·已返货（本单）",
       dataIndex: ["self_report", "head_returned_qty"],
       width: 110,
       render: (_: unknown, row) => raw(row.self_report.head_returned_qty),
     },
     {
-      title: "事实·未用件收回",
+      title: "未用件收回（项目口径）",
       dataIndex: ["facts", "returned_good_qty"],
       width: 140,
       render: (_: unknown, row) => <StatCell stat={row.facts.returned_good_qty} />,
     },
     {
-      title: "事实·坏件回收",
+      title: "坏件回收（项目口径）",
       dataIndex: ["facts", "returned_bad_qty"],
       width: 130,
       render: (_: unknown, row) => <StatCell stat={row.facts.returned_bad_qty} />,

@@ -108,7 +108,10 @@ export default function BossProjectDrillPage() {
           }}
         />
         <Text type="secondary" style={{ fontSize: 11.5 }}>
-          自报列（氚云头级汇总）与事实列（发货单/返库单/入库单）并排展示，系统不做差异判定。
+          自报列是氚云在<strong>本单</strong>头上填的汇总；实发/收回列是
+          <strong>整个项目</strong>的发货单/返库单/入库单事实（发货与入库单没有需求单
+          行级键，无法拆到单张需求单）。两组数字口径不同、不可相减，系统只并排展示、
+          不做任何差异判定。
         </Text>
       </Card>
       {selected ? (

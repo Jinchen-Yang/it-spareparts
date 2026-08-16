@@ -119,7 +119,9 @@ def test_rule1_line_level_cost_and_source_restricted(db, tmp_path):
     orders = import_wbdd(db, tmp_path, lines_per_order=1)
     assign(db, orders[0], proj)
     set_costs(db, source="pool_sales", amount="99.99")
-    client = manager_client(db, username="no-cost-mgr2", with_cost=False)
+    # 用「全范围但无成本」账号隔离成本维度：本人范围账号会先被 IDOR 范围校验挡在
+    # 404（见 test_line_drilldown_enforces_project_scope_idor），验不到成本脱敏。
+    client = boss_client(db, username="nocost-boss-lines", with_cost=False)
     lines = client.get(
         f"/api/maintenance/boss-board/orders/{orders[0].raw_order_id}/lines").json()
     row = lines["rows"][0]
@@ -183,3 +185,36 @@ def test_attention_has_no_cost_derived_items_without_permission(db):
     no_cost = manager_client(db, username="no-cost-mgr7", with_cost=False)
     body = no_cost.get("/api/maintenance/boss-board/attention").json()
     assert body["items"] == []
+
+
+def test_line_drilldown_enforces_project_scope_idor(db, tmp_path):
+    """IDOR 防回归（plan §6.2「越权 id → 404」）：
+
+    PN 证据行下钻只按 source_order_id 取数，若不做范围校验，项目经理凭单据 ID
+    即可读到他人项目、乃至未归属单的明细。此处锁死越权一律 404（不暴露存在性）。
+    """
+    mine, theirs = make_project(db, "我的项目"), make_project(db, "别人的项目")
+    orders = import_wbdd(db, tmp_path, orders=3)
+    assign(db, orders[0], mine)
+    assign(db, orders[1], theirs)
+    # orders[2] 保持未归属
+
+    boss = boss_client(db, username="idor-boss")
+    # 全范围账号可读全部三种
+    for order in orders:
+        assert boss.get(
+            f"/api/maintenance/boss-board/orders/{order.raw_order_id}/lines"
+        ).status_code == 200, order.raw_order_id
+
+    manager = manager_client(db, username="idor-manager")
+    # 本人范围账号：他人项目单据与未归属单据均 404
+    assert manager.get(
+        f"/api/maintenance/boss-board/orders/{orders[1].raw_order_id}/lines"
+    ).status_code == 404
+    assert manager.get(
+        f"/api/maintenance/boss-board/orders/{orders[2].raw_order_id}/lines"
+    ).status_code == 404
+    # 不存在的单据同样 404（与越权不可区分）
+    assert manager.get(
+        "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
+    ).status_code == 404

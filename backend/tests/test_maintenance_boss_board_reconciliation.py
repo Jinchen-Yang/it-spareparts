@@ -127,3 +127,38 @@ def test_project_cost_sums_equal_global_cost(db, tmp_path):
     global_known = Decimal(
         str(summary["known_apply_cost_inc_tax"]["value"]["known_amount"]))
     assert per_project == global_known == Decimal("300.00")
+
+
+def test_aggregation_sql_never_references_status_columns():
+    """铁律 3 的**真闸门**：编译聚合 SQL，断言其中不出现任何流转状态列。
+
+    只断言 AGGREGATE_SOURCE_COLUMNS 与状态列集合不相交是不够的——那只证明两个
+    常量不重叠，不证明真实查询遵守白名单。这里把每条聚合语句编译成 SQL 文本逐一
+    检查，任何人日后在聚合里引用 supplied_qty/consumed_qty 之类都会立刻红。
+    """
+    from sqlalchemy.dialects import postgresql
+
+    from app.services import maintenance_boss_facts as facts
+
+    statements = {
+        "ckd": facts._applied_ckd_lines(),
+        "return_order": facts._applied_return_lines(),
+        "rkd": facts._applied_rkd_lines(),
+    }
+    for name, stmt in statements.items():
+        sql = str(stmt.compile(dialect=postgresql.dialect(),
+                               compile_kwargs={"literal_binds": True}))
+        for column in board.STATUS_ONLY_COLUMNS:
+            assert column not in sql, f"{name} 聚合 SQL 引用了流转状态列 {column}"
+
+
+def test_cost_aggregation_sql_never_references_status_columns(db):
+    """成本五件套聚合同样不得引用状态列（成本只看 cost_* 与 qty）。"""
+    from sqlalchemy.dialects import postgresql
+
+    stmt_columns = board._cost_columns()
+    for expr in stmt_columns:
+        sql = str(expr.compile(dialect=postgresql.dialect(),
+                               compile_kwargs={"literal_binds": True}))
+        for column in board.STATUS_ONLY_COLUMNS:
+            assert column not in sql, f"成本聚合引用了流转状态列 {column}"
