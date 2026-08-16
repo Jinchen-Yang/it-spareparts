@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-08-16
+
+**Agent:** Claude Code (Claude Code on the web)
+**Session:** 维保前端信息架构设计（分支 `claude/maintenance-frontend-redesign-vr72wy`，基线 `origin/main@4f8b688`）
+**阶段:** Plan —— 仅产出设计文档，未修改任何代码
+
+**Before:**
+- 维保前端的改造依据只有两份文档：`docs/superpowers/plans/PR3-ux-refactor.md` 与
+  `docs/维保管理字段业务化改造方案.html`，两者内容约九成是术语翻译（`项目经理→维保负责人`、
+  `PN→备件型号`、`dry-run→预检不保存`）
+- 没有任何文档定义信息层级、状态语义分类、以及业务事实的页面归属
+- 结果：文案改完之后信息仍然没有逻辑
+
+**Changed:**
+- 新建 `docs/maintenance/frontend-information-design.md`（commit `cb5bc66`）
+  - 诊断 6 个结构问题 D1–D6，逐项附代码证据行号
+  - 定义信息四层：决断层 / 指标层 / 事实层 / 依据层，每层固定呈现规格
+  - 定义状态语义六类：逾期 / 待办 / 正常 / 不适用 / 受限 / 阻塞，规定只有前两类使用暖色
+  - 定义归属唯一规则 + 18 条业务事实的阶段归属表（修 D1）
+  - 定义标签预算：项目卡最多 3 个状态位（修 D3）
+  - 逐页给出「展示哪些信息（含数据来源字段与所属层）」+「有哪些按钮（含出现条件、
+    点击后行为、权限）」，覆盖我的待办 / 项目总览 / 项目详情五阶段 / 侧栏导航
+  - 形式为文字说明 + ASCII 结构图，不含代码
+
+**原因:**
+- 用户反馈「前端显示的信息很没逻辑」，要求在 plan 阶段先出设计
+- 已有文档只覆盖文案层，缺少信息架构层的定义
+
+**验证:**
+- 不涉及代码，无测试与构建
+- 三张 ASCII 结构图已按 CJK 双宽规则校验列对齐（68 / 64 / 70 列，全部一致）
+
+**Notes:**
+- 落地映射到 PR1/PR3 已列出的待建文件（`BusinessActionCard.tsx`、`TechnicalDetails.tsx`、
+  `MaintenanceWorkflowNav.tsx`、`MaintenanceWorkDashboardPage.tsx`），不新增 PR
+- 新增一项 PR3 未覆盖的改动建议：项目总览的「任务类型」9 选项下拉改为按紧急度筛选
+- 需业务确认 4 项：指标层取哪三个数 / 阻塞类是否支持一键转派 admin /
+  决断条优先级按截止日还是金额 / `not_counted` 是否永不需要人工干预
+- 实现需等用户确认本设计后另起 PR
+
+---
+
 ## 2026-08-13
 
 **Agent:** Claude Code (WSL Ubuntu 26.04)
