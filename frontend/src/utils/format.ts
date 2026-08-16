@@ -21,6 +21,10 @@ export const qty = (v: number | null | undefined): string =>
 export const moneyExact = (v: number | null | undefined): string =>
   v == null ? EMPTY : `¥${Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
 
+/** 含税金额：固定保留 2 位小数（金额口径统一标注「含税」时用，如前置库估值/变卖收入）。 */
+export const moneyIncTax = (v: number | null | undefined): string =>
+  v == null ? EMPTY : `¥${Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 /** 轴刻度金额：压缩成 万/亿，去尾零（轴上寸土寸金，精确值交给 tooltip）。 */
 export const moneyAxis = (v: number | null | undefined): string => {
   if (v == null) return EMPTY;

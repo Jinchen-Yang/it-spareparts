@@ -125,14 +125,11 @@ def stream_first_sheet_rows(data: bytes):
         except (KeyError, ET.ParseError):
             target = None
         if target is None or target not in archive.namelist():
-            targets = sorted(
-                name
-                for name in archive.namelist()
-                if name.startswith("xl/worksheets/") and name.endswith(".xml")
+            # 关系文件缺失/损坏无法确定可见 sheet：fail-closed，不回退猜
+            # worksheet 文件名排序（可能读到 hidden sheet，round-6 Blocker 10）
+            raise UploadSafetyError(
+                "xlsx 关系文件缺失或损坏，无法确定首个可见 worksheet"
             )
-            if not targets:
-                raise UploadSafetyError("xlsx 缺少 worksheet")
-            target = targets[0]
 
         # 2) sharedStrings：t="s" 单元格引用其索引
         shared: list[str] = []
@@ -192,16 +189,30 @@ def _column_index(ref: str) -> int:
     return index
 
 
+def _canonical_header(name: str) -> str:
+    """剥离 (必填)/(不可修改)/(含税) 变体后缀的 canonical 列名。"""
+    for suffix in ("(必填)", "(不可修改)", "(含税)"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)].strip()
+    return name.strip()
+
+
 def apply_column_aliases(headers: list, column_aliases: dict | None) -> list:
-    """应用列别名映射；两个源列映射同一目标列时 fail-closed（round-5 Blocker 10）。"""
+    """应用列别名映射；两个源列映射同一目标列时 fail-closed（round-5/6 Blocker）。
+
+    重复检测在剥离变体后缀后的 canonical 名上进行：文件自身
+    「订单编号」+「订单编号(必填)」并存、或 alias 把另一列映射到已有
+    canonical，都不允许静默择一。
+    """
     if not column_aliases:
         return headers
     mapped = [column_aliases.get(h, h) for h in headers]
     seen: dict[str, str] = {}
     for source, target in zip(headers, mapped):
-        if target in seen and seen[target] != source:
+        key = _canonical_header(target)
+        if key in seen:
             raise UploadSafetyError(
-                f"多个源列映射同一目标列：{target}（{seen[target]} / {source}）"
+                f"多个源列映射同一目标列：{key}（{seen[key]} / {source}）"
             )
-        seen.setdefault(target, source)
+        seen[key] = source
     return mapped

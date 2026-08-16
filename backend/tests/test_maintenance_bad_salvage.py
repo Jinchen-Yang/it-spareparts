@@ -326,3 +326,69 @@ def test_salvage_margin_frozen_at_register(db, salvage_project):
     row = listing["rows"][0]
     assert row["cost_basis_inc_tax"] == 113.0
     assert row["margin"] == 274.0
+
+
+def test_salvage_api_rejects_without_profit_data(db, salvage_project):
+    """无 data_profit：清单 403、登记 403（round-6 Blocker 11 负向门）。"""
+    from app import permissions as _perms
+    from app.auth import hash_password
+    from app.models.system import SysUser
+
+    graph = _perms.effective("sales", None)
+    graph.update(
+        {
+            "page_maintenance": True,
+            "action_maintenance_bad_return_manage": True,
+            "data_profit": False,
+        }
+    )
+    user = SysUser(
+        username="salvage_no_profit",
+        role="sales",
+        display_name="无利润权限销售",
+        password_hash=hash_password("synthetic-password-123"),
+        permissions=graph,
+    )
+    db.add(user)
+    db.flush()
+    from app.models.maintenance_project import MaintenanceProjectUserAssignment
+    from datetime import datetime, timezone
+
+    db.add(
+        MaintenanceProjectUserAssignment(
+            assignment_id="salvage-noprofit-assign",
+            project_id="salvage-project-1",
+            responsibility_type="primary_manager",
+            user_id=user.id,
+            assigned_at=datetime.now(timezone.utc),
+            assigned_by="synthetic-admin",
+            assignment_reason="合成负责人映射",
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_bad_salvage.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "salvage_no_profit", "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    listing = client.get(
+        "/api/maintenance/projects/stable/salvage-project-1/salvages"
+    )
+    assert listing.status_code == 403
+    register = client.post(
+        "/api/maintenance/projects/stable/salvage-project-1/salvages",
+        json={
+            "part_id": salvage_project["part_id"],
+            "pn": "SV-A-001",
+            "qty": "1",
+            "revenue": "10.00",
+            "salvage_date": "2026-08-12",
+            "idempotency_key": "salvage-noprofit-key-1",
+        },
+    )
+    assert register.status_code == 403

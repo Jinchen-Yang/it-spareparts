@@ -128,10 +128,21 @@ def _seed(db):
             collection_id="wb3-snap-1",
             project_id="wb3-project-1",
             project_contract_id="wb3-pc-1",
-            report_month=date(2026, 10, 1),
+            report_month=date(2026, 8, 1),
             cumulative_amount=Decimal("2986.57"),
             status="confirmed",
             receipt_reference="HKD-0001",
+        )
+    )
+    # 未来月度快照不得进入导出（round-6 Blocker 7 反例）
+    db.add(
+        MaintenanceCollectionSnapshot(
+            collection_id="wb3-snap-future",
+            project_id="wb3-project-1",
+            project_contract_id="wb3-pc-1",
+            report_month=date(2026, 10, 1),
+            cumulative_amount=Decimal("9999"),
+            status="confirmed",
         )
     )
     issue = MaintenanceSiteIssue(
@@ -216,8 +227,10 @@ def test_build_workbook_sheets_and_data(db):
     ws05 = workbook["05_项目经理回款单"]
     rows = list(ws05.iter_rows(values_only=True))
     assert rows[1][1] == "XSDD-20260731-0086"
-    assert rows[1][2] == "2026-10"
+    assert rows[1][2] == "2026-08"
     assert rows[1][3] == 2986.57
+    # 未来 2026-10 快照被 as_of 过滤
+    assert all(row[2] != "2026-10" for row in rows[1:] if row[2])
 
     ws06 = workbook["06_现场领用与返还"]
     rows = list(ws06.iter_rows(values_only=True))
@@ -268,3 +281,56 @@ def test_workbook_v3_api_export_and_404(db):
         "/api/maintenance/projects/stable/no-such-project/workbook-v3.xlsx"
     )
     assert missing.status_code == 404
+
+
+def test_workbook_v3_api_rejects_without_data_groups(db):
+    """缺 data_purchase_cost 或 data_profit：导出 403（round-6 Blocker 11 负向门）。"""
+    from app import permissions as _perms
+    from app.auth import hash_password
+    from app.models.maintenance_project import MaintenanceProjectUserAssignment
+    from datetime import datetime, timezone
+
+    _seed(db)
+    graph = _perms.effective("sales", None)
+    graph.update(
+        {
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        }
+    )
+    user = SysUser(
+        username="wb3_no_profit",
+        role="sales",
+        display_name="无利润权限销售",
+        password_hash=hash_password("synthetic-password-123"),
+        permissions=graph,
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        MaintenanceProjectUserAssignment(
+            assignment_id="wb3-noprofit-assign",
+            project_id="wb3-project-1",
+            responsibility_type="primary_manager",
+            user_id=user.id,
+            assigned_at=datetime.now(timezone.utc),
+            assigned_by="synthetic-admin",
+            assignment_reason="合成负责人映射",
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_project_workbook_v3.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "wb3_no_profit", "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    denied = client.get(
+        "/api/maintenance/projects/stable/wb3-project-1/workbook-v3.xlsx"
+    )
+    assert denied.status_code == 403

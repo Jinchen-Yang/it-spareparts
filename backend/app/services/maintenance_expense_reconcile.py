@@ -1,19 +1,18 @@
-"""报销对账只读视图（C4，round-5 修复版）：台账归集 vs 氚云 BXD raw vs 正式费用事实。
+"""报销对账只读视图（C4，round-6 修复版）：台账归集 vs 氚云 BXD raw vs 正式费用事实。
 
-口径（import-field-contract §168-176,261-280 + Codex round-5 Blocker 7）：
-- 正式计入金额列与审批完成原值待业务确认：确认前**不输出 matched/mismatch
-  经营结论**，只输出三源证据与 ``amounts_aligned``（原始比对事实）；
-  多源齐备但口径未定的行 status = ``unresolved``（附 unresolved_basis 说明）；
-- 单源存在时输出 *_only 证据行（无结论）；
-- 同单号多行先聚合成单号级金额再比较；任一金额缺失 → 该源金额为 null，
-  不按 0 计（缺金额不伪造对齐）；
-- 有效事实过滤：台账=已应用批次且无 issue、BXD=已应用批次且头/明细无 issue、
-  正式费用=生效口径 + 成功导入批次（sys_import_batch.status='success'）；
-- 每条带来源计数与批次引用（可下钻审计）；limit/offset 分页。
+口径（业务 2026-08-16 确认）：
+- 正式计入金额列 = amount_inc_tax（含税计算值；amount 仅作审计原值）；
+- 结论口径：台账（含税归集）↔ 正式（含税计算）→ matched/mismatch；
+  BXD（氚云原值）作为第三源证据，仅报告 ``bxd_aligned``，不混层级；
+- 来源存在与金额是否为空是两个独立字段（缺金额不伪造存在，也不伪造对齐）；
+- 同文件重传去重：每个 (单号, file_hash) 只取最近 applied 批次；
+- 有效事实过滤：台账=已应用且无 issue、BXD=已应用且头/明细无 issue、
+  正式=生效口径 + 成功导入批次；limit/offset 分页。
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -37,30 +36,34 @@ def _qty(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
 
 
-def _status(ledger, bxd, formal) -> str:
-    present = sum(1 for value in (ledger, bxd, formal) if value is not None)
-    if present <= 1:
-        if ledger is not None:
-            return "ledger_only"
-        if bxd is not None:
-            return "bxd_only"
-        return "formal_only"
-    return "unresolved"
+def _latest_batch_ids(rows: list[tuple], file_hash_pos: int, at_pos: int) -> dict:
+    """(row_key, file_hash) → 最近 applied 批次集合（同文件重传只计最新）。"""
+    by_file: dict[tuple, dict[str, datetime]] = defaultdict(dict)
+    for row in rows:
+        key = (row[0], row[file_hash_pos])
+        batch_id = row[-1]
+        applied_at = row[at_pos] or datetime.min
+        if batch_id not in by_file[key]:
+            by_file[key][batch_id] = applied_at
+    latest: set[str] = set()
+    for entries in by_file.values():
+        max_at = max(entries.values())
+        latest.update(batch_id for batch_id, at in entries.items() if at == max_at)
+    return latest
 
 
 def expense_reconcile_rows(
     db: Session, *, limit: int | None = None, offset: int = 0
 ) -> list[dict]:
-    """三源全集逐费用单号对账（证据视角，不出经营结论）。"""
-    # 台账：已应用批次、无 issue 行，按单号聚合；任一金额缺失 → 该源金额 null
-    ledger_facts: dict[str, dict] = defaultdict(
-        lambda: {"amount": None, "has_null": False, "row_count": 0, "batch_ids": set()}
-    )
+    """三源全集逐费用单号对账（台账↔正式为结论，BXD 为证据）。"""
+    # 台账：已应用批次、无 issue 行；同文件重传取最新批次
     ledger_rows = db.execute(
         select(
             MaintenanceLedgerExpenseRow.bxd_no,
             MaintenanceLedgerExpenseRow.amount,
-            MaintenanceLedgerExpenseRow.batch_id,
+            MaintenanceLedgerImportBatch.file_hash,
+            MaintenanceLedgerImportBatch.applied_at,
+            MaintenanceLedgerImportBatch.batch_id,
             MaintenanceLedgerExpenseRow.project_name_raw,
             func.cardinality(MaintenanceLedgerExpenseRow.issues),
         )
@@ -74,13 +77,22 @@ def expense_reconcile_rows(
             MaintenanceLedgerImportBatch.status == "applied",
         )
     ).all()
+    latest_ledger = _latest_batch_ids(
+        [(r[0], r[2], r[3], r[4]) for r in ledger_rows], 1, 2
+    )
+    ledger_facts: dict[str, dict] = defaultdict(
+        lambda: {"present": False, "amount": None, "has_null": False, "row_count": 0}
+    )
     ledger_projects: dict[str, str] = {}
-    for bxd_no, amount, batch_id, project_name, issue_count in ledger_rows:
-        if issue_count:
+    for row in ledger_rows:
+        (
+            bxd_no, amount, file_hash, applied_at, batch_id, project_name, issues,
+        ) = row
+        if issues or batch_id not in latest_ledger:
             continue
         facts = ledger_facts[bxd_no]
+        facts["present"] = True
         facts["row_count"] += 1
-        facts["batch_ids"].add(batch_id)
         if amount is None:
             facts["has_null"] = True
         elif not facts["has_null"]:
@@ -88,15 +100,14 @@ def expense_reconcile_rows(
         if project_name:
             ledger_projects[bxd_no] = project_name
 
-    # BXD：已应用批次、头/明细均无 issue，按单号聚合明细金额（原值口径）
-    bxd_facts: dict[str, dict] = defaultdict(
-        lambda: {"amount": None, "has_null": False, "line_count": 0, "batch_ids": set()}
-    )
+    # BXD：已应用批次、头/明细无 issue；同文件重传取最新批次
     bxd_rows = db.execute(
         select(
             MaintenanceDocHeadRow.head_no,
             MaintenanceDocLineRow.amount,
-            MaintenanceDocHeadRow.batch_id,
+            MaintenanceDocImportBatch.file_hash,
+            MaintenanceDocImportBatch.applied_at,
+            MaintenanceDocImportBatch.batch_id,
             func.cardinality(MaintenanceDocHeadRow.issues),
             func.cardinality(MaintenanceDocLineRow.issues),
         )
@@ -114,21 +125,25 @@ def expense_reconcile_rows(
             MaintenanceDocHeadRow.head_no.is_not(None),
         )
     ).all()
-    for head_no, amount, batch_id, head_issues, line_issues in bxd_rows:
-        if head_issues or line_issues:
+    latest_bxd = _latest_batch_ids(
+        [(r[0], r[2], r[3], r[4]) for r in bxd_rows], 1, 2
+    )
+    bxd_facts: dict[str, dict] = defaultdict(
+        lambda: {"present": False, "amount": None, "has_null": False, "line_count": 0}
+    )
+    for row in bxd_rows:
+        head_no, amount, file_hash, applied_at, batch_id, head_issues, line_issues = row
+        if head_issues or line_issues or batch_id not in latest_bxd:
             continue
         facts = bxd_facts[head_no]
+        facts["present"] = True
         facts["line_count"] += 1
-        facts["batch_ids"].add(batch_id)
         if amount is None:
             facts["has_null"] = True
         elif not facts["has_null"]:
             facts["amount"] = (facts["amount"] or Decimal("0")) + amount
 
-    # 正式费用：生效口径 + 成功导入批次，含税计算值；缺金额不按 0
-    formal_facts: dict[str, dict] = defaultdict(
-        lambda: {"amount": None, "has_null": False, "row_count": 0}
-    )
+    # 正式费用：生效口径 + 成功导入批次；含税计算值（业务确认口径）
     formal_rows = db.execute(
         select(
             FProjectExpense.bxd_no,
@@ -143,10 +158,14 @@ def expense_reconcile_rows(
             FProjectExpense.data_status == MAINT_EXPENSE_ACTIVE_STATUS,
         )
     ).all()
+    formal_facts: dict[str, dict] = defaultdict(
+        lambda: {"present": False, "amount": None, "has_null": False, "row_count": 0}
+    )
     for bxd_no, amount_inc_tax, batch_status in formal_rows:
         if batch_status != "success":
             continue
         facts = formal_facts[bxd_no]
+        facts["present"] = True
         facts["row_count"] += 1
         if amount_inc_tax is None:
             facts["has_null"] = True
@@ -163,48 +182,57 @@ def expense_reconcile_rows(
         ledger_fact = ledger_facts.get(bxd_no)
         bxd_fact = bxd_facts.get(bxd_no)
         formal_fact = formal_facts.get(bxd_no)
+        ledger_present = ledger_fact is not None and ledger_fact["present"]
+        bxd_present = bxd_fact is not None and bxd_fact["present"]
+        formal_present = formal_fact is not None and formal_fact["present"]
         ledger_amount = (
-            None if ledger_fact is None or ledger_fact["has_null"]
+            None if not ledger_present or ledger_fact["has_null"]
             else ledger_fact["amount"]
         )
         bxd_amount = (
-            None if bxd_fact is None or bxd_fact["has_null"]
+            None if not bxd_present or bxd_fact["has_null"]
             else bxd_fact["amount"]
         )
         formal_amount = (
-            None if formal_fact is None or formal_fact["has_null"]
+            None if not formal_present or formal_fact["has_null"]
             else formal_fact["amount"]
         )
-        present = [
-            value for value in (ledger_amount, bxd_amount, formal_amount)
-            if value is not None
-        ]
-        aligned = len(present) >= 2 and all(
-            value == present[0] for value in present[1:]
+        if ledger_present and formal_present:
+            if ledger_amount is None or formal_amount is None:
+                status = "unresolved"  # 来源在但金额缺，不出结论
+            else:
+                status = "matched" if ledger_amount == formal_amount else "mismatch"
+        elif ledger_present:
+            status = "ledger_only"
+        elif formal_present:
+            status = "formal_only"
+        else:
+            status = "bxd_only"
+        bxd_aligned = (
+            bxd_amount is not None
+            and formal_amount is not None
+            and bxd_amount == formal_amount
         )
         result.append(
             {
                 "bxd_no": bxd_no,
-                "status": _status(ledger_amount, bxd_amount, formal_amount),
-                "amounts_aligned": aligned,
-                "unresolved_basis": (
-                    "正式计入金额列与审批原值待业务确认；"
-                    "多源金额齐备前不输出对账结论"
-                    if _status(ledger_amount, bxd_amount, formal_amount)
-                    == "unresolved"
+                "status": status,
+                # 结论口径：台账含税归集 ↔ 正式含税计算（业务 2026-08-16 确认）
+                "conclusion_basis": (
+                    "ledger_inc_tax == formal_amount_inc_tax"
+                    if status in ("matched", "mismatch")
                     else None
                 ),
-                # 口径：台账=含税归集、BXD=氚云原值、正式=含税计算值
+                "bxd_aligned": bxd_aligned,
                 "ledger_amount": _qty(ledger_amount),
                 "bxd_amount": _qty(bxd_amount),
                 "formal_amount": _qty(formal_amount),
+                "ledger_present": ledger_present,
+                "bxd_present": bxd_present,
+                "formal_present": formal_present,
                 "ledger_row_count": ledger_fact["row_count"] if ledger_fact else 0,
                 "bxd_line_count": bxd_fact["line_count"] if bxd_fact else 0,
                 "formal_row_count": formal_fact["row_count"] if formal_fact else 0,
-                "ledger_batch_ids": sorted(ledger_fact["batch_ids"])
-                if ledger_fact
-                else [],
-                "bxd_batch_ids": sorted(bxd_fact["batch_ids"]) if bxd_fact else [],
                 "ledger_project_name": ledger_projects.get(bxd_no),
             }
         )

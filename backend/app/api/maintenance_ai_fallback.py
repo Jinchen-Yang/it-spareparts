@@ -99,6 +99,15 @@ def _read_headers_and_samples(data: bytes, doc_type: str) -> tuple[list[str], li
             str(v).strip() if v is not None else ""
             for v in (rows[header_row_index] if rows else [])
         ]
+        if doc_type == "ledger":
+            # 验证首行确实是台账表头而非业务数据行：须含已知 canonical 列名
+            # （订单编号/项目名称/费用单号 任一），否则 422 拒发（round-6 Blocker 9）
+            sentinels = {"订单编号", "项目名称", "费用单号", "计划期次", "订单金额"}
+            if not sentinels.intersection(headers):
+                raise ValueError(
+                    "无法确认台账表头行：首行不含已知台账列名，"
+                    "拒绝将数据行外发为表头"
+                )
         samples: list[list] = []
         for row in rows[header_row_index + 1 : header_row_index + 6]:
             samples.append([str(v)[:40] if v is not None else "" for v in row])

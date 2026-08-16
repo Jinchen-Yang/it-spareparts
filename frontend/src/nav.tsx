@@ -74,6 +74,8 @@ const loadProjectCost = () => import("./pages/ProjectCostPage");
 const loadProjectDownloads = () => import("./pages/ProjectDownloadsPage");
 const loadProjectReminders = () => import("./pages/ProjectRemindersPage");
 const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
+const loadMaintenanceWorkbench = () => import("./pages/maintenance/MaintenanceWorkbenchPage");
+const loadMaintenanceSalesDashboard = () => import("./pages/maintenance/MaintenanceSalesDashboardPage");
 const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDemandManagementPage");
 const loadMaintenanceWarehouse = () => import("./pages/maintenance/MaintenanceWarehouseWorkbenchPage");
 const loadMaintenanceSourceOrderAssignments = () => import("./pages/maintenance/MaintenanceSourceOrderAssignmentsPage");
@@ -108,6 +110,8 @@ const ProjectCostPage = lazy(loadProjectCost);
 const ProjectDownloadsPage = lazy(loadProjectDownloads);
 const ProjectRemindersPage = lazy(loadProjectReminders);
 const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
+const MaintenanceWorkbenchPage = lazy(loadMaintenanceWorkbench);
+const MaintenanceSalesDashboardPage = lazy(loadMaintenanceSalesDashboard);
 const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
 const MaintenanceWarehouseWorkbenchPage = lazy(loadMaintenanceWarehouse);
 const MaintenanceSourceOrderAssignmentsPage = lazy(loadMaintenanceSourceOrderAssignments);
@@ -183,6 +187,13 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-maintenance-beta",
     label: "维保工作台",
     items: [
+      // 维保模块第一入口：登录后的维保落地页（我的维保）。
+      { key: "maintenance-workbench", path: "/maintenance/beta/workbench", label: "我的维保", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceWorkbenchPage, load: loadMaintenanceWorkbench },
+      // 销售看板：仅 admin/boss 可见（visibleWhen 按角色判断，不绑定可委派权限键）。
+      { key: "maintenance-sales-dashboard", path: "/maintenance/beta/sales-dashboard", label: "销售看板", icon: <LineChartOutlined />, visibleWhen: () => {
+        const role = localStorage.getItem("role") || "";
+        return role === "admin" || role === "boss";
+      }, page: MaintenanceSalesDashboardPage, load: loadMaintenanceSalesDashboard },
       { key: "maintenance-projects", path: "/maintenance/beta/projects", label: "项目总览", icon: <DashboardOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
       { key: "maintenance-updates", path: "/maintenance/beta/updates", label: "月度项目更新", icon: <CloudUploadOutlined />, betaFeature: "maintenance", visibleWhen: () => {
         const capabilities = readMaintenanceCapabilities();

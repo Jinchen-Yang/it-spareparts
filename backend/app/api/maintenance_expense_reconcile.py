@@ -53,6 +53,8 @@ def get_expense_reconcile(
         "rows": rows,
         "limit": limit,
         "offset": offset,
+        "matched": sum(1 for row in rows if row["status"] == "matched"),
+        "mismatch": sum(1 for row in rows if row["status"] == "mismatch"),
         "unresolved": sum(1 for row in rows if row["status"] == "unresolved"),
         "ledger_only": sum(1 for row in rows if row["status"] == "ledger_only"),
         "bxd_only": sum(1 for row in rows if row["status"] == "bxd_only"),

@@ -13,9 +13,12 @@ import {
 } from "../../api/maintenanceOperations";
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
 import BadReturnPanel from "../../components/maintenance/BadReturnPanel";
+import FrontStockPanel from "../../components/maintenance/FrontStockPanel";
 import MaintenanceAcceptancePanel from "../../components/maintenance/MaintenanceAcceptancePanel";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
 import ProjectWorkbookActions from "../../components/maintenance/ProjectWorkbookActions";
+import RecoverySummaryPanel from "../../components/maintenance/RecoverySummaryPanel";
+import SalvagePanel from "../../components/maintenance/SalvagePanel";
 import SiteIssueWorkflowPanel from "../../components/maintenance/SiteIssueWorkflowPanel";
 import WorkbookFourSheetPreview from "../../components/maintenance/WorkbookFourSheetPreview";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
@@ -369,6 +372,10 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
         canManage={canManageBadReturns}
         onChanged={() => void load(detailPages)}
       />
+
+      <FrontStockPanel projectId={project.project_id} />
+      <SalvagePanel projectId={project.project_id} />
+      <RecoverySummaryPanel projectId={project.project_id} />
 
       <Card title="回款明细" extra={<Tag>{`截至 ${workspace.as_of}`}</Tag>}>
         <div data-testid="collection-snapshot-table">

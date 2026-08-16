@@ -44,6 +44,19 @@ def upgrade() -> None:
             "stock_deducted", sa.Boolean(), server_default="true", nullable=False
         ),
     )
+    # 存量回填（round-6 Blocker 1）：stock_deducted 由真实 salvage_out 流水推导，
+    # 旧实现从未写过流水 → 无对应流水的旧登记一律改为未扣账，不得 blanket true。
+    op.execute(
+        """
+        UPDATE maintenance_bad_salvage AS salvage
+        SET stock_deducted = false
+        WHERE NOT EXISTS (
+            SELECT 1 FROM maintenance_front_stock_ledger AS ledger
+            WHERE ledger.source_type = 'salvage'
+              AND ledger.source_ref LIKE 'salvage:' || salvage.salvage_id || ':%'
+        )
+        """
+    )
     op.create_check_constraint(
         "ck_maintenance_bad_salvage_cost_pair",
         "maintenance_bad_salvage",

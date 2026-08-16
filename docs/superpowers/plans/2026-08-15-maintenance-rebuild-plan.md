@@ -160,3 +160,28 @@ round-5 报告：`.ai/review/review-20260816-0344-round5.md`。13 项 Blocker �
 1. RKD 入库类别白名单（当前=维保拆旧返件+旧库退返；真实数据坏品集中在采购入库 1971 行——
    若采购入库坏品也计返还，需改 config 并重新评估「入库类别即返还意图」假设）；
 2. C4 正式计入金额列与审批完成原值（当前只出证据不出结论）。
+
+## 6.2 业务口径终确认（2026-08-16 业务答复）
+
+| 问题 | 业务答复 | 落点 |
+|---|---|---|
+| RKD 返还率分子入库类别 | **只有返件类（维保拆旧返件+旧库退返）**；采购入库/销售退货/其他入库的坏品不入分子 | `config.RKD_RETURN_CATEGORIES` 已去「待确认」，注释改为业务确认口径 |
+| C4 正式计入金额列 | **amount_inc_tax（含税计算值）**；amount 仅作审计原值 | `config.EXPENSE_RECONCILE_FORMAL_BASIS`；C4 恢复 matched/mismatch（台账含税↔正式含税），BXD 降为证据列（bxd_aligned） |
+
+## 6.3 Codex 审核响应记录（round-6，2026-08-16）
+
+round-6 报告：`.ai/review/review-20260816-0558-round6.md`。11 项新 Blocker 处置：
+
+| Blocker | 处置 | 说明 |
+|---|---|---|
+| 1 d7/e3 存量迁移错误 | ✅已修 | d7 从返还事实回填 RKD 头项目归属（无法推导保持 NULL 待治理）+ downgrade 守卫；e3 由真实 salvage_out 流水推导 stock_deducted（无流水→false） |
+| 2 F3 跨 PN/不完整发布 | ✅已修（口径已终确认） | 返还类主表明细测试结果未识别（空/未知）→ 失败关闭；类别白名单业务已确认 |
+| 3 F5 任意变卖 | ⚠️部分 | part_id 可空保留（坏件常无标准 PN）；无结存不扣账已注明 stock_basis；绑定 RKD 剩余可售量待 F5 下一轮 |
+| 4 front-stock identity-map 丢更新 | ✅已修 | `_get_or_create_stock` 锁读加 `populate_existing` 强制重读 |
+| 5 AI accept identity-map 二次建批 | ✅已修 | proposal FOR UPDATE 加 `populate_existing` |
+| 6 F6 文件/DB 崩溃一致 + 重放不补关闭 | ✅已修 | 落盘移至 DB commit 后，失败置 inactive 补偿；重放也重试关闭 |
+| 7 D1 未来回款/部分比率 | ✅已修 | 快照按 as_of 过滤；缺金额合同→总额与派生比率 null；成本率缺成本行不发布 |
+| 8 C4 重传重复/假分页 | ✅已修 | 同文件重传按 (单号, file_hash) 取最新 applied 批次；业务确认口径后恢复 matched/mismatch |
+| 9 C3 伪表头外发/重复 canonical | ✅已修 | 台账首行哨兵校验（订单编号/项目名称/费用单号等任一缺失→422）；alias 去重按剥离 (必填)/(不可修改)/(含税) 后的 canonical 名 |
+| 10 C5 malformed rels 读隐藏 sheet | ✅已修 | 关系文件缺失/损坏 → fail-closed，不再回退文件名排序 |
+| 11 F4/F5/D1 权限负向矩阵 | ✅已修 | 三个负向 HTTP 测试（无 data_profit/data_purchase_cost → 403/脱敏） |

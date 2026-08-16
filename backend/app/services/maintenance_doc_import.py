@@ -638,7 +638,15 @@ def apply_batch(
                 .all()
             )
             pending_facts: list[tuple[str, MaintenanceDocLineRow]] = []
+            known_results = ("成品",) + RKD_RETURN_TEST_RESULTS
             for line in lines:
+                if line.test_result not in known_results:
+                    # 返还类主表明细测试结果未识别：关键身份异常，失败关闭
+                    failures.append(
+                        f"{head.head_no}: 明细测试结果未识别"
+                        f"（{line.test_result or '空'}）"
+                    )
+                    continue
                 # 测试结果枚举：成品/坏品/废品（兼容历史写法 坏件/故障）
                 if line.test_result not in RKD_RETURN_TEST_RESULTS:
                     continue

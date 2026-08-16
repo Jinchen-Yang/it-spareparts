@@ -61,6 +61,19 @@
   gap: 16px;
 }
 
+.maintenance-workbench-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.maintenance-workbench-block-title {
+  color: var(--mb-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .bad-return-metric-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

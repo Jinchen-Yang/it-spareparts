@@ -105,6 +105,7 @@ def _get_or_create_stock(
         16,
     )
     db.execute(select(func.pg_advisory_xact_lock(lock_key)))
+    # 锁后必须强制重读：Session identity map 可能缓存旧行（round-6 Blocker 4）
     stock = db.execute(
         select(MaintenanceFrontStock)
         .where(
@@ -113,6 +114,7 @@ def _get_or_create_stock(
             MaintenanceFrontStock.warehouse_name == warehouse_name,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if stock is not None:
         return stock

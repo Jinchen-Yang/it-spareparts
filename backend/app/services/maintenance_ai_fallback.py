@@ -290,10 +290,12 @@ def accept_proposal(
     （FOR UPDATE）贯穿整个关键区，不会出现「batch 已提交、proposal 未更新」
     的孤儿 batch；并发 accept 在行锁处排队，重读后稳定重放既有 batch。
     """
+    # 行锁后强制重读：API 已预读 proposal，identity map 可能缓存旧状态（round-6 Blocker 5）
     row = db.execute(
         select(MaintenanceAiMappingProposal)
         .where(MaintenanceAiMappingProposal.proposal_id == proposal_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if row is None:
         raise AIProposalError("提案不存在")

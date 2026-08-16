@@ -207,44 +207,8 @@ def save_evidence(
             "md5": md5_digest,
             "replayed": True,
         }
-    # 落盘在 DB 行 flush 之后、API 最终 commit 之前：API 异常路径负责补偿清理
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temp_name = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, path)
-    except BaseException:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
-        raise
-    try:
-        _write_meta_sidecar(
-            file_id,
-            {
-                "file_id": file_id,
-                "milestone_id": milestone_id,
-                "original_filename": safe_name,
-                "mime_type": safe_mime,
-                "size_bytes": len(content),
-                "md5": md5_digest,
-                "sha256": sha256_digest,
-                "uploaded_by": operator,
-                "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                "storage": "local",
-            },
-        )
-    except BaseException:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        raise
+    # 文件落盘推迟到 API 的 DB commit 之后（round-6 Blocker 6）：
+    # DB 行先定案，文件失败可把凭证置 inactive 补偿，不产生指向缺失文件的活跃行。
     return {
         "evidence_id": evidence_row.evidence_id,
         "file_id": file_id,
@@ -266,6 +230,36 @@ def evidence_paths(file_id: str, object_key: str) -> tuple[Path, Path]:
     return data_path, meta_path
 
 
+def write_evidence_files(
+    *, file_id: str, object_key: str, content: bytes, meta: dict
+) -> None:
+    """DB 已 commit 后落盘凭证（binary → yml；任一步失败补偿清理，不留半套文件）。"""
+    path = _resolved_path(object_key)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temp_name = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+    try:
+        _write_meta_sidecar(file_id, meta)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def try_close_milestone_after_upload(
     db: Session,
     *,
@@ -285,6 +279,9 @@ def try_close_milestone_after_upload(
     milestone = db.get(MaintenanceCollectionMilestone, milestone_id)
     if milestone is None:
         return {"closed": False, "reason": "节点不存在"}
+    if milestone.follow_up_status == "handled":
+        # 已关闭（本凭证或他处关闭）：重放/重复上传直接报告关闭，不触发幂等冲突
+        return {"closed": True, "reason": None}
     try:
         payload = reminders.follow_up_collection_milestone(
             db,
@@ -299,6 +296,13 @@ def try_close_milestone_after_upload(
             user_ctx=user_ctx,
             as_of=as_of,
         )
+    except reminders.CollectionReminderConflict:
+        # 并发关闭冲突：以节点实际状态为准
+        db.refresh(milestone)
+        return {
+            "closed": milestone.follow_up_status == "handled",
+            "reason": "并发关闭冲突，以节点状态为准",
+        }
     except reminders.CollectionReminderInvalid as exc:
         return {"closed": False, "reason": str(exc)}
     if payload is None:

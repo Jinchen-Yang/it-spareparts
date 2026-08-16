@@ -21,6 +21,7 @@ vi.mock("../../api/replenishment", () => ({
   startReplenishmentRevision: vi.fn(),
   downloadManualReviewWorkbook: vi.fn(),
   downloadWbddSubsetWorkbook: vi.fn(),
+  downloadPurchaseListWorkbook: vi.fn(),
 }));
 
 import ReplenishmentBetaPage from "../ReplenishmentBetaPage";

@@ -49,6 +49,18 @@ describe("维保管理信息架构", () => {
       perm,
     }))).toEqual([
       {
+        key: "maintenance-workbench",
+        path: "/maintenance/beta/workbench",
+        label: "我的维保",
+        perm: "page_maintenance_beta",
+      },
+      {
+        key: "maintenance-sales-dashboard",
+        path: "/maintenance/beta/sales-dashboard",
+        label: "销售看板",
+        perm: undefined,
+      },
+      {
         key: "maintenance-projects",
         path: "/maintenance/beta/projects",
         label: "项目总览",
@@ -182,6 +194,24 @@ describe("维保管理信息架构", () => {
     }));
 
     expect(migration?.visibleWhen?.()).toBe(false);
+  });
+
+  it("我的维保是维保工作台第一入口，销售看板仅 admin/boss 可见", () => {
+    const workbench = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
+    expect(workbench?.items[0]?.key).toBe("maintenance-workbench");
+    expect(workbench?.items[0]?.label).toBe("我的维保");
+    expect(matchNavItem("/maintenance/beta/workbench")?.label).toBe("我的维保");
+    expect(matchNavItem("/maintenance/beta/workbench")?.perm).toBe("page_maintenance_beta");
+
+    const dashboard = workbench?.items.find((item) => item.key === "maintenance-sales-dashboard");
+    expect(dashboard).toBeDefined();
+    expect(dashboard?.visibleWhen).toBeDefined();
+    localStorage.setItem("role", "sales");
+    expect(dashboard?.visibleWhen?.()).toBe(false);
+    localStorage.setItem("role", "boss");
+    expect(dashboard?.visibleWhen?.()).toBe(true);
+    localStorage.setItem("role", "admin");
+    expect(dashboard?.visibleWhen?.()).toBe(true);
   });
 
   it("旧维保路径仍是稳定版，Beta 路由与权限独立", () => {

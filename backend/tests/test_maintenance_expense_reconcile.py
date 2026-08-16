@@ -167,9 +167,9 @@ def test_reconcile_aggregates_lines_before_compare(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0001"]
-    assert row["status"] == "unresolved"
-    assert row["amounts_aligned"] is True
-    assert row["unresolved_basis"]
+    assert row["status"] == "matched"  # 台账含税 == 正式含税（业务确认口径）
+    assert row["conclusion_basis"]
+    assert row["bxd_aligned"] is True
     assert row["bxd_amount"] == 1000.0  # 400+600 聚合
     assert row["bxd_line_count"] == 2
     assert row["ledger_amount"] == 1000.0
@@ -189,8 +189,8 @@ def test_reconcile_detects_over_summed_bxd(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0002"]
-    assert row["status"] == "unresolved"
-    assert row["amounts_aligned"] is False
+    assert row["status"] == "matched"  # 台账↔正式一致
+    assert row["bxd_aligned"] is False  # BXD 证据 1500 ≠ 正式 1000
     assert row["bxd_amount"] == 1500.0
 
 
@@ -206,8 +206,8 @@ def test_reconcile_three_way_matched(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0003"]
-    assert row["status"] == "unresolved"
-    assert row["amounts_aligned"] is True
+    assert row["status"] == "matched"
+    assert row["bxd_aligned"] is True
 
 
 def test_reconcile_union_includes_formal_only_and_bxd_formal(db):
@@ -222,8 +222,9 @@ def test_reconcile_union_includes_formal_only_and_bxd_formal(db):
     db.commit()
     rows = {r["bxd_no"]: r for r in reconcile.expense_reconcile_rows(db)}
     assert rows["BXD-20260425-0004"]["status"] == "formal_only"
-    assert rows["BXD-20260425-0005"]["status"] == "unresolved"
-    assert rows["BXD-20260425-0005"]["amounts_aligned"] is True
+    # 无台账：BXD 与正式只作证据对齐，不单独出结论
+    assert rows["BXD-20260425-0005"]["status"] == "formal_only"
+    assert rows["BXD-20260425-0005"]["bxd_aligned"] is True
     assert rows["BXD-20260425-0005"]["ledger_amount"] is None
 
 
@@ -332,3 +333,38 @@ def test_reconcile_limit_offset_pagination(db):
         "BXD-20260425-1001",
         "BXD-20260425-1002",
     ]
+
+
+def test_reconcile_mismatch_and_retransmit_dedup(db):
+    """台账 1200 ≠ 正式 1000 → mismatch；同文件重传两个 applied 批次只计最新（round-6 Blocker 8）。"""
+    from datetime import timedelta
+
+    # 同 file_hash 的两个 applied 台账批次（重传场景），较旧批次的金额不参与
+    for batch_id, key in (("rc-ledger-old", "key-old"), ("rc-ledger-new", "key-new")):
+        db.add(
+            MaintenanceLedgerImportBatch(
+                batch_id=batch_id,
+                file_hash="same-file-hash-retransmit",
+                filename="台账.xlsx",
+                idempotency_key=key,
+                source_kind="project_manager_xls_v1",
+                uploaded_by="合成管理员",
+                status="applied",
+                applied_by="合成管理员",
+                applied_at=APPLIED_AT
+                + (timedelta(seconds=0) if batch_id.endswith("old") else timedelta(days=1)),
+            )
+        )
+    db.flush()
+    _ledger_row(db, row_id="rc-ler-old", batch_id="rc-ledger-old",
+                bxd_no="BXD-20260425-0009", amount="999.00")
+    _ledger_row(db, row_id="rc-ler-new", batch_id="rc-ledger-new",
+                bxd_no="BXD-20260425-0009", amount="1200.00")
+    _formal_row(db, raw_line_id="rc-fpe-9", bxd_no="BXD-20260425-0009",
+                amount_inc_tax="1000.00")
+    db.commit()
+    rows = {r["bxd_no"]: r for r in reconcile.expense_reconcile_rows(db)}
+    row = rows["BXD-20260425-0009"]
+    assert row["status"] == "mismatch"
+    assert row["ledger_amount"] == 1200.0  # 只计最新批次，旧批次 999 被去重
+    assert row["formal_amount"] == 1000.0

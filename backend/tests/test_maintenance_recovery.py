@@ -19,6 +19,7 @@ from app.models.maintenance_project import MaintenanceProject
 from app.models.system import SysUser
 from app.services import maintenance_front_stock as front_stock
 from app.services import maintenance_recovery as recovery
+from sqlalchemy import select
 
 
 def _seed_recovery(db):
@@ -100,15 +101,17 @@ def _seed_recovery(db):
 
 
 def _recovery_client(db, *, username: str) -> TestClient:
-    db.add(
-        SysUser(
-            username=username,
-            role="admin",
-            display_name="合成收回清单操作人",
-            password_hash=hash_password("synthetic-password-123"),
+    existing = db.scalar(select(SysUser).where(SysUser.username == username))
+    if existing is None:
+        db.add(
+            SysUser(
+                username=username,
+                role="admin",
+                display_name="合成收回清单操作人",
+                password_hash=hash_password("synthetic-password-123"),
+            )
         )
-    )
-    db.commit()
+        db.commit()
     app = FastAPI()
     app.include_router(auth.router, prefix="/api")
     app.include_router(maintenance_recovery.router, prefix="/api")
@@ -153,3 +156,46 @@ def test_recovery_summary_api_requires_project(db):
         "/api/maintenance/projects/stable/no-such-project/recovery-summary"
     )
     assert missing.status_code == 404
+
+
+def test_recovery_api_masks_cost_without_data_permission(db):
+    """无 data_purchase_cost：200 但成本/估值字段脱敏（round-6 Blocker 11）。"""
+    from app import permissions as _perms
+    from app.auth import hash_password
+    from app.models.maintenance_project import MaintenanceProjectUserAssignment
+    from datetime import datetime, timezone
+
+    _seed_recovery(db)
+    graph = _perms.effective("sales", None)
+    graph.update({"page_maintenance": True})
+    user = SysUser(
+        username="recovery_limited",
+        role="sales",
+        display_name="无成本权限销售",
+        password_hash=hash_password("synthetic-password-123"),
+        permissions=graph,
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        MaintenanceProjectUserAssignment(
+            assignment_id="recovery-assign-1",
+            project_id="recovery-project-1",
+            responsibility_type="primary_manager",
+            user_id=user.id,
+            assigned_at=datetime.now(timezone.utc),
+            assigned_by="synthetic-admin",
+            assignment_reason="合成负责人映射",
+        )
+    )
+    db.commit()
+    client = _recovery_client(db, username="recovery_limited")
+    ok = client.get(
+        "/api/maintenance/projects/stable/recovery-project-1/recovery-summary"
+    )
+    assert ok.status_code == 200, ok.text
+    payload = ok.json()
+    for row in payload["remaining_stock"]:
+        assert row["unit_cost_ex_tax"] is None
+        assert row["value_inc_tax"] is None
+    assert payload["remaining_total_qty"] == 3.0

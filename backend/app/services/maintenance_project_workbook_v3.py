@@ -249,12 +249,15 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     contract_nos = [c.contract_no for c in contracts]
     expenses = _expenses(db, contract_nos)
     wbdd = _wbdd_lines(db, project_id)
+    as_of = business_today()
     collections = list(
         db.execute(
             select(MaintenanceCollectionSnapshot)
             .where(
                 MaintenanceCollectionSnapshot.project_id == project_id,
                 MaintenanceCollectionSnapshot.status == "confirmed",
+                # 未来月度快照不得进入当前导出（round-6 Blocker 7）
+                MaintenanceCollectionSnapshot.report_month <= as_of,
             )
             .order_by(MaintenanceCollectionSnapshot.report_month)
         ).scalars()
@@ -329,14 +332,16 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     _blank(ws, len(c_headers))
     first_metric_row = ws.max_row + 2
     ws.cell(row=first_metric_row, column=1, value="二、关键指标（只读）").font = TITLE_FONT
-    total_inc = sum(
-        c.amount_inc_tax
-        for c in contracts
-        if c.included_in_total and c.amount_inc_tax is not None
-    )
+    included = [c for c in contracts if c.included_in_total]
     missing_amount_nos = [
-        c.contract_no for c in contracts if c.amount_inc_tax is None
+        c.contract_no for c in included if c.amount_inc_tax is None
     ]
+    # 任一计入合同缺金额：总额与派生比率一律 null（缺失不按 0、不出部分和）
+    total_inc = (
+        sum(c.amount_inc_tax for c in included)
+        if included and not missing_amount_nos
+        else None
+    )
     cumulative = (
         sum(v.cumulative_amount for v in latest_by_contract.values())
         if latest_by_contract
@@ -375,17 +380,18 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     if missing_cost_lines:
         completeness_notes.append(f"{missing_cost_lines} 行领用缺成本")
     metrics = [
-        ("合同总额(含税)", round(float(total_inc), 2) if total_inc else ""),
+        ("合同总额(含税)", round(float(total_inc), 2) if total_inc is not None else ""),
         ("累计回款(含税)", float(cumulative) if cumulative is not None else ""),
         ("回款进度", (
             f"{float(cumulative) / float(total_inc) * 100:.1f}%"
-            if cumulative is not None and total_inc > 0
+            if cumulative is not None and total_inc is not None and total_inc > 0
             else ""
         )),
         ("项目已计成本(含税)", round(float(cost_total), 2)),
+        # 成本率：缺成本行或总额不完整时不发布（缺失只展示下界，round-6 Blocker 7）
         ("成本率", (
             f"{float(cost_total) / float(total_inc) * 100:.1f}%"
-            if total_inc > 0
+            if total_inc is not None and total_inc > 0 and missing_cost_lines == 0
             else ""
         )),
         ("缺失成本行数", missing_cost_lines),

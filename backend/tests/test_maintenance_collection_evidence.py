@@ -81,6 +81,24 @@ def test_save_evidence_writes_file_yml_and_md5_row(db, seeded_milestone, tmp_pat
         content=content,
     )
     db.commit()
+    # 文件落盘在 DB commit 之后（round-6 Blocker 6：DB 行先定案）
+    evidence_service.write_evidence_files(
+        file_id=payload["file_id"],
+        object_key=payload["object_key"],
+        content=content,
+        meta={
+            "file_id": payload["file_id"],
+            "milestone_id": seeded_milestone["milestone_id"],
+            "original_filename": payload["original_filename"],
+            "mime_type": payload["mime_type"],
+            "size_bytes": len(content),
+            "md5": payload["md5"],
+            "sha256": payload["sha256"],
+            "uploaded_by": "合成上传人",
+            "uploaded_at": "2026-08-16T00:00:00+00:00",
+            "storage": "local",
+        },
+    )
     assert payload["replayed"] is False
     assert payload["md5"] == hashlib.md5(content).hexdigest()
     assert payload["sha256"] == hashlib.sha256(content).hexdigest()
@@ -182,7 +200,7 @@ def test_upload_closes_reminder_and_replay_stays_idempotent(db, seeded_milestone
     )
     assert replay.status_code == 201, replay.text
     assert replay.json()["replayed"] is True
-    assert replay.json()["closed"] is False
+    assert replay.json()["closed"] is True  # 已关闭：重放按实际状态报告
 
     listing = client.get(
         f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence"

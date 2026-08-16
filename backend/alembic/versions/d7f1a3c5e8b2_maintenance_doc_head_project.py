@@ -30,9 +30,39 @@ def upgrade() -> None:
         "maintenance_doc_head_row",
         ["project_id"],
     )
+    # 存量回填（round-6 Blocker 1）：已应用 RKD 头可从返还事实推导项目归属；
+    # 无法推导的（无坏件返还行的头）保持 NULL，视为待重导治理，不虚构归属。
+    op.execute(
+        """
+        UPDATE maintenance_doc_head_row AS head
+        SET project_id = fact.project_id
+        FROM maintenance_rkd_return_line AS fact
+        WHERE fact.head_row_id = head.row_id
+          AND head.project_id IS NULL
+        """
+    )
 
 
 def downgrade() -> None:
+    # 项目归属是返还率就绪判定依据；已有归属事实时禁止回滚（round-6 Blocker 1）
+    op.execute(
+        "LOCK TABLE maintenance_doc_head_row IN ACCESS EXCLUSIVE MODE"
+    )
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM maintenance_doc_head_row WHERE project_id IS NOT NULL
+          )
+          THEN
+            RAISE EXCEPTION
+              'd7f1a3c5e8b2 downgrade blocked: resolved doc head projects exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
     op.drop_index(
         "ix_maintenance_doc_head_project", table_name="maintenance_doc_head_row"
     )
