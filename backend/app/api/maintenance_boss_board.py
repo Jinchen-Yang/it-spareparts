@@ -68,6 +68,7 @@ class ProjectSearch(BaseModel):
     page_size: int = Field(default=20, ge=1, le=200)
     lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
     sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost)$")
+    card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
 
 
 @router.get("/health")
@@ -116,6 +117,7 @@ def board_projects(
     lifecycle: str = Query("all", pattern=r"^(ongoing|ended|missing|all)$"),
     sort: str = Query("name", pattern=r"^(attention|orders|name|known_cost)$"),
     has_activity: bool | None = Query(None),
+    card_status: str | None = Query(None, pattern=r"^(normal|warning|alert)$"),
     date_from: date | None = Query(None, alias="from"),
     date_to: date | None = Query(None, alias="to"),
     db: Session = Depends(get_db),
@@ -135,8 +137,9 @@ def board_projects(
     try:
         return board.projects(
             db, user_ctx=ctx, page=page, page_size=page_size, lifecycle=lifecycle,
-            sort=sort, has_activity=has_activity, date_from=date_from,
-            date_to=date_to, allowed_project_ids=_allowed_scope(db, ctx),
+            sort=sort, has_activity=has_activity, card_status_filter=card_status,
+            date_from=date_from, date_to=date_to,
+            allowed_project_ids=_allowed_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:
         raise HTTPException(
@@ -161,6 +164,7 @@ def board_projects_search(
         return board.projects(
             db, user_ctx=ctx, page=payload.page, page_size=payload.page_size,
             lifecycle=payload.lifecycle, sort=payload.sort, q_text=payload.q,
+            card_status_filter=payload.card_status,
             allowed_project_ids=_allowed_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:

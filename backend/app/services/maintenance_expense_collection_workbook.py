@@ -157,6 +157,25 @@ def build_workbook(db: Session, *, project_id: str) -> bytes | None:
     wb = Workbook()
     wb.remove(wb.active)
 
+    _build_expense_sheet(wb, db, contracts)
+    _build_collection_sheet(wb, db, project_id, contracts)
+
+    meta = wb.create_sheet(_META_SHEET)
+    meta.append(["协议版本", PROTOCOL_VERSION])
+    meta.append(["项目ID", project_id])
+    meta.append(["导出ID", str(uuid4())])
+    meta.append(["导出时间", datetime.now(timezone.utc).isoformat()])
+    meta.append(["口径", "正式金额=含税(系统按未税×1.13 计算)；回款=月度累计快照"])
+    meta.sheet_state = "hidden"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_expense_sheet(wb, db: Session, contracts) -> None:
+    """04_报销订单。抽出供项目总表（六 sheet）复用，口径只此一份。"""
+    expenses = _expenses(db, [c.contract_no for c in contracts])
     ws = wb.create_sheet(SHEET_EXPENSE)
     _style_header(ws, _EXPENSE_HEADERS,
                   [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY])
@@ -179,6 +198,10 @@ def build_workbook(db: Session, *, project_id: str) -> bytes | None:
     ws.column_dimensions[ws.cell(row=1, column=len(_EXPENSE_HEADERS) + 1)
                          .column_letter].hidden = True
 
+def _build_collection_sheet(wb, db: Session, project_id: str, contracts) -> None:
+    """05_项目经理回款单（月度累计快照）。同样抽出供总表复用。"""
+    contract_no_by_id = {c.project_contract_id: c.contract_no for c in contracts}
+    latest = _latest_snapshots(db, project_id)
     ws = wb.create_sheet(SHEET_COLLECTION)
     _style_header(ws, _COLLECTION_HEADERS,
                   [_EDITABLE, _READONLY, _EDITABLE, _EDITABLE, _EDITABLE,
@@ -196,18 +219,6 @@ def build_workbook(db: Session, *, project_id: str) -> bytes | None:
     # 表尾留空行供追加新月份（月度累计快照按月追加，不是改历史行）
     for _ in range(8):
         ws.append([""] * len(_COLLECTION_HEADERS))
-
-    meta = wb.create_sheet(_META_SHEET)
-    meta.append(["协议版本", PROTOCOL_VERSION])
-    meta.append(["项目ID", project_id])
-    meta.append(["导出ID", str(uuid4())])
-    meta.append(["导出时间", datetime.now(timezone.utc).isoformat()])
-    meta.append(["口径", "正式金额=含税(系统按未税×1.13 计算)；回款=月度累计快照"])
-    meta.sheet_state = "hidden"
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
 
 
 # ------------------------------------------------------------------ 解析
@@ -261,6 +272,19 @@ def validate(db: Session, *, project_id: str, data: bytes) -> WorkbookPlan:
     expense_updates = _parse_expenses(db, wb[SHEET_EXPENSE], project_id=project_id)
     collection_ops = _parse_collections(db, wb[SHEET_COLLECTION],
                                         project_id=project_id)
+    return WorkbookPlan(project_id=project_id,
+                        expense_updates=tuple(expense_updates),
+                        collection_ops=tuple(collection_ops))
+
+
+def validate_partial(db: Session, *, project_id: str, workbook) -> WorkbookPlan:
+    """只解析 workbook 里实际存在的 04/05，供项目总表与单 sheet 上传复用。"""
+    expense_updates = (_parse_expenses(db, workbook[SHEET_EXPENSE],
+                                       project_id=project_id)
+                       if SHEET_EXPENSE in workbook.sheetnames else [])
+    collection_ops = (_parse_collections(db, workbook[SHEET_COLLECTION],
+                                         project_id=project_id)
+                      if SHEET_COLLECTION in workbook.sheetnames else [])
     return WorkbookPlan(project_id=project_id,
                         expense_updates=tuple(expense_updates),
                         collection_ops=tuple(collection_ops))
@@ -351,7 +375,7 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
 # ------------------------------------------------------------------ 应用
 
 def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
-          import_batch_id: str) -> dict:
+          import_batch_id: str, commit: bool = True) -> dict:
     """整份事务应用。上传即覆盖——同合同同月份的 CREATE 覆盖既有累计额。"""
     for update in plan.expense_updates:
         expense = db.execute(
@@ -403,6 +427,7 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             existing.source = "workbook"
             existing.import_batch_id = import_batch_id
             existing.version += 1
-    db.commit()
+    if commit:
+        db.commit()
     return {"applied_by": operated_by, "import_batch_id": import_batch_id,
             **plan.summary}

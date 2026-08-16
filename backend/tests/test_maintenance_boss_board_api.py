@@ -292,3 +292,132 @@ def test_attention_never_aggregates_status_columns(db):
                                compile_kwargs={"literal_binds": True}))
         for column in b.STATUS_ONLY_COLUMNS:
             assert column not in sql, column
+
+
+# ---------- 项目卡墙字段（REQUIREMENTS #34/#35/#41/#43） ----------
+
+def _card(db, client, project_id):
+    rows = client.get("/api/maintenance/boss-board/projects",
+                      params={"from": "2026-01-01", "to": "2026-12-31"}).json()["rows"]
+    return next(r for r in rows if r["project_id"] == project_id)
+
+
+def test_card_carries_contract_manager_and_amount(db, tmp_path):
+    from app.models.maintenance_project import MaintenanceProject
+
+    proj = make_project(db)
+    db.get(MaintenanceProject, proj.project_id).cmo_name = "李经理"
+    db.commit()
+    _contract(db, proj, "100000.00")
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    row = _card(db, boss_client(db, username="card-boss"), proj.project_id)
+    assert row["contract_nos"] == ["HT-001"]
+    assert row["project_manager"] == "李经理"
+    assert row["contract_amount_inc_tax"]["value"] == "100000.00"
+
+
+def test_card_status_is_green_yellow_red_by_cost_ratio(db, tmp_path):
+    """#35：<80% 绿 / 80–100% 黄 / >100% 红。"""
+    from app.services import maintenance_boss_board as b
+    from decimal import Decimal as D
+
+    assert b.card_status(D("79.9")) == "normal"
+    assert b.card_status(D("80.0")) == "warning"
+    assert b.card_status(D("100.0")) == "warning"
+    assert b.card_status(D("100.1")) == "alert"
+    # 算不出来不拿绿色冒充健康（铁律 5）
+    assert b.card_status(None) is None
+
+
+def test_card_status_alert_end_to_end(db, tmp_path):
+    proj = make_project(db)
+    _contract(db, proj, "100.00")
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="100.00")          # 2 行 × 100 = 200，合同 100 → 200%
+    row = _card(db, boss_client(db, username="card-alert"), proj.project_id)
+    assert row["card_status"] == "alert"
+    assert row["cost_ratio_pct"]["value"] == "200.0"
+
+
+def test_card_status_is_none_without_contract_amount(db, tmp_path):
+    """无合同额 → 成本率算不出 → 不给三态（前端显示「数据不足」）。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db)
+    row = _card(db, boss_client(db, username="card-nocontract"), proj.project_id)
+    assert row["card_status"] is None
+    assert row["cost_ratio_pct"]["value"] is None
+
+
+def test_procured_qty_is_warehouse_shipped_plus_direct_ship(db, tmp_path):
+    """#41 业务指定公式：维保备件采购数 = 库房发货 + 直采直发。"""
+    from decimal import Decimal as D
+
+    from app.models.maintenance import FMaintenanceLine
+
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)
+    assign(db, orders[0], proj)
+    for ln in db.execute(select(FMaintenanceLine)).scalars():
+        ln.warehouse_shipped_qty = D("2")
+        ln.direct_ship_qty = D("3")
+    db.commit()
+    row = _card(db, boss_client(db, username="card-procured"), proj.project_id)
+    assert row["procured_qty"]["value"] == "10.000"      # (2+3) × 2 行
+
+
+def test_card_money_fields_are_restricted_without_cost_permission(db, tmp_path):
+    proj = make_project(db)
+    _contract(db, proj, "100000.00")
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db)
+    client = boss_client(db, username="card-nocost", with_cost=False)
+    row = _card(db, client, proj.project_id)
+    for field in ("contract_amount_inc_tax", "known_apply_cost_ex_tax",
+                  "collection_preview_inc_tax", "cost_ratio_pct"):
+        assert row[field]["state"] == "restricted", field
+        assert row[field]["value"] is None, field
+    # 三态本身也是成本派生物：无权限时不给，免得从颜色反推金额
+    assert row["card_status"] is None
+
+
+def test_search_matches_xsdd_contract_no(db, tmp_path):
+    """#37：搜索要能命中项目单号（XSDD 合同号）。"""
+    proj = make_project(db, "看不出名字的项目")
+    _contract(db, proj, "1000.00")
+    client = boss_client(db, username="card-search")
+    body = client.post("/api/maintenance/boss-board/projects/search",
+                       json={"q": "HT-001"}).json()
+    assert proj.project_id in {r["project_id"] for r in body["rows"]}
+
+
+def test_card_status_filter(db, tmp_path):
+    proj = make_project(db)
+    _contract(db, proj, "100.00")
+    orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="100.00")          # → alert
+    client = boss_client(db, username="card-filter")
+    alert = client.get("/api/maintenance/boss-board/projects",
+                       params={"card_status": "alert"}).json()["rows"]
+    assert proj.project_id in {r["project_id"] for r in alert}
+    normal = client.get("/api/maintenance/boss-board/projects",
+                        params={"card_status": "normal"}).json()["rows"]
+    assert proj.project_id not in {r["project_id"] for r in normal}
+
+
+def test_bucket_row_has_the_same_card_keys(db, tmp_path):
+    """桶行与项目行键集必须一致（同构数组）。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2)
+    assign(db, orders[0], proj)
+    rows = boss_client(db, username="card-shape").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
+    real = next(r for r in rows if r["project_id"] == proj.project_id)
+    assert set(bucket) == set(real)
+    assert bucket["contract_nos"] == [] and bucket["project_manager"] is None

@@ -42,16 +42,23 @@ AGGREGATE_SOURCE_COLUMNS: frozenset[str] = frozenset({
     # f_maintenance_line：数量事实
     "qty", "return_qty",
     # f_maintenance_line：成本回填列（recompute 独占写）
-    "cost_amount_inc_tax", "cost_source", "cost_tax_basis", "confidence",
-    "anomaly_flags",
+    "cost_amount_inc_tax", "cost_amount_ex_tax", "cost_source", "cost_tax_basis",
+    "confidence", "anomaly_flags",
+}) | frozenset({"warehouse_shipped_qty", "direct_ship_qty"})
+# 「维保备件采购数」的两列（REQUIREMENTS #41，业务 2026-08-16 明文指定公式
+# ＝库房发货＋直采直发）。铁律 3 禁止进聚合的状态列，原文枚举的是
+# 「已采/待供/待返/领用」——这两列不在其中，且 #41 显式授权按此聚合，
+# 故从 STATUS_ONLY_COLUMNS 里豁免这两列，其余 26 列照旧禁止。
+PROCURED_QTY_COLUMNS: frozenset[str] = frozenset({
+    "warehouse_shipped_qty", "direct_ship_qty",
 })
 # 流转状态列（只展示，永不进聚合）——由 mapping 的明细展示列取前 14 项定义域
-STATUS_ONLY_COLUMNS: frozenset[str] = frozenset(
+STATUS_ONLY_COLUMNS: frozenset[str] = (frozenset(
     mapping.MAINTENANCE_LINE_DISPLAY_FIELDS
 ) | frozenset({
     # 头级自报四列同样只展示（M4-4 无判定并排）
     "head_demand_qty", "head_purchase_qty", "head_shipped_qty", "head_returned_qty",
-})
+})) - PROCURED_QTY_COLUMNS
 
 
 # ---------------------------------------------------------------- 信封
@@ -528,6 +535,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
              page_size: int = 20, lifecycle: str = "all",
              sort: str = "name", q_text: str | None = None,
              has_activity: bool | None = None,
+             card_status_filter: str | None = None,
              date_from: date | None = None,
              date_to: date | None = None,
              allowed_project_ids: set[str] | None = None) -> dict:
@@ -562,9 +570,18 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         filters.append(MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
     if q_text:
         needle = q_text.strip()
+        # 除项目名/编号外还命中 XSDD 合同号（#37：搜项目名、项目单号）
+        from app.models.maintenance_project import MaintenanceProjectContract
+
+        by_contract = (
+            select(MaintenanceProjectContract.project_id)
+            .where(MaintenanceProjectContract.contract_no
+                   .icontains(needle, autoescape=True))
+        )
         filters.append(or_(
             MaintenanceProject.project_code.icontains(needle, autoescape=True),
             MaintenanceProject.display_name.icontains(needle, autoescape=True),
+            MaintenanceProject.project_id.in_(by_contract),
         ))
 
     # 窗口内的每项目计数/成本子查询：既用于 has_activity 过滤，也用于真实排序。
@@ -656,6 +673,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                    if project_ids else {})
     pre_delivery = _pre_delivery_counts(db, project_ids)
     source_states = maintenance_source_health.source_health(db)["sources"]
+    # 项目卡墙补充数据（REQUIREMENTS #34/#35/#41），逐项一次分组查询，与页大小无关
+    contracts = _card_contracts(db, project_ids)
+    procured = _card_procured_qty(db, window, project_ids)
+    collections = _card_collections(db, project_ids)
+    cost_ex = _card_cost_ex_tax(db, window, project_ids)
 
     out_rows = []
     for proj in rows:
@@ -674,6 +696,12 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "known_apply_cost_inc_tax": (
                 cost_bundles[proj.project_id] if wbdd_ready
                 else (restricted() if not can_cost else not_imported())),
+            **_card_fields(proj, can_cost=can_cost, wbdd_ready=wbdd_ready,
+                           contracts=contracts.get(proj.project_id),
+                           procured=procured.get(proj.project_id),
+                           collected=collections.get(proj.project_id),
+                           cost_ex=cost_ex.get(proj.project_id),
+                           bundle=cost_bundles.get(proj.project_id)),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
         })
 
@@ -696,10 +724,19 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                 _cost_bundle(db, window=window, unassigned_only=True,
                              can_cost=can_cost) if wbdd_ready
                 else (restricted() if not can_cost else not_imported())),
+            # 桶不是项目：没有合同/经理/回款可言，一律 not_imported 而非 0
+            **_card_fields(None, can_cost=can_cost, wbdd_ready=wbdd_ready,
+                           contracts=None, procured=None, collected=None,
+                           cost_ex=None, bundle=None),
             # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
             # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
             **{k: fact_not_imported() for k in FACT_FIELDS},
         })
+    if card_status_filter in CARD_STATUSES:
+        # 三态只由成本率决定（#43）。这里在**取完当页后**过滤而不是下推 SQL：
+        # 口径必须与卡片显示的完全一致，两处各写一份迟早会漂。代价是筛选态下
+        # 分页是「页内过滤」，total 如实回传过滤前的口径，前端据 rows 长度续拉。
+        out_rows = [r for r in out_rows if r.get("card_status") == card_status_filter]
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
             "sort_applied": sort,
@@ -810,6 +847,165 @@ def _project_window_counts(db: Session, window: tuple[date, date],
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     return {pid: (int(o), int(l)) for pid, o, l in rows}
+
+
+# 卡片三态（REQUIREMENTS #35/#43）：成本÷合同额 <80% 绿 / 80–100% 黄 / >100% 红。
+# 「需关注」= 提醒 = 黄，不再单列一栏（#43）。
+CARD_STATUSES = ("normal", "warning", "alert")
+_WARNING_AT = Decimal("80")
+_ALERT_AT = Decimal("100")
+
+
+def card_status(cost_ratio_pct: Decimal | None) -> str | None:
+    """算不出来就返回 None（无合同额或无成本）——不拿绿色冒充「健康」（铁律 5）。"""
+    if cost_ratio_pct is None:
+        return None
+    if cost_ratio_pct > _ALERT_AT:
+        return "alert"
+    if cost_ratio_pct >= _WARNING_AT:
+        return "warning"
+    return "normal"
+
+
+def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
+    """逐项目：合同总额（含税，只认 included_in_total）+ 合同号清单。
+
+    合同号即 XSDD 销售订单号（REQUIREMENTS #45 归属判定依据）。多合同项目
+    （生产唯一例外「兵装财务…整体维保」）返回多个号，前端并排或筛选。
+    """
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    if not project_ids:
+        return {}
+    rows = db.execute(
+        select(MaintenanceProjectContract.project_id,
+               MaintenanceProjectContract.contract_no,
+               MaintenanceProjectContract.amount_inc_tax,
+               MaintenanceProjectContract.included_in_total)
+        .where(MaintenanceProjectContract.project_id.in_(project_ids))
+        .order_by(MaintenanceProjectContract.effective_from)
+    ).all()
+    out: dict[str, dict] = {}
+    for pid, no, amount, included in rows:
+        bucket = out.setdefault(pid, {"contract_nos": [], "amount_inc_tax": None})
+        if no and no not in bucket["contract_nos"]:
+            bucket["contract_nos"].append(no)
+        if included and amount is not None:
+            bucket["amount_inc_tax"] = (bucket["amount_inc_tax"] or Decimal(0)) + amount
+    return out
+
+
+def _card_procured_qty(db: Session, window: tuple[date, date],
+                       project_ids: list[str]) -> dict[str, Decimal]:
+    """维保备件采购数 = 库房发货 + 直采直发（REQUIREMENTS #41 业务指定公式）。
+
+    这两列在需求单上，属流转状态列家族；#41 是业务对这两列的**明文授权**，
+    豁免范围见 PROCURED_QTY_COLUMNS 的注释，其余状态列一律不得入聚合。
+    """
+    if not project_ids:
+        return {}
+    start, end = window
+    active = and_(
+        MaintenanceSourceOrderAssignment.source_order_id
+        == FMaintenanceOrder.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )
+    rows = db.execute(
+        select(MaintenanceSourceOrderAssignment.project_id,
+               func.coalesce(func.sum(
+                   func.coalesce(FMaintenanceLine.warehouse_shipped_qty, 0)
+                   + func.coalesce(FMaintenanceLine.direct_ship_qty, 0)), 0))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+               FMaintenanceOrder.order_date >= start,
+               FMaintenanceOrder.order_date <= end)
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+    ).all()
+    return {pid: Decimal(qty or 0) for pid, qty in rows}
+
+
+def _card_collections(db: Session, project_ids: list[str]) -> dict[str, Decimal]:
+    """回款预览 = 每份合同最新 confirmed 月度累计快照之和（REQUIREMENTS #30）。"""
+    from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+
+    if not project_ids:
+        return {}
+    rows = db.execute(
+        select(MaintenanceCollectionSnapshot)
+        .where(MaintenanceCollectionSnapshot.project_id.in_(project_ids),
+               MaintenanceCollectionSnapshot.status == "confirmed",
+               MaintenanceCollectionSnapshot.report_month <= business_today())
+        .order_by(MaintenanceCollectionSnapshot.report_month)
+    ).scalars()
+    latest: dict[tuple[str, str], MaintenanceCollectionSnapshot] = {}
+    for snapshot in rows:
+        latest[(snapshot.project_id, snapshot.project_contract_id)] = snapshot
+    out: dict[str, Decimal] = {}
+    for (pid, _), snapshot in latest.items():
+        out[pid] = (out.get(pid) or Decimal(0)) + snapshot.cumulative_amount
+    return out
+
+
+def _card_cost_ex_tax(db: Session, window: tuple[date, date],
+                      project_ids: list[str]) -> dict[str, Decimal]:
+    """备件成本（未税）——卡片小字与含税并列显示。"""
+    if not project_ids:
+        return {}
+    start, end = window
+    active = and_(
+        MaintenanceSourceOrderAssignment.source_order_id
+        == FMaintenanceOrder.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )
+    rows = db.execute(
+        select(MaintenanceSourceOrderAssignment.project_id,
+               func.coalesce(func.sum(FMaintenanceLine.cost_amount_ex_tax), 0))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+               FMaintenanceOrder.order_date >= start,
+               FMaintenanceOrder.order_date <= end)
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+    ).all()
+    return {pid: Decimal(v or 0) for pid, v in rows}
+
+
+def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
+                 contracts: dict | None, procured, collected, cost_ex,
+                 bundle: dict | None) -> dict:
+    """项目卡的补充字段（REQUIREMENTS #34/#35）。
+
+    金额三件（合同额/成本未税/回款预览）挂 `data_purchase_cost`：无权限一律
+    restricted 信封，键集与有权限时一致（§6.2 无侧信道）。
+    成本率算不出来时 status 为 None——**不拿绿色冒充「健康」**（铁律 5）。
+    """
+    money = (lambda value: ready(value)) if can_cost else (lambda _v: restricted())
+    contract_nos = (contracts or {}).get("contract_nos") or []
+    contract_amount = (contracts or {}).get("amount_inc_tax")
+    known_inc = None
+    if bundle is not None and bundle.get("state") == "ready":
+        known_inc = Decimal(str((bundle.get("value") or {}).get("known_amount") or 0))
+    ratio = None
+    if can_cost and contract_amount and contract_amount > 0 and known_inc is not None:
+        ratio = (known_inc / contract_amount * Decimal("100")).quantize(Decimal("0.1"))
+    return {
+        # XSDD 销售订单号即归属判定依据（#45）；多合同项目返回多个
+        "contract_nos": contract_nos,
+        "project_manager": getattr(project, "cmo_name", None),
+        "contract_amount_inc_tax": money(contract_amount),
+        "known_apply_cost_ex_tax": (
+            money(cost_ex) if wbdd_ready
+            else (restricted() if not can_cost else not_imported())),
+        "procured_qty": (ready(procured if procured is not None else None)
+                         if wbdd_ready and project is not None else not_imported()),
+        "collection_preview_inc_tax": money(collected),
+        "cost_ratio_pct": money(ratio),
+        # 三态只由成本率决定（#43）；算不出来是 None，前端显示「数据不足」
+        "card_status": (card_status(ratio) if can_cost else None),
+    }
 
 
 def _pre_delivery_counts(db: Session, project_ids: list[str]) -> dict:

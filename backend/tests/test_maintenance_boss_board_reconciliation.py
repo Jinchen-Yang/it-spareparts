@@ -30,15 +30,26 @@ def _flag_on():
 
 
 def test_status_columns_never_enter_aggregation(db):
-    """铁律 3 锁死：聚合白名单与 28 流转状态列（+头级自报四列）交集为空。"""
+    """铁律 3 锁死：聚合白名单与流转状态列交集为空。
+
+    唯一豁免：`PROCURED_QTY_COLUMNS`（库房发货＋直采直发）——业务
+    2026-08-16 在 REQUIREMENTS #41 明文指定「维保备件采购数」就是这两列之和。
+    铁律 3 原文枚举的是「已采/待供/待返/领用」，这两列不在其中。本用例把豁免
+    锁死为**恰好这两列**：任何人日后想再豁免第三列，这里会红。
+    """
+    assert board.PROCURED_QTY_COLUMNS == {"warehouse_shipped_qty", "direct_ship_qty"}
     assert board.AGGREGATE_SOURCE_COLUMNS & board.STATUS_ONLY_COLUMNS == frozenset()
     # 白名单确实覆盖了需求侧数量与成本列
     assert {"qty", "return_qty", "cost_amount_inc_tax"} <= board.AGGREGATE_SOURCE_COLUMNS
-    # 状态列域与 mapping 定义一致
-    assert set(mapping.MAINTENANCE_LINE_DISPLAY_FIELDS) <= board.STATUS_ONLY_COLUMNS
+    # 状态列域＝mapping 定义减去被明文豁免的两列
+    assert (set(mapping.MAINTENANCE_LINE_DISPLAY_FIELDS) - board.PROCURED_QTY_COLUMNS
+            <= board.STATUS_ONLY_COLUMNS)
+    # 铁律 3 原文点名的四类，以及头级自报列，永远不得入聚合
     for status_col in ("supplied_qty", "consumed_qty", "purchased_qty",
-                       "pending_return_qty", "head_shipped_qty"):
+                       "pending_return_qty", "pending_supply_qty", "returned_qty",
+                       "head_shipped_qty"):
         assert status_col not in board.AGGREGATE_SOURCE_COLUMNS
+        assert status_col in board.STATUS_ONLY_COLUMNS
 
 
 def test_projects_plus_unassigned_equals_global_cohort(db, tmp_path):

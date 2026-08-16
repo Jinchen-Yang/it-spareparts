@@ -713,6 +713,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "写维保需求单事实表并触发全表成本重算；默认关闭，仅名单勾选。",
     },
+    "action_maintenance_expense_collection_upload": {
+        "label": "报销/回款工作簿上传覆盖",
+        "summary": "允许上传报销/回款往返工作簿（04_报销订单＋05_项目经理回款单 两张 sheet 合一），按上传内容覆盖报销未税金额与月度累计回款快照。",
+        "can": "下载本项目工作簿、预演（validate）与应用（apply）；同合同同月份重传即覆盖累计回款额；显式 VOID 作废历史快照。",
+        "cannot": "不能新增报销单（报销单在源系统产生，本表只改金额）；不能直填含税金额（系统按未税×1.13 计算）；不录回款计划（唯一事实源是台账 02_回款计划）。",
+        "typical": ["项目经理", "商务"],
+        "sensitivity": "high",
+        "risk": "改写项目报销金额与累计回款事实，直接影响成本率与回款进度；默认关闭。",
+    },
     "page_boss_board": {
         "label": "老板经营看板",
         "summary": "可打开经营看板，查看全公司经营汇总与个人排名。",
