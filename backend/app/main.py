@@ -22,6 +22,7 @@ from app.api import (
     maintenance_ai_fallback,
     maintenance_bad_returns,
     maintenance_bad_salvage,
+    maintenance_boss_board,
     maintenance_ckd_import,
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
@@ -102,6 +103,7 @@ app.include_router(maintenance.router, prefix=settings.api_prefix)
 # 维保展示板（plan v1.3）：独立 flag 闸（router 自带 require_maintenance_boss），
 # 不挂 Beta 依赖——回滚=关 maintenance_boss_dashboard_enabled。
 app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
+app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
 app.include_router(
     maintenance_acceptance.router,
