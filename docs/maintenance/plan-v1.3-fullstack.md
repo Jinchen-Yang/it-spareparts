@@ -2,7 +2,7 @@
 
 > **本文 = 后端 v1.2 执行计划 + 前端信息架构设计 + 业务确认的 Q1–Q4 决议，合并为一份
 > 交给实现者（Claude）直接执行的单一计划。** 两个上游：
-> - 后端：`docs/maintenance/plan-v1.2-executable.md`（949 行，字段级契约，已独立复核）
+> - 后端：`docs/maintenance/archive/plan-v1.2-executable.md`（949 行，字段级契约，已归档）
 > - 前端：`docs/maintenance/frontend-information-design.md`（454 行，信息四层/状态语义/归属唯一，附录 A 全文收录）
 > - 事实与需求：业务口径以两本活文档为准——`docs/maintenance/ARCHITECTURE.md`（业务架构）、
 >   `docs/maintenance/REQUIREMENTS.md`（核心需求增量表）；事实档案已归档至
