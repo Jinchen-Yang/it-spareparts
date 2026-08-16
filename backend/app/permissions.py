@@ -86,6 +86,8 @@ ACTION_KEYS: list[str] = [
     # 维保备件需求单（WBDD）专用上传（plan v1.3 M1-6）：只接受 WBDD 文件，
     # 不复用 /api/import/upload 全家桶；文件无价格列故不挂数据组依赖。
     "action_maintenance_wbdd_import",
+    # 报销/回款往返工作簿上传覆盖（AB-3）；能改金额 → 依赖 data_profit。
+    "action_maintenance_expense_collection_upload",
     # 回款提醒（设计 §9）：标记已处理/改期/重新打开；以及 XLS 回款计划
     # 导入的预览/绑定候选查询/应用。两者都是实名白名单能力：admin 也不得
     # 通过 require_action 短路，必须由 security.require_explicit_account_action
@@ -139,6 +141,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_doc_import": "氚云单据导入应用（发货/入库/返库/报销；发货入前置库）",
     "page_maintenance_boss": "维保展示板（老板全范围）",
     "action_maintenance_wbdd_import": "维保需求单（WBDD）专用上传",
+    "action_maintenance_expense_collection_upload": "报销/回款工作簿上传覆盖",
     "action_maintenance_collection_follow_up": "回款提醒跟进（标记已处理/改期/重新打开）",
     "action_maintenance_collection_plan_import": "回款计划导入（预览/绑定/应用）",
     "page_replenishment_beta": "补库申请",
@@ -193,6 +196,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_doc_import": False,
              "page_maintenance_boss": False,
              "action_maintenance_wbdd_import": False,
+             "action_maintenance_expense_collection_upload": False,
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
              "action_replenishment_review": False},
@@ -220,6 +224,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_doc_import": False,
                  "page_maintenance_boss": False,
                  "action_maintenance_wbdd_import": False,
+                 "action_maintenance_expense_collection_upload": False,
                  "page_replenishment_beta": False,
                  "action_replenishment_create": False,
                  "action_replenishment_review": False,
@@ -258,6 +263,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_doc_import": False,
         "page_maintenance_boss": False,
         "action_maintenance_wbdd_import": False,
+        "action_maintenance_expense_collection_upload": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
@@ -299,6 +305,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_doc_import": False,
         "page_maintenance_boss": False,
         "action_maintenance_wbdd_import": False,
+        "action_maintenance_expense_collection_upload": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
@@ -356,6 +363,8 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     # 回款计划导入能看到计划金额与合同额：能改必须能看（follow-up 不需金额可见性）。
     "action_maintenance_collection_plan_import": "data_profit",
     "action_maintenance_ledger_import": "data_profit",
+    # 报销/回款工作簿能改金额并写回累计回款：能改必须能看（AB-3）。
+    "action_maintenance_expense_collection_upload": "data_profit",
     "action_maintenance_doc_import": "data_purchase_cost",
     "action_replenishment_create": "data_pool_price_governance",
 }
@@ -379,6 +388,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_ledger_import": "page_maintenance",
     "action_maintenance_doc_import": "page_maintenance",
     "action_maintenance_wbdd_import": "page_maintenance",
+    "action_maintenance_expense_collection_upload": "page_maintenance",
     "action_maintenance_collection_follow_up": "page_maintenance",
     "action_maintenance_collection_plan_import": "page_maintenance",
     "action_replenishment_create": "page_replenishment_beta",
@@ -508,6 +518,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_ledger_import",
     "action_maintenance_doc_import",
     "action_maintenance_wbdd_import",
+    "action_maintenance_expense_collection_upload",
     "action_replenishment_review",
 }
 
@@ -548,7 +559,8 @@ UI_GROUPS: list[dict] = [
               "action_maintenance_migration_review",
                "action_maintenance_ledger_import",
                "action_maintenance_doc_import",
-               "action_maintenance_wbdd_import"]},
+               "action_maintenance_wbdd_import",
+               "action_maintenance_expense_collection_upload"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
