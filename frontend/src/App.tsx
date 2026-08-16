@@ -112,7 +112,10 @@ export default function App() {
     const perms = readPerms();
     return DETAIL_ROUTES.filter((r) => (
       !r.betaFeature || betaFeatures[r.betaFeature] === true
-    ) && (isAdmin || !!perms[r.perm]));
+    ) && (isAdmin
+      || (r.perm ? !!perms[r.perm]
+        : r.anyPerm ? r.anyPerm.some((p) => !!perms[p])
+          : false)));
   }, [token, betaFeatures]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）

@@ -6,6 +6,8 @@ export const api = axios.create({ baseURL: "/api" });
 export interface BetaFeatures {
   maintenance: boolean;
   replenishment: boolean;
+  /** 维保展示板总闸（plan v1.3）：服务端 flag ∧ 实名 ∧ 页面权限。 */
+  maintenance_boss: boolean;
 }
 
 export const getBetaFeatures = () =>

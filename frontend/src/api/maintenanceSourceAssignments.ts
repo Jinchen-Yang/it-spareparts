@@ -9,6 +9,15 @@ export interface AssignedMaintenanceProject {
   is_active: boolean;
 }
 
+/** 归属候选（只出候选、人工确认；ADR-0002：名称只是线索）。 */
+export interface MaintenanceAssignmentCandidate {
+  project_id: string;
+  project_code: string;
+  display_name: string;
+  match_type: "exact" | "trgm";
+  score: number;
+}
+
 export interface MaintenanceSourceOrderRow {
   raw_order_id: string;
   order_no: string;
@@ -18,6 +27,9 @@ export interface MaintenanceSourceOrderRow {
   assignment_id: string | null;
   assignment_version: number | null;
   assigned_project: AssignedMaintenanceProject | null;
+  /** 仅当 include_candidates=true 时出现。 */
+  candidates?: MaintenanceAssignmentCandidate[];
+  is_pre_delivery?: boolean;
 }
 
 export interface MaintenanceSourceOrderDirectory {
@@ -46,6 +58,8 @@ export const listMaintenanceSourceOrders = (params: {
   source_order_id?: string[];
   assignment_status?: "unassigned" | "assigned" | "all";
   project_id?: string;
+  /** 展示板扩展（plan v1.3 M2-1）：只读归属候选与预交付徽标；默认关闭时响应形状不变。 */
+  include_candidates?: boolean;
   page?: number;
   page_size?: number;
 } = {}) => api.get<MaintenanceSourceOrderDirectory>(

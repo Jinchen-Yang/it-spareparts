@@ -24,6 +24,15 @@ import {
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
 
+/** 读登录时写入的权限快照（与 App.tsx readPerms 同源），供 visibleWhen 判断动作键。 */
+function readPermissionMap(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    return {};
+  }
+}
+
 /**
  * 导航单一真值源：路由、侧栏菜单、面包屑、页面标题都从这里生成。
  * 新增页面只改这一处，避免"菜单有入口但路由/权限没跟上"的漂移。
@@ -46,7 +55,7 @@ export interface NavItem {
   /** 组合权限可见性；用于必须同时满足多项数据与动作权限的业务入口。 */
   visibleWhen?: () => boolean;
   /** 服务端总闸与实名白名单共同签发的 Beta 能力。 */
-  betaFeature?: "maintenance" | "replenishment";
+  betaFeature?: "maintenance" | "replenishment" | "maintenance_boss";
   page: LazyExoticComponent<ComponentType>;
   /** 与 page 共用同一 import() 工厂：空闲时预取，点菜单即秒开 */
   load: () => Promise<{ default: ComponentType }>;
@@ -74,6 +83,12 @@ const loadProjectCost = () => import("./pages/ProjectCostPage");
 const loadProjectDownloads = () => import("./pages/ProjectDownloadsPage");
 const loadProjectReminders = () => import("./pages/ProjectRemindersPage");
 const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
+// 维保展示板（plan v1.3 §5.1）：flag maintenance_boss 关闭时整组隐藏（后端同时 404）
+const loadBossOverview = () => import("./pages/maintenance/boss/BossOverviewPage");
+const loadBossProjectList = () => import("./pages/maintenance/boss/BossProjectListPage");
+const loadBossProjectDrill = () => import("./pages/maintenance/boss/BossProjectDrillPage");
+const loadBossUploadConsole = () => import("./pages/maintenance/boss/BossUploadConsolePage");
+const loadBossProjectMaster = () => import("./pages/maintenance/boss/BossProjectMasterPage");
 const loadMaintenanceWorkbench = () => import("./pages/maintenance/MaintenanceWorkbenchPage");
 const loadMaintenanceSalesDashboard = () => import("./pages/maintenance/MaintenanceSalesDashboardPage");
 const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDemandManagementPage");
@@ -110,6 +125,11 @@ const ProjectCostPage = lazy(loadProjectCost);
 const ProjectDownloadsPage = lazy(loadProjectDownloads);
 const ProjectRemindersPage = lazy(loadProjectReminders);
 const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
+const BossOverviewPage = lazy(loadBossOverview);
+const BossProjectListPage = lazy(loadBossProjectList);
+const BossProjectDrillPage = lazy(loadBossProjectDrill);
+const BossUploadConsolePage = lazy(loadBossUploadConsole);
+const BossProjectMasterPage = lazy(loadBossProjectMaster);
 const MaintenanceWorkbenchPage = lazy(loadMaintenanceWorkbench);
 const MaintenanceSalesDashboardPage = lazy(loadMaintenanceSalesDashboard);
 const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
@@ -205,6 +225,21 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // 维保展示板（plan v1.3）：老板/管理层看数决策入口。整组受服务端总闸
+    // maintenance_boss_dashboard_enabled 控制（关闭时前端隐藏 + 后端 404 双保险）。
+    key: "grp-maintenance-boss",
+    label: "维保展示板",
+    items: [
+      { key: "maintenance-boss-overview", path: "/maintenance/boss", label: "展示板首屏", icon: <DashboardOutlined />, anyPerm: ["page_maintenance_boss", "page_maintenance"], betaFeature: "maintenance_boss", page: BossOverviewPage, load: loadBossOverview },
+      { key: "maintenance-boss-projects", path: "/maintenance/boss/projects", label: "全部项目", icon: <ProfileOutlined />, anyPerm: ["page_maintenance_boss", "page_maintenance"], betaFeature: "maintenance_boss", page: BossProjectListPage, load: loadBossProjectList },
+      { key: "maintenance-boss-uploads", path: "/maintenance/boss/uploads", label: "数据上传", icon: <CloudUploadOutlined />, betaFeature: "maintenance_boss", visibleWhen: () => {
+        const perms = readPermissionMap();
+        return !!perms.action_maintenance_wbdd_import || !!perms.action_maintenance_doc_import;
+      }, page: BossUploadConsolePage, load: loadBossUploadConsole },
+      { key: "maintenance-boss-master", path: "/maintenance/boss/master", label: "项目归属确认", icon: <DeploymentUnitOutlined />, betaFeature: "maintenance_boss", visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: BossProjectMasterPage, load: loadBossProjectMaster },
+    ],
+  },
+  {
     key: "grp-maintenance-admin",
     label: "维保数据维护",
     items: [
@@ -265,8 +300,10 @@ export interface DetailRoute {
   /** 匹配当前地址用（menu 高亮/标题/面包屑），与 path 的参数段对应 */
   pattern: RegExp;
   label: string;
-  perm: string;
-  betaFeature?: "maintenance" | "replenishment";
+  /** 与母页同门；anyPerm 用于「任一权限即可进」的入口（如维保展示板）。 */
+  perm?: string;
+  anyPerm?: string[];
+  betaFeature?: "maintenance" | "replenishment" | "maintenance_boss";
   menuKey: string;
   page: LazyExoticComponent<ComponentType>;
   load: () => Promise<{ default: ComponentType }>;
@@ -283,6 +320,17 @@ export const DETAIL_ROUTES: DetailRoute[] = [
     menuKey: "maintenance-project-master",
     page: MaintenanceSourceOrderAssignmentsPage,
     load: loadMaintenanceSourceOrderAssignments,
+  },
+  {
+    key: "maintenance-boss-project-drill",
+    path: "/maintenance/boss/projects/:projectId",
+    pattern: /^\/maintenance\/boss\/projects\/[^/]+$/,
+    label: "项目单据证据",
+    anyPerm: ["page_maintenance_boss", "page_maintenance"],
+    betaFeature: "maintenance_boss",
+    menuKey: "maintenance-boss-projects",
+    page: BossProjectDrillPage,
+    load: loadBossProjectDrill,
   },
   {
     key: "pool-analysis",

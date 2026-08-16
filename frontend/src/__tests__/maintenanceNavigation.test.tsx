@@ -254,3 +254,67 @@ describe("维保管理信息架构", () => {
     ).toBe(true);
   });
 });
+
+describe("维保展示板导航（plan v1.3 §5.1）", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("展示板独立成组，整组受 maintenance_boss 总闸控制", () => {
+    const group = NAV_GROUPS.find((g) => g.key === "grp-maintenance-boss");
+    expect(group?.label).toBe("维保展示板");
+    expect(group?.items.map((item) => item.path)).toEqual([
+      "/maintenance/boss",
+      "/maintenance/boss/projects",
+      "/maintenance/boss/uploads",
+      "/maintenance/boss/master",
+    ]);
+    // flag 关闭时整组隐藏（App 层按 betaFeature 过滤），与后端 404 双保险
+    for (const item of group?.items ?? []) {
+      expect(item.betaFeature).toBe("maintenance_boss");
+    }
+  });
+
+  it("查看类入口任一查看权限即可见，写入类入口按动作键收紧", () => {
+    const group = NAV_GROUPS.find((g) => g.key === "grp-maintenance-boss");
+    const overview = group?.items.find((i) => i.key === "maintenance-boss-overview");
+    expect(overview?.anyPerm).toEqual(["page_maintenance_boss", "page_maintenance"]);
+    const uploads = group?.items.find((i) => i.key === "maintenance-boss-uploads");
+    expect(uploads?.perm).toBeUndefined();
+    expect(typeof uploads?.visibleWhen).toBe("function");
+    localStorage.setItem("permissions", JSON.stringify({}));
+    expect(uploads?.visibleWhen?.()).toBe(false);
+    localStorage.setItem(
+      "permissions",
+      JSON.stringify({ action_maintenance_wbdd_import: true }),
+    );
+    expect(uploads?.visibleWhen?.()).toBe(true);
+  });
+
+  it("项目下钻详情路由与列表页同门", () => {
+    const detail = DETAIL_ROUTES.find((r) => r.key === "maintenance-boss-project-drill");
+    expect(detail?.path).toBe("/maintenance/boss/projects/:projectId");
+    expect(detail?.betaFeature).toBe("maintenance_boss");
+    expect(detail?.anyPerm).toEqual(["page_maintenance_boss", "page_maintenance"]);
+    expect(detail?.pattern.test("/maintenance/boss/projects/abc-123")).toBe(true);
+    expect(detail?.pattern.test("/maintenance/boss/projects")).toBe(false);
+  });
+
+  it("冻结清单功能零导航入口", () => {
+    // 冻结清单（需求定义 §3.6）：代码保留、导航隐藏、不上线
+    const frozen = [
+      "购物车",
+      "补库",
+      "凭证",
+      "变卖",
+      "工作簿导出",
+      "前置库账本",
+      "收回清单",
+      "报销对账",
+    ];
+    const bossGroup = NAV_GROUPS.find((g) => g.key === "grp-maintenance-boss");
+    for (const item of bossGroup?.items ?? []) {
+      for (const word of frozen) {
+        expect(item.label).not.toContain(word);
+      }
+    }
+  });
+});
