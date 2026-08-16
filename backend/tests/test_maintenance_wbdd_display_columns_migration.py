@@ -29,7 +29,7 @@ def test_new_revision_is_additive_child_and_single_head():
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
     # 全链单 head（本计划两个迁移线性追加，不开分叉）
-    assert list(script.get_heads()) == ["c5d9e3f7a2b4"]
+    assert list(script.get_heads()) == ["d6e1f4a8c3b5"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():

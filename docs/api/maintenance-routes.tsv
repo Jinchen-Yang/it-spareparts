@@ -95,6 +95,7 @@ POST	/api/maintenance/projects/stable/{project_id}/cost-gaps/recompute	page_main
 GET	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook.xlsx	page_maintenance		
 POST	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook/apply	page_maintenance	_ACTION_KEY	data_profit
 POST	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook/validate	page_maintenance	_ACTION_KEY	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/expense-rows	page_maintenance		
 POST	/api/maintenance/projects/stable/{project_id}/expenses	page_maintenance	action_maintenance_roundtrip_apply	data_profit
 PUT	/api/maintenance/projects/stable/{project_id}/expenses/readiness	page_maintenance	action_maintenance_roundtrip_apply	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/front-stock	page_maintenance		

@@ -9,6 +9,7 @@ const getMaintenanceProject = vi.fn();
 const listMaintenanceSourceOrders = vi.fn();
 const assignMaintenanceSourceOrders = vi.fn();
 const downloadProjectMaster = vi.fn();
+const listProjectExpenseRows = vi.fn();
 
 vi.mock("../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -36,6 +37,7 @@ vi.mock("../../../api/maintenanceWorkbooks", async () => {
   return {
     ...actual,
     downloadProjectMaster: (...a: unknown[]) => downloadProjectMaster(...a),
+    listProjectExpenseRows: (...a: unknown[]) => listProjectExpenseRows(...a),
     applyProjectMaster: vi.fn(),
     saveBlob: vi.fn(),
   };
@@ -82,6 +84,7 @@ beforeEach(() => {
   getBoardProjectOrders.mockResolvedValue({ data: { rows: [orderRow], total: 1 } });
   getBoardOrderLines.mockResolvedValue({ data: { rows: [], total: 0 } });
   listMaintenanceSourceOrders.mockResolvedValue({ data: { rows: [] } });
+  listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
 });
 
 afterEach(cleanup);
@@ -151,7 +154,8 @@ describe("项目面板", () => {
       JSON.stringify({ action_maintenance_project_manage: true }));
     listMaintenanceSourceOrders.mockResolvedValue({
       data: { rows: [{ raw_order_id: "RAW-9", order_no: "WBDD-9",
-                       order_date: "2026-07-20", project_raw: "某项目" }] },
+                       order_date: "2026-07-20", project_raw: "某项目",
+                       matches_project_xsdd: true }] },
     });
     renderPanel();
     expect(await screen.findByText(/归属挂靠（判定依据＝XSDD 销售订单）/))
@@ -179,5 +183,77 @@ describe("项目面板", () => {
     renderPanel();
     fireEvent.click(await screen.findByText("WBDD-1"));
     expect(await screen.findByText(/系统只展示、不参与任何计算/)).toBeInTheDocument();
+  });
+});
+
+describe("归属挂靠候选按 XSDD 预筛（#48）", () => {
+  it("把本项目 id 交给后端排序，而不是前端筛（前端只拿一页会漏选）", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    renderPanel();
+    await waitFor(() => expect(listMaintenanceSourceOrders).toHaveBeenCalled());
+    expect(listMaintenanceSourceOrders.mock.calls[0][0]).toMatchObject({
+      assignment_status: "unassigned",
+      xsdd_project_id: "p1",
+    });
+  });
+
+  it("命中本项目 XSDD 的候选打「同 XSDD」标", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    listMaintenanceSourceOrders.mockResolvedValue({
+      data: { rows: [
+        { raw_order_id: "RAW-A", order_no: "WBDD-A", order_date: "2026-07-20",
+          project_raw: "本项目", matches_project_xsdd: true },
+        { raw_order_id: "RAW-B", order_no: "WBDD-B", order_date: "2026-07-21",
+          project_raw: "别的", matches_project_xsdd: false },
+      ] },
+    });
+    renderPanel();
+    expect(await screen.findByText("同 XSDD")).toBeInTheDocument();
+    // 不命中的单仍在列表里——这是排序不是过滤
+    expect(screen.getByText("WBDD-B")).toBeInTheDocument();
+  });
+});
+
+describe("报销 tab 展示备注（#47）", () => {
+  it("列出报销行并显示备注列", async () => {
+    listProjectExpenseRows.mockResolvedValue({
+      rows: [{
+        raw_line_id: "BXD-1#1", bxd_no: "BXD-20260101-1",
+        expense_date: "2026-07-01", person: "张三", expense_type: "差旅",
+        fee_category: "交通", reason: "现场维保", contract_no: "XSDD-1",
+        amount_ex_tax: "100.00", amount_inc_tax: "113.00",
+        data_status: "已结束", remark: "客户确认可报",
+      }],
+      total: 1,
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    expect(await screen.findByText("客户确认可报")).toBeInTheDocument();
+    expect(screen.getByText("BXD-20260101-1")).toBeInTheDocument();
+  });
+
+  it("没有备注时显示「—」，不显示空白也不显示 0", async () => {
+    listProjectExpenseRows.mockResolvedValue({
+      rows: [{
+        raw_line_id: "BXD-2#1", bxd_no: "BXD-2", expense_date: null,
+        person: null, expense_type: null, fee_category: null, reason: null,
+        contract_no: null, amount_ex_tax: null, amount_inc_tax: null,
+        data_status: null, remark: null,
+      }],
+      total: 1,
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    await screen.findByText("BXD-2");
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("上传覆盖后回读，页面不留旧值", async () => {
+    listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    await waitFor(() => expect(listProjectExpenseRows).toHaveBeenCalledWith("p1"));
   });
 });

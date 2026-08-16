@@ -30,7 +30,7 @@ FORMAT = "v123-maintenance-boss-1"
 
 # 迁移区间（docs/releases/v1.23-migration-audit.md 逐修订审计）
 DB_FROM = "c8e2a4f6b1d3"
-DB_TO = "c5d9e3f7a2b4"
+DB_TO = "d6e1f4a8c3b5"
 
 # 本次发布必须显式声明的运行时开关。展示板总闸在 migrate 阶段强制 false，
 # 冻结功能的四个闸门在整个发布过程中恒 false（审计表 §2）。

@@ -130,6 +130,53 @@ async def apply_global_lines(
     return result
 
 
+@router.get("/projects/stable/{project_id}/expense-rows")
+def list_project_expense_rows(
+    response: Response,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _data: None = Depends(_require_profit_visibility),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """项目面板「报销」tab 的只读行（含备注，#47）。
+
+    与 04_报销订单 sheet 同源同口径（都走 ec._expenses 按合同号归集），
+    页面只**展示**——改金额/备注仍只能走「下载 → 改 → 上传覆盖」（#40）。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    contracts = ec._contracts(db, project_id)
+    rows = ec._expenses(db, [c.contract_no for c in contracts])
+    total = len(rows)
+    window = rows[(page - 1) * page_size: page * page_size]
+    return {
+        "rows": [
+            {
+                "raw_line_id": expense.raw_line_id,
+                "bxd_no": expense.bxd_no,
+                "expense_date": (expense.expense_date.isoformat()
+                                 if expense.expense_date else None),
+                "person": expense.person,
+                "expense_type": expense.expense_type,
+                "fee_category": expense.fee_category,
+                "reason": expense.reason,
+                "contract_no": expense.linked_sales_order_no,
+                "amount_ex_tax": (str(expense.amount_ex_tax)
+                                  if expense.amount_ex_tax is not None else None),
+                "amount_inc_tax": (str(expense.amount_inc_tax)
+                                   if expense.amount_inc_tax is not None else None),
+                "data_status": expense.data_status,
+                "remark": expense.remark,
+            }
+            for expense in window
+        ],
+        "total": total, "page": page, "page_size": page_size,
+    }
+
+
 # ---------------------------------------------------------- 项目总表 / 单 sheet
 
 @router.get(_MASTER + ".xlsx")

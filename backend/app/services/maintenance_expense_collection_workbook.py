@@ -47,7 +47,7 @@ TAX_RATE = Decimal("0.13")
 
 _EXPENSE_HEADERS = ["报销单号", "报销日期", "报销人员", "报销类别", "费用分类",
                     "支出事由", "合同编号", "未税金额", "含税金额(系统计算)",
-                    "流程状态"]
+                    "流程状态", "备注"]
 _COLLECTION_HEADERS = ["操作", "合同编号", "报告月份", "累计回款金额(含税)",
                        "回款凭证号", "状态(系统)", "备注"]
 
@@ -68,8 +68,10 @@ class WorkbookError(ValueError):
 @dataclass(frozen=True)
 class ExpenseUpdate:
     raw_line_id: str
-    amount_ex_tax: Decimal
-    amount_inc_tax: Decimal
+    # 金额与备注各自独立：只改备注不填金额也是一次合法回填（#47）
+    amount_ex_tax: Decimal | None
+    amount_inc_tax: Decimal | None
+    remark: str | None
 
 
 @dataclass(frozen=True)
@@ -178,7 +180,7 @@ def _build_expense_sheet(wb, db: Session, contracts) -> None:
     expenses = _expenses(db, [c.contract_no for c in contracts])
     ws = wb.create_sheet(SHEET_EXPENSE)
     _style_header(ws, _EXPENSE_HEADERS,
-                  [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY])
+                  [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY, _EDITABLE])
     for expense in expenses:
         ws.append([
             expense.bxd_no or "",
@@ -191,6 +193,7 @@ def _build_expense_sheet(wb, db: Session, contracts) -> None:
             float(expense.amount_ex_tax) if expense.amount_ex_tax is not None else "",
             float(expense.amount_inc_tax) if expense.amount_inc_tax is not None else "",
             expense.data_status or "",
+            expense.remark or "",
         ])
         # 行标识写进隐藏元数据列，避免用可编辑列做主键（改了单号就对不上行）
         ws.cell(row=ws.max_row, column=len(_EXPENSE_HEADERS) + 1,
@@ -311,19 +314,27 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             raise WorkbookError("expense_not_found",
                                 f"第 {row_no} 行的报销行已不存在，请重新下载")
         raw_amount = row[7] if len(row) > 7 else None
-        if _text(raw_amount) == "":
-            continue                                   # 未填=不改这一行
-        ex_tax = _decimal(raw_amount, label="未税金额", row_no=row_no)
-        if expense.amount_ex_tax is not None and ex_tax == expense.amount_ex_tax:
-            continue                                   # 无变化不写库
-        updates.append(ExpenseUpdate(
-            raw_line_id=raw_line_id,
-            amount_ex_tax=ex_tax,
-            # 正式金额列由系统算，不接受人工直填含税（REQUIREMENTS #8）
+        remark_col = _EXPENSE_HEADERS.index("备注")
+        raw_remark = row[remark_col] if len(row) > remark_col else None
+        remark = _text(raw_remark) or None
+
+        ex_tax = inc_tax = None
+        if _text(raw_amount) != "":
+            ex_tax = _decimal(raw_amount, label="未税金额", row_no=row_no)
+            # 正式金额列由系统算，不接受人工直填含税（REQUIREMENTS #8）。
             # 与 CHECK 里的 round(amount_ex_tax * 1.13, 2) 同形：Postgres 的
             # round 是四舍五入，Decimal 默认 ROUND_HALF_EVEN 会在 .005 上差一分。
-            amount_inc_tax=(ex_tax * (Decimal("1") + TAX_RATE))
-            .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if expense.amount_ex_tax is not None and ex_tax == expense.amount_ex_tax:
+                ex_tax = inc_tax = None            # 金额无变化，不写这两列
+
+        # 金额与备注各自判断：只改备注、或只改金额，都是一次合法回填
+        if ex_tax is None and remark == (expense.remark or None):
+            continue                               # 两边都没变 → 不写库
+        updates.append(ExpenseUpdate(
+            raw_line_id=raw_line_id, amount_ex_tax=ex_tax,
+            amount_inc_tax=inc_tax, remark=remark,
         ))
     return updates
 
@@ -382,13 +393,15 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             select(FProjectExpense)
             .where(FProjectExpense.raw_line_id == update.raw_line_id)
         ).scalar_one()
-        # 三个字段必须一起改：f_project_expense 有两条 CHECK 锁死
-        # 「amount = 该 basis 对应的那一列」与「含税 = round(未税×1.13, 2)」。
-        # amount 保留操作者实际填入的原值（这里就是未税），审计可追。
-        expense.amount = update.amount_ex_tax
-        expense.amount_ex_tax = update.amount_ex_tax
-        expense.amount_inc_tax = update.amount_inc_tax
-        expense.tax_basis = "ex"            # 人工填的是未税，含税为系统计算值
+        if update.amount_ex_tax is not None:
+            # 三个字段必须一起改：f_project_expense 有两条 CHECK 锁死
+            # 「amount = 该 basis 对应的那一列」与「含税 = round(未税×1.13, 2)」。
+            # amount 保留操作者实际填入的原值（这里就是未税），审计可追。
+            expense.amount = update.amount_ex_tax
+            expense.amount_ex_tax = update.amount_ex_tax
+            expense.amount_inc_tax = update.amount_inc_tax
+            expense.tax_basis = "ex"        # 人工填的是未税，含税为系统计算值
+        expense.remark = update.remark      # 备注独立于金额（#47），清空即置 None
 
     for op in plan.collection_ops:
         existing = db.execute(

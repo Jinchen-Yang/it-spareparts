@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -117,6 +117,22 @@ def _candidates_for(db: Session, project_std: str | None) -> list[dict]:
     return out
 
 
+def project_xsdd_keys(db: Session, project_id: str) -> set[str]:
+    """项目名下的全部 XSDD 销售订单号（台账合同表为准，#45/#46）。
+
+    多合同项目要把名下**每一个**合同号都算作本项目的键——只取第一个会把
+    「兵装财务…整体维保」那种 1 项目 2 合同的另一半单据判成不相关。
+    """
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    rows = db.execute(
+        select(MaintenanceProjectContract.contract_no)
+        .where(MaintenanceProjectContract.project_id == project_id,
+               MaintenanceProjectContract.contract_no.is_not(None))
+    ).scalars().all()
+    return {no for no in rows if no}
+
+
 def list_source_orders(
     db: Session,
     *,
@@ -128,6 +144,7 @@ def list_source_orders(
     page_size: int,
     user_ctx: UserContext,
     include_candidates: bool = False,
+    xsdd_project_id: str | None = None,
 ) -> dict:
     active_join = and_(
         MaintenanceSourceOrderAssignment.source_order_id
@@ -172,6 +189,16 @@ def list_source_orders(
             )
         )
 
+    # #48 归属挂靠候选预筛：命中「本项目 XSDD 集合」的未归属单排最前，其余在后。
+    # 判定依据＝XSDD 销售订单（#45）；多合同项目把名下**全部**合同号都算本项目的键
+    # （生产唯一例外「兵装财务…整体维保」1 项目 2 XSDD，见 #46）。
+    # 这是**排序**不是过滤：其余未归属单仍要能看到、能挂，只是排在后面。
+    xsdd_keys = project_xsdd_keys(db, xsdd_project_id) if xsdd_project_id else set()
+    xsdd_rank = (
+        case((FMaintenanceOrder.linked_sales_order_no.in_(xsdd_keys), 0), else_=1)
+        if xsdd_keys else None
+    )
+
     count_stmt = active_beta_maintenance_orders(
         select(func.count())
         .select_from(FMaintenanceOrder)
@@ -194,6 +221,7 @@ def list_source_orders(
         )
         .where(*filters)
         .order_by(
+            *([xsdd_rank] if xsdd_rank is not None else []),
             FMaintenanceOrder.order_date.desc().nullslast(),
             FMaintenanceOrder.order_no,
             FMaintenanceOrder.raw_order_id,
@@ -240,6 +268,12 @@ def list_source_orders(
             )
             rows[-1]["is_pre_delivery"] = project_names.is_pre_delivery(
                 source.project_raw
+            )
+        if xsdd_project_id:
+            # 同样只在显式请求时追加，保持既有目录契约逐字节不变
+            rows[-1]["matches_project_xsdd"] = bool(
+                source.linked_sales_order_no
+                and source.linked_sales_order_no in xsdd_keys
             )
     return {
         "rows": rows,

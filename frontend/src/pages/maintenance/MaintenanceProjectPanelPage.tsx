@@ -28,10 +28,12 @@ import {
   getBoardProjectOrders,
   searchBoardProjects,
 } from "../../api/maintenanceBossBoard";
+import type { ProjectExpenseRow } from "../../api/maintenanceWorkbooks";
 import {
   SHEETS,
   applyProjectMaster,
   downloadProjectMaster,
+  listProjectExpenseRows,
 } from "../../api/maintenanceWorkbooks";
 import {
   getMaintenanceProject,
@@ -272,13 +274,84 @@ export function MaintenanceProjectPanelPage() {
             ),
           },
           sheetTab("备件成本", SHEETS.parts),
-          sheetTab("报销", SHEETS.expense),
+          {
+            key: SHEETS.expense,
+            label: "报销",
+            children: (
+              <ExpenseTab projectId={projectId} canUpload={canUpload} />
+            ),
+          },
           sheetTab("回款", SHEETS.collection),
         ]}
       />
     </Space>
   );
 }
+
+/** 报销 tab：04 表的 web 呈现（含备注，#47）+ 下载上传。只展示，不散改。 */
+function ExpenseTab({
+  projectId,
+  canUpload,
+}: {
+  projectId: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<ProjectExpenseRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setRows((await listProjectExpenseRows(projectId)).rows);
+    } catch (err) {
+      message.error(readError(err, "报销明细加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="报销"
+        filename={`${projectId}-04.xlsx`}
+        canUpload={canUpload}
+        hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();          // 上传覆盖后立刻回读，页面不留旧值
+          return result;
+        }}
+      />
+      <Table<ProjectExpenseRow>
+        rowKey="raw_line_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无报销行" }}
+        columns={[
+          { title: "报销单号", dataIndex: "bxd_no", render: raw },
+          { title: "报销日期", dataIndex: "expense_date", render: raw },
+          { title: "报销人员", dataIndex: "person", render: raw },
+          { title: "费用分类", dataIndex: "fee_category", render: raw },
+          { title: "合同编号", dataIndex: "contract_no", render: raw },
+          { title: "未税金额", dataIndex: "amount_ex_tax", render: raw },
+          { title: "含税金额(系统计算)", dataIndex: "amount_inc_tax", render: raw },
+          { title: "流程状态", dataIndex: "data_status", render: raw },
+          { title: "备注", dataIndex: "remark", render: raw },
+        ]}
+      />
+    </Space>
+  );
+}
+
 
 /** 基础信息 tab：表 6 sheet 01 的 web 呈现 + 归属挂靠（#39/#45）。 */
 function BasicsTab({
@@ -299,8 +372,11 @@ function BasicsTab({
 
   const loadCandidates = useCallback(async () => {
     try {
+      // #48：让后端按本项目 XSDD 集合排序——前端只拿一页，若在前端筛会漏掉
+      // 命中但排在 20 条之外的单。多合同项目的全部 XSDD 都由后端从台账取。
       const resp = await listMaintenanceSourceOrders({
         page: 1, page_size: 20, assignment_status: "unassigned",
+        xsdd_project_id: projectId,
       });
       setCandidates(resp.data.rows ?? []);
     } catch {
@@ -358,6 +434,7 @@ function BasicsTab({
         <Card size="small" title="归属挂靠（判定依据＝XSDD 销售订单）">
           <Text type="secondary" style={{ fontSize: 11.5 }}>
             同一销售订单＝同一项目；对不上任何销售订单的单子才独立成项目。
+            标「同 XSDD」的是命中本项目销售单的候选，已排在最前。
           </Text>
           <Table<MaintenanceSourceOrderRow>
             rowKey="raw_order_id"
@@ -366,7 +443,18 @@ function BasicsTab({
             pagination={false}
             locale={{ emptyText: "没有待确认的未归属单据" }}
             columns={[
-              { title: "需求单号", dataIndex: "order_no" },
+              {
+                title: "需求单号",
+                dataIndex: "order_no",
+                render: (value: string, order) => (
+                  <Space size={4}>
+                    <span>{value}</span>
+                    {order.matches_project_xsdd ? (
+                      <Tag color="blue">同 XSDD</Tag>
+                    ) : null}
+                  </Space>
+                ),
+              },
               { title: "制单日期", dataIndex: "order_date", render: raw },
               { title: "项目原文", dataIndex: "project_raw", render: raw },
               {

@@ -81,6 +81,29 @@ export const applyProjectMaster = (projectId: string, file: File) =>
   upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/apply`,
     file);
 
+/** 项目面板「报销」tab 的只读行（含备注，#47）。改动仍只走下载→改→上传覆盖。 */
+export interface ProjectExpenseRow {
+  raw_line_id: string;
+  bxd_no: string | null;
+  expense_date: string | null;
+  person: string | null;
+  expense_type: string | null;
+  fee_category: string | null;
+  reason: string | null;
+  contract_no: string | null;
+  amount_ex_tax: string | null;
+  amount_inc_tax: string | null;
+  data_status: string | null;
+  remark: string | null;
+}
+
+export const listProjectExpenseRows = async (projectId: string) => {
+  const resp = await api.get<{ rows: ProjectExpenseRow[]; total: number }>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/expense-rows`,
+  );
+  return resp.data;
+};
+
 /** 浏览器落盘：后端返回的是 attachment，这里只负责触发保存。 */
 export function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# v1.23 维保展示板：在隔离网络里用冻结备份演练 c8e2a4f6b1d3 -> c5d9e3f7a2b4。
+# v1.23 维保展示板：在隔离网络里用冻结备份演练 c8e2a4f6b1d3 -> d6e1f4a8c3b5。
 #
 # 演练三件事（plan v1.3 M5-4）：
 #   1. 迁移真跑：升级前后读回 alembic_version 并核验；
@@ -10,7 +10,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly FROM_REV=c8e2a4f6b1d3
-readonly TO_REV=c5d9e3f7a2b4
+readonly TO_REV=d6e1f4a8c3b5
 readonly RELEASE_FLAG=MAINTENANCE_BOSS_DASHBOARD_ENABLED
 readonly FROZEN_FLAGS=(
   MAINTENANCE_BETA_ENABLED

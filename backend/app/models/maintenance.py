@@ -407,6 +407,8 @@ class FProjectExpense(Base):
         default=Decimal("0.13"),
         server_default="0.13",
     )
+    # 项目工作簿 04_报销订单 的黄底「备注」列（#47）；纯展示与回填，不进任何计算
+    remark: Mapped[str | None] = mapped_column(Text)
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 

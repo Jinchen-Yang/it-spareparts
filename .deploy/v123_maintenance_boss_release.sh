@@ -14,7 +14,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly FROM_REV=c8e2a4f6b1d3
-readonly TO_REV=c5d9e3f7a2b4
+readonly TO_REV=d6e1f4a8c3b5
 readonly RELEASE_FLAG=MAINTENANCE_BOSS_DASHBOARD_ENABLED
 readonly PHASES=(preflight backup migrate deploy canary observe commit-release)
 

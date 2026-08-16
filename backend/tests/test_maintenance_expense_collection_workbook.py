@@ -324,3 +324,89 @@ def test_non_xlsx_upload_is_415(db, project):
         f"{_BASE}/{project.project_id}/expense-collection-workbook/apply",
         files={"file": ("x.csv", io.BytesIO(b"a,b"), "text/csv")})
     assert resp.status_code == 415
+
+
+# ---------- #47：报销备注列 ----------
+
+def test_expense_sheet_has_editable_remark_column(db, project):
+    _expense(db)
+    wb = load_workbook(io.BytesIO(_download(uploader(db, "rmk-1"), project)))
+    # 表头行末尾还有一列隐藏的行标识（值为空），所以按名字取位置而不是取 [-1]
+    headers = [c.value for c in wb[wbk.SHEET_EXPENSE][1]]
+    assert "备注" in headers
+    remark_col = headers.index("备注") + 1
+    assert remark_col == len(wbk._EXPENSE_HEADERS)
+    # 黄底＝可编辑（与未税金额同色），与只读列区分
+    ws = wb[wbk.SHEET_EXPENSE]
+    assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
+        == ws.cell(row=1, column=8).fill.fgColor.rgb
+    assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
+        != ws.cell(row=1, column=1).fill.fgColor.rgb
+
+
+def test_remark_roundtrips_into_the_database(db, project):
+    _expense(db)
+    client = uploader(db, "rmk-2")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.cell(row=2, column=len(wbk._EXPENSE_HEADERS), value="客户确认可报")
+    buf = io.BytesIO()
+    wb.save(buf)
+    resp = _upload(client, project, buf.getvalue())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["expense_updates"] == 1
+    db.expire_all()
+    assert db.execute(select(FProjectExpense)).scalars().one().remark == "客户确认可报"
+
+
+def test_existing_remark_is_exported_back(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.remark = "上一轮写的备注"
+    db.commit()
+    wb = load_workbook(io.BytesIO(_download(uploader(db, "rmk-3"), project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    assert ws.cell(row=2, column=len(wbk._EXPENSE_HEADERS)).value == "上一轮写的备注"
+
+
+def test_remark_only_edit_does_not_touch_amounts(db, project):
+    """只改备注不填金额也是合法回填：金额三列一个都不能动。"""
+    _expense(db, ex_tax="100.00")
+    client = uploader(db, "rmk-4")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.cell(row=2, column=8).value = None                      # 未税留空
+    ws.cell(row=2, column=len(wbk._EXPENSE_HEADERS), value="只改备注")
+    buf = io.BytesIO()
+    wb.save(buf)
+    assert _upload(client, project, buf.getvalue()).status_code == 200
+    db.expire_all()
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    assert expense.remark == "只改备注"
+    assert expense.amount_ex_tax == Decimal("100.00")
+    assert expense.amount_inc_tax == Decimal("113.00")
+
+
+def test_clearing_remark_writes_null(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.remark = "待清空"
+    db.commit()
+    client = uploader(db, "rmk-5")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    wb[wbk.SHEET_EXPENSE].cell(row=2, column=len(wbk._EXPENSE_HEADERS)).value = None
+    buf = io.BytesIO()
+    wb.save(buf)
+    assert _upload(client, project, buf.getvalue()).status_code == 200
+    db.expire_all()
+    assert db.execute(select(FProjectExpense)).scalars().one().remark is None
+
+
+def test_unchanged_remark_is_not_a_write(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.remark = "没动过"
+    db.commit()
+    client = uploader(db, "rmk-6")
+    content = _download(client, project)
+    assert _upload(client, project, content).json()["expense_updates"] == 0

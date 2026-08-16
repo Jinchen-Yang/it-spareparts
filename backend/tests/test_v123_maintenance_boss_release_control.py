@@ -25,7 +25,7 @@ STATIC_TEST = DEPLOY / "v123_maintenance_boss_static_test.py"
 AUDIT_DOC = ROOT / "docs" / "releases" / "v1.23-migration-audit.md"
 
 DB_FROM = "c8e2a4f6b1d3"
-DB_TO = "c5d9e3f7a2b4"
+DB_TO = "d6e1f4a8c3b5"
 RELEASE_FLAG = "MAINTENANCE_BOSS_DASHBOARD_ENABLED"
 TARGET_SHA = "a" * 40
 PARENT_SHA = "b" * 40
@@ -79,7 +79,7 @@ def test_migration_audit_doc_covers_every_carried_revision():
         "e7b3d9f2c1a4", "b1e3f7d9c2a5", "c3b5d9e1f7a2", "d1e3f5a7c2b9",
         "e9f2d4b7a1c6", "f1a2b3c4d5e6", "a7c3e5f9b2d1", "b9d1e7c3f5a8",
         "c3e9d1b7f5a2", "d7f1a3c5e8b2", "e3c5a7f9d1b2", "f1b3d5e7a9c2",
-        "b4c8d2e6f1a3", "c5d9e3f7a2b4",
+        "b4c8d2e6f1a3", "c5d9e3f7a2b4", "d6e1f4a8c3b5",
     ]
     for revision in carried:
         assert revision in doc, f"审计表缺少修订 {revision}"

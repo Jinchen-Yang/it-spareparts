@@ -29,6 +29,8 @@ export interface MaintenanceSourceOrderRow {
   assigned_project: AssignedMaintenanceProject | null;
   /** 仅当 include_candidates=true 时出现。 */
   candidates?: MaintenanceAssignmentCandidate[];
+  /** 仅当传了 xsdd_project_id 时出现：该单的 XSDD 是否属于本项目（#48）。 */
+  matches_project_xsdd?: boolean;
   is_pre_delivery?: boolean;
 }
 
@@ -60,6 +62,8 @@ export const listMaintenanceSourceOrders = (params: {
   project_id?: string;
   /** 展示板扩展（plan v1.3 M2-1）：只读归属候选与预交付徽标；默认关闭时响应形状不变。 */
   include_candidates?: boolean;
+  /** #48：命中该项目 XSDD 集合的未归属单排最前（**排序**不是过滤，其余仍在列表里）。 */
+  xsdd_project_id?: string;
   page?: number;
   page_size?: number;
 } = {}) => api.get<MaintenanceSourceOrderDirectory>(

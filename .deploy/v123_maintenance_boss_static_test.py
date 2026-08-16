@@ -17,7 +17,7 @@ REHEARSE = HERE / "v123_maintenance_boss_rehearse.sh"
 RELEASE = HERE / "v123_maintenance_boss_release.sh"
 
 DB_FROM = "c8e2a4f6b1d3"
-DB_TO = "c5d9e3f7a2b4"
+DB_TO = "d6e1f4a8c3b5"
 RELEASE_FLAG = "MAINTENANCE_BOSS_DASHBOARD_ENABLED"
 
 failures: list[str] = []
