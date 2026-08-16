@@ -111,13 +111,17 @@ export function BossProjectTable({
       loading={loading}
       dataSource={rows}
       columns={columns}
+      // 未归属桶是后端额外置顶的一行，不计入 total。若交给 antd 客户端分页，
+      // 21 行遇 pageSize=20 会被切掉最后一个真实项目（页面文案却承诺「不静默丢失」）。
+      // 因此显式关闭客户端分页：dataSource 已经是服务端切好的当页数据。
       pagination={{
         current: page,
-        pageSize,
+        pageSize: rows.length || pageSize,
         total,
         showSizeChanger: true,
-        showTotal: (value) => `共 ${value} 个项目`,
-        onChange,
+        pageSizeOptions: ["20", "50", "100", "200"],
+        showTotal: () => `共 ${total} 个项目（未归属单另置顶一行）`,
+        onChange: (nextPage, nextSize) => onChange(nextPage, nextSize ?? pageSize),
       }}
     />
   );

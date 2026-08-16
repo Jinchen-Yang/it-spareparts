@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
@@ -431,9 +432,12 @@ def assign_source_orders(
     )
     # plan v1.3 M4-3：新归属立刻让先前无法解析的已应用单据头补上项目
     # （上传顺序无关）。同事务、幂等、不覆盖既有归属。
-    from app.services import maintenance_doc_import
+    # 受展示板总闸约束：flag 关闭时本次发布的新行为必须整体收回，归属确认端点
+    # 回到 v1.2 语义（铁律 7「回滚=关 flag」）。
+    if get_settings().maintenance_boss_dashboard_enabled:
+        from app.services import maintenance_doc_import
 
-    maintenance_doc_import.relink_projects(db, commit=False)
+        maintenance_doc_import.relink_projects(db, commit=False)
     return [assignment_dict(resulting[source_id]) for source_id in source_ids]
 
 

@@ -3,10 +3,12 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.auth import hash_password
+from app.config import get_settings
 from app.etl import pipeline
 from app.main import app
 from app.models.maintenance import FMaintenanceOrder
@@ -21,6 +23,18 @@ from app.services import maintenance_doc_import as docs
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
 _PASSWORD = "synthetic-password-123"
+
+
+@pytest.fixture(autouse=True)
+def _flag_on():
+    """relink 端点是 v1.3 新增写端点，与展示板同受总闸约束（铁律 7）。"""
+    settings = get_settings()
+    original = settings.maintenance_boss_dashboard_enabled
+    settings.maintenance_boss_dashboard_enabled = True
+    try:
+        yield
+    finally:
+        settings.maintenance_boss_dashboard_enabled = original
 
 
 def _admin_client(db, username="relink-admin") -> TestClient:
@@ -135,6 +149,38 @@ def test_relink_never_overwrites_existing_project(db, tmp_path):
                       "reason": "合成测试确认归属"})
     db.expire_all()
     assert db.get(MaintenanceDocHeadRow, head_row_id).project_id == proj_b.project_id
+
+
+def test_relink_is_retracted_when_flag_off(db, tmp_path):
+    """铁律 7「回滚=关 flag」：关闭总闸后，M4-3 的新写路径必须整体收回。
+
+    端点 404（与未发布不可区分），且归属确认端点回到 v1.2 语义——不再顺带
+    改写已应用单据头的 project_id。否则回滚只关掉了展示板，写行为还在跑。
+    """
+    proj = _project(db)
+    head_row_id = _rkd_batch_unlinked(db, wbdd_no="WBDD-20260001")
+    order = _import_wbdd(db, tmp_path)
+    client = _admin_client(db, username="relink-flagoff-admin")
+
+    settings = get_settings()
+    settings.maintenance_boss_dashboard_enabled = False
+    resp = client.post("/api/maintenance/doc-imports/relink-projects")
+    assert resp.status_code == 404
+    assign = client.post("/api/maintenance/project-assignments/orders/assign",
+                         json={"project_id": proj.project_id,
+                               "items": [{"source_order_id": order.raw_order_id}],
+                               "reason": "合成测试确认归属"})
+    assert assign.status_code == 200, assign.text
+    db.expire_all()
+    assert db.get(MaintenanceDocHeadRow, head_row_id).project_id is None
+
+    # 重新打开总闸 → 新行为回来（同一份数据，仅 flag 差异）
+    settings.maintenance_boss_dashboard_enabled = True
+    again = client.post("/api/maintenance/doc-imports/relink-projects")
+    assert again.status_code == 200
+    assert again.json()["relinked"] == 1
+    db.expire_all()
+    assert db.get(MaintenanceDocHeadRow, head_row_id).project_id == proj.project_id
 
 
 def test_relink_permission_matrix(db, tmp_path):

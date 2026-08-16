@@ -1,4 +1,6 @@
 """M3-3：三类账号 HTTP 矩阵 + 无侧信道三条硬规则（plan v1.3 §6.2）。"""
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -218,3 +220,41 @@ def test_line_drilldown_enforces_project_scope_idor(db, tmp_path):
     assert manager.get(
         "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
     ).status_code == 404
+
+
+def test_summary_is_scoped_for_manager_accounts(db, tmp_path):
+    """§6.2「经理 200（范围聚合）」：/summary 必须收敛到本人范围。
+
+    此前 summary 不做范围收敛，只有 page_maintenance 的项目经理会拿到全公司的
+    单量/行数与成本合计，且与 /projects 的范围口径不一致（恒等式必然对不上）。
+    """
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=3, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="100.00")
+
+    boss = boss_client(db, username="scope-boss")
+    manager = manager_client(db, username="scope-mgr")   # 无任何可见项目
+
+    boss_body = boss.get("/api/maintenance/boss-board/summary",
+                         params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    mgr_body = manager.get("/api/maintenance/boss-board/summary",
+                           params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    assert boss_body["orders_ytd"]["value"] == 3
+    # 范围为空的经理不得看到全公司数字
+    assert mgr_body["orders_ytd"]["value"] == 0
+    assert Decimal(str(mgr_body["known_apply_cost_inc_tax"]["value"]["known_amount"])) \
+        == Decimal("0")
+    assert Decimal(str(boss_body["known_apply_cost_inc_tax"]["value"]["known_amount"])) \
+        == Decimal("300.00")
+
+
+def test_unassigned_bucket_facts_are_not_imported_not_zero(db, tmp_path):
+    """铁律 5：未归属单没有项目口径的三源事实——系统「无法知道」，不是「等于 0」。"""
+    import_wbdd(db, tmp_path, orders=1)
+    rows = boss_client(db, username="bucket-boss").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
+    for field in ("shipped_qty", "returned_good_qty", "returned_bad_qty"):
+        assert bucket[field]["state"] == "not_imported", field
+        assert bucket[field]["value"] is None, field

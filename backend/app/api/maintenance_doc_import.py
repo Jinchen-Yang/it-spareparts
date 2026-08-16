@@ -8,6 +8,7 @@ from app.auth import current_identity, current_role
 from app.db import get_db
 from app.models.maintenance_doc_import import MaintenanceDocImportBatch
 from app.api.maintenance_project_scope import resolve_visible_project_ids
+from app.maintenance_boss import require_maintenance_boss
 from app.security import (
     UserContext,
     get_current_user_context,
@@ -212,6 +213,9 @@ def get_doc_import(
 @router.post("/doc-imports/relink-projects")
 def relink_doc_import_projects(
     response: Response = None,
+    # M4-3 是本次发布新增的写端点：必须同受展示板总闸约束，否则「回滚=关 flag」
+    # 收不回它（铁律 7）。既有三单导入端点不受影响。
+    _flag: None = Depends(require_maintenance_boss),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),

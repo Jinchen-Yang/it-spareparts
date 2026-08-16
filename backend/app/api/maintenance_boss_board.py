@@ -92,7 +92,8 @@ def board_summary(
     ctx: UserContext = Depends(require_board_view),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return board.summary(db, user_ctx=ctx, date_from=date_from, date_to=date_to)
+    return board.summary(db, user_ctx=ctx, date_from=date_from, date_to=date_to,
+                         allowed_project_ids=_allowed_scope(db, ctx))
 
 
 @router.get("/attention")

@@ -111,7 +111,8 @@ def previous_window(window: tuple[date, date]) -> tuple[date, date]:
 def _cost_bundle(db: Session, *, window: tuple[date, date],
                  project_id: str | None = None,
                  unassigned_only: bool = False,
-                 can_cost: bool) -> dict:
+                 can_cost: bool,
+                 allowed_project_ids: set[str] | None = None) -> dict:
     """「已知申请估算成本（含税）」actual/estimated/missing/coverage/quality（§4.3）。
 
     口径与 services/maintenance_cost_quality 完全一致；缺价不按 0——missing_lines
@@ -126,7 +127,9 @@ def _cost_bundle(db: Session, *, window: tuple[date, date],
                   FMaintenanceOrder.id == FMaintenanceLine.order_id)
             .where(FMaintenanceOrder.order_date >= start,
                    FMaintenanceOrder.order_date <= end))
-    stmt = _scope_stmt(stmt, project_id=project_id, unassigned_only=unassigned_only)
+    stmt = _scope_stmt(stmt, project_id=project_id,
+                       unassigned_only=unassigned_only,
+                       allowed_project_ids=allowed_project_ids)
     return _bundle_from_row(*db.execute(stmt).one())
 
 
@@ -224,7 +227,8 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
     return {oid: found.get(oid, empty) for oid in order_ids}
 
 
-def _scope_stmt(stmt, *, project_id: str | None, unassigned_only: bool):
+def _scope_stmt(stmt, *, project_id: str | None, unassigned_only: bool,
+                allowed_project_ids: set[str] | None = None):
     """按项目归属收敛语句：项目桶 / 未归属桶 / 全局。"""
     active = and_(
         MaintenanceSourceOrderAssignment.source_order_id
@@ -237,6 +241,10 @@ def _scope_stmt(stmt, *, project_id: str | None, unassigned_only: bool):
     if project_id:
         return stmt.join(MaintenanceSourceOrderAssignment, active).where(
             MaintenanceSourceOrderAssignment.project_id == project_id)
+    if allowed_project_ids is not None:
+        return stmt.join(MaintenanceSourceOrderAssignment, active).where(
+            MaintenanceSourceOrderAssignment.project_id.in_(
+                allowed_project_ids or {""}))
     return stmt
 
 
@@ -248,12 +256,14 @@ def health(db: Session) -> dict:
 
 def _window_counts(db: Session, window: tuple[date, date], *,
                    project_id: str | None = None,
-                   unassigned_only: bool = False) -> tuple[int, int]:
+                   unassigned_only: bool = False,
+                   allowed_project_ids: set[str] | None = None) -> tuple[int, int]:
     start, end = window
     orders_stmt = select(func.count(func.distinct(FMaintenanceOrder.id))).where(
         FMaintenanceOrder.order_date >= start, FMaintenanceOrder.order_date <= end)
     orders_stmt = _scope_stmt(orders_stmt, project_id=project_id,
-                              unassigned_only=unassigned_only)
+                              unassigned_only=unassigned_only,
+                              allowed_project_ids=allowed_project_ids)
     lines_stmt = (select(func.count(FMaintenanceLine.id))
                   .select_from(FMaintenanceLine)
                   .join(FMaintenanceOrder,
@@ -261,7 +271,8 @@ def _window_counts(db: Session, window: tuple[date, date], *,
                   .where(FMaintenanceOrder.order_date >= start,
                          FMaintenanceOrder.order_date <= end))
     lines_stmt = _scope_stmt(lines_stmt, project_id=project_id,
-                             unassigned_only=unassigned_only)
+                             unassigned_only=unassigned_only,
+                             allowed_project_ids=allowed_project_ids)
     return int(db.execute(orders_stmt).scalar_one()), int(
         db.execute(lines_stmt).scalar_one())
 
@@ -277,8 +288,14 @@ def wbdd_imported(db: Session) -> bool:
 
 
 def summary(db: Session, *, user_ctx: UserContext,
-            date_from: date | None = None, date_to: date | None = None) -> dict:
-    """本期变化：orders_ytd / lines_ytd / 成本五件套 + 环比基期（§4.4）。"""
+            date_from: date | None = None, date_to: date | None = None,
+            allowed_project_ids: set[str] | None = None) -> dict:
+    """本期变化：orders_ytd / lines_ytd / 成本五件套 + 环比基期（§4.4）。
+
+    allowed_project_ids 非空 = 本人范围账号：全部计数与成本必须收敛到该范围
+    （§6.2「经理 200（范围聚合）」），否则经理会拿到全公司口径，且与 /projects
+    的范围不一致导致恒等式必然对不上。
+    """
     window = resolve_window(date_from, date_to)
     prev = previous_window(window)
     can_cost = can_view_cost(user_ctx)
@@ -297,20 +314,23 @@ def summary(db: Session, *, user_ctx: UserContext,
                 **empty,
             },
         }
-    orders, lines = _window_counts(db, window)
-    prev_orders, prev_lines = _window_counts(db, prev)
+    orders, lines = _window_counts(db, window, allowed_project_ids=allowed_project_ids)
+    prev_orders, prev_lines = _window_counts(db, prev,
+                                             allowed_project_ids=allowed_project_ids)
     return {
         "window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
         "orders_ytd": ready(orders),
         "lines_ytd": ready(lines),
         "known_apply_cost_inc_tax": _cost_bundle(
-            db, window=window, can_cost=can_cost),
+            db, window=window, can_cost=can_cost,
+            allowed_project_ids=allowed_project_ids),
         "prev_window": {
             "window": {"from": prev[0].isoformat(), "to": prev[1].isoformat()},
             "orders_ytd": ready(prev_orders),
             "lines_ytd": ready(prev_lines),
             "known_apply_cost_inc_tax": _cost_bundle(
-                db, window=prev, can_cost=can_cost),
+                db, window=prev, can_cost=can_cost,
+                allowed_project_ids=allowed_project_ids),
         },
     }
 
@@ -471,7 +491,10 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                 _cost_bundle(db, window=window, unassigned_only=True,
                              can_cost=can_cost) if wbdd_ready
                 else (restricted() if not can_cost else not_imported())),
-            **_fact_envelopes(None, source_states),
+            # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
+            # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
+            **{k: not_imported() for k in
+               ("shipped_qty", "returned_good_qty", "returned_bad_qty")},
         })
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
