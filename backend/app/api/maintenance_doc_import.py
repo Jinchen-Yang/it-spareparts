@@ -8,9 +8,11 @@ from app.auth import current_identity, current_role
 from app.db import get_db
 from app.models.maintenance_doc_import import MaintenanceDocImportBatch
 from app.api.maintenance_project_scope import resolve_visible_project_ids
+from app.maintenance_boss import require_maintenance_boss
 from app.security import (
     UserContext,
     get_current_user_context,
+    record_access_log,
     require_action,
     require_page,
 )
@@ -206,3 +208,33 @@ def get_doc_import(
         "applied_at": batch.applied_at.isoformat() if batch.applied_at else None,
         "report": batch.report_json,
     }
+
+
+@router.post("/doc-imports/relink-projects")
+def relink_doc_import_projects(
+    response: Response = None,
+    # M4-3 是本次发布新增的写端点：必须同受展示板总闸约束，否则「回滚=关 flag」
+    # 收不回它（铁律 7）。既有三单导入端点不受影响。
+    _flag: None = Depends(require_maintenance_boss),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """已应用单据头行的项目重解析（plan v1.3 M4-3：上传顺序无关）。
+
+    先传 RKD/返库、后建 WBDD 归属的场景下，把停在 NULL 的 project_id 补齐；
+    幂等，不覆盖既有归属。非 admin/boss 只在自身可见项目范围内补。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    allowed = (None if ctx.role in ("admin", "boss")
+               else set(resolve_visible_project_ids(db, ctx) or set()))
+    result = docs.relink_projects(db, allowed_project_ids=allowed)
+    _log_relink(ctx, result)
+    return result
+
+
+def _log_relink(ctx: UserContext, result: dict) -> None:
+    record_access_log(ctx, "relink_projects", "maintenance_doc_import", dict(result))

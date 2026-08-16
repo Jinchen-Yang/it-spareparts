@@ -56,9 +56,12 @@ export default function App() {
             || requestId !== latestRequest
             || localStorage.getItem("token") !== expectedToken
           ) return;
+          // 逐键重建（不要写死键名）：漏掉任何一个键都会让对应导航组永久隐藏，
+          // 且因为本函数在挂载/聚焦时覆盖 localStorage，登录时写入的完整快照会被抹掉。
           const refreshed = {
             maintenance: data.maintenance === true,
             replenishment: data.replenishment === true,
+            maintenance_boss: data.maintenance_boss === true,
           };
           localStorage.setItem("beta_features", JSON.stringify(refreshed));
           setBetaFeatures(refreshed);
@@ -112,7 +115,10 @@ export default function App() {
     const perms = readPerms();
     return DETAIL_ROUTES.filter((r) => (
       !r.betaFeature || betaFeatures[r.betaFeature] === true
-    ) && (isAdmin || !!perms[r.perm]));
+    ) && (isAdmin
+      || (r.perm ? !!perms[r.perm]
+        : r.anyPerm ? r.anyPerm.some((p) => !!perms[p])
+          : false)));
   }, [token, betaFeatures]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）

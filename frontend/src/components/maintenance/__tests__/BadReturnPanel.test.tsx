@@ -34,6 +34,7 @@ const returnRate = {
   status: "basis_incomplete" as const,
   official_basis: null,
   official_rate_pct: null,
+  official_returned_quantity: null,
   registered_rate_pct: null,
   warehouse_confirmed_rate_pct: null,
   required_quantity: "5.000",
@@ -320,6 +321,7 @@ describe("BadReturnPanel", () => {
     const availableRate = {
       ...returnRate,
       status: "available" as const,
+      official_returned_quantity: null,
       official_rate_pct: null,
       registered_rate_pct: "40.00",
       warehouse_confirmed_rate_pct: "20.00",

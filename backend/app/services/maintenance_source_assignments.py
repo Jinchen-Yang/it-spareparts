@@ -5,14 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.security import FULL_SCOPE_ROLES, UserContext
-from app.services import maintenance_project_assignments
+from app.services import maintenance_project_assignments, project_names
 from app.services.query_filters import active_beta_maintenance_orders
 
 
@@ -54,6 +55,84 @@ def _require_full_scope(user_ctx: UserContext) -> None:
         )
 
 
+# 归属候选（plan v1.3 M2-1）：只出候选、不自动写；确认仍走 assign 的人工+审计通道。
+_CANDIDATE_LIMIT = 5
+_CANDIDATE_TRGM_THRESHOLD = 0.6
+
+
+def _candidates_for(db: Session, project_std: str | None) -> list[dict]:
+    """按 project_std（ETL 已剥「预交付-」前缀）生成 ≤5 个候选。
+
+    一级：lower(project_code) 精确命中（ux_maintenance_project_code_ci）→ exact/1.0 恒排首；
+    二级：pg_trgm 相似度 ≥ 0.6（ix_maintenance_project_*_trgm GIN 索引）按分降序。
+    纯只读；多候选/低分一律不自动（ADR-0002：名称只是线索）。
+    """
+    if not project_std:
+        return []
+    out: list[dict] = []
+    exact = db.execute(
+        select(MaintenanceProject)
+        .where(
+            func.lower(MaintenanceProject.project_code) == project_std.lower(),
+            MaintenanceProject.is_active.is_(True),
+        )
+    ).scalars().all()
+    seen: set[str] = set()
+    for proj in exact:
+        out.append({
+            "project_id": proj.project_id,
+            "project_code": proj.project_code,
+            "display_name": proj.display_name,
+            "match_type": "exact",
+            "score": 1.0,
+        })
+        seen.add(proj.project_id)
+    if len(out) >= _CANDIDATE_LIMIT:
+        return out[:_CANDIDATE_LIMIT]
+    score = func.greatest(
+        func.similarity(MaintenanceProject.project_code, project_std),
+        func.similarity(MaintenanceProject.display_name, project_std),
+    )
+    fuzzy = db.execute(
+        select(MaintenanceProject, score.label("score"))
+        .where(
+            MaintenanceProject.is_active.is_(True),
+            score >= _CANDIDATE_TRGM_THRESHOLD,
+        )
+        .order_by(score.desc(), MaintenanceProject.project_code)
+        .limit(_CANDIDATE_LIMIT)
+    ).all()
+    for proj, sim in fuzzy:
+        if proj.project_id in seen:
+            continue
+        out.append({
+            "project_id": proj.project_id,
+            "project_code": proj.project_code,
+            "display_name": proj.display_name,
+            "match_type": "trgm",
+            "score": round(float(sim), 3),
+        })
+        if len(out) >= _CANDIDATE_LIMIT:
+            break
+    return out
+
+
+def project_xsdd_keys(db: Session, project_id: str) -> set[str]:
+    """项目名下的全部 XSDD 销售订单号（台账合同表为准，#45/#46）。
+
+    多合同项目要把名下**每一个**合同号都算作本项目的键——只取第一个会把
+    「兵装财务…整体维保」那种 1 项目 2 合同的另一半单据判成不相关。
+    """
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    rows = db.execute(
+        select(MaintenanceProjectContract.contract_no)
+        .where(MaintenanceProjectContract.project_id == project_id,
+               MaintenanceProjectContract.contract_no.is_not(None))
+    ).scalars().all()
+    return {no for no in rows if no}
+
+
 def list_source_orders(
     db: Session,
     *,
@@ -64,6 +143,8 @@ def list_source_orders(
     page: int,
     page_size: int,
     user_ctx: UserContext,
+    include_candidates: bool = False,
+    xsdd_project_id: str | None = None,
 ) -> dict:
     active_join = and_(
         MaintenanceSourceOrderAssignment.source_order_id
@@ -108,6 +189,16 @@ def list_source_orders(
             )
         )
 
+    # #48 归属挂靠候选预筛：命中「本项目 XSDD 集合」的未归属单排最前，其余在后。
+    # 判定依据＝XSDD 销售订单（#45）；多合同项目把名下**全部**合同号都算本项目的键
+    # （生产唯一例外「兵装财务…整体维保」1 项目 2 XSDD，见 #46）。
+    # 这是**排序**不是过滤：其余未归属单仍要能看到、能挂，只是排在后面。
+    xsdd_keys = project_xsdd_keys(db, xsdd_project_id) if xsdd_project_id else set()
+    xsdd_rank = (
+        case((FMaintenanceOrder.linked_sales_order_no.in_(xsdd_keys), 0), else_=1)
+        if xsdd_keys else None
+    )
+
     count_stmt = active_beta_maintenance_orders(
         select(func.count())
         .select_from(FMaintenanceOrder)
@@ -130,6 +221,7 @@ def list_source_orders(
         )
         .where(*filters)
         .order_by(
+            *([xsdd_rank] if xsdd_rank is not None else []),
             FMaintenanceOrder.order_date.desc().nullslast(),
             FMaintenanceOrder.order_no,
             FMaintenanceOrder.raw_order_id,
@@ -165,6 +257,24 @@ def list_source_orders(
                 ),
             }
         )
+        if include_candidates:
+            # 展示板扩展字段（plan v1.3 M2）。默认关闭 → 目录响应形状逐字节不变，
+            # 既有契约测试与前端不受影响。
+            # - candidates：只对未归属行生成（纯只读，绝不自动写 assignment）；
+            # - is_pre_delivery：预交付徽标（方案 B），取自 project_raw 前缀，不落库。
+            rows[-1]["candidates"] = (
+                _candidates_for(db, source.project_std)
+                if assignment is None else []
+            )
+            rows[-1]["is_pre_delivery"] = project_names.is_pre_delivery(
+                source.project_raw
+            )
+        if xsdd_project_id:
+            # 同样只在显式请求时追加，保持既有目录契约逐字节不变
+            rows[-1]["matches_project_xsdd"] = bool(
+                source.linked_sales_order_no
+                and source.linked_sales_order_no in xsdd_keys
+            )
     return {
         "rows": rows,
         "total": total,
@@ -354,6 +464,14 @@ def assign_source_orders(
         reason=clean_reason,
         source_order_ids=set(source_ids),
     )
+    # plan v1.3 M4-3：新归属立刻让先前无法解析的已应用单据头补上项目
+    # （上传顺序无关）。同事务、幂等、不覆盖既有归属。
+    # 受展示板总闸约束：flag 关闭时本次发布的新行为必须整体收回，归属确认端点
+    # 回到 v1.2 语义（铁律 7「回滚=关 flag」）。
+    if get_settings().maintenance_boss_dashboard_enabled:
+        from app.services import maintenance_doc_import
+
+        maintenance_doc_import.relink_projects(db, commit=False)
     return [assignment_dict(resulting[source_id]) for source_id in source_ids]
 
 

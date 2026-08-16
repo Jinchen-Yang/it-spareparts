@@ -394,6 +394,10 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_migration_review",
                                    "action_maintenance_ledger_import",
                                    "action_maintenance_doc_import",
+                                   # plan v1.3 M1-6：WBDD 专用上传动作键（默认全员 false）
+                                   "action_maintenance_wbdd_import",
+                                   # 增补包 AB-3：报销/回款工作簿上传（默认全员 false）
+                                   "action_maintenance_expense_collection_upload",
                                    "action_maintenance_collection_follow_up",
                                    "action_maintenance_collection_plan_import",
                                    "action_replenishment_create",

@@ -473,6 +473,33 @@ def export_manual_review(
     return _excel_response(data, filename)
 
 
+@router.get("/applications/{application_id}/exports/system-screening.xlsx")
+def export_system_screening(
+    application_id: str,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+    _action: None = Depends(
+        require_action(
+            "action_replenishment_create",
+            require_data="data_pool_price_governance",
+        )
+    ),
+) -> StreamingResponse:
+    """AB-4：系统三查结果导出，交人工复核。系统不记录人工审核结论。"""
+    username, role = _identity(db, ident)
+    _require_price_data(ctx)
+    try:
+        data, filename = replenishment.system_screening_workbook(
+            db, application_id, username=username, role=role
+        )
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
+    return _excel_response(data, filename)
+
+
 @router.get("/applications/{application_id}/exports/wbdd-subset.xlsx")
 def export_wbdd_subset(
     application_id: str,

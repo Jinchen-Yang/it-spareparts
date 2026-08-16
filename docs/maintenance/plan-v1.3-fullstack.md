@@ -2,10 +2,11 @@
 
 > **本文 = 后端 v1.2 执行计划 + 前端信息架构设计 + 业务确认的 Q1–Q4 决议，合并为一份
 > 交给实现者（Claude）直接执行的单一计划。** 两个上游：
-> - 后端：`docs/maintenance/plan-v1.2-executable.md`（949 行，字段级契约，已独立复核）
+> - 后端：`docs/maintenance/archive/plan-v1.2-executable.md`（949 行，字段级契约，已归档）
 > - 前端：`docs/maintenance/frontend-information-design.md`（454 行，信息四层/状态语义/归属唯一，附录 A 全文收录）
-> - 事实与需求：`docs/maintenance/data-facts-and-linkage-2026-08.md`、
->   `docs/maintenance/甲方核心需求与问题定义.md`（实现前必读）
+> - 事实与需求：业务口径以两本活文档为准——`docs/maintenance/ARCHITECTURE.md`（业务架构）、
+>   `docs/maintenance/REQUIREMENTS.md`（核心需求增量表）；事实档案已归档至
+>   `docs/maintenance/archive/data-facts-and-linkage-2026-08.md`。
 >
 > 合并决议（Q1–Q4 业务已确认，附录 B）：
 > - Q1 指标三槽 = 回款率 / 已知申请估算成本(占合同，不完整前缀 ≥) / 待办件数；返还率只作状态位与事实行，不占槽；
@@ -18,9 +19,9 @@
 > 相对 v1.2 的合并改动：铁律增加第 8 条（前端设计系统）；里程碑增加 M3b（前端页面）；
 > §5 前端章节替换为合并版；附录 A/B 为前端设计与合并决议原文。
 
-> 本版以 v1.1（`docs/maintenance/plan-v1-boss-dashboard.md`）为底稿，修正其中的错误与粗糙处，
-> 不改变方向。全部数据引用注明出处：「事实档案」= `docs/maintenance/data-facts-and-linkage-2026-08.md`，
-> 「需求定义」= `docs/maintenance/甲方核心需求与问题定义.md`。代码引用均已在当前分支
+> 本版以 v1.1（`docs/maintenance/archive/plan-v1-boss-dashboard.md`）为底稿，修正其中的错误与粗糙处，
+> 不改变方向。全部数据引用注明出处：「事实档案」= `docs/maintenance/archive/data-facts-and-linkage-2026-08.md`，
+> 「需求定义」= `docs/maintenance/archive/甲方核心需求与问题定义.md`（已归档，活口径见 ARCHITECTURE/REQUIREMENTS）。代码引用均已在当前分支
 > `feat/maintenance-ledger-import`（基线 main = 生产 SHA `4f8b6881`）逐一核实。
 >
 > **本文只是计划，不含任何代码改动。**

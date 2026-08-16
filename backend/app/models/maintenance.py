@@ -87,6 +87,42 @@ class FMaintenanceOrder(Base):
     maint_start: Mapped[date | None] = mapped_column(Date)
     maint_end: Mapped[date | None] = mapped_column(Date)
     data_status: Mapped[str | None] = mapped_column(String(16))
+    # ---- WBDD 展示补全列（plan v1.3 §3.1，34 列全 nullable）----
+    # 头级自报汇总四列：仅展示/与三源事实无判定并排（M4-4）；禁止进入任何聚合计算（铁律 3）
+    head_demand_qty: Mapped[Decimal | None] = mapped_column(Qty)          # 需求数量（头段）
+    head_purchase_qty: Mapped[Decimal | None] = mapped_column(Qty)        # 需采数量（头段尾部）
+    head_shipped_qty: Mapped[Decimal | None] = mapped_column(Qty)         # 已发货数量（自报）
+    head_returned_qty: Mapped[Decimal | None] = mapped_column(Qty)        # 已返货数量（自报）
+    maintainer_raw: Mapped[str | None] = mapped_column(String(64))        # 维保负责人
+    work_order_no: Mapped[str | None] = mapped_column(String(64))         # 维保工单
+    created_by_raw: Mapped[str | None] = mapped_column(String(64))        # 制单人员
+    purchaser_raw: Mapped[str | None] = mapped_column(String(64))         # 采购员
+    purchaser2_raw: Mapped[str | None] = mapped_column(String(64))        # 采购人员（并存第二列）
+    project_manager_raw: Mapped[str | None] = mapped_column(String(64))   # 项目经理
+    project_manager_staff_raw: Mapped[str | None] = mapped_column(String(64))  # 项目经理人员
+    co_salesperson_raw: Mapped[str | None] = mapped_column(String(64))    # 协同销售人员
+    partner_raw: Mapped[str | None] = mapped_column(String(64))           # 合作伙伴人
+    sales_dept_raw: Mapped[str | None] = mapped_column(String(64))        # 销售部门
+    warehouse_keeper_raw: Mapped[str | None] = mapped_column(String(64))  # 仓管员
+    storage_center: Mapped[str | None] = mapped_column(String(64))        # 仓储中心
+    warehouse_raw: Mapped[str | None] = mapped_column(String(64))         # 仓库（与 warehouse=出库仓库 并存）
+    change_warehouse_flag: Mapped[bool | None] = mapped_column(Boolean)   # 是否变仓库（是/否；其他→NULL+issue）
+    change_warehouse: Mapped[str | None] = mapped_column(String(64))      # 变更仓库
+    change_warehouse_handler: Mapped[str | None] = mapped_column(String(64))  # 变更仓承办人
+    warehouse_handler: Mapped[str | None] = mapped_column(String(64))     # 仓库承办人
+    supply_deadline: Mapped[date | None] = mapped_column(Date)            # 供货期限（归一化失败→NULL+issue）
+    delivery_address_option: Mapped[str | None] = mapped_column(String(128))  # 选择收货地址
+    receiver: Mapped[str | None] = mapped_column(String(64))              # 收货人（customer_info 组脱敏）
+    receiver_phone: Mapped[str | None] = mapped_column(String(32))        # 收货人电话（同上）
+    receiver_address: Mapped[str | None] = mapped_column(Text)            # 收货地址（同上）
+    express_no: Mapped[str | None] = mapped_column(String(128))           # 快递单号
+    express_no2: Mapped[str | None] = mapped_column(String(128))          # 快递单号#
+    image_urls: Mapped[str | None] = mapped_column(Text)                  # 图片（原样 URL 文本）
+    attachments: Mapped[str | None] = mapped_column(Text)                 # 附件（原样 URL 文本）
+    whole_machine_check: Mapped[str | None] = mapped_column(String(16))   # 整机需采备件校验（原样）
+    accept_generic_flag: Mapped[bool | None] = mapped_column(Boolean)     # 是否可以接受通用号（91 列布局独有）
+    created_at_raw: Mapped[str | None] = mapped_column(String(32))        # 创建时间（原样文本，仅展示）
+    modified_at_raw: Mapped[str | None] = mapped_column(String(32))       # 修改时间（原样文本，仅展示）
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
@@ -151,6 +187,38 @@ class FMaintenanceLine(Base):
     anomaly_flags: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )
+    # ---- WBDD 明细展示补全列（plan v1.3 §3.2，28 列全 nullable）----
+    # 1–14 为「流转状态列」：只原样展示、不参与任何计算、不标注可信度（铁律 3，
+    # 看板聚合服务以 AGGREGATE_SOURCE_COLUMNS 白名单锁死）。
+    purchase_qty: Mapped[Decimal | None] = mapped_column(Qty)             # 需采数量
+    change_warehouse_purchase_qty: Mapped[Decimal | None] = mapped_column(Qty)  # 变更仓需采数量
+    purchased_qty: Mapped[Decimal | None] = mapped_column(Qty)            # 已采数量
+    pending_purchase_qty: Mapped[Decimal | None] = mapped_column(Qty)     # 待采数量
+    direct_ship_qty: Mapped[Decimal | None] = mapped_column(Qty)          # 直采直发数
+    warehouse_need_qty: Mapped[Decimal | None] = mapped_column(Qty)       # 库房需发数
+    warehouse_shipped_qty: Mapped[Decimal | None] = mapped_column(Qty)    # 库房发货数
+    supplied_qty: Mapped[Decimal | None] = mapped_column(Qty)             # 已供数量
+    pending_supply_qty: Mapped[Decimal | None] = mapped_column(Qty)       # 待供数量
+    returned_qty: Mapped[Decimal | None] = mapped_column(Qty)             # 已返数量
+    pending_return_qty: Mapped[Decimal | None] = mapped_column(Qty)       # 待返数量
+    consumed_qty: Mapped[Decimal | None] = mapped_column(Qty)             # 领用数量（29,140 行仅 18 行非空）
+    demand_pending_return_qty: Mapped[Decimal | None] = mapped_column(Qty)  # 需求待返数
+    return_old_part: Mapped[str | None] = mapped_column(String(16))       # 退返旧件
+    # 15–28 为展示/排查列
+    whole_or_part: Mapped[str | None] = mapped_column(String(8))          # 整机/备件（斜杠单列）
+    whole_machine_purchase_part: Mapped[str | None] = mapped_column(Text)  # 整机需采备件
+    whole_machine_part_purchased: Mapped[str | None] = mapped_column(String(16))  # 整机备件已采
+    purchase_note: Mapped[str | None] = mapped_column(Text)               # 需采备件说明
+    line_note: Mapped[str | None] = mapped_column(Text)                   # 备注
+    line_image_urls: Mapped[str | None] = mapped_column(Text)             # 图片/附件（斜杠单列）
+    warehouse_stock_raw: Mapped[str | None] = mapped_column(Text)         # 各仓库存（原样多仓文本）
+    adjust_warehouse_flag: Mapped[bool | None] = mapped_column(Boolean)   # 个别调整发货仓（是/否）
+    adjust_warehouse: Mapped[str | None] = mapped_column(String(64))      # 调整仓库
+    adjust_storage_center: Mapped[str | None] = mapped_column(String(64))  # 调整仓储中心
+    adjust_keeper: Mapped[str | None] = mapped_column(String(64))         # 调整库管员
+    ship_warehouse: Mapped[str | None] = mapped_column(String(64))        # 发货仓库
+    ship_warehouse_object_id: Mapped[str | None] = mapped_column(String(64))  # 发货仓ObjectID
+    ship_stock: Mapped[Decimal | None] = mapped_column(Qty)               # 发货库存（数值化失败→NULL+issue）
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
 
     __table_args__ = (
@@ -339,6 +407,8 @@ class FProjectExpense(Base):
         default=Decimal("0.13"),
         server_default="0.13",
     )
+    # 项目工作簿 04_报销订单 的黄底「备注」列（#47）；纯展示与回填，不进任何计算
+    remark: Mapped[str | None] = mapped_column(Text)
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 

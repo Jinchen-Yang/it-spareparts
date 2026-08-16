@@ -1,0 +1,273 @@
+"""M3-3：三类账号 HTTP 矩阵 + 无侧信道三条硬规则（plan v1.3 §6.2）。"""
+from decimal import Decimal
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.main import app
+from app.services import maintenance_boss_board as board
+from tests.boss_board_helpers import (
+    assign,
+    boss_client,
+    import_wbdd,
+    make_project,
+    manager_client,
+    no_access_client,
+    set_costs,
+)
+
+_READ_PATHS = (
+    "/api/maintenance/boss-board/health",
+    "/api/maintenance/boss-board/summary",
+    "/api/maintenance/boss-board/attention",
+    "/api/maintenance/boss-board/projects",
+)
+
+
+@pytest.fixture(autouse=True)
+def _flag_on():
+    settings = get_settings()
+    original = settings.maintenance_boss_dashboard_enabled
+    settings.maintenance_boss_dashboard_enabled = True
+    try:
+        yield
+    finally:
+        settings.maintenance_boss_dashboard_enabled = original
+
+
+def _numbers(payload) -> list:
+    """递归收集 JSON 中所有数字（用于「无成本账号响应中没有金额」断言）。"""
+    out = []
+    if isinstance(payload, dict):
+        for value in payload.values():
+            out.extend(_numbers(value))
+    elif isinstance(payload, list):
+        for value in payload:
+            out.extend(_numbers(value))
+    elif isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        out.append(payload)
+    return out
+
+
+def _keyset(payload) -> set:
+    return set(payload) if isinstance(payload, dict) else set()
+
+
+# ---------- 三类账号 × 端点矩阵 ----------
+
+def test_unauthenticated_is_401(db):
+    anon = TestClient(app)
+    for path in _READ_PATHS:
+        assert anon.get(path).status_code == 401, path
+
+
+def test_no_permission_account_is_403(db):
+    client = no_access_client(db)
+    for path in _READ_PATHS:
+        assert client.get(path).status_code == 403, path
+
+
+def test_boss_sees_all_endpoints(db, tmp_path):
+    import_wbdd(db, tmp_path)
+    client = boss_client(db)
+    for path in _READ_PATHS:
+        assert client.get(path).status_code == 200, path
+
+
+def test_manager_sees_all_projects(db, tmp_path):
+    """M0-B 已改判为①全部可见（AB-1，业务 2026-08-16 签署）。
+
+    展示板查看权限本身即勾选名单制：能进页面的账号就是获授整套可见的账号
+    （REQUIREMENTS #2/#14）。此前按 resolve_visible_project_ids 逐项目收敛，
+    经理只见「被指派」的项目——与业务口径不符。
+    """
+    mine, theirs = make_project(db, "我的项目"), make_project(db, "别人的项目")
+    orders = import_wbdd(db, tmp_path, orders=3)
+    assign(db, orders[0], mine)
+    assign(db, orders[1], theirs)
+    client = manager_client(db)
+    ids = {r["project_id"]
+           for r in client.get("/api/maintenance/boss-board/projects").json()["rows"]}
+    assert {mine.project_id, theirs.project_id} <= ids
+    # 未归属桶对经理同样可见（全范围口径下没有「本人范围」这一说）
+    assert board.UNASSIGNED_BUCKET in ids
+    assert client.get(
+        f"/api/maintenance/boss-board/projects/{board.UNASSIGNED_BUCKET}/orders"
+    ).status_code == 200
+
+
+def test_boss_sees_unassigned_bucket(db, tmp_path):
+    import_wbdd(db, tmp_path)
+    client = boss_client(db)
+    ids = {r["project_id"]
+           for r in client.get("/api/maintenance/boss-board/projects").json()["rows"]}
+    assert board.UNASSIGNED_BUCKET in ids
+
+
+# ---------- 无侧信道三条硬规则 ----------
+
+def test_rule1_cost_fields_restricted_without_permission(db, tmp_path):
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, lines_per_order=2)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="123.45")
+    client = manager_client(db, username="no-cost-mgr", with_cost=False)
+    summary = client.get("/api/maintenance/boss-board/summary").json()
+    bundle = summary["known_apply_cost_inc_tax"]
+    assert bundle["state"] == "restricted"
+    assert bundle["value"] is None and bundle["as_of"] is None
+    # 递归扫描：响应中不得出现成本金额
+    assert 123.45 not in _numbers(summary)
+
+
+def test_rule1_line_level_cost_and_source_restricted(db, tmp_path):
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db, source="pool_sales", amount="99.99")
+    # 用「全范围但无成本」账号隔离成本维度：本人范围账号会先被 IDOR 范围校验挡在
+    # 404（见 test_line_drilldown_enforces_project_scope_idor），验不到成本脱敏。
+    client = boss_client(db, username="nocost-boss-lines", with_cost=False)
+    lines = client.get(
+        f"/api/maintenance/boss-board/orders/{orders[0].raw_order_id}/lines").json()
+    row = lines["rows"][0]
+    # 金额、取价来源、置信度同属成本组：一并 restricted（防经来源反推）
+    for field in ("known_apply_cost_inc_tax", "cost_source", "confidence"):
+        assert row[field]["state"] == "restricted", field
+        assert row[field]["value"] is None
+    assert "pool_sales" not in str(lines)
+    assert 99.99 not in _numbers(lines)
+
+
+def test_rule2_cost_sort_is_422_not_silent_downgrade(db, tmp_path):
+    """静默降级会通过顺序泄露排名 → 必须显式 422。"""
+    make_project(db)
+    no_cost = manager_client(db, username="no-cost-mgr3", with_cost=False)
+    resp = no_cost.get("/api/maintenance/boss-board/projects",
+                       params={"sort": "known_cost"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "sort_requires_cost_permission"
+    # 有成本权限的账号可用该排序
+    assert boss_client(db).get("/api/maintenance/boss-board/projects",
+                               params={"sort": "known_cost"}).status_code == 200
+
+
+def test_rule2_search_endpoint_also_rejects_cost_sort(db):
+    make_project(db)
+    no_cost = manager_client(db, username="no-cost-mgr4", with_cost=False)
+    resp = no_cost.post("/api/maintenance/boss-board/projects/search",
+                        json={"q": "合成", "sort": "known_cost"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "sort_requires_cost_permission"
+
+
+def test_rule3_response_shape_identical_with_and_without_cost(db, tmp_path):
+    """restricted 与 ready 的键集合必须一致（防「字段存在性」侧信道）。"""
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db)
+    # 只改变成本维度（范围同为全范围），确保比较的是「有无成本权限」而非范围差异
+    with_cost = boss_client(db, username="cost-boss").get(
+        "/api/maintenance/boss-board/summary").json()
+    without = boss_client(db, username="nocost-boss", with_cost=False).get(
+        "/api/maintenance/boss-board/summary").json()
+    assert _keyset(with_cost) == _keyset(without)
+    assert (_keyset(with_cost["known_apply_cost_inc_tax"])
+            == _keyset(without["known_apply_cost_inc_tax"]))
+
+    rows_with = boss_client(db, username="cost-boss2").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    rows_without = boss_client(db, username="nocost-boss2", with_cost=False).get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    assert rows_with and rows_without
+    assert _keyset(rows_with[0]) == _keyset(rows_without[0])
+    assert (_keyset(rows_with[0]["known_apply_cost_inc_tax"])
+            == _keyset(rows_without[0]["known_apply_cost_inc_tax"]))
+
+
+def test_attention_has_no_cost_derived_items_without_permission(db):
+    """无成本账号不得出现成本派生条目（M0-A 拍板后队列不再恒空，见 AB-2）。"""
+    no_cost = manager_client(db, username="no-cost-mgr7", with_cost=False)
+    body = no_cost.get("/api/maintenance/boss-board/attention").json()
+    assert all(i["kind"] != "budget_remaining" for i in body["items"])
+    # 非成本派生的 kind 仍然注册着——「队列为空」不再是本用例的断言点
+    assert body["registered_kinds"] == ["budget_remaining", "pending_return"]
+
+
+def test_line_drilldown_enforces_project_scope_idor(db, tmp_path):
+    """IDOR 防回归（plan §6.2「越权 id → 404」）：
+
+    PN 证据行下钻只按 source_order_id 取数，若不做范围校验，项目经理凭单据 ID
+    即可读到他人项目、乃至未归属单的明细。此处锁死越权一律 404（不暴露存在性）。
+    """
+    mine, theirs = make_project(db, "我的项目"), make_project(db, "别人的项目")
+    orders = import_wbdd(db, tmp_path, orders=3)
+    assign(db, orders[0], mine)
+    assign(db, orders[1], theirs)
+    # orders[2] 保持未归属
+
+    boss = boss_client(db, username="idor-boss")
+    # 全范围账号可读全部三种
+    for order in orders:
+        assert boss.get(
+            f"/api/maintenance/boss-board/orders/{order.raw_order_id}/lines"
+        ).status_code == 200, order.raw_order_id
+
+    manager = manager_client(db, username="idor-manager")
+    # M0-B 改判后经理同为全范围：他人项目与未归属单据均可读
+    for order in orders:
+        assert manager.get(
+            f"/api/maintenance/boss-board/orders/{order.raw_order_id}/lines"
+        ).status_code == 200, order.raw_order_id
+    # 不存在的单据仍须 404——不得用空列表冒充「这张单没有明细」（AB-1 验收点）
+    assert manager.get(
+        "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
+    ).status_code == 404
+    assert boss.get(
+        "/api/maintenance/boss-board/orders/NO-SUCH-ORDER/lines"
+    ).status_code == 404
+    # 不存在的项目同理
+    assert boss.get(
+        "/api/maintenance/boss-board/projects/no-such-project/orders"
+    ).status_code == 404
+
+
+def test_summary_matches_project_list_totals(db, tmp_path):
+    """§6.2：/summary 与 /projects 必须同源同范围（恒等式前提）。
+
+    此前 summary 不做范围收敛，只有 page_maintenance 的项目经理会拿到全公司的
+    单量/行数与成本合计，且与 /projects 的范围口径不一致（恒等式必然对不上）。
+    """
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=3, lines_per_order=1)
+    assign(db, orders[0], proj)
+    set_costs(db, amount="100.00")
+
+    boss = boss_client(db, username="scope-boss")
+    manager = manager_client(db, username="scope-mgr")
+
+    boss_body = boss.get("/api/maintenance/boss-board/summary",
+                         params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    mgr_body = manager.get("/api/maintenance/boss-board/summary",
+                           params={"from": "2026-01-01", "to": "2026-12-31"}).json()
+    # M0-B 改判①：两类账号口径一致；关键不变量是 summary 与 /projects 同源，
+    # 否则恒等式必然对不上（这条才是本用例真正看守的东西）。
+    assert boss_body["orders_ytd"]["value"] == mgr_body["orders_ytd"]["value"] == 3
+    assert Decimal(str(boss_body["known_apply_cost_inc_tax"]["value"]["known_amount"])) \
+        == Decimal("300.00")
+    rows = manager.get("/api/maintenance/boss-board/projects",
+                       params={"from": "2026-01-01", "to": "2026-12-31"}).json()["rows"]
+    assert sum(r["orders_ytd"]["value"] for r in rows) == mgr_body["orders_ytd"]["value"]
+
+
+def test_unassigned_bucket_facts_are_not_imported_not_zero(db, tmp_path):
+    """铁律 5：未归属单没有项目口径的三源事实——系统「无法知道」，不是「等于 0」。"""
+    import_wbdd(db, tmp_path, orders=1)
+    rows = boss_client(db, username="bucket-boss").get(
+        "/api/maintenance/boss-board/projects").json()["rows"]
+    bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
+    for field in ("shipped_qty", "returned_good_qty", "returned_bad_qty"):
+        assert bucket[field]["state"] == "not_imported", field
+        assert bucket[field]["value"] is None, field

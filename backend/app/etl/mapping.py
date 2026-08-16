@@ -110,6 +110,85 @@ MAINTENANCE_LINE = {
     "需求明细.发货SN": "serial_numbers",
 }
 
+# ---- WBDD 展示补全列（plan v1.3 §3，34 头 + 28 明细，全部只展示）----
+# 头级 34 列：源列名 → f_maintenance_order 列。头段位置见 §1.1（91 列布局 [0..6]∪[44..90]）。
+# 排除不落库 6 列：项目经理#、备注(头)、数据标题、创建人(必填)、拥有者(必填)、所属部门(必填)。
+MAINTENANCE_HEAD_DISPLAY = {
+    "需求数量": "head_demand_qty",
+    "需采数量": "head_purchase_qty",
+    "已发货数量": "head_shipped_qty",
+    "已返货数量": "head_returned_qty",
+    "维保负责人": "maintainer_raw",
+    "维保工单": "work_order_no",
+    "制单人员": "created_by_raw",
+    "采购员": "purchaser_raw",
+    # 与采购单头「采购人员(必填)」共用同一规范键（canonicalize 会把裸「采购人员」归一到
+    # 注解形式），两个文件类型各自的映射表按此键取各自字段，互不干扰。
+    "采购人员(必填)": "purchaser2_raw",
+    "项目经理": "project_manager_raw",
+    "项目经理人员": "project_manager_staff_raw",
+    "协同销售人员": "co_salesperson_raw",
+    "合作伙伴人": "partner_raw",
+    "销售部门": "sales_dept_raw",
+    "仓管员": "warehouse_keeper_raw",
+    "仓储中心": "storage_center",
+    "仓库": "warehouse_raw",
+    "是否变仓库": "change_warehouse_flag",
+    "变更仓库": "change_warehouse",
+    "变更仓承办人(必填)": "change_warehouse_handler",
+    "仓库承办人(必填)": "warehouse_handler",
+    "供货期限": "supply_deadline",
+    "选择收货地址": "delivery_address_option",
+    "收货人": "receiver",
+    "收货人电话": "receiver_phone",
+    "收货地址": "receiver_address",
+    "快递单号": "express_no",
+    "快递单号#": "express_no2",
+    "图片": "image_urls",
+    "附件": "attachments",
+    "整机需采备件校验": "whole_machine_check",
+    "是否可以接受通用号": "accept_generic_flag",   # 91 列布局独有；90 列文件 → NULL
+    "创建时间(必填)": "created_at_raw",
+    "修改时间(必填)": "modified_at_raw",
+}
+# 明细级 28 列：前 14 为「流转状态列」——只原样展示、不参与任何计算（铁律 3）。
+# 排除不落库 2 列：数据标题(明细)、产品名称#。「整机/备件」「图片/附件」是名称含斜杠的单列。
+MAINTENANCE_LINE_DISPLAY = {
+    "需求明细.需采数量(必填)": "purchase_qty",
+    "需求明细.变更仓需采数量(必填)": "change_warehouse_purchase_qty",
+    "需求明细.已采数量": "purchased_qty",
+    "需求明细.待采数量": "pending_purchase_qty",
+    "需求明细.直采直发数": "direct_ship_qty",
+    "需求明细.库房需发数": "warehouse_need_qty",
+    "需求明细.库房发货数": "warehouse_shipped_qty",
+    "需求明细.已供数量": "supplied_qty",
+    "需求明细.待供数量": "pending_supply_qty",
+    "需求明细.已返数量": "returned_qty",
+    "需求明细.待返数量": "pending_return_qty",
+    "需求明细.领用数量": "consumed_qty",
+    "需求明细.需求待返数": "demand_pending_return_qty",
+    "需求明细.退返旧件": "return_old_part",
+    "需求明细.整机/备件": "whole_or_part",
+    "需求明细.整机需采备件": "whole_machine_purchase_part",
+    "需求明细.整机备件已采": "whole_machine_part_purchased",
+    "需求明细.需采备件说明": "purchase_note",
+    "需求明细.备注": "line_note",
+    "需求明细.图片/附件": "line_image_urls",
+    "需求明细.各仓库存": "warehouse_stock_raw",
+    "需求明细.个别调整发货仓": "adjust_warehouse_flag",
+    "需求明细.调整仓库": "adjust_warehouse",
+    "需求明细.调整仓储中心": "adjust_storage_center",
+    "需求明细.调整库管员": "adjust_keeper",
+    "需求明细.发货仓库": "ship_warehouse",
+    "需求明细.发货仓ObjectID": "ship_warehouse_object_id",
+    "需求明细.发货库存": "ship_stock",
+}
+MAINTENANCE_HEAD_DISPLAY_FIELDS: tuple[str, ...] = tuple(MAINTENANCE_HEAD_DISPLAY.values())
+MAINTENANCE_LINE_DISPLAY_FIELDS: tuple[str, ...] = tuple(MAINTENANCE_LINE_DISPLAY.values())
+# 并入主映射：ffill / canonicalize / transform 反查共用一份
+MAINTENANCE_HEAD.update(MAINTENANCE_HEAD_DISPLAY)
+MAINTENANCE_LINE.update(MAINTENANCE_LINE_DISPLAY)
+
 # ---- 维保报销单（BXD 费用侧，§16.3）：正式源=项目追踪工作簿的报销明细页 ----
 # 金额在行级；「数据标题」= BXD单号+姓名，单号由 transform 正则提取；
 # 工作簿版存在列名漂移（费用分类 vs 报销明细.费用分类、冗余「销售订单」列），transform 做回退互补。

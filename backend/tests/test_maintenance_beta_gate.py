@@ -153,9 +153,13 @@ def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
     settings = get_settings()
     original_maintenance = settings.maintenance_beta_enabled
     original_replenishment = settings.replenishment_beta_enabled
+    # 维保展示板（plan v1.3）与两个 Beta 同为服务端总闸；本用例聚焦 Beta 两闸，
+    # 展示板闸恒关，其能力键随之恒 False。
+    original_boss = settings.maintenance_boss_dashboard_enabled
     try:
         settings.maintenance_beta_enabled = False
         settings.replenishment_beta_enabled = False
+        settings.maintenance_boss_dashboard_enabled = False
         closed = real.post(
             "/api/auth/login",
             json={
@@ -167,6 +171,7 @@ def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
         assert closed.json()["beta_features"] == {
             "maintenance": False,
             "replenishment": False,
+            "maintenance_boss": False,
         }
         live_closed = real.get("/api/auth/beta-features")
         assert live_closed.status_code == 200, live_closed.text
@@ -186,6 +191,7 @@ def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
         assert opened.json()["beta_features"] == {
             "maintenance": True,
             "replenishment": True,
+            "maintenance_boss": False,
         }
         live_opened = real.get("/api/auth/beta-features")
         assert live_opened.status_code == 200, live_opened.text
@@ -199,18 +205,21 @@ def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
         assert shared.json()["beta_features"] == {
             "maintenance": False,
             "replenishment": False,
+            "maintenance_boss": False,
         }
         shared_client = TestClient(app)
         shared_client.headers["Authorization"] = f"Bearer {shared.json()['token']}"
         assert shared_client.get("/api/auth/beta-features").json() == {
             "maintenance": False,
             "replenishment": False,
+            "maintenance_boss": False,
         }
         denied = shared_client.post("/api/maintenance/demands/search", json={})
         assert denied.status_code == 403, denied.text
     finally:
         settings.maintenance_beta_enabled = original_maintenance
         settings.replenishment_beta_enabled = original_replenishment
+        settings.maintenance_boss_dashboard_enabled = original_boss
 
 
 def test_every_beta_router_fails_closed_before_business_lookup(db):
