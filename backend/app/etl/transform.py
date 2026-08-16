@@ -198,8 +198,8 @@ def _safe_money(x):
 
 
 # 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）。
-# 横线必需（半/全角/长横容差）：只剥「预交付-X」，不动恰好以「预交付」开头的正常项目名。
-_PROJECT_PREFIX = re.compile(r"^预交付[-—－]")
+# 单一事实源在 services/project_names（plan v1.3 M2-3 统一）；此处保留别名兼容既有引用。
+from app.services.project_names import PRE_DELIVERY_PREFIX as _PROJECT_PREFIX  # noqa: E402
 
 # ---- WBDD 展示补全列解析规格（plan v1.3 §3；只展示，坏值不阻断行，计 rows_display_issue）----
 # 值 = (解析类别, 字符列截断长度 None=Text 不截断)。字段集与 mapping.MAINTENANCE_*_DISPLAY 一一对应。

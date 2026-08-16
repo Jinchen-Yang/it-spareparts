@@ -12,7 +12,7 @@ from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.security import FULL_SCOPE_ROLES, UserContext
-from app.services import maintenance_project_assignments
+from app.services import maintenance_project_assignments, project_names
 from app.services.query_filters import active_beta_maintenance_orders
 
 
@@ -54,6 +54,68 @@ def _require_full_scope(user_ctx: UserContext) -> None:
         )
 
 
+# 归属候选（plan v1.3 M2-1）：只出候选、不自动写；确认仍走 assign 的人工+审计通道。
+_CANDIDATE_LIMIT = 5
+_CANDIDATE_TRGM_THRESHOLD = 0.6
+
+
+def _candidates_for(db: Session, project_std: str | None) -> list[dict]:
+    """按 project_std（ETL 已剥「预交付-」前缀）生成 ≤5 个候选。
+
+    一级：lower(project_code) 精确命中（ux_maintenance_project_code_ci）→ exact/1.0 恒排首；
+    二级：pg_trgm 相似度 ≥ 0.6（ix_maintenance_project_*_trgm GIN 索引）按分降序。
+    纯只读；多候选/低分一律不自动（ADR-0002：名称只是线索）。
+    """
+    if not project_std:
+        return []
+    out: list[dict] = []
+    exact = db.execute(
+        select(MaintenanceProject)
+        .where(
+            func.lower(MaintenanceProject.project_code) == project_std.lower(),
+            MaintenanceProject.is_active.is_(True),
+        )
+    ).scalars().all()
+    seen: set[str] = set()
+    for proj in exact:
+        out.append({
+            "project_id": proj.project_id,
+            "project_code": proj.project_code,
+            "display_name": proj.display_name,
+            "match_type": "exact",
+            "score": 1.0,
+        })
+        seen.add(proj.project_id)
+    if len(out) >= _CANDIDATE_LIMIT:
+        return out[:_CANDIDATE_LIMIT]
+    score = func.greatest(
+        func.similarity(MaintenanceProject.project_code, project_std),
+        func.similarity(MaintenanceProject.display_name, project_std),
+    )
+    fuzzy = db.execute(
+        select(MaintenanceProject, score.label("score"))
+        .where(
+            MaintenanceProject.is_active.is_(True),
+            score >= _CANDIDATE_TRGM_THRESHOLD,
+        )
+        .order_by(score.desc(), MaintenanceProject.project_code)
+        .limit(_CANDIDATE_LIMIT)
+    ).all()
+    for proj, sim in fuzzy:
+        if proj.project_id in seen:
+            continue
+        out.append({
+            "project_id": proj.project_id,
+            "project_code": proj.project_code,
+            "display_name": proj.display_name,
+            "match_type": "trgm",
+            "score": round(float(sim), 3),
+        })
+        if len(out) >= _CANDIDATE_LIMIT:
+            break
+    return out
+
+
 def list_source_orders(
     db: Session,
     *,
@@ -64,6 +126,7 @@ def list_source_orders(
     page: int,
     page_size: int,
     user_ctx: UserContext,
+    include_candidates: bool = False,
 ) -> dict:
     active_join = and_(
         MaintenanceSourceOrderAssignment.source_order_id
@@ -165,6 +228,18 @@ def list_source_orders(
                 ),
             }
         )
+        if include_candidates:
+            # 展示板扩展字段（plan v1.3 M2）。默认关闭 → 目录响应形状逐字节不变，
+            # 既有契约测试与前端不受影响。
+            # - candidates：只对未归属行生成（纯只读，绝不自动写 assignment）；
+            # - is_pre_delivery：预交付徽标（方案 B），取自 project_raw 前缀，不落库。
+            rows[-1]["candidates"] = (
+                _candidates_for(db, source.project_std)
+                if assignment is None else []
+            )
+            rows[-1]["is_pre_delivery"] = project_names.is_pre_delivery(
+                source.project_raw
+            )
     return {
         "rows": rows,
         "total": total,

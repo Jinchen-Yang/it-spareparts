@@ -29,6 +29,9 @@ _SEP_DATE_RE = re.compile(
 _PROJECT_PERIOD_RE = re.compile(
     r"(20\d{2})[-/.]?(\d{2})[-/.]?(\d{2})\s*[-~—至到]\s*(20\d{2})[-/.]?(\d{2})[-/.]?(\d{2})"
 )
+# 台账手写名容差比 services/project_names.PRE_DELIVERY_PREFIX 更宽（另含「预付/预」
+# 变体、横线可选）——台账身份解析特化口径；「预交付」的规范判定以 project_names 为准
+# （plan v1.3 M2-3 统一备案）。
 _PROJECT_PREFIX_RE = re.compile(r"^(?:预交付|预付|预)\s*[-—–]?\s*")
 
 EXCEL_EPOCH = datetime(1899, 12, 30)

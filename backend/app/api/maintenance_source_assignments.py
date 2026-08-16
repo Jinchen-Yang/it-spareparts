@@ -65,6 +65,7 @@ def source_order_directory(
     source_order_id: list[str] | None = Query(None),
     assignment_status: str = Query("unassigned"),
     project_id: str | None = Query(None, max_length=36),
+    include_candidates: bool = Query(False),   # plan v1.3 M2-1：只读候选，不自动写
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -105,6 +106,7 @@ def source_order_directory(
             page=page,
             page_size=page_size,
             user_ctx=ctx,
+            include_candidates=include_candidates,
         )
     except assignments.SourceAssignmentError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
