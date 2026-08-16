@@ -1,0 +1,156 @@
+method	path	page_keys	action_keys	data_keys
+POST	/api/maintenance/acceptance-deliverables/search	page_maintenance		
+POST	/api/maintenance/acceptance-deliverables/{deliverable_id}/review	page_maintenance	action_maintenance_acceptance_review	
+GET	/api/maintenance/acceptance-files/{file_id}	page_maintenance		
+GET	/api/maintenance/ai-fallback/proposals	page_maintenance		
+POST	/api/maintenance/ai-fallback/propose	page_maintenance		
+POST	/api/maintenance/ai-fallback/{proposal_id}/accept	page_maintenance		
+GET	/api/maintenance/as-of	page_maintenance		
+POST	/api/maintenance/bad-returns	page_maintenance	action_maintenance_bad_return_manage	
+POST	/api/maintenance/bad-returns/search	page_maintenance		
+POST	/api/maintenance/bad-returns/{return_id}/in-transit	page_maintenance	action_maintenance_bad_return_manage	
+POST	/api/maintenance/bad-returns/{return_id}/submit	page_maintenance	action_maintenance_bad_return_manage	
+POST	/api/maintenance/bad-returns/{return_id}/void	page_maintenance	action_maintenance_bad_return_manage	
+POST	/api/maintenance/bad-returns/{return_id}/warehouse-confirm	page_maintenance	action_maintenance_bad_return_manage	
+GET	/api/maintenance/board	page_maintenance		
+GET	/api/maintenance/board/export	page_maintenance		
+GET	/api/maintenance/boss-board/attention			
+GET	/api/maintenance/boss-board/health			
+GET	/api/maintenance/boss-board/orders/{source_order_id}/lines			
+GET	/api/maintenance/boss-board/projects			
+POST	/api/maintenance/boss-board/projects/search			
+GET	/api/maintenance/boss-board/projects/{project_id}/orders			
+GET	/api/maintenance/boss-board/summary			
+POST	/api/maintenance/ckd-imports/preview	page_maintenance		data_purchase_cost
+GET	/api/maintenance/ckd-imports/{batch_id}	page_maintenance		data_purchase_cost
+POST	/api/maintenance/ckd-imports/{batch_id}/apply	page_maintenance		data_purchase_cost
+GET	/api/maintenance/collection-milestones/{milestone_id}/evidence	page_maintenance		
+POST	/api/maintenance/collection-milestones/{milestone_id}/evidence	page_maintenance		
+POST	/api/maintenance/collection-milestones/{milestone_id}/follow-ups	page_maintenance		
+POST	/api/maintenance/collection-plan-imports/preview	page_maintenance		
+POST	/api/maintenance/collection-plan-imports/{batch_id}/apply	page_maintenance		
+GET	/api/maintenance/collection-plan-imports/{batch_id}/binding-options	page_maintenance		
+GET	/api/maintenance/collection-plan-imports/{batch_id}/source-file	page_maintenance		
+POST	/api/maintenance/collection-reminders/search	page_maintenance		
+POST	/api/maintenance/demands/delete-intents	page_maintenance	action_maintenance_demand_delete	
+GET	/api/maintenance/demands/delete-intents/{intent_id}	page_maintenance	action_maintenance_demand_delete	
+POST	/api/maintenance/demands/delete-intents/{intent_id}/arm	page_maintenance	action_maintenance_demand_delete	
+POST	/api/maintenance/demands/delete-intents/{intent_id}/cancel	page_maintenance	action_maintenance_demand_delete	
+POST	/api/maintenance/demands/delete-intents/{intent_id}/execute	page_maintenance	action_maintenance_demand_delete	
+POST	/api/maintenance/demands/search	page_maintenance		
+POST	/api/maintenance/demands/{source_order_id}/restore	page_maintenance	action_maintenance_demand_delete	
+POST	/api/maintenance/doc-imports/relink-projects	page_maintenance		data_purchase_cost
+GET	/api/maintenance/doc-imports/{batch_id}	page_maintenance		data_purchase_cost
+POST	/api/maintenance/doc-imports/{batch_id}/apply	page_maintenance		data_purchase_cost
+POST	/api/maintenance/doc-imports/{doc_type}/preview	page_maintenance		data_purchase_cost
+GET	/api/maintenance/export	page_maintenance		
+GET	/api/maintenance/export-workbook	page_maintenance		
+GET	/api/maintenance/export-workbooks	page_maintenance		
+POST	/api/maintenance/ledger-imports/preview	page_maintenance		
+GET	/api/maintenance/ledger-imports/{batch_id}	page_maintenance		
+POST	/api/maintenance/ledger-imports/{batch_id}/apply	page_maintenance		
+GET	/api/maintenance/lines	page_maintenance		
+GET	/api/maintenance/lines/export	page_maintenance		
+GET	/api/maintenance/match-audit	page_maintenance		
+POST	/api/maintenance/migration-runs/preview			
+POST	/api/maintenance/migration-runs/search			
+GET	/api/maintenance/migration-runs/{run_id}			
+POST	/api/maintenance/migration-runs/{run_id}/approve			
+GET	/api/maintenance/migration-runs/{run_id}/manifest			
+GET	/api/maintenance/migration-runs/{run_id}/projects/{project_id}/evidence			
+POST	/api/maintenance/migration-runs/{run_id}/reconcile			
+GET	/api/maintenance/orders/export	page_maintenance		
+GET	/api/maintenance/project-assignments/orders	page_maintenance		
+POST	/api/maintenance/project-assignments/orders/assign	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/project-assignments/orders/unassign	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/project-manager-assignments/search	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/project-manager-assignments/{assignment_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/project-manager/workbooks/v3	page_maintenance		
+POST	/api/maintenance/project-manager/workbooks/v3/apply	page_maintenance	action_maintenance_manager_workbook_apply	data_profit
+GET	/api/maintenance/project-manager/workbooks/v3/status	page_maintenance		
+POST	/api/maintenance/project-manager/workbooks/v3/validate	page_maintenance		
+GET	/api/maintenance/projects	page_maintenance		
+GET	/api/maintenance/projects/stable	page_maintenance		
+POST	/api/maintenance/projects/stable	page_maintenance	action_maintenance_project_manage	data_profit
+PATCH	/api/maintenance/projects/stable/collections/{collection_id}	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+PATCH	/api/maintenance/projects/stable/contracts/{project_contract_id}	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/projects/stable/contracts/{project_contract_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
+PATCH	/api/maintenance/projects/stable/expenses/{expense_id}/status	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+GET	/api/maintenance/projects/stable/operations	page_maintenance		
+POST	/api/maintenance/projects/stable/operations/search	page_maintenance		
+POST	/api/maintenance/projects/stable/search	page_maintenance		
+PATCH	/api/maintenance/projects/stable/site-issues/{issue_id}/status	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+GET	/api/maintenance/projects/stable/{project_id}	page_maintenance		
+PATCH	/api/maintenance/projects/stable/{project_id}	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/acceptance	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/acceptance/attachments	page_maintenance	action_maintenance_acceptance_submit	
+POST	/api/maintenance/projects/stable/{project_id}/acceptance/submit	page_maintenance	action_maintenance_acceptance_submit	
+POST	/api/maintenance/projects/stable/{project_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/collection-milestones	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/collections	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+POST	/api/maintenance/projects/stable/{project_id}/contracts	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/cost-gaps	page_maintenance		
+PATCH	/api/maintenance/projects/stable/{project_id}/cost-gaps	page_maintenance	action_maintenance_project_manage	data_purchase_cost
+POST	/api/maintenance/projects/stable/{project_id}/cost-gaps/recompute	page_maintenance	action_maintenance_project_manage	data_purchase_cost
+GET	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook.xlsx	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook/apply	page_maintenance		data_profit
+POST	/api/maintenance/projects/stable/{project_id}/expense-collection-workbook/validate	page_maintenance		data_profit
+POST	/api/maintenance/projects/stable/{project_id}/expenses	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+PUT	/api/maintenance/projects/stable/{project_id}/expenses/readiness	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/front-stock	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/manager-assignment	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/purchases	page_maintenance		
+GET	/api/maintenance/projects/stable/{project_id}/recovery-summary	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/restore	page_maintenance	action_maintenance_project_manage	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/return-rate	page_maintenance		
+GET	/api/maintenance/projects/stable/{project_id}/salvages	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/salvages	page_maintenance	action_maintenance_bad_return_manage	data_profit
+POST	/api/maintenance/projects/stable/{project_id}/site-issues	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+GET	/api/maintenance/projects/stable/{project_id}/tasks	page_maintenance		
+GET	/api/maintenance/projects/stable/{project_id}/workbook	page_maintenance		
+GET	/api/maintenance/projects/stable/{project_id}/workbook-v3.xlsx	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/workbook/apply	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+POST	/api/maintenance/projects/stable/{project_id}/workbook/validate	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/workspace	page_maintenance		
+POST	/api/maintenance/recompute			
+GET	/api/maintenance/reconcile/expenses	page_maintenance		
+GET	/api/maintenance/return-categories	page_maintenance		
+POST	/api/maintenance/return-obligations/search	page_maintenance		
+POST	/api/maintenance/return-obligations/{obligation_id}/resolve-category	page_maintenance		
+POST	/api/maintenance/roundtrip-import	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+GET	/api/maintenance/roundtrip-template	page_maintenance		
+GET	/api/maintenance/roundtrip-templates	page_maintenance		
+POST	/api/maintenance/salvages/{salvage_id}/void	page_maintenance	action_maintenance_bad_return_manage	data_profit
+POST	/api/maintenance/site-issues/projects/{project_id}	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+POST	/api/maintenance/site-issues/projects/{project_id}/candidates/search	page_maintenance		
+POST	/api/maintenance/site-issues/search	page_maintenance		
+PATCH	/api/maintenance/site-issues/{issue_id}	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+POST	/api/maintenance/site-issues/{issue_id}/confirm	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+POST	/api/maintenance/site-issues/{issue_id}/preview	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+POST	/api/maintenance/site-issues/{issue_id}/void	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
+POST	/api/maintenance/warehouse-ambiguities/search	page_maintenance		
+POST	/api/maintenance/warehouse-ambiguities/{ambiguity_id}/resolve	page_maintenance	action_maintenance_warehouse_manage	
+POST	/api/maintenance/warehouse-documents/search	page_maintenance		
+POST	/api/maintenance/warehouse-imports/preview	page_maintenance		
+POST	/api/maintenance/warehouse-imports/{import_id}/apply	page_maintenance	action_maintenance_warehouse_manage	
+POST	/api/maintenance/warehouse-integrations/reconcile	page_maintenance	action_maintenance_warehouse_manage	
+POST	/api/maintenance/wbdd-imports	page_maintenance		
+GET	/api/maintenance/wbdd-imports/latest	page_maintenance		
+GET	/api/maintenance/workbook-validations/{validation_id}/errors.xlsx	page_maintenance	action_maintenance_roundtrip_apply	data_profit
+GET	/api/replenishment-beta/applications			
+POST	/api/replenishment-beta/applications		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}			
+PATCH	/api/replenishment-beta/applications/{application_id}		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/evidence		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/system-screening.xlsx		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx		action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/lines		action_replenishment_create	data_pool_price_governance
+DELETE	/api/replenishment-beta/applications/{application_id}/lines/{line_id}		action_replenishment_create	data_pool_price_governance
+PATCH	/api/replenishment-beta/applications/{application_id}/lines/{line_id}		action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/review-results		action_replenishment_review	
+POST	/api/replenishment-beta/applications/{application_id}/revision		action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/submit		action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/capabilities			
+GET	/api/replenishment-beta/catalog			
