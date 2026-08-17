@@ -427,6 +427,8 @@ export default function ReplenishmentBetaPage() {
 
   useEffect(() => {
     if (!selectedProjectId) return;
+    // #10：退回编辑模式不加载云端草稿——行来自被打回申请，避免覆盖预填内容
+    if (editingRevision) return;
     hydratingCart.current = true;
     setDraftVersion(null);
     setRequestNote("");
@@ -448,10 +450,12 @@ export default function ReplenishmentBetaPage() {
       .catch((error) => message.error(errorText(error)))
       .finally(() => { hydratingCart.current = false; });
     return () => { hydratingCart.current = true; };
-  }, [selectedProjectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId, editingRevision]);
 
   useEffect(() => {
-    if (!selectedProjectId || hydratingCart.current) return undefined;
+    // #10：退回编辑模式不写云端草稿（编辑的是申请行，提交走 revisions）
+    if (!selectedProjectId || hydratingCart.current || editingRevision) return undefined;
     if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
     if (!draftLines.length) {
       if (draftVersion == null) return undefined;

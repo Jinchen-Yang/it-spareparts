@@ -10,6 +10,7 @@ const getProjects = vi.fn();
 const getCartDraft = vi.fn();
 const replaceCartDraft = vi.fn();
 const submitCartDraft = vi.fn();
+const applyRevision = vi.fn();
 
 vi.mock("../../api/replenishment", () => ({
   getReplenishmentCapabilities: (...args: unknown[]) => getCapabilities(...args),
@@ -21,7 +22,8 @@ vi.mock("../../api/replenishment", () => ({
   replaceReplenishmentCartDraft: (...args: unknown[]) => replaceCartDraft(...args),
   submitReplenishmentCartDraft: (...args: unknown[]) => submitCartDraft(...args),
   deleteReplenishmentCartDraft: vi.fn(),
-  applyReplenishmentRevision: vi.fn(),
+  applyReplenishmentRevision: (...args: unknown[]) => applyRevision(...args),
+  downloadSystemScreeningWorkbook: vi.fn(),
 }));
 
 import ReplenishmentBetaPage from "../ReplenishmentBetaPage";
@@ -243,5 +245,114 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
 
     expect(await screen.findByText("BLK-20260817-ABC1234567")).toBeInTheDocument();
     expect(screen.getByText(/WX-2026-001 · 测试维保项目A/)).toBeInTheDocument();
+  });
+
+  it("打回后「退回编辑」：预填原行（标红+推荐），可删减后全量重新提交（#10）", async () => {
+    const rejectedApp = {
+      application_id: "app-rejected",
+      application_no: "BLK-20260818-REJECT001",
+      owner_username: "admin",
+      owner_display_name: "管理员",
+      salesperson_name_snapshot: null,
+      is_legacy_project_unbound: false,
+      project,
+      status: "needs_revision",
+      workflow_mode: "system_screening",
+      stage: "needs_revision",
+      version: 2,
+      latest_version_no: 1,
+      created_at: "2026-08-18T00:00:00Z",
+      updated_at: "2026-08-18T01:00:00Z",
+      versions: [{
+        version_id: "version-1",
+        version_no: 1,
+        parent_version_id: null,
+        status: "submitted",
+        warehouse: null,
+        request_note: "原备注",
+        content_digest: "1".repeat(64),
+        submitted_by: "admin",
+        submitted_at: "2026-08-18T01:00:00Z",
+        lines: [{
+          line_id: "line-1",
+          request_line_id: "req-1",
+          source_line_id: null,
+          line_no: 1,
+          part_id: 10467,
+          pn_std: "COLD-PN-001",
+          description: "冷门备件",
+          brand: null,
+          unit: "件",
+          quantity: 1,
+          special_note: null,
+          pool: { group_id: null, name: null, version: null },
+          price_window: { date_from: "2026-02-12", date_to: "2026-08-10", days: 180, basis: "未税数量加权" },
+          purchase: null,
+          sales: null,
+          screening: {
+            schema_version: 2,
+            as_of: "2026-08-18",
+            lookback_days: 182,
+            checks: [{ key: "pool_membership", passed: false, detail: { in_pool: false } }],
+            anomaly_count: 1,
+            auto_review: { decision: "rejected", reason_code: "no_purchase_or_sales_in_182_days" },
+            recommendations: [{
+              part_id: 7671, pn_std: "POOL-PN-001", pool_name: "测试池",
+            }],
+          },
+          latest_sales: null,
+          pool_floor_ex_tax: null,
+          review: { decision: "rejected", reason: "no_purchase_or_sales_in_182_days" },
+        }],
+        review: null,
+      }],
+    };
+    applyRevision.mockResolvedValue({ data: { ...submittedApplication, application_id: "app-rejected", application_no: "BLK-20260818-REJECT001" } });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1, page: 1, page_size: 20,
+        items: [{
+          application_id: "app-rejected",
+          application_no: "BLK-20260818-REJECT001",
+          owner_display_name: "管理员",
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: "2026-08-18T01:00:00Z",
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: rejectedApp });
+    getCartDraft.mockResolvedValue({ data: { draft: null } });
+
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    // 打回申请详情出现「退回编辑」
+    expect(await screen.findByText("BLK-20260818-REJECT001")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /退回编辑/ }));
+
+    // 编辑态：标题变为编辑被打回申请，打回行标红 + 推荐替换按钮
+    expect(await screen.findByText("编辑被打回申请：BLK-20260818-REJECT001")).toBeInTheDocument();
+    expect(screen.getByText(/被打回：no_purchase_or_sales_in_182_days/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /替换为 POOL-PN-001/ })).toBeInTheDocument();
+
+    // 用推荐替换打回行，然后重新提交 → applyRevision 带完整 lines
+    fireEvent.click(screen.getByRole("button", { name: /替换为 POOL-PN-001/ }));
+    fireEvent.click(screen.getByRole("button", { name: /提交补库申请/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确认提交/ }));
+
+    await waitFor(() => {
+      expect(applyRevision).toHaveBeenCalledTimes(1);
+    });
+    const [applicationId, payload] = applyRevision.mock.calls[0];
+    expect(applicationId).toBe("app-rejected");
+    expect(payload).toMatchObject({
+      expected_application_version: 2,
+      lines: [{ part_id: 7671, quantity: 1, special_note: null }],
+    });
+    expect(payload.client_request_id).toMatch(/^.{8,128}$/);
   });
 });
