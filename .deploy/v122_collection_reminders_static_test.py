@@ -80,7 +80,12 @@ def _validate_migration_graph() -> None:
             referenced.add(parent)
         elif isinstance(parent, tuple):
             referenced.update(parent)
-    assert sorted(set(graph) - referenced) == ["c8e2a4f6b1d3"]
+    # v1.22 之后的发布会继续推进迁移头（v1.23 → d6e1f4a8c3b5），所以这里锁的是
+    # 「图仍是单头」＋「v1.22 的区间端点仍在链上」，而不是 c8 永远当头。打包态
+    # （source.tar 冻结的 v1.22 源码）里 c8 依旧是唯一头，同样通过。
+    heads = sorted(set(graph) - referenced)
+    assert len(heads) == 1, heads
+    assert "c8e2a4f6b1d3" in graph
     assert graph["c8e2a4f6b1d3"] == "d9f1a3c7e5b2"
     cursor = "c8e2a4f6b1d3"
     visited: set[str] = set()

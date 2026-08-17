@@ -34,6 +34,7 @@ import {
   addReplenishmentLine,
   createReplenishmentApplication,
   downloadManualReviewWorkbook,
+  downloadPurchaseListWorkbook,
   downloadWbddSubsetWorkbook,
   getReplenishmentApplication,
   getReplenishmentCapabilities,
@@ -474,18 +475,22 @@ export default function ReplenishmentBetaPage() {
     });
   };
 
-  const exportWorkbook = async (kind: "manual" | "wbdd") => {
+  const exportWorkbook = async (kind: "manual" | "wbdd" | "purchase") => {
     if (!current) return;
     setWorking(true);
     try {
       const response = kind === "manual"
         ? await downloadManualReviewWorkbook(current.application_id)
-        : await downloadWbddSubsetWorkbook(current.application_id);
+        : kind === "wbdd"
+          ? await downloadWbddSubsetWorkbook(current.application_id)
+          : await downloadPurchaseListWorkbook(current.application_id);
       saveBlob(
         response.data,
         kind === "manual"
           ? `${current.application_no}-人工审核.xlsx`
-          : `${current.application_no}-WBDD字段子集.xlsx`,
+          : kind === "wbdd"
+            ? `${current.application_no}-WBDD字段子集.xlsx`
+            : `${current.application_no}-采购清单.xlsx`,
       );
       message.success("文件已生成；导出行为已留痕");
     } catch (error) {
@@ -709,10 +714,19 @@ export default function ReplenishmentBetaPage() {
                       导出 WBDD 字段子集
                     </Button>
                   )}
+                  {current.status === "approved" && (
+                    <Button
+                      icon={<DownloadOutlined />}
+                      onClick={() => void exportWorkbook("purchase")}
+                    >
+                      一键导出采购清单(四列)
+                    </Button>
+                  )}
                 </Space>
                 {current.status === "approved" && (
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     WBDD 字段子集只是录入辅助，不含源数据 ID 和 F 字段码，不能直接回灌氚云。
+                    采购清单为四列导出（PN / 数量 / 采购金额参考 / 销售金额参考），仅作采购执行参考。
                   </Text>
                 )}
                 {!current.salesperson_name_snapshot && (

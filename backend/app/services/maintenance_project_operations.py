@@ -527,6 +527,7 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "source_order_id": row.source_order_id,
         "source_line_id": row.source_line_id,
         "serial_number": row.serial_number,
+        "no_return": row.no_return,
         "linked_purchase_line_id": row.linked_purchase_line_id,
         "manual_unit_cost": _money(row.manual_unit_cost),
         "manual_unit_cost_inc_tax": _money(row.manual_unit_cost_inc_tax),
@@ -942,6 +943,7 @@ def _site_issue_return_payload(
                 "part_id": line.part_id,
                 "pn": line.pn,
                 "serial_number": line.serial_number,
+                "no_return": line.no_return,
                 "quantity": _qty(line.quantity),
             }
             for line in lines
@@ -1368,10 +1370,14 @@ def _normalize_site_issue_patch_lines(lines: list[dict]) -> list[dict]:
         if delivery_line_id in seen:
             raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
         seen.add(delivery_line_id)
+        no_return = raw_line.get("no_return")
+        if no_return is not None and not isinstance(no_return, bool):
+            raise MaintenanceOperationError("不返还标记必须是是/否或留空")
         normalized.append(
             {
                 "delivery_line_id": delivery_line_id,
                 "quantity": _quantity(raw_line["quantity"]),
+                "no_return": no_return,
             }
         )
     return normalized
@@ -1412,6 +1418,7 @@ def _build_site_issue_lines(
                 source_order_id=source.source_order_id,
                 source_line_id=source.source_line_id,
                 serial_number=source.serial_number,
+                no_return=requested.get("no_return"),
                 linked_purchase_line_id=source.linked_purchase_line_id,
                 manual_unit_cost=None,
                 reference_sample_ids=[],
@@ -1465,6 +1472,7 @@ def patch_site_issue(
                 {
                     "delivery_line_id": line["delivery_line_id"],
                     "quantity": _qty(line["quantity"]),
+                    "no_return": line.get("no_return"),
                 }
                 for line in normalized_lines
             ]
@@ -2081,10 +2089,14 @@ def create_site_issue_draft(
         if delivery_line_id in seen_delivery_ids:
             raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
         seen_delivery_ids.add(delivery_line_id)
+        no_return = raw_line.get("no_return")
+        if no_return is not None and not isinstance(no_return, bool):
+            raise MaintenanceOperationError("不返还标记必须是是/否或留空")
         normalized_lines.append(
             {
                 "delivery_line_id": delivery_line_id,
                 "quantity": _quantity(raw_line["quantity"]),
+                "no_return": no_return,
             }
         )
 
@@ -2099,6 +2111,7 @@ def create_site_issue_draft(
                 {
                     "delivery_line_id": line["delivery_line_id"],
                     "quantity": _qty(line["quantity"]),
+                    "no_return": line.get("no_return"),
                 }
                 for line in normalized_lines
             ],
@@ -2174,6 +2187,7 @@ def create_site_issue_draft(
                 source_order_id=source_row.source_order_id,
                 source_line_id=source_row.source_line_id,
                 serial_number=source_row.serial_number,
+                no_return=requested.get("no_return"),
                 linked_purchase_line_id=source_row.linked_purchase_line_id,
                 manual_unit_cost=None,
                 reference_sample_ids=[],
@@ -2279,6 +2293,7 @@ def create_site_issue(
                 part_id=int(raw_line["part_id"]),
                 pn=_required(raw_line.get("pn"), "料号", 128),
                 quantity=_quantity(raw_line["quantity"]),
+                no_return=raw_line.get("no_return"),
                 linked_purchase_line_id=raw_line.get("linked_purchase_line_id"),
                 manual_unit_cost=None,
                 reference_sample_ids=[],
@@ -5497,14 +5512,18 @@ def _directory_reminder_query(
             .filter(
                 and_(
                     effective_contract,
+                    MaintenanceProjectContract.amount_inc_tax.is_(None),
                     MaintenanceProjectContract.contract_amount.is_(None),
                 )
             )
             .label("missing_amount_count"),
             func.coalesce(
-                func.sum(MaintenanceProjectContract.contract_amount).filter(
-                    effective_contract
-                ),
+                func.sum(
+                    func.coalesce(
+                        MaintenanceProjectContract.amount_inc_tax,
+                        MaintenanceProjectContract.contract_amount,
+                    )
+                ).filter(effective_contract),
                 Decimal("0.00"),
             ).label("total_contract_amount"),
         )

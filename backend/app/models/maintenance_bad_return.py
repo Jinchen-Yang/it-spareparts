@@ -41,6 +41,11 @@ class MaintenanceReturnObligation(Base):
     source_quantity: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     required_quantity: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     classification: Mapped[str] = mapped_column(String(24), nullable=False)
+    # 豁免来源：none / category_disk / line_no_return / project_default_no_return；
+    # pending_category 时为 NULL。
+    exemption_source: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
     category_id_snapshot: Mapped[int | None] = mapped_column(Integer)
     category_major_snapshot: Mapped[str | None] = mapped_column(String(64))
     category_minor_snapshot: Mapped[str | None] = mapped_column(String(128))
@@ -77,12 +82,15 @@ class MaintenanceReturnObligation(Base):
         ),
         CheckConstraint(
             "(classification = 'required' AND category_id_snapshot IS NOT NULL "
-            "AND required_quantity = source_quantity) OR "
-            "(classification = 'exempt' AND category_id_snapshot IS NOT NULL "
-            "AND category_major_snapshot = '硬盘' AND required_quantity = 0) OR "
+            "AND required_quantity = source_quantity AND exemption_source = 'none') OR "
+            "(classification = 'exempt' AND required_quantity = 0 AND ("
+            "(category_id_snapshot IS NOT NULL AND category_major_snapshot = '硬盘' "
+            "AND exemption_source = 'category_disk') OR "
+            "(exemption_source IN ('line_no_return', 'project_default_no_return')"
+            "))) OR "
             "(classification = 'pending_category' AND category_id_snapshot IS NULL "
             "AND category_major_snapshot IS NULL AND category_minor_snapshot IS NULL "
-            "AND required_quantity = 0)",
+            "AND required_quantity = 0 AND exemption_source IS NULL)",
             name="ck_maintenance_return_obligation_rule_result",
         ),
         CheckConstraint(

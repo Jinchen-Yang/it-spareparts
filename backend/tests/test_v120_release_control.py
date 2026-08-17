@@ -1851,6 +1851,9 @@ def _load_artifact_validator() -> object:
 
 
 def test_ci_pins_setup_uv_action_and_binary_version() -> None:
+    # 供应链闸门（#183）锁的是「CI 里跑的 uv 必须恰好是 0.11.31」。迁到 cloudlay
+    # 自托管 runner 后（8fc3b9c/159efd5）uv 改为 runner 预装、setup-uv action 移除，
+    # 版本锁改由 workflow 显式校验二进制版本承担——两种机制都算锁住，但必须有其一。
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     setup = re.search(
         r"- uses: astral-sh/setup-uv@v8\.3\.2\n"
@@ -1858,9 +1861,14 @@ def test_ci_pins_setup_uv_action_and_binary_version() -> None:
         r'\s+version: "0\.11\.31"\n',
         workflow,
     )
+    pinned_binary = re.search(
+        r'test "\$\(uv --version\)" = "uv 0\.11\.31 \([^"]+\)"',
+        workflow,
+    )
 
-    assert setup is not None
-    assert workflow.count("astral-sh/setup-uv@v8.3.2") == 1
+    assert setup is not None or pinned_binary is not None
+    if setup is not None:
+        assert workflow.count("astral-sh/setup-uv@v8.3.2") == 1
 
 
 def test_artifact_validator_preflights_member_count_before_inflation(

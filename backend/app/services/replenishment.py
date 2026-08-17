@@ -39,6 +39,8 @@ from app.services import pool_price_analysis
 MAX_LINES = 200
 PRICE_WINDOW_DAYS = 180
 MAX_EXCEL_TEXT = 32767
+# 无值一律显示「—」，绝不用 0 顶替（铁律 5；AB-4 明示池内最低价无值时的展示）
+_NO_VALUE = "—"
 _INVALID_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
@@ -1118,6 +1120,87 @@ def manual_review_workbook(
     _audit(db, app, "manual_exported", username, "导出老板人工审核工作簿", version_id=version.version_id)
     db.commit()
     return data, f"replenishment-{app.application_no}-v{version.version_no}-manual-review.xlsx"
+
+
+def system_screening_workbook(
+    db: Session,
+    application_id: str,
+    *,
+    username: str,
+    role: str,
+) -> tuple[bytes, str]:
+    """AB-4 系统三查工作簿：系统侧判定材料，导出后交人工复核。
+
+    与既有 ``manual_review_workbook`` 的关键区别：**没有「审核结论 / 打回原因」
+    两列**。业务 2026-08-16 确认「系统只做系统侧，不建模人工审批、不记录人工审
+    结果」——把人工结论栏印在系统导出里，等于系统仍在承接那段流程。
+
+    列按增补包 AB-4 原文：PN、数量、产品描述、每 PN 最近销售历史、池内最低价对比；
+    三查结论随行附上，供人判断。池内最低价无值显示「—」（铁律 5：不知道 ≠ 没有）。
+    """
+    from app.services import replenishment_screening as screening
+
+    _actor(db, username)
+    app = _application_scope(db, application_id, username=username, role=role)
+    version = _latest_version(db, app)
+    payload = _version_payload(db, version)
+    lines = payload["lines"]
+    part_ids = [line["part_id"] for line in lines]
+    screenings = screening.screen(db, part_ids=part_ids)
+    latest_sales = screening.latest_sales_history(db, part_ids=part_ids)
+    floors = screening.pool_floor_prices(
+        db, [line["pool"]["group_id"] for line in lines])
+
+    headers = [
+        "申请单号", "版本", "申请人", "序号", "PN", "产品描述", "数量", "单位",
+        "最近销售日期", "最近销售未税单价", "池内最低价(未税)", "与池内最低价对比",
+        "①通用池归属", "②半年内购销记录", "③是否小众PN", "系统三查",
+    ]
+    rows = []
+    for line in lines:
+        result = screenings.get(line["part_id"])
+        recent = latest_sales.get(line["part_id"]) or {}
+        floor = floors.get(line["pool"]["group_id"])
+        recent_price = recent.get("price_ex_tax")
+        # 任何一侧缺值就不做减法——差额算不出来时显示「—」，不显示 0
+        if floor is None or recent_price is None:
+            comparison = _NO_VALUE
+        else:
+            comparison = float(Decimal(str(recent_price)) - Decimal(str(floor)))
+        pool_check = result.get("pool_membership")
+        activity = result.get("recent_activity")
+        niche = result.get("niche_pn")
+        rows.append([
+            app.application_no, version.version_no, app.owner_display_name,
+            line["line_no"], line["pn_std"], line["description"],
+            line["quantity"], line["unit"],
+            recent.get("order_date") or _NO_VALUE,
+            recent_price if recent_price is not None else _NO_VALUE,
+            float(floor) if floor is not None else _NO_VALUE,
+            comparison,
+            pool_check.detail.get("pool_name") or (
+                "无法判断（PN 未标准化）" if pool_check.detail.get("in_pool") is None
+                else "未加入互通池"),
+            f"采购 {activity.detail['purchase_samples']} 单 / "
+            f"销售 {activity.detail['sales_samples']} 单",
+            "是" if niche.detail["is_niche"] else "否",
+            "通过" if result.all_passed else "有未通过项，请人工判断",
+        ])
+    data = _workbook_bytes(
+        "系统三查",
+        headers,
+        rows,
+        notice=("系统三查结果，导出后交人工复核。系统不记录人工审核结论；"
+                "本申请为独立记录，不进入 WBDD、不参与项目成本与对账。"),
+    )
+    # 复用既有 manual_exported 审计动作：ck_replenishment_audit_action 是 CHECK
+    # 枚举，新增取值要改约束=迁移，而增补包明令本期四项零迁移。语义也吻合——
+    # 这就是「导出给人工看」的那次导出。
+    _audit(db, app, "manual_exported", username, "导出系统三查工作簿",
+           version_id=version.version_id)
+    db.commit()
+    return data, (f"replenishment-{app.application_no}"
+                  f"-v{version.version_no}-system-screening.xlsx")
 
 
 def _approved_lines(db: Session, app: ReplenishmentApplication) -> list[tuple[ReplenishmentApplicationVersion, ReplenishmentApplicationLine]]:

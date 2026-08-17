@@ -112,6 +112,8 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
     assert before_login["beta_features"] == {
         "maintenance": False,
         "replenishment": False,
+        # 维保展示板（plan v1.3）总闸默认关闭，与两个 Beta 同为服务端闸
+        "maintenance_boss": False,
     }
 
     settings = get_settings()
@@ -148,6 +150,8 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
         assert pilot_login["beta_features"] == {
             "maintenance": True,
             "replenishment": True,
+            # 展示板总闸未开 → 恒 False（与两个 Beta 闸互相独立）
+            "maintenance_boss": False,
         }
         assert pilot_client.get("/api/replenishment-beta/capabilities").status_code == 200
 
@@ -212,7 +216,11 @@ def test_feature_snapshot_requires_explicit_page_bits_even_for_admin():
             permission_map=graph,
             real_identity=True,
             settings=settings,
-        ) == {"maintenance": False, "replenishment": False}
+        ) == {
+            "maintenance": False,
+            "replenishment": False,
+            "maintenance_boss": False,
+        }
         graph.update(
             page_maintenance_beta=True,
             page_replenishment_beta=True,
@@ -222,7 +230,12 @@ def test_feature_snapshot_requires_explicit_page_bits_even_for_admin():
             permission_map=graph,
             real_identity=True,
             settings=settings,
-        ) == {"maintenance": True, "replenishment": True}
+        ) == {
+            "maintenance": True,
+            "replenishment": True,
+            # 展示板闸未开 → 恒 False（本用例只验证 Beta 页面位的显式要求）
+            "maintenance_boss": False,
+        }
     finally:
         settings.maintenance_beta_enabled = original_maintenance
         settings.replenishment_beta_enabled = original_replenishment

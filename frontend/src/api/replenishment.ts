@@ -178,3 +178,10 @@ export const downloadWbddSubsetWorkbook = (applicationId: string) =>
   api.get<Blob>(`/replenishment-beta/applications/${applicationId}/exports/wbdd-subset.xlsx`, {
     responseType: "blob",
   });
+
+/** 审核通过后的四列采购清单导出（PN / 数量 / 采购金额参考 / 销售金额参考）。 */
+export const downloadPurchaseListWorkbook = (applicationId: string) =>
+  api.get<Blob>(
+    `/replenishment-beta/applications/${applicationId}/exports/purchase-list.xlsx`,
+    { responseType: "blob" },
+  );

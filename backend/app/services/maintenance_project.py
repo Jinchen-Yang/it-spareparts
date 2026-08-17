@@ -232,7 +232,11 @@ def project_overview_from_facts(
         issues.append({"code": "unmapped_contract_status", "contract_ids": unmapped})
 
     missing_amount = sorted(
-        {row.contract_id for row in effective if row.contract_amount is None}
+        {
+            row.contract_id
+            for row in effective
+            if row.amount_inc_tax is None and row.contract_amount is None
+        }
     )
     if missing_amount:
         issues.append(
@@ -256,7 +260,12 @@ def project_overview_from_facts(
         completeness = {"status": "incomplete", "issues": issues}
     else:
         total_amount = sum(
-            (relation.contract_amount for relation in effective),
+            (
+                relation.amount_inc_tax
+                if relation.amount_inc_tax is not None
+                else relation.contract_amount
+                for relation in effective
+            ),
             start=Decimal("0.00"),
         )
         completeness = {"status": "complete", "issues": []}
@@ -275,7 +284,15 @@ def project_overview_from_facts(
             "project_contract_id": relation.project_contract_id,
             "contract_id": relation.contract_id,
             "contract_no": relation.contract_no,
-            "contract_amount": None if amount_restricted else relation.contract_amount,
+            "contract_amount": (
+                None
+                if amount_restricted
+                else (
+                    relation.amount_inc_tax
+                    if relation.amount_inc_tax is not None
+                    else relation.contract_amount
+                )
+            ),
             "contract_amount_basis": "inc_tax",
             "contract_status": relation.contract_status,
             "status_mapping_state": relation.status_mapping_state,

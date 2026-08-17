@@ -26,6 +26,9 @@ PAGE_KEYS: list[str] = [
     "page_inventory", "page_chat", "page_import", "page_governance",
     "page_master_data", "page_maintenance", "page_boss_board",
     "page_pool_analysis",
+    # 维保展示板（plan v1.3）：老板全范围查看入口。flag maintenance_boss_dashboard_enabled
+    # 关闭时整组路由 404；打开后本键或 page_maintenance（范围按 M0-B）可读。
+    "page_maintenance_boss",
     # 维保新工作台 Beta：稳定版 page_maintenance 仍是基础权限；本键仅给
     # 明确进入灰度名单的账号，关闭后不影响原维保页面与接口。
     "page_maintenance_beta",
@@ -76,6 +79,15 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_warehouse_manage",
     # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
     "action_maintenance_migration_review",
+    # 台账工作簿导入应用：项目/合同/期限/回款计划唯一事实源同步（admin 默认）。
+    "action_maintenance_ledger_import",
+    # 氚云四单导入（发货/入库/返库/报销）raw 落库与应用（写前置库；默认关闭）。
+    "action_maintenance_doc_import",
+    # 维保备件需求单（WBDD）专用上传（plan v1.3 M1-6）：只接受 WBDD 文件，
+    # 不复用 /api/import/upload 全家桶；文件无价格列故不挂数据组依赖。
+    "action_maintenance_wbdd_import",
+    # 报销/回款往返工作簿上传覆盖（AB-3）；能改金额 → 依赖 data_profit。
+    "action_maintenance_expense_collection_upload",
     # 回款提醒（设计 §9）：标记已处理/改期/重新打开；以及 XLS 回款计划
     # 导入的预览/绑定候选查询/应用。两者都是实名白名单能力：admin 也不得
     # 通过 require_action 短路，必须由 security.require_explicit_account_action
@@ -125,6 +137,11 @@ LABELS: dict[str, str] = {
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
+    "action_maintenance_ledger_import": "台账工作簿导入应用（项目/合同/回款计划同步）",
+    "action_maintenance_doc_import": "氚云单据导入应用（发货/入库/返库/报销；发货入前置库）",
+    "page_maintenance_boss": "维保展示板（老板全范围）",
+    "action_maintenance_wbdd_import": "维保需求单（WBDD）专用上传",
+    "action_maintenance_expense_collection_upload": "报销/回款工作簿上传覆盖",
     "action_maintenance_collection_follow_up": "回款提醒跟进（标记已处理/改期/重新打开）",
     "action_maintenance_collection_plan_import": "回款计划导入（预览/绑定/应用）",
     "page_replenishment_beta": "补库申请",
@@ -175,6 +192,11 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_acceptance_review": False,
              "action_maintenance_warehouse_manage": False,
              "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
+             "action_maintenance_doc_import": False,
+             "page_maintenance_boss": False,
+             "action_maintenance_wbdd_import": False,
+             "action_maintenance_expense_collection_upload": False,
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
              "action_replenishment_review": False},
@@ -198,6 +220,11 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_acceptance_review": False,
                  "action_maintenance_warehouse_manage": False,
                  "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
+             "action_maintenance_doc_import": False,
+                 "page_maintenance_boss": False,
+                 "action_maintenance_wbdd_import": False,
+                 "action_maintenance_expense_collection_upload": False,
                  "page_replenishment_beta": False,
                  "action_replenishment_create": False,
                  "action_replenishment_review": False,
@@ -232,6 +259,11 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
+             "action_maintenance_doc_import": False,
+        "page_maintenance_boss": False,
+        "action_maintenance_wbdd_import": False,
+        "action_maintenance_expense_collection_upload": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
@@ -269,6 +301,11 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
+             "action_maintenance_doc_import": False,
+        "page_maintenance_boss": False,
+        "action_maintenance_wbdd_import": False,
+        "action_maintenance_expense_collection_upload": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
@@ -321,8 +358,14 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_project_manage": "data_profit",
     "action_maintenance_site_issue_manage": "data_purchase_cost",
     "action_maintenance_migration_review": "data_profit",
+    # 台账导入能看到合同额与计划金额：能改必须能看（follow-up 不需金额可见性）。
+    "action_maintenance_ledger_import": "data_profit",
     # 回款计划导入能看到计划金额与合同额：能改必须能看（follow-up 不需金额可见性）。
     "action_maintenance_collection_plan_import": "data_profit",
+    "action_maintenance_ledger_import": "data_profit",
+    # 报销/回款工作簿能改金额并写回累计回款：能改必须能看（AB-3）。
+    "action_maintenance_expense_collection_upload": "data_profit",
+    "action_maintenance_doc_import": "data_purchase_cost",
     "action_replenishment_create": "data_pool_price_governance",
 }
 
@@ -342,6 +385,10 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_review": "page_maintenance",
     "action_maintenance_warehouse_manage": "page_maintenance",
     "action_maintenance_migration_review": "page_maintenance",
+    "action_maintenance_ledger_import": "page_maintenance",
+    "action_maintenance_doc_import": "page_maintenance",
+    "action_maintenance_wbdd_import": "page_maintenance",
+    "action_maintenance_expense_collection_upload": "page_maintenance",
     "action_maintenance_collection_follow_up": "page_maintenance",
     "action_maintenance_collection_plan_import": "page_maintenance",
     "action_replenishment_create": "page_replenishment_beta",
@@ -359,6 +406,8 @@ ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_review": "page_maintenance_beta",
     "action_maintenance_warehouse_manage": "page_maintenance_beta",
     "action_maintenance_migration_review": "page_maintenance_beta",
+    "action_maintenance_ledger_import": "page_maintenance_beta",
+    "action_maintenance_doc_import": "page_maintenance_beta",
     "action_maintenance_collection_follow_up": "page_maintenance_beta",
     "action_maintenance_collection_plan_import": "page_maintenance_beta",
 }
@@ -451,6 +500,7 @@ def hidden_groups(perms: dict | None) -> set[str]:
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
 HIGH_RISK_KEYS: set[str] = {
     "page_maintenance_beta",
+    "page_maintenance_boss",
     "page_replenishment_beta",
     "page_accounts",
     "action_account_manage",
@@ -465,6 +515,10 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_migration_review",
     "action_maintenance_collection_follow_up",
     "action_maintenance_collection_plan_import",
+    "action_maintenance_ledger_import",
+    "action_maintenance_doc_import",
+    "action_maintenance_wbdd_import",
+    "action_maintenance_expense_collection_upload",
     "action_replenishment_review",
 }
 
@@ -502,7 +556,11 @@ UI_GROUPS: list[dict] = [
     {"key": "admin", "label": "高风险管理能力",
      "hint": "接近管理员的能力，只有管理员本人可以授予或撤销，请谨慎开放。",
      "keys": ["page_accounts", "action_account_manage",
-              "action_maintenance_migration_review"]},
+              "action_maintenance_migration_review",
+               "action_maintenance_ledger_import",
+               "action_maintenance_doc_import",
+               "action_maintenance_wbdd_import",
+               "action_maintenance_expense_collection_upload"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
@@ -636,6 +694,33 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["采购", "老板"],
         "sensitivity": "high",
         "risk": "公司维保项目的真实盈亏。",
+    },
+    "page_maintenance_boss": {
+        "label": "维保展示板（老板全范围）",
+        "summary": "可打开维保展示板首屏与全项目列表，查看四源健康、本期变化与项目证据下钻（全项目范围）。",
+        "can": "四源 readiness/截止日期、orders_ytd/lines_ytd、全部项目分页列表、单据/PN 证据下钻、未归属桶。",
+        "cannot": "成本金额仍由「查看采购成本」控制（无权限时相关字段与排序整体受限，无侧信道）；服务端总闸关闭时页面整体 404。",
+        "typical": ["老板", "管理员"],
+        "sensitivity": "critical",
+        "risk": "全部维保项目的申请与成本全景，默认关闭、逐账号勾选。",
+    },
+    "action_maintenance_wbdd_import": {
+        "label": "维保需求单（WBDD）专用上传",
+        "summary": "允许通过维保专用端点上传氚云维保备件需求单（90/91 列导出），快照式更新需求单事实并触发成本回填。",
+        "can": "上传 WBDD .xlsx（自动识别 90/91 列布局），返回精确对账报告（计数/快照差异/成本重算统计）；同幂等键重放返回原报告。",
+        "cannot": "不能上传采购/销售/库存/报销文件（非 WBDD 一律 422 零写入）；不含通用导入页 page_import 的任何能力；不改成本回填列。",
+        "typical": ["管理员", "维保数据维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "写维保需求单事实表并触发全表成本重算；默认关闭，仅名单勾选。",
+    },
+    "action_maintenance_expense_collection_upload": {
+        "label": "报销/回款工作簿上传覆盖",
+        "summary": "允许上传报销/回款往返工作簿（04_报销订单＋05_项目经理回款单 两张 sheet 合一），按上传内容覆盖报销未税金额与月度累计回款快照。",
+        "can": "下载本项目工作簿、预演（validate）与应用（apply）；同合同同月份重传即覆盖累计回款额；显式 VOID 作废历史快照。",
+        "cannot": "不能新增报销单（报销单在源系统产生，本表只改金额）；不能直填含税金额（系统按未税×1.13 计算）；不录回款计划（唯一事实源是台账 02_回款计划）。",
+        "typical": ["项目经理", "商务"],
+        "sensitivity": "high",
+        "risk": "改写项目报销金额与累计回款事实，直接影响成本率与回款进度；默认关闭。",
     },
     "page_boss_board": {
         "label": "老板经营看板",
@@ -809,6 +894,24 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "独立复核人（需单独授权）"],
         "sensitivity": "critical",
         "risk": "错误审批会把成本和库存切换到错误基线；系统默认仅管理员持有且生产开关仍独立关闭。",
+    },
+    "action_maintenance_ledger_import": {
+        "label": "台账工作簿导入应用",
+        "summary": "允许上传维保台账工作簿（项目/合同/期限/回款计划），预览后同步为正式项目与合同事实。",
+        "can": "上传台账 Excel 零写入预览，核对行数与异常清单后应用；项目、合同与回款计划以台账为唯一事实源。",
+        "cannot": "不能删除台账中没有的历史事实；报销归集行只保留原始记录，待与氚云报销逐条对账后才进入正式统计。",
+        "typical": ["管理员", "维保台账维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "应用会批量创建或更新项目与合同事实；金额口径（台账含税额）与销售单未税额自动对账，异常进入清单不静默。",
+    },
+    "action_maintenance_doc_import": {
+        "label": "氚云单据导入应用",
+        "summary": "允许上传氚云发货/入库/返库/报销四类单据，预览后落原始事实；发货维保供货会写入项目前置库账本。",
+        "can": "上传 .xlsx 零写入预览，查看行数与异常清单后应用；仅已生效单据参与入账，来源事件幂等且带 payload 校验。",
+        "cannot": "不能修改原始单元格值；未归属项目、未知 PN 或同来源不同内容重放时整批失败关闭，不按名称猜测。",
+        "typical": ["管理员", "仓库数据维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "应用会写入项目前置库结存与流水；默认仅管理员可授予，且要求同时具备成本数据可见权限。",
     },
     "action_maintenance_collection_follow_up": {
         "label": "回款提醒跟进",

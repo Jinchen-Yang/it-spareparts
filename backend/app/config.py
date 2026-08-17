@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
     llm_timeout_seconds: int = 60
     llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
-    llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
+    llm_max_retries: int = 2
+    # AI 兜底列映射是否允许把表头+脱敏样本发给外部 LLM；默认关闭（需显式开通）
+    llm_mapping_external_enabled: bool = False           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
 
     # 成本/库存切换是独立生产闸门；代码、迁移与审批 manifest 都不会自动启用新口径。
@@ -77,6 +79,10 @@ class Settings(BaseSettings):
     # 销售经理补库购物车 Beta 服务端总闸。关闭时只保留能力探测，全部业务读写和导出
     # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
     replenishment_beta_enabled: bool = False
+
+    # 维保展示板（plan v1.3）服务端总闸：WBDD 专用上传 + boss-board 端点整组受控。
+    # 默认关闭（404）；回滚=关本闸，不做 schema downgrade（铁律 7）。
+    maintenance_boss_dashboard_enabled: bool = False
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
@@ -238,6 +244,17 @@ MAINT_TAX_PREFERENCE = "inc_first"                # 同一取价层含税/不含
 MAINT_PRICE_WINDOW_DAYS = 7                       # ±窗口天数：出库日 ±7 天内最近采购价优先于当月均价（同距取更早、同日加权）
 MAINT_BUDGET_WARN_PCT = Decimal("0.20")           # 盈亏看板黄灯阈值：剩余预算占比 ≤20% 报警（用户口径"只剩 20% 就报警"）
 MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（其余枚举待全量数据确认）
+
+# ---- F3 返还率分子口径（RKD 收货入库单）----
+# 测试结果枚举（真实样例实测：成品/坏品/废品；兼容历史写法 坏件/故障）
+RKD_RETURN_TEST_RESULTS = ("坏品", "坏件", "故障", "废品")
+# 计入坏件返还分子的入库类别。业务 2026-08-16 确认：只有现场返件类
+# （维保拆旧返件/旧库退返）计入返还分子；采购入库/销售退货/其他入库
+# 的坏品是采购质量/渠道问题，不入分子。
+RKD_RETURN_CATEGORIES = ("维保拆旧返件", "旧库退返")
+# C4 报销对账正式金额列。业务 2026-08-16 确认：amount_inc_tax（含税计算值）
+# 与台账含税归集、氚云原值对账；amount 仅作审计原值。
+EXPENSE_RECONCILE_FORMAL_BASIS = "amount_inc_tax"
 
 # 仓库导出模板的完整双表头合同。键是 adapter version，值是一个或多个
 # 已经人工复核的 ordered ((internal_code, business_label), ...) 元组。

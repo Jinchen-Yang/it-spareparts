@@ -1,0 +1,187 @@
+"""maintenance doc imports (RKD/return/BXD): generic raw layer (C1b)
+
+Revision ID: e9f2d4b7a1c6
+Revises: d1e3f5a7c2b9
+Create Date: 2026-08-15
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+revision = "e9f2d4b7a1c6"
+down_revision = "d1e3f5a7c2b9"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "maintenance_doc_import_batch",
+        sa.Column("batch_id", sa.String(length=36), nullable=False),
+        sa.Column("doc_type", sa.String(length=16), nullable=False),
+        sa.Column("file_hash", sa.String(length=64), nullable=False),
+        sa.Column("filename", sa.String(length=255), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=128), nullable=False),
+        sa.Column("uploaded_by", sa.String(length=64), nullable=False),
+        sa.Column(
+            "uploaded_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("head_rows", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("line_rows", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("issue_rows", sa.Integer(), server_default="0", nullable=False),
+        sa.Column(
+            "status", sa.String(length=16), server_default="'pending'", nullable=False
+        ),
+        sa.Column("report_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("applied_by", sa.String(length=64), nullable=True),
+        sa.Column("applied_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint(
+            "doc_type IN ('rkd_inbound', 'return_order', 'bxd_expense')",
+            name="ck_maintenance_doc_import_doc_type",
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending', 'applied', 'failed')",
+            name="ck_maintenance_doc_import_status",
+        ),
+        sa.CheckConstraint(
+            "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
+            name="ck_maintenance_doc_import_applied",
+        ),
+        sa.PrimaryKeyConstraint("batch_id"),
+        sa.UniqueConstraint(
+            "uploaded_by", "idempotency_key",
+            name="uq_maintenance_doc_import_idempotency",
+        ),
+    )
+    op.create_index(
+        "ix_maintenance_doc_import_hash", "maintenance_doc_import_batch", ["file_hash"]
+    )
+    op.create_index(
+        "ix_maintenance_doc_import_type_uploaded",
+        "maintenance_doc_import_batch",
+        ["doc_type", "uploaded_at"],
+    )
+
+    # ---- 权限：氚云单据导入（admin 默认开启，其余失败关闭）----
+    op.execute(
+        """
+        UPDATE sys_role_template
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
+            || jsonb_build_object(
+                'action_maintenance_doc_import',
+                code = 'admin'
+            )
+        """
+    )
+    op.execute(
+        """
+        UPDATE sys_user
+        SET template_perms = template_perms || jsonb_build_object(
+                'action_maintenance_doc_import',
+                COALESCE(template_code, role) = 'admin'
+            ),
+            perm_overrides = CASE
+                    WHEN jsonb_typeof(perm_overrides) = 'object'
+                    THEN perm_overrides
+                    ELSE '{}'::jsonb
+                END
+                - 'action_maintenance_doc_import'
+        WHERE jsonb_typeof(template_perms) = 'object'
+        """
+    )
+    op.execute(
+        """
+        UPDATE sys_user
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
+            || jsonb_build_object(
+                'action_maintenance_doc_import',
+                role = 'admin'
+            )
+        WHERE permissions IS NOT NULL
+        """
+    )
+
+    op.create_table(
+        "maintenance_doc_head_row",
+        sa.Column("row_id", sa.String(length=36), nullable=False),
+        sa.Column("batch_id", sa.String(length=36), nullable=False),
+        sa.Column("row_no", sa.Integer(), nullable=False),
+        sa.Column("raw_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("head_no", sa.String(length=64), nullable=True),
+        sa.Column("head_date", sa.Date(), nullable=True),
+        sa.Column("category", sa.String(length=64), nullable=True),
+        sa.Column("wbdd_no", sa.String(length=64), nullable=True),
+        sa.Column("xsdd_no", sa.String(length=64), nullable=True),
+        sa.Column("project_name", sa.String(length=256), nullable=True),
+        sa.Column("data_status", sa.String(length=64), nullable=True),
+        sa.Column("issues", postgresql.ARRAY(sa.String(length=128)), nullable=True),
+        sa.CheckConstraint("row_no >= 1", name="ck_maintenance_doc_head_row_no"),
+        sa.ForeignKeyConstraint(["batch_id"], ["maintenance_doc_import_batch.batch_id"]),
+        sa.PrimaryKeyConstraint("row_id"),
+    )
+    op.create_index("ix_maintenance_doc_head_batch", "maintenance_doc_head_row", ["batch_id"])
+    op.create_index("ix_maintenance_doc_head_no", "maintenance_doc_head_row", ["head_no"])
+
+    op.create_table(
+        "maintenance_doc_line_row",
+        sa.Column("row_id", sa.String(length=36), nullable=False),
+        sa.Column("batch_id", sa.String(length=36), nullable=False),
+        sa.Column("head_row_id", sa.String(length=36), nullable=False),
+        sa.Column("row_no", sa.Integer(), nullable=False),
+        sa.Column("raw_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("line_key", sa.String(length=64), nullable=True),
+        sa.Column("pn", sa.String(length=128), nullable=True),
+        sa.Column("qty", sa.Numeric(14, 3), nullable=True),
+        sa.Column("amount", sa.Numeric(14, 2), nullable=True),
+        sa.Column("test_result", sa.String(length=64), nullable=True),
+        sa.Column("warehouse", sa.String(length=128), nullable=True),
+        sa.Column("location", sa.String(length=128), nullable=True),
+        sa.Column("issues", postgresql.ARRAY(sa.String(length=128)), nullable=True),
+        sa.CheckConstraint("row_no >= 1", name="ck_maintenance_doc_line_row_no"),
+        sa.ForeignKeyConstraint(["batch_id"], ["maintenance_doc_import_batch.batch_id"]),
+        sa.ForeignKeyConstraint(["head_row_id"], ["maintenance_doc_head_row.row_id"]),
+        sa.PrimaryKeyConstraint("row_id"),
+    )
+    op.create_index("ix_maintenance_doc_line_batch", "maintenance_doc_line_row", ["batch_id"])
+    op.create_index("ix_maintenance_doc_line_head", "maintenance_doc_line_row", ["head_row_id"])
+
+
+def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_doc_import_batch, maintenance_doc_head_row, maintenance_doc_line_row, maintenance_front_stock_ledger IN ACCESS EXCLUSIVE MODE")
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_doc_import_batch)
+             OR EXISTS (SELECT 1 FROM maintenance_doc_head_row)
+             OR EXISTS (SELECT 1 FROM maintenance_doc_line_row)
+             OR EXISTS (SELECT 1 FROM maintenance_front_stock_ledger
+                        WHERE source_type = 'return_order_line')
+          THEN
+            RAISE EXCEPTION
+              'e9f2d4b7a1c6 downgrade blocked: doc import facts exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
+    op.drop_index("ix_maintenance_doc_line_head", table_name="maintenance_doc_line_row")
+    op.drop_index("ix_maintenance_doc_line_batch", table_name="maintenance_doc_line_row")
+    op.drop_table("maintenance_doc_line_row")
+    op.drop_index("ix_maintenance_doc_head_no", table_name="maintenance_doc_head_row")
+    op.drop_index("ix_maintenance_doc_head_batch", table_name="maintenance_doc_head_row")
+    op.drop_table("maintenance_doc_head_row")
+    op.drop_index(
+        "ix_maintenance_doc_import_type_uploaded", table_name="maintenance_doc_import_batch"
+    )
+    op.drop_index("ix_maintenance_doc_import_hash", table_name="maintenance_doc_import_batch")
+    op.drop_table("maintenance_doc_import_batch")

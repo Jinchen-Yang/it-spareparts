@@ -72,6 +72,33 @@ from app.models.maintenance_migration import (
     MaintenanceMigrationRun,
     MaintenanceProjectCutoverPlan,
 )
+from app.models.maintenance_ledger import (
+    MaintenanceLedgerContractRow,
+    MaintenanceLedgerExpenseRow,
+    MaintenanceLedgerImportBatch,
+    MaintenanceLedgerPlanRow,
+)
+from app.models.maintenance_front_stock import (
+    MaintenanceFrontStock,
+    MaintenanceFrontStockLedger,
+)
+from app.models.maintenance_ckd_import import (
+    MaintenanceCkdHeadRow,
+    MaintenanceCkdImportBatch,
+    MaintenanceCkdLineRow,
+)
+from app.models.maintenance_doc_import import (
+    MaintenanceDocHeadRow,
+    MaintenanceDocImportBatch,
+    MaintenanceDocLineRow,
+    MaintenanceRkdReturnLine,
+)
+from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
+from app.models.maintenance_collection_evidence import (
+    MaintenanceCollectionEvidence,
+)
+from app.models.maintenance_ai_fallback import MaintenanceAiMappingProposal
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -171,6 +198,20 @@ __all__ = [
     "MaintenanceInventoryOpeningBalance",
     "MaintenanceMigrationDiscrepancy",
     "MaintenanceMigrationEvent",
+    "MaintenanceLedgerImportBatch",
+    "MaintenanceLedgerContractRow",
+    "MaintenanceLedgerPlanRow",
+    "MaintenanceLedgerExpenseRow",
+    "MaintenanceFrontStock",
+    "MaintenanceFrontStockLedger",
+    "MaintenanceCkdImportBatch",
+    "MaintenanceCkdHeadRow",
+    "MaintenanceCkdLineRow",
+    "MaintenanceDocImportBatch",
+    "MaintenanceWbddImportReceipt",
+    "MaintenanceDocHeadRow",
+    "MaintenanceDocLineRow",
+    "MaintenanceAiMappingProposal",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

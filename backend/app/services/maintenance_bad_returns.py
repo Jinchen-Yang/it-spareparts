@@ -19,6 +19,11 @@ from app.models.maintenance_bad_return import (
     MaintenanceBadReturnLine,
     MaintenanceReturnObligation,
 )
+from app.models.maintenance_doc_import import (
+    MaintenanceDocHeadRow,
+    MaintenanceDocImportBatch,
+    MaintenanceRkdReturnLine,
+)
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
@@ -52,19 +57,57 @@ def classify_return_obligation(
     category_id: int | None,
     category_major: str | None,
     category_minor: str | None,
+    no_return_line: bool | None = None,
+    project_no_return_default: bool = False,
 ) -> dict:
-    """Freeze the standard-category evidence used by the return rule.
+    """Freeze the evidence used by the return rule (B3 行级默认口径).
+
+    判定顺序（系统自动审批，无需人工逐行审批）：
+    1. 行级 no_return=True → 不返还；False → 必须返还（覆盖项目默认）；
+    2. 行级未填 → 项目级默认：项目默认不返还 → 不返还；否则按品类规则；
+    3. 品类规则：标准大类「硬盘」不返还，其余必须返还；
+    4. 无标准品类证据 → pending_category（不形成应返数量）。
 
     A textual category without a standard ``category_id`` is deliberately not
-    evidence.  Only the exact standard major category ``硬盘`` is exempt.
+    evidence.
     """
 
-    if category_id is None:
+    # 判定顺序（B3 口径）：行级 → 项目默认 → 品类 → pending。
+    # 行级 True 无需品类证据即可豁免；行级 False 必须有品类证据才能要求返还，
+    # 无品类证据时按 pending 待判定（不形成应返数量）。
+    exemption_source = "none"
+    if no_return_line is True:
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "line_no_return"
+    elif no_return_line is False:
+        if category_id is None:
+            classification = "pending_category"
+            major_snapshot = None
+            minor_snapshot = None
+            exemption_source = None
+        else:
+            classification = "required"
+            major_snapshot = category_major
+            minor_snapshot = category_minor
+    elif project_no_return_default:
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "project_default_no_return"
+    elif category_id is None:
         classification = "pending_category"
         major_snapshot = None
         minor_snapshot = None
+        exemption_source = None
+    elif category_major == "硬盘":
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "category_disk"
     else:
-        classification = "exempt" if category_major == "硬盘" else "required"
+        classification = "required"
         major_snapshot = category_major
         minor_snapshot = category_minor
     return {
@@ -72,8 +115,18 @@ def classify_return_obligation(
         "category_id_snapshot": category_id,
         "category_major_snapshot": major_snapshot,
         "category_minor_snapshot": minor_snapshot,
+        "exemption_source": exemption_source,
         "rule_version": RETURN_RULE_VERSION,
     }
+
+
+def _no_return_flag(raw_line: dict) -> bool | None:
+    value = raw_line.get("no_return")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise BadReturnError("现场领用返还事件 no_return 标记无效")
 
 
 def _rate(numerator: Decimal, denominator: Decimal) -> str:
@@ -92,8 +145,9 @@ def calculate_return_rate(
     pending_quantity: Decimal,
     registered_quantity: Decimal,
     warehouse_confirmed_quantity: Decimal,
+    official_returned_quantity: Decimal | None = None,
 ) -> dict:
-    """Return operational rates while the official numerator remains undecided."""
+    """Return rates. The official numerator is the RKD inbound quantity (Q8)."""
 
     payload = {
         "required_quantity": required_quantity,
@@ -101,11 +155,17 @@ def calculate_return_rate(
         "pending_quantity": pending_quantity,
         "registered_quantity": registered_quantity,
         "warehouse_confirmed_quantity": warehouse_confirmed_quantity,
+        "official_returned_quantity": official_returned_quantity,
         "outstanding_quantity": max(
             required_quantity - warehouse_confirmed_quantity,
             Decimal("0"),
         ),
-        "official_basis": None,
+        # 无应返义务时不成立官方口径（required_quantity = 0 → no_return_required）
+        "official_basis": (
+            "rkd_inbound"
+            if official_returned_quantity is not None and required_quantity > 0
+            else None
+        ),
         "registered_rate_pct": None,
         "warehouse_confirmed_rate_pct": None,
         "official_rate_pct": None,
@@ -116,11 +176,17 @@ def calculate_return_rate(
         return {**payload, "status": "no_return_required"}
     registered_rate = _rate(registered_quantity, required_quantity)
     confirmed_rate = _rate(warehouse_confirmed_quantity, required_quantity)
+    official_rate = (
+        _rate(official_returned_quantity, required_quantity)
+        if official_returned_quantity is not None
+        else None
+    )
     return {
         **payload,
         "status": "available",
         "registered_rate_pct": registered_rate,
         "warehouse_confirmed_rate_pct": confirmed_rate,
+        "official_rate_pct": official_rate,
     }
 
 
@@ -276,6 +342,7 @@ def _obligation_dict(
         "source_quantity": _qty(Decimal(row.source_quantity)),
         "required_quantity": _qty(Decimal(row.required_quantity)),
         "classification": row.classification,
+        "exemption_source": row.exemption_source,
         "category_id_snapshot": row.category_id_snapshot,
         "category_major_snapshot": row.category_major_snapshot,
         "category_minor_snapshot": row.category_minor_snapshot,
@@ -518,6 +585,13 @@ def consume_return_event(
         if delivery_id not in existing_by_delivery
     }
     categories = _category_evidence(db, new_part_ids)
+    project_no_return_default = bool(
+        db.scalar(
+            select(MaintenanceProject.no_return_default).where(
+                MaintenanceProject.project_id == event.project_id
+            )
+        )
+    )
     projected: list[MaintenanceReturnObligation] = []
     for delivery_line_id, raw_line in now_lines.items():
         issue_line_id = _required(raw_line.get("issue_line_id"), "领用明细编号", 64)
@@ -533,6 +607,8 @@ def consume_return_event(
                 category_id=category_id,
                 category_major=category_major,
                 category_minor=category_minor,
+                no_return_line=_no_return_flag(raw_line),
+                project_no_return_default=project_no_return_default,
             )
             required_quantity = (
                 source_quantity
@@ -550,6 +626,7 @@ def consume_return_event(
                 source_quantity=source_quantity,
                 required_quantity=required_quantity,
                 classification=classification["classification"],
+                exemption_source=classification["exemption_source"],
                 category_id_snapshot=classification["category_id_snapshot"],
                 category_major_snapshot=classification["category_major_snapshot"],
                 category_minor_snapshot=classification["category_minor_snapshot"],
@@ -575,8 +652,27 @@ def consume_return_event(
         else:
             if row.part_id != part_id or row.pn != pn:
                 raise BadReturnConflict("同一稳定发货明细的 PN 身份不能更改")
+            # 更正路径沿用行内冻结的品类证据（新分类仅用于新行；老行不因
+            # 本轮 categories 未重新加载而退化到 pending）
+            category_id, category_major, category_minor = categories.get(
+                part_id,
+                (
+                    row.category_id_snapshot,
+                    row.category_major_snapshot,
+                    row.category_minor_snapshot,
+                ),
+            )
+            classification = classify_return_obligation(
+                category_id=category_id,
+                category_major=category_major,
+                category_minor=category_minor,
+                no_return_line=_no_return_flag(raw_line),
+                project_no_return_default=project_no_return_default,
+            )
             required_quantity = (
-                source_quantity if row.classification == "required" else Decimal("0")
+                source_quantity
+                if classification["classification"] == "required"
+                else Decimal("0")
             )
             registered = quantities.get(
                 row.obligation_id,
@@ -588,6 +684,12 @@ def consume_return_event(
             row.issue_line_id = issue_line_id
             row.source_quantity = source_quantity
             row.required_quantity = required_quantity
+            row.classification = classification["classification"]
+            row.exemption_source = classification["exemption_source"]
+            row.category_id_snapshot = classification["category_id_snapshot"]
+            row.category_major_snapshot = classification["category_major_snapshot"]
+            row.category_minor_snapshot = classification["category_minor_snapshot"]
+            row.rule_version = classification["rule_version"]
             row.source_issue_version = event.issue_version
             row.last_source_event_id = event.event_id
             row.is_active = True
@@ -773,29 +875,107 @@ def return_rates_for_projects(
     ):
         return_facts[project_id] = (Decimal(registered), Decimal(confirmed))
 
+    # 官方返还率分子（Q8）：氚云收货入库单 RKD 的坏品/坏件/故障/废品明细件数。
+    rkd_facts: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for project_id, official_qty in db.execute(
+        select(
+            MaintenanceRkdReturnLine.project_id,
+            func.coalesce(
+                func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")
+            ),
+        )
+        .where(MaintenanceRkdReturnLine.project_id.in_(ids))
+        .group_by(MaintenanceRkdReturnLine.project_id)
+    ):
+        rkd_facts[project_id] = Decimal(official_qty)
+
+    # 项目是否已导入过 RKD（已应用批次的头已解析归属）→ 未导入不得发布伪 0%
+    rkd_imported_projects: set[str] = set(
+        db.execute(
+            select(MaintenanceDocHeadRow.project_id)
+            .join(
+                MaintenanceDocImportBatch,
+                MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id,
+            )
+            .where(
+                MaintenanceDocImportBatch.doc_type == "rkd_inbound",
+                MaintenanceDocImportBatch.status == "applied",
+                MaintenanceDocHeadRow.project_id.in_(ids),
+            )
+            .distinct()
+        ).scalars()
+    )
+
+    # 项目级口径（Q8 无 SN/不按行匹配）：逐 PN 错配仅作透明警告，不改公式
+    rkd_pns: dict[str, set[str]] = defaultdict(set)
+    for project_id, pn in db.execute(
+        select(
+            MaintenanceRkdReturnLine.project_id,
+            MaintenanceRkdReturnLine.pn,
+        ).where(MaintenanceRkdReturnLine.project_id.in_(ids))
+    ):
+        rkd_pns[project_id].add(pn)
+    obligation_pns: dict[str, set[str]] = defaultdict(set)
+    for project_id, pn in db.execute(
+        select(
+            MaintenanceReturnObligation.project_id,
+            MaintenanceReturnObligation.pn,
+        ).where(
+            MaintenanceReturnObligation.project_id.in_(ids),
+            MaintenanceReturnObligation.is_active.is_(True),
+        )
+    ):
+        obligation_pns[project_id].add(pn)
+
     result: dict[str, dict] = {}
     for project_id in ids:
         facts = obligation_facts[project_id]
         registered, confirmed = return_facts[project_id]
+        imported = project_id in rkd_imported_projects
         calculated = calculate_return_rate(
             required_quantity=Decimal(facts["required_quantity"]),
             exempt_quantity=Decimal(facts["exempt_quantity"]),
             pending_quantity=Decimal(facts["pending_quantity"]),
             registered_quantity=registered,
             warehouse_confirmed_quantity=confirmed,
+            official_returned_quantity=(
+                rkd_facts[project_id] if imported else None
+            ),
         )
+        payload = {
+            key: _qty(value) if isinstance(value, Decimal) else value
+            for key, value in calculated.items()
+        }
+        if not imported:
+            # 未导入 RKD：不发布伪 0%（round-5 Blocker 3）；无应返义务除外
+            if calculated["status"] in ("available", "basis_incomplete"):
+                payload["official_basis"] = "rkd_not_imported"
+                payload["official_rate_pct"] = None
+                if calculated["status"] == "available":
+                    payload["status"] = "not_ready"
+        pn_mismatch = sorted(rkd_pns[project_id] - obligation_pns[project_id])
         result[project_id] = {
             "project_id": project_id,
-            **{
-                key: _qty(value) if isinstance(value, Decimal) else value
-                for key, value in calculated.items()
-            },
+            **payload,
             "required_count": int(facts["required_count"]),
             "exempt_count": int(facts["exempt_count"]),
             "pending_count": int(facts["pending_count"]),
+            "rkd_imported": imported,
+            "pn_mismatch_warning": pn_mismatch[:20],
             "business_assumption": (
-                "仓库确认量仅作试算；官方返还率分子待业务确认。"
-                "返库登记仅表示已登记或在途。"
+                "官方返还率=入库单坏件数/(领用−不返还)；"
+                "返库登记/仓库确认量仅作过程参考。"
+                + (
+                    "该项目尚未导入收货入库单(RKD)，返还率暂不发布。"
+                    if not imported
+                    else ""
+                )
+                + (
+                    f"存在返还 PN 不在领用清单中（{', '.join(pn_mismatch[:5])}），"
+                    "项目级口径下请人工复核。"
+                    if pn_mismatch
+                    else ""
+                )
             ),
         }
     return result
@@ -1360,6 +1540,7 @@ def resolve_obligation_category(
     row.category_major_snapshot = classification["category_major_snapshot"]
     row.category_minor_snapshot = classification["category_minor_snapshot"]
     row.classification = classification["classification"]
+    row.exemption_source = classification["exemption_source"]
     row.rule_version = classification["rule_version"]
     row.required_quantity = (
         Decimal(row.source_quantity)

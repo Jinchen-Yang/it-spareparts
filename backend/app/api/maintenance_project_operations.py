@@ -135,6 +135,7 @@ class SiteIssueLineCreate(BaseModel):
     part_id: int = Field(ge=1)
     pn: str = Field(min_length=1, max_length=128)
     quantity: Decimal = Field(gt=0)
+    no_return: bool | None = None
     linked_purchase_line_id: int | None = Field(default=None, ge=1)
 
 
@@ -158,6 +159,8 @@ class SiteIssueDraftLineCreate(BaseModel):
 
     delivery_line_id: str = Field(min_length=1, max_length=64)
     quantity: Decimal = Field(gt=0)
+    # 行级不返还：True/False 覆盖项目默认；留空继承项目默认
+    no_return: bool | None = None
 
 
 class SiteIssueDraftCreate(BaseModel):

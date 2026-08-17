@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from app import config, tax_policy
 from app.business_time import business_today
+from app.services import project_names
 from app.config import get_settings
 from app.etl import cleaner, pipeline, reader
 from app.models import maintenance as maintenance_models
@@ -3096,7 +3097,8 @@ def _validate_exported_row_identities(
 
 
 def _project_std(value: str | None) -> str | None:
-    return re.sub(r"^预交付-", "", value).strip() if value else value
+    # 口径统一走 services/project_names（plan v1.3 M2-3）：与 ETL project_std 完全一致
+    return project_names.strip_pre_delivery(value) if value else value
 
 
 def _change_contracts(*values: str | None) -> frozenset[str]:

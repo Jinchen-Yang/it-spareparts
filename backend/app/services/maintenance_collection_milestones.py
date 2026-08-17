@@ -38,6 +38,7 @@ def write_collection_milestone(
     source: str,
     source_batch_id: str | None = None,
     collection_plan_import_batch_id: str | None = None,
+    ledger_batch_id: str | None = None,
     date_precision: str | None = None,
     operator: str = "system",
 ) -> MaintenanceCollectionMilestone:
@@ -79,6 +80,7 @@ def write_collection_milestone(
             source=source,
             source_batch_id=source_batch_id,
             collection_plan_import_batch_id=collection_plan_import_batch_id,
+            ledger_batch_id=ledger_batch_id,
             date_precision=date_precision,
             follow_up_status="pending",
             follow_up_review_required=False,
@@ -103,12 +105,14 @@ def write_collection_milestone(
         milestone.source != source
         or milestone.source_batch_id != source_batch_id
         or milestone.collection_plan_import_batch_id != collection_plan_import_batch_id
+        or milestone.ledger_batch_id != ledger_batch_id
     )
     if not planned_changed and not source_changed:
         return milestone
     milestone.source = source
     milestone.source_batch_id = source_batch_id
     milestone.collection_plan_import_batch_id = collection_plan_import_batch_id
+    milestone.ledger_batch_id = ledger_batch_id
     milestone.date_precision = date_precision
     if planned_changed:
         milestone.planned_date = planned_date

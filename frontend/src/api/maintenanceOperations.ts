@@ -381,24 +381,31 @@ export interface SiteIssueCommandInput {
 export type MaintenanceReturnRateStatus =
   | "available"
   | "basis_incomplete"
-  | "no_return_required";
+  | "no_return_required"
+  | "not_ready";
 
 export interface MaintenanceReturnRate {
   project_id: string;
   status: MaintenanceReturnRateStatus;
-  official_basis: "warehouse_confirmed_v1" | null;
+  /** 官方口径数据基础：rkd_inbound（已导入收货入库单）/ rkd_not_imported（未导入，暂不发布）。 */
+  official_basis: "rkd_inbound" | "rkd_not_imported" | null;
+  /** 官方返还率，服务端返回定点两位小数的百分数字符串（如 "50.00"），null = 暂不发布。 */
   official_rate_pct: string | null;
   registered_rate_pct: string | null;
   warehouse_confirmed_rate_pct: string | null;
   required_quantity: string;
   registered_quantity: string;
   warehouse_confirmed_quantity: string;
+  official_returned_quantity: string | null;
   outstanding_quantity: string;
   exempt_quantity: string;
   pending_quantity: string;
   required_count: number;
   exempt_count: number;
   pending_count: number;
+  rkd_imported?: boolean;
+  /** 返还 PN 不在领用清单中的透明警告（项目级口径不改变公式，仅提示人工复核）。 */
+  pn_mismatch_warning?: string[];
   business_assumption: string;
 }
 
@@ -1373,4 +1380,217 @@ export const resolveMaintenanceReturnObligationCategory = (
 ) => api.post<MaintenanceReturnObligation>(
   `/maintenance/return-obligations/${encodeURIComponent(obligationId)}/resolve-category`,
   input,
+);
+
+// ===== 前置库 / 官方返还率 / 收回清单 / 坏件变卖 / 工作簿 v3 / 回款凭证 / 报销对账 =====
+// 全部挂在项目稳定路径下：登录 + page_maintenance + 项目范围；
+// 金额字段按 data_purchase_cost / data_profit 脱敏，缺数据一律 null，前端不得伪造。
+
+export interface MaintenanceFrontStockRow {
+  stock_id: string;
+  part_id: number;
+  pn: string;
+  description: string | null;
+  warehouse_name: string;
+  qty: number;
+  unit_cost_ex_tax: number | null;
+  unit_cost_inc_tax: number | null;
+  value_ex_tax: number | null;
+  value_inc_tax: number | null;
+  last_inbound_at: string | null;
+  age_days: number | null;
+  last_consumed_at: string | null;
+  days_since_last_consumption: number | null;
+  /** 入库超 90 天且（从未领用或最近领用也超 90 天）；新入库未领用件不算超期。 */
+  stale_90d: boolean;
+}
+
+export type MaintenanceFrontStockCompleteness =
+  | "complete"
+  | "incomplete"
+  | "not_visible";
+
+export interface MaintenanceFrontStockSummary {
+  project_id: string;
+  rows: MaintenanceFrontStockRow[];
+  total_qty: number;
+  total_value_ex_tax: number | null;
+  total_value_inc_tax: number | null;
+  value_completeness: MaintenanceFrontStockCompleteness;
+  /** 当前账号是否可见成本/估值；false 时金额字段恒为 null。 */
+  cost_visible: boolean;
+  stale_90d_count: number;
+}
+
+export const getMaintenanceProjectFrontStock = (projectId: string) =>
+  api.get<MaintenanceFrontStockSummary>(`${projectBase(projectId)}/front-stock`);
+
+/** 官方返还率（独立端点；与 workspace 内嵌的 return_rate 同源同形状）。 */
+export const getMaintenanceProjectReturnRate = (projectId: string) =>
+  api.get<MaintenanceReturnRate>(`${projectBase(projectId)}/return-rate`);
+
+export interface MaintenanceRecoveryGoodReturnedRow {
+  source_ref: string;
+  qty: number;
+  occurred_at: string | null;
+  reason: string | null;
+}
+
+export interface MaintenanceRecoveryBadReturnedRow {
+  head_no: string;
+  pn: string;
+  part_id: number;
+  qty: number;
+  test_result: string | null;
+  occurred_at: string | null;
+}
+
+export interface MaintenanceRecoverySummary {
+  project_id: string;
+  good_returned: MaintenanceRecoveryGoodReturnedRow[];
+  good_returned_total_qty: number;
+  bad_returned: MaintenanceRecoveryBadReturnedRow[];
+  bad_returned_total_qty: number;
+  remaining_stock: MaintenanceFrontStockRow[];
+  remaining_total_qty: number;
+}
+
+export const getMaintenanceProjectRecoverySummary = (projectId: string) =>
+  api.get<MaintenanceRecoverySummary>(`${projectBase(projectId)}/recovery-summary`);
+
+export interface MaintenanceSalvageRow {
+  salvage_id: string;
+  pn: string;
+  part_id: number | null;
+  qty: number;
+  /** 变卖收入（含税，登记原值）。 */
+  revenue: number;
+  salvage_date: string;
+  buyer_note: string | null;
+  reason: string | null;
+  operated_by: string;
+  is_active: boolean;
+  version: number;
+  stock_deducted: boolean;
+  /** 登记时冻结的成本证据（含税）；缺成本不按 0。 */
+  cost_basis_inc_tax: number | null;
+  cost_source_ref: string | null;
+  cost_algorithm_version: string | null;
+  /** 贡献毛利（含税）= 收入 − 冻结成本 × 数量；缺成本为 null。 */
+  margin: number | null;
+}
+
+export interface MaintenanceSalvageDirectory {
+  project_id: string;
+  rows: MaintenanceSalvageRow[];
+  active_count: number;
+  total_revenue: number;
+  total_margin: number | null;
+  margin_completeness: "complete" | "incomplete";
+}
+
+/** 坏件变卖清单：读端要求 data_profit（含成本与毛利），无权限 403。 */
+export const listMaintenanceSalvages = (projectId: string) =>
+  api.get<MaintenanceSalvageDirectory>(`${projectBase(projectId)}/salvages`);
+
+/** 项目工作簿 v3 导出（要求同时具备 data_profit 与 data_purchase_cost）。 */
+export const downloadMaintenanceProjectWorkbookV3 = (projectId: string) =>
+  api.get<Blob>(`${projectBase(projectId)}/workbook-v3.xlsx`, { responseType: "blob" });
+
+export interface MaintenanceCollectionEvidenceRow {
+  evidence_id: string;
+  file_id: string;
+  md5: string;
+  sha256: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_by: string;
+  uploaded_at: string;
+  is_active: boolean;
+}
+
+export interface MaintenanceCollectionEvidenceDirectory {
+  milestone_id: string;
+  rows: MaintenanceCollectionEvidenceRow[];
+}
+
+export interface MaintenanceCollectionEvidenceUploadResult {
+  evidence_id: string;
+  file_id: string;
+  milestone_id: string;
+  md5: string;
+  replayed: boolean;
+  object_key?: string;
+  sha256?: string;
+  size_bytes?: number;
+  original_filename?: string;
+  mime_type?: string;
+  /** 上传凭证即关闭回款提醒：true = 本节点已闭环。 */
+  closed?: boolean;
+  close_reason?: string | null;
+}
+
+export const listMaintenanceCollectionEvidence = (milestoneId: string) =>
+  api.get<MaintenanceCollectionEvidenceDirectory>(
+    `/maintenance/collection-milestones/${encodeURIComponent(milestoneId)}/evidence`,
+  );
+
+export const uploadMaintenanceCollectionEvidence = (
+  milestoneId: string,
+  file: File,
+) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<MaintenanceCollectionEvidenceUploadResult>(
+    `/maintenance/collection-milestones/${encodeURIComponent(milestoneId)}/evidence`,
+    form,
+    { timeout: 120000 },
+  );
+};
+
+export type MaintenanceExpenseReconcileStatus =
+  | "matched"
+  | "mismatch"
+  | "unresolved"
+  | "ledger_only"
+  | "bxd_only"
+  | "formal_only";
+
+export interface MaintenanceExpenseReconcileRow {
+  bxd_no: string;
+  status: MaintenanceExpenseReconcileStatus;
+  conclusion_basis: string | null;
+  /** 氚云 BXD 原值与正式费用事实是否一致（第三源证据，不参与结论）。 */
+  bxd_aligned: boolean;
+  ledger_amount: number | null;
+  bxd_amount: number | null;
+  formal_amount: number | null;
+  ledger_present: boolean;
+  bxd_present: boolean;
+  formal_present: boolean;
+  ledger_row_count: number;
+  bxd_line_count: number;
+  formal_row_count: number;
+  ledger_project_name: string | null;
+}
+
+export interface MaintenanceExpenseReconcileDirectory {
+  rows: MaintenanceExpenseReconcileRow[];
+  limit: number;
+  offset: number;
+  matched: number;
+  mismatch: number;
+  unresolved: number;
+  ledger_only: number;
+  bxd_only: number;
+  formal_only: number;
+}
+
+/** 报销对账（仅 admin/boss + data_profit）。 */
+export const getMaintenanceExpenseReconcile = (
+  params: { limit?: number; offset?: number } = {},
+) => api.get<MaintenanceExpenseReconcileDirectory>(
+  "/maintenance/reconcile/expenses",
+  { params },
 );

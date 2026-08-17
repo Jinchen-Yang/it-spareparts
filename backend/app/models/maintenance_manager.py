@@ -119,6 +119,9 @@ class MaintenanceServicePeriod(Base):
     source_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("maintenance_manager_upload_batch.batch_id")
     )
+    ledger_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_ledger_import_batch.batch_id")
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -144,12 +147,15 @@ class MaintenanceServicePeriod(Base):
             name="ck_maintenance_service_period_date_order",
         ),
         CheckConstraint(
-            "source IN ('direct_api', 'manager_workbook_v3')",
+            "source IN ('direct_api', 'manager_workbook_v3', 'project_manager_xls_v1')",
             name="ck_maintenance_service_period_source",
         ),
         CheckConstraint(
-            "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL) OR "
-            "(source = 'direct_api' AND source_batch_id IS NULL)",
+            "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL "
+            "AND ledger_batch_id IS NULL) OR "
+            "(source = 'project_manager_xls_v1' AND ledger_batch_id IS NOT NULL "
+            "AND source_batch_id IS NULL) OR "
+            "(source = 'direct_api' AND source_batch_id IS NULL AND ledger_batch_id IS NULL)",
             name="ck_maintenance_service_period_batch_source",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_service_period_version"),
@@ -189,6 +195,10 @@ class MaintenanceCollectionMilestone(Base):
     date_precision: Mapped[str] = mapped_column(String(8), nullable=False, default="day")
     collection_plan_import_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("maintenance_collection_plan_import_batch.batch_id")
+    )
+    # 台账工作簿导入批次（B2）：source=project_manager_xls_v1 时二选一必填。
+    ledger_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_ledger_import_batch.batch_id")
     )
     follow_up_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     follow_up_review_required: Mapped[bool] = mapped_column(
@@ -242,11 +252,14 @@ class MaintenanceCollectionMilestone(Base):
         ),
         CheckConstraint(
             "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL "
-            "AND collection_plan_import_batch_id IS NULL) OR "
-            "(source = 'project_manager_xls_v1' AND collection_plan_import_batch_id IS NOT NULL "
-            "AND source_batch_id IS NULL) OR "
+            "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL) OR "
+            "(source = 'project_manager_xls_v1' AND ("
+            "(collection_plan_import_batch_id IS NOT NULL AND source_batch_id IS NULL "
+            "AND ledger_batch_id IS NULL) OR "
+            "(ledger_batch_id IS NOT NULL AND collection_plan_import_batch_id IS NULL "
+            "AND source_batch_id IS NULL))) OR "
             "(source = 'direct_api' AND source_batch_id IS NULL "
-            "AND collection_plan_import_batch_id IS NULL)",
+            "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL)",
             name="ck_maintenance_collection_milestone_batch_source",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_collection_milestone_version"),

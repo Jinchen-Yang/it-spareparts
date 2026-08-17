@@ -19,18 +19,32 @@ from app.api import (
     maintenance,
     maintenance_acceptance,
     maintenance_audit,
+    maintenance_ai_fallback,
     maintenance_bad_returns,
+    maintenance_bad_salvage,
+    maintenance_boss_board,
+    maintenance_ckd_import,
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
+    maintenance_collection_evidence,
     maintenance_demands,
+    maintenance_doc_import,
+    maintenance_expense_reconcile,
+    maintenance_front_stock,
+    maintenance_ledger,
     maintenance_manager_workbooks,
     maintenance_project_assignments,
     maintenance_migration,
     maintenance_project_operations,
     maintenance_source_assignments,
     maintenance_project_workbooks,
+    maintenance_project_workbook_v3,
     maintenance_projects,
+    maintenance_recovery,
     maintenance_warehouse,
+    maintenance_expense_collection_workbook,
+    maintenance_project_master_workbook,
+    maintenance_wbdd_import,
     parts,
     pool_analysis,
     pools,
@@ -88,6 +102,12 @@ app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
 app.include_router(replenishment.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
+# 维保展示板（plan v1.3）：独立 flag 闸（router 自带 require_maintenance_boss），
+# 不挂 Beta 依赖——回滚=关 maintenance_boss_dashboard_enabled。
+app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
+app.include_router(maintenance_expense_collection_workbook.router, prefix=settings.api_prefix)
+app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
+app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
 app.include_router(
     maintenance_acceptance.router,
@@ -142,7 +162,17 @@ app.include_router(
     dependencies=maintenance_beta_dependencies,
 )
 app.include_router(
+    maintenance_project_workbook_v3.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
     maintenance_warehouse.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_collection_evidence.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
@@ -153,6 +183,46 @@ app.include_router(
 )
 app.include_router(
     maintenance_collection_plan_imports.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_ledger.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_front_stock.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_recovery.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_bad_salvage.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_ckd_import.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_doc_import.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_ai_fallback.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_expense_reconcile.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

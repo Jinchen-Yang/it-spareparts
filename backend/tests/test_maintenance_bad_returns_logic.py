@@ -19,6 +19,7 @@ def test_only_standard_hard_drive_category_is_exempt() -> None:
         "category_id_snapshot": 17,
         "category_major_snapshot": "硬盘",
         "category_minor_snapshot": "SAS-HDD",
+        "exemption_source": "category_disk",
         "rule_version": RETURN_RULE_VERSION,
     }
     assert classify_return_obligation(
@@ -70,3 +71,39 @@ def test_return_rate_never_fabricates_an_official_percentage() -> None:
     assert available["warehouse_confirmed_rate_pct"] == "50.00"
     assert available["official_basis"] is None
     assert available["official_rate_pct"] is None
+
+
+def test_return_rate_official_numerator_is_rkd_inbound() -> None:
+    """Q8：官方返还率 = 入库单坏件件数 / (领用 − 不返还)。"""
+    available = calculate_return_rate(
+        required_quantity=Decimal("8"),
+        exempt_quantity=Decimal("2"),
+        pending_quantity=Decimal("0"),
+        registered_quantity=Decimal("6"),
+        warehouse_confirmed_quantity=Decimal("4"),
+        official_returned_quantity=Decimal("6"),
+    )
+    assert available["status"] == "available"
+    assert available["official_basis"] == "rkd_inbound"
+    assert available["official_returned_quantity"] == Decimal("6")
+    assert available["official_rate_pct"] == "75.00"
+
+    over = calculate_return_rate(
+        required_quantity=Decimal("8"),
+        exempt_quantity=Decimal("0"),
+        pending_quantity=Decimal("0"),
+        registered_quantity=Decimal("0"),
+        warehouse_confirmed_quantity=Decimal("0"),
+        official_returned_quantity=Decimal("10"),
+    )
+    assert over["official_rate_pct"] == "125.00"  # 允许超 100%，数据透明不截断
+
+    zero = calculate_return_rate(
+        required_quantity=Decimal("8"),
+        exempt_quantity=Decimal("0"),
+        pending_quantity=Decimal("0"),
+        registered_quantity=Decimal("0"),
+        warehouse_confirmed_quantity=Decimal("0"),
+        official_returned_quantity=Decimal("0"),
+    )
+    assert zero["official_rate_pct"] == "0.00"

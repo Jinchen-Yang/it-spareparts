@@ -32,6 +32,14 @@ class MaintenanceProject(Base):
     project_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     project_manager_id: Mapped[str | None] = mapped_column(String(64))
+    # 台账拥有字段（商务线事实源，系统不日常建档）
+    business_type: Mapped[str | None] = mapped_column(String(64))
+    cmo_name: Mapped[str | None] = mapped_column(String(128))
+    salesperson: Mapped[str | None] = mapped_column(String(64))
+    # 项目级不返还默认值（行级默认：领用行可覆盖，见 c3b5d9e1f7a2）
+    no_return_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     lifecycle_status: Mapped[str] = mapped_column(String(32), nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
@@ -99,6 +107,8 @@ class MaintenanceProjectContract(Base):
     contract_id: Mapped[str] = mapped_column(String(64), nullable=False)
     contract_no: Mapped[str] = mapped_column(String(64), nullable=False)
     contract_amount: Mapped[Decimal | None] = mapped_column(Money)
+    # 台账合同额（含税）；contract_amount 为对账后的未税金额。
+    amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
     # Raw source status is preserved.  Inclusion is never guessed from this text.
     contract_status: Mapped[str | None] = mapped_column(String(64))
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -153,6 +163,11 @@ class MaintenanceProjectContract(Base):
             "contract_amount IS NULL OR "
             "(contract_amount >= 0 AND contract_amount < 1000000000000)",
             name="ck_maintenance_project_contract_amount",
+        ),
+        CheckConstraint(
+            "amount_inc_tax IS NULL OR "
+            "(amount_inc_tax >= 0 AND amount_inc_tax < 1000000000000)",
+            name="ck_maintenance_project_contract_amount_inc_tax",
         ),
         CheckConstraint(
             "version >= 1",

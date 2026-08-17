@@ -164,6 +164,15 @@ _TABLES = [
     "business_file_link", "business_file", "maintenance_acceptance_deliverable",
     "maintenance_collection_milestone", "maintenance_collection_milestone_operation",
     "maintenance_collection_plan_import_batch", "maintenance_collection_plan_source_binding",
+    "maintenance_ledger_expense_row", "maintenance_ledger_plan_row",
+    "maintenance_ledger_contract_row", "maintenance_ledger_import_batch",
+    "maintenance_front_stock_ledger", "maintenance_front_stock",
+    "maintenance_ckd_line_row", "maintenance_ckd_head_row", "maintenance_ckd_import_batch",
+    "maintenance_doc_line_row", "maintenance_doc_head_row", "maintenance_doc_import_batch",
+    "maintenance_rkd_return_line",
+    "maintenance_bad_salvage",
+    "maintenance_collection_evidence",
+    "maintenance_ai_mapping_proposal",
     "maintenance_service_period",
     "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",
     "maintenance_project_user_assignment",
@@ -204,13 +213,48 @@ def _reseed_business_setting(conn) -> None:
         " VALUES (1, 'both', 'both', 'ex', 1)"))
 
 
-@pytest.fixture(scope="session", autouse=True)
-def migrated():
+def _alembic_cfg():
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option("script_location",
                         os.path.join(os.path.dirname(__file__), "..", "alembic"))
+    return cfg
+
+
+# Postgres 的 1600 列上限**把已 drop 的列也算进去**：drop column 只是把
+# pg_attribute 行标成 attisdropped，槽位到表被重建为止都不释放。迁移测试家族
+# 每跑一次 downgrade→upgrade 就把途经迁移新增的列加一遍、drop 一遍，槽位单调
+# 累积。整套跑下来这个数会逼近 1600，然后某个 add_column 报 TooManyColumns：
+# 该测试的 upgrade head 半途失败，库停在降级态，其后**每个**用例都在
+# TRUNCATE 上炸 UndefinedTable（曾一次性产生 366 个 error，把真实失败全埋了）。
+# 这里在槽位逼近上限前重建 schema——测试间本来就 TRUNCATE 全表，重建无损。
+_SLOT_REBUILD_THRESHOLD = 1000
+_SLOT_PROBE = text(
+    "SELECT coalesce(max(cnt), 0) FROM ("
+    "  SELECT count(*) AS cnt FROM pg_attribute a"
+    "   JOIN pg_class c ON c.oid = a.attrelid"
+    "   WHERE a.attnum > 0 AND c.relkind = 'r'"
+    "     AND c.relnamespace = 'public'::regnamespace"
+    "   GROUP BY a.attrelid) t"
+)
+
+
+def _rebuild_schema_if_slots_exhausted() -> bool:
+    with engine.connect() as conn:
+        if conn.execute(_SLOT_PROBE).scalar_one() < _SLOT_REBUILD_THRESHOLD:
+            return False
+    engine.dispose()          # DROP SCHEMA 前放掉池里的旧连接
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    alembic_command.upgrade(_alembic_cfg(), "head")
+    print("[conftest] 列槽位逼近上限，已重建 schema", file=sys.stderr)
+    return True
+
+
+@pytest.fixture(scope="session", autouse=True)
+def migrated():
     try:
-        alembic_command.upgrade(cfg, "head")
+        alembic_command.upgrade(_alembic_cfg(), "head")
         yield
     finally:
         _cleanup_run()
@@ -226,6 +270,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture()
 def db(migrated):
+    _rebuild_schema_if_slots_exhausted()
     with engine.connect() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
         _reseed_templates(conn)
