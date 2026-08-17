@@ -79,9 +79,10 @@ def beta_feature_availability(
                 real_identity=real_identity,
             )
         ),
-        # 维保展示板（plan v1.3）：服务端总闸 ∧ 实名 ∧ 查看权限
-        # （page_maintenance_boss 全范围 或 page_maintenance 本人范围，M0-B 两案兼容）。
-        # 前端据此隐藏整组导航；后端 require_maintenance_boss 同时 404，双保险。
+        # 维保项目看板（plan v1.3）：正式功能（2026-08-17 去 Beta）。
+        # 默认开启；maintenance_boss_dashboard_enabled 仅作紧急回滚开关（关→整组 404）。
+        # 前端导航已不再据此隐藏（仅按 page_maintenance_boss/page_maintenance 权限展示），
+        # 本键保留为服务端状态信号与历史兼容。
         "maintenance_boss": bool(
             current.maintenance_boss_dashboard_enabled
             and maintenance_boss_visible(

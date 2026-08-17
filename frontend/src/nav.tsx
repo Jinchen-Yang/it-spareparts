@@ -165,8 +165,9 @@ export const NAV_GROUPS: NavGroup[] = [
         path: "/maintenance",
         label: "维保主页",
         icon: <DashboardOutlined />,
+        // 维保项目看板是正式功能，不挂 Beta（2026-08-17）：仅按权限展示；
+        // 服务端 maintenance_boss_dashboard_enabled 保留为紧急回滚总闸。
         anyPerm: ["page_maintenance_boss", "page_maintenance"],
-        betaFeature: "maintenance_boss",
         page: MaintenanceHomePage,
         load: loadMaintenanceHome,
       },
@@ -239,7 +240,6 @@ export const DETAIL_ROUTES: DetailRoute[] = [
     pattern: /^\/maintenance\/projects\/[^/]+$/,
     label: "项目面板",
     anyPerm: ["page_maintenance_boss", "page_maintenance"],
-    betaFeature: "maintenance_boss",
     menuKey: "maintenance-home",
     page: MaintenanceProjectPanelPage,
     load: loadMaintenanceProjectPanel,
