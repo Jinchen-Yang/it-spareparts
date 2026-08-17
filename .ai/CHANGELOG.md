@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-08-17
+
+**Agent:** Claude Code (macOS，本地会话)
+**Session:** v1.23 维保展示板生产发布（PR #254 → main `bd867a7`）＋ 发布阻断修复 ＋ 卡墙 R5 回归修复
+
+**Changed:**
+- `docker-compose.yml` — **发布阻断修复**：app 服务补透传 `MAINTENANCE_BOSS_DASHBOARD_ENABLED`（此前容器内恒 unset，发布 deploy 闸门必 FATAL、总闸永远翻不开；生产容器实测确认）。同步登记 `.env.example` / `backend/.env.example`
+- `backend/tests/test_v120_release_control.py` — uv 供应链闸门测试兼容自托管 runner（`8fc3b9c`/`159efd5` 迁移后 setup-uv action 已移除，版本锁由 runner 侧二进制校验承担；main 上长期红）
+- `.deploy/v122_collection_reminders_static_test.py` — 迁移头断言改为「单头＋v1.22 区间端点在链」（原写死 `c8e2a4f6b1d3`，被 v1.23 推进到 `d6e1f4a8c3b5` 后必失败）
+- `.deploy/v123_maintenance_boss_release.sh` — 去掉 `compose run --no-build`（生产机 Ubuntu 打包版 compose 2.40.3+ds1 的 `run` 无此参数；发布时以 `unknown flag` 安全失败后打补丁放行）
+- `docs/releases/v1.23-deploy-plan.md` — §0.1 发布前复核发现（6 项）＋ §3 补「构建新镜像」步骤 ＋ §4 全程执行结果回填
+- `frontend/src/pages/maintenance/MaintenanceHomePage.tsx` + `ProjectCard.tsx` — **R5 回归修复**：卡墙筛选器补「期限缺失」档＋卡片「期限缺失」标签＋空态指引。生产 415 个项目 lifecycle 全 missing（台账未导入），原筛选器只有进行中/已结束两档 → 整面卡墙无声全空。默认仍「进行中」（#37 业务口径不动）
+
+**生产发布（2026-08-17 上午，relay-vps）：**
+- 生产代码 `ab42005` → `bd867a7`（一次性追平 main，跨 143,665 行）；DB `c8e2a4f6b1d3` → `d6e1f4a8c3b5`（15 条迁移 2.4s）
+- 七阶段闸门全过：preflight → backup（39MB，`pg_restore --list` 988 条目验证可恢复）→ migrate → deploy（停机约 3s，总闸读回 false）→ canary（读回 true，展示板端点 404→401）→ observe 30 分钟（6 次采样全绿）→ commit-release
+- `.env`：`MAINTENANCE_BETA_ENABLED` → false；新增 `MAINTENANCE_BOSS_DASHBOARD_ENABLED`（canary 后 true）；`REPLENISHMENT_BETA_ENABLED`／`MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED` 保持 true（后者与审计 §2 2b 的偏离已记录，业务拍板保持）
+- 权限：91 账号＋7 角色模板两个新键全部 fail-closed 回填 false（生产读回核验）
+
+**验证：**
+- 后端 CI `3529 passed`（70 分钟；一次 `test_pytest_run_isolation` 偶发＝main 既有、重跑过；一次 runner 断网）；前端 tsc/build/vitest 绿
+- R5 修复：相关 12 文件 98 tests 绿 + tsc 干净
+
+**Notes:**
+- 存档 issue：#255（凭证落盘顺序 P1，beta 闸后不可达）、#256（对账分页 P2，同）、#257（`LLM_MAPPING_EXTERNAL_ENABLED`/`ENABLE_AGENT` 未透传）
+- 演练脚本用 `docker run -e` 绕开 compose，因此 compose 层缺陷（透传缺失、参数不兼容）演练测不到——后续发布前置检查清单见 deploy-plan §4.3
+- 台账首次导入生产仍未完成（plan M2-4 验收项）：完成前卡墙默认「进行中」为空属预期，项目在「期限缺失」档可见
+
+---
+
 ## 2026-08-13
 
 **Agent:** Claude Code (WSL Ubuntu 26.04)

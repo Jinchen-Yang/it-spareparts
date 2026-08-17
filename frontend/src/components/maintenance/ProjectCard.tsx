@@ -86,6 +86,8 @@ export function ProjectCard({ row }: ProjectCardProps) {
         </Title>
         <Space size={4} wrap>
           {status ? <Tag color={status.color}>{status.label}</Tag> : null}
+          {/* R5：台账没给项目周期时以明确状态示人，不让卡片看起来「什么都没说」 */}
+          {!isBucket && row.lifecycle === "missing" ? <Tag>期限缺失</Tag> : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
           {row.pre_delivery_order_count > 0 ? (
             <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>

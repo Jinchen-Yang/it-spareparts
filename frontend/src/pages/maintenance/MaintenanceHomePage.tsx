@@ -31,7 +31,10 @@ const { RangePicker } = DatePicker;
 
 const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
 
-type LifecycleFilter = "ongoing" | "ended";
+// missing＝台账未提供项目周期（plan v1.3 R5：期限缺失要以明确状态可见，而非空白）。
+// 台账导入生产之前 415 个项目全部 missing——若筛选器没有这一档，整面卡墙会
+// 无声全空，用户无从区分「没项目」和「周期未维护」。默认仍是进行中（#37）。
+type LifecycleFilter = "ongoing" | "ended" | "missing";
 
 /**
  * 维保主页（项目卡墙）——页面定稿两页之一（REQUIREMENTS #33/#34/#35/#37/#38）。
@@ -125,6 +128,7 @@ export function MaintenanceHomePage() {
             options={[
               { label: "进行中", value: "ongoing" },
               { label: "已结束", value: "ended" },
+              { label: "期限缺失", value: "missing" },
             ]}
           />
           <Select
@@ -192,7 +196,13 @@ export function MaintenanceHomePage() {
       </Row>
 
       {!rows.length && !loading ? (
-        <Empty description="没有符合条件的项目" />
+        <Empty
+          description={
+            lifecycle === "missing"
+              ? "没有符合条件的项目"
+              : "没有符合条件的项目；若项目台账尚未导入，项目周期无从判定，请切换「期限缺失」查看"
+          }
+        />
       ) : null}
 
       <div ref={sentinel} style={{ textAlign: "center", padding: 12 }}>
