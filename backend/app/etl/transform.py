@@ -14,7 +14,7 @@ from app import config, tax_policy
 from app.etl import anomaly, cleaner, mapping
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
-SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive"})
+SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress"})
 
 
 @dataclass
@@ -405,12 +405,21 @@ def _clip(s: str | None, limit: int = 64) -> str | None:
 
 
 def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
-    """报销明细（费用侧，§17.3 来源无关宽松口径）：单表平铺，行级金额，行行独立（无 ffill）。
+    """报销明细（费用侧，§17.3 来源无关宽松口径）：单表平铺，行级金额，头级字段块内继承。
 
-    必需列仅 报销日期 + 报销金额。行分拣：
-      - 两者皆空/只有日期 → 跳过（rows_skipped_no_data，空行）
-      - 有金额但缺日期：任一文本格含「合计」→ 跳过（导出件合计行）；否则 **missing_date 错误**
-        ——半截行必须响，不许静默丢（对账口径）
+    真实氚云导出（生产批次 #168 实锤）是「头行＋明细延续行」结构：头行带费用单号/
+    报销日期/人员/事由/销售订单，同一张报销单的后续明细行这些头级格留空（Excel
+    「同上」习惯），只有行级明细金额。原「行行独立（无 ffill）」口径把延续行全判
+    missing_date——97 行只进 14 行。现口径：
+      - **头行**（报销日期非空）：快照头级字段，供后续延续行继承；
+      - **延续行**（有明细金额、头级全空）：继承上方头行的 日期/单号/人员/事由/
+        类别/销售订单/流程状态；行级明细列（报销明细.*）不继承；
+      - 文件开头无头可承的孤行仍报 missing_date；**新单据块首行有单号却没日期**
+        同样报错并作废旧快照——绝不跨单据块继承日期（宁缺毋错）。
+    行分拣（其余不变）：
+      - 金额全空/只有日期 → 跳过（rows_skipped_no_data，空行）
+      - 有金额但缺日期且无头可承：任一文本格含「合计」→ 跳过（导出件合计行）；
+        否则 **missing_date 错误**——半截行必须响，不许静默丢（对账口径）
     归集键：行级 维保销售订单/销售订单 > 页级锚(anchor)；皆无 → 错误行。
     幂等键（§17.4，生产 f_project_expense 为空表，无历史键兼容包袱）：
       1. 报销明细.数据ID（氚云原生，实际已无此来源，保留兼容）
@@ -424,6 +433,11 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
     full_map = {**mapping.EXPENSE_HEAD, **mapping.EXPENSE_LINE}
     content_seen: dict[str, int] = {}
     composite_seen: set[tuple] = set()
+    # 延续行可继承的头级列（仅头级；报销明细.* 行级列绝不继承）
+    _HEAD_COLS = ("报销日期", "费用单号", "单号", "报销单号", "数据标题",
+                  "报销人员", "申请人", "支出事由", "报销主题",
+                  "报销类别", "费用类型", "维保销售订单", "销售订单", "流程状态")
+    head_ctx: dict[str, object] = {}
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -437,6 +451,23 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             return None
 
         raw_date = gv("报销日期")
+        is_continuation = False
+        if raw_date is not None or gv("费用单号", "单号", "报销单号") is not None:
+            # 头行（有日期或有单号）：快照头级字段（只存非空格）。在途单（审批未
+            # 完成、日期未生成）的头行也快照——快照里没有「报销日期」键，延续行
+            # 不会错误继承旧单日期，但能拿到流程状态按「在途」归类。
+            head_ctx = {c: gv(c) for c in _HEAD_COLS if gv(c) is not None}
+
+        def gvh(*names):
+            """头级字段读取：本行为延续行时回退到头行快照（行级列不走此函数）。"""
+            v = gv(*names)
+            if v is not None:
+                return v
+            if is_continuation:
+                for n in names:
+                    if n in head_ctx:
+                        return head_ctx[n]
+            return None
         raw_amount = gv("报销明细.报销金额", "报销金额")
         raw_amount_ex = gv(
             "报销明细.报销金额（未税）",
@@ -460,10 +491,33 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             if "合计" in texts:
                 res.rows_skipped_no_data += 1      # 导出件/手填的合计行
                 continue
-            res.errors.append(ErrorRec(row_no, "missing_date",
-                                       "该行有金额但缺报销日期（日期不允许留空「同上」，请补齐）",
-                                       _row_dict(row, full_map)))
-            continue
+            if head_ctx.get("报销日期") is not None:
+                # 延续行：继承上方头行日期（同一报销单的明细，「同上」语义）
+                raw_date = head_ctx["报销日期"]
+                is_continuation = True
+            else:
+                # 无日期可继承：区分「在途单」与「真孤行」。流程状态非生效
+                # （如「进行中」＝审批未走完，氚云尚未生成报销日期）是预期内
+                # 状态——软标记不计错误数（同 empty_pn_inactive 惯例）；单据
+                # 走完审批后重新导出上传，快照 upsert 自然计入。
+                status = cleaner.clean_str(gv("流程状态")) or cleaner.clean_str(
+                    head_ctx.get("流程状态"))
+                head_no = (cleaner.clean_str(gv("费用单号", "单号", "报销单号"))
+                           or cleaner.clean_str(head_ctx.get("费用单号")))
+                if status and status != config.MAINT_EXPENSE_ACTIVE_STATUS:
+                    tail = f"（{head_no}）" if head_no else ""
+                    res.errors.append(ErrorRec(
+                        row_no, "missing_date_in_progress",
+                        f"报销单{tail}流程状态为「{status}」，报销日期尚未生成，"
+                        "本次跳过；审批完成后重新导出上传即会计入（可忽略）",
+                        _row_dict(row, full_map)))
+                else:
+                    res.errors.append(ErrorRec(
+                        row_no, "missing_date",
+                        "该行有金额但缺报销日期，且上方没有可继承的头行"
+                        "（同一报销单的明细行日期可留空「同上」；孤行请补齐日期）",
+                        _row_dict(row, full_map)))
+                continue
         try:
             expense_date = cleaner.parse_date(raw_date)
             amount = cleaner.parse_money(
@@ -654,20 +708,21 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
         amount_ex_tax = tax_policy.round_money(amount_ex_tax)
         amount_inc_tax = tax_policy.round_money(amount_inc_tax)
 
-        xsdd = _clip(cleaner.clean_str(gv("维保销售订单", "销售订单")) or anchor)
+        # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv
+        xsdd = _clip(cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor)
         if not xsdd:
             res.errors.append(ErrorRec(row_no, "missing_link",
                                        "缺少销售订单(XSDD)：行内无该列且工作表无「销售订单」锚",
                                        _row_dict(row, full_map)))
             continue
 
-        title = cleaner.clean_str(gv("数据标题"))
+        title = cleaner.clean_str(gvh("数据标题"))
         m = _BXD_RX.search(title or "")
         bxd_no = _clip(m.group(0) if m
-                       else cleaner.clean_str(gv("单号", "费用单号", "报销单号")))
+                       else cleaner.clean_str(gvh("单号", "费用单号", "报销单号")))
         line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
-        person = _clip(cleaner.clean_str(gv("报销人员", "申请人")))
-        reason = cleaner.clean_str(gv("支出事由", "报销主题"))
+        person = _clip(cleaner.clean_str(gvh("报销人员", "申请人")))
+        reason = cleaner.clean_str(gvh("支出事由", "报销主题"))
 
         raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
         if not raw_line:
@@ -693,11 +748,11 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
 
         res.lines.append({
             "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
-            "data_status": _clip(cleaner.clean_str(gv("流程状态")), 16)
+            "data_status": _clip(cleaner.clean_str(gvh("流程状态")), 16)
                            or config.MAINT_EXPENSE_ACTIVE_STATUS,
             "expense_date": expense_date,
             "person": person,
-            "expense_type": _clip(cleaner.clean_str(gv("报销类别", "费用类型"))),
+            "expense_type": _clip(cleaner.clean_str(gvh("报销类别", "费用类型"))),
             "fee_category": _clip(cleaner.clean_str(gv("报销明细.费用分类", "费用分类"))),
             "reason": reason,
             "linked_sales_order_no": xsdd,

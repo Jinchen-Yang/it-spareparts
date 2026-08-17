@@ -326,6 +326,7 @@ export default function ImportPage() {
   // 软标记（非真错误，可忽略）→ 灰色；其余 → 红色
   const ERR_LABEL: Record<string, { label: string; color: string }> = {
     empty_pn_inactive: { label: "草稿/取消单·可忽略", color: "default" },
+    missing_date_in_progress: { label: "审批未完成·可忽略", color: "default" },
   };
   const errCols: ColumnsType<any> = [
     { title: "行号", dataIndex: "row_no", width: 80 },
