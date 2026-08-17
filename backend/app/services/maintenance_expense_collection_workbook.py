@@ -68,21 +68,30 @@ class WorkbookError(ValueError):
 @dataclass(frozen=True)
 class ExpenseUpdate:
     raw_line_id: str
-    # 金额与备注各自独立：只改备注不填金额也是一次合法回填（#47）
-    amount_ex_tax: Decimal | None
-    amount_inc_tax: Decimal | None
-    remark: str | None
+    # 2026-08-17 全面放开：所有事实列可改后回传覆盖
+    expense_date: date | None = None
+    person: str | None = None
+    expense_type: str | None = None
+    fee_category: str | None = None
+    reason: str | None = None
+    contract_no: str | None = None
+    amount_ex_tax: Decimal | None = None
+    amount_inc_tax: Decimal | None = None
+    data_status: str | None = None
+    remark: str | None = None
 
 
 @dataclass(frozen=True)
 class CollectionOp:
-    operation: str                       # CREATE | VOID
+    operation: str                       # CREATE | VOID | UPDATE
     project_contract_id: str
     contract_no: str
     report_month: date
     cumulative_amount: Decimal | None    # VOID 时为 None
     receipt_reference: str | None
     remark: str | None
+    # 2026-08-17 全面放开：非 VOID 时可覆盖状态
+    collection_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,10 +103,13 @@ class WorkbookPlan:
     @property
     def summary(self) -> dict:
         creates = sum(1 for op in self.collection_ops if op.operation == "CREATE")
+        updates = sum(1 for op in self.collection_ops if op.operation == "UPDATE")
+        voids = sum(1 for op in self.collection_ops if op.operation == "VOID")
         return {
             "expense_updates": len(self.expense_updates),
             "collection_creates": creates,
-            "collection_voids": len(self.collection_ops) - creates,
+            "collection_updates": updates,
+            "collection_voids": voids,
         }
 
 
@@ -179,8 +191,9 @@ def _build_expense_sheet(wb, db: Session, contracts) -> None:
     """04_报销订单。抽出供项目总表（六 sheet）复用，口径只此一份。"""
     expenses = _expenses(db, [c.contract_no for c in contracts])
     ws = wb.create_sheet(SHEET_EXPENSE)
+    # 2026-08-17 全面放开：除含税金额(系统计算)外所有列黄底可改
     _style_header(ws, _EXPENSE_HEADERS,
-                  [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY, _EDITABLE])
+                  [_EDITABLE] * 7 + [_EDITABLE, _READONLY, _EDITABLE, _EDITABLE])
     for expense in expenses:
         ws.append([
             expense.bxd_no or "",
@@ -206,9 +219,8 @@ def _build_collection_sheet(wb, db: Session, project_id: str, contracts) -> None
     contract_no_by_id = {c.project_contract_id: c.contract_no for c in contracts}
     latest = _latest_snapshots(db, project_id)
     ws = wb.create_sheet(SHEET_COLLECTION)
-    _style_header(ws, _COLLECTION_HEADERS,
-                  [_EDITABLE, _READONLY, _EDITABLE, _EDITABLE, _EDITABLE,
-                   _READONLY, _EDITABLE])
+    # 2026-08-17 全面放开：所有列黄底可改（含合同编号/状态）
+    _style_header(ws, _COLLECTION_HEADERS, [_EDITABLE] * 7)
     for snapshot in latest.values():
         ws.append([
             "",                                    # 操作留空=本行不动
@@ -301,11 +313,10 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             continue
         raw_line_id = _text(row[id_col - 1]) if len(row) >= id_col else ""
         if not raw_line_id:
-            # 报销行只能改金额，不能凭空新增：新报销单走氚云导入（铁律 1）
             raise WorkbookError(
                 "expense_row_not_recognized",
                 f"第 {row_no} 行不是导出的报销行——报销单只能在源系统新增，"
-                "本表只改未税金额")
+                "本表只改已有行的字段")
         expense = db.execute(
             select(FProjectExpense)
             .where(FProjectExpense.raw_line_id == raw_line_id)
@@ -313,6 +324,36 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
         if expense is None:
             raise WorkbookError("expense_not_found",
                                 f"第 {row_no} 行的报销行已不存在，请重新下载")
+
+        # 2026-08-17 全面放开：读取所有事实列
+        def _col(idx: int) -> str:
+            return _text(row[idx]) if len(row) > idx else ""
+
+        raw_date = _col(1)
+        expense_date = (
+            _date(raw_date, row_no=row_no, label="报销日期")
+            if raw_date else None
+        ) if raw_date else None
+        # 日期解析：由 _col 返回字符串，调用 _date 辅助
+        dt = None
+        if raw_date:
+            try:
+                dt = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                try:
+                    dt = datetime.strptime(raw_date, "%Y/%m/%d").date()
+                except (ValueError, TypeError):
+                    raise WorkbookError(
+                        "invalid_expense_date",
+                        f"第 {row_no} 行报销日期 {raw_date!r} 格式无效（需 YYYY-MM-DD）")
+
+        person = _col(2) or None
+        expense_type = _col(3) or None
+        fee_category = _col(4) or None
+        reason = _col(5) or None
+        contract_no = _col(6) or None
+        data_status = _col(9) or None
+
         raw_amount = row[7] if len(row) > 7 else None
         remark_col = _EXPENSE_HEADERS.index("备注")
         raw_remark = row[remark_col] if len(row) > remark_col else None
@@ -321,20 +362,38 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
         ex_tax = inc_tax = None
         if _text(raw_amount) != "":
             ex_tax = _decimal(raw_amount, label="未税金额", row_no=row_no)
-            # 正式金额列由系统算，不接受人工直填含税（REQUIREMENTS #8）。
-            # 与 CHECK 里的 round(amount_ex_tax * 1.13, 2) 同形：Postgres 的
-            # round 是四舍五入，Decimal 默认 ROUND_HALF_EVEN 会在 .005 上差一分。
             inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
             if expense.amount_ex_tax is not None and ex_tax == expense.amount_ex_tax:
-                ex_tax = inc_tax = None            # 金额无变化，不写这两列
+                ex_tax = inc_tax = None
 
-        # 金额与备注各自判断：只改备注、或只改金额，都是一次合法回填
-        if ex_tax is None and remark == (expense.remark or None):
-            continue                               # 两边都没变 → 不写库
+        # 2026-08-17 全面放开：判断任一字段是否有变化
+        changed = (
+            ex_tax is not None
+            or remark != (expense.remark or None)
+            or (dt is not None and dt != expense.expense_date)
+            or (person is not None and person != (expense.person or ""))
+            or (expense_type is not None and expense_type != (expense.expense_type or ""))
+            or (fee_category is not None and fee_category != (expense.fee_category or ""))
+            or (reason is not None and reason != (expense.reason or ""))
+            or (contract_no is not None and contract_no != (expense.linked_sales_order_no or ""))
+            or (data_status is not None and data_status != (expense.data_status or ""))
+        )
+        if not changed:
+            continue
+
         updates.append(ExpenseUpdate(
-            raw_line_id=raw_line_id, amount_ex_tax=ex_tax,
-            amount_inc_tax=inc_tax, remark=remark,
+            raw_line_id=raw_line_id,
+            expense_date=dt,
+            person=person,
+            expense_type=expense_type,
+            fee_category=fee_category,
+            reason=reason,
+            contract_no=contract_no,
+            amount_ex_tax=ex_tax,
+            amount_inc_tax=inc_tax,
+            data_status=data_status,
+            remark=remark,
         ))
     return updates
 
@@ -348,10 +407,10 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
             continue
         operation = _text(row[0]).upper()
         if operation == "":
-            continue                                   # 操作留空=本行不动
-        if operation not in ("CREATE", "VOID"):
+            continue
+        if operation not in ("CREATE", "VOID", "UPDATE"):
             raise WorkbookError("invalid_operation",
-                                f"第 {row_no} 行操作必须是 CREATE 或 VOID")
+                                f"第 {row_no} 行操作必须是 CREATE、UPDATE 或 VOID")
         contract_no = _text(row[1])
         contract = contracts.get(contract_no)
         if contract is None:
@@ -366,11 +425,13 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
                 f"第 {row_no} 行与前面重复：同一合同同一月份只能有一条累计快照")
         seen.add(key)
         amount = None
-        if operation == "CREATE":
+        if operation in ("CREATE", "UPDATE"):
             if _text(row[3] if len(row) > 3 else None) == "":
                 raise WorkbookError("missing_amount",
-                                    f"第 {row_no} 行 CREATE 必须填累计回款金额")
+                                    f"第 {row_no} 行 {operation} 必须填累计回款金额")
             amount = _decimal(row[3], label="累计回款金额", row_no=row_no)
+        # 2026-08-17 全面放开：状态列也可编辑
+        status_raw = _text(row[5] if len(row) > 5 else None) or None
         ops.append(CollectionOp(
             operation=operation,
             project_contract_id=contract.project_contract_id,
@@ -379,6 +440,7 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
             cumulative_amount=amount,
             receipt_reference=_text(row[4] if len(row) > 4 else None) or None,
             remark=_text(row[6] if len(row) > 6 else None) or None,
+            collection_status=status_raw,
         ))
     return ops
 
@@ -393,15 +455,27 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             select(FProjectExpense)
             .where(FProjectExpense.raw_line_id == update.raw_line_id)
         ).scalar_one()
+        # 2026-08-17 全面放开：所有事实列可回传覆盖
+        if update.expense_date is not None and update.expense_date != expense.expense_date:
+            expense.expense_date = update.expense_date
+        if update.person is not None and update.person != (expense.person or ""):
+            expense.person = update.person
+        if update.expense_type is not None and update.expense_type != (expense.expense_type or ""):
+            expense.expense_type = update.expense_type
+        if update.fee_category is not None and update.fee_category != (expense.fee_category or ""):
+            expense.fee_category = update.fee_category
+        if update.reason is not None and update.reason != (expense.reason or ""):
+            expense.reason = update.reason
+        if update.contract_no is not None and update.contract_no != (expense.linked_sales_order_no or ""):
+            expense.linked_sales_order_no = update.contract_no
         if update.amount_ex_tax is not None:
-            # 三个字段必须一起改：f_project_expense 有两条 CHECK 锁死
-            # 「amount = 该 basis 对应的那一列」与「含税 = round(未税×1.13, 2)」。
-            # amount 保留操作者实际填入的原值（这里就是未税），审计可追。
             expense.amount = update.amount_ex_tax
             expense.amount_ex_tax = update.amount_ex_tax
             expense.amount_inc_tax = update.amount_inc_tax
-            expense.tax_basis = "ex"        # 人工填的是未税，含税为系统计算值
-        expense.remark = update.remark      # 备注独立于金额（#47），清空即置 None
+            expense.tax_basis = "ex"
+        if update.data_status is not None and update.data_status != (expense.data_status or ""):
+            expense.data_status = update.data_status
+        expense.remark = update.remark
 
     for op in plan.collection_ops:
         existing = db.execute(
@@ -418,6 +492,20 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             existing.status = "void"
             existing.version += 1
             continue
+        if op.operation == "UPDATE":
+            if existing is None:
+                raise WorkbookError(
+                    "update_target_missing",
+                    f"{op.contract_no} {op.report_month:%Y-%m} 没有可更新的快照")
+            existing.cumulative_amount = op.cumulative_amount
+            existing.receipt_reference = op.receipt_reference
+            existing.remark = op.remark
+            if op.collection_status is not None:
+                existing.status = op.collection_status
+            existing.source = "workbook"
+            existing.import_batch_id = import_batch_id
+            existing.version += 1
+            continue
         if existing is None:
             db.add(MaintenanceCollectionSnapshot(
                 collection_id=str(uuid4()),
@@ -425,7 +513,7 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
                 project_contract_id=op.project_contract_id,
                 report_month=op.report_month,
                 cumulative_amount=op.cumulative_amount,
-                status="confirmed",
+                status=op.collection_status or "confirmed",
                 receipt_reference=op.receipt_reference,
                 remark=op.remark,
                 source="workbook",
@@ -434,7 +522,7 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             ))
         else:
             existing.cumulative_amount = op.cumulative_amount
-            existing.status = "confirmed"
+            existing.status = op.collection_status or "confirmed"
             existing.receipt_reference = op.receipt_reference
             existing.remark = op.remark
             existing.source = "workbook"

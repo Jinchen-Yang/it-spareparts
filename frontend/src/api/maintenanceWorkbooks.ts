@@ -104,6 +104,33 @@ export const listProjectExpenseRows = async (projectId: string) => {
   return resp.data;
 };
 
+/** 03_备件订单 行级（PN）只读数据源——备件成本 tab 的 web 呈现（2026-08-17）。 */
+export interface ProjectPartsRow {
+  line_id: number;
+  order_no: string;
+  order_date: string | null;
+  sales_order_no: string;
+  project_raw: string;
+  pn_std: string;
+  description: string;
+  qty: number | null;
+  return_qty: number | null;
+  serial_numbers: string;
+  warehouse: string;
+  cost_source: string;
+  unit_cost_ex_tax: number | null;
+  unit_cost_inc_tax: number | null;
+  change_reason: string;
+}
+
+export const listProjectPartsRows = async (projectId: string) => {
+  const resp = await api.get<{ sheet: string; total: number; rows: ProjectPartsRow[] }>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/rows`,
+    { params: { sheet: SHEETS.parts } },
+  );
+  return resp.data;
+};
+
 /** 浏览器落盘：后端返回的是 attachment，这里只负责触发保存。 */
 export function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);

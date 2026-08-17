@@ -98,6 +98,13 @@ class CostRefill:
 class SiteReturnFlag:
     issue_line_id: str
     no_return: bool | None
+    # 2026-08-17 全面放开：可回传覆盖的领用事实
+    issue_no: str | None = None
+    issue_date: date | None = None
+    pn: str | None = None
+    serial_number: str | None = None
+    quantity: Decimal | None = None
+    remark: str | None = None
 
 
 @dataclass(frozen=True)
@@ -236,8 +243,9 @@ def _sheet_overview(wb, db: Session, project: MaintenanceProject,
 
 def _sheet_parts(wb, db: Session, lines, *, project_name_by_id=None) -> None:
     ws = wb.create_sheet(SHEET_PARTS)
+    # 2026-08-17 全面放开：未税单价+含税单价+变更原因 三列黄底可改
     _style(ws, _PARTS_HEADERS,
-           [_READONLY] * 11 + [_EDITABLE, _READONLY, _EDITABLE])
+           [_READONLY] * 11 + [_EDITABLE, _EDITABLE, _EDITABLE])
     for ln, order, _pid in lines:
         ws.append([
             order.order_no, order.order_date.isoformat() if order.order_date else "",
@@ -253,7 +261,8 @@ def _sheet_parts(wb, db: Session, lines, *, project_name_by_id=None) -> None:
 
 def _sheet_site(wb, db: Session, project_id: str) -> None:
     ws = wb.create_sheet(SHEET_SITE)
-    _style(ws, _SITE_HEADERS, [_READONLY] * 5 + [_EDITABLE, _EDITABLE])
+    # 2026-08-17 全面放开：所有列黄底可改
+    _style(ws, _SITE_HEADERS, [_EDITABLE] * 7)
     rows = db.execute(
         select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
         .join(MaintenanceSiteIssue,
@@ -360,7 +369,8 @@ def _decimal(value, *, label: str, row_no: int) -> Decimal:
 
 def _parse_cost_refills(db: Session, ws, *, headers: list[str],
                         cost_col: int, reason_col: int) -> list[CostRefill]:
-    """缺价补录：只认隐藏列里的 line_id，未填金额的行原样不动。"""
+    """缺价补录：只认隐藏列里的 line_id，未填金额的行原样不动。
+    2026-08-17 全面放开：含税单价也可直接填写。"""
     key_col = len(headers) + 1
     out: list[CostRefill] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -371,19 +381,32 @@ def _parse_cost_refills(db: Session, ws, *, headers: list[str],
             raise WorkbookError(
                 "line_not_recognized",
                 f"第 {row_no} 行不是导出的备件行——需求单只能由氚云导入，本表只补价")
-        value = row[cost_col - 1] if len(row) >= cost_col else None
-        if ec._text(value) == "":
+        raw_ex = row[cost_col - 1] if len(row) >= cost_col else None
+        # 含税单价列（紧跟未税之后）
+        inc_col = cost_col + 1
+        raw_inc = row[inc_col - 1] if len(row) >= inc_col else None
+        has_ex = ec._text(raw_ex) != ""
+        has_inc = ec._text(raw_inc) != ""
+        if not has_ex and not has_inc:
             continue
-        ex_tax = _decimal(value, label="未税单位成本", row_no=row_no)
         line = db.get(FMaintenanceLine, int(raw_key))
         if line is None:
             raise WorkbookError("line_not_found",
                                 f"第 {row_no} 行的备件行已不存在，请重新下载")
+        if has_ex:
+            ex_tax = _decimal(raw_ex, label="未税单位成本", row_no=row_no)
+            inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            # 只填含税 → 推算未税
+            inc_val = _decimal(raw_inc, label="含税单位成本", row_no=row_no)
+            inc_tax = inc_val
+            ex_tax = (inc_val / (Decimal("1") + TAX_RATE)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
         out.append(CostRefill(
             line_id=line.id,
             unit_cost_ex_tax=ex_tax,
-            unit_cost_inc_tax=(ex_tax * (Decimal("1") + TAX_RATE))
-            .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            unit_cost_inc_tax=inc_tax,
             reason=ec._text(row[reason_col - 1]) or None
             if len(row) >= reason_col else None,
         ))
@@ -391,6 +414,7 @@ def _parse_cost_refills(db: Session, ws, *, headers: list[str],
 
 
 def _parse_site_flags(db: Session, ws) -> list[SiteReturnFlag]:
+    """2026-08-17 全面放开：06 所有列可改后回传覆盖。"""
     key_col = len(_SITE_HEADERS) + 1
     out: list[SiteReturnFlag] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -400,13 +424,44 @@ def _parse_site_flags(db: Session, ws) -> list[SiteReturnFlag]:
         if not raw_key:
             raise WorkbookError("line_not_recognized",
                                 f"第 {row_no} 行不是导出的领用行")
-        text = ec._text(row[5]) if len(row) > 5 else ""
-        if text == "":
-            continue                       # 留空＝继承项目默认，不写库
-        if text not in ("是", "否"):
-            raise WorkbookError("invalid_flag",
-                                f"第 {row_no} 行「是否应返还」只能填 是 / 否")
-        out.append(SiteReturnFlag(issue_line_id=raw_key, no_return=(text == "否")))
+
+        issue_no = ec._text(row[0]) if len(row) > 0 and ec._text(row[0]) else None
+        raw_date = ec._text(row[1]) if len(row) > 1 else ""
+        parsed_date = None
+        if raw_date:
+            from datetime import datetime as dt_cls
+            try:
+                parsed_date = dt_cls.strptime(raw_date, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                try:
+                    parsed_date = dt_cls.strptime(raw_date, "%Y/%m/%d").date()
+                except (ValueError, TypeError):
+                    parsed_date = None
+        pn = ec._text(row[2]) if len(row) > 2 and ec._text(row[2]) else None
+        sn = ec._text(row[3]) if len(row) > 3 and ec._text(row[3]) else None
+        raw_qty = row[4] if len(row) > 4 else None
+        qty = _decimal(raw_qty, label="领用数量", row_no=row_no) if ec._text(raw_qty) != "" else None
+        raw_flag = ec._text(row[5]) if len(row) > 5 else ""
+        no_return: bool | None = None
+        if raw_flag != "":
+            if raw_flag not in ("是", "否"):
+                raise WorkbookError("invalid_flag",
+                                    f"第 {row_no} 行「是否应返还」只能填 是 / 否")
+            no_return = raw_flag == "否"
+        remark = ec._text(row[6]) if len(row) > 6 and ec._text(row[6]) else None
+        # 至少有一个字段变化才记录
+        if no_return is None and remark is None and parsed_date is None and pn is None and sn is None and qty is None and issue_no is None:
+            continue
+        out.append(SiteReturnFlag(
+            issue_line_id=raw_key,
+            no_return=no_return,
+            issue_no=issue_no,
+            issue_date=parsed_date,
+            pn=pn,
+            serial_number=sn,
+            quantity=qty,
+            remark=remark,
+        ))
     return out
 
 
@@ -487,6 +542,23 @@ def apply(db: Session, plan: MasterPlan, *, operated_by: str,
             raise WorkbookError("line_not_found",
                                 f"领用行 {flag.issue_line_id} 已不存在，请重新下载")
         line.no_return = flag.no_return
+        # 2026-08-17 全面放开：领用行级字段覆盖
+        if flag.pn is not None:
+            line.pn = flag.pn
+        if flag.serial_number is not None:
+            line.serial_number = flag.serial_number
+        if flag.quantity is not None:
+            line.quantity = flag.quantity
+        if flag.remark is not None:
+            line.remark = flag.remark
+        # 现场领用单头字段（issue_no/issue_date）需要通过关联的单头更新
+        if flag.issue_no is not None or flag.issue_date is not None:
+            issue = db.get(MaintenanceSiteIssue, line.issue_id)
+            if issue is not None:
+                if flag.issue_no is not None:
+                    issue.issue_no = flag.issue_no
+                if flag.issue_date is not None:
+                    issue.issue_date = flag.issue_date
 
     if plan.inner is not None:
         ec.apply(db, plan.inner, operated_by=operated_by,

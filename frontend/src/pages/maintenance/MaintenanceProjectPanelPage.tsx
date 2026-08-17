@@ -32,12 +32,13 @@ import {
   getBoardProjectOrders,
   searchBoardProjects,
 } from "../../api/maintenanceBossBoard";
-import type { ProjectExpenseRow } from "../../api/maintenanceWorkbooks";
+import type { ProjectExpenseRow, ProjectPartsRow } from "../../api/maintenanceWorkbooks";
 import {
   SHEETS,
   applyProjectMaster,
   downloadProjectMaster,
   listProjectExpenseRows,
+  listProjectPartsRows,
 } from "../../api/maintenanceWorkbooks";
 import {
   getMaintenanceProject,
@@ -53,6 +54,11 @@ import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
 const { Text, Title } = Typography;
+
+/** 导出文件名片段清洗：去掉路径/非法字符，避免项目名破坏文件名（2026-08-17）。 */
+function safeFilenamePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|\r\n\t]+/g, "_").trim().replace(/\.+$/, "") || "项目";
+}
 
 /** 数值渲染：非 ready 状态一律说人话，绝不落回 0（铁律 5）。 */
 function statText(stat: { state: string; value: unknown } | undefined): string {
@@ -124,6 +130,13 @@ export function MaintenanceProjectPanelPage() {
   const perms = readPermissionMap();
   const canUpload = !!perms.action_maintenance_expense_collection_upload;
   const canManageProject = !!perms.action_maintenance_project_manage;
+
+  // 下载文件名 = XSDD销售订单号（取第一个） + 维保项目名 + 表单类型（2026-08-17）
+  const exportBase = (() => {
+    const xsdd = row?.contract_nos?.[0] ?? project?.project_code ?? projectId;
+    const name = row?.display_name ?? project?.display_name ?? projectId;
+    return `${xsdd}-${safeFilenamePart(name)}`;
+  })();
 
   const loadProject = useCallback(async () => {
     setLoading(true);
@@ -222,7 +235,7 @@ export function MaintenanceProjectPanelPage() {
         <WorkbookRoundTrip
           size="small"
           title={label}
-          filename={`${projectId}-${sheet}.xlsx`}
+          filename={`${exportBase}-${sheet}.xlsx`}
           canUpload={canUpload}
           hint="在哪下载就在哪上传：本页只回填本表的黄底列"
           onDownload={() => downloadProjectMaster(projectId, [sheet])}
@@ -276,7 +289,7 @@ export function MaintenanceProjectPanelPage() {
             <WorkbookRoundTrip
               size="small"
               title="本项目总表"
-              filename={`${projectId}-master.xlsx`}
+              filename={`${exportBase}-总表.xlsx`}
               canUpload={canUpload}
               hint="六 sheet 一次下载，回填后整份上传覆盖"
               onDownload={() => downloadProjectMaster(projectId)}
@@ -318,6 +331,7 @@ export function MaintenanceProjectPanelPage() {
             children: (
               <BasicsTab
                 projectId={projectId}
+                exportBase={exportBase}
                 row={row}
                 project={project}
                 canUpload={canUpload}
@@ -326,12 +340,22 @@ export function MaintenanceProjectPanelPage() {
               />
             ),
           },
-          sheetTab("备件成本", SHEETS.parts),
+          {
+            key: SHEETS.parts,
+            label: "备件成本",
+            children: (
+              <PartsTab
+                projectId={projectId}
+                exportBase={exportBase}
+                canUpload={canUpload}
+              />
+            ),
+          },
           {
             key: SHEETS.expense,
             label: "报销",
             children: (
-              <ExpenseTab projectId={projectId} canUpload={canUpload} />
+              <ExpenseTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
             ),
           },
           sheetTab("回款", SHEETS.collection),
@@ -344,9 +368,11 @@ export function MaintenanceProjectPanelPage() {
 /** 报销 tab：04 表的 web 呈现（含备注，#47）+ 下载上传。只展示，不散改。 */
 function ExpenseTab({
   projectId,
+  exportBase,
   canUpload,
 }: {
   projectId: string;
+  exportBase: string;
   canUpload: boolean;
 }) {
   const [rows, setRows] = useState<ProjectExpenseRow[]>([]);
@@ -372,7 +398,7 @@ function ExpenseTab({
       <WorkbookRoundTrip
         size="small"
         title="报销"
-        filename={`${projectId}-04.xlsx`}
+        filename={`${exportBase}-${SHEETS.expense}.xlsx`}
         canUpload={canUpload}
         hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
@@ -406,9 +432,89 @@ function ExpenseTab({
 }
 
 
+/** 备件成本 tab：03_备件订单 的 web 呈现（PN 行级，2026-08-17）+ 下载上传。 */
+function PartsTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<ProjectPartsRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setRows((await listProjectPartsRows(projectId)).rows);
+    } catch (err) {
+      message.error(readError(err, "备件订单明细加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="备件成本"
+        filename={`${exportBase}-${SHEETS.parts}.xlsx`}
+        canUpload={canUpload}
+        hint="在哪下载就在哪上传：黄底的「未税单价」「含税单价」「变更原因」可改"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();          // 上传覆盖后立刻回读，页面不留旧值
+          return result;
+        }}
+      />
+      <Table<ProjectPartsRow>
+        rowKey="line_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        scroll={{ x: 1200 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无备件订单明细" }}
+        columns={[
+          { title: "维保单号", dataIndex: "order_no", render: raw },
+          { title: "制单日期", dataIndex: "order_date", render: raw },
+          { title: "合同编号", dataIndex: "sales_order_no", render: raw },
+          { title: "PN", dataIndex: "pn_std", render: raw },
+          { title: "产品描述", dataIndex: "description", render: raw, ellipsis: true },
+          { title: "需求数量", dataIndex: "qty", render: raw },
+          { title: "退货数量", dataIndex: "return_qty", render: raw },
+          { title: "出库仓库", dataIndex: "warehouse", render: raw },
+          { title: "成本来源", dataIndex: "cost_source", render: raw },
+          {
+            title: "未税单价",
+            render: (_: unknown, line) =>
+              line.unit_cost_ex_tax == null ? "—" : `¥${line.unit_cost_ex_tax.toFixed(2)}`,
+          },
+          {
+            title: "含税单价",
+            render: (_: unknown, line) =>
+              line.unit_cost_inc_tax == null ? "—" : `¥${line.unit_cost_inc_tax.toFixed(2)}`,
+          },
+          { title: "变更原因", dataIndex: "change_reason", render: raw },
+        ]}
+      />
+    </Space>
+  );
+}
+
+
 /** 基础信息 tab：表 6 sheet 01 的 web 呈现 + 归属挂靠（#39/#45）。 */
 function BasicsTab({
   projectId,
+  exportBase,
   row,
   project,
   canUpload,
@@ -416,6 +522,7 @@ function BasicsTab({
   onAssigned,
 }: {
   projectId: string;
+  exportBase: string;
   row: BoardProjectRow | null;
   /** stable 目录的基础信息——boss-board 聚合行缺位时的回退源（数据源不同，字段较少）。 */
   project: MaintenanceProject | null;
@@ -467,7 +574,7 @@ function BasicsTab({
       <WorkbookRoundTrip
         size="small"
         title="基础信息表"
-        filename={`${projectId}-01.xlsx`}
+        filename={`${exportBase}-${SHEETS.basics}.xlsx`}
         canUpload={canUpload}
         hint="01 表为只读呈现；可编辑内容在 03/04/05 各自的 tab 里回填"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.basics])}
