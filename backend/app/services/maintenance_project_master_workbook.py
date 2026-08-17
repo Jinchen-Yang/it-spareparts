@@ -644,7 +644,25 @@ class MasterV2Plan:
 
 
 def _v2_hash(values: list[object]) -> str:
-    return hashlib.sha256(json.dumps(values, ensure_ascii=False, default=str, separators=(",", ":")).encode()).hexdigest()
+    """只读事实哈希（2026-08-18 修复）：数字/日期统一归一化——
+    - 数字：导出侧 Decimal 原值 vs Excel 读回 float，str 不一致 → 统一转 float
+    - 日期：导出写 ISO 字符串，openpyxl 识别为日期后读回 datetime → 统一 strftime('%Y-%m-%d')"""
+    normalized: list[object] = []
+    for value in values:
+        if isinstance(value, bool):
+            normalized.append(value)
+        elif isinstance(value, (datetime, date)):
+            normalized.append(value.strftime("%Y-%m-%d"))
+        elif isinstance(value, Decimal):
+            normalized.append(float(value))
+        elif isinstance(value, (int, float)):
+            normalized.append(float(value))
+        else:
+            normalized.append(value)
+    return hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, default=str,
+                   separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None) -> None:
