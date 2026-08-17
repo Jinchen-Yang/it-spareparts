@@ -16,6 +16,7 @@
 - `.deploy/v123_maintenance_boss_release.sh` — 去掉 `compose run --no-build`（生产机 Ubuntu 打包版 compose 2.40.3+ds1 的 `run` 无此参数；发布时以 `unknown flag` 安全失败后打补丁放行）
 - `docs/releases/v1.23-deploy-plan.md` — §0.1 发布前复核发现（6 项）＋ §3 补「构建新镜像」步骤 ＋ §4 全程执行结果回填
 - `frontend/src/pages/maintenance/MaintenanceHomePage.tsx` + `ProjectCard.tsx` — **R5 回归修复**：卡墙筛选器补「期限缺失」档＋卡片「期限缺失」标签＋空态指引。生产 415 个项目 lifecycle 全 missing（台账未导入），原筛选器只有进行中/已结束两档 → 整面卡墙无声全空。默认仍「进行中」（#37 业务口径不动）
+- `backend/app/services/maintenance_ledger.py` + 迁移 `e8b2c6f4d1a7` — **#50 项目周期从名称提取**（业务指示 08-17）：新增 `_period_from_display_name`（8 位日起止为主、支持 `-`/`~`/空格连接符与 6 位年月段）＋`_resolve_lifecycle`（台账权威、名称兜底）；迁移对存量 missing 项目一次性回填（纯数据 UPDATE 零 DDL，自包含解析副本）。生产名称干跑：373/415 回填（152 ongoing＋221 ended），42 保持 missing（真无周期/笔误）。两副本对全部 415 名称输出逐一验证一致
 
 **生产发布（2026-08-17 上午，relay-vps）：**
 - 生产代码 `ab42005` → `bd867a7`（一次性追平 main，跨 143,665 行）；DB `c8e2a4f6b1d3` → `d6e1f4a8c3b5`（15 条迁移 2.4s）

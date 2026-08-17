@@ -437,3 +437,67 @@ def test_apply_orphan_plan_row_fail_closed(db):
     # 零 canonical 写入
     assert db.execute(select(MaintenanceProject)).scalars().first() is None
     assert db.execute(select(MaintenanceCollectionMilestone)).scalars().first() is None
+
+
+# ---- 项目名称周期解析（REQUIREMENTS #50：周期从项目名提取，名称仅兜底源）----
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        # 生产真实命名式样：客户名+8位起-8位止+服务商+业务类型
+        ("上海图书馆20250610-20260609酷易信息备件外包", (date(2025, 6, 10), date(2026, 6, 9))),
+        # 日期段后带空格
+        ("韵达货运20240712-20251015 上海致腾 整体维保", (date(2024, 7, 12), date(2025, 10, 15))),
+        # 跨多年
+        ("北京华品博睿网络20221101-20280114北京天奕浩博整体维保", (date(2022, 11, 1), date(2028, 1, 14))),
+        # 连字符后带空格（生产实例）
+        ("北京移动网运中心20250301- 20271231云和恩墨整体外包", (date(2025, 3, 1), date(2027, 12, 31))),
+        # 波浪号连接（生产实例）
+        ("江西IT服务器20240301~20250228昆仑联通整体维保", (date(2024, 3, 1), date(2025, 2, 28))),
+        # 6 位年月段：起月首日、止月末日（生产实例）
+        ("云南电网202505-202705唐纳整体维保", (date(2025, 5, 1), date(2027, 5, 31))),
+        # 无日期段（生产确有此类）
+        ("广东省教育考试院Oracle数据库小型机负载均衡设备及存储系统运维", (None, None)),
+        # 名称笔误不救：止日期只有 7 位
+        ("黄山九章云智20260715-2070714客户直签整体维保", (None, None)),
+        # 名称笔误不救：双连字符拆散日期
+        ("鼎甲20251016-2026-1016服务器整体维保", (None, None)),
+        # 年份段（2024-2025）不是日期段，不得误吃
+        ("广州分公司2024-2025年东涌机房政务云设备维保项目", (None, None)),
+        # 非法日期：13 月
+        ("某客户20241301-20251231某服务商整体维保", (None, None)),
+        # 起止倒置
+        ("某客户20260101-20250101某服务商整体维保", (None, None)),
+        ("", (None, None)),
+        (None, (None, None)),
+    ],
+)
+def test_period_from_display_name(name, expected):
+    assert ledger._period_from_display_name(name) == expected
+
+
+def test_resolve_lifecycle_ledger_period_wins_over_name():
+    # 台账周期是权威源：即使名称写着已结束的旧周期，也按台账判 ongoing
+    today = date(2026, 8, 17)
+    status = ledger._resolve_lifecycle(
+        date(2026, 1, 1), date(2026, 12, 31),
+        "某客户20200101-20201231某服务商整体维保", today,
+    )
+    assert status == "ongoing"
+
+
+def test_resolve_lifecycle_falls_back_to_name_when_period_missing():
+    today = date(2026, 8, 17)
+    assert ledger._resolve_lifecycle(
+        None, None, "某客户20250610-20270609某服务商备件外包", today
+    ) == "ongoing"
+    assert ledger._resolve_lifecycle(
+        None, None, "某客户20240101-20241231某服务商整体维保", today
+    ) == "ended"
+    # 未来周期：起始未到 → 仍按 missing（与 _lifecycle_status 口径一致）
+    assert ledger._resolve_lifecycle(
+        None, None, "某客户20270101-20271231某服务商整体维保", today
+    ) == "missing"
+    # 名称也解析不出 → missing
+    assert ledger._resolve_lifecycle(None, None, "无期限项目", today) == "missing"
