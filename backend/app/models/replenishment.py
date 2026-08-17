@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -40,6 +41,16 @@ class ReplenishmentApplication(Base):
     # Business-system salesperson mapping is distinct from a UI nickname. The
     # snapshot prevents later profile edits from changing an approved export.
     salesperson_name_snapshot: Mapped[str | None] = mapped_column(String(128))
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_project.project_id", ondelete="RESTRICT")
+    )
+    project_code_snapshot: Mapped[str | None] = mapped_column(String(64))
+    project_name_snapshot: Mapped[str | None] = mapped_column(String(256))
+    client_request_id: Mapped[str | None] = mapped_column(String(128))
+    request_digest: Mapped[str | None] = mapped_column(String(64))
+    is_legacy_project_unbound: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default="draft", server_default="draft"
     )
@@ -69,6 +80,36 @@ class ReplenishmentApplication(Base):
             "char_length(btrim(application_no)) > 0 "
             "AND char_length(btrim(owner_username)) > 0",
             name="ck_replenishment_application_identity",
+        ),
+        CheckConstraint(
+            "(is_legacy_project_unbound AND project_id IS NULL "
+            "AND project_code_snapshot IS NULL AND project_name_snapshot IS NULL) OR "
+            "(NOT is_legacy_project_unbound AND project_id IS NOT NULL "
+            "AND project_code_snapshot IS NOT NULL "
+            "AND project_name_snapshot IS NOT NULL "
+            "AND char_length(btrim(project_code_snapshot)) > 0 "
+            "AND char_length(btrim(project_name_snapshot)) > 0)",
+            name="ck_replenishment_application_project_binding",
+        ),
+        CheckConstraint(
+            "(client_request_id IS NULL AND request_digest IS NULL) OR "
+            "(client_request_id IS NOT NULL AND request_digest IS NOT NULL "
+            "AND char_length(btrim(client_request_id)) BETWEEN 8 AND 128 "
+            "AND request_digest ~ '^[a-f0-9]{64}$')",
+            name="ck_replenishment_application_client_request",
+        ),
+        Index(
+            "ux_replenishment_application_owner_request",
+            "owner_username",
+            "client_request_id",
+            unique=True,
+            postgresql_where=client_request_id.is_not(None),
+        ),
+        Index(
+            "ix_replenishment_application_project_updated",
+            "project_id",
+            "updated_at",
+            "application_id",
         ),
         Index(
             "ix_replenishment_application_owner_updated",
@@ -124,8 +165,7 @@ class ReplenishmentApplicationVersion(Base):
             "(status = 'draft' AND content_digest IS NULL "
             "AND submitted_by IS NULL AND submitted_at IS NULL) OR "
             "(status = 'submitted' AND content_digest ~ '^[a-f0-9]{64}$' "
-            "AND char_length(btrim(submitted_by)) > 0 AND submitted_at IS NOT NULL "
-            "AND char_length(btrim(warehouse)) > 0)",
+            "AND char_length(btrim(submitted_by)) > 0 AND submitted_at IS NOT NULL)",
             name="ck_replenishment_version_submission_state",
         ),
         CheckConstraint(
@@ -169,6 +209,7 @@ class ReplenishmentApplicationLine(Base):
     purchase_stats_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     sales_stats_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    screening_json: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )

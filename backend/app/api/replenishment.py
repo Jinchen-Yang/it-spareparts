@@ -7,7 +7,6 @@ show a clear closed-state and a link back to the stable inventory page.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -104,49 +103,31 @@ def _raise_domain(exc: replenishment.ReplenishmentError) -> None:
     raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)}) from exc
 
 
+def _retired() -> None:
+    raise HTTPException(
+        status.HTTP_410_GONE,
+        {
+            "code": "retired",
+            "message": "旧补库草稿与审核流程已停用，请使用按项目一次性提交和人工复核包。",
+        },
+    )
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ApplicationCreate(StrictModel):
-    # Free text bounds are enforced in the service with generic errors. Pydantic's
-    # max_length error reflects the rejected business text in the 422 response.
-    warehouse: str | None = None
-    request_note: str | None = None
-
-
-class DraftUpdate(StrictModel):
-    expected_version: int = Field(ge=1)
-    warehouse: str | None = None
-    request_note: str | None = None
-
-
-class LineWrite(StrictModel):
-    expected_version: int = Field(ge=1)
+class AtomicLineWrite(StrictModel):
     part_id: int = Field(ge=1)
-    quantity: Decimal = Field(gt=0, le=Decimal("999999.999"), max_digits=14, decimal_places=3)
-    special_note: str | None = None
+    quantity: int = Field(ge=1, le=999999)
+    special_note: str | None = Field(None, max_length=4000)
 
 
-class VersionCommand(StrictModel):
-    expected_version: int = Field(ge=1)
-
-
-class ReviewDecision(StrictModel):
-    line_id: str = Field(min_length=36, max_length=36)
-    decision: str = Field(pattern="^(approved|rejected)$")
-    reason: str | None = None
-
-
-class ReviewWrite(StrictModel):
-    version_id: str = Field(min_length=36, max_length=36)
-    content_digest: str = Field(pattern="^[a-f0-9]{64}$")
-    idempotency_key: str = Field(min_length=8, max_length=128)
-    external_reference: str | None = None
-    summary_note: str | None = None
-    # The service validates exact submitted-line coverage without reflecting a
-    # rejected oversized decision list in FastAPI's default 422 payload.
-    decisions: list[ReviewDecision]
+class ApplicationCreate(StrictModel):
+    client_request_id: str = Field(min_length=8, max_length=128)
+    project_id: str = Field(min_length=1, max_length=36)
+    request_note: str | None = Field(None, max_length=4000)
+    lines: list[AtomicLineWrite] = Field(min_length=1, max_length=200)
 
 
 @router.get("/capabilities")
@@ -167,9 +148,14 @@ def capabilities(
             _allowed(ctx, "action_replenishment_create")
             and _allowed(ctx, "data_pool_price_governance")
         ),
-        "can_review": _allowed(ctx, "action_replenishment_review"),
+        "can_review": False,
+        "workflow_mode": "system_screening",
+        "stage": "screening_complete",
         "stable_path": "/inventory",
-        "data_contract": "仅记录补库申请，不修改库存；历史价格为未税聚合事实，不是自动定价。",
+        "data_contract": (
+            "仅记录维保项目补库申请与提交时冻结的三查事实；"
+            "不修改库存、不自动审批、不自动定价。"
+        ),
     }
 
 
@@ -193,6 +179,19 @@ def catalog(
     return replenishment.catalog_search(db, q, page=page, page_size=page_size)
 
 
+@router.get("/projects")
+def projects(
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+) -> dict:
+    _no_store(response)
+    username, role = _identity(db, ident)
+    return {"items": replenishment.available_projects(db, username=username, role=role)}
+
+
 @router.get("/applications")
 def applications(
     response: Response,
@@ -210,7 +209,7 @@ def applications(
     return replenishment.list_applications(db, username=username, role=role, page=page, page_size=page_size)
 
 
-@router.post("/applications")
+@router.post("/applications", status_code=status.HTTP_201_CREATED)
 def create_application(
     body: ApplicationCreate,
     response: Response,
@@ -221,9 +220,17 @@ def create_application(
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
-    username, _role = _identity(db, ident)
+    username, role = _identity(db, ident)
     try:
-        return replenishment.create_application(db, username=username, warehouse=body.warehouse, request_note=body.request_note)
+        return replenishment.submit_application_atomic(
+            db,
+            username=username,
+            role=role,
+            client_request_id=body.client_request_id,
+            project_id=body.project_id,
+            request_note=body.request_note,
+            lines=[line.model_dump() for line in body.lines],
+        )
     except replenishment.ReplenishmentError as exc:
         _raise_domain(exc)
 
@@ -250,189 +257,73 @@ def application_detail(
 @router.patch("/applications/{application_id}")
 def patch_application(
     application_id: str,
-    body: DraftUpdate,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.update_draft(
-            db,
-            application_id,
-            username=username,
-            role=role,
-            expected_version=body.expected_version,
-            warehouse=body.warehouse,
-            request_note=body.request_note,
-        )
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.post("/applications/{application_id}/lines")
 def add_line(
     application_id: str,
-    body: LineWrite,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.add_line(
-            db,
-            application_id,
-            username=username,
-            role=role,
-            expected_version=body.expected_version,
-            part_id=body.part_id,
-            quantity=body.quantity,
-            special_note=body.special_note,
-        )
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.patch("/applications/{application_id}/lines/{line_id}")
 def patch_line(
     application_id: str,
     line_id: str,
-    body: LineWrite,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.update_line(
-            db,
-            application_id,
-            line_id,
-            username=username,
-            role=role,
-            expected_version=body.expected_version,
-            part_id=body.part_id,
-            quantity=body.quantity,
-            special_note=body.special_note,
-        )
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.delete("/applications/{application_id}/lines/{line_id}")
 def delete_line(
     application_id: str,
     line_id: str,
-    response: Response,
-    expected_version: int = Query(..., ge=1),
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.remove_line(
-            db,
-            application_id,
-            line_id,
-            username=username,
-            role=role,
-            expected_version=expected_version,
-        )
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.post("/applications/{application_id}/submit")
 def submit_application(
     application_id: str,
-    body: VersionCommand,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.submit(db, application_id, username=username, role=role, expected_version=body.expected_version)
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.post("/applications/{application_id}/revision")
 def create_revision(
     application_id: str,
-    body: VersionCommand,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
-) -> dict:
-    _no_store(response)
-    username, role = _identity(db, ident)
-    try:
-        return replenishment.start_revision(db, application_id, username=username, role=role, expected_version=body.expected_version)
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 @router.post("/applications/{application_id}/review-results")
 def review_result(
     application_id: str,
-    body: ReviewWrite,
-    response: Response,
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    # The current endpoint is authenticated as a human system account.  Keep it behind the
-    # same account-scoped Beta allowlist as every other route so the legacy admin action
-    # bypass cannot turn the global feature flag into an implicit all-admin write grant.
-    # A future machine callback needs a separate signed integration-auth contract.
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_review")),
-) -> dict:
-    _no_store(response)
-    username, _role = _identity(db, ident)
-    if not 1 <= len(body.decisions) <= replenishment.MAX_LINES:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"审核结论条数必须为 1-{replenishment.MAX_LINES}",
-        )
-    try:
-        return replenishment.record_review(
-            db,
-            application_id,
-            reviewer=username,
-            version_id=body.version_id,
-            content_digest=body.content_digest,
-            idempotency_key=body.idempotency_key,
-            external_reference=body.external_reference,
-            summary_note=body.summary_note,
-            decisions=[item.model_dump() for item in body.decisions],
-        )
-    except replenishment.ReplenishmentError as exc:
-        _raise_domain(exc)
+) -> None:
+    _retired()
 
 
 def _excel_response(data: bytes, filename: str) -> StreamingResponse:
@@ -464,6 +355,7 @@ def export_manual_review(
         )
     ),
 ) -> StreamingResponse:
+    _retired()
     username, role = _identity(db, ident)
     _require_price_data(ctx)
     try:
@@ -515,6 +407,7 @@ def export_wbdd_subset(
         )
     ),
 ) -> StreamingResponse:
+    _retired()
     username, role = _identity(db, ident)
     _require_price_data(ctx)
     try:
@@ -544,6 +437,7 @@ def application_evidence(
 
     仅 owner/admin 可见（非 owner 与不存在同 404）；仅 approved 状态（否则 409）。
     """
+    _retired()
     _no_store(response)
     _require_price_data(ctx)
     from app.services import maintenance_replenishment_evidence as evidence
@@ -577,6 +471,7 @@ def export_purchase_list(
 
     仅 owner/admin 可见（非 owner 与不存在同 404）；仅 approved 状态（否则 409）。
     """
+    _retired()
     from app.services import maintenance_replenishment_evidence as evidence
 
     _require_price_data(ctx)

@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.main import app
 from app.models.dimensions import DimPart
 from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
+from app.models.maintenance_project import MaintenanceProject
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysImportBatch, SysUser
 from app.services import replenishment
@@ -144,6 +145,20 @@ def test_sale_outside_the_window_does_not_count(db):
     assert result.get("niche_pn").detail["is_niche"] is True
 
 
+def test_recent_activity_window_contains_exactly_182_calendar_days(db):
+    part = _part(db, pn="PN-CART-WINDOW")
+    db.commit()
+    as_of = date(2026, 8, 17)
+
+    result = screening.screen(db, part_ids=[part.id], as_of=as_of)[part.id]
+
+    window = result.get("recent_activity").detail["window"]
+    assert window == {
+        "from": (as_of - timedelta(days=screening.LOOKBACK_DAYS - 1)).isoformat(),
+        "to": as_of.isoformat(),
+    }
+
+
 def test_pool_floor_is_none_when_no_current_policy(db):
     """铁律 5：池没有当前约束价 → None（展示层渲染「—」），不用 0 顶替。"""
     part = _part(db)
@@ -171,14 +186,23 @@ def _owner(db, username="cart_owner") -> SysUser:
 
 
 def _submitted_application(db, part, owner):
-    created = replenishment.create_application(
-        db, username=owner.username, warehouse="北京前置库", request_note=None)
-    created = replenishment.add_line(
-        db, created["application_id"], username=owner.username, role=owner.role,
-        expected_version=created["version"], part_id=part.id, quantity=3)
-    return replenishment.submit(
-        db, created["application_id"], username=owner.username, role=owner.role,
-        expected_version=created["version"])
+    project = MaintenanceProject(
+        project_id=f"cart-screen-{part.id}",
+        project_code=f"CART-SCREEN-{part.id}",
+        display_name="补库导出测试项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    db.add(project)
+    db.flush()
+    return replenishment.submit_application_atomic(
+        db,
+        username=owner.username,
+        role=owner.role,
+        client_request_id=f"screening-{owner.username}-{part.id}",
+        project_id=project.project_id,
+        lines=[{"part_id": part.id, "quantity": 3}],
+    )
 
 
 def _export(db, application_id, owner) -> list[list]:
@@ -198,9 +222,10 @@ def test_export_columns_match_the_signed_list(db):
     application = _submitted_application(db, part, owner)
     rows = _export(db, application["application_id"], owner)
     headers = rows[1]
-    for expected in ("PN", "产品描述", "数量", "最近销售日期", "最近销售未税单价",
-                     "池内最低价(未税)", "与池内最低价对比",
-                     "①通用池归属", "②半年内购销记录", "③是否小众PN"):
+    for expected in ("项目编码", "项目名称", "PN", "产品描述", "数量",
+                     "最近销售日期", "最近销售未税单价", "池内最低价(未税)",
+                     "与池内最低价对比", "①当前池有效性",
+                     "②近182天购销事实", "③冷门零样本边界"):
         assert expected in headers, expected
     # 系统不建模人工审批：导出里不得出现人工结论栏（AB-4 明示）
     assert "审核结论" not in headers and "打回原因" not in headers

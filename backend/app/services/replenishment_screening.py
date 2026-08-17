@@ -1,7 +1,7 @@
 """补库购物车「系统三查」（增补包 AB-4）。
 
 业务口径（2026-08-16 确认，REQUIREMENTS #26/#27/#28）：
-销售经理选 PN＋数量 → **系统三查** → 系统审批通过 → 导出 Excel 交人工复核。
+销售经理选项目、PN 与数量 → **系统三查** → 冻结事实证据 → 导出交人工复核。
 
 三查：
 1. ``pool_membership``  通用池归属——沿用主数据双线查（并档 PN 跟随主档一跳），
@@ -74,7 +74,7 @@ class Screening:
 
 def _window(as_of: date | None) -> tuple[date, date]:
     upper = as_of or business_today()
-    return upper - timedelta(days=LOOKBACK_DAYS), upper
+    return upper - timedelta(days=LOOKBACK_DAYS - 1), upper
 
 
 def _samples(stats: dict | None) -> int:
@@ -101,8 +101,8 @@ def pool_floor_prices(db: Session, group_ids: list[int]) -> dict[int, Decimal | 
     return {gid: found.get(gid) for gid in ids}
 
 
-def screen(db: Session, *, part_ids: list[int],
-           as_of: date | None = None) -> dict[int, Screening]:
+def screen(db: Session, *, part_ids: list[int], as_of: date | None = None,
+           price_facts: dict[int, dict] | None = None) -> dict[int, Screening]:
     """对一批 PN 跑三查。只读，不写库、不改申请状态。"""
     ids = [int(v) for v in dict.fromkeys(part_ids)]
     if not ids:
@@ -112,8 +112,10 @@ def screen(db: Session, *, part_ids: list[int],
     ).all()
     pn_by_id = {pid: pn for pid, pn in parts}
     lower, upper = _window(as_of)
-    facts = pool_price_analysis.aggregate_part_price_facts(
-        db, ids, date_from=lower, date_to=upper)
+    facts = price_facts if price_facts is not None else (
+        pool_price_analysis.aggregate_part_price_facts(
+            db, ids, date_from=lower, date_to=upper)
+    )
     pools = pool_membership(db, {pn for pn in pn_by_id.values() if pn})
 
     out: dict[int, Screening] = {}
