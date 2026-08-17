@@ -105,7 +105,8 @@ const submittedApplication = {
         anomaly_count: 0,
       },
       latest_sales: null,
-      pool_floor_ex_tax: null,
+      // 后端 Decimal 序列化可能为字符串——渲染必须兼容（回归用例）
+      pool_floor_ex_tax: "1758.60",
       review: null,
     }],
     review: null,
@@ -202,6 +203,8 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(screen.getAllByText(/WX-2026-001/).length).toBeGreaterThan(0);
     expect(screen.getByText("已提交，系统三查与价格证据已冻结")).toBeInTheDocument();
     expect(screen.getByText(/三查通过/)).toBeInTheDocument();
+    // 字符串金额必须归一为数字渲染，不能崩溃
+    expect(screen.getByText(/池内最低价参考 ¥1758.60/)).toBeInTheDocument();
   });
 
   it("历史申请展示项目归属并可切换查看详情", async () => {

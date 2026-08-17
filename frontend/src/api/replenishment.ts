@@ -72,7 +72,8 @@ export interface ReplenishmentLine extends Omit<CatalogPart, "needs_review"> {
     anomaly_count: number;
   } | null;
   latest_sales: Record<string, unknown> | null;
-  pool_floor_ex_tax: number | null;
+  /** 后端 Decimal 序列化可能为字符串，展示前需 Number() 归一。 */
+  pool_floor_ex_tax: number | string | null;
   review: ReviewFeedback | null;
 }
 

@@ -85,10 +85,12 @@ function errorText(error: unknown): string {
 
 function priceText(stats: PriceStats | null, unit: string | null): string {
   if (!stats || stats.weighted_avg == null) return "半年内无有效样本";
+  const avg = Number(stats.weighted_avg);
+  if (!Number.isFinite(avg)) return "半年内无有效样本";
   const quantity = unit
     ? `${stats.total_qty ?? 0} ${unit}`
     : `数量 ${stats.total_qty ?? 0}`;
-  return `¥${stats.weighted_avg.toFixed(2)} · ${quantity} · ${stats.order_count} 单`;
+  return `¥${avg.toFixed(2)} · ${quantity} · ${stats.order_count} 单`;
 }
 
 function PriceFacts({ part }: { part: Pick<CatalogPart, "purchase" | "sales" | "price_window" | "unit"> }) {
@@ -111,15 +113,17 @@ function ScreeningSummary({ line }: { line: Pick<ReplenishmentLine, "screening" 
     .filter((check) => !check.passed)
     .map((check) => check.name)
     .join("、");
+  // 后端可能返回字符串金额（Decimal 序列化），统一转数字再展示
+  const floor = line.pool_floor_ex_tax == null ? null : Number(line.pool_floor_ex_tax);
   return (
     <div className="replenishment-screening-summary">
       <Space wrap size={4}>
         <Tag color={anomaly_count > 0 ? "orange" : "green"}>
           三查{anomaly_count > 0 ? ` ${anomaly_count} 项提示` : "通过"}
         </Tag>
-        {line.pool_floor_ex_tax != null && (
+        {floor != null && Number.isFinite(floor) && (
           <Text type="secondary" style={{ fontSize: 11 }}>
-            池内最低价参考 ¥{line.pool_floor_ex_tax.toFixed(2)}
+            池内最低价参考 ¥{floor.toFixed(2)}
           </Text>
         )}
         {!!line.latest_sales?.date && (
