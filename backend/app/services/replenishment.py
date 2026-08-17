@@ -1552,8 +1552,10 @@ def apply_revision_atomic(
         version = ReplenishmentApplicationVersion(
             version_id=_uid(), application_id=app.application_id,
             version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
-            status="submitted", request_note=previous.request_note, created_by=username,
-            submitted_by=username, submitted_at=_now(),
+            # 先 draft 插行（guard_replenishment_line_draft_only 要求行插入时版本为 draft），
+            # 全部行写入后再置 submitted（2026-08-18）
+            status="draft", request_note=previous.request_note, created_by=username,
+            submitted_by=None, submitted_at=None,
         )
         db.add(version)
         db.flush()
@@ -1580,12 +1582,18 @@ def apply_revision_atomic(
                 screening = replenishment_screening.screen(db, part_ids=[part.id], as_of=as_of, price_facts=facts)[part.id]
                 decision, reason_code = _auto_review_decision(screening)
                 pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
+                latest_sales = replenishment_screening.latest_sales_history(db, part_ids=[part.id], as_of=as_of)
+                floors = replenishment_screening.pool_floor_prices(
+                    db, [pool["group_id"]] if pool.get("group_id") else []
+                )
                 snapshot = _json_value({
                     "schema_version": 2,
                     "as_of": as_of,
                     "lookback_days": PRICE_WINDOW_DAYS,
                     "checks": screening.as_dict()["checks"],
                     "anomaly_count": sum(not check["passed"] for check in screening.as_dict()["checks"]),
+                    "latest_sales": latest_sales.get(part.id) or {},
+                    "pool_floor_ex_tax": floors.get(pool["group_id"]),
                     "auto_review": {"decision": decision, "reason_code": reason_code},
                     "recommendations": _auto_review_recommendations(db, part) if decision == "rejected" else [],
                 })
@@ -1626,11 +1634,19 @@ def apply_revision_atomic(
         db.flush()
         content_digest = _digest({"client_request_id": key, "version": _submission_content(version, final_lines)})
         version.content_digest = content_digest
+        # 行已全部写入：版本从 draft 置 submitted（2026-08-18）
+        version.status = "submitted"
+        version.submitted_by = username
+        version.submitted_at = _now()
         app.latest_version_no = version.version_no
         app.version += 1
+        # status 必须在任何 flush 之前赋值：guard_replenishment_application_identity
+        # 要求每次 UPDATE version = OLD+1；若 status 单独成第二条 UPDATE 会触发
+        # "identity/version is immutable"（2026-08-18）
         if get_settings().replenishment_auto_review_enabled:
             approved_count = sum(decision == "approved" for _line, decision, _reason in decisions)
             rejected_count = len(decisions) - approved_count
+            app.status = "needs_revision" if rejected_count else "approved"
             auto_review = ReplenishmentReview(
                 review_id=_uid(), version_id=version.version_id,
                 idempotency_key=f"auto-review:{version.version_id}",
@@ -1647,7 +1663,6 @@ def apply_revision_atomic(
                     version_line_id=line.line_id, decision=decision,
                     reason=None if decision == "approved" else reason,
                 ))
-            app.status = "needs_revision" if rejected_count else "approved"
         else:
             app.status = "submitted"
         _audit(

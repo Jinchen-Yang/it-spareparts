@@ -24,6 +24,7 @@ import {
 import {
   ArrowLeftOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   ReloadOutlined,
   SearchOutlined,
   SendOutlined,
@@ -32,15 +33,16 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import {
+  applyReplenishmentRevision,
+  deleteReplenishmentCartDraft,
+  downloadSystemScreeningWorkbook,
   getReplenishmentApplication,
   getReplenishmentCapabilities,
   getReplenishmentCartDraft,
   getReplenishmentProjects,
   listReplenishmentApplications,
-  applyReplenishmentRevision,
-  searchReplenishmentCatalog,
-  deleteReplenishmentCartDraft,
   replaceReplenishmentCartDraft,
+  searchReplenishmentCatalog,
   submitReplenishmentCartDraft,
   type ApplicationSummary,
   type CatalogPart,
@@ -57,6 +59,18 @@ import "./ReplenishmentBetaPage.css";
 const MAINTENANCE_HOME_PATH = "/maintenance";
 
 const { Text, Title } = Typography;
+
+/** 浏览器落盘：导出 Excel 用（#11）。 */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
 
 const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string }> = {
   draft: { label: "草稿", color: "blue" },
@@ -265,9 +279,17 @@ function RevisionPanel({
 }) {
   const version = application.versions[0];
   const rejected = version?.lines.filter((line) => line.review?.decision === "rejected") || [];
-  const [choices, setChoices] = useState<Record<string, { action: "replace" | "remove"; part_id?: number; quantity?: number }>>({});
+  const [choices, setChoices] = useState<Record<string, {
+    action: "replace" | "remove";
+    part_id?: number;
+    quantity?: number;
+    special_note?: string;
+  }>>({});
   const [saving, setSaving] = useState(false);
   if (application.status !== "needs_revision" || !version || !rejected.length) return null;
+  const setChoice = (requestLineId: string, patch: Partial<{ action: "replace" | "remove"; part_id?: number; quantity?: number; special_note?: string }>) => {
+    setChoices((prev) => ({ ...prev, [requestLineId]: { ...prev[requestLineId], ...patch } }));
+  };
   const submit = async () => {
     if (rejected.some((line) => !choices[line.request_line_id])) return;
     setSaving(true);
@@ -275,11 +297,18 @@ function RevisionPanel({
       const { data } = await applyReplenishmentRevision(application.application_id, {
         expected_application_version: application.version,
         client_request_id: newRevisionRequestId(),
-        resolutions: rejected.map((line) => ({
-          request_line_id: line.request_line_id,
-          ...choices[line.request_line_id],
-          quantity: choices[line.request_line_id]?.quantity ?? line.quantity,
-        })),
+        resolutions: rejected.map((line) => {
+          const choice = choices[line.request_line_id];
+          // remove 只传 action；replace 传 part_id + 可调数量/特殊情况备注
+          if (choice.action === "remove") return { request_line_id: line.request_line_id, action: "remove" };
+          return {
+            request_line_id: line.request_line_id,
+            action: "replace",
+            part_id: choice.part_id,
+            quantity: choice.quantity ?? line.quantity,
+            special_note: choice.special_note?.trim() ? choice.special_note.trim() : null,
+          };
+        }),
       });
       onUpdated(data);
       message.success("打回行已重新提交");
@@ -294,24 +323,50 @@ function RevisionPanel({
       <Space direction="vertical" style={{ width: "100%" }}>
         {rejected.map((line) => {
           const candidates = line.screening?.recommendations || [];
+          const choice = choices[line.request_line_id];
           return (
             <div key={line.request_line_id} className="replenishment-cart-line is-revision">
-              <Space wrap>
+              <Space wrap style={{ width: "100%" }}>
                 <Text strong>{line.pn_std}</Text>
                 <Text type="danger">{line.review?.reason || "无近182天采购/销售记录"}</Text>
                 {candidates.slice(0, 3).map((candidate) => (
-                  <Button key={candidate.part_id} size="small" onClick={() => setChoices((prev) => ({
-                    ...prev,
-                    [line.request_line_id]: { action: "replace", part_id: candidate.part_id },
-                  }))}>
-                    一键替换为 {candidate.pn_std}
+                  <Button key={candidate.part_id} size="small"
+                    type={choice?.part_id === candidate.part_id ? "primary" : "default"}
+                    onClick={() => setChoice(line.request_line_id, {
+                      action: "replace", part_id: candidate.part_id, quantity: line.quantity,
+                    })}>
+                    替换为 {candidate.pn_std}
                   </Button>
                 ))}
-                <Button size="small" danger onClick={() => setChoices((prev) => ({
-                  ...prev, [line.request_line_id]: { action: "remove" },
-                }))}>移除</Button>
-                {choices[line.request_line_id] && <Tag color="green">已选择 {choices[line.request_line_id].action === "remove" ? "移除" : "替换"}</Tag>}
+                <Button size="small" danger
+                  type={choice?.action === "remove" ? "primary" : "default"}
+                  onClick={() => setChoice(line.request_line_id, { action: "remove" })}>
+                  移除
+                </Button>
               </Space>
+              {choice?.action === "replace" && (
+                <Space wrap style={{ marginTop: 8 }}>
+                  <InputNumber
+                    min={1}
+                    max={999999}
+                    precision={0}
+                    value={choice.quantity ?? line.quantity}
+                    onChange={(value) => setChoice(line.request_line_id, { quantity: Number(value || 1) })}
+                    placeholder="数量"
+                    style={{ width: 100 }}
+                  />
+                  <Input
+                    value={choice.special_note ?? ""}
+                    maxLength={4000}
+                    onChange={(event) => setChoice(line.request_line_id, { special_note: event.target.value })}
+                    placeholder="特殊情况说明（选填，替换后需说明使用原因）"
+                    style={{ width: 320 }}
+                  />
+                </Space>
+              )}
+              {choice && <Tag color="green" style={{ marginTop: 8 }}>
+                {choice.action === "remove" ? "将移除" : `将替换为 ${choice.part_id ? candidates.find((c) => c.part_id === choice.part_id)?.pn_std ?? "已选 PN" : ""}`}
+              </Tag>}
             </div>
           );
         })}
@@ -346,6 +401,21 @@ export default function ReplenishmentBetaPage() {
   const [applicationPage, setApplicationPage] = useState(1);
   const [applicationTotal, setApplicationTotal] = useState(0);
   const [current, setCurrent] = useState<ReplenishmentApplication | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const exportCurrent = async () => {
+    if (!current) return;
+    setExporting(true);
+    try {
+      const response = await downloadSystemScreeningWorkbook(current.application_id);
+      saveBlob(response.data, `${current.application_no}-复核包.xlsx`);
+      message.success("复核包已导出，可发给领导/采购过目");
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId) || null;
 
@@ -743,6 +813,19 @@ export default function ReplenishmentBetaPage() {
                   <Tag color="geekblue">{current.project.project_code} · {current.project.display_name}</Tag>
                 )}
                 <Text type="secondary">v{current.latest_version_no} · {current.owner_display_name}</Text>
+              </Space>
+              <Space wrap style={{ marginTop: 12 }}>
+                <Button
+                  type="primary"
+                  icon={<DownloadOutlined />}
+                  loading={exporting}
+                  onClick={() => void exportCurrent()}
+                >
+                  导出复核包 Excel
+                </Button>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  无论审核结果如何均可导出（#11）；内容为提交时冻结的 PN/数量/价格与三查证据
+                </Text>
               </Space>
               {current.stage === "screening_complete" && (
                 <Alert

@@ -251,3 +251,10 @@ export const applyReplenishmentRevision = (applicationId: string, input: {
   `/replenishment-beta/applications/${encodeURIComponent(applicationId)}/revisions`,
   input,
 );
+
+/** 导出系统三查复核包 Excel（submitted/approved/needs_revision 均可，#11）。 */
+export const downloadSystemScreeningWorkbook = (applicationId: string) =>
+  api.get<Blob>(
+    `/replenishment-beta/applications/${encodeURIComponent(applicationId)}/exports/system-screening.xlsx`,
+    { responseType: "blob" },
+  );
