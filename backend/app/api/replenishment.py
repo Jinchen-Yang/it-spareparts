@@ -158,7 +158,11 @@ class RevisionResolution(StrictModel):
 class RevisionCreate(StrictModel):
     expected_application_version: int = Field(ge=1)
     client_request_id: str = Field(min_length=8, max_length=128)
-    resolutions: list[RevisionResolution] = Field(min_length=1, max_length=200)
+    # 二选一（2026-08-18）：
+    # - lines：完整期望行集合——打回后「退回编辑」全量重编辑（可添加/删减/换PN/改数量/填备注）
+    # - resolutions：仅逐条处理打回行（旧交互，兼容）
+    lines: list[AtomicLineWrite] | None = Field(None, min_length=1, max_length=200)
+    resolutions: list[RevisionResolution] | None = Field(None, min_length=1, max_length=200)
 
 
 @router.get("/capabilities")
@@ -447,17 +451,25 @@ def apply_application_revision(
 ) -> dict:
     _no_store(response)
     username, role = _identity(db, ident)
-    for item in body.resolutions:
+    for item in body.resolutions or []:
         if item.action == "replace" and item.part_id is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {
                 "code": "replacement_part_required", "message": "replace 必须提供 part_id"
             })
+    if not body.lines and not body.resolutions:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {
+            "code": "revision_content_required",
+            "message": "必须提供 lines（完整重编辑）或 resolutions（逐条处理打回行）",
+        })
     try:
         return replenishment.apply_revision_atomic(
             db, application_id, username=username, role=role,
             expected_application_version=body.expected_application_version,
             client_request_id=body.client_request_id,
-            resolutions=[item.model_dump() for item in body.resolutions],
+            lines=[item.model_dump() for item in body.lines]
+            if body.lines is not None else None,
+            resolutions=[item.model_dump() for item in body.resolutions]
+            if body.resolutions is not None else None,
         )
     except replenishment.ReplenishmentError as exc:
         _raise_domain(exc)

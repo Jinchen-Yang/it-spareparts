@@ -87,6 +87,11 @@ interface DraftLine {
   unit: string | null;
   quantity: number;
   special_note: string;
+  /** 退回编辑时标记被打回行（#10） */
+  rejected?: boolean;
+  rejectedReason?: string | null;
+  /** 打回行的推荐替换候选（池内相似 PN） */
+  recommendations?: Array<{ part_id: number; pn_std: string; pool_name?: string | null }>;
 }
 
 function errorText(error: unknown): string {
@@ -389,6 +394,7 @@ export default function ReplenishmentBetaPage() {
   const [requestNote, setRequestNote] = useState("");
   const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
   const [draftVersion, setDraftVersion] = useState<number | null>(null);
+  const [editingRevision, setEditingRevision] = useState<ReplenishmentApplication | null>(null);
   const hydratingCart = useRef(false);
   const cartSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -593,6 +599,26 @@ export default function ReplenishmentBetaPage() {
   const runSubmit = async () => {
     setWorking(true);
     try {
+      if (editingRevision) {
+        // #10 退回编辑后重新提交：原申请新版本 + 全量行重新审核
+        const { data } = await applyReplenishmentRevision(editingRevision.application_id, {
+          expected_application_version: editingRevision.version,
+          client_request_id: newRevisionRequestId(),
+          lines: draftLines.map((line) => ({
+            part_id: line.part_id,
+            quantity: line.quantity,
+            special_note: line.special_note?.trim() ? line.special_note.trim() : null,
+          })),
+        });
+        setCurrent(data);
+        setEditingRevision(null);
+        setDraftLines([]);
+        setRequestNote("");
+        setSelectedProjectId("");
+        await refreshList(data.application_id);
+        message.success(data.idempotent ? "已返回既有申请" : `已重新提交 ${data.application_no}`);
+        return;
+      }
       const version = await flushCart();
       const { data } = await submitReplenishmentCartDraft(selectedProjectId, version);
       setCurrent(data);
@@ -606,6 +632,33 @@ export default function ReplenishmentBetaPage() {
     } finally {
       setWorking(false);
     }
+  };
+
+  /** #10：打回申请「退回编辑」——把原申请行载入购物车编辑态（打回行标红+推荐）。 */
+  const startEditingRevision = (application: ReplenishmentApplication) => {
+    const version = application.versions[0];
+    const lines = (version?.lines ?? []).map((line) => ({
+      part_id: line.part_id,
+      pn_std: line.pn_std,
+      description: line.description,
+      unit: line.unit,
+      quantity: line.quantity,
+      special_note: line.special_note ?? "",
+      rejected: line.review?.decision === "rejected",
+      rejectedReason: line.review?.reason ?? null,
+      recommendations: line.screening?.recommendations ?? [],
+    }));
+    setEditingRevision(application);
+    setSelectedProjectId(application.project?.project_id ?? "");
+    setDraftLines(lines);
+    setRequestNote(version?.request_note ?? "");
+  };
+
+  const cancelEditingRevision = () => {
+    setEditingRevision(null);
+    setDraftLines([]);
+    setRequestNote("");
+    setSelectedProjectId("");
   };
 
   if (loading) return <Spin fullscreen tip="正在打开补库申请…" />;
@@ -646,7 +699,17 @@ export default function ReplenishmentBetaPage() {
       {/* ① 新建补库申请：决断层（选项目 → 组明细 → 一次性提交） */}
       <Card
         className="replenishment-cart-card"
-        title={<Space><SendOutlined />新建维保补库申请</Space>}
+        title={(
+          <Space>
+            <SendOutlined />
+            {editingRevision
+              ? <Text strong>编辑被打回申请：{editingRevision.application_no}</Text>
+              : "新建维保补库申请"}
+          </Space>
+        )}
+        extra={editingRevision ? (
+          <Button onClick={cancelEditingRevision} disabled={working}>取消编辑</Button>
+        ) : null}
       >
         <Spin spinning={working}>
           {projects.length === 0 ? (
@@ -686,14 +749,51 @@ export default function ReplenishmentBetaPage() {
 
                 <div className="replenishment-cart-lines">
                   {draftLines.map((line) => (
-                    <div className="replenishment-cart-line" key={line.part_id}>
+                    <div className={`replenishment-cart-line${line.rejected ? " is-revision" : ""}`} key={line.part_id}>
                       <div className="replenishment-cart-line-top replenishment-draft-line-row">
                         <div>
                           <Text strong>{line.pn_std}</Text>
                           <div className="replenishment-part-desc">{line.description || "暂无产品描述"}</div>
                         </div>
-                        <Text type="secondary">数量 {line.quantity} {line.unit || "件"}</Text>
+                        <Space size={4} wrap>
+                          {line.rejected && (
+                            <Tag color="red">被打回：{line.rejectedReason || "无近182天采购/销售记录"}</Tag>
+                          )}
+                          <Text type="secondary">数量 {line.quantity} {line.unit || "件"}</Text>
+                        </Space>
                       </div>
+                      {line.rejected && !!line.recommendations?.length && (
+                        <Space wrap size={4} style={{ margin: "4px 0" }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>推荐替换（池内）：</Text>
+                          {line.recommendations.slice(0, 3).map((candidate) => (
+                            <Button
+                              key={candidate.part_id}
+                              size="small"
+                              type="primary"
+                              ghost
+                              onClick={() => {
+                                const source = draftLines.find((d) => d.part_id === line.part_id);
+                                setDraftLines((lines) => {
+                                  const rest = lines.filter((d) => d.part_id !== line.part_id);
+                                  return [
+                                    ...rest,
+                                    {
+                                      part_id: candidate.part_id,
+                                      pn_std: candidate.pn_std,
+                                      description: line.description,
+                                      unit: line.unit,
+                                      quantity: source?.quantity ?? 1,
+                                      special_note: line.special_note,
+                                    },
+                                  ];
+                                });
+                              }}
+                            >
+                              替换为 {candidate.pn_std}
+                            </Button>
+                          ))}
+                        </Space>
+                      )}
                       <Row gutter={[8, 8]}>
                         <Col xs={24} sm={5}>
                           <Space.Compact block>
@@ -840,7 +940,20 @@ export default function ReplenishmentBetaPage() {
               {current.versions[0]?.lines.map((line) => (
                 <SubmittedLine key={line.line_id} line={line} />
               ))}
-              <RevisionPanel application={current} onUpdated={setCurrent} />
+              {current.status === "needs_revision" && (
+                <Alert
+                  showIcon
+                  type="warning"
+                  message="申请被自动审核打回——可退回编辑后重新提交"
+                  description="退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
+                  action={(
+                    <Button type="primary" danger onClick={() => startEditingRevision(current)}>
+                      退回编辑
+                    </Button>
+                  )}
+                  style={{ marginTop: 12 }}
+                />
+              )}
               <VersionHistory versions={current.versions} />
             </div>
             <Collapse

@@ -240,7 +240,10 @@ export const submitReplenishmentCartDraft = (projectId: string, expectedVersion:
 export const applyReplenishmentRevision = (applicationId: string, input: {
   expected_application_version: number;
   client_request_id: string;
-  resolutions: Array<{
+  /** 打回后「退回编辑」全量重提交（#10）：完整期望行集合，可添加/删减/换 PN/改数量/填备注 */
+  lines?: AtomicLineInput[];
+  /** 逐条处理打回行（旧交互，兼容） */
+  resolutions?: Array<{
     request_line_id: string;
     action: "replace" | "remove";
     part_id?: number;
