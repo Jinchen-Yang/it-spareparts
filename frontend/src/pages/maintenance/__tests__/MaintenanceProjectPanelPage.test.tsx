@@ -80,7 +80,17 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   searchBoardProjects.mockResolvedValue({ data: { rows: [projectRow], total: 1 } });
-  getMaintenanceProject.mockResolvedValue({ data: { project_id: "p1" } });
+  // 与后端真实契约同形（MaintenanceProjectOverview = {project: {...}}）——旧 mock 的
+  // 扁平形状曾掩盖「按 UUID 搜卡墙永远搜不到」的取数缺陷（2026-08-17 生产实发）。
+  getMaintenanceProject.mockResolvedValue({
+    data: {
+      project: {
+        project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+        project_manager_id: null, lifecycle_status: "ongoing",
+        is_active: true, version: 1,
+      },
+    },
+  });
   getBoardProjectOrders.mockResolvedValue({ data: { rows: [orderRow], total: 1 } });
   getBoardOrderLines.mockResolvedValue({ data: { rows: [], total: 0 } });
   listMaintenanceSourceOrders.mockResolvedValue({ data: { rows: [] } });

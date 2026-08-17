@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   Modal,
+  Progress,
   Select,
   Space,
   Table,
@@ -39,6 +40,7 @@ import {
   getMaintenanceProject,
   updateMaintenanceProject,
 } from "../../api/maintenanceProjects";
+import type { MaintenanceProject } from "../../api/maintenanceProjects";
 import {
   assignMaintenanceSourceOrders,
   listMaintenanceSourceOrders,
@@ -62,6 +64,42 @@ function raw(value: unknown) {
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
 
+const LIFECYCLE_LABEL: Record<string, string> = {
+  ongoing: "进行中",
+  ended: "已结束",
+  missing: "期限缺失",
+};
+
+/** 三态色与卡墙一致（#35/#43）：<80% 绿、80–100% 黄、>100% 红。 */
+const STATUS_COLOR: Record<string, string> = {
+  normal: "#52c41a",
+  warning: "#faad14",
+  alert: "#ff4d4f",
+};
+
+/** 成本÷合同额进度条（#35）：算不出来就说算不出来，不画 0% 的绿条（铁律 5）。 */
+function CostRatioBar({ row }: { row: BoardProjectRow | null }) {
+  const stat = row?.cost_ratio_pct;
+  const ratio =
+    stat?.state === "ready" && stat.value !== null ? Number(stat.value) : null;
+  if (ratio === null) {
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }} data-testid="panel-ratio-unknown">
+        数据不足（缺合同额或成本）
+      </Text>
+    );
+  }
+  return (
+    <Progress
+      percent={Math.min(ratio, 100)}
+      strokeColor={row?.card_status ? STATUS_COLOR[row.card_status] : undefined}
+      size="small"
+      style={{ maxWidth: 420 }}
+      format={() => `${ratio}%`}
+    />
+  );
+}
+
 /**
  * 项目面板——页面定稿两页之二（REQUIREMENTS #33/#38/#39/#45）。
  *
@@ -72,6 +110,7 @@ function raw(value: unknown) {
 export function MaintenanceProjectPanelPage() {
   const { projectId = "" } = useParams();
   const [row, setRow] = useState<BoardProjectRow | null>(null);
+  const [project, setProject] = useState<MaintenanceProject | null>(null);
   const [orders, setOrders] = useState<BoardOrderRow[]>([]);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
   const [selectedOrder, setSelectedOrder] = useState<string | null>(null);
@@ -87,12 +126,22 @@ export function MaintenanceProjectPanelPage() {
     setLoading(true);
     setError(null);
     try {
-      // 卡片数据直接复用项目墙的搜索（同一口径，避免两处各算一遍成本率）
-      const resp = await searchBoardProjects({ q: projectId, page_size: 200 });
-      const hit = resp.data.rows.find((item) => item.project_id === projectId);
+      // 基础信息以 stable 目录为准；卡墙聚合行（成本率/合同额，口径与项目墙一致）
+      // 用**项目名称**回查 boss-board 搜索——按 UUID 搜名称/编号/合同号永远搜不到，
+      // 这正是 2026-08-17 面板全「—」的取数缺陷。
       const detail = await getMaintenanceProject(projectId);
-      setRow(hit ?? null);
-      if (!hit && !detail.data) setError("项目不存在或无权查看");
+      const stable = detail.data?.project ?? null;
+      setProject(stable);
+      let hit: BoardProjectRow | null = null;
+      if (stable?.display_name) {
+        const resp = await searchBoardProjects({
+          q: stable.display_name.slice(0, 128),
+          page_size: 50,
+        });
+        hit = resp.data.rows.find((item) => item.project_id === projectId) ?? null;
+      }
+      setRow(hit);
+      if (!hit && !stable) setError("项目不存在或无权查看");
       const ordersResp = await getBoardProjectOrders(projectId, { page_size: 200 });
       setOrders(ordersResp.data.rows);
     } catch (err) {
@@ -193,7 +242,7 @@ export function MaintenanceProjectPanelPage() {
       <Space align="center" wrap>
         <Link to="/maintenance">← 返回项目墙</Link>
         <Title level={4} style={{ margin: 0 }}>
-          {row?.display_name ?? projectId}
+          {row?.display_name ?? project?.display_name ?? projectId}
         </Title>
         {row?.is_archived ? <Tag>已归档</Tag> : null}
         <EditBasicsButton
@@ -267,6 +316,7 @@ export function MaintenanceProjectPanelPage() {
               <BasicsTab
                 projectId={projectId}
                 row={row}
+                project={project}
                 canUpload={canUpload}
                 canAssign={canManageProject}
                 onAssigned={loadProject}
@@ -357,12 +407,15 @@ function ExpenseTab({
 function BasicsTab({
   projectId,
   row,
+  project,
   canUpload,
   canAssign,
   onAssigned,
 }: {
   projectId: string;
   row: BoardProjectRow | null;
+  /** stable 目录的基础信息——boss-board 聚合行缺位时的回退源（数据源不同，字段较少）。 */
+  project: MaintenanceProject | null;
   canUpload: boolean;
   canAssign: boolean;
   onAssigned: () => void;
@@ -418,16 +471,30 @@ function BasicsTab({
         onApply={(file) => applyProjectMaster(projectId, file)}
       />
       <Descriptions bordered size="small" column={2}>
-        <Descriptions.Item label="项目名称">{row?.display_name ?? "—"}</Descriptions.Item>
-        <Descriptions.Item label="项目编号">{row?.project_code ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="项目名称">
+          {row?.display_name ?? project?.display_name ?? "—"}
+        </Descriptions.Item>
+        <Descriptions.Item label="项目编号">
+          {row?.project_code ?? project?.project_code ?? "—"}
+        </Descriptions.Item>
         <Descriptions.Item label="合同号(XSDD)">
           {row?.contract_nos.length ? row.contract_nos.join("、") : "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="项目经理">{row?.project_manager ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="项目经理">
+          {row?.project_manager ?? project?.project_manager_id ?? "—"}
+        </Descriptions.Item>
         <Descriptions.Item label="合同总额">
           {statText(row?.contract_amount_inc_tax)}
         </Descriptions.Item>
-        <Descriptions.Item label="生命周期">{row?.lifecycle ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="生命周期">
+          {(() => {
+            const lc = row?.lifecycle ?? project?.lifecycle_status;
+            return lc ? LIFECYCLE_LABEL[lc] ?? lc : "—";
+          })()}
+        </Descriptions.Item>
+        <Descriptions.Item label="成本率（成本÷合同额）" span={2}>
+          <CostRatioBar row={row} />
+        </Descriptions.Item>
       </Descriptions>
 
       {canAssign ? (
