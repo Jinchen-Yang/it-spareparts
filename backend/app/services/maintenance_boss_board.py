@@ -524,11 +524,43 @@ def attention(db: Session, *, user_ctx: UserContext, limit: int = 10) -> dict:
 
 # ---------------------------------------------------------------- 项目列表
 
-_SORTS = {"attention", "orders", "name", "known_cost"}
+_SORTS = {"attention", "orders", "name", "known_cost", "cost_ratio"}
 
 
 class BoardSortNotPermitted(Exception):
     """成本相关排序需要成本数据权限（不静默降级——降级会通过顺序泄露排名）。"""
+
+
+def sort_project_ids_by_cost_ratio(
+    project_ids: list[str],
+    *,
+    cost_bundles: dict,
+    contracts: dict,
+) -> list[str]:
+    """Use the same cost bundle and contract snapshot as the project card.
+
+    Unknown ratios (no positive contract amount or no resolved cost bundle) are
+    deliberately last; project IDs provide a deterministic final tie-breaker.
+    """
+    def ratio(project_id: str) -> Decimal | None:
+        contract = contracts.get(project_id) or {}
+        amount = contract.get("amount_inc_tax")
+        bundle = cost_bundles.get(project_id) or {}
+        if not amount or Decimal(str(amount)) <= 0 or bundle.get("state") != "ready":
+            return None
+        known = (bundle.get("value") or {}).get("known_amount")
+        if known is None:
+            return None
+        return Decimal(str(known)) / Decimal(str(amount))
+
+    return sorted(
+        project_ids,
+        key=lambda project_id: (
+            ratio(project_id) is None,
+            -(ratio(project_id) or Decimal("0")),
+            project_id,
+        ),
+    )
 
 
 def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
@@ -548,6 +580,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         sort = "name"
     can_cost = can_view_cost(user_ctx)
     if sort == "known_cost" and not can_cost:
+        raise BoardSortNotPermitted()
+    if sort == "cost_ratio" and not can_cost:
         raise BoardSortNotPermitted()
     window = resolve_window(date_from, date_to)
 
@@ -655,12 +689,31 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             attn.insert(0, func.coalesce(budget_stats.c.overspend, 0).desc())
         order_by = (*attn, func.coalesce(window_stats.c.orders_n, 0).desc(),
                     MaintenanceProject.project_code)
+    elif sort == "cost_ratio":
+        # This branch is handled after the candidate query below because the
+        # card's ratio depends on the same Python cost bundle and contract
+        # snapshot used for rendering.
+        order_by = (MaintenanceProject.project_code,)
     else:
         order_by = (MaintenanceProject.project_code,)
-    rows = db.execute(
-        base.order_by(*order_by)
-        .offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
+    if sort == "cost_ratio":
+        candidates = db.execute(base.order_by(*order_by)).scalars().all()
+        candidate_ids = [project.project_id for project in candidates]
+        all_cost_bundles = _cost_bundles_by_project(
+            db, window=window, project_ids=candidate_ids, can_cost=True
+        )
+        all_contracts = _card_contracts(db, candidate_ids)
+        ordered_ids = sort_project_ids_by_cost_ratio(
+            candidate_ids, cost_bundles=all_cost_bundles, contracts=all_contracts
+        )
+        by_id = {project.project_id: project for project in candidates}
+        rows = [by_id[project_id] for project_id in ordered_ids]
+        rows = rows[(page - 1) * page_size: page * page_size]
+    else:
+        rows = db.execute(
+            base.order_by(*order_by)
+            .offset((page - 1) * page_size).limit(page_size)
+        ).scalars().all()
 
     project_ids = [p.project_id for p in rows]
     # 一次性取本页项目的窗口计数、成本五件套与三源事实（M3-4：查询数与页大小无关）

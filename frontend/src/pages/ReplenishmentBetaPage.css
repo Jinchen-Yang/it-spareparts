@@ -70,6 +70,22 @@
   background: #fff;
 }
 
+.replenishment-draft-line-row {
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.replenishment-draft-line-row > div:first-child {
+  min-width: 0;
+}
+
+.replenishment-draft-line-row .replenishment-part-desc {
+  max-width: 48ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .replenishment-cart-line.is-revision {
   border-color: #ffd591;
   background: #fffaf2;
@@ -120,5 +136,10 @@
 @media (max-width: 900px) {
   .replenishment-catalog-grid {
     grid-template-columns: 1fr;
+  }
+
+  .replenishment-draft-line-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

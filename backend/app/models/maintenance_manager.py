@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -168,6 +169,9 @@ class MaintenanceCollectionMilestone(Base):
     __tablename__ = "maintenance_collection_milestone"
 
     milestone_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     project_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
@@ -247,7 +251,7 @@ class MaintenanceCollectionMilestone(Base):
             name="ck_maintenance_collection_milestone_follow_up_review_required",
         ),
         CheckConstraint(
-            "source IN ('direct_api', 'manager_workbook_v3', 'project_manager_xls_v1')",
+            "source IN ('direct_api', 'manager_workbook_v3', 'project_manager_xls_v1', 'project_master_v2')",
             name="ck_maintenance_collection_milestone_source",
         ),
         CheckConstraint(
@@ -259,6 +263,8 @@ class MaintenanceCollectionMilestone(Base):
             "(ledger_batch_id IS NOT NULL AND collection_plan_import_batch_id IS NULL "
             "AND source_batch_id IS NULL))) OR "
             "(source = 'direct_api' AND source_batch_id IS NULL "
+            "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL) OR "
+            "(source = 'project_master_v2' AND source_batch_id IS NULL "
             "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL)",
             name="ck_maintenance_collection_milestone_batch_source",
         ),
@@ -280,6 +286,11 @@ class MaintenanceCollectionMilestone(Base):
             "follow_up_status",
             "planned_date",
             "sequence",
+        ),
+        Index(
+            "ix_maintenance_collection_milestone_active_project_date",
+            "project_id", "planned_date", "sequence",
+            postgresql_where=text("is_active = true"),
         ),
     )
 

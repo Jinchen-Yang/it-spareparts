@@ -23,6 +23,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
+from app.config import get_settings
 from app.models.dimensions import DimPart
 from app.models.inventory import PartPool, PartPoolMember
 from app.models.maintenance_project import MaintenanceProject
@@ -36,6 +37,8 @@ from app.models.replenishment import (
 )
 from app.models.system import SysUser
 from app.services import pool_price_analysis, replenishment_screening
+from app.services.query_filters import col_matches_any, keyword_groups_or_substr
+from app.services.part_resolver import resolve as resolve_part
 
 MAX_LINES = 200
 PRICE_WINDOW_DAYS = replenishment_screening.LOOKBACK_DAYS
@@ -221,6 +224,51 @@ def _pool_snapshot(db: Session, part_id: int) -> dict[str, Any]:
     )
 
 
+def _auto_review_recommendations(db: Session, part: DimPart) -> list[dict]:
+    resolved = resolve_part(
+        db,
+        f"{part.pn_std} {part.description or ''}".strip(),
+        limit=10,
+        log_miss=False,
+        include_similar=True,
+    )
+    candidates = [*resolved.get("items", []), *resolved.get("similar_items", [])]
+    found: list[dict] = []
+    seen: set[int] = {part.id}
+    for item in candidates:
+        candidate_id = int(item.get("part_id") or 0)
+        if not candidate_id or candidate_id in seen:
+            continue
+        if item.get("is_excluded") or item.get("pool_group_id") is None:
+            continue
+        seen.add(candidate_id)
+        found.append({
+            "part_id": candidate_id,
+            "pn_std": item.get("pn_std"),
+            "description": item.get("description"),
+            "pool_group_id": item.get("pool_group_id"),
+            "pool_name": item.get("pool_name"),
+            "score": item.get("score"),
+            "match_reason": item.get("match_reason"),
+        })
+        if len(found) >= 3:
+            break
+    return found
+
+
+def _auto_review_decision(screening) -> tuple[str, str]:
+    pool = screening.get("pool_membership")
+    activity = screening.get("recent_activity")
+    if pool.passed:
+        return "approved", "pool_member"
+    detail = activity.detail or {}
+    if int(detail.get("purchase_samples") or 0) > 0:
+        return "approved", "recent_purchase"
+    if int(detail.get("sales_samples") or 0) > 0:
+        return "approved", "recent_sales"
+    return "rejected", "no_purchase_or_sales_in_182_days"
+
+
 def _price_snapshot(db: Session, part_id: int, *, as_of: date | None = None) -> dict:
     upper = as_of or business_today()
     lower = upper - timedelta(days=PRICE_WINDOW_DAYS - 1)
@@ -334,13 +382,9 @@ def catalog_search(
     page_size = min(50, max(1, page_size))
     predicate = [DimPart.status == "active", DimPart.is_excluded.is_(False)]
     if q:
-        pattern = f"%{q}%"
-        predicate.append(
-            or_(
-                DimPart.pn_std.ilike(pattern),
-                DimPart.description.ilike(pattern),
-                DimPart.brand.ilike(pattern),
-            )
+        groups = keyword_groups_or_substr(q)
+        predicate.extend(
+            col_matches_any(DimPart.search_doc, group) for group in groups
         )
     total = int(db.scalar(select(func.count()).select_from(DimPart).where(*predicate)) or 0)
     parts = list(
@@ -529,6 +573,10 @@ def get_application(db: Session, application_id: str, *, username: str, role: st
         "stage": (
             "legacy_history"
             if _workflow_mode(app) == "legacy_history"
+            else "needs_revision"
+            if app.status == "needs_revision"
+            else "approved"
+            if app.status == "approved"
             else "screening_complete"
             if app.status == "submitted"
             else app.status
@@ -874,6 +922,7 @@ def submit_application_atomic(
     project_id: str,
     lines: list[dict],
     request_note: str | None = None,
+    commit: bool = True,
 ) -> dict:
     """Validate, screen, freeze and create one immutable application transaction."""
     try:
@@ -934,7 +983,8 @@ def submit_application_atomic(
                 db, existing.application_id, username=username, role=role
             )
             result["idempotent"] = True
-            db.commit()
+            if commit:
+                db.commit()
             return result
 
         project = _authorized_project(db, project_id=project_id, user=user, role=role)
@@ -1002,21 +1052,36 @@ def submit_application_atomic(
         db.add_all([application, version])
         db.flush()
         submitted_lines: list[ReplenishmentApplicationLine] = []
+        auto_decisions: list[tuple[ReplenishmentApplicationLine, str, str]] = []
+        auto_review_enabled = get_settings().replenishment_auto_review_enabled
         for line_no, item in enumerate(cleaned_items, 1):
             part = parts_by_id[item["part_id"]]
             pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
             part_facts = facts.get(part.id) or {}
             result = screenings[part.id]
             checks = result.as_dict()["checks"]
+            decision, reason_code = _auto_review_decision(result)
+            recommendations = (
+                _auto_review_recommendations(db, part)
+                if auto_review_enabled and decision == "rejected"
+                else []
+            )
             screening_snapshot = _json_value(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2 if auto_review_enabled else 1,
                     "as_of": as_of,
                     "lookback_days": PRICE_WINDOW_DAYS,
                     "checks": checks,
                     "anomaly_count": sum(not check["passed"] for check in checks),
                     "latest_sales": latest_sales.get(part.id) or {},
                     "pool_floor_ex_tax": floors.get(pool["group_id"]),
+                    **({
+                        "auto_review": {
+                            "decision": decision,
+                            "reason_code": reason_code,
+                        },
+                        "recommendations": recommendations,
+                    } if auto_review_enabled else {}),
                 }
             )
             digest_payload = {
@@ -1050,6 +1115,8 @@ def submit_application_atomic(
                 evidence_digest=_digest(digest_payload),
             )
             submitted_lines.append(line)
+            if auto_review_enabled:
+                auto_decisions.append((line, decision, reason_code))
             db.add(line)
         db.flush()
         content_digest = _digest(
@@ -1064,7 +1131,35 @@ def submit_application_atomic(
         version.content_digest = content_digest
         version.submitted_by = username
         version.submitted_at = _now()
-        application.status = "submitted"
+        if auto_review_enabled:
+            approved_count = sum(decision == "approved" for _line, decision, _reason in auto_decisions)
+            rejected_count = len(auto_decisions) - approved_count
+            review = ReplenishmentReview(
+                review_id=_uid(),
+                version_id=version_id,
+                idempotency_key=f"auto-review:{version_id}",
+                payload_digest=_digest({
+                    "version_id": version_id,
+                    "decisions": [(line.line_id, decision, reason) for line, decision, reason in auto_decisions],
+                }),
+                summary_note="系统按池归属及近182天采购/销售事实自动裁决",
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                reviewed_by="system:replenishment-screening",
+            )
+            db.add(review)
+            db.flush()
+            for line, decision, reason_code in auto_decisions:
+                db.add(ReplenishmentReviewLine(
+                    review_line_id=_uid(),
+                    review_id=review.review_id,
+                    version_line_id=line.line_id,
+                    decision=decision,
+                    reason=None if decision == "approved" else reason_code,
+                ))
+            application.status = "needs_revision" if rejected_count else "approved"
+        else:
+            application.status = "submitted"
         application.version += 1
         _audit(
             db,
@@ -1079,7 +1174,8 @@ def submit_application_atomic(
                 "content_digest": content_digest,
             },
         )
-        db.commit()
+        if commit:
+            db.commit()
         result = get_application(db, application_id, username=username, role=role)
         result["idempotent"] = False
         return result
@@ -1384,6 +1480,188 @@ def start_revision(
     )
     db.commit()
     return get_application(db, application_id, username=username, role=role)
+
+
+def apply_revision_atomic(
+    db: Session,
+    application_id: str,
+    *,
+    username: str,
+    role: str,
+    expected_application_version: int,
+    client_request_id: str,
+    resolutions: list[dict],
+) -> dict:
+    """Resolve exactly the rejected request lines without reopening approved facts."""
+    key = (client_request_id or "").strip()
+    if not 8 <= len(key) <= 128:
+        raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+    try:
+        db.execute(select(func.pg_advisory_xact_lock(
+            func.hashtextextended(f"replenishment-revision:{application_id}:{key}", 0)
+        )))
+        app = _application_scope(db, application_id, username=username, role=role, lock=True)
+        if app.version != expected_application_version:
+            raise ReplenishmentError("申请已被其他操作更新，请刷新后重试", code="version_conflict", status_code=409)
+        previous = _latest_version(db, app, lock=True)
+        review = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.version_id == previous.version_id))
+        if review is None or app.status != "needs_revision":
+            raise ReplenishmentError("当前申请没有待处理的打回条目", code="invalid_state", status_code=409)
+        rejected = {
+            line.request_line_id: line
+            for line in db.scalars(select(ReplenishmentApplicationLine).where(
+                ReplenishmentApplicationLine.version_id == previous.version_id
+            ))
+        }
+        rejected_ids = {
+            line.request_line_id
+            for line in db.scalars(select(ReplenishmentApplicationLine).where(
+                ReplenishmentApplicationLine.version_id == previous.version_id,
+                ReplenishmentApplicationLine.line_id.in_(select(ReplenishmentReviewLine.version_line_id).where(
+                    ReplenishmentReviewLine.review_id == review.review_id,
+                    ReplenishmentReviewLine.decision == "rejected",
+                )),
+            ))
+        }
+        actions = {str(item.get("request_line_id")): item for item in resolutions}
+        if set(actions) != rejected_ids or len(actions) != len(resolutions):
+            raise ReplenishmentError("必须逐一处理全部打回行，不能遗漏或重复", code="revision_line_required", status_code=422)
+        for event in db.scalars(select(ReplenishmentAuditEvent).where(
+            ReplenishmentAuditEvent.application_id == app.application_id,
+            ReplenishmentAuditEvent.action == "revision_started",
+        )):
+            if (event.after_json or {}).get("client_request_id") == key:
+                result = get_application(db, app.application_id, username=username, role=role)
+                result["idempotent"] = True
+                db.commit()
+                return result
+
+        replacements = [item for item in actions.values() if item.get("action") == "replace"]
+        replacement_ids = [int(item.get("part_id") or 0) for item in replacements]
+        if len(replacement_ids) != len(set(replacement_ids)):
+            raise ReplenishmentError("替换后的 PN 不能重复", code="duplicate_part", status_code=409)
+        if any(item.get("action") not in {"replace", "remove"} for item in actions.values()):
+            raise ReplenishmentError("只支持 replace 或 remove", code="invalid_revision_action", status_code=422)
+        parts = list(db.scalars(select(DimPart).where(
+            DimPart.id.in_(replacement_ids), DimPart.status == "active", DimPart.is_excluded.is_(False)
+        ))) if replacement_ids else []
+        parts_by_id = {part.id: part for part in parts}
+        if set(parts_by_id) != set(replacement_ids):
+            raise ReplenishmentError("替换 PN 不存在、已合并或已排除", code="part_unavailable", status_code=422)
+
+        version = ReplenishmentApplicationVersion(
+            version_id=_uid(), application_id=app.application_id,
+            version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
+            status="submitted", request_note=previous.request_note, created_by=username,
+            submitted_by=username, submitted_at=_now(),
+        )
+        db.add(version)
+        db.flush()
+        prior_review_lines = {
+            line.version_line_id: line
+            for line in db.scalars(select(ReplenishmentReviewLine).where(ReplenishmentReviewLine.review_id == review.review_id))
+        }
+        final_lines: list[ReplenishmentApplicationLine] = []
+        decisions: list[tuple[ReplenishmentApplicationLine, str, str]] = []
+        for source in db.scalars(select(ReplenishmentApplicationLine).where(
+            ReplenishmentApplicationLine.version_id == previous.version_id
+        ).order_by(ReplenishmentApplicationLine.line_no)):
+            prior = prior_review_lines.get(source.line_id)
+            if prior is not None and prior.decision == "rejected":
+                item = actions[source.request_line_id]
+                if item.get("action") == "remove":
+                    continue
+                part = parts_by_id[int(item["part_id"])]
+                quantity = _integer_quantity(item.get("quantity", source.quantity))
+                as_of = business_today()
+                lower = as_of - timedelta(days=PRICE_WINDOW_DAYS - 1)
+                facts = pool_price_analysis.aggregate_part_price_facts(db, [part.id], date_from=lower, date_to=as_of)
+                pools = _pool_snapshots(db, [part.id])
+                screening = replenishment_screening.screen(db, part_ids=[part.id], as_of=as_of, price_facts=facts)[part.id]
+                decision, reason_code = _auto_review_decision(screening)
+                pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
+                snapshot = _json_value({
+                    "schema_version": 2,
+                    "as_of": as_of,
+                    "lookback_days": PRICE_WINDOW_DAYS,
+                    "checks": screening.as_dict()["checks"],
+                    "anomaly_count": sum(not check["passed"] for check in screening.as_dict()["checks"]),
+                    "auto_review": {"decision": decision, "reason_code": reason_code},
+                    "recommendations": _auto_review_recommendations(db, part) if decision == "rejected" else [],
+                })
+                new_line = ReplenishmentApplicationLine(
+                    line_id=_uid(), request_line_id=source.request_line_id,
+                    source_line_id=source.line_id, version_id=version.version_id,
+                    line_no=len(final_lines) + 1, part_id=part.id, pn_std=part.pn_std,
+                    description=part.description, brand=part.brand, unit=part.unit,
+                    quantity=quantity, special_note=_clean_optional(item.get("special_note"), maximum=4000),
+                    pool_group_id=pool["group_id"], pool_name=pool["name"], pool_version=pool["version"],
+                    price_window_from=lower, price_window_to=as_of, price_as_of=as_of,
+                    purchase_stats_json=_json_value((facts.get(part.id) or {}).get("purchase") or {}),
+                    sales_stats_json=_json_value((facts.get(part.id) or {}).get("sales") or {}),
+                    screening_json=snapshot,
+                    evidence_digest=_digest({"part_id": part.id, "screening": snapshot}),
+                )
+                final_lines.append(new_line)
+                decisions.append((new_line, decision, reason_code))
+                db.add(new_line)
+                continue
+            copied = ReplenishmentApplicationLine(
+                line_id=_uid(), request_line_id=source.request_line_id,
+                source_line_id=source.line_id, version_id=version.version_id,
+                line_no=len(final_lines) + 1, part_id=source.part_id, pn_std=source.pn_std,
+                description=source.description, brand=source.brand, unit=source.unit,
+                quantity=source.quantity, special_note=source.special_note,
+                pool_group_id=source.pool_group_id, pool_name=source.pool_name, pool_version=source.pool_version,
+                price_window_from=source.price_window_from, price_window_to=source.price_window_to,
+                price_as_of=source.price_as_of, purchase_stats_json=source.purchase_stats_json,
+                sales_stats_json=source.sales_stats_json, screening_json=source.screening_json,
+                evidence_digest=source.evidence_digest,
+            )
+            final_lines.append(copied)
+            decisions.append((copied, "approved", "approved_previous_version"))
+            db.add(copied)
+        if not final_lines:
+            raise ReplenishmentError("至少保留一条有效申请明细", code="empty_revision", status_code=422)
+        db.flush()
+        content_digest = _digest({"client_request_id": key, "version": _submission_content(version, final_lines)})
+        version.content_digest = content_digest
+        app.latest_version_no = version.version_no
+        app.version += 1
+        if get_settings().replenishment_auto_review_enabled:
+            approved_count = sum(decision == "approved" for _line, decision, _reason in decisions)
+            rejected_count = len(decisions) - approved_count
+            auto_review = ReplenishmentReview(
+                review_id=_uid(), version_id=version.version_id,
+                idempotency_key=f"auto-review:{version.version_id}",
+                payload_digest=_digest([(line.line_id, decision, reason) for line, decision, reason in decisions]),
+                summary_note="系统按池归属及近182天采购/销售事实自动裁决",
+                approved_count=approved_count, rejected_count=rejected_count,
+                reviewed_by="system:replenishment-screening",
+            )
+            db.add(auto_review)
+            db.flush()
+            for line, decision, reason in decisions:
+                db.add(ReplenishmentReviewLine(
+                    review_line_id=_uid(), review_id=auto_review.review_id,
+                    version_line_id=line.line_id, decision=decision,
+                    reason=None if decision == "approved" else reason,
+                ))
+            app.status = "needs_revision" if rejected_count else "approved"
+        else:
+            app.status = "submitted"
+        _audit(
+            db, app, "revision_started", username, "处理自动审核打回行并重新提交",
+            version_id=version.version_id,
+            after={"client_request_id": key, "line_count": len(final_lines)},
+        )
+        db.commit()
+        result = get_application(db, app.application_id, username=username, role=role)
+        result["idempotent"] = False
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _excel_safe(value: Any) -> Any:

@@ -70,6 +70,19 @@ export interface ReplenishmentLine extends Omit<CatalogPart, "needs_review"> {
     lookback_days: number;
     checks: Array<{ name: string; passed: boolean; detail?: unknown }>;
     anomaly_count: number;
+    auto_review?: {
+      decision: "approved" | "rejected";
+      reason_code: string;
+    };
+    recommendations?: Array<{
+      part_id: number;
+      pn_std: string;
+      description: string | null;
+      pool_group_id: number | null;
+      pool_name: string | null;
+      score: number;
+      match_reason: string | null;
+    }>;
   } | null;
   latest_sales: Record<string, unknown> | null;
   /** 后端 Decimal 序列化可能为字符串，展示前需 Number() 归一。 */
@@ -136,6 +149,29 @@ export interface AtomicLineInput {
   special_note?: string | null;
 }
 
+export interface ReplenishmentCartDraftLine {
+  draft_line_id: string;
+  line_no: number;
+  part_id: number;
+  pn_std: string;
+  description: string | null;
+  brand: string | null;
+  unit: string | null;
+  quantity: number;
+  special_note: string | null;
+}
+
+export interface ReplenishmentCartDraft {
+  draft_id: string;
+  project_id: string;
+  request_note: string | null;
+  client_request_id: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  lines: ReplenishmentCartDraftLine[];
+}
+
 export const getReplenishmentCapabilities = () =>
   api.get<ReplenishmentCapabilities>("/replenishment-beta/capabilities");
 
@@ -174,3 +210,44 @@ export const createReplenishmentApplication = (input: {
     "/replenishment-beta/applications",
     input,
   );
+
+export const getReplenishmentCartDraft = (projectId: string) =>
+  api.get<{ draft: ReplenishmentCartDraft | null }>(
+    `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
+  );
+
+export const replaceReplenishmentCartDraft = (projectId: string, input: {
+  expected_version?: number | null;
+  request_note?: string | null;
+  lines: AtomicLineInput[];
+}) => api.put<{ draft: ReplenishmentCartDraft }>(
+  `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
+  input,
+);
+
+export const deleteReplenishmentCartDraft = (projectId: string, expectedVersion?: number) =>
+  api.delete<{ deleted: boolean }>(
+    `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
+    { params: expectedVersion ? { expected_version: expectedVersion } : undefined },
+  );
+
+export const submitReplenishmentCartDraft = (projectId: string, expectedVersion: number) =>
+  api.post<ReplenishmentApplication & { idempotent?: boolean }>(
+    `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}/submit`,
+    { expected_version: expectedVersion },
+  );
+
+export const applyReplenishmentRevision = (applicationId: string, input: {
+  expected_application_version: number;
+  client_request_id: string;
+  resolutions: Array<{
+    request_line_id: string;
+    action: "replace" | "remove";
+    part_id?: number;
+    quantity?: number;
+    special_note?: string | null;
+  }>;
+}) => api.post<ReplenishmentApplication & { idempotent?: boolean }>(
+  `/replenishment-beta/applications/${encodeURIComponent(applicationId)}/revisions`,
+  input,
+);

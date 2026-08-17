@@ -35,6 +35,7 @@ const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
 // 台账导入生产之前 415 个项目全部 missing——若筛选器没有这一档，整面卡墙会
 // 无声全空，用户无从区分「没项目」和「周期未维护」。默认仍是进行中（#37）。
 type LifecycleFilter = "ongoing" | "ended" | "missing";
+type ProjectSort = "name" | "attention" | "orders" | "known_cost" | "cost_ratio";
 
 /**
  * 维保主页（项目卡墙）——页面定稿两页之一（REQUIREMENTS #33/#34/#35/#37/#38）。
@@ -45,8 +46,13 @@ type LifecycleFilter = "ongoing" | "ended" | "missing";
  * 「需关注」不再是独立栏目：超预算即黄/红，直接体现在卡片状态上（#43）。
  */
 export function MaintenanceHomePage() {
+  const permissions = readPermissionMap();
+  const canUpload = !!permissions.action_maintenance_expense_collection_upload;
+  const canViewCost = localStorage.getItem("role") === "admin"
+    || permissions.data_purchase_cost === true;
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [status, setStatus] = useState<CardStatus | undefined>();
+  const [sort, setSort] = useState<ProjectSort>(() => canViewCost ? "cost_ratio" : "name");
   const [keyword, setKeyword] = useState("");
   const [rows, setRows] = useState<BoardProjectRow[]>([]);
   const [page, setPage] = useState(1);
@@ -59,8 +65,6 @@ export function MaintenanceHomePage() {
   // 并发保护：筛选一变就作废在途请求的结果，避免旧响应盖掉新筛选
   const requestSeq = useRef(0);
 
-  const canUpload = !!readPermissionMap().action_maintenance_expense_collection_upload;
-
   const load = useCallback(
     async (nextPage: number, replace: boolean) => {
       const seq = ++requestSeq.current;
@@ -72,6 +76,7 @@ export function MaintenanceHomePage() {
           page_size: PAGE_SIZE,
           lifecycle,
           card_status: status,
+          sort,
         };
         const resp = keyword.trim()
           ? await searchBoardProjects({ q: keyword.trim(), ...params })
@@ -91,7 +96,7 @@ export function MaintenanceHomePage() {
         if (seq === requestSeq.current) setLoading(false);
       }
     },
-    [lifecycle, status, keyword],
+    [lifecycle, status, keyword, sort],
   );
 
   useEffect(() => {
@@ -141,6 +146,18 @@ export function MaintenanceHomePage() {
               { label: "正常", value: "normal" },
               { label: "提醒", value: "warning" },
               { label: "报警", value: "alert" },
+            ]}
+          />
+          <Select
+            style={{ width: 150 }}
+            value={sort}
+            onChange={(value) => setSort(value as ProjectSort)}
+            options={[
+              ...(canViewCost ? [{ label: "成本率降序", value: "cost_ratio" as const }] : []),
+              { label: "项目名称", value: "name" as const },
+              ...(canViewCost ? [{ label: "备件成本", value: "known_cost" as const }] : []),
+              { label: "订单数", value: "orders" as const },
+              ...(canViewCost ? [{ label: "需关注", value: "attention" as const }] : []),
             ]}
           />
           <Input.Search

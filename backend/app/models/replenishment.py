@@ -354,3 +354,77 @@ class ReplenishmentAuditEvent(Base):
             "event_id",
         ),
     )
+
+
+class ReplenishmentCartDraft(Base):
+    """One cloud cart per user and maintenance project.
+
+    This is a convenience record, not an application draft. A successful
+    submission removes it in the same transaction as application creation.
+    """
+
+    __tablename__ = "replenishment_cart_draft"
+
+    draft_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    request_note: Mapped[str | None] = mapped_column(Text)
+    client_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_replenishment_cart_draft_version"),
+        CheckConstraint(
+            "char_length(btrim(client_request_id)) BETWEEN 8 AND 128",
+            name="ck_replenishment_cart_draft_client_request",
+        ),
+        UniqueConstraint(
+            "owner_user_id", "project_id", name="uq_replenishment_cart_draft_owner_project"
+        ),
+        UniqueConstraint(
+            "owner_user_id", "client_request_id",
+            name="uq_replenishment_cart_draft_owner_request",
+        ),
+        Index(
+            "ix_replenishment_cart_draft_owner_updated",
+            "owner_user_id", "updated_at", "draft_id",
+        ),
+    )
+
+
+class ReplenishmentCartDraftLine(Base):
+    """Normalised cart lines; part identity is never stored as PN text."""
+
+    __tablename__ = "replenishment_cart_draft_line"
+
+    draft_line_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("replenishment_cart_draft.draft_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    special_note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("line_no >= 1", name="ck_replenishment_cart_draft_line_no"),
+        CheckConstraint(
+            "quantity BETWEEN 1 AND 999999",
+            name="ck_replenishment_cart_draft_line_quantity",
+        ),
+        UniqueConstraint(
+            "draft_id", "part_id", name="uq_replenishment_cart_draft_line_part"
+        ),
+        UniqueConstraint(
+            "draft_id", "line_no", name="uq_replenishment_cart_draft_line_no"
+        ),
+    )

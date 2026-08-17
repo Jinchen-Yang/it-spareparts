@@ -7,7 +7,9 @@ const searchCatalog = vi.fn();
 const listApplications = vi.fn();
 const getApplication = vi.fn();
 const getProjects = vi.fn();
-const createApplication = vi.fn();
+const getCartDraft = vi.fn();
+const replaceCartDraft = vi.fn();
+const submitCartDraft = vi.fn();
 
 vi.mock("../../api/replenishment", () => ({
   getReplenishmentCapabilities: (...args: unknown[]) => getCapabilities(...args),
@@ -15,7 +17,11 @@ vi.mock("../../api/replenishment", () => ({
   listReplenishmentApplications: (...args: unknown[]) => listApplications(...args),
   getReplenishmentApplication: (...args: unknown[]) => getApplication(...args),
   getReplenishmentProjects: (...args: unknown[]) => getProjects(...args),
-  createReplenishmentApplication: (...args: unknown[]) => createApplication(...args),
+  getReplenishmentCartDraft: (...args: unknown[]) => getCartDraft(...args),
+  replaceReplenishmentCartDraft: (...args: unknown[]) => replaceCartDraft(...args),
+  submitReplenishmentCartDraft: (...args: unknown[]) => submitCartDraft(...args),
+  deleteReplenishmentCartDraft: vi.fn(),
+  applyReplenishmentRevision: vi.fn(),
 }));
 
 import ReplenishmentBetaPage from "../ReplenishmentBetaPage";
@@ -121,7 +127,9 @@ beforeEach(() => {
     data: { items: [], total: 0, page: 1, page_size: 20 },
   });
   getApplication.mockReset();
-  createApplication.mockReset();
+  getCartDraft.mockResolvedValue({ data: { draft: null } });
+  replaceCartDraft.mockResolvedValue({ data: { draft: { version: 1 } } });
+  submitCartDraft.mockReset();
   searchCatalog.mockResolvedValue({
     data: { total: 1, page: 1, page_size: 20, items: [noPoolPart] },
   });
@@ -173,7 +181,7 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
   });
 
   it("选择项目并加入 PN 后一次性原子提交，展示冻结结果", async () => {
-    createApplication.mockResolvedValue({ data: submittedApplication });
+    submitCartDraft.mockResolvedValue({ data: submittedApplication });
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     // 选择项目（antd Select）
@@ -189,14 +197,16 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /确认提交/ }));
 
     await waitFor(() => {
-      expect(createApplication).toHaveBeenCalledTimes(1);
+      expect(replaceCartDraft).toHaveBeenCalled();
+      expect(submitCartDraft).toHaveBeenCalledTimes(1);
     });
-    const [payload] = createApplication.mock.calls[0];
+    const calls = replaceCartDraft.mock.calls;
+    const [projectId, payload] = calls[calls.length - 1];
+    expect(projectId).toBe("proj-a");
     expect(payload).toMatchObject({
-      project_id: "proj-a",
       lines: [{ part_id: 7, quantity: 1, special_note: null }],
     });
-    expect(payload.client_request_id).toMatch(/^.{8,128}$/);
+    expect(submitCartDraft.mock.calls[0]).toEqual(["proj-a", 1]);
 
     // 结果展示：单号 + 项目 + 已提交 + 冻结证据
     expect(await screen.findByText("BLK-20260817-ABC1234567")).toBeInTheDocument();

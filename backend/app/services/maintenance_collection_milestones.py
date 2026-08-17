@@ -53,13 +53,16 @@ def write_collection_milestone(
       由车道 A 写入），审计由各调用方自行追加。
     """
     expected_precision = _SOURCE_DEFAULT_PRECISION.get(source, "day")
+    flexible_precision = source == "project_master_v2"
     if date_precision is None:
         date_precision = expected_precision
-    elif date_precision != expected_precision:
+    elif not flexible_precision and date_precision != expected_precision:
         raise ValueError(
             f"来源 {source} 的计划精度必须为 {expected_precision}，"
             f"调用方传入 {date_precision} 与之冲突"
         )
+    if date_precision not in {"day", "month"}:
+        raise ValueError(f"计划精度必须为 day/month，收到 {date_precision}")
     amount = Decimal(str(planned_amount)) if planned_amount is not None else None
 
     milestone = db.scalar(

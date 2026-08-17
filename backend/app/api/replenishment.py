@@ -27,6 +27,7 @@ from app.security import (
     require_action,
 )
 from app.services import replenishment
+from app.services import replenishment_cart
 
 router = APIRouter(prefix="/replenishment-beta", tags=["replenishment-beta"])
 
@@ -130,6 +131,36 @@ class ApplicationCreate(StrictModel):
     lines: list[AtomicLineWrite] = Field(min_length=1, max_length=200)
 
 
+class CartLineWrite(StrictModel):
+    part_id: int = Field(ge=1)
+    quantity: int = Field(ge=1, le=999999)
+    special_note: str | None = Field(None, max_length=4000)
+
+
+class CartReplace(StrictModel):
+    expected_version: int | None = Field(None, ge=1)
+    request_note: str | None = Field(None, max_length=4000)
+    lines: list[CartLineWrite] = Field(min_length=1, max_length=200)
+
+
+class CartSubmit(StrictModel):
+    expected_version: int = Field(ge=1)
+
+
+class RevisionResolution(StrictModel):
+    request_line_id: str = Field(min_length=1, max_length=36)
+    action: str = Field(pattern=r"^(replace|remove)$")
+    part_id: int | None = Field(None, ge=1)
+    quantity: int | None = Field(None, ge=1, le=999999)
+    special_note: str | None = Field(None, max_length=4000)
+
+
+class RevisionCreate(StrictModel):
+    expected_application_version: int = Field(ge=1)
+    client_request_id: str = Field(min_length=8, max_length=128)
+    resolutions: list[RevisionResolution] = Field(min_length=1, max_length=200)
+
+
 @router.get("/capabilities")
 def capabilities(
     response: Response,
@@ -149,12 +180,16 @@ def capabilities(
             and _allowed(ctx, "data_pool_price_governance")
         ),
         "can_review": False,
-        "workflow_mode": "system_screening",
+        "workflow_mode": (
+            "system_auto_review"
+            if get_settings().replenishment_auto_review_enabled
+            else "system_screening"
+        ),
         "stage": "screening_complete",
         "stable_path": "/inventory",
         "data_contract": (
             "仅记录维保项目补库申请与提交时冻结的三查事实；"
-            "不修改库存、不自动审批、不自动定价。"
+            "不修改库存、不自动定价；自动审核开启时只对 PN 做系统裁决。"
         ),
     }
 
@@ -190,6 +225,89 @@ def projects(
     _no_store(response)
     username, role = _identity(db, ident)
     return {"items": replenishment.available_projects(db, username=username, role=role)}
+
+
+@router.get("/cart-drafts/{project_id}")
+def get_cart_draft(
+    project_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+) -> dict:
+    _no_store(response)
+    username, _role = _identity(db, ident)
+    try:
+        return {"draft": replenishment_cart.get_cart_draft(db, username=username, project_id=project_id)}
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
+
+
+@router.put("/cart-drafts/{project_id}")
+def put_cart_draft(
+    project_id: str,
+    body: CartReplace,
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+) -> dict:
+    _no_store(response)
+    username, role = _identity(db, ident)
+    try:
+        return {"draft": replenishment_cart.replace_cart_draft(
+            db, username=username, role=role, project_id=project_id,
+            expected_version=body.expected_version, request_note=body.request_note,
+            lines=[line.model_dump() for line in body.lines],
+        )}
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
+
+
+@router.delete("/cart-drafts/{project_id}")
+def remove_cart_draft(
+    project_id: str,
+    response: Response,
+    expected_version: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+) -> dict:
+    _no_store(response)
+    username, _role = _identity(db, ident)
+    try:
+        return {"deleted": replenishment_cart.delete_cart_draft(
+            db, username=username, project_id=project_id, expected_version=expected_version
+        )}
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
+
+
+@router.post("/cart-drafts/{project_id}/submit", status_code=status.HTTP_201_CREATED)
+def submit_cart_draft(
+    project_id: str,
+    body: CartSubmit,
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+) -> dict:
+    _no_store(response)
+    username, role = _identity(db, ident)
+    try:
+        return replenishment_cart.submit_cart_draft_atomic(
+            db, username=username, role=role, project_id=project_id,
+            expected_version=body.expected_version,
+        )
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
 
 
 @router.get("/applications")
@@ -314,6 +432,35 @@ def create_revision(
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> None:
     _retired()
+
+
+@router.post("/applications/{application_id}/revisions")
+def apply_application_revision(
+    application_id: str,
+    body: RevisionCreate,
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _gate: None = Depends(_beta_enabled),
+    _page: None = Depends(_beta_page_whitelist),
+    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+) -> dict:
+    _no_store(response)
+    username, role = _identity(db, ident)
+    for item in body.resolutions:
+        if item.action == "replace" and item.part_id is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {
+                "code": "replacement_part_required", "message": "replace 必须提供 part_id"
+            })
+    try:
+        return replenishment.apply_revision_atomic(
+            db, application_id, username=username, role=role,
+            expected_application_version=body.expected_application_version,
+            client_request_id=body.client_request_id,
+            resolutions=[item.model_dump() for item in body.resolutions],
+        )
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
 
 
 @router.post("/applications/{application_id}/review-results")

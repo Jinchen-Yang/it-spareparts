@@ -104,23 +104,30 @@ export const listProjectExpenseRows = async (projectId: string) => {
   return resp.data;
 };
 
-/** 03_备件订单 行级（PN）只读数据源——备件成本 tab 的 web 呈现（2026-08-17）。 */
+/** 03 备件明细行级（PN）只读数据源——兼容 V1/V2 协议。 */
 export interface ProjectPartsRow {
   line_id: number;
-  order_no: string;
+  part_id?: number | null;
+  order_no: string | null;
   order_date: string | null;
-  sales_order_no: string;
-  project_raw: string;
-  pn_std: string;
-  description: string;
-  qty: number | null;
-  return_qty: number | null;
-  serial_numbers: string;
-  warehouse: string;
-  cost_source: string;
-  unit_cost_ex_tax: number | null;
-  unit_cost_inc_tax: number | null;
-  change_reason: string;
+  sales_order_no?: string | null;
+  project_raw?: string | null;
+  pn_std: string | null;
+  description: string | null;
+  qty: number | string | null;
+  return_qty?: number | string | null;
+  serial_numbers?: string | null;
+  warehouse: string | null;
+  cost_source: string | null;
+  cost_source_label?: string | null;
+  confidence?: "high" | "medium" | "low" | "none" | null;
+  unit_cost_ex_tax: number | string | null;
+  unit_cost_inc_tax: number | string | null;
+  change_reason?: string | null;
+  manual_unit_cost_ex_tax?: string | null;
+  manual_reason?: string | null;
+  missing_kind?: "out_of_scope" | "none" | null;
+  can_refill?: boolean;
 }
 
 export const listProjectPartsRows = async (projectId: string) => {

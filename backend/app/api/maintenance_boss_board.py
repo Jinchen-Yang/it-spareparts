@@ -67,7 +67,7 @@ class ProjectSearch(BaseModel):
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
     lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
-    sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost)$")
+    sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$")
     card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
 
 
@@ -115,7 +115,7 @@ def board_projects(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     lifecycle: str = Query("all", pattern=r"^(ongoing|ended|missing|all)$"),
-    sort: str = Query("name", pattern=r"^(attention|orders|name|known_cost)$"),
+    sort: str = Query("name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$"),
     has_activity: bool | None = Query(None),
     card_status: str | None = Query(None, pattern=r"^(normal|warning|alert)$"),
     date_from: date | None = Query(None, alias="from"),

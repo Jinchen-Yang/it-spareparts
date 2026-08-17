@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -32,12 +32,16 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import {
-  createReplenishmentApplication,
   getReplenishmentApplication,
   getReplenishmentCapabilities,
+  getReplenishmentCartDraft,
   getReplenishmentProjects,
   listReplenishmentApplications,
+  applyReplenishmentRevision,
   searchReplenishmentCatalog,
+  deleteReplenishmentCartDraft,
+  replaceReplenishmentCartDraft,
+  submitReplenishmentCartDraft,
   type ApplicationSummary,
   type CatalogPart,
   type PriceStats,
@@ -54,14 +58,6 @@ const MAINTENANCE_HOME_PATH = "/maintenance";
 
 const { Text, Title } = Typography;
 
-/** 幂等键：同一页面会话内重复提交会命中同一申请（8-128 字符）。 */
-function newClientRequestId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `blk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string }> = {
   draft: { label: "草稿", color: "blue" },
   submitted: { label: "已提交", color: "gold" },
@@ -69,8 +65,12 @@ const STATUS: Record<ReplenishmentApplication["status"], { label: string; color:
   approved: { label: "已通过", color: "green" },
 };
 
-/** 本地待提交行：选购 PN 后暂存，提交时一次性原子写入。 */
-interface DraftLine extends CatalogPart {
+/** 待提交行：明细事实在云端草稿保存，价格事实不重复塞进购物车。 */
+interface DraftLine {
+  part_id: number;
+  pn_std: string;
+  description: string | null;
+  unit: string | null;
   quantity: number;
   special_note: string;
 }
@@ -190,8 +190,10 @@ function CatalogCard({
 
 /** 提交结果里的一条冻结明细（只读证据层）。 */
 function SubmittedLine({ line }: { line: ReplenishmentLine }) {
+  const rejected = line.review?.decision === "rejected";
+  const recommendations = line.screening?.recommendations || [];
   return (
-    <div className="replenishment-cart-line">
+    <div className={`replenishment-cart-line${rejected ? " is-revision" : ""}`}>
       <div className="replenishment-cart-line-top">
         <div>
           <Text strong>{line.line_no}. {line.pn_std}</Text>
@@ -206,6 +208,9 @@ function SubmittedLine({ line }: { line: ReplenishmentLine }) {
       <ScreeningSummary line={line} />
       {line.special_note && <Text>特殊情况：{line.special_note}</Text>}
       {line.review?.reason && <Text type="danger">审核原因：{line.review.reason}</Text>}
+      {rejected && recommendations.length > 0 && (
+        <Text type="warning">相似候选：{recommendations.map((item) => `${item.pn_std}（${item.match_reason || "相似"}）`).join("、")}</Text>
+      )}
     </div>
   );
 }
@@ -246,6 +251,78 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
   );
 }
 
+function newRevisionRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `revision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function RevisionPanel({
+  application,
+  onUpdated,
+}: {
+  application: ReplenishmentApplication;
+  onUpdated: (next: ReplenishmentApplication) => void;
+}) {
+  const version = application.versions[0];
+  const rejected = version?.lines.filter((line) => line.review?.decision === "rejected") || [];
+  const [choices, setChoices] = useState<Record<string, { action: "replace" | "remove"; part_id?: number; quantity?: number }>>({});
+  const [saving, setSaving] = useState(false);
+  if (application.status !== "needs_revision" || !version || !rejected.length) return null;
+  const submit = async () => {
+    if (rejected.some((line) => !choices[line.request_line_id])) return;
+    setSaving(true);
+    try {
+      const { data } = await applyReplenishmentRevision(application.application_id, {
+        expected_application_version: application.version,
+        client_request_id: newRevisionRequestId(),
+        resolutions: rejected.map((line) => ({
+          request_line_id: line.request_line_id,
+          ...choices[line.request_line_id],
+          quantity: choices[line.request_line_id]?.quantity ?? line.quantity,
+        })),
+      });
+      onUpdated(data);
+      message.success("打回行已重新提交");
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card size="small" title="处理自动审核打回行" style={{ marginTop: 12 }}>
+      <Space direction="vertical" style={{ width: "100%" }}>
+        {rejected.map((line) => {
+          const candidates = line.screening?.recommendations || [];
+          return (
+            <div key={line.request_line_id} className="replenishment-cart-line is-revision">
+              <Space wrap>
+                <Text strong>{line.pn_std}</Text>
+                <Text type="danger">{line.review?.reason || "无近182天采购/销售记录"}</Text>
+                {candidates.slice(0, 3).map((candidate) => (
+                  <Button key={candidate.part_id} size="small" onClick={() => setChoices((prev) => ({
+                    ...prev,
+                    [line.request_line_id]: { action: "replace", part_id: candidate.part_id },
+                  }))}>
+                    一键替换为 {candidate.pn_std}
+                  </Button>
+                ))}
+                <Button size="small" danger onClick={() => setChoices((prev) => ({
+                  ...prev, [line.request_line_id]: { action: "remove" },
+                }))}>移除</Button>
+                {choices[line.request_line_id] && <Tag color="green">已选择 {choices[line.request_line_id].action === "remove" ? "移除" : "替换"}</Tag>}
+              </Space>
+            </div>
+          );
+        })}
+        <Button type="primary" loading={saving} disabled={rejected.some((line) => !choices[line.request_line_id])} onClick={() => void submit()}>
+          提交处理结果
+        </Button>
+      </Space>
+    </Card>
+  );
+}
+
 export default function ReplenishmentBetaPage() {
   const navigate = useNavigate();
   const [capabilities, setCapabilities] = useState<ReplenishmentCapabilities | null>(null);
@@ -256,6 +333,9 @@ export default function ReplenishmentBetaPage() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [requestNote, setRequestNote] = useState("");
   const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
+  const [draftVersion, setDraftVersion] = useState<number | null>(null);
+  const hydratingCart = useRef(false);
+  const cartSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState<CatalogPart[]>([]);
@@ -268,6 +348,78 @@ export default function ReplenishmentBetaPage() {
   const [current, setCurrent] = useState<ReplenishmentApplication | null>(null);
 
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId) || null;
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    hydratingCart.current = true;
+    setDraftVersion(null);
+    setRequestNote("");
+    setDraftLines([]);
+    void getReplenishmentCartDraft(selectedProjectId)
+      .then(({ data }) => {
+        const draft = data.draft;
+        setDraftVersion(draft?.version ?? null);
+        setRequestNote(draft?.request_note ?? "");
+        setDraftLines((draft?.lines ?? []).map((line) => ({
+          part_id: line.part_id,
+          pn_std: line.pn_std,
+          description: line.description,
+          unit: line.unit,
+          quantity: Number(line.quantity),
+          special_note: line.special_note ?? "",
+        })));
+      })
+      .catch((error) => message.error(errorText(error)))
+      .finally(() => { hydratingCart.current = false; });
+    return () => { hydratingCart.current = true; };
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || hydratingCart.current) return undefined;
+    if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    if (!draftLines.length) {
+      if (draftVersion == null) return undefined;
+      cartSaveTimer.current = setTimeout(() => {
+        void deleteReplenishmentCartDraft(selectedProjectId, draftVersion)
+          .then(() => setDraftVersion(null))
+          .catch((error) => message.error(errorText(error)));
+      }, 500);
+      return () => {
+        if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+      };
+    }
+    cartSaveTimer.current = setTimeout(() => {
+      void replaceReplenishmentCartDraft(selectedProjectId, {
+        expected_version: draftVersion,
+        request_note: requestNote || null,
+        lines: draftLines.map((line) => ({
+          part_id: line.part_id,
+          quantity: line.quantity,
+          special_note: line.special_note || null,
+        })),
+      }).then(({ data }) => setDraftVersion(data.draft.version))
+        .catch((error) => message.error(errorText(error)));
+    }, 500);
+    return () => {
+      if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    };
+  }, [selectedProjectId, draftLines, requestNote]);
+
+  const flushCart = async (): Promise<number> => {
+    if (!selectedProjectId) throw new Error("请先选择维保项目");
+    if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    const { data } = await replaceReplenishmentCartDraft(selectedProjectId, {
+      expected_version: draftVersion,
+      request_note: requestNote || null,
+      lines: draftLines.map((line) => ({
+        part_id: line.part_id,
+        quantity: line.quantity,
+        special_note: line.special_note || null,
+      })),
+    });
+    setDraftVersion(data.draft.version);
+    return data.draft.version;
+  };
 
   const refreshList = async (preferredId?: string, page = applicationPage) => {
     const { data } = await listReplenishmentApplications(page, 20);
@@ -324,7 +476,14 @@ export default function ReplenishmentBetaPage() {
     }
     setDraftLines((lines) => [
       ...lines,
-      { ...part, quantity: Math.max(1, Math.floor(quantity)), special_note: "" },
+      {
+        part_id: part.part_id,
+        pn_std: part.pn_std,
+        description: part.description,
+        unit: part.unit,
+        quantity: Math.max(1, Math.floor(quantity)),
+        special_note: "",
+      },
     ]);
   };
 
@@ -364,17 +523,8 @@ export default function ReplenishmentBetaPage() {
   const runSubmit = async () => {
     setWorking(true);
     try {
-      const clientRequestId = newClientRequestId();
-      const { data } = await createReplenishmentApplication({
-        client_request_id: clientRequestId,
-        project_id: selectedProjectId,
-        request_note: requestNote || null,
-        lines: draftLines.map((line) => ({
-          part_id: line.part_id,
-          quantity: line.quantity,
-          special_note: line.special_note || null,
-        })),
-      });
+      const version = await flushCart();
+      const { data } = await submitReplenishmentCartDraft(selectedProjectId, version);
       setCurrent(data);
       setDraftLines([]);
       setRequestNote("");
@@ -467,14 +617,13 @@ export default function ReplenishmentBetaPage() {
                 <div className="replenishment-cart-lines">
                   {draftLines.map((line) => (
                     <div className="replenishment-cart-line" key={line.part_id}>
-                      <div className="replenishment-cart-line-top">
+                      <div className="replenishment-cart-line-top replenishment-draft-line-row">
                         <div>
                           <Text strong>{line.pn_std}</Text>
                           <div className="replenishment-part-desc">{line.description || "暂无产品描述"}</div>
                         </div>
-                        <Tag>{line.pool.name || "未加入互通池"}</Tag>
+                        <Text type="secondary">数量 {line.quantity} {line.unit || "件"}</Text>
                       </div>
-                      <PriceFacts part={line} />
                       <Row gutter={[8, 8]}>
                         <Col xs={24} sm={5}>
                           <Space.Compact block>
@@ -608,6 +757,7 @@ export default function ReplenishmentBetaPage() {
               {current.versions[0]?.lines.map((line) => (
                 <SubmittedLine key={line.line_id} line={line} />
               ))}
+              <RevisionPanel application={current} onUpdated={setCurrent} />
               <VersionHistory versions={current.versions} />
             </div>
             <Collapse

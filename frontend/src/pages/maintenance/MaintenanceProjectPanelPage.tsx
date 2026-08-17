@@ -73,6 +73,28 @@ function raw(value: unknown) {
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
 
+const COST_SOURCE_LABEL: Record<string, string> = {
+  direct: "直接采购价",
+  window: "7天采购窗口",
+  purchase_history: "采购历史",
+  pool_purchase: "备件池采购",
+  sales_history: "销售历史",
+  pool_sales: "备件池销售",
+  month_avg: "月均价",
+  none: "暂无成本",
+};
+
+function CostSourceTag({ row }: { row: ProjectPartsRow }) {
+  const confidence = row.confidence ?? (row.cost_source === "none" ? "none" : null);
+  const color = confidence === "high" ? "green"
+    : confidence === "medium" ? "orange"
+      : confidence === "low" ? "red" : "default";
+  const label = row.cost_source_label || COST_SOURCE_LABEL[row.cost_source || ""] || raw(row.cost_source);
+  const suffix = row.missing_kind === "out_of_scope" ? "（起算日前）"
+    : row.missing_kind === "none" ? "（未找到）" : "";
+  return <Tag color={color}>{label}{suffix}</Tag>;
+}
+
 const LIFECYCLE_LABEL: Record<string, string> = {
   ongoing: "进行中",
   ended: "已结束",
@@ -432,7 +454,7 @@ function ExpenseTab({
 }
 
 
-/** 备件成本 tab：03_备件订单 的 web 呈现（PN 行级，2026-08-17）+ 下载上传。 */
+/** 备件成本 tab：V2 03_备件明细 的九列事实展示 + 下载上传。 */
 function PartsTab({
   projectId,
   exportBase,
@@ -467,7 +489,7 @@ function PartsTab({
         title="备件成本"
         filename={`${exportBase}-${SHEETS.parts}.xlsx`}
         canUpload={canUpload}
-        hint="在哪下载就在哪上传：黄底的「未税单价」「含税单价」「变更原因」可改"
+        hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
         onApply={async (file) => {
           const result = await applyProjectMaster(projectId, file);
@@ -486,24 +508,21 @@ function PartsTab({
         columns={[
           { title: "维保单号", dataIndex: "order_no", render: raw },
           { title: "制单日期", dataIndex: "order_date", render: raw },
-          { title: "合同编号", dataIndex: "sales_order_no", render: raw },
           { title: "PN", dataIndex: "pn_std", render: raw },
           { title: "产品描述", dataIndex: "description", render: raw, ellipsis: true },
-          { title: "需求数量", dataIndex: "qty", render: raw },
-          { title: "退货数量", dataIndex: "return_qty", render: raw },
+          { title: "数量", dataIndex: "qty", render: raw },
           { title: "出库仓库", dataIndex: "warehouse", render: raw },
-          { title: "成本来源", dataIndex: "cost_source", render: raw },
+          { title: "成本来源", render: (_: unknown, line) => <CostSourceTag row={line} /> },
           {
             title: "未税单价",
             render: (_: unknown, line) =>
-              line.unit_cost_ex_tax == null ? "—" : `¥${line.unit_cost_ex_tax.toFixed(2)}`,
+              line.unit_cost_ex_tax == null ? "—" : `¥${Number(line.unit_cost_ex_tax).toFixed(2)}`,
           },
           {
             title: "含税单价",
             render: (_: unknown, line) =>
-              line.unit_cost_inc_tax == null ? "—" : `¥${line.unit_cost_inc_tax.toFixed(2)}`,
+              line.unit_cost_inc_tax == null ? "—" : `¥${Number(line.unit_cost_inc_tax).toFixed(2)}`,
           },
-          { title: "变更原因", dataIndex: "change_reason", render: raw },
         ]}
       />
     </Space>

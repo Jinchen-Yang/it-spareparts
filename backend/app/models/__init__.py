@@ -126,6 +126,8 @@ from app.models.replenishment import (
     ReplenishmentAuditEvent,
     ReplenishmentReview,
     ReplenishmentReviewLine,
+    ReplenishmentCartDraft,
+    ReplenishmentCartDraftLine,
 )
 
 __all__ = [
@@ -231,4 +233,6 @@ __all__ = [
     "ReplenishmentReview",
     "ReplenishmentReviewLine",
     "ReplenishmentAuditEvent",
+    "ReplenishmentCartDraft",
+    "ReplenishmentCartDraftLine",
 ]

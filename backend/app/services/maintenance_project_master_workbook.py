@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -34,6 +36,7 @@ from app.business_time import business_today
 from app.models.maintenance import (
     FMaintenanceLine,
     FMaintenanceOrder,
+    FProjectExpense,
     MaintenanceManualCostOverride,
 )
 from app.models.maintenance_project import (
@@ -45,14 +48,18 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
+from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_expense_collection_workbook as ec
+from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_expense_collection_workbook import (
     TAX_RATE,
     WorkbookError,
 )
 
 PROTOCOL_VERSION = "project-master-v1"
+V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
+V2_TEMPLATE_VERSION = "2.0.0"
 
 SHEET_BASICS = "01_项目基础信息"
 SHEET_OVERVIEW = "02_概览数据"
@@ -82,6 +89,37 @@ _SITE_HEADERS = ["现场领用单号", "领用日期", "PN", "备件SN", "领用
 _GLOBAL_HEADERS = ["项目名称", "合同编号", "维保单号", "制单日期", "PN", "产品描述",
                    "需求数量", "退货数量", "成本来源(系统)", "未税单位成本",
                    "含税单位成本(系统计算)", "变更原因"]
+
+V2_SHEET_OVERVIEW = "01_项目概览"
+V2_SHEET_PLAN = "02_回款计划"
+V2_SHEET_PARTS = "03_备件明细"
+V2_SHEET_EXPENSE = "04_费用报销"
+V2_SHEET_RECEIPTS = "05_实收回款"
+V2_SHEET_SITE = "06_领用返还"
+V2_SHEET_DICTIONARY = "98_字段说明"
+V2_SHEET_META = "99_元数据"
+V2_ALL_SHEETS = (V2_SHEET_OVERVIEW, V2_SHEET_PLAN, V2_SHEET_PARTS,
+                 V2_SHEET_EXPENSE, V2_SHEET_RECEIPTS, V2_SHEET_SITE,
+                 V2_SHEET_DICTIONARY, V2_SHEET_META)
+V2_EDITABLE = PatternFill("solid", fgColor="FFE699")
+V2_READONLY = PatternFill("solid", fgColor="D9E2F3")
+V2_HEADER = PatternFill("solid", fgColor="1F4E78")
+V2_TITLE = PatternFill("solid", fgColor="17365D")
+V2_PART_HEADERS = [
+    "维保单号", "制单日期", "XSDD", "需求类型", "仓库", "销售人员", "业务类型",
+    "PN", "描述", "需求数量", "SN", "退货数量", "成本来源", "置信度",
+    "系统未税单位成本", "系统含税单位成本", "人工未税单位成本", "人工成本原因",
+    "成本缺失类型", "可补价", "实体ID", "备件主键", "只读哈希",
+    "备注", "来源",
+]
+V2_PLAN_HEADERS = ["操作", "合同编号", "期次", "计划回款日期", "日期精度", "计划回款金额（含税）",
+                   "累计计划金额", "最新累计实收", "到款状态", "提醒状态", "负责人", "备注", "实体ID", "基础版本"]
+V2_EXPENSE_HEADERS = ["费用单号", "明细序号", "报销日期", "报销人员", "报销类别", "费用分类",
+                      "支出事由", "维保销售订单（归集键）", "项目名称", "销售人员", "流程状态",
+                      "原始报销金额", "金额口径", "未税金额", "含税金额（系统）", "备注", "实体ID"]
+V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID"]
+V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注",
+                   "应返数量", "返还状态", "返还单号", "实体ID"]
 
 
 # ------------------------------------------------------------------ 计划
@@ -566,3 +604,514 @@ def apply(db: Session, plan: MasterPlan, *, operated_by: str,
     db.commit()
     return {"applied_by": operated_by, "import_batch_id": import_batch_id,
             "sheets": list(plan.sheets), **plan.summary}
+
+
+# ====================================================================== V2
+
+@dataclass(frozen=True)
+class V2MilestoneChange:
+    operation: str
+    contract_no: str
+    sequence: int
+    planned_date: date | None
+    date_precision: str
+    planned_amount: Decimal | None
+    entity_id: str | None
+    base_version: int | None
+
+
+@dataclass(frozen=True)
+class MasterV2Plan:
+    project_id: str
+    sheets: tuple[str, ...]
+    cost_refills: tuple[CostRefill, ...] = ()
+    site_flags: tuple[SiteReturnFlag, ...] = ()
+    expense_updates: tuple[ec.ExpenseUpdate, ...] = ()
+    receipt_ops: tuple[ec.CollectionOp, ...] = ()
+    milestone_changes: tuple[V2MilestoneChange, ...] = ()
+
+    @property
+    def summary(self) -> dict:
+        return {
+            "cost_overrides": len(self.cost_refills),
+            "expense_updates": len(self.expense_updates),
+            "plan_creates": sum(x.operation == "CREATE" for x in self.milestone_changes),
+            "plan_updates": sum(x.operation == "UPDATE" for x in self.milestone_changes),
+            "plan_voids": sum(x.operation == "VOID" for x in self.milestone_changes),
+            "collection_updates": len(self.receipt_ops),
+            "site_updates": len(self.site_flags),
+        }
+
+
+def _v2_hash(values: list[object]) -> str:
+    return hashlib.sha256(json.dumps(values, ensure_ascii=False, default=str, separators=(",", ":")).encode()).hexdigest()
+
+
+def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None) -> None:
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{ws.cell(ws.max_row or 1, len(headers)).coordinate}"
+    for index, header in enumerate(headers, 1):
+        cell = ws.cell(1, index)
+        cell.fill = V2_HEADER
+        cell.font = Font(bold=True, color="FFFFFF")
+        width = min(60, max(12, len(str(header)) * 2 + 2))
+        ws.column_dimensions[cell.column_letter].width = width
+    if hidden_from is not None:
+        for index in range(hidden_from, len(headers) + 1):
+            ws.column_dimensions[ws.cell(1, index).column_letter].hidden = True
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = cell.alignment.copy(wrap_text=True, vertical="top")
+        ws.row_dimensions[row[0].row].height = min(72, max(18, 18 + 12 * sum("\n" in str(c.value or "") for c in row)))
+
+
+def _v2_header(ws, headers: list[str], editable: set[int] = set()) -> None:
+    ws.append(headers)
+    for idx in range(1, len(headers) + 1):
+        cell = ws.cell(1, idx)
+        cell.fill = V2_EDITABLE if idx in editable else V2_HEADER
+        cell.font = Font(bold=True, color="FFFFFF" if idx not in editable else "4F3B00")
+
+
+def _v2_build_overview(wb, project, contracts, db, lines) -> None:
+    ws = wb.create_sheet(V2_SHEET_OVERVIEW)
+    ws.append(["项目总览", None])
+    ws.merge_cells("A1:B1")
+    ws["A1"].fill = V2_TITLE
+    ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
+    total_contract = sum((c.amount_inc_tax or Decimal(0)) for c in contracts if c.included_in_total)
+    cost = sum((line.cost_amount_inc_tax or Decimal(0)) for line, _order, _pid in lines)
+    values = [
+        ("项目编号", project.project_code), ("项目名称", project.display_name),
+        ("生命周期", project.lifecycle_status), ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
+        ("负责人账号", project.project_manager_id or "未关联账号"),
+        ("销售人员", project.salesperson or "—"), ("CMO", project.cmo_name or "—"),
+        ("合同编号", "、".join(c.contract_no for c in contracts) or "—"),
+        ("合同总额（含税）", str(total_contract) if total_contract else "—"),
+        ("备件成本（含税）", str(cost) if cost else "—"),
+        ("成本率", f"{(cost / total_contract * 100).quantize(Decimal('0.1'))}%" if total_contract else "—"),
+        ("缺成本行数", sum(line.cost_amount_inc_tax is None for line, _order, _pid in lines)),
+    ]
+    for item in values:
+        ws.append(list(item))
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 54
+    ws.freeze_panes = "A2"
+
+
+def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
+    ws = wb.create_sheet(V2_SHEET_PLAN)
+    _v2_header(ws, V2_PLAN_HEADERS, editable={1, 2, 3, 4, 5, 6, 12})
+    contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
+    milestones = list(db.scalars(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project_id,
+        MaintenanceCollectionMilestone.is_active.is_(True),
+    ).order_by(MaintenanceCollectionMilestone.project_contract_id, MaintenanceCollectionMilestone.sequence)))
+    cumulative: dict[str, Decimal] = {}
+    for milestone in milestones:
+        contract_no = contract_by_id.get(milestone.project_contract_id, "")
+        cumulative[contract_no] = cumulative.get(contract_no, Decimal(0)) + (milestone.planned_amount or Decimal(0))
+        ws.append([
+            "", contract_no, milestone.sequence, milestone.planned_date,
+            milestone.date_precision, milestone.planned_amount,
+            cumulative[contract_no], "—", "未上报", milestone.follow_up_status,
+            project_id, milestone.follow_up_note or "", milestone.milestone_id, milestone.version,
+        ])
+    for _ in range(4):
+        ws.append([""] * len(V2_PLAN_HEADERS))
+    _v2_finalize(ws, V2_PLAN_HEADERS, hidden_from=13)
+
+
+def _v2_build_parts(wb, db, project_id: str, lines) -> None:
+    ws = wb.create_sheet(V2_SHEET_PARTS)
+    # 1-based：17=人工未税单位成本 18=人工成本原因 24=来源（删除"行事实版本"后列号）
+    editable = {17, 18, 24}
+    _v2_header(ws, V2_PART_HEADERS, editable=editable)
+    line_ids = [line.id for line, _order, _pid in lines]
+    overrides = {
+        item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
+            MaintenanceManualCostOverride.line_id.in_(line_ids)
+        ))
+    } if line_ids else {}
+    for line, order, _pid in lines:
+        override = overrides.get(line.id)
+        readonly = [order.order_no, order.order_date, order.linked_sales_order_no or "", order.demand_type or "",
+                    order.warehouse or "", order.salesperson or "", order.business_type or "",
+                    line.pn_std or line.pn_raw or "", line.description or "", line.qty, line.serial_numbers or "",
+                    line.return_qty, line.cost_source or "", line.confidence or "none",
+                    line.unit_cost_ex_tax, line.unit_cost_inc_tax, line.id]
+        ws.append(readonly[:14] + [readonly[14], readonly[15],
+                                   override.unit_cost_ex_tax if override else "",
+                                   override.reason if override else "",
+                                   "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None else ("none" if line.unit_cost_ex_tax is None else ""),
+                                   "是" if line.cost_source in (None, "none") else "否",
+                                   line.id, line.part_id,
+                                   _v2_hash(readonly), line.line_note or "", "WBDD"])
+    _v2_finalize(ws, V2_PART_HEADERS, hidden_from=20)
+
+
+def _v2_build_expense(wb, db, project_id: str, contracts) -> None:
+    ws = wb.create_sheet(V2_SHEET_EXPENSE)
+    _v2_header(ws, V2_EXPENSE_HEADERS, editable={1, 3, 4, 5, 6, 7, 8, 11, 13, 16})
+    expenses = ec._expenses(db, [c.contract_no for c in contracts])
+    for expense in expenses:
+        ws.append([expense.bxd_no or "", expense.line_no, expense.expense_date, expense.person or "",
+                   expense.expense_type or "", expense.fee_category or "", expense.reason or "",
+                   expense.linked_sales_order_no or "", project_id, "—", expense.data_status or "",
+                   expense.amount, expense.tax_basis or "ex", expense.amount_ex_tax,
+                   expense.amount_inc_tax, expense.remark or "", expense.raw_line_id])
+    _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=17)
+
+
+def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
+    ws = wb.create_sheet(V2_SHEET_RECEIPTS)
+    _v2_header(ws, V2_RECEIPT_HEADERS)
+    contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
+    rows = list(db.scalars(select(MaintenanceCollectionSnapshot).where(
+        MaintenanceCollectionSnapshot.project_id == project_id,
+        MaintenanceCollectionSnapshot.status == "confirmed",
+    ).order_by(MaintenanceCollectionSnapshot.report_month)))
+    for row in rows:
+        ws.append([contract_by_id.get(row.project_contract_id, ""), row.report_month,
+                   row.cumulative_amount, row.status, row.receipt_reference or "", row.remark or "", row.collection_id])
+    _v2_finalize(ws, V2_RECEIPT_HEADERS, hidden_from=7)
+
+
+def _v2_build_site(wb, db, project_id: str) -> None:
+    ws = wb.create_sheet(V2_SHEET_SITE)
+    _v2_header(ws, V2_SITE_HEADERS, editable={1, 2, 3, 4, 5, 6, 7})
+    rows = db.execute(select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).join(
+        MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id
+    ).where(MaintenanceSiteIssue.project_id == project_id).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
+    for line, issue in rows:
+        ws.append([issue.issue_no, issue.issue_date, line.pn, line.serial_number or "", line.quantity,
+                   "" if line.no_return is None else ("否" if line.no_return else "是"), line.remark or "",
+                   "—", "待确认品类", "—", line.issue_line_id])
+    _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11)
+
+
+def _v2_build_dictionary(wb) -> None:
+    ws = wb.create_sheet(V2_SHEET_DICTIONARY)
+    headers = ["字段", "业务含义", "来源/表字段", "编辑性", "格式/允许值", "空值意义", "覆盖影响"]
+    _v2_header(ws, headers)
+    rows = [
+        ("part_id", "备件主键", "f_maintenance_line.part_id → dim_part.id", "只读", "整数", "异常需治理", "关系身份不随 PN 文本改变"),
+        ("人工未税单位成本", "缺成本时的人工补价", "maintenance_manual_cost_override.unit_cost_ex_tax", "可编辑", "非负金额", "不创建 override", "覆盖该行成本人工证据"),
+        ("计划回款金额", "合同期次计划金额", "maintenance_collection_milestone.planned_amount", "可编辑", "正数", "节点 incomplete", "更新计划节点并触发提醒复核"),
+        ("最新累计实收", "已确认回款快照累计额", "maintenance_collection_snapshot.cumulative_amount", "只读", "金额", "未上报，不等于0", "仅影响展示和到款状态"),
+        ("实体ID", "稳定写回身份", "各事实表主键", "只读", "UUID/字符串", "非法文件", "缺失或跨项目拒绝"),
+    ]
+    for row in rows:
+        ws.append(row)
+    _v2_finalize(ws, headers)
+
+
+def build_project_master_v2(db: Session, *, project_id: str) -> bytes | None:
+    project = db.get(MaintenanceProject, project_id)
+    if project is None:
+        return None
+    contracts = ec._contracts(db, project_id)
+    lines = _assigned_lines(db, project_id=project_id, window=None)
+    wb = Workbook()
+    wb.remove(wb.active)
+    _v2_build_overview(wb, project, contracts, db, lines)
+    _v2_build_plan(wb, db, project_id, contracts)
+    _v2_build_parts(wb, db, project_id, lines)
+    _v2_build_expense(wb, db, project_id, contracts)
+    _v2_build_receipts(wb, db, project_id, contracts)
+    _v2_build_site(wb, db, project_id)
+    _v2_build_dictionary(wb)
+    meta = wb.create_sheet(V2_SHEET_META)
+    for key, value in (("protocol_id", V2_PROTOCOL_ID), ("template_version", V2_TEMPLATE_VERSION),
+                       ("project_id", project_id), ("export_id", str(uuid4())),
+                       ("exported_at", datetime.now(timezone.utc).isoformat()),
+                       ("included_sheets", ",".join(V2_ALL_SHEETS[:-1]))):
+        meta.append([key, value])
+    meta.sheet_state = "hidden"
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _v2_date(value, *, row_no: int, label: str) -> date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m"):
+        try:
+            parsed = datetime.strptime(raw, fmt).date()
+            return parsed.replace(day=1) if fmt == "%Y-%m" else parsed
+        except ValueError:
+            continue
+    raise WorkbookError("invalid_date", f"第 {row_no} 行{label}日期格式无效")
+
+
+def _v2_decimal(value, *, row_no: int, label: str, required: bool = False) -> Decimal | None:
+    if value in (None, ""):
+        if required:
+            raise WorkbookError("missing_amount", f"第 {row_no} 行{label}不能为空")
+        return None
+    try:
+        parsed = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
+    if parsed < 0:
+        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不能为负")
+    return parsed.quantize(Decimal("0.01"))
+
+
+def _v2_meta(wb) -> dict[str, str]:
+    if V2_SHEET_META not in wb.sheetnames:
+        raise WorkbookError("template_version_mismatch", "工作簿缺少 V2 元数据，请重新下载当前项目总表")
+    return {
+        str(row[0].value).strip(): str(row[1].value or "").strip()
+        for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2)
+        if row[0].value
+    }
+
+
+def _v2_verify_meta(wb, project_id: str) -> dict[str, str]:
+    meta = _v2_meta(wb)
+    if meta.get("protocol_id") != V2_PROTOCOL_ID or meta.get("template_version") != V2_TEMPLATE_VERSION:
+        raise WorkbookError("template_version_mismatch", "工作簿版本已更新，请重新下载当前项目总表后再上传。")
+    if meta.get("project_id") != project_id:
+        raise WorkbookError("project_mismatch", "工作簿所属项目与上传入口不一致")
+    missing = [name for name in V2_ALL_SHEETS[:-1] if name not in wb.sheetnames]
+    if missing:
+        raise WorkbookError("missing_sheet", f"V2 工作簿缺少工作表：{'、'.join(missing)}")
+    return meta
+
+
+def _v2_parse_parts(db: Session, ws) -> list[CostRefill]:
+    headers = [str(cell.value or "") for cell in ws[1]]
+    index = {name: i for i, name in enumerate(headers)}
+    required = {"系统未税单位成本", "人工未税单位成本", "人工成本原因", "实体ID", "只读哈希"}
+    if not required.issubset(index):
+        raise WorkbookError("template_version_mismatch", "03_备件明细列定义不是当前 V2 版本")
+    out: list[CostRefill] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if not row or all(value in (None, "") for value in row):
+            continue
+        line_id = row[index["实体ID"]]
+        if line_id in (None, ""):
+            raise WorkbookError("line_not_recognized", f"03_备件明细第 {row_no} 行缺少实体ID")
+        line = db.get(FMaintenanceLine, int(line_id))
+        if line is None:
+            raise WorkbookError("line_not_found", f"第 {row_no} 行备件事实已不存在，请重新下载")
+        readonly = list(row[:16]) + [line.id]
+        if _v2_hash(readonly) != str(row[index["只读哈希"]] or ""):
+            raise WorkbookError("readonly_cell_modified", f"第 {row_no} 行只读事实已修改或已过期，请重新下载")
+        raw_manual = row[index["人工未税单位成本"]]
+        reason = str(row[index["人工成本原因"]] or "").strip() or None
+        if raw_manual in (None, ""):
+            continue
+        amount = _v2_decimal(raw_manual, row_no=row_no, label="人工未税单位成本", required=True)
+        inc = (amount * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        out.append(CostRefill(line_id=line.id, unit_cost_ex_tax=amount, unit_cost_inc_tax=inc, reason=reason))
+    return out
+
+
+def _v2_parse_site(db: Session, ws) -> list[SiteReturnFlag]:
+    headers = [str(cell.value or "") for cell in ws[1]]
+    index = {name: i for i, name in enumerate(headers)}
+    out: list[SiteReturnFlag] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if not row or all(value in (None, "") for value in row):
+            continue
+        raw_id = row[index["实体ID"]]
+        if raw_id in (None, ""):
+            raise WorkbookError("line_not_recognized", f"06_领用返还第 {row_no} 行缺少实体ID")
+        flag = str(row[index["是否应返还"]] or "").strip()
+        if flag and flag not in {"是", "否"}:
+            raise WorkbookError("invalid_flag", f"第 {row_no} 行是否应返还只能填 是 / 否")
+        out.append(SiteReturnFlag(
+            issue_line_id=str(raw_id),
+            no_return=(flag == "否") if flag else None,
+            issue_no=str(row[index["领用单号"]] or "").strip() or None,
+            issue_date=_v2_date(row[index["领用日期"]], row_no=row_no, label="领用") if row[index["领用日期"]] not in (None, "") else None,
+            pn=str(row[index["PN"]] or "").strip() or None,
+            serial_number=str(row[index["SN"]] or "").strip() or None,
+            quantity=_v2_decimal(row[index["领用数量"]], row_no=row_no, label="领用数量") if row[index["领用数量"]] not in (None, "") else None,
+            remark=str(row[index["备注"]] or "").strip() or None,
+        ))
+    return out
+
+
+def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
+    contracts = {c.contract_no: c for c in ec._contracts(db, project_id)}
+    headers = [str(cell.value or "") for cell in ws[1]]
+    index = {name: i for i, name in enumerate(headers)}
+    out: list[V2MilestoneChange] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if not row or all(value in (None, "") for value in row):
+            continue
+        operation = str(row[index["操作"]] or "").strip().upper()
+        if not operation:
+            continue
+        if operation not in {"CREATE", "UPDATE", "VOID"}:
+            raise WorkbookError("invalid_operation", f"第 {row_no} 行操作必须是 CREATE、UPDATE 或 VOID")
+        contract_no = str(row[index["合同编号"]] or "").strip()
+        contract = contracts.get(contract_no)
+        if contract is None:
+            raise WorkbookError("contract_not_found", f"第 {row_no} 行合同编号不属于本项目")
+        sequence = int(row[index["期次"]])
+        if not 1 <= sequence <= 24:
+            raise WorkbookError("invalid_sequence", f"第 {row_no} 行期次必须为 1-24")
+        precision = str(row[index["日期精度"]] or "day").strip()
+        if precision not in {"day", "month"}:
+            raise WorkbookError("invalid_date_precision", f"第 {row_no} 行日期精度只能是 day/month")
+        amount = _v2_decimal(row[index["计划回款金额（含税）"]], row_no=row_no, label="计划回款金额", required=operation != "VOID")
+        planned_date = _v2_date(row[index["计划回款日期"]], row_no=row_no, label="计划回款")
+        if operation != "VOID" and planned_date is None and amount is None:
+            raise WorkbookError("incomplete_milestone", f"第 {row_no} 行计划日期和金额不能同时为空")
+        out.append(V2MilestoneChange(
+            operation=operation, contract_no=contract_no, sequence=sequence,
+            planned_date=planned_date, date_precision=precision, planned_amount=amount,
+            entity_id=str(row[index["实体ID"]] or "").strip() or None,
+            base_version=int(row[index["基础版本"]]) if row[index["基础版本"]] not in (None, "") else None,
+        ))
+    return out
+
+
+def _v2_parse_expenses(db: Session, ws) -> list[ec.ExpenseUpdate]:
+    headers = [str(cell.value or "") for cell in ws[1]]
+    index = {name: i for i, name in enumerate(headers)}
+    out: list[ec.ExpenseUpdate] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if not row or all(value in (None, "") for value in row):
+            continue
+        raw_id = str(row[index["实体ID"]] or "").strip()
+        expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_id))
+        if expense is None:
+            raise WorkbookError("expense_not_found", f"第 {row_no} 行报销事实已不存在，请重新下载")
+        amount = _v2_decimal(row[index["未税金额"]], row_no=row_no, label="未税金额")
+        inc = (amount * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if amount is not None else None
+        out.append(ec.ExpenseUpdate(
+            raw_line_id=raw_id,
+            expense_date=_v2_date(row[index["报销日期"]], row_no=row_no, label="报销") if row[index["报销日期"]] not in (None, "") else None,
+            person=str(row[index["报销人员"]] or "").strip() or None,
+            expense_type=str(row[index["报销类别"]] or "").strip() or None,
+            fee_category=str(row[index["费用分类"]] or "").strip() or None,
+            reason=str(row[index["支出事由"]] or "").strip() or None,
+            contract_no=str(row[index["维保销售订单（归集键）"]] or "").strip() or None,
+            amount_ex_tax=amount,
+            amount_inc_tax=inc,
+            data_status=str(row[index["流程状态"]] or "").strip() or None,
+            remark=str(row[index["备注"]] or "").strip() or None,
+        ))
+    return out
+
+
+def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp]:
+    contracts = {c.contract_no: c for c in ec._contracts(db, project_id)}
+    headers = [str(cell.value or "") for cell in ws[1]]
+    index = {name: i for i, name in enumerate(headers)}
+    out: list[ec.CollectionOp] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if not row or all(value in (None, "") for value in row):
+            continue
+        contract_no = str(row[index["合同编号"]] or "").strip()
+        contract = contracts.get(contract_no)
+        if contract is None:
+            raise WorkbookError("contract_not_found", f"第 {row_no} 行合同编号不属于本项目")
+        month = _v2_date(row[index["报告月份"]], row_no=row_no, label="报告月份")
+        if month is None:
+            raise WorkbookError("invalid_month", f"第 {row_no} 行报告月份不能为空")
+        amount = _v2_decimal(row[index["累计实收金额（含税）"]], row_no=row_no, label="累计实收金额", required=True)
+        existing = db.scalar(select(MaintenanceCollectionSnapshot).where(
+            MaintenanceCollectionSnapshot.project_contract_id == contract.project_contract_id,
+            MaintenanceCollectionSnapshot.report_month == month,
+        ))
+        out.append(ec.CollectionOp(
+            operation="UPDATE" if existing is not None else "CREATE",
+            project_contract_id=contract.project_contract_id, contract_no=contract_no,
+            report_month=month, cumulative_amount=amount,
+            receipt_reference=str(row[index["回款凭证号"]] or "").strip() or None,
+            remark=str(row[index["备注"]] or "").strip() or None,
+            collection_status=str(row[index["状态"]] or "confirmed").strip() or "confirmed",
+        ))
+    return out
+
+
+def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> MasterV2Plan:
+    try:
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+    except Exception as exc:
+        raise WorkbookError("invalid_file", f"无法读取 .xlsx：{type(exc).__name__}") from exc
+    _v2_verify_meta(wb, project_id)
+    return MasterV2Plan(
+        project_id=project_id,
+        sheets=tuple(name for name in V2_ALL_SHEETS if name in wb.sheetnames),
+        cost_refills=tuple(_v2_parse_parts(db, wb[V2_SHEET_PARTS])),
+        site_flags=tuple(_v2_parse_site(db, wb[V2_SHEET_SITE])),
+        expense_updates=tuple(_v2_parse_expenses(db, wb[V2_SHEET_EXPENSE])),
+        receipt_ops=tuple(_v2_parse_receipts(db, project_id, wb[V2_SHEET_RECEIPTS])),
+        milestone_changes=tuple(_v2_parse_plan(db, project_id, wb[V2_SHEET_PLAN])),
+    )
+
+
+def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str, import_batch_id: str) -> dict:
+    # All mutations deliberately happen on this one Session transaction.
+    for refill in plan.cost_refills:
+        existing = db.scalar(select(MaintenanceManualCostOverride).where(MaintenanceManualCostOverride.line_id == refill.line_id))
+        if existing is None:
+            db.add(MaintenanceManualCostOverride(line_id=refill.line_id, unit_cost_ex_tax=refill.unit_cost_ex_tax,
+                                                 unit_cost_inc_tax=refill.unit_cost_inc_tax, reason=refill.reason,
+                                                 active=True, version=1, updated_by=operated_by))
+        else:
+            existing.unit_cost_ex_tax = refill.unit_cost_ex_tax
+            existing.unit_cost_inc_tax = refill.unit_cost_inc_tax
+            existing.reason = refill.reason
+            existing.active = True
+            existing.version += 1
+            existing.updated_by = operated_by
+    for flag in plan.site_flags:
+        line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
+        if line is None:
+            raise WorkbookError("line_not_found", f"领用行 {flag.issue_line_id} 已不存在，请重新下载")
+        line.no_return = flag.no_return
+        if flag.pn is not None: line.pn = flag.pn
+        if flag.serial_number is not None: line.serial_number = flag.serial_number
+        if flag.quantity is not None: line.quantity = flag.quantity
+        if flag.remark is not None: line.remark = flag.remark
+        if flag.issue_no is not None or flag.issue_date is not None:
+            issue = db.get(MaintenanceSiteIssue, line.issue_id)
+            if issue is not None:
+                if flag.issue_no is not None: issue.issue_no = flag.issue_no
+                if flag.issue_date is not None: issue.issue_date = flag.issue_date
+    if plan.expense_updates or plan.receipt_ops:
+        ec.apply(db, ec.WorkbookPlan(plan.project_id, plan.expense_updates, plan.receipt_ops),
+                 operated_by=operated_by, import_batch_id=import_batch_id, commit=False)
+    contracts = {c.contract_no: c for c in ec._contracts(db, plan.project_id)}
+    for change in plan.milestone_changes:
+        contract = contracts[change.contract_no]
+        existing = db.scalar(select(MaintenanceCollectionMilestone).where(
+            MaintenanceCollectionMilestone.project_contract_id == contract.project_contract_id,
+            MaintenanceCollectionMilestone.sequence == change.sequence,
+        ).with_for_update())
+        if change.operation == "VOID":
+            if existing is None:
+                raise WorkbookError("void_target_missing", f"合同 {change.contract_no} 第 {change.sequence} 期不存在")
+            if change.base_version is not None and existing.version != change.base_version:
+                raise WorkbookError("stale_row", f"合同 {change.contract_no} 第 {change.sequence} 期已被更新")
+            existing.is_active = False
+            existing.version += 1
+            continue
+        if existing is not None and change.base_version is not None and existing.version != change.base_version:
+            raise WorkbookError("stale_row", f"合同 {change.contract_no} 第 {change.sequence} 期已被更新")
+        milestone = write_collection_milestone(
+            db, project_id=plan.project_id, project_contract_id=contract.project_contract_id,
+            sequence=change.sequence, planned_date=change.planned_date,
+            planned_amount=change.planned_amount, completeness_state=("complete" if change.planned_date and change.planned_amount else "date_only" if change.planned_date else "amount_only"),
+            source="project_master_v2", date_precision=change.date_precision, operator=operated_by,
+        )
+        milestone.is_active = True
+    db.commit()
+    return {"applied_by": operated_by, "import_batch_id": import_batch_id,
+            "protocol_id": V2_PROTOCOL_ID, "template_version": V2_TEMPLATE_VERSION,
+            "project_id": plan.project_id, "sheets": list(plan.sheets), **plan.summary,
+            "warnings": []}

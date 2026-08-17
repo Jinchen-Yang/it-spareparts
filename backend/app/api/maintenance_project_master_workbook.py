@@ -27,6 +27,7 @@ from app.api.maintenance_expense_collection_workbook import (
     _require_profit_visibility,
 )
 from app.auth import current_identity, current_role
+from app.config import get_settings
 from app.db import get_db
 from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
@@ -230,8 +231,12 @@ def download_project_master(
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
     try:
-        content = master.build_project_master(db, project_id=project_id,
-                                              sheets=wanted)
+        if get_settings().maintenance_project_master_v2_enabled:
+            content = master.build_project_master_v2(db, project_id=project_id)
+            wanted = master.V2_ALL_SHEETS
+        else:
+            content = master.build_project_master(db, project_id=project_id,
+                                                  sheets=wanted)
     except ec.WorkbookError as exc:
         _fail(exc)
     if content is None:
@@ -253,7 +258,39 @@ def list_master_rows(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
-    if sheet != master.SHEET_PARTS:
+    if (get_settings().maintenance_project_master_v2_enabled
+            and sheet in {master.V2_SHEET_PARTS, master.SHEET_PARTS}):
+        rows = master._assigned_lines(db, project_id=project_id, window=None)
+        line_ids = [line.id for line, _order, _pid in rows]
+        overrides = {
+            item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id.in_(line_ids)
+            ))
+        } if line_ids else {}
+        return {
+            "sheet": sheet,
+            "total": len(rows),
+            "rows": [{
+                "line_id": line.id,
+                "part_id": line.part_id,
+                "order_no": order.order_no,
+                "order_date": order.order_date.isoformat() if order.order_date else None,
+                "pn_std": line.pn_std or line.pn_raw or "",
+                "description": line.description or "",
+                "qty": str(line.qty) if line.qty is not None else None,
+                "warehouse": order.warehouse or "",
+                "cost_source": line.cost_source or "none",
+                "cost_source_label": line.cost_source or "无成本结果",
+                "confidence": line.confidence or "none",
+                "unit_cost_ex_tax": str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None,
+                "unit_cost_inc_tax": str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None,
+                "missing_kind": "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None else ("none" if line.unit_cost_ex_tax is None else None),
+                "can_refill": line.unit_cost_ex_tax is None,
+                "manual_unit_cost_ex_tax": str(overrides[line.id].unit_cost_ex_tax) if line.id in overrides else None,
+                "manual_reason": overrides[line.id].reason if line.id in overrides else None,
+            } for line, order, _pid in rows],
+        }
+    if sheet not in {master.SHEET_PARTS}:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "unsupported_sheet",
@@ -316,6 +353,17 @@ async def validate_project_master(
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
     try:
+        if get_settings().maintenance_project_master_v2_enabled:
+            plan = master.validate_project_master_v2(db, project_id=project_id, data=data)
+            return {
+                "valid": True,
+                "protocol_id": master.V2_PROTOCOL_ID,
+                "template_version": master.V2_TEMPLATE_VERSION,
+                "project_id": project_id,
+                "sheets": list(plan.sheets),
+                **plan.summary,
+                "warnings": [],
+            }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:
         _fail(exc)
@@ -339,9 +387,15 @@ async def apply_project_master(
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
     try:
-        plan = master.validate(db, project_id=project_id, data=data)
-        result = master.apply(db, plan, operated_by=_operator(ident),
-                              import_batch_id=str(uuid.uuid4()))
+        if get_settings().maintenance_project_master_v2_enabled:
+            plan = master.validate_project_master_v2(db, project_id=project_id, data=data)
+            result = master.apply_project_master_v2(
+                db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4())
+            )
+        else:
+            plan = master.validate(db, project_id=project_id, data=data)
+            result = master.apply(db, plan, operated_by=_operator(ident),
+                                  import_batch_id=str(uuid.uuid4()))
     except ec.WorkbookError as exc:
         db.rollback()
         _fail(exc)

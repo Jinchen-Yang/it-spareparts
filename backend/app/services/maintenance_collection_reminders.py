@@ -34,6 +34,7 @@ from app.models.maintenance_manager import (
     MaintenanceCollectionMilestoneOperation,
     MaintenanceServicePeriod,
 )
+from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectContract,
@@ -214,6 +215,58 @@ def derive_reminder_state(milestone, *, as_of: date) -> str:
     return "upcoming"
 
 
+def derive_collection_payment_state(
+    milestone,
+    *,
+    cumulative_planned: Decimal,
+    previous_cumulative_planned: Decimal,
+    latest_confirmed_snapshot=None,
+    as_of: date,
+) -> str:
+    """Derive receipt progress without treating a missing snapshot as zero."""
+    if _attr(milestone, "completeness_state") != "complete":
+        return "incomplete"
+    if latest_confirmed_snapshot is None:
+        return "not_reported"
+    received = Decimal(str(_attr(latest_confirmed_snapshot, "cumulative_amount") or 0))
+    if received >= cumulative_planned:
+        return "paid"
+    if received > previous_cumulative_planned:
+        return "partial"
+    planned_date = _attr(milestone, "planned_date")
+    if planned_date is not None and (
+        _attr(milestone, "date_precision") == "day" and planned_date < as_of
+        or _month_key(planned_date) <= _month_key(as_of)
+    ):
+        return "unpaid"
+    return "not_due"
+
+
+def _payment_fields(db: Session, milestone: MaintenanceCollectionMilestone, *, as_of: date) -> dict:
+    active = MaintenanceCollectionMilestone.is_active.is_(True)
+    current = list(db.scalars(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_contract_id == milestone.project_contract_id,
+        active,
+        MaintenanceCollectionMilestone.sequence <= milestone.sequence,
+    ).order_by(MaintenanceCollectionMilestone.sequence)))
+    cumulative = sum((item.planned_amount or Decimal(0)) for item in current)
+    previous = sum((item.planned_amount or Decimal(0)) for item in current[:-1])
+    snapshot = db.scalar(select(MaintenanceCollectionSnapshot).where(
+        MaintenanceCollectionSnapshot.project_contract_id == milestone.project_contract_id,
+        MaintenanceCollectionSnapshot.status == "confirmed",
+    ).order_by(MaintenanceCollectionSnapshot.report_month.desc()))
+    return {
+        "payment_state": derive_collection_payment_state(
+            milestone, cumulative_planned=cumulative,
+            previous_cumulative_planned=previous,
+            latest_confirmed_snapshot=snapshot, as_of=as_of,
+        ),
+        "cumulative_planned_amount": _money_text(cumulative),
+        "latest_cumulative_received": _money_text(snapshot.cumulative_amount) if snapshot else None,
+        "latest_received_month": snapshot.report_month.isoformat() if snapshot else None,
+    }
+
+
 def select_next_actionable_milestone(milestones, *, as_of: date):
     """选“下一条”可跟进节点：``needs_review > overdue > due_this_month >
     incomplete > upcoming``，再按计划月份和期次；绝不选择普通 handled 节点。
@@ -323,10 +376,12 @@ def _milestone_row(
         "follow_up_note": milestone.follow_up_note,
         "last_operation": last_operation_dict,
         "version": milestone.version,
+        **_payment_fields(db, milestone, as_of=as_of),
     }
 
 
 def _actionable_dict(
+    db: Session,
     milestone: MaintenanceCollectionMilestone,
     *,
     as_of: date,
@@ -344,6 +399,7 @@ def _actionable_dict(
         ),
         "reminder_state": derive_reminder_state(milestone, as_of=as_of),
         "version": milestone.version,
+        **_payment_fields(db, milestone, as_of=as_of),
     }
 
 
@@ -446,7 +502,8 @@ def search_collection_reminders(
     milestones = list(
         db.scalars(
             select(MaintenanceCollectionMilestone).where(
-                MaintenanceCollectionMilestone.project_id.in_(project_ids)
+                MaintenanceCollectionMilestone.project_id.in_(project_ids),
+                MaintenanceCollectionMilestone.is_active.is_(True),
             )
         )
     )
@@ -464,7 +521,9 @@ def search_collection_reminders(
         if reminder_state is not None and reminder_state not in states:
             continue
         next_actionable = select_next_actionable_milestone(
-            project_milestones, as_of=as_of
+            [milestone for milestone in project_milestones
+             if _payment_fields(db, milestone, as_of=as_of)["payment_state"] != "paid"],
+            as_of=as_of,
         )
         if next_actionable is None:
             next_actionable_dict = None
@@ -472,6 +531,7 @@ def search_collection_reminders(
             sort_month = date.max
         else:
             next_actionable_dict = _actionable_dict(
+                db,
                 next_actionable,
                 as_of=as_of,
                 amount_visible=amount_visible,
@@ -577,6 +637,7 @@ def get_project_collection_milestones(
         db.scalars(
             select(MaintenanceCollectionMilestone)
             .where(MaintenanceCollectionMilestone.project_id == project_id)
+            .where(MaintenanceCollectionMilestone.is_active.is_(True))
             .order_by(
                 MaintenanceCollectionMilestone.planned_date.asc().nulls_last(),
                 MaintenanceCollectionMilestone.sequence,
