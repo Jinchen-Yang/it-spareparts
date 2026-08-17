@@ -40,6 +40,11 @@ class MaintenanceProject(Base):
     no_return_default: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # 维保期限（#51）：台账导入时以台账为权威覆盖；台账缺位时由 WBDD 挂靠单据聚合
+    # （min(maint_start)/max(maint_end)，生产覆盖 411/415）回填，名称解析（#50）兜底。
+    # 甲方核心需求 §3.3 与 #39 要求期限可显示、可在面板编辑。
+    period_from: Mapped[date | None] = mapped_column(Date)
+    period_to: Mapped[date | None] = mapped_column(Date)
     lifecycle_status: Mapped[str] = mapped_column(String(32), nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean,

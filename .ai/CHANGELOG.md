@@ -17,6 +17,7 @@
 - `docs/releases/v1.23-deploy-plan.md` — §0.1 发布前复核发现（6 项）＋ §3 补「构建新镜像」步骤 ＋ §4 全程执行结果回填
 - `frontend/src/pages/maintenance/MaintenanceHomePage.tsx` + `ProjectCard.tsx` — **R5 回归修复**：卡墙筛选器补「期限缺失」档＋卡片「期限缺失」标签＋空态指引。生产 415 个项目 lifecycle 全 missing（台账未导入），原筛选器只有进行中/已结束两档 → 整面卡墙无声全空。默认仍「进行中」（#37 业务口径不动）
 - `backend/app/services/maintenance_ledger.py` + 迁移 `e8b2c6f4d1a7` — **#50 项目周期从名称提取**（业务指示 08-17）：新增 `_period_from_display_name`（8 位日起止为主、支持 `-`/`~`/空格连接符与 6 位年月段）＋`_resolve_lifecycle`（台账权威、名称兜底）；迁移对存量 missing 项目一次性回填（纯数据 UPDATE 零 DDL，自包含解析副本）。生产名称干跑：373/415 回填（152 ongoing＋221 ended），42 保持 missing（真无周期/笔误）。两副本对全部 415 名称输出逐一验证一致
+- **#51 接回 v1.17 老版数据链**（业务指示 08-17：现有 XSDD/WBDD 数据即可确定名称/期限/合同额，不必等台账；参照老版 ProjectCostPage/projects_aggregate 口径）：①迁移 `f3b5d7c9e2a4` 给 `maintenance_project` 加 `period_from/to`（纯加法），WBDD 挂靠聚合回填（覆盖 411/415）→名称解析兜底，lifecycle 按期限重算；②boss-board 合同额两层取数——台账合同优先，缺位回退 XSDD 聚合（生产覆盖 402/415），带 `contract_shared`/`contract_incomplete` 诚实标注；③面板显示维保期限并支持编辑（#39 落地，PATCH 校验起止、按新期限重算 lifecycle、乐观锁）；④修复面板编辑表单三处断头（cmo_name/salesperson 后端不收、response shape 错配、RangePicker 无回填）；⑤台账导入侧 `_resolve_period`（台账权威，缺位不清空回填值）。浏览器端到端验证：期限显示/编辑/重算/回读全链路 200
 
 **生产发布（2026-08-17 上午，relay-vps）：**
 - 生产代码 `ab42005` → `bd867a7`（一次性追平 main，跨 143,665 行）；DB `c8e2a4f6b1d3` → `d6e1f4a8c3b5`（15 条迁移 2.4s）

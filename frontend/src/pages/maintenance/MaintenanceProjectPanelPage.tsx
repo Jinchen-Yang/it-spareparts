@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  DatePicker,
   Descriptions,
   Form,
   Input,
@@ -14,9 +15,11 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
+import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type {
@@ -484,7 +487,27 @@ function BasicsTab({
           {row?.project_manager ?? project?.project_manager_id ?? "—"}
         </Descriptions.Item>
         <Descriptions.Item label="合同总额">
-          {statText(row?.contract_amount_inc_tax)}
+          <Space size={6}>
+            <span>{statText(row?.contract_amount_inc_tax)}</span>
+            {row?.contract_shared ? (
+              <Tooltip title="有销售订单同时挂在多个项目上，合同额会在项目间重复计入，仅作参考">
+                <Tag color="orange">共用单</Tag>
+              </Tooltip>
+            ) : null}
+            {row?.contract_incomplete ? (
+              <Tooltip title="部分关联销售订单未在销售表中找到金额，合同额被低估">
+                <Tag color="orange">不完整</Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="维保期限">
+          {(() => {
+            const pf = row?.period_from ?? project?.period_from;
+            const pt = row?.period_to ?? project?.period_to;
+            if (!pf && !pt) return "—";
+            return `${pf ?? "—"} ~ ${pt ?? "—"}`;
+          })()}
         </Descriptions.Item>
         <Descriptions.Item label="生命周期">
           {(() => {
@@ -561,7 +584,20 @@ function EditBasicsButton({
   const openModal = async () => {
     try {
       const resp = await getMaintenanceProject(projectId);
-      form.setFieldsValue(resp.data);
+      // 后端契约是 {project: {...}}（MaintenanceProjectOverview）
+      const proj = resp.data.project;
+      form.setFieldsValue({
+        display_name: proj.display_name,
+        project_manager_id: proj.project_manager_id,
+        version: proj.version,
+        period:
+          proj.period_from || proj.period_to
+            ? [
+                proj.period_from ? dayjs(proj.period_from) : null,
+                proj.period_to ? dayjs(proj.period_to) : null,
+              ]
+            : null,
+      });
       setOpen(true);
     } catch (err) {
       message.error(readError(err, "读取项目主档失败"));
@@ -570,9 +606,22 @@ function EditBasicsButton({
 
   const submit = async () => {
     const values = await form.validateFields();
+    const { period, ...rest } = values as {
+      period?: [Dayjs | null, Dayjs | null] | null;
+    } & Record<string, unknown>;
+    const payload = {
+      ...rest,
+      // 期限整组提交（#39/#51）；清空即回 missing
+      period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
+      period_to: period?.[1] ? period[1].format("YYYY-MM-DD") : null,
+      reason: "面板编辑基本信息",
+    };
     setSaving(true);
     try {
-      await updateMaintenanceProject(projectId, values);
+      await updateMaintenanceProject(
+        projectId,
+        payload as Parameters<typeof updateMaintenanceProject>[1],
+      );
       message.success("已保存");
       setOpen(false);
       onSaved();
@@ -605,11 +654,12 @@ function EditBasicsButton({
           <Form.Item name="display_name" label="项目名称">
             <Input />
           </Form.Item>
-          <Form.Item name="cmo_name" label="项目经理(CMO)">
+          <Form.Item name="project_manager_id" label="维保负责人">
             <Input />
           </Form.Item>
-          <Form.Item name="salesperson" label="销售人员">
-            <Input />
+          {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
+          <Form.Item name="period" label="维保期限（起止）">
+            <DatePicker.RangePicker style={{ width: "100%" }} allowEmpty={[true, true]} />
           </Form.Item>
           <Form.Item name="version" hidden>
             <Input />

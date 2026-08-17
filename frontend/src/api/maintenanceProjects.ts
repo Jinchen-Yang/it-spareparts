@@ -5,6 +5,9 @@ export interface MaintenanceProject {
   project_code: string;
   display_name: string;
   project_manager_id: string | null;
+  /** 维保期限主数据（#39/#51）：可显示、可在面板编辑。 */
+  period_from: string | null;
+  period_to: string | null;
   lifecycle_status: string;
   is_active: boolean;
   version: number;
@@ -34,6 +37,9 @@ export interface MaintenanceProjectUpdateInput {
   version: number;
   display_name?: string;
   project_manager_id?: string | null;
+  /** 维保期限（#39/#51）：YYYY-MM-DD；起止整组提交。 */
+  period_from?: string | null;
+  period_to?: string | null;
   reason: string;
 }
 

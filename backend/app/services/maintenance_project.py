@@ -98,6 +98,9 @@ def project_directory(
             "project_code": project.project_code,
             "display_name": project.display_name,
             "project_manager_id": project.project_manager_id,
+            # 维保期限主数据（#39/#51），与 overview/catalog 的键集一致
+            "period_from": project.period_from.isoformat() if project.period_from else None,
+            "period_to": project.period_to.isoformat() if project.period_to else None,
             "lifecycle_status": project.lifecycle_status,
             "is_active": project.is_active,
             "version": project.version,
@@ -275,6 +278,9 @@ def project_overview_from_facts(
         "project_code": project.project_code,
         "display_name": project.display_name,
         "project_manager_id": project.project_manager_id,
+        # 维保期限主数据（#39/#51）：面板显示与编辑回读都走这份 payload
+        "period_from": project.period_from.isoformat() if project.period_from else None,
+        "period_to": project.period_to.isoformat() if project.period_to else None,
         "lifecycle_status": project.lifecycle_status,
         "is_active": project.is_active,
         "version": project.version,

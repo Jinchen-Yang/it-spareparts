@@ -99,8 +99,18 @@ export function ProjectCard({ row }: ProjectCardProps) {
         </Text>
         <Space size={12} wrap style={{ fontSize: 12 }}>
           <Text>项目经理：{row.project_manager || "—"}</Text>
-          <Text>合同总额：{money(row.contract_amount_inc_tax)}</Text>
+          <Text>
+            合同总额：{money(row.contract_amount_inc_tax)}
+            {/* #51 诚实标注：XSDD 回退层的共用单/缺单，金额仅参考 */}
+            {row.contract_shared ? "（共用单）" : ""}
+            {row.contract_incomplete ? "（不完整）" : ""}
+          </Text>
         </Space>
+        {row.period_from || row.period_to ? (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            期限：{row.period_from ?? "—"} ~ {row.period_to ?? "—"}
+          </Text>
+        ) : null}
 
         <div style={{ fontSize: 11.5, lineHeight: 1.9, color: "rgba(0,0,0,.55)" }}>
           <div>

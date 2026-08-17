@@ -687,6 +687,9 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": proj.project_code,
             "display_name": proj.display_name,
             "lifecycle": proj.lifecycle_status,
+            # 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值
+            "period_from": proj.period_from.isoformat() if proj.period_from else None,
+            "period_to": proj.period_to.isoformat() if proj.period_to else None,
             # 归档但仍带单：留在列表里保住母集恒等式，用标记让老板知道它已归档
             "is_archived": not proj.is_active,
             "has_activity_in_window": bool(orders_n),
@@ -715,6 +718,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
             "lifecycle": "missing",
+            "period_from": None,       # 桶不是项目，没有期限可言
+            "period_to": None,
             "is_archived": False,      # 键集与项目行保持一致
             "has_activity_in_window": bool(u_orders),
             "pre_delivery_order_count": 0,
@@ -868,12 +873,23 @@ def card_status(cost_ratio_pct: Decimal | None) -> str | None:
 
 
 def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
-    """逐项目：合同总额（含税，只认 included_in_total）+ 合同号清单。
+    """逐项目：合同总额（含税）+ 合同号清单 + 诚实标注（#51 两层取数）。
 
-    合同号即 XSDD 销售订单号（REQUIREMENTS #45 归属判定依据）。多合同项目
-    （生产唯一例外「兵装财务…整体维保」）返回多个号，前端并排或筛选。
+    1. **台账合同**（MaintenanceProjectContract，只认 included_in_total）＝权威源，
+       项目有台账合同行就用它（REQUIREMENTS #8/#31）。
+    2. **XSDD 回退**（v1.17 老版口径，业务指示 2026-08-17）：台账缺位时按项目挂靠
+       单据的 distinct XSDD 去销售表取金额——`max(amount_ex_tax×(1+tax_rate))` 每单
+       取最新有效版本的最大值，跨单求和。两个诚实标注随行返回：
+       - `contract_shared`：某 XSDD 同时挂在多个项目上（生产 13 张共用单），合同额
+         会在项目间重复计入——只标注，不擅自分摊（Q5：合同额仅参考，不出毛利）；
+       - `contract_incomplete`：有 XSDD 不在销售表（生产 5 个 2023 老单），合同额被
+         低估——标注而非静默按 0（铁律 5）。
+
+    合同号即 XSDD 销售订单号（#45 归属判定依据）；回退层的合同号=挂靠 XSDD 清单。
     """
     from app.models.maintenance_project import MaintenanceProjectContract
+    from app.models.sales import FSalesOrder
+    from app.services.query_filters import active_orders
 
     if not project_ids:
         return {}
@@ -887,11 +903,71 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
     ).all()
     out: dict[str, dict] = {}
     for pid, no, amount, included in rows:
-        bucket = out.setdefault(pid, {"contract_nos": [], "amount_inc_tax": None})
+        bucket = out.setdefault(
+            pid, {"contract_nos": [], "amount_inc_tax": None,
+                  "contract_shared": False, "contract_incomplete": False})
         if no and no not in bucket["contract_nos"]:
             bucket["contract_nos"].append(no)
         if included and amount is not None:
             bucket["amount_inc_tax"] = (bucket["amount_inc_tax"] or Decimal(0)) + amount
+
+    # —— XSDD 回退：只对「台账没给出金额」的项目生效，台账永远优先 ——
+    fallback_ids = [pid for pid in project_ids
+                    if (out.get(pid) or {}).get("amount_inc_tax") is None]
+    if not fallback_ids:
+        return out
+    active = and_(
+        MaintenanceSourceOrderAssignment.source_order_id
+        == FMaintenanceOrder.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )
+    # 全量「XSDD→挂了哪些项目」映射：shared 判定必须看全局（不止本页），
+    # 否则翻页会把共用单误标成独占。
+    xsdd_rows = db.execute(
+        select(MaintenanceSourceOrderAssignment.project_id,
+               FMaintenanceOrder.linked_sales_order_no)
+        .select_from(FMaintenanceOrder)
+        .join(MaintenanceSourceOrderAssignment, active)
+        .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
+        .group_by(MaintenanceSourceOrderAssignment.project_id,
+                  FMaintenanceOrder.linked_sales_order_no)
+    ).all()
+    order_projects: dict[str, set] = {}
+    project_orders: dict[str, list] = {}
+    for pid, ono in xsdd_rows:
+        order_projects.setdefault(ono, set()).add(pid)
+        if pid in fallback_ids:
+            project_orders.setdefault(pid, []).append(ono)
+    all_orders = sorted({o for pid in fallback_ids
+                         for o in project_orders.get(pid, [])})
+    amounts: dict[str, Decimal] = {}
+    if all_orders:
+        cq = active_orders(
+            select(FSalesOrder.order_no,
+                   func.max(FSalesOrder.amount_ex_tax
+                            * (1 + func.coalesce(FSalesOrder.tax_rate, 0))))
+            .where(FSalesOrder.order_no.in_(all_orders),
+                   FSalesOrder.amount_ex_tax.is_not(None))
+            .group_by(FSalesOrder.order_no),
+            FSalesOrder)
+        amounts = {ono: Decimal(str(inc)).quantize(Decimal("0.01"))
+                   for ono, inc in db.execute(cq).all() if inc is not None}
+    for pid in fallback_ids:
+        onos = sorted(project_orders.get(pid, []))
+        if not onos:
+            continue
+        bucket = out.setdefault(
+            pid, {"contract_nos": [], "amount_inc_tax": None,
+                  "contract_shared": False, "contract_incomplete": False})
+        if not bucket["contract_nos"]:
+            bucket["contract_nos"] = onos
+        total = sum((amounts.get(o) or Decimal(0)) for o in onos)
+        missing = [o for o in onos if o not in amounts]
+        if total > 0:
+            bucket["amount_inc_tax"] = total
+        bucket["contract_shared"] = any(
+            len(order_projects.get(o, set())) > 1 for o in onos)
+        bucket["contract_incomplete"] = bool(missing)
     return out
 
 
@@ -996,6 +1072,9 @@ def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
         "contract_nos": contract_nos,
         "project_manager": getattr(project, "cmo_name", None),
         "contract_amount_inc_tax": money(contract_amount),
+        # #51 诚实标注：XSDD 回退层的共用单/缺单提示（台账层恒 false）
+        "contract_shared": bool((contracts or {}).get("contract_shared")),
+        "contract_incomplete": bool((contracts or {}).get("contract_incomplete")),
         "known_apply_cost_ex_tax": (
             money(cost_ex) if wbdd_ready
             else (restricted() if not can_cost else not_imported())),
