@@ -10,6 +10,11 @@ const listMaintenanceSourceOrders = vi.fn();
 const assignMaintenanceSourceOrders = vi.fn();
 const downloadProjectMaster = vi.fn();
 const listProjectExpenseRows = vi.fn();
+const listProjectPartsRows = vi.fn();
+const getMaintenanceProjectWorkspace = vi.fn();
+const searchSiteIssues = vi.fn();
+const searchMaintenanceReturnObligations = vi.fn();
+const searchMaintenanceBadReturns = vi.fn();
 
 vi.mock("../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -38,8 +43,22 @@ vi.mock("../../../api/maintenanceWorkbooks", async () => {
     ...actual,
     downloadProjectMaster: (...a: unknown[]) => downloadProjectMaster(...a),
     listProjectExpenseRows: (...a: unknown[]) => listProjectExpenseRows(...a),
+    listProjectPartsRows: (...a: unknown[]) => listProjectPartsRows(...a),
     applyProjectMaster: vi.fn(),
     saveBlob: vi.fn(),
+  };
+});
+vi.mock("../../../api/maintenanceOperations", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../../../api/maintenanceOperations",
+  );
+  return {
+    ...actual,
+    getMaintenanceProjectWorkspace: (...a: unknown[]) => getMaintenanceProjectWorkspace(...a),
+    searchSiteIssues: (...a: unknown[]) => searchSiteIssues(...a),
+    searchMaintenanceReturnObligations: (...a: unknown[]) =>
+      searchMaintenanceReturnObligations(...a),
+    searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
   };
 });
 
@@ -95,6 +114,26 @@ beforeEach(() => {
   getBoardOrderLines.mockResolvedValue({ data: { rows: [], total: 0 } });
   listMaintenanceSourceOrders.mockResolvedValue({ data: { rows: [] } });
   listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
+  listProjectPartsRows.mockResolvedValue({ rows: [], total: 0, sheet: "03_备件订单" });
+  getMaintenanceProjectWorkspace.mockResolvedValue({
+    data: {
+      project: { metrics: {
+        received_amount: 100,
+        total_contract_amount: 1000,
+        collection_progress_pct: 10,
+      } },
+      collection_snapshots: { rows: [], total: 0, page: 1, page_size: 100 },
+    },
+  });
+  searchSiteIssues.mockResolvedValue({
+    data: { project_id: "p1", rows: [], total: 0, page: 1, page_size: 100 },
+  });
+  searchMaintenanceReturnObligations.mockResolvedValue({
+    data: { project_id: "p1", rows: [], total: 0, page: 1, page_size: 200 },
+  });
+  searchMaintenanceBadReturns.mockResolvedValue({
+    data: { project_id: "p1", rows: [], total: 0, page: 1, page_size: 100 },
+  });
 });
 
 afterEach(cleanup);
@@ -117,11 +156,108 @@ describe("项目面板", () => {
     expect(screen.getByText("出库明细")).toBeInTheDocument();
   });
 
-  it("四个 tab 齐全（表 6 的 web 呈现）", async () => {
+  it("五个同级 tab 齐全（表 6 的 web 呈现）", async () => {
     renderPanel();
-    for (const label of ["项目基础信息", "备件成本", "报销", "回款"]) {
+    for (const label of ["项目基础信息", "备件成本", "报销", "回款", "维保领用与返还"]) {
       expect(await screen.findByRole("tab", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("回款 tab 展示项目回款进度和每条回款状态", async () => {
+    getMaintenanceProjectWorkspace.mockResolvedValue({
+      data: {
+        project: { metrics: {
+          received_amount: 600,
+          total_contract_amount: 1000,
+          collection_progress_pct: 60,
+        } },
+        collection_snapshots: {
+          rows: [{
+            collection_id: "COL-1",
+            project_contract_id: "PC-1",
+            contract_no: "XSDD-1",
+            report_month: "2026-08-01",
+            cumulative_amount: 600,
+            receipt_reference: "REC-1",
+            status: "confirmed",
+            remark: "已到账",
+            version: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        },
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "回款" }));
+    expect(await screen.findByText("回款状态")).toBeInTheDocument();
+    expect(screen.getByText("已确认")).toBeInTheDocument();
+    expect(screen.getByText("60%")).toBeInTheDocument();
+    expect(screen.getByText("REC-1")).toBeInTheDocument();
+  });
+
+  it("维保领用与返还 tab 合并领用、返还义务和返还单状态", async () => {
+    searchSiteIssues.mockResolvedValue({
+      data: {
+        project_id: "p1",
+        rows: [{
+          issue_id: "ISSUE-1",
+          project_id: "p1",
+          issue_no: "CKD-1",
+          issue_date: "2026-08-18",
+          workflow_status: "confirmed",
+          lines: [{
+            issue_line_id: "LINE-1",
+            part_id: 9,
+            pn: "PN-001",
+            serial_number: "SN-001",
+            quantity: "2",
+            no_return: false,
+          }],
+        }],
+        total: 1,
+        page: 1,
+        page_size: 100,
+      },
+    });
+    searchMaintenanceReturnObligations.mockResolvedValue({
+      data: {
+        project_id: "p1",
+        rows: [{
+          obligation_id: "OB-1",
+          issue_line_id: "LINE-1",
+          classification: "required",
+          required_quantity: "2",
+          registered_quantity: "2",
+          warehouse_confirmed_quantity: "2",
+          remaining_quantity: "0",
+        }],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+    });
+    searchMaintenanceBadReturns.mockResolvedValue({
+      data: {
+        project_id: "p1",
+        rows: [{
+          return_id: "RET-1",
+          return_no: "HJFH-1",
+          status: "warehouse_confirmed",
+          lines: [{ obligation_id: "OB-1" }],
+        }],
+        total: 1,
+        page: 1,
+        page_size: 100,
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "维保领用与返还" }));
+    expect(await screen.findByText("CKD-1")).toBeInTheDocument();
+    expect(screen.getByText("PN-001")).toBeInTheDocument();
+    expect(screen.getByText("仓库已确认返还")).toBeInTheDocument();
+    expect(screen.getByText("HJFH-1")).toBeInTheDocument();
   });
 
   it("多合同项目给出合同筛选（#39）", async () => {

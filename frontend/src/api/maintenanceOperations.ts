@@ -298,6 +298,8 @@ export interface SiteIssueLine {
   source_order_id: string | null;
   source_line_id: string | null;
   serial_number: string | null;
+  /** 行级返还规则：true=免返，false=必须返还，null=继承项目默认。 */
+  no_return: boolean | null;
   cost_source: string | null;
   cost_source_label: string | null;
   cost_is_estimate: boolean;

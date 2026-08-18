@@ -3,11 +3,13 @@ export type PaymentState = "paid" | "partial" | "unpaid" | "not_reported" | "not
 
 export interface MasterV2ChangeSummary {
   cost_overrides: number;
+  expense_creates: number;
   expense_updates: number;
   plan_creates: number;
   plan_updates: number;
   plan_voids: number;
   collection_updates: number;
+  site_creates: number;
   site_updates: number;
 }
 

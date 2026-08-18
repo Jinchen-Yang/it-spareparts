@@ -50,6 +50,19 @@ import {
   listMaintenanceSourceOrders,
 } from "../../api/maintenanceSourceAssignments";
 import type { MaintenanceSourceOrderRow } from "../../api/maintenanceSourceAssignments";
+import type {
+  MaintenanceBadReturn,
+  MaintenanceCollectionSnapshotRow,
+  MaintenanceReturnObligation,
+  SiteIssueDocument,
+  SiteIssueLine,
+} from "../../api/maintenanceOperations";
+import {
+  getMaintenanceProjectWorkspace,
+  searchMaintenanceBadReturns,
+  searchMaintenanceReturnObligations,
+  searchSiteIssues,
+} from "../../api/maintenanceOperations";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
@@ -108,6 +121,27 @@ const STATUS_COLOR: Record<string, string> = {
   alert: "#ff4d4f",
 };
 
+const COLLECTION_STATUS: Record<string, { label: string; color: string }> = {
+  confirmed: { label: "已确认", color: "green" },
+  unconfirmed: { label: "待确认", color: "gold" },
+  void: { label: "已作废", color: "default" },
+};
+
+const ISSUE_STATUS: Record<string, { label: string; color: string }> = {
+  draft: { label: "领用草稿", color: "gold" },
+  confirmed: { label: "领用已确认", color: "green" },
+  corrected: { label: "领用已更正", color: "blue" },
+  void: { label: "领用已作废", color: "default" },
+};
+
+const RETURN_DOCUMENT_STATUS: Record<string, string> = {
+  draft: "返还草稿",
+  submitted: "已提交返还",
+  in_transit: "返还在途",
+  warehouse_confirmed: "仓库已确认",
+  void: "返还已作废",
+};
+
 /** 成本÷合同额进度条（#35）：算不出来就说算不出来，不画 0% 的绿条（铁律 5）。 */
 function CostRatioBar({ row }: { row: BoardProjectRow | null }) {
   const stat = row?.cost_ratio_pct;
@@ -134,7 +168,8 @@ function CostRatioBar({ row }: { row: BoardProjectRow | null }) {
 /**
  * 项目面板——页面定稿两页之二（REQUIREMENTS #33/#38/#39/#45）。
  *
- * 顶部＝出库明细（按合同筛选）；子 tab＝表 6 的 web 呈现（基础信息/备件成本/报销/回款）；
+ * 顶部＝出库明细（按合同筛选）；子 tab＝表 6 的 web 呈现
+ * （基础信息/备件成本/报销/回款/维保领用与返还）；
  * tab 栏右侧下载**本项目总表**，每个 tab 内单独下载对应 sheet——**在哪下载就在哪上传**。
  * 归属挂靠在「基础信息」tab（#45：判定依据＝XSDD 销售订单）。
  */
@@ -249,32 +284,6 @@ export function MaintenanceProjectPanelPage() {
     { title: "取价来源", render: (_: unknown, line) => statText(line.cost_source) },
   ];
 
-  const sheetTab = (label: string, sheet: string, extra?: React.ReactNode) => ({
-    key: sheet,
-    label,
-    children: (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <WorkbookRoundTrip
-          size="small"
-          title={label}
-          filename={`${exportBase}-${sheet}.xlsx`}
-          canUpload={canUpload}
-          hint="在哪下载就在哪上传：本页只回填本表的黄底列"
-          onDownload={() => downloadProjectMaster(projectId, [sheet])}
-          onApply={(file) => applyProjectMaster(projectId, file)}
-        />
-        {extra ?? (
-          <Alert
-            type="info"
-            showIcon
-            message={`${label} 的内容以 Excel 为准`}
-            description="缺价补录、报销、回款一律走「下载 → 改 → 上传覆盖」，系统内不提供手工散改表单。"
-          />
-        )}
-      </Space>
-    ),
-  });
-
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Space align="center" wrap>
@@ -380,7 +389,279 @@ export function MaintenanceProjectPanelPage() {
               <ExpenseTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
             ),
           },
-          sheetTab("回款", SHEETS.collection),
+          {
+            key: SHEETS.collection,
+            label: "回款",
+            children: (
+              <CollectionTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+            ),
+          },
+          {
+            key: SHEETS.site,
+            label: "维保领用与返还",
+            children: (
+              <SiteReturnTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+            ),
+          },
+        ]}
+      />
+    </Space>
+  );
+}
+
+/** 回款 tab：展示累计回款、项目回款进度和每条快照的确认状态。 */
+function CollectionTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<MaintenanceCollectionSnapshotRow[]>([]);
+  const [metrics, setMetrics] = useState<{
+    received: number | null;
+    contract: number | null;
+    progress: number | null;
+  }>({ received: null, contract: null, progress: null });
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await getMaintenanceProjectWorkspace(projectId, {
+        collection_page: 1,
+        collection_page_size: 100,
+        requisition_page_size: 1,
+        expense_page_size: 1,
+      });
+      setRows(response.data.collection_snapshots.rows);
+      setMetrics({
+        received: response.data.project.metrics.received_amount,
+        contract: response.data.project.metrics.total_contract_amount,
+        progress: response.data.project.metrics.collection_progress_pct,
+      });
+    } catch (err) {
+      message.error(readError(err, "回款状态加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="回款"
+        filename={`${exportBase}-${SHEETS.collection}.xlsx`}
+        canUpload={canUpload}
+        hint="下载后可回填累计实收、状态、凭证号和备注"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();
+          return result;
+        }}
+      />
+      <Descriptions bordered size="small" column={3}>
+        <Descriptions.Item label="累计已回款">
+          {metrics.received == null ? "—" : `¥${metrics.received.toFixed(2)}`}
+        </Descriptions.Item>
+        <Descriptions.Item label="合同总额（含税）">
+          {metrics.contract == null ? "—" : `¥${metrics.contract.toFixed(2)}`}
+        </Descriptions.Item>
+        <Descriptions.Item label="回款进度">
+          {metrics.progress == null ? "数据不足" : `${metrics.progress}%`}
+        </Descriptions.Item>
+      </Descriptions>
+      <Table<MaintenanceCollectionSnapshotRow>
+        rowKey="collection_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无回款记录" }}
+        columns={[
+          { title: "合同编号", dataIndex: "contract_no", render: raw },
+          { title: "报告月份", dataIndex: "report_month", render: raw },
+          {
+            title: "累计实收金额（含税）",
+            dataIndex: "cumulative_amount",
+            render: (value) => value == null ? "—" : `¥${Number(value).toFixed(2)}`,
+          },
+          {
+            title: "回款状态",
+            dataIndex: "status",
+            render: (value: string) => {
+              const status = COLLECTION_STATUS[value];
+              return <Tag color={status?.color}>{status?.label ?? raw(value)}</Tag>;
+            },
+          },
+          { title: "回款凭证号", dataIndex: "receipt_reference", render: raw },
+          { title: "备注", dataIndex: "remark", render: raw },
+        ]}
+      />
+    </Space>
+  );
+}
+
+interface SiteReturnRow {
+  issueLineId: string;
+  issue: SiteIssueDocument;
+  line: SiteIssueLine;
+  obligation: MaintenanceReturnObligation | null;
+  returns: MaintenanceBadReturn[];
+}
+
+function returnStatus(row: SiteReturnRow): { label: string; color: string } {
+  if (row.issue.workflow_status === "void") return { label: "领用已作废", color: "default" };
+  if (row.line.no_return === true || row.obligation?.classification === "exempt") {
+    return { label: "免返", color: "blue" };
+  }
+  if (row.obligation?.classification === "pending_category") {
+    return { label: "待确认品类", color: "gold" };
+  }
+  if (!row.obligation) return { label: "待生成返还义务", color: "gold" };
+  const remaining = Number(row.obligation.remaining_quantity);
+  const confirmed = Number(row.obligation.warehouse_confirmed_quantity);
+  const registered = Number(row.obligation.registered_quantity);
+  if (remaining <= 0 && confirmed > 0) return { label: "仓库已确认返还", color: "green" };
+  if (registered > 0 && remaining > 0) return { label: "部分返还", color: "orange" };
+  const activeReturn = row.returns.find((item) => item.status !== "void");
+  if (activeReturn) {
+    return {
+      label: RETURN_DOCUMENT_STATUS[activeReturn.status] ?? activeReturn.status,
+      color: activeReturn.status === "in_transit" ? "cyan" : "blue",
+    };
+  }
+  return { label: "待返还", color: "red" };
+}
+
+/** 维保领用与返还 tab：以领用行 part_id 为主轴，合并返还义务和返还单状态。 */
+function SiteReturnTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<SiteReturnRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [issuesResponse, obligationsResponse, returnsResponse] = await Promise.all([
+        searchSiteIssues({ project_id: projectId, page: 1, page_size: 100 }),
+        searchMaintenanceReturnObligations({
+          project_id: projectId,
+          active_only: false,
+          page: 1,
+          page_size: 200,
+        }),
+        searchMaintenanceBadReturns({ project_id: projectId, page: 1, page_size: 100 }),
+      ]);
+      const obligations = new Map(
+        obligationsResponse.data.rows.map((item) => [item.issue_line_id, item]),
+      );
+      const returns = new Map<string, MaintenanceBadReturn[]>();
+      for (const document of returnsResponse.data.rows) {
+        for (const line of document.lines) {
+          const current = returns.get(line.obligation_id) ?? [];
+          current.push(document);
+          returns.set(line.obligation_id, current);
+        }
+      }
+      setRows(issuesResponse.data.rows.flatMap((issue) =>
+        issue.lines.map((line) => {
+          const obligation = obligations.get(line.issue_line_id) ?? null;
+          return {
+            issueLineId: line.issue_line_id,
+            issue,
+            line,
+            obligation,
+            returns: obligation ? returns.get(obligation.obligation_id) ?? [] : [],
+          };
+        }),
+      ));
+    } catch (err) {
+      message.error(readError(err, "维保领用与返还状态加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="维保领用与返还"
+        filename={`${exportBase}-${SHEETS.site}.xlsx`}
+        canUpload={canUpload}
+        hint="可回填领用事实和是否应返还；上传后页面立即刷新"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();
+          return result;
+        }}
+      />
+      <Table<SiteReturnRow>
+        rowKey="issueLineId"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        scroll={{ x: 1300 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无维保领用记录" }}
+        columns={[
+          { title: "领用单号", render: (_value, item) => raw(item.issue.issue_no) },
+          { title: "领用日期", render: (_value, item) => raw(item.issue.issue_date) },
+          {
+            title: "领用状态",
+            render: (_value, item) => {
+              const status = ISSUE_STATUS[item.issue.workflow_status];
+              return <Tag color={status?.color}>{status?.label ?? item.issue.workflow_status}</Tag>;
+            },
+          },
+          { title: "PN", render: (_value, item) => raw(item.line.pn) },
+          { title: "SN", render: (_value, item) => raw(item.line.serial_number) },
+          { title: "领用数量", render: (_value, item) => raw(item.line.quantity) },
+          {
+            title: "应返数量",
+            render: (_value, item) => raw(item.obligation?.required_quantity),
+          },
+          {
+            title: "已登记返还",
+            render: (_value, item) => raw(item.obligation?.registered_quantity),
+          },
+          {
+            title: "仓库确认返还",
+            render: (_value, item) => raw(item.obligation?.warehouse_confirmed_quantity),
+          },
+          {
+            title: "返还状态",
+            render: (_value, item) => {
+              const status = returnStatus(item);
+              return <Tag color={status.color}>{status.label}</Tag>;
+            },
+          },
+          {
+            title: "返还单号",
+            render: (_value, item) => {
+              const numbers = item.returns
+                .filter((document) => document.status !== "void")
+                .map((document) => document.return_no);
+              return numbers.length ? numbers.join("、") : "—";
+            },
+          },
         ]}
       />
     </Space>

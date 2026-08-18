@@ -37,6 +37,10 @@ export interface WorkbookApplyResult {
   cost_refills: number;
   site_return_flags: number;
   expense_updates: number;
+  expense_creates?: number;
+  site_creates?: number;
+  site_updates?: number;
+  cost_overrides?: number;
   collection_creates: number;
   collection_voids: number;
 }
