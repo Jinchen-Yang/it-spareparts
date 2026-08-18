@@ -45,6 +45,8 @@ import {
   updateMaintenanceProject,
 } from "../../api/maintenanceProjects";
 import type { MaintenanceProject } from "../../api/maintenanceProjects";
+import { listAccounts } from "../../api/accounts";
+import type { Account } from "../../api/accounts";
 import {
   assignMaintenanceSourceOrders,
   autoAssignMaintenanceSourceOrders,
@@ -1014,6 +1016,7 @@ function EditBasicsButton({
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
 
   const openModal = async () => {
     try {
@@ -1032,6 +1035,13 @@ function EditBasicsButton({
               ]
             : null,
       });
+      // 加载系统内账号供「维保负责人」下拉选择
+      try {
+        const accountsResp = await listAccounts();
+        setAccounts(accountsResp.data);
+      } catch {
+        setAccounts([]);
+      }
       setOpen(true);
     } catch (err) {
       message.error(readError(err, "读取项目主档失败"));
@@ -1089,7 +1099,18 @@ function EditBasicsButton({
             <Input />
           </Form.Item>
           <Form.Item name="project_manager_id" label="维保负责人">
-            <Input />
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择系统内账号/人名"
+              optionFilterProp="label"
+              options={accounts.map((account) => ({
+                value: account.username,
+                label: account.display_name
+                  ? `${account.username} · ${account.display_name}`
+                  : account.username,
+              }))}
+            />
           </Form.Item>
           {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
           <Form.Item name="period" label="维保期限（起止）">
