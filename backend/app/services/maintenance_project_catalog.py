@@ -30,6 +30,9 @@ def project_dict(project: MaintenanceProject) -> dict:
         "project_code": project.project_code,
         "display_name": project.display_name,
         "project_manager_id": project.project_manager_id,
+        # 维保期限主数据（#51）：面板可显示、可编辑（#39）
+        "period_from": project.period_from.isoformat() if project.period_from else None,
+        "period_to": project.period_to.isoformat() if project.period_to else None,
         "lifecycle_status": project.lifecycle_status,
         "is_active": project.is_active,
         "version": project.version,
@@ -180,7 +183,7 @@ def update_project(
             f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试"
         )
     allowed = {key: value for key, value in updates.items() if key in {
-        "display_name", "project_manager_id"
+        "display_name", "project_manager_id", "period_from", "period_to"
     }}
     if not allowed:
         raise MaintenanceProjectCatalogError("没有可修改的项目字段")
@@ -198,10 +201,22 @@ def update_project(
             label="项目经理标识",
             max_length=64,
         )
-    changed = (
-        project.display_name != before["display_name"]
-        or project.project_manager_id != before["project_manager_id"]
-    )
+    # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交），起>止拒绝；
+    # 改动后按新期限重算 lifecycle（快照语义，与台账导入同口径）。
+    if "period_from" in allowed or "period_to" in allowed:
+        new_from = allowed.get("period_from", project.period_from)
+        new_to = allowed.get("period_to", project.period_to)
+        if new_from is not None and new_to is not None and new_from > new_to:
+            raise MaintenanceProjectCatalogError("维保期限起始日期不能晚于终止日期")
+        project.period_from = new_from
+        project.period_to = new_to
+        from app.business_time import business_today
+        from app.services.maintenance_ledger import _lifecycle_status
+
+        status = _lifecycle_status(new_from, new_to, business_today())
+        # 期限被清空时不打回 missing 之外的状态——按口径就是 missing
+        project.lifecycle_status = status
+    changed = project_dict(project) != before
     if not changed:
         return before
     project.version += 1

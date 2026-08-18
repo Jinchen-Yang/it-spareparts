@@ -107,6 +107,10 @@ os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
 # 新维保接口在生产默认关闭；业务测试需显式处于 Beta 已开启环境。
 # 总闸关闭及逐账号白名单边界由 test_maintenance_beta_gate 单独覆盖。
 os.environ.setdefault("MAINTENANCE_BETA_ENABLED", "true")
+# 面板依赖的基础信息/归属挂靠 router 自 2026-08-17 起随 boss 总闸（#51 迁移，
+# main.py 挂载注释）——业务测试同样需要它默认开启；开合边界由
+# test_maintenance_beta_gate.test_boss_gate_keeps_panel_routers_live 单独覆盖。
+os.environ.setdefault("MAINTENANCE_BOSS_DASHBOARD_ENABLED", "true")
 
 try:
     import pytest  # noqa: E402

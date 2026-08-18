@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -510,6 +511,80 @@ def _lifecycle_status(period_from: date | None, period_to: date | None, today: d
     return "missing"
 
 
+# 项目名称里嵌着服务周期：`客户名YYYYMMDD-YYYYMMDD服务商 业务类型`（REQUIREMENTS #50，
+# 业务 2026-08-17 指示：周期从项目名提取）。按生产 415 个名称实测定的两档式样：
+# 8 位日起止为主（89%），连接符有 `-`/`~`/空格混排；另有 6 位年月段（YYYYMM）个例。
+# 前后负向断言防止从更长的数字串中间截取；名称笔误（7 位日期、双连字符）不救——
+# 名称只是兜底源，宁缺毋错。
+_NAME_PERIOD_RE = re.compile(r"(?<!\d)(\d{8})\s*[-—~至]\s*(\d{8})(?!\d)")
+_NAME_PERIOD_YM_RE = re.compile(r"(?<!\d)(\d{6})\s*[-—~至]\s*(\d{6})(?!\d)")
+
+
+def _period_from_display_name(name: str | None) -> tuple[date | None, date | None]:
+    """从项目名称提取服务周期；解析不出（无日期段/非法日期/起止倒置）一律返回
+    (None, None)。年月段取起月首日、止月末日。
+
+    迁移 e8b2c6f4d1a7 内嵌同款逻辑做存量回填（迁移必须自包含、不得 import 本模块，
+    否则 CI 重放整链会绑死 app 包的历史形状）；改这里记得同步那份副本。
+    """
+    if not name:
+        return (None, None)
+    start = end = None
+    match = _NAME_PERIOD_RE.search(name)
+    if match is not None:
+        try:
+            start = datetime.strptime(match.group(1), "%Y%m%d").date()
+            end = datetime.strptime(match.group(2), "%Y%m%d").date()
+        except ValueError:
+            return (None, None)
+    else:
+        match = _NAME_PERIOD_YM_RE.search(name)
+        if match is None:
+            return (None, None)
+        try:
+            start = datetime.strptime(match.group(1), "%Y%m").date()
+            end_month = datetime.strptime(match.group(2), "%Y%m").date()
+        except ValueError:
+            return (None, None)
+        end = end_month.replace(day=monthrange(end_month.year, end_month.month)[1])
+    if start > end:
+        return (None, None)
+    return (start, end)
+
+
+def _resolve_lifecycle(
+    period_from: date | None,
+    period_to: date | None,
+    display_name: str | None,
+    today: date,
+) -> str:
+    """台账周期是权威源；台账没给（missing）时才回退到名称解析（#50）。
+
+    注意这是**快照语义**：与台账导入一致，lifecycle 反映计算当日的状态，
+    ongoing→ended 的翻转靠下一次台账导入（或下一次名称回填）刷新。
+    """
+    status = _lifecycle_status(period_from, period_to, today)
+    if status != "missing":
+        return status
+    name_from, name_to = _period_from_display_name(display_name)
+    return _lifecycle_status(name_from, name_to, today)
+
+
+def _resolve_period(
+    ledger_from: date | None,
+    ledger_to: date | None,
+    display_name: str | None,
+) -> tuple[date | None, date | None]:
+    """期限主数据的写入值（#51）：台账优先，缺位回退名称解析，都没有返回 (None, None)。
+
+    返回 (None, None) 时调用方**不得清空**项目上已有的 period——那可能是迁移
+    f3b5d7c9e2a4 按 WBDD 挂靠聚合回填的值，比「没有」更接近事实。
+    """
+    if ledger_from is not None or ledger_to is not None:
+        return (ledger_from, ledger_to)
+    return _period_from_display_name(display_name)
+
+
 def _upsert_project(
     db: Session,
     row: MaintenanceLedgerContractRow,
@@ -522,8 +597,18 @@ def _upsert_project(
     project = db.execute(
         select(MaintenanceProject).where(MaintenanceProject.project_code == code)
     ).scalar_one_or_none()
-    lifecycle = _lifecycle_status(row.project_period_from, row.project_period_to, today)
     display_name = row.project_name_raw or code
+    # 期限主数据（#51）：台账优先、名称解析兜底；两者都没有时保留项目上已有的
+    # 回填值（WBDD 挂靠聚合），并以「实际生效的期限」计算 lifecycle——否则台账
+    # 导入会把已回填的期限/状态打回 missing（update 分支对 lifecycle 无条件同步）。
+    new_from, new_to = _resolve_period(
+        row.project_period_from, row.project_period_to, display_name
+    )
+    eff_from = new_from if (new_from or new_to) else (
+        project.period_from if project is not None else None)
+    eff_to = new_to if (new_from or new_to) else (
+        project.period_to if project is not None else None)
+    lifecycle = _lifecycle_status(eff_from, eff_to, today)
     if project is None:
         project = MaintenanceProject(
             project_id=str(uuid4()),
@@ -533,6 +618,8 @@ def _upsert_project(
             business_type=row.business_type or None,
             cmo_name=(row.cmo or "")[:128] or None,
             salesperson=(row.salesperson_raw or "")[:64] or None,
+            period_from=new_from,
+            period_to=new_to,
             lifecycle_status=lifecycle,
             is_active=True,
             version=1,
@@ -556,6 +643,8 @@ def _upsert_project(
     before = {
         "display_name": project.display_name,
         "lifecycle_status": project.lifecycle_status,
+        "period_from": project.period_from.isoformat() if project.period_from else None,
+        "period_to": project.period_to.isoformat() if project.period_to else None,
         "business_type": project.business_type,
         "cmo_name": project.cmo_name,
         "salesperson": project.salesperson,
@@ -565,6 +654,15 @@ def _upsert_project(
     if project.display_name != display_name:
         project.display_name = display_name
         after["display_name"] = display_name
+        changed = True
+    # 台账/名称给出了期限才覆盖（#51）；都没有时保留既有回填值
+    if (new_from or new_to) and (
+        project.period_from != new_from or project.period_to != new_to
+    ):
+        project.period_from = new_from
+        project.period_to = new_to
+        after["period_from"] = new_from.isoformat() if new_from else None
+        after["period_to"] = new_to.isoformat() if new_to else None
         changed = True
     if project.lifecycle_status != lifecycle:
         project.lifecycle_status = lifecycle

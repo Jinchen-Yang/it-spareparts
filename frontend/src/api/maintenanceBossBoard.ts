@@ -93,12 +93,18 @@ export interface BoardProjectRow {
   project_code: string;
   display_name: string;
   lifecycle: "ongoing" | "ended" | "missing";
+  /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
+  period_from: string | null;
+  period_to: string | null;
   /** 已归档但仍带单：留在列表里保住母集恒等式，不让单据凭空消失。 */
   is_archived: boolean;
   /** XSDD 销售订单号＝归属判定依据（#45）；多合同项目返回多个。 */
   contract_nos: string[];
   project_manager: string | null;
   contract_amount_inc_tax: Stat<string | number>;
+  /** #51 诚实标注：合同额来自 XSDD 回退层时，共用单（金额跨项目重复）/缺单（被低估）。 */
+  contract_shared: boolean;
+  contract_incomplete: boolean;
   known_apply_cost_ex_tax: Stat<string | number>;
   /** 维保备件采购数＝库房发货＋直采直发（#41 业务指定公式）。 */
   procured_qty: Stat<string | number>;

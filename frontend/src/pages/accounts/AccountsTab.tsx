@@ -8,7 +8,7 @@ import { PlusOutlined } from "@ant-design/icons";
 import ResizableTable from "../../components/ResizableTable";
 import type { Account, AccountsMeta, BulkOperation } from "../../api/accounts";
 import {
-  createAccount, explainApiError, getActivity, resetPassword, setAccountActive,
+  createAccount, deleteAccount, explainApiError, getActivity, resetPassword, setAccountActive,
 } from "../../api/accounts";
 import AccountDrawer from "./AccountDrawer";
 import BulkModal from "./BulkModal";
@@ -41,6 +41,8 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   } | null>(null);
   const [cForm] = Form.useForm();
   const [pwForm] = Form.useForm();
+  // 删除账号仅管理员可见（后端仍强校验，前端只是隐藏入口）
+  const isAdmin = localStorage.getItem("role") === "admin";
 
   const rows = useMemo(() => accounts.filter((u) => {
     if (fTpl && u.template_code !== fTpl) return false;
@@ -92,6 +94,16 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
     }
   };
 
+  const removeAccount = async (u: Account) => {
+    try {
+      await deleteAccount(u.username);
+      message.success(`已删除账号 ${u.username}`);
+      onChanged();
+    } catch (e) {
+      message.error(explainApiError(e, "删除失败"));
+    }
+  };
+
   const openActivity = async (u: Account) => {
     setActT(u); setAct(null);
     try {
@@ -127,6 +139,17 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
           <Popconfirm title={u.is_active ? "停用该账号？" : "启用该账号？"} onConfirm={() => toggleActive(u)}>
             <a style={{ color: u.is_active ? "#cf1322" : "#389e0d" }}>{u.is_active ? "停用" : "启用"}</a>
           </Popconfirm>
+          {isAdmin && u.username !== "admin" && u.role !== "admin" && (
+            <Popconfirm
+              title={`删除账号 ${u.username}？`}
+              description="删除后该账号将无法登录，历史记录保留。此操作不可撤销。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => removeAccount(u)}
+            >
+              <a style={{ color: "#cf1322" }}>删除</a>
+            </Popconfirm>
+          )}
         </Space>
       ) },
   ];

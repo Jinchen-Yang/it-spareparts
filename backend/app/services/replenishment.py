@@ -23,8 +23,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
+from app.config import get_settings
 from app.models.dimensions import DimPart
 from app.models.inventory import PartPool, PartPoolMember
+from app.models.maintenance_project import MaintenanceProject
 from app.models.replenishment import (
     ReplenishmentApplication,
     ReplenishmentApplicationLine,
@@ -34,10 +36,12 @@ from app.models.replenishment import (
     ReplenishmentReviewLine,
 )
 from app.models.system import SysUser
-from app.services import pool_price_analysis
+from app.services import pool_price_analysis, replenishment_screening
+from app.services.query_filters import col_matches_any, keyword_groups_or_substr
+from app.services.part_resolver import resolve as resolve_part
 
 MAX_LINES = 200
-PRICE_WINDOW_DAYS = 180
+PRICE_WINDOW_DAYS = replenishment_screening.LOOKBACK_DAYS
 MAX_EXCEL_TEXT = 32767
 # 无值一律显示「—」，绝不用 0 顶替（铁律 5；AB-4 明示池内最低价无值时的展示）
 _NO_VALUE = "—"
@@ -83,6 +87,20 @@ def _quantity(value: Decimal | int | float | str) -> Decimal:
     if result <= 0 or result > Decimal("999999.999"):
         raise ReplenishmentError("数量必须大于 0 且不超过 999999.999")
     return result
+
+
+def _integer_quantity(value: Any) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except Exception as exc:  # noqa: BLE001
+        raise ReplenishmentError("数量格式不正确") from exc
+    if result != result.to_integral_value() or result < 1 or result > Decimal("999999"):
+        raise ReplenishmentError("数量必须是 1-999999 的整数", code="invalid_quantity")
+    return result.quantize(Decimal("0.001"))
+
+
+def _json_value(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
 def _actor(db: Session, username: str) -> SysUser:
@@ -139,6 +157,14 @@ def _application_scope(
         # Owner isolation intentionally shares the same 404 as a missing object.
         raise ReplenishmentError("补库申请不存在", code="not_found", status_code=404)
     return app
+
+
+def _workflow_mode(app: ReplenishmentApplication) -> str:
+    return (
+        "system_screening"
+        if app.client_request_id is not None and app.request_digest is not None
+        else "legacy_history"
+    )
 
 
 def _latest_version(db: Session, app: ReplenishmentApplication, *, lock: bool = False):
@@ -198,6 +224,51 @@ def _pool_snapshot(db: Session, part_id: int) -> dict[str, Any]:
     )
 
 
+def _auto_review_recommendations(db: Session, part: DimPart) -> list[dict]:
+    resolved = resolve_part(
+        db,
+        f"{part.pn_std} {part.description or ''}".strip(),
+        limit=10,
+        log_miss=False,
+        include_similar=True,
+    )
+    candidates = [*resolved.get("items", []), *resolved.get("similar_items", [])]
+    found: list[dict] = []
+    seen: set[int] = {part.id}
+    for item in candidates:
+        candidate_id = int(item.get("part_id") or 0)
+        if not candidate_id or candidate_id in seen:
+            continue
+        if item.get("is_excluded") or item.get("pool_group_id") is None:
+            continue
+        seen.add(candidate_id)
+        found.append({
+            "part_id": candidate_id,
+            "pn_std": item.get("pn_std"),
+            "description": item.get("description"),
+            "pool_group_id": item.get("pool_group_id"),
+            "pool_name": item.get("pool_name"),
+            "score": item.get("score"),
+            "match_reason": item.get("match_reason"),
+        })
+        if len(found) >= 3:
+            break
+    return found
+
+
+def _auto_review_decision(screening) -> tuple[str, str]:
+    pool = screening.get("pool_membership")
+    activity = screening.get("recent_activity")
+    if pool.passed:
+        return "approved", "pool_member"
+    detail = activity.detail or {}
+    if int(detail.get("purchase_samples") or 0) > 0:
+        return "approved", "recent_purchase"
+    if int(detail.get("sales_samples") or 0) > 0:
+        return "approved", "recent_sales"
+    return "rejected", "no_purchase_or_sales_in_182_days"
+
+
 def _price_snapshot(db: Session, part_id: int, *, as_of: date | None = None) -> dict:
     upper = as_of or business_today()
     lower = upper - timedelta(days=PRICE_WINDOW_DAYS - 1)
@@ -225,6 +296,59 @@ def _price_snapshot(db: Session, part_id: int, *, as_of: date | None = None) -> 
         "sales": facts["sales"] or {},
         "digest": _digest(evidence),
     }
+
+
+def available_projects(db: Session, *, username: str, role: str) -> list[dict]:
+    user = _actor(db, username)
+    predicate = [MaintenanceProject.is_active.is_(True)]
+    if role == "sales":
+        salesperson = user.salesperson_name
+        if not salesperson or not salesperson.strip():
+            return []
+        predicate.append(MaintenanceProject.salesperson == salesperson)
+    elif role != "admin":
+        return []
+    projects = db.scalars(
+        select(MaintenanceProject)
+        .where(*predicate)
+        .order_by(MaintenanceProject.project_code, MaintenanceProject.project_id)
+    )
+    return [
+        {
+            "project_id": project.project_id,
+            "project_code": project.project_code,
+            "display_name": project.display_name,
+        }
+        for project in projects
+    ]
+
+
+def _authorized_project(
+    db: Session, *, project_id: str, user: SysUser, role: str
+) -> MaintenanceProject:
+    if role not in {"admin", "sales"}:
+        raise ReplenishmentError(
+            "项目不存在或不可选", code="project_unavailable", status_code=404
+        )
+    predicate = [
+        MaintenanceProject.project_id == project_id,
+        MaintenanceProject.is_active.is_(True),
+    ]
+    if role == "sales":
+        salesperson = user.salesperson_name
+        if not salesperson or not salesperson.strip():
+            raise ReplenishmentError(
+                "项目不存在或不可选", code="project_unavailable", status_code=404
+            )
+        predicate.append(MaintenanceProject.salesperson == salesperson)
+    project = db.scalar(
+        select(MaintenanceProject).where(*predicate).with_for_update()
+    )
+    if project is None:
+        raise ReplenishmentError(
+            "项目不存在或不可选", code="project_unavailable", status_code=404
+        )
+    return project
 
 
 def _line_snapshot(db: Session, part: DimPart, *, as_of: date | None = None) -> dict:
@@ -258,13 +382,9 @@ def catalog_search(
     page_size = min(50, max(1, page_size))
     predicate = [DimPart.status == "active", DimPart.is_excluded.is_(False)]
     if q:
-        pattern = f"%{q}%"
-        predicate.append(
-            or_(
-                DimPart.pn_std.ilike(pattern),
-                DimPart.description.ilike(pattern),
-                DimPart.brand.ilike(pattern),
-            )
+        groups = keyword_groups_or_substr(q)
+        predicate.extend(
+            col_matches_any(DimPart.search_doc, group) for group in groups
         )
     total = int(db.scalar(select(func.count()).select_from(DimPart).where(*predicate)) or 0)
     parts = list(
@@ -314,17 +434,42 @@ def create_application(
     username: str,
     warehouse: str | None = None,
     request_note: str | None = None,
+    project_id: str | None = None,
 ) -> dict:
+    """创建补库购物车草稿（测试/草稿入口）。
+
+    project_id 提供时按原子提交身份约束补全 project_id/client_request_id/
+    request_digest/项目快照（满足 guard_replenishment_project_binding 的 INSERT
+    要求）；None 时保持旧的无绑定草稿形态（仅测试直插场景）。
+    """
     user = _actor(db, username)
     app_id = _uid()
     version_id = _uid()
     suffix = app_id.replace("-", "")[:10].upper()
+    project_snap = None
+    client_request_id = None
+    request_digest = None
+    if project_id is not None:
+        project = db.get(MaintenanceProject, project_id)
+        if project is None:
+            raise ReplenishmentError("指定的维保项目不存在")
+        project_snap = (project.project_code, project.display_name)
+        client_request_id = f"manual-{app_id.replace('-', '')[:24]}"
+        request_digest = hashlib.sha256(
+            f"{app_id}:{client_request_id}".encode("utf-8")
+        ).hexdigest()
     app = ReplenishmentApplication(
         application_id=app_id,
         application_no=f"BLK-{business_today():%Y%m%d}-{suffix}",
         owner_username=user.username,
         owner_display_name=user.display_name or user.salesperson_name or user.username,
         salesperson_name_snapshot=user.salesperson_name,
+        project_id=project_id,
+        project_code_snapshot=project_snap[0] if project_snap else None,
+        project_name_snapshot=project_snap[1] if project_snap else None,
+        client_request_id=client_request_id,
+        request_digest=request_digest,
+        is_legacy_project_unbound=project_id is None,
     )
     version = ReplenishmentApplicationVersion(
         version_id=version_id,
@@ -343,6 +488,7 @@ def create_application(
 
 
 def _serialize_line(line: ReplenishmentApplicationLine, review_line=None) -> dict:
+    screening = line.screening_json or {}
     return {
         "line_id": line.line_id,
         "request_line_id": line.request_line_id,
@@ -368,6 +514,9 @@ def _serialize_line(line: ReplenishmentApplicationLine, review_line=None) -> dic
         },
         "purchase": _stats_payload(line.purchase_stats_json),
         "sales": _stats_payload(line.sales_stats_json),
+        "screening": screening or None,
+        "latest_sales": screening.get("latest_sales"),
+        "pool_floor_ex_tax": screening.get("pool_floor_ex_tax"),
         "review": (
             {"decision": review_line.decision, "reason": review_line.reason}
             if review_line is not None
@@ -434,7 +583,29 @@ def get_application(db: Session, application_id: str, *, username: str, role: st
         "owner_username": app.owner_username,
         "owner_display_name": app.owner_display_name,
         "salesperson_name_snapshot": app.salesperson_name_snapshot,
+        "is_legacy_project_unbound": app.is_legacy_project_unbound,
+        "project": (
+            {
+                "project_id": app.project_id,
+                "project_code": app.project_code_snapshot,
+                "display_name": app.project_name_snapshot,
+            }
+            if app.project_id
+            else None
+        ),
         "status": app.status,
+        "workflow_mode": _workflow_mode(app),
+        "stage": (
+            "legacy_history"
+            if _workflow_mode(app) == "legacy_history"
+            else "needs_revision"
+            if app.status == "needs_revision"
+            else "approved"
+            if app.status == "approved"
+            else "screening_complete"
+            if app.status == "submitted"
+            else app.status
+        ),
         "version": app.version,
         "latest_version_no": app.latest_version_no,
         "created_at": app.created_at.isoformat(),
@@ -463,7 +634,25 @@ def list_applications(db: Session, *, username: str, role: str, page: int = 1, p
                 "application_id": app.application_id,
                 "application_no": app.application_no,
                 "owner_display_name": app.owner_display_name,
+                "project": (
+                    {
+                        "project_id": app.project_id,
+                        "project_code": app.project_code_snapshot,
+                        "display_name": app.project_name_snapshot,
+                    }
+                    if app.project_id
+                    else None
+                ),
                 "status": app.status,
+                "is_legacy_project_unbound": app.is_legacy_project_unbound,
+                "workflow_mode": _workflow_mode(app),
+                "stage": (
+                    "legacy_history"
+                    if _workflow_mode(app) == "legacy_history"
+                    else "screening_complete"
+                    if app.status == "submitted"
+                    else app.status
+                ),
                 "version": app.version,
                 "latest_version_no": app.latest_version_no,
                 "updated_at": app.updated_at.isoformat(),
@@ -548,6 +737,31 @@ def add_line(
     line_id = _uid()
     price = snapshot["price"]
     pool = snapshot["pool"]
+    # 2026-08-18：行加入即冻结筛查快照（与原子提交一致）——旧草稿购物车加行
+    # 也生成完整 screening_json，满足 guard_replenishment_atomic_submission 的提交检查
+    as_of = price["as_of"]
+    screening_result = replenishment_screening.screen(
+        db, part_ids=[part.id], as_of=as_of
+    ).get(part.id)
+    latest_sales = replenishment_screening.latest_sales_history(
+        db, part_ids=[part.id], as_of=as_of
+    ).get(part.id)
+    floors = replenishment_screening.pool_floor_prices(
+        db, [pool["group_id"]] if pool["group_id"] else []
+    )
+    screening_snapshot = _json_value({
+        "schema_version": 1,
+        "as_of": as_of,
+        "lookback_days": PRICE_WINDOW_DAYS,
+        "checks": screening_result.as_dict()["checks"] if screening_result else [],
+        "anomaly_count": sum(
+            not check["passed"] for check in (
+                screening_result.as_dict()["checks"] if screening_result else []
+            )
+        ),
+        "latest_sales": latest_sales or {},
+        "pool_floor_ex_tax": floors.get(pool["group_id"]),
+    })
     line = ReplenishmentApplicationLine(
         line_id=line_id,
         request_line_id=_uid(),
@@ -568,6 +782,7 @@ def add_line(
         price_as_of=price["as_of"],
         purchase_stats_json=price["purchase"],
         sales_stats_json=price["sales"],
+        screening_json=screening_snapshot,
         evidence_digest=price["digest"],
     )
     db.add(line)
@@ -741,11 +956,283 @@ def _submission_content(version: ReplenishmentApplicationVersion, lines: list[Re
                 "price_as_of": line.price_as_of,
                 "purchase": line.purchase_stats_json,
                 "sales": line.sales_stats_json,
+                "screening": line.screening_json,
                 "evidence_digest": line.evidence_digest,
             }
             for line in lines
         ],
     }
+
+
+def submit_application_atomic(
+    db: Session,
+    *,
+    username: str,
+    role: str,
+    client_request_id: str,
+    project_id: str,
+    lines: list[dict],
+    request_note: str | None = None,
+    commit: bool = True,
+) -> dict:
+    """Validate, screen, freeze and create one immutable application transaction."""
+    try:
+        user = _actor(db, username)
+        key = (client_request_id or "").strip()
+        if not 8 <= len(key) <= 128:
+            raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+        if not 1 <= len(lines) <= MAX_LINES:
+            raise ReplenishmentError(f"补库明细必须为 1-{MAX_LINES} 条")
+        cleaned_items = [
+            {
+                "part_id": int(item["part_id"]),
+                "quantity": _integer_quantity(item["quantity"]),
+                "special_note": _clean_optional(item.get("special_note"), maximum=4000),
+            }
+            for item in lines
+        ]
+        part_ids = [item["part_id"] for item in cleaned_items]
+        if len(part_ids) != len(set(part_ids)):
+            raise ReplenishmentError(
+                "同一 PN 只能出现一次", code="duplicate_part", status_code=409
+            )
+        note = _clean_optional(request_note, maximum=4000)
+        canonical = {
+            "project_id": project_id,
+            "request_note": note,
+            "lines": [
+                {
+                    "part_id": item["part_id"],
+                    "quantity": str(item["quantity"]),
+                    "special_note": item["special_note"],
+                }
+                for item in cleaned_items
+            ],
+        }
+        request_digest = _digest(canonical)
+        db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"replenishment-submit:{username}:{key}", 0)
+                )
+            )
+        )
+        existing = db.scalar(
+            select(ReplenishmentApplication).where(
+                ReplenishmentApplication.owner_username == username,
+                ReplenishmentApplication.client_request_id == key,
+            )
+        )
+        if existing is not None:
+            if existing.request_digest != request_digest:
+                raise ReplenishmentError(
+                    "相同 client_request_id 对应了不同提交内容",
+                    code="idempotency_conflict",
+                    status_code=409,
+                )
+            result = get_application(
+                db, existing.application_id, username=username, role=role
+            )
+            result["idempotent"] = True
+            if commit:
+                db.commit()
+            return result
+
+        project = _authorized_project(db, project_id=project_id, user=user, role=role)
+        parts = list(
+            db.scalars(
+                select(DimPart)
+                .where(
+                    DimPart.id.in_(part_ids),
+                    DimPart.status == "active",
+                    DimPart.is_excluded.is_(False),
+                )
+                .with_for_update()
+            )
+        )
+        parts_by_id = {part.id: part for part in parts}
+        if set(parts_by_id) != set(part_ids):
+            raise ReplenishmentError(
+                "明细包含不存在、已合并或已排除的 PN",
+                code="part_unavailable",
+                status_code=422,
+            )
+
+        as_of = business_today()
+        lower = as_of - timedelta(days=PRICE_WINDOW_DAYS - 1)
+        facts = pool_price_analysis.aggregate_part_price_facts(
+            db, part_ids, date_from=lower, date_to=as_of
+        )
+        pools = _pool_snapshots(db, part_ids)
+        screenings = replenishment_screening.screen(
+            db, part_ids=part_ids, as_of=as_of, price_facts=facts
+        )
+        latest_sales = replenishment_screening.latest_sales_history(
+            db, part_ids=part_ids, as_of=as_of
+        )
+        floors = replenishment_screening.pool_floor_prices(
+            db, [pool["group_id"] for pool in pools.values()]
+        )
+
+        application_id = _uid()
+        version_id = _uid()
+        suffix = application_id.replace("-", "")[:10].upper()
+        application = ReplenishmentApplication(
+            application_id=application_id,
+            application_no=f"BLK-{as_of:%Y%m%d}-{suffix}",
+            owner_username=user.username,
+            owner_display_name=user.display_name
+            or user.salesperson_name
+            or user.username,
+            salesperson_name_snapshot=user.salesperson_name,
+            project_id=project.project_id,
+            project_code_snapshot=project.project_code,
+            project_name_snapshot=project.display_name,
+            client_request_id=key,
+            request_digest=request_digest,
+            status="draft",
+        )
+        version = ReplenishmentApplicationVersion(
+            version_id=version_id,
+            application_id=application_id,
+            version_no=1,
+            status="draft",
+            request_note=note,
+            created_by=username,
+        )
+        db.add_all([application, version])
+        db.flush()
+        submitted_lines: list[ReplenishmentApplicationLine] = []
+        auto_decisions: list[tuple[ReplenishmentApplicationLine, str, str]] = []
+        auto_review_enabled = get_settings().replenishment_auto_review_enabled
+        for line_no, item in enumerate(cleaned_items, 1):
+            part = parts_by_id[item["part_id"]]
+            pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
+            part_facts = facts.get(part.id) or {}
+            result = screenings[part.id]
+            checks = result.as_dict()["checks"]
+            decision, reason_code = _auto_review_decision(result)
+            recommendations = (
+                _auto_review_recommendations(db, part)
+                if auto_review_enabled and decision == "rejected"
+                else []
+            )
+            screening_snapshot = _json_value(
+                {
+                    "schema_version": 2 if auto_review_enabled else 1,
+                    "as_of": as_of,
+                    "lookback_days": PRICE_WINDOW_DAYS,
+                    "checks": checks,
+                    "anomaly_count": sum(not check["passed"] for check in checks),
+                    "latest_sales": latest_sales.get(part.id) or {},
+                    "pool_floor_ex_tax": floors.get(pool["group_id"]),
+                    **({
+                        "auto_review": {
+                            "decision": decision,
+                            "reason_code": reason_code,
+                        },
+                        "recommendations": recommendations,
+                    } if auto_review_enabled else {}),
+                }
+            )
+            digest_payload = {
+                "part_id": part.id,
+                "window": {"from": lower, "to": as_of},
+                "purchase": part_facts.get("purchase"),
+                "sales": part_facts.get("sales"),
+                "screening": screening_snapshot,
+            }
+            line = ReplenishmentApplicationLine(
+                line_id=_uid(),
+                request_line_id=_uid(),
+                version_id=version_id,
+                line_no=line_no,
+                part_id=part.id,
+                pn_std=part.pn_std,
+                description=part.description,
+                brand=part.brand,
+                unit=part.unit,
+                quantity=item["quantity"],
+                special_note=item["special_note"],
+                pool_group_id=pool["group_id"],
+                pool_name=pool["name"],
+                pool_version=pool["version"],
+                price_window_from=lower,
+                price_window_to=as_of,
+                price_as_of=as_of,
+                purchase_stats_json=_json_value(part_facts.get("purchase") or {}),
+                sales_stats_json=_json_value(part_facts.get("sales") or {}),
+                screening_json=screening_snapshot,
+                evidence_digest=_digest(digest_payload),
+            )
+            submitted_lines.append(line)
+            if auto_review_enabled:
+                auto_decisions.append((line, decision, reason_code))
+            db.add(line)
+        db.flush()
+        content_digest = _digest(
+            {
+                "project_id": project.project_id,
+                "client_request_id": key,
+                "request_digest": request_digest,
+                "version": _submission_content(version, submitted_lines),
+            }
+        )
+        version.status = "submitted"
+        version.content_digest = content_digest
+        version.submitted_by = username
+        version.submitted_at = _now()
+        if auto_review_enabled:
+            approved_count = sum(decision == "approved" for _line, decision, _reason in auto_decisions)
+            rejected_count = len(auto_decisions) - approved_count
+            review = ReplenishmentReview(
+                review_id=_uid(),
+                version_id=version_id,
+                idempotency_key=f"auto-review:{version_id}",
+                payload_digest=_digest({
+                    "version_id": version_id,
+                    "decisions": [(line.line_id, decision, reason) for line, decision, reason in auto_decisions],
+                }),
+                summary_note="系统按池归属及近182天采购/销售事实自动裁决",
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                reviewed_by="system:replenishment-screening",
+            )
+            db.add(review)
+            db.flush()
+            for line, decision, reason_code in auto_decisions:
+                db.add(ReplenishmentReviewLine(
+                    review_line_id=_uid(),
+                    review_id=review.review_id,
+                    version_line_id=line.line_id,
+                    decision=decision,
+                    reason=None if decision == "approved" else reason_code,
+                ))
+            application.status = "needs_revision" if rejected_count else "approved"
+        else:
+            application.status = "submitted"
+        application.version += 1
+        _audit(
+            db,
+            application,
+            "version_submitted",
+            username,
+            "按项目原子提交并冻结系统三查证据",
+            version_id=version_id,
+            after={
+                "project_id": project.project_id,
+                "line_count": len(submitted_lines),
+                "content_digest": content_digest,
+            },
+        )
+        if commit:
+            db.commit()
+        result = get_application(db, application_id, username=username, role=role)
+        result["idempotent"] = False
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 def submit(
@@ -1046,6 +1533,406 @@ def start_revision(
     return get_application(db, application_id, username=username, role=role)
 
 
+def apply_revision_atomic(
+    db: Session,
+    application_id: str,
+    *,
+    username: str,
+    role: str,
+    expected_application_version: int,
+    client_request_id: str,
+    lines: list[dict] | None = None,
+    resolutions: list[dict] | None = None,
+) -> dict:
+    """打回后重新提交（2026-08-18，双模式）：
+    - lines：完整期望行集合——「退回编辑」全量重编辑（可添加/删减/换 PN/改数量/填备注）
+    - resolutions：仅逐条处理打回行（旧交互，兼容）"""
+    if lines is not None:
+        return _apply_revision_full_lines(
+            db, application_id=application_id, username=username, role=role,
+            expected_application_version=expected_application_version,
+            client_request_id=client_request_id, lines=lines,
+        )
+    if not resolutions:
+        raise ReplenishmentError(
+            "必须提供 lines（完整重编辑）或 resolutions（逐条处理打回行）",
+            code="revision_content_required", status_code=422)
+    """Resolve exactly the rejected request lines without reopening approved facts."""
+    key = (client_request_id or "").strip()
+    if not 8 <= len(key) <= 128:
+        raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+    try:
+        db.execute(select(func.pg_advisory_xact_lock(
+            func.hashtextextended(f"replenishment-revision:{application_id}:{key}", 0)
+        )))
+        app = _application_scope(db, application_id, username=username, role=role, lock=True)
+        if app.version != expected_application_version:
+            raise ReplenishmentError("申请已被其他操作更新，请刷新后重试", code="version_conflict", status_code=409)
+        previous = _latest_version(db, app, lock=True)
+        review = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.version_id == previous.version_id))
+        if review is None or app.status != "needs_revision":
+            raise ReplenishmentError("当前申请没有待处理的打回条目", code="invalid_state", status_code=409)
+        rejected = {
+            line.request_line_id: line
+            for line in db.scalars(select(ReplenishmentApplicationLine).where(
+                ReplenishmentApplicationLine.version_id == previous.version_id
+            ))
+        }
+        rejected_ids = {
+            line.request_line_id
+            for line in db.scalars(select(ReplenishmentApplicationLine).where(
+                ReplenishmentApplicationLine.version_id == previous.version_id,
+                ReplenishmentApplicationLine.line_id.in_(select(ReplenishmentReviewLine.version_line_id).where(
+                    ReplenishmentReviewLine.review_id == review.review_id,
+                    ReplenishmentReviewLine.decision == "rejected",
+                )),
+            ))
+        }
+        actions = {str(item.get("request_line_id")): item for item in resolutions}
+        if set(actions) != rejected_ids or len(actions) != len(resolutions):
+            raise ReplenishmentError("必须逐一处理全部打回行，不能遗漏或重复", code="revision_line_required", status_code=422)
+        for event in db.scalars(select(ReplenishmentAuditEvent).where(
+            ReplenishmentAuditEvent.application_id == app.application_id,
+            ReplenishmentAuditEvent.action == "revision_started",
+        )):
+            if (event.after_json or {}).get("client_request_id") == key:
+                result = get_application(db, app.application_id, username=username, role=role)
+                result["idempotent"] = True
+                db.commit()
+                return result
+
+        replacements = [item for item in actions.values() if item.get("action") == "replace"]
+        replacement_ids = [int(item.get("part_id") or 0) for item in replacements]
+        if len(replacement_ids) != len(set(replacement_ids)):
+            raise ReplenishmentError("替换后的 PN 不能重复", code="duplicate_part", status_code=409)
+        if any(item.get("action") not in {"replace", "remove"} for item in actions.values()):
+            raise ReplenishmentError("只支持 replace 或 remove", code="invalid_revision_action", status_code=422)
+        parts = list(db.scalars(select(DimPart).where(
+            DimPart.id.in_(replacement_ids), DimPart.status == "active", DimPart.is_excluded.is_(False)
+        ))) if replacement_ids else []
+        parts_by_id = {part.id: part for part in parts}
+        if set(parts_by_id) != set(replacement_ids):
+            raise ReplenishmentError("替换 PN 不存在、已合并或已排除", code="part_unavailable", status_code=422)
+
+        version = ReplenishmentApplicationVersion(
+            version_id=_uid(), application_id=app.application_id,
+            version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
+            # 先 draft 插行（guard_replenishment_line_draft_only 要求行插入时版本为 draft），
+            # 全部行写入后再置 submitted（2026-08-18）
+            status="draft", request_note=previous.request_note, created_by=username,
+            submitted_by=None, submitted_at=None,
+        )
+        db.add(version)
+        db.flush()
+        prior_review_lines = {
+            line.version_line_id: line
+            for line in db.scalars(select(ReplenishmentReviewLine).where(ReplenishmentReviewLine.review_id == review.review_id))
+        }
+        final_lines: list[ReplenishmentApplicationLine] = []
+        decisions: list[tuple[ReplenishmentApplicationLine, str, str]] = []
+        for source in db.scalars(select(ReplenishmentApplicationLine).where(
+            ReplenishmentApplicationLine.version_id == previous.version_id
+        ).order_by(ReplenishmentApplicationLine.line_no)):
+            prior = prior_review_lines.get(source.line_id)
+            if prior is not None and prior.decision == "rejected":
+                item = actions[source.request_line_id]
+                if item.get("action") == "remove":
+                    continue
+                part = parts_by_id[int(item["part_id"])]
+                quantity = _integer_quantity(item.get("quantity", source.quantity))
+                as_of = business_today()
+                lower = as_of - timedelta(days=PRICE_WINDOW_DAYS - 1)
+                facts = pool_price_analysis.aggregate_part_price_facts(db, [part.id], date_from=lower, date_to=as_of)
+                pools = _pool_snapshots(db, [part.id])
+                screening = replenishment_screening.screen(db, part_ids=[part.id], as_of=as_of, price_facts=facts)[part.id]
+                decision, reason_code = _auto_review_decision(screening)
+                pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
+                latest_sales = replenishment_screening.latest_sales_history(db, part_ids=[part.id], as_of=as_of)
+                floors = replenishment_screening.pool_floor_prices(
+                    db, [pool["group_id"]] if pool.get("group_id") else []
+                )
+                snapshot = _json_value({
+                    "schema_version": 2,
+                    "as_of": as_of,
+                    "lookback_days": PRICE_WINDOW_DAYS,
+                    "checks": screening.as_dict()["checks"],
+                    "anomaly_count": sum(not check["passed"] for check in screening.as_dict()["checks"]),
+                    "latest_sales": latest_sales.get(part.id) or {},
+                    "pool_floor_ex_tax": floors.get(pool["group_id"]),
+                    "auto_review": {"decision": decision, "reason_code": reason_code},
+                    "recommendations": _auto_review_recommendations(db, part) if decision == "rejected" else [],
+                })
+                new_line = ReplenishmentApplicationLine(
+                    line_id=_uid(), request_line_id=source.request_line_id,
+                    source_line_id=source.line_id, version_id=version.version_id,
+                    line_no=len(final_lines) + 1, part_id=part.id, pn_std=part.pn_std,
+                    description=part.description, brand=part.brand, unit=part.unit,
+                    quantity=quantity, special_note=_clean_optional(item.get("special_note"), maximum=4000),
+                    pool_group_id=pool["group_id"], pool_name=pool["name"], pool_version=pool["version"],
+                    price_window_from=lower, price_window_to=as_of, price_as_of=as_of,
+                    purchase_stats_json=_json_value((facts.get(part.id) or {}).get("purchase") or {}),
+                    sales_stats_json=_json_value((facts.get(part.id) or {}).get("sales") or {}),
+                    screening_json=snapshot,
+                    evidence_digest=_digest({"part_id": part.id, "screening": snapshot}),
+                )
+                final_lines.append(new_line)
+                decisions.append((new_line, decision, reason_code))
+                db.add(new_line)
+                continue
+            copied = ReplenishmentApplicationLine(
+                line_id=_uid(), request_line_id=source.request_line_id,
+                source_line_id=source.line_id, version_id=version.version_id,
+                line_no=len(final_lines) + 1, part_id=source.part_id, pn_std=source.pn_std,
+                description=source.description, brand=source.brand, unit=source.unit,
+                quantity=source.quantity, special_note=source.special_note,
+                pool_group_id=source.pool_group_id, pool_name=source.pool_name, pool_version=source.pool_version,
+                price_window_from=source.price_window_from, price_window_to=source.price_window_to,
+                price_as_of=source.price_as_of, purchase_stats_json=source.purchase_stats_json,
+                sales_stats_json=source.sales_stats_json, screening_json=source.screening_json,
+                evidence_digest=source.evidence_digest,
+            )
+            final_lines.append(copied)
+            decisions.append((copied, "approved", "approved_previous_version"))
+            db.add(copied)
+        if not final_lines:
+            raise ReplenishmentError("至少保留一条有效申请明细", code="empty_revision", status_code=422)
+        db.flush()
+        content_digest = _digest({"client_request_id": key, "version": _submission_content(version, final_lines)})
+        version.content_digest = content_digest
+        # 行已全部写入：版本从 draft 置 submitted（2026-08-18）
+        version.status = "submitted"
+        version.submitted_by = username
+        version.submitted_at = _now()
+        app.latest_version_no = version.version_no
+        app.version += 1
+        # status 必须在任何 flush 之前赋值：guard_replenishment_application_identity
+        # 要求每次 UPDATE version = OLD+1；若 status 单独成第二条 UPDATE 会触发
+        # "identity/version is immutable"（2026-08-18）
+        if get_settings().replenishment_auto_review_enabled:
+            approved_count = sum(decision == "approved" for _line, decision, _reason in decisions)
+            rejected_count = len(decisions) - approved_count
+            app.status = "needs_revision" if rejected_count else "approved"
+            auto_review = ReplenishmentReview(
+                review_id=_uid(), version_id=version.version_id,
+                idempotency_key=f"auto-review:{version.version_id}",
+                payload_digest=_digest([(line.line_id, decision, reason) for line, decision, reason in decisions]),
+                summary_note="系统按池归属及近182天采购/销售事实自动裁决",
+                approved_count=approved_count, rejected_count=rejected_count,
+                reviewed_by="system:replenishment-screening",
+            )
+            db.add(auto_review)
+            db.flush()
+            for line, decision, reason in decisions:
+                db.add(ReplenishmentReviewLine(
+                    review_line_id=_uid(), review_id=auto_review.review_id,
+                    version_line_id=line.line_id, decision=decision,
+                    reason=None if decision == "approved" else reason,
+                ))
+        else:
+            app.status = "submitted"
+        _audit(
+            db, app, "revision_started", username, "处理自动审核打回行并重新提交",
+            version_id=version.version_id,
+            after={"client_request_id": key, "line_count": len(final_lines)},
+        )
+        db.commit()
+        result = get_application(db, app.application_id, username=username, role=role)
+        result["idempotent"] = False
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _apply_revision_full_lines(
+    db: Session,
+    *,
+    application_id: str,
+    username: str,
+    role: str,
+    expected_application_version: int,
+    client_request_id: str,
+    lines: list[dict],
+) -> dict:
+    """打回后「退回编辑」全量重提交（2026-08-18，#10）：
+    原申请生成新版本，行集合 = 用户编辑后的完整 lines（可添加/删减/换 PN/改数量/填备注），
+    全部行重新三查 + 自动审核。旧版本中同 part_id 的行链 source_line_id 保留审计。"""
+    key = (client_request_id or "").strip()
+    if not 8 <= len(key) <= 128:
+        raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+    try:
+        db.execute(select(func.pg_advisory_xact_lock(
+            func.hashtextextended(f"replenishment-revision:{application_id}:{key}", 0)
+        )))
+        app = _application_scope(db, application_id, username=username, role=role, lock=True)
+        if app.version != expected_application_version:
+            raise ReplenishmentError("申请已被其他操作更新，请刷新后重试", code="version_conflict", status_code=409)
+        previous = _latest_version(db, app, lock=True)
+        review = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.version_id == previous.version_id))
+        if review is None or app.status != "needs_revision":
+            raise ReplenishmentError("当前申请没有待处理的打回条目", code="invalid_state", status_code=409)
+        for event in db.scalars(select(ReplenishmentAuditEvent).where(
+            ReplenishmentAuditEvent.application_id == app.application_id,
+            ReplenishmentAuditEvent.action == "revision_started",
+        )):
+            if (event.after_json or {}).get("client_request_id") == key:
+                result = get_application(db, app.application_id, username=username, role=role)
+                result["idempotent"] = True
+                db.commit()
+                return result
+
+        cleaned_items = [
+            {
+                "part_id": int(item["part_id"]),
+                "quantity": _integer_quantity(item["quantity"]),
+                "special_note": _clean_optional(item.get("special_note"), maximum=4000),
+            }
+            for item in lines
+        ]
+        part_ids = [item["part_id"] for item in cleaned_items]
+        if len(part_ids) != len(set(part_ids)):
+            raise ReplenishmentError("同一 PN 只能出现一次", code="duplicate_part", status_code=409)
+        parts = list(db.scalars(select(DimPart).where(
+            DimPart.id.in_(part_ids), DimPart.status == "active", DimPart.is_excluded.is_(False)
+        )))
+        parts_by_id = {part.id: part for part in parts}
+        if set(parts_by_id) != set(part_ids):
+            raise ReplenishmentError(
+                "明细包含不存在、已合并或已排除的 PN", code="part_unavailable", status_code=422)
+
+        # 旧版本行按 part_id 映射（同 PN 续链，保留审计）
+        old_by_part = {
+            old.part_id: old
+            for old in db.scalars(select(ReplenishmentApplicationLine).where(
+                ReplenishmentApplicationLine.version_id == previous.version_id
+            ))
+        }
+
+        version = ReplenishmentApplicationVersion(
+            version_id=_uid(), application_id=app.application_id,
+            version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
+            # 先 draft 插行（guard_replenishment_line_draft_only），行写完再置 submitted
+            status="draft", request_note=previous.request_note, created_by=username,
+            submitted_by=None, submitted_at=None,
+        )
+        db.add(version)
+        db.flush()
+
+        as_of = business_today()
+        lower = as_of - timedelta(days=PRICE_WINDOW_DAYS - 1)
+        facts = pool_price_analysis.aggregate_part_price_facts(
+            db, part_ids, date_from=lower, date_to=as_of)
+        pools = _pool_snapshots(db, part_ids)
+        screenings = replenishment_screening.screen(
+            db, part_ids=part_ids, as_of=as_of, price_facts=facts)
+        latest_sales = replenishment_screening.latest_sales_history(db, part_ids=part_ids, as_of=as_of)
+        floors = replenishment_screening.pool_floor_prices(
+            db, [pool["group_id"] for pool in pools.values() if pool.get("group_id")])
+
+        auto_review_enabled = get_settings().replenishment_auto_review_enabled
+        decisions: list[tuple[ReplenishmentApplicationLine, str, str]] = []
+        final_lines: list[ReplenishmentApplicationLine] = []
+        for line_no, item in enumerate(cleaned_items, 1):
+            part = parts_by_id[item["part_id"]]
+            source = old_by_part.get(part.id)
+            pool = pools.get(part.id, {"group_id": None, "name": None, "version": None})
+            result = screenings[part.id]
+            checks = result.as_dict()["checks"]
+            if auto_review_enabled:
+                decision, reason_code = _auto_review_decision(result)
+                recommendations = (
+                    _auto_review_recommendations(db, part)
+                    if decision == "rejected" else []
+                )
+            else:
+                decision, reason_code = "approved", "system_screening_disabled"
+                recommendations = []
+            screening_snapshot = _json_value({
+                "schema_version": 2 if auto_review_enabled else 1,
+                "as_of": as_of,
+                "lookback_days": PRICE_WINDOW_DAYS,
+                "checks": checks,
+                "anomaly_count": sum(not check["passed"] for check in checks),
+                "latest_sales": latest_sales.get(part.id) or {},
+                "pool_floor_ex_tax": floors.get(pool["group_id"]),
+                **({
+                    "auto_review": {"decision": decision, "reason_code": reason_code},
+                    "recommendations": recommendations,
+                } if auto_review_enabled else {}),
+            })
+            digest_payload = {
+                "part_id": part.id,
+                "window": {"from": lower, "to": as_of},
+                "purchase": (facts.get(part.id) or {}).get("purchase"),
+                "sales": (facts.get(part.id) or {}).get("sales"),
+                "screening": screening_snapshot,
+            }
+            new_line = ReplenishmentApplicationLine(
+                line_id=_uid(), request_line_id=_uid(),
+                source_line_id=source.line_id if source is not None else None,
+                version_id=version.version_id,
+                line_no=line_no, part_id=part.id, pn_std=part.pn_std,
+                description=part.description, brand=part.brand, unit=part.unit,
+                quantity=item["quantity"], special_note=item["special_note"],
+                pool_group_id=pool["group_id"], pool_name=pool["name"], pool_version=pool["version"],
+                price_window_from=lower, price_window_to=as_of, price_as_of=as_of,
+                purchase_stats_json=_json_value((facts.get(part.id) or {}).get("purchase") or {}),
+                sales_stats_json=_json_value((facts.get(part.id) or {}).get("sales") or {}),
+                screening_json=screening_snapshot,
+                evidence_digest=_digest(digest_payload),
+            )
+            final_lines.append(new_line)
+            decisions.append((new_line, decision, reason_code))
+            db.add(new_line)
+        db.flush()
+
+        content_digest = _digest(
+            {"client_request_id": key, "version": _submission_content(version, final_lines)})
+        version.content_digest = content_digest
+        # 行已全部写入：版本从 draft 置 submitted
+        version.status = "submitted"
+        version.submitted_by = username
+        version.submitted_at = _now()
+        app.latest_version_no = version.version_no
+        app.version += 1
+        # status 必须在任何 flush 之前赋值（guard_replenishment_application_identity）
+        if auto_review_enabled:
+            approved_count = sum(d == "approved" for _line, d, _r in decisions)
+            rejected_count = len(decisions) - approved_count
+            app.status = "needs_revision" if rejected_count else "approved"
+            auto_review = ReplenishmentReview(
+                review_id=_uid(), version_id=version.version_id,
+                idempotency_key=f"auto-review:{version.version_id}",
+                payload_digest=_digest([(line.line_id, d, r) for line, d, r in decisions]),
+                summary_note="系统按池归属及近182天采购/销售事实自动裁决（退回重编辑）",
+                approved_count=approved_count, rejected_count=rejected_count,
+                reviewed_by="system:replenishment-screening",
+            )
+            db.add(auto_review)
+            db.flush()
+            for line, decision, reason in decisions:
+                db.add(ReplenishmentReviewLine(
+                    review_line_id=_uid(), review_id=auto_review.review_id,
+                    version_line_id=line.line_id, decision=decision,
+                    reason=None if decision == "approved" else reason,
+                ))
+        else:
+            app.status = "submitted"
+        _audit(
+            db, app, "revision_started", username, "退回编辑后全量重新提交",
+            version_id=version.version_id,
+            after={"client_request_id": key, "line_count": len(final_lines),
+                   "revision_mode": "full_lines"},
+        )
+        db.commit()
+        result = get_application(db, app.application_id, username=username, role=role)
+        result["idempotent"] = False
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
 def _excel_safe(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -1129,78 +2016,93 @@ def system_screening_workbook(
     username: str,
     role: str,
 ) -> tuple[bytes, str]:
-    """AB-4 系统三查工作簿：系统侧判定材料，导出后交人工复核。
-
-    与既有 ``manual_review_workbook`` 的关键区别：**没有「审核结论 / 打回原因」
-    两列**。业务 2026-08-16 确认「系统只做系统侧，不建模人工审批、不记录人工审
-    结果」——把人工结论栏印在系统导出里，等于系统仍在承接那段流程。
-
-    列按增补包 AB-4 原文：PN、数量、产品描述、每 PN 最近销售历史、池内最低价对比；
-    三查结论随行附上，供人判断。池内最低价无值显示「—」（铁律 5：不知道 ≠ 没有）。
-    """
-    from app.services import replenishment_screening as screening
-
+    """Export only the immutable facts captured by atomic submission."""
     _actor(db, username)
     app = _application_scope(db, application_id, username=username, role=role)
+    if app.is_legacy_project_unbound:
+        raise ReplenishmentError(
+            "历史补库申请尚未绑定真实项目，不能导出复核包",
+            code="legacy_project_unbound",
+            status_code=409,
+        )
+    if _workflow_mode(app) != "system_screening":
+        raise ReplenishmentError(
+            "历史补库申请没有冻结的系统三查证据",
+            code="legacy_screening_unavailable",
+            status_code=409,
+        )
     version = _latest_version(db, app)
+    if version.status != "submitted":
+        raise ReplenishmentError(
+            "只有已提交版本可以导出人工复核包",
+            code="invalid_state",
+            status_code=409,
+        )
     payload = _version_payload(db, version)
     lines = payload["lines"]
-    part_ids = [line["part_id"] for line in lines]
-    screenings = screening.screen(db, part_ids=part_ids)
-    latest_sales = screening.latest_sales_history(db, part_ids=part_ids)
-    floors = screening.pool_floor_prices(
-        db, [line["pool"]["group_id"] for line in lines])
+    if any(line["screening"] is None for line in lines):
+        raise ReplenishmentError(
+            "该历史版本没有冻结的系统三查证据",
+            code="frozen_evidence_unavailable",
+            status_code=409,
+        )
 
     headers = [
-        "申请单号", "版本", "申请人", "序号", "PN", "产品描述", "数量", "单位",
-        "最近销售日期", "最近销售未税单价", "池内最低价(未税)", "与池内最低价对比",
-        "①通用池归属", "②半年内购销记录", "③是否小众PN", "系统三查",
+        "申请单号", "项目编码", "项目名称", "版本", "申请人", "序号", "PN",
+        "产品描述", "数量", "单位", "最近销售日期", "最近销售未税单价",
+        "池内最低价(未税)", "与池内最低价对比", "①当前池有效性",
+        "②近182天购销事实", "③冷门零样本边界", "异常项数量", "异常证据", "证据日期",
     ]
     rows = []
     for line in lines:
-        result = screenings.get(line["part_id"])
-        recent = latest_sales.get(line["part_id"]) or {}
-        floor = floors.get(line["pool"]["group_id"])
+        evidence = line["screening"]
+        checks = {check["key"]: check for check in evidence["checks"]}
+        pool_check = checks["pool_membership"]
+        activity = checks["recent_activity"]
+        niche = checks["niche_pn"]
+        recent = line["latest_sales"] or {}
+        floor = line["pool_floor_ex_tax"]
         recent_price = recent.get("price_ex_tax")
-        # 任何一侧缺值就不做减法——差额算不出来时显示「—」，不显示 0
         if floor is None or recent_price is None:
             comparison = _NO_VALUE
         else:
             comparison = float(Decimal(str(recent_price)) - Decimal(str(floor)))
-        pool_check = result.get("pool_membership")
-        activity = result.get("recent_activity")
-        niche = result.get("niche_pn")
+        anomalies = [
+            label
+            for check, label in (
+                (pool_check, "无当前有效互通池证据"),
+                (activity, "近182天无有效购销样本"),
+                (niche, "冷门零样本"),
+            )
+            if not check["passed"]
+        ]
         rows.append([
-            app.application_no, version.version_no, app.owner_display_name,
-            line["line_no"], line["pn_std"], line["description"],
-            line["quantity"], line["unit"],
+            app.application_no, app.project_code_snapshot, app.project_name_snapshot,
+            version.version_no, app.owner_display_name, line["line_no"], line["pn_std"],
+            line["description"], line["quantity"], line["unit"],
             recent.get("order_date") or _NO_VALUE,
             recent_price if recent_price is not None else _NO_VALUE,
-            float(floor) if floor is not None else _NO_VALUE,
-            comparison,
-            pool_check.detail.get("pool_name") or (
-                "无法判断（PN 未标准化）" if pool_check.detail.get("in_pool") is None
-                else "未加入互通池"),
-            f"采购 {activity.detail['purchase_samples']} 单 / "
-            f"销售 {activity.detail['sales_samples']} 单",
-            "是" if niche.detail["is_niche"] else "否",
-            "通过" if result.all_passed else "有未通过项，请人工判断",
+            float(floor) if floor is not None else _NO_VALUE, comparison,
+            pool_check["detail"].get("pool_name") or (
+                "无法判断（PN 未标准化）"
+                if pool_check["detail"].get("in_pool") is None
+                else "未加入互通池"
+            ),
+            f"采购 {activity['detail']['purchase_samples']} 单 / "
+            f"销售 {activity['detail']['sales_samples']} 单",
+            "零样本" if niche["detail"]["is_niche"] else "存在样本",
+            evidence["anomaly_count"],
+            "；".join(anomalies) if anomalies else "未发现规则异常；仍需人工复核",
+            evidence["as_of"],
         ])
     data = _workbook_bytes(
-        "系统三查",
+        "人工复核包",
         headers,
         rows,
-        notice=("系统三查结果，导出后交人工复核。系统不记录人工审核结论；"
+        notice=("提交时冻结的系统三查事实与需注意项，供线下人工复核；系统不记录人工结论。"
                 "本申请为独立记录，不进入 WBDD、不参与项目成本与对账。"),
     )
-    # 复用既有 manual_exported 审计动作：ck_replenishment_audit_action 是 CHECK
-    # 枚举，新增取值要改约束=迁移，而增补包明令本期四项零迁移。语义也吻合——
-    # 这就是「导出给人工看」的那次导出。
-    _audit(db, app, "manual_exported", username, "导出系统三查工作簿",
-           version_id=version.version_id)
-    db.commit()
-    return data, (f"replenishment-{app.application_no}"
-                  f"-v{version.version_no}-system-screening.xlsx")
+    return data, f"replenishment-{app.application_no}-v{version.version_no}-system-screening.xlsx"
 
 
 def _approved_lines(db: Session, app: ReplenishmentApplication) -> list[tuple[ReplenishmentApplicationVersion, ReplenishmentApplicationLine]]:

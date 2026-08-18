@@ -4,18 +4,22 @@ import {
   Alert,
   Button,
   Card,
+  DatePicker,
   Descriptions,
   Form,
   Input,
   Modal,
+  Progress,
   Select,
   Space,
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
+import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type {
@@ -28,26 +32,49 @@ import {
   getBoardProjectOrders,
   searchBoardProjects,
 } from "../../api/maintenanceBossBoard";
-import type { ProjectExpenseRow } from "../../api/maintenanceWorkbooks";
+import type { ProjectExpenseRow, ProjectPartsRow } from "../../api/maintenanceWorkbooks";
 import {
   SHEETS,
   applyProjectMaster,
   downloadProjectMaster,
   listProjectExpenseRows,
+  listProjectPartsRows,
 } from "../../api/maintenanceWorkbooks";
 import {
   getMaintenanceProject,
   updateMaintenanceProject,
 } from "../../api/maintenanceProjects";
+import type { MaintenanceProject } from "../../api/maintenanceProjects";
+import { listAccounts } from "../../api/accounts";
+import type { Account } from "../../api/accounts";
 import {
   assignMaintenanceSourceOrders,
+  autoAssignMaintenanceSourceOrders,
   listMaintenanceSourceOrders,
 } from "../../api/maintenanceSourceAssignments";
 import type { MaintenanceSourceOrderRow } from "../../api/maintenanceSourceAssignments";
+import type {
+  MaintenanceBadReturn,
+  MaintenanceCollectionSnapshotRow,
+  MaintenanceReturnObligation,
+  SiteIssueDocument,
+  SiteIssueLine,
+} from "../../api/maintenanceOperations";
+import {
+  getMaintenanceProjectWorkspace,
+  searchMaintenanceBadReturns,
+  searchMaintenanceReturnObligations,
+  searchSiteIssues,
+} from "../../api/maintenanceOperations";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
 const { Text, Title } = Typography;
+
+/** 导出文件名片段清洗：去掉路径/非法字符，避免项目名破坏文件名（2026-08-17）。 */
+function safeFilenamePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|\r\n\t]+/g, "_").trim().replace(/\.+$/, "") || "项目";
+}
 
 /** 数值渲染：非 ready 状态一律说人话，绝不落回 0（铁律 5）。 */
 function statText(stat: { state: string; value: unknown } | undefined): string {
@@ -62,16 +89,97 @@ function raw(value: unknown) {
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
 
+const COST_SOURCE_LABEL: Record<string, string> = {
+  direct: "直接采购价",
+  window: "7天采购窗口",
+  purchase_history: "采购历史",
+  pool_purchase: "备件池采购",
+  sales_history: "销售历史",
+  pool_sales: "备件池销售",
+  month_avg: "月均价",
+  none: "暂无成本",
+};
+
+function CostSourceTag({ row }: { row: ProjectPartsRow }) {
+  const confidence = row.confidence ?? (row.cost_source === "none" ? "none" : null);
+  const color = confidence === "high" ? "green"
+    : confidence === "medium" ? "orange"
+      : confidence === "low" ? "red" : "default";
+  const label = row.cost_source_label || COST_SOURCE_LABEL[row.cost_source || ""] || raw(row.cost_source);
+  const suffix = row.missing_kind === "out_of_scope" ? "（起算日前）"
+    : row.missing_kind === "none" ? "（未找到）" : "";
+  return <Tag color={color}>{label}{suffix}</Tag>;
+}
+
+const LIFECYCLE_LABEL: Record<string, string> = {
+  ongoing: "进行中",
+  ended: "已结束",
+  missing: "期限缺失",
+};
+
+/** 三态色与卡墙一致（#35/#43）：<80% 绿、80–100% 黄、>100% 红。 */
+const STATUS_COLOR: Record<string, string> = {
+  normal: "#52c41a",
+  warning: "#faad14",
+  alert: "#ff4d4f",
+};
+
+const COLLECTION_STATUS: Record<string, { label: string; color: string }> = {
+  confirmed: { label: "已确认", color: "green" },
+  unconfirmed: { label: "待确认", color: "gold" },
+  void: { label: "已作废", color: "default" },
+};
+
+const ISSUE_STATUS: Record<string, { label: string; color: string }> = {
+  draft: { label: "领用草稿", color: "gold" },
+  confirmed: { label: "领用已确认", color: "green" },
+  corrected: { label: "领用已更正", color: "blue" },
+  void: { label: "领用已作废", color: "default" },
+};
+
+const RETURN_DOCUMENT_STATUS: Record<string, string> = {
+  draft: "返还草稿",
+  submitted: "已提交返还",
+  in_transit: "返还在途",
+  warehouse_confirmed: "仓库已确认",
+  void: "返还已作废",
+};
+
+/** 成本÷合同额进度条（#35）：算不出来就说算不出来，不画 0% 的绿条（铁律 5）。 */
+function CostRatioBar({ row }: { row: BoardProjectRow | null }) {
+  const stat = row?.cost_ratio_pct;
+  const ratio =
+    stat?.state === "ready" && stat.value !== null ? Number(stat.value) : null;
+  if (ratio === null) {
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }} data-testid="panel-ratio-unknown">
+        数据不足（缺合同额或成本）
+      </Text>
+    );
+  }
+  return (
+    <Progress
+      percent={Math.min(ratio, 100)}
+      strokeColor={row?.card_status ? STATUS_COLOR[row.card_status] : undefined}
+      size="small"
+      style={{ maxWidth: 420 }}
+      format={() => `${ratio}%`}
+    />
+  );
+}
+
 /**
  * 项目面板——页面定稿两页之二（REQUIREMENTS #33/#38/#39/#45）。
  *
- * 顶部＝出库明细（按合同筛选）；子 tab＝表 6 的 web 呈现（基础信息/备件成本/报销/回款）；
+ * 顶部＝出库明细（按合同筛选）；子 tab＝表 6 的 web 呈现
+ * （基础信息/备件成本/报销/回款/维保领用与返还）；
  * tab 栏右侧下载**本项目总表**，每个 tab 内单独下载对应 sheet——**在哪下载就在哪上传**。
  * 归属挂靠在「基础信息」tab（#45：判定依据＝XSDD 销售订单）。
  */
 export function MaintenanceProjectPanelPage() {
   const { projectId = "" } = useParams();
   const [row, setRow] = useState<BoardProjectRow | null>(null);
+  const [project, setProject] = useState<MaintenanceProject | null>(null);
   const [orders, setOrders] = useState<BoardOrderRow[]>([]);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
   const [selectedOrder, setSelectedOrder] = useState<string | null>(null);
@@ -83,16 +191,33 @@ export function MaintenanceProjectPanelPage() {
   const canUpload = !!perms.action_maintenance_expense_collection_upload;
   const canManageProject = !!perms.action_maintenance_project_manage;
 
+  // 下载文件名 = XSDD销售订单号（取第一个） + 维保项目名 + 表单类型（2026-08-17）
+  const exportBase = (() => {
+    const xsdd = row?.contract_nos?.[0] ?? project?.project_code ?? projectId;
+    const name = row?.display_name ?? project?.display_name ?? projectId;
+    return `${xsdd}-${safeFilenamePart(name)}`;
+  })();
+
   const loadProject = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // 卡片数据直接复用项目墙的搜索（同一口径，避免两处各算一遍成本率）
-      const resp = await searchBoardProjects({ q: projectId, page_size: 200 });
-      const hit = resp.data.rows.find((item) => item.project_id === projectId);
+      // 基础信息以 stable 目录为准；卡墙聚合行（成本率/合同额，口径与项目墙一致）
+      // 用**项目名称**回查 boss-board 搜索——按 UUID 搜名称/编号/合同号永远搜不到，
+      // 这正是 2026-08-17 面板全「—」的取数缺陷。
       const detail = await getMaintenanceProject(projectId);
-      setRow(hit ?? null);
-      if (!hit && !detail.data) setError("项目不存在或无权查看");
+      const stable = detail.data?.project ?? null;
+      setProject(stable);
+      let hit: BoardProjectRow | null = null;
+      if (stable?.display_name) {
+        const resp = await searchBoardProjects({
+          q: stable.display_name.slice(0, 128),
+          page_size: 50,
+        });
+        hit = resp.data.rows.find((item) => item.project_id === projectId) ?? null;
+      }
+      setRow(hit);
+      if (!hit && !stable) setError("项目不存在或无权查看");
       const ordersResp = await getBoardProjectOrders(projectId, { page_size: 200 });
       setOrders(ordersResp.data.rows);
     } catch (err) {
@@ -162,38 +287,12 @@ export function MaintenanceProjectPanelPage() {
     { title: "取价来源", render: (_: unknown, line) => statText(line.cost_source) },
   ];
 
-  const sheetTab = (label: string, sheet: string, extra?: React.ReactNode) => ({
-    key: sheet,
-    label,
-    children: (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <WorkbookRoundTrip
-          size="small"
-          title={label}
-          filename={`${projectId}-${sheet}.xlsx`}
-          canUpload={canUpload}
-          hint="在哪下载就在哪上传：本页只回填本表的黄底列"
-          onDownload={() => downloadProjectMaster(projectId, [sheet])}
-          onApply={(file) => applyProjectMaster(projectId, file)}
-        />
-        {extra ?? (
-          <Alert
-            type="info"
-            showIcon
-            message={`${label} 的内容以 Excel 为准`}
-            description="缺价补录、报销、回款一律走「下载 → 改 → 上传覆盖」，系统内不提供手工散改表单。"
-          />
-        )}
-      </Space>
-    ),
-  });
-
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Space align="center" wrap>
         <Link to="/maintenance">← 返回项目墙</Link>
         <Title level={4} style={{ margin: 0 }}>
-          {row?.display_name ?? projectId}
+          {row?.display_name ?? project?.display_name ?? projectId}
         </Title>
         {row?.is_archived ? <Tag>已归档</Tag> : null}
         <EditBasicsButton
@@ -224,7 +323,7 @@ export function MaintenanceProjectPanelPage() {
             <WorkbookRoundTrip
               size="small"
               title="本项目总表"
-              filename={`${projectId}-master.xlsx`}
+              filename={`${exportBase}-总表.xlsx`}
               canUpload={canUpload}
               hint="六 sheet 一次下载，回填后整份上传覆盖"
               onDownload={() => downloadProjectMaster(projectId)}
@@ -266,22 +365,306 @@ export function MaintenanceProjectPanelPage() {
             children: (
               <BasicsTab
                 projectId={projectId}
+                exportBase={exportBase}
                 row={row}
+                project={project}
                 canUpload={canUpload}
                 canAssign={canManageProject}
                 onAssigned={loadProject}
               />
             ),
           },
-          sheetTab("备件成本", SHEETS.parts),
+          {
+            key: SHEETS.parts,
+            label: "备件成本",
+            children: (
+              <PartsTab
+                projectId={projectId}
+                exportBase={exportBase}
+                canUpload={canUpload}
+              />
+            ),
+          },
           {
             key: SHEETS.expense,
             label: "报销",
             children: (
-              <ExpenseTab projectId={projectId} canUpload={canUpload} />
+              <ExpenseTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
             ),
           },
-          sheetTab("回款", SHEETS.collection),
+          {
+            key: SHEETS.collection,
+            label: "回款",
+            children: (
+              <CollectionTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+            ),
+          },
+          {
+            key: SHEETS.site,
+            label: "维保领用与返还",
+            children: (
+              <SiteReturnTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+            ),
+          },
+        ]}
+      />
+    </Space>
+  );
+}
+
+/** 回款 tab：展示累计回款、项目回款进度和每条快照的确认状态。 */
+function CollectionTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<MaintenanceCollectionSnapshotRow[]>([]);
+  const [metrics, setMetrics] = useState<{
+    received: number | null;
+    contract: number | null;
+    progress: number | null;
+  }>({ received: null, contract: null, progress: null });
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await getMaintenanceProjectWorkspace(projectId, {
+        collection_page: 1,
+        collection_page_size: 100,
+        requisition_page_size: 1,
+        expense_page_size: 1,
+      });
+      setRows(response.data.collection_snapshots.rows);
+      setMetrics({
+        received: response.data.project.metrics.received_amount,
+        contract: response.data.project.metrics.total_contract_amount,
+        progress: response.data.project.metrics.collection_progress_pct,
+      });
+    } catch (err) {
+      message.error(readError(err, "回款状态加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="回款"
+        filename={`${exportBase}-${SHEETS.collection}.xlsx`}
+        canUpload={canUpload}
+        hint="下载后可回填累计实收、状态、凭证号和备注"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();
+          return result;
+        }}
+      />
+      <Descriptions bordered size="small" column={3}>
+        <Descriptions.Item label="累计已回款">
+          {metrics.received == null ? "—" : `¥${metrics.received.toFixed(2)}`}
+        </Descriptions.Item>
+        <Descriptions.Item label="合同总额（含税）">
+          {metrics.contract == null ? "—" : `¥${metrics.contract.toFixed(2)}`}
+        </Descriptions.Item>
+        <Descriptions.Item label="回款进度">
+          {metrics.progress == null ? "数据不足" : `${metrics.progress}%`}
+        </Descriptions.Item>
+      </Descriptions>
+      <Table<MaintenanceCollectionSnapshotRow>
+        rowKey="collection_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无回款记录" }}
+        columns={[
+          { title: "合同编号", dataIndex: "contract_no", render: raw },
+          { title: "报告月份", dataIndex: "report_month", render: raw },
+          {
+            title: "累计实收金额（含税）",
+            dataIndex: "cumulative_amount",
+            render: (value) => value == null ? "—" : `¥${Number(value).toFixed(2)}`,
+          },
+          {
+            title: "回款状态",
+            dataIndex: "status",
+            render: (value: string) => {
+              const status = COLLECTION_STATUS[value];
+              return <Tag color={status?.color}>{status?.label ?? raw(value)}</Tag>;
+            },
+          },
+          { title: "回款凭证号", dataIndex: "receipt_reference", render: raw },
+          { title: "备注", dataIndex: "remark", render: raw },
+        ]}
+      />
+    </Space>
+  );
+}
+
+interface SiteReturnRow {
+  issueLineId: string;
+  issue: SiteIssueDocument;
+  line: SiteIssueLine;
+  obligation: MaintenanceReturnObligation | null;
+  returns: MaintenanceBadReturn[];
+}
+
+function returnStatus(row: SiteReturnRow): { label: string; color: string } {
+  if (row.issue.workflow_status === "void") return { label: "领用已作废", color: "default" };
+  if (row.line.no_return === true || row.obligation?.classification === "exempt") {
+    return { label: "免返", color: "blue" };
+  }
+  if (row.obligation?.classification === "pending_category") {
+    return { label: "待确认品类", color: "gold" };
+  }
+  if (!row.obligation) return { label: "待生成返还义务", color: "gold" };
+  const remaining = Number(row.obligation.remaining_quantity);
+  const confirmed = Number(row.obligation.warehouse_confirmed_quantity);
+  const registered = Number(row.obligation.registered_quantity);
+  if (remaining <= 0 && confirmed > 0) return { label: "仓库已确认返还", color: "green" };
+  if (registered > 0 && remaining > 0) return { label: "部分返还", color: "orange" };
+  const activeReturn = row.returns.find((item) => item.status !== "void");
+  if (activeReturn) {
+    return {
+      label: RETURN_DOCUMENT_STATUS[activeReturn.status] ?? activeReturn.status,
+      color: activeReturn.status === "in_transit" ? "cyan" : "blue",
+    };
+  }
+  return { label: "待返还", color: "red" };
+}
+
+/** 维保领用与返还 tab：以领用行 part_id 为主轴，合并返还义务和返还单状态。 */
+function SiteReturnTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<SiteReturnRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [issuesResponse, obligationsResponse, returnsResponse] = await Promise.all([
+        searchSiteIssues({ project_id: projectId, page: 1, page_size: 100 }),
+        searchMaintenanceReturnObligations({
+          project_id: projectId,
+          active_only: false,
+          page: 1,
+          page_size: 200,
+        }),
+        searchMaintenanceBadReturns({ project_id: projectId, page: 1, page_size: 100 }),
+      ]);
+      const obligations = new Map(
+        obligationsResponse.data.rows.map((item) => [item.issue_line_id, item]),
+      );
+      const returns = new Map<string, MaintenanceBadReturn[]>();
+      for (const document of returnsResponse.data.rows) {
+        for (const line of document.lines) {
+          const current = returns.get(line.obligation_id) ?? [];
+          current.push(document);
+          returns.set(line.obligation_id, current);
+        }
+      }
+      setRows(issuesResponse.data.rows.flatMap((issue) =>
+        issue.lines.map((line) => {
+          const obligation = obligations.get(line.issue_line_id) ?? null;
+          return {
+            issueLineId: line.issue_line_id,
+            issue,
+            line,
+            obligation,
+            returns: obligation ? returns.get(obligation.obligation_id) ?? [] : [],
+          };
+        }),
+      ));
+    } catch (err) {
+      message.error(readError(err, "维保领用与返还状态加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="维保领用与返还"
+        filename={`${exportBase}-${SHEETS.site}.xlsx`}
+        canUpload={canUpload}
+        hint="可回填领用事实和是否应返还；上传后页面立即刷新"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();
+          return result;
+        }}
+      />
+      <Table<SiteReturnRow>
+        rowKey="issueLineId"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        scroll={{ x: 1300 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无维保领用记录" }}
+        columns={[
+          { title: "领用单号", render: (_value, item) => raw(item.issue.issue_no) },
+          { title: "领用日期", render: (_value, item) => raw(item.issue.issue_date) },
+          {
+            title: "领用状态",
+            render: (_value, item) => {
+              const status = ISSUE_STATUS[item.issue.workflow_status];
+              return <Tag color={status?.color}>{status?.label ?? item.issue.workflow_status}</Tag>;
+            },
+          },
+          { title: "PN", render: (_value, item) => raw(item.line.pn) },
+          { title: "SN", render: (_value, item) => raw(item.line.serial_number) },
+          { title: "领用数量", render: (_value, item) => raw(item.line.quantity) },
+          {
+            title: "应返数量",
+            render: (_value, item) => raw(item.obligation?.required_quantity),
+          },
+          {
+            title: "已登记返还",
+            render: (_value, item) => raw(item.obligation?.registered_quantity),
+          },
+          {
+            title: "仓库确认返还",
+            render: (_value, item) => raw(item.obligation?.warehouse_confirmed_quantity),
+          },
+          {
+            title: "返还状态",
+            render: (_value, item) => {
+              const status = returnStatus(item);
+              return <Tag color={status.color}>{status.label}</Tag>;
+            },
+          },
+          {
+            title: "返还单号",
+            render: (_value, item) => {
+              const numbers = item.returns
+                .filter((document) => document.status !== "void")
+                .map((document) => document.return_no);
+              return numbers.length ? numbers.join("、") : "—";
+            },
+          },
         ]}
       />
     </Space>
@@ -291,9 +674,11 @@ export function MaintenanceProjectPanelPage() {
 /** 报销 tab：04 表的 web 呈现（含备注，#47）+ 下载上传。只展示，不散改。 */
 function ExpenseTab({
   projectId,
+  exportBase,
   canUpload,
 }: {
   projectId: string;
+  exportBase: string;
   canUpload: boolean;
 }) {
   const [rows, setRows] = useState<ProjectExpenseRow[]>([]);
@@ -319,7 +704,7 @@ function ExpenseTab({
       <WorkbookRoundTrip
         size="small"
         title="报销"
-        filename={`${projectId}-04.xlsx`}
+        filename={`${exportBase}-${SHEETS.expense}.xlsx`}
         canUpload={canUpload}
         hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
@@ -353,16 +738,97 @@ function ExpenseTab({
 }
 
 
+/** 备件成本 tab：V2 03_备件明细 的九列事实展示 + 下载上传。 */
+function PartsTab({
+  projectId,
+  exportBase,
+  canUpload,
+}: {
+  projectId: string;
+  exportBase: string;
+  canUpload: boolean;
+}) {
+  const [rows, setRows] = useState<ProjectPartsRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setRows((await listProjectPartsRows(projectId)).rows);
+    } catch (err) {
+      message.error(readError(err, "备件订单明细加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <WorkbookRoundTrip
+        size="small"
+        title="备件成本"
+        filename={`${exportBase}-${SHEETS.parts}.xlsx`}
+        canUpload={canUpload}
+        hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
+        onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
+        onApply={async (file) => {
+          const result = await applyProjectMaster(projectId, file);
+          await load();          // 上传覆盖后立刻回读，页面不留旧值
+          return result;
+        }}
+      />
+      <Table<ProjectPartsRow>
+        rowKey="line_id"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        scroll={{ x: 1200 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
+        locale={{ emptyText: "本项目暂无备件订单明细" }}
+        columns={[
+          { title: "维保单号", dataIndex: "order_no", render: raw },
+          { title: "制单日期", dataIndex: "order_date", render: raw },
+          { title: "PN", dataIndex: "pn_std", render: raw },
+          { title: "产品描述", dataIndex: "description", render: raw, ellipsis: true },
+          { title: "数量", dataIndex: "qty", render: raw },
+          { title: "出库仓库", dataIndex: "warehouse", render: raw },
+          { title: "成本来源", render: (_: unknown, line) => <CostSourceTag row={line} /> },
+          {
+            title: "未税单价",
+            render: (_: unknown, line) =>
+              line.unit_cost_ex_tax == null ? "—" : `¥${Number(line.unit_cost_ex_tax).toFixed(2)}`,
+          },
+          {
+            title: "含税单价",
+            render: (_: unknown, line) =>
+              line.unit_cost_inc_tax == null ? "—" : `¥${Number(line.unit_cost_inc_tax).toFixed(2)}`,
+          },
+        ]}
+      />
+    </Space>
+  );
+}
+
+
 /** 基础信息 tab：表 6 sheet 01 的 web 呈现 + 归属挂靠（#39/#45）。 */
 function BasicsTab({
   projectId,
+  exportBase,
   row,
+  project,
   canUpload,
   canAssign,
   onAssigned,
 }: {
   projectId: string;
+  exportBase: string;
   row: BoardProjectRow | null;
+  /** stable 目录的基础信息——boss-board 聚合行缺位时的回退源（数据源不同，字段较少）。 */
+  project: MaintenanceProject | null;
   canUpload: boolean;
   canAssign: boolean;
   onAssigned: () => void;
@@ -406,35 +872,97 @@ function BasicsTab({
     }
   };
 
+  const autoAssign = async () => {
+    setBusy(true);
+    try {
+      const { data } = await autoAssignMaintenanceSourceOrders();
+      const r = data.result;
+      message.success(
+        `自动挂靠完成：${r.assigned_orders} 张单` +
+          (r.matched_projects ? `，挂到 ${r.matched_projects} 个已有项目` : "") +
+          (r.created_projects ? `，自动新建 ${r.created_projects} 个项目` : "") +
+          (r.skipped_groups ? `；${r.skipped_groups} 个无项目名已跳过` : ""),
+      );
+      await loadCandidates();
+      onAssigned();
+    } catch (err) {
+      message.error(readError(err, "自动挂靠失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <WorkbookRoundTrip
         size="small"
         title="基础信息表"
-        filename={`${projectId}-01.xlsx`}
+        filename={`${exportBase}-${SHEETS.basics}.xlsx`}
         canUpload={canUpload}
         hint="01 表为只读呈现；可编辑内容在 03/04/05 各自的 tab 里回填"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.basics])}
         onApply={(file) => applyProjectMaster(projectId, file)}
       />
       <Descriptions bordered size="small" column={2}>
-        <Descriptions.Item label="项目名称">{row?.display_name ?? "—"}</Descriptions.Item>
-        <Descriptions.Item label="项目编号">{row?.project_code ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="项目名称">
+          {row?.display_name ?? project?.display_name ?? "—"}
+        </Descriptions.Item>
+        <Descriptions.Item label="项目编号">
+          {row?.project_code ?? project?.project_code ?? "—"}
+        </Descriptions.Item>
         <Descriptions.Item label="合同号(XSDD)">
           {row?.contract_nos.length ? row.contract_nos.join("、") : "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="项目经理">{row?.project_manager ?? "—"}</Descriptions.Item>
-        <Descriptions.Item label="合同总额">
-          {statText(row?.contract_amount_inc_tax)}
+        <Descriptions.Item label="项目经理">
+          {row?.project_manager ?? project?.project_manager_id ?? "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="生命周期">{row?.lifecycle ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="合同总额">
+          <Space size={6}>
+            <span>{statText(row?.contract_amount_inc_tax)}</span>
+            {row?.contract_shared ? (
+              <Tooltip title="有销售订单同时挂在多个项目上，合同额会在项目间重复计入，仅作参考">
+                <Tag color="orange">共用单</Tag>
+              </Tooltip>
+            ) : null}
+            {row?.contract_incomplete ? (
+              <Tooltip title="部分关联销售订单未在销售表中找到金额，合同额被低估">
+                <Tag color="orange">不完整</Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="维保期限">
+          {(() => {
+            const pf = row?.period_from ?? project?.period_from;
+            const pt = row?.period_to ?? project?.period_to;
+            if (!pf && !pt) return "—";
+            return `${pf ?? "—"} ~ ${pt ?? "—"}`;
+          })()}
+        </Descriptions.Item>
+        <Descriptions.Item label="生命周期">
+          {(() => {
+            const lc = row?.lifecycle ?? project?.lifecycle_status;
+            return lc ? LIFECYCLE_LABEL[lc] ?? lc : "—";
+          })()}
+        </Descriptions.Item>
+        <Descriptions.Item label="成本率（成本÷合同额）" span={2}>
+          <CostRatioBar row={row} />
+        </Descriptions.Item>
       </Descriptions>
 
       {canAssign ? (
-        <Card size="small" title="归属挂靠（判定依据＝XSDD 销售订单）">
+        <Card
+          size="small"
+          title="归属挂靠（判定依据＝XSDD 销售订单）"
+          extra={(
+            <Button size="small" type="primary" ghost loading={busy} onClick={() => void autoAssign()}>
+              自动匹配挂靠
+            </Button>
+          )}
+        >
           <Text type="secondary" style={{ fontSize: 11.5 }}>
-            同一销售订单＝同一项目；对不上任何销售订单的单子才独立成项目。
-            标「同 XSDD」的是命中本项目销售单的候选，已排在最前。
+            同一销售订单＝同一项目。点「自动匹配挂靠」会按单据自带的项目名自动挂到已有项目，
+            对不上的才留在下面人工确认；标「同 XSDD」的是命中本项目销售单的候选，已排最前。
           </Text>
           <Table<MaintenanceSourceOrderRow>
             rowKey="raw_order_id"
@@ -490,11 +1018,32 @@ function EditBasicsButton({
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
 
   const openModal = async () => {
     try {
       const resp = await getMaintenanceProject(projectId);
-      form.setFieldsValue(resp.data);
+      // 后端契约是 {project: {...}}（MaintenanceProjectOverview）
+      const proj = resp.data.project;
+      form.setFieldsValue({
+        display_name: proj.display_name,
+        project_manager_id: proj.project_manager_id,
+        version: proj.version,
+        period:
+          proj.period_from || proj.period_to
+            ? [
+                proj.period_from ? dayjs(proj.period_from) : null,
+                proj.period_to ? dayjs(proj.period_to) : null,
+              ]
+            : null,
+      });
+      // 加载系统内账号供「维保负责人」下拉选择
+      try {
+        const accountsResp = await listAccounts();
+        setAccounts(accountsResp.data);
+      } catch {
+        setAccounts([]);
+      }
       setOpen(true);
     } catch (err) {
       message.error(readError(err, "读取项目主档失败"));
@@ -503,9 +1052,22 @@ function EditBasicsButton({
 
   const submit = async () => {
     const values = await form.validateFields();
+    const { period, ...rest } = values as {
+      period?: [Dayjs | null, Dayjs | null] | null;
+    } & Record<string, unknown>;
+    const payload = {
+      ...rest,
+      // 期限整组提交（#39/#51）；清空即回 missing
+      period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
+      period_to: period?.[1] ? period[1].format("YYYY-MM-DD") : null,
+      reason: "面板编辑基本信息",
+    };
     setSaving(true);
     try {
-      await updateMaintenanceProject(projectId, values);
+      await updateMaintenanceProject(
+        projectId,
+        payload as Parameters<typeof updateMaintenanceProject>[1],
+      );
       message.success("已保存");
       setOpen(false);
       onSaved();
@@ -538,11 +1100,23 @@ function EditBasicsButton({
           <Form.Item name="display_name" label="项目名称">
             <Input />
           </Form.Item>
-          <Form.Item name="cmo_name" label="项目经理(CMO)">
-            <Input />
+          <Form.Item name="project_manager_id" label="维保负责人">
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择系统内账号/人名"
+              optionFilterProp="label"
+              options={accounts.map((account) => ({
+                value: account.username,
+                label: account.display_name
+                  ? `${account.username} · ${account.display_name}`
+                  : account.username,
+              }))}
+            />
           </Form.Item>
-          <Form.Item name="salesperson" label="销售人员">
-            <Input />
+          {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
+          <Form.Item name="period" label="维保期限（起止）">
+            <DatePicker.RangePicker style={{ width: "100%" }} allowEmpty={[true, true]} />
           </Form.Item>
           <Form.Item name="version" hidden>
             <Input />

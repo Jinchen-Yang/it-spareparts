@@ -80,9 +80,14 @@ class Settings(BaseSettings):
     # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
     replenishment_beta_enabled: bool = False
 
-    # 维保展示板（plan v1.3）服务端总闸：WBDD 专用上传 + boss-board 端点整组受控。
-    # 默认关闭（404）；回滚=关本闸，不做 schema downgrade（铁律 7）。
-    maintenance_boss_dashboard_enabled: bool = False
+    # 维保项目看板（plan v1.3）服务端总闸：WBDD 专用上传 + boss-board 端点整组受控。
+    # 看板已是正式功能（2026-08-17 去 Beta）：默认开启；本闸保留为紧急回滚开关——
+    # 回滚=关本闸（整组 404），不做 schema downgrade（铁律 7）。
+    maintenance_boss_dashboard_enabled: bool = True
+
+    # Rollout switches; neither is a navigation/Beta permission gate.
+    maintenance_project_master_v2_enabled: bool = False
+    replenishment_auto_review_enabled: bool = False
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级

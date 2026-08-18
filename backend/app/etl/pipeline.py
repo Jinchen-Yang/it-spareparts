@@ -271,16 +271,20 @@ def run_import(session: Session, file_path: str, original_name: str,
     session.flush()  # 取 batch.id
 
     try:
-        inspected_sheets = reader.inspect_workbook(file_path)
+        # 先只扫描全部 sheet 的边界和表头；真正的值只加载选中的业务页，
+        # 这是 inline-string 大工作簿避免 OOM 的关键边界。
+        inspected_sheets = reader.inspect_workbook(file_path, load_data=False)
         selection = sheet_selection.select_workbook_sheets(inspected_sheets)
         if not selection.selected:
             raise ReaderError(
                 "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
                 code="no_recognized_sheet",
             )
-        selected_sheets = [
-            sheet.parsed for sheet in selection.selected if sheet.parsed is not None
-        ]
+        selected_sheets = reader.load_selected_workbook(
+            file_path,
+            [sheet.sheet_name for sheet in selection.selected],
+            inspections=inspected_sheets,
+        )
 
         # §17.5 调度：**有报销页才是项目追踪工作簿**——只吃报销页，其余可识别页
         # （系统导出的备件回填副本/手工粘贴件，非权威源）跳过并报告，防回环污染。

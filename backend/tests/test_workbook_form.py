@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from sqlalchemy import func, select
 
 from app.etl import mapping, pipeline, reader
-from app.etl.transform import transform
+from app.etl.transform import SOFT_ERROR_TYPES, transform
 from app.models.maintenance import FProjectExpense
 from app.models.system import SysImportBatch
 
@@ -493,7 +493,9 @@ def test_upsert_requires_clean_sheet(db, tmp_path):
     db.commit()
     bad = _workbook_xlsx(tmp_path, "cl1.xlsx",
                          [_canon_row(amount=150),
-                          {"报销金额": 66, "支出事由": "有金额没日期"}],   # missing_date 错误行
+                          # bad_number 错误行（原用「有金额没日期」，自头级块内继承
+                          # 落地后该形态是合法延续行，不再构成错误）
+                          {"报销日期": "2026-05-02", "报销金额": "非数字", "支出事由": "坏金额"}],
                          with_parts=False, with_total_row=False)
     from app.etl.reader import ReaderError
     with pytest.raises(ReaderError, match="修复模式"):
@@ -526,3 +528,63 @@ def test_blank_form_export_reimports_clean(db, batch, tmp_path):
     b = pipeline.run_import(db, str(p), "blank.xlsx")
     db.commit()
     assert b.status == "success" and b.rows_inserted == 0 and b.rows_error == 0
+
+
+# ---- 头级字段块内继承（生产批次 #168 实锤形态：头行＋明细延续行）----
+
+
+def test_expense_continuation_rows_inherit_head_fields():
+    """延续行继承头行的日期/单号/人员/事由/销售订单；行级明细列不受影响。"""
+    df = pd.DataFrame([
+        {"报销日期": "2026-05-29", "费用单号": "BXD-20260514-0030",
+         "报销人员": "李呈辉", "支出事由": "出差交通费", "流程状态": "已结束",
+         "维保销售订单": "XSDD-1", "报销明细.报销金额": 770},
+        {"报销明细.报销金额": 2448},                 # 延续行：头级全空
+        {"报销明细.报销金额": 1270},
+    ])
+    res = transform(df, mapping.EXPENSE)
+    assert [e.error_type for e in res.errors] == []
+    assert len(res.lines) == 3
+    assert {str(r["expense_date"]) for r in res.lines} == {"2026-05-29"}
+    assert {r["bxd_no"] for r in res.lines} == {"BXD-20260514-0030"}
+    assert {r["person"] for r in res.lines} == {"李呈辉"}
+    assert {r["linked_sales_order_no"] for r in res.lines} == {"XSDD-1"}
+    # 同头行派生键内容相同金额相同也不撞（#重复序）：三行键互不相同
+    assert len({r["raw_line_id"] for r in res.lines}) == 3
+
+
+def test_expense_in_progress_head_without_date_is_soft_skipped():
+    """在途单（流程状态非生效、日期未生成）整块软标记跳过——不计硬错误，
+    审批完成重新导出上传后由快照 upsert 自然计入。"""
+    df = pd.DataFrame([
+        {"费用单号": "BXD-20260526-0006", "报销人员": "李呈辉",
+         "流程状态": "进行中", "维保销售订单": "XSDD-1",
+         "报销明细.报销金额": 785},
+        {"报销明细.报销金额": 1329},                 # 同单延续行
+    ])
+    res = transform(df, mapping.EXPENSE)
+    assert len(res.lines) == 0
+    assert [e.error_type for e in res.errors] == [
+        "missing_date_in_progress", "missing_date_in_progress"]
+    assert all(e.error_type in SOFT_ERROR_TYPES for e in res.errors)
+    assert "BXD-20260526-0006" in res.errors[0].error_detail
+    assert "审批完成后重新导出" in res.errors[0].error_detail
+
+
+def test_expense_orphan_row_without_head_still_hard_errors():
+    """文件开头无头可承的孤行仍是硬错误；新单据块首行有单号却没日期且已生效，
+    不得跨块继承上一单日期。"""
+    df = pd.DataFrame([
+        {"报销明细.报销金额": 66},                   # 开头孤行：无头可承
+        {"报销日期": "2026-05-01", "费用单号": "BXD-A", "流程状态": "已结束",
+         "维保销售订单": "XSDD-1", "报销明细.报销金额": 100},
+        # 新块首行：有单号、已生效、却没日期 → 硬错误，且不得继承 BXD-A 的日期
+        {"费用单号": "BXD-B", "流程状态": "已结束", "报销明细.报销金额": 50},
+        {"报销明细.报销金额": 20},                   # BXD-B 的延续行：同样无日期可承
+    ])
+    res = transform(df, mapping.EXPENSE)
+    assert len(res.lines) == 1                       # 只有 BXD-A 头行入库
+    assert res.lines[0]["bxd_no"] == "BXD-A"
+    assert [e.error_type for e in res.errors] == [
+        "missing_date", "missing_date", "missing_date"]
+    assert all(e.error_type not in SOFT_ERROR_TYPES for e in res.errors)

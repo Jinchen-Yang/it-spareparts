@@ -8,6 +8,7 @@ from app.auth import hash_password
 from app.config import get_settings
 from app.main import app
 from app.maintenance_beta import require_maintenance_beta
+from app.maintenance_boss import require_maintenance_boss
 from app.models.system import SysUser
 
 
@@ -90,8 +91,9 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
         for stable_path in ("/api/maintenance/projects",):
             stable = client.get(stable_path)
             assert stable.status_code == 200, (stable_path, stable.text)
+        # /projects/stable（基础信息 CRUD）自 2026-08-17 起随 boss 总闸而非 beta
+        # ——见本文件 test_boss_gate_keeps_panel_routers_live 与 main.py 挂载注释。
         for method, path, body in (
-            ("get", "/api/maintenance/projects/stable", None),
             ("get", "/api/maintenance/projects/stable/operations", None),
             ("post", "/api/maintenance/demands/search", {}),
         ):
@@ -104,7 +106,6 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
 
         settings.maintenance_beta_enabled = True
         for method, path, body in (
-            ("get", "/api/maintenance/projects/stable", None),
             ("get", "/api/maintenance/projects/stable/operations", None),
             ("post", "/api/maintenance/demands/search", {}),
         ):
@@ -228,11 +229,11 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = False
+        # /projects/stable 与 /project-assignments/orders 已迁 boss 闸（面板依赖），
+        # 不在本清单——它们的 fail-closed 看守见 test_boss_gate_keeps_panel_routers_live。
         calls = (
-            ("get", "/api/maintenance/projects/stable", None),
             ("get", "/api/maintenance/projects/stable/operations", None),
             ("get", "/api/maintenance/project-manager/workbooks/v3/status", None),
-            ("get", "/api/maintenance/project-assignments/orders", None),
             ("get", "/api/maintenance/return-categories", None),
             ("get", "/api/maintenance/projects/stable/not-real/workbook", None),
             ("post", "/api/maintenance/demands/search", {}),
@@ -273,24 +274,82 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
         "app.api.maintenance_project_assignments",
         "app.api.maintenance_project_operations",
         "app.api.maintenance_project_workbooks",
-        "app.api.maintenance_projects",
-        "app.api.maintenance_source_assignments",
         "app.api.maintenance_warehouse",
     }
-    beta_routes = [
-        route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.endpoint.__module__ in beta_endpoint_modules
-    ]
-    assert beta_routes
+    # 面板依赖的两个模块（基础信息 CRUD、归属挂靠）随 boss 总闸——同等强度看守：
+    # 新路由同样不得绕开各自的发布 kill switch（2026-08-17 迁移，main.py 挂载注释）。
+    boss_endpoint_modules = {
+        "app.api.maintenance_projects",
+        "app.api.maintenance_source_assignments",
+    }
 
-    missing = [
-        f"{','.join(sorted(route.methods))} {route.path}"
-        for route in beta_routes
-        if not any(
-            dependency.call is require_maintenance_beta
-            for dependency in route.dependant.dependencies
-        )
-    ]
-    assert missing == []
+    def _routes(modules: set[str]) -> list[APIRoute]:
+        return [
+            route
+            for route in app.routes
+            if isinstance(route, APIRoute) and route.endpoint.__module__ in modules
+        ]
+
+    def _missing(routes: list[APIRoute], gate) -> list[str]:
+        return [
+            f"{','.join(sorted(route.methods))} {route.path}"
+            for route in routes
+            if not any(
+                dependency.call is gate
+                for dependency in route.dependant.dependencies
+            )
+        ]
+
+    beta_routes = _routes(beta_endpoint_modules)
+    assert beta_routes
+    assert _missing(beta_routes, require_maintenance_beta) == []
+
+    boss_routes = _routes(boss_endpoint_modules)
+    assert boss_routes
+    assert _missing(boss_routes, require_maintenance_boss) == []
+
+
+def test_boss_gate_keeps_panel_routers_live(db):
+    """面板依赖的两个 router（基础信息 CRUD、归属挂靠）随 boss 总闸开合。
+
+    2026-08-17 生产实发：beta 总闸按 v1.23 审计置 false 后，新面板的基础信息与
+    归属挂靠整组 404「页面不存在」——两个 router 当时还挂在 beta 闸上。迁到
+    boss 闸后必须双向看守：boss 关＝404（与未发布不可区分），boss 开＝可服务。
+    """
+    client = _client(db, username="maintenance-boss-panel-admin", role="admin")
+    settings = get_settings()
+    original_boss = settings.maintenance_boss_dashboard_enabled
+    original_beta = settings.maintenance_beta_enabled
+    calls = (
+        ("get", "/api/maintenance/projects/stable", None),
+        (
+            "get",
+            "/api/maintenance/project-assignments/orders"
+            "?page=1&page_size=20&assignment_status=unassigned",
+            None,
+        ),
+    )
+    try:
+        # beta 开关不影响这两组路由（这正是本次迁移要解耦的）
+        settings.maintenance_beta_enabled = False
+
+        settings.maintenance_boss_dashboard_enabled = False
+        for method, path, body in calls:
+            closed = (
+                getattr(client, method)(path, json=body)
+                if body is not None
+                else getattr(client, method)(path)
+            )
+            assert closed.status_code == 404, (method, path, closed.text)
+
+        settings.maintenance_boss_dashboard_enabled = True
+        for method, path, body in calls:
+            opened = (
+                getattr(client, method)(path, json=body)
+                if body is not None
+                else getattr(client, method)(path)
+            )
+            assert opened.status_code == 200, (method, path, opened.text)
+    finally:
+        settings.maintenance_boss_dashboard_enabled = original_boss
+        settings.maintenance_beta_enabled = original_beta

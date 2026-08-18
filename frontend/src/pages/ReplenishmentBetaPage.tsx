@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -6,6 +6,7 @@ import {
   Card,
   Col,
   Collapse,
+  Drawer,
   Empty,
   Input,
   InputNumber,
@@ -14,6 +15,7 @@ import {
   Pagination,
   Result,
   Row,
+  Select,
   Space,
   Spin,
   Tag,
@@ -22,49 +24,77 @@ import {
 } from "antd";
 import {
   ArrowLeftOutlined,
-  CheckCircleOutlined,
+  DeleteOutlined,
   DownloadOutlined,
+  HistoryOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SendOutlined,
   ShoppingCartOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import {
-  addReplenishmentLine,
-  createReplenishmentApplication,
-  downloadManualReviewWorkbook,
-  downloadPurchaseListWorkbook,
-  downloadWbddSubsetWorkbook,
+  applyReplenishmentRevision,
+  deleteReplenishmentCartDraft,
+  downloadSystemScreeningWorkbook,
   getReplenishmentApplication,
   getReplenishmentCapabilities,
+  getReplenishmentCartDraft,
+  getReplenishmentProjects,
   listReplenishmentApplications,
-  removeReplenishmentLine,
+  replaceReplenishmentCartDraft,
   searchReplenishmentCatalog,
-  startReplenishmentRevision,
-  submitReplenishmentApplication,
-  updateReplenishmentDraft,
-  updateReplenishmentLine,
+  submitReplenishmentCartDraft,
   type ApplicationSummary,
   type CatalogPart,
   type PriceStats,
   type ReplenishmentApplication,
   type ReplenishmentCapabilities,
   type ReplenishmentLine,
+  type ReplenishmentProject,
   type ReplenishmentVersion,
 } from "../api/replenishment";
 import "./ReplenishmentBetaPage.css";
 
-const STABLE_INVENTORY_PATH = "/inventory";
+// 补库申请自 2026-08-17 归入维保项目组：前置态返回按钮指向维保主页
+const MAINTENANCE_HOME_PATH = "/maintenance";
 
 const { Text, Title } = Typography;
 
+/** 浏览器落盘：导出 Excel 用（#11）。 */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string }> = {
-  draft: { label: "购物车草稿", color: "blue" },
-  submitted: { label: "等待审核", color: "gold" },
-  needs_revision: { label: "有条目被打回", color: "red" },
-  approved: { label: "审核通过", color: "green" },
+  draft: { label: "草稿", color: "blue" },
+  submitted: { label: "已提交", color: "gold" },
+  needs_revision: { label: "需补充信息", color: "red" },
+  approved: { label: "已通过", color: "green" },
 };
+
+/** 待提交行：明细事实在云端草稿保存，价格事实不重复塞进购物车。 */
+interface DraftLine {
+  part_id: number;
+  pn_std: string;
+  description: string | null;
+  unit: string | null;
+  quantity: number;
+  special_note: string;
+  /** 退回编辑时标记被打回行（#10） */
+  rejected?: boolean;
+  rejectedReason?: string | null;
+  /** 打回行的推荐替换候选（池内相似 PN） */
+  recommendations?: Array<{ part_id: number; pn_std: string; pool_name?: string | null }>;
+}
 
 function errorText(error: unknown): string {
   const payload = error as { response?: { data?: { detail?: string | { message?: string } } } };
@@ -76,21 +106,12 @@ function errorText(error: unknown): string {
 
 function priceText(stats: PriceStats | null, unit: string | null): string {
   if (!stats || stats.weighted_avg == null) return "半年内无有效样本";
+  const avg = Number(stats.weighted_avg);
+  if (!Number.isFinite(avg)) return "半年内无有效样本";
   const quantity = unit
     ? `${stats.total_qty ?? 0} ${unit}`
     : `数量 ${stats.total_qty ?? 0}`;
-  return `¥${stats.weighted_avg.toFixed(2)} · ${quantity} · ${stats.order_count} 单`;
-}
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  return `¥${avg.toFixed(2)} · ${quantity} · ${stats.order_count} 单`;
 }
 
 function PriceFacts({ part }: { part: Pick<CatalogPart, "purchase" | "sales" | "price_window" | "unit"> }) {
@@ -105,15 +126,48 @@ function PriceFacts({ part }: { part: Pick<CatalogPart, "purchase" | "sales" | "
   );
 }
 
+/** 提交时冻结的三查快照摘要（证据层）。 */
+function ScreeningSummary({ line }: { line: Pick<ReplenishmentLine, "screening" | "pool_floor_ex_tax" | "latest_sales"> }) {
+  if (!line.screening) return null;
+  const { as_of, lookback_days, anomaly_count, checks } = line.screening;
+  const details = checks
+    .filter((check) => !check.passed)
+    .map((check) => check.name)
+    .join("、");
+  // 后端可能返回字符串金额（Decimal 序列化），统一转数字再展示
+  const floor = line.pool_floor_ex_tax == null ? null : Number(line.pool_floor_ex_tax);
+  return (
+    <div className="replenishment-screening-summary">
+      <Space wrap size={4}>
+        <Tag color={anomaly_count > 0 ? "orange" : "green"}>
+          三查{anomaly_count > 0 ? ` ${anomaly_count} 项提示` : "通过"}
+        </Tag>
+        {floor != null && Number.isFinite(floor) && (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            池内最低价参考 ¥{floor.toFixed(2)}
+          </Text>
+        )}
+        {!!line.latest_sales?.date && (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            最近销售 {String(line.latest_sales.date)}
+          </Text>
+        )}
+      </Space>
+      {details && <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{details}</Text>}
+      <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
+        快照 {as_of} · 回看 {lookback_days} 天 · 提交时冻结
+      </Text>
+    </div>
+  );
+}
+
 function CatalogCard({
   part,
   disabled,
-  replacing,
   onAdd,
 }: {
   part: CatalogPart;
   disabled: boolean;
-  replacing: boolean;
   onAdd: (quantity: number) => void;
 }) {
   const [quantity, setQuantity] = useState(1);
@@ -134,107 +188,49 @@ function CatalogCard({
       <PriceFacts part={part} />
       <Space.Compact block>
         <InputNumber
-          min={0.001}
-          max={999999.999}
-          precision={3}
+          min={1}
+          max={999999}
+          precision={0}
           value={quantity}
           onChange={(value) => setQuantity(Number(value || 1))}
           style={{ flex: 1 }}
         />
         <Button disabled>{part.unit || "件"}</Button>
         <Button
-          type={replacing ? "primary" : "default"}
+          type="primary"
           icon={<ShoppingCartOutlined />}
           disabled={disabled}
           onClick={() => onAdd(quantity)}
         >
-          {replacing ? "替换为此 PN" : "加入补库单"}
+          加入申请
         </Button>
       </Space.Compact>
     </Card>
   );
 }
 
-function CartLine({
-  line,
-  appVersion,
-  disabled,
-  replacing,
-  feedbackReason,
-  onReplace,
-  onSave,
-  onRemove,
-}: {
-  line: ReplenishmentLine;
-  appVersion: number;
-  disabled: boolean;
-  replacing: boolean;
-  feedbackReason?: string | null;
-  onReplace: () => void;
-  onSave: (line: ReplenishmentLine, quantity: number, note: string) => void;
-  onRemove: () => void;
-}) {
-  const [quantity, setQuantity] = useState(line.quantity);
-  const [note, setNote] = useState(line.special_note || "");
-  useEffect(() => {
-    setQuantity(line.quantity);
-    setNote(line.special_note || "");
-  }, [line.line_id, line.quantity, line.special_note, appVersion]);
+/** 提交结果里的一条冻结明细（只读证据层）。 */
+function SubmittedLine({ line }: { line: ReplenishmentLine }) {
+  const rejected = line.review?.decision === "rejected";
+  const recommendations = line.screening?.recommendations || [];
   return (
-    <div className={`replenishment-cart-line ${line.source_line_id ? "is-revision" : ""}`}>
+    <div className={`replenishment-cart-line${rejected ? " is-revision" : ""}`}>
       <div className="replenishment-cart-line-top">
         <div>
           <Text strong>{line.line_no}. {line.pn_std}</Text>
           <div className="replenishment-part-desc">{line.description || "暂无产品描述"}</div>
         </div>
-        <Tag>{line.pool.name || "未加入互通池"}</Tag>
-      </div>
-      {line.source_line_id && !disabled && (
-        <Alert
-          showIcon
-          type="warning"
-          message="这是上一版本的打回项"
-          description={feedbackReason
-            ? `审核原因：${feedbackReason}。请重选 PN，或说明继续使用原 PN 的特殊情况。`
-            : "请重选 PN，或在特殊情况说明中写明继续使用原 PN 的原因。"}
-        />
-      )}
-      <PriceFacts part={line} />
-      <Row gutter={[8, 8]}>
-        <Col xs={24} sm={7}>
-          <Space.Compact block>
-            <InputNumber
-              min={0.001}
-              max={999999.999}
-              precision={3}
-              value={quantity}
-              disabled={disabled}
-              onChange={(value) => setQuantity(Number(value || 0))}
-              style={{ flex: 1 }}
-            />
-            <Button disabled>{line.unit || "件"}</Button>
-          </Space.Compact>
-        </Col>
-        <Col xs={24} sm={17}>
-          <Input
-            value={note}
-            maxLength={4000}
-            disabled={disabled}
-            placeholder={line.source_line_id ? "特殊情况继续原 PN 时必填" : "备注（选填）"}
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </Col>
-      </Row>
-      {!disabled && (
-        <Space wrap>
-          <Button size="small" type="primary" onClick={() => onSave(line, quantity, note)}>保存</Button>
-          {line.source_line_id && (
-            <Button size="small" type={replacing ? "primary" : "default"} onClick={onReplace}>
-              {replacing ? "正在重选：请从左侧选择" : "重选 PN"}
-            </Button>
-          )}
-          {!line.source_line_id && <Button size="small" danger onClick={onRemove}>移除</Button>}
+        <Space size={4} wrap>
+          <Tag>{line.pool.name || "未加入互通池"}</Tag>
+          <Text strong>数量 {line.quantity} {line.unit || "件"}</Text>
         </Space>
+      </div>
+      <PriceFacts part={line} />
+      <ScreeningSummary line={line} />
+      {line.special_note && <Text>特殊情况：{line.special_note}</Text>}
+      {line.review?.reason && <Text type="danger">审核原因：{line.review.reason}</Text>}
+      {rejected && recommendations.length > 0 && (
+        <Text type="warning">相似候选：{recommendations.map((item) => `${item.pn_std}（${item.match_reason || "相似"}）`).join("、")}</Text>
       )}
     </div>
   );
@@ -244,7 +240,7 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
   return (
     <div className="replenishment-version-history">
       <Text strong>版本留存（{versions.length}）</Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>每次已提交内容和审核结果只读保留</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>每次提交内容与冻结证据只读保留</Text>
       <Collapse
         size="small"
         items={versions.map((version) => ({
@@ -255,11 +251,6 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
               <Tag color={version.status === "draft" ? "blue" : "default"}>
                 {version.status === "draft" ? "草稿" : "已提交"}
               </Tag>
-              {version.review && (
-                <Text type="secondary">
-                  通过 {version.review.approved_count} / 打回 {version.review.rejected_count}
-                </Text>
-              )}
             </Space>
           ),
           children: (
@@ -269,29 +260,9 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
                   ? `提交时间：${new Date(version.submitted_at).toLocaleString()}`
                   : "尚未提交"}
               </Text>
-              {version.content_digest && (
-                <Text type="secondary" copyable={{ text: version.content_digest }}>
-                  版本摘要：{version.content_digest.slice(0, 12)}…
-                </Text>
-              )}
               {version.request_note && <Text>整单备注：{version.request_note}</Text>}
               {version.lines.map((line) => (
-                <div className="replenishment-history-line" key={line.line_id}>
-                  <Space wrap>
-                    <Text strong>{line.line_no}. {line.pn_std}</Text>
-                    <Text>数量 {line.quantity} {line.unit || "件"}</Text>
-                    <Tag>{line.pool.name || "未加入互通池"}</Tag>
-                    {line.review && (
-                      <Tag color={line.review.decision === "approved" ? "green" : "red"}>
-                        {line.review.decision === "approved" ? "通过" : "打回"}
-                      </Tag>
-                    )}
-                  </Space>
-                  <div className="replenishment-part-desc">{line.description || "暂无产品描述"}</div>
-                  <PriceFacts part={line} />
-                  {line.special_note && <Text>特殊情况：{line.special_note}</Text>}
-                  {line.review?.reason && <Text type="danger">审核原因：{line.review.reason}</Text>}
-                </div>
+                <SubmittedLine key={line.line_id} line={line} />
               ))}
             </div>
           ),
@@ -301,25 +272,239 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
   );
 }
 
+function newRevisionRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `revision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function RevisionPanel({
+  application,
+  onUpdated,
+}: {
+  application: ReplenishmentApplication;
+  onUpdated: (next: ReplenishmentApplication) => void;
+}) {
+  const version = application.versions[0];
+  const rejected = version?.lines.filter((line) => line.review?.decision === "rejected") || [];
+  const [choices, setChoices] = useState<Record<string, {
+    action: "replace" | "remove";
+    part_id?: number;
+    quantity?: number;
+    special_note?: string;
+  }>>({});
+  const [saving, setSaving] = useState(false);
+  if (application.status !== "needs_revision" || !version || !rejected.length) return null;
+  const setChoice = (requestLineId: string, patch: Partial<{ action: "replace" | "remove"; part_id?: number; quantity?: number; special_note?: string }>) => {
+    setChoices((prev) => ({ ...prev, [requestLineId]: { ...prev[requestLineId], ...patch } }));
+  };
+  const submit = async () => {
+    if (rejected.some((line) => !choices[line.request_line_id])) return;
+    setSaving(true);
+    try {
+      const { data } = await applyReplenishmentRevision(application.application_id, {
+        expected_application_version: application.version,
+        client_request_id: newRevisionRequestId(),
+        resolutions: rejected.map((line) => {
+          const choice = choices[line.request_line_id];
+          // remove 只传 action；replace 传 part_id + 可调数量/特殊情况备注
+          if (choice.action === "remove") return { request_line_id: line.request_line_id, action: "remove" };
+          return {
+            request_line_id: line.request_line_id,
+            action: "replace",
+            part_id: choice.part_id,
+            quantity: choice.quantity ?? line.quantity,
+            special_note: choice.special_note?.trim() ? choice.special_note.trim() : null,
+          };
+        }),
+      });
+      onUpdated(data);
+      message.success("打回行已重新提交");
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card size="small" title="处理自动审核打回行" style={{ marginTop: 12 }}>
+      <Space direction="vertical" style={{ width: "100%" }}>
+        {rejected.map((line) => {
+          const candidates = line.screening?.recommendations || [];
+          const choice = choices[line.request_line_id];
+          return (
+            <div key={line.request_line_id} className="replenishment-cart-line is-revision">
+              <Space wrap style={{ width: "100%" }}>
+                <Text strong>{line.pn_std}</Text>
+                <Text type="danger">{line.review?.reason || "无近182天采购/销售记录"}</Text>
+                {candidates.slice(0, 3).map((candidate) => (
+                  <Button key={candidate.part_id} size="small"
+                    type={choice?.part_id === candidate.part_id ? "primary" : "default"}
+                    onClick={() => setChoice(line.request_line_id, {
+                      action: "replace", part_id: candidate.part_id, quantity: line.quantity,
+                    })}>
+                    替换为 {candidate.pn_std}
+                  </Button>
+                ))}
+                <Button size="small" danger
+                  type={choice?.action === "remove" ? "primary" : "default"}
+                  onClick={() => setChoice(line.request_line_id, { action: "remove" })}>
+                  移除
+                </Button>
+              </Space>
+              {choice?.action === "replace" && (
+                <Space wrap style={{ marginTop: 8 }}>
+                  <InputNumber
+                    min={1}
+                    max={999999}
+                    precision={0}
+                    value={choice.quantity ?? line.quantity}
+                    onChange={(value) => setChoice(line.request_line_id, { quantity: Number(value || 1) })}
+                    placeholder="数量"
+                    style={{ width: 100 }}
+                  />
+                  <Input
+                    value={choice.special_note ?? ""}
+                    maxLength={4000}
+                    onChange={(event) => setChoice(line.request_line_id, { special_note: event.target.value })}
+                    placeholder="特殊情况说明（选填，替换后需说明使用原因）"
+                    style={{ width: 320 }}
+                  />
+                </Space>
+              )}
+              {choice && <Tag color="green" style={{ marginTop: 8 }}>
+                {choice.action === "remove" ? "将移除" : `将替换为 ${choice.part_id ? candidates.find((c) => c.part_id === choice.part_id)?.pn_std ?? "已选 PN" : ""}`}
+              </Tag>}
+            </div>
+          );
+        })}
+        <Button type="primary" loading={saving} disabled={rejected.some((line) => !choices[line.request_line_id])} onClick={() => void submit()}>
+          提交处理结果
+        </Button>
+      </Space>
+    </Card>
+  );
+}
+
 export default function ReplenishmentBetaPage() {
   const navigate = useNavigate();
   const [capabilities, setCapabilities] = useState<ReplenishmentCapabilities | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+
+  const [projects, setProjects] = useState<ReplenishmentProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [requestNote, setRequestNote] = useState("");
+  const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
+  const [draftVersion, setDraftVersion] = useState<number | null>(null);
+  const [editingRevision, setEditingRevision] = useState<ReplenishmentApplication | null>(null);
+  const hydratingCart = useRef(false);
+  const cartSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState<CatalogPart[]>([]);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogPage, setCatalogPage] = useState(1);
+
   const [applications, setApplications] = useState<ApplicationSummary[]>([]);
   const [applicationPage, setApplicationPage] = useState(1);
   const [applicationTotal, setApplicationTotal] = useState(0);
   const [current, setCurrent] = useState<ReplenishmentApplication | null>(null);
-  const [warehouse, setWarehouse] = useState("");
-  const [requestNote, setRequestNote] = useState("");
-  const [replaceLineId, setReplaceLineId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyDetail, setHistoryDetail] = useState<ReplenishmentApplication | null>(null);
 
-  const latest = current?.versions[0] || null;
-  const editable = !!current && current.status === "draft" && latest?.status === "draft";
+  const exportCurrent = async (application?: ReplenishmentApplication) => {
+    const target = application ?? current;
+    if (!target) return;
+    setExporting(true);
+    try {
+      const response = await downloadSystemScreeningWorkbook(target.application_id);
+      saveBlob(response.data, `${target.application_no}-复核包.xlsx`);
+      message.success("复核包已导出，可发给领导/采购过目");
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const selectedProject = projects.find((project) => project.project_id === selectedProjectId) || null;
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    // #10：退回编辑模式不加载云端草稿——行来自被打回申请，避免覆盖预填内容
+    if (editingRevision) return;
+    hydratingCart.current = true;
+    setDraftVersion(null);
+    setRequestNote("");
+    setDraftLines([]);
+    void getReplenishmentCartDraft(selectedProjectId)
+      .then(({ data }) => {
+        const draft = data.draft;
+        setDraftVersion(draft?.version ?? null);
+        setRequestNote(draft?.request_note ?? "");
+        setDraftLines((draft?.lines ?? []).map((line) => ({
+          part_id: line.part_id,
+          pn_std: line.pn_std,
+          description: line.description,
+          unit: line.unit,
+          quantity: Number(line.quantity),
+          special_note: line.special_note ?? "",
+        })));
+      })
+      .catch((error) => message.error(errorText(error)))
+      .finally(() => { hydratingCart.current = false; });
+    return () => { hydratingCart.current = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId, editingRevision]);
+
+  useEffect(() => {
+    // #10：退回编辑模式不写云端草稿（编辑的是申请行，提交走 revisions）
+    if (!selectedProjectId || hydratingCart.current || editingRevision) return undefined;
+    if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    if (!draftLines.length) {
+      if (draftVersion == null) return undefined;
+      cartSaveTimer.current = setTimeout(() => {
+        void deleteReplenishmentCartDraft(selectedProjectId, draftVersion)
+          .then(() => setDraftVersion(null))
+          .catch((error) => message.error(errorText(error)));
+      }, 500);
+      return () => {
+        if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+      };
+    }
+    cartSaveTimer.current = setTimeout(() => {
+      void replaceReplenishmentCartDraft(selectedProjectId, {
+        expected_version: draftVersion,
+        request_note: requestNote || null,
+        lines: draftLines.map((line) => ({
+          part_id: line.part_id,
+          quantity: line.quantity,
+          special_note: line.special_note || null,
+        })),
+      }).then(({ data }) => setDraftVersion(data.draft.version))
+        .catch((error) => message.error(errorText(error)));
+    }, 500);
+    return () => {
+      if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    };
+  }, [selectedProjectId, draftLines, requestNote]);
+
+  const flushCart = async (): Promise<number> => {
+    if (!selectedProjectId) throw new Error("请先选择维保项目");
+    if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    const { data } = await replaceReplenishmentCartDraft(selectedProjectId, {
+      expected_version: draftVersion,
+      request_note: requestNote || null,
+      lines: draftLines.map((line) => ({
+        part_id: line.part_id,
+        quantity: line.quantity,
+        special_note: line.special_note || null,
+      })),
+    });
+    setDraftVersion(data.draft.version);
+    return data.draft.version;
+  };
 
   const refreshList = async (preferredId?: string, page = applicationPage) => {
     const { data } = await listReplenishmentApplications(page, 20);
@@ -350,7 +535,13 @@ export default function ReplenishmentBetaPage() {
         if (!active) return;
         setCapabilities(data);
         if (data.enabled && data.can_view_price) {
-          await Promise.all([loadCatalog(1, ""), refreshList()]);
+          const [projectsResponse] = await Promise.all([
+            getReplenishmentProjects(),
+            loadCatalog(1, ""),
+            refreshList(),
+          ]);
+          if (!active) return;
+          setProjects(projectsResponse.data.items);
         }
       } catch (error) {
         if (active) message.error(errorText(error));
@@ -363,136 +554,88 @@ export default function ReplenishmentBetaPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    setWarehouse(latest?.warehouse || "");
-    setRequestNote(latest?.request_note || "");
-    setReplaceLineId(null);
-  }, [latest?.version_id, latest?.warehouse, latest?.request_note]);
-
-  const run = async (task: () => Promise<ReplenishmentApplication>, success: string) => {
-    setWorking(true);
-    try {
-      const next = await task();
-      setCurrent(next);
-      await refreshList(next.application_id);
-      message.success(success);
-    } catch (error) {
-      message.error(errorText(error));
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const createCart = () => run(
-    async () => (await createReplenishmentApplication()).data,
-    "已创建新的补库购物车",
-  );
-
-  const addOrReplace = (part: CatalogPart, quantity: number) => {
-    if (!current) {
-      message.info("请先创建补库购物车");
+  const addDraftLine = (part: CatalogPart, quantity: number) => {
+    if (draftLines.some((line) => line.part_id === part.part_id)) {
+      message.info(`${part.pn_std} 已在申请中`);
       return;
     }
-    if (replaceLineId) {
-      const source = latest?.lines.find((line) => line.line_id === replaceLineId);
-      if (!source) return;
-      void run(
-        async () => {
-          const response = await updateReplenishmentLine(current.application_id, source.line_id, {
-            expected_version: current.version,
-            part_id: part.part_id,
-            quantity,
-            special_note: source.special_note,
-          });
-          setReplaceLineId(null);
-          return response.data;
-        },
-        `已替换为 ${part.pn_std}`,
-      );
-      return;
-    }
-    void run(
-      async () => (await addReplenishmentLine(current.application_id, {
-        expected_version: current.version,
+    setDraftLines((lines) => [
+      ...lines,
+      {
         part_id: part.part_id,
-        quantity,
-      })).data,
-      `已将 ${part.pn_std} 加入补库单`,
-    );
+        pn_std: part.pn_std,
+        description: part.description,
+        unit: part.unit,
+        quantity: Math.max(1, Math.floor(quantity)),
+        special_note: "",
+      },
+    ]);
   };
 
-  const saveHeader = () => {
-    if (!current) return;
-    void run(
-      async () => (await updateReplenishmentDraft(current.application_id, {
-        expected_version: current.version,
-        warehouse,
-        request_note: requestNote,
-      })).data,
-      "申请信息已保存",
-    );
+  const updateDraftLine = (partId: number, patch: Partial<Pick<DraftLine, "quantity" | "special_note">>) => {
+    setDraftLines((lines) => lines.map((line) => (
+      line.part_id === partId ? { ...line, ...patch } : line
+    )));
   };
 
-  const saveLine = (line: ReplenishmentLine, quantity: number, note: string) => {
-    if (!current) return;
-    void run(
-      async () => (await updateReplenishmentLine(current.application_id, line.line_id, {
-        expected_version: current.version,
-        part_id: line.part_id,
-        quantity,
-        special_note: note || null,
-      })).data,
-      "条目已保存",
-    );
+  const removeDraftLine = (partId: number) => {
+    setDraftLines((lines) => lines.filter((line) => line.part_id !== partId));
   };
 
-  const removeLine = (line: ReplenishmentLine) => {
-    if (!current) return;
+  const submitApplication = () => {
+    if (!selectedProjectId) {
+      message.warning("请先选择维保项目");
+      return;
+    }
+    if (!draftLines.length) {
+      message.warning("请先加入至少一个 PN");
+      return;
+    }
     Modal.confirm({
-      title: `移除 ${line.pn_std}？`,
-      content: "只会从当前补库草稿移除，不影响任何库存。",
-      okText: "确认移除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: () => run(
-        async () => (await removeReplenishmentLine(current.application_id, line.line_id, current.version)).data,
-        "已从补库单移除",
+      title: "提交维保补库申请？",
+      content: (
+        <div>
+          <p>将一次性提交 <Text strong>{draftLines.length}</Text> 条明细到项目「{selectedProject?.display_name}」。</p>
+          <p>提交后立即冻结三查证据与半年价格快照，不可修改；不改变库存、不自动定价。</p>
+        </div>
       ),
-    });
-  };
-
-  const submitCart = () => {
-    if (!current) return;
-    Modal.confirm({
-      title: `提交 ${current.application_no} v${latest?.version_no}？`,
-      content: "提交后本版本及半年价格快照将不可修改，审核方会针对这个精确版本反馈。",
       okText: "确认提交",
       cancelText: "继续检查",
-      onOk: () => run(
-        async () => (await submitReplenishmentApplication(current.application_id, current.version)).data,
-        "补库申请已提交",
-      ),
+      onOk: () => void runSubmit(),
     });
   };
 
-  const exportWorkbook = async (kind: "manual" | "wbdd" | "purchase") => {
-    if (!current) return;
+  const runSubmit = async () => {
     setWorking(true);
     try {
-      const response = kind === "manual"
-        ? await downloadManualReviewWorkbook(current.application_id)
-        : kind === "wbdd"
-          ? await downloadWbddSubsetWorkbook(current.application_id)
-          : await downloadPurchaseListWorkbook(current.application_id);
-      saveBlob(
-        response.data,
-        kind === "manual"
-          ? `${current.application_no}-人工审核.xlsx`
-          : kind === "wbdd"
-            ? `${current.application_no}-WBDD字段子集.xlsx`
-            : `${current.application_no}-采购清单.xlsx`,
-      );
-      message.success("文件已生成；导出行为已留痕");
+      if (editingRevision) {
+        // #10 退回编辑后重新提交：原申请新版本 + 全量行重新审核
+        const { data } = await applyReplenishmentRevision(editingRevision.application_id, {
+          expected_application_version: editingRevision.version,
+          client_request_id: newRevisionRequestId(),
+          lines: draftLines.map((line) => ({
+            part_id: line.part_id,
+            quantity: line.quantity,
+            special_note: line.special_note?.trim() ? line.special_note.trim() : null,
+          })),
+        });
+        setCurrent(data);
+        setEditingRevision(null);
+        setDraftLines([]);
+        setRequestNote("");
+        setSelectedProjectId("");
+        await refreshList(data.application_id);
+        message.success(data.idempotent ? "已返回既有申请" : `已重新提交 ${data.application_no}`);
+        return;
+      }
+      const version = await flushCart();
+      const { data } = await submitReplenishmentCartDraft(selectedProjectId, version);
+      setCurrent(data);
+      setDraftLines([]);
+      setRequestNote("");
+      setSelectedProjectId("");
+      await refreshList(data.application_id);
+      message.success(data.idempotent ? "已返回既有申请" : `已提交 ${data.application_no}`);
     } catch (error) {
       message.error(errorText(error));
     } finally {
@@ -500,14 +643,32 @@ export default function ReplenishmentBetaPage() {
     }
   };
 
-  const rejectedFeedback = useMemo(
-    () => latest?.status === "submitted" && latest.review
-      ? latest.lines
-        .filter((line) => line.review?.decision === "rejected")
-        .map((line) => ({ version: latest.version_no, line }))
-      : [],
-    [latest],
-  );
+  /** #10：打回申请「退回编辑」——把原申请行载入购物车编辑态（打回行标红+推荐）。 */
+  const startEditingRevision = (application: ReplenishmentApplication) => {
+    const version = application.versions[0];
+    const lines = (version?.lines ?? []).map((line) => ({
+      part_id: line.part_id,
+      pn_std: line.pn_std,
+      description: line.description,
+      unit: line.unit,
+      quantity: line.quantity,
+      special_note: line.special_note ?? "",
+      rejected: line.review?.decision === "rejected",
+      rejectedReason: line.review?.reason ?? null,
+      recommendations: line.screening?.recommendations ?? [],
+    }));
+    setEditingRevision(application);
+    setSelectedProjectId(application.project?.project_id ?? "");
+    setDraftLines(lines);
+    setRequestNote(version?.request_note ?? "");
+  };
+
+  const cancelEditingRevision = () => {
+    setEditingRevision(null);
+    setDraftLines([]);
+    setRequestNote("");
+    setSelectedProjectId("");
+  };
 
   if (loading) return <Spin fullscreen tip="正在打开补库申请…" />;
   if (!capabilities) return <Result status="error" title="无法读取补库申请状态" />;
@@ -517,7 +678,7 @@ export default function ReplenishmentBetaPage() {
         status="info"
         title="补库申请当前未开放"
         subTitle="服务端功能开关已关闭，历史申请仍安全保留，库存与原业务流程不受影响。"
-        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存页</Button>}
+        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(MAINTENANCE_HOME_PATH)}>返回维保主页</Button>}
       />
     );
   }
@@ -527,7 +688,7 @@ export default function ReplenishmentBetaPage() {
         status="403"
         title="补库申请暂不可用"
         subTitle="当前账号没有半年采购/销售价格事实的查看权限，请联系管理员授权。"
-        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存页</Button>}
+        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(MAINTENANCE_HOME_PATH)}>返回维保主页</Button>}
       />
     );
   }
@@ -535,40 +696,22 @@ export default function ReplenishmentBetaPage() {
   return (
     <div className="replenishment-beta-page">
       <PageHeader
-        title="销售补库申请"
-        subtitle="搜索 PN、查看近半年采购/销售事实并加入补库单；提交和审核只记录申请，不会自动定价或改变库存。"
+        title="维保补库申请"
+        subtitle="选择维保项目、选购 PN 后一次性提交；系统三查与半年价格证据在提交时冻结，不会自动定价或改变库存。"
         extra={(
           <Space wrap>
-            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存</Button>
-            <Button icon={<ReloadOutlined />} onClick={() => void refreshList()}>刷新审核结果</Button>
-            {capabilities.can_create && <Button type="primary" icon={<ShoppingCartOutlined />} onClick={() => void createCart()}>新建补库单</Button>}
+            <Button icon={<ReloadOutlined />} onClick={() => void refreshList()}>刷新</Button>
           </Space>
         )}
       />
-      <Alert
-        showIcon
-        type="info"
-        message="口径边界"
-        description={capabilities.data_contract}
-        style={{ marginBottom: 16 }}
-      />
 
-      <Row gutter={[16, 16]} align="top">
-        <Col xs={24} xl={14}>
+      <div className="replenishment-layout">
+        {/* 左栏：选购 PN（宽，独立列高度随内容） */}
+        <div className="replenishment-catalog-col">
           <Card
             title={<Space><SearchOutlined />选购 PN</Space>}
             extra={<Text type="secondary">没有所属池或半年价格的 PN 仍会完整显示</Text>}
           >
-            {replaceLineId && (
-              <Alert
-                closable
-                type="warning"
-                showIcon
-                message="重选模式：点击任一商品卡的“替换为此 PN”"
-                onClose={() => setReplaceLineId(null)}
-                style={{ marginBottom: 12 }}
-              />
-            )}
             <Input.Search
               allowClear
               enterButton="搜索"
@@ -577,16 +720,15 @@ export default function ReplenishmentBetaPage() {
               placeholder="搜索 PN、产品描述或品牌"
               onChange={(event) => setQuery(event.target.value)}
               onSearch={() => void loadCatalog(1)}
-              style={{ marginBottom: 14 }}
+              style={{ marginBottom: 14, maxWidth: 560 }}
             />
             <div className="replenishment-catalog-grid">
               {catalog.map((part) => (
                 <CatalogCard
                   key={part.part_id}
                   part={part}
-                  replacing={!!replaceLineId}
-                  disabled={!capabilities.can_create || !editable || working}
-                  onAdd={(quantity) => addOrReplace(part, quantity)}
+                  disabled={!capabilities.can_create || working || !selectedProjectId}
+                  onAdd={(quantity) => addDraftLine(part, quantity)}
                 />
               ))}
             </div>
@@ -602,162 +744,291 @@ export default function ReplenishmentBetaPage() {
               />
             )}
           </Card>
-        </Col>
+        </div>
 
-        <Col xs={24} xl={10}>
-          <Card
-            className="replenishment-cart-card"
-            title={<Space><ShoppingCartOutlined />补库单</Space>}
-            extra={current && <Tag color={STATUS[current.status].color}>{STATUS[current.status].label}</Tag>}
-          >
-            {!current ? (
-              <Empty
-                description="还没有补库单"
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-              >
-                {capabilities.can_create && <Button type="primary" onClick={() => void createCart()}>创建购物车</Button>}
-              </Empty>
-            ) : (
-              <Spin spinning={working}>
-                <div className="replenishment-cart-meta">
-                  <Title level={5} copyable style={{ margin: 0 }}>{current.application_no}</Title>
-                  <Text type="secondary">v{latest?.version_no} · {current.owner_display_name}</Text>
+        {/* 右栏：购物车 + 历史记录（垂直堆叠，记录紧跟购物车下方） */}
+        <div className="replenishment-right">
+      {/* ① 新建补库申请：决断层（选项目 → 组明细 → 一次性提交） */}
+      <Card
+        className="replenishment-cart-card"
+        title={(
+          <Space>
+            <SendOutlined />
+            {editingRevision
+              ? <Text strong>编辑被打回申请：{editingRevision.application_no}</Text>
+              : "新建维保补库申请"}
+          </Space>
+        )}
+        extra={(
+          <Space wrap>
+            {editingRevision && (
+              <Button onClick={cancelEditingRevision} disabled={working}>取消编辑</Button>
+            )}
+            <Button
+              icon={<HistoryOutlined />}
+              onClick={() => setHistoryOpen(true)}
+            >
+              申请记录
+              {applicationTotal > 0 && (
+                <Badge count={applicationTotal} color="#1677ff" style={{ marginLeft: 4 }} />
+              )}
+            </Button>
+          </Space>
+        )}
+      >
+        <Spin spinning={working}>
+          {projects.length === 0 ? (
+            <Alert
+              showIcon
+              type="warning"
+              message="当前账号没有可选的维保项目"
+              description="销售经理需要先在账号中配置销售人员映射并挂维保项目；管理员可见全部活动项目。"
+            />
+          ) : (
+            <>
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <div className="replenishment-cart-head">
+                  <Select
+                    showSearch
+                    value={selectedProjectId || undefined}
+                    placeholder="选择维保项目（必选）"
+                    optionFilterProp="label"
+                    options={projects.map((project) => ({
+                      value: project.project_id,
+                      label: `${project.project_code} · ${project.display_name}`,
+                    }))}
+                    onChange={setSelectedProjectId}
+                    disabled={working}
+                  />
+                  <Input.TextArea
+                    value={requestNote}
+                    disabled={working}
+                    maxLength={4000}
+                    autoSize={{ minRows: 1, maxRows: 4 }}
+                    placeholder="整单备注（选填）"
+                    onChange={(event) => setRequestNote(event.target.value)}
+                  />
                 </div>
-                <Input
-                  value={warehouse}
-                  disabled={!editable}
-                  maxLength={64}
-                  placeholder="出库仓库（提交前必填）"
-                  onChange={(event) => setWarehouse(event.target.value)}
-                />
-                <Input.TextArea
-                  value={requestNote}
-                  disabled={!editable}
-                  maxLength={4000}
-                  autoSize={{ minRows: 2, maxRows: 5 }}
-                  placeholder="整单备注（选填）"
-                  onChange={(event) => setRequestNote(event.target.value)}
-                />
-                {editable && <Button onClick={saveHeader}>保存仓库和备注</Button>}
 
                 <div className="replenishment-cart-lines">
-                  {latest?.lines.map((line) => (
-                    <CartLine
-                      key={line.line_id}
-                      line={line}
-                      appVersion={current.version}
-                      disabled={!editable || !capabilities.can_create || working}
-                      replacing={replaceLineId === line.line_id}
-                      feedbackReason={line.source_line_id
-                        ? current.versions
-                          .flatMap((version) => version.lines)
-                          .find((historyLine) => historyLine.line_id === line.source_line_id)
-                          ?.review?.reason
-                        : null}
-                      onReplace={() => setReplaceLineId((value) => value === line.line_id ? null : line.line_id)}
-                      onSave={saveLine}
-                      onRemove={() => removeLine(line)}
-                    />
+                  {draftLines.map((line) => (
+                    <div className={`replenishment-cart-line${line.rejected ? " is-revision" : ""}`} key={line.part_id}>
+                      <div className="replenishment-cart-line-top replenishment-draft-line-row">
+                        <div>
+                          <Text strong>{line.pn_std}</Text>
+                          <div className="replenishment-part-desc">{line.description || "暂无产品描述"}</div>
+                        </div>
+                        <Space size={4} wrap>
+                          {line.rejected && (
+                            <Tag color="red">被打回：{line.rejectedReason || "无近182天采购/销售记录"}</Tag>
+                          )}
+                          <Text type="secondary">数量 {line.quantity} {line.unit || "件"}</Text>
+                        </Space>
+                      </div>
+                      {line.rejected && !!line.recommendations?.length && (
+                        <Space wrap size={4} style={{ margin: "4px 0" }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>推荐替换（池内）：</Text>
+                          {line.recommendations.slice(0, 3).map((candidate) => (
+                            <Button
+                              key={candidate.part_id}
+                              size="small"
+                              type="primary"
+                              ghost
+                              onClick={() => {
+                                const source = draftLines.find((d) => d.part_id === line.part_id);
+                                setDraftLines((lines) => {
+                                  const rest = lines.filter((d) => d.part_id !== line.part_id);
+                                  return [
+                                    ...rest,
+                                    {
+                                      part_id: candidate.part_id,
+                                      pn_std: candidate.pn_std,
+                                      description: line.description,
+                                      unit: line.unit,
+                                      quantity: source?.quantity ?? 1,
+                                      special_note: line.special_note,
+                                    },
+                                  ];
+                                });
+                              }}
+                            >
+                              替换为 {candidate.pn_std}
+                            </Button>
+                          ))}
+                        </Space>
+                      )}
+                      <div className="replenishment-cart-line-edit">
+                        <Space.Compact block>
+                          <InputNumber
+                            min={1}
+                            max={999999}
+                            precision={0}
+                            value={line.quantity}
+                            disabled={working}
+                            onChange={(value) => updateDraftLine(line.part_id, { quantity: Number(value || 1) })}
+                            style={{ width: 96 }}
+                          />
+                          <Button disabled>{line.unit || "件"}</Button>
+                        </Space.Compact>
+                        <Input
+                          value={line.special_note}
+                          maxLength={4000}
+                          disabled={working}
+                          placeholder="特殊情况说明（选填）"
+                          onChange={(event) => updateDraftLine(line.part_id, { special_note: event.target.value })}
+                        />
+                        <Button
+                          danger
+                          type="text"
+                          icon={<DeleteOutlined />}
+                          disabled={working}
+                          onClick={() => removeDraftLine(line.part_id)}
+                        />
+                      </div>
+                    </div>
                   ))}
-                  {!latest?.lines.length && <Empty description="从左侧把 PN 加入购物车" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                  {!draftLines.length && (
+                    <Empty
+                      description="还没有明细——从下方选购 PN 加入"
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    />
+                  )}
                 </div>
 
-                {current.status === "submitted" && (
-                  <Alert showIcon type="info" message="已提交，等待审核方回传逐条结果" />
-                )}
-                {current.status === "needs_revision" && (
-                  <Alert
-                    showIcon
-                    type="error"
-                    message={`审核打回 ${latest?.review?.rejected_count ?? 0} 条`}
-                    description={(
-                      <div>
-                        {rejectedFeedback.map(({ version, line }) => (
-                          <div key={line.line_id}>v{version} · {line.pn_std}：{line.review?.reason}</div>
-                        ))}
-                      </div>
-                    )}
-                  />
-                )}
-                {current.status === "approved" && (
-                  <Alert showIcon type="success" icon={<CheckCircleOutlined />} message="全部条目已通过审核" />
-                )}
-
-                <Space wrap className="replenishment-cart-actions">
-                  {editable && capabilities.can_create && (
-                    <Button type="primary" disabled={!latest?.lines.length || !warehouse.trim()} onClick={submitCart}>
-                      提交审核
-                    </Button>
-                  )}
-                  {current.status === "needs_revision" && capabilities.can_create && (
-                    <Button
-                      danger
-                      onClick={() => void run(
-                        async () => (await startReplenishmentRevision(current.application_id, current.version)).data,
-                        "已创建复提草稿，仅带入打回条目",
-                      )}
-                    >
-                      处理打回条目
-                    </Button>
-                  )}
-                  {(current.status === "submitted" || current.status === "needs_revision" || current.status === "approved") && latest?.status === "submitted" && (
-                    <Button icon={<DownloadOutlined />} onClick={() => void exportWorkbook("manual")}>导出老板人工审核表</Button>
-                  )}
-                  {current.status === "approved" && (
-                    <Button
-                      type="primary"
-                      icon={<DownloadOutlined />}
-                      disabled={!current.salesperson_name_snapshot}
-                      title={current.salesperson_name_snapshot ? undefined : "缺少销售人员业务映射"}
-                      onClick={() => void exportWorkbook("wbdd")}
-                    >
-                      导出 WBDD 字段子集
-                    </Button>
-                  )}
-                  {current.status === "approved" && (
-                    <Button
-                      icon={<DownloadOutlined />}
-                      onClick={() => void exportWorkbook("purchase")}
-                    >
-                      一键导出采购清单(四列)
-                    </Button>
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    icon={<SendOutlined />}
+                    disabled={!selectedProjectId || !draftLines.length || working}
+                    title={!selectedProjectId ? "先选择维保项目" : !draftLines.length ? "先加入至少一个 PN" : undefined}
+                    onClick={submitApplication}
+                  >
+                    提交补库申请
+                  </Button>
+                  {!capabilities.can_create && (
+                    <Text type="secondary">当前账号无提交权限，仅可查看</Text>
                   )}
                 </Space>
-                {current.status === "approved" && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    WBDD 字段子集只是录入辅助，不含源数据 ID 和 F 字段码，不能直接回灌氚云。
-                    采购清单为四列导出（PN / 数量 / 采购金额参考 / 销售金额参考），仅作采购执行参考。
-                  </Text>
-                )}
-                {!current.salesperson_name_snapshot && (
-                  <Alert
-                    showIcon
-                    type="warning"
-                    message="销售人员业务映射缺失"
-                    description="当前账号只有页面显示名，没有氚云/销售事实使用的销售人员映射；可继续留存申请，但不能导出 WBDD 字段子集。"
-                  />
-                )}
-                <VersionHistory versions={current.versions} />
-              </Spin>
-            )}
-          </Card>
+              </Space>
+            </>
+          )}
+        </Spin>
+      </Card>
 
-          <Card title="我的补库申请" style={{ marginTop: 16 }}>
+        </div>{/* .replenishment-right */}
+      </div>
+
+      {/* 申请记录：全屏可展开子页面（购物车右上角「申请记录」打开） */}
+      <Drawer
+        title={historyDetail ? (
+          <Space>
+            <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => setHistoryDetail(null)} />
+            <HistoryOutlined />
+            {historyDetail.application_no}
+            <Tag color={STATUS[historyDetail.status].color}>{STATUS[historyDetail.status].label}</Tag>
+          </Space>
+        ) : (
+          <Space>
+            <HistoryOutlined />
+            申请记录
+            <Badge count={applicationTotal} color="#1677ff" />
+          </Space>
+        )}
+        placement="right"
+        width="100%"
+        open={historyOpen}
+        onClose={() => {
+          setHistoryOpen(false);
+          setHistoryDetail(null);
+        }}
+        extra={historyDetail ? (
+          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} onClick={() => void exportCurrent(historyDetail)}>
+            导出复核包 Excel
+          </Button>
+        ) : (
+          <Button onClick={() => void refreshList()}>刷新</Button>
+        )}
+      >
+        {historyDetail ? (
+          <div className="replenishment-current-application">
+            <Space wrap>
+              {historyDetail.project && (
+                <Tag color="geekblue">{historyDetail.project.project_code} · {historyDetail.project.display_name}</Tag>
+              )}
+              <Text type="secondary">v{historyDetail.latest_version_no} · {historyDetail.owner_display_name}</Text>
+            </Space>
+            {historyDetail.stage === "screening_complete" && (
+              <Alert
+                showIcon
+                type="success"
+                icon={<ShoppingCartOutlined />}
+                message="已提交，系统三查与价格证据已冻结"
+                description="申请只作为记录与人工复核包，不自动审批、不改变库存；如需调整请重新提交新申请。"
+                style={{ marginTop: 12 }}
+              />
+            )}
+            {historyDetail.versions[0]?.lines.map((line) => (
+              <SubmittedLine key={line.line_id} line={line} />
+            ))}
+            {historyDetail.status === "needs_revision" && (
+              <Alert
+                showIcon
+                type="warning"
+                message="申请被自动审核打回——可退回编辑后重新提交"
+                description="退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
+                action={(
+                  <Button type="primary" danger onClick={() => {
+                    startEditingRevision(historyDetail);
+                    setHistoryOpen(false);
+                    setHistoryDetail(null);
+                  }}>
+                    退回编辑
+                  </Button>
+                )}
+                style={{ marginTop: 12 }}
+              />
+            )}
+            <VersionHistory versions={historyDetail.versions} />
+          </div>
+        ) : (
+          <>
             <List
               dataSource={applications}
-              locale={{ emptyText: "暂无申请" }}
+              locale={{ emptyText: "还没有提交记录——回到购物车提交第一份申请" }}
               renderItem={(item) => (
                 <List.Item
                   className={item.application_id === current?.application_id ? "is-current-application" : ""}
-                  onClick={() => void getReplenishmentApplication(item.application_id).then((response) => setCurrent(response.data))}
+                  actions={[
+                    <Button
+                      key="view"
+                      type="link"
+                      onClick={() => {
+                        void getReplenishmentApplication(item.application_id)
+                          .then((response) => {
+                            setCurrent(response.data);
+                            setHistoryDetail(response.data);
+                          });
+                      }}
+                    >
+                      查看详情
+                    </Button>,
+                  ]}
                 >
                   <List.Item.Meta
-                    title={<Space><span>{item.application_no}</span><Badge color={STATUS[item.status].color} text={STATUS[item.status].label} /></Space>}
+                    title={(
+                      <Space wrap>
+                        <Text strong>{item.application_no}</Text>
+                        <Badge color={STATUS[item.status].color} text={STATUS[item.status].label} />
+                        {item.project && (
+                          <Text type="secondary">{item.project.project_code} · {item.project.display_name}</Text>
+                        )}
+                      </Space>
+                    )}
                     description={`v${item.latest_version_no} · ${new Date(item.updated_at).toLocaleString()}`}
                   />
                 </List.Item>
               )}
-              />
+            />
             {applicationTotal > 20 && (
               <Pagination
                 current={applicationPage}
@@ -771,9 +1042,14 @@ export default function ReplenishmentBetaPage() {
                 style={{ marginTop: 12, textAlign: "right" }}
               />
             )}
-          </Card>
-        </Col>
-      </Row>
+          </>
+        )}
+      </Drawer>
+
+      {/* 口径边界：依据层，页尾小字 */}
+      <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
+        口径边界：{capabilities.data_contract}
+      </Text>
     </div>
   );
 }

@@ -2,6 +2,54 @@
   padding-bottom: 32px;
 }
 
+/* 2026-08-18 左右布局：左=选购 PN（宽），右=购物车+记录（垂直堆叠，记录紧跟购物车） */
+.replenishment-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+/* 左栏：选购 PN（独立列，高度随内容） */
+.replenishment-catalog-col {
+  min-width: 0;
+}
+
+/* 右栏：购物车 + 历史记录 垂直堆叠（内部 gap 16，不受左栏高度影响） */
+.replenishment-right {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+/* 购物车右栏：项目/备注在一行收窄 */
+.replenishment-cart-head {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.replenishment-cart-head .ant-select,
+.replenishment-cart-head .ant-input {
+  width: 100% !important;
+}
+
+/* 购物车行更紧凑（右栏窄，行内数量/备注/移除竖排） */
+.replenishment-cart-line .ant-row {
+  row-gap: 6px;
+}
+
+/* 2026-08-18 购物车行编辑区：数量+备注+移除 flex 单行（右栏窄内不换行） */
+.replenishment-cart-line-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.replenishment-cart-line-edit > .ant-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .replenishment-catalog-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -61,6 +109,21 @@
   display: grid;
   gap: 10px;
   margin: 6px 0;
+  /* 2026-08-18 弹性容器：内容少随内容增长，多则内部滚动（不无限拉长页面） */
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.replenishment-cart-lines::-webkit-scrollbar {
+  width: 6px;
+}
+.replenishment-cart-lines::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 3px;
+}
+.replenishment-cart-lines::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .replenishment-cart-line {
@@ -70,9 +133,30 @@
   background: #fff;
 }
 
+.replenishment-draft-line-row {
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.replenishment-draft-line-row > div:first-child {
+  min-width: 0;
+}
+
+.replenishment-draft-line-row .replenishment-part-desc {
+  max-width: 48ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .replenishment-cart-line.is-revision {
-  border-color: #ffd591;
-  background: #fffaf2;
+  border: 1px solid #ffa39e;
+  background: #fff1f0;
+  box-shadow: inset 3px 0 0 #ff4d4f;
+}
+
+.replenishment-cart-line.is-revision .ant-tag.ant-tag-red {
+  font-weight: 600;
 }
 
 .replenishment-cart-line .ant-alert {
@@ -117,8 +201,19 @@
   cursor: pointer;
 }
 
+@media (max-width: 1100px) {
+  .replenishment-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .replenishment-catalog-grid {
     grid-template-columns: 1fr;
+  }
+
+  .replenishment-draft-line-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

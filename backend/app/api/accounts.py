@@ -22,6 +22,7 @@ effective(role, 完整图) 逐键等于该图，回滚零漂移（设计 §1.6�
 """
 import hashlib
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -284,7 +285,9 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
 @router.get("")
 def list_accounts(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> list[dict]:
     tpls = _template_map(db)
-    users = db.execute(select(SysUser).order_by(SysUser.id)).scalars().all()
+    users = db.execute(
+        select(SysUser).where(SysUser.deleted_at.is_(None)).order_by(SysUser.id)
+    ).scalars().all()
     return [_view(u, tpls.get(u.template_code or "")) for u in users]
 
 
@@ -628,3 +631,36 @@ def activity(username: str, limit: int = 50, db: Session = Depends(get_db),
                      "reason": c.reason, "before": c.before_json, "after": c.after_json}
                     for c in changes],
     }
+
+
+@router.delete("/{username}")
+def delete_account(
+    username: str,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _: None = Depends(_write_gate),
+) -> dict:
+    """删除账号（软删除，仅管理员）。
+
+    安全护栏：内置 admin 不可删；不能删自己；不能删最后一个启用管理员；
+    仅管理员可删 admin 角色账号（_write_gate 已保证，这里再明确拒绝普通账号删他人）。
+    """
+    u = _get(db, username)
+    if u.deleted_at is not None:
+        raise HTTPException(400, "该账号已删除")
+    if u.username == "admin":
+        raise HTTPException(400, "内置 admin 账号不可删除")
+    if ident.get("sub") == u.username:
+        raise HTTPException(400, "不能删除当前登录账号自己，请由另一位管理员操作")
+    if u.role == "admin" and u.is_active and _active_admin_count(db) <= 1:
+        raise HTTPException(400, "这是最后一个启用状态的管理员，不能删除——请先增设另一位管理员")
+    if not _op_is_admin(ident) and u.role == "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可删除管理员账号")
+
+    before = _acct_snapshot(u)
+    u.is_active = False
+    u.deleted_at = datetime.now(timezone.utc)
+    _bump_token(u)   # 立即吊销该账号全部旧 token
+    _audit(db, u.id, "account_delete", before, _acct_snapshot(u), ident["sub"])
+    db.commit()
+    return {"username": username, "deleted": True}

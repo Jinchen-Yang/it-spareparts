@@ -141,7 +141,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
-      { key: "replenishment-beta", path: "/sales/replenishment-beta", label: "补库申请", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", betaFeature: "replenishment", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
     ],
   },
   {
@@ -166,11 +165,15 @@ export const NAV_GROUPS: NavGroup[] = [
         path: "/maintenance",
         label: "维保主页",
         icon: <DashboardOutlined />,
+        // 维保项目看板是正式功能，不挂 Beta（2026-08-17）：仅按权限展示；
+        // 服务端 maintenance_boss_dashboard_enabled 保留为紧急回滚总闸。
         anyPerm: ["page_maintenance_boss", "page_maintenance"],
-        betaFeature: "maintenance_boss",
         page: MaintenanceHomePage,
         load: loadMaintenanceHome,
       },
+      // 补库申请是维保业务动作（业务指示 2026-08-17 迁出销售组）：
+      // 权限/betaFeature/页面不变，仅归组与路径；旧 /sales/replenishment-beta 有重定向
+      { key: "replenishment-beta", path: "/maintenance/replenishment", label: "补库申请", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", betaFeature: "replenishment", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
     ],
   },
   {
@@ -237,7 +240,6 @@ export const DETAIL_ROUTES: DetailRoute[] = [
     pattern: /^\/maintenance\/projects\/[^/]+$/,
     label: "项目面板",
     anyPerm: ["page_maintenance_boss", "page_maintenance"],
-    betaFeature: "maintenance_boss",
     menuKey: "maintenance-home",
     page: MaintenanceProjectPanelPage,
     load: loadMaintenanceProjectPanel,
@@ -267,6 +269,9 @@ export interface NavRedirect { from: string; to: string; perm?: string }
 export const NAV_REDIRECTS: NavRedirect[] = [
   // 采购拆分：旧 /purchases 收藏跳到默认采购子页（采购分析）
   { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
+  // 补库申请迁维保组（2026-08-17）：旧销售组路径的收藏/外链自动跳新址
+  { from: "/sales/replenishment-beta", to: "/maintenance/replenishment",
+    perm: "page_replenishment_beta" },
   // 集成期曾使用 /maintenance/legacy；发布 Beta 后恢复 /maintenance 为稳定版默认入口。
   { from: "/maintenance/legacy", to: "/maintenance", perm: "page_maintenance" },
   // 2026-08-16 页面重设计：22 页收敛为 2 页，旧页面代码已删除。老收藏/老外链

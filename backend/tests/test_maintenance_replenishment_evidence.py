@@ -10,6 +10,7 @@
 import io
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
@@ -23,6 +24,7 @@ from app.models.maintenance_ckd_import import (
     MaintenanceCkdImportBatch,
     MaintenanceCkdLineRow,
 )
+from app.models.maintenance_project import MaintenanceProject
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.replenishment import (
     ReplenishmentApplication,
@@ -51,6 +53,20 @@ def owner_user(db):
         )
     )
     db.commit()
+
+
+def _project(db, code: str = "EVTEST-0001") -> MaintenanceProject:
+    project = MaintenanceProject(
+        project_id=str(uuid4()),
+        project_code=code,
+        display_name=f"证据测试项目-{code}",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    return project
 
 
 def _line(
@@ -86,6 +102,46 @@ def _line(
         or {"weighted_avg": None, "total_qty": 0, "order_count": 0},
         sales_stats_json=sales
         or {"weighted_avg": None, "total_qty": 0, "order_count": 0},
+        # 2026-08-18：version 提交 guard（guard_replenishment_atomic_submission）
+        # 要求行级 screening_json 完整——建行时补一份符合 validator 的筛查快照
+        screening_json={
+            "schema_version": 1,
+            "as_of": "2026-08-17",
+            "lookback_days": 182,
+            "checks": [
+                {
+                    "key": "pool_membership",
+                    "passed": pool_group_id is not None,
+                    "detail": {
+                        "in_pool": pool_group_id is not None,
+                        "pool_name": pool_name,
+                        "pool_status": "active" if pool_group_id is not None else None,
+                    },
+                },
+                {
+                    "key": "recent_activity",
+                    "passed": False,
+                    "detail": {
+                        "window": {"from": "2026-02-17", "to": "2026-08-17"},
+                        "purchase_samples": 0,
+                        "sales_samples": 0,
+                    },
+                },
+                {
+                    "key": "niche_pn",
+                    "passed": False,
+                    "detail": {
+                        "is_niche": False,
+                        "purchase_samples": 0,
+                        "sales_samples": 0,
+                        "rule": "no_purchase_or_sales_in_182_days",
+                    },
+                },
+            ],
+            "anomaly_count": 1,
+            "latest_sales": sales or {"weighted_avg": None, "total_qty": 0},
+            "pool_floor_ex_tax": None,
+        },
         evidence_digest=HEX64,
     )
     db.add(line)
@@ -159,7 +215,12 @@ def approved_two_version(db, owner_user):
         application_id="evidence-app-1",
         application_no="EV-APP-0001",
         owner_username=OWNER,
-        status="approved",
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
+        status="draft",
         latest_version_no=2,
         version=1,
     )
@@ -194,6 +255,8 @@ def approved_two_version(db, owner_user):
     )
     _submit_version(db, version_id="ev-ver-2")
     _review(db, version_id="ev-ver-2", decisions=[("ev-a2", "approved", None)])
+    application.status = "approved"
+    application.version += 1
     db.commit()
     return {"application_id": application.application_id, "part_b": part_b.id}
 
@@ -206,6 +269,11 @@ def test_draft_rejected_409_and_other_owner_404(db, owner_user):
         application_id="evidence-draft-1",
         application_no="EV-APP-DRAFT",
         owner_username=OWNER,
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
         status="draft",
         latest_version_no=1,
         version=1,
@@ -413,7 +481,12 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
         application_id="evidence-app-2",
         application_no="EV-APP-0002",
         owner_username=OWNER,
-        status="approved",
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
+        status="draft",
         latest_version_no=1,
         version=1,
     )
@@ -427,6 +500,8 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
     )
     _submit_version(db, version_id="ev2-ver-1")
     _review(db, version_id="ev2-ver-1", decisions=[("ev2-line-c", "approved", None)])
+    application.status = "approved"
+    application.version += 1
     db.commit()
 
     payload = evidence.application_evidence(
@@ -512,16 +587,14 @@ def test_evidence_and_export_owner_scope_http(db, approved_two_version):
         owner = client_for(OWNER)
         other = client_for("other-sales-http")
         admin = client_for("evidence_admin_http")
-        assert owner.get(evidence_path).status_code == 200
-        assert owner.get(export_path).status_code == 200
-        # 非 owner 与不存在同 404
-        assert other.get(evidence_path).status_code == 404
-        assert other.get(export_path).status_code == 404
-        assert admin.get(evidence_path).status_code == 200
-        assert admin.get(export_path).status_code == 200
+        # 2026-08-18：旧 evidence/导出 HTTP 端点已停用（_retired → 410），
+        # _retired 在权限检查前执行——对所有用户（含非 owner/不存在）统一 410。
+        for who in (owner, other, admin):
+            assert who.get(evidence_path).status_code == 410
+            assert who.get(export_path).status_code == 410
         missing = owner.get(
             "/api/replenishment-beta/applications/no-such-app/evidence"
         )
-        assert missing.status_code == 404
+        assert missing.status_code == 410
     finally:
         settings.replenishment_beta_enabled = original

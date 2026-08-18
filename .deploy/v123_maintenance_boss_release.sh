@@ -134,8 +134,11 @@ case "$COMMAND" in
       -c 'SELECT version_num FROM alembic_version' | tr -d '[:space:]')
     [ "$current_rev" = "$FROM_REV" ] \
       || fatal "生产基线不是 $FROM_REV（实为 ${current_rev:-空}），拒绝迁移"
-    # 迁移与功能开放解耦：本阶段强制关闭总闸
-    compose run --rm --no-deps --no-build \
+    # 迁移与功能开放解耦：本阶段强制关闭总闸。
+    # 不加 --no-build：生产机的 Ubuntu 打包版 compose（2.40.3+ds1）的 `run` 子命令
+    # 不认这个参数（只有 `up` 有），加了会以 "unknown flag" 直接失败。省略它并不会
+    # 触发构建——`run` 只在镜像缺失时才构建，而发布流程要求先显式 `compose build`。
+    compose run --rm --no-deps \
       -e "$RELEASE_FLAG=false" app alembic upgrade "$TO_REV" \
       || fatal "迁移失败"
     new_rev=$(compose exec -T db psql -qtAX -U spareparts -d spareparts \

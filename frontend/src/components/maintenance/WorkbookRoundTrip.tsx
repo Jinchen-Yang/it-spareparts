@@ -26,11 +26,16 @@ export interface WorkbookRoundTripProps {
 
 function describe(result: WorkbookApplyResult): string {
   const parts: string[] = [];
-  if (result.cost_refills) parts.push(`补价 ${result.cost_refills} 行`);
-  if (result.expense_updates) parts.push(`报销 ${result.expense_updates} 行`);
+  if (result.cost_refills || result.cost_overrides) {
+    parts.push(`补价 ${result.cost_refills || result.cost_overrides} 行`);
+  }
+  if (result.expense_creates) parts.push(`报销新增 ${result.expense_creates} 行`);
+  if (result.expense_updates) parts.push(`报销更新 ${result.expense_updates} 行`);
   if (result.collection_creates) parts.push(`回款新增/覆盖 ${result.collection_creates} 条`);
   if (result.collection_voids) parts.push(`回款作废 ${result.collection_voids} 条`);
   if (result.site_return_flags) parts.push(`返还标记 ${result.site_return_flags} 行`);
+  if (result.site_creates) parts.push(`领用新增 ${result.site_creates} 行`);
+  if (result.site_updates) parts.push(`领用更新 ${result.site_updates} 行`);
   return parts.length ? `已覆盖：${parts.join("、")}` : "文件没有改动，未写入任何数据";
 }
 

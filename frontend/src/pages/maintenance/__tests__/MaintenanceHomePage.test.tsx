@@ -113,6 +113,16 @@ describe("维保主页（项目卡墙）", () => {
       }));
   });
 
+  it("期限缺失可筛出（R5：台账未导入时项目不得整面消失）", async () => {
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText("期限缺失"));
+    await waitFor(() =>
+      expect(lastArg(getBoardProjects)).toMatchObject({
+        lifecycle: "missing",
+      }));
+  });
+
   it("有关键字时改走搜索端点（GET 不接自由文本）", async () => {
     renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());

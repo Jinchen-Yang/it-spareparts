@@ -17,12 +17,13 @@ import {
 describe("维保信息架构（2 页定稿）", () => {
   beforeEach(() => localStorage.clear());
 
-  it("维保只有一个导航组、一个导航项", () => {
+  it("维保只有一个导航组；组内为维保主页 + 补库申请", () => {
     const groups = NAV_GROUPS.filter((group) => group.key.startsWith("grp-maintenance"));
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("维保项目");
     expect(groups[0].items.map((item) => ({ key: item.key, path: item.path }))).toEqual([
       { key: "maintenance-home", path: "/maintenance" },
+      { key: "replenishment-beta", path: "/maintenance/replenishment" },
     ]);
   });
 
@@ -33,10 +34,11 @@ describe("维保信息架构（2 页定稿）", () => {
     expect(new Set(labels).size).toBe(labels.length);
   });
 
-  it("主页 anyPerm＝老板或项目经理，且受展示板总闸控制", () => {
+  it("主页 anyPerm＝老板或项目经理，正式功能不挂 Beta 总闸", () => {
     const home = matchNavItem("/maintenance");
     expect(home?.anyPerm).toEqual(["page_maintenance_boss", "page_maintenance"]);
-    expect(home?.betaFeature).toBe("maintenance_boss");
+    // 看板已去 Beta 化（2026-08-17）：只按权限展示，不再受 betaFeature 隐藏
+    expect(home?.betaFeature).toBeUndefined();
     // 两条查看权限任一即可进（M0-B 改判①后两者都是全项目范围）
     expect(home?.perm).toBeUndefined();
   });
@@ -45,7 +47,7 @@ describe("维保信息架构（2 页定稿）", () => {
     const panel = DETAIL_ROUTES.find((route) => route.key === "maintenance-project-panel");
     expect(panel?.path).toBe("/maintenance/projects/:projectId");
     expect(panel?.anyPerm).toEqual(["page_maintenance_boss", "page_maintenance"]);
-    expect(panel?.betaFeature).toBe("maintenance_boss");
+    expect(panel?.betaFeature).toBeUndefined();
     expect(panel?.menuKey).toBe("maintenance-home");
     expect(matchDetailRoute("/maintenance/projects/abc-123")?.key)
       .toBe("maintenance-project-panel");
@@ -102,6 +104,6 @@ describe("维保信息架构（2 页定稿）", () => {
   it("维保导航项路径唯一（重设计后不留重复入口）", () => {
     const paths = NAV_ITEMS.filter((item) => item.path.startsWith("/maintenance"))
       .map((item) => item.path);
-    expect(paths).toEqual(["/maintenance"]);
+    expect(paths).toEqual(["/maintenance", "/maintenance/replenishment"]);
   });
 });

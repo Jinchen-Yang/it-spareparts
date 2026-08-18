@@ -40,6 +40,9 @@ class StableProjectPatch(BaseModel):
     version: int = Field(ge=1)
     display_name: str | None = Field(default=None, max_length=256)
     project_manager_id: str | None = Field(default=None, max_length=64)
+    # 维保期限（#39/#51）：面板「编辑基本信息」可改起止日期
+    period_from: date | None = None
+    period_to: date | None = None
     reason: str = Field(min_length=1, max_length=1000)
 
 

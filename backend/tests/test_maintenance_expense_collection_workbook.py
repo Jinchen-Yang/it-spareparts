@@ -158,8 +158,8 @@ def test_expense_inc_tax_is_computed_not_accepted_from_the_sheet(db, project):
     assert expense.tax_basis == "ex"
 
 
-def test_expense_rows_cannot_be_invented_in_the_sheet(db, project):
-    """铁律 1：报销单在源系统产生；本表只改金额，不能凭空新增行。"""
+def test_manual_expense_row_without_entity_id_is_created(db, project):
+    """人工回填兼容：空实体 ID 的完整报销行由后端生成稳定键并新增。"""
     _expense(db)
     client = uploader(db)
     wb = load_workbook(io.BytesIO(_download(client, project)))
@@ -169,8 +169,13 @@ def test_expense_rows_cannot_be_invented_in_the_sheet(db, project):
     buf = io.BytesIO()
     wb.save(buf)
     resp = _upload(client, project, buf.getvalue())
-    assert resp.status_code == 422
-    assert resp.json()["detail"]["code"] == "expense_row_not_recognized"
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["expense_creates"] == 1
+    rows = db.scalars(select(FProjectExpense).order_by(FProjectExpense.id)).all()
+    assert len(rows) == 2
+    assert rows[1].bxd_no == "BXD-NEW"
+    assert rows[1].amount_ex_tax == Decimal("50.00")
+    assert rows[1].raw_line_id.startswith("EXP:")
 
 
 def test_blank_amount_leaves_the_row_untouched(db, project):
@@ -340,8 +345,10 @@ def test_expense_sheet_has_editable_remark_column(db, project):
     ws = wb[wbk.SHEET_EXPENSE]
     assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
         == ws.cell(row=1, column=8).fill.fgColor.rgb
+    # 2026-08-17 全面放开：除「含税金额(系统计算)」外所有列黄底可改（支持手工新增报销）。
+    # 只读仅剩含税金额列（第 9 列），备注黄底应与它不同色。
     assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
-        != ws.cell(row=1, column=1).fill.fgColor.rgb
+        != ws.cell(row=1, column=9).fill.fgColor.rgb
 
 
 def test_remark_roundtrips_into_the_database(db, project):

@@ -873,9 +873,60 @@ def reject_roundtrip_workbook(path: str) -> None:
 
 
 def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspection]:
-    """统一探测全部工作表；预检仅读表头，正式导入同时构造完整 DataFrame。"""
+    """统一探测全部工作表。
+
+    普通 shared-string 工作簿继续走 pandas/openpyxl；氚云等系统写出的
+    inline-string 工作簿改走 ``xlsx_stream``，避免 openpyxl read-only 丢值或
+    全量加载巨大 sheet。预检最多物化表头扫描行，正式导入的选中 sheet 由
+    :func:`load_selected_workbook` 单独物化。
+    """
     _check_xlsx_archive_safety(path)
     row_counts = _check_workbook_size(path)
+    try:
+        from app.etl import xlsx_stream
+
+        layout = xlsx_stream.inspect_ooxml_layout(path)
+    except Exception as exc:
+        raise ReaderError(
+            "文件无法按 .xlsx 解析：可能是旧版 .xls 格式、非 Excel 文件或文件已损坏。"
+            "请在 Excel 中打开后「另存为 → Excel 工作簿 (.xlsx)」再上传。",
+            code="invalid_ooxml_structure",
+        ) from exc
+    if layout.is_mixed_or_inline:
+        try:
+            frames = {
+                name: pd.DataFrame(
+                    list(
+                        xlsx_stream.iter_worksheet_rows(
+                            path,
+                            next(sheet for sheet in layout.sheets if sheet.name == name),
+                            max_rows=None if load_data else _HEADER_SCAN_ROWS,
+                        )
+                    )
+                )
+                for name in (sheet.name for sheet in layout.sheets)
+            }
+        except xlsx_stream.UnsupportedCellEncoding as exc:
+            raise ReaderError(
+                f"工作簿包含暂不支持的单元格编码：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
+        except Exception as exc:
+            raise ReaderError(
+                "工作簿 XML 结构无法读取，请从氚云重新导出或在 Excel 中另存为 .xlsx。",
+                code="invalid_ooxml_structure",
+            ) from exc
+        if not frames or all(raw.empty for raw in frames.values()):
+            raise ReaderError("文件为空", code="empty_workbook")
+        return [
+            _inspect_frame(
+                frames[name],
+                name,
+                load_data=load_data,
+                row_count=row_counts.get(name) if row_counts is not None else None,
+            )
+            for name in frames
+        ]
     try:
         sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object,
                                engine="openpyxl",
@@ -897,6 +948,67 @@ def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspecti
         )
         for name, raw in sheets.items()
     ]
+
+
+def load_selected_workbook(
+    path: str,
+    sheet_names: list[str] | tuple[str, ...],
+    *,
+    inspections: list[SheetInspection] | None = None,
+) -> list[SheetData]:
+    """Load only the sheets selected by the preview phase.
+
+    This is the memory boundary for multi-sheet uploads: ignored sheets are
+    scanned for safety and headers, but their cell values are never materialised.
+    """
+    if not sheet_names:
+        return []
+    inspected = inspections or inspect_workbook(path, load_data=False)
+    by_name = {item.sheet_name: item for item in inspected}
+    try:
+        from app.etl import xlsx_stream
+
+        layout = xlsx_stream.inspect_ooxml_layout(path)
+    except Exception as exc:
+        raise ReaderError("工作簿 XML 结构无法读取。", code="invalid_ooxml_structure") from exc
+    if layout.is_mixed_or_inline:
+        try:
+            frames = xlsx_stream.load_selected_frames(path, sheet_names)
+        except xlsx_stream.UnsupportedCellEncoding as exc:
+            raise ReaderError(
+                f"工作簿包含暂不支持的单元格编码：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
+        except Exception as exc:
+            raise ReaderError("工作簿 XML 结构无法读取。", code="invalid_ooxml_structure") from exc
+    else:
+        try:
+            frames = pd.read_excel(
+                path,
+                sheet_name=list(sheet_names),
+                header=None,
+                dtype=object,
+                engine="openpyxl",
+            )
+            if isinstance(frames, pd.DataFrame):
+                frames = {sheet_names[0]: frames}
+        except Exception as exc:
+            raise ReaderError(
+                "文件无法按 .xlsx 解析：可能是旧版 .xls 格式、非 Excel 文件或文件已损坏。",
+                code="invalid_workbook",
+            ) from exc
+    result: list[SheetData] = []
+    for name in sheet_names:
+        raw = frames.get(name, pd.DataFrame())
+        item = _inspect_frame(
+            raw,
+            name,
+            load_data=True,
+            row_count=(by_name.get(name).data_rows if by_name.get(name) else None),
+        )
+        if item.parsed is not None:
+            result.append(item.parsed)
+    return result
 
 
 def read_workbook(path: str) -> list[SheetData]:

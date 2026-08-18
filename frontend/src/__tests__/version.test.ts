@@ -1,36 +1,63 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.21.0 release notes", () => {
-  it("publishes the GA feature-control boundary", () => {
-    expect(APP_VERSION).toBe("1.21.0");
+describe("v1.23.0 release notes", () => {
+  it("publishes the two-page maintenance redesign", () => {
+    expect(APP_VERSION).toBe("1.23.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-08-12");
+    expect(LATEST.date).toBe("2026-08-17");
 
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/维保管理正式工作台/);
-    expect(notes).toMatch(/实名系统账号/);
-    expect(notes).toMatch(/新增流程使用附加事实、影子状态/);
-    expect(notes).toMatch(/成本和库存口径切换.*独立停用开关/);
+    expect(notes).toMatch(/22 个页面收敛为 2 个/);
+    expect(notes).toMatch(/维保主页（项目卡墙）/);
+    expect(notes).toMatch(/项目面板/);
+    expect(notes).toMatch(/旧页面地址自动跳转/);
     expect(notes).not.toMatch(/Beta|试用/);
   });
 
-  it("documents the integrated maintenance manager workflow", () => {
+  it("documents the card wall with the three-color cost ratio bar", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/项目方块工作台/);
-    expect(notes).toMatch(/缺合同额、价格或期限.*仍完整展示/);
-    expect(notes).toMatch(/已回款\/合同额.*已消耗\/合同额/);
-    expect(notes).toMatch(/80%.*黄色.*100%.*红色/);
-    expect(notes).toMatch(/服务端 7 秒/);
-    expect(notes).toMatch(/现场备件领用单.*不直接写库存/);
+    expect(notes).toMatch(/一行五卡/);
+    expect(notes).toMatch(/成本÷合同额/);
+    expect(notes).toMatch(/80% 绿色.*80–100% 黄色.*100% 红色/);
+    expect(notes).toMatch(/默认显示进行中项目/);
+    expect(notes).toMatch(/期限缺失可切换筛出/);
   });
 
-  it("documents the replenishment cart and its external-review boundary", () => {
+  it("documents period and contract amount derived from existing data (#51)", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/补库购物车/);
-    expect(notes).toMatch(/所属池和近半年采购\/销售价量/);
-    expect(notes).toMatch(/逐条审核反馈、打回复提、版本留存/);
-    expect(notes).toMatch(/不自动审批.*不修改库存/);
+    expect(notes).toMatch(/无需先导入台账/);
+    expect(notes).toMatch(/维保起止日期/);
+    expect(notes).toMatch(/销售订单自动汇总/);
+    // 诚实标注（铁律 5）：共用单 / 不完整必须写进公告，不许静默
+    expect(notes).toMatch(/共用单/);
+    expect(notes).toMatch(/不完整/);
+    expect(notes).toMatch(/台账导入将以台账为准/);
+  });
+
+  it("documents the panel tabs, assignment and period editing (#39)", () => {
+    const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/项目基础信息 \/ 备件成本 \/ 报销 \/ 回款/);
+    expect(notes).toMatch(/归属挂靠.*XSDD 销售订单预筛/);
+    expect(notes).toMatch(/维保负责人与维保期限/);
+    expect(notes).toMatch(/状态自动重算/);
+  });
+
+  it("documents the three download/upload spots and honest empty states", () => {
+    const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/在哪下载就在哪上传/);
+    expect(notes).toMatch(/全项目备件行级表/);
+    expect(notes).toMatch(/六 sheet/);
+    expect(notes).toMatch(/尚未导入/);
+    expect(notes).toMatch(/绝不显示 0/);
+  });
+
+  it("keeps prior releases archived in the changelog", () => {
+    const versions = CHANGELOG.map((entry) => entry.version);
+    expect(versions).toContain("1.21.0");
+    expect(versions).toContain("1.20.0");
+    // 数组按新→旧排列
+    expect(versions[0]).toBe("1.23.0");
   });
 });

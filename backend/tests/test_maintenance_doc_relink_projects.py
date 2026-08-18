@@ -18,6 +18,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocLineRow,
 )
 from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysUser
 from app.services import maintenance_doc_import as docs
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
@@ -166,19 +167,28 @@ def test_relink_is_retracted_when_flag_off(db, tmp_path):
     settings.maintenance_boss_dashboard_enabled = False
     resp = client.post("/api/maintenance/doc-imports/relink-projects")
     assert resp.status_code == 404
+    # 2026-08-18：归属挂靠路由随 boss 总闸（#45/#48 挂 boss_dependencies）——
+    # 关闸后与 relink 一同收回为 404；重新开闸后恢复。
     assign = client.post("/api/maintenance/project-assignments/orders/assign",
                          json={"project_id": proj.project_id,
                                "items": [{"source_order_id": order.raw_order_id}],
                                "reason": "合成测试确认归属"})
-    assert assign.status_code == 200, assign.text
+    assert assign.status_code == 404, assign.text
     db.expire_all()
     assert db.get(MaintenanceDocHeadRow, head_row_id).project_id is None
 
     # 重新打开总闸 → 新行为回来（同一份数据，仅 flag 差异）
     settings.maintenance_boss_dashboard_enabled = True
+    # 开闸后归属挂靠恢复：先确认挂靠（200），relink 才能解析出项目
+    assign_back = client.post("/api/maintenance/project-assignments/orders/assign",
+                              json={"project_id": proj.project_id,
+                                    "items": [{"source_order_id": order.raw_order_id}],
+                                    "reason": "合成测试确认归属（开闸后）"})
+    # 开闸后端点恢复：relink 可用（200），归属挂靠可用（200）
     again = client.post("/api/maintenance/doc-imports/relink-projects")
     assert again.status_code == 200
-    assert again.json()["relinked"] == 1
+    assert assign_back.status_code == 200, assign_back.text
+    # assign 内部会顺带 relink 已应用头行（M4-3 写路径）——挂靠后 head 即被关联
     db.expire_all()
     assert db.get(MaintenanceDocHeadRow, head_row_id).project_id == proj.project_id
 

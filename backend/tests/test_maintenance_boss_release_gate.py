@@ -62,10 +62,11 @@ def flag():
 
 
 def test_flag_defaults_closed():
-    """发布默认态：总闸关闭（迁移可先行，功能后开——铁律 7）。"""
+    """发布默认态（2026-08-17 去 Beta 后）：看板已是正式功能默认开启；
+    回滚闸仍保留——关闸即整组 404，不做 schema downgrade（铁律 7）。"""
     from app.config import Settings
 
-    assert Settings().maintenance_boss_dashboard_enabled is False
+    assert Settings().maintenance_boss_dashboard_enabled is True
 
 
 def test_flag_off_hides_every_board_endpoint(db, flag):

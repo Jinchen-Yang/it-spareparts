@@ -63,6 +63,10 @@ services:
       # 在 migrate 阶段强制 false、canary 阶段翻 true，并从**运行容器**读回核验——
       # 不在此透传则容器内恒为 unset，闸门读回必失败且总闸永远打不开。
       MAINTENANCE_BOSS_DASHBOARD_ENABLED: ${MAINTENANCE_BOSS_DASHBOARD_ENABLED:-false}
+      # 项目总表 V2 工作簿（2026-08-18）：默认关＝仍走旧六 sheet；开＝八 sheet V2。
+      MAINTENANCE_PROJECT_MASTER_V2_ENABLED: ${MAINTENANCE_PROJECT_MASTER_V2_ENABLED:-false}
+      # 补库自动审核（2026-08-18）：默认关＝三查只记录不裁决；开＝池内放行/2项不过打回/推荐。
+      REPLENISHMENT_AUTO_REVIEW_ENABLED: ${REPLENISHMENT_AUTO_REVIEW_ENABLED:-false}
       # 回款计划导入保持写入关闭；仅完成具名项目 canary 验收后才显式打开。
       MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED: ${MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED:-false}
       # 留空即不限制项目（仅用于正式扩围）；首次授权 action 前必须设置唯一已审核项目 UUID。

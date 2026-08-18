@@ -87,3 +87,15 @@ export const unassignMaintenanceSourceOrders = (body: {
   "/maintenance/project-assignments/orders/unassign",
   body,
 );
+
+/** 自动补挂靠：未归属维保订单按 project_std 精确匹配已有项目主档并挂靠。 */
+export const autoAssignMaintenanceSourceOrders = () =>
+  api.post<{
+    result: {
+      assigned_orders: number;
+      matched_projects: number;
+      created_projects: number;
+      skipped_groups: number;
+      skipped_ambiguous: number;
+    };
+  }>("/maintenance/project-assignments/orders/auto-assign", {});

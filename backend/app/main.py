@@ -59,6 +59,7 @@ from app.config import check_security, get_settings
 from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
 from app.maintenance_beta import require_maintenance_beta
+from app.maintenance_boss import require_maintenance_boss
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -109,6 +110,10 @@ app.include_router(maintenance_expense_collection_workbook.router, prefix=settin
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
+# 新 2 页（卡墙/项目面板，plan v1.3）依赖的 router 随 boss 总闸走：beta 总闸在 v1.23
+# 发布后恒 false（审计 §2 2a），若面板的基础信息/归属挂靠仍挂 beta 闸会整组 404
+# ——2026-08-17 生产实发（「页面不存在」）。回滚口径统一＝关 boss 闸。
+maintenance_boss_dependencies = [Depends(require_maintenance_boss)]
 app.include_router(
     maintenance_acceptance.router,
     prefix=settings.api_prefix,
@@ -132,7 +137,8 @@ app.include_router(
 app.include_router(
     maintenance_source_assignments.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    # 归属挂靠是项目面板「基础信息」tab 的功能（#45/#48）——随 boss 总闸，不随 beta
+    dependencies=maintenance_boss_dependencies,
 )
 app.include_router(
     maintenance_migration.router,
@@ -229,7 +235,9 @@ app.include_router(
 app.include_router(
     maintenance_projects.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    # 项目基础信息 GET/PATCH 是面板「基础信息 tab／编辑基本信息」的落点（各端点
+    # 另有 page/action 级权限）——随 boss 总闸，不随 beta
+    dependencies=maintenance_boss_dependencies,
 )
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)

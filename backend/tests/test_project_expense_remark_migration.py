@@ -39,7 +39,8 @@ def test_revision_is_appended_at_the_tail_and_chain_stays_linear():
     script = ScriptDirectory.from_config(_cfg())
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS, "必须追加在链尾（只增不改）"
-    assert list(script.get_heads()) == [_REVISION], "链必须保持单 head，不开分叉"
+    # 链必须单 head（后续迁移可继续追加，但不许开分叉）
+    assert len(script.get_heads()) == 1, "链必须保持单 head，不开分叉"
 
 
 def test_migration_is_strictly_additive():

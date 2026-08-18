@@ -37,6 +37,10 @@ export interface WorkbookApplyResult {
   cost_refills: number;
   site_return_flags: number;
   expense_updates: number;
+  expense_creates?: number;
+  site_creates?: number;
+  site_updates?: number;
+  cost_overrides?: number;
   collection_creates: number;
   collection_voids: number;
 }
@@ -100,6 +104,40 @@ export interface ProjectExpenseRow {
 export const listProjectExpenseRows = async (projectId: string) => {
   const resp = await api.get<{ rows: ProjectExpenseRow[]; total: number }>(
     `${BASE}/projects/stable/${encodeURIComponent(projectId)}/expense-rows`,
+  );
+  return resp.data;
+};
+
+/** 03 备件明细行级（PN）只读数据源——兼容 V1/V2 协议。 */
+export interface ProjectPartsRow {
+  line_id: number;
+  part_id?: number | null;
+  order_no: string | null;
+  order_date: string | null;
+  sales_order_no?: string | null;
+  project_raw?: string | null;
+  pn_std: string | null;
+  description: string | null;
+  qty: number | string | null;
+  return_qty?: number | string | null;
+  serial_numbers?: string | null;
+  warehouse: string | null;
+  cost_source: string | null;
+  cost_source_label?: string | null;
+  confidence?: "high" | "medium" | "low" | "none" | null;
+  unit_cost_ex_tax: number | string | null;
+  unit_cost_inc_tax: number | string | null;
+  change_reason?: string | null;
+  manual_unit_cost_ex_tax?: string | null;
+  manual_reason?: string | null;
+  missing_kind?: "out_of_scope" | "none" | null;
+  can_refill?: boolean;
+}
+
+export const listProjectPartsRows = async (projectId: string) => {
+  const resp = await api.get<{ sheet: string; total: number; rows: ProjectPartsRow[] }>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/rows`,
+    { params: { sheet: SHEETS.parts } },
   );
   return resp.data;
 };

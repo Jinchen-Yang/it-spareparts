@@ -86,6 +86,8 @@ export function ProjectCard({ row }: ProjectCardProps) {
         </Title>
         <Space size={4} wrap>
           {status ? <Tag color={status.color}>{status.label}</Tag> : null}
+          {/* R5：台账没给项目周期时以明确状态示人，不让卡片看起来「什么都没说」 */}
+          {!isBucket && row.lifecycle === "missing" ? <Tag>期限缺失</Tag> : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
           {row.pre_delivery_order_count > 0 ? (
             <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>
@@ -97,8 +99,18 @@ export function ProjectCard({ row }: ProjectCardProps) {
         </Text>
         <Space size={12} wrap style={{ fontSize: 12 }}>
           <Text>项目经理：{row.project_manager || "—"}</Text>
-          <Text>合同总额：{money(row.contract_amount_inc_tax)}</Text>
+          <Text>
+            合同总额：{money(row.contract_amount_inc_tax)}
+            {/* #51 诚实标注：XSDD 回退层的共用单/缺单，金额仅参考 */}
+            {row.contract_shared ? "（共用单）" : ""}
+            {row.contract_incomplete ? "（不完整）" : ""}
+          </Text>
         </Space>
+        {row.period_from || row.period_to ? (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            期限：{row.period_from ?? "—"} ~ {row.period_to ?? "—"}
+          </Text>
+        ) : null}
 
         <div style={{ fontSize: 11.5, lineHeight: 1.9, color: "rgba(0,0,0,.55)" }}>
           <div>

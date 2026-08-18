@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-08-17
+
+**Agent:** Claude Code (macOS，本地会话)
+**Session:** v1.23 维保展示板生产发布（PR #254 → main `bd867a7`）＋ 发布阻断修复 ＋ 卡墙 R5 回归修复
+
+**Changed:**
+- `docker-compose.yml` — **发布阻断修复**：app 服务补透传 `MAINTENANCE_BOSS_DASHBOARD_ENABLED`（此前容器内恒 unset，发布 deploy 闸门必 FATAL、总闸永远翻不开；生产容器实测确认）。同步登记 `.env.example` / `backend/.env.example`
+- `backend/tests/test_v120_release_control.py` — uv 供应链闸门测试兼容自托管 runner（`8fc3b9c`/`159efd5` 迁移后 setup-uv action 已移除，版本锁由 runner 侧二进制校验承担；main 上长期红）
+- `.deploy/v122_collection_reminders_static_test.py` — 迁移头断言改为「单头＋v1.22 区间端点在链」（原写死 `c8e2a4f6b1d3`，被 v1.23 推进到 `d6e1f4a8c3b5` 后必失败）
+- `.deploy/v123_maintenance_boss_release.sh` — 去掉 `compose run --no-build`（生产机 Ubuntu 打包版 compose 2.40.3+ds1 的 `run` 无此参数；发布时以 `unknown flag` 安全失败后打补丁放行）
+- `docs/releases/v1.23-deploy-plan.md` — §0.1 发布前复核发现（6 项）＋ §3 补「构建新镜像」步骤 ＋ §4 全程执行结果回填
+- `frontend/src/pages/maintenance/MaintenanceHomePage.tsx` + `ProjectCard.tsx` — **R5 回归修复**：卡墙筛选器补「期限缺失」档＋卡片「期限缺失」标签＋空态指引。生产 415 个项目 lifecycle 全 missing（台账未导入），原筛选器只有进行中/已结束两档 → 整面卡墙无声全空。默认仍「进行中」（#37 业务口径不动）
+- `backend/app/services/maintenance_ledger.py` + 迁移 `e8b2c6f4d1a7` — **#50 项目周期从名称提取**（业务指示 08-17）：新增 `_period_from_display_name`（8 位日起止为主、支持 `-`/`~`/空格连接符与 6 位年月段）＋`_resolve_lifecycle`（台账权威、名称兜底）；迁移对存量 missing 项目一次性回填（纯数据 UPDATE 零 DDL，自包含解析副本）。生产名称干跑：373/415 回填（152 ongoing＋221 ended），42 保持 missing（真无周期/笔误）。两副本对全部 415 名称输出逐一验证一致
+- `backend/app/etl/transform.py` — **报销导入头级字段块内继承**（生产批次 #168 实锤：97 行只进 14 行）：真实氚云导出是「头行＋明细延续行」结构（头行带单号/日期/人员/事由，同单明细行头级格留空「同上」），原「行行独立」口径把 83 行延续行全判 missing_date。现延续行继承头行的日期/单号/人员/事由/销售订单/流程状态；在途单（流程状态「进行中」、日期未生成）整块软标记「可忽略」不计硬错误（同 empty_pn_inactive 惯例），审批完成重新导出上传自然计入；文件开头孤行与「有单号没日期的已生效块首行」仍硬错误，绝不跨块继承。真实文件验证：71 行入库＋26 行在途软标记＝97 行全有归宿、0 硬错误
+- **#51 接回 v1.17 老版数据链**（业务指示 08-17：现有 XSDD/WBDD 数据即可确定名称/期限/合同额，不必等台账；参照老版 ProjectCostPage/projects_aggregate 口径）：①迁移 `f3b5d7c9e2a4` 给 `maintenance_project` 加 `period_from/to`（纯加法），WBDD 挂靠聚合回填（覆盖 411/415）→名称解析兜底，lifecycle 按期限重算；②boss-board 合同额两层取数——台账合同优先，缺位回退 XSDD 聚合（生产覆盖 402/415），带 `contract_shared`/`contract_incomplete` 诚实标注；③面板显示维保期限并支持编辑（#39 落地，PATCH 校验起止、按新期限重算 lifecycle、乐观锁）；④修复面板编辑表单三处断头（cmo_name/salesperson 后端不收、response shape 错配、RangePicker 无回填）；⑤台账导入侧 `_resolve_period`（台账权威，缺位不清空回填值）。浏览器端到端验证：期限显示/编辑/重算/回读全链路 200
+
+**生产发布（2026-08-17 上午，relay-vps）：**
+- 生产代码 `ab42005` → `bd867a7`（一次性追平 main，跨 143,665 行）；DB `c8e2a4f6b1d3` → `d6e1f4a8c3b5`（15 条迁移 2.4s）
+- 七阶段闸门全过：preflight → backup（39MB，`pg_restore --list` 988 条目验证可恢复）→ migrate → deploy（停机约 3s，总闸读回 false）→ canary（读回 true，展示板端点 404→401）→ observe 30 分钟（6 次采样全绿）→ commit-release
+- `.env`：`MAINTENANCE_BETA_ENABLED` → false；新增 `MAINTENANCE_BOSS_DASHBOARD_ENABLED`（canary 后 true）；`REPLENISHMENT_BETA_ENABLED`／`MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED` 保持 true（后者与审计 §2 2b 的偏离已记录，业务拍板保持）
+- 权限：91 账号＋7 角色模板两个新键全部 fail-closed 回填 false（生产读回核验）
+
+**验证：**
+- 后端 CI `3529 passed`（70 分钟；一次 `test_pytest_run_isolation` 偶发＝main 既有、重跑过；一次 runner 断网）；前端 tsc/build/vitest 绿
+- R5 修复：相关 12 文件 98 tests 绿 + tsc 干净
+
+**Notes:**
+- 存档 issue：#255（凭证落盘顺序 P1，beta 闸后不可达）、#256（对账分页 P2，同）、#257（`LLM_MAPPING_EXTERNAL_ENABLED`/`ENABLE_AGENT` 未透传）
+- 演练脚本用 `docker run -e` 绕开 compose，因此 compose 层缺陷（透传缺失、参数不兼容）演练测不到——后续发布前置检查清单见 deploy-plan §4.3
+- 台账首次导入生产仍未完成（plan M2-4 验收项）：完成前卡墙默认「进行中」为空属预期，项目在「期限缺失」档可见
+
+---
+
 ## 2026-08-13
 
 **Agent:** Claude Code (WSL Ubuntu 26.04)

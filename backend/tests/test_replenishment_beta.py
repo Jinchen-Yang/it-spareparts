@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from io import BytesIO
 from threading import Barrier
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -19,6 +20,7 @@ from app.main import app
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
+from app.models.maintenance_project import MaintenanceProject
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.replenishment import (
     ReplenishmentApplication,
@@ -62,6 +64,22 @@ def _user(db, username: str = "sales_manager") -> SysUser:
     db.add(user)
     db.flush()
     return user
+
+
+def _project(db, code: str | None = None) -> MaintenanceProject:
+    if code is None:
+        code = f"RTEST-{uuid4().hex[:8].upper()}"
+    project = MaintenanceProject(
+        project_id=str(uuid4()),
+        project_code=code,
+        display_name=f"补库测试项目-{code}",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    return project
 
 
 def test_server_feature_gate_closes_business_api_without_hiding_beta_state(db):
@@ -171,6 +189,7 @@ def test_application_owner_scope_is_row_isolated(db):
         username=owner.username,
         warehouse="北京前置库",
         request_note=None,
+        project_id=_project(db).project_id,
     )
 
     assert replenishment.list_applications(
@@ -267,7 +286,11 @@ def test_review_callback_requires_page_allowlist_and_action(db):
     db.add_all([part, reviewer])
     db.commit()
     created = replenishment.create_application(
-        db, username=owner.username, warehouse="北京前置库", request_note=None
+        db,
+        username=owner.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     created = replenishment.add_line(
         db,
@@ -299,6 +322,8 @@ def test_review_callback_requires_page_allowlist_and_action(db):
     try:
         settings.replenishment_beta_enabled = True
         assert client.get("/api/replenishment-beta/capabilities").status_code == 403
+        # 2026-08-18：旧 review-results 已停用（_retired → 410）；无页面权限时
+        # 权限检查在前（403），加权限后仍是 410（旧回调端点整体停用）。
         response = client.post(
             f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
             json={
@@ -346,8 +371,8 @@ def test_review_callback_requires_page_allowlist_and_action(db):
                 ],
             },
         )
-        assert response.status_code == 200, response.text
-        assert response.json()["application_status"] == "approved"
+        # 加了权限后：旧回调端点仍 410（retired 在权限检查之后生效）
+        assert response.status_code == 410, response.text
     finally:
         settings.replenishment_beta_enabled = original
 
@@ -386,6 +411,7 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
         username=submitter.username,
         warehouse="北京前置库",
         request_note=None,
+        project_id=_project(db).project_id,
     )
     created = replenishment.add_line(
         db,
@@ -418,6 +444,8 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
     original = settings.replenishment_beta_enabled
     try:
         settings.replenishment_beta_enabled = True
+        # 2026-08-18：旧 review-results 人工审核回调已停用（_retired → 410），
+        # 职责分离改由自动审核 + 复核包流程承载；此处验证旧回调端点已停用。
         response = client.post(
             f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
             json={
@@ -432,9 +460,7 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
                 ],
             },
         )
-        assert response.status_code == 409, response.text
-        assert response.json()["detail"]["code"] == "separation_of_duties"
-        assert "提交人与审核人不能是同一账号" in response.text
+        assert response.status_code == 410, response.text
     finally:
         settings.replenishment_beta_enabled = original
 
@@ -474,8 +500,7 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
                 ],
             },
         )
-        assert distinct_review.status_code == 200, distinct_review.text
-        assert distinct_review.json()["application_status"] == "approved"
+        assert distinct_review.status_code == 410, distinct_review.text
 
         login = client.post(
             "/api/auth/login",
@@ -497,18 +522,18 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
                 ],
             },
         )
-        assert self_replay.status_code == 409, self_replay.text
-        assert self_replay.json()["detail"]["code"] == "separation_of_duties"
+        assert self_replay.status_code == 410, self_replay.text
     finally:
         settings.replenishment_beta_enabled = original
 
     db.expire_all()
+    # 2026-08-18：旧人工审核已停用（review-results 410），不再产生 review 行
     review = db.scalar(
         select(ReplenishmentReview).where(
             ReplenishmentReview.version_id == version["version_id"]
         )
     )
-    assert review.reviewed_by == reviewer.username
+    assert review is None
 
 
 def test_free_text_bounds_do_not_reflect_business_input(db):
@@ -534,12 +559,24 @@ def test_free_text_bounds_do_not_reflect_business_input(db):
     client.headers["Authorization"] = f"Bearer {login.json()['token']}"
     secret_note = "SENSITIVE-REPLENISHMENT-NOTE-" + "x" * 4000
     secret_query = "SENSITIVE-CATALOG-QUERY-" + "x" * 129
+    project = _project(db, "RTEXT-0001")
+    part = DimPart(pn_std="TEXT-BOUNDS-PN", description="文本边界测试件", status="active")
+    db.add(part)
+    db.commit()
     settings = get_settings()
     original = settings.replenishment_beta_enabled
     try:
         settings.replenishment_beta_enabled = True
+        # 原子提交需 client_request_id + project_id + 有效 lines；
+        # 超长 request_note 由业务层校验（400），且错误信息不反射原文
         note_response = client.post(
-            "/api/replenishment-beta/applications", json={"request_note": secret_note}
+            "/api/replenishment-beta/applications",
+            json={
+                "client_request_id": "beta-text-bounds-crid",
+                "project_id": project.project_id,
+                "request_note": secret_note,
+                "lines": [{"part_id": part.id, "quantity": 1, "special_note": None}],
+            },
         )
         assert note_response.status_code == 400
         assert "SENSITIVE-REPLENISHMENT-NOTE" not in note_response.text
@@ -562,7 +599,8 @@ def test_catalog_keeps_no_pool_no_price_part_visible(db):
     assert item["pool"] == {"group_id": None, "name": None, "version": None}
     assert item["purchase"] is None
     assert item["sales"] is None
-    assert item["price_window"]["days"] == 180
+    # 2026-08-18 自动审核口径：半年价格窗 = 182 天（LOOKBACK_DAYS）
+    assert item["price_window"]["days"] == 182
 
 
 def test_catalog_price_facts_do_not_depend_on_pool_and_exclude_confirmed_source_error(db):
@@ -670,7 +708,11 @@ def test_removing_first_draft_line_compacts_numbers_without_unique_collision(db)
     db.add_all(parts)
     db.commit()
     application = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     for part in parts:
         application = replenishment.add_line(
@@ -706,7 +748,11 @@ def test_concurrent_review_retry_is_idempotent(db):
     db.add(part)
     db.commit()
     application = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     application = replenishment.add_line(
         db,
@@ -748,11 +794,11 @@ def test_concurrent_review_retry_is_idempotent(db):
                 ],
             )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [future.result(timeout=20) for future in [executor.submit(callback), executor.submit(callback)]]
-
-    assert {result["idempotent"] for result in results} == {False, True}
-    assert len({result["review_id"] for result in results}) == 1
+    # 2026-08-18：旧人工审核回调已停用——提交后 status 不可变（guard 拒绝
+    # submitted → approved），record_review 一律抛错，不产生 review 记录。
+    for _ in range(2):
+        with pytest.raises(Exception):
+            callback()
 
 
 def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
@@ -769,6 +815,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         username=user.username,
         warehouse="北京前置库",
         request_note="首轮申请",
+        project_id=_project(db).project_id,
     )
     application = replenishment.add_line(
         db,
@@ -821,6 +868,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         "price_as_of",
         "purchase",
         "sales",
+        "screening",
         "evidence_digest",
     }
     base_digest = replenishment._digest(canonical)
@@ -860,36 +908,30 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         {"line_id": version_one["lines"][0]["line_id"], "decision": "rejected", "reason": "请说明特殊原因"},
         {"line_id": version_one["lines"][1]["line_id"], "decision": "approved", "reason": None},
     ]
-    review = replenishment.record_review(
-        db,
-        submitted["application_id"],
-        reviewer=reviewer.username,
-        version_id=version_one["version_id"],
-        content_digest=version_one["content_digest"],
-        idempotency_key="review-v1-fixed",
-        external_reference="agent-run-1",
-        summary_note="一条打回",
-        decisions=decisions,
-    )
-    assert review["rejected_count"] == 1
-    replay = replenishment.record_review(
-        db,
-        submitted["application_id"],
-        reviewer=reviewer.username,
-        version_id=version_one["version_id"],
-        content_digest=version_one["content_digest"],
-        idempotency_key="review-v1-fixed",
-        external_reference="agent-run-1",
-        summary_note="一条打回",
-        decisions=decisions,
-    )
-    assert replay["idempotent"] is True
-    assert replay["application_status"] == review["application_status"] == "needs_revision"
+    # 2026-08-18：旧人工审核回调已停用——提交后 status 不可变（guard 拒绝
+    # submitted 后改状态），record_review 一律抛错，不产生 review 记录。
+    with pytest.raises(Exception):
+        replenishment.record_review(
+            db,
+            submitted["application_id"],
+            reviewer=reviewer.username,
+            version_id=version_one["version_id"],
+            content_digest=version_one["content_digest"],
+            idempotency_key="review-v1-fixed",
+            external_reference="agent-run-1",
+            summary_note="一条打回",
+            decisions=decisions,
+        )
+    db.rollback()
 
     # Review-line provenance is also enforced at the database boundary: an
     # append-only row may not point at a line from another application/version.
     foreign = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     foreign = replenishment.add_line(
         db,
@@ -907,6 +949,27 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         role="admin",
         expected_version=foreign["version"],
     )
+    # 2026-08-18：旧人工审核已停用（record_review 被 guard 拒），review 行不再由
+    # 服务创建；此处直接构造一条 review 行，验证「review_line 不得指向其他
+    # 版本/申请的 line」的 DB 层 guard 仍生效。
+    review_id = "00000000-0000-0000-0000-000000000090"
+    db.execute(
+        text(
+            """
+            INSERT INTO replenishment_review
+              (review_id, version_id, idempotency_key, payload_digest,
+               approved_count, rejected_count, reviewed_by)
+            VALUES
+              (:review_id, :version_id, 'closed-loop-key', :digest, 1, 0, 'reviewer')
+            """
+        ),
+        {
+            "review_id": review_id,
+            "version_id": submitted["versions"][0]["version_id"],
+            "digest": "ab" * 32,
+        },
+    )
+    db.commit()
     with pytest.raises(DBAPIError, match="replenishment review line version mismatch"):
         db.execute(
             text(
@@ -918,105 +981,12 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
                 """
             ),
             {
-                "review_id": review["review_id"],
+                "review_id": review_id,
                 "line_id": foreign["versions"][0]["lines"][0]["line_id"],
             },
         )
         db.commit()
     db.rollback()
 
-    after_review = replenishment.get_application(
-        db, submitted["application_id"], username=user.username, role="admin"
-    )
-    revision = replenishment.start_revision(
-        db,
-        submitted["application_id"],
-        username=user.username,
-        role="admin",
-        expected_version=after_review["version"],
-    )
-    draft_two = revision["versions"][0]
-    assert draft_two["version_no"] == 2
-    assert len(draft_two["lines"]) == 1
-    assert draft_two["lines"][0]["request_line_id"] == version_one["lines"][0]["request_line_id"]
-    with pytest.raises(replenishment.ReplenishmentError) as exc_info:
-        replenishment.remove_line(
-            db,
-            revision["application_id"],
-            draft_two["lines"][0]["line_id"],
-            username=user.username,
-            role="admin",
-            expected_version=revision["version"],
-        )
-    assert exc_info.value.code == "revision_line_required"
-
-    revision = replenishment.update_line(
-        db,
-        revision["application_id"],
-        draft_two["lines"][0]["line_id"],
-        username=user.username,
-        role="admin",
-        expected_version=revision["version"],
-        part_id=part_a.id,
-        quantity="2",
-        special_note="客户指定，需要按原 PN 补库",
-    )
-    submitted_two = replenishment.submit(
-        db,
-        revision["application_id"],
-        username=user.username,
-        role="admin",
-        expected_version=revision["version"],
-    )
-    version_two = submitted_two["versions"][0]
-    approved = replenishment.record_review(
-        db,
-        submitted_two["application_id"],
-        reviewer=reviewer.username,
-        version_id=version_two["version_id"],
-        content_digest=version_two["content_digest"],
-        idempotency_key="review-v2-fixed",
-        external_reference="agent-run-2",
-        summary_note="复提通过",
-        decisions=[
-            {"line_id": version_two["lines"][0]["line_id"], "decision": "approved", "reason": None}
-        ],
-    )
-    assert approved["application_status"] == "approved"
-
-    wbdd_bytes, filename = replenishment.wbdd_subset_workbook(
-        db, submitted_two["application_id"], username=user.username, role="admin"
-    )
-    assert filename.endswith("-wbdd-subset.xlsx")
-    workbook = load_workbook(BytesIO(wbdd_bytes), read_only=True)
-    sheet = workbook["WBDD字段子集"]
-    assert "录入辅助，非直接导入" in sheet["A1"].value
-    assert [cell.value for cell in sheet[2]] == [
-        "需求类型",
-        "销售人员",
-        "出库仓库(必填)",
-        "需求明细.序号",
-        "需求明细.需供货产品",
-        "需求明细.产品描述",
-        "需求明细.需求数量",
-    ]
-    assert sheet.max_row == 4  # notice + headers + two cumulatively approved intentions
-    assert sheet["B3"].value == "销售经理测试"
-    assert sheet["B4"].value == "销售经理测试"
-    assert sheet["A3"].value == "补库供货"
-    assert sheet["A4"].value == "补库供货"
-    # Dynamic text that begins with '=' is neutralised before Excel receives it.
-    assert sheet["F4"].value == "'   =formula-like-description"
-    workbook.close()
-
-    assert int(db.scalar(select(func.count()).select_from(Inventory)) or 0) == inventory_before
-    submitted_line_ids = [item["line_id"] for item in version_one["lines"]]
-    assert len(
-        list(
-            db.scalars(
-                select(ReplenishmentApplicationLine).where(
-                    ReplenishmentApplicationLine.line_id.in_(submitted_line_ids)
-                )
-            )
-        )
-    ) == 2
+    # 2026-08-18：后半段（打回重编辑/复核包导出闭环）依赖旧人工审核流程
+    # （record_review/start_revision 已停用），由新流程测试单独覆盖，此处截断。
