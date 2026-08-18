@@ -184,6 +184,24 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
 
   it("选择项目并加入 PN 后一次性原子提交，展示冻结结果", async () => {
     submitCartDraft.mockResolvedValue({ data: submittedApplication });
+    listApplications.mockResolvedValue({
+      data: {
+        total: 1, page: 1, page_size: 20,
+        items: [{
+          application_id: submittedApplication.application_id,
+          application_no: submittedApplication.application_no,
+          owner_display_name: "管理员",
+          project,
+          status: "submitted",
+          workflow_mode: "system_screening",
+          stage: "screening_complete",
+          version: 1,
+          latest_version_no: 1,
+          updated_at: "2026-08-17T01:00:00Z",
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: submittedApplication });
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     // 选择项目（antd Select）
@@ -210,8 +228,10 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     });
     expect(submitCartDraft.mock.calls[0]).toEqual(["proj-a", 1]);
 
-    // 结果展示：单号 + 项目 + 已提交 + 冻结证据
-    expect(await screen.findByText("BLK-20260817-ABC1234567")).toBeInTheDocument();
+    // 提交成功：打开「申请记录」Drawer，详情展示单号 + 项目 + 已提交 + 冻结证据
+    fireEvent.click(screen.getByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    expect((await screen.findAllByText(/BLK-20260817-ABC1234567/)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/WX-2026-001/).length).toBeGreaterThan(0);
     expect(screen.getByText("已提交，系统三查与价格证据已冻结")).toBeInTheDocument();
     expect(screen.getByText(/三查通过/)).toBeInTheDocument();
@@ -243,6 +263,8 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
 
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
+    // 打开「申请记录」Drawer：列表展示单号 + 项目归属
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
     expect(await screen.findByText("BLK-20260817-ABC1234567")).toBeInTheDocument();
     expect(screen.getByText(/WX-2026-001 · 测试维保项目A/)).toBeInTheDocument();
   });
@@ -330,8 +352,10 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
 
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
-    // 打回申请详情出现「退回编辑」
-    expect(await screen.findByText("BLK-20260818-REJECT001")).toBeInTheDocument();
+    // 打开「申请记录」Drawer → 查看打回申请详情 → 出现「退回编辑」
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    expect((await screen.findAllByText(/BLK-20260818-REJECT001/)).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /退回编辑/ }));
 
     // 编辑态：标题变为编辑被打回申请，打回行标红 + 推荐替换按钮

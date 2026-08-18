@@ -6,6 +6,7 @@ import {
   Card,
   Col,
   Collapse,
+  Drawer,
   Empty,
   Input,
   InputNumber,
@@ -25,6 +26,7 @@ import {
   ArrowLeftOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  HistoryOutlined,
   ReloadOutlined,
   SearchOutlined,
   SendOutlined,
@@ -75,7 +77,7 @@ function saveBlob(blob: Blob, filename: string) {
 const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string }> = {
   draft: { label: "草稿", color: "blue" },
   submitted: { label: "已提交", color: "gold" },
-  needs_revision: { label: "需复核", color: "red" },
+  needs_revision: { label: "需补充信息", color: "red" },
   approved: { label: "已通过", color: "green" },
 };
 
@@ -408,13 +410,16 @@ export default function ReplenishmentBetaPage() {
   const [applicationTotal, setApplicationTotal] = useState(0);
   const [current, setCurrent] = useState<ReplenishmentApplication | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyDetail, setHistoryDetail] = useState<ReplenishmentApplication | null>(null);
 
-  const exportCurrent = async () => {
-    if (!current) return;
+  const exportCurrent = async (application?: ReplenishmentApplication) => {
+    const target = application ?? current;
+    if (!target) return;
     setExporting(true);
     try {
-      const response = await downloadSystemScreeningWorkbook(current.application_id);
-      saveBlob(response.data, `${current.application_no}-复核包.xlsx`);
+      const response = await downloadSystemScreeningWorkbook(target.application_id);
+      saveBlob(response.data, `${target.application_no}-复核包.xlsx`);
       message.success("复核包已导出，可发给领导/采购过目");
     } catch (error) {
       message.error(errorText(error));
@@ -701,6 +706,48 @@ export default function ReplenishmentBetaPage() {
       />
 
       <div className="replenishment-layout">
+        {/* 左栏：选购 PN（宽，独立列高度随内容） */}
+        <div className="replenishment-catalog-col">
+          <Card
+            title={<Space><SearchOutlined />选购 PN</Space>}
+            extra={<Text type="secondary">没有所属池或半年价格的 PN 仍会完整显示</Text>}
+          >
+            <Input.Search
+              allowClear
+              enterButton="搜索"
+              size="large"
+              value={query}
+              placeholder="搜索 PN、产品描述或品牌"
+              onChange={(event) => setQuery(event.target.value)}
+              onSearch={() => void loadCatalog(1)}
+              style={{ marginBottom: 14, maxWidth: 560 }}
+            />
+            <div className="replenishment-catalog-grid">
+              {catalog.map((part) => (
+                <CatalogCard
+                  key={part.part_id}
+                  part={part}
+                  disabled={!capabilities.can_create || working || !selectedProjectId}
+                  onAdd={(quantity) => addDraftLine(part, quantity)}
+                />
+              ))}
+            </div>
+            {!catalog.length && <Empty description="没有匹配的 PN" />}
+            {catalogTotal > 20 && (
+              <Pagination
+                current={catalogPage}
+                pageSize={20}
+                total={catalogTotal}
+                showSizeChanger={false}
+                onChange={(page) => void loadCatalog(page)}
+                style={{ marginTop: 16 }}
+              />
+            )}
+          </Card>
+        </div>
+
+        {/* 右栏：购物车 + 历史记录（垂直堆叠，记录紧跟购物车下方） */}
+        <div className="replenishment-right">
       {/* ① 新建补库申请：决断层（选项目 → 组明细 → 一次性提交） */}
       <Card
         className="replenishment-cart-card"
@@ -712,9 +759,22 @@ export default function ReplenishmentBetaPage() {
               : "新建维保补库申请"}
           </Space>
         )}
-        extra={editingRevision ? (
-          <Button onClick={cancelEditingRevision} disabled={working}>取消编辑</Button>
-        ) : null}
+        extra={(
+          <Space wrap>
+            {editingRevision && (
+              <Button onClick={cancelEditingRevision} disabled={working}>取消编辑</Button>
+            )}
+            <Button
+              icon={<HistoryOutlined />}
+              onClick={() => setHistoryOpen(true)}
+            >
+              申请记录
+              {applicationTotal > 0 && (
+                <Badge count={applicationTotal} color="#1677ff" style={{ marginLeft: 4 }} />
+              )}
+            </Button>
+          </Space>
+        )}
       >
         <Spin spinning={working}>
           {projects.length === 0 ? (
@@ -797,41 +857,34 @@ export default function ReplenishmentBetaPage() {
                           ))}
                         </Space>
                       )}
-                      <Row gutter={[8, 8]}>
-                        <Col xs={24} sm={5}>
-                          <Space.Compact block>
-                            <InputNumber
-                              min={1}
-                              max={999999}
-                              precision={0}
-                              value={line.quantity}
-                              disabled={working}
-                              onChange={(value) => updateDraftLine(line.part_id, { quantity: Number(value || 1) })}
-                              style={{ flex: 1 }}
-                            />
-                            <Button disabled>{line.unit || "件"}</Button>
-                          </Space.Compact>
-                        </Col>
-                        <Col xs={24} sm={17}>
-                          <Input
-                            value={line.special_note}
-                            maxLength={4000}
+                      <div className="replenishment-cart-line-edit">
+                        <Space.Compact block>
+                          <InputNumber
+                            min={1}
+                            max={999999}
+                            precision={0}
+                            value={line.quantity}
                             disabled={working}
-                            placeholder="特殊情况说明（选填）"
-                            onChange={(event) => updateDraftLine(line.part_id, { special_note: event.target.value })}
+                            onChange={(value) => updateDraftLine(line.part_id, { quantity: Number(value || 1) })}
+                            style={{ width: 96 }}
                           />
-                        </Col>
-                        <Col xs={24} sm={2} style={{ textAlign: "right" }}>
-                          <Button
-                            danger
-                            icon={<DeleteOutlined />}
-                            disabled={working}
-                            onClick={() => removeDraftLine(line.part_id)}
-                          >
-                            移除
-                          </Button>
-                        </Col>
-                      </Row>
+                          <Button disabled>{line.unit || "件"}</Button>
+                        </Space.Compact>
+                        <Input
+                          value={line.special_note}
+                          maxLength={4000}
+                          disabled={working}
+                          placeholder="特殊情况说明（选填）"
+                          onChange={(event) => updateDraftLine(line.part_id, { special_note: event.target.value })}
+                        />
+                        <Button
+                          danger
+                          type="text"
+                          icon={<DeleteOutlined />}
+                          disabled={working}
+                          onClick={() => removeDraftLine(line.part_id)}
+                        />
+                      </div>
                     </div>
                   ))}
                   {!draftLines.length && (
@@ -862,133 +915,119 @@ export default function ReplenishmentBetaPage() {
         </Spin>
       </Card>
 
-      {/* ② 选购 PN（左栏） */}
-      <Card
-        className="replenishment-catalog-col"
-        title={<Space><SearchOutlined />选购 PN</Space>}
-        extra={<Text type="secondary">没有所属池或半年价格的 PN 仍会完整显示</Text>}
-      >
-        <Input.Search
-          allowClear
-          enterButton="搜索"
-          size="large"
-          value={query}
-          placeholder="搜索 PN、产品描述或品牌"
-          onChange={(event) => setQuery(event.target.value)}
-          onSearch={() => void loadCatalog(1)}
-          style={{ marginBottom: 14, maxWidth: 560 }}
-        />
-        <div className="replenishment-catalog-grid">
-          {catalog.map((part) => (
-            <CatalogCard
-              key={part.part_id}
-              part={part}
-              disabled={!capabilities.can_create || working || !selectedProjectId}
-              onAdd={(quantity) => addDraftLine(part, quantity)}
-            />
-          ))}
-        </div>
-        {!catalog.length && <Empty description="没有匹配的 PN" />}
-        {catalogTotal > 20 && (
-          <Pagination
-            current={catalogPage}
-            pageSize={20}
-            total={catalogTotal}
-            showSizeChanger={false}
-            onChange={(page) => void loadCatalog(page)}
-            style={{ marginTop: 16 }}
-          />
-        )}
-      </Card>
+        </div>{/* .replenishment-right */}
+      </div>
 
-      {/* ③ 最近提交 / 历史申请（右栏） */}
-      <Card
-        className="replenishment-record-col"
-        title={<Space><Badge count={applicationTotal} color="#d9d9d9" />补库申请记录</Space>}
+      {/* 申请记录：全屏可展开子页面（购物车右上角「申请记录」打开） */}
+      <Drawer
+        title={historyDetail ? (
+          <Space>
+            <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => setHistoryDetail(null)} />
+            <HistoryOutlined />
+            {historyDetail.application_no}
+            <Tag color={STATUS[historyDetail.status].color}>{STATUS[historyDetail.status].label}</Tag>
+          </Space>
+        ) : (
+          <Space>
+            <HistoryOutlined />
+            申请记录
+            <Badge count={applicationTotal} color="#1677ff" />
+          </Space>
+        )}
+        placement="right"
+        width="100%"
+        open={historyOpen}
+        onClose={() => {
+          setHistoryOpen(false);
+          setHistoryDetail(null);
+        }}
+        extra={historyDetail ? (
+          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} onClick={() => void exportCurrent(historyDetail)}>
+            导出复核包 Excel
+          </Button>
+        ) : (
+          <Button onClick={() => void refreshList()}>刷新</Button>
+        )}
       >
-        {current ? (
-          <>
-            <div className="replenishment-current-application">
-              <Space wrap>
-                <Title level={5} copyable style={{ margin: 0 }}>{current.application_no}</Title>
-                <Tag color={STATUS[current.status].color}>{STATUS[current.status].label}</Tag>
-                {current.project && (
-                  <Tag color="geekblue">{current.project.project_code} · {current.project.display_name}</Tag>
+        {historyDetail ? (
+          <div className="replenishment-current-application">
+            <Space wrap>
+              {historyDetail.project && (
+                <Tag color="geekblue">{historyDetail.project.project_code} · {historyDetail.project.display_name}</Tag>
+              )}
+              <Text type="secondary">v{historyDetail.latest_version_no} · {historyDetail.owner_display_name}</Text>
+            </Space>
+            {historyDetail.stage === "screening_complete" && (
+              <Alert
+                showIcon
+                type="success"
+                icon={<ShoppingCartOutlined />}
+                message="已提交，系统三查与价格证据已冻结"
+                description="申请只作为记录与人工复核包，不自动审批、不改变库存；如需调整请重新提交新申请。"
+                style={{ marginTop: 12 }}
+              />
+            )}
+            {historyDetail.versions[0]?.lines.map((line) => (
+              <SubmittedLine key={line.line_id} line={line} />
+            ))}
+            {historyDetail.status === "needs_revision" && (
+              <Alert
+                showIcon
+                type="warning"
+                message="申请被自动审核打回——可退回编辑后重新提交"
+                description="退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
+                action={(
+                  <Button type="primary" danger onClick={() => {
+                    startEditingRevision(historyDetail);
+                    setHistoryOpen(false);
+                    setHistoryDetail(null);
+                  }}>
+                    退回编辑
+                  </Button>
                 )}
-                <Text type="secondary">v{current.latest_version_no} · {current.owner_display_name}</Text>
-              </Space>
-              <Space wrap style={{ marginTop: 12 }}>
-                <Button
-                  type="primary"
-                  icon={<DownloadOutlined />}
-                  loading={exporting}
-                  onClick={() => void exportCurrent()}
+                style={{ marginTop: 12 }}
+              />
+            )}
+            <VersionHistory versions={historyDetail.versions} />
+          </div>
+        ) : (
+          <>
+            <List
+              dataSource={applications}
+              locale={{ emptyText: "还没有提交记录——回到购物车提交第一份申请" }}
+              renderItem={(item) => (
+                <List.Item
+                  className={item.application_id === current?.application_id ? "is-current-application" : ""}
+                  actions={[
+                    <Button
+                      key="view"
+                      type="link"
+                      onClick={() => {
+                        void getReplenishmentApplication(item.application_id)
+                          .then((response) => {
+                            setCurrent(response.data);
+                            setHistoryDetail(response.data);
+                          });
+                      }}
+                    >
+                      查看详情
+                    </Button>,
+                  ]}
                 >
-                  导出复核包 Excel
-                </Button>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  无论审核结果如何均可导出（#11）；内容为提交时冻结的 PN/数量/价格与三查证据
-                </Text>
-              </Space>
-              {current.stage === "screening_complete" && (
-                <Alert
-                  showIcon
-                  type="success"
-                  icon={<ShoppingCartOutlined />}
-                  message="已提交，系统三查与价格证据已冻结"
-                  description="申请只作为记录与人工复核包，不自动审批、不改变库存；如需调整请重新提交新申请。"
-                  style={{ marginTop: 12 }}
-                />
-              )}
-              {current.versions[0]?.lines.map((line) => (
-                <SubmittedLine key={line.line_id} line={line} />
-              ))}
-              {current.status === "needs_revision" && (
-                <Alert
-                  showIcon
-                  type="warning"
-                  message="申请被自动审核打回——可退回编辑后重新提交"
-                  description="退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
-                  action={(
-                    <Button type="primary" danger onClick={() => startEditingRevision(current)}>
-                      退回编辑
-                    </Button>
-                  )}
-                  style={{ marginTop: 12 }}
-                />
-              )}
-              <VersionHistory versions={current.versions} />
-            </div>
-            <Collapse
-              ghost
-              style={{ marginTop: 8 }}
-              items={[{
-                key: "history",
-                label: <Space>历史申请<Badge count={applicationTotal} color="#d9d9d9" /></Space>,
-                children: (
-                  <List
-                    dataSource={applications}
-                    locale={{ emptyText: "暂无申请" }}
-                    renderItem={(item) => (
-                      <List.Item
-                        className={item.application_id === current.application_id ? "is-current-application" : ""}
-                        onClick={() => void getReplenishmentApplication(item.application_id).then((response) => setCurrent(response.data))}
-                      >
-                        <List.Item.Meta
-                          title={
-                            <Space wrap>
-                              <span>{item.application_no}</span>
-                              <Badge color={STATUS[item.status].color} text={STATUS[item.status].label} />
-                              {item.project && <Text type="secondary">{item.project.project_code} · {item.project.display_name}</Text>}
-                            </Space>
-                          }
-                          description={`v${item.latest_version_no} · ${new Date(item.updated_at).toLocaleString()}`}
-                        />
-                      </List.Item>
+                  <List.Item.Meta
+                    title={(
+                      <Space wrap>
+                        <Text strong>{item.application_no}</Text>
+                        <Badge color={STATUS[item.status].color} text={STATUS[item.status].label} />
+                        {item.project && (
+                          <Text type="secondary">{item.project.project_code} · {item.project.display_name}</Text>
+                        )}
+                      </Space>
                     )}
+                    description={`v${item.latest_version_no} · ${new Date(item.updated_at).toLocaleString()}`}
                   />
-                ),
-              }]}
+                </List.Item>
+              )}
             />
             {applicationTotal > 20 && (
               <Pagination
@@ -1004,12 +1043,8 @@ export default function ReplenishmentBetaPage() {
               />
             )}
           </>
-        ) : (
-          <Empty description="还没有提交记录——填好项目与明细后提交第一份申请" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         )}
-      </Card>
-
-      </div>
+      </Drawer>
 
       {/* 口径边界：依据层，页尾小字 */}
       <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>

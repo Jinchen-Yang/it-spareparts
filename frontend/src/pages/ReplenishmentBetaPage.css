@@ -2,31 +2,25 @@
   padding-bottom: 32px;
 }
 
-/* 2026-08-18 左右布局：左=选购 PN（宽），右=购物车+记录（窄，固定操作区） */
+/* 2026-08-18 左右布局：左=选购 PN（宽），右=购物车+记录（垂直堆叠，记录紧跟购物车） */
 .replenishment-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
-  grid-template-rows: auto auto;
   gap: 16px;
   align-items: start;
 }
 
-/* ① 新建补库申请卡 → 右栏顶部 */
-.replenishment-cart-card {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-/* ② 选购 PN 卡 → 左栏（跨两行撑满高度） */
+/* 左栏：选购 PN（独立列，高度随内容） */
 .replenishment-catalog-col {
-  grid-column: 1;
-  grid-row: 1 / span 2;
+  min-width: 0;
 }
 
-/* ③ 补库申请记录卡 → 右栏底部 */
-.replenishment-record-col {
-  grid-column: 2;
-  grid-row: 2;
+/* 右栏：购物车 + 历史记录 垂直堆叠（内部 gap 16，不受左栏高度影响） */
+.replenishment-right {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  align-content: start;
 }
 
 /* 购物车右栏：项目/备注在一行收窄 */
@@ -43,6 +37,17 @@
 /* 购物车行更紧凑（右栏窄，行内数量/备注/移除竖排） */
 .replenishment-cart-line .ant-row {
   row-gap: 6px;
+}
+
+/* 2026-08-18 购物车行编辑区：数量+备注+移除 flex 单行（右栏窄内不换行） */
+.replenishment-cart-line-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.replenishment-cart-line-edit > .ant-input {
+  flex: 1;
+  min-width: 0;
 }
 
 .replenishment-catalog-grid {
@@ -104,6 +109,21 @@
   display: grid;
   gap: 10px;
   margin: 6px 0;
+  /* 2026-08-18 弹性容器：内容少随内容增长，多则内部滚动（不无限拉长页面） */
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.replenishment-cart-lines::-webkit-scrollbar {
+  width: 6px;
+}
+.replenishment-cart-lines::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 3px;
+}
+.replenishment-cart-lines::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .replenishment-cart-line {
@@ -130,8 +150,13 @@
 }
 
 .replenishment-cart-line.is-revision {
-  border-color: #ffd591;
-  background: #fffaf2;
+  border: 1px solid #ffa39e;
+  background: #fff1f0;
+  box-shadow: inset 3px 0 0 #ff4d4f;
+}
+
+.replenishment-cart-line.is-revision .ant-tag.ant-tag-red {
+  font-weight: 600;
 }
 
 .replenishment-cart-line .ant-alert {
