@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from io import BytesIO
 from threading import Barrier
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -19,6 +20,7 @@ from app.main import app
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
+from app.models.maintenance_project import MaintenanceProject
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.replenishment import (
     ReplenishmentApplication,
@@ -62,6 +64,20 @@ def _user(db, username: str = "sales_manager") -> SysUser:
     db.add(user)
     db.flush()
     return user
+
+
+def _project(db, code: str = "RTEST-0001") -> MaintenanceProject:
+    project = MaintenanceProject(
+        project_id=str(uuid4()),
+        project_code=code,
+        display_name=f"补库测试项目-{code}",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    return project
 
 
 def test_server_feature_gate_closes_business_api_without_hiding_beta_state(db):
@@ -171,6 +187,7 @@ def test_application_owner_scope_is_row_isolated(db):
         username=owner.username,
         warehouse="北京前置库",
         request_note=None,
+        project_id=_project(db).project_id,
     )
 
     assert replenishment.list_applications(
@@ -267,7 +284,11 @@ def test_review_callback_requires_page_allowlist_and_action(db):
     db.add_all([part, reviewer])
     db.commit()
     created = replenishment.create_application(
-        db, username=owner.username, warehouse="北京前置库", request_note=None
+        db,
+        username=owner.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     created = replenishment.add_line(
         db,
@@ -386,6 +407,7 @@ def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissi
         username=submitter.username,
         warehouse="北京前置库",
         request_note=None,
+        project_id=_project(db).project_id,
     )
     created = replenishment.add_line(
         db,
@@ -534,12 +556,21 @@ def test_free_text_bounds_do_not_reflect_business_input(db):
     client.headers["Authorization"] = f"Bearer {login.json()['token']}"
     secret_note = "SENSITIVE-REPLENISHMENT-NOTE-" + "x" * 4000
     secret_query = "SENSITIVE-CATALOG-QUERY-" + "x" * 129
+    project = _project(db, "RTEXT-0001")
+    db.commit()
     settings = get_settings()
     original = settings.replenishment_beta_enabled
     try:
         settings.replenishment_beta_enabled = True
+        # 原子提交需 client_request_id + project_id；超长 request_note 触发 400 且不反射原文
         note_response = client.post(
-            "/api/replenishment-beta/applications", json={"request_note": secret_note}
+            "/api/replenishment-beta/applications",
+            json={
+                "client_request_id": "beta-text-bounds-crid",
+                "project_id": project.project_id,
+                "request_note": secret_note,
+                "lines": [],
+            },
         )
         assert note_response.status_code == 400
         assert "SENSITIVE-REPLENISHMENT-NOTE" not in note_response.text
@@ -562,7 +593,8 @@ def test_catalog_keeps_no_pool_no_price_part_visible(db):
     assert item["pool"] == {"group_id": None, "name": None, "version": None}
     assert item["purchase"] is None
     assert item["sales"] is None
-    assert item["price_window"]["days"] == 180
+    # 2026-08-18 自动审核口径：半年价格窗 = 182 天（LOOKBACK_DAYS）
+    assert item["price_window"]["days"] == 182
 
 
 def test_catalog_price_facts_do_not_depend_on_pool_and_exclude_confirmed_source_error(db):
@@ -670,7 +702,11 @@ def test_removing_first_draft_line_compacts_numbers_without_unique_collision(db)
     db.add_all(parts)
     db.commit()
     application = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     for part in parts:
         application = replenishment.add_line(
@@ -706,7 +742,11 @@ def test_concurrent_review_retry_is_idempotent(db):
     db.add(part)
     db.commit()
     application = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     application = replenishment.add_line(
         db,
@@ -769,6 +809,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         username=user.username,
         warehouse="北京前置库",
         request_note="首轮申请",
+        project_id=_project(db).project_id,
     )
     application = replenishment.add_line(
         db,
@@ -889,7 +930,11 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
     # Review-line provenance is also enforced at the database boundary: an
     # append-only row may not point at a line from another application/version.
     foreign = replenishment.create_application(
-        db, username=user.username, warehouse="北京前置库", request_note=None
+        db,
+        username=user.username,
+        warehouse="北京前置库",
+        request_note=None,
+        project_id=_project(db).project_id,
     )
     foreign = replenishment.add_line(
         db,

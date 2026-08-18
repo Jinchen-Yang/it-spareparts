@@ -434,17 +434,42 @@ def create_application(
     username: str,
     warehouse: str | None = None,
     request_note: str | None = None,
+    project_id: str | None = None,
 ) -> dict:
+    """创建补库购物车草稿（测试/草稿入口）。
+
+    project_id 提供时按原子提交身份约束补全 project_id/client_request_id/
+    request_digest/项目快照（满足 guard_replenishment_project_binding 的 INSERT
+    要求）；None 时保持旧的无绑定草稿形态（仅测试直插场景）。
+    """
     user = _actor(db, username)
     app_id = _uid()
     version_id = _uid()
     suffix = app_id.replace("-", "")[:10].upper()
+    project_snap = None
+    client_request_id = None
+    request_digest = None
+    if project_id is not None:
+        project = db.get(MaintenanceProject, project_id)
+        if project is None:
+            raise ReplenishmentError("指定的维保项目不存在")
+        project_snap = (project.project_code, project.display_name)
+        client_request_id = f"manual-{app_id.replace('-', '')[:24]}"
+        request_digest = hashlib.sha256(
+            f"{app_id}:{client_request_id}".encode("utf-8")
+        ).hexdigest()
     app = ReplenishmentApplication(
         application_id=app_id,
         application_no=f"BLK-{business_today():%Y%m%d}-{suffix}",
         owner_username=user.username,
         owner_display_name=user.display_name or user.salesperson_name or user.username,
         salesperson_name_snapshot=user.salesperson_name,
+        project_id=project_id,
+        project_code_snapshot=project_snap[0] if project_snap else None,
+        project_name_snapshot=project_snap[1] if project_snap else None,
+        client_request_id=client_request_id,
+        request_digest=request_digest,
+        is_legacy_project_unbound=project_id is None,
     )
     version = ReplenishmentApplicationVersion(
         version_id=version_id,

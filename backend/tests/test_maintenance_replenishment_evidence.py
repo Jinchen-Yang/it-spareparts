@@ -10,6 +10,7 @@
 import io
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
@@ -23,6 +24,7 @@ from app.models.maintenance_ckd_import import (
     MaintenanceCkdImportBatch,
     MaintenanceCkdLineRow,
 )
+from app.models.maintenance_project import MaintenanceProject
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.replenishment import (
     ReplenishmentApplication,
@@ -51,6 +53,20 @@ def owner_user(db):
         )
     )
     db.commit()
+
+
+def _project(db, code: str = "EVTEST-0001") -> MaintenanceProject:
+    project = MaintenanceProject(
+        project_id=str(uuid4()),
+        project_code=code,
+        display_name=f"证据测试项目-{code}",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    return project
 
 
 def _line(
@@ -159,7 +175,12 @@ def approved_two_version(db, owner_user):
         application_id="evidence-app-1",
         application_no="EV-APP-0001",
         owner_username=OWNER,
-        status="approved",
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
+        status="draft",
         latest_version_no=2,
         version=1,
     )
@@ -194,6 +215,7 @@ def approved_two_version(db, owner_user):
     )
     _submit_version(db, version_id="ev-ver-2")
     _review(db, version_id="ev-ver-2", decisions=[("ev-a2", "approved", None)])
+    application.status = "approved"
     db.commit()
     return {"application_id": application.application_id, "part_b": part_b.id}
 
@@ -206,6 +228,11 @@ def test_draft_rejected_409_and_other_owner_404(db, owner_user):
         application_id="evidence-draft-1",
         application_no="EV-APP-DRAFT",
         owner_username=OWNER,
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
         status="draft",
         latest_version_no=1,
         version=1,
@@ -413,7 +440,12 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
         application_id="evidence-app-2",
         application_no="EV-APP-0002",
         owner_username=OWNER,
-        status="approved",
+        project_id=_project(db).project_id,
+        project_code_snapshot="EVTEST-0001",
+        project_name_snapshot="证据测试项目",
+        client_request_id="evidence-manual-crid",
+        request_digest="abababababababababababababababababababababababababababababababab",
+        status="draft",
         latest_version_no=1,
         version=1,
     )
@@ -427,6 +459,7 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
     )
     _submit_version(db, version_id="ev2-ver-1")
     _review(db, version_id="ev2-ver-1", decisions=[("ev2-line-c", "approved", None)])
+    application.status = "approved"
     db.commit()
 
     payload = evidence.application_evidence(

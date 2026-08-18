@@ -6,6 +6,7 @@ import os
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -741,4 +742,9 @@ def test_downgrade_fails_closed_when_project_bound_atomic_rows_exist(db):
         alembic_command.downgrade(cfg, _PREVIOUS)
 
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == _HEAD
+        # downgrade 被 guard 阻止后回滚，alembic_version 停留在全链当前 head
+        # （本迁移之后可能还有更新的迁移追加在链尾，故动态取 head 而非硬编码 _HEAD）
+        current_head = ScriptDirectory.from_config(cfg).get_heads()[0]
+        assert connection.scalar(
+            text("SELECT version_num FROM alembic_version")
+        ) == current_head

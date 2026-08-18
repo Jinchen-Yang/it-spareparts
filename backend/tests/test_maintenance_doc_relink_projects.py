@@ -166,11 +166,13 @@ def test_relink_is_retracted_when_flag_off(db, tmp_path):
     settings.maintenance_boss_dashboard_enabled = False
     resp = client.post("/api/maintenance/doc-imports/relink-projects")
     assert resp.status_code == 404
+    # 2026-08-18：归属挂靠路由随 boss 总闸（#45/#48 挂 boss_dependencies）——
+    # 关闸后与 relink 一同收回为 404；重新开闸后恢复。
     assign = client.post("/api/maintenance/project-assignments/orders/assign",
                          json={"project_id": proj.project_id,
                                "items": [{"source_order_id": order.raw_order_id}],
                                "reason": "合成测试确认归属"})
-    assert assign.status_code == 200, assign.text
+    assert assign.status_code == 404, assign.text
     db.expire_all()
     assert db.get(MaintenanceDocHeadRow, head_row_id).project_id is None
 

@@ -345,8 +345,10 @@ def test_expense_sheet_has_editable_remark_column(db, project):
     ws = wb[wbk.SHEET_EXPENSE]
     assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
         == ws.cell(row=1, column=8).fill.fgColor.rgb
+    # 2026-08-17 全面放开：除「含税金额(系统计算)」外所有列黄底可改（支持手工新增报销）。
+    # 只读仅剩含税金额列（第 9 列），备注黄底应与它不同色。
     assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
-        != ws.cell(row=1, column=1).fill.fgColor.rgb
+        != ws.cell(row=1, column=9).fill.fgColor.rgb
 
 
 def test_remark_roundtrips_into_the_database(db, project):

@@ -107,19 +107,23 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
     pilot = _named_admin(db, "beta-allowlist-pilot")
     db.commit()
 
-    operator_client, _ = _login(operator.username)
-    before_client, before_login = _login(pilot.username)
-    assert before_login["beta_features"] == {
-        "maintenance": False,
-        "replenishment": False,
-        # 维保展示板（plan v1.3）总闸默认关闭，与两个 Beta 同为服务端闸
-        "maintenance_boss": False,
-    }
-
     settings = get_settings()
     original_maintenance = settings.maintenance_beta_enabled
     original_replenishment = settings.replenishment_beta_enabled
     try:
+        # conftest 为业务测试默认开 Beta；本测试验证「未授权前关闭 → 授权后开启」，
+        # 需先把初始态压回关闭（发布默认态）再走流程。
+        settings.maintenance_beta_enabled = False
+        settings.replenishment_beta_enabled = False
+        operator_client, _ = _login(operator.username)
+        before_client, before_login = _login(pilot.username)
+        assert before_login["beta_features"] == {
+            "maintenance": False,
+            "replenishment": False,
+            # 维保展示板（plan v1.3）总闸默认关闭，与两个 Beta 同为服务端闸
+            "maintenance_boss": False,
+        }
+
         settings.maintenance_beta_enabled = True
         settings.replenishment_beta_enabled = True
         assert before_client.get("/api/auth/beta-features").status_code == 200
