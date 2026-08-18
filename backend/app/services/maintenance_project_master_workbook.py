@@ -600,39 +600,61 @@ def validate_global(db: Session, *, data: bytes) -> MasterPlan:
 
 # ------------------------------------------------------------------ 应用
 
+def _merge_manual_cost_to_line(
+    db: Session, refill: "CostRefill", *, operated_by: str,
+) -> None:
+    """2026-08-19：人工成本合并到主表——写 override 表（审计/回滚）并同步
+    f_maintenance_line 主表：unit_cost_ex_tax/inc_tax + cost_source='manual' +
+    cost_amount 字段。这样面板/看板/概览读主表即得人工值，无需各处 merge；
+    与其他 sheet（02/04/05/06 直接写主表）行为一致。
+    """
+    if refill.unit_cost_ex_tax is not None:
+        existing = db.execute(
+            select(MaintenanceManualCostOverride)
+            .where(MaintenanceManualCostOverride.line_id == refill.line_id)
+        ).scalar_one_or_none()
+        if existing is None:
+            db.add(MaintenanceManualCostOverride(
+                line_id=refill.line_id,
+                unit_cost_ex_tax=refill.unit_cost_ex_tax,
+                unit_cost_inc_tax=refill.unit_cost_inc_tax,
+                reason=refill.reason, active=True, version=1,
+                updated_by=operated_by))
+        else:
+            existing.unit_cost_ex_tax = refill.unit_cost_ex_tax
+            existing.unit_cost_inc_tax = refill.unit_cost_inc_tax
+            existing.reason = refill.reason
+            existing.active = True
+            existing.version += 1
+            existing.updated_by = operated_by
+        line = db.get(FMaintenanceLine, refill.line_id)
+        if line is not None:
+            qty = line.qty or Decimal(0)
+            line.unit_cost_ex_tax = refill.unit_cost_ex_tax
+            line.unit_cost_inc_tax = refill.unit_cost_inc_tax
+            line.cost_amount_ex_tax = (refill.unit_cost_ex_tax * qty).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            line.cost_amount_inc_tax = (refill.unit_cost_inc_tax * qty).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            line.cost_source = "manual"
+    elif refill.reason is not None:
+        existing = db.execute(
+            select(MaintenanceManualCostOverride)
+            .where(MaintenanceManualCostOverride.line_id == refill.line_id)
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.reason = refill.reason
+            existing.version += 1
+            existing.updated_by = operated_by
+
+
 def apply(db: Session, plan: MasterPlan, *, operated_by: str,
           import_batch_id: str) -> dict:
     """整份事务应用；上传即覆盖。"""
     for refill in plan.cost_refills:
         # 2026-08-18：备注/原因独立于成本——只改备注不写覆盖表
-        if refill.unit_cost_ex_tax is not None:
-            existing = db.execute(
-                select(MaintenanceManualCostOverride)
-                .where(MaintenanceManualCostOverride.line_id == refill.line_id)
-            ).scalar_one_or_none()
-            if existing is None:
-                db.add(MaintenanceManualCostOverride(
-                    line_id=refill.line_id,
-                    unit_cost_ex_tax=refill.unit_cost_ex_tax,
-                    unit_cost_inc_tax=refill.unit_cost_inc_tax,
-                    reason=refill.reason, active=True, version=1,
-                    updated_by=operated_by))
-            else:
-                existing.unit_cost_ex_tax = refill.unit_cost_ex_tax
-                existing.unit_cost_inc_tax = refill.unit_cost_inc_tax
-                existing.reason = refill.reason
-                existing.active = True
-                existing.version += 1
-                existing.updated_by = operated_by
-        elif refill.reason is not None:
-            existing = db.execute(
-                select(MaintenanceManualCostOverride)
-                .where(MaintenanceManualCostOverride.line_id == refill.line_id)
-            ).scalar_one_or_none()
-            if existing is not None:
-                existing.reason = refill.reason
-                existing.version += 1
-                existing.updated_by = operated_by
+        if refill.unit_cost_ex_tax is not None or refill.reason is not None:
+            _merge_manual_cost_to_line(db, refill, operated_by=operated_by)
         if refill.note is not None:
             line = db.get(FMaintenanceLine, refill.line_id)
             if line is not None:
@@ -1468,26 +1490,9 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
 def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str, import_batch_id: str) -> dict:
     # All mutations deliberately happen on this one Session transaction.
     for refill in plan.cost_refills:
-        # 2026-08-18：备注/原因独立于成本——只改备注/原因不写覆盖表；金额可空
-        if refill.unit_cost_ex_tax is not None:
-            existing = db.scalar(select(MaintenanceManualCostOverride).where(MaintenanceManualCostOverride.line_id == refill.line_id))
-            if existing is None:
-                db.add(MaintenanceManualCostOverride(line_id=refill.line_id, unit_cost_ex_tax=refill.unit_cost_ex_tax,
-                                                     unit_cost_inc_tax=refill.unit_cost_inc_tax, reason=refill.reason,
-                                                     active=True, version=1, updated_by=operated_by))
-            else:
-                existing.unit_cost_ex_tax = refill.unit_cost_ex_tax
-                existing.unit_cost_inc_tax = refill.unit_cost_inc_tax
-                existing.reason = refill.reason
-                existing.active = True
-                existing.version += 1
-                existing.updated_by = operated_by
-        elif refill.reason is not None:
-            existing = db.scalar(select(MaintenanceManualCostOverride).where(MaintenanceManualCostOverride.line_id == refill.line_id))
-            if existing is not None:
-                existing.reason = refill.reason
-                existing.version += 1
-                existing.updated_by = operated_by
+        # 2026-08-19：人工成本合并主表（写 override + 同步主表 cost_source='manual'）
+        if refill.unit_cost_ex_tax is not None or refill.reason is not None:
+            _merge_manual_cost_to_line(db, refill, operated_by=operated_by)
         if refill.note is not None:
             line = db.get(FMaintenanceLine, refill.line_id)
             if line is not None:
