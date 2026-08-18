@@ -878,8 +878,10 @@ function BasicsTab({
       const { data } = await autoAssignMaintenanceSourceOrders();
       const r = data.result;
       message.success(
-        `自动挂靠完成：${r.assigned_orders} 张单挂到 ${r.matched_projects} 个项目` +
-          (r.skipped_groups ? `；${r.skipped_groups} 个对不上项目名已跳过` : ""),
+        `自动挂靠完成：${r.assigned_orders} 张单` +
+          (r.matched_projects ? `，挂到 ${r.matched_projects} 个已有项目` : "") +
+          (r.created_projects ? `，自动新建 ${r.created_projects} 个项目` : "") +
+          (r.skipped_groups ? `；${r.skipped_groups} 个无项目名已跳过` : ""),
       );
       await loadCandidates();
       onAssigned();

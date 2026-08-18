@@ -94,6 +94,7 @@ export const autoAssignMaintenanceSourceOrders = () =>
     result: {
       assigned_orders: number;
       matched_projects: number;
+      created_projects: number;
       skipped_groups: number;
       skipped_ambiguous: number;
     };
