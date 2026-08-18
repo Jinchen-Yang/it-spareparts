@@ -1854,7 +1854,9 @@ def search_site_issues(
         raise MaintenanceOperationError("现场领用状态筛选无效")
     filters = [
         MaintenanceSiteIssue.project_id == project_id,
-        MaintenanceSiteIssue.source == "site_issue_v2",
+        # 2026-08-18：search 是只读展示，须显示工作簿(workbook)/旧数据(legacy)/线上(site_issue_v2)
+        # 全部来源的领用单；之前硬编码 site_issue_v2 导致工作簿上传的领用数据面板不显示
+        MaintenanceSiteIssue.source.in_(["site_issue_v2", "workbook", "legacy"]),
         MaintenanceSiteIssue.normalized_status.in_(workflow_statuses),
     ]
     q = (q_text or "").strip()

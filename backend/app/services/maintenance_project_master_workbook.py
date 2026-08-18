@@ -30,7 +30,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -52,6 +52,7 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.models.sales import FSalesOrder
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_collection_milestones import write_collection_milestone
@@ -891,17 +892,71 @@ def _v2_build_site(wb, db, project_id: str) -> None:
 
 def _v2_build_dictionary(wb) -> None:
     ws = wb.create_sheet(V2_SHEET_DICTIONARY)
-    headers = ["字段", "业务含义", "来源/表字段", "编辑性", "格式/允许值", "空值意义", "覆盖影响"]
+    headers = ["工作表", "列名", "怎么填（大白话）", "示例", "留空会怎样", "能否改"]
     _v2_header(ws, headers)
-    rows = [
-        ("part_id", "备件主键", "f_maintenance_line.part_id → dim_part.id", "只读", "整数", "异常需治理", "关系身份不随 PN 文本改变"),
-        ("人工未税单位成本", "缺成本时的人工补价", "maintenance_manual_cost_override.unit_cost_ex_tax", "可编辑", "非负金额", "不创建 override", "覆盖该行成本人工证据"),
-        ("计划回款金额", "合同期次计划金额", "maintenance_collection_milestone.planned_amount", "可编辑", "正数", "节点 incomplete", "更新计划节点并触发提醒复核"),
-        ("最新累计实收", "已确认回款快照累计额", "maintenance_collection_snapshot.cumulative_amount", "只读", "金额", "未上报，不等于0", "仅影响展示和到款状态"),
-        ("实体ID", "稳定写回身份", "各事实表主键", "只读", "UUID/字符串", "非法文件", "缺失或跨项目拒绝"),
+    # 总原则（直白，紧跟表头之下）
+    ws.append(["⚠️ 填写须知：先读这 4 条再填表", None, None, None, None, None])
+    principles = [
+        ("1", "只有黄底的列能改", "白底/深蓝底是系统算好的只读事实，改了会报「只读事实已修改」，请重新下载再改。"),
+        ("2", "改完直接上传覆盖", "不用另存格式；空行=不处理；没动的表不会变。"),
+        ("3", "实体ID 是系统认行的暗号", "各表的「实体ID」列请勿删除或改动，系统靠它知道改的是哪一行。"),
+        ("4", "不会填就留空", "大部分列留空=不写/不处理；必填的列留空会明确报错告诉你哪行。"),
     ]
-    for row in rows:
-        ws.append(row)
+    for tag, title, detail in principles:
+        ws.append([f"  {tag}. {title}", detail, None, None, None, None])
+
+    def row(sheet, column, guide, example, empty, editable):
+        ws.append([sheet, column, guide, example, empty, "✅ 可改" if editable else "❌ 只读"])
+
+    # 02 回款计划
+    ws.append(["【02 回款计划】每期应收款计划，一行一期", None, None, None, None, None])
+    row("02", "操作", "要做什么：新增填 CREATE、改动填 UPDATE、作废填 VOID。", "CREATE / UPDATE / VOID", "空=不改这行", "✅")
+    row("02", "合同编号", "这个项目签的哪份合同。可留空，系统自动填项目唯一销售单号。", "XSDD-20260604-0063", "自动回填", "✅")
+    row("02", "期次", "第几期回款（1-24）。", "1", "必填", "✅")
+    row("02", "计划回款日期", "这笔钱计划哪天到。", "2026-08-31", "可与金额二选一", "✅")
+    row("02", "日期精度", "只记到月填 month，记到天填 day。", "month / day", "默认 day", "✅")
+    row("02", "计划回款金额（含税）", "这期计划回多少（含税）。", "50000.00", "可与日期二选一", "✅")
+    row("02", "备注", "这期说明，如扣款/延迟原因。", "客户要求延后一月", "空=不写", "✅")
+
+    # 03 备件明细
+    ws.append(["【03 备件明细】一行一个备件", None, None, None, None, None])
+    row("03", "人工未税单位成本", "系统没有这备件成本价时，人工补一个未税单价。", "888.88", "空=不补价", "✅")
+    row("03", "人工成本原因", "为什么人工补价，写一句。", "按供应商报价补价", "空=不写", "✅")
+    row("03", "备注", "这行备件的说明。", "客户指定品牌", "空=不写", "✅")
+
+    # 04 费用报销
+    ws.append(["【04 费用报销】一行一笔报销", None, None, None, None, None])
+    row("04", "费用单号", "报销单号（BXD 单号）。新增报销可自己编一个不重复的。", "BXD-20260818-0001", "留空会报错", "✅")
+    row("04", "报销日期", "这笔费用是哪天的。", "2026-08-18", "留空会报错", "✅")
+    row("04", "报销人员", "谁报的销。", "张三", "空=不填", "✅")
+    row("04", "报销类别", "费用类型，如交通/住宿/办公。", "交通", "空=不填", "✅")
+    row("04", "费用分类", "大类，如差旅/招待。", "差旅", "空=不填", "✅")
+    row("04", "支出事由", "为什么花的钱。", "客户现场巡检", "空=不填", "✅")
+    row("04", "维保销售订单（归集键）", "报销归到哪个销售单（XSDD 号）。", "XSDD-20260604-0063", "留空会报错", "✅")
+    row("04", "流程状态", "报销走到哪步，如已结束/审核中。", "已结束", "空=不填", "✅")
+    row("04", "金额口径", "金额是含税还是未税：填 ex 表示未税。", "ex / inc", "默认 ex", "✅")
+    row("04", "未税金额", "这笔报销的未税金额。", "100.00", "留空会报错", "✅")
+    row("04", "备注", "报销补充说明。", "发票已上传", "空=不填", "✅")
+
+    # 05 实收回款
+    ws.append(["【05 实收回款】一行一个月的实际回款", None, None, None, None, None])
+    row("05", "合同编号", "回款算到哪份合同。可留空，系统自动填项目唯一销售单号。", "XSDD-20260604-0063", "自动回填", "✅")
+    row("05", "报告月份", "这是哪个月的回款。填年月，或只填月份数字（默认当年）。", "2026-08 或 8", "留空会报错", "✅")
+    row("05", "累计实收金额（含税）", "到这个月底累计实际收到多少（含税）。", "2000.00", "留空会报错", "✅")
+    row("05", "状态", "这笔回款状态：已收款/未收款/作废。", "已收款", "默认已收款", "✅")
+    row("05", "回款凭证号", "银行回单或凭证号。", "123", "空=不填", "✅")
+    row("05", "备注", "回款说明。", "客户转账", "空=不填", "✅")
+
+    # 06 领用返还
+    ws.append(["【06 领用返还】一行一次现场领用", None, None, None, None, None])
+    row("06", "领用单号", "现场领用单号（CKD 单号）。新增领用可自己编一个。", "CKD-20260804-0080", "新增时必填", "✅")
+    row("06", "领用日期", "哪天领用的。", "2026-08-04", "新增时必填", "✅")
+    row("06", "PN", "领用的备件料号。", "WUH721818ALE6L4", "新增时必填", "✅")
+    row("06", "SN", "领用的序列号（如果有）。", "4BG36J6H", "空=不填", "✅")
+    row("06", "领用数量", "领了几个。", "1", "新增时必填", "✅")
+    row("06", "是否应返还", "用完后要不要还库房：要还填「是」，不用还填「否」。", "是 / 否", "空=继承项目默认", "✅")
+    row("06", "备注", "领用说明。", "现场更换备件", "空=不填", "✅")
+
     _v2_finalize(ws, headers)
 
 
@@ -1237,6 +1292,81 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> list[ec.ExpenseUpdat
     return out
 
 
+def _xsdd_contract_for_project(
+    db: Session, project_id: str, row_no: int,
+) -> MaintenanceProjectContract:
+    """05 实收回款合同编号留空时自动回填（2026-08-18，PDD 样例）：
+
+    取项目挂靠单据的 distinct XSDD 作合同号；唯一时若合同表无此 XSDD 记录，
+    则按销售表金额自动建立（source='xsdd'）并复用；多个/无 XSDD 时明确报错，
+    避免静默写错合同。"""
+    xsdd_rows = db.execute(
+        select(FMaintenanceOrder.linked_sales_order_no)
+        .select_from(FMaintenanceOrder)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+        )
+        .group_by(FMaintenanceOrder.linked_sales_order_no)
+    ).scalars().all()
+    xsdd_nos = sorted({str(o) for o in xsdd_rows if o})
+    if not xsdd_nos:
+        raise WorkbookError(
+            "contract_not_found",
+            f"第 {row_no} 行合同编号留空，但该项目未挂靠任何 XSDD 单据，无法自动回填",
+        )
+    if len(xsdd_nos) > 1:
+        raise WorkbookError(
+            "contract_not_found",
+            f"第 {row_no} 行合同编号留空，但该项目挂靠多个 XSDD（{'、'.join(xsdd_nos)}），请明确填写",
+        )
+    contract_no = xsdd_nos[0]
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project_id,
+        MaintenanceProjectContract.contract_no == contract_no,
+    ))
+    if contract is not None:
+        return contract
+    # 无 XSDD 合同记录 → 按销售表金额自动建立（幂等：已存在则复用）
+    sale = db.execute(
+        select(FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
+        .where(FSalesOrder.order_no == contract_no,
+               FSalesOrder.amount_ex_tax.is_not(None))
+        .limit(1)
+    ).one_or_none()
+    amount_ex_tax = Decimal(str(sale[0])) if sale and sale[0] is not None else None
+    inc_tax = (amount_ex_tax * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01")) \
+        if amount_ex_tax is not None else None
+    project = db.get(MaintenanceProject, project_id)
+    contract = MaintenanceProjectContract(
+        project_contract_id=str(uuid4()),
+        project_id=project_id,
+        contract_id=f"xsdd-{contract_no}",
+        contract_no=contract_no,
+        contract_amount=amount_ex_tax,
+        amount_inc_tax=inc_tax,
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="workbook-v2-xsdd",
+        included_in_total=True,
+        effective_from=project.period_from if project else None,
+        effective_to=project.period_to if project else None,
+        source="xsdd",
+        version=1,
+    )
+    db.add(contract)
+    db.flush()
+    return contract
+
+
 def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp]:
     contracts = {c.contract_no: c for c in ec._contracts(db, project_id)}
     headers = [str(cell.value or "") for cell in ws[1]]
@@ -1247,9 +1377,19 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
             continue
         contract_no = str(row[index["合同编号"]] or "").strip()
         contract = contracts.get(contract_no)
+        if contract is None and not contract_no:
+            # 2026-08-18：合同编号留空 → 自动回填项目唯一 XSDD（并自动建合同记录）
+            contract = _xsdd_contract_for_project(db, project_id, row_no)
+            contract_no = contract.contract_no
         if contract is None:
             raise WorkbookError("contract_not_found", f"第 {row_no} 行合同编号不属于本项目")
-        month = _v2_date(row[index["报告月份"]], row_no=row_no, label="报告月份")
+        raw_month = row[index["报告月份"]]
+        # 2026-08-18：报告月份支持纯数字月（如 8 → 当前年 8 月），贴合人工填写习惯
+        raw_str = str(raw_month).strip() if raw_month is not None else ""
+        if raw_str.isdigit() and 1 <= int(raw_str) <= 12:
+            month = date(business_today().year, int(raw_str), 1)
+        else:
+            month = _v2_date(raw_month, row_no=row_no, label="报告月份")
         if month is None:
             raise WorkbookError("invalid_month", f"第 {row_no} 行报告月份不能为空")
         amount = _v2_decimal(row[index["累计实收金额（含税）"]], row_no=row_no, label="累计实收金额", required=True)
@@ -1257,13 +1397,21 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
             MaintenanceCollectionSnapshot.project_contract_id == contract.project_contract_id,
             MaintenanceCollectionSnapshot.report_month == month,
         ))
+        # 2026-08-18：状态支持中文业务词 → 快照枚举（已收款→confirmed 等）
+        raw_status = str(row[index["状态"]] or "").strip()
+        status_map = {
+            "已收款": "confirmed", "已收": "confirmed", "收款": "confirmed", "confirmed": "confirmed",
+            "未收款": "unconfirmed", "未收": "unconfirmed", "unconfirmed": "unconfirmed",
+            "作废": "void", "已作废": "void", "void": "void",
+        }
+        status_value = status_map.get(raw_status, "confirmed" if not raw_status else raw_status)
         out.append(ec.CollectionOp(
             operation="UPDATE" if existing is not None else "CREATE",
             project_contract_id=contract.project_contract_id, contract_no=contract_no,
             report_month=month, cumulative_amount=amount,
             receipt_reference=str(row[index["回款凭证号"]] or "").strip() or None,
             remark=str(row[index["备注"]] or "").strip() or None,
-            collection_status=str(row[index["状态"]] or "confirmed").strip() or "confirmed",
+            collection_status=status_value,
         ))
     return out
 
