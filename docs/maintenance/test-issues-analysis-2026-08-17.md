@@ -243,6 +243,48 @@ V2 的 26 列与现有字段关系：
 
 ---
 
+## #10 上传解析入口：维保 roundtrip 的 multipart part size 限制与文件体积上限不一致（阻断正常文件）
+
+### 背景
+维保回填导入上传是通过 `MultiPartParser` 解析 `.xlsx`，但当前把 `max_part_size` 设成 1024 字节。
+
+### 现状证据
+- `backend/app/api/maintenance.py:1110-1114`：`max_files=1, max_fields=0, max_part_size=1024`。
+- `_save_roundtrip_upload` 使用 `config.MAX_UPLOAD_MB` 作为文件上限，并逐块读取完整文件保存到临时文件。
+
+### 思维链
+`max_part_size` 限制的是单个 multipart part 大小。Excel 文件 part 常见远大于 1KB。这里即使总文件上限是几 MB，也会在表单解析阶段被拒绝，导致入口不可用（与后续写库无关）。
+
+### 结论
+这是高优先级阻断缺陷：上传约束与业务上限冲突。
+
+### 建议
+将 file part 的 `max_part_size` 调整为与 `config.MAX_UPLOAD_MB` 一致或与仓库导入共享统一上传预检策略。
+
+### 确认点
+① 是否允许把 text 字段与文件字段区分开分别设置上限？② 该入口是否保留 1MB 级更细粒度的防过载保护。
+
+## #11 仓库导入/预检入口：`max_part_size=16KB` 同样过小，上传可复现失败
+
+### 背景
+仓库单据预览/应用路径的 `_multipart` 也对 file part 使用了固定 16KB 上限，远小于常规 `.xlsx` 文件体积。
+
+### 现状证据
+- `backend/app/api/maintenance_warehouse.py:130-134`：`max_files=1, max_fields=2/0, max_part_size=16 * 1024`。
+- 文件上限使用 `config.MAX_UPLOAD_MB`，明显与单 part 上限不一致。
+
+### 思维链
+该配置会导致真实导入文件在解析阶段失败（413 或格式错误），前端/后端均难以复现“偶发”，而是与文件实际体积相关的稳定失败。
+
+### 结论
+这是与 #10 同类的高可见度配置缺陷，应与业务上限统一。
+
+### 建议
+将 `max_part_size` 调整为可落地的实际上限，并复用同一套 upload 上限常量，避免同类缺陷再发。
+
+### 确认点
+① 预检与应用共用同配置可接受吗？② 是否需新增单测覆盖 `.xlsx` 大于 16KB 的解析场景。
+
 ## 实施顺序建议
 
 | 波次 | 项 | 理由 | 方案状态 |
