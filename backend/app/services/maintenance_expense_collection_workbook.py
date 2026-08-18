@@ -18,6 +18,7 @@ v1 明确不做（AB-3 裁剪）：氚云 BXD 逐条对账、凭证附件、进�
 """
 from __future__ import annotations
 
+import hashlib
 import io
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -29,6 +30,7 @@ from openpyxl.styles import Font, PatternFill
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import config
 from app.business_time import business_today
 from app.models.maintenance import FProjectExpense
 from app.models.maintenance_project import (
@@ -36,6 +38,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
 )
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.models.system import SysImportBatch
 
 PROTOCOL_VERSION = "expense-collection-v1"
 SHEET_EXPENSE = "04_报销订单"
@@ -68,6 +71,9 @@ class WorkbookError(ValueError):
 @dataclass(frozen=True)
 class ExpenseUpdate:
     raw_line_id: str
+    is_create: bool = False
+    bxd_no: str | None = None
+    line_no: int | None = None
     # 2026-08-17 全面放开：所有事实列可改后回传覆盖
     expense_date: date | None = None
     person: str | None = None
@@ -106,7 +112,8 @@ class WorkbookPlan:
         updates = sum(1 for op in self.collection_ops if op.operation == "UPDATE")
         voids = sum(1 for op in self.collection_ops if op.operation == "VOID")
         return {
-            "expense_updates": len(self.expense_updates),
+            "expense_creates": sum(item.is_create for item in self.expense_updates),
+            "expense_updates": sum(not item.is_create for item in self.expense_updates),
             "collection_creates": creates,
             "collection_updates": updates,
             "collection_voids": voids,
@@ -307,45 +314,28 @@ def validate_partial(db: Session, *, project_id: str, workbook) -> WorkbookPlan:
 
 def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
     id_col = len(_EXPENSE_HEADERS) + 1
+    contract_nos = {c.contract_no for c in _contracts(db, project_id)}
     updates: list[ExpenseUpdate] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(_text(v) == "" for v in row):
             continue
-        raw_line_id = _text(row[id_col - 1]) if len(row) >= id_col else ""
-        if not raw_line_id:
-            raise WorkbookError(
-                "expense_row_not_recognized",
-                f"第 {row_no} 行不是导出的报销行——报销单只能在源系统新增，"
-                "本表只改已有行的字段")
-        expense = db.execute(
-            select(FProjectExpense)
-            .where(FProjectExpense.raw_line_id == raw_line_id)
-        ).scalar_one_or_none()
-        if expense is None:
-            raise WorkbookError("expense_not_found",
-                                f"第 {row_no} 行的报销行已不存在，请重新下载")
-
-        # 2026-08-17 全面放开：读取所有事实列
         def _col(idx: int) -> str:
             return _text(row[idx]) if len(row) > idx else ""
 
+        bxd_no = _col(0) or None
         raw_date = _col(1)
-        expense_date = (
-            _date(raw_date, row_no=row_no, label="报销日期")
-            if raw_date else None
-        ) if raw_date else None
-        # 日期解析：由 _col 返回字符串，调用 _date 辅助
         dt = None
         if raw_date:
-            try:
-                dt = datetime.strptime(raw_date, "%Y-%m-%d").date()
-            except (ValueError, TypeError):
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S"):
                 try:
-                    dt = datetime.strptime(raw_date, "%Y/%m/%d").date()
+                    dt = datetime.strptime(raw_date, fmt).date()
+                    break
                 except (ValueError, TypeError):
-                    raise WorkbookError(
-                        "invalid_expense_date",
-                        f"第 {row_no} 行报销日期 {raw_date!r} 格式无效（需 YYYY-MM-DD）")
+                    continue
+            if dt is None:
+                raise WorkbookError(
+                    "invalid_expense_date",
+                    f"第 {row_no} 行报销日期 {raw_date!r} 格式无效（需 YYYY-MM-DD）")
 
         person = _col(2) or None
         expense_type = _col(3) or None
@@ -364,11 +354,39 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             ex_tax = _decimal(raw_amount, label="未税金额", row_no=row_no)
             inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if expense.amount_ex_tax is not None and ex_tax == expense.amount_ex_tax:
-                ex_tax = inc_tax = None
+        raw_line_id = _text(row[id_col - 1]) if len(row) >= id_col else ""
+        is_create = False
+        if not raw_line_id:
+            if not contract_no or contract_no not in contract_nos:
+                raise WorkbookError(
+                    "contract_not_found",
+                    f"第 {row_no} 行合同编号 {contract_no or ''!r} 不属于本项目")
+            if dt is None:
+                raise WorkbookError("missing_expense_date",
+                                    f"第 {row_no} 行手工新增报销必须填写报销日期")
+            if ex_tax is None:
+                raise WorkbookError("missing_amount",
+                                    f"第 {row_no} 行手工新增报销必须填写未税金额")
+            basis = "|".join([
+                contract_no, bxd_no or "", dt.isoformat(), str(ex_tax),
+                reason or "", person or "",
+            ])
+            raw_line_id = f"EXP:{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:36]}#0"
+            expense = db.scalar(select(FProjectExpense).where(
+                FProjectExpense.raw_line_id == raw_line_id))
+            is_create = expense is None
+        else:
+            expense = db.scalar(select(FProjectExpense).where(
+                FProjectExpense.raw_line_id == raw_line_id))
+            if expense is None:
+                raise WorkbookError("expense_not_found",
+                                    f"第 {row_no} 行的报销行已不存在，请重新下载")
+
+        if not is_create and expense.amount_ex_tax is not None and ex_tax == expense.amount_ex_tax:
+            ex_tax = inc_tax = None
 
         # 2026-08-17 全面放开：判断任一字段是否有变化
-        changed = (
+        changed = is_create or (
             ex_tax is not None
             or remark != (expense.remark or None)
             or (dt is not None and dt != expense.expense_date)
@@ -383,7 +401,8 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             continue
 
         updates.append(ExpenseUpdate(
-            raw_line_id=raw_line_id,
+            raw_line_id=raw_line_id, is_create=is_create,
+            bxd_no=bxd_no, line_no=None,
             expense_date=dt,
             person=person,
             expense_type=expense_type,
@@ -450,11 +469,54 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
 def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
           import_batch_id: str, commit: bool = True) -> dict:
     """整份事务应用。上传即覆盖——同合同同月份的 CREATE 覆盖既有累计额。"""
+    manual_batch = None
+    if any(update.is_create for update in plan.expense_updates):
+        manual_batch = SysImportBatch(
+            filename="manual-expense-workbook.xlsx",
+            file_type="maintenance",
+            file_hash=hashlib.sha256(
+                f"manual-expense:{import_batch_id}".encode("utf-8")
+            ).hexdigest(),
+            uploaded_by=operated_by,
+            rows_total=sum(update.is_create for update in plan.expense_updates),
+            rows_inserted=sum(update.is_create for update in plan.expense_updates),
+            status="success",
+            report_json={"source": "workbook_manual_create", "project_id": plan.project_id},
+        )
+        db.add(manual_batch)
+        db.flush()
     for update in plan.expense_updates:
-        expense = db.execute(
-            select(FProjectExpense)
-            .where(FProjectExpense.raw_line_id == update.raw_line_id)
-        ).scalar_one()
+        normalized_status = (
+            config.MAINT_EXPENSE_ACTIVE_STATUS
+            if update.data_status == "已生效"
+            else update.data_status
+        )
+        expense = db.scalar(select(FProjectExpense).where(
+            FProjectExpense.raw_line_id == update.raw_line_id))
+        if expense is None and update.is_create:
+            expense = FProjectExpense(
+                raw_line_id=update.raw_line_id,
+                bxd_no=update.bxd_no,
+                line_no=update.line_no,
+                data_status=normalized_status or config.MAINT_EXPENSE_ACTIVE_STATUS,
+                expense_date=update.expense_date,
+                person=update.person,
+                expense_type=update.expense_type,
+                fee_category=update.fee_category,
+                reason=update.reason,
+                linked_sales_order_no=update.contract_no,
+                amount=update.amount_ex_tax,
+                amount_ex_tax=update.amount_ex_tax,
+                amount_inc_tax=update.amount_inc_tax,
+                tax_basis="ex",
+                tax_rate_used=TAX_RATE,
+                remark=update.remark,
+                import_batch_id=manual_batch.id,
+            )
+            db.add(expense)
+            continue
+        if expense is None:
+            raise WorkbookError("expense_not_found", "报销行已不存在，请重新下载")
         # 2026-08-17 全面放开：所有事实列可回传覆盖
         if update.expense_date is not None and update.expense_date != expense.expense_date:
             expense.expense_date = update.expense_date
@@ -473,8 +535,8 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             expense.amount_ex_tax = update.amount_ex_tax
             expense.amount_inc_tax = update.amount_inc_tax
             expense.tax_basis = "ex"
-        if update.data_status is not None and update.data_status != (expense.data_status or ""):
-            expense.data_status = update.data_status
+        if normalized_status is not None and normalized_status != (expense.data_status or ""):
+            expense.data_status = normalized_status
         expense.remark = update.remark
 
     for op in plan.collection_ops:

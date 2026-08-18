@@ -87,9 +87,10 @@ def _workbook_filename(
         .where(MaintenanceProjectContract.project_id == project_id)
         .order_by(MaintenanceProjectContract.effective_from)
     ).scalars())
-    xsdd = contracts[0].contract_no if contracts else (
-        project.project_code if project else project_id
-    )
+    project_xsdds = master.project_sales_order_nos(db, project_id)
+    xsdd = (contracts[0].contract_no if contracts else
+            project_xsdds[0] if project_xsdds else
+            project.project_code if project else project_id)
     name = _safe_filename_part(project.display_name) if project else _safe_filename_part(project_id)
     form = "总表" if len(wanted) == len(master.ALL_SHEETS) else (
         wanted[0] if len(wanted) == 1 else "多表单"
@@ -187,8 +188,7 @@ def list_project_expense_rows(
     页面只**展示**——改金额/备注仍只能走「下载 → 改 → 上传覆盖」（#40）。
     """
     response.headers["Cache-Control"] = "no-store"
-    contracts = ec._contracts(db, project_id)
-    rows = ec._expenses(db, [c.contract_no for c in contracts])
+    rows = ec._expenses(db, master.project_sales_order_nos(db, project_id))
     total = len(rows)
     window = rows[(page - 1) * page_size: page * page_size]
     return {
@@ -232,8 +232,18 @@ def download_project_master(
               if sheets else master.ALL_SHEETS)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
-            content = master.build_project_master_v2(db, project_id=project_id)
-            wanted = master.V2_ALL_SHEETS
+            v2_names = {
+                master.SHEET_BASICS: master.V2_SHEET_OVERVIEW,
+                master.SHEET_OVERVIEW: master.V2_SHEET_PLAN,
+                master.SHEET_PARTS: master.V2_SHEET_PARTS,
+                master.SHEET_EXPENSE: master.V2_SHEET_EXPENSE,
+                master.SHEET_COLLECTION: master.V2_SHEET_RECEIPTS,
+                master.SHEET_SITE: master.V2_SHEET_SITE,
+            }
+            v2_wanted = tuple(v2_names.get(name, name) for name in wanted)
+            content = master.build_project_master_v2(
+                db, project_id=project_id, sheets=v2_wanted,
+            )
         else:
             content = master.build_project_master(db, project_id=project_id,
                                                   sheets=wanted)
