@@ -737,6 +737,31 @@ def add_line(
     line_id = _uid()
     price = snapshot["price"]
     pool = snapshot["pool"]
+    # 2026-08-18：行加入即冻结筛查快照（与原子提交一致）——旧草稿购物车加行
+    # 也生成完整 screening_json，满足 guard_replenishment_atomic_submission 的提交检查
+    as_of = price["as_of"]
+    screening_result = replenishment_screening.screen(
+        db, part_ids=[part.id], as_of=as_of
+    ).get(part.id)
+    latest_sales = replenishment_screening.latest_sales_history(
+        db, part_ids=[part.id], as_of=as_of
+    ).get(part.id)
+    floors = replenishment_screening.pool_floor_prices(
+        db, [pool["group_id"]] if pool["group_id"] else []
+    )
+    screening_snapshot = _json_value({
+        "schema_version": 1,
+        "as_of": as_of,
+        "lookback_days": PRICE_WINDOW_DAYS,
+        "checks": screening_result.as_dict()["checks"] if screening_result else [],
+        "anomaly_count": sum(
+            not check["passed"] for check in (
+                screening_result.as_dict()["checks"] if screening_result else []
+            )
+        ),
+        "latest_sales": latest_sales or {},
+        "pool_floor_ex_tax": floors.get(pool["group_id"]),
+    })
     line = ReplenishmentApplicationLine(
         line_id=line_id,
         request_line_id=_uid(),
@@ -757,6 +782,7 @@ def add_line(
         price_as_of=price["as_of"],
         purchase_stats_json=price["purchase"],
         sales_stats_json=price["sales"],
+        screening_json=screening_snapshot,
         evidence_digest=price["digest"],
     )
     db.add(line)

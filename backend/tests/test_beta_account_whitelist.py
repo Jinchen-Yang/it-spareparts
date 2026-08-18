@@ -110,11 +110,13 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
     settings = get_settings()
     original_maintenance = settings.maintenance_beta_enabled
     original_replenishment = settings.replenishment_beta_enabled
+    original_boss = settings.maintenance_boss_dashboard_enabled
     try:
         # conftest 为业务测试默认开 Beta；本测试验证「未授权前关闭 → 授权后开启」，
         # 需先把初始态压回关闭（发布默认态）再走流程。
         settings.maintenance_beta_enabled = False
         settings.replenishment_beta_enabled = False
+        settings.maintenance_boss_dashboard_enabled = False
         operator_client, _ = _login(operator.username)
         before_client, before_login = _login(pilot.username)
         assert before_login["beta_features"] == {
@@ -178,6 +180,7 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
     finally:
         settings.maintenance_beta_enabled = original_maintenance
         settings.replenishment_beta_enabled = original_replenishment
+        settings.maintenance_boss_dashboard_enabled = original_boss
 
 
 def test_named_admin_cannot_add_self_to_beta_allowlist(db):
@@ -212,9 +215,11 @@ def test_feature_snapshot_requires_explicit_page_bits_even_for_admin():
     settings = get_settings()
     original_maintenance = settings.maintenance_beta_enabled
     original_replenishment = settings.replenishment_beta_enabled
+    original_boss = settings.maintenance_boss_dashboard_enabled
     try:
         settings.maintenance_beta_enabled = True
         settings.replenishment_beta_enabled = True
+        settings.maintenance_boss_dashboard_enabled = False
         assert beta_feature_availability(
             role="admin",
             permission_map=graph,
@@ -243,6 +248,7 @@ def test_feature_snapshot_requires_explicit_page_bits_even_for_admin():
     finally:
         settings.maintenance_beta_enabled = original_maintenance
         settings.replenishment_beta_enabled = original_replenishment
+        settings.maintenance_boss_dashboard_enabled = original_boss
 
 
 def test_replenishment_allowlist_cannot_be_bypassed_by_legacy_rbac_switch(

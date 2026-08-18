@@ -127,7 +127,9 @@ class AtomicLineWrite(StrictModel):
 class ApplicationCreate(StrictModel):
     client_request_id: str = Field(min_length=8, max_length=128)
     project_id: str = Field(min_length=1, max_length=36)
-    request_note: str | None = Field(None, max_length=4000)
+    # 2026-08-18：不在 pydantic 层限长——超长文本反射进 422 detail 泄露敏感内容；
+    # 长度校验交给业务层 _clean_optional（400，不反射原文）
+    request_note: str | None = None
     lines: list[AtomicLineWrite] = Field(min_length=1, max_length=200)
 
 
