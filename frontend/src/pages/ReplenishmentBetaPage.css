@@ -2,6 +2,49 @@
   padding-bottom: 32px;
 }
 
+/* 2026-08-18 左右布局：左=选购 PN（宽），右=购物车+记录（窄，固定操作区） */
+.replenishment-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+  grid-template-rows: auto auto;
+  gap: 16px;
+  align-items: start;
+}
+
+/* ① 新建补库申请卡 → 右栏顶部 */
+.replenishment-cart-card {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* ② 选购 PN 卡 → 左栏（跨两行撑满高度） */
+.replenishment-catalog-col {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+
+/* ③ 补库申请记录卡 → 右栏底部 */
+.replenishment-record-col {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+/* 购物车右栏：项目/备注在一行收窄 */
+.replenishment-cart-head {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.replenishment-cart-head .ant-select,
+.replenishment-cart-head .ant-input {
+  width: 100% !important;
+}
+
+/* 购物车行更紧凑（右栏窄，行内数量/备注/移除竖排） */
+.replenishment-cart-line .ant-row {
+  row-gap: 6px;
+}
+
 .replenishment-catalog-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -131,6 +174,12 @@
 .is-current-application,
 .replenishment-beta-page .ant-list-item {
   cursor: pointer;
+}
+
+@media (max-width: 1100px) {
+  .replenishment-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {

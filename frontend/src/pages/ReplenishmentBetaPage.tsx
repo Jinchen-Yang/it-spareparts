@@ -700,6 +700,7 @@ export default function ReplenishmentBetaPage() {
         )}
       />
 
+      <div className="replenishment-layout">
       {/* ① 新建补库申请：决断层（选项目 → 组明细 → 一次性提交） */}
       <Card
         className="replenishment-cart-card"
@@ -726,12 +727,11 @@ export default function ReplenishmentBetaPage() {
           ) : (
             <>
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <Space wrap>
+                <div className="replenishment-cart-head">
                   <Select
                     showSearch
                     value={selectedProjectId || undefined}
                     placeholder="选择维保项目（必选）"
-                    style={{ width: 360 }}
                     optionFilterProp="label"
                     options={projects.map((project) => ({
                       value: project.project_id,
@@ -745,11 +745,10 @@ export default function ReplenishmentBetaPage() {
                     disabled={working}
                     maxLength={4000}
                     autoSize={{ minRows: 1, maxRows: 4 }}
-                    style={{ width: 420 }}
                     placeholder="整单备注（选填）"
                     onChange={(event) => setRequestNote(event.target.value)}
                   />
-                </Space>
+                </div>
 
                 <div className="replenishment-cart-lines">
                   {draftLines.map((line) => (
@@ -863,11 +862,11 @@ export default function ReplenishmentBetaPage() {
         </Spin>
       </Card>
 
-      {/* ② 选购 PN */}
+      {/* ② 选购 PN（左栏） */}
       <Card
+        className="replenishment-catalog-col"
         title={<Space><SearchOutlined />选购 PN</Space>}
         extra={<Text type="secondary">没有所属池或半年价格的 PN 仍会完整显示</Text>}
-        style={{ marginTop: 16 }}
       >
         <Input.Search
           allowClear
@@ -902,10 +901,10 @@ export default function ReplenishmentBetaPage() {
         )}
       </Card>
 
-      {/* ③ 最近提交 / 历史申请 */}
+      {/* ③ 最近提交 / 历史申请（右栏） */}
       <Card
+        className="replenishment-record-col"
         title={<Space><Badge count={applicationTotal} color="#d9d9d9" />补库申请记录</Space>}
-        style={{ marginTop: 16 }}
       >
         {current ? (
           <>
@@ -1009,6 +1008,8 @@ export default function ReplenishmentBetaPage() {
           <Empty description="还没有提交记录——填好项目与明细后提交第一份申请" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         )}
       </Card>
+
+      </div>
 
       {/* 口径边界：依据层，页尾小字 */}
       <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
