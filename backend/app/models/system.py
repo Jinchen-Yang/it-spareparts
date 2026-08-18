@@ -53,6 +53,8 @@ class SysUser(Base):
     locked_until: Mapped[datetime | None] = mapped_column(TZDateTime)
     # token 版本：改密/停用/改权限时递增 → 旧 token 的 tv 不匹配即失效（即时吊销）
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 软删除：删除账号置 is_active=false + deleted_at=now；历史外键引用保留
+    deleted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 

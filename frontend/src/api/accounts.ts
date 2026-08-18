@@ -134,6 +134,8 @@ export const resetPassword = (username: string, password: string) =>
   api.put(`/accounts/${username}/password`, { password });
 export const setAccountActive = (username: string, is_active: boolean) =>
   api.put(`/accounts/${username}/active`, { is_active });
+export const deleteAccount = (username: string) =>
+  api.delete<{ username: string; deleted: boolean }>(`/accounts/${username}`);
 export const getActivity = (username: string) => api.get(`/accounts/${username}/activity`);
 export const bulkAccounts = (body: BulkRequest) =>
   api.post<BulkPreview | BulkResult>("/accounts/bulk", body);
