@@ -47,6 +47,7 @@ import {
 import type { MaintenanceProject } from "../../api/maintenanceProjects";
 import {
   assignMaintenanceSourceOrders,
+  autoAssignMaintenanceSourceOrders,
   listMaintenanceSourceOrders,
 } from "../../api/maintenanceSourceAssignments";
 import type { MaintenanceSourceOrderRow } from "../../api/maintenanceSourceAssignments";
@@ -869,6 +870,24 @@ function BasicsTab({
     }
   };
 
+  const autoAssign = async () => {
+    setBusy(true);
+    try {
+      const { data } = await autoAssignMaintenanceSourceOrders();
+      const r = data.result;
+      message.success(
+        `自动挂靠完成：${r.assigned_orders} 张单挂到 ${r.matched_projects} 个项目` +
+          (r.skipped_groups ? `；${r.skipped_groups} 个对不上项目名已跳过` : ""),
+      );
+      await loadCandidates();
+      onAssigned();
+    } catch (err) {
+      message.error(readError(err, "自动挂靠失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <WorkbookRoundTrip
@@ -928,10 +947,18 @@ function BasicsTab({
       </Descriptions>
 
       {canAssign ? (
-        <Card size="small" title="归属挂靠（判定依据＝XSDD 销售订单）">
+        <Card
+          size="small"
+          title="归属挂靠（判定依据＝XSDD 销售订单）"
+          extra={(
+            <Button size="small" type="primary" ghost loading={busy} onClick={() => void autoAssign()}>
+              自动匹配挂靠
+            </Button>
+          )}
+        >
           <Text type="secondary" style={{ fontSize: 11.5 }}>
-            同一销售订单＝同一项目；对不上任何销售订单的单子才独立成项目。
-            标「同 XSDD」的是命中本项目销售单的候选，已排在最前。
+            同一销售订单＝同一项目。点「自动匹配挂靠」会按单据自带的项目名自动挂到已有项目，
+            对不上的才留在下面人工确认；标「同 XSDD」的是命中本项目销售单的候选，已排最前。
           </Text>
           <Table<MaintenanceSourceOrderRow>
             rowKey="raw_order_id"

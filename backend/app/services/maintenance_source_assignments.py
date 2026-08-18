@@ -577,3 +577,123 @@ def unassign_source_orders(
         source_order_ids=set(source_ids),
     )
     return [assignment_dict(row) for row in archived]
+
+
+def auto_assign_unassigned(
+    db: Session,
+    *,
+    operated_by: str,
+    user_ctx: UserContext,
+) -> dict:
+    """自动补挂靠（2026-08-18，用户提出）：
+
+    未归属维保订单用自身 project_std（去「预交付-」前缀）精确匹配已有项目主档
+    display_name，命中唯一项目就自动建挂靠；无匹配/匹配到多个项目则跳过，
+    留在挂靠列表人工处理。返回本次执行统计。
+    """
+    _require_full_scope(user_ctx)
+    clean_reason = "自动补挂靠：project_std 精确匹配项目主档"
+
+    # 1. 未归属单（assignment_id IS NULL 且未删）
+    unassigned_stmt = (
+        select(FMaintenanceOrder)
+        .outerjoin(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .where(MaintenanceSourceOrderAssignment.assignment_id.is_(None))
+    )
+    unassigned = list(
+        db.scalars(active_beta_maintenance_orders(unassigned_stmt, FMaintenanceOrder))
+    )
+    if not unassigned:
+        return {"assigned_orders": 0, "matched_projects": 0,
+                "skipped_groups": 0, "skipped_ambiguous": 0}
+
+    # 2. 按归一化项目名（project_std 去预交付前缀）分组
+    grouped: dict[str, list[FMaintenanceOrder]] = {}
+    for order in unassigned:
+        key = project_names.strip_pre_delivery(order.project_std or "") or (
+            project_names.strip_pre_delivery(order.project_raw or "") or ""
+        )
+        if not key:
+            continue
+        grouped.setdefault(key, []).append(order)
+
+    # 3. 每组精确匹配项目主档（display_name 全等）；唯一才挂
+    assigned_orders = 0
+    matched_projects: set[str] = set()
+    skipped_groups = 0
+    skipped_ambiguous = 0
+    for project_name, orders in grouped.items():
+        projects = list(
+            db.scalars(
+                select(MaintenanceProject).where(
+                    MaintenanceProject.display_name == project_name,
+                    MaintenanceProject.is_active.is_(True),
+                )
+            )
+        )
+        if not projects:
+            skipped_groups += 1
+            continue
+        if len(projects) > 1:
+            # display_name 重复：不能确定挂哪个，跳过（保守）
+            skipped_ambiguous += 1
+            continue
+        project = projects[0]
+        for order in orders:
+            existing = db.scalar(
+                select(MaintenanceSourceOrderAssignment).where(
+                    MaintenanceSourceOrderAssignment.source_order_id
+                    == order.raw_order_id,
+                    MaintenanceSourceOrderAssignment.is_active.is_(True),
+                )
+            )
+            if existing is not None:
+                continue
+            assignment = MaintenanceSourceOrderAssignment(
+                assignment_id=str(uuid4()),
+                source_order_id=order.raw_order_id,
+                project_id=project.project_id,
+                is_active=True,
+                version=1,
+                created_by=operated_by,
+            )
+            db.add(assignment)
+            db.flush()
+            db.add(
+                MaintenanceProjectAuditLog(
+                    project_id=project.project_id,
+                    entity_type="source_order_assignment",
+                    entity_id=assignment.assignment_id,
+                    action="assign",
+                    before_json=None,
+                    after_json=assignment_dict(assignment),
+                    reason=clean_reason,
+                    operated_by=operated_by,
+                )
+            )
+            assigned_orders += 1
+            matched_projects.add(project.project_id)
+    db.flush()
+    # 同步仓配候选投影（与 assign_source_orders 一致）
+    if assigned_orders:
+        from app.services import maintenance_warehouse
+
+        maintenance_warehouse.reconcile_project_assignment_links(
+            db,
+            operated_by=operated_by,
+            reason=clean_reason,
+            source_order_ids=set(),
+        )
+    return {
+        "assigned_orders": assigned_orders,
+        "matched_projects": len(matched_projects),
+        "skipped_groups": skipped_groups,
+        "skipped_ambiguous": skipped_ambiguous,
+    }

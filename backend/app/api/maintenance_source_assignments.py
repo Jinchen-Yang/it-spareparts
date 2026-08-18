@@ -186,3 +186,40 @@ def unassign_source_orders(
     except Exception:
         db.rollback()
         raise
+
+
+@router.post("/auto-assign")
+def auto_assign_unassigned_orders(
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action("action_maintenance_project_manage", require_data="data_profit")
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """自动补挂靠：未归属维保订单按 project_std 精确匹配已有项目主档并挂靠。"""
+    operated_by = _real_operator(db, ident)
+    try:
+        payload = assignments.auto_assign_unassigned(
+            db,
+            operated_by=operated_by,
+            user_ctx=ctx,
+        )
+        db.commit()
+        record_access_log(
+            ctx,
+            "auto_assign_source_orders",
+            "maintenance_project",
+            {"result": payload},
+        )
+        return {"result": payload}
+    except assignments.SourceAssignmentError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except assignments.SourceAssignmentPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
