@@ -414,10 +414,10 @@ describe("项目面板", () => {
     // 分类彩标：direct=绿标、manual=紫标、none=红标
     const directTag = screen.getByText("直接采购价").closest(".ant-tag");
     expect(directTag?.className).toContain("green");
-    const manualTag = screen.getByText("人工回填").closest(".ant-tag");
-    // 图例里也有「人工回填」文案，取成本来源列里的那个（第二个）
+    // 图例与成本来源列各有一个「人工回填」Tag，两个都应为紫色
     const manualTags = screen.getAllByText("人工回填").map((n) => n.closest(".ant-tag"));
-    expect(manualTags.some((t) => t?.className.includes("purple"))).toBe(true);
+    expect(manualTags.length).toBeGreaterThanOrEqual(2);
+    expect(manualTags.every((t) => t?.className.includes("purple"))).toBe(true);
     const noneTag = screen.getByText("暂无成本").closest(".ant-tag");
     expect(noneTag?.className).toContain("red");
   });
