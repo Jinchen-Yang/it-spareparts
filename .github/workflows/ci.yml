@@ -5,9 +5,48 @@ on:
     branches: [main]
   pull_request:
 
+# 同一分支的新 push 自动取消在跑的旧 run（2026-08-19 教训：无此配置时，
+# 被取代的 75 分钟后端套件继续占着自托管 runner，新 run 只能排队）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # PR 分层（2026-08-19）：只改 frontend/ 的 PR 不再陪跑 75 分钟的后端全量套件；
+  # 任何 frontend/ 之外的改动（backend/、.github/、根目录文件）都算后端相关。
+  # push 到 main 永远全量。跳过的 job 在 GitHub 合并门禁里按通过计。
+  changes:
+    name: 识别改动范围
+    runs-on: [self-hosted, Linux, X64, cloudlay-ts]
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          echo "本次 PR 改动文件："
+          echo "$changed"
+          backend=false
+          frontend=false
+          if echo "$changed" | grep -q '^frontend/'; then frontend=true; fi
+          if echo "$changed" | grep -qv '^frontend/'; then backend=true; fi
+          if [ -z "$changed" ]; then backend=true; frontend=true; fi
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+
   backend:
     name: 后端测试（pytest + 迁移链验证）
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: [self-hosted, Linux, X64, cloudlay-ts]
     services:
       postgres:
@@ -18,11 +57,14 @@ jobs:
           POSTGRES_DB: spareparts_test
         ports:
           - 5432/tcp
+        # max_locks_per_transaction：xdist 多 worker 并行跑迁移 + 每用例
+        # TRUNCATE ~190 表 CASCADE，默认 64 会把共享锁表打爆（out of shared memory）。
         options: >-
           --health-cmd "pg_isready -U spareparts"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          -c max_locks_per_transaction=512
     steps:
       - uses: actions/checkout@v7
       - name: 校验 self-hosted uv 版本
@@ -45,13 +87,15 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
         run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
+      # xdist 并行（2026-08-19）：测试隔离按进程建库建目录（pid+token），
+      # worker 间天然隔离，-n auto 按 runner CPU 核数开 worker。
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
         if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
         timeout-minutes: 75
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
-        run: uv run --extra dev pytest -q
+        run: uv run --extra dev pytest -q -n auto
       - name: 扫描后端生产依赖漏洞
         working-directory: backend
         run: |
@@ -60,6 +104,8 @@ jobs:
 
   frontend:
     name: 前端类型检查 + 构建
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: [self-hosted, Linux, X64, cloudlay-ts]
     steps:
       - uses: actions/checkout@v7

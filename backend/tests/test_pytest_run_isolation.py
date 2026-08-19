@@ -869,7 +869,9 @@ def test_raw_base_rejects_tmp_itself_and_symlink_or_file_ancestors(tmp_path):
         validate_raw_base(file_ancestor / "child")
 
 
-def test_pytest_worker_environment_is_rejected_before_resources(tmp_path):
+def test_pytest_worker_environment_is_accepted_with_isolated_resources(tmp_path):
+    # xdist 自 2026-08-19 起放行：隔离资源按进程建（数据库 pid+token 命名、
+    # raw 目录同理），每个 worker 独立进程 ⇒ 独立数据库 + 独立 raw 目录。
     raw_base = tmp_path / "worker-raw"
     env = os.environ.copy()
     env.update(
@@ -886,9 +888,7 @@ def test_pytest_worker_environment_is_rejected_before_resources(tmp_path):
         text=True,
         timeout=SUBPROCESS_TIMEOUT_SECONDS,
     )
-    assert completed.returncode != 0
-    assert "xdist" in (completed.stdout + completed.stderr).lower()
-    assert not raw_base.exists()
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -900,7 +900,7 @@ def test_pytest_worker_environment_is_rejected_before_resources(tmp_path):
         ["--numprocesses=2"],
     ],
 )
-def test_xdist_cli_is_explicitly_rejected_before_resources(tmp_path, xdist_args):
+def test_xdist_cli_is_accepted_with_isolated_resources(tmp_path, xdist_args):
     raw_base = tmp_path / "xdist-cli-raw"
     env = os.environ.copy()
     env["PYTEST_RAW_FILE_BASE_DIR"] = str(raw_base)
@@ -913,9 +913,7 @@ def test_xdist_cli_is_explicitly_rejected_before_resources(tmp_path, xdist_args)
         timeout=SUBPROCESS_TIMEOUT_SECONDS,
     )
     combined = completed.stdout + completed.stderr
-    assert completed.returncode != 0
-    assert "pytest-xdist is not supported" in combined
-    assert not raw_base.exists()
+    assert completed.returncode == 0, combined
 
 
 def test_probe_state_contains_no_url_or_secret_and_is_consumed(tmp_path):
