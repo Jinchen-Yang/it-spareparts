@@ -243,3 +243,26 @@ def test_dsn_gate(db):
                      {"action_agent_dsn_ro": True, "own_customers_only": False})
     # 授权但部署未配置 DSH_RO_DSN → 501
     assert c.get("/api/agent/dsn", headers=granted).status_code == 501
+
+
+# ---------- P6：LLM 配置下发端点 ----------
+
+def test_dsh_llm_config_access(monkeypatch):
+    from app import config as _cfg
+    monkeypatch.setattr(_cfg.get_settings(), "dsh_config_token", "m2m-token")
+    monkeypatch.setattr(_cfg.get_settings(), "llm_api_key", "sk-x")
+    monkeypatch.setattr(_cfg.get_settings(), "llm_base_url", "https://llm.local/v1")
+    monkeypatch.setattr(_cfg.get_settings(), "llm_model", "m1")
+    # 机器密钥放行
+    r = c.get("/api/system-settings/dsh-llm-config",
+              headers={"x-dsh-config-token": "m2m-token"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider_id"] == "enterprise-llm"
+    assert body["default_model"] == "m1"
+    assert body["base_url"] == "https://llm.local/v1"
+    assert body["api_key"] == "sk-x" or body["api_key_env"] == "DSH_ENTERPRISE_LLM_KEY"
+    # 错误密钥 403；无密钥无 Bearer 403
+    assert c.get("/api/system-settings/dsh-llm-config",
+                 headers={"x-dsh-config-token": "bad"}).status_code == 403
+    assert c.get("/api/system-settings/dsh-llm-config").status_code == 403

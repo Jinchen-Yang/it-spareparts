@@ -1,0 +1,1 @@
+import{z as r}from"./index-DNpS18Yh.js";async function s(e,a={}){const{data:t}=await r.get("/parts/search",{params:{q:e?.trim()||void 0,page_size:a.pageSize??20,...a.browse?{browse:!0}:{},...a.filters||{}}});return t}async function n(e){const{data:a}=await r.get("/parts/overview",{params:e});return a}export{n as f,s as u};

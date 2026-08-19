@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.1.0-rc.7"
+  },
+  "_npx": {
+    "packages": [
+      "@deepseek-ai/dsh"
+    ]
+  }
+}

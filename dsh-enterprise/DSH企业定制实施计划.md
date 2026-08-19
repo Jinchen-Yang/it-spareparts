@@ -159,3 +159,19 @@
 - `/agent/sql` 只读端点是新攻击面 → 只读事务 + 白名单语句类型 + 行数/超时限制 + 复用 `record_access_log` 审计
 - iframe 内 IT 前端改动（base 路径、CSP、cookie SameSite）需联调 → P5 单列验证
 - 多用户共享拓扑（若选）下 host 内存 token 的会话隔离需按 DSH session id 严格键控，P2 设计时按共享标准做（本机拓扑天然兼容）
+
+---
+
+## 6. 执行状态（2026-08-19 晚）
+
+| 阶段 | 状态 | 证据 |
+|---|---|---|
+| P1 企业 preset it-data | ✅ | `standingKeyFor` 挂载校验通过 |
+| P2 itdata 插件骨架+登录桥+反代 | ✅ | 3081 实例 RPC 全链路（含错误路径透传） |
+| P3 /agent/sql\|schema\|call + 3 工具 | ✅ | 后端 E2E 16/16 + 工具层 10/10 |
+| P4 白名单脚本+DSN+管理面板 | ✅ | 后端 28/28 + 工具层 18/18 + 真实 dsh 进程 RPC 验证 |
+| P5 面板 iframe 嵌入 | ✅ | /itd/ SPA+assets+fallback+反代登录全通（prefix 无尾斜杠坑已修） |
+| P6 模型锁定+远程下发 | ✅ | 隔离 DSH_HOME 验证 settings 被锁定（llm-pi-ai 单 provider + agent-default-model 固定）+ 组合树 disable 生效 |
+| P7 收尾 | ✅ | 部署手册完成、测试实例与临时库清理 |
+
+**遗留（用户侧动作）**：重启本机 dsh web（3080）加载全部定制；8000 dev 后端重启以暴露新端点。
