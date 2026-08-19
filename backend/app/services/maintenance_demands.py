@@ -950,6 +950,32 @@ def void_fast(
         raise MaintenanceDemandError("作废理由无效")
     source_order_ids = _validate_source_order_ids(source_order_ids)
 
+    request_digest = _request_digest(
+        source_order_ids=source_order_ids,
+        reason=normalized_reason,
+        operated_by=operated_by,
+    )
+    if idempotency_key:
+        # 幂等重放（P2，Codex review #272）：同键同请求 → 返回首次结果；
+        # 同键异请求 → 冲突。与 create_delete_intent 共用每键串行锁。
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"maintenance-demand-delete-intent:{idempotency_key}"},
+        )
+        existing = db.scalar(
+            select(MaintenanceDemandDeleteIntent).where(
+                MaintenanceDemandDeleteIntent.idempotency_key == idempotency_key
+            )
+        )
+        if existing is not None:
+            if existing.request_digest != request_digest:
+                raise DeleteIntentConflict("幂等键已被另一份作废请求使用")
+            replay = dict(existing.result_json or {})
+            replay.setdefault("intent_id", existing.intent_id)
+            replay.setdefault("status", existing.status)
+            replay["replayed"] = True
+            return replay
+
     db.execute(
         text("SELECT pg_advisory_xact_lock(:k)"),
         {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
@@ -987,11 +1013,6 @@ def void_fast(
 
     # 同事务落一条已执行的 intent：墓碑 FK（delete_intent_id）与既有审计链不变。
     idem = idempotency_key or f"void-fast:{uuid4()}"
-    request_digest = _request_digest(
-        source_order_ids=source_order_ids,
-        reason=normalized_reason,
-        operated_by=operated_by,
-    )
     intent = MaintenanceDemandDeleteIntent(
         intent_id=str(uuid4()),
         idempotency_key=idem,

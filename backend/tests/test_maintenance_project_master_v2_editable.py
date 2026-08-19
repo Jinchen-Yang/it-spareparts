@@ -32,11 +32,13 @@ from app.services import maintenance_project_master_workbook as master
 def _make_project_with_line(db, *, qty=Decimal("2"), unit_cost=Decimal("100.00"),
                             cost_source="direct", return_qty=Decimal("0"),
                             source_line_id=None):
+    tag = uuid.uuid4().hex[:8]
     project = MaintenanceProject(
-        project_id=str(uuid.uuid4()), project_code="EDIT",
+        project_id=str(uuid.uuid4()), project_code=f"EDIT-{tag}",
         display_name="可编辑测试", lifecycle_status="ongoing",
     )
-    part = DimPart(pn_std="EDIT-PN-001", description="可编辑备件")
+    # PN 查找走 upper() 归一，夹具须用大写 hex 避免大小写错配
+    part = DimPart(pn_std=f"EDIT-PN-{tag.upper()}", description="可编辑备件")
     db.add_all([project, part])
     db.flush()
     db.add(MaintenanceProjectContract(
@@ -566,3 +568,104 @@ def test_search_include_voided_view(db):
                  if item["source_order_id"] == order.raw_order_id)
     assert entry["is_voided"] is True
     assert entry["order_no"] == order.order_no
+
+
+def test_review_p2_void_fast_idempotent_replay(db):
+    """同幂等键同请求重放 → 返回首次结果；同键异请求 → 冲突。"""
+    import pytest
+    from app.services import maintenance_demands
+
+    _project, _part, order, _line = _make_project_with_line(db)
+    first = maintenance_demands.void_fast(
+        db, source_order_ids=[order.raw_order_id],
+        reason="重放测试", operated_by="tester", idempotency_key="replay-key-01")
+    db.commit()
+    replay = maintenance_demands.void_fast(
+        db, source_order_ids=[order.raw_order_id],
+        reason="重放测试", operated_by="tester", idempotency_key="replay-key-01")
+    assert replay["replayed"] is True
+    assert replay["voided"] == first["voided"] == 1
+    with pytest.raises(maintenance_demands.DeleteIntentConflict):
+        maintenance_demands.void_fast(
+            db, source_order_ids=[order.raw_order_id],
+            reason="不同的请求", operated_by="tester", idempotency_key="replay-key-01")
+
+
+def test_review_p1_cross_project_line_is_rejected(db):
+    """拿别项目的实体ID 在本项目入口上传 → line_not_in_project 拒绝。"""
+    import pytest
+    from app.services.maintenance_expense_collection_workbook import WorkbookError
+
+    project_a, _p, _o, line_a = _make_project_with_line(db)
+    project_b, _p2, _o2, _line_b = _make_project_with_line(db)
+    _content, wb, _ws = _parts_sheet(db, project_b.project_id)
+    ws = wb[master.V2_SHEET_PARTS]
+    # 把 A 项目的实体ID 塞进 B 项目的空白新增行并标 UPDATE
+    ws.cell(row=2, column=1, value="UPDATE")
+    ws.cell(row=2, column=22, value=line_a.id)
+    ws.cell(row=2, column=11, value=9)
+    buf = io.BytesIO()
+    wb.save(buf)
+    with pytest.raises(WorkbookError) as exc:
+        master.validate_project_master_v2(
+            db, project_id=project_b.project_id, data=buf.getvalue())
+    assert exc.value.code in ("line_not_in_project", "readonly_cell_modified", "line_not_found")
+
+
+def test_review_p1_pn_change_updates_part_id(db):
+    """改 PN 必须同步换 part_id，否则库存/成本 join 腐化。"""
+    project, part_old, _order, line = _make_project_with_line(db)
+    part_new = DimPart(pn_std="EDIT-PN-002", description="新备件")
+    db.add(part_new)
+    db.commit()
+    _content, wb, ws = _parts_sheet(db, project.project_id)
+    ws.cell(row=2, column=9, value=part_new.pn_std)  # PN
+    _reupload(db, project.project_id, wb)
+    db.refresh(line)
+    assert line.pn_std == part_new.pn_std
+    assert line.part_id == part_new.id
+
+
+def test_review_p1_late_imported_expense_is_not_voided(db):
+    """下载后新导入的报销行不在导出全集里 → 缺行判定不得误杀；
+    用户真删的行（导出时存在）照常作废（P1，Codex review #272）。"""
+    project, _order, _line, expense = _make_project_with_expense(db)
+    keeper = FProjectExpense(
+        raw_line_id=f"bxd-{uuid.uuid4()}",
+        bxd_no="BXD-EDIT-001", line_no=2,
+        expense_date=date(2026, 8, 4), person="测试员",
+        linked_sales_order_no="XSDD-EDIT-001",
+        amount=Decimal("300.00"), tax_basis="ex",
+        amount_ex_tax=Decimal("300.00"), amount_inc_tax=Decimal("339.00"),
+        import_batch_id=_batch(db),
+    )
+    db.add(keeper)
+    db.commit()
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    # 下载之后、上传之前：新导入一行报销（不在导出全集）
+    late = FProjectExpense(
+        raw_line_id=f"bxd-late-{uuid.uuid4()}",
+        bxd_no="BXD-LATE-001", line_no=1,
+        expense_date=date(2026, 8, 5), person="迟到导入",
+        linked_sales_order_no="XSDD-EDIT-001",
+        amount=Decimal("100.00"), tax_basis="ex",
+        amount_ex_tax=Decimal("100.00"), amount_inc_tax=Decimal("113.00"),
+        import_batch_id=_batch(db),
+    )
+    db.add(late)
+    db.commit()
+    # 用户在旧文件里删掉导出时存在的那行
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_EXPENSE].delete_rows(2)
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.expense_voids == (expense.raw_line_id,)
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(expense)
+    db.refresh(late)
+    assert expense.data_status == "已作废"
+    assert late.data_status != "已作废"

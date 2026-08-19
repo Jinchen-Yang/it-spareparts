@@ -975,11 +975,20 @@ def build_project_master_v2(
     if V2_SHEET_SITE in wanted:
         _v2_build_site(wb, db, project_id)
     _v2_build_dictionary(wb)
+    meta_rows = [
+        ("protocol_id", V2_PROTOCOL_ID), ("template_version", V2_TEMPLATE_VERSION),
+        ("project_id", project_id), ("export_id", str(uuid4())),
+        ("exported_at", datetime.now(timezone.utc).isoformat()),
+        ("included_sheets", ",".join(wanted)),
+    ]
+    if V2_SHEET_PARTS in wanted:
+        meta_rows.append(("parts_row_ids",
+                          _encode_row_ids([ln.id for ln, _o, _p in lines])))
+    if V2_SHEET_EXPENSE in wanted:
+        meta_rows.append(("expense_row_ids",
+                          _encode_row_ids(_expected_expense_ids(db, project_id))))
     meta = wb.create_sheet(V2_SHEET_META)
-    for key, value in (("protocol_id", V2_PROTOCOL_ID), ("template_version", V2_TEMPLATE_VERSION),
-                       ("project_id", project_id), ("export_id", str(uuid4())),
-                       ("exported_at", datetime.now(timezone.utc).isoformat()),
-                       ("included_sheets", ",".join(wanted))):
+    for key, value in meta_rows:
         meta.append([key, value])
     meta.sheet_state = "hidden"
     buffer = io.BytesIO()
@@ -1251,6 +1260,22 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
         if line is None or not line.is_active:
             raise WorkbookError("line_not_found",
                                 f"第 {row_no} 行备件事实已不存在或已作废，请重新下载")
+        # 行必须归属本项目（P1，Codex review #272）：防止拿别项目工作簿的
+        # 实体ID（或构造行）越权 UPDATE/VOID 本项目之外的事实。
+        owner_project = db.scalar(
+            select(MaintenanceSourceOrderAssignment.project_id)
+            .join(FMaintenanceOrder,
+                  FMaintenanceOrder.id == line.order_id)
+            .where(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+            .limit(1)
+        )
+        if owner_project != project_id:
+            raise WorkbookError("line_not_in_project",
+                                f"第 {row_no} 行备件事实不属于本项目，请重新下载")
         # 只读事实哈希校验（只覆盖锁定列；可编辑列改动不触发）
         readonly_values = [_cell(row, index, name) for name in V2_PART_HASH_COLUMNS]
         if _v2_hash(readonly_values) != str(_cell(row, index, "只读哈希") or ""):
@@ -1270,6 +1295,7 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
         # UPDATE：逐字段与现值比对，只有变化的字段下发——原样上传不重写、
         # 不标 workbook_manual、不重算金额、不写假审计（幂等）。
         pn = None
+        part_id = None
         pn_cell = str(_cell(row, index, "PN") or "").strip()
         if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
             part = _exact_part_for_pn(db, pn_cell)
@@ -1277,6 +1303,7 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
                 raise WorkbookError("part_not_found",
                                     f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
             pn = part.pn_std
+            part_id = part.id
         desc_cell = str(_cell(row, index, "描述") or "").strip()
         description = desc_cell if desc_cell != (line.description or "") else None
         qty_cell = _cell(row, index, "需求数量")
@@ -1323,7 +1350,8 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
             continue
         out.append(CostRefill(
             line_id=line.id, operation="UPDATE",
-            pn=pn, description=description, qty=qty, return_qty=return_qty,
+            pn=pn, part_id=part_id,
+            description=description, qty=qty, return_qty=return_qty,
             serial_numbers=serial_numbers,
             unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
             reason=reason, note=note,
@@ -1572,6 +1600,19 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
     return out
 
 
+def _encode_row_ids(ids) -> str:
+    """导出时行ID全集（P1，Codex review #272）：缺行=作废只允许命中
+    「导出时存在、上传时消失」的行；导出之后新导入的行天然豁免，
+    应用后原样重传（幂等重试）也不受影响。"""
+    return ",".join(str(i) for i in sorted(ids))
+
+
+def _decode_row_ids(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {part for part in value.split(",") if part}
+
+
 def _expected_expense_ids(db: Session, project_id: str) -> list[str]:
     # 与 _v2_build_expense 同口径（含挂靠 XSDD），保证缺行=作废的对账集合一致
     return [e.raw_line_id for e in ec._expenses(db, project_sales_order_nos(db, project_id))]
@@ -1623,30 +1664,32 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     if V2_SHEET_EXPENSE in included:
         uploaded_expense_ids = ({u.raw_line_id for u in expense_updates}
                                 | set(expense_voids))
-        expected_expense_ids = _expected_expense_ids(db, project_id)
-        missing_expense_ids = [rid for rid in expected_expense_ids
+        # 缺行=作废只针对导出时存在的行（P1，Codex review #272）：
+        # 导出后新导入的行不在导出全集里，天然豁免误杀。
+        export_expense_ids = _decode_row_ids(meta.get("expense_row_ids"))
+        missing_expense_ids = [rid for rid in export_expense_ids
                                if rid not in uploaded_expense_ids]
         for rid in missing_expense_ids:
             expense_voids.append(rid)
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
         # 防呆：上传的报销数据行比导出少一半以上 → 整本拒绝，防止 Excel
         # 筛选/局部复制后误传把整片行作废（唯一一道防呆，契约 #265）。
-        if expected_expense_ids and Decimal(len(uploaded_expense_ids)) < Decimal(len(expected_expense_ids)) * _ROW_LOSS_GUARD_RATIO:
+        if export_expense_ids and Decimal(len(uploaded_expense_ids)) < Decimal(len(export_expense_ids)) * _ROW_LOSS_GUARD_RATIO:
             raise WorkbookError(
                 "row_loss_guard",
                 f"04_费用报销上传行数（{len(uploaded_expense_ids)}）不足导出行数"
-                f"（{len(expected_expense_ids)}）的一半，疑似删行过多；请确认或分批操作")
+                f"（{len(export_expense_ids)}）的一半，疑似删行过多；请确认或分批操作")
 
     if V2_SHEET_PARTS in included:
         # 防呆：03 上传的数据行（带实体ID）比导出少一半以上 → 整本拒绝。
         # 注意口径是「上传的实体行数」而非「解析出的操作数」——原样回传
         # 不产生任何操作，不能被误判为行丢失。
-        expected_lines = _assigned_lines(db, project_id=project_id, window=None)
-        if expected_lines and Decimal(uploaded_line_rows) < Decimal(len(expected_lines)) * _ROW_LOSS_GUARD_RATIO:
+        export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
+        if export_parts_ids and Decimal(uploaded_line_rows) < Decimal(len(export_parts_ids)) * _ROW_LOSS_GUARD_RATIO:
             raise WorkbookError(
                 "row_loss_guard",
                 f"03_备件明细上传行数（{uploaded_line_rows}）不足导出行数"
-                f"（{len(expected_lines)}）的一半，疑似筛选后误传；请检查文件或分批操作")
+                f"（{len(export_parts_ids)}）的一半，疑似筛选后误传；请检查文件或分批操作")
 
     return MasterV2Plan(
         project_id=project_id,
@@ -1746,6 +1789,11 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
             before["pn"] = line.pn_std or line.pn_raw
             line.pn_std = refill.pn
             line.pn_raw = refill.pn
+            # 跨表身份同步换 part_id（P1，Codex review #272）：库存/成本/池
+            # 等 join 都走 part_id，只改文本不改主键会腐化下游聚合。
+            if refill.part_id is not None:
+                before["part_id"] = line.part_id
+                line.part_id = refill.part_id
         if refill.description is not None:
             before["description"] = line.description
             line.description = refill.description
