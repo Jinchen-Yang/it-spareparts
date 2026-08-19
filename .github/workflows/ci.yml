@@ -5,9 +5,51 @@ on:
     branches: [main]
   pull_request:
 
+# 同一分支的新 push 自动取消在跑的旧 run（2026-08-19 教训：无此配置时，
+# 被取代的 75 分钟后端套件继续占着自托管 runner，新 run 只能排队）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # PR 分层（2026-08-19）：只改 frontend/ 的 PR 不再陪跑 75 分钟的后端全量套件；
+  # 任何 frontend/ 之外的改动（backend/、.github/、根目录文件）都算后端相关。
+  # push 到 main 永远全量。跳过的 job 在 GitHub 合并门禁里按通过计。
+  changes:
+    name: 识别改动范围
+    runs-on: [self-hosted, Linux, X64, cloudlay-ts]
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      # 用 API compare 而非 git fetch：runner 到 github.com 的 git 端点 TLS 频繁
+      # 中断（2026-08-19 checkout 多次失败），api.github.com 则稳定。两点对比对
+      # 「main 漂移」保守误报为多跑后端，绝不漏跑。
+      - uses: actions/github-script@v7
+        id: filter
+        with:
+          script: |
+            let backend = true;
+            let frontend = true;
+            if (context.eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              const { data } = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${pr.base.ref}...${pr.head.sha}`,
+              });
+              const files = (data.files || []).map((f) => f.filename);
+              console.log('本次 PR 改动文件：', files);
+              frontend = files.some((f) => f.startsWith('frontend/'));
+              backend = files.length === 0 || files.some((f) => !f.startsWith('frontend/'));
+            }
+            core.setOutput('backend', String(backend));
+            core.setOutput('frontend', String(frontend));
+
   backend:
     name: 后端测试（pytest + 迁移链验证）
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: [self-hosted, Linux, X64, cloudlay-ts]
     services:
       postgres:
@@ -18,6 +60,9 @@ jobs:
           POSTGRES_DB: spareparts_test
         ports:
           - 5432/tcp
+        # 注意：services.options 是 docker create 的参数，不是 postgres 的参数，
+        # 在这里放 -c max_locks_per_transaction 会被 docker 当成 --cpu-shares 直接
+        # 报错（exit 125）。锁表压力改为靠限制 worker 数（-n 4）规避，见下方注释。
         options: >-
           --health-cmd "pg_isready -U spareparts"
           --health-interval 5s
@@ -45,13 +90,17 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
         run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
+      # xdist 并行（2026-08-19）：测试隔离按进程建库建目录（pid+token），
+      # worker 间天然隔离。固定 -n 4 而非 -n auto：worker 太多时并行迁移 +
+      # 每用例 TRUNCATE ~190 表 CASCADE 会打爆 PG 默认锁表（out of shared
+      # memory，本地 -n auto 实测复现；4 worker + 默认锁表本地全量验证通过）。
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
         if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
         timeout-minutes: 75
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
-        run: uv run --extra dev pytest -q
+        run: uv run --extra dev pytest -q -n 4
       - name: 扫描后端生产依赖漏洞
         working-directory: backend
         run: |
@@ -60,6 +109,8 @@ jobs:
 
   frontend:
     name: 前端类型检查 + 构建
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: [self-hosted, Linux, X64, cloudlay-ts]
     steps:
       - uses: actions/checkout@v7

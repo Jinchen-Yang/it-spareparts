@@ -182,13 +182,11 @@ def validate_pytest_invocation(
     argv: Sequence[str],
     environ: Mapping[str, str],
 ) -> None:
-    if "PYTEST_XDIST_WORKER" in environ or "PYTEST_XDIST_WORKER_COUNT" in environ:
-        raise RuntimeError("pytest-xdist is not supported by run isolation")
-    for argument in argv:
-        if argument == "-n" or (argument.startswith("-n") and len(argument) > 2):
-            raise RuntimeError("pytest-xdist is not supported by run isolation")
-        if argument == "--numprocesses" or argument.startswith("--numprocesses="):
-            raise RuntimeError("pytest-xdist is not supported by run isolation")
+    # pytest-xdist 自 2026-08-19 起允许：隔离资源本来就是按进程建的
+    # （数据库 spareparts_test_{pid}_{token}、raw 目录同理），每个 xdist worker
+    # 是独立进程 → 独立数据库 + 独立 raw 目录，互不干扰。此处不再拒绝 -n。
+    del argv, environ  # 保留函数签名，调用点（conftest）不动
+    return None
 
 
 def _render(url: URL) -> str:
