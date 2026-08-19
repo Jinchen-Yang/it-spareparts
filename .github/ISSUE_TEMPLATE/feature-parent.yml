@@ -1,0 +1,144 @@
+name: Feature parent
+description: 创建不直接写代码的父 Feature，用于聚合分层 Workstream、契约 DAG 和最终验收
+title: "[Feature] "
+labels:
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        父 Feature 不持有实现 branch，也不挂 agent:* 标签。Database、Backend、Frontend 等实际工作请分别创建 Workstream implementation 子 Issue。
+
+  - type: textarea
+    id: problem-goal
+    attributes:
+      label: 业务问题、目标与非目标
+      description: 说明完整 Feature 解决什么、最终由谁消费，以及明确不做什么。
+      placeholder: |
+        Problem:
+        Goal:
+        Consumers:
+        Non-goals:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data-path
+    attributes:
+      label: 总体数据链路
+      description: 按 AGENTS.md 选择完整 Feature 涉及的链路。
+      options:
+        - A - Excel -> 数据库
+        - B - 数据库 -> 处理层 -> 前端
+        - C - Excel -> 数据库 -> 处理层 -> 前端
+        - 非数据链路
+    validations:
+      required: true
+
+  - type: textarea
+    id: data-facts
+    attributes:
+      label: 表结构事实与备件影响
+      description: 汇总 Feature 直接相关的表、字段、约束、读写职责和证据，并说明完整备件流转；不适用时写明原因。
+      placeholder: |
+        | 表 | 关键字段 | Feature 中的职责 | 读/写 | 证据来源 |
+        | --- | --- | --- | --- | --- |
+        | | | | | |
+
+        备件影响：
+    validations:
+      required: true
+
+  - type: textarea
+    id: contract-freeze
+    attributes:
+      label: 契约冻结
+      description: 创建时可先写 pending；实现子 Issue 开始写代码前必须由 Integration Owner 回填准确 Contract PR/SHA。
+      placeholder: |
+        Contract Issue:
+        Contract PR:
+        Contract SHA:
+        Frozen by:
+        Frozen at:
+        Applies to:
+        Compatibility:
+    validations:
+      required: true
+
+  - type: textarea
+    id: workstreams
+    attributes:
+      label: Workstreams
+      description: 父 Issue 与每个实现子 Issue 保持双向链接；不需要的层写 N/A。
+      placeholder: |
+        - [ ] Contract: #... / PR #...
+        - [ ] Database: #... / PR #...
+        - [ ] Backend: #... / PR #...
+        - [ ] Frontend: #... / PR #...
+        - [ ] Cross-layer integration: #... / evidence
+        - [ ] Deployment
+        - [ ] User acceptance
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependency-dag
+    attributes:
+      label: 依赖 DAG 与合并顺序
+      description: 用 Issue/PR/SHA 表达 Depends on、Blocks 和下游解锁条件。
+      placeholder: |
+        #contract blocks #database, #backend, #frontend
+        #database blocks #backend runtime verification
+        Merge order: Contract -> DB -> Backend -> Frontend -> Integration
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Feature 验收与 Integration Gate
+      description: 必须包含真实迁移、Backend 新 Schema、API contract、Frontend 真实 API 和一个 tracer-bullet。
+      placeholder: |
+        - [ ] Contract frozen:
+        - [ ] Real migration:
+        - [ ] Backend with new Schema:
+        - [ ] API contract:
+        - [ ] Frontend with real API:
+        - [ ] End-to-end tracer-bullet:
+        - [ ] Regression:
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment-release
+    attributes:
+      label: 集成环境、发布与用户验收
+      description: 不填写凭据。共享环境必须记录各层 SHA 和 snapshot/seed；生产动作仍需单独授权。
+      placeholder: |
+        Environment:
+        DB migration/head:
+        Backend SHA:
+        Frontend SHA:
+        Contract SHA:
+        Snapshot/seed:
+        Integration Owner:
+        Deployment requirement:
+        User acceptance requirement:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: 父 Feature 确认
+      options:
+        - label: 父 Issue 不直接持有代码分支或 agent:* 标签
+          required: true
+        - label: 每个实现 Workstream 将使用独立子 Issue、branch 和 worktree
+          required: true
+        - label: 下游实现只消费 Integration Owner 冻结的准确 Contract SHA
+          required: true
+        - label: 三个单层 PR 通过后仍将执行最终跨层 Integration Gate
+          required: true
+        - label: Issue 中不包含密码、token、连接串或生产敏感数据
+          required: true
