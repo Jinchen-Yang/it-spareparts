@@ -262,8 +262,9 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => webServer.register({
+    // 注意：prefix 不能带尾斜杠 —— webserver 以 `${prefix}/` 拼子路径匹配
     kind: 'prefix',
-    path: PANEL_PREFIX,
+    path: '/itd',
     handler(req, res) {
       const sub = req.url.replace(/^\/itd/, '') || '/'
       if (sub === '/api' || sub.startsWith('/api/')) {

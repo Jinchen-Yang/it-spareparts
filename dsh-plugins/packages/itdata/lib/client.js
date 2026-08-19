@@ -254,6 +254,29 @@ function apply(ctx) {
       return import_react.default.createElement("div", { style: { maxWidth: 720 } }, children);
     }
   ));
+  slots.inject("conversation.view", () => slots.register(
+    { name: "conversation.view", id: "itdata.panel", order: 30, label: "\u6570\u636E\u9762\u677F" },
+    function ItDataPanelView() {
+      return import_react.default.createElement(
+        "div",
+        {
+          style: { height: "100%", display: "flex", flexDirection: "column" }
+        },
+        import_react.default.createElement("div", {
+          style: {
+            padding: "4px 12px",
+            fontSize: 12,
+            opacity: 0.65,
+            borderBottom: "1px solid rgba(128,128,128,0.2)"
+          }
+        }, "IT \u5907\u4EF6\u7BA1\u7406\u7CFB\u7EDF\uFF08iframe \u5D4C\u5165\uFF1B\u8D26\u53F7\u5728\u9762\u677F\u5185\u72EC\u7ACB\u767B\u5F55\uFF09"),
+        import_react.default.createElement("iframe", {
+          src: "/itd/",
+          style: { flex: 1, width: "100%", border: "none", background: "#fff" }
+        })
+      );
+    }
+  ));
 }
 function ScriptsSection() {
   const [scripts, setScripts] = (0, import_react.useState)(null);

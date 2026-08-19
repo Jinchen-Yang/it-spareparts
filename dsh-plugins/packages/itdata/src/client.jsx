@@ -197,6 +197,28 @@ export function apply(ctx) {
       return React.createElement('div', { style: { maxWidth: 720 } }, children)
     },
   ))
+
+  // ── 数据面板：会话视图标签页（conversation.view ring，与 Chat 并列） ──
+  // 内嵌 /itd/（DSH 反代 → 前端 SPA + /itd/api → 后端）；前端 VITE_BASE=/itd/ 构建。
+  slots.inject('conversation.view', () => slots.register(
+    { name: 'conversation.view', id: 'itdata.panel', order: 30, label: '数据面板' },
+    function ItDataPanelView() {
+      return React.createElement('div', {
+        style: { height: '100%', display: 'flex', flexDirection: 'column' },
+      },
+        React.createElement('div', {
+          style: {
+            padding: '4px 12px', fontSize: 12, opacity: 0.65,
+            borderBottom: '1px solid rgba(128,128,128,0.2)',
+          },
+        }, 'IT 备件管理系统（iframe 嵌入；账号在面板内独立登录）'),
+        React.createElement('iframe', {
+          src: '/itd/',
+          style: { flex: 1, width: '100%', border: 'none', background: '#fff' },
+        }),
+      )
+    },
+  ))
 }
 
 function ScriptsSection() {

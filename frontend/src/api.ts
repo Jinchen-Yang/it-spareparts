@@ -1,7 +1,11 @@
 import axios from "axios";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 
-export const api = axios.create({ baseURL: "/api" });
+// DSH 企业定制：嵌入面板构建时 VITE_API_BASE=/itd/api（经 DSH 反代到后端），
+// 独立部署仍默认 /api。所有 fetch/axios 走同一常量，避免路径分叉。
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? "/api";
+
+export const api = axios.create({ baseURL: API_BASE });
 
 export interface BetaFeatures {
   maintenance: boolean;
@@ -103,7 +107,7 @@ export const getChatMessages = (id: number) =>
 /** 停止当前生成：服务端 worker 收束并把已生成部分以"已中断"落库。
  * 用 fetch 而非 axios：避开全局 401 拦截器的整页 reload。 */
 export const cancelChatStream = (id: number) =>
-  fetch(`/api/agent/sessions/${id}/chat/cancel`, {
+  fetch(`${API_BASE}/agent/sessions/${id}/chat/cancel`, {
     method: "POST",
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
   }).catch(() => undefined);
@@ -149,7 +153,7 @@ export async function sessionChatStream(
   onEvent: (ev: SessionStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/stream`, {
+  const resp = await fetch(`${API_BASE}/agent/sessions/${sessionId}/chat/stream`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -168,7 +172,7 @@ export async function attachChatStream(
   onEvent: (ev: SessionStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/attach`, {
+  const resp = await fetch(`${API_BASE}/agent/sessions/${sessionId}/chat/attach`, {
     method: "POST",
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     signal,
@@ -321,7 +325,7 @@ export const agentUpload = (file: File) => {
 export const agentDownload = async (url: string, fallbackName = "下载.xlsx") => {
   const m = /\/api\/agent\/files\/([a-f0-9]{6,})/.exec(url);
   if (!m) throw new Error("bad-url");
-  const resp = await fetch(`/api/agent/files/${m[1]}`, {
+  const resp = await fetch(`${API_BASE}/agent/files/${m[1]}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     cache: "no-store",
   });
@@ -347,7 +351,7 @@ export interface FilePreview {
 
 /** 在线预览文件内容（用 fetch 而非 axios：避开全局 401 拦截器的整页刷新，绝不打断对话）。 */
 export const agentPreview = async (fileId: string): Promise<FilePreview> => {
-  const resp = await fetch(`/api/agent/files/${fileId}/preview`, {
+  const resp = await fetch(`${API_BASE}/agent/files/${fileId}/preview`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     cache: "no-store",
   });
@@ -358,7 +362,7 @@ export const agentPreview = async (fileId: string): Promise<FilePreview> => {
 
 /** 取文件 blob 的 object URL（图片预览用，带鉴权）；调用方用完需 URL.revokeObjectURL。 */
 export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
-  const resp = await fetch(`/api/agent/files/${fileId}`, {
+  const resp = await fetch(`${API_BASE}/agent/files/${fileId}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     cache: "no-store",
   });

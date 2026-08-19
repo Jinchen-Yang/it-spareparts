@@ -181,7 +181,8 @@ function FileCard({ href, label }: { href: string; label?: string }) {
 /** markdown 里的文件链接渲染成文件卡片（预览+下载）；其余链接走普通 <a>。 */
 function MdLink(props: { href?: string; children?: React.ReactNode }) {
   const href = props.href || "";
-  if (href.includes("/api/agent/files/")) {
+  // DSH 嵌入面板（/itd/）下后端回链带 /itd/api 前缀，两种都要识别
+  if (href.includes("/api/agent/files/") || href.includes("/itd/api/agent/files/")) {
     return <FileCard href={href} label={nodeText(props.children)} />;
   }
   return <a href={href} target="_blank" rel="noreferrer">{props.children}</a>;
