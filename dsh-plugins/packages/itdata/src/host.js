@@ -178,6 +178,39 @@ export function apply(ctx, config) {
             jsonReply(res, 200, { ok: true, auth: authSummary() })
             return
           }
+          // ── 脚本管理（权限面板，admin 操作由后端 require_admin 把关） ──
+          if (msg?.action === 'scripts_list') {
+            if (!authSummary().loggedIn) { jsonReply(res, 200, { ok: false, error: '未登录' }); return }
+            const r = await backendRequest('GET', '/api/agent/scripts', { token: auth.token, timeoutMs: 15000 })
+            jsonReply(res, 200, r.status === 200 ? { ok: true, scripts: r.json.scripts } : backendError('scripts_list', r))
+            return
+          }
+          if (msg?.action === 'script_create' || msg?.action === 'script_update') {
+            if (!authSummary().loggedIn) { jsonReply(res, 200, { ok: false, error: '未登录' }); return }
+            const { name: sname, description = '', content = '', required_action = null, timeout_seconds = 60, enabled = true } = msg
+            if (typeof sname !== 'string' || sname === '' || typeof content !== 'string' || content === '') {
+              jsonReply(res, 200, { ok: false, error: '名称与内容必填' }); return
+            }
+            const r = await backendRequest(msg.action === 'script_create' ? 'POST' : 'PUT',
+              msg.action === 'script_create' ? '/api/agent/scripts' : `/api/agent/scripts/${encodeURIComponent(sname)}`,
+              { token: auth.token, body: { name: sname, description, content, required_action, timeout_seconds, enabled }, timeoutMs: 15000 })
+            jsonReply(res, 200, r.status === 200 ? { ok: true, script: r.json } : backendError('script_save', r))
+            return
+          }
+          if (msg?.action === 'script_delete') {
+            if (!authSummary().loggedIn) { jsonReply(res, 200, { ok: false, error: '未登录' }); return }
+            const r = await backendRequest('DELETE', `/api/agent/scripts/${encodeURIComponent(String(msg.name ?? ''))}`,
+              { token: auth.token, timeoutMs: 15000 })
+            jsonReply(res, 200, r.status === 200 ? { ok: true } : backendError('script_delete', r))
+            return
+          }
+          if (msg?.action === 'script_run') {
+            if (!authSummary().loggedIn) { jsonReply(res, 200, { ok: false, error: '未登录' }); return }
+            const r = await backendRequest('POST', `/api/agent/scripts/${encodeURIComponent(String(msg.name ?? ''))}/run`,
+              { token: auth.token, body: { args: msg.args ?? {} }, timeoutMs: 70000 })
+            jsonReply(res, 200, r.status === 200 ? { ok: true, ...r.json } : backendError('script_run', r))
+            return
+          }
           jsonReply(res, 400, { ok: false, error: `unknown action: ${String(msg?.action)}` })
         } catch (error) {
           jsonReply(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -414,6 +447,100 @@ export function apply(ctx, config) {
     },
   }))
 
+  // ── whitelist scripts + read-only DSN（P4） ────────────────────────────
+
+  ctx.effect(() => tools.register({
+    name: 'list_scripts',
+    description: [
+      'List the admin-maintained whitelist scripts on the IT spare-parts backend (name, description, required action).',
+      'Whitelisted scripts are the ONLY way to write to the database; read-only analysis belongs in ad-hoc scripts via run_script.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    output,
+    async execute() {
+      if (!authSummary().loggedIn) return notLoggedIn()
+      const r = await backendRequest('GET', '/api/agent/scripts', { token: auth.token, timeoutMs: 15000 })
+      if (r.status !== 200) return backendError('list_scripts', r)
+      return { ok: true, scripts: r.json.scripts }
+    },
+  }))
+
+  ctx.effect(() => tools.register({
+    name: 'run_script',
+    description: [
+      'Run a Python script. Two modes — exactly one must be set:',
+      '- script_name (recommended for any WRITE): run an admin whitelisted script on the server; the server executes it with DB write',
+      '  credentials that never leave it, gated by the script\'s required permission. Pass positional args via script_args (JSON).',
+      '- code: run YOUR OWN script locally in this harness for READ-ONLY analysis. The environment provides ITD_DB_URL (a read-only',
+      '  role DSN, only when the account holds the explicit read-only-DSN permission; otherwise the variable is absent) and',
+      '  ITD_USER. Local scripts must not attempt writes; the read-only role enforces this at the database.',
+      'Prefer list_scripts + db_schema before writing SQL or scripts.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        script_name: { type: 'string', description: 'Admin whitelisted script to run server-side (set script_args for its inputs).' },
+        script_args: { type: 'object', additionalProperties: true, description: 'JSON args forwarded to the whitelisted script as ITD_ARGS_JSON.' },
+        code: { type: 'string', description: 'Local read-only Python source (only when no script_name is given).' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    output,
+    async execute(args) {
+      if (!authSummary().loggedIn) return notLoggedIn()
+      if (typeof args?.script_name === 'string' && args.script_name.trim() !== '') {
+        const r = await backendRequest('POST', `/api/agent/scripts/${encodeURIComponent(args.script_name.trim())}/run`, {
+          token: auth.token,
+          body: { args: args.script_args ?? {} },
+          timeoutMs: 60000,
+        })
+        if (r.status !== 200) return backendError('run_script', r)
+        return { ok: r.json.ok, mode: 'whitelisted', ...r.json }
+      }
+      if (typeof args?.code === 'string' && args.code.trim() !== '') {
+        const dsnR = await backendRequest('GET', '/api/agent/dsn', { token: auth.token, timeoutMs: 15000 })
+        if (dsnR.status !== 200) {
+          return {
+            ok: false,
+            mode: 'local',
+            error: dsnR.status === 403
+              ? '账号没有领取只读 DSN 的权限（action_agent_dsn_ro），本地脚本模式不可用；如需写库请改用白名单脚本。'
+              : dsnR.status === 501
+                ? '部署未配置只读 DSN（后端 DSH_RO_DSN），本地脚本模式不可用；请改用白名单脚本。'
+                : `领取只读 DSN 失败（HTTP ${dsnR.status}）`,
+          }
+        }
+        try {
+          const { execFile } = await import('node:child_process')
+          const os = await import('node:os')
+          const fsp = await import('node:fs/promises')
+          const path = await import('node:path')
+          const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'itd_local_'))
+          const file = path.join(tmpDir, 'user_script.py')
+          await fsp.writeFile(file, args.code, 'utf8')
+          const env = { ...process.env, ITD_DB_URL: dsnR.json.dsn, ITD_USER: auth.name ?? auth.role ?? '' }
+          const out = await new Promise((resolve) => {
+            execFile('python3', [file], { env, timeout: 60000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+              if (err && err.killed) resolve({ ok: false, stdout: stdout ?? '', stderr: (stderr ?? '') + '\n[脚本超时已终止]', returncode: err.code ?? null })
+              else resolve({ ok: !err, stdout: stdout ?? '', stderr: stderr ?? '', returncode: err ? err.code ?? null : 0 })
+            })
+          })
+          void fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+          return { ok: out.ok, mode: 'local', ...out }
+        } catch (error) {
+          return { ok: false, mode: 'local', error: String(error?.message ?? error) }
+        }
+      }
+      return { ok: false, error: '必须提供 script_name（白名单脚本）或 code（本地只读脚本）二者之一' }
+    },
+  }))
+
   // ── prompt section ────────────────────────────────────────────────────
   if (systemPrompt !== undefined) {
     ctx.effect(() => systemPrompt.section({
@@ -423,6 +550,7 @@ export function apply(ctx, config) {
         '[IT 备件系统企业插件 — 权限门与数据访问规则]',
         '- 所有 IT 备件系统的数据访问必须走 itdata 系列工具（itdata_status / db_schema / db_query / call_api），它们携带当前登录用户的 token，由后端 RBAC（字段级/页面/动作/行级权限）过滤结果。',
         '- 写 SQL 前先 db_schema 看表结构；标准业务问题优先 call_api（业务工具带行级客户匿名化），自由分析才用 db_query（只读、字段脱敏）。',
+        '- 写库边界：任何 UPDATE/INSERT/覆盖只能通过白名单脚本（list_scripts 查看 → run_script script_name），由服务端执行并审计；本地临时脚本（run_script code）只允许只读分析，不得尝试写库。',
         '- 未登录时不要尝试任何数据访问；引导用户到 设置 → IT 备件系统 登录（itdata_status 可随时查询状态）。',
         '- 严禁绕过权限门：不得直连数据库、不得伪造/复用他人凭据、不得把 token 写入脚本或文件。',
         '- Excel/Word/PDF 处理通过 bash 运行 Python 脚本完成（openpyxl / python-docx / pdfplumber 等）。',

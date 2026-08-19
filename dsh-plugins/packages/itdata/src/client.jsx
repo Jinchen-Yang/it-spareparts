@@ -189,7 +189,166 @@ export function apply(ctx) {
         }, String(error)))
       }
 
-      return React.createElement('div', { style: { maxWidth: 520 } }, children)
+      // ── 白名单脚本管理（仅 admin 角色展示；后端 require_admin 把关） ──
+      if (auth.loggedIn && auth.role === 'admin') {
+        children.push(React.createElement(ScriptsSection, { key: 'scripts' }))
+      }
+
+      return React.createElement('div', { style: { maxWidth: 720 } }, children)
     },
   ))
+}
+
+function ScriptsSection() {
+  const [scripts, setScripts] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [form, setForm] = useState({
+    name: '', description: '', required_action: '', content: '', timeout_seconds: '60', enabled: true,
+  })
+  const [editing, setEditing] = useState(null)
+  const [outputs, setOutputs] = useState({})
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await rpc('scripts_list')
+      setScripts(r.ok === true ? r.scripts : [])
+      setMsg(r.ok === true ? null : String(r.error ?? '加载失败'))
+    } catch (e) {
+      setMsg(String(e?.message ?? e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const save = async () => {
+    if (form.name.trim() === '' || form.content.trim() === '') { setMsg('名称与内容必填'); return }
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await rpc(editing ? 'script_update' : 'script_create', {
+        ...form,
+        required_action: form.required_action.trim() === '' ? null : form.required_action.trim(),
+        timeout_seconds: Math.min(Math.max(Number(form.timeout_seconds) || 60, 5), 600),
+      })
+      if (r.ok !== true) setMsg(String(r.error ?? '保存失败'))
+      else {
+        setForm({ name: '', description: '', required_action: '', content: '', timeout_seconds: '60', enabled: true })
+        setEditing(null)
+        void refresh()
+      }
+    } catch (e) {
+      setMsg(String(e?.message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (name) => {
+    setBusy(true)
+    try {
+      const r = await rpc('script_delete', { name })
+      if (r.ok !== true) setMsg(String(r.error ?? '删除失败'))
+      void refresh()
+    } finally { setBusy(false) }
+  }
+
+  const run = async (name) => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await rpc('script_run', { name, args: {} })
+      setOutputs((prev) => ({ ...prev, [name]: r }))
+    } finally { setBusy(false) }
+  }
+
+  const head = React.createElement('div', { key: 'head', style: { fontSize: 14, fontWeight: 600, marginTop: 16 } },
+    '白名单脚本（agent 写库的唯一通道，服务端执行）')
+
+  const listItems = Array.isArray(scripts)
+    ? scripts.map((s) => React.createElement('div', {
+        key: s.name,
+        style: { ...card, padding: '10px 12px' },
+      },
+        React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          React.createElement('code', { style: { fontSize: 13 } }, s.name),
+          React.createElement('span', { style: { fontSize: 12, opacity: 0.65 } }, s.description || ''),
+          s.enabled ? null : React.createElement('span', { style: { fontSize: 12, color: '#d05663' } }, '已停用'),
+          React.createElement('span', { style: { fontSize: 12, opacity: 0.65, marginLeft: 'auto' } },
+            s.required_action ? `需权限: ${s.required_action}` : '仅需登录'),
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+          React.createElement('button', {
+            style: button, onClick: () => run(s.name), disabled: busy,
+          }, '执行'),
+          React.createElement('button', {
+            style: button, onClick: () => {
+              setEditing(s.name)
+              setForm({
+                name: s.name, description: s.description || '', required_action: s.required_action || '',
+                content: s.content || '', timeout_seconds: String(s.timeout_seconds ?? 60), enabled: s.enabled !== false,
+              })
+            }, disabled: busy,
+          }, '编辑'),
+          React.createElement('button', {
+            style: { ...button, color: '#d05663', borderColor: 'rgba(208,86,99,0.5)' },
+            onClick: () => remove(s.name), disabled: busy,
+          }, '删除'),
+        ),
+        outputs[s.name] ? React.createElement('pre', {
+          style: {
+            marginTop: 8, padding: 8, borderRadius: 6, fontSize: 11, lineHeight: 1.5,
+            background: 'rgba(128,128,128,0.1)', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            maxHeight: 200, overflow: 'auto',
+          },
+        }, `rc=${outputs[s.name].returncode ?? '?'}\n${outputs[s.name].stdout ?? ''}${outputs[s.name].stderr ? `\n[stderr]\n${outputs[s.name].stderr}` : ''}`) : null,
+      ))
+    : []
+
+  const formEl = React.createElement('div', { key: 'form', style: card },
+    React.createElement('div', { style: { ...label, fontSize: 13, opacity: 1 } },
+      editing ? `编辑脚本：${editing}` : '新建脚本'),
+    React.createElement('label', { style: label }, '名称（小写字母/数字/_/-）'),
+    React.createElement('input', {
+      style: input, value: form.name, disabled: editing !== null,
+      onChange: (e) => setForm({ ...form, name: e.target.value }),
+    }),
+    React.createElement('label', { style: label }, '说明'),
+    React.createElement('input', {
+      style: input, value: form.description,
+      onChange: (e) => setForm({ ...form, description: e.target.value }),
+    }),
+    React.createElement('label', { style: label }, '所需权限键（留空=仅需登录；如 action_maintenance_ledger_import）'),
+    React.createElement('input', {
+      style: input, value: form.required_action,
+      onChange: (e) => setForm({ ...form, required_action: e.target.value }),
+    }),
+    React.createElement('label', { style: label }, '超时秒数（5-600）'),
+    React.createElement('input', {
+      style: input, value: form.timeout_seconds,
+      onChange: (e) => setForm({ ...form, timeout_seconds: e.target.value }),
+    }),
+    React.createElement('label', { style: label }, 'Python 源码（env: ITD_DB_URL / ITD_USER / ITD_ROLE / ITD_ARGS_JSON）'),
+    React.createElement('textarea', {
+      style: { ...input, minHeight: 140, fontFamily: 'monospace' },
+      value: form.content,
+      onChange: (e) => setForm({ ...form, content: e.target.value }),
+    }),
+    React.createElement('div', { style: { display: 'flex', gap: 10 } },
+      React.createElement('button', { style: button, onClick: save, disabled: busy }, '保存'),
+      editing ? React.createElement('button', {
+        style: button, onClick: () => {
+          setEditing(null)
+          setForm({ name: '', description: '', required_action: '', content: '', timeout_seconds: '60', enabled: true })
+        },
+      }, '取消') : null,
+    ),
+  )
+
+  return React.createElement(React.Fragment, null,
+    head,
+    formEl,
+    listItems.length > 0 ? React.createElement('div', { key: 'list' }, listItems) : null,
+    msg ? React.createElement('div', { key: 'msg', style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, msg) : null,
+  )
 }

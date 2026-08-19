@@ -248,9 +248,214 @@ function apply(ctx) {
           style: { ...card, borderColor: "#d05663", color: "#d05663", fontSize: 13 }
         }, String(error)));
       }
-      return import_react.default.createElement("div", { style: { maxWidth: 520 } }, children);
+      if (auth.loggedIn && auth.role === "admin") {
+        children.push(import_react.default.createElement(ScriptsSection, { key: "scripts" }));
+      }
+      return import_react.default.createElement("div", { style: { maxWidth: 720 } }, children);
     }
   ));
+}
+function ScriptsSection() {
+  const [scripts, setScripts] = (0, import_react.useState)(null);
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [msg, setMsg] = (0, import_react.useState)(null);
+  const [form, setForm] = (0, import_react.useState)({
+    name: "",
+    description: "",
+    required_action: "",
+    content: "",
+    timeout_seconds: "60",
+    enabled: true
+  });
+  const [editing, setEditing] = (0, import_react.useState)(null);
+  const [outputs, setOutputs] = (0, import_react.useState)({});
+  const refresh = (0, import_react.useCallback)(async () => {
+    try {
+      const r = await rpc("scripts_list");
+      setScripts(r.ok === true ? r.scripts : []);
+      setMsg(r.ok === true ? null : String(r.error ?? "\u52A0\u8F7D\u5931\u8D25"));
+    } catch (e) {
+      setMsg(String(e?.message ?? e));
+    }
+  }, []);
+  (0, import_react.useEffect)(() => {
+    void refresh();
+  }, [refresh]);
+  const save = async () => {
+    if (form.name.trim() === "" || form.content.trim() === "") {
+      setMsg("\u540D\u79F0\u4E0E\u5185\u5BB9\u5FC5\u586B");
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await rpc(editing ? "script_update" : "script_create", {
+        ...form,
+        required_action: form.required_action.trim() === "" ? null : form.required_action.trim(),
+        timeout_seconds: Math.min(Math.max(Number(form.timeout_seconds) || 60, 5), 600)
+      });
+      if (r.ok !== true) setMsg(String(r.error ?? "\u4FDD\u5B58\u5931\u8D25"));
+      else {
+        setForm({ name: "", description: "", required_action: "", content: "", timeout_seconds: "60", enabled: true });
+        setEditing(null);
+        void refresh();
+      }
+    } catch (e) {
+      setMsg(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async (name) => {
+    setBusy(true);
+    try {
+      const r = await rpc("script_delete", { name });
+      if (r.ok !== true) setMsg(String(r.error ?? "\u5220\u9664\u5931\u8D25"));
+      void refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const run = async (name) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await rpc("script_run", { name, args: {} });
+      setOutputs((prev) => ({ ...prev, [name]: r }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const head = import_react.default.createElement(
+    "div",
+    { key: "head", style: { fontSize: 14, fontWeight: 600, marginTop: 16 } },
+    "\u767D\u540D\u5355\u811A\u672C\uFF08agent \u5199\u5E93\u7684\u552F\u4E00\u901A\u9053\uFF0C\u670D\u52A1\u7AEF\u6267\u884C\uFF09"
+  );
+  const listItems = Array.isArray(scripts) ? scripts.map((s) => import_react.default.createElement(
+    "div",
+    {
+      key: s.name,
+      style: { ...card, padding: "10px 12px" }
+    },
+    import_react.default.createElement(
+      "div",
+      { style: { display: "flex", gap: 8, alignItems: "center" } },
+      import_react.default.createElement("code", { style: { fontSize: 13 } }, s.name),
+      import_react.default.createElement("span", { style: { fontSize: 12, opacity: 0.65 } }, s.description || ""),
+      s.enabled ? null : import_react.default.createElement("span", { style: { fontSize: 12, color: "#d05663" } }, "\u5DF2\u505C\u7528"),
+      import_react.default.createElement(
+        "span",
+        { style: { fontSize: 12, opacity: 0.65, marginLeft: "auto" } },
+        s.required_action ? `\u9700\u6743\u9650: ${s.required_action}` : "\u4EC5\u9700\u767B\u5F55"
+      )
+    ),
+    import_react.default.createElement(
+      "div",
+      { style: { display: "flex", gap: 8, marginTop: 8 } },
+      import_react.default.createElement("button", {
+        style: button,
+        onClick: () => run(s.name),
+        disabled: busy
+      }, "\u6267\u884C"),
+      import_react.default.createElement("button", {
+        style: button,
+        onClick: () => {
+          setEditing(s.name);
+          setForm({
+            name: s.name,
+            description: s.description || "",
+            required_action: s.required_action || "",
+            content: s.content || "",
+            timeout_seconds: String(s.timeout_seconds ?? 60),
+            enabled: s.enabled !== false
+          });
+        },
+        disabled: busy
+      }, "\u7F16\u8F91"),
+      import_react.default.createElement("button", {
+        style: { ...button, color: "#d05663", borderColor: "rgba(208,86,99,0.5)" },
+        onClick: () => remove(s.name),
+        disabled: busy
+      }, "\u5220\u9664")
+    ),
+    outputs[s.name] ? import_react.default.createElement("pre", {
+      style: {
+        marginTop: 8,
+        padding: 8,
+        borderRadius: 6,
+        fontSize: 11,
+        lineHeight: 1.5,
+        background: "rgba(128,128,128,0.1)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-all",
+        maxHeight: 200,
+        overflow: "auto"
+      }
+    }, `rc=${outputs[s.name].returncode ?? "?"}
+${outputs[s.name].stdout ?? ""}${outputs[s.name].stderr ? `
+[stderr]
+${outputs[s.name].stderr}` : ""}`) : null
+  )) : [];
+  const formEl = import_react.default.createElement(
+    "div",
+    { key: "form", style: card },
+    import_react.default.createElement(
+      "div",
+      { style: { ...label, fontSize: 13, opacity: 1 } },
+      editing ? `\u7F16\u8F91\u811A\u672C\uFF1A${editing}` : "\u65B0\u5EFA\u811A\u672C"
+    ),
+    import_react.default.createElement("label", { style: label }, "\u540D\u79F0\uFF08\u5C0F\u5199\u5B57\u6BCD/\u6570\u5B57/_/-\uFF09"),
+    import_react.default.createElement("input", {
+      style: input,
+      value: form.name,
+      disabled: editing !== null,
+      onChange: (e) => setForm({ ...form, name: e.target.value })
+    }),
+    import_react.default.createElement("label", { style: label }, "\u8BF4\u660E"),
+    import_react.default.createElement("input", {
+      style: input,
+      value: form.description,
+      onChange: (e) => setForm({ ...form, description: e.target.value })
+    }),
+    import_react.default.createElement("label", { style: label }, "\u6240\u9700\u6743\u9650\u952E\uFF08\u7559\u7A7A=\u4EC5\u9700\u767B\u5F55\uFF1B\u5982 action_maintenance_ledger_import\uFF09"),
+    import_react.default.createElement("input", {
+      style: input,
+      value: form.required_action,
+      onChange: (e) => setForm({ ...form, required_action: e.target.value })
+    }),
+    import_react.default.createElement("label", { style: label }, "\u8D85\u65F6\u79D2\u6570\uFF085-600\uFF09"),
+    import_react.default.createElement("input", {
+      style: input,
+      value: form.timeout_seconds,
+      onChange: (e) => setForm({ ...form, timeout_seconds: e.target.value })
+    }),
+    import_react.default.createElement("label", { style: label }, "Python \u6E90\u7801\uFF08env: ITD_DB_URL / ITD_USER / ITD_ROLE / ITD_ARGS_JSON\uFF09"),
+    import_react.default.createElement("textarea", {
+      style: { ...input, minHeight: 140, fontFamily: "monospace" },
+      value: form.content,
+      onChange: (e) => setForm({ ...form, content: e.target.value })
+    }),
+    import_react.default.createElement(
+      "div",
+      { style: { display: "flex", gap: 10 } },
+      import_react.default.createElement("button", { style: button, onClick: save, disabled: busy }, "\u4FDD\u5B58"),
+      editing ? import_react.default.createElement("button", {
+        style: button,
+        onClick: () => {
+          setEditing(null);
+          setForm({ name: "", description: "", required_action: "", content: "", timeout_seconds: "60", enabled: true });
+        }
+      }, "\u53D6\u6D88") : null
+    )
+  );
+  return import_react.default.createElement(
+    import_react.default.Fragment,
+    null,
+    head,
+    formEl,
+    listItems.length > 0 ? import_react.default.createElement("div", { key: "list" }, listItems) : null,
+    msg ? import_react.default.createElement("div", { key: "msg", style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, msg) : null
+  );
 }
 		return module.exports;
 	}
