@@ -801,6 +801,44 @@ def _v2_header(ws, headers: list[str], editable: set[int] = set()) -> None:
         cell.font = Font(bold=True, color="FFFFFF" if idx not in editable else "4F3B00")
 
 
+def _project_order_salesperson(db: Session, project_id: str) -> str | None:
+    """项目销售人员（2026-08-20 用户口径）：本项目挂靠需求单上的销售众数。
+
+    台账 salesperson 优先（project.salesperson），缺省回落到订单侧自动回填。
+    """
+    from app.services import maintenance_demands
+
+    rows = db.execute(
+        select(FMaintenanceOrder.salesperson, func.count())
+        .join(MaintenanceSourceOrderAssignment,
+              (MaintenanceSourceOrderAssignment.source_order_id
+               == FMaintenanceOrder.raw_order_id)
+              & MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            FMaintenanceOrder.salesperson.is_not(None),
+            FMaintenanceOrder.salesperson != "",
+            maintenance_demands.active_demand_condition(),
+        )
+        .group_by(FMaintenanceOrder.salesperson)
+        .order_by(func.count().desc())
+        .limit(1)
+    ).all()
+    return rows[0][0] if rows else None
+
+
+def _account_display_name(db: Session, username: str | None) -> str | None:
+    """账号 → 显示人名（找不到回退账号本身）。"""
+    if not username:
+        return None
+    from app.models.system import SysUser
+
+    row = db.execute(
+        select(SysUser.display_name).where(SysUser.username == username)
+    ).scalar_one_or_none()
+    return row or username
+
+
 def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     ws = wb.create_sheet(V2_SHEET_OVERVIEW)
     ws.append(["项目总览", None])
@@ -819,8 +857,12 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     values = [
         ("项目编号", project.project_code), ("项目名称", project.display_name),
         ("生命周期", project.lifecycle_status), ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
-        ("负责人账号", project.project_manager_id or "未关联账号"),
-        ("销售人员", project.salesperson or "—"), ("CMO", project.cmo_name or "—"),
+        # 2026-08-20 用户口径：负责人＝项目经理（显示人名）；销售人员＝台账优先、
+        # 缺省自动回填为挂靠需求单的销售众数；CMO＝台账来源（无台账则缺）。
+        ("项目经理（负责人）",
+         _account_display_name(db, project.project_manager_id) or "未关联账号"),
+        ("销售人员", project.salesperson or _project_order_salesperson(db, project.project_id) or "—"),
+        ("CMO", project.cmo_name or "—"),
         ("合同编号", "、".join(c.contract_no for c in contracts) or "—"),
         ("合同总额（含税）", str(total_contract) if total_contract else "—"),
         ("合同额口径", "XSDD 销售回退（台账未导入）" if (contract_shared or contract_incomplete) or (total_contract and not contracts) else "台账合同"),

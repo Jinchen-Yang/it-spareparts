@@ -303,17 +303,23 @@ def _card(db, client, project_id):
 
 
 def test_card_carries_contract_manager_and_amount(db, tmp_path):
+    """2026-08-20 修正：project_manager＝项目经理（账号显示名），不再误用 CMO。"""
     from app.models.maintenance_project import MaintenanceProject
+    from app.models.system import SysUser
 
     proj = make_project(db)
-    db.get(MaintenanceProject, proj.project_id).cmo_name = "李经理"
+    record = db.get(MaintenanceProject, proj.project_id)
+    record.cmo_name = "李CMO"
+    record.project_manager_id = "pm-zhang"
+    db.add(SysUser(username="pm-zhang", password_hash="x", role="admin", display_name="张项目经理", is_active=True))
     db.commit()
     _contract(db, proj, "100000.00")
     orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)
     assign(db, orders[0], proj)
     row = _card(db, boss_client(db, username="card-boss"), proj.project_id)
     assert row["contract_nos"] == ["HT-001"]
-    assert row["project_manager"] == "李经理"
+    assert row["project_manager"] == "张项目经理"
+    assert row["project_manager"] != "李CMO"
     assert row["contract_amount_inc_tax"]["value"] == "100000.00"
 
 

@@ -738,6 +738,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     contracts = _card_contracts(db, project_ids)
     procured = _card_procured_qty(db, window, project_ids)
     collections = _card_collections(db, project_ids)
+    manager_names = _manager_display_names(
+        db, [p.project_manager_id for p in rows])
     cost_ex = _card_cost_ex_tax(db, window, project_ids)
 
     out_rows = []
@@ -765,7 +767,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                            procured=procured.get(proj.project_id),
                            collected=collections.get(proj.project_id),
                            cost_ex=cost_ex.get(proj.project_id),
-                           bundle=cost_bundles.get(proj.project_id)),
+                           bundle=cost_bundles.get(proj.project_id),
+                           manager_display=manager_names.get(proj.project_manager_id or "")),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
         })
 
@@ -1114,9 +1117,24 @@ def _card_cost_ex_tax(db: Session, window: tuple[date, date],
     return {pid: Decimal(v or 0) for pid, v in rows}
 
 
+def _manager_display_names(db: Session, usernames: list[str | None]) -> dict[str, str]:
+    """账号 → 显示名（批量）。项目经理卡片展示用人名，不用账号串。"""
+    from app.models.system import SysUser
+
+    wanted = {u for u in usernames if u}
+    if not wanted:
+        return {}
+    rows = db.execute(
+        select(SysUser.username, SysUser.display_name).where(
+            SysUser.username.in_(wanted))
+    ).all()
+    return {u: (d or u) for u, d in rows}
+
+
 def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
                  contracts: dict | None, procured, collected, cost_ex,
-                 bundle: dict | None) -> dict:
+                 bundle: dict | None,
+                 manager_display: str | None = None) -> dict:
     """项目卡的补充字段（REQUIREMENTS #34/#35）。
 
     金额三件（合同额/成本未税/回款预览）挂 `data_purchase_cost`：无权限一律
@@ -1135,7 +1153,10 @@ def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
     return {
         # XSDD 销售订单号即归属判定依据（#45）；多合同项目返回多个
         "contract_nos": contract_nos,
-        "project_manager": getattr(project, "cmo_name", None),
+        # 2026-08-20 修复：此处曾误填 cmo_name（张冠李戴）。项目经理 =
+        # project_manager_id 解析出的账号显示名（无账号回退原值）。
+        "project_manager": manager_display or (
+            getattr(project, "project_manager_id", None) if project is not None else None),
         "contract_amount_inc_tax": money(contract_amount),
         # #51 诚实标注：XSDD 回退层的共用单/缺单提示（台账层恒 false）
         "contract_shared": bool((contracts or {}).get("contract_shared")),
