@@ -1,0 +1,8 @@
+{
+  "name": "dsh-plugins-itdata",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "devDependencies": {
+    "esbuild": "^0.25.6"
+  }
+}
