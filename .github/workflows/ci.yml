@@ -22,9 +22,10 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
     steps:
+      # 不用 fetch-depth: 0——runner 到 github.com 的网络对大全量 fetch 不稳定
+      #（2026-08-19 实测三连 TLS 失败）。depth=1 只拉 base 尖端即可比对；
+      # 两点 diff 对「main 漂移」保守误报为多跑后端，绝不漏跑。
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - id: filter
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
@@ -32,7 +33,10 @@ jobs:
             echo "frontend=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          for i in 1 2 3; do
+            git fetch --depth=1 origin "${{ github.base_ref }}" && break || sleep 5
+          done
+          changed="$(git diff --name-only FETCH_HEAD HEAD)"
           echo "本次 PR 改动文件："
           echo "$changed"
           backend=false
