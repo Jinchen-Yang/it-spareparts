@@ -32,8 +32,41 @@ export const COST_SOURCE_LABEL: Record<string, string> = {
   sales_history: "销售历史",
   pool_sales: "备件池销售",
   month_avg: "月均价",
+  trace_avg: "追溯均价",
+  sales_ref: "销售参考价",
+  manual: "人工回填",
   none: "暂无成本",
 };
+
+/**
+ * 取价来源四分类配色（2026-08-20 用户拍板，取代旧的置信度配色）：
+ * 系统关联（direct 采购单挂接）＝绿；估算（窗口/历史/池/月均/销售参考）＝橙；
+ * 人工回填（manual）＝紫；缺失（none/NULL）＝红。
+ */
+export type CostSourceCategory = "linked" | "estimated" | "manual" | "missing" | "unknown";
+
+export function costSourceCategory(source: string | null | undefined): CostSourceCategory {
+  if (!source) return "missing";
+  if (source === "direct") return "linked";
+  if (source === "manual") return "manual";
+  if (source === "none") return "missing";
+  return "estimated";
+}
+
+export const COST_CATEGORY_COLOR: Record<CostSourceCategory, string> = {
+  linked: "green",
+  estimated: "orange",
+  manual: "purple",
+  missing: "red",
+  unknown: "default",
+};
+
+export const COST_CATEGORY_LEGEND: { color: string; text: string }[] = [
+  { color: "green", text: "系统关联" },
+  { color: "orange", text: "估算" },
+  { color: "purple", text: "人工回填" },
+  { color: "red", text: "缺失" },
+];
 
 /** CostSourceTag 的最小入参：ProjectPartsRow 天然满足，board 行级明细取 Stat 值后组装。 */
 export interface CostSourceLike {
@@ -44,10 +77,7 @@ export interface CostSourceLike {
 }
 
 export function CostSourceTag({ row }: { row: CostSourceLike }) {
-  const confidence = row.confidence ?? (row.cost_source === "none" ? "none" : null);
-  const color = confidence === "high" ? "green"
-    : confidence === "medium" ? "orange"
-      : confidence === "low" ? "red" : "default";
+  const color = COST_CATEGORY_COLOR[costSourceCategory(row.cost_source)];
   const label = row.cost_source_label || COST_SOURCE_LABEL[row.cost_source || ""] || raw(row.cost_source);
   const suffix = row.missing_kind === "out_of_scope" ? "（起算日前）"
     : row.missing_kind === "none" ? "（未找到）" : "";

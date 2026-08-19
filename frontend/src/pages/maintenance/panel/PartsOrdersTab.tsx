@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Card, Select, Space, Table, Typography, message } from "antd";
+import { Card, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardLineRow, BoardOrderRow } from "../../../api/maintenanceBossBoard";
 import {
@@ -13,7 +13,13 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
-import { CostSourceTag, raw, readError, statText } from "./panelUtils";
+import {
+  COST_CATEGORY_LEGEND,
+  CostSourceTag,
+  raw,
+  readError,
+  statText,
+} from "./panelUtils";
 import type { CostSourceLike } from "./panelUtils";
 
 const { Text } = Typography;
@@ -106,21 +112,39 @@ export function PartsOrdersTab({
     },
   ];
 
+  // PN 为主的行级明细（2026-08-20 用户拍板）：PN+描述合并主列、单价两档、
+  // 成本来源四分类彩标（绿=系统关联 / 橙=估算 / 紫=人工回填 / 红=缺失）。
   const lineColumns: ColumnsType<BoardLineRow> = [
-    { title: "PN", dataIndex: "pn_std", render: (v, r) => raw(v || r.pn_raw) },
-    { title: "描述", dataIndex: "description", render: raw },
-    { title: "需求", dataIndex: "qty", render: raw },
-    // 以下为流转状态列：原样展示，不参与任何计算（铁律 3）
-    { title: "已采", dataIndex: "purchased_qty", render: raw },
-    { title: "待供", dataIndex: "pending_supply_qty", render: raw },
-    { title: "待返", dataIndex: "pending_return_qty", render: raw },
-    { title: "领用", dataIndex: "consumed_qty", render: raw },
+    {
+      title: "PN / 描述",
+      dataIndex: "pn_std",
+      width: 320,
+      render: (v: string | null, r: BoardLineRow) => (
+        <Space direction="vertical" size={0}>
+          <Text strong copyable={Boolean(v)}>{raw(v || r.pn_raw)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{raw(r.description)}</Text>
+        </Space>
+      ),
+    },
+    { title: "需求数量", dataIndex: "qty", width: 90, render: raw },
+    { title: "退货数量", dataIndex: "return_qty", width: 90, render: raw },
+    {
+      title: "未税单价",
+      width: 110,
+      render: (_: unknown, line) => statText(line.unit_cost_ex_tax),
+    },
+    {
+      title: "含税单价",
+      width: 110,
+      render: (_: unknown, line) => statText(line.unit_cost_inc_tax),
+    },
     {
       title: "已知申请估算成本(含税)",
       render: (_: unknown, line) => statText(line.known_apply_cost_inc_tax),
     },
     {
       title: "成本来源",
+      width: 150,
       render: (_: unknown, line) => <CostSourceTag row={lineCostSource(line)} />,
     },
   ];
@@ -166,9 +190,14 @@ export function PartsOrdersTab({
         />
         {selectedOrder ? (
           <>
-            <Text type="secondary" style={{ fontSize: 11.5 }}>
-              流转状态列（已采/待供/待返/领用）为氚云原样数据，系统只展示、不参与任何计算。
-            </Text>
+            <Space size={12} wrap>
+              {COST_CATEGORY_LEGEND.map((item) => (
+                <Tag key={item.text} color={item.color}>{item.text}</Tag>
+              ))}
+              <Text type="secondary" style={{ fontSize: 11.5 }}>
+                成本来源：绿=系统关联（采购单挂接）｜橙=估算（窗口/历史/池/月均/销售参考）｜紫=人工回填｜红=缺失
+              </Text>
+            </Space>
             <Table<BoardLineRow>
               rowKey="raw_line_id"
               size="small"

@@ -1307,6 +1307,10 @@ def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
             # 成本与取价来源同属成本数据组（无权限时整体 restricted，无侧信道）
             "known_apply_cost_inc_tax": (
                 ready(ln.cost_amount_inc_tax) if can_cost else restricted()),
+            "unit_cost_ex_tax": (
+                ready(ln.unit_cost_ex_tax) if can_cost else restricted()),
+            "unit_cost_inc_tax": (
+                ready(ln.unit_cost_inc_tax) if can_cost else restricted()),
             "cost_source": (ready(ln.cost_source) if can_cost else restricted()),
             "confidence": (ready(ln.confidence) if can_cost else restricted()),
         })
