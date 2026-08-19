@@ -101,6 +101,9 @@ ACTION_KEYS: list[str] = [
     # 只读 + 字段级脱敏 + 表黑名单，但仍越过业务层行级过滤，故按账号显式授权：
     # 模板全 False（admin 走 require_action 短路恒放行），权限中心逐人开。
     "action_agent_sql",
+    # Agent 本地临时脚本（run_script 只读模式）领取只读 DSN（/api/agent/dsn）。
+    # PG 层只授 SELECT 业务表，但**不做字段级脱敏**，比 db_query 更强，独立显式授权。
+    "action_agent_dsn_ro",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -152,6 +155,7 @@ LABELS: dict[str, str] = {
     "action_replenishment_create": "补库申请创建与复提",
     "action_replenishment_review": "补库审核结果回写",
     "action_agent_sql": "Agent 直查数据库（text2sql，只读+脱敏）",
+    "action_agent_dsn_ro": "Agent 临时脚本只读数据库连接（不经字段脱敏）",
 }
 
 
@@ -205,7 +209,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
              "action_replenishment_review": False,
-             "action_agent_sql": False},
+             "action_agent_sql": False,
+             "action_agent_dsn_ro": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -236,6 +241,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_replenishment_review": False,
                  # Agent 直查数据库按账号显式授权，guest/readonly 兜底模板决不能带
                  "action_agent_sql": False,
+                 "action_agent_dsn_ro": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -558,6 +564,7 @@ UI_GROUPS: list[dict] = [
          "action_replenishment_create",
          "action_replenishment_review",
          "action_agent_sql",
+         "action_agent_dsn_ro",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -966,6 +973,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "数据岗（显式授权）"],
         "sensitivity": "critical",
         "risk": "越过业务层行级过滤直接读库，仅给确有 text2sql 需要的账号逐人开通。",
+    },
+    "action_agent_dsn_ro": {
+        "label": "Agent 临时脚本只读连接",
+        "summary": "允许 AI 助手（DSH 企业插件）领取只读数据库连接串，在本地运行自己写的 Python 脚本查询数据。",
+        "can": "运行任意临时 Python 脚本，通过只读 PG 角色连接业务库（仅 SELECT，无敏感系统表）。",
+        "cannot": "不能写库；不经字段级脱敏（比 db_query 更强）；脚本只能在本机 DSH 环境运行。",
+        "typical": ["数据岗（显式授权）"],
+        "sensitivity": "critical",
+        "risk": "PG 只读角色直连不受应用层脱敏控制，只授给完全信任的数据岗位。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

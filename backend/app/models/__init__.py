@@ -112,6 +112,7 @@ from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import (
     SysAuditLog,
     SysBusinessSetting,
+    SysDshScript,
     SysImportBatch,
     SysImportError,
     SysImportJob,
@@ -227,6 +228,7 @@ __all__ = [
     "SysBusinessSetting",
     "SysUser",
     "SysRoleTemplate",
+    "SysDshScript",
     "ReplenishmentApplication",
     "ReplenishmentApplicationVersion",
     "ReplenishmentApplicationLine",

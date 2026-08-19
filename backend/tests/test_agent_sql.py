@@ -179,3 +179,67 @@ def test_call_whitelist(db):
     assert r.status_code == 200
     body = r.json()
     assert "error" in body  # 业务错（空查询）原样回灌，而非 500
+
+
+# ---------- P4：白名单脚本 + 只读 DSN ----------
+
+def test_scripts_crud_requires_admin(db):
+    admin = _login(db, "sc_admin", role="admin")
+    h = _login(db, "sc_user")
+    r = c.post("/api/agent/scripts", headers=h,
+               json={"name": "x", "content": "print(1)"})
+    assert r.status_code == 403
+    r = c.post("/api/agent/scripts", headers=admin,
+               json={"name": "health_check", "content": "import os\nprint(os.environ.get('ITD_USER',''))"})
+    assert r.status_code == 200
+    # 重名 409
+    r = c.post("/api/agent/scripts", headers=admin,
+               json={"name": "health_check", "content": "print(2)"})
+    assert r.status_code == 409
+    # 非法权限键 400
+    r = c.post("/api/agent/scripts", headers=admin,
+               json={"name": "bad_action", "content": "print(1)",
+                     "required_action": "not_a_key"})
+    assert r.status_code == 400
+    # 列表：普通用户只见 enabled
+    r = c.get("/api/agent/scripts", headers=h)
+    assert {s["name"] for s in r.json()["scripts"]} == {"health_check"}
+    # 删除
+    r = c.delete("/api/agent/scripts/health_check", headers=admin)
+    assert r.status_code == 200
+
+
+def test_script_run_action_gate_and_timeout(db):
+    admin = _login(db, "sr_admin", role="admin")
+    h = _login(db, "sr_user")
+    r = c.post("/api/agent/scripts", headers=admin,
+               json={"name": "write_ledger", "content": "print('ledger')",
+                     "required_action": "action_maintenance_ledger_import"})
+    assert r.status_code == 200
+    # 无该动作 → 403；admin 短路放行
+    assert c.post("/api/agent/scripts/write_ledger/run", headers=h,
+                  json={"args": {}}).status_code == 403
+    assert c.post("/api/agent/scripts/write_ledger/run", headers=admin,
+                  json={"args": {}}).status_code == 200
+    # 超时保护
+    c.post("/api/agent/scripts", headers=admin,
+           json={"name": "slow", "content": "import time; time.sleep(30)",
+                 "timeout_seconds": 5})
+    r = c.post("/api/agent/scripts/slow/run", headers=h, json={"args": {}})
+    body = r.json()
+    assert body["ok"] is False and "超时" in body["stderr"]
+    # 停用脚本 404
+    c.put("/api/agent/scripts/slow", headers=admin,
+          json={"name": "slow", "content": "print(1)", "enabled": False})
+    assert c.post("/api/agent/scripts/slow/run", headers=h,
+                  json={"args": {}}).status_code == 404
+
+
+def test_dsn_gate(db):
+    h = _login(db, "dsn_user")
+    # 未授权 → 403（配置与否都到不了）
+    assert c.get("/api/agent/dsn", headers=h).status_code == 403
+    granted = _login(db, "dsn_granted",
+                     {"action_agent_dsn_ro": True, "own_customers_only": False})
+    # 授权但部署未配置 DSH_RO_DSN → 501
+    assert c.get("/api/agent/dsn", headers=granted).status_code == 501

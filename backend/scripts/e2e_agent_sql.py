@@ -146,6 +146,57 @@ def main() -> int:
         ]
         check("structure: all agent routes gated", not bad_routes, str(bad_routes))
 
+        # ── P4：白名单脚本 + 只读 DSN ──────────────────────────────────────
+        # 11) 脚本 CRUD：非 admin 被拒
+        r = c.post("/api/agent/scripts", headers=ok,
+                   json={"name": "x1", "content": "print(1)"})
+        check("scripts: non-admin create 403", r.status_code == 403)
+
+        # 12) admin 创建 → 列表 → 执行（无 required_action：仅 page_chat）
+        r = c.post("/api/agent/scripts", headers=admin,
+                   json={"name": "health_check", "description": "回显用户",
+                         "content": "import os\nprint('hi', os.environ.get('ITD_USER', ''))"})
+        check("scripts: admin create", r.status_code == 200, r.text[:150])
+        r = c.get("/api/agent/scripts", headers=ok)
+        names = {s["name"] for s in r.json()["scripts"]} if r.status_code == 200 else set()
+        check("scripts: list shows enabled", "health_check" in names)
+        r = c.post("/api/agent/scripts/health_check/run", headers=ok, json={"args": {}})
+        body = r.json() if r.status_code == 200 else {}
+        check("scripts: run by page_chat user",
+              r.status_code == 200 and body.get("ok") is True and "sq_ok" in (body.get("stdout") or ""),
+              r.text[:200])
+
+        # 13) required_action 门：绑定 action_maintenance_ledger_import，无权限用户 403
+        r = c.post("/api/agent/scripts", headers=admin,
+                   json={"name": "write_ledger", "content": "print('ledger')",
+                         "required_action": "action_maintenance_ledger_import"})
+        check("scripts: admin create w/ action", r.status_code == 200)
+        r = c.post("/api/agent/scripts/write_ledger/run", headers=ok, json={"args": {}})
+        check("scripts: missing action 403", r.status_code == 403, r.text[:150])
+        admin_run = c.post("/api/agent/scripts/write_ledger/run", headers=admin, json={"args": {}})
+        check("scripts: admin short-circuit", admin_run.status_code == 200)
+
+        # 14) 脚本超时保护
+        r = c.post("/api/agent/scripts", headers=admin,
+                   json={"name": "slow_script", "content": "import time; time.sleep(30)",
+                         "timeout_seconds": 5})
+        check("scripts: create slow", r.status_code == 200)
+        r = c.post("/api/agent/scripts/slow_script/run", headers=ok, json={"args": {}})
+        body = r.json() if r.status_code == 200 else {}
+        check("scripts: timeout enforced",
+              r.status_code == 200 and body.get("ok") is False and "超时" in (body.get("stderr") or ""),
+              r.text[:200])
+
+        # 15) DSN：无授权 → 403；已授权但部署未配置 → 501
+        r = c.get("/api/agent/dsn", headers=ok)
+        check("dsn: no permission 403", r.status_code == 403)
+        dsn_user = login("dsn_ok", {"action_agent_dsn_ro": True, "own_customers_only": False})
+        r = c.get("/api/agent/dsn", headers=dsn_user)
+        check("dsn: granted but unconfigured 501", r.status_code == 501)
+        no_dsn = login("dsn_noperm")
+        r = c.get("/api/agent/dsn", headers=no_dsn)
+        check("dsn: no permission 403", r.status_code == 403)
+
         db.close()
     finally:
         try:

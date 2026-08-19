@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # 数据库：默认指向 docker-compose 中的 db 服务；本地裸跑可用 .env 覆盖
     database_url: str = "postgresql+psycopg://spareparts:spareparts@db:5432/spareparts"
 
+    # DSH 企业定制：agent 临时脚本（run_script 本地只读模式）使用的只读 DB 连接串。
+    # 部署方建一个只对业务表授 SELECT 的 PG 角色（不含 sys_* 表），写在此处（env DSH_RO_DSN）。
+    # 留空 = 该能力关闭，run_script 只支持白名单脚本（服务端执行）。
+    dsh_ro_dsn: str = ""
+
     # 原始上传文件归档目录
     raw_file_dir: str = "./data/raw"
 

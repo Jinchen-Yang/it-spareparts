@@ -247,3 +247,25 @@ class SysAccessLog(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (Index("ix_access_user_time", "username", "created_at"),)
+
+
+class SysDshScript(Base):
+    """DSH agent 白名单脚本（企业定制 P4）。
+
+    由管理员在权限面板维护；agent 通过 /api/agent/scripts/{name}/run 触发，
+    服务端子进程执行（独立于业务 ORM），执行前按 required_action 做动作级准入，
+    每次执行写 sys_access_log 审计。写库语义由脚本内容与专用 PG 角色约束。
+    """
+
+    __tablename__ = "sys_dsh_script"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(String(256))
+    content: Mapped[str] = mapped_column(Text)             # Python 源码
+    required_action: Mapped[str | None] = mapped_column(String(64))  # ACTION_KEYS 之一；空=仅需 page_chat
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
