@@ -132,6 +132,7 @@ def test_v2_single_sheet_export_only_validates_that_sheet(db):
     assert wb.sheetnames == [
         master.V2_SHEET_EXPENSE,
         master.V2_SHEET_DICTIONARY,
+        master.V2_SHEET_USAGE,
         master.V2_SHEET_META,
     ]
     assert wb[master.V2_SHEET_META]["B6"].value == master.V2_SHEET_EXPENSE

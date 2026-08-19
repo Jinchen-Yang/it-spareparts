@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
@@ -68,7 +69,7 @@ V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
 # 2026-08-19（#264/#267）：03 全字段可编辑 + 04 作废/缺行=作废——新增「操作」列、
 # 放开行级数据列、只读哈希收窄。旧 2.0.0 工作簿因哈希列集合变更一律拒绝并
 # 提示重新下载。
-V2_TEMPLATE_VERSION = "2.1.0"
+V2_TEMPLATE_VERSION = "2.2.0"
 
 SHEET_BASICS = "01_项目基础信息"
 SHEET_OVERVIEW = "02_概览数据"
@@ -99,6 +100,7 @@ _GLOBAL_HEADERS = ["项目名称", "合同编号", "维保单号", "制单日期
                    "需求数量", "退货数量", "成本来源(系统)", "未税单位成本",
                    "含税单位成本(系统计算)", "变更原因"]
 
+V2_SHEET_USAGE = "00_使用说明"
 V2_SHEET_OVERVIEW = "01_项目概览"
 V2_SHEET_PLAN = "02_回款计划"
 V2_SHEET_PARTS = "03_备件明细"
@@ -109,7 +111,7 @@ V2_SHEET_DICTIONARY = "98_字段说明"
 V2_SHEET_META = "99_元数据"
 V2_ALL_SHEETS = (V2_SHEET_OVERVIEW, V2_SHEET_PLAN, V2_SHEET_PARTS,
                  V2_SHEET_EXPENSE, V2_SHEET_RECEIPTS, V2_SHEET_SITE,
-                 V2_SHEET_DICTIONARY, V2_SHEET_META)
+                 V2_SHEET_DICTIONARY, V2_SHEET_USAGE, V2_SHEET_META)
 V2_EDITABLE = PatternFill("solid", fgColor="FFE699")
 V2_READONLY = PatternFill("solid", fgColor="D9E2F3")
 V2_HEADER = PatternFill("solid", fgColor="1F4E78")
@@ -744,18 +746,47 @@ def _v2_hash(values: list[object]) -> str:
         ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None) -> None:
+def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None,
+                 editable: set[int] | None = None,
+                 operation_col: int | None = None,
+                 operation_choices: tuple[str, ...] = ("UPDATE", "VOID", "CREATE")) -> None:
+    """收尾样式：黄底=可编辑（表头+数据区整列），操作列做成下拉只能选不能乱填。"""
+    editable = editable or set()
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{ws.cell(ws.max_row or 1, len(headers)).coordinate}"
     for index, header in enumerate(headers, 1):
         cell = ws.cell(1, index)
-        cell.fill = V2_HEADER
-        cell.font = Font(bold=True, color="FFFFFF")
+        if index in editable:
+            cell.fill = V2_EDITABLE
+            cell.font = Font(bold=True, color="4F3B00")
+        else:
+            cell.fill = V2_HEADER
+            cell.font = Font(bold=True, color="FFFFFF")
         width = min(60, max(12, len(str(header)) * 2 + 2))
         ws.column_dimensions[cell.column_letter].width = width
     if hidden_from is not None:
         for index in range(hidden_from, len(headers) + 1):
             ws.column_dimensions[ws.cell(1, index).column_letter].hidden = True
+    # 数据区可编辑列整列黄底（含空白新增行，向下多刷 20 行备用）
+    if editable:
+        last_row = (ws.max_row or 1) + 20
+        for index in editable:
+            letter = ws.cell(1, index).column_letter
+            for r in range(2, last_row + 1):
+                ws[f"{letter}{r}"].fill = V2_EDITABLE
+    # 操作列：Excel 数据验证下拉（允许留空），杜绝自由输入拼错
+    if operation_col is not None:
+        dv = DataValidation(
+            type="list",
+            formula1='"' + ",".join(operation_choices) + '"',
+            allow_blank=True,
+            showDropDown=False,  # False=显示下拉箭头（openpyxl 语义反转）
+        )
+        dv.error = "操作列只能从下拉选择：{}".format("/".join(operation_choices))
+        dv.errorTitle = "操作列取值无效"
+        ws.add_data_validation(dv)
+        letter = ws.cell(1, operation_col).column_letter
+        dv.add(f"{letter}2:{letter}{(ws.max_row or 1) + 20}")
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = cell.alignment.copy(wrap_text=True, vertical="top")
@@ -824,7 +855,8 @@ def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
         ])
     for _ in range(4):
         ws.append([""] * len(V2_PLAN_HEADERS))
-    _v2_finalize(ws, V2_PLAN_HEADERS, hidden_from=13)
+    _v2_finalize(ws, V2_PLAN_HEADERS, hidden_from=13,
+                 editable={1, 2, 3, 4, 5, 6, 12}, operation_col=1)
 
 
 def _v2_part_row_values(line, order, override) -> dict[str, object]:
@@ -880,7 +912,8 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
     for _ in range(5):
         ws.append([""] * len(V2_PART_HEADERS))
-    _v2_finalize(ws, V2_PART_HEADERS)
+    _v2_finalize(ws, V2_PART_HEADERS,
+                 editable=V2_PART_EDITABLE, operation_col=1)
     # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)。备注(25)/来源(26) 可见。
     for col in (22, 23, 24):
         ws.column_dimensions[ws.cell(1, col).column_letter].hidden = True
@@ -896,7 +929,8 @@ def _v2_build_expense(wb, db, project_id: str, contracts) -> None:
                    expense.linked_sales_order_no or "", project_id, "—", expense.data_status or "",
                    expense.amount, expense.tax_basis or "ex", expense.amount_ex_tax,
                    expense.amount_inc_tax, expense.remark or "", expense.raw_line_id])
-    _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=18)
+    _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=18,
+                 editable={1, 4, 5, 6, 7, 8, 9, 12, 14, 17}, operation_col=1)
 
 
 def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
@@ -925,7 +959,48 @@ def _v2_build_site(wb, db, project_id: str) -> None:
         ws.append([issue.issue_no, issue.issue_date, line.pn, line.serial_number or "", line.quantity,
                    "" if line.no_return is None else ("否" if line.no_return else "是"), line.remark or "",
                    "—", "待确认品类", "—", line.issue_line_id])
-    _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11)
+    _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
+                 editable={1, 2, 3, 4, 5, 6, 7})
+
+
+def _v2_build_usage(wb) -> None:
+    """00_使用说明：怎么改、怎么删、哪些能改（黄底）、防呆规则。"""
+    ws = wb.create_sheet(V2_SHEET_USAGE)
+    rows = [
+        ("如何使用本项目总表", ""),
+        ("", ""),
+        ("【总原则】", "黄底单元格 = 可以修改；其他颜色/无底色 = 系统只读，改了会被拒绝并要求重新下载。"),
+        ("", "每个数据行的第 1 列是「操作」下拉框：留空=更新该行 / UPDATE=更新 / VOID=作废该行 / CREATE=新增行（只用于表尾空白行）。"),
+        ("", ""),
+        ("【03 备件明细】", ""),
+        ("改数量/退货数量", "直接改黄底单元格，回传后系统按 数量-退货数量×单价 重算金额。"),
+        ("改 PN", "填新的标准 PN（必须能匹配备件主数据），回传后行会整体换绑新备件。"),
+        ("新增一行", "在表尾空白行：操作列选 CREATE，填 维保单号（必须是本项目已有需求单）+ PN + 数量。"),
+        ("删除一行", "两种等价方式：① 操作列选 VOID；② 直接把该行整行删掉。回传后该行作废，不再进入任何统计与导出。"),
+        ("整单删除", "把该单的所有行都删掉/标 VOID，回传后整张需求单自动作废（可由管理员在系统内恢复）。"),
+        ("【04 费用报销】", ""),
+        ("删除一行", "直接删行或操作列选 VOID。作废的行从此不再导出、不计金额。"),
+        ("新增一行", "表尾填 费用单号+明细序号+报销日期+金额+归集键（XSDD），操作列留空或 CREATE。"),
+        ("【02 回款计划 / 05 实收回款 / 06 领用返还】", "按黄底提示编辑；02/05 带「基础版本」乐观锁，若系统侧已更新会提示重新下载。"),
+        ("", ""),
+        ("【安全规则】", ""),
+        ("行数防呆", "上传的数据行少于导出时的一半 → 整本拒绝（防止筛选后误传删掉大片数据）。"),
+        ("缺行判定", "「删行=作废」只对下载时存在的行生效；下载之后系统里新导入的行不受影响。"),
+        ("原样回传", "什么都不改直接传回去 = 零变更（幂等），不会产生任何写库。"),
+        ("改错了怎么办", "行级作废需管理员在系统内恢复；整单作废同。恢复入口：维保需求单页面 → 搜索（勾选「含已作废」）→ 恢复。"),
+    ]
+    for k, v in rows:
+        ws.append([k, v])
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 100
+    ws["A1"].fill = V2_TITLE
+    ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
+    ws.merge_cells("A1:B1")
+    for r in range(1, ws.max_row + 1):
+        a = ws.cell(r, 1)
+        if a.value and str(a.value).startswith("【"):
+            a.font = Font(bold=True)
+        ws.cell(r, 2).alignment = ws.cell(r, 2).alignment.copy(wrap_text=True, vertical="top")
 
 
 def _v2_build_dictionary(wb) -> None:
@@ -975,6 +1050,7 @@ def build_project_master_v2(
     if V2_SHEET_SITE in wanted:
         _v2_build_site(wb, db, project_id)
     _v2_build_dictionary(wb)
+    _v2_build_usage(wb)
     meta_rows = [
         ("protocol_id", V2_PROTOCOL_ID), ("template_version", V2_TEMPLATE_VERSION),
         ("project_id", project_id), ("export_id", str(uuid4())),
@@ -1175,7 +1251,7 @@ def _v2_verify_meta(wb, project_id: str) -> dict[str, str]:
     return meta
 
 
-def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill], int]:
+def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill], int, set[int]]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
     required = {"操作", "维保单号", "PN", "需求数量", "人工未税单位成本",
@@ -1185,6 +1261,7 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
                             "03_备件明细列定义不是当前 V2.1 版本，请重新下载当前项目总表")
     out: list[CostRefill] = []
     uploaded_entity_rows = 0
+    uploaded_entity_ids: set[int] = set()
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
@@ -1193,6 +1270,7 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
         has_entity = raw_id not in (None, "")
         if has_entity:
             uploaded_entity_rows += 1
+            uploaded_entity_ids.add(int(raw_id))
 
         if not has_entity:
             # 新增行：操作可空或 CREATE；空白占位行（单号/PN/数量全空）跳过
@@ -1356,7 +1434,7 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
             unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
             reason=reason, note=note,
         ))
-    return out, uploaded_entity_rows
+    return out, uploaded_entity_rows, uploaded_entity_ids
 
 
 def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
@@ -1640,8 +1718,9 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     receipt_ops: tuple[ec.CollectionOp, ...] = ()
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
     uploaded_line_rows = 0
+    uploaded_line_ids: set[int] = set()
     if V2_SHEET_PARTS in included:
-        parsed_refills, uploaded_line_rows = _v2_parse_parts(
+        parsed_refills, uploaded_line_rows, uploaded_line_ids = _v2_parse_parts(
             db, project_id, wb[V2_SHEET_PARTS])
         cost_refills = tuple(parsed_refills)
     if V2_SHEET_SITE in included:
@@ -1660,6 +1739,21 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         if refill.operation == "VOID":
             will_void_rows.append({"sheet": "03_备件明细", "entity_id": str(refill.line_id),
                                    "label": f"{refill.order_no or ''}"})
+
+    # 03 缺行=作废（用户 2026-08-20 拍板，与 04 同语义）：只命中「导出时存在、
+    # 上传时消失」的行；导出后新导入的行不在导出全集里，天然豁免。
+    if V2_SHEET_PARTS in included:
+        export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
+        voided_line_ids = {r.line_id for r in cost_refills if r.operation == "VOID"}
+        for line_id_str in export_parts_ids - {str(i) for i in uploaded_line_ids}:
+            line_id = int(line_id_str)
+            if line_id in voided_line_ids:
+                continue
+            cost_refills = cost_refills + (CostRefill(
+                line_id=line_id, operation="VOID",
+                unit_cost_ex_tax=None, unit_cost_inc_tax=None, reason=None),)
+            will_void_rows.append({"sheet": "03_备件明细", "entity_id": line_id_str,
+                                   "label": "", "reason": "上传文件缺行"})
 
     if V2_SHEET_EXPENSE in included:
         uploaded_expense_ids = ({u.raw_line_id for u in expense_updates}
@@ -1829,6 +1923,35 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
                          entity_type="maintenance_line", entity_id=line.id,
                          action="UPDATE", operated_by=operated_by, reason=audit_reason,
                          before=before or None, after=after)
+    # 行级作废的整单级联：被 VOID 的行所属需求单若活动行归零 → 整单墓碑
+    # （需求单搜索消失、氚云重传不复活；恢复走 demands 页面既有入口）。
+    db.flush()  # Session autoflush=False：先把 is_active=False 刷库，级联计数才准
+    voided_order_ids = {
+        line.order_id
+        for line in (
+            db.get(FMaintenanceLine, r.line_id)
+            for r in plan.cost_refills if r.operation == "VOID"
+        )
+        if line is not None
+    }
+    if voided_order_ids:
+        from app.services import maintenance_demands as _demands
+
+        raw_ids = db.scalars(
+            select(FMaintenanceOrder.raw_order_id).where(
+                FMaintenanceOrder.id.in_(voided_order_ids))
+        ).all()
+        cascaded = _demands.cascade_tombstone_orders(
+            db, source_order_ids=list(raw_ids),
+            operated_by=operated_by,
+            reason=f"{audit_reason}（行全部作废级联）",
+        )
+        if cascaded:
+            audit_after = {"cascaded_orders": cascaded}
+            _write_audit(db, project_id=plan.project_id,
+                         entity_type="maintenance_order", entity_id=",".join(cascaded),
+                         action="VOID", operated_by=operated_by, reason=audit_reason,
+                         after=audit_after)
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         if line is None and flag.is_create:

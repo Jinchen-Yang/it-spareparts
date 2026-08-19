@@ -117,7 +117,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.1.0"
+    assert meta["template_version"] == "2.2.0"
 
 
 def test_v21_void_line_sets_inactive_and_excludes_from_export(db):
@@ -669,3 +669,106 @@ def test_review_p1_late_imported_expense_is_not_voided(db):
     db.refresh(late)
     assert expense.data_status == "已作废"
     assert late.data_status != "已作废"
+
+
+def test_v22_parts_missing_row_becomes_void(db):
+    """03 删行=作废（与 04 同语义，2026-08-20 用户拍板）。
+    两行删一行＝50%，不触发防呆；唯一行被删会被防呆拦（契约行为）。"""
+    project, part, order, line = _make_project_with_line(db)
+    second = FMaintenanceLine(
+        raw_line_id=f"raw-line-{uuid.uuid4()}",
+        order_id=order.id, line_no=2, part_id=part.id,
+        pn_std=part.pn_std, pn_raw=part.pn_std, description=part.description,
+        qty=Decimal("1"), return_qty=Decimal("0"), import_batch_id=_batch(db),
+    )
+    db.add(second)
+    db.commit()
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_PARTS].delete_rows(2)  # 删第 2 行（第一条明细）
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert any(r.operation == "VOID" and r.line_id == line.id for r in plan.cost_refills)
+    assert any(r["sheet"] == "03_备件明细" and r.get("reason") == "上传文件缺行"
+               for r in plan.will_void_rows)
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(line)
+    assert line.is_active is False
+
+
+def test_v22_void_all_lines_cascades_order_tombstone(db):
+    """整单行全作废 → 级联整单墓碑：搜索消失、挂靠停用、重传不复活。"""
+    from app.services import maintenance_demands
+
+    project, _part, order, line = _make_project_with_line(db)
+    _content, wb, ws = _parts_sheet(db, project.project_id)
+    ws.cell(row=2, column=1, value="VOID")
+    _reupload(db, project.project_id, wb)
+
+    db.refresh(line)
+    assert line.is_active is False
+    tombstone = db.get(MaintenanceDemandTombstone, order.raw_order_id)
+    assert tombstone is not None and tombstone.restored_at is None
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id))
+    assert assignment.is_active is False
+    # 默认搜索不见
+    result = maintenance_demands.search_demands(db, q=None, page=1, page_size=20)
+    assert all(item["source_order_id"] != order.raw_order_id
+               for item in result["items"])
+
+
+def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
+    project, _p, _o, _l = _make_project_with_line(db)
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content))
+    # 使用说明 sheet
+    assert master.V2_SHEET_USAGE in wb.sheetnames
+    usage_texts = "\n".join(str(c.value) for row in wb[master.V2_SHEET_USAGE].iter_rows()
+                            for c in row if c.value)
+    assert "黄底" in usage_texts and "VOID" in usage_texts
+    # 操作列下拉
+    ws = wb[master.V2_SHEET_PARTS]
+    dvs = list(ws.data_validations.dataValidation)
+    assert any(dv.type == "list" and "VOID" in (dv.formula1 or "") for dv in dvs)
+    # 可编辑数据区黄底（PN 列=9，第 2 行）
+    from openpyxl.styles import PatternFill
+    fill = ws.cell(row=2, column=9).fill
+    assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
+    # 模板版本 2.2.0
+    meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
+    assert meta["template_version"] == "2.2.0"
+
+
+def test_latest_missing_marks_suspicious_when_ratio_high(db):
+    """缺失占比 > 50% → suspicious=true（前端禁用批量作废）。"""
+    from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+    from app.services import maintenance_wbdd_import as wbdd
+
+    project, _part, order, _line = _make_project_with_line(db)
+    # 再造 4 张同窗口、不在文件批次里的单 → 库内 5 张活跃，文件只有 1 张
+    others = []
+    for i in range(4):
+        b = _batch(db)
+        o = FMaintenanceOrder(
+            raw_order_id=f"raw-ghost-{i}-{uuid.uuid4()}", order_no=f"WBDD-GHOST-{i}",
+            order_date=order.order_date, linked_sales_order_no="XSDD-EDIT-001",
+            project_raw="可编辑测试", data_status="已生效", import_batch_id=b,
+        )
+        others.append(o)
+        db.add(o)
+    db.add(MaintenanceWbddImportReceipt(
+        batch_id=order.import_batch_id, idempotency_key="suspicious-key-0001",
+        uploaded_by="tester", file_hash=uuid.uuid4().hex,
+        report_json={"batch_id": order.import_batch_id},
+    ))
+    db.commit()
+    result = wbdd.latest_missing(db)
+    assert result["missing_count"] == 4
+    assert result["db_active_in_window"] == 5
+    assert result["suspicious"] is True
+    assert result["missing_ratio"] > 0.5

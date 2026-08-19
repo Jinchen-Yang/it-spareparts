@@ -288,6 +288,15 @@ export function MaintenanceDemandsPage() {
             ) : null}
           </Space>
 
+          {missing?.suspicious ? (
+            <Alert
+              type="error"
+              showIcon
+              message="疑似不完整的导出——消失占比异常，已禁用批量作废"
+              description={`本次快照判定消失 ${missing.missing_count} 张，而同期库内活跃单共 ${missing.db_active_in_window ?? "?"} 张（占比 ${Math.round((missing.missing_ratio ?? 0) * 100)}%）。这通常说明氚云导出时带了筛选条件或被行数截断，而非真的删除。请清空筛选、确认导出范围后再重新上传；仍要单独作废某张单，请在下方需求单列表里逐张操作。`}
+            />
+          ) : null}
+
           {missing?.truncated ? (
             <Alert
               type="warning"
@@ -319,7 +328,7 @@ export function MaintenanceDemandsPage() {
               <Button
                 type="primary"
                 danger
-                disabled={!selectedRowKeys.length}
+                disabled={!selectedRowKeys.length || (missing?.suspicious ?? false)}
                 onClick={() => openVoidModal(selectedRowKeys)}
               >
                 按氚云现状批量作废

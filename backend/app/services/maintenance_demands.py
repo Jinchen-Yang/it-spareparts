@@ -861,6 +861,105 @@ def cancel_delete_intent(
     return _intent_payload(db, intent)
 
 
+def cascade_tombstone_orders(
+    db: Session,
+    *,
+    source_order_ids: list[str],
+    operated_by: str,
+    reason: str,
+    now: datetime | None = None,
+) -> list[str]:
+    """总表行级作废的级联：某需求单的活动行归零 → 整单打墓碑（#264 增强）。
+
+    与 void-fast 同构（intent 锚 + 墓碑 + 挂靠停用 + 事件），但不做行数/范围
+    校验——调用方（工作簿 apply）已完成行级校验，这里只负责收尾整单状态。
+    返回实际打了墓碑的单（本来就没有活动行的跳过）。
+    """
+    now = now or _utc_now()
+    reason = (reason or "总表行全部作废").strip()[:MAX_REASON_LENGTH]
+    tombstoned_now: list[str] = []
+    if not source_order_ids:
+        return tombstoned_now
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
+    for source_id in source_order_ids:
+        order = db.scalar(
+            select(FMaintenanceOrder).where(
+                FMaintenanceOrder.raw_order_id == source_id)
+        )
+        if order is None:
+            continue
+        already = db.get(MaintenanceDemandTombstone, source_id)
+        if already is not None and already.restored_at is None:
+            continue
+        active_lines = int(db.scalar(
+            select(func.count(FMaintenanceLine.id)).where(
+                FMaintenanceLine.order_id == order.id,
+                FMaintenanceLine.is_active.is_(True),
+            )
+        ) or 0)
+        if active_lines > 0:
+            continue
+        intent = MaintenanceDemandDeleteIntent(
+            intent_id=str(uuid4()),
+            idempotency_key=f"workbook-cascade:{source_id}:{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}",
+            request_digest=_digest({"cascade": source_id, "reason": reason,
+                                    "operated_by": operated_by}),
+            selection_digest=_digest({"cascade": source_id}),
+            status="executed",
+            reason=reason,
+            operated_by=operated_by,
+            header_count=1,
+            line_count=0,
+            created_at=now,
+            not_before=now,
+            expires_at=now,
+        )
+        db.add(intent)
+        db.flush()
+        tombstone = MaintenanceDemandTombstone(
+            source_order_id=source_id,
+            delete_intent_id=intent.intent_id,
+            version_digest=_digest({"cascade": source_id, "at": now.isoformat()}),
+            deleted_by=operated_by,
+            delete_reason=reason,
+            deleted_at=now,
+            version=1,
+        )
+        db.add(tombstone)
+        result = {"intent_id": intent.intent_id, "status": "executed",
+                  "mode": "workbook_cascade", "source_order_id": source_id,
+                  "order_no": order.order_no, "executed_at": now.isoformat()}
+        intent.result_json = result
+        _event(
+            db,
+            event_type="executed",
+            idempotency_key=f"workbook-cascade:{intent.intent_id}",
+            operated_by=operated_by,
+            reason=reason,
+            payload=result,
+            occurred_at=now,
+            intent_id=intent.intent_id,
+            source_order_id=source_id,
+        )
+        tombstoned_now.append(source_id)
+    db.flush()
+    if tombstoned_now:
+        _deactivate_assignments(
+            db, source_order_ids=tombstoned_now,
+            operated_by=operated_by, reason=reason, now=now,
+        )
+        from app.services import maintenance_warehouse
+
+        maintenance_warehouse.reconcile_project_assignment_links(
+            db, operated_by=operated_by, reason=reason,
+            source_order_ids=set(tombstoned_now),
+        )
+    return tombstoned_now
+
+
 def _deactivate_assignments(
     db: Session,
     *,

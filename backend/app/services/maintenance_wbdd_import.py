@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -145,6 +146,7 @@ def snapshot_diff(db: Session, file_order_nos: set[str],
 # 差异清单明细上限（#265 契约）：与 void-fast 的 MAX_DELETE_HEADERS 对齐，
 # 超出部分 truncated=true，前端提示分批作废。
 _MISSING_DETAILS_LIMIT = 1_000
+_MISSING_SUSPICIOUS_RATIO = Decimal("0.5")
 
 
 def latest_missing(db: Session) -> dict:
@@ -183,6 +185,11 @@ def latest_missing(db: Session) -> dict:
         "missing_count": diff["missing_orders"],
         "missing_orders": [],
         "truncated": False,
+        "db_active_in_window": None,
+        "missing_ratio": None,
+        # 疑似不完整导出（2026-08-20 人工测试发现）：局部/筛选导出会把大量
+        # 活着的单误报为消失。占比超阈值时前端禁用一键批量作废并要求确认。
+        "suspicious": False,
     }
     if diff["missing_orders"] == 0 or not diff.get("window"):
         return base
@@ -224,6 +231,18 @@ def latest_missing(db: Session) -> dict:
         .order_by(FMaintenanceOrder.order_no)
         .limit(_MISSING_DETAILS_LIMIT + 1)
     ).all()
+    active_in_window = int(db.scalar(
+        select(func.count(FMaintenanceOrder.id)).where(
+            FMaintenanceOrder.order_date >= lo,
+            FMaintenanceOrder.order_date <= hi,
+            FMaintenanceOrder.raw_order_id.notin_(tombstoned),
+        )
+    ) or 0)
+    base["db_active_in_window"] = active_in_window
+    if active_in_window:
+        ratio = Decimal(diff["missing_orders"]) / Decimal(active_in_window)
+        base["missing_ratio"] = float(round(ratio, 4))
+        base["suspicious"] = ratio > _MISSING_SUSPICIOUS_RATIO
     base["truncated"] = len(rows) > _MISSING_DETAILS_LIMIT
     base["missing_orders"] = [
         {
