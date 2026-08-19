@@ -68,10 +68,14 @@
 
 ## 六、实现状态（2026-08-19 收尾）
 
-- **后端+数据库全部完成**，分支 `feat/maintenance-delete-void`（cda4ca7 → 5051f97 → 186d91c），已推 origin（经 WSL 中转：本机到 github.com 443 被重置）。
-- 正式契约文档：`docs/maintenance/contracts/project-master-delete-void.md`（冻结版）。
-- 测试：`test_maintenance_project_master_v2_editable.py` 17/17；WSL 全量回归与基线 99b836c 对比，分支新增失败仅 2 项且已修复；**基线既有 36 个失败**（replenishment_beta/evidence 等）与本改动无关，待单独排查。
-- checkpoint 潜伏 bug 修复记录：`_v2_hash` Excel 往返类型漂移（Decimal→float/date→datetime）；CREATE 备注列号 off-by-one；均因 checkpoint 从未被 pytest 验证。
-- 测试执行环境：WSL `wsl.cloudlay.cn:2222`（密钥 `~/.ssh/cloud_claude_wsl`），克隆 `~/Workspaces/it-spareparts-verify`；本机 macOS conftest 拒跑（Linux isolation 强制）。
-- ⚠️ 本地 main（`99b836c`，16 个提交）未推过 origin/main；分支推送已把它们带上远端分支，main 未动。
-- 剩余：前端三入口（#267 前端线）、#268 两大场景 tracer bullet。
+> ⚠️ **血统事故与修正（重要，后续会话必读）**：
+> 仓库存在两条并行血统——(a) origin/main squash 线（`27c95fa` = GitHub squash 合并）；(b) 本地链（`bd867a7`→…16 提交→`99b836c`，含购物车暂存/八Sheet 重写/补库原子提交/打回重编辑等未发布工作，用户后期把本地 main 重置回 `27c95fa`）。
+> 我最初误从 `99b836c` 建分支（当时本地 main 指向它），后来**从 `27c95fa` 重建分支并 force push 替换远端同名分支**；本地链的 16 个提交仍在本地（无远端备份），归用户自行处置。
+> 两血统的同名文件是**两套实现**（如 master workbook：27c95fa 版含 XSDD 合同回退/04 手工新增/FSalesOrder 自动建合同；99b836c 版是八Sheet 重写）。跨血统移植必须语义合流，不能文本 rebase。
+
+- **后端+数据库完成**：分支 `feat/maintenance-delete-void`（@49081b5，基线 27c95fa），PR **#272** → main。契约文档 `docs/maintenance/contracts/project-master-delete-void.md`。
+- 27c95fa 合流保留清单：04 空白实体手工新增（V2.1 与操作列双轨）、`project_sales_order_nos` 归集、`_v2_build_overview` XSDD 回退、`_xsdd_contract_for_project`、v1 apply 备注独立、`_v2_date` 带时间格式、`sheets=included` 语义。
+- 前端 PR **#270**（三入口+两页重设计，基于 27c95fa）：组合验证 vitest 623/623 + 构建通过；前端期望的三处后端契约缺口（void-fast results[] / search include_voided / validate will_void_rows）已在 49081b5 补齐。
+- WSL 全量：仅 https_rollback 9 失败（纯 27c95fa 基线同样失败，环境类；CI runner 上 main 全绿）。
+- 测试环境：WSL `wsl.cloudlay.cn:2222`（密钥 `~/.ssh/cloud_claude_wsl`），克隆 `~/Workspaces/it-spareparts-verify`；本机 macOS conftest 拒跑。**本机到 github.com 443 常被重置——推送走 WSL git bundle 中转**。
+- 剩余：PR #272 CI → 合并 → #270 合并；#268 两大场景 tracer bullet。
