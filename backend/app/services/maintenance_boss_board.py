@@ -141,7 +141,8 @@ def _cost_bundle(db: Session, *, window: tuple[date, date],
                 MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
             )
             .where(FMaintenanceOrder.order_date >= start,
-                   FMaintenanceOrder.order_date <= end))
+                   FMaintenanceOrder.order_date <= end,
+                   FMaintenanceLine.is_active.is_(True)))
     stmt = _scope_stmt(stmt, project_id=project_id,
                        unassigned_only=unassigned_only,
                        allowed_project_ids=allowed_project_ids)
@@ -232,7 +233,8 @@ def _cost_bundles_by_project(db: Session, *, window: tuple[date, date],
         .join(MaintenanceSourceOrderAssignment, active)
         .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
                FMaintenanceOrder.order_date >= start,
-               FMaintenanceOrder.order_date <= end)
+               FMaintenanceOrder.order_date <= end,
+               FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     found = {row[0]: _bundle_from_row(*row[1:]) for row in rows}
@@ -249,7 +251,8 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
     if not can_cost:
         counts = db.execute(
             select(FMaintenanceLine.order_id, func.count(FMaintenanceLine.id))
-            .where(FMaintenanceLine.order_id.in_(order_ids))
+            .where(FMaintenanceLine.order_id.in_(order_ids),
+                   FMaintenanceLine.is_active.is_(True))
             .group_by(FMaintenanceLine.order_id)
         ).all()
         line_counts = {oid: int(n) for oid, n in counts}
@@ -260,7 +263,8 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
             MaintenanceManualCostOverride,
             MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
         )
-        .where(FMaintenanceLine.order_id.in_(order_ids))
+        .where(FMaintenanceLine.order_id.in_(order_ids),
+               FMaintenanceLine.is_active.is_(True))
         .group_by(FMaintenanceLine.order_id)
     ).all()
     found = {row[0]: (_bundle_from_row(*row[1:]), int(row[5])) for row in rows}
@@ -310,7 +314,8 @@ def _window_counts(db: Session, window: tuple[date, date], *,
                   .join(FMaintenanceOrder,
                         FMaintenanceOrder.id == FMaintenanceLine.order_id)
                   .where(FMaintenanceOrder.order_date >= start,
-                         FMaintenanceOrder.order_date <= end))
+                         FMaintenanceOrder.order_date <= end,
+                         FMaintenanceLine.is_active.is_(True)))
     lines_stmt = _scope_stmt(lines_stmt, project_id=project_id,
                              unassigned_only=unassigned_only,
                              allowed_project_ids=allowed_project_ids)
@@ -408,6 +413,7 @@ def _attention_demand(db: Session) -> dict[str, dict]:
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .join(MaintenanceSourceOrderAssignment, active)
+        .where(FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     return {pid: {"demand_qty": Decimal(d or 0), "demand_return_qty": Decimal(r or 0)}
@@ -686,6 +692,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .join(MaintenanceSourceOrderAssignment, active)
+        .where(FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
         .subquery()
     )
@@ -876,6 +883,7 @@ def _budget_overspend_stats():
               and_(MaintenanceSourceOrderAssignment.source_order_id
                    == FMaintenanceOrder.raw_order_id,
                    MaintenanceSourceOrderAssignment.is_active.is_(True)))
+        .where(FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
         .subquery()
     )
@@ -935,7 +943,8 @@ def _project_window_counts(db: Session, window: tuple[date, date],
                    FMaintenanceLine.order_id == FMaintenanceOrder.id)
         .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
                FMaintenanceOrder.order_date >= start,
-               FMaintenanceOrder.order_date <= end)
+               FMaintenanceOrder.order_date <= end,
+               FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     return {pid: (int(o), int(l)) for pid, o, l in rows}
@@ -1083,7 +1092,8 @@ def _card_procured_qty(db: Session, window: tuple[date, date],
         .join(MaintenanceSourceOrderAssignment, active)
         .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
                FMaintenanceOrder.order_date >= start,
-               FMaintenanceOrder.order_date <= end)
+               FMaintenanceOrder.order_date <= end,
+               FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     return {pid: Decimal(qty or 0) for pid, qty in rows}
@@ -1130,7 +1140,8 @@ def _card_cost_ex_tax(db: Session, window: tuple[date, date],
         .join(MaintenanceSourceOrderAssignment, active)
         .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
                FMaintenanceOrder.order_date >= start,
-               FMaintenanceOrder.order_date <= end)
+               FMaintenanceOrder.order_date <= end,
+               FMaintenanceLine.is_active.is_(True))
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all()
     return {pid: Decimal(v or 0) for pid, v in rows}
@@ -1287,9 +1298,11 @@ def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
         return {"rows": [], "total": 0, "page": page, "page_size": page_size}
     total = int(db.execute(
         select(func.count(FMaintenanceLine.id))
-        .where(FMaintenanceLine.order_id == order.id)).scalar_one())
+        .where(FMaintenanceLine.order_id == order.id,
+               FMaintenanceLine.is_active.is_(True))).scalar_one())
     rows = db.execute(
-        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id)
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id,
+                                       FMaintenanceLine.is_active.is_(True))
         .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
         .offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()

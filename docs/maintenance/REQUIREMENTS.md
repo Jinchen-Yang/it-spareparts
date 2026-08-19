@@ -63,6 +63,7 @@
 | 08-17 | 52 | **补库草稿只存在浏览器**：入口迁入维保项目面板；选择项目、增删 PN、改数量/备注均不写业务数据库。页面只保留一个主操作「提交申请」；未提交离开需提醒，失败保留输入，当前申请优先、历史申请折叠。唯一写入口 `POST /replenishment-beta/applications` 一次提交 `client_request_id`、真实 `project_id`、1–200 个不重复 PN、正整数数量及有界备注。 | 已实现（#260 候选分支，待发布） | GitHub #260 |
 | 08-17 | 53 | **项目范围 fail closed**：admin 只列全部 active 项目；sales 只列 `maintenance_project.salesperson == sys_user.salesperson_name` 的精确匹配，缺销售映射返回 0 项；不存在、停用或越权项目一律不可提交且不泄露存在性。相同 owner＋`client_request_id`＋相同 payload 幂等返回原单，不同 payload 返回 409；并发与任一校验失败不得留下部分申请/版本/行/审计。 | 已实现（#260 候选分支，待发布） | GitHub #260 |
 | 08-17 | 54 | 新补库申请原始状态仍为 `submitted`，由 `workflow_mode=system_screening`、`stage=screening_complete` 表达「三查事实已冻结」，**不产生 approved/rejected 语义**。系统在同一事务冻结三查、最近销售、提交时池底价和 `as_of`；`system-screening.xlsx` 只读冻结证据、不回查实时表、只陈述事实与需注意项。历史无项目申请显式标为 legacy/unbound、永久只读且导出返回 409；旧草稿/改单/评审/WBDD/evidence/purchase-list 写入口退役为 410/404。 | 已实现（#260 候选分支，待发布） | GitHub #260 |
+| 08-19 | 55 | **项目总表 V2.1 全字段可编辑**（业务指示 08-19，落地 #11/#40）：在现有 V2 总表内下载→改→上传（不做在线编辑器）。03 备件明细放开行级数据列（PN/描述/需求数量/SN/退货数量/人工成本/备注），支持**新增行**（挂本项目已有需求单）、**修改行**、**删除行=作废**。删除为软作废（`is_active=false`）：不计入任何计算、下次导出不再出现、需求单内 06 领用返还关联记录级联作废；氚云重传不复活。归属字段（XSDD/项目名/需求单头号/系统成本）保持锁定。数量变更后服务端按现有单价重算成本金额。02/04/05 沿用既有 CREATE/UPDATE/VOID。行级审计（`maintenance_project_operation_audit`）即可，不做字段级全量 diff。模板升级到 `2.1.0`，旧 2.0.0 工作簿拒绝并提示重新下载。 | 待发布（feat/maintenance-v2-editable） | 业务指示 |
 
 ## 状态约定
 

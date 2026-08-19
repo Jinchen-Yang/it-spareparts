@@ -327,6 +327,10 @@ class MaintenanceSiteIssueLine(Base):
     reference_window_to: Mapped[date | None] = mapped_column(Date)
     algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # 2026-08-19：06 行随 03 备件行级联作废；读侧过滤 is_active=false（#55）。
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )

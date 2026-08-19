@@ -236,6 +236,8 @@ def _preflight_resource_limits(
         FMaintenanceOrder.linked_sales_order_no.in_(contracts),
         FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE,
         maintenance_demands.active_demand_condition(),
+        # 2026-08-19：作废明细行不计入工作簿导出；LEFT JOIN 占位行（无明细的单）保留（#55）
+        or_(FMaintenanceLine.id.is_(None), FMaintenanceLine.is_active.is_(True)),
     ]
     if config.ACTIVE_STATUS_ONLY:
         part_filters.append(FMaintenanceOrder.data_status == config.ACTIVE_STATUS)

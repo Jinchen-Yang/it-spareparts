@@ -296,7 +296,8 @@ def line_evidence(db: Session, *, source_order_id: str) -> list[dict]:
     rows = db.execute(
         select(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
-        .where(FMaintenanceOrder.raw_order_id == source_order_id)
+        .where(FMaintenanceOrder.raw_order_id == source_order_id,
+               FMaintenanceLine.is_active.is_(True))
         .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
     ).scalars().all()
     pools = pool_membership(db, {ln.pn_std for ln in rows if ln.pn_std})

@@ -231,6 +231,8 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
         .order_by(FMaintenanceLine.id)
     )
     maintenance_stmt = active_orders(maintenance_stmt, FMaintenanceOrder)
+    # 2026-08-19：作废明细行不进采购↔维保匹配审计（#55）
+    maintenance_stmt = maintenance_stmt.where(FMaintenanceLine.is_active.is_(True))
     exact_eligible, by_loose = _purchase_indexes(db)
 
     bucket_counts = {code: 0 for code, _label, _repairable in _BUCKETS}

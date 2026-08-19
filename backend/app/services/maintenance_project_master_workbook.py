@@ -40,6 +40,7 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceManualCostOverride,
 )
+from app.models.system import SysImportBatch
 from app.models.dimensions import DimPart, PartAlias
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -47,6 +48,7 @@ from app.models.maintenance_project import (
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
+    MaintenanceProjectOperationAudit,
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
@@ -63,7 +65,9 @@ from app.services.maintenance_expense_collection_workbook import (
 
 PROTOCOL_VERSION = "project-master-v1"
 V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
-V2_TEMPLATE_VERSION = "2.0.0"
+# 2026-08-19：03 全字段可编辑——新增「操作」列、放开行级数据列、只读哈希收窄。
+# 旧 2.0.0 工作簿因哈希列集合变更一律拒绝并提示重新下载。
+V2_TEMPLATE_VERSION = "2.1.0"
 
 SHEET_BASICS = "01_项目基础信息"
 SHEET_OVERVIEW = "02_概览数据"
@@ -110,11 +114,20 @@ V2_READONLY = PatternFill("solid", fgColor="D9E2F3")
 V2_HEADER = PatternFill("solid", fgColor="1F4E78")
 V2_TITLE = PatternFill("solid", fgColor="17365D")
 V2_PART_HEADERS = [
-    "维保单号", "制单日期", "XSDD", "需求类型", "仓库", "销售人员", "业务类型",
+    "操作", "维保单号", "制单日期", "XSDD", "需求类型", "仓库", "销售人员", "业务类型",
     "PN", "描述", "需求数量", "SN", "退货数量", "成本来源", "置信度",
     "系统未税单位成本", "系统含税单位成本", "人工未税单位成本", "人工成本原因",
     "成本缺失类型", "可补价", "实体ID", "备件主键", "只读哈希",
     "备注", "来源",
+]
+# 2026-08-19 全字段可编辑：1-based 可编辑列。行级数据列（PN/描述/数量/SN/退货数量）+
+# 人工成本两列 + 备注 + 操作列放开；维保单号/制单日期/XSDD/头级字段/系统成本/来源仍锁。
+V2_PART_EDITABLE = {1, 9, 10, 11, 12, 13, 18, 19, 25}
+# 参与只读哈希的列（按表头名定位，避免插入操作列后错位）：行级身份与系统事实，
+# 可编辑列一律不进哈希。
+V2_PART_HASH_COLUMNS = [
+    "维保单号", "制单日期", "XSDD", "需求类型", "仓库", "销售人员", "业务类型",
+    "成本来源", "置信度", "系统未税单位成本", "系统含税单位成本", "来源", "实体ID",
 ]
 V2_PLAN_HEADERS = ["操作", "合同编号", "期次", "计划回款日期", "日期精度", "计划回款金额（含税）",
                    "累计计划金额", "最新累计实收", "到款状态", "提醒状态", "负责人", "备注", "实体ID", "基础版本"]
@@ -130,12 +143,24 @@ V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "
 
 @dataclass(frozen=True)
 class CostRefill:
-    line_id: int
+    line_id: int | None
     # 2026-08-18：金额可空——只改备注/原因不填金额也是一次合法回填
     unit_cost_ex_tax: Decimal | None
     unit_cost_inc_tax: Decimal | None
     reason: str | None
     note: str | None = None
+    # 2026-08-19 全字段可编辑（03）：UPDATE/VOID 作用于既有行；CREATE 新增行时
+    # line_id 为 None，order_no+pn+qty 必填。
+    operation: str = "UPDATE"
+    pn: str | None = None
+    description: str | None = None
+    qty: Decimal | None = None
+    return_qty: Decimal | None = None
+    serial_numbers: str | None = None
+    order_no: str | None = None
+    is_create: bool = False
+    order_id: int | None = None
+    part_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -247,6 +272,8 @@ def _assigned_lines(db: Session, *, project_id: str | None,
               (MaintenanceSourceOrderAssignment.source_order_id
                == FMaintenanceOrder.raw_order_id)
               & MaintenanceSourceOrderAssignment.is_active.is_(True))
+        # 2026-08-19：V2 总表作废行不计入计算/导出/看板/面板（#55）
+        .where(FMaintenanceLine.is_active.is_(True))
         .order_by(FMaintenanceOrder.order_date, FMaintenanceOrder.order_no,
                   FMaintenanceLine.line_no)
     )
@@ -354,7 +381,8 @@ def _sheet_site(wb, db: Session, project_id: str) -> None:
         select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
         .join(MaintenanceSiteIssue,
               MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-        .where(MaintenanceSiteIssue.project_id == project_id)
+        .where(MaintenanceSiteIssue.project_id == project_id,
+               MaintenanceSiteIssueLine.is_active.is_(True))
         .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)
     ).all()
     for line, issue in rows:
@@ -608,9 +636,10 @@ def _merge_manual_cost_to_line(
     cost_amount 字段。这样面板/看板/概览读主表即得人工值，无需各处 merge；
     与其他 sheet（02/04/05/06 直接写主表）行为一致。
 
-    Codex P1：仅当主表当前**无自动成本**（cost_source IN (NULL,'none')）时才合并
-    manual 到主表——已有 direct/window 等自动证据的行不被人工值覆盖（legacy 导出
-    预填系统价，原样上传不应把自动行重分类为 manual）；override 表始终写入审计。
+    Codex P1：仅当主表当前**无自动成本**（cost_source IN (NULL,'none','manual')）
+    时才合并 manual 到主表——已有 direct/window 等自动证据的行不被人工值覆盖
+    （legacy 导出预填系统价，原样上传不应把自动行重分类为 manual）；'manual' 行
+    允许通过 V2.1 编辑修正人工价。override 表始终写入审计。
     """
     if refill.unit_cost_ex_tax is not None:
         existing = db.execute(
@@ -653,6 +682,31 @@ def _merge_manual_cost_to_line(
             existing.reason = refill.reason
             existing.version += 1
             existing.updated_by = operated_by
+
+
+def _recompute_line_amounts(line: FMaintenanceLine) -> None:
+    """数量/退货数量变更后，按现有单位成本重算两套成本金额（数量×单价）。
+    无成本的行（none/NULL）保持 NULL，不伪造金额。"""
+    effective_qty = max((line.qty or Decimal(0)) - (line.return_qty or Decimal(0)),
+                        Decimal(0))
+    if line.unit_cost_ex_tax is not None:
+        line.cost_amount_ex_tax = (line.unit_cost_ex_tax * effective_qty).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if line.unit_cost_inc_tax is not None:
+        line.cost_amount_inc_tax = (line.unit_cost_inc_tax * effective_qty).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _write_audit(db: Session, *, project_id: str, entity_type: str,
+                 entity_id: str, action: str, operated_by: str,
+                 reason: str, before: dict | None = None,
+                 after: dict | None = None) -> None:
+    """行级审计（#4：行级即可，不做字段级全量 diff）。"""
+    db.add(MaintenanceProjectOperationAudit(
+        project_id=project_id, entity_type=entity_type, entity_id=str(entity_id),
+        action=action, before_json=before, after_json=after,
+        reason=reason or "工作簿编辑", operated_by=operated_by,
+    ))
 
 
 def apply(db: Session, plan: MasterPlan, *, operated_by: str,
@@ -873,32 +927,64 @@ def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
     _v2_finalize(ws, V2_PLAN_HEADERS, hidden_from=13, editable={1, 2, 3, 4, 5, 6, 12})
 
 
+def _v2_part_row_values(line, order, override) -> dict[str, object]:
+    """03 一行的全部展示值（按表头名）。build/parse 共用，保证哈希口径一致。"""
+    has_cost = line.unit_cost_ex_tax is not None
+    return {
+        "操作": "",
+        "维保单号": order.order_no or "",
+        "制单日期": order.order_date,
+        "XSDD": order.linked_sales_order_no or "",
+        "需求类型": order.demand_type or "",
+        "仓库": order.warehouse or "",
+        "销售人员": order.salesperson or "",
+        "业务类型": order.business_type or "",
+        "PN": line.pn_std or line.pn_raw or "",
+        "描述": line.description or "",
+        "需求数量": line.qty,
+        "SN": line.serial_numbers or "",
+        "退货数量": line.return_qty,
+        "成本来源": line.cost_source or "",
+        "置信度": line.confidence or "none",
+        "系统未税单位成本": line.unit_cost_ex_tax,
+        "系统含税单位成本": line.unit_cost_inc_tax,
+        "人工未税单位成本": override.unit_cost_ex_tax if override else None,
+        "人工成本原因": override.reason if override else None,
+        "成本缺失类型": (
+            "out_of_scope" if line.cost_source is None and not has_cost
+            else ("none" if not has_cost else "")
+        ),
+        "可补价": "是" if line.cost_source in (None, "none") and not has_cost else "否",
+        "实体ID": line.id,
+        "备件主键": line.part_id,
+        "只读哈希": "",  # 占位，下方回填
+        "备注": line.line_note or "",
+        "来源": "工作簿" if line.edited_source == "workbook_manual" else "WBDD",
+    }
+
+
 def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     ws = wb.create_sheet(V2_SHEET_PARTS)
-    # 1-based：17=人工未税单位成本 18=人工成本原因 24=备注（删除"行事实版本"后列号）
-    editable = {17, 18, 24}
-    _v2_header(ws, V2_PART_HEADERS, editable=editable)
+    _v2_header(ws, V2_PART_HEADERS, editable=V2_PART_EDITABLE)
     line_ids = [line.id for line, _order, _pid in lines]
     overrides = {
         item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
             MaintenanceManualCostOverride.line_id.in_(line_ids)
         ))
     } if line_ids else {}
+    col_index = {name: i for i, name in enumerate(V2_PART_HEADERS)}
     for line, order, _pid in lines:
-        override = overrides.get(line.id)
-        readonly = [order.order_no, order.order_date, order.linked_sales_order_no or "", order.demand_type or "",
-                    order.warehouse or "", order.salesperson or "", order.business_type or "",
-                    line.pn_std or line.pn_raw or "", line.description or "", line.qty, line.serial_numbers or "",
-                    line.return_qty, line.cost_source or "", line.confidence or "none",
-                    line.unit_cost_ex_tax, line.unit_cost_inc_tax, line.id]
-        ws.append(readonly[:14] + [readonly[14], readonly[15],
-                                   override.unit_cost_ex_tax if override else "",
-                                   override.reason if override else "",
-                                   "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None else ("none" if line.unit_cost_ex_tax is None else ""),
-                                   "是" if line.cost_source in (None, "none") else "否",
-                                   line.id, line.part_id,
-                                   _v2_hash(readonly), line.line_note or "", "WBDD"])
-    _v2_finalize(ws, V2_PART_HEADERS, hidden_from=20, editable=editable)
+        values = _v2_part_row_values(line, order, overrides.get(line.id))
+        digest = _v2_hash([values[name] for name in V2_PART_HASH_COLUMNS])
+        values["只读哈希"] = digest
+        ws.append([values[name] for name in V2_PART_HEADERS])
+    # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
+    for _ in range(5):
+        ws.append([""] * len(V2_PART_HEADERS))
+    # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)。备注(25)/来源(26) 可见可改。
+    _v2_finalize(ws, V2_PART_HEADERS, editable=V2_PART_EDITABLE)
+    for col in (22, 23, 24):
+        ws.column_dimensions[ws.cell(1, col).column_letter].hidden = True
 
 
 def _v2_build_expense(wb, db, project_id: str, contracts) -> None:
@@ -934,7 +1020,9 @@ def _v2_build_site(wb, db, project_id: str) -> None:
     _v2_header(ws, V2_SITE_HEADERS, editable={1, 2, 3, 4, 5, 6, 7})
     rows = db.execute(select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).join(
         MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id
-    ).where(MaintenanceSiteIssue.project_id == project_id).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
+    ).where(MaintenanceSiteIssue.project_id == project_id,
+            MaintenanceSiteIssueLine.is_active.is_(True))
+    .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
     for line, issue in rows:
         ws.append([issue.issue_no, issue.issue_date, line.pn, line.serial_number or "", line.quantity,
                    "" if line.no_return is None else ("否" if line.no_return else "是"), line.remark or "",
@@ -971,10 +1059,17 @@ def _v2_build_dictionary(wb) -> None:
     row("02", "备注", "这期说明，如扣款/延迟原因。", "客户要求延后一月", "空=不写", "✅")
 
     # 03 备件明细
-    ws.append(["【03 备件明细】一行一个备件", None, None, None, None, None])
+    ws.append(["【03 备件明细】一行一个备件；改数量/PN/备注，作废或新增都在这张表", None, None, None, None, None])
+    row("03", "操作", "这行怎么处理：留空或 UPDATE=改、VOID=作废这行（不物理删）；新增行填 CREATE 或留空。", "VOID", "已有行留空=不改", "✅")
+    row("03", "PN", "备件料号；改 PN 必须能在备件主数据里找到。", "WUH721818ALE6L4", "新增行必填", "✅")
+    row("03", "描述", "备件说明。", "4TB 企业级硬盘", "空=不写", "✅")
+    row("03", "需求数量", "这行需要几个；改完系统按新数量重算成本金额。", "2", "新增行必填且>0", "✅")
+    row("03", "SN", "序列号（如果有）。", "4BG36J6H", "空=不写", "✅")
+    row("03", "退货数量", "退回几个，不能大于需求数量。", "1", "空=0", "✅")
     row("03", "人工未税单位成本", "系统没有这备件成本价时，人工补一个未税单价。", "888.88", "空=不补价", "✅")
     row("03", "人工成本原因", "为什么人工补价，写一句。", "按供应商报价补价", "空=不写", "✅")
     row("03", "备注", "这行备件的说明。", "客户指定品牌", "空=不写", "✅")
+    ws.append(["03", "新增行", "在表底空行填：维保单号（必须是本项目已有的需求单）、PN、需求数量；实体ID留空。单号/日期/XSDD/系统成本等白底列不能改。", None, None, "✅"])
 
     # 04 费用报销
     ws.append(["【04 费用报销】一行一笔报销", None, None, None, None, None])
@@ -1117,37 +1212,171 @@ def _v2_verify_meta(wb, project_id: str) -> dict[str, str]:
     return meta
 
 
-def _v2_parse_parts(db: Session, ws) -> list[CostRefill]:
+def _cell(row, index: dict[str, int], name: str):
+    return row[index[name]] if name in index and index[name] < len(row) else None
+
+
+def _v2_parse_parts(db: Session, project_id: str, ws) -> list[CostRefill]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
-    required = {"系统未税单位成本", "人工未税单位成本", "人工成本原因", "实体ID", "只读哈希"}
+    required = {"操作", "维保单号", "PN", "需求数量", "人工未税单位成本",
+                "人工成本原因", "实体ID", "只读哈希", "备注"}
     if not required.issubset(index):
-        raise WorkbookError("template_version_mismatch", "03_备件明细列定义不是当前 V2 版本")
+        raise WorkbookError("template_version_mismatch",
+                            "03_备件明细列定义不是当前 V2.1 版本，请重新下载当前项目总表")
     out: list[CostRefill] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        line_id = row[index["实体ID"]]
-        if line_id in (None, ""):
-            raise WorkbookError("line_not_recognized", f"03_备件明细第 {row_no} 行缺少实体ID")
-        line = db.get(FMaintenanceLine, int(line_id))
-        if line is None:
-            raise WorkbookError("line_not_found", f"第 {row_no} 行备件事实已不存在，请重新下载")
-        readonly = list(row[:16]) + [line.id]
-        if _v2_hash(readonly) != str(row[index["只读哈希"]] or ""):
-            raise WorkbookError("readonly_cell_modified", f"第 {row_no} 行只读事实已修改或已过期，请重新下载")
-        raw_manual = row[index["人工未税单位成本"]]
-        reason = str(row[index["人工成本原因"]] or "").strip() or None
-        note = str(row[index["备注"]] or "").strip() or None if "备注" in index else None
-        # 2026-08-18：成本/原因/备注任一变化都是一次合法回填
-        if raw_manual in (None, "") and reason is None and note is None:
+        raw_id = _cell(row, index, "实体ID")
+        operation = str(_cell(row, index, "操作") or "").strip().upper()
+        has_entity = raw_id not in (None, "")
+
+        if not has_entity:
+            # 新增行：操作可空或 CREATE；空白占位行（单号/PN/数量全空）跳过
+            order_no = str(_cell(row, index, "维保单号") or "").strip()
+            pn_raw = str(_cell(row, index, "PN") or "").strip()
+            qty_raw = _cell(row, index, "需求数量")
+            if not order_no and not pn_raw and qty_raw in (None, ""):
+                continue
+            if operation and operation != "CREATE":
+                raise WorkbookError("invalid_operation",
+                                    f"第 {row_no} 行无实体ID，只能填 CREATE 或留空")
+            if not order_no:
+                raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写维保单号")
+            # 维保单号必须已存在且归属本项目
+            order = db.scalar(
+                select(FMaintenanceOrder)
+                .join(MaintenanceSourceOrderAssignment,
+                      (MaintenanceSourceOrderAssignment.source_order_id
+                       == FMaintenanceOrder.raw_order_id)
+                      & MaintenanceSourceOrderAssignment.is_active.is_(True))
+                .where(FMaintenanceOrder.order_no == order_no,
+                       MaintenanceSourceOrderAssignment.project_id == project_id)
+                .limit(1)
+            )
+            if order is None:
+                raise WorkbookError(
+                    "order_not_in_project",
+                    f"第 {row_no} 行维保单号 {order_no!r} 不在本项目，"
+                    "新增明细只能挂到本项目已有需求单")
+            if not pn_raw:
+                raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写 PN")
+            part = _exact_part_for_pn(db, pn_raw)
+            if part is None:
+                raise WorkbookError("part_not_found",
+                                    f"第 {row_no} 行 PN {pn_raw!r} 未匹配备件主数据")
+            qty = _v2_decimal(qty_raw, row_no=row_no, label="需求数量", required=True)
+            if qty is None or qty <= 0:
+                raise WorkbookError("invalid_amount",
+                                    f"第 {row_no} 行需求数量必须大于 0")
+            return_qty = _v2_decimal(_cell(row, index, "退货数量"),
+                                     row_no=row_no, label="退货数量") or Decimal(0)
+            if return_qty > qty:
+                raise WorkbookError("invalid_amount",
+                                    f"第 {row_no} 行退货数量不能大于需求数量")
+            raw_manual = _cell(row, index, "人工未税单位成本")
+            amount = inc = None
+            if raw_manual not in (None, ""):
+                amount = _v2_decimal(raw_manual, row_no=row_no,
+                                     label="人工未税单位成本", required=True)
+                inc = (amount * (Decimal("1") + TAX_RATE)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+            out.append(CostRefill(
+                line_id=None, operation="CREATE", is_create=True,
+                order_no=order_no, order_id=order.id, part_id=part.id, pn=part.pn_std,
+                description=str(_cell(row, index, "描述") or "").strip() or None,
+                qty=qty, return_qty=return_qty,
+                serial_numbers=str(_cell(row, index, "SN") or "").strip() or None,
+                unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
+                reason=(str(_cell(row, index, "人工成本原因") or "").strip() or None),
+                note=(str(_cell(row, index, "备注") or "").strip() or None),
+            ))
             continue
+
+        line = db.get(FMaintenanceLine, int(raw_id))
+        if line is None or not line.is_active:
+            raise WorkbookError("line_not_found",
+                                f"第 {row_no} 行备件事实已不存在或已作废，请重新下载")
+        # 只读事实哈希校验（只覆盖锁定列）
+        readonly_values = [_cell(row, index, name) for name in V2_PART_HASH_COLUMNS]
+        if _v2_hash(readonly_values) != str(_cell(row, index, "只读哈希") or ""):
+            raise WorkbookError(
+                "readonly_cell_modified",
+                f"第 {row_no} 行只读事实（单号/日期/XSDD/系统成本等）已修改或已过期，"
+                "请重新下载；如需改数量/PN/备注请改黄底列")
+        if operation == "VOID":
+            out.append(CostRefill(line_id=line.id, operation="VOID",
+                                  unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                                  reason=None))
+            continue
+        if operation and operation != "UPDATE":
+            raise WorkbookError("invalid_operation",
+                                f"第 {row_no} 行操作只能是 UPDATE、VOID 或留空")
+
+        # UPDATE：逐字段比对，只有变化的字段下发
+        pn = None
+        pn_cell = str(_cell(row, index, "PN") or "").strip()
+        if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
+            part = _exact_part_for_pn(db, pn_cell)
+            if part is None:
+                raise WorkbookError("part_not_found",
+                                    f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
+            pn = part.pn_std
+        desc_cell = str(_cell(row, index, "描述") or "").strip()
+        description = desc_cell if desc_cell != (line.description or "") else None
+        qty_cell = _cell(row, index, "需求数量")
+        qty_parsed = _v2_decimal(qty_cell, row_no=row_no, label="需求数量") if qty_cell not in (None, "") else None
+        if qty_parsed is not None and qty_parsed <= 0:
+            raise WorkbookError("invalid_amount", f"第 {row_no} 行需求数量必须大于 0")
+        # 与现值比对：导出总是带上数量，逐字段 diff 后未变的不回写（避免原样上传
+        # 把所有行标成 workbook_manual、重算金额并写假审计）。
+        qty = qty_parsed if qty_parsed is not None and qty_parsed != (line.qty or Decimal(0)) else None
+        return_parsed = (
+            _v2_decimal(_cell(row, index, "退货数量"), row_no=row_no, label="退货数量")
+            if _cell(row, index, "退货数量") not in (None, "") else None)
+        return_qty = (return_parsed if return_parsed is not None
+                      and return_parsed != (line.return_qty or Decimal(0)) else None)
+        # 用「变更后生效值」校验退货不超需求（只改退货数量时也要校验）。
+        effective_qty = qty if qty is not None else (line.qty or Decimal(0))
+        effective_return = return_qty if return_qty is not None else (line.return_qty or Decimal(0))
+        if effective_return > effective_qty:
+            raise WorkbookError("invalid_amount",
+                                f"第 {row_no} 行退货数量不能大于需求数量")
+        sn_cell = str(_cell(row, index, "SN") or "").strip()
+        serial_numbers = sn_cell if sn_cell != (line.serial_numbers or "") else None
+        note_cell = str(_cell(row, index, "备注") or "").strip()
+        note = note_cell if note_cell != (line.line_note or "") else None
+
+        # 人工成本两列在导出时对已有 override 的行会预填；必须与现值比对，否则原样
+        # 上传会把所有人工成本行重写一遍（版本号自增、写假审计）。
+        override = db.scalar(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id == line.id))
+        raw_manual = _cell(row, index, "人工未税单位成本")
         amount = inc = None
         if raw_manual not in (None, ""):
-            amount = _v2_decimal(raw_manual, row_no=row_no, label="人工未税单位成本", required=True)
-            inc = (amount * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        out.append(CostRefill(line_id=line.id, unit_cost_ex_tax=amount,
-                              unit_cost_inc_tax=inc, reason=reason, note=note))
+            parsed_amount = _v2_decimal(raw_manual, row_no=row_no,
+                                        label="人工未税单位成本", required=True)
+            if override is None or parsed_amount != (override.unit_cost_ex_tax or Decimal(0)):
+                amount = parsed_amount
+                inc = (amount * (Decimal("1") + TAX_RATE)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+        reason_cell = str(_cell(row, index, "人工成本原因") or "").strip() or None
+        reason = (reason_cell if reason_cell != (override.reason if override else None)
+                  else None)
+
+        if (pn is None and description is None and qty is None
+                and return_qty is None and serial_numbers is None and note is None
+                and amount is None and reason is None):
+            continue
+        out.append(CostRefill(
+            line_id=line.id, operation="UPDATE",
+            pn=pn, description=description, qty=qty, return_qty=return_qty,
+            serial_numbers=serial_numbers,
+            unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
+            reason=reason, note=note,
+        ))
     return out
 
 
@@ -1481,7 +1710,7 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     return MasterV2Plan(
         project_id=project_id,
         sheets=included,
-        cost_refills=(tuple(_v2_parse_parts(db, wb[V2_SHEET_PARTS]))
+        cost_refills=(tuple(_v2_parse_parts(db, project_id, wb[V2_SHEET_PARTS]))
                       if V2_SHEET_PARTS in included else ()),
         site_flags=(tuple(_v2_parse_site(db, project_id, wb[V2_SHEET_SITE]))
                     if V2_SHEET_SITE in included else ()),
@@ -1494,16 +1723,145 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     )
 
 
+def _cascade_void_site_lines(db: Session, line: FMaintenanceLine) -> int:
+    """03 行作废时，按 source_line_id 文本匹配级联作废本项目的 06 领用返还行
+    （06↔03 无 FK，best-effort，匹配不到不报错）。返回级联条数。"""
+    if not line.raw_line_id:
+        return 0
+    site_lines = db.scalars(
+        select(MaintenanceSiteIssueLine)
+        .join(MaintenanceSiteIssue,
+              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+        .where(MaintenanceSiteIssueLine.source_line_id == line.raw_line_id,
+               MaintenanceSiteIssueLine.is_active.is_(True))
+    ).all()
+    for sl in site_lines:
+        sl.is_active = False
+    return len(site_lines)
+
+
 def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str, import_batch_id: str) -> dict:
     # All mutations deliberately happen on this one Session transaction.
+    audit_reason = f"项目总表应用 {import_batch_id[:8]}"
+    # 手工新增行需要一个 import_batch（NOT NULL FK）
+    manual_batch: SysImportBatch | None = None
+    if any(r.is_create for r in plan.cost_refills):
+        manual_batch = SysImportBatch(
+            filename="manual-maintenance-line-workbook.xlsx",
+            file_type="maintenance",
+            file_hash=hashlib.sha256(
+                f"manual-line:{import_batch_id}".encode("utf-8")).hexdigest(),
+            uploaded_by=operated_by,
+            rows_total=sum(r.is_create for r in plan.cost_refills),
+            rows_inserted=sum(r.is_create for r in plan.cost_refills),
+            status="success",
+            report_json={"source": "workbook_manual_create",
+                         "project_id": plan.project_id},
+        )
+        db.add(manual_batch)
+        db.flush()
+
     for refill in plan.cost_refills:
-        # 2026-08-19：人工成本合并主表（写 override + 同步主表 cost_source='manual'）
+        if refill.is_create:
+            order = db.get(FMaintenanceOrder, refill.order_id)
+            base_line_no = db.scalar(
+                select(func.coalesce(func.max(FMaintenanceLine.line_no), 0))
+                .where(FMaintenanceLine.order_id == refill.order_id)) or 0
+            new_line = FMaintenanceLine(
+                raw_line_id=f"manual-line:{uuid4()}",
+                order_id=refill.order_id,
+                line_no=int(base_line_no) + 1,
+                part_id=refill.part_id,
+                pn_std=refill.pn, pn_raw=refill.pn,
+                description=refill.description,
+                qty=refill.qty, return_qty=refill.return_qty or Decimal(0),
+                serial_numbers=refill.serial_numbers,
+                line_note=refill.note,
+                edited_source="workbook_manual",
+                is_active=True,
+                import_batch_id=manual_batch.id,
+            )
+            if refill.unit_cost_ex_tax is not None:
+                new_line.unit_cost_ex_tax = refill.unit_cost_ex_tax
+                new_line.unit_cost_inc_tax = refill.unit_cost_inc_tax
+                new_line.cost_source = "manual"
+                new_line.cost_tax_basis = "ex"
+                _recompute_line_amounts(new_line)
+            db.add(new_line)
+            db.flush()
+            if refill.unit_cost_ex_tax is not None:
+                db.add(MaintenanceManualCostOverride(
+                    line_id=new_line.id,
+                    unit_cost_ex_tax=refill.unit_cost_ex_tax,
+                    unit_cost_inc_tax=refill.unit_cost_inc_tax,
+                    reason=refill.reason, active=True, version=1,
+                    updated_by=operated_by))
+            _write_audit(db, project_id=plan.project_id,
+                         entity_type="maintenance_line", entity_id=new_line.id,
+                         action="CREATE", operated_by=operated_by, reason=audit_reason,
+                         after={"pn": refill.pn, "qty": str(refill.qty),
+                                "order_no": refill.order_no})
+            continue
+
+        line = db.get(FMaintenanceLine, refill.line_id)
+        if line is None:
+            raise WorkbookError("line_not_found",
+                                f"备件行 {refill.line_id} 已不存在，请重新下载")
+
+        if refill.operation == "VOID":
+            if line.is_active:
+                line.is_active = False
+                line.voided_at = datetime.now(timezone.utc)
+                line.voided_by = operated_by
+                line.void_reason = audit_reason
+                cascaded = _cascade_void_site_lines(db, line)
+                _write_audit(db, project_id=plan.project_id,
+                             entity_type="maintenance_line", entity_id=line.id,
+                             action="VOID", operated_by=operated_by, reason=audit_reason,
+                             after={"cascaded_site_lines": cascaded})
+            continue
+
+        # UPDATE：行级数据字段
+        before: dict[str, object] = {}
+        if refill.pn is not None:
+            before["pn"] = line.pn_std or line.pn_raw
+            line.pn_std = refill.pn
+            line.pn_raw = refill.pn
+        if refill.description is not None:
+            before["description"] = line.description
+            line.description = refill.description
+        if refill.qty is not None:
+            before["qty"] = str(line.qty) if line.qty is not None else None
+            line.qty = refill.qty
+        if refill.return_qty is not None:
+            before["return_qty"] = str(line.return_qty) if line.return_qty is not None else None
+            line.return_qty = refill.return_qty
+        if refill.serial_numbers is not None:
+            before["sn"] = line.serial_numbers
+            line.serial_numbers = refill.serial_numbers
+        if refill.note is not None:
+            before["note"] = line.line_note
+            line.line_note = refill.note
+        # 数量类字段有变化 → 重算金额
+        if "qty" in before or "return_qty" in before:
+            _recompute_line_amounts(line)
+        # 人工成本（写 override + 合并主表，沿用既有逻辑）
+        cost_changed = False
         if refill.unit_cost_ex_tax is not None or refill.reason is not None:
             _merge_manual_cost_to_line(db, refill, operated_by=operated_by)
-        if refill.note is not None:
-            line = db.get(FMaintenanceLine, refill.line_id)
-            if line is not None:
-                line.line_note = refill.note
+            cost_changed = True
+        line.edited_source = "workbook_manual"
+        if before or cost_changed:
+            after = {"pn": line.pn_std, "qty": str(line.qty),
+                     "return_qty": str(line.return_qty)}
+            if refill.unit_cost_ex_tax is not None:
+                after["cost"] = str(refill.unit_cost_ex_tax)
+            if refill.reason is not None:
+                after["cost_reason"] = refill.reason
+            _write_audit(db, project_id=plan.project_id,
+                         entity_type="maintenance_line", entity_id=line.id,
+                         action="UPDATE", operated_by=operated_by, reason=audit_reason,
+                         before=before or None, after=after)
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         if line is None and flag.is_create:
@@ -1571,6 +1929,12 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
                 raise WorkbookError("stale_row", f"合同 {change.contract_no} 第 {change.sequence} 期已被更新")
             existing.is_active = False
             existing.version += 1
+            _write_audit(db, project_id=plan.project_id,
+                         entity_type="collection_milestone",
+                         entity_id=existing.milestone_id, action="VOID",
+                         operated_by=operated_by, reason=audit_reason,
+                         after={"contract_no": change.contract_no,
+                                "sequence": change.sequence})
             continue
         if existing is not None and change.base_version is not None and existing.version != change.base_version:
             raise WorkbookError("stale_row", f"合同 {change.contract_no} 第 {change.sequence} 期已被更新")

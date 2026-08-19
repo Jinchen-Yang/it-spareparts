@@ -121,6 +121,8 @@ def _wbdd_lines(db: Session, project_id: str) -> list[tuple[FMaintenanceOrder, F
             .where(
                 MaintenanceSourceOrderAssignment.project_id == project_id,
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
+                # 2026-08-19：作废明细行不进工作簿 v3（#55）
+                FMaintenanceLine.is_active.is_(True),
             )
             .order_by(FMaintenanceOrder.order_date, FMaintenanceLine.line_no)
         ).all()
@@ -170,6 +172,8 @@ def _site_issue_rows(db: Session, project_id: str) -> list[dict]:
         .where(
             MaintenanceSiteIssue.project_id == project_id,
             MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+            # 2026-08-19：作废领用行不导出/不计入工作簿 v3（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
         .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)
     ).all()
@@ -353,6 +357,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         .where(
             MaintenanceSiteIssue.project_id == project_id,
             MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
     ) or Decimal("0")
     expense_cost = sum(
@@ -368,6 +373,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
                 MaintenanceSiteIssue.project_id == project_id,
                 MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
                 MaintenanceSiteIssueLine.unit_cost_inc_tax.is_(None),
+                MaintenanceSiteIssueLine.is_active.is_(True),
             )
         )
         or 0

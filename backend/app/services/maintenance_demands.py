@@ -245,7 +245,11 @@ def _load_snapshots(
     if internal_ids:
         line_statement = (
             select(FMaintenanceLine)
-            .where(FMaintenanceLine.order_id.in_(internal_ids))
+            .where(
+                FMaintenanceLine.order_id.in_(internal_ids),
+                # 2026-08-19：用户作废的明细行不出现在需求快照/搜索/详情（#55）
+                FMaintenanceLine.is_active.is_(True),
+            )
             .order_by(FMaintenanceLine.order_id, FMaintenanceLine.raw_line_id)
         )
         if lock:
@@ -315,6 +319,8 @@ def search_demands(
         line_match = exists(
             select(1).where(
                 FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                # 2026-08-19：作废行不参与订单搜索命中（#55）
+                FMaintenanceLine.is_active.is_(True),
                 or_(
                     FMaintenanceLine.pn_std.ilike(pattern, escape="\\"),
                     FMaintenanceLine.pn_raw.ilike(pattern, escape="\\"),

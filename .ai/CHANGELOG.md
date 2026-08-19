@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-08-19
+
+**Agent:** Claude Code（本地会话，分支 `feat/maintenance-v2-editable`）
+**任务：** 项目总表 V2.1 全字段可编辑——03 备件明细支持改/作废/新增/改数量（REQUIREMENTS #11/#18/#55）
+
+**决策（用户）：** 1A 在现有 V2 工作簿内下载→改→上传（不做在线编辑器）；2A 01-05 数据字段可改但归属字段（XSDD/项目名/需求单头号/系统成本）锁定，主要诉求是 03 增删改+改数量；3A 删除=软作废（不计算、不再导出、需求单内 06 关联级联作废）；4 行级审计即可。
+
+**Changed:**
+- 迁移 `b7c2d4e6f8a1`（down_revision `d1f3a5c7e2b4`）：`f_maintenance_line` 加 `is_active/voided_at/voided_by/void_reason/edited_source` + `ix_ml_active`/`ix_ml_order_active`；`maintenance_site_issue_line` 加 `is_active` + `ix_msil_active`。纯加法、server_default、向前兼容；氚云 loader upsert 白名单不含新列（重传不复活作废行）
+- `app/models/maintenance.py`、`app/models/maintenance_project_operations.py`：新列映射
+- `app/services/maintenance_project_master_workbook.py`：
+  - 模板升级 `2.0.0 → 2.1.0`（旧 2.0.0 因哈希列集合变更拒绝并提示重新下载）；03 新增「操作」列（UPDATE/VOID/CREATE）
+  - 03 可编辑列：PN/描述/需求数量/SN/退货数量/人工成本两列/备注；只读哈希收窄到锁定列（含实体ID），可编辑列不再触发 `readonly_cell_modified`
+  - `_v2_parse_parts` 重写：新增行校验（维保单号必须在本项目、PN 须匹配主数据、数量>0、退货≤需求）；VOID/UPDATE 逐字段 diff
+  - `apply_project_master_v2`：CREATE 生成 `manual-line:<uuid>` 行并写 override；UPDATE 行级字段并按新数量 `_recompute_line_amounts` 重算双税成本金额；VOID 软作废+`_cascade_void_site_lines` 按 `source_line_id` 级联作废 06 行；每个受影响实体写 `MaintenanceProjectOperationAudit`（CREATE/UPDATE/VOID 行级，不做字段级 diff）；02 里程碑 VOID 也写审计
+  - `_assigned_lines` 过滤 `is_active`（overview/parts/global/rows API 共用）；06 build 过滤 `is_active`
+  - 字典 sheet（98）补操作列/新增行/作废说明；03 build 增加空白新增行
+  - 修复两处解析幂等性 bug：①UPDATE 时需求数量/退货数量总是导出回传，早期未与现值 diff → 原样上传把所有行标 `workbook_manual`、重算金额、写假审计；现逐字段比对未变不写；用「变更后生效值」校验退货≤需求（只改退货也校验）。②人工成本两列对已有 override 的行会预填，现与 override 现值 diff，原样回传不重写/不自增版本/不写假审计
+  - 已作废行（stale 工作簿里的旧实体）再次 UPDATE/CREATE 一律报 `line_not_found`；`_merge_manual_cost_to_line` 允许 `cost_source='manual'` 行修正人工价（仍不覆盖 direct/window 自动行，Codex P1 不变）
+- `app/services/maintenance_boss_board.py`：10 处 FMaintenanceLine 聚合/明细查询加 `is_active` 过滤（成本五件套、行计数、需求/退货数量、超预算、采购数、成本 ex、单据明细）
+- 读侧 `FMaintenanceLine` 全量审计并补过滤：`maintenance_demands._load_snapshots`（需求快照/详情/删除意图版本摘要）+ 搜索 exists 子查询；`maintenance_project_workbook_v3._wbdd_lines`；`inventory.dynamic_stock_map` 的维保出库 out_maint；`maintenance_workbook_export` 预检行数（LEFT JOIN 占位行保留）；`maintenance_cost.contract_workbook_data`（合同工作簿实际渲染数据源）；`maintenance_match_audit`。ETL upsert/merge/失效化/legacy 原始导出/roundtrip 有意保留全量（raw/debug 或写路径）
+- 读侧 `MaintenanceSiteIssueLine` 全量审计并补过滤：`maintenance_project_operations` 的已领用量聚合、面板列表、候选余量、成本缺口/重算/补价、项目工作区聚合与明细、目录卡片与提醒；`maintenance_project_workbook_v3`（导出+KPI+缺成本计数）；`workbook_adapter` 计数；`bad_salvage` 成本依据；`front_stock` 最近消耗。写路径 `_site_issue_lines`（load-diff-replace）刻意不过滤，避免替换时复活已作废行
+- `app/services/maintenance_boss_facts.py`、`maintenance_replenishment_evidence.py`、`maintenance_cost.py`：活动行/取价重算过滤作废行
+- `docs/maintenance/contracts/project-master-v2.md`：协议更新到 2.1（可编辑矩阵、作废语义、审计、事务顺序）
+- `docs/maintenance/REQUIREMENTS.md`：追加 #55
+- `.ai/MAINTENANCE_V2_EDITABLE_PLAN.md`：实现计划
+- `tests/test_maintenance_project_master_v2_editable.py`：新增（操作列/模板号、作废+不再导出、作废不计算、改数量重算金额、级联作废 06、新增行、锁列拒绝、审计、原样上传幂等、作废行拒绝编辑）
+
+**验证：** 全部改动文件 byte-compile 通过；所有受影响模块 import 通过、新列在模型中确认；迁移 `alembic heads` 单头 `b7c2d4e6f8a1`；确认 `maintenance_site_issue_line.is_active` 未与既有迁移冲突（c9e1 的 is_active 属里程碑表、f4b8 属 delivery 表）。pytest 需 Linux 隔离（本机 macOS 跑不了），待 CI。本记录随恢复性 checkpoint 提交；准确 SHA 以对应 Draft PR head 为准。
+
+---
+
 ## 2026-08-17
 
 **Agent:** Claude Code (macOS，本地会话)

@@ -297,6 +297,8 @@ def balance_rows(db: Session, project_id: str) -> list[dict]:
                 MaintenanceSiteIssue.normalized_status.in_(
                     ("confirmed", "corrected")
                 ),
+                # 2026-08-19：作废领用行不计入前置库最近消耗（#55）
+                MaintenanceSiteIssueLine.is_active.is_(True),
             )
             .group_by(MaintenanceSiteIssueLine.part_id)
         ):

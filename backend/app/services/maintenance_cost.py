@@ -382,6 +382,8 @@ def recompute(db: Session, *, commit: bool = True) -> dict:
                FMaintenanceLine.anomaly_flags,
                FMaintenanceOrder.order_no, FMaintenanceOrder.order_date)
         .join(FMaintenanceOrder, FMaintenanceLine.order_id == FMaintenanceOrder.id)
+        # 2026-08-19：作废行不参与取价重算（#55）
+        .where(FMaintenanceLine.is_active.is_(True))
     )
     q = active_orders(q, FMaintenanceOrder)
     rows = db.execute(q).all()
@@ -1713,7 +1715,11 @@ def contract_workbook_data(
         select(mo, ml)
         .select_from(mo)
         .outerjoin(ml, ml.order_id == mo.id)
-        .where(mo.linked_sales_order_no == contract)
+        .where(
+            mo.linked_sales_order_no == contract,
+            # 2026-08-19：作废明细行不进合同工作簿；无明细单的占位行保留（#55）
+            or_(ml.id.is_(None), ml.is_active.is_(True)),
+        )
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
     stmt = stmt.order_by(
