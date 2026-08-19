@@ -708,8 +708,13 @@ class MasterV2Plan:
 
     @property
     def summary(self) -> dict:
+        updates = [x for x in self.cost_refills if not x.is_create and x.operation != "VOID"]
         return {
-            "cost_overrides": sum(not x.is_create and x.operation != "VOID" for x in self.cost_refills),
+            # E2E #5：改数量不再被误报为 cost_overrides——行更新与成本覆盖分开计
+            "line_updates": len(updates),
+            "qty_updates": sum(x.qty is not None or x.return_qty is not None for x in updates),
+            "cost_overrides": sum(
+                x.unit_cost_ex_tax is not None or x.reason is not None for x in updates),
             "line_creates": sum(x.is_create for x in self.cost_refills),
             "line_voids": sum(x.operation == "VOID" for x in self.cost_refills),
             "expense_creates": sum(getattr(x, "is_create", False) for x in self.expense_updates),
@@ -961,14 +966,16 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
         ws.column_dimensions[ws.cell(1, col).column_letter].hidden = True
 
 
-def _v2_build_expense(wb, db, project_id: str, contracts) -> None:
+def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> None:
     ws = wb.create_sheet(V2_SHEET_EXPENSE)
     _v2_header(ws, V2_EXPENSE_HEADERS, editable={1, 4, 5, 6, 7, 8, 9, 12, 14, 17})
     expenses = ec._expenses(db, project_sales_order_nos(db, project_id))
     for expense in expenses:
         ws.append(["", expense.bxd_no or "", expense.line_no, expense.expense_date, expense.person or "",
                    expense.expense_type or "", expense.fee_category or "", expense.reason or "",
-                   expense.linked_sales_order_no or "", project_id, "—", expense.data_status or "",
+                   expense.linked_sales_order_no or "",
+                   project.display_name if getattr(project, "display_name", None) else project_id,
+                   "—", expense.data_status or "",
                    expense.amount, expense.tax_basis or "ex", expense.amount_ex_tax,
                    expense.amount_inc_tax, expense.remark or "", expense.raw_line_id])
     _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=18,
@@ -1028,7 +1035,7 @@ def _v2_build_usage(wb) -> None:
         ("【安全规则】", ""),
         ("行数防呆", "上传的数据行少于导出时的一半 → 整本拒绝（防止筛选后误传删掉大片数据）。"),
         ("缺行判定", "「删行=作废」只对下载时存在的行生效；下载之后系统里新导入的行不受影响。"),
-        ("原样回传", "什么都不改直接传回去 = 零变更（幂等），不会产生任何写库。"),
+        ("原样回传", "基于「本次下载」的文件什么都不改直接传回去 = 零变更（幂等）。注意：已经应用过一次的旧文件再传，其中已作废的行会被拒绝（提示重新下载），这是正常的保护。"),
         ("改错了怎么办", "行级作废需管理员在系统内恢复；整单作废同。恢复入口：维保需求单页面 → 搜索（勾选「含已作废」）→ 恢复。"),
     ]
     for k, v in rows:
@@ -1086,7 +1093,7 @@ def build_project_master_v2(
     if V2_SHEET_PARTS in wanted:
         _v2_build_parts(wb, db, project_id, lines)
     if V2_SHEET_EXPENSE in wanted:
-        _v2_build_expense(wb, db, project_id, contracts)
+        _v2_build_expense(wb, db, project_id, contracts, project=project)
     if V2_SHEET_RECEIPTS in wanted:
         _v2_build_receipts(wb, db, project_id, contracts)
     if V2_SHEET_SITE in wanted:
@@ -1810,7 +1817,10 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
         # 防呆：上传的报销数据行比导出少一半以上 → 整本拒绝，防止 Excel
         # 筛选/局部复制后误传把整片行作废（唯一一道防呆，契约 #265）。
-        if export_expense_ids and Decimal(len(uploaded_expense_ids)) < Decimal(len(export_expense_ids)) * _ROW_LOSS_GUARD_RATIO:
+        # 单行表放行：唯一一行被删是明确的业务意图（误操作影响小且有审计），
+        # 防呆目标是「批量」损失（E2E #1）。
+        if (len(export_expense_ids) >= 2
+                and Decimal(len(uploaded_expense_ids)) < Decimal(len(export_expense_ids)) * _ROW_LOSS_GUARD_RATIO):
             raise WorkbookError(
                 "row_loss_guard",
                 f"04_费用报销上传行数（{len(uploaded_expense_ids)}）不足导出行数"
@@ -1821,7 +1831,8 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         # 注意口径是「上传的实体行数」而非「解析出的操作数」——原样回传
         # 不产生任何操作，不能被误判为行丢失。
         export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
-        if export_parts_ids and Decimal(uploaded_line_rows) < Decimal(len(export_parts_ids)) * _ROW_LOSS_GUARD_RATIO:
+        if (len(export_parts_ids) >= 2
+                and Decimal(uploaded_line_rows) < Decimal(len(export_parts_ids)) * _ROW_LOSS_GUARD_RATIO):
             raise WorkbookError(
                 "row_loss_guard",
                 f"03_备件明细上传行数（{uploaded_line_rows}）不足导出行数"

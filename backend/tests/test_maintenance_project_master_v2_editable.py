@@ -428,19 +428,25 @@ def test_v21_expense_explicit_void_operation(db):
 
 
 def test_v21_row_loss_guard_rejects_half_missing(db):
-    """行数骤减防呆：上传行不足导出的一半 → 整本拒绝。"""
-    project, _part, _order, _line = _make_project_with_line(db)
-    # 再造一条行 → 导出 2 行数据行，回传只留 1 行（=50%，不触发）；删到 0 行触发
+    """行数骤减防呆：≥2 行的表删光全部数据行 → 整本拒绝（单行表放行，E2E #1）。"""
+    import pytest
+    from app.services.maintenance_expense_collection_workbook import WorkbookError
+
+    project, part, _order, _line = _make_project_with_line(db)
+    second = FMaintenanceLine(
+        raw_line_id=f"raw-line-{uuid.uuid4()}",
+        order_id=_order.id, line_no=2, part_id=part.id,
+        pn_std=part.pn_std, pn_raw=part.pn_std, description=part.description,
+        qty=Decimal("1"), return_qty=Decimal("0"), import_batch_id=_batch(db),
+    )
+    db.add(second)
+    db.commit()
     content = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
     wb = load_workbook(io.BytesIO(content))
-    ws = wb[master.V2_SHEET_PARTS]
-    # 删除全部 2 条数据行（第 2、3 行）
-    ws.delete_rows(2, 2)
+    wb[master.V2_SHEET_PARTS].delete_rows(2, 2)  # 删光 2 条数据行 → 0 < 2×50%
     buf = io.BytesIO()
     wb.save(buf)
-    import pytest
-    from app.services.maintenance_expense_collection_workbook import WorkbookError
     with pytest.raises(WorkbookError) as exc:
         master.validate_project_master_v2(
             db, project_id=project.project_id, data=buf.getvalue())
@@ -772,3 +778,34 @@ def test_latest_missing_marks_suspicious_when_ratio_high(db):
     assert result["db_active_in_window"] == 5
     assert result["suspicious"] is True
     assert result["missing_ratio"] > 0.5
+
+
+def test_e2e_fix_single_row_delete_allowed(db):
+    """E2E #1：单行表删除唯一一行不再被防呆拦截（防呆只拦批量损失）。"""
+    project, _order, _line, _expense = _make_project_with_expense(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_EXPENSE].delete_rows(2)  # 唯一一行
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.expense_voids == (_expense.raw_line_id,)
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(_expense)
+    assert _expense.data_status == "已作废"
+
+
+def test_e2e_fix_summary_distinguishes_qty_from_cost(db):
+    """E2E #5：改数量报 line_updates/qty_updates，不再误报 cost_overrides。"""
+    project, _part, _order, line = _make_project_with_line(db)
+    _c, wb, ws = _parts_sheet(db, project.project_id)
+    ws.cell(row=2, column=11, value=5)
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["qty_updates"] == 1
+    assert plan.summary["line_updates"] == 1
+    assert plan.summary["cost_overrides"] == 0

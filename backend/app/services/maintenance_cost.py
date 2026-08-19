@@ -1024,6 +1024,8 @@ def _project_lines_query(
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = select(ml, mo).join(mo, ml.order_id == mo.id)
+    # E2E #3：行级作废默认不进全局行列表（与总表/看板同口径）。
+    base = base.where(ml.is_active.is_(True))
     base = base.where(mo.project_std == project if project != "(未填项目)"
                       else mo.project_std.is_(None))
     if security.is_scoped_sales(user_ctx):
