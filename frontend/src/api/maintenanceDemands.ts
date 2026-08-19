@@ -99,9 +99,9 @@ export const searchMaintenanceDemands = (body: MaintenanceDemandSearchInput) =>
 export const voidFastMaintenanceDemands = (body: MaintenanceDemandVoidFastInput) =>
   api.post<MaintenanceDemandVoidFastResult>("/maintenance/demands/void-fast", body);
 
-/** 恢复已作废单（ADR-0003：清派生成本 + 待重算，由后端负责）。 */
-export const restoreMaintenanceDemand = (sourceOrderId: string) =>
-  api.post(`/maintenance/demands/${encodeURIComponent(sourceOrderId)}/restore`);
+/** 恢复已作废单（ADR-0003：清派生成本 + 待重算，由后端负责）。后端强制 reason 非空 + admin。 */
+export const restoreMaintenanceDemand = (sourceOrderId: string, reason: string) =>
+  api.post(`/maintenance/demands/${encodeURIComponent(sourceOrderId)}/restore`, { reason });
 
 export const createMaintenanceDemandDeleteIntent = (
   body: MaintenanceDemandDeleteIntentInput,

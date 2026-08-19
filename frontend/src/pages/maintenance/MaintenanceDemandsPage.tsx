@@ -45,6 +45,9 @@ export function MaintenanceDemandsPage() {
   const permissions = readPermissionMap();
   const canVoid = !!permissions.action_maintenance_demand_delete;
   const canImport = !!permissions.action_maintenance_wbdd_import;
+  // 恢复接口后端硬性要求 admin（require_admin），非 admin 给了按钮也只会吃 403
+  const isAdmin = localStorage.getItem("role") === "admin";
+  const canRestore = canVoid && isAdmin;
 
   // ---- 区块一：氚云快照同步 + 差异清单 ----
   const [missing, setMissing] = useState<WbddMissing | null>(null);
@@ -64,6 +67,11 @@ export function MaintenanceDemandsPage() {
   const [voidTarget, setVoidTarget] = useState<string[] | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
+
+  // ---- 恢复原因弹窗（后端强制 reason 非空） ----
+  const [restoreTarget, setRestoreTarget] = useState<MaintenanceDemandSummary | null>(null);
+  const [restoreReason, setRestoreReason] = useState("");
+  const [restoring, setRestoring] = useState(false);
 
   const loadMissing = useCallback(async () => {
     setMissingLoading(true);
@@ -158,13 +166,23 @@ export function MaintenanceDemandsPage() {
     }
   };
 
-  const handleRestore = async (row: MaintenanceDemandSummary) => {
+  const openRestoreModal = (row: MaintenanceDemandSummary) => {
+    setRestoreTarget(row);
+    setRestoreReason("");
+  };
+
+  const confirmRestore = async () => {
+    if (!restoreTarget) return;
+    setRestoring(true);
     try {
-      await restoreMaintenanceDemand(row.source_order_id);
-      message.success(`已恢复需求单 ${row.order_no}`);
+      await restoreMaintenanceDemand(restoreTarget.source_order_id, restoreReason.trim());
+      message.success(`已恢复需求单 ${restoreTarget.order_no}`);
+      setRestoreTarget(null);
       await loadDemands(demandPage, keyword, includeVoided);
     } catch (error) {
       message.error(readError(error, "恢复失败"));
+    } finally {
+      setRestoring(false);
     }
   };
 
@@ -210,9 +228,11 @@ export function MaintenanceDemandsPage() {
             width: 120,
             render: (_: unknown, row: MaintenanceDemandSummary) =>
               isVoided(row) ? (
-                <Button size="small" onClick={() => void handleRestore(row)}>
-                  恢复
-                </Button>
+                canRestore ? (
+                  <Button size="small" onClick={() => openRestoreModal(row)}>
+                    恢复
+                  </Button>
+                ) : null
               ) : (
                 <Button
                   size="small"
@@ -379,6 +399,35 @@ export function MaintenanceDemandsPage() {
             placeholder="作废原因，例如：氚云侧已删除该单"
             value={voidReason}
             onChange={(event) => setVoidReason(event.target.value)}
+          />
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`恢复需求单 ${restoreTarget?.order_no ?? ""}`}
+        open={restoreTarget !== null}
+        okText="确认恢复"
+        cancelText="取消"
+        okButtonProps={{
+          loading: restoring,
+          disabled: !restoreReason.trim() || restoreReason.trim().length > 1000,
+        }}
+        onOk={() => void confirmRestore()}
+        onCancel={() => setRestoreTarget(null)}
+        maskClosable={false}
+      >
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Text>
+            恢复会清掉这张单的派生成本并标记为待重算（ADR-0003）。请填写恢复原因（必填，1000
+            字以内）：
+          </Text>
+          <Input.TextArea
+            rows={3}
+            maxLength={1000}
+            showCount
+            placeholder="恢复原因，例如：误作废，氚云侧单仍然有效"
+            value={restoreReason}
+            onChange={(event) => setRestoreReason(event.target.value)}
           />
         </Space>
       </Modal>

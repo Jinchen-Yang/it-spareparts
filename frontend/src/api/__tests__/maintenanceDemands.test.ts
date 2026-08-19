@@ -47,9 +47,11 @@ describe("maintenance demand API contract", () => {
     });
   });
 
-  it("restore hits the per-order restore endpoint", () => {
-    restoreMaintenanceDemand("RAW-1");
-    expect(post).toHaveBeenCalledWith("/maintenance/demands/RAW-1/restore");
+  it("restore posts the required reason to the per-order restore endpoint", () => {
+    restoreMaintenanceDemand("RAW-1", "误作废，氚云侧单仍然有效");
+    expect(post).toHaveBeenCalledWith("/maintenance/demands/RAW-1/restore", {
+      reason: "误作废，氚云侧单仍然有效",
+    });
   });
 
   it("uses separate intent, arm and execute endpoints", () => {

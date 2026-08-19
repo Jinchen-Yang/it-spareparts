@@ -215,8 +215,9 @@ describe("需求单与数据同步页", () => {
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
 
-  it("作废行灰显并给「恢复」入口（宽松识别 is_voided 契约外字段）", async () => {
+  it("作废行灰显并给「恢复」入口；恢复需填原因（后端强制 reason 非空 + admin）", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    localStorage.setItem("role", "admin");
     searchMaintenanceDemands.mockResolvedValue(
       demandPage([demandRow("RAW-9", "XQD-009", { is_voided: true })]),
     );
@@ -226,9 +227,31 @@ describe("需求单与数据同步页", () => {
     expect(screen.queryByRole("button", { name: /^作\s*废$/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /^恢\s*复$/ }));
+    // 弹窗填原因前「确认恢复」不可用
+    const confirm = await screen.findByRole("button", { name: /确认恢复/ });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/恢复原因/), {
+      target: { value: "误作废，氚云侧单仍然有效" },
+    });
+    fireEvent.click(confirm);
     await waitFor(() =>
-      expect(restoreMaintenanceDemand).toHaveBeenCalledWith("RAW-9"));
+      expect(restoreMaintenanceDemand).toHaveBeenCalledWith(
+        "RAW-9",
+        "误作废，氚云侧单仍然有效",
+      ));
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+  });
+
+  it("非 admin 看不到「恢复」入口（后端 require_admin，给了也只会 403）", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    localStorage.setItem("role", "user");
+    searchMaintenanceDemands.mockResolvedValue(
+      demandPage([demandRow("RAW-9", "XQD-009", { is_voided: true })]),
+    );
+    render(<MaintenanceDemandsPage />);
+
+    expect(await screen.findByText("已作废")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^恢\s*复$/ })).toBeNull();
   });
 
   it("「含已作废」开关触发 include_voided=true 的重新查询", async () => {
