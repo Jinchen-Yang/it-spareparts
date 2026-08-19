@@ -3,11 +3,12 @@
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.auth import current_identity, require_admin
+from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysBusinessSetting
 from app.services import system_settings
@@ -107,3 +108,77 @@ def update_system_settings(
     except Exception:
         db.rollback()
         raise
+
+
+# ── DSH 企业定制：LLM 配置下发（P6）────────────────────────────────────────
+# dsh-itdata-config 插件启动/轮询本端点，把企业唯一模型写入 DSH 的
+# llm-pi-ai + agent-default-model settings（取消用户自定义模型）。
+# 仅 admin 可读；apiKey 由 DSH 侧按 apiKeyEnv 引用，不落 DSH settings 明文。
+
+
+class DshLlmConfig(BaseModel):
+    enabled: bool
+    provider_id: str
+    display_name: str
+    api: str = "openai-completions"
+    base_url: str
+    api_key: str = ""
+    api_key_env: str
+    models: list[dict]
+    default_model: str
+    default_context_window: int | None = None
+    default_max_tokens: int | None = None
+
+
+def _require_dsh_config_access(request: Request) -> None:
+    """机器对机密钥（X-DSH-Config-Token）或 admin Bearer 二选一。
+
+    不用 require_admin/current_identity 依赖：它们在匿名请求上先抛 401，
+    会挡掉纯机器密钥通道。这里手动验签 + 角色判断。
+    """
+    from app import auth as _auth
+    token = get_settings().dsh_config_token.strip()
+    if token:
+        if request.headers.get("x-dsh-config-token") == token:
+            return
+    authz = request.headers.get("authorization", "")
+    if authz.startswith("Bearer "):
+        try:
+            data = _auth.verify_token(authz[7:])
+            if data.get("role") == "admin":
+                return
+        except Exception:
+            pass
+    if token:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无效的配置密钥")
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可读取 LLM 配置")
+
+
+@router.get("/dsh-llm-config", response_model=DshLlmConfig,
+            dependencies=[Depends(_require_dsh_config_access)])
+def get_dsh_llm_config() -> DshLlmConfig:
+    s = get_settings()
+    if not s.llm_api_key:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED,
+                            "企业 LLM 未配置（后端 .env 的 LLM_API_KEY 为空）")
+    provider_id = "enterprise-llm"
+    api_key_env = "DSH_ENTERPRISE_LLM_KEY"
+    models = [{
+        "id": s.llm_model,
+        "name": s.llm_model,
+        "contextWindow": getattr(s, "llm_context_window", None),
+        "maxTokens": s.llm_max_tokens,
+    }]
+    return DshLlmConfig(
+        enabled=True,
+        provider_id=provider_id,
+        display_name="企业统一模型",
+        api="openai-completions",
+        base_url=s.llm_base_url,
+        api_key=s.llm_api_key,
+        api_key_env=api_key_env,
+        models=models,
+        default_model=s.llm_model,
+        default_context_window=getattr(s, "llm_context_window", None),
+        default_max_tokens=s.llm_max_tokens,
+    )

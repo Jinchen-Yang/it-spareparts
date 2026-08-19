@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # 留空 = 该能力关闭，run_script 只支持白名单脚本（服务端执行）。
     dsh_ro_dsn: str = ""
 
+    # DSH 企业定制：LLM 配置下发端点的机器对机密钥（env DSH_CONFIG_TOKEN）。
+    # DSH 侧的 dsh-itdata-config 插件带 X-DSH-Config-Token 头轮询；留空则仅 admin 可读。
+    dsh_config_token: str = ""
+
     # 原始上传文件归档目录
     raw_file_dir: str = "./data/raw"
 

@@ -18,6 +18,8 @@ importers:
         specifier: ^18.2.0
         version: 18.3.1
 
+  packages/itdata-config: {}
+
 packages:
 
   '@esbuild/aix-ppc64@0.25.12':
