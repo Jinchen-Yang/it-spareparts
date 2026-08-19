@@ -1,0 +1,52 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+
+# VisLab (dsh-vislab): cross-directory file tools (Obsidian vaults / workdirs)
+# plus the math-and-physics visualization panel in the web UI.
+# Host half registers the model tools and the /plugins/vislab/state route;
+# the client half (dsh.client) joins the browser boot graph as the panel.
+- insert:
+    - id: vislab
+      name: 'dsh-vislab'
+      config:
+        dirs:
+          - path: /Users/yangjinchen/Library/Mobile Documents/iCloud~md~obsidian/Documents/MY_note
+            label: Obsidian·MY_note
+          - path: /Users/yangjinchen/Documents/商业项目/项目跟进仓库
+            label: Obsidian·商业项目
+
+    # IT 备件管理系统企业插件（dsh-itdata）：登录桥（权限门）+ /itd/ 面板反代
+    # + itdata 数据工具。frontendDist 指向 vite base=/itd/ 构建产物（P5 已就绪）。
+    - id: itdata
+      name: 'dsh-itdata'
+      config:
+        backendUrl: 'http://127.0.0.1:8000'
+        frontendDist: '/Users/yangjinchen/Code/dsharness-it-data/frontend/dist-itd'
+
+    # 企业模型锁定（P6）：从 IT 后端 /api/system-settings/dsh-llm-config 拉取唯一
+    # 模型配置写入 settings（llm-pi-ai + agent-default-model），取消自定义模型。
+    # configToken 对应后端 .env 的 DSH_CONFIG_TOKEN（机器对机密钥）。
+    - id: itdata-config
+      name: 'dsh-itdata-config'
+      config:
+        configUrl: 'http://127.0.0.1:8000/api/system-settings/dsh-llm-config'
+        configToken: 'itdata-dev-token'
+        pollMs: 60000
+
+# ── 企业定制：锁定模型选择 UI（取消自定义模型） ──────────────────────────────
+- id: ui-settings-models
+  disabled: true
+
+- id: ui-model-selection
+  disabled: true
+
+# ── 企业合规：遥测硬关闭（防环境变量误开；上报域名可被 DSH_TELEMETRY_OTLP_URL 覆盖） ──
+- id: session-telemetry-otel
+  config:
+    mode: 'DISABLED'
+
+# ── 企业默认 preset：it-data（裁剪后的常规 agent） ──────────────────────────
+- id: agent-presets
+  config:
+    default: it-data

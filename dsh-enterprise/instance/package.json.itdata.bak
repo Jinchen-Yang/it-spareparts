@@ -1,0 +1,17 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "dsh-vislab": "link:/Users/yangjinchen/Code/DSHarness_plugins/packages/vislab",
+    "dsh-itdata": "link:/Users/yangjinchen/Code/dsharness-it-data/dsh-plugins/packages/itdata",
+    "dsh-itdata-config": "link:/Users/yangjinchen/Code/dsharness-it-data/dsh-plugins/packages/itdata-config"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
+      ]
+    }
+  }
+}
