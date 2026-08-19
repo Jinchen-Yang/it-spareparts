@@ -16,6 +16,7 @@ import {
   Statistic,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -52,11 +53,18 @@ import {
   statText,
 } from "./panel/panelUtils";
 
-const { Title } = Typography;
+const { Text, Title } = Typography;
 
 interface HealthMetrics {
   received: number | null;
   progress: number | null;
+  /** 四类成本（2026-08-20 用户拍板）：缺口径/缺数据一律显示 0，后期补齐。 */
+  costs: {
+    parts: number;
+    expense: number;
+    issued: number;
+    returned: number;
+  };
 }
 
 const HEALTH_VALUE_STYLE = { fontSize: 18, fontWeight: 600 } as const;
@@ -83,6 +91,17 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
   } else {
     ratioText = statText(row.cost_ratio_pct);
   }
+
+  const costLines: { label: string; value: number; color: string; hint?: string }[] = [
+    { label: "备件成本", value: metrics.costs.parts, color: "#1677ff",
+      hint: "本项目挂靠需求单明细的已知备件成本（含税）" },
+    { label: "报销成本", value: metrics.costs.expense, color: "#fa8c16",
+      hint: "已批准报销（含税）" },
+    { label: "已领用成本", value: metrics.costs.issued, color: "#722ed1",
+      hint: "现场领用（已确认/已更正）的已知成本（含税）" },
+    { label: "返还成本", value: metrics.costs.returned, color: "#13c2c2",
+      hint: "返还成本口径建设中，暂计 0，后期补上" },
+  ];
 
   return (
     <Card size="small" data-testid="panel-health-band">
@@ -112,6 +131,22 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
           />
         </Col>
       </Row>
+      <div style={{ marginTop: 10 }}>
+        {costLines.map((line) => (
+          <Row key={line.label} style={{ padding: "2px 0" }} gutter={8}>
+            <Col span={6}>
+              <Text strong>{line.label}</Text>
+            </Col>
+            <Col span={18}>
+              <Tooltip title={line.hint}>
+                <Text strong style={{ color: line.color, fontSize: 16 }}>
+                  ¥{line.value.toFixed(2)}
+                </Text>
+              </Tooltip>
+            </Col>
+          </Row>
+        ))}
+      </div>
     </Card>
   );
 }
@@ -131,7 +166,10 @@ export function MaintenanceProjectPanelPage() {
   const [error, setError] = useState<string | null>(null);
   const [collectionRows, setCollectionRows] = useState<MaintenanceCollectionSnapshotRow[]>([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
-  const [metrics, setMetrics] = useState<HealthMetrics>({ received: null, progress: null });
+  const [metrics, setMetrics] = useState<HealthMetrics>({
+    received: null, progress: null,
+    costs: { parts: 0, expense: 0, issued: 0, returned: 0 },
+  });
 
   const perms = readPermissionMap();
   const canUpload = !!perms.action_maintenance_expense_collection_upload;
@@ -158,6 +196,15 @@ export function MaintenanceProjectPanelPage() {
         });
         hit = resp.data.rows.find((item) => item.project_id === projectId) ?? null;
       }
+      const knownParts = hit?.known_apply_cost_inc_tax?.state === "ready"
+        ? hit.known_apply_cost_inc_tax.value?.known_amount
+        : null;
+      if (knownParts != null) {
+        setMetrics((prev) => ({
+          ...prev,
+          costs: { ...prev.costs, parts: Number(knownParts) },
+        }));
+      }
       setRow(hit);
       if (!hit && !stable) setError("项目不存在或无权查看");
     } catch (err) {
@@ -176,9 +223,16 @@ export function MaintenanceProjectPanelPage() {
         expense_page_size: 1,
       });
       setCollectionRows(response.data.collection_snapshots.rows);
+      const wsMetrics = response.data.project.metrics;
       setMetrics({
-        received: response.data.project.metrics.received_amount,
-        progress: response.data.project.metrics.collection_progress_pct,
+        received: wsMetrics.received_amount,
+        progress: wsMetrics.collection_progress_pct,
+        costs: {
+          parts: metrics.costs.parts, // 备件成本来自 boss 聚合行，loadProject 里回填
+          expense: Number(wsMetrics.approved_expense_inc_tax ?? 0),
+          issued: Number(wsMetrics.site_requisition_known_cost_inc_tax ?? 0),
+          returned: 0, // 返还成本口径建设中，暂计 0（后期补上）
+        },
       });
     } catch (err) {
       message.error(readError(err, "回款状态加载失败"));
