@@ -113,3 +113,16 @@ def latest(
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     return wbdd.latest_health(db)
+
+
+@router.get("/latest/missing")
+def latest_missing(
+    response: Response,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action(_ACTION_KEY)),
+) -> dict:
+    """最近一次快照的差异清单明细（#264/#267）：供「按氚云现状批量作废」页面。"""
+    response.headers["Cache-Control"] = "no-store"
+    return wbdd.latest_missing(db)

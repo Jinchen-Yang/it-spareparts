@@ -44,8 +44,9 @@ def _manual_workbook(db, project_id: str) -> bytes:
     content = master.build_project_master_v2(db, project_id=project_id)
     wb = load_workbook(io.BytesIO(content))
     expense = wb[master.V2_SHEET_EXPENSE]
+    # V2.1：第 1 列为「操作」，留空 = 空白实体手工新增（CREATE 语义）
     expense.append([
-        "BXD-20260818-0001", 1, "2026-08-18 10:00:00", "测试人员",
+        "", "BXD-20260818-0001", 1, "2026-08-18 10:00:00", "测试人员",
         "维保费用", "交通费", "人工新增报销", "XSDD-MANUAL-001",
         "手工新增兼容测试", "测试销售", "已生效", 100, "ex", 100,
         113, "人工新增", "",
@@ -97,7 +98,7 @@ def test_v2_blank_entity_ids_create_expense_and_site_rows(db):
     exported = load_workbook(io.BytesIO(
         master.build_project_master_v2(db, project_id=project.project_id)
     ), data_only=True)
-    assert exported[master.V2_SHEET_EXPENSE]["Q2"].value == expense.raw_line_id
+    assert exported[master.V2_SHEET_EXPENSE]["R2"].value  # V2.1：实体ID 移至第 18 列（操作列插入） == expense.raw_line_id
     assert exported[master.V2_SHEET_SITE]["K2"].value == site_line.issue_line_id
 
 

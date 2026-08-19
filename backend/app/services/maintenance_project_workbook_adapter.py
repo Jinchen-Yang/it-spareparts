@@ -409,6 +409,7 @@ class MaintenanceProjectWorkbookAdapter:
                     MaintenanceSiteIssue.normalized_status.in_(
                         ("confirmed", "corrected")
                     ),
+                    MaintenanceSiteIssueLine.is_active.is_(True),
                 )
                 .scalar_subquery()
                 .label("consumptions"),
@@ -422,6 +423,7 @@ class MaintenanceProjectWorkbookAdapter:
                 .where(
                     MaintenanceSiteIssue.project_id == project_id,
                     MaintenanceSiteIssue.issue_date <= self.as_of,
+                    MaintenanceSiteIssueLine.is_active.is_(True),
                 )
                 .scalar_subquery()
                 .label("loaded_consumptions"),

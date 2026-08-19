@@ -1110,7 +1110,10 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
                 limited_request.stream(),
                 max_files=1,
                 max_fields=0,
-                max_part_size=1024,
+                # 1024B 会在表单解析阶段拒绝正常体积的 Excel（#267 修复 4）。
+                # 总量已有 content-length + limited_receive 双重 413 限制，
+                # 这里放宽到文件上限只是取消对文件 part 的误伤。
+                max_part_size=file_limit,
             )
             form = await parser.parse()
         except HTTPException:

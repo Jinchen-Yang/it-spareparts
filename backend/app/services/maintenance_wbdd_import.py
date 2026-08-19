@@ -142,6 +142,102 @@ def snapshot_diff(db: Session, file_order_nos: set[str],
     }
 
 
+# 差异清单明细上限（#265 契约）：与 void-fast 的 MAX_DELETE_HEADERS 对齐，
+# 超出部分 truncated=true，前端提示分批作废。
+_MISSING_DETAILS_LIMIT = 1_000
+
+
+def latest_missing(db: Session) -> dict:
+    """最近一次快照的差异清单明细（#264/#267：氚云删单 → 系统跟随作废）。
+
+    实时重算而非读导入时快照：批次事实（import_batch_id）与窗口都在库里，
+    重算永远反映当前墓碑状态——已作废的单自动从清单消失，重复点击安全。
+    """
+    from app.models.maintenance import FMaintenanceLine
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
+
+    receipt = db.execute(
+        select(MaintenanceWbddImportReceipt)
+        .order_by(MaintenanceWbddImportReceipt.created_at.desc(),
+                  MaintenanceWbddImportReceipt.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if receipt is None:
+        return {"readiness": "not_imported", "missing_orders": [],
+                "truncated": False}
+
+    file_rows = db.execute(
+        select(FMaintenanceOrder.order_no, FMaintenanceOrder.order_date)
+        .where(FMaintenanceOrder.import_batch_id == receipt.batch_id)
+    ).all()
+    file_order_nos = {r.order_no for r in file_rows}
+    file_dates = [r.order_date for r in file_rows if r.order_date is not None]
+    diff = snapshot_diff(db, file_order_nos, file_dates)
+    base = {
+        "readiness": "ready",
+        "batch_id": receipt.batch_id,
+        "uploaded_at": receipt.created_at.isoformat(),
+        "window": diff.get("window"),
+        "missing_count": diff["missing_orders"],
+        "missing_orders": [],
+        "truncated": False,
+    }
+    if diff["missing_orders"] == 0 or not diff.get("window"):
+        return base
+
+    lo = date.fromisoformat(diff["window"]["from"])
+    hi = date.fromisoformat(diff["window"]["to"])
+    tombstoned = select(MaintenanceDemandTombstone.source_order_id).where(
+        MaintenanceDemandTombstone.restored_at.is_(None)
+    )
+    active_line_count = (
+        select(func.count(FMaintenanceLine.id))
+        .where(
+            FMaintenanceLine.order_id == FMaintenanceOrder.id,
+            FMaintenanceLine.is_active.is_(True),
+        )
+        .correlate(FMaintenanceOrder)
+        .scalar_subquery()
+    )
+    rows = db.execute(
+        select(
+            FMaintenanceOrder.raw_order_id,
+            FMaintenanceOrder.order_no,
+            FMaintenanceOrder.order_date,
+            MaintenanceSourceOrderAssignment.project_id,
+            active_line_count.label("line_count"),
+        )
+        .outerjoin(
+            MaintenanceSourceOrderAssignment,
+            (MaintenanceSourceOrderAssignment.source_order_id
+             == FMaintenanceOrder.raw_order_id)
+            & MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .where(
+            FMaintenanceOrder.order_date >= lo,
+            FMaintenanceOrder.order_date <= hi,
+            FMaintenanceOrder.order_no.notin_(file_order_nos),
+            FMaintenanceOrder.raw_order_id.notin_(tombstoned),
+        )
+        .order_by(FMaintenanceOrder.order_no)
+        .limit(_MISSING_DETAILS_LIMIT + 1)
+    ).all()
+    base["truncated"] = len(rows) > _MISSING_DETAILS_LIMIT
+    base["missing_orders"] = [
+        {
+            "source_order_id": r.raw_order_id,
+            "order_no": r.order_no,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "line_count": int(r.line_count or 0),
+            "assigned_project_id": r.project_id,
+        }
+        for r in rows[:_MISSING_DETAILS_LIMIT]
+    ]
+    return base
+
+
 def import_wbdd(db: Session, *, file_path: str, original_name: str,
                 operator: str, idempotency_key: str) -> tuple[dict, bool]:
     """执行导入并返回 (报告, replayed)。调用方负责 HTTP 错误映射与临时文件清理。

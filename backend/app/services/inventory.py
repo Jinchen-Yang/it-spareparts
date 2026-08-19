@@ -187,7 +187,7 @@ def dynamic_stock_map(db: Session, part_ids: list[int] | None = None) -> dict[in
         rec["anchor_qty"], rec["anchor_date"] = aq or Decimal(0), ad
         out[pid] = rec
 
-    def _flow(line, order, qty_expr, key):
+    def _flow(line, order, qty_expr, key, extra_where=None):
         stmt = (
             select(line.part_id, func.coalesce(func.sum(qty_expr), 0))
             .join(order, line.order_id == order.id)
@@ -197,6 +197,8 @@ def dynamic_stock_map(db: Session, part_ids: list[int] | None = None) -> dict[in
             .group_by(line.part_id)
         )
         stmt = active_orders(stmt, order)
+        if extra_where is not None:
+            stmt = stmt.where(extra_where)
         if part_ids is not None:
             stmt = stmt.where(line.part_id.in_(part_ids))
         for pid, qv in db.execute(stmt):
@@ -204,9 +206,10 @@ def dynamic_stock_map(db: Session, part_ids: list[int] | None = None) -> dict[in
 
     _flow(FPurchaseLine, FPurchaseOrder, func.coalesce(FPurchaseLine.qty, 0), "in_qty")
     _flow(FSalesLine, FSalesOrder, func.coalesce(FSalesLine.qty, 0), "out_sales")
+    # 2026-08-19：作废维保明细行不计入维保出库，避免虚增 out_maint（#55）
     _flow(FMaintenanceLine, FMaintenanceOrder,
           func.coalesce(FMaintenanceLine.qty, 0) - func.coalesce(FMaintenanceLine.return_qty, 0),
-          "out_maint")
+          "out_maint", extra_where=FMaintenanceLine.is_active.is_(True))
 
     for rec in out.values():
         rec["dynamic_qty"] = (rec["anchor_qty"] + rec["in_qty"]

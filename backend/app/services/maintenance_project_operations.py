@@ -995,6 +995,8 @@ def _confirmed_site_issue_quantities(
     filters = [
         MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
         MaintenanceSiteIssueLine.delivery_line_id.in_(sorted(delivery_line_ids)),
+        # 2026-08-19：被 03 行作废级联软删的领用行不计入已领用量（#55）
+        MaintenanceSiteIssueLine.is_active.is_(True),
     ]
     if exclude_issue_id is not None:
         filters.append(MaintenanceSiteIssue.issue_id != exclude_issue_id)
@@ -1897,7 +1899,9 @@ def search_site_issues(
             .where(
                 MaintenanceSiteIssueLine.issue_id.in_(
                     [issue.issue_id for issue in issues]
-                )
+                ),
+                # 2026-08-19：03 行作废级联软删的领用行不在面板展示（#55）
+                MaintenanceSiteIssueLine.is_active.is_(True),
             )
             .order_by(
                 MaintenanceSiteIssueLine.issue_id,
@@ -1964,6 +1968,8 @@ def search_site_issue_candidates(
         .where(
             MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
             MaintenanceSiteIssueLine.delivery_line_id.is_not(None),
+            # 2026-08-19：作废领用行不占用发货可领余量（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
         .group_by(MaintenanceSiteIssueLine.delivery_line_id)
         .subquery()
@@ -2565,6 +2571,8 @@ def list_cost_gaps(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
         MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
         MaintenanceSiteIssueLine.cost_amount.is_(None),
+        # 2026-08-19：作废领用行不再出现在成本缺口（#55）
+        MaintenanceSiteIssueLine.is_active.is_(True),
     )
     total = int(
         db.scalar(
@@ -2745,6 +2753,8 @@ def recompute_cost_gaps(
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.status_mapping_state == "mapped",
         MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+        # 2026-08-19：作废领用行不参与成本重算（#55）
+        MaintenanceSiteIssueLine.is_active.is_(True),
     )
     candidate_total = int(
         db.scalar(
@@ -2871,6 +2881,8 @@ def fill_manual_cost(
         .where(
             MaintenanceSiteIssueLine.issue_line_id == issue_line_id,
             MaintenanceSiteIssue.project_id == project_id,
+            # 2026-08-19：已作废的领用行不能补价（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
         .with_for_update()
     ).one_or_none()
@@ -4606,6 +4618,8 @@ def project_workspace(
         .where(
             MaintenanceSiteIssue.project_id == project_id,
             MaintenanceSiteIssue.issue_date <= as_of,
+            # 2026-08-19：作废领用行不计入工作区领用/成本统计（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
     ).one()
     requisition_total = int(issue_fact.total)
@@ -4758,6 +4772,8 @@ def project_workspace(
         .where(
             MaintenanceSiteIssue.project_id == project_id,
             MaintenanceSiteIssue.issue_date <= as_of,
+            # 2026-08-19：作废领用行不出现在工作区领用明细（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
         .order_by(
             MaintenanceSiteIssue.issue_date,
@@ -5265,6 +5281,8 @@ def _project_cards_for_ids(
         .where(
             MaintenanceSiteIssue.project_id.in_(project_ids),
             MaintenanceSiteIssue.issue_date <= as_of,
+            # 2026-08-19：作废领用行不计入卡片成本/缺口统计（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
     ):
         facts = cost_facts[project_id]
@@ -5606,7 +5624,11 @@ def _directory_reminder_query(
             MaintenanceSiteIssueLine,
             MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
         )
-        .where(MaintenanceSiteIssue.issue_date <= as_of)
+        .where(
+            MaintenanceSiteIssue.issue_date <= as_of,
+            # 2026-08-19：作废领用行不计入目录提醒的缺口/已领成本（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
+        )
         .group_by(MaintenanceSiteIssue.project_id)
         .cte("directory_issue_fact")
     )

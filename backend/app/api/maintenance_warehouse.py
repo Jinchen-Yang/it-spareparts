@@ -130,7 +130,9 @@ async def _multipart(request: Request, *, apply: bool) -> tuple[bytes, str, dict
             form = await limited_request.form(
                 max_files=1,
                 max_fields=2 if apply else 0,
-                max_part_size=16 * 1024,
+                # 16KB 会误伤正常体积的 Excel 文件 part（#267 修复 4）。
+                # 总量已有 content-length + limited_receive 双重 413 限制。
+                max_part_size=limit + _MULTIPART_OVERHEAD,
             )
         except (MultiPartException, ValueError, UnicodeError) as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "multipart 请求格式无效") from exc

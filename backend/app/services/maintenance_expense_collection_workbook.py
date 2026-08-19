@@ -27,7 +27,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -131,12 +131,19 @@ def _contracts(db: Session, project_id: str) -> list[MaintenanceProjectContract]
 
 
 def _expenses(db: Session, contract_nos: list[str]) -> list[FProjectExpense]:
-    """报销行经 XSDD/合同编号归集到项目（与 v3 同源，口径不另立）。"""
+    """报销行经 XSDD/合同编号归集到项目（与 v3 同源，口径不另立）。
+
+    作废行（data_status='已作废'）彻底不导出（#264/#267 读侧修复 3：
+    用户拍板 2026-08-19）——导出口径即回传口径，缺行=作废的对账语义
+    要求导出侧从源头剔除已作废行，否则作废行永远循环出现在往返文件里。
+    """
     if not contract_nos:
         return []
     return list(db.execute(
         select(FProjectExpense)
         .where(FProjectExpense.linked_sales_order_no.in_(contract_nos))
+        .where(or_(FProjectExpense.data_status.is_(None),
+                   FProjectExpense.data_status != "已作废"))
         .order_by(FProjectExpense.expense_date, FProjectExpense.raw_line_id)
     ).scalars())
 
