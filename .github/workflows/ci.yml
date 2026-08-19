@@ -61,14 +61,14 @@ jobs:
           POSTGRES_DB: spareparts_test
         ports:
           - 5432/tcp
-        # max_locks_per_transaction：xdist 多 worker 并行跑迁移 + 每用例
-        # TRUNCATE ~190 表 CASCADE，默认 64 会把共享锁表打爆（out of shared memory）。
+        # 注意：services.options 是 docker create 的参数，不是 postgres 的参数，
+        # 在这里放 -c max_locks_per_transaction 会被 docker 当成 --cpu-shares 直接
+        # 报错（exit 125）。锁表压力改为靠限制 worker 数（-n 4）规避，见下方注释。
         options: >-
           --health-cmd "pg_isready -U spareparts"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-          -c max_locks_per_transaction=512
     steps:
       - uses: actions/checkout@v7
       - name: 校验 self-hosted uv 版本
@@ -92,14 +92,16 @@ jobs:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
         run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
       # xdist 并行（2026-08-19）：测试隔离按进程建库建目录（pid+token），
-      # worker 间天然隔离，-n auto 按 runner CPU 核数开 worker。
+      # worker 间天然隔离。固定 -n 4 而非 -n auto：worker 太多时并行迁移 +
+      # 每用例 TRUNCATE ~190 表 CASCADE 会打爆 PG 默认锁表（out of shared
+      # memory，本地 -n auto 实测复现；4 worker + 默认锁表本地全量验证通过）。
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
         if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
         timeout-minutes: 75
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
-        run: uv run --extra dev pytest -q -n auto
+        run: uv run --extra dev pytest -q -n 4
       - name: 扫描后端生产依赖漏洞
         working-directory: backend
         run: |
