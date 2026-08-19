@@ -283,6 +283,137 @@ export function apply(ctx, config) {
     },
   }))
 
+  // ── permission-gated data tools（P3） ──────────────────────────────────
+  // 三个工具都要求登录：未登录返回 ok:false + 引导文案；后端按当前用户
+  // RBAC（action_agent_sql / page_chat / data_* 脱敏 / own_customers_only）裁决。
+
+  function notLoggedIn() {
+    return {
+      ok: false,
+      error: 'NOT_LOGGED_IN',
+      hint: '用户尚未登录 IT 备件系统。请让用户在 设置 → IT 备件系统 登录后重试（itdata_status 可查状态）。',
+    }
+  }
+
+  function backendError(action, r) {
+    const detail = r.json && r.json.detail ? String(r.json.detail) : `HTTP ${r.status}`
+    const friendly = r.status === 401
+      ? '登录已过期，请让用户重新登录（设置 → IT 备件系统）。'
+      : r.status === 403
+        ? `权限不足（${detail}）`
+        : `${action} 失败：${detail}`
+    return { ok: false, status: r.status, error: friendly }
+  }
+
+  let schemaCache = { token: null, at: 0, data: null }
+
+  ctx.effect(() => tools.register({
+    name: 'db_schema',
+    description: [
+      'Get the IT spare-parts database schema (curated metadata: tables, columns, types) for writing SQL.',
+      'Sensitive system tables are excluded. Requires the user to be logged in (Settings → IT 备件系统).',
+      'Use together with db_query to run the SQL you write.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        refresh: { type: 'boolean', description: 'Force refresh the cached schema (default false).' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    output,
+    async execute(args) {
+      if (!authSummary().loggedIn) return notLoggedIn()
+      const now = Date.now()
+      if (args?.refresh !== true && schemaCache.token === auth.token && schemaCache.data !== null && now - schemaCache.at < 600000) {
+        return { ok: true, cached: true, ...schemaCache.data }
+      }
+      const r = await backendRequest('GET', '/api/agent/schema', { token: auth.token, timeoutMs: 30000 })
+      if (r.status !== 200) return backendError('db_schema', r)
+      const data = { table_count: r.json?.table_count, tables: r.json?.tables }
+      schemaCache = { token: auth.token, at: now, data }
+      return { ok: true, cached: false, ...data }
+    },
+  }))
+
+  ctx.effect(() => tools.register({
+    name: 'db_query',
+    description: [
+      'Execute ONE read-only SQL statement (SELECT / WITH) against the IT spare-parts database (text2sql executor).',
+      'Runs as the logged-in user: results are field-masked by their data permissions, sensitive system tables and writes are rejected,',
+      'accounts restricted to their own customers (own_customers_only) cannot use this tool at all — use call_api instead.',
+      'Write db_schema first to learn tables/columns. max_rows caps returned rows (default 100, max 500); truncated=true means more rows existed.',
+      'This tool is READ-ONLY: never attempt UPDATE/INSERT/DELETE here.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string', description: 'A single read-only SELECT / WITH statement. No trailing semicolon needed.' },
+        max_rows: { type: 'integer', description: 'Maximum rows to return (default 100, cap 500).' },
+      },
+      required: ['sql'],
+      additionalProperties: false,
+    },
+    output,
+    async execute(args) {
+      if (!authSummary().loggedIn) return notLoggedIn()
+      const body = { sql: args.sql }
+      if (args.max_rows !== undefined) body.max_rows = args.max_rows
+      const r = await backendRequest('POST', '/api/agent/sql', { token: auth.token, body, timeoutMs: 30000 })
+      if (r.status !== 200) return backendError('db_query', r)
+      const j = r.json
+      const trimmedRows = j.rows.map((row) => {
+        const out = {}
+        for (const [k, v] of Object.entries(row)) {
+          const s = typeof v === 'string' ? (v.length > 500 ? `${v.slice(0, 500)}…` : v) : v
+          out[k] = s
+        }
+        return out
+      })
+      return {
+        ok: true,
+        columns: j.columns,
+        rows: trimmedRows,
+        row_count: j.row_count,
+        truncated: j.truncated,
+        elapsed_ms: j.elapsed_ms,
+        hint: j.truncated ? '结果被截断：请加 WHERE / LIMIT 收窄查询。' : undefined,
+      }
+    },
+  }))
+
+  ctx.effect(() => tools.register({
+    name: 'call_api',
+    description: [
+      'Call a whitelisted read-only business query tool on the IT spare-parts backend (search_parts, get_part_overview,',
+      'lookup_prices_bulk, list_recent_purchases, get_profit_ranking, get_purchase_analysis, get_inventory,',
+      'get_maintenance_board, get_maintenance_projects, get_maintenance_lines, get_cancellation_stats).',
+      'These apply full business-layer permission filtering (row-level customer anonymization included) —',
+      'prefer this over db_query for standard business questions.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        tool: { type: 'string', description: 'Whitelisted tool name.' },
+        args: { type: 'object', additionalProperties: true, description: 'Tool arguments (e.g. {"query": "轴承"}).' },
+      },
+      required: ['tool'],
+      additionalProperties: false,
+    },
+    output,
+    async execute(args) {
+      if (!authSummary().loggedIn) return notLoggedIn()
+      const r = await backendRequest('POST', '/api/agent/call', {
+        token: auth.token,
+        body: { tool: args.tool, args: args.args ?? {} },
+        timeoutMs: 30000,
+      })
+      if (r.status !== 200) return backendError('call_api', r)
+      return { ok: true, result: r.json }
+    },
+  }))
+
   // ── prompt section ────────────────────────────────────────────────────
   if (systemPrompt !== undefined) {
     ctx.effect(() => systemPrompt.section({
@@ -290,7 +421,8 @@ export function apply(ctx, config) {
       order: 90,
       text: [
         '[IT 备件系统企业插件 — 权限门与数据访问规则]',
-        '- 所有 IT 备件系统的数据访问必须走 itdata 系列工具（itdata_status；db_query / run_script / call_api 上线后同样适用），它们携带当前登录用户的 token，由后端 RBAC（字段级/页面/动作/行级权限）过滤结果。',
+        '- 所有 IT 备件系统的数据访问必须走 itdata 系列工具（itdata_status / db_schema / db_query / call_api），它们携带当前登录用户的 token，由后端 RBAC（字段级/页面/动作/行级权限）过滤结果。',
+        '- 写 SQL 前先 db_schema 看表结构；标准业务问题优先 call_api（业务工具带行级客户匿名化），自由分析才用 db_query（只读、字段脱敏）。',
         '- 未登录时不要尝试任何数据访问；引导用户到 设置 → IT 备件系统 登录（itdata_status 可随时查询状态）。',
         '- 严禁绕过权限门：不得直连数据库、不得伪造/复用他人凭据、不得把 token 写入脚本或文件。',
         '- Excel/Word/PDF 处理通过 bash 运行 Python 脚本完成（openpyxl / python-docx / pdfplumber 等）。',
