@@ -297,45 +297,51 @@ export function MaintenanceDemandsPage() {
             />
           ) : null}
 
-          {missing?.truncated ? (
-            <Alert
-              type="warning"
-              showIcon
-              message="消失的单太多，这里只显示前 1000 条；处理完这批后请重新拉取差异清单。"
-            />
-          ) : null}
+          {/* 疑似不完整导出（局部/筛选同步）时整张清单收起：删除走总表删行=作废
+              与需求单列表逐张作废，差异清单只在真全量同步（占比健康）时展开。 */}
+          {missing?.suspicious ? null : (
+            <>
+              {missing?.truncated ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="消失的单太多，这里只显示前 1000 条；处理完这批后请重新拉取差异清单。"
+                />
+              ) : null}
 
-          <Table<WbddMissingOrder>
-            rowKey="source_order_id"
-            size="small"
-            loading={missingLoading}
-            dataSource={missing?.missing_orders ?? []}
-            columns={missingColumns}
-            pagination={false}
-            locale={{ emptyText: "最近一份快照没有消失的单" }}
-            rowSelection={
-              canVoid
-                ? {
-                    selectedRowKeys,
-                    onChange: (keys) => setSelectedRowKeys(keys as string[]),
-                  }
-                : undefined
-            }
-          />
+              <Table<WbddMissingOrder>
+                rowKey="source_order_id"
+                size="small"
+                loading={missingLoading}
+                dataSource={missing?.missing_orders ?? []}
+                columns={missingColumns}
+                pagination={false}
+                locale={{ emptyText: "最近一份快照没有消失的单" }}
+                rowSelection={
+                  canVoid
+                    ? {
+                        selectedRowKeys,
+                        onChange: (keys) => setSelectedRowKeys(keys as string[]),
+                      }
+                    : undefined
+                }
+              />
 
-          {canVoid ? (
-            <div>
-              <Button
-                type="primary"
-                danger
-                disabled={!selectedRowKeys.length || (missing?.suspicious ?? false)}
-                onClick={() => openVoidModal(selectedRowKeys)}
-              >
-                按氚云现状批量作废
-                {selectedRowKeys.length ? `（已选 ${selectedRowKeys.length} 张）` : ""}
-              </Button>
-            </div>
-          ) : null}
+              {canVoid ? (
+                <div>
+                  <Button
+                    type="primary"
+                    danger
+                    disabled={!selectedRowKeys.length || (missing?.suspicious ?? false)}
+                    onClick={() => openVoidModal(selectedRowKeys)}
+                  >
+                    按氚云现状批量作废
+                    {selectedRowKeys.length ? `（已选 ${selectedRowKeys.length} 张）` : ""}
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          )}
         </Space>
       </Card>
 
