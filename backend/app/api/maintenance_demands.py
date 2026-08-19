@@ -31,6 +31,8 @@ class DemandSearchRequest(BaseModel):
     q: str | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=200)
+    # #268 场景一「含已作废」视图：默认 false 只看有效单。
+    include_voided: bool = False
 
 
 class DeleteIntentCreateRequest(BaseModel):
@@ -141,7 +143,61 @@ def search_demands(
         page=body.page,
         page_size=body.page_size,
         allowed_project_ids=allowed_project_ids,
+        include_voided=body.include_voided,
     )
+
+
+class DemandVoidFastRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Bound validation stays in the service（同 DeleteIntentCreateRequest 的
+    # 防反射约定：Pydantic 集合边界错误会把整份被拒列表回显给调用方）。
+    source_order_ids: list
+    reason: str = Field(min_length=1)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+
+
+@router.post("/void-fast")
+def void_fast(
+    body: DemandVoidFastRequest,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """一键批量作废（#264/#267）：单事务墓碑 + 挂靠停用，无两阶段等待。"""
+    operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
+    record_access_log(
+        ctx,
+        "maintenance_demand_void_fast",
+        "maintenance_demands",
+        {"headers": len(body.source_order_ids), "scope": "full" if allowed_project_ids is None else "owned"},
+    )
+    try:
+        result = maintenance_demands.void_fast(
+            db,
+            source_order_ids=body.source_order_ids,
+            reason=body.reason,
+            operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
+            idempotency_key=body.idempotency_key,
+        )
+        db.commit()
+        return result
+    except maintenance_demands.MaintenanceDemandError as exc:
+        db.rollback()
+        _raise_service_error(exc)
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/delete-intents", status_code=status.HTTP_201_CREATED)

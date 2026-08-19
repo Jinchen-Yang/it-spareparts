@@ -220,10 +220,20 @@ class FMaintenanceLine(Base):
     ship_warehouse_object_id: Mapped[str | None] = mapped_column(String(64))  # 发货仓ObjectID
     ship_stock: Mapped[Decimal | None] = mapped_column(Qty)               # 发货库存（数值化失败→NULL+issue）
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
+    # V2 项目总表行级作废（软删除）：删除=作废，不物理删氚云事实。loader upsert
+    # 白名单不含这些列，重传不复活；读侧一律过滤 is_active=false（#264/#266）。
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    voided_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    voided_by: Mapped[str | None] = mapped_column(String(64))
+    void_reason: Mapped[str | None] = mapped_column(Text)
+    # wbdd=氚云原始事实；workbook_manual=总表手工新增/改动
+    edited_source: Mapped[str] = mapped_column(String(16), nullable=False, server_default="wbdd")
 
     __table_args__ = (
         Index("ix_ml_order", "order_id"),
         Index("ix_ml_part", "part_id"),
+        Index("ix_ml_active", "is_active"),
+        Index("ix_ml_order_active", "order_id", "is_active"),
     )
 
 

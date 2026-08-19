@@ -245,7 +245,11 @@ def _load_snapshots(
     if internal_ids:
         line_statement = (
             select(FMaintenanceLine)
-            .where(FMaintenanceLine.order_id.in_(internal_ids))
+            .where(
+                FMaintenanceLine.order_id.in_(internal_ids),
+                # 2026-08-19：用户作废的明细行不出现在需求快照/搜索/详情（#55）
+                FMaintenanceLine.is_active.is_(True),
+            )
             .order_by(FMaintenanceLine.order_id, FMaintenanceLine.raw_line_id)
         )
         if lock:
@@ -285,15 +289,19 @@ def search_demands(
     page: int,
     page_size: int,
     allowed_project_ids: set[str] | None = None,
+    include_voided: bool = False,
 ) -> dict:
-    """Search active WBDD headers; joins never duplicate a header row.
+    """Search WBDD headers; joins never duplicate a header row.
 
     When *allowed_project_ids* is a set (non-admin), only demands with an
     active assignment to one of those projects are returned.  Unassigned
     demands are visible only in full scope (admin).
+
+    include_voided=True（#268 场景一「含已作废」视图）：不作墓碑过滤，item 带
+    is_voided 标记，供恢复入口使用。
     """
 
-    predicates = [beta_active_demand_condition()]
+    predicates = [] if include_voided else [beta_active_demand_condition()]
     if allowed_project_ids is not None:
         if not allowed_project_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0}
@@ -315,6 +323,8 @@ def search_demands(
         line_match = exists(
             select(1).where(
                 FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                # 2026-08-19：作废行不参与订单搜索命中（#55）
+                FMaintenanceLine.is_active.is_(True),
                 or_(
                     FMaintenanceLine.pn_std.ilike(pattern, escape="\\"),
                     FMaintenanceLine.pn_raw.ilike(pattern, escape="\\"),
@@ -352,7 +362,22 @@ def search_demands(
             .limit(page_size)
         )
     )
-    snapshots = _load_snapshots(db, source_ids)
+    snapshots = _load_snapshots(db, source_ids, active_only=not include_voided)
+    if include_voided:
+        voided_ids = set(
+            db.execute(
+                select(MaintenanceDemandTombstone.source_order_id).where(
+                    MaintenanceDemandTombstone.source_order_id.in_(source_ids),
+                    MaintenanceDemandTombstone.restored_at.is_(None),
+                )
+            ).scalars().all()
+        )
+        for source_id in source_ids:
+            snapshots.setdefault(
+                source_id,
+                {"source_order_id": source_id, "order_no": None, "is_voided": True},
+            )
+            snapshots[source_id]["is_voided"] = source_id in voided_ids
     return {
         "items": [snapshots[source_id] for source_id in source_ids],
         "page": page,
@@ -760,6 +785,16 @@ def execute_delete_intent(
             tombstone.restored_at = None
             tombstone.version += 1
 
+    # 两阶段执行同样停用挂靠（#267 读侧修复 2）：否则墓碑单继续通过
+    # assignment join 出现在项目总表/概览。
+    _deactivate_assignments(
+        db,
+        source_order_ids=source_order_ids,
+        operated_by=operated_by,
+        reason=intent.reason,
+        now=now,
+    )
+
     result = {
         "intent_id": intent.intent_id,
         "status": "executed",
@@ -824,6 +859,237 @@ def cancel_delete_intent(
     )
     db.flush()
     return _intent_payload(db, intent)
+
+
+def _deactivate_assignments(
+    db: Session,
+    *,
+    source_order_ids: list[str],
+    operated_by: str,
+    reason: str,
+    now: datetime,
+) -> int:
+    """作废/删除时同步停用挂靠关系（#267 读侧修复 2）。
+
+    未停用的 assignment 会绕过墓碑过滤（项目总表 join 只看 is_active），
+    导致已作废单的行继续出现在总表/概览。restore 不逆向复活挂靠——
+    重新挂靠走正常 assign 流程，保持「恢复后以人工重挂为准」。
+    """
+    if not source_order_ids:
+        return 0
+    from app.models.maintenance_project import MaintenanceProjectAuditLog
+
+    assignments = db.scalars(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(source_order_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    )
+    deactivated = 0
+    for assignment in assignments:
+        before = {
+            "assignment_id": assignment.assignment_id,
+            "source_order_id": assignment.source_order_id,
+            "project_id": assignment.project_id,
+            "is_active": True,
+            "version": assignment.version,
+        }
+        assignment.is_active = False
+        assignment.version += 1
+        assignment.archived_by = operated_by
+        # archived_at 必须 >= created_at（ck_..._archive_state）：调用方传入的
+        # now 可能被测试冻结在 created_at 之前，取 max 保证约束恒成立。
+        assignment.archived_at = (
+            now if assignment.created_at is None or now >= assignment.created_at
+            else assignment.created_at
+        )
+        db.add(
+            MaintenanceProjectAuditLog(
+                project_id=assignment.project_id,
+                entity_type="source_order_assignment",
+                entity_id=assignment.assignment_id,
+                action="void_out",
+                before_json=before,
+                after_json={
+                    **before,
+                    "is_active": False,
+                    "version": before["version"] + 1,
+                },
+                reason=reason,
+                operated_by=operated_by,
+            )
+        )
+        deactivated += 1
+    db.flush()
+    return deactivated
+
+
+def void_fast(
+    db: Session,
+    *,
+    source_order_ids: list[str],
+    reason: str,
+    operated_by: str,
+    allowed_project_ids: set[str] | None = None,
+    idempotency_key: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """一键批量作废（#264/#267 契约）：一次事务内完成快照校验→墓碑→挂靠停用。
+
+    与两阶段 delete-intents 的差别：跳过 arm/7 秒窗口，同事务内创建一条
+    ``status='executed'`` 的 intent 作为墓碑外键与审计锚。仍保留：
+    独占 data-change 锁、行级快照（版本 digest 存档）、行数上限、项目范围
+    TOCTOU 校验、整批零删除（任何一张单不在活跃态即整批拒绝——已墓碑的单
+    视为已完成，返回 already_voided 而非报错，允许前端安全重放点击）。
+    """
+    now = now or _utc_now()
+    normalized_reason = (reason or "").strip()
+    if not normalized_reason:
+        raise MaintenanceDemandError("作废理由不能为空")
+    if len(reason) > MAX_REASON_LENGTH:
+        raise MaintenanceDemandError("作废理由无效")
+    source_order_ids = _validate_source_order_ids(source_order_ids)
+
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
+
+    # 已墓碑（未恢复）的单幂等放行；不存在/未知的单整批拒绝（零写入）。
+    tombstoned = set(
+        db.execute(
+            select(MaintenanceDemandTombstone.source_order_id).where(
+                MaintenanceDemandTombstone.source_order_id.in_(source_order_ids),
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )
+        ).scalars().all()
+    )
+    unknown = [sid for sid in source_order_ids if sid not in tombstoned]
+    snapshots = _load_snapshots(db, unknown, lock=True, active_only=True) if unknown else {}
+    missing = [sid for sid in unknown if sid not in snapshots]
+    if missing:
+        raise MaintenanceDemandNotFound(
+            "所选 WBDD 已不存在或状态发生变化，整批未作废"
+        )
+
+    items = [snapshots[sid] for sid in unknown]
+    if allowed_project_ids is not None:
+        for item in items:
+            assignment = item.get("active_project_assignment")
+            project_id = assignment.get("project_id") if assignment else None
+            if project_id is None or project_id not in allowed_project_ids:
+                raise MaintenanceDemandForbidden(
+                    "只能作废本人负责项目下的维保需求单"
+                )
+    line_count = sum(int(item["line_count"]) for item in items)
+    if line_count > MAX_DELETE_LINES:
+        raise DeleteIntentConflict(f"一次最多涉及 {MAX_DELETE_LINES} 行备件")
+
+    # 同事务落一条已执行的 intent：墓碑 FK（delete_intent_id）与既有审计链不变。
+    idem = idempotency_key or f"void-fast:{uuid4()}"
+    request_digest = _request_digest(
+        source_order_ids=source_order_ids,
+        reason=normalized_reason,
+        operated_by=operated_by,
+    )
+    intent = MaintenanceDemandDeleteIntent(
+        intent_id=str(uuid4()),
+        idempotency_key=idem,
+        request_digest=request_digest,
+        selection_digest=_selection_digest(items, normalized_reason, operated_by),
+        status="executed",
+        reason=normalized_reason,
+        operated_by=operated_by,
+        header_count=len(source_order_ids),
+        line_count=line_count,
+        created_at=now,
+        not_before=now,
+        expires_at=now,
+    )
+    db.add(intent)
+    db.flush()
+    for ordinal, item in enumerate(items):
+        db.add(
+            MaintenanceDemandDeleteIntentItem(
+                intent_id=intent.intent_id,
+                source_order_id=item["source_order_id"],
+                ordinal=ordinal,
+                version_digest=item["version_digest"],
+                snapshot_json=item,
+            )
+        )
+    db.flush()
+
+    for item in items:
+        tombstone = db.get(MaintenanceDemandTombstone, item["source_order_id"])
+        if tombstone is None:
+            tombstone = MaintenanceDemandTombstone(
+                source_order_id=item["source_order_id"],
+                delete_intent_id=intent.intent_id,
+                version_digest=item["version_digest"],
+                deleted_by=operated_by,
+                delete_reason=normalized_reason,
+                deleted_at=now,
+                version=1,
+            )
+            db.add(tombstone)
+
+    # 作废同步停用挂靠关系：未停用的 assignment 会绕过墓碑过滤（读侧 join
+    # 只看 is_active），且 restore 依赖挂靠重建归属（#267 读侧修复 2）。
+    _deactivate_assignments(
+        db,
+        source_order_ids=source_order_ids,
+        operated_by=operated_by,
+        reason=normalized_reason,
+        now=now,
+    )
+
+    order_no_by_source = {
+        item["source_order_id"]: item.get("order_no") for item in items
+    }
+    result = {
+        "intent_id": intent.intent_id,
+        "status": "executed",
+        "mode": "void_fast",
+        "header_count": len(source_order_ids),
+        "line_count": line_count,
+        "voided": len(unknown),
+        "already_voided": len(tombstoned),
+        # #265 冻结契约：逐单结果（前端逐行反馈 + 幂等命中不算错误）。
+        "results": [
+            {
+                "source_order_id": source_id,
+                "order_no": order_no_by_source.get(source_id),
+                "status": ("voided" if source_id in snapshots else "already_voided"),
+            }
+            for source_id in source_order_ids
+        ],
+        "source_order_ids": source_order_ids,
+        "executed_at": now.isoformat(),
+    }
+    intent.result_json = result
+    # event_type 复用 CHECK 约束内的 'executed'——不新增枚举（零迁移），
+    # 来源由 payload.mode 与幂等键前缀 void-fast: 区分。
+    _event(
+        db,
+        event_type="executed",
+        idempotency_key=f"void-fast:{intent.intent_id}",
+        operated_by=operated_by,
+        reason=normalized_reason,
+        payload=result,
+        occurred_at=now,
+        intent_id=intent.intent_id,
+    )
+    db.flush()
+    from app.services import maintenance_warehouse
+
+    maintenance_warehouse.reconcile_project_assignment_links(
+        db,
+        operated_by=operated_by,
+        reason=normalized_reason,
+        source_order_ids=set(source_order_ids),
+    )
+    return result
 
 
 def restore_demand(

@@ -327,6 +327,10 @@ class MaintenanceSiteIssueLine(Base):
     reference_window_to: Mapped[date | None] = mapped_column(Date)
     algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # 06 行随 03 备件行级联作废；读侧过滤 is_active=false（#264/#266）。
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )
@@ -405,6 +409,7 @@ class MaintenanceSiteIssueLine(Base):
         UniqueConstraint("issue_id", "line_no", name="uq_maintenance_site_issue_line_no"),
         Index("ix_maintenance_site_issue_line_issue", "issue_id", "line_no"),
         Index("ix_maintenance_site_issue_line_part", "part_id"),
+        Index("ix_msil_active", "is_active"),
     )
 
 

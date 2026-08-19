@@ -28,8 +28,9 @@ def test_new_revision_is_additive_child_and_single_head():
     script = ScriptDirectory.from_config(cfg)
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
-    # 全链单 head（本计划两个迁移线性追加，不开分叉）
-    assert list(script.get_heads()) == ["d1f3a5c7e2b4"]
+    # 全链单 head（本计划两个迁移线性追加，不开分叉）。
+    # head 随链前进更新：c5d7e9f1a3b5 = 维保行级作废（#264/#266）。
+    assert list(script.get_heads()) == ["c5d7e9f1a3b5"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():
@@ -55,14 +56,16 @@ def test_columns_exist_nullable_and_no_new_indexes(db):
     for name in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS:
         assert name in line_cols, name
         assert line_cols[name]["nullable"] is True, name
-    # 纯加法：事实表命名索引集不因本迁移扩大（唯一约束自动索引 *_key 除外）
+    # 纯加法：事实表命名索引集不因本迁移缩小/改名（唯一约束自动索引 *_key 除外）。
+    # 不钉死全集：后续迁移（如 c5d7e9f1a3b5 行级作废的 ix_ml_active/ix_ml_order_active）
+    # 允许继续加索引，这里只守护本迁移没有移除或更名任何既有索引。
     order_idx = {i["name"] for i in insp.get_indexes("f_maintenance_order")
                  if not i["name"].endswith("_key")}
-    assert order_idx == {"ix_mo_order_no", "ix_mo_linked", "ix_mo_project",
-                         "ix_mo_status_date"}
+    assert {"ix_mo_order_no", "ix_mo_linked", "ix_mo_project",
+            "ix_mo_status_date"} <= order_idx
     line_idx = {i["name"] for i in insp.get_indexes("f_maintenance_line")
                 if not i["name"].endswith("_key")}
-    assert line_idx == {"ix_ml_order", "ix_ml_part"}
+    assert {"ix_ml_order", "ix_ml_part"} <= line_idx
 
 
 def test_receipt_table_shape(db):

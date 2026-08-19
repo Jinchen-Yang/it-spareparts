@@ -138,6 +138,7 @@ def line_evidence(db: Session, line: ReplenishmentApplicationLine) -> dict:
             FMaintenanceOrder.order_date >= today - timedelta(days=INACTIVE_WINDOW_DAYS),
             FMaintenanceOrder.order_date <= today,
             FMaintenanceLine.qty > 0,
+            FMaintenanceLine.is_active.is_(True),
         )
     )
     is_high_frequency = bool(

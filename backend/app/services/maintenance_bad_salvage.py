@@ -109,6 +109,8 @@ def _latest_cost_basis(
             MaintenanceSiteIssueLine.part_id == part_id,
             MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
             MaintenanceSiteIssueLine.unit_cost_inc_tax.is_not(None),
+            # 2026-08-19：作废领用行不能作为坏件变卖成本依据（#55）
+            MaintenanceSiteIssueLine.is_active.is_(True),
         )
         .order_by(
             MaintenanceSiteIssue.issue_date.desc(),

@@ -372,6 +372,9 @@ async def validate_project_master(
                 "project_id": project_id,
                 "sheets": list(plan.sheets),
                 **plan.summary,
+                # #265 契约：作废预览（03 显式 VOID + 04 显式 VOID/缺行），
+                # apply 前对用户可见（前端 WorkbookRoundTrip 两阶段确认）。
+                "will_void_rows": [dict(r) for r in plan.will_void_rows],
                 "warnings": [],
             }
         plan = master.validate(db, project_id=project_id, data=data)
