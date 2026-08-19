@@ -161,13 +161,17 @@ def _cost_columns():
             (FMaintenanceLine.cost_source.in_(
                 tuple(maintenance_cost_quality.ACTUAL_SOURCES)),
              FMaintenanceLine.cost_amount_inc_tax),
-            # 人工回填：主表无成本 + override 存在 → 按 override 含税金额×数量计入 actual
+            # 人工回填：主表无成本（NULL 或 'none'，含历史失败瀑布行）+ override 存在
+            # → 按 override 含税金额×有效数量计入 actual（2026-08-19 Codex P1：历史
+            # override 属 'none' 行，须识别缺失态而非仅 SQL NULL）
             (and_(
-                FMaintenanceLine.cost_source.is_(None),
+                or_(FMaintenanceLine.cost_source.is_(None),
+                    FMaintenanceLine.cost_source == "none"),
                 MaintenanceManualCostOverride.line_id.is_not(None),
              ),
              MaintenanceManualCostOverride.unit_cost_inc_tax
-             * FMaintenanceLine.qty),
+             * func.greatest(FMaintenanceLine.qty
+                             - func.coalesce(FMaintenanceLine.return_qty, 0), 0)),
             else_=0)), 0),
         func.coalesce(func.sum(case(
             (FMaintenanceLine.cost_source.in_(

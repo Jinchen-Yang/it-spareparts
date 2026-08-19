@@ -607,6 +607,10 @@ def _merge_manual_cost_to_line(
     f_maintenance_line 主表：unit_cost_ex_tax/inc_tax + cost_source='manual' +
     cost_amount 字段。这样面板/看板/概览读主表即得人工值，无需各处 merge；
     与其他 sheet（02/04/05/06 直接写主表）行为一致。
+
+    Codex P1：仅当主表当前**无自动成本**（cost_source IN (NULL,'none')）时才合并
+    manual 到主表——已有 direct/window 等自动证据的行不被人工值覆盖（legacy 导出
+    预填系统价，原样上传不应把自动行重分类为 manual）；override 表始终写入审计。
     """
     if refill.unit_cost_ex_tax is not None:
         existing = db.execute(
@@ -628,13 +632,16 @@ def _merge_manual_cost_to_line(
             existing.version += 1
             existing.updated_by = operated_by
         line = db.get(FMaintenanceLine, refill.line_id)
-        if line is not None:
-            qty = line.qty or Decimal(0)
+        if line is not None and line.cost_source in (None, "none"):
+            # 2026-08-19（Codex P2）：成本金额按有效数量 max(qty-return_qty,0) 计算，
+            # 与既有成本口径一致（退货冲抵成本，避免全额计费）
+            effective_qty = max((line.qty or Decimal(0)) - (line.return_qty or Decimal(0)),
+                                Decimal(0))
             line.unit_cost_ex_tax = refill.unit_cost_ex_tax
             line.unit_cost_inc_tax = refill.unit_cost_inc_tax
-            line.cost_amount_ex_tax = (refill.unit_cost_ex_tax * qty).quantize(
+            line.cost_amount_ex_tax = (refill.unit_cost_ex_tax * effective_qty).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
-            line.cost_amount_inc_tax = (refill.unit_cost_inc_tax * qty).quantize(
+            line.cost_amount_inc_tax = (refill.unit_cost_inc_tax * effective_qty).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
             line.cost_source = "manual"
     elif refill.reason is not None:
