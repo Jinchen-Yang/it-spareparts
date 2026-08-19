@@ -45,6 +45,20 @@ export interface WorkbookApplyResult {
   collection_voids: number;
 }
 
+/** 总表 2.1 回传预检（#265 契约三）：在 apply 结果字段之外带回作废预览清单。 */
+export interface WillVoidRow {
+  sheet?: string;
+  row_token?: string;
+  order_no?: string;
+  reason?: string;
+  [key: string]: unknown; // 宽松解析：后端字段调整不阻塞前端
+}
+
+export interface WorkbookValidateResult extends Partial<WorkbookApplyResult> {
+  will_void_rows?: WillVoidRow[];
+  [key: string]: unknown;
+}
+
 const BASE = "/maintenance";
 
 async function download(path: string, params?: Record<string, unknown>): Promise<Blob> {
@@ -77,9 +91,15 @@ export const downloadProjectMaster = (projectId: string, sheets?: string[]) =>
   download(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook.xlsx`,
     sheets && sheets.length ? { sheets: sheets.join(",") } : undefined);
 
-export const validateProjectMaster = (projectId: string, file: File) =>
-  upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/validate`,
-    file);
+export const validateProjectMaster = async (projectId: string, file: File) => {
+  const body = new FormData();
+  body.append("file", file);
+  const resp = await api.post<WorkbookValidateResult>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/validate`,
+    body,
+  );
+  return resp.data;
+};
 
 export const applyProjectMaster = (projectId: string, file: File) =>
   upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/apply`,

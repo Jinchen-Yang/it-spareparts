@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -150,20 +150,72 @@ function renderPanel() {
 }
 
 describe("项目面板", () => {
-  it("顶部出库明细列出单据", async () => {
+  it("页头展示项目名、状态 Tag 和总表下载（主操作提到页头）", async () => {
     renderPanel();
-    expect(await screen.findByText("WBDD-1")).toBeInTheDocument();
-    expect(screen.getByText("出库明细")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    // 页头生命周期 Tag（概览 tab 的 Descriptions 也有一项，故不校验唯一性）
+    expect(screen.getAllByText("进行中").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /下载本项目总表/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /返回项目墙/ })).toBeInTheDocument();
   });
 
-  it("五个同级 tab 齐全（表 6 的 web 呈现）", async () => {
+  it("健康带四格：合同额、累计已回款、回款进度、成本率", async () => {
     renderPanel();
-    for (const label of ["项目基础信息", "备件成本", "报销", "回款", "维保领用与返还"]) {
+    const band = await screen.findByTestId("panel-health-band");
+    // antd Statistic 会把带小数的值拆成整数/小数两个 span 并加千分位，按 textContent 断言
+    const bandText = () => (band.textContent ?? "").replace(/,/g, "");
+    await waitFor(() => expect(bandText()).toContain("1000.00"));
+    expect(bandText()).toContain("合同额");
+    expect(bandText()).toContain("累计已回款");
+    expect(bandText()).toContain("¥100.00");
+    expect(bandText()).toContain("回款进度");
+    expect(bandText()).toContain("10%");
+    expect(bandText()).toContain("成本率");
+    expect(bandText()).toContain("50.0%");
+  });
+
+  it("聚合行缺失时健康带说「聚合数据暂缺」，页面不报错、基础信息走 stable 回退", async () => {
+    searchBoardProjects.mockResolvedValue({ data: { rows: [], total: 0 } });
+    renderPanel();
+    const band = await screen.findByTestId("panel-health-band");
+    await waitFor(() =>
+      expect(within(band).getAllByText("聚合数据暂缺").length).toBeGreaterThan(0));
+    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("五个同级 tab 重排：概览 / 备件与需求单 / 报销 / 回款 / 领用与返还", async () => {
+    renderPanel();
+    for (const label of ["概览", "备件与需求单", "报销", "回款", "领用与返还"]) {
       expect(await screen.findByRole("tab", { name: label })).toBeInTheDocument();
     }
   });
 
-  it("回款 tab 展示项目回款进度和每条回款状态", async () => {
+  it("出库明细并入「备件与需求单」tab：需求单列表 + 点击单号钻取行级明细", async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
+    expect(await screen.findByText("WBDD-1")).toBeInTheDocument();
+    // 首屏不再被出库明细大表占据：概览是默认 tab，需求单表不在这里
+  });
+
+  it("概览 tab 只读：没有 01 表下载/上传，全页上传入口只有页头总表", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+    renderPanel();
+    await screen.findByTestId("panel-health-band");
+    expect(screen.queryByRole("button", { name: /下载基础信息表/ })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /上传覆盖/ })).toHaveLength(1);
+  });
+
+  it("回款 tab 只留快照表：累计/进度已上健康带，不再重复", async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "回款" }));
+    expect(await screen.findByText("本项目暂无回款记录")).toBeInTheDocument();
+    expect(screen.getAllByText("回款进度")).toHaveLength(1);
+    expect(screen.getAllByText("累计已回款")).toHaveLength(1);
+  });
+
+  it("回款 tab 展示每条回款状态", async () => {
     getMaintenanceProjectWorkspace.mockResolvedValue({
       data: {
         project: { metrics: {
@@ -193,11 +245,13 @@ describe("项目面板", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "回款" }));
     expect(await screen.findByText("回款状态")).toBeInTheDocument();
     expect(screen.getByText("已确认")).toBeInTheDocument();
-    expect(screen.getByText("60%")).toBeInTheDocument();
     expect(screen.getByText("REC-1")).toBeInTheDocument();
+    // 进度在健康带（页面顶部），不在 tab 内
+    const band = screen.getByTestId("panel-health-band");
+    expect(within(band).getByText("60%")).toBeInTheDocument();
   });
 
-  it("维保领用与返还 tab 合并领用、返还义务和返还单状态", async () => {
+  it("领用与返还 tab 合并领用、返还义务和返还单状态", async () => {
     searchSiteIssues.mockResolvedValue({
       data: {
         project_id: "p1",
@@ -253,15 +307,16 @@ describe("项目面板", () => {
       },
     });
     renderPanel();
-    fireEvent.click(await screen.findByRole("tab", { name: "维保领用与返还" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
     expect(await screen.findByText("CKD-1")).toBeInTheDocument();
     expect(screen.getByText("PN-001")).toBeInTheDocument();
     expect(screen.getByText("仓库已确认返还")).toBeInTheDocument();
     expect(screen.getByText("HJFH-1")).toBeInTheDocument();
   });
 
-  it("多合同项目给出合同筛选（#39）", async () => {
+  it("多合同项目在「备件与需求单」tab 给出合同筛选（#39）", async () => {
     renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
     expect(await screen.findByText("全部合同")).toBeInTheDocument();
   });
 
@@ -275,7 +330,7 @@ describe("项目面板", () => {
   it("tab 内下载只取该 sheet（#38 在哪下载就在哪上传）", async () => {
     downloadProjectMaster.mockResolvedValue(new Blob(["x"]));
     renderPanel();
-    fireEvent.click(await screen.findByRole("tab", { name: "备件成本" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
     fireEvent.click(await screen.findByRole("button", { name: /下载备件成本/ }));
     await waitFor(() =>
       expect(downloadProjectMaster).toHaveBeenCalledWith("p1", ["03_备件订单"]));
@@ -290,12 +345,12 @@ describe("项目面板", () => {
 
   it("无项目管理动作键时不显示归属挂靠与编辑入口", async () => {
     renderPanel();
-    await screen.findByText("WBDD-1");
+    await screen.findByTestId("panel-health-band");
     expect(screen.queryByText(/归属挂靠/)).toBeNull();
     expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeDisabled();
   });
 
-  it("有项目管理动作键时给出归属挂靠（#45 判定依据＝XSDD）", async () => {
+  it("有项目管理动作键时概览给出归属挂靠（#45 判定依据＝XSDD）", async () => {
     localStorage.setItem("permissions",
       JSON.stringify({ action_maintenance_project_manage: true }));
     listMaintenanceSourceOrders.mockResolvedValue({
@@ -327,8 +382,10 @@ describe("项目面板", () => {
       }], total: 1 },
     });
     renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
     fireEvent.click(await screen.findByText("WBDD-1"));
     expect(await screen.findByText(/系统只展示、不参与任何计算/)).toBeInTheDocument();
+    expect(screen.getByText("直接采购价")).toBeInTheDocument();
   });
 });
 

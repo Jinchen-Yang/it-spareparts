@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Alert,
+  Button,
   Card,
   Col,
   DatePicker,
@@ -42,6 +44,10 @@ type ProjectSort = "name" | "attention" | "orders" | "known_cost" | "cost_ratio"
  *
  * 顶部筛选（进行中默认 / 已结束、正常/提醒/报警、模糊搜索）＋ 一行 5 卡下滑无限加载
  * ＋ 全局下载全项目备件行级表（改价补价上传覆盖＝真实源）。
+ *
+ * 布局（#267）：页头行＝标题副标（左）＋全局操作（右：需求单与同步入口 /
+ * 日期区间 / 全项目备件行级表）；筛选行独立一行，只放筛项目的四个控件。
+ * 全局操作从筛选行解放出来，轻重分开。
  *
  * 「需关注」不再是独立栏目：超预算即黄/红，直接体现在卡片状态上（#43）。
  */
@@ -125,6 +131,50 @@ export function MaintenanceHomePage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {/* 页头行：左标题副标，右全局操作；窄屏自动换行 */}
+      <Row justify="space-between" align="middle" gutter={[16, 12]} wrap>
+        <Col flex="auto">
+          <Title level={4} style={{ marginBottom: 4 }}>
+            维保项目
+          </Title>
+          <Text type="secondary">
+            超预算的项目会变黄、变红；点卡片进项目看明细
+          </Text>
+        </Col>
+        <Col flex="none">
+          <Space size={8} align="start" wrap>
+            <Link to="/maintenance/demands">
+              <Button>需求单与同步</Button>
+            </Link>
+            <Select
+              style={{ width: 110 }}
+              value={rangePreset}
+              onChange={(value) => setRangePreset(value as RangePreset)}
+              options={(Object.keys(RANGE_LABELS) as RangePreset[]).map((key) => ({
+                label: RANGE_LABELS[key],
+                value: key,
+              }))}
+            />
+            {rangePreset === "custom" ? (
+              <RangePicker
+                onChange={(value) =>
+                  setCustomRange(value as [Dayjs, Dayjs] | null)
+                }
+              />
+            ) : null}
+            <WorkbookRoundTrip
+              title="全项目备件行级表"
+              filename={`spare-part-lines-${rangePreset}.xlsx`}
+              canUpload={canUpload}
+              hint="下载 → 改价/补价 → 上传覆盖＝真实源"
+              onDownload={async () => downloadSparePartLines(rangeParams())}
+              onApply={(file) => applySparePartLines(file)}
+            />
+          </Space>
+        </Col>
+      </Row>
+
+      {/* 筛选行：只放「筛哪面墙」的控件 */}
       <Card size="small">
         <Space wrap size={12} align="center" style={{ width: "100%" }}>
           <Segmented
@@ -166,37 +216,6 @@ export function MaintenanceHomePage() {
             style={{ width: 260 }}
             onSearch={setKeyword}
           />
-          <div style={{ marginLeft: "auto" }}>
-            <Space size={8} align="center" wrap>
-              <Select
-                size="small"
-                style={{ width: 110 }}
-                value={rangePreset}
-                onChange={(value) => setRangePreset(value as RangePreset)}
-                options={(Object.keys(RANGE_LABELS) as RangePreset[]).map((key) => ({
-                  label: RANGE_LABELS[key],
-                  value: key,
-                }))}
-              />
-              {rangePreset === "custom" ? (
-                <RangePicker
-                  size="small"
-                  onChange={(value) =>
-                    setCustomRange(value as [Dayjs, Dayjs] | null)
-                  }
-                />
-              ) : null}
-              <WorkbookRoundTrip
-                size="small"
-                title="全项目备件行级表"
-                filename={`spare-part-lines-${rangePreset}.xlsx`}
-                canUpload={canUpload}
-                hint="下载 → 改价/补价 → 上传覆盖＝真实源"
-                onDownload={async () => downloadSparePartLines(rangeParams())}
-                onApply={(file) => applySparePartLines(file)}
-              />
-            </Space>
-          </div>
         </Space>
       </Card>
 

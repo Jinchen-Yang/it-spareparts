@@ -8,7 +8,9 @@ import {
   armMaintenanceDemandDeleteIntent,
   createMaintenanceDemandDeleteIntent,
   executeMaintenanceDemandDeleteIntent,
+  restoreMaintenanceDemand,
   searchMaintenanceDemands,
+  voidFastMaintenanceDemands,
 } from "../maintenanceDemands";
 
 describe("maintenance demand API contract", () => {
@@ -20,6 +22,35 @@ describe("maintenance demand API contract", () => {
       q: "PN-123",
       page: 3,
       page_size: 25,
+    });
+  });
+
+  it("search can opt into the voided view via include_voided", () => {
+    searchMaintenanceDemands({ page: 1, page_size: 20, include_voided: true });
+    expect(post).toHaveBeenCalledWith("/maintenance/demands/search", {
+      page: 1,
+      page_size: 20,
+      include_voided: true,
+    });
+  });
+
+  it("void-fast posts the whole batch plus reason in one call (#265)", () => {
+    voidFastMaintenanceDemands({
+      source_order_ids: ["RAW-1", "RAW-2"],
+      reason: "氚云侧已删除",
+      idempotency_key: "void-key-1",
+    });
+    expect(post).toHaveBeenCalledWith("/maintenance/demands/void-fast", {
+      source_order_ids: ["RAW-1", "RAW-2"],
+      reason: "氚云侧已删除",
+      idempotency_key: "void-key-1",
+    });
+  });
+
+  it("restore posts the required reason to the per-order restore endpoint", () => {
+    restoreMaintenanceDemand("RAW-1", "误作废，氚云侧单仍然有效");
+    expect(post).toHaveBeenCalledWith("/maintenance/demands/RAW-1/restore", {
+      reason: "误作废，氚云侧单仍然有效",
     });
   });
 
