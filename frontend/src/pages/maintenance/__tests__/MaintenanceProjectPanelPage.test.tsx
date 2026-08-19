@@ -403,7 +403,7 @@ describe("项目面板", () => {
     fireEvent.click(await screen.findByText("WBDD-1"));
     // 配色图例
     expect(await screen.findByText("系统关联")).toBeInTheDocument();
-    expect(screen.getByText("人工回填")).toBeInTheDocument();
+    expect(screen.getAllByText("人工回填").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("缺失")).toBeInTheDocument();
     expect(screen.getByText("估算")).toBeInTheDocument();
     // PN 主列：加粗 PN + 描述副行
