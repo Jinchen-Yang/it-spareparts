@@ -103,6 +103,18 @@ describe("维保主页（项目卡墙）", () => {
     expect(screen.getByText("项目二")).toBeInTheDocument();
   });
 
+  it("页头有标题与副标（超预算变色、点卡进项目）", () => {
+    renderPage();
+    expect(screen.getByRole("heading", { name: "维保项目" })).toBeInTheDocument();
+    expect(screen.getByText(/超预算的项目会变黄、变红/)).toBeInTheDocument();
+  });
+
+  it("页头有「需求单与同步」入口，链到 /maintenance/demands（#267）", () => {
+    renderPage();
+    const link = screen.getByRole("link", { name: "需求单与同步" });
+    expect(link).toHaveAttribute("href", "/maintenance/demands");
+  });
+
   it("切到已结束会重新拉取", async () => {
     renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));

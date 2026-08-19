@@ -10,19 +10,22 @@ import {
 } from "../nav";
 
 /**
- * 维保信息架构：2026-08-16 定稿**只有两页**（REQUIREMENTS #33/#44）。
- * ①维保主页（项目卡墙，导航项）②项目面板（从卡片进入的详情路由，不占导航项）。
+ * 维保信息架构：2026-08-16 定稿两页（REQUIREMENTS #33/#44），
+ * 2026-08-19 #267 增加第三页「需求单与同步」（WBDD 快照差异 + 需求单作废/恢复）。
+ * ①维保主页（项目卡墙，导航项）②需求单与同步（导航项）
+ * ③项目面板（从卡片进入的详情路由，不占导航项）。
  * 旧的三代页面（旧版 3 / 工作台 9 / 展示板 5 / 数据维护 5）已随重设计删除。
  */
-describe("维保信息架构（2 页定稿）", () => {
+describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
   beforeEach(() => localStorage.clear());
 
-  it("维保只有一个导航组；组内为维保主页 + 补库申请", () => {
+  it("维保只有一个导航组；组内为维保主页 + 需求单与同步 + 补库申请", () => {
     const groups = NAV_GROUPS.filter((group) => group.key.startsWith("grp-maintenance"));
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("维保项目");
     expect(groups[0].items.map((item) => ({ key: item.key, path: item.path }))).toEqual([
       { key: "maintenance-home", path: "/maintenance" },
+      { key: "maintenance-demands", path: "/maintenance/demands" },
       { key: "replenishment-beta", path: "/maintenance/replenishment" },
     ]);
   });
@@ -104,6 +107,10 @@ describe("维保信息架构（2 页定稿）", () => {
   it("维保导航项路径唯一（重设计后不留重复入口）", () => {
     const paths = NAV_ITEMS.filter((item) => item.path.startsWith("/maintenance"))
       .map((item) => item.path);
-    expect(paths).toEqual(["/maintenance", "/maintenance/replenishment"]);
+    expect(paths).toEqual([
+      "/maintenance",
+      "/maintenance/demands",
+      "/maintenance/replenishment",
+    ]);
   });
 });

@@ -8,6 +8,7 @@ import {
   DollarOutlined,
   FundOutlined,
   FileSearchOutlined,
+  FileSyncOutlined,
   InboxOutlined,
   LineChartOutlined,
   ProfileOutlined,
@@ -79,10 +80,12 @@ const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
-// 维保两页（2026-08-16 定稿）：主页项目卡墙 + 项目面板。
+// 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。
 const loadMaintenanceHome = () => import("./pages/maintenance/MaintenanceHomePage");
 const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
+const loadMaintenanceDemands = () =>
+  import("./pages/maintenance/MaintenanceDemandsPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadMasterData = () => import("./pages/MasterDataPage");
@@ -103,6 +106,7 @@ const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
+const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
 const MasterDataPage = lazy(loadMasterData);
@@ -153,9 +157,9 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    // 维保只有两页（2026-08-16 定稿，REQUIREMENTS #33/#44）：
-    // ①维保主页（项目卡墙）②项目面板。旧的三代页面（旧版 3 / 工作台 9 /
-    // 展示板 5）已随本次重设计删除，不再保留导航项。
+    // 维保页面定稿（2026-08-19 #267 增「需求单与同步」）：①维保主页（项目卡墙）
+    // ②需求单与同步（氚云快照上传 / 差异清单 / 作废恢复）③项目面板（详情路由，
+    // 不占菜单）。旧的三代页面已随 2026-08-16 重设计删除，不再保留导航项。
     // 原始单据上传仍走 admin「数据中心 → 数据导入」（#42），不在本组。
     key: "grp-maintenance",
     label: "维保项目",
@@ -170,6 +174,15 @@ export const NAV_GROUPS: NavGroup[] = [
         anyPerm: ["page_maintenance_boss", "page_maintenance"],
         page: MaintenanceHomePage,
         load: loadMaintenanceHome,
+      },
+      {
+        key: "maintenance-demands",
+        path: "/maintenance/demands",
+        label: "需求单与同步",
+        icon: <FileSyncOutlined />,
+        perm: "page_maintenance",
+        page: MaintenanceDemandsPage,
+        load: loadMaintenanceDemands,
       },
       // 补库申请是维保业务动作（业务指示 2026-08-17 迁出销售组）：
       // 权限/betaFeature/页面不变，仅归组与路径；旧 /sales/replenishment-beta 有重定向
@@ -234,7 +247,7 @@ export interface DetailRoute {
 
 export const DETAIL_ROUTES: DetailRoute[] = [
   {
-    // 项目面板：从项目卡「进入面板」进来，不占导航项（页面定稿只有两页）
+    // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）
     key: "maintenance-project-panel",
     path: "/maintenance/projects/:projectId",
     pattern: /^\/maintenance\/projects\/[^/]+$/,
@@ -275,7 +288,8 @@ export const NAV_REDIRECTS: NavRedirect[] = [
   // 集成期曾使用 /maintenance/legacy；发布 Beta 后恢复 /maintenance 为稳定版默认入口。
   { from: "/maintenance/legacy", to: "/maintenance", perm: "page_maintenance" },
   // 2026-08-16 页面重设计：22 页收敛为 2 页，旧页面代码已删除。老收藏/老外链
-  // 一律回维保主页，不留空白页（#44 直接替换上线）。
+  // 一律回维保主页，不留空白页（#44 直接替换上线）。注意 /maintenance/demands
+  // 已由 #267 重建为正式页面（需求单与同步），不在此重定向清单里。
   ...[
     "/maintenance/downloads", "/maintenance/reminders",
     "/maintenance/boss", "/maintenance/boss/projects", "/maintenance/boss/uploads",
@@ -288,7 +302,7 @@ export const NAV_REDIRECTS: NavRedirect[] = [
     "/maintenance/beta/demands", "/maintenance/beta/warehouse",
     "/maintenance/beta/cost-refill", "/maintenance/beta/migration",
     "/maintenance/project-master", "/maintenance/project-master/source-orders",
-    "/maintenance/demands", "/maintenance/warehouse",
+    "/maintenance/warehouse",
     "/maintenance/project-manager/monthly-workbook", "/maintenance/acceptance",
     "/maintenance/updates", "/maintenance/cost-refill", "/maintenance/migration",
   ].map((from) => ({ from, to: "/maintenance", perm: "page_maintenance" })),
