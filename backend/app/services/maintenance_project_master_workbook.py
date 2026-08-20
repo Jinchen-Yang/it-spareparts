@@ -1817,6 +1817,7 @@ def _ensure_contract_for_xsdd(db: Session, project_id: str, contract_no: str):
         status_mapping_version="workbook-v2-xsdd",
         included_in_total=True,
         effective_from=project.period_from if project else None,
+        source="sales_fallback",
         version=1,
     )
     db.add(contract)
