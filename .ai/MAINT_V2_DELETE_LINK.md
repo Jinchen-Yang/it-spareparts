@@ -79,3 +79,7 @@
 - WSL 全量：仅 https_rollback 9 失败（纯 27c95fa 基线同样失败，环境类；CI runner 上 main 全绿）。
 - 测试环境：WSL `wsl.cloudlay.cn:2222`（密钥 `~/.ssh/cloud_claude_wsl`），克隆 `~/Workspaces/it-spareparts-verify`；本机 macOS conftest 拒跑。**本机到 github.com 443 常被重置——推送走 WSL git bundle 中转**。
 - 剩余：PR #272 CI → 合并 → #270 合并；#268 两大场景 tracer bullet。
+
+## 七、工作纪律（用户 2026-08-21 指定）
+
+**每次修复必须端到端验证**：前端实际调用路径 → 后端路由真实命中（带鉴权的真实请求，不能用 401/单测 mock 代替）→ 数据库实际变更（psql 对账）。三段全通才算修完。教训案例：collection-plan 端点连续两次假修复（路径少段 404、Decimal 导入空转 500）都因只验证了片段。
