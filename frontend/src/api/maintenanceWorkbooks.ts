@@ -38,10 +38,19 @@ export interface WorkbookApplyResult {
   site_return_flags: number;
   expense_updates: number;
   expense_creates?: number;
+  expense_voids?: number;
   site_creates?: number;
   site_updates?: number;
   cost_overrides?: number;
+  line_creates?: number;
+  line_updates?: number;
+  qty_updates?: number;
+  line_voids?: number;
+  plan_creates?: number;
+  plan_updates?: number;
+  plan_voids?: number;
   collection_creates: number;
+  collection_updates?: number;
   collection_voids: number;
 }
 

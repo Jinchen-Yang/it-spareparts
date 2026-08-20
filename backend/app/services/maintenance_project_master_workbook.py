@@ -1057,7 +1057,11 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
         MaintenanceCollectionSnapshot.status == "confirmed",
     ).order_by(MaintenanceCollectionSnapshot.report_month)))
     for row in rows:
-        ws.append([contract_by_id.get(row.project_contract_id, ""), row.report_month,
+        # 报告月份导出为 YYYY-MM（用户看到 2026-09-01 00:00:00 很怪；解析侧
+        # 对 YYYY-MM 回 parse 为当月一号，往返一致）
+        month_text = (row.report_month.isoformat()[:7]
+                      if hasattr(row.report_month, "isoformat") else str(row.report_month or ""))
+        ws.append([contract_by_id.get(row.project_contract_id, ""), month_text,
                    row.cumulative_amount, row.status, row.receipt_reference or "", row.remark or "", row.collection_id])
     _v2_append_example_row(ws, V2_RECEIPT_HEADERS, {
         "合同编号": next(iter(contract_by_id.values()), "") or "（本项目合同号）",

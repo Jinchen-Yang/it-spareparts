@@ -35,10 +35,21 @@ function describe(result: Partial<WorkbookApplyResult>): string {
   if (result.cost_refills || result.cost_overrides) {
     parts.push(`补价 ${result.cost_refills || result.cost_overrides} 行`);
   }
+  if (result.line_creates) parts.push(`备件新增 ${result.line_creates} 行`);
+  if (result.line_updates || result.qty_updates) {
+    parts.push(`备件更新 ${result.line_updates || result.qty_updates} 行`);
+  }
+  if (result.line_voids) parts.push(`备件作废 ${result.line_voids} 行`);
   if (result.expense_creates) parts.push(`报销新增 ${result.expense_creates} 行`);
   if (result.expense_updates) parts.push(`报销更新 ${result.expense_updates} 行`);
-  if (result.collection_creates) parts.push(`回款新增/覆盖 ${result.collection_creates} 条`);
+  if (result.expense_voids) parts.push(`报销作废 ${result.expense_voids} 行`);
+  if (result.collection_creates || result.collection_updates) {
+    parts.push(`回款新增/覆盖 ${result.collection_creates || result.collection_updates} 条`);
+  }
   if (result.collection_voids) parts.push(`回款作废 ${result.collection_voids} 条`);
+  if (result.plan_creates) parts.push(`回款计划新增 ${result.plan_creates} 条`);
+  if (result.plan_updates) parts.push(`回款计划更新 ${result.plan_updates} 条`);
+  if (result.plan_voids) parts.push(`回款计划作废 ${result.plan_voids} 条`);
   if (result.site_return_flags) parts.push(`返还标记 ${result.site_return_flags} 行`);
   if (result.site_creates) parts.push(`领用新增 ${result.site_creates} 行`);
   if (result.site_updates) parts.push(`领用更新 ${result.site_updates} 行`);
