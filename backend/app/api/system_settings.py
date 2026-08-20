@@ -166,8 +166,9 @@ def get_dsh_llm_config() -> DshLlmConfig:
     models = [{
         "id": s.llm_model,
         "name": s.llm_model,
-        "contextWindow": getattr(s, "llm_context_window", None),
-        "maxTokens": s.llm_max_tokens,
+        # None 不能下发：pi-ai 的 settings 校验会拒绝 null maxTokens/contextWindow
+        **({"contextWindow": getattr(s, "llm_context_window", None)} if getattr(s, "llm_context_window", None) else {}),
+        **({"maxTokens": s.llm_max_tokens} if s.llm_max_tokens else {}),
     }]
     return DshLlmConfig(
         enabled=True,
