@@ -69,7 +69,7 @@ V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
 # 2026-08-19（#264/#267）：03 全字段可编辑 + 04 作废/缺行=作废——新增「操作」列、
 # 放开行级数据列、只读哈希收窄。旧 2.0.0 工作簿因哈希列集合变更一律拒绝并
 # 提示重新下载。
-V2_TEMPLATE_VERSION = "2.2.0"
+V2_TEMPLATE_VERSION = "2.3.0"
 
 SHEET_BASICS = "01_项目基础信息"
 SHEET_OVERVIEW = "02_概览数据"
@@ -844,6 +844,34 @@ def _account_display_name(db: Session, username: str | None) -> str | None:
     return row or username
 
 
+_EXAMPLE_FONT = Font(color="999999", italic=True)
+_EXAMPLE_FILL = PatternFill("solid", fgColor="F5F5F5")
+
+
+def _v2_append_example_row(ws, headers: list[str], values: dict[str, object]) -> None:
+    """每个数据 sheet 底部一行灰色「示例」：告诉用户怎么填，上传时系统忽略。
+
+    标记约定：操作列填「示例」（02/03/04）；无操作列的 sheet（05/06）在备注列
+    填「【示例】…」。解析侧 _is_example_row 统一识别跳过。
+    """
+    row = [values.get(name, "") for name in headers]
+    ws.append(row)
+    r = ws.max_row
+    for c in range(1, len(headers) + 1):
+        cell = ws.cell(r, c)
+        cell.font = _EXAMPLE_FONT
+        cell.fill = _EXAMPLE_FILL
+
+
+def _is_example_row(row) -> bool:
+    """上传侧识别示例行：任一单元格为「示例」或以「【示例】」开头。"""
+    for value in row or ():
+        text = str(value or "").strip()
+        if text == "示例" or text.startswith("【示例】"):
+            return True
+    return False
+
+
 def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     ws = wb.create_sheet(V2_SHEET_OVERVIEW)
     ws.append(["项目总览", None])
@@ -902,6 +930,15 @@ def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
         ])
     for _ in range(4):
         ws.append([""] * len(V2_PLAN_HEADERS))
+    _v2_append_example_row(ws, V2_PLAN_HEADERS, {
+        "操作": "示例",
+        "合同编号": "（填本项目合同号，如 XSDD-20260107-0011）",
+        "期次": 1,
+        "计划回款日期": "2026-09-30",
+        "日期精度": "day",
+        "计划回款金额（含税）": 50000,
+        "备注": "新增一条计划：操作选 CREATE，按合同节点填期次/日期/金额",
+    })
     _v2_finalize(ws, V2_PLAN_HEADERS, hidden_from=13,
                  editable={1, 2, 3, 4, 5, 6, 12}, operation_col=1)
 
@@ -959,6 +996,17 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
     for _ in range(5):
         ws.append([""] * len(V2_PART_HEADERS))
+    _v2_append_example_row(ws, V2_PART_HEADERS, {
+        "操作": "示例",
+        "维保单号": "（填本项目已有需求单号）",
+        "PN": "（填标准PN，需在主数据中存在）",
+        "描述": "新增一行备件",
+        "需求数量": 2,
+        "退货数量": 0,
+        "人工未税单位成本": 88.5,
+        "人工成本原因": "采购价依据",
+        "备注": "新增示例：操作选 CREATE，必须挂本项目已有单号",
+    })
     _v2_finalize(ws, V2_PART_HEADERS,
                  editable=V2_PART_EDITABLE, operation_col=1)
     # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)。备注(25)/来源(26) 可见。
@@ -978,6 +1026,20 @@ def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> None:
                    "—", expense.data_status or "",
                    expense.amount, expense.tax_basis or "ex", expense.amount_ex_tax,
                    expense.amount_inc_tax, expense.remark or "", expense.raw_line_id])
+    _v2_append_example_row(ws, V2_EXPENSE_HEADERS, {
+        "操作": "示例",
+        "费用单号": "BXD-20260901-0001",
+        "明细序号": 1,
+        "报销日期": "2026-09-01",
+        "报销人员": "张三",
+        "报销类别": "维保费用",
+        "费用分类": "交通费",
+        "支出事由": "现场交通",
+        "维保销售订单（归集键）": "（填本项目XSDD合同号）",
+        "原始报销金额": 226,
+        "未税金额": 200,
+        "备注": "手工新增示例：实体ID留空，费用单号+明细序号必填",
+    })
     _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=18,
                  editable={1, 4, 5, 6, 7, 8, 9, 12, 14, 17}, operation_col=1)
 
@@ -993,6 +1055,14 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
     for row in rows:
         ws.append([contract_by_id.get(row.project_contract_id, ""), row.report_month,
                    row.cumulative_amount, row.status, row.receipt_reference or "", row.remark or "", row.collection_id])
+    _v2_append_example_row(ws, V2_RECEIPT_HEADERS, {
+        "合同编号": "（填本项目合同号）",
+        "报告月份": "2026-09",
+        "累计实收金额（含税）": 50000,
+        "状态": "confirmed",
+        "回款凭证号": "PJ-202609-001",
+        "备注": "【示例】实收=每月累计快照：同一合同同月重复上传即覆盖更新，凭证号选填",
+    })
     _v2_finalize(ws, V2_RECEIPT_HEADERS, hidden_from=7)
 
 
@@ -1008,6 +1078,15 @@ def _v2_build_site(wb, db, project_id: str) -> None:
         ws.append([issue.issue_no, issue.issue_date, line.pn, line.serial_number or "", line.quantity,
                    "" if line.no_return is None else ("否" if line.no_return else "是"), line.remark or "",
                    "—", "待确认品类", "—", line.issue_line_id])
+    _v2_append_example_row(ws, V2_SITE_HEADERS, {
+        "领用单号": "CKD-20260901-0001",
+        "领用日期": "2026-09-01",
+        "PN": "（填标准PN）",
+        "SN": "SN-001",
+        "领用数量": 1,
+        "是否应返还": "是",
+        "备注": "【示例】手工新增领用：实体ID留空，单号/日期/PN/数量必填",
+    })
     _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
                  editable={1, 2, 3, 4, 5, 6, 7})
 
@@ -1030,7 +1109,10 @@ def _v2_build_usage(wb) -> None:
         ("【04 费用报销】", ""),
         ("删除一行", "直接删行或操作列选 VOID。作废的行从此不再导出、不计金额。"),
         ("新增一行", "表尾填 费用单号+明细序号+报销日期+金额+归集键（XSDD），操作列留空或 CREATE。"),
-        ("【02 回款计划 / 05 实收回款 / 06 领用返还】", "按黄底提示编辑；02/05 带「基础版本」乐观锁，若系统侧已更新会提示重新下载。"),
+        ("【02 回款计划】", "计划=打算什么时候收多少钱：一行一个合同期次。操作选 CREATE 新增，填合同号、期次（第几期）、计划回款日期、金额；改已有行选 UPDATE（带基础版本防冲突）；作废选 VOID。"),
+        ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
+        ("【06 领用返还】", "按黄底提示编辑；手工新增领用行填单号/日期/PN/数量，实体ID留空。"),
+        ("【灰色示例行】", "每个数据页最后一行灰色斜体是填写示例，系统上传时自动忽略，不会入库——照着它的格式填，填完可保留或删除该行。"),
         ("", ""),
         ("【安全规则】", ""),
         ("行数防呆", "上传的数据行少于导出时的一半 → 整本拒绝（防止筛选后误传删掉大片数据）。"),
@@ -1314,6 +1396,8 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
+        if _is_example_row(row):
+            continue
         raw_id = _cell(row, index, "实体ID")
         operation = str(_cell(row, index, "操作") or "").strip().upper()
         has_entity = raw_id not in (None, "")
@@ -1494,6 +1578,8 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
+        if _is_example_row(row):
+            continue
         raw_id = _cell(row, index, "实体ID")
         issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
         issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no, label="领用")
@@ -1582,6 +1668,8 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
+        if _is_example_row(row):
+            continue
         operation = str(row[index["操作"]] or "").strip().upper()
         if not operation:
             continue
@@ -1626,6 +1714,8 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
     voids: list[str] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
+            continue
+        if _is_example_row(row):
             continue
         operation = str(_cell(row, index, "操作") or "").strip().upper()
         if operation and operation not in {"VOID", "UPDATE", "CREATE"}:
@@ -1702,6 +1792,8 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
     out: list[ec.CollectionOp] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
+            continue
+        if _is_example_row(row):
             continue
         contract_no = str(row[index["合同编号"]] or "").strip()
         contract = contracts.get(contract_no)

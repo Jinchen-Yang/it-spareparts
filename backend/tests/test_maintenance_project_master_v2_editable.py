@@ -117,7 +117,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.2.0"
+    assert meta["template_version"] == "2.3.0"
 
 
 def test_v21_void_line_sets_inactive_and_excludes_from_export(db):
@@ -747,7 +747,7 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
     assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
     # 模板版本 2.2.0
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.2.0"
+    assert meta["template_version"] == "2.3.0"
 
 
 def test_latest_missing_marks_suspicious_when_ratio_high(db):
@@ -809,3 +809,32 @@ def test_e2e_fix_summary_distinguishes_qty_from_cost(db):
     assert plan.summary["qty_updates"] == 1
     assert plan.summary["line_updates"] == 1
     assert plan.summary["cost_overrides"] == 0
+
+
+def test_v23_example_rows_present_and_ignored_on_upload(db):
+    """每个数据 sheet 底部有灰色示例行；回传时被系统忽略（零变更幂等）。"""
+    project, _order, _line, _expense = _make_project_with_expense(db)
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content))
+    for sheet_name in (master.V2_SHEET_PLAN, master.V2_SHEET_PARTS,
+                       master.V2_SHEET_EXPENSE, master.V2_SHEET_RECEIPTS,
+                       master.V2_SHEET_SITE):
+        ws = wb[sheet_name]
+        # finalize 会向下多刷 20 行样式（max_row 被撑大），全表扫找示例标记
+        found = any(
+            str(c.value or "").strip() in ("示例",) or str(c.value or "").startswith("【示例】")
+            for row in ws.iter_rows(min_row=2) for c in row
+        )
+        assert found, sheet_name
+    # 原样回传（含示例行）：零变更
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["line_creates"] == 0
+    assert plan.summary["line_updates"] == 0
+    assert plan.summary["line_voids"] == 0
+    assert plan.summary["expense_creates"] == 0
+    assert plan.summary["expense_voids"] == 0
+    assert plan.summary["plan_creates"] == 0
+    assert not plan.will_void_rows
