@@ -930,9 +930,11 @@ def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
         ])
     for _ in range(4):
         ws.append([""] * len(V2_PLAN_HEADERS))
+    sample_contract = ((contracts[0].contract_no if contracts else None)
+                       or next(iter(project_sales_order_nos(db, project_id)), ""))
     _v2_append_example_row(ws, V2_PLAN_HEADERS, {
         "操作": "示例",
-        "合同编号": "（填本项目合同号，如 XSDD-20260107-0011）",
+        "合同编号": sample_contract or "（先在需求单挂靠后自动获得 XSDD）",
         "期次": 1,
         "计划回款日期": "2026-09-30",
         "日期精度": "day",
@@ -996,10 +998,12 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
     for _ in range(5):
         ws.append([""] * len(V2_PART_HEADERS))
+    sample_line = lines[0] if lines else None
     _v2_append_example_row(ws, V2_PART_HEADERS, {
         "操作": "示例",
-        "维保单号": "（填本项目已有需求单号）",
-        "PN": "（填标准PN，需在主数据中存在）",
+        "维保单号": (sample_line[1].order_no if sample_line else "（本项目已有需求单号）"),
+        "PN": ((sample_line[0].pn_std or sample_line[0].pn_raw or "") if sample_line
+               else "（标准PN）"),
         "描述": "新增一行备件",
         "需求数量": 2,
         "退货数量": 0,
@@ -1056,7 +1060,7 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
         ws.append([contract_by_id.get(row.project_contract_id, ""), row.report_month,
                    row.cumulative_amount, row.status, row.receipt_reference or "", row.remark or "", row.collection_id])
     _v2_append_example_row(ws, V2_RECEIPT_HEADERS, {
-        "合同编号": "（填本项目合同号）",
+        "合同编号": next(iter(contract_by_id.values()), "") or "（本项目合同号）",
         "报告月份": "2026-09",
         "累计实收金额（含税）": 50000,
         "状态": "confirmed",
@@ -1081,7 +1085,7 @@ def _v2_build_site(wb, db, project_id: str) -> None:
     _v2_append_example_row(ws, V2_SITE_HEADERS, {
         "领用单号": "CKD-20260901-0001",
         "领用日期": "2026-09-01",
-        "PN": "（填标准PN）",
+        "PN": (rows[0][0].pn if rows else "（标准PN）"),
         "SN": "SN-001",
         "领用数量": 1,
         "是否应返还": "是",
@@ -1676,9 +1680,7 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
         if operation not in {"CREATE", "UPDATE", "VOID"}:
             raise WorkbookError("invalid_operation", f"第 {row_no} 行操作必须是 CREATE、UPDATE 或 VOID")
         contract_no = str(row[index["合同编号"]] or "").strip()
-        contract = contracts.get(contract_no)
-        if contract is None:
-            raise WorkbookError("contract_not_found", f"第 {row_no} 行合同编号不属于本项目")
+        contract = _resolve_plan_contract(db, project_id, contract_no, row_no)
         sequence = int(row[index["期次"]])
         if not 1 <= sequence <= 24:
             raise WorkbookError("invalid_sequence", f"第 {row_no} 行期次必须为 1-24")
@@ -1783,6 +1785,85 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
             remark=str(_cell(row, index, "备注") or "").strip() or None,
         ))
     return out, voids
+
+
+def _ensure_contract_for_xsdd(db: Session, project_id: str, contract_no: str):
+    """按 XSDD 取合同；台账没有则从销售表自动建（幂等复用），对齐 05 既有语义。"""
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project_id,
+        MaintenanceProjectContract.contract_no == contract_no,
+    ))
+    if contract is not None:
+        return contract
+    sale = db.execute(
+        select(FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
+        .where(FSalesOrder.order_no == contract_no,
+               FSalesOrder.amount_ex_tax.is_not(None))
+        .limit(1)
+    ).one_or_none()
+    amount_ex_tax = Decimal(str(sale[0])) if sale and sale[0] is not None else None
+    inc_tax = (amount_ex_tax * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01")) \
+        if amount_ex_tax is not None else None
+    project = db.get(MaintenanceProject, project_id)
+    contract = MaintenanceProjectContract(
+        project_contract_id=str(uuid4()),
+        project_id=project_id,
+        contract_id=f"xsdd-{contract_no}",
+        contract_no=contract_no,
+        contract_amount=amount_ex_tax,
+        amount_inc_tax=inc_tax,
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="workbook-v2-xsdd",
+        included_in_total=True,
+        effective_from=project.period_from if project else None,
+        version=1,
+    )
+    db.add(contract)
+    db.flush()
+    return contract
+
+
+def _xsdd_contract_for_project(db: Session, project_id: str, row_no: int):
+    """合同编号留空 → 按项目唯一挂靠 XSDD 自动回填（多义/缺失整本拒绝）。"""
+    xsdd_rows = db.scalars(
+        select(FMaintenanceOrder.linked_sales_order_no)
+        .join(MaintenanceSourceOrderAssignment,
+              (MaintenanceSourceOrderAssignment.source_order_id
+               == FMaintenanceOrder.raw_order_id)
+              & MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+        )
+        .group_by(FMaintenanceOrder.linked_sales_order_no)
+    ).all()
+    xsdd_nos = sorted({str(o) for o in xsdd_rows if o})
+    if not xsdd_nos:
+        raise WorkbookError(
+            "contract_not_found",
+            f"第 {row_no} 行合同编号留空，但该项目未挂靠任何 XSDD 单据，无法自动回填")
+    if len(xsdd_nos) > 1:
+        raise WorkbookError(
+            "contract_not_found",
+            f"第 {row_no} 行合同编号留空，但该项目挂靠多个 XSDD（{'、'.join(xsdd_nos)}），请明确填写")
+    return _ensure_contract_for_xsdd(db, project_id, xsdd_nos[0])
+
+
+def _resolve_plan_contract(db: Session, project_id: str, contract_no: str, row_no: int):
+    """02 回款计划的合同解析：台账优先 → 本项目 XSDD 自动建（无台账也能填）→
+    明确报错并列出可用合同（2026-08-20 用户踩坑：台账未导入时全部被拒）。"""
+    ledger = {c.contract_no: c for c in ec._contracts(db, project_id)}
+    if contract_no in ledger:
+        return ledger[contract_no]
+    xsdd = set(project_sales_order_nos(db, project_id))
+    if contract_no in xsdd:
+        return _ensure_contract_for_xsdd(db, project_id, contract_no)
+    available = sorted(set(ledger) | xsdd)
+    raise WorkbookError(
+        "contract_not_found",
+        f"第 {row_no} 行合同编号 {contract_no or ''!r} 不属于本项目"
+        + (f"（可用：{'、'.join(available[:8])}）" if available else "（本项目还没有合同，请先填挂靠单据上的 XSDD 号）"))
 
 
 def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp]:

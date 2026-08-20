@@ -838,3 +838,49 @@ def test_v23_example_rows_present_and_ignored_on_upload(db):
     assert plan.summary["expense_voids"] == 0
     assert plan.summary["plan_creates"] == 0
     assert not plan.will_void_rows
+
+
+def test_v23_plan_accepts_xsdd_without_ledger_contract(db):
+    """台账未导入的项目也能填 02：合同号=挂靠 XSDD → 自动建合同（用户踩坑）。"""
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    project, _part, order, _line = _make_project_with_line(db)
+    # 该项目挂靠单的 XSDD = XSDD-EDIT-001（fixture 里 linked_sales_order_no）
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    # 在示例行后追加一条 CREATE（用挂靠 XSDD，不依赖台账）
+    ws.append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+               None, None, None, None, None, None, None, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["plan_creates"] == 1
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id,
+        MaintenanceProjectContract.contract_no == "XSDD-EDIT-001"))
+    assert contract is not None  # 自动建出来了
+
+
+def test_v23_plan_rejects_with_helpful_error(db):
+    """不属于本项目的合同号 → 报错列出可用合同。"""
+    import pytest
+    from app.services.maintenance_expense_collection_workbook import WorkbookError
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    ws.append(["CREATE", "XSDD-别的项目", 1, "2026-09-30", "day", 100, None, None,
+               None, None, None, None, None, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+    with pytest.raises(WorkbookError) as exc:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=buf.getvalue())
+    assert "可用" in str(exc.value) and "XSDD-EDIT-001" in str(exc.value)
