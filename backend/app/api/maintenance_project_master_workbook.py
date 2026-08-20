@@ -40,6 +40,7 @@ from app.security import (
 )
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services import maintenance_project_master_workbook as master
+from app.services import maintenance_workbook_renderer
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
@@ -294,7 +295,9 @@ def list_master_rows(
                     if line.cost_amount_inc_tax is not None else None),
                 "warehouse": order.warehouse or "",
                 "cost_source": line.cost_source or "none",
-                "cost_source_label": line.cost_source or "无成本结果",
+                # 中文标签（复用渲染器的统一映射），不再吐英文代码
+                "cost_source_label": maintenance_workbook_renderer.SOURCE_LABELS.get(
+                    line.cost_source, "成本缺失"),
                 "confidence": line.confidence or "none",
                 "unit_cost_ex_tax": str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None,
                 "unit_cost_inc_tax": str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None,
