@@ -1,6 +1,7 @@
 import { lazy } from "react";
 import type { ComponentType, LazyExoticComponent, ReactNode } from "react";
 import {
+  BarChartOutlined,
   CloudUploadOutlined,
   ControlOutlined,
   DashboardOutlined,
@@ -82,6 +83,7 @@ const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseException
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 // 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。
 const loadMaintenanceHome = () => import("./pages/maintenance/MaintenanceHomePage");
+const loadMaintenanceAnalytics = () => import("./pages/maintenance/MaintenanceAnalyticsPage");
 const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadMaintenanceDemands = () =>
@@ -105,6 +107,7 @@ const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
+const MaintenanceAnalyticsPage = lazy(loadMaintenanceAnalytics);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
 const InventoryPage = lazy(loadInventory);
@@ -174,6 +177,15 @@ export const NAV_GROUPS: NavGroup[] = [
         anyPerm: ["page_maintenance_boss", "page_maintenance"],
         page: MaintenanceHomePage,
         load: loadMaintenanceHome,
+      },
+      {
+        key: "maintenance-analytics",
+        path: "/maintenance/analytics",
+        label: "数据分析",
+        icon: <BarChartOutlined />,
+        perm: "page_maintenance",
+        page: MaintenanceAnalyticsPage,
+        load: loadMaintenanceAnalytics,
       },
       {
         key: "maintenance-demands",

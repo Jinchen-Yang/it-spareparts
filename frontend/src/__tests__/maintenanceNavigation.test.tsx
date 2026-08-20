@@ -19,12 +19,13 @@ import {
 describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
   beforeEach(() => localStorage.clear());
 
-  it("维保只有一个导航组；组内为维保主页 + 需求单与同步 + 补库申请", () => {
+  it("维保只有一个导航组；组内为维保主页 + 数据分析 + 需求单与同步 + 补库申请", () => {
     const groups = NAV_GROUPS.filter((group) => group.key.startsWith("grp-maintenance"));
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("维保项目");
     expect(groups[0].items.map((item) => ({ key: item.key, path: item.path }))).toEqual([
       { key: "maintenance-home", path: "/maintenance" },
+      { key: "maintenance-analytics", path: "/maintenance/analytics" },
       { key: "maintenance-demands", path: "/maintenance/demands" },
       { key: "replenishment-beta", path: "/maintenance/replenishment" },
     ]);
@@ -109,6 +110,7 @@ describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
       .map((item) => item.path);
     expect(paths).toEqual([
       "/maintenance",
+      "/maintenance/analytics",
       "/maintenance/demands",
       "/maintenance/replenishment",
     ]);
