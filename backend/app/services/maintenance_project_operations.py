@@ -4938,7 +4938,9 @@ def project_workspace(
         select(MaintenanceCollectionSnapshot)
         .where(
             MaintenanceCollectionSnapshot.project_id == project_id,
-            MaintenanceCollectionSnapshot.report_month <= as_of,
+            # 2026-08-21：不再静默隐藏未来月份（用户实测踩坑——实收填了未来月
+            # 页面空白无解释）。未来月份照常返回，前端打「未来月份」标记；
+            # 指标计算（latest_confirmed）仍保持 <= as_of 口径不变。
         )
         .order_by(
             MaintenanceCollectionSnapshot.report_month,

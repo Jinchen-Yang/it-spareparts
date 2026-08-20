@@ -129,7 +129,18 @@ export function CollectionTab({
         locale={{ emptyText: "本项目暂无回款记录" }}
           columns={[
             { title: "合同编号", dataIndex: "contract_no", render: raw },
-            { title: "报告月份", dataIndex: "report_month", render: raw },
+            {
+              title: "报告月份",
+              dataIndex: "report_month",
+              render: (value: string) => {
+                const text = raw(value);
+                // 未来月份照常显示但打标（2026-08-21：此前静默隐藏导致页面空白）
+                const month = value ? value.slice(0, 7) : "";
+                const now = new Date();
+                const isFuture = month > `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+                return isFuture ? <Tag color="gold">{text}（未来月份）</Tag> : text;
+              },
+            },
             {
               title: "累计实收金额（含税）",
               dataIndex: "cumulative_amount",
