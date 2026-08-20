@@ -26,7 +26,7 @@ def pn_ranking(
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
     sort: str = Query("cost_inc",
-                      pattern="^(cost_inc|cost_ex|qty|occurrences|bad_qty)$"),
+                      pattern="^(cost_inc|cost_ex|qty|return_qty|effective_qty|occurrences|order_count|project_count|monthly_avg|bad_qty|bad_rate|missing_lines|cost_share|pn)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),

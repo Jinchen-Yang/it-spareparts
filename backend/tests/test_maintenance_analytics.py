@@ -225,3 +225,26 @@ def test_ranking_pagination_and_sort_whitelist(db):
     page2 = ana.pn_ranking(db, range_="all", sort="qty", page=3, page_size=2,
                            can_cost=True)
     assert len(page2["rows"]) == 1
+
+
+def test_ranking_per_column_sorts(db):
+    """各列排序键独立生效（用户需求：每个字段都可排序）。"""
+    proj = _project(db, "H")
+    for i, (qty, ret) in enumerate([(Decimal("10"), Decimal("0")),
+                                    (Decimal("2"), Decimal("2")),
+                                    (Decimal("5"), Decimal("0"))]):
+        part = _part(db, f"ANA-SORT-{i}")
+        _line(db, proj, part, order_no=f"WBD-SORT-{i}", order_date=date(2026, 1, 1),
+              qty=qty, return_qty=ret,
+              cost_inc=Decimal(str((i + 1) * 100)) if i != 1 else None)
+    db.commit()
+    by_qty = ana.pn_ranking(db, range_="all", sort="qty", can_cost=True)["rows"][0]
+    assert by_qty["qty"] == Decimal("10")
+    by_eff = ana.pn_ranking(db, range_="all", sort="effective_qty", can_cost=True)["rows"][0]
+    assert by_eff["effective_qty"] == Decimal("5") or by_eff["effective_qty"] == Decimal("10")
+    by_ret = ana.pn_ranking(db, range_="all", sort="return_qty", can_cost=True)["rows"][0]
+    assert by_ret["return_qty"] == Decimal("2")
+    by_missing = ana.pn_ranking(db, range_="all", sort="missing_lines", can_cost=True)["rows"][0]
+    assert by_missing["missing_lines"] == 1
+    by_pn = ana.pn_ranking(db, range_="all", sort="pn", can_cost=True)["rows"][0]
+    assert by_pn["pn"] == "ANA-SORT-0"

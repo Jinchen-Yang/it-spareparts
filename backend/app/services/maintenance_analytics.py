@@ -29,7 +29,11 @@ from app.services import query_filters
 from app.services.maintenance_boss_board import not_imported, ready, restricted, wbdd_imported
 
 RANGES = ("ytd", "12m", "all", "custom")
-SORTS = ("cost_inc", "cost_ex", "qty", "occurrences", "bad_qty")
+SORTS = (
+    "cost_inc", "cost_ex", "qty", "return_qty", "effective_qty",
+    "occurrences", "order_count", "project_count", "monthly_avg",
+    "bad_qty", "bad_rate", "missing_lines", "cost_share", "pn",
+)
 COST_SORTS = {"cost_inc", "cost_ex"}
 
 
@@ -169,20 +173,8 @@ def pn_ranking(
     total_effective = sum(i["effective_qty"] for i in items)
     total_bad = sum(i["bad_return_qty"] for i in items)
 
-    def sort_key(i):
-        if sort == "cost_inc":
-            return (i["cost_inc"] or Decimal("0"), i["effective_qty"])
-        if sort == "cost_ex":
-            return (i["cost_ex"] or Decimal("0"), i["effective_qty"])
-        if sort == "qty":
-            return (i["effective_qty"], i["cost_inc"] or Decimal("0"))
-        if sort == "bad_qty":
-            return (i["bad_return_qty"], i["effective_qty"])
-        return (i["occurrences"], i["effective_qty"])
-
-    items.sort(key=sort_key, reverse=True)
-    for rank, i in enumerate(items, 1):
-        i["rank"] = rank
+    # 先加工派生指标（排序键依赖），再排序，最后赋名次
+    for i in items:
         i["cost_share_pct"] = (
             float(((i["cost_inc"] or Decimal("0")) / total_cost_inc * 100).quantize(Decimal("0.1")))
             if total_cost_inc else None)
@@ -192,6 +184,28 @@ def pn_ranking(
         i["bad_return_rate_pct"] = (
             float(((i["bad_return_qty"] / i["effective_qty"]) * 100).quantize(Decimal("0.1")))
             if i["effective_qty"] > 0 and i["bad_return_qty"] > 0 else None)
+
+    def sort_key(i):
+        return {
+            "cost_inc": (i["cost_inc"] or Decimal("0"), i["effective_qty"]),
+            "cost_ex": (i["cost_ex"] or Decimal("0"), i["effective_qty"]),
+            "qty": (i["qty"] or Decimal("0"), i["occurrences"]),
+            "return_qty": (i["return_qty"] or Decimal("0"),),
+            "effective_qty": (i["effective_qty"], i["cost_inc"] or Decimal("0")),
+            "occurrences": (i["occurrences"], i["effective_qty"]),
+            "order_count": (i["order_count"], i["effective_qty"]),
+            "project_count": (i["project_count"], i["effective_qty"]),
+            "monthly_avg": (i["monthly_avg_qty"] or 0, i["effective_qty"]),
+            "bad_qty": (i["bad_return_qty"], i["effective_qty"]),
+            "bad_rate": (i["bad_return_rate_pct"] or 0, i["bad_return_qty"]),
+            "missing_lines": (i["missing_lines"],),
+            "cost_share": (i["cost_share_pct"] or 0,),
+            "pn": (i["pn"],),
+        }[sort]
+
+    items.sort(key=sort_key, reverse=(sort != "pn"))  # PN 按字母升序更自然
+    for rank, i in enumerate(items, 1):
+        i["rank"] = rank
 
     total = len(items)
     page_items = items[(page - 1) * page_size: page * page_size]

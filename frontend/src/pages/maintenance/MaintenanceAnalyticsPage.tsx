@@ -15,7 +15,7 @@ import {
   Typography,
   message,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import type { ColumnsType, TableProps } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
 import { BarChartOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
@@ -104,6 +104,33 @@ export function MaintenanceAnalyticsPage() {
     void load();
   }, [load]);
 
+  /** 表头排序 → 服务端排序键（服务端分页，必须整库排序不能只排当页）。 */
+  const SORTER_TO_KEY: Record<string, string> = {
+    pn: "pn",
+    occurrences: "occurrences",
+    order_count: "order_count",
+    project_count: "project_count",
+    qty: "qty",
+    return_qty: "return_qty",
+    effective_qty: "effective_qty",
+    monthly_avg_qty: "monthly_avg",
+    cost_inc: "cost_inc",
+    cost_ex: "cost_ex",
+    cost_share_pct: "cost_share",
+    bad_return_qty: "bad_qty",
+    bad_return_rate_pct: "bad_rate",
+    missing_lines: "missing_lines",
+  };
+
+  const onTableChange: TableProps<PnRankingRow>["onChange"] = (_pg, _fl, sorter) => {
+    const field = Array.isArray(sorter) ? sorter[0]?.field : sorter?.field;
+    const key = field ? SORTER_TO_KEY[String(field)] : undefined;
+    if (key && key !== sort) {
+      setSort(key);
+      setPage(1);
+    }
+  };
+
   const columns: ColumnsType<PnRankingRow> = [
     { title: "#", dataIndex: "rank", width: 60 },
     {
@@ -126,25 +153,28 @@ export function MaintenanceAnalyticsPage() {
     {
       title: "月均",
       dataIndex: "monthly_avg_qty",
+      sorter: true,
       width: 80,
       render: (v: number | null) => (v === null ? "—" : String(v)),
     },
-    { title: "含税成本", dataIndex: "cost_inc", width: 130, render: (_: unknown, r) => statText(r.cost_inc) },
-    { title: "未税成本", dataIndex: "cost_ex", width: 130, render: (_: unknown, r) => statText(r.cost_ex) },
+    { title: "含税成本", dataIndex: "cost_inc", sorter: true, width: 130, render: (_: unknown, r) => statText(r.cost_inc) },
+    { title: "未税成本", dataIndex: "cost_ex", sorter: true, width: 130, render: (_: unknown, r) => statText(r.cost_ex) },
     {
       title: "成本占比",
       dataIndex: "cost_share_pct",
+      sorter: true,
       width: 100,
       render: (v: number | null) => (v === null ? "—" : `${v}%`),
     },
-    { title: "坏件返还", dataIndex: "bad_return_qty", width: 100, render: raw },
+    { title: "坏件返还", dataIndex: "bad_return_qty", sorter: true, width: 100, render: raw },
     {
       title: "坏返率",
       dataIndex: "bad_return_rate_pct",
+      sorter: true,
       width: 90,
       render: (v: number | null) => (v === null ? "—" : <Tag color={v > 50 ? "red" : v > 20 ? "orange" : "default"}>{v}%</Tag>),
     },
-    { title: "缺价行", dataIndex: "missing_lines", width: 80 },
+    { title: "缺价行", dataIndex: "missing_lines", sorter: true, width: 80 },
   ];
 
   const summary = data?.summary;
@@ -233,6 +263,7 @@ export function MaintenanceAnalyticsPage() {
           loading={loading}
           dataSource={data?.rows ?? []}
           columns={columns}
+          onChange={onTableChange}
           scroll={{ x: 1500 }}
           pagination={{
             current: page,
