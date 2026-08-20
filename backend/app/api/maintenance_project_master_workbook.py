@@ -258,6 +258,70 @@ def download_project_master(
     return _xlsx(content, _workbook_filename(db, project_id, wanted))
 
 
+@router.get(_MASTER + "/collection-plan")
+def get_collection_plan(
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """回款计划（02）+ 到款状态：计划期次对比实收累计，供回款 tab 展示待回款。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+    from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+    from app.business_time import business_today
+
+    contracts = master.ec._contracts(db, project_id)
+    contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
+    milestones = list(db.scalars(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project_id,
+        MaintenanceCollectionMilestone.is_active.is_(True),
+    ).order_by(
+        MaintenanceCollectionMilestone.project_contract_id,
+        MaintenanceCollectionMilestone.sequence,
+    )))
+    # 每份合同最新 confirmed 快照的累计实收（待回款判定基准）
+    actual: dict[str, Decimal] = {}
+    for c in contracts:
+        snap = db.scalar(select(MaintenanceCollectionSnapshot).where(
+            MaintenanceCollectionSnapshot.project_contract_id == c.project_contract_id,
+            MaintenanceCollectionSnapshot.status == "confirmed",
+        ).order_by(MaintenanceCollectionSnapshot.report_month.desc()))
+        actual[c.project_contract_id] = (
+            snap.cumulative_amount if snap and snap.cumulative_amount is not None
+            else Decimal("0"))
+    today = business_today()
+    rows = []
+    cum_planned: dict[str, Decimal] = {}
+    for m in milestones:
+        cid = m.project_contract_id
+        cum_planned[cid] = cum_planned.get(cid, Decimal("0")) + (m.planned_amount or Decimal("0"))
+        cum_actual = actual.get(cid, Decimal("0"))
+        if cum_actual >= cum_planned[cid] and cum_planned[cid] > 0:
+            state = "paid"
+        elif cum_actual > (cum_planned[cid] - (m.planned_amount or Decimal("0"))):
+            state = "partial"
+        else:
+            state = "pending"
+        if state != "paid" and m.planned_date is not None and m.planned_date < today:
+            state = "overdue"
+        rows.append({
+            "milestone_id": m.milestone_id,
+            "contract_no": contract_by_id.get(cid, ""),
+            "sequence": m.sequence,
+            "planned_date": m.planned_date.isoformat() if m.planned_date else None,
+            "date_precision": m.date_precision,
+            "planned_amount": str(m.planned_amount) if m.planned_amount is not None else None,
+            "cumulative_planned": str(cum_planned[cid]),
+            "cumulative_actual": str(actual.get(cid, Decimal("0"))),
+            "arrival_state": state,
+            "follow_up_status": m.follow_up_status,
+            "note": m.follow_up_note,
+            "version": m.version,
+        })
+    return {"total": len(rows), "rows": rows}
+
+
 @router.get(_MASTER + "/rows")
 def list_master_rows(
     project_id: str = Path(..., min_length=1, max_length=36),

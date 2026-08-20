@@ -183,3 +183,26 @@ export function saveBlob(blob: Blob, filename: string) {
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 }
+
+/** 回款计划行（02）+ 到款状态（对比实收累计计算）。 */
+export interface CollectionPlanRow {
+  milestone_id: string;
+  contract_no: string;
+  sequence: number;
+  planned_date: string | null;
+  date_precision?: string | null;
+  planned_amount: string | null;
+  cumulative_planned: string;
+  cumulative_actual: string;
+  arrival_state: "paid" | "partial" | "pending" | "overdue" | string;
+  follow_up_status?: string | null;
+  note?: string | null;
+  version: number;
+}
+
+export const getCollectionPlan = async (projectId: string) => {
+  const resp = await api.get<{ total: number; rows: CollectionPlanRow[] }>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/collection-plan`,
+  );
+  return resp.data;
+};
