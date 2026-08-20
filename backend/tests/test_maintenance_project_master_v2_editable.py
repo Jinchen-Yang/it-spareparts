@@ -884,3 +884,73 @@ def test_v23_plan_rejects_with_helpful_error(db):
         master.validate_project_master_v2(
             db, project_id=project.project_id, data=buf.getvalue())
     assert "可用" in str(exc.value) and "XSDD-EDIT-001" in str(exc.value)
+
+
+def test_v23_plan_modify_without_operation_applies(db):
+    """02 改单元格（不填操作）→ 生效；改了日期/金额才下发。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    # 先 CREATE 一期
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    ws.append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+               None, None, None, None, None, None, None, None])
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(db, project_id=project.project_id, data=buf.getvalue())
+    master.apply_project_master_v2(db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+    # 重新下载，不填操作直接改金额 → 生效
+    content2 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb2 = load_workbook(io.BytesIO(content2))
+    ws2 = wb2[master.V2_SHEET_PLAN]
+    found = False
+    for r in ws2.iter_rows(min_row=2):
+        if r[12].value:  # 实体ID 列（1-based 13 → idx 12）
+            r[5].value = 30000  # 计划金额
+            found = True
+    assert found
+    buf2 = io.BytesIO(); wb2.save(buf2)
+    plan2 = master.validate_project_master_v2(db, project_id=project.project_id, data=buf2.getvalue())
+    assert plan2.summary["plan_updates"] == 1
+    master.apply_project_master_v2(db, plan2, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    ms = db.scalar(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project.project_id))
+    assert ms.planned_amount == Decimal("30000")
+
+    # 原样再传（什么都不改）→ 零变更
+    content3 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    plan3 = master.validate_project_master_v2(db, project_id=project.project_id, data=content3)
+    assert plan3.summary["plan_updates"] == 0 and plan3.summary["plan_creates"] == 0
+
+
+def test_v23_plan_delete_row_voids(db):
+    """02 删行=作废（对齐 03/04）。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_PLAN].append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+                                     None, None, None, None, None, None, None, None])
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(db, project_id=project.project_id, data=buf.getvalue())
+    master.apply_project_master_v2(db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+    content2 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb2 = load_workbook(io.BytesIO(content2))
+    ws2 = wb2[master.V2_SHEET_PLAN]
+    for r in range(ws2.max_row, 1, -1):
+        if ws2.cell(r, 13).value:  # 实体ID
+            ws2.delete_rows(r)
+    buf2 = io.BytesIO(); wb2.save(buf2)
+    plan2 = master.validate_project_master_v2(db, project_id=project.project_id, data=buf2.getvalue())
+    assert plan2.summary["plan_voids"] == 1
+    assert any(x["sheet"] == "02_回款计划" for x in plan2.will_void_rows)
+    master.apply_project_master_v2(db, plan2, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    ms = db.scalar(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project.project_id))
+    assert ms.is_active is False

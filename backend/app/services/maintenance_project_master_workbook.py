@@ -702,6 +702,7 @@ class MasterV2Plan:
     expense_updates: tuple[ec.ExpenseUpdate, ...] = ()
     receipt_ops: tuple[ec.CollectionOp, ...] = ()
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
+    will_void_rows: list[dict] = []
     # 04 报销作废（#264/#267 契约）：显式 VOID 操作列 + 缺行=作废。
     expense_voids: tuple[str, ...] = ()
     will_void_rows: tuple[dict, ...] = ()
@@ -1196,6 +1197,14 @@ def build_project_master_v2(
         ("exported_at", datetime.now(timezone.utc).isoformat()),
         ("included_sheets", ",".join(wanted)),
     ]
+    if V2_SHEET_PLAN in wanted:
+        from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+        plan_ids = db.scalars(select(MaintenanceCollectionMilestone.milestone_id).where(
+            MaintenanceCollectionMilestone.project_id == project_id,
+            MaintenanceCollectionMilestone.is_active.is_(True),
+        )).all()
+        meta_rows.append(("plan_row_ids", _encode_row_ids(plan_ids)))
     if V2_SHEET_PARTS in wanted:
         meta_rows.append(("parts_row_ids",
                           _encode_row_ids([ln.id for ln, _o, _p in lines])))
@@ -1679,10 +1688,13 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
         if _is_example_row(row):
             continue
         operation = str(row[index["操作"]] or "").strip().upper()
-        if not operation:
+        raw_entity = str(row[index["实体ID"]] or "").strip() or None
+        if not operation and not raw_entity:
             continue
-        if operation not in {"CREATE", "UPDATE", "VOID"}:
+        if operation and operation not in {"CREATE", "UPDATE", "VOID"}:
             raise WorkbookError("invalid_operation", f"第 {row_no} 行操作必须是 CREATE、UPDATE 或 VOID")
+        # 留空操作 + 已有实体行 = 与 03/04 同语义：改了才更新（diff 幂等），
+        # 原样回传零变更（2026-08-20 用户三连问：改/删都要同步）。
         contract_no = str(row[index["合同编号"]] or "").strip()
         contract = _resolve_plan_contract(db, project_id, contract_no, row_no)
         sequence = int(row[index["期次"]])
@@ -1691,14 +1703,49 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
         precision = str(row[index["日期精度"]] or "day").strip()
         if precision not in {"day", "month"}:
             raise WorkbookError("invalid_date_precision", f"第 {row_no} 行日期精度只能是 day/month")
-        amount = _v2_decimal(row[index["计划回款金额（含税）"]], row_no=row_no, label="计划回款金额", required=operation != "VOID")
+        amount = _v2_decimal(row[index["计划回款金额（含税）"]], row_no=row_no, label="计划回款金额", required=operation == "CREATE")
         planned_date = _v2_date(row[index["计划回款日期"]], row_no=row_no, label="计划回款")
-        if operation != "VOID" and planned_date is None and amount is None:
+        if operation not in ("VOID",) and not raw_entity and planned_date is None and amount is None:
             raise WorkbookError("incomplete_milestone", f"第 {row_no} 行计划日期和金额不能同时为空")
+        note = str(row[index["备注"]] or "").strip() if "备注" in index else None
+        if raw_entity:
+            milestone = db.get(MaintenanceCollectionMilestone, raw_entity)
+            if milestone is None or not milestone.is_active or milestone.project_id != project_id:
+                raise WorkbookError("milestone_not_found",
+                                    f"第 {row_no} 行回款计划已不存在或已作废，请重新下载")
+            if operation == "VOID":
+                out.append(V2MilestoneChange(
+                    operation="VOID", contract_no=contract_no, sequence=sequence,
+                    planned_date=planned_date, date_precision=precision, planned_amount=amount,
+                    entity_id=raw_entity,
+                    base_version=int(row[index["基础版本"]]) if row[index["基础版本"]] not in (None, "") else None))
+                continue
+            # 留空或 UPDATE：空单元格=保留现值；与现值 diff，未变化不下发
+            # （原样回传零变更；writer 对 None 会当清空，故传生效值）。
+            eff_date = planned_date if planned_date is not None else milestone.planned_date
+            eff_amount = amount if amount is not None else milestone.planned_amount
+            changed = (
+                eff_date != milestone.planned_date
+                or eff_amount != milestone.planned_amount
+                or precision != milestone.date_precision
+                or (note is not None and note != (milestone.follow_up_note or ""))
+            )
+            if not changed:
+                continue
+            out.append(V2MilestoneChange(
+                operation="UPDATE", contract_no=contract_no, sequence=sequence,
+                planned_date=eff_date, date_precision=precision,
+                planned_amount=eff_amount,
+                entity_id=raw_entity,
+                base_version=int(row[index["基础版本"]]) if row[index["基础版本"]] not in (None, "") else None,
+            ))
+            continue
+        if operation == "VOID":
+            raise WorkbookError("invalid_operation", f"第 {row_no} 行无实体ID不能 VOID")
         out.append(V2MilestoneChange(
-            operation=operation, contract_no=contract_no, sequence=sequence,
+            operation="CREATE", contract_no=contract_no, sequence=sequence,
             planned_date=planned_date, date_precision=precision, planned_amount=amount,
-            entity_id=str(row[index["实体ID"]] or "").strip() or None,
+            entity_id=None,
             base_version=int(row[index["基础版本"]]) if row[index["基础版本"]] not in (None, "") else None,
         ))
     return out
@@ -1944,6 +1991,7 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     expense_voids: list[str] = []
     receipt_ops: tuple[ec.CollectionOp, ...] = ()
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
+    will_void_rows: list[dict] = []
     uploaded_line_rows = 0
     uploaded_line_ids: set[int] = set()
     if V2_SHEET_PARTS in included:
@@ -1959,9 +2007,35 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         receipt_ops = tuple(_v2_parse_receipts(db, project_id, wb[V2_SHEET_RECEIPTS]))
     if V2_SHEET_PLAN in included:
         milestone_changes = tuple(_v2_parse_plan(db, project_id, wb[V2_SHEET_PLAN]))
+        # 02 缺行=作废（2026-08-20 用户三连问）：只命中导出时存在的里程碑
+        export_plan_ids = _decode_row_ids(meta.get("plan_row_ids"))
+        voided_plan_ids = {c.entity_id for c in milestone_changes if c.operation == "VOID"}
+        extra_voids = []
+        for mid in export_plan_ids:
+            if mid in voided_plan_ids:
+                continue
+            found = any(
+                c.entity_id == mid and c.operation != "CREATE"
+                for c in milestone_changes
+            )
+            if not found:
+                extra_voids.append(mid)
+        if extra_voids:
+            from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+            for mid in extra_voids:
+                ms = db.get(MaintenanceCollectionMilestone, mid)
+                contract_no = next(
+                    (c.contract_no for c in ec._contracts(db, project_id)
+                     if c.project_contract_id == ms.project_contract_id), "")
+                milestone_changes = milestone_changes + (V2MilestoneChange(
+                    operation="VOID", contract_no=contract_no, sequence=ms.sequence,
+                    planned_date=None, date_precision="day", planned_amount=None,
+                    entity_id=mid, base_version=None),)
+                will_void_rows.append({"sheet": "02_回款计划", "entity_id": mid,
+                                       "label": f"第{ms.sequence}期", "reason": "上传文件缺行"})
 
     # ---- 缺行=作废（04，#264 契约）+ 行数骤减防呆（03/04 共用一道） ----
-    will_void_rows: list[dict] = []
     for refill in cost_refills:
         if refill.operation == "VOID":
             will_void_rows.append({"sheet": "03_备件明细", "entity_id": str(refill.line_id),
