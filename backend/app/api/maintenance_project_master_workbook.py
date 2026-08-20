@@ -288,6 +288,10 @@ def list_master_rows(
                 "pn_std": line.pn_std or line.pn_raw or "",
                 "description": line.description or "",
                 "qty": str(line.qty) if line.qty is not None else None,
+                "return_qty": str(line.return_qty) if line.return_qty is not None else None,
+                "cost_amount_inc_tax": (
+                    str(line.cost_amount_inc_tax)
+                    if line.cost_amount_inc_tax is not None else None),
                 "warehouse": order.warehouse or "",
                 "cost_source": line.cost_source or "none",
                 "cost_source_label": line.cost_source or "无成本结果",

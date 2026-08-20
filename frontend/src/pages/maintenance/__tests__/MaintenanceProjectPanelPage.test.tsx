@@ -369,38 +369,30 @@ describe("项目面板", () => {
     });
   });
 
-  it("明细 PN 为主：PN+描述主列、单价两档、成本来源四分类配色（2026-08-20）", async () => {
-    getBoardOrderLines.mockResolvedValue({
-      data: { rows: [
-        { raw_line_id: "L1", pn_std: "PN-1", pn_raw: "PN-1",
-          pool: { in_pool: null, pool_name: null, pool_status: null },
+  it("明细 PN 为主：全量直出、PN+描述主列、单价两档、成本来源四分类配色（2026-08-20）", async () => {
+    listProjectPartsRows.mockResolvedValue({
+      total: 3,
+      sheet: "03_备件订单",
+      rows: [
+        { line_id: 1, pn_std: "PN-1", order_no: "WBDD-1",
           description: "系统关联行", qty: "3", return_qty: "0",
-          purchased_qty: "1", pending_supply_qty: "1", pending_return_qty: "1",
-          consumed_qty: null,
-          known_apply_cost_inc_tax: stat("100.00"),
-          unit_cost_ex_tax: stat("88.50"), unit_cost_inc_tax: stat("100.00"),
-          cost_source: stat("direct"), confidence: stat("high") },
-        { raw_line_id: "L2", pn_std: "PN-2", pn_raw: "PN-2",
-          pool: { in_pool: null, pool_name: null, pool_status: null },
+          unit_cost_ex_tax: "88.50", unit_cost_inc_tax: "100.00",
+          cost_amount_inc_tax: "300.00",
+          cost_source: "direct", confidence: "high" },
+        { line_id: 2, pn_std: "PN-2", order_no: "WBDD-2",
           description: "人工回填行", qty: "1", return_qty: "0",
-          purchased_qty: null, pending_supply_qty: null, pending_return_qty: null,
-          consumed_qty: null,
-          known_apply_cost_inc_tax: stat("56.50"),
-          unit_cost_ex_tax: stat("50.00"), unit_cost_inc_tax: stat("56.50"),
-          cost_source: stat("manual"), confidence: stat("none") },
-        { raw_line_id: "L3", pn_std: "PN-3", pn_raw: "PN-3",
-          pool: { in_pool: null, pool_name: null, pool_status: null },
+          unit_cost_ex_tax: "50.00", unit_cost_inc_tax: "56.50",
+          cost_amount_inc_tax: "56.50",
+          cost_source: "manual", confidence: "none" },
+        { line_id: 3, pn_std: "PN-3", order_no: "WBDD-3",
           description: "缺失行", qty: "2", return_qty: "0",
-          purchased_qty: null, pending_supply_qty: null, pending_return_qty: null,
-          consumed_qty: null,
-          known_apply_cost_inc_tax: stat(null),
-          unit_cost_ex_tax: stat(null), unit_cost_inc_tax: stat(null),
-          cost_source: stat("none"), confidence: stat("none") },
-      ], total: 3 },
+          unit_cost_ex_tax: null, unit_cost_inc_tax: null,
+          cost_amount_inc_tax: null,
+          cost_source: "none", confidence: "none" },
+      ],
     });
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
-    fireEvent.click(await screen.findByText("WBDD-1"));
     // 配色图例
     expect(await screen.findByText("系统关联")).toBeInTheDocument();
     expect(screen.getAllByText("人工回填").length).toBeGreaterThanOrEqual(1);

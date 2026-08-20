@@ -144,6 +144,7 @@ export interface ProjectPartsRow {
   warehouse: string | null;
   cost_source: string | null;
   cost_source_label?: string | null;
+  cost_amount_inc_tax?: string | null;
   confidence?: "high" | "medium" | "low" | "none" | null;
   unit_cost_ex_tax: number | string | null;
   unit_cost_inc_tax: number | string | null;
