@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Input,
   Row,
   Segmented,
@@ -179,20 +180,11 @@ export function MaintenanceAnalyticsPage() {
           <Segmented options={RANGE_OPTIONS} value={rangeKey}
             onChange={(v) => { setRangeKey(String(v)); setPage(1); }} />
           {rangeKey === "custom" ? (
-            <Input.Group compact>
-              {[0, 1].map((i) => (
-                <Input key={i} style={{ width: 130 }} placeholder={i === 0 ? "起 YYYY-MM-DD" : "止 YYYY-MM-DD"}
-                  onChange={(e) => {
-                    const v = dayjs(e.target.value);
-                    if (!v.isValid()) return;
-                    setCustomRange((prev) => {
-                      const next: [Dayjs | null, Dayjs | null] = [prev?.[0] ?? null, prev?.[1] ?? null];
-                      next[i] = v;
-                      return next;
-                    });
-                  }} />
-              ))}
-            </Input.Group>
+            <DatePicker.RangePicker
+              value={customRange as [Dayjs | null, Dayjs | null] | null}
+              onChange={(v) => setCustomRange(v as [Dayjs | null, Dayjs | null] | null)}
+              allowEmpty={[false, false]}
+            />
           ) : null}
           <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
             onChange={(v) => { setSort(v); setPage(1); }} />
