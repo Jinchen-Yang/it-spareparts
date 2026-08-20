@@ -202,7 +202,7 @@ export interface CollectionPlanRow {
 
 export const getCollectionPlan = async (projectId: string) => {
   const resp = await api.get<{ total: number; rows: CollectionPlanRow[] }>(
-    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/collection-plan`,
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/collection-plan`,
   );
   return resp.data;
 };
