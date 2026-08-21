@@ -43,6 +43,7 @@ from app.api import (
     maintenance_recovery,
     maintenance_warehouse,
     maintenance_expense_collection_workbook,
+    maintenance_analytics,
     maintenance_project_master_workbook,
     maintenance_wbdd_import,
     parts,
@@ -107,6 +108,7 @@ app.include_router(maintenance.router, prefix=settings.api_prefix)
 # 不挂 Beta 依赖——回滚=关 maintenance_boss_dashboard_enabled。
 app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
 app.include_router(maintenance_expense_collection_workbook.router, prefix=settings.api_prefix)
+app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
