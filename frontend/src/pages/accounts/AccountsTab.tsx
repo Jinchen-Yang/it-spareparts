@@ -14,7 +14,7 @@ import AccountDrawer from "./AccountDrawer";
 import BulkModal from "./BulkModal";
 
 const ROLE_LABEL: Record<string, string> = {
-  admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读",
+  admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读", maintenance_manager: "维保负责人",
 };
 const fmt = (s: string | null) => (s ? new Date(s).toLocaleString("zh-CN") : "—");
 

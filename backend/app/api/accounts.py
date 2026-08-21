@@ -37,7 +37,7 @@ from app.security import require_action, require_page
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
-_ROLES = ["admin", "boss", "sales", "purchaser", "readonly"]
+_ROLES = ["admin", "boss", "sales", "purchaser", "readonly", "maintenance_manager"]
 _page_gate = require_page("page_accounts")
 _write_gate = require_action("action_account_manage")
 

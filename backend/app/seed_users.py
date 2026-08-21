@@ -21,6 +21,13 @@ _SALES = [
 ]
 _SALES_DEFAULT_PW = "sales123"
 
+# 维保负责人示例（2026-08-21 客户反馈）：整套维保页面 + 行级收敛（负责人∪销售），
+# 成本金额默认不可见。salesperson_name 对齐需求单「销售人员」列——行级隔离靠它。
+_MAINTENANCE_MANAGERS = [
+    ("maint_wang", "王维保", "王维保"),
+]
+_MAINT_DEFAULT_PW = "maint123"
+
 
 def _upsert(db, username, role, display_name, salesperson_name, password):
     u = db.scalar(select(SysUser).where(SysUser.username == username))
@@ -40,6 +47,9 @@ def main() -> None:
         out.append(("boss", _upsert(db, "boss", "boss", "老板", None, s.admin_password)))
         for username, role, dn, sp in _SALES:
             out.append((username, _upsert(db, username, role, dn, sp, _SALES_DEFAULT_PW)))
+        for username, dn, sp in _MAINTENANCE_MANAGERS:
+            out.append((username, _upsert(
+                db, username, "maintenance_manager", dn, sp, _MAINT_DEFAULT_PW)))
         db.commit()
         for name, st in out:
             print(f"  {name}: {st}")

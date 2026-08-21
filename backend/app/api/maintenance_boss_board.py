@@ -51,13 +51,16 @@ def _allowed_scope(db: Session, ctx: UserContext) -> set[str] | None:
     M0-B 已于 2026-08-16 改判为**①全部可见**（签署清单 / 增补包 AB-1）：
     展示板的查看权限本身就是勾选名单制——能进这个页面的账号（`page_maintenance`
     或 `page_maintenance_boss`）即视为获授全部项目可见，与既有「老板＋被勾选项目
-    经理整套可见」口径一致（REQUIREMENTS #2/#14）。因此不再按 `resolve_visible_
-    project_ids` 逐项目收敛。
+    经理整套可见」口径一致（REQUIREMENTS #2/#14）。
 
-    保留本函数而非删掉调用点：改判是权限口径而非架构决定，若日后回到②仅本人项目，
-    只需在此恢复收敛，七个端点与 summary/下钻的调用方无需改动。
+    2026-08-21（客户反馈「销售只能看到自己的」）：在此恢复收敛，但只对开了
+    own_maintenance_projects_only 行键的账号生效——可见集 =
+    「我是维保负责人 ∪ 项目销售 = 我的销售名」（maintenance_scope_project_ids）。
+    没开键的账号维持 M0-B 全量口径，既有勾选名单行为零变化。
     """
-    return None
+    from app.services import maintenance_project_assignments
+
+    return maintenance_project_assignments.maintenance_scope_project_ids(db, ctx)
 
 
 class ProjectSearch(BaseModel):
@@ -105,7 +108,8 @@ def board_attention(
     ctx: UserContext = Depends(require_board_view),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return board.attention(db, user_ctx=ctx, limit=limit)
+    return board.attention(db, user_ctx=ctx, limit=limit,
+                           allowed_project_ids=_allowed_scope(db, ctx))
 
 
 @router.get("/projects")

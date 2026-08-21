@@ -13,6 +13,7 @@ const BASE_ROLES = [
   { value: "readonly", label: "只读" },
   { value: "sales", label: "销售" },
   { value: "purchaser", label: "采购" },
+  { value: "maintenance_manager", label: "维保负责人" },
   { value: "boss", label: "老板" },
 ];
 

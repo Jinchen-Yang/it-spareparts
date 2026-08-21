@@ -83,7 +83,14 @@ def pn_ranking(
     page: int = 1,
     page_size: int = 20,
     can_cost: bool,
+    allowed_project_ids: set[str] | None = None,
 ) -> dict:
+    """PN 排名聚合。
+
+    allowed_project_ids 非 None（行键 own_maintenance_projects_only 开）时，
+    行集与坏件佐证都收敛到该范围：未归属行（assignment 为 NULL）一并排除，
+    不得经排名/汇总泄露他人项目（含 total 口径）。
+    """
     start, end = resolve_window(range_, date_from, date_to)
     months = _window_months(start, end)
 
@@ -118,6 +125,11 @@ def pn_ranking(
         .group_by(FMaintenanceLine.part_id)
     )
     stmt = query_filters.active_orders(stmt, FMaintenanceOrder)
+    if allowed_project_ids is not None:
+        # outerjoin 上的 where 让未归属行（NULL）自然落选——范围账号看不到无主行
+        stmt = stmt.where(
+            MaintenanceSourceOrderAssignment.project_id.in_(
+                allowed_project_ids or {""}))
     if start is not None:
         stmt = stmt.where(FMaintenanceOrder.order_date >= start)
     if end is not None:
@@ -125,15 +137,16 @@ def pn_ranking(
     rows = db.execute(stmt).all()
 
     # ---- 坏件佐证：RKD 坏件返还按 part_id 聚合 ----
-    rkd = db.execute(
-        select(
-            MaintenanceRkdReturnLine.part_id,
-            func.upper(MaintenanceRkdReturnLine.pn),
-            func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")),
-        )
-        .group_by(MaintenanceRkdReturnLine.part_id,
-                  func.upper(MaintenanceRkdReturnLine.pn))
-    ).all()
+    rkd_stmt = select(
+        MaintenanceRkdReturnLine.part_id,
+        func.upper(MaintenanceRkdReturnLine.pn),
+        func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")),
+    ).group_by(MaintenanceRkdReturnLine.part_id,
+               func.upper(MaintenanceRkdReturnLine.pn))
+    if allowed_project_ids is not None:
+        rkd_stmt = rkd_stmt.where(
+            MaintenanceRkdReturnLine.project_id.in_(allowed_project_ids or {""}))
+    rkd = db.execute(rkd_stmt).all()
     bad_by_part = {p: q for p, _pn, q in rkd if p is not None}
     bad_by_pn = {pn.upper(): q for _p, pn, q in rkd}
 

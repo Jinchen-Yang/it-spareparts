@@ -36,7 +36,7 @@ from app.security import require_action
 router = APIRouter(prefix="/role-templates", tags=["role-templates"])
 
 _write_gate = require_action("action_account_manage")
-_BASE_ROLES = ["boss", "sales", "purchaser", "readonly"]
+_BASE_ROLES = ["boss", "sales", "purchaser", "readonly", "maintenance_manager"]
 _CODE_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 
 

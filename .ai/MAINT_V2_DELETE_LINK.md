@@ -83,3 +83,32 @@
 ## 七、工作纪律（用户 2026-08-21 指定）
 
 **每次修复必须端到端验证**：前端实际调用路径 → 后端路由真实命中（带鉴权的真实请求，不能用 401/单测 mock 代替）→ 数据库实际变更（psql 对账）。三段全通才算修完。教训案例：collection-plan 端点连续两次假修复（路径少段 404、Decimal 导入空转 500）都因只验证了片段。
+
+## 八、客户反馈六条实施记录（2026-08-21，分支 feat/maintenance-feedback-v124 @ 基线 577f7b4）
+
+微信客户（亚博威）六条反馈分四批落地，全部按第七节纪律做了真实登录（admin_t1@8000 + spareparts_dev@5433）+ psql 对账：
+
+### 批次一（展示修正）
+- 卡片显销售：`GET boss-board/projects` 返回 salesperson=李呈辉 ↔ psql 台账 salesperson 空 + 需求单销售众数 5 票李呈辉，兜底路径对账一致；未归属桶 salesperson=None。
+- 明细倒序：`master-workbook/rows?sheet=03_备件订单` 前三行 2026-08-19/08-18-0004/08-18-0009 ↔ psql 同 ORDER BY 完全一致。
+- 发货数文案（3,446 个）为前端渲染，留页面验收。
+
+### 批次二（维保负责人自动回填）
+- auto-assign 实跑：sales_filled 417 / manager_filled 414 / assignments_created 18 ↔ psql 417/419 项目有销售、20 活跃指派（18 新 + 2 旧）。
+- 采样：中国广电BOSS数据库项目 salesperson=刘青青、assignment→sales_t1（salesperson_name 匹配）三字段一致。
+- 幂等重跑全零、指派数不变。
+- 下拉数据源修复中发现并修正：assignments 路由整体挂 Beta 总闸，search 端点挪 stable_router（page_maintenance 门），维保负责人账号实测 200。
+
+### 批次三（验收清单导入）
+- 模板下载 200（真 xlsx、示例行防呆跳过）→ preview 4 行（2 完成 2 待验收）→ apply → psql 批次表 applied/4/0 + 行表逐行一致。
+- 替换语义：第二版 will_replace_rows=4 提示、replaced_batch_id 串链、history=2；问题行（"大概"）409 整批拒绝且当前清单未被污染；同 key 同文件幂等重放返回原批次。
+
+### 批次四（维保负责人角色 + 行级隔离）
+- 建号 maint_test_lch（role=maintenance_manager、salesperson_name=李呈辉）：template page_maintenance=T、行键=T、data 组全 F。
+- boss-board total=79 ↔ psql salesperson='李呈辉' 项目数 79；页面只见李呈辉项目、无未归属桶；admin 全量 419 不受影响。
+- PN 排名收敛（1492 PN）+ 成本位 restricted（无 data_purchase_cost）。
+- 越权：访问他人项目 403、自己项目 200、验收清单读 200。
+
+### 遗留
+- **WSL pytest 未跑**（wsl.cloudlay.cn:2222 持续 Connection Refused，机器 ssh 未起）：三个新测试文件（owner_backfill / acceptance_checklist / role_scope）+ 受影响回归只做了语法级验证 + 本地端到端；WSL 恢复后必须补跑。
+- mac Node≥22 的 localStorage 垫片使 `spyOn(Storage.prototype)` 落空（LoginPage 既有失败），已改 spy 实例；前端 631/631 绿。
