@@ -112,3 +112,11 @@
 ### 遗留
 - **WSL pytest 未跑**（wsl.cloudlay.cn:2222 持续 Connection Refused，机器 ssh 未起）：三个新测试文件（owner_backfill / acceptance_checklist / role_scope）+ 受影响回归只做了语法级验证 + 本地端到端；WSL 恢复后必须补跑。
 - mac Node≥22 的 localStorage 垫片使 `spyOn(Storage.prototype)` 落空（LoginPage 既有失败），已改 spy 实例；前端 631/631 绿。
+
+### 测试收口（2026-08-21 晚，cloudlay-ts = Tailscale 100.95.182.73）
+- WSL（wsl.cloudlay.cn:2222，3080 宿主）ssh 全程 Refused；改走 Tailscale cloudlay-ts（原自建 CI runner）：bundle 传输 + docker PG15@5435 + uv（清华镜像 TLS 瞬态，换 aliyun）。
+- **迁移链**：alembic upgrade head → alembic check 双过（ALEMBIC_OK）。
+- **全量首轮**：3637 过 / 21 失败（74:56）→ 12 个真问题全部归因修复（commit b4b8fab）：目录搜索迁 maintenance_manager_directory 稳定版模块（beta 模块看守不变量）、workspace collection_total 漏改的真 bug（rows=4/total=3 分页错位）、六处测试期望随行为更新（未来月份行集/迁移哨兵/权限接线清单/目录开放）。
+- **全量复跑**：3648 过 / 6 跳过 / 10 失败（77:04）——9 个 https_rollback 为已知环境类（纯基线同败、CI main 绿），1 个 run_isolation 为同集群连跑残留（单独复跑即过，CI 新库不命中）。
+- 前端：631/631 + tsc 绿（Mac 本机）。
+- GitHub：三分支已推，堆叠 PR #273（workbook-ux→main）→ #274（analytics）→ #275（feedback-v124）；CI 计费仍堵（job 未启动，Billing 报错），生产前绿章以 cloudlay-ts 全量为准。
