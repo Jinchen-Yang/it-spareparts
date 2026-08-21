@@ -18,6 +18,7 @@ from app.api import (
     inventory,
     maintenance,
     maintenance_acceptance,
+    maintenance_acceptance_checklist,
     maintenance_audit,
     maintenance_ai_fallback,
     maintenance_bad_returns,
@@ -121,10 +122,20 @@ app.include_router(
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
+# 验收清单导入挂在稳定版项目面板（page_maintenance），不受 Beta 总闸约束
+app.include_router(
+    maintenance_acceptance_checklist.router,
+    prefix=settings.api_prefix,
+)
 app.include_router(
     maintenance_project_assignments.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
+)
+# 负责人账号搜索（稳定版面板下拉数据源）不随 Beta 总闸——见该文件 stable_router 注释
+app.include_router(
+    maintenance_project_assignments.stable_router,
+    prefix=settings.api_prefix,
 )
 app.include_router(
     maintenance_demands.router,

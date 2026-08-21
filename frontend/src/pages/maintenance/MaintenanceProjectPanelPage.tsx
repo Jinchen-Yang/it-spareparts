@@ -34,10 +34,10 @@ import {
   updateMaintenanceProject,
 } from "../../api/maintenanceProjects";
 import type { MaintenanceProject } from "../../api/maintenanceProjects";
-import { listAccounts } from "../../api/accounts";
-import type { Account } from "../../api/accounts";
 import { getMaintenanceProjectWorkspace } from "../../api/maintenanceOperations";
 import type { MaintenanceCollectionSnapshotRow } from "../../api/maintenanceOperations";
+import { searchMaintenanceManagerAccounts } from "../../api/maintenanceOperations";
+import type { MaintenanceManagerAccount } from "../../api/maintenanceOperations";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 import OverviewTab from "./panel/OverviewTab";
@@ -45,6 +45,7 @@ import PartsOrdersTab from "./panel/PartsOrdersTab";
 import ExpenseTab from "./panel/ExpenseTab";
 import CollectionTab from "./panel/CollectionTab";
 import SiteReturnTab from "./panel/SiteReturnTab";
+import AcceptanceTab from "./panel/AcceptanceTab";
 import {
   LIFECYCLE_LABEL,
   STATUS_COLOR,
@@ -174,6 +175,7 @@ export function MaintenanceProjectPanelPage() {
   const perms = readPermissionMap();
   const canUpload = !!perms.action_maintenance_expense_collection_upload;
   const canManageProject = !!perms.action_maintenance_project_manage;
+  const canImportChecklist = !!perms.action_maintenance_acceptance_checklist_import;
 
   // 下载文件名 = XSDD销售订单号（取第一个） + 维保项目名 + 表单类型（2026-08-17）
   const exportBase = (() => {
@@ -339,6 +341,16 @@ export function MaintenanceProjectPanelPage() {
               <SiteReturnTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
             ),
           },
+          {
+            key: "acceptance",
+            label: "验收",
+            children: (
+              <AcceptanceTab
+                projectId={projectId}
+                canImport={canImportChecklist}
+              />
+            ),
+          },
         ]}
       />
     </Space>
@@ -358,7 +370,7 @@ function EditBasicsButton({
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
 
   const openModal = async () => {
     try {
@@ -377,10 +389,13 @@ function EditBasicsButton({
               ]
             : null,
       });
-      // 加载系统内账号供「维保负责人」下拉选择
+      // 加载系统内账号供「维保负责人」下拉选择。2026-08-21 改走负责人搜索
+      // 端点（page_maintenance 门）——原 /accounts 受 page_accounts 门，
+      // 无该权限的角色（如维保负责人）下拉会空白。
       try {
-        const accountsResp = await listAccounts();
-        setAccounts(accountsResp.data);
+        const accountsResp = await searchMaintenanceManagerAccounts(
+          { page: 1, page_size: 100 });
+        setAccounts(accountsResp.data.rows);
       } catch {
         setAccounts([]);
       }
