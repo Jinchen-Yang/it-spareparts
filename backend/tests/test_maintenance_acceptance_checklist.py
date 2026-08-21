@@ -90,9 +90,13 @@ def test_parse_rejects_missing_header(db):
 
 def _preview(db, project, data, *, key=None, by="tester"):
     parsed = svc.parse_checklist_workbook(data, "checklist.xlsx")
-    return svc.store_preview(db, parsed, project_id=project.project_id,
-                             uploaded_by=by,
-                             idempotency_key=key or f"key-{uuid.uuid4()}")
+    batch_id = svc.store_preview(db, parsed, project_id=project.project_id,
+                                 uploaded_by=by,
+                                 idempotency_key=key or f"key-{uuid.uuid4()}")
+    # replay 分支对幂等冲突会 db.rollback()（API 层已 commit 的生产路径语义）——
+    # 测试直连服务层必须先提交，否则回滚撤掉刚 flush 的批次
+    db.commit()
+    return batch_id
 
 
 def test_store_preview_idempotent_replay(db):

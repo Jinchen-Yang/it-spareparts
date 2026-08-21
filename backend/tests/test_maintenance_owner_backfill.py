@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.auth import hash_password
 from app.etl import loader
 from app import auth as auth_api
-from app.api import maintenance_project_assignments as assignments_api
+from app.api import maintenance_manager_directory as directory_api
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -96,11 +96,13 @@ def test_salesperson_mode_picks_majority_and_breaks_ties_stably(db):
     db.commit()
     assert sa.salesperson_modes_by_project(db, [project.project_id]) \
         == {project.project_id: "阿销售"}
-    # 1:1:1 三方并列时按名字稳定排序——同一数据两次刷新结果一致
-    orders[1].salesperson = "波销售"
+    # 1:1:1 三方并列时按名字码点稳定排序——同一数据两次刷新结果一致
+    # （"A销售" < "B销售" < "测试销售" 的 codepoint 序；中文姓按码点不按拼音）
+    orders[0].salesperson = "A销售"
+    orders[1].salesperson = "B销售"
     db.commit()
     assert sa.salesperson_modes_by_project(db, [project.project_id]) \
-        == {project.project_id: "阿销售"}
+        == {project.project_id: "A销售"}
 
 
 def test_auto_assign_backfills_salesperson_manager_and_assignment(db):
@@ -188,7 +190,7 @@ def test_manager_account_search_open_to_page_maintenance(db):
     db.commit()
     test_app = FastAPI()
     test_app.include_router(auth_api.router, prefix="/api")
-    test_app.include_router(assignments_api.router, prefix="/api")
+    test_app.include_router(directory_api.router, prefix="/api")
     client = TestClient(test_app)
 
     def login(username: str) -> TestClient:
