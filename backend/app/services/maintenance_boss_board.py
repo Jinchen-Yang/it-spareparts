@@ -19,7 +19,11 @@ from sqlalchemy.orm import Session
 
 from app.business_time import business_today
 from app.etl import mapping
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceManualCostOverride,
+)
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.security import UserContext
@@ -135,6 +139,10 @@ def _cost_bundle(db: Session, *, window: tuple[date, date],
             .select_from(FMaintenanceLine)
             .join(FMaintenanceOrder,
                   FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .outerjoin(
+                MaintenanceManualCostOverride,
+                MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+            )
             .where(FMaintenanceOrder.order_date >= start,
                    FMaintenanceOrder.order_date <= end,
                    FMaintenanceLine.is_active.is_(True)))
@@ -145,12 +153,26 @@ def _cost_bundle(db: Session, *, window: tuple[date, date],
 
 
 def _cost_columns():
-    """成本五件套的聚合列（复用于全局/逐项目分组查询，口径单一）。"""
+    """成本五件套的聚合列（复用于全局/逐项目分组查询，口径单一）。
+
+    2026-08-19：合并人工成本覆盖——主表 cost_source='none' 但存在
+    maintenance_manual_cost_override 的行，按 override 含税金额×数量计入
+    actual 成本（ACTUAL_SOURCES 含 'manual'）；否则人工回填只影响 03 面板，
+    看板成本率会漏算。调用方须 outerjoin override（line_id 唯一，不翻倍）。
+    """
     return (
         func.coalesce(func.sum(case(
             (FMaintenanceLine.cost_source.in_(
                 tuple(maintenance_cost_quality.ACTUAL_SOURCES)),
-             FMaintenanceLine.cost_amount_inc_tax), else_=0)), 0),
+             FMaintenanceLine.cost_amount_inc_tax),
+            # 人工回填：主表无成本 + override 存在 → 按 override 含税金额×数量计入 actual
+            (and_(
+                FMaintenanceLine.cost_source.is_(None),
+                MaintenanceManualCostOverride.line_id.is_not(None),
+             ),
+             MaintenanceManualCostOverride.unit_cost_inc_tax
+             * FMaintenanceLine.qty),
+            else_=0)), 0),
         func.coalesce(func.sum(case(
             (FMaintenanceLine.cost_source.in_(
                 tuple(maintenance_cost_quality.ESTIMATED_SOURCES)),
@@ -203,6 +225,10 @@ def _cost_bundles_by_project(db: Session, *, window: tuple[date, date],
         select(MaintenanceSourceOrderAssignment.project_id, *_cost_columns())
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+        )
         .join(MaintenanceSourceOrderAssignment, active)
         .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
                FMaintenanceOrder.order_date >= start,
@@ -232,6 +258,10 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
         return {oid: (restricted(), line_counts.get(oid, 0)) for oid in order_ids}
     rows = db.execute(
         select(FMaintenanceLine.order_id, *_cost_columns())
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+        )
         .where(FMaintenanceLine.order_id.in_(order_ids),
                FMaintenanceLine.is_active.is_(True))
         .group_by(FMaintenanceLine.order_id)

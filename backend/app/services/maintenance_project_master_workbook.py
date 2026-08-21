@@ -641,7 +641,7 @@ def apply(db: Session, plan: MasterPlan, *, operated_by: str,
           import_batch_id: str) -> dict:
     """整份事务应用；上传即覆盖。"""
     for refill in plan.cost_refills:
-        # 备注与成本独立——只改备注不写覆盖表（27c95fa 行为保留）
+        # 备注与成本独立——只改备注/原因不写覆盖表
         if refill.unit_cost_ex_tax is not None or refill.reason is not None:
             _merge_manual_cost_to_line(db, refill, operated_by=operated_by)
         if refill.note is not None:
@@ -889,7 +889,27 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
         total_contract = card["amount_inc_tax"]
     contract_shared = bool(card and card.get("contract_shared"))
     contract_incomplete = bool(card and card.get("contract_incomplete"))
-    cost = sum((line.cost_amount_inc_tax or Decimal(0)) for line, _order, _pid in lines)
+    # 2026-08-19：备件成本合并人工覆盖——主表无成本但有 override 的行按
+    # override 含税金额×数量计入（与看板/面板口径一致）
+    line_ids = [line.id for line, _order, _pid in lines]
+    override_map = {
+        item.line_id: item for item in db.scalars(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id.in_(line_ids)
+            )
+        )
+    } if line_ids else {}
+
+    def _line_cost(line) -> Decimal:
+        base = line.cost_amount_inc_tax
+        if base is not None:
+            return base
+        ov = override_map.get(line.id)
+        if ov is not None and ov.unit_cost_inc_tax is not None:
+            return ov.unit_cost_inc_tax * (line.qty or Decimal(0))
+        return Decimal(0)
+
+    cost = sum(_line_cost(line) for line, _order, _pid in lines)
     values = [
         ("项目编号", project.project_code), ("项目名称", project.display_name),
         ("生命周期", project.lifecycle_status), ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
@@ -904,7 +924,10 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
         ("合同额口径", "XSDD 销售回退（台账未导入）" if (contract_shared or contract_incomplete) or (total_contract and not contracts) else "台账合同"),
         ("备件成本（含税）", str(cost) if cost else "—"),
         ("成本率", f"{(cost / total_contract * 100).quantize(Decimal('0.1'))}%" if total_contract else "—"),
-        ("缺成本行数", sum(line.cost_amount_inc_tax is None for line, _order, _pid in lines)),
+        ("缺成本行数", sum(
+            line.cost_amount_inc_tax is None and line.id not in override_map
+            for line, _order, _pid in lines
+        )),
     ]
     for item in values:
         ws.append(list(item))

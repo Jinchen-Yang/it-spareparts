@@ -359,15 +359,23 @@ def list_master_rows(
                     str(line.cost_amount_inc_tax)
                     if line.cost_amount_inc_tax is not None else None),
                 "warehouse": order.warehouse or "",
-                "cost_source": line.cost_source or "none",
-                # 中文标签（复用渲染器的统一映射），不再吐英文代码
-                "cost_source_label": maintenance_workbook_renderer.SOURCE_LABELS.get(
-                    line.cost_source, "成本缺失"),
+                # 2026-08-19：面板展示须合并人工成本覆盖——主表 unit_cost_ex_tax 为 NULL
+                # 时，人工回填（override 表）应显示为成本并标记来源 manual；
+                # 其余来源沿用渲染器统一中文映射
+                "cost_source": (
+                    "manual"
+                    if (line.unit_cost_ex_tax is None and line.id in overrides)
+                    else (line.cost_source or "none")),
+                "cost_source_label": (
+                    "人工回填"
+                    if (line.unit_cost_ex_tax is None and line.id in overrides)
+                    else maintenance_workbook_renderer.SOURCE_LABELS.get(
+                        line.cost_source, "成本缺失")),
                 "confidence": line.confidence or "none",
-                "unit_cost_ex_tax": str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None,
-                "unit_cost_inc_tax": str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None,
-                "missing_kind": "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None else ("none" if line.unit_cost_ex_tax is None else None),
-                "can_refill": line.unit_cost_ex_tax is None,
+                "unit_cost_ex_tax": str(overrides[line.id].unit_cost_ex_tax) if (line.unit_cost_ex_tax is None and line.id in overrides) else (str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None),
+                "unit_cost_inc_tax": str(overrides[line.id].unit_cost_inc_tax) if (line.unit_cost_ex_tax is None and line.id in overrides) else (str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None),
+                "missing_kind": "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None and line.id not in overrides else ("none" if line.unit_cost_ex_tax is None and line.id not in overrides else None),
+                "can_refill": line.unit_cost_ex_tax is None and line.id not in overrides,
                 "manual_unit_cost_ex_tax": str(overrides[line.id].unit_cost_ex_tax) if line.id in overrides else None,
                 "manual_reason": overrides[line.id].reason if line.id in overrides else None,
             } for line, order, _pid in rows],

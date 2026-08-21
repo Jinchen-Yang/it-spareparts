@@ -11,7 +11,8 @@ jobs:
     # 2026-08-19：自建 runner（cloudlay-ts）到 github.com 的网络频繁被重置导致
     # checkout 失败，切换 GitHub 托管 runner（用户拍板）。uv 用官方安装器钉版本。
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 2026-08-22：免费 runner 性能波动大（同套件 30~75+ 分钟），90 分钟会掐慢机
+    timeout-minutes: 150
     services:
       postgres:
         image: postgres:15
@@ -54,7 +55,7 @@ jobs:
         run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
         if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
-        timeout-minutes: 75
+        timeout-minutes: 140
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
