@@ -75,6 +75,9 @@ ACTION_KEYS: list[str] = [
     # 验收报告提交与审批严格分权；审批在业务角色未定前默认仅 admin。
     "action_maintenance_acceptance_submit",
     "action_maintenance_acceptance_review",
+    # 验收需求清单 Excel 导入（2026-08-21 客户反馈）：apply 整表替换当前清单，
+    # 旧批次留档。清单无成本/价格数据，不挂数据组依赖。
+    "action_maintenance_acceptance_checklist_import",
     # 仓库单据落库与关联歧义人工裁决（实名、高风险、默认仅管理员）。
     "action_maintenance_warehouse_manage",
     # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
@@ -98,7 +101,12 @@ ACTION_KEYS: list[str] = [
     "action_replenishment_create",
     "action_replenishment_review",
 ]
-ROW_KEYS: list[str] = ["own_customers_only"]
+ROW_KEYS: list[str] = [
+    "own_customers_only",
+    # 2026-08-21 客户反馈「销售只能看到自己的」：维保项目行级收敛
+    # （负责人 ∪ 项目销售并集；boss板/分析/需求单/目录全链路生效）
+    "own_maintenance_projects_only",
+]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
 _VALID = set(ALL_KEYS)
 
@@ -124,6 +132,7 @@ LABELS: dict[str, str] = {
     "action_pool_manage": "互通PN池维护（建池/成员/归档）",
     "action_pool_set_policy": "池约束价设置（采购上限/销售下限）",
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
+    "own_maintenance_projects_only": "只看自己负责/销售的维保项目",
     "page_accounts": "账号与权限中心（查看）",
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
@@ -135,6 +144,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_bad_return_manage": "维保坏件返还管理",
     "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传",
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
+    "action_maintenance_acceptance_checklist_import": "验收需求清单 Excel 导入",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
     "action_maintenance_ledger_import": "台账工作簿导入应用（项目/合同/回款计划同步）",
@@ -162,6 +172,22 @@ def _full(own: bool = False) -> dict[str, bool]:
     for key in ACCOUNT_SCOPED_ACTION_KEYS:
         d[key] = False
     d["own_customers_only"] = own
+    # 维保行级收敛键不进全开图：admin/boss 恒全范围（is_scoped_maintenance 双保险）
+    d["own_maintenance_projects_only"] = False
+    return d
+
+
+def _maintenance_manager() -> dict[str, bool]:
+    """维保负责人（2026-08-21 客户反馈）：整套维保页面 + 行级收敛，无成本数据组。
+
+    权限矩阵拍板：page_maintenance=True（主页/面板/分析共用键，零额外开发）；
+    data_* 全 false（成本默认不可见——客户原话「这个权限还有点高」）；
+    own_maintenance_projects_only=True（负责人∪销售并集收敛）；
+    其余页面/动作全关，管理员可在权限中心按账号微调。
+    """
+    d = {k: False for k in ALL_KEYS}
+    d["page_maintenance"] = True
+    d["own_maintenance_projects_only"] = True
     return d
 
 
@@ -190,6 +216,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_bad_return_manage": False,
              "action_maintenance_acceptance_submit": False,
              "action_maintenance_acceptance_review": False,
+             "action_maintenance_acceptance_checklist_import": False,
              "action_maintenance_warehouse_manage": False,
              "action_maintenance_migration_review": False,
              "action_maintenance_ledger_import": False,
@@ -218,6 +245,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_bad_return_manage": False,
                  "action_maintenance_acceptance_submit": False,
                  "action_maintenance_acceptance_review": False,
+                 "action_maintenance_acceptance_checklist_import": False,
                  "action_maintenance_warehouse_manage": False,
                  "action_maintenance_migration_review": False,
              "action_maintenance_ledger_import": False,
@@ -257,6 +285,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_bad_return_manage": False,
         "action_maintenance_acceptance_submit": False,
         "action_maintenance_acceptance_review": False,
+        "action_maintenance_acceptance_checklist_import": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
              "action_maintenance_ledger_import": False,
@@ -270,6 +299,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_replenishment_create": False,
         "action_replenishment_review": False,
         "own_customers_only": True,
+        "own_maintenance_projects_only": False,
     },
     "purchaser": {
         "data_supplier": True, "data_customer": False,
@@ -299,6 +329,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_bad_return_manage": False,
         "action_maintenance_acceptance_submit": False,
         "action_maintenance_acceptance_review": False,
+        "action_maintenance_acceptance_checklist_import": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
              "action_maintenance_ledger_import": False,
@@ -311,8 +342,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
+        "own_maintenance_projects_only": False,
         "own_customers_only": False,
     },
+    "maintenance_manager": _maintenance_manager(),
 }
 _DEFAULT = ROLE_TEMPLATES["readonly"]
 
@@ -383,6 +416,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_bad_return_manage": "page_maintenance",
     "action_maintenance_acceptance_submit": "page_maintenance",
     "action_maintenance_acceptance_review": "page_maintenance",
+    "action_maintenance_acceptance_checklist_import": "page_maintenance",
     "action_maintenance_warehouse_manage": "page_maintenance",
     "action_maintenance_migration_review": "page_maintenance",
     "action_maintenance_ledger_import": "page_maintenance",
@@ -511,6 +545,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_site_issue_manage",
     "action_maintenance_bad_return_manage",
     "action_maintenance_acceptance_review",
+    "action_maintenance_acceptance_checklist_import",
     "action_maintenance_warehouse_manage",
     "action_maintenance_migration_review",
     "action_maintenance_collection_follow_up",
@@ -560,6 +595,7 @@ UI_GROUPS: list[dict] = [
                "action_maintenance_ledger_import",
                "action_maintenance_doc_import",
                "action_maintenance_wbdd_import",
+               "action_maintenance_acceptance_checklist_import",
                "action_maintenance_expense_collection_upload"]},
 ]
 
@@ -877,6 +913,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "审批结果是正式业务结论；业务审批角色尚未配置，默认仅 admin 可用。",
     },
+    "action_maintenance_acceptance_checklist_import": {
+        "label": "验收需求清单 Excel 导入",
+        "summary": "允许在项目面板上传「验收需求 / 是否完成」两列的 Excel 清单，预览确认后整表替换该项目的验收需求清单。",
+        "can": "下载标准模板、上传 .xlsx（幂等键防重放）、预览解析结果（条数/已完成数/问题行）；应用后清单立即生效并保留历史版本。",
+        "cannot": "不能改验收交付附件与审批流（另由验收提交/审批两键分权）；清单不含成本与价格数据；不能替他人应用批次。",
+        "typical": ["管理员", "项目验收协调人员（需单独授权）"],
+        "sensitivity": "medium",
+        "risk": "整表替换当前清单（有确认弹窗与历史留档）；行级校验失败整批拒绝，不落半份数据。",
+    },
     "action_maintenance_warehouse_manage": {
         "label": "仓库单据导入与歧义裁决",
         "summary": "允许把仓库导出单据固化为只读事实，并实名处理无法自动关联的歧义。",
@@ -958,6 +1003,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["销售"],
         "sensitivity": "low",
         "risk": "对销售角色建议保持勾选；取消后该账号能看到全部客户成交归属。",
+    },
+    "own_maintenance_projects_only": {
+        "label": "只看自己负责/销售的维保项目",
+        "summary": "开启后，维保主页项目卡墙、项目面板、数据分析看板与需求单列表都只显示「我是维保负责人」或「项目销售是我」的项目。",
+        "can": "看到自己的项目卡片、面板详情、PN 排名与汇总（按自己的项目口径重算）。",
+        "cannot": "看不到同事的项目与全局合计；未归属单据桶也不再显示（无主数据不属于任何人）。",
+        "typical": ["销售", "维保负责人角色"],
+        "sensitivity": "low",
+        "risk": "限制型开关（勾上=看得更少）；不勾时维持「能进页面即全量可见」的既有名单制口径。",
     },
 }
 

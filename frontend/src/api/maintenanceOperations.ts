@@ -1225,6 +1225,77 @@ export const downloadMaintenanceAcceptanceAttachment = (fileId: string) =>
     responseType: "blob",
   });
 
+// ---- 验收需求清单（2026-08-21 客户反馈：验收需求/是否完成 两列 Excel 导入） ----
+
+export interface MaintenanceAcceptanceChecklistItem {
+  item_id: string;
+  row_no: number;
+  requirement: string;
+  done: boolean | null;
+}
+
+export interface MaintenanceAcceptanceChecklistCurrent {
+  batch_id: string;
+  filename: string;
+  uploaded_by: string;
+  applied_by: string;
+  applied_at: string | null;
+  item_rows: number;
+  done_rows: number;
+  todo_rows: number;
+  items: MaintenanceAcceptanceChecklistItem[];
+}
+
+export interface MaintenanceAcceptanceChecklist {
+  current: MaintenanceAcceptanceChecklistCurrent | null;
+  history: {
+    batch_id: string;
+    filename: string;
+    applied_by: string;
+    applied_at: string | null;
+    item_rows: number;
+  }[];
+}
+
+export interface MaintenanceAcceptanceChecklistPreview {
+  batch_id: string;
+  file_hash: string;
+  item_rows: number;
+  issue_rows: number;
+  done_rows: number;
+  todo_rows: number;
+  issues: string[];
+  will_replace_rows: number;
+}
+
+export const getMaintenanceAcceptanceChecklist = (projectId: string) =>
+  api.get<MaintenanceAcceptanceChecklist>(
+    `${projectBase(projectId)}/acceptance/checklist`);
+
+export const downloadAcceptanceChecklistTemplate = (projectId: string) =>
+  api.get<Blob>(
+    `${projectBase(projectId)}/acceptance/checklist/template`,
+    { responseType: "blob" },
+  );
+
+export const previewMaintenanceAcceptanceChecklist = (
+  projectId: string,
+  input: { file: File; idempotencyKey: string },
+) => {
+  const form = new FormData();
+  form.append("file", input.file);
+  return api.post<MaintenanceAcceptanceChecklistPreview>(
+    `${projectBase(projectId)}/acceptance/checklist/preview`,
+    form,
+    { headers: { "Idempotency-Key": input.idempotencyKey }, timeout: 120000 },
+  );
+};
+
+export const applyMaintenanceAcceptanceChecklist = (batchId: string) =>
+  api.post<{ batch_id: string; item_rows: number; done_rows: number;
+             todo_rows: number; replaced_batch_id: string | null }>(
+    `/maintenance/acceptance-checklist/${encodeURIComponent(batchId)}/apply`);
+
 export const listMaintenanceCostGaps = (
   projectId: string,
   params: { page?: number; page_size?: number } = {},

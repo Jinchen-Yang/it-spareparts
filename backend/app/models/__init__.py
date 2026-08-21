@@ -94,6 +94,10 @@ from app.models.maintenance_doc_import import (
     MaintenanceRkdReturnLine,
 )
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+from app.models.maintenance_acceptance_checklist import (
+    MaintenanceAcceptanceChecklistBatch,
+    MaintenanceAcceptanceChecklistItem,
+)
 from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
 from app.models.maintenance_collection_evidence import (
     MaintenanceCollectionEvidence,
