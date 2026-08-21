@@ -17,6 +17,7 @@ interface LocalMaintenancePermissions {
   action_maintenance_migration_review?: boolean;
   action_maintenance_collection_follow_up?: boolean;
   action_maintenance_collection_plan_import?: boolean;
+  action_maintenance_acceptance_checklist_import?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -41,6 +42,7 @@ export interface MaintenanceCapabilities {
   canViewCollectionReminders: boolean;
   canFollowUpCollection: boolean;
   canImportCollectionPlan: boolean;
+  canImportAcceptanceChecklist: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -197,6 +199,10 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && role === "admin"
       && permissions.action_maintenance_collection_plan_import === true
       && canViewContract,
+    // 验收清单导入挂在稳定版面板（非 Beta），常规 admin 短路适用
+    canImportAcceptanceChecklist: isAdmin || (
+      permissions.action_maintenance_acceptance_checklist_import === true
+    ),
   };
 }
 

@@ -30,7 +30,7 @@ class SysUser(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256))   # pbkdf2$iter$salt$hash
-    role: Mapped[str] = mapped_column(String(16))             # admin/boss/sales/purchaser/readonly
+    role: Mapped[str] = mapped_column(String(32))             # admin/boss/sales/purchaser/readonly/maintenance_manager
     display_name: Mapped[str | None] = mapped_column(String(64))
     salesperson_name: Mapped[str | None] = mapped_column(String(64))  # 对齐销售数据，行级过滤用
     ding_user_id: Mapped[str | None] = mapped_column(String(64), unique=True)
@@ -74,7 +74,7 @@ class SysRoleTemplate(Base):
     description: Mapped[str | None] = mapped_column(Text)
     # 套用该模板的账号获得的基础角色 ∈ boss/sales/purchaser/readonly（内置 admin 模板=admin）。
     # role 挂着行级语义/文件 ACL/replace require_roles 等硬编码点，跟模板走避免"勾了权限仍 403"
-    base_role: Mapped[str] = mapped_column(String(16))
+    base_role: Mapped[str] = mapped_column(String(32))
     permissions: Mapped[dict] = mapped_column(JSONB)   # 完整键→bool 图（保存时 normalize 补全）
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
@@ -238,7 +238,7 @@ class SysAccessLog(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64))
-    role: Mapped[str | None] = mapped_column(String(16))
+    role: Mapped[str | None] = mapped_column(String(32))
     action: Mapped[str] = mapped_column(String(32))        # search/overview/.../login_success/login_failed…
     resource: Mapped[str | None] = mapped_column(Text)     # 查的型号/客户/维度
     detail: Mapped[dict | None] = mapped_column(JSONB)

@@ -122,6 +122,11 @@ def can_access_project(
 ) -> bool:
     if user_ctx.role in FULL_SCOPE_ROLES:
         return True
+    # 2026-08-21 行键收敛：own_maintenance_projects_only 开 → 负责人∪销售并集判定
+    from app.security import is_scoped_maintenance
+
+    if is_scoped_maintenance(user_ctx):
+        return project_id in (maintenance_scope_project_ids(db, user_ctx) or set())
     return bool(
         db.scalar(
             select(MaintenanceProjectUserAssignment.assignment_id)
@@ -136,6 +141,32 @@ def can_access_project(
             )
         )
     )
+
+
+def maintenance_scope_project_ids(
+    db: Session, user_ctx: UserContext
+) -> set[str] | None:
+    """行键 own_maintenance_projects_only 的可见项目集（None = 全范围）。
+
+    并集规则（2026-08-21 客户反馈拍板）：
+    「我是项目维保负责人（primary_manager 挂靠本人账号）」∪
+    「项目销售 = 我的销售名（台账 salesperson 事实源）」。
+    两条件皆无匹配 → 空集，**绝不误放全量**。
+    """
+    from app.security import is_scoped_maintenance
+
+    if not is_scoped_maintenance(user_ctx):
+        return None
+    ids: set[str] = set(db.scalars(owned_project_ids(user_ctx)).all())
+    if user_ctx.salesperson_name:
+        ids.update(
+            db.scalars(
+                select(MaintenanceProject.project_id).where(
+                    MaintenanceProject.salesperson == user_ctx.salesperson_name
+                )
+            ).all()
+        )
+    return ids
 
 
 def search_active_users(

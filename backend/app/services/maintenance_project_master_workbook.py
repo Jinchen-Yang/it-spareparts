@@ -269,6 +269,8 @@ def _assigned_lines(db: Session, *, project_id: str | None,
 
     2026-08-19（#267 读侧修复 1）：墓碑整单作废与行级软作废都在此过滤——
     项目总表 03、02 概览、主页全局行级表三处共用本入口。
+    2026-08-21（客户反馈）：order_date 倒序——最新日期排前面；行键/行级哈希
+    与行序解耦，Excel 回传不受行序影响。
     """
     from app.services import maintenance_demands
 
@@ -282,7 +284,7 @@ def _assigned_lines(db: Session, *, project_id: str | None,
               & MaintenanceSourceOrderAssignment.is_active.is_(True))
         .where(FMaintenanceLine.is_active.is_(True),
                maintenance_demands.active_demand_condition())
-        .order_by(FMaintenanceOrder.order_date, FMaintenanceOrder.order_no,
+        .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
                   FMaintenanceLine.line_no)
     )
     if project_id is not None:

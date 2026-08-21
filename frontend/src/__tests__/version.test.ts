@@ -1,14 +1,37 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.23.0 release notes", () => {
-  it("publishes the two-page maintenance redesign", () => {
-    expect(APP_VERSION).toBe("1.23.0");
+describe("v1.24.0 release notes", () => {
+  it("publishes the customer-feedback display fixes (2026-08-21)", () => {
+    expect(APP_VERSION).toBe("1.24.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-08-17");
+    expect(LATEST.date).toBe("2026-08-21");
 
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/项目卡改显「销售」/);
+    expect(notes).toMatch(/不再显示项目经理/);
+    expect(notes).toMatch(/维保备件发货数/);
+    expect(notes).toMatch(/3,446 个/);
+    expect(notes).toMatch(/日期倒序/);
+  });
+
+  it("keeps prior releases archived in the changelog", () => {
+    const versions = CHANGELOG.map((entry) => entry.version);
+    expect(versions).toContain("1.23.0");
+    expect(versions).toContain("1.21.0");
+    // 数组按新→旧排列
+    expect(versions[0]).toBe("1.24.0");
+  });
+});
+
+describe("v1.23.0 release notes (archived)", () => {
+  const v123 = CHANGELOG.find((entry) => entry.version === "1.23.0")!;
+
+  it("publishes the two-page maintenance redesign", () => {
+    expect(v123.date).toBe("2026-08-17");
+
+    const notes = v123.items.join("\n");
     expect(notes).toMatch(/22 个页面收敛为 2 个/);
     expect(notes).toMatch(/维保主页（项目卡墙）/);
     expect(notes).toMatch(/项目面板/);
@@ -17,7 +40,7 @@ describe("v1.23.0 release notes", () => {
   });
 
   it("documents the card wall with the three-color cost ratio bar", () => {
-    const notes = LATEST.items.join("\n");
+    const notes = v123.items.join("\n");
     expect(notes).toMatch(/一行五卡/);
     expect(notes).toMatch(/成本÷合同额/);
     expect(notes).toMatch(/80% 绿色.*80–100% 黄色.*100% 红色/);
@@ -26,7 +49,7 @@ describe("v1.23.0 release notes", () => {
   });
 
   it("documents period and contract amount derived from existing data (#51)", () => {
-    const notes = LATEST.items.join("\n");
+    const notes = v123.items.join("\n");
     expect(notes).toMatch(/无需先导入台账/);
     expect(notes).toMatch(/维保起止日期/);
     expect(notes).toMatch(/销售订单自动汇总/);
@@ -37,7 +60,7 @@ describe("v1.23.0 release notes", () => {
   });
 
   it("documents the panel tabs, assignment and period editing (#39)", () => {
-    const notes = LATEST.items.join("\n");
+    const notes = v123.items.join("\n");
     expect(notes).toMatch(/项目基础信息 \/ 备件成本 \/ 报销 \/ 回款/);
     expect(notes).toMatch(/归属挂靠.*XSDD 销售订单预筛/);
     expect(notes).toMatch(/维保负责人与维保期限/);
@@ -45,19 +68,11 @@ describe("v1.23.0 release notes", () => {
   });
 
   it("documents the three download/upload spots and honest empty states", () => {
-    const notes = LATEST.items.join("\n");
+    const notes = v123.items.join("\n");
     expect(notes).toMatch(/在哪下载就在哪上传/);
     expect(notes).toMatch(/全项目备件行级表/);
     expect(notes).toMatch(/六 sheet/);
     expect(notes).toMatch(/尚未导入/);
     expect(notes).toMatch(/绝不显示 0/);
-  });
-
-  it("keeps prior releases archived in the changelog", () => {
-    const versions = CHANGELOG.map((entry) => entry.version);
-    expect(versions).toContain("1.21.0");
-    expect(versions).toContain("1.20.0");
-    // 数组按新→旧排列
-    expect(versions[0]).toBe("1.23.0");
   });
 });

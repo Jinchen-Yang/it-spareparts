@@ -243,7 +243,8 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
             ("get", "/api/maintenance/collection-plan-imports/not-real/source-file", None),
             ("post", "/api/maintenance/acceptance-deliverables/search", {}),
             ("post", "/api/maintenance/migration-runs/search", {}),
-            ("post", "/api/maintenance/project-manager-assignments/search", {}),
+            # 负责人目录搜索已迁 maintenance_manager_directory（稳定版面板下拉，
+            # page_maintenance 门）——不随 Beta 总闸，2026-08-21 客户反馈。
         )
         for method, path, body in calls:
             response = (

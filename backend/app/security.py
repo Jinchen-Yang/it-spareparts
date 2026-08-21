@@ -52,6 +52,22 @@ def is_scoped_sales(user_ctx: UserContext | None) -> bool:
     return user_ctx.role == "sales"
 
 
+def is_scoped_maintenance(user_ctx: UserContext | None) -> bool:
+    """维保项目行级收敛（2026-08-21 客户反馈「销售只能看到自己的」）。
+
+    own_maintenance_projects_only 行键开的账号收敛到
+    「我是项目维保负责人 ∪ 项目销售 = 我的销售名」；FULL_SCOPE 角色（admin/boss）
+    恒不收敛。新键无旧 token 回退——旧 token 缺键即不收敛，与 M0-B 口径一致。
+    """
+    if not (config.ENABLE_RBAC and user_ctx):
+        return False
+    if user_ctx.role in FULL_SCOPE_ROLES:
+        return False
+    if user_ctx.permissions is not None:
+        return bool(user_ctx.permissions.get("own_maintenance_projects_only"))
+    return False
+
+
 def get_current_user_context(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
     db: Session = Depends(get_db),

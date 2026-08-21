@@ -56,7 +56,21 @@ def project_directory(
         user_ctx,
         None,
     ) == "me":
-        filters.append(maintenance_project_assignments.owned_project_condition(user_ctx))
+        # 2026-08-21 行键收敛：own_maintenance_projects_only 开 → 负责人∪销售并集；
+        # 未开键维持 #205 挂靠负责人口径
+        from app.security import is_scoped_maintenance
+
+        if is_scoped_maintenance(user_ctx):
+            from app.services.maintenance_project_assignments import (
+                maintenance_scope_project_ids,
+            )
+
+            allowed = maintenance_scope_project_ids(db, user_ctx) or set()
+            filters.append(MaintenanceProject.project_id.in_(allowed or {""}))
+        else:
+            filters.append(
+                maintenance_project_assignments.owned_project_condition(user_ctx)
+            )
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
     if q_text and (search := q_text.strip()):

@@ -10,8 +10,13 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.maintenance import FMaintenanceOrder
-from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAuditLog,
+    MaintenanceProjectUserAssignment,
+)
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.business_time import business_today
 from app.services import maintenance_project_assignments, project_names
@@ -584,6 +589,176 @@ def unassign_source_orders(
     return [assignment_dict(row) for row in archived]
 
 
+AUTO_OWNER_BACKFILL_REASON = "导入销售订单自动回填：销售人员列众数"
+
+
+def salesperson_modes_by_project(
+    db: Session, project_ids: list[str]
+) -> dict[str, str]:
+    """每项目活单 XSDD 销售众数（2026-08-21 客户反馈；并列按名字稳定排序）。
+
+    卡片「销售」与维保负责人自动回填的共用口径：活单条件下按
+    (project, salesperson) 分组计数取众数，一次查询覆盖整批项目。
+    """
+    if not project_ids:
+        return {}
+    from app.services import maintenance_demands
+
+    rows = db.execute(
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            FMaintenanceOrder.salesperson,
+            func.count(),
+        )
+        .select_from(FMaintenanceOrder)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            FMaintenanceOrder.salesperson.isnot(None),
+            FMaintenanceOrder.salesperson != "",
+            maintenance_demands.active_demand_condition(),
+        )
+        .group_by(
+            MaintenanceSourceOrderAssignment.project_id,
+            FMaintenanceOrder.salesperson,
+        )
+    ).all()
+    counts: dict[str, list[tuple[str, int]]] = {}
+    for pid, person, n in rows:
+        counts.setdefault(pid, []).append((person, int(n)))
+    return {
+        pid: sorted(v, key=lambda it: (-it[1], it[0]))[0][0]
+        for pid, v in counts.items()
+    }
+
+
+def _backfill_project_owner(
+    db: Session,
+    *,
+    project: MaintenanceProject,
+    salesperson: str,
+    operated_by: str,
+    reason: str = AUTO_OWNER_BACKFILL_REASON,
+) -> dict:
+    """维保负责人/销售自动回填——**只补空，绝不覆盖人工编辑**（幂等）。
+
+    - `project.salesperson`（台账商务线事实源）为空时补销售众数；
+    - `project.project_manager_id`（维保负责人原文）为空时同值回填；
+    - 文本与销售一致且尚无活跃 primary_manager 时，按
+      `sys_user.salesperson_name` 匹配活跃账号自动建账号级指派
+      （锁/审计走 assign_primary_manager 既有链路）。
+    """
+    stats = {"sales_filled": False, "manager_filled": False, "assignment_created": False}
+    salesperson = salesperson.strip()
+    if not salesperson:
+        return stats
+    before = {
+        "salesperson": project.salesperson,
+        "project_manager_id": project.project_manager_id,
+    }
+    if not (project.salesperson or "").strip():
+        project.salesperson = salesperson[:64]
+        stats["sales_filled"] = True
+    manager_text = (project.project_manager_id or "").strip()
+    if not manager_text:
+        project.project_manager_id = salesperson[:64]
+        manager_text = salesperson[:64]
+        stats["manager_filled"] = True
+    if stats["sales_filled"] or stats["manager_filled"]:
+        db.flush()
+        db.add(
+            MaintenanceProjectAuditLog(
+                project_id=project.project_id,
+                entity_type="project",
+                entity_id=project.project_id,
+                action="update",
+                before_json=before,
+                after_json={
+                    "salesperson": project.salesperson,
+                    "project_manager_id": project.project_manager_id,
+                },
+                reason=reason,
+                operated_by=operated_by,
+            )
+        )
+        db.flush()
+    # 账号级指派：仅当负责人文本就是销售（含刚回填）且当前无人负责
+    if manager_text != (salesperson[:64]):
+        return stats
+    current = db.scalar(
+        select(MaintenanceProjectUserAssignment.assignment_id).where(
+            MaintenanceProjectUserAssignment.project_id == project.project_id,
+            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+    )
+    if current is not None:
+        return stats
+    user = db.scalar(
+        select(SysUser)
+        .where(
+            SysUser.salesperson_name == salesperson,
+            SysUser.is_active.is_(True),
+        )
+        .order_by(SysUser.id)
+    )
+    if user is None:
+        return stats
+    maintenance_project_assignments.assign_primary_manager(
+        db,
+        project_id=project.project_id,
+        user_id=user.id,
+        expected_assignment_id=None,
+        expected_assignment_version=None,
+        reason=reason,
+        operated_by=operated_by,
+    )
+    stats["assignment_created"] = True
+    return stats
+
+
+def backfill_owner_fields(db: Session, *, operated_by: str) -> dict:
+    """存量项目销售/维保负责人补齐（幂等：只填空，不动人工编辑）。
+
+    auto-assign 运维按钮顺带执行：销售或负责人原文为空的项目按活单销售
+    众数回填；台账事实源已给值的项目不动（salesperson 以台账为准）。
+    """
+    stats = {"sales_filled_projects": 0, "manager_filled_projects": 0,
+             "assignments_created": 0}
+    projects = list(
+        db.scalars(
+            select(MaintenanceProject).where(
+                MaintenanceProject.is_active.is_(True),
+                or_(
+                    func.coalesce(MaintenanceProject.salesperson, "") == "",
+                    func.coalesce(MaintenanceProject.project_manager_id, "") == "",
+                ),
+            )
+        )
+    )
+    if not projects:
+        return stats
+    modes = salesperson_modes_by_project(db, [p.project_id for p in projects])
+    for project in projects:
+        salesperson = modes.get(project.project_id)
+        if not salesperson:
+            continue
+        one = _backfill_project_owner(
+            db, project=project, salesperson=salesperson, operated_by=operated_by)
+        stats["sales_filled_projects"] += int(one["sales_filled"])
+        stats["manager_filled_projects"] += int(one["manager_filled"])
+        stats["assignments_created"] += int(one["assignment_created"])
+    db.flush()
+    return stats
+
+
 def auto_assign_unassigned(
     db: Session,
     *,
@@ -597,6 +772,9 @@ def auto_assign_unassigned(
     - 匹配不到任何项目 → 自动创建项目主档（项目名取自 project_std，
       期限从名称解析，编号 AUTO- 递增，lifecycle 由期限计算）再挂靠；
     - 多个项目同名（歧义）或单据无项目名 → 跳过留人工。
+
+    2026-08-21（客户反馈）：收尾顺带对存量/新建项目做销售与维保负责人
+    自动回填（`backfill_owner_fields`，只补空不动人工编辑）。
     返回本次执行统计。
     """
     _require_full_scope(user_ctx)
@@ -620,8 +798,12 @@ def auto_assign_unassigned(
         db.scalars(active_beta_maintenance_orders(unassigned_stmt, FMaintenanceOrder))
     )
     if not unassigned:
-        return {"assigned_orders": 0, "matched_projects": 0,
-                "created_projects": 0, "skipped_groups": 0, "skipped_ambiguous": 0}
+        result = {"assigned_orders": 0, "matched_projects": 0,
+                  "created_projects": 0, "skipped_groups": 0, "skipped_ambiguous": 0}
+        # 没有未归属单也要做存量回填——按钮本身就是运维入口
+        result.update(backfill_owner_fields(db, operated_by=operated_by))
+        db.flush()
+        return result
 
     # 2. 按归一化项目名（project_std 去预交付前缀）分组
     grouped: dict[str, list[FMaintenanceOrder]] = {}
@@ -699,6 +881,9 @@ def auto_assign_unassigned(
             assigned_orders += 1
             matched_projects.add(project.project_id)
     db.flush()
+    # 2026-08-21 客户反馈：存量与新建项目的销售/维保负责人自动回填（只补空，
+    # 不覆盖台账与人工编辑；新建项目在此刻已落库，可与存量一并处理）
+    owner = backfill_owner_fields(db, operated_by=operated_by)
     # 同步仓配候选投影（与 assign_source_orders 一致）
     if assigned_orders:
         from app.services import maintenance_warehouse
@@ -715,6 +900,7 @@ def auto_assign_unassigned(
         "created_projects": created_projects,
         "skipped_groups": skipped_groups,
         "skipped_ambiguous": skipped_ambiguous,
+        **owner,
     }
 
 

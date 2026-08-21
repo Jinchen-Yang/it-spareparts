@@ -52,10 +52,14 @@ def pn_ranking(
     record_access_log(ctx, "maintenance_analytics_pn_ranking", "pn_ranking",
                       {"q": bool(q and q.strip()), "sort": sort, "range": range_,
                        "scope": "full"})
+    # 2026-08-21 行键收敛：own_maintenance_projects_only 开 → 负责人∪销售范围
+    from app.services import maintenance_project_assignments
+
+    allowed = maintenance_project_assignments.maintenance_scope_project_ids(db, ctx)
     try:
         return maintenance_analytics.pn_ranking(
             db, range_=range_, date_from=date_from, date_to=date_to,
             q=q, sort=sort, page=page, page_size=page_size,
-            can_cost=can_cost)
+            can_cost=can_cost, allowed_project_ids=allowed)
     except maintenance_analytics.AnalyticsValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

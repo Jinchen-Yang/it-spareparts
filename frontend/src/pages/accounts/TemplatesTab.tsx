@@ -8,7 +8,7 @@ import TemplateDrawer, { type TemplateDraft } from "./TemplateDrawer";
 import SyncModal from "./SyncModal";
 
 const ROLE_LABEL: Record<string, string> = {
-  admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读",
+  admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读", maintenance_manager: "维保负责人",
 };
 
 export default function TemplatesTab({ meta, onChanged }: {

@@ -47,9 +47,16 @@ def resolve_visible_project_ids(
 
     Callers that need to filter a listing by project must treat None as
     "no filter" and an empty set as "no visible rows".
+
+    2026-08-21：own_maintenance_projects_only 行键开的账号返回
+    「维保负责人 ∪ 项目销售」并集（maintenance_scope_project_ids），
+    未开键的账号维持 #205 挂靠负责人口径。
     """
     if ctx.role in FULL_SCOPE_ROLES:
         return None
+    scoped = assignments.maintenance_scope_project_ids(db, ctx)
+    if scoped is not None:
+        return scoped
     return set(
         db.scalars(assignments.owned_project_ids(ctx)).all()
     )
