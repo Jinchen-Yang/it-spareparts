@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from app.auth import hash_password
 from app.etl import loader
-from app.api import auth as auth_api
+from app import auth as auth_api
 from app.api import maintenance_project_assignments as assignments_api
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
