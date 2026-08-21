@@ -7,6 +7,7 @@ import type {
   Stat,
 } from "../../api/maintenanceBossBoard";
 import { UNASSIGNED_BUCKET } from "../../api/maintenanceBossBoard";
+import { qty } from "../../utils/format";
 
 const { Text, Title } = Typography;
 
@@ -39,6 +40,24 @@ function statText(stat: Stat<string | number> | undefined, unit = ""): string {
 
 function money(stat: Stat<string | number> | undefined): string {
   return statText(stat, " 元");
+}
+
+/** 数量位（2026-08-21 客户反馈）：千分位 + 「个」，不展示后端 Decimal 的 ".000"。 */
+function statQty(stat: Stat<string | number> | undefined): string {
+  if (!stat) return "—";
+  switch (stat.state) {
+    case "ready":
+    case "partial":
+    case "stale":
+      if (stat.value === null || stat.value === "") return "—";
+      return `${qty(Number(stat.value))} 个`;
+    case "not_imported":
+      return "尚未导入";
+    case "restricted":
+      return "无权限";
+    default:
+      return "暂不可用";
+  }
 }
 
 /** 成本五件套：ready 时取指定字段，其余状态照六态语义说话（不落回 0）。 */
@@ -98,7 +117,8 @@ export function ProjectCard({ row }: ProjectCardProps) {
           {row.contract_nos.length ? row.contract_nos.join("、") : "无合同号"}
         </Text>
         <Space size={12} wrap style={{ fontSize: 12 }}>
-          <Text>项目经理：{row.project_manager || "—"}</Text>
+          {/* 2026-08-21 客户反馈：卡片显示销售名称，不再显示项目经理 */}
+          <Text>销售：{row.salesperson || "—"}</Text>
           <Text>
             合同总额：{money(row.contract_amount_inc_tax)}
             {/* #51 诚实标注：XSDD 回退层的共用单/缺单，金额仅参考 */}
@@ -118,7 +138,8 @@ export function ProjectCard({ row }: ProjectCardProps) {
             {" / "}未税 {money(row.known_apply_cost_ex_tax)}
           </div>
           <div>缺失成本：{missingLines(row.known_apply_cost_inc_tax)}</div>
-          <div>维保备件采购数：{statText(row.procured_qty)}</div>
+          {/* 2026-08-21 客户反馈：公式本就是「库房发货＋直采直发」，改叫发货数并按个数展示 */}
+          <div>维保备件发货数：{statQty(row.procured_qty)}</div>
           <div>回款预览：{money(row.collection_preview_inc_tax)}</div>
         </div>
 

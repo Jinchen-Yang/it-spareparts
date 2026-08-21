@@ -71,6 +71,7 @@ const projectRow = {
   project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
   lifecycle: "ongoing", is_archived: false,
   contract_nos: ["XSDD-1", "XSDD-2"], project_manager: "李经理",
+  salesperson: "王销售",
   contract_amount_inc_tax: stat("1000.00"),
   known_apply_cost_ex_tax: stat("500.00"), procured_qty: stat("1.000"),
   collection_preview_inc_tax: stat("100.00"), cost_ratio_pct: stat("50.0"),

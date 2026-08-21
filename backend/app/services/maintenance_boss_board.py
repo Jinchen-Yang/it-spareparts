@@ -39,6 +39,9 @@ AGGREGATE_SOURCE_COLUMNS: frozenset[str] = frozenset({
     # f_maintenance_order
     "raw_order_id", "order_no", "order_date", "project_std", "project_raw",
     "data_status",
+    # salesperson（2026-08-21 客户反馈）：卡片「销售」与负责人回填的身份列，
+    # 仅用于分组取众数（非数值聚合，也非流转状态列），与 project_std 同类。
+    "salesperson",
     # f_maintenance_line：数量事实
     "qty", "return_qty",
     # f_maintenance_line：成本回填列（recompute 独占写）
@@ -472,15 +475,22 @@ def _pending_return_item(project, demand: dict, facts: dict | None,
     }
 
 
-def attention(db: Session, *, user_ctx: UserContext, limit: int = 10) -> dict:
+def attention(db: Session, *, user_ctx: UserContext, limit: int = 10,
+              allowed_project_ids: set[str] | None = None) -> dict:
     """需关注队列 ≤10 条（M0-A 已拍板：只有 ①超预算 与 ③待返件多）。
 
     无成本权限的账号看不到 ①——预算条目本身就是金额派生物，「它在不在队列里」
     已经泄露成本排名，所以整条略去而不是包 restricted 信封（无侧信道）。
+    allowed_project_ids 非 None（行键 own_maintenance_projects_only 开）时，
+    队列收敛到该范围，不得经「关注事项」泄露他人项目。
     """
     can_cost = can_view_cost(user_ctx)
+    project_filters = [MaintenanceProject.is_active.is_(True)]
+    if allowed_project_ids is not None:
+        project_filters.append(
+            MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
     projects = db.execute(
-        select(MaintenanceProject).where(MaintenanceProject.is_active.is_(True))
+        select(MaintenanceProject).where(*project_filters)
     ).scalars().all()
     if not projects:
         return {"items": [], "registered_kinds": list(ATTENTION_KINDS),
@@ -741,6 +751,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     manager_names = _manager_display_names(
         db, [p.project_manager_id for p in rows])
     cost_ex = _card_cost_ex_tax(db, window, project_ids)
+    # 卡片「销售」（2026-08-21 客户反馈）：台账 salesperson 优先，XSDD 众数兜底
+    sales_modes = _card_salesperson_modes(db, project_ids)
 
     out_rows = []
     for proj in rows:
@@ -768,7 +780,9 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                            collected=collections.get(proj.project_id),
                            cost_ex=cost_ex.get(proj.project_id),
                            bundle=cost_bundles.get(proj.project_id),
-                           manager_display=manager_names.get(proj.project_manager_id or "")),
+                           manager_display=manager_names.get(proj.project_manager_id or ""),
+                           salesperson=(proj.salesperson
+                                        or sales_modes.get(proj.project_id))),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
         })
 
@@ -1037,6 +1051,20 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+def _card_salesperson_modes(db: Session,
+                            project_ids: list[str]) -> dict[str, str]:
+    """每项目 XSDD 需求单销售众数（2026-08-21 客户反馈：卡片显示销售）。
+
+    台账 salesperson 缺省时的兜底口径，与总表导出 `_project_order_salesperson`
+    一致；查询实现在 maintenance_source_assignments.salesperson_modes_by_project
+    （与维保负责人自动回填共用同一口径），此处只做转发。
+    """
+    from app.services import maintenance_source_assignments
+
+    return maintenance_source_assignments.salesperson_modes_by_project(
+        db, project_ids)
+
+
 def _card_procured_qty(db: Session, window: tuple[date, date],
                        project_ids: list[str]) -> dict[str, Decimal]:
     """维保备件采购数 = 库房发货 + 直采直发（REQUIREMENTS #41 业务指定公式）。
@@ -1134,7 +1162,8 @@ def _manager_display_names(db: Session, usernames: list[str | None]) -> dict[str
 def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
                  contracts: dict | None, procured, collected, cost_ex,
                  bundle: dict | None,
-                 manager_display: str | None = None) -> dict:
+                 manager_display: str | None = None,
+                 salesperson: str | None = None) -> dict:
     """项目卡的补充字段（REQUIREMENTS #34/#35）。
 
     金额三件（合同额/成本未税/回款预览）挂 `data_purchase_cost`：无权限一律
@@ -1157,6 +1186,9 @@ def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
         # project_manager_id 解析出的账号显示名（无账号回退原值）。
         "project_manager": manager_display or (
             getattr(project, "project_manager_id", None) if project is not None else None),
+        # 2026-08-21 客户反馈：卡片改显销售（台账 salesperson 优先，XSDD 众数兜底）；
+        # project_manager 字段保留给老消费方兼容，前端不再展示。
+        "salesperson": salesperson,
         "contract_amount_inc_tax": money(contract_amount),
         # #51 诚实标注：XSDD 回退层的共用单/缺单提示（台账层恒 false）
         "contract_shared": bool((contracts or {}).get("contract_shared")),

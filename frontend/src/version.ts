@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.23.0";
+export const APP_VERSION = "1.24.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.24.0",
+    date: "2026-08-21",
+    items: [
+      "项目卡改显「销售」（取台账销售人员，缺省时按需求单销售众数回补），不再显示项目经理",
+      "「维保备件采购数」更名为「维保备件发货数」并按个数展示（如 3,446 个，不再显示 3446.000）",
+      "备件成本明细（项目面板与导出 Excel）按日期倒序排列，最新单据排在最前",
+    ],
+  },
   {
     version: "1.23.0",
     date: "2026-08-17",

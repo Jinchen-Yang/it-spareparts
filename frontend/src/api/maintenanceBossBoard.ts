@@ -101,6 +101,8 @@ export interface BoardProjectRow {
   /** XSDD 销售订单号＝归属判定依据（#45）；多合同项目返回多个。 */
   contract_nos: string[];
   project_manager: string | null;
+  /** 销售（2026-08-21 客户反馈）：台账 salesperson 优先，XSDD 需求单众数兜底。 */
+  salesperson: string | null;
   contract_amount_inc_tax: Stat<string | number>;
   /** #51 诚实标注：合同额来自 XSDD 回退层时，共用单（金额跨项目重复）/缺单（被低估）。 */
   contract_shared: boolean;

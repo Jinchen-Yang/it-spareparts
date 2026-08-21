@@ -7,7 +7,9 @@ afterEach(() => {
 });
 
 it("登录会话最后发布 token，使其它标签页只看到完整权限快照", () => {
-  const setItem = vi.spyOn(Storage.prototype, "setItem");
+  // spy 实例而不是 Storage.prototype：test/setup 在 Node≥22 会装带自有方法的
+  // 内存 localStorage 垫片，prototype 上的 spy 抓不到调用。
+  const setItem = vi.spyOn(localStorage, "setItem");
 
   persistLoginSession({
     token: "signed-token",

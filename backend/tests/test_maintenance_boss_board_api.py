@@ -323,6 +323,25 @@ def test_card_carries_contract_manager_and_amount(db, tmp_path):
     assert row["contract_amount_inc_tax"]["value"] == "100000.00"
 
 
+def test_card_carries_salesperson_ledger_first_mode_fallback(db, tmp_path):
+    """2026-08-21 客户反馈：卡片显示销售——台账 salesperson 优先，XSDD 众数兜底。"""
+    from app.models.maintenance_project import MaintenanceProject
+
+    # 路径一：台账没给 salesperson → 回落需求单销售众数（夹具「销售人员」=合成销售）
+    proj = make_project(db, code="合成项目B")
+    orders = import_wbdd(db, tmp_path, project="合成项目B", orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    row = _card(db, boss_client(db, username="card-sales-fallback"), proj.project_id)
+    assert row["salesperson"] == "合成销售"
+
+    # 路径二：台账给了 salesperson → 台账事实源优先，不被动静
+    record = db.get(MaintenanceProject, proj.project_id)
+    record.salesperson = "台账销售"
+    db.commit()
+    row = _card(db, boss_client(db, username="card-sales-ledger"), proj.project_id)
+    assert row["salesperson"] == "台账销售"
+
+
 def test_card_status_is_green_yellow_red_by_cost_ratio(db, tmp_path):
     """#35：<80% 绿 / 80–100% 黄 / >100% 红。"""
     from app.services import maintenance_boss_board as b
