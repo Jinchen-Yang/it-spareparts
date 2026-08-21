@@ -111,7 +111,8 @@ export function OverviewTab({
         <Descriptions.Item label="合同号(XSDD)">
           {row?.contract_nos.length ? row.contract_nos.join("、") : "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="项目经理">
+        <Descriptions.Item label="项目经理（负责人）">
+          {/* boss 聚合行给显示人名；缺失回退账号；编辑保存后 loadProject 刷新 */}
           {row?.project_manager ?? project?.project_manager_id ?? "—"}
         </Descriptions.Item>
         <Descriptions.Item label="合同总额">

@@ -195,6 +195,8 @@ export interface BoardLineRow {
   return_old_part: string | null;
   serial_numbers: string | null;
   known_apply_cost_inc_tax: Stat<string | number>;
+  unit_cost_ex_tax: Stat<string | number>;
+  unit_cost_inc_tax: Stat<string | number>;
   cost_source: Stat<string>;
   confidence: Stat<string>;
 }

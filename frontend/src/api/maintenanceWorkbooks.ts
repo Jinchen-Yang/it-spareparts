@@ -38,10 +38,19 @@ export interface WorkbookApplyResult {
   site_return_flags: number;
   expense_updates: number;
   expense_creates?: number;
+  expense_voids?: number;
   site_creates?: number;
   site_updates?: number;
   cost_overrides?: number;
+  line_creates?: number;
+  line_updates?: number;
+  qty_updates?: number;
+  line_voids?: number;
+  plan_creates?: number;
+  plan_updates?: number;
+  plan_voids?: number;
   collection_creates: number;
+  collection_updates?: number;
   collection_voids: number;
 }
 
@@ -144,6 +153,7 @@ export interface ProjectPartsRow {
   warehouse: string | null;
   cost_source: string | null;
   cost_source_label?: string | null;
+  cost_amount_inc_tax?: string | null;
   confidence?: "high" | "medium" | "low" | "none" | null;
   unit_cost_ex_tax: number | string | null;
   unit_cost_inc_tax: number | string | null;
@@ -173,3 +183,26 @@ export function saveBlob(blob: Blob, filename: string) {
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 }
+
+/** 回款计划行（02）+ 到款状态（对比实收累计计算）。 */
+export interface CollectionPlanRow {
+  milestone_id: string;
+  contract_no: string;
+  sequence: number;
+  planned_date: string | null;
+  date_precision?: string | null;
+  planned_amount: string | null;
+  cumulative_planned: string;
+  cumulative_actual: string;
+  arrival_state: "paid" | "partial" | "pending" | "overdue" | string;
+  follow_up_status?: string | null;
+  note?: string | null;
+  version: number;
+}
+
+export const getCollectionPlan = async (projectId: string) => {
+  const resp = await api.get<{ total: number; rows: CollectionPlanRow[] }>(
+    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/collection-plan`,
+  );
+  return resp.data;
+};

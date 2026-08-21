@@ -288,45 +288,60 @@ export function MaintenanceDemandsPage() {
             ) : null}
           </Space>
 
-          {missing?.truncated ? (
+          {missing?.suspicious ? (
             <Alert
-              type="warning"
+              type="error"
               showIcon
-              message="消失的单太多，这里只显示前 1000 条；处理完这批后请重新拉取差异清单。"
+              message="疑似不完整的导出——消失占比异常，已禁用批量作废"
+              description={`本次快照判定消失 ${missing.missing_count} 张，而同期库内活跃单共 ${missing.db_active_in_window ?? "?"} 张（占比 ${Math.round((missing.missing_ratio ?? 0) * 100)}%）。这通常说明氚云导出时带了筛选条件或被行数截断，而非真的删除。请清空筛选、确认导出范围后再重新上传；仍要单独作废某张单，请在下方需求单列表里逐张操作。`}
             />
           ) : null}
 
-          <Table<WbddMissingOrder>
-            rowKey="source_order_id"
-            size="small"
-            loading={missingLoading}
-            dataSource={missing?.missing_orders ?? []}
-            columns={missingColumns}
-            pagination={false}
-            locale={{ emptyText: "最近一份快照没有消失的单" }}
-            rowSelection={
-              canVoid
-                ? {
-                    selectedRowKeys,
-                    onChange: (keys) => setSelectedRowKeys(keys as string[]),
-                  }
-                : undefined
-            }
-          />
+          {/* 疑似不完整导出（局部/筛选同步）时整张清单收起：删除走总表删行=作废
+              与需求单列表逐张作废，差异清单只在真全量同步（占比健康）时展开。 */}
+          {missing?.suspicious ? null : (
+            <>
+              {missing?.truncated ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="消失的单太多，这里只显示前 1000 条；处理完这批后请重新拉取差异清单。"
+                />
+              ) : null}
 
-          {canVoid ? (
-            <div>
-              <Button
-                type="primary"
-                danger
-                disabled={!selectedRowKeys.length}
-                onClick={() => openVoidModal(selectedRowKeys)}
-              >
-                按氚云现状批量作废
-                {selectedRowKeys.length ? `（已选 ${selectedRowKeys.length} 张）` : ""}
-              </Button>
-            </div>
-          ) : null}
+              <Table<WbddMissingOrder>
+                rowKey="source_order_id"
+                size="small"
+                loading={missingLoading}
+                dataSource={missing?.missing_orders ?? []}
+                columns={missingColumns}
+                pagination={false}
+                locale={{ emptyText: "最近一份快照没有消失的单" }}
+                rowSelection={
+                  canVoid
+                    ? {
+                        selectedRowKeys,
+                        onChange: (keys) => setSelectedRowKeys(keys as string[]),
+                      }
+                    : undefined
+                }
+              />
+
+              {canVoid ? (
+                <div>
+                  <Button
+                    type="primary"
+                    danger
+                    disabled={!selectedRowKeys.length || (missing?.suspicious ?? false)}
+                    onClick={() => openVoidModal(selectedRowKeys)}
+                  >
+                    按氚云现状批量作废
+                    {selectedRowKeys.length ? `（已选 ${selectedRowKeys.length} 张）` : ""}
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          )}
         </Space>
       </Card>
 

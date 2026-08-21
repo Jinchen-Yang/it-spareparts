@@ -117,7 +117,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.1.0"
+    assert meta["template_version"] == "2.3.0"
 
 
 def test_v21_void_line_sets_inactive_and_excludes_from_export(db):
@@ -428,19 +428,25 @@ def test_v21_expense_explicit_void_operation(db):
 
 
 def test_v21_row_loss_guard_rejects_half_missing(db):
-    """行数骤减防呆：上传行不足导出的一半 → 整本拒绝。"""
-    project, _part, _order, _line = _make_project_with_line(db)
-    # 再造一条行 → 导出 2 行数据行，回传只留 1 行（=50%，不触发）；删到 0 行触发
+    """行数骤减防呆：≥2 行的表删光全部数据行 → 整本拒绝（单行表放行，E2E #1）。"""
+    import pytest
+    from app.services.maintenance_expense_collection_workbook import WorkbookError
+
+    project, part, _order, _line = _make_project_with_line(db)
+    second = FMaintenanceLine(
+        raw_line_id=f"raw-line-{uuid.uuid4()}",
+        order_id=_order.id, line_no=2, part_id=part.id,
+        pn_std=part.pn_std, pn_raw=part.pn_std, description=part.description,
+        qty=Decimal("1"), return_qty=Decimal("0"), import_batch_id=_batch(db),
+    )
+    db.add(second)
+    db.commit()
     content = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
     wb = load_workbook(io.BytesIO(content))
-    ws = wb[master.V2_SHEET_PARTS]
-    # 删除全部 2 条数据行（第 2、3 行）
-    ws.delete_rows(2, 2)
+    wb[master.V2_SHEET_PARTS].delete_rows(2, 2)  # 删光 2 条数据行 → 0 < 2×50%
     buf = io.BytesIO()
     wb.save(buf)
-    import pytest
-    from app.services.maintenance_expense_collection_workbook import WorkbookError
     with pytest.raises(WorkbookError) as exc:
         master.validate_project_master_v2(
             db, project_id=project.project_id, data=buf.getvalue())
@@ -669,3 +675,282 @@ def test_review_p1_late_imported_expense_is_not_voided(db):
     db.refresh(late)
     assert expense.data_status == "已作废"
     assert late.data_status != "已作废"
+
+
+def test_v22_parts_missing_row_becomes_void(db):
+    """03 删行=作废（与 04 同语义，2026-08-20 用户拍板）。
+    两行删一行＝50%，不触发防呆；唯一行被删会被防呆拦（契约行为）。"""
+    project, part, order, line = _make_project_with_line(db)
+    second = FMaintenanceLine(
+        raw_line_id=f"raw-line-{uuid.uuid4()}",
+        order_id=order.id, line_no=2, part_id=part.id,
+        pn_std=part.pn_std, pn_raw=part.pn_std, description=part.description,
+        qty=Decimal("1"), return_qty=Decimal("0"), import_batch_id=_batch(db),
+    )
+    db.add(second)
+    db.commit()
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_PARTS].delete_rows(2)  # 删第 2 行（第一条明细）
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert any(r.operation == "VOID" and r.line_id == line.id for r in plan.cost_refills)
+    assert any(r["sheet"] == "03_备件明细" and r.get("reason") == "上传文件缺行"
+               for r in plan.will_void_rows)
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(line)
+    assert line.is_active is False
+
+
+def test_v22_void_all_lines_cascades_order_tombstone(db):
+    """整单行全作废 → 级联整单墓碑：搜索消失、挂靠停用、重传不复活。"""
+    from app.services import maintenance_demands
+
+    project, _part, order, line = _make_project_with_line(db)
+    _content, wb, ws = _parts_sheet(db, project.project_id)
+    ws.cell(row=2, column=1, value="VOID")
+    _reupload(db, project.project_id, wb)
+
+    db.refresh(line)
+    assert line.is_active is False
+    tombstone = db.get(MaintenanceDemandTombstone, order.raw_order_id)
+    assert tombstone is not None and tombstone.restored_at is None
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id))
+    assert assignment.is_active is False
+    # 默认搜索不见
+    result = maintenance_demands.search_demands(db, q=None, page=1, page_size=20)
+    assert all(item["source_order_id"] != order.raw_order_id
+               for item in result["items"])
+
+
+def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
+    project, _p, _o, _l = _make_project_with_line(db)
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content))
+    # 使用说明 sheet
+    assert master.V2_SHEET_USAGE in wb.sheetnames
+    usage_texts = "\n".join(str(c.value) for row in wb[master.V2_SHEET_USAGE].iter_rows()
+                            for c in row if c.value)
+    assert "黄底" in usage_texts and "VOID" in usage_texts
+    # 操作列下拉
+    ws = wb[master.V2_SHEET_PARTS]
+    dvs = list(ws.data_validations.dataValidation)
+    assert any(dv.type == "list" and "VOID" in (dv.formula1 or "") for dv in dvs)
+    # 可编辑数据区黄底（PN 列=9，第 2 行）
+    from openpyxl.styles import PatternFill
+    fill = ws.cell(row=2, column=9).fill
+    assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
+    # 模板版本 2.2.0
+    meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
+    assert meta["template_version"] == "2.3.0"
+
+
+def test_latest_missing_marks_suspicious_when_ratio_high(db):
+    """缺失占比 > 50% → suspicious=true（前端禁用批量作废）。"""
+    from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+    from app.services import maintenance_wbdd_import as wbdd
+
+    project, _part, order, _line = _make_project_with_line(db)
+    # 再造 4 张同窗口、不在文件批次里的单 → 库内 5 张活跃，文件只有 1 张
+    others = []
+    for i in range(4):
+        b = _batch(db)
+        o = FMaintenanceOrder(
+            raw_order_id=f"raw-ghost-{i}-{uuid.uuid4()}", order_no=f"WBDD-GHOST-{i}",
+            order_date=order.order_date, linked_sales_order_no="XSDD-EDIT-001",
+            project_raw="可编辑测试", data_status="已生效", import_batch_id=b,
+        )
+        others.append(o)
+        db.add(o)
+    db.add(MaintenanceWbddImportReceipt(
+        batch_id=order.import_batch_id, idempotency_key="suspicious-key-0001",
+        uploaded_by="tester", file_hash=uuid.uuid4().hex,
+        report_json={"batch_id": order.import_batch_id},
+    ))
+    db.commit()
+    result = wbdd.latest_missing(db)
+    assert result["missing_count"] == 4
+    assert result["db_active_in_window"] == 5
+    assert result["suspicious"] is True
+    assert result["missing_ratio"] > 0.5
+
+
+def test_e2e_fix_single_row_delete_allowed(db):
+    """E2E #1：单行表删除唯一一行不再被防呆拦截（防呆只拦批量损失）。"""
+    project, _order, _line, _expense = _make_project_with_expense(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_EXPENSE].delete_rows(2)  # 唯一一行
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.expense_voids == (_expense.raw_line_id,)
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(_expense)
+    assert _expense.data_status == "已作废"
+
+
+def test_e2e_fix_summary_distinguishes_qty_from_cost(db):
+    """E2E #5：改数量报 line_updates/qty_updates，不再误报 cost_overrides。"""
+    project, _part, _order, line = _make_project_with_line(db)
+    _c, wb, ws = _parts_sheet(db, project.project_id)
+    ws.cell(row=2, column=11, value=5)
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["qty_updates"] == 1
+    assert plan.summary["line_updates"] == 1
+    assert plan.summary["cost_overrides"] == 0
+
+
+def test_v23_example_rows_present_and_ignored_on_upload(db):
+    """每个数据 sheet 底部有灰色示例行；回传时被系统忽略（零变更幂等）。"""
+    project, _order, _line, _expense = _make_project_with_expense(db)
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content))
+    for sheet_name in (master.V2_SHEET_PLAN, master.V2_SHEET_PARTS,
+                       master.V2_SHEET_EXPENSE, master.V2_SHEET_RECEIPTS,
+                       master.V2_SHEET_SITE):
+        ws = wb[sheet_name]
+        # finalize 会向下多刷 20 行样式（max_row 被撑大），全表扫找示例标记
+        found = any(
+            str(c.value or "").strip() in ("示例",) or str(c.value or "").startswith("【示例】")
+            for row in ws.iter_rows(min_row=2) for c in row
+        )
+        assert found, sheet_name
+    # 原样回传（含示例行）：零变更
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["line_creates"] == 0
+    assert plan.summary["line_updates"] == 0
+    assert plan.summary["line_voids"] == 0
+    assert plan.summary["expense_creates"] == 0
+    assert plan.summary["expense_voids"] == 0
+    assert plan.summary["plan_creates"] == 0
+    assert not plan.will_void_rows
+
+
+def test_v23_plan_accepts_xsdd_without_ledger_contract(db):
+    """台账未导入的项目也能填 02：合同号=挂靠 XSDD → 自动建合同（用户踩坑）。"""
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    project, _part, order, _line = _make_project_with_line(db)
+    # 该项目挂靠单的 XSDD = XSDD-EDIT-001（fixture 里 linked_sales_order_no）
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    # 在示例行后追加一条 CREATE（用挂靠 XSDD，不依赖台账）
+    ws.append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+               None, None, None, None, None, None, None, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["plan_creates"] == 1
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id,
+        MaintenanceProjectContract.contract_no == "XSDD-EDIT-001"))
+    assert contract is not None  # 自动建出来了
+
+
+def test_v23_plan_rejects_with_helpful_error(db):
+    """不属于本项目的合同号 → 报错列出可用合同。"""
+    import pytest
+    from app.services.maintenance_expense_collection_workbook import WorkbookError
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    ws.append(["CREATE", "XSDD-别的项目", 1, "2026-09-30", "day", 100, None, None,
+               None, None, None, None, None, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+    with pytest.raises(WorkbookError) as exc:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=buf.getvalue())
+    assert "可用" in str(exc.value) and "XSDD-EDIT-001" in str(exc.value)
+
+
+def test_v23_plan_modify_without_operation_applies(db):
+    """02 改单元格（不填操作）→ 生效；改了日期/金额才下发。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    # 先 CREATE 一期
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PLAN]
+    ws.append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+               None, None, None, None, None, None, None, None])
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(db, project_id=project.project_id, data=buf.getvalue())
+    master.apply_project_master_v2(db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+    # 重新下载，不填操作直接改金额 → 生效
+    content2 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb2 = load_workbook(io.BytesIO(content2))
+    ws2 = wb2[master.V2_SHEET_PLAN]
+    found = False
+    for r in ws2.iter_rows(min_row=2):
+        if r[12].value:  # 实体ID 列（1-based 13 → idx 12）
+            r[5].value = 30000  # 计划金额
+            found = True
+    assert found
+    buf2 = io.BytesIO(); wb2.save(buf2)
+    plan2 = master.validate_project_master_v2(db, project_id=project.project_id, data=buf2.getvalue())
+    assert plan2.summary["plan_updates"] == 1
+    master.apply_project_master_v2(db, plan2, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    ms = db.scalar(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project.project_id))
+    assert ms.planned_amount == Decimal("30000")
+
+    # 原样再传（什么都不改）→ 零变更
+    content3 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    plan3 = master.validate_project_master_v2(db, project_id=project.project_id, data=content3)
+    assert plan3.summary["plan_updates"] == 0 and plan3.summary["plan_creates"] == 0
+
+
+def test_v23_plan_delete_row_voids(db):
+    """02 删行=作废（对齐 03/04）。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb = load_workbook(io.BytesIO(content))
+    wb[master.V2_SHEET_PLAN].append(["CREATE", "XSDD-EDIT-001", 1, "2026-09-30", "day", 40000,
+                                     None, None, None, None, None, None, None, None])
+    buf = io.BytesIO(); wb.save(buf)
+    plan = master.validate_project_master_v2(db, project_id=project.project_id, data=buf.getvalue())
+    master.apply_project_master_v2(db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+    content2 = master.build_project_master_v2(db, project_id=project.project_id, sheets=(master.V2_SHEET_PLAN,))
+    wb2 = load_workbook(io.BytesIO(content2))
+    ws2 = wb2[master.V2_SHEET_PLAN]
+    for r in range(ws2.max_row, 1, -1):
+        if ws2.cell(r, 13).value:  # 实体ID
+            ws2.delete_rows(r)
+    buf2 = io.BytesIO(); wb2.save(buf2)
+    plan2 = master.validate_project_master_v2(db, project_id=project.project_id, data=buf2.getvalue())
+    assert plan2.summary["plan_voids"] == 1
+    assert any(x["sheet"] == "02_回款计划" for x in plan2.will_void_rows)
+    master.apply_project_master_v2(db, plan2, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    ms = db.scalar(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project.project_id))
+    assert ms.is_active is False

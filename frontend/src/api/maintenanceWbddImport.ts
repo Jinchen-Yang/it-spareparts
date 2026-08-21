@@ -59,6 +59,12 @@ export interface WbddMissing {
   /** true＝清单被截断（只返回前 1000 条），页面要提示。 */
   truncated: boolean;
   missing_orders: WbddMissingOrder[];
+  /** 库内同日期窗的活跃单总数（判断误报用）。 */
+  db_active_in_window?: number | null;
+  /** 缺失占比 = missing_count / db_active_in_window。 */
+  missing_ratio?: number | null;
+  /** true＝疑似不完整导出（缺失占比 > 50%），批量作废被禁用。 */
+  suspicious?: boolean;
 }
 
 /**

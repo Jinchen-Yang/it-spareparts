@@ -369,23 +369,49 @@ describe("项目面板", () => {
     });
   });
 
-  it("状态列在明细里原样展示，页面明示不参与计算（铁律 3）", async () => {
-    getBoardOrderLines.mockResolvedValue({
-      data: { rows: [{
-        raw_line_id: "L1", pn_std: "PN-1", pn_raw: "PN-1",
-        pool: { in_pool: null, pool_name: null, pool_status: null },
-        description: "描述", qty: "3", return_qty: "0",
-        purchased_qty: "1", pending_supply_qty: "1", pending_return_qty: "1",
-        consumed_qty: null,
-        known_apply_cost_inc_tax: stat("100.00"), cost_source: stat("direct"),
-        confidence: stat("high"),
-      }], total: 1 },
+  it("明细 PN 为主：全量直出、PN+描述主列、单价两档、成本来源四分类配色（2026-08-20）", async () => {
+    listProjectPartsRows.mockResolvedValue({
+      total: 3,
+      sheet: "03_备件订单",
+      rows: [
+        { line_id: 1, pn_std: "PN-1", order_no: "WBDD-1",
+          description: "系统关联行", qty: "3", return_qty: "0",
+          unit_cost_ex_tax: "88.50", unit_cost_inc_tax: "100.00",
+          cost_amount_inc_tax: "300.00",
+          cost_source: "direct", confidence: "high" },
+        { line_id: 2, pn_std: "PN-2", order_no: "WBDD-2",
+          description: "人工回填行", qty: "1", return_qty: "0",
+          unit_cost_ex_tax: "50.00", unit_cost_inc_tax: "56.50",
+          cost_amount_inc_tax: "56.50",
+          cost_source: "manual", confidence: "none" },
+        { line_id: 3, pn_std: "PN-3", order_no: "WBDD-3",
+          description: "缺失行", qty: "2", return_qty: "0",
+          unit_cost_ex_tax: null, unit_cost_inc_tax: null,
+          cost_amount_inc_tax: null,
+          cost_source: "none", confidence: "none" },
+      ],
     });
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
-    fireEvent.click(await screen.findByText("WBDD-1"));
-    expect(await screen.findByText(/系统只展示、不参与任何计算/)).toBeInTheDocument();
-    expect(screen.getByText("直接采购价")).toBeInTheDocument();
+    // 配色图例
+    expect(await screen.findByText("系统关联")).toBeInTheDocument();
+    expect(screen.getAllByText("人工回填").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("缺失")).toBeInTheDocument();
+    expect(screen.getByText("估算")).toBeInTheDocument();
+    // PN 主列：加粗 PN + 描述副行
+    expect(screen.getByText("PN-1")).toBeInTheDocument();
+    expect(screen.getByText("系统关联行")).toBeInTheDocument();
+    // 单价两档渲染
+    expect(screen.getByText("88.50")).toBeInTheDocument();
+    // 分类彩标：direct=绿标、manual=紫标、none=红标
+    const directTag = screen.getByText("直接采购价").closest(".ant-tag");
+    expect(directTag?.className).toContain("green");
+    // 图例与成本来源列各有一个「人工回填」Tag，两个都应为紫色
+    const manualTags = screen.getAllByText("人工回填").map((n) => n.closest(".ant-tag"));
+    expect(manualTags.length).toBeGreaterThanOrEqual(2);
+    expect(manualTags.every((t) => t?.className.includes("purple"))).toBe(true);
+    const noneTag = screen.getByText("暂无成本").closest(".ant-tag");
+    expect(noneTag?.className).toContain("red");
   });
 });
 

@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Card, Select, Space, Table, Typography, message } from "antd";
+import { Card, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import type { BoardLineRow, BoardOrderRow } from "../../../api/maintenanceBossBoard";
-import {
-  getBoardOrderLines,
-  getBoardProjectOrders,
-} from "../../../api/maintenanceBossBoard";
+import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
+import { getBoardProjectOrders } from "../../../api/maintenanceBossBoard";
+import { listProjectPartsRows } from "../../../api/maintenanceWorkbooks";
+import type { ProjectPartsRow } from "../../../api/maintenanceWorkbooks";
 import {
   SHEETS,
   applyProjectMaster,
@@ -13,20 +12,15 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
-import { CostSourceTag, raw, readError, statText } from "./panelUtils";
-import type { CostSourceLike } from "./panelUtils";
+import {
+  COST_CATEGORY_LEGEND,
+  CostSourceTag,
+  raw,
+  readError,
+  statText,
+} from "./panelUtils";
 
 const { Text } = Typography;
-
-/** board 行级明细的 cost_source/confidence 是 Stat 信封，取出 ready 值喂给 CostSourceTag。 */
-function lineCostSource(line: BoardLineRow): CostSourceLike {
-  return {
-    cost_source: line.cost_source?.state === "ready" ? line.cost_source.value : null,
-    confidence: (line.confidence?.state === "ready"
-      ? line.confidence.value
-      : null) as CostSourceLike["confidence"],
-  };
-}
 
 /**
  * 备件与需求单 tab（2026-08-19 重设计）：原顶部「出库明细」卡与原「备件成本」tab
@@ -47,17 +41,22 @@ export function PartsOrdersTab({
 }) {
   const [orders, setOrders] = useState<BoardOrderRow[]>([]);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
-  const [selectedOrder, setSelectedOrder] = useState<string | null>(null);
-  const [lines, setLines] = useState<BoardLineRow[]>([]);
+  /** 点选的需求单号＝行过滤（再点一次取消）；默认展示项目全部备件行。 */
+  const [selectedOrderNo, setSelectedOrderNo] = useState<string | null>(null);
+  const [lines, setLines] = useState<ProjectPartsRow[]>([]);
   const [loading, setLoading] = useState(false);
 
   const loadOrders = useCallback(async () => {
     setLoading(true);
     try {
-      const ordersResp = await getBoardProjectOrders(projectId, { page_size: 200 });
+      const [ordersResp, partsResp] = await Promise.all([
+        getBoardProjectOrders(projectId, { page_size: 200 }),
+        listProjectPartsRows(projectId),
+      ]);
       setOrders(ordersResp.data.rows);
+      setLines(partsResp.rows);
     } catch (err) {
-      message.error(readError(err, "需求单加载失败"));
+      message.error(readError(err, "需求单/备件明细加载失败"));
     } finally {
       setLoading(false);
     }
@@ -66,16 +65,6 @@ export function PartsOrdersTab({
   useEffect(() => {
     void loadOrders();
   }, [loadOrders]);
-
-  useEffect(() => {
-    if (!selectedOrder) {
-      setLines([]);
-      return;
-    }
-    void getBoardOrderLines(selectedOrder, { page_size: 200 })
-      .then((resp) => setLines(resp.data.rows))
-      .catch((err) => message.error(readError(err, "明细加载失败")));
-  }, [selectedOrder]);
 
   const shownOrders = contractFilter
     ? orders.filter((order) => order.order_no.includes(contractFilter)
@@ -87,7 +76,9 @@ export function PartsOrdersTab({
       title: "需求单号",
       dataIndex: "order_no",
       render: (value: string, order) => (
-        <a onClick={() => setSelectedOrder(order.source_order_id)}>{value}</a>
+        <a onClick={() => setSelectedOrderNo(selectedOrderNo === value ? null : value)}>
+          {value}
+        </a>
       ),
     },
     { title: "制单日期", dataIndex: "order_date", render: raw },
@@ -106,22 +97,49 @@ export function PartsOrdersTab({
     },
   ];
 
-  const lineColumns: ColumnsType<BoardLineRow> = [
-    { title: "PN", dataIndex: "pn_std", render: (v, r) => raw(v || r.pn_raw) },
-    { title: "描述", dataIndex: "description", render: raw },
-    { title: "需求", dataIndex: "qty", render: raw },
-    // 以下为流转状态列：原样展示，不参与任何计算（铁律 3）
-    { title: "已采", dataIndex: "purchased_qty", render: raw },
-    { title: "待供", dataIndex: "pending_supply_qty", render: raw },
-    { title: "待返", dataIndex: "pending_return_qty", render: raw },
-    { title: "领用", dataIndex: "consumed_qty", render: raw },
+  // PN 为主的行级明细（2026-08-20 用户拍板）：PN+描述合并主列、单价两档、
+  // 成本来源四分类彩标（绿=系统关联 / 橙=估算 / 紫=人工回填 / 红=缺失）。
+  const shownLines = selectedOrderNo
+    ? lines.filter((line) => line.order_no === selectedOrderNo)
+    : lines;
+
+  const lineColumns: ColumnsType<ProjectPartsRow> = [
     {
-      title: "已知申请估算成本(含税)",
-      render: (_: unknown, line) => statText(line.known_apply_cost_inc_tax),
+      title: "PN / 描述",
+      dataIndex: "pn_std",
+      width: 320,
+      render: (v: string | null, r: ProjectPartsRow) => (
+        <Space direction="vertical" size={0}>
+          <Text strong copyable={Boolean(v)}>{raw(v)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{raw(r.description)}</Text>
+        </Space>
+      ),
+    },
+    { title: "维保单号", dataIndex: "order_no", width: 170, render: raw },
+    { title: "需求数量", dataIndex: "qty", width: 90, render: raw },
+    { title: "退货数量", dataIndex: "return_qty", width: 90, render: raw },
+    {
+      title: "未税单价",
+      dataIndex: "unit_cost_ex_tax",
+      width: 110,
+      render: raw,
+    },
+    {
+      title: "含税单价",
+      dataIndex: "unit_cost_inc_tax",
+      width: 110,
+      render: raw,
+    },
+    {
+      title: "已知成本(含税)",
+      dataIndex: "cost_amount_inc_tax",
+      width: 120,
+      render: raw,
     },
     {
       title: "成本来源",
-      render: (_: unknown, line) => <CostSourceTag row={lineCostSource(line)} />,
+      width: 150,
+      render: (_: unknown, line) => <CostSourceTag row={line} />,
     },
   ];
 
@@ -164,21 +182,24 @@ export function PartsOrdersTab({
           columns={orderColumns}
           pagination={{ pageSize: 10, showSizeChanger: false }}
         />
-        {selectedOrder ? (
-          <>
-            <Text type="secondary" style={{ fontSize: 11.5 }}>
-              流转状态列（已采/待供/待返/领用）为氚云原样数据，系统只展示、不参与任何计算。
-            </Text>
-            <Table<BoardLineRow>
-              rowKey="raw_line_id"
-              size="small"
-              dataSource={lines}
-              columns={lineColumns}
-              scroll={{ x: 1100 }}
-              pagination={{ pageSize: 10, showSizeChanger: false }}
-            />
-          </>
-        ) : null}
+        <Space size={12} wrap>
+          {COST_CATEGORY_LEGEND.map((item) => (
+            <Tag key={item.text} color={item.color}>{item.text}</Tag>
+          ))}
+          <Text type="secondary" style={{ fontSize: 11.5 }}>
+            成本来源：绿=系统关联（采购单挂接）｜橙=估算（窗口/历史/池/月均/销售参考）｜紫=人工回填｜红=缺失
+            {selectedOrderNo ? `｜当前过滤：${selectedOrderNo}（再点单号取消）` : ""}
+          </Text>
+        </Space>
+        <Table<ProjectPartsRow>
+          rowKey="line_id"
+          size="small"
+          loading={loading}
+          dataSource={shownLines}
+          columns={lineColumns}
+          scroll={{ x: 1200 }}
+          pagination={{ pageSize: 20, showSizeChanger: false }}
+        />
       </Card>
     </Space>
   );

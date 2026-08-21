@@ -13,6 +13,7 @@
 """
 import re
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -40,6 +41,7 @@ from app.security import (
 )
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services import maintenance_project_master_workbook as master
+from app.services import maintenance_workbook_renderer
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
@@ -257,6 +259,70 @@ def download_project_master(
     return _xlsx(content, _workbook_filename(db, project_id, wanted))
 
 
+@router.get(_MASTER + "/collection-plan")
+def get_collection_plan(
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """回款计划（02）+ 到款状态：计划期次对比实收累计，供回款 tab 展示待回款。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+    from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+    from app.business_time import business_today
+
+    contracts = master.ec._contracts(db, project_id)
+    contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
+    milestones = list(db.scalars(select(MaintenanceCollectionMilestone).where(
+        MaintenanceCollectionMilestone.project_id == project_id,
+        MaintenanceCollectionMilestone.is_active.is_(True),
+    ).order_by(
+        MaintenanceCollectionMilestone.project_contract_id,
+        MaintenanceCollectionMilestone.sequence,
+    )))
+    # 每份合同最新 confirmed 快照的累计实收（待回款判定基准）
+    actual: dict[str, Decimal] = {}
+    for c in contracts:
+        snap = db.scalar(select(MaintenanceCollectionSnapshot).where(
+            MaintenanceCollectionSnapshot.project_contract_id == c.project_contract_id,
+            MaintenanceCollectionSnapshot.status == "confirmed",
+        ).order_by(MaintenanceCollectionSnapshot.report_month.desc()))
+        actual[c.project_contract_id] = (
+            snap.cumulative_amount if snap and snap.cumulative_amount is not None
+            else Decimal("0"))
+    today = business_today()
+    rows = []
+    cum_planned: dict[str, Decimal] = {}
+    for m in milestones:
+        cid = m.project_contract_id
+        cum_planned[cid] = cum_planned.get(cid, Decimal("0")) + (m.planned_amount or Decimal("0"))
+        cum_actual = actual.get(cid, Decimal("0"))
+        if cum_actual >= cum_planned[cid] and cum_planned[cid] > 0:
+            state = "paid"
+        elif cum_actual > (cum_planned[cid] - (m.planned_amount or Decimal("0"))):
+            state = "partial"
+        else:
+            state = "pending"
+        if state != "paid" and m.planned_date is not None and m.planned_date < today:
+            state = "overdue"
+        rows.append({
+            "milestone_id": m.milestone_id,
+            "contract_no": contract_by_id.get(cid, ""),
+            "sequence": m.sequence,
+            "planned_date": m.planned_date.isoformat() if m.planned_date else None,
+            "date_precision": m.date_precision,
+            "planned_amount": str(m.planned_amount) if m.planned_amount is not None else None,
+            "cumulative_planned": str(cum_planned[cid]),
+            "cumulative_actual": str(actual.get(cid, Decimal("0"))),
+            "arrival_state": state,
+            "follow_up_status": m.follow_up_status,
+            "note": m.follow_up_note,
+            "version": m.version,
+        })
+    return {"total": len(rows), "rows": rows}
+
+
 @router.get(_MASTER + "/rows")
 def list_master_rows(
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -288,9 +354,15 @@ def list_master_rows(
                 "pn_std": line.pn_std or line.pn_raw or "",
                 "description": line.description or "",
                 "qty": str(line.qty) if line.qty is not None else None,
+                "return_qty": str(line.return_qty) if line.return_qty is not None else None,
+                "cost_amount_inc_tax": (
+                    str(line.cost_amount_inc_tax)
+                    if line.cost_amount_inc_tax is not None else None),
                 "warehouse": order.warehouse or "",
                 "cost_source": line.cost_source or "none",
-                "cost_source_label": line.cost_source or "无成本结果",
+                # 中文标签（复用渲染器的统一映射），不再吐英文代码
+                "cost_source_label": maintenance_workbook_renderer.SOURCE_LABELS.get(
+                    line.cost_source, "成本缺失"),
                 "confidence": line.confidence or "none",
                 "unit_cost_ex_tax": str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None,
                 "unit_cost_inc_tax": str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None,
