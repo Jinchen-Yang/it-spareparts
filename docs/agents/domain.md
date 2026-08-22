@@ -1,59 +1,35 @@
-# Domain Docs
+# Domain Docs 路由
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+本仓库采用 single-context：根目录 `CONTEXT.md` 定义全局业务语言，`docs/adr/` 记录架构决策，模块文档和 `.ai/contracts/` 提供更窄的正式口径。
 
-This repo is **single-context**: one `CONTEXT.md` + `docs/adr/` at the repo root (a single
-deployable app — FastAPI backend + React/Vite frontend + Postgres).
+## 1. 阅读顺序
 
-## Before exploring, read these
+1. `AGENTS.md`：开发边界、数据链路、验证与发布规则。
+2. `CONTEXT.md`：系统主干、统一术语和业务对象。
+3. 与任务直接相关的 ADR、模块文档和契约。
+4. 当前源码、Alembic 迁移、测试与可用的数据库只读事实。
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+事实冲突时遵循 `AGENTS.md` 中的优先级；旧计划、归档文档和注释不能覆盖当前数据库或源码事实。
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`/grill-with-docs`) creates them lazily when terms or decisions actually get resolved.
+## 2. 按任务路由
 
-> Note: this repo doesn't have `CONTEXT.md` or `docs/adr/` yet. There is, however, real
-> domain/architecture prose under `docs/` (`PN标准化Agent设计方案.md`, `智能体平台架构与演进路线.md`,
-> `DEPLOY.md`, etc.) and a deeper domain summary in the maintainer's auto-memory — useful
-> background until `/grill-with-docs` produces a proper `CONTEXT.md`.
+| 任务主题 | 优先读取 |
+| --- | --- |
+| 维保业务与页面 | `docs/maintenance/ARCHITECTURE.md`、`docs/maintenance/REQUIREMENTS.md` |
+| 维保 Excel / 工作簿 / 字段契约 | `docs/maintenance/import-field-contract.md`、`docs/maintenance/contracts/`、`.ai/contracts/maintenance-spares/` |
+| 回款提醒 | `.ai/contracts/maintenance-collections/` |
+| 数据质量 | `docs/data-quality/`、`docs/adr/0001-separate-row-quality-issues.md` |
+| 互通池与策略覆盖 | `docs/pool-analysis/`、`docs/pool-policy-coverage/` |
+| 价格纪律 | `docs/price-discipline/` |
+| 发布、迁移与回滚 | `docs/DEPLOY.md`、`docs/releases/`、当前 Alembic 链 |
+| 多 Agent 认领与交接 | `.ai/AI_WORKFLOW.md`、`docs/agents/issue-tracker.md`、`docs/agents/collaboration.md` |
 
-## File structure
+只读与任务直接相关的最小文档集合，不要为了“建立上下文”全量扫描归档目录或 `.ai/CHANGELOG.md`。
 
-Single-context repo (most repos):
+## 3. 使用规则
 
-```
-/
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
-```
-
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
-
-```
-/
-├── CONTEXT-MAP.md
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── CONTEXT.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── docs/adr/
-```
-
-## Use the glossary's vocabulary
-
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
-
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/grill-with-docs`).
-
-## Flag ADR conflicts
-
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
-
-> _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
+- Issue 标题、测试名和实现说明使用 `CONTEXT.md` 的统一术语。
+- 若实现会违背 ADR，必须在计划和 PR 中显式指出，不得悄悄覆盖。
+- 若正式文档与当前运行事实不一致，记录差异和证据，再由 Issue/ADR 决定修正文档还是实现。
+- 新的长期决策写 ADR；单项任务的进度和阻塞写 Issue/PR，不写进 `CONTEXT.md`。
+- 归档文档只用于追溯，除非当前正式文档明确引用，否则不能直接作为新实现依据。
