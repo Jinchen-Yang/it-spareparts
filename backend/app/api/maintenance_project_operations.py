@@ -1396,22 +1396,25 @@ def stable_project_operations(
 
 @router.post("/site-issue-costs/backfill")
 def backfill_site_issue_costs_endpoint(
+    force: bool = Query(False, description="算法升级后全量重算"),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """领用成本回填（2026-08-22）：历史领用行跑采购价瀑布解析。
+    """领用成本回填：历史领用行跑「需求单价格优先」瀑布解析。
 
-    幂等批量修复「已领用成本恒 —」的数据根因。仅 admin。
+    幂等；force=true 时先清掉算法产生的历史结果全量重算（算法升级用）。
+    仅 admin。
     """
     from app.security import record_access_log
 
     if ctx.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "领用成本回填仅管理员可执行")
     operator = _real_operator(db, ident)
-    stats = operations_service.backfill_site_issue_costs(db, operated_by=operator)
+    stats = operations_service.backfill_site_issue_costs(
+        db, operated_by=operator, force=_force)
     db.commit()
     record_access_log(ctx, "maintenance_site_issue_cost_backfill",
                       "maintenance_site_issue_line", dict(stats))

@@ -13,17 +13,18 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app import config
 from app import tax_policy
 from app.models.maintenance_project_operations import MaintenanceSiteIssueLine
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
 
-ALGORITHM_VERSION = "site-issue-cost-v1"
+ALGORITHM_VERSION = "site-issue-cost-v2"  # v2: 维保需求单价格成为最强证据层
 _CENT = Decimal("0.01")
 _MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
@@ -356,6 +357,60 @@ def resolve_lines(
     if not entries:
         return []
     part_ids = {line.part_id for _issue_date, line in entries}
+
+    # 2026-08-23：维保领用的权威价格 = 该项目维保需求单（WBDD）同 PN 的
+    # 已回填成本（它本身已过 direct/estimate 成本回填，是业务事实源）。
+    # 作为最强证据层，优先于采购价窗口（用户口径：PN 价格从需求单提取）。
+    from app.models.maintenance_project import MaintenanceProject
+    from app.models.maintenance_project_operations import MaintenanceSiteIssue
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
+
+    # 迁移源测试用 SimpleNamespace 模拟行（无 issue_id）——拿不到项目就
+    # 跳过需求单层，走原瀑布
+    issue_ids = {line.issue_id for _issue_date, line in entries
+                 if getattr(line, "issue_id", None) is not None}
+    issue_project = {
+        issue_id: project_id for issue_id, project_id in db.execute(
+            select(
+                MaintenanceSiteIssue.issue_id,
+                MaintenanceSiteIssue.project_id,
+            ).where(MaintenanceSiteIssue.issue_id.in_(issue_ids))
+        )
+    }
+    project_ids = set(issue_project.values())
+    demand_price: dict[tuple[str, int], Decimal] = {}
+    if project_ids:
+        demand_rows = db.execute(
+            select(
+                MaintenanceSourceOrderAssignment.project_id,
+                FMaintenanceLine.part_id,
+                FMaintenanceLine.cost_amount_ex_tax,
+                FMaintenanceLine.qty,
+                FMaintenanceOrder.order_date,
+            )
+            .select_from(FMaintenanceLine)
+            .join(FMaintenanceOrder,
+                  FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .join(MaintenanceSourceOrderAssignment, and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ))
+            .where(
+                MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+                FMaintenanceLine.part_id.in_(part_ids),
+                FMaintenanceLine.is_active.is_(True),
+                FMaintenanceLine.cost_amount_ex_tax.isnot(None),
+                FMaintenanceLine.qty > 0,
+            )
+            .order_by(FMaintenanceOrder.order_date.desc())
+        ).all()
+        for pid, part_id, amount_ex, qty, _order_date in demand_rows:
+            key = (pid, part_id)
+            if key not in demand_price and _valid(qty, amount_ex / qty):
+                demand_price[key] = _amount(Decimal(amount_ex) / Decimal(qty))
     linked_ids = {
         line.linked_purchase_line_id
         for _issue_date, line in entries
@@ -448,10 +503,21 @@ def resolve_lines(
         side: str | None = None
         unit_cost: Decimal | None = None
         samples: list[dict] = []
-        direct = direct_by_id.get(line.linked_purchase_line_id)
-        if (
-            direct is not None
-            and direct.part_id == line.part_id
+        demand_unit = demand_price.get(
+            (issue_project.get(getattr(line, "issue_id", None), ""),
+             line.part_id))
+        if demand_unit is not None:
+            source, side = "maint_demand", "maint"
+            unit_cost = demand_unit
+            samples = [{
+                "sample_id": f"wbdd:{line.part_id}",
+                "basis": "维保需求单同 PN 已回填成本",
+                "unit_price_ex_tax": format(demand_unit, "f"),
+            }]
+        elif (
+            direct := direct_by_id.get(line.linked_purchase_line_id)
+        ) is not None and (
+            direct.part_id == line.part_id
             and _valid(direct.qty, direct.unit_price)
         ):
             source, side = "direct_purchase", "purchase"

@@ -396,8 +396,8 @@ def _audit_contract(
 
 
 def backfill_site_issue_costs(
-    db: Session, *, operated_by: str,
-    reason: str = "领用成本回填：采购价瀑布解析历史领用行"
+    db: Session, *, operated_by: str, force: bool = False,
+    reason: str = "领用成本回填：需求单价格优先的瀑布解析历史领用行"
 ) -> dict:
     """对没有任何成本证据的历史领用行跑成本解析瀑布（2026-08-22）。
 
@@ -405,6 +405,27 @@ def backfill_site_issue_costs(
     resolve_lines 瀰布：手工价 > 关联采购行 > 采购价±7 天窗口；解析不出
     的行保持 NULL（不知道≠0，铁律 5）。幂等：只处理 cost 为空的行。
     """
+    if force:
+        # 强制重算：清掉算法产生的历史解析结果（manual 输入保留——解析器会
+        # 按新瀑布重新套用），让新算法（如 v2 的需求单价格优先）全量生效
+        from sqlalchemy import update
+
+        db.execute(
+            update(MaintenanceSiteIssueLine).where(
+                MaintenanceSiteIssueLine.cost_source.in_(
+                    ["direct_purchase", "purchase_window",
+                     "sales_window", "maint_demand"])
+            ).values(
+                cost_source=None, reference_side=None,
+                reference_samples=None, reference_sample_ids=None,
+                reference_sample_count=None,
+                reference_window_from=None, reference_window_to=None,
+                unit_cost=None, cost_amount=None,
+                unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                cost_amount_ex_tax=None, cost_amount_inc_tax=None,
+            )
+        )
+        db.flush()
     rows = db.execute(
         select(MaintenanceSiteIssueLine, MaintenanceSiteIssue.issue_date)
         .join(MaintenanceSiteIssue,

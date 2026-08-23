@@ -324,7 +324,7 @@ def test_recompute_persists_t_plus_three_purchase_once_with_line_audit(db):
     assert line.cost_amount == 50
     assert line.reference_sample_ids == [line.reference_samples[0]["sample_id"]]
     assert line.reference_samples[0]["distance_days"] == 3
-    assert line.algorithm_version == "site-issue-cost-v1"
+    assert line.algorithm_version == "site-issue-cost-v2"
     assert line.version == 2
     state_after = db.get(MaintenanceProjectWorkbookState, project.project_id)
     assert state_after.revision == revision_before + 1
