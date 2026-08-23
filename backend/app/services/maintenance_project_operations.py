@@ -452,7 +452,11 @@ def backfill_expense_attribution(
 
     stats = {"total": 0, "attributed": 0, "already": 0,
              "skipped_no_contract": 0, "skipped_ambiguous": 0,
-             "skipped_invalid": 0, "projects_touched": 0}
+             "skipped_invalid": 0, "skipped_duplicate": 0,
+             "projects_touched": 0}
+    # ETL 幂等键有「数据ID」与「bxd#line」两种形态，同一逻辑行可能以不同
+    # raw_line_id 重复入库——按 (project, expense_ref) 进程内去重防 uq 冲突
+    seen_refs: set[tuple[str, str]] = set()
     per_project: dict[str, dict[str, int]] = defaultdict(
         lambda: {"rows": 0, "approved": 0, "void": 0, "unknown": 0})
     pending: list[MaintenanceProjectExpenseAttribution] = []
@@ -474,6 +478,14 @@ def backfill_expense_attribution(
         if amount_ex is None or row.expense_date is None:
             stats["skipped_invalid"] += 1
             continue
+        ref = (
+            f"{row.bxd_no}#{row.line_no}"
+            if row.bxd_no and row.line_no is not None
+            else (row.bxd_no or row.raw_line_id))
+        if (project_id, ref) in seen_refs:
+            stats["skipped_duplicate"] += 1
+            continue
+        seen_refs.add((project_id, ref))
         if row.data_status == MAINT_EXPENSE_ACTIVE_STATUS:
             mapping_state, normalized = "mapped", "approved"
         elif row.data_status in ("已作废", "作废"):
@@ -484,11 +496,7 @@ def backfill_expense_attribution(
             expense_id=expense_id,
             project_id=project_id,
             project_contract_id=None,
-            # uq（project_id, expense_ref）：同单多行必须带行号才唯一
-            expense_ref=(
-                f"{row.bxd_no}#{row.line_no}"
-                if row.bxd_no and row.line_no is not None
-                else (row.bxd_no or row.raw_line_id)),
+            expense_ref=ref,
             expense_date=row.expense_date,
             applicant=row.person,
             category=row.fee_category or row.expense_type,
