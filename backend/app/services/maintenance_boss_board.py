@@ -1153,9 +1153,24 @@ def _card_expense_and_requisition_costs(
         )
         .group_by(MaintenanceSiteIssue.project_id)
     ).all()
+    # 有领用行但全无参照价 → None（「—」= 算不出）；完全没有领用行 → 0（可知的零）
+    has_lines = {
+        pid for (pid,) in db.execute(
+            select(MaintenanceSiteIssue.project_id).where(
+                MaintenanceSiteIssue.project_id.in_(project_ids),
+                MaintenanceSiteIssue.status_mapping_state == "mapped",
+                MaintenanceSiteIssue.normalized_status.in_(["confirmed", "corrected"]),
+                MaintenanceSiteIssue.issue_date <= today,
+            ).distinct())
+    }
+    requisition_costs: dict[str, Decimal] = {
+        pid: Decimal(v or 0) for pid, v in requisition_rows}
+    for pid in project_ids:
+        if pid not in requisition_costs and pid not in has_lines:
+            requisition_costs[pid] = Decimal(0)
     return (
         {pid: Decimal(v or 0) for pid, v in expense_rows},
-        {pid: Decimal(v or 0) for pid, v in requisition_rows},
+        requisition_costs,
     )
 
 
