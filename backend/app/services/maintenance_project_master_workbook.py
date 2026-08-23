@@ -1403,12 +1403,21 @@ def _v2_meta(wb) -> dict[str, str]:
     }
 
 
-def _v2_verify_meta(wb, project_id: str) -> dict[str, str]:
+def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
     meta = _v2_meta(wb)
     if meta.get("protocol_id") != V2_PROTOCOL_ID or meta.get("template_version") != V2_TEMPLATE_VERSION:
         raise WorkbookError("template_version_mismatch", "工作簿版本已更新，请重新下载当前项目总表后再上传。")
     if meta.get("project_id") != project_id:
-        raise WorkbookError("project_mismatch", "工作簿所属项目与上传入口不一致")
+        # 2026-08-23：带上工作簿真正所属的项目名——批量处理多项目时极易
+        # 拿错文件，只说「不一致」用户不知道这表是谁的
+        from app.models.maintenance_project import MaintenanceProject
+
+        other = db.get(MaintenanceProject, meta.get("project_id"))
+        other_name = other.display_name if other is not None else "未知项目"
+        raise WorkbookError(
+            "project_mismatch",
+            f"这份工作簿属于项目「{other_name}」，请到该项目的面板上传；"
+            f"或重新从当前项目下载后再改。")
     included = tuple(
         name.strip() for name in meta.get("included_sheets", "").split(",")
         if name.strip()
@@ -2003,7 +2012,7 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         wb = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:
         raise WorkbookError("invalid_file", f"无法读取 .xlsx：{type(exc).__name__}") from exc
-    meta = _v2_verify_meta(wb, project_id)
+    meta = _v2_verify_meta(db, wb, project_id)
     included_meta = tuple(
         name.strip() for name in meta["included_sheets"].split(",") if name.strip()
     )
