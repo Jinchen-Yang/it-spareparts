@@ -484,7 +484,11 @@ def backfill_expense_attribution(
             expense_id=expense_id,
             project_id=project_id,
             project_contract_id=None,
-            expense_ref=row.bxd_no or row.raw_line_id,
+            # uq（project_id, expense_ref）：同单多行必须带行号才唯一
+            expense_ref=(
+                f"{row.bxd_no}#{row.line_no}"
+                if row.bxd_no and row.line_no is not None
+                else (row.bxd_no or row.raw_line_id)),
             expense_date=row.expense_date,
             applicant=row.person,
             category=row.fee_category or row.expense_type,
