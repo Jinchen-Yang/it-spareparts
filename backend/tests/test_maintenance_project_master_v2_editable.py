@@ -378,15 +378,14 @@ def test_v21_expense_missing_row_becomes_void(db):
         db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
     wb = load_workbook(io.BytesIO(content))
     ws = wb[master.V2_SHEET_EXPENSE]
-    # 删光全部数据行 → 50% 防呆整本拒绝（契约行为）
+    # 2026-08-22 撤防呆：删光全部 → 放行为全量作废（用户拍板大批量修改期）
     wb_all_deleted = load_workbook(io.BytesIO(content))
     wb_all_deleted[master.V2_SHEET_EXPENSE].delete_rows(2, 2)
     buf_all = io.BytesIO()
     wb_all_deleted.save(buf_all)
-    with pytest.raises(WorkbookError) as guard_exc:
-        master.validate_project_master_v2(
-            db, project_id=project.project_id, data=buf_all.getvalue())
-    assert guard_exc.value.code == "row_loss_guard"
+    plan_all = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf_all.getvalue())
+    assert all(r.operation == "VOID" for r in plan_all.expense_updates)
     # 正常路径：只删第一行（=50%，放行）
     ws.delete_rows(2)
     buf = io.BytesIO()
@@ -427,8 +426,8 @@ def test_v21_expense_explicit_void_operation(db):
     assert expense.data_status == "已作废"
 
 
-def test_v21_row_loss_guard_rejects_half_missing(db):
-    """行数骤减防呆：≥2 行的表删光全部数据行 → 整本拒绝（单行表放行，E2E #1）。"""
+def test_v21_row_loss_guard_removed_all_rows_voidable(db):
+    """2026-08-22 撤防呆：≥2 行的表删光全部数据行 → 全量 VOID 放行（用户拍板）。"""
     import pytest
     from app.services.maintenance_expense_collection_workbook import WorkbookError
 
@@ -444,13 +443,12 @@ def test_v21_row_loss_guard_rejects_half_missing(db):
     content = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
     wb = load_workbook(io.BytesIO(content))
-    wb[master.V2_SHEET_PARTS].delete_rows(2, 2)  # 删光 2 条数据行 → 0 < 2×50%
+    wb[master.V2_SHEET_PARTS].delete_rows(2, 2)  # 删光 2 条数据行 → 全量 VOID
     buf = io.BytesIO()
     wb.save(buf)
-    with pytest.raises(WorkbookError) as exc:
-        master.validate_project_master_v2(
-            db, project_id=project.project_id, data=buf.getvalue())
-    assert exc.value.code == "row_loss_guard"
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert [r.operation for r in plan.cost_refills].count("VOID") == 2
 
 
 def test_void_fast_tombstones_deactivates_assignment(db):

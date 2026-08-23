@@ -323,6 +323,38 @@ def test_card_carries_contract_manager_and_amount(db, tmp_path):
     assert row["contract_amount_inc_tax"]["value"] == "100000.00"
 
 
+def test_card_carries_expense_and_requisition_costs(db, tmp_path):
+    """2026-08-22 客户反馈：报销/已领用成本上卡——有成本权限出值，无权限 restricted。"""
+    from datetime import date
+    from decimal import Decimal
+
+    from app.models.maintenance_project_operations import (
+        MaintenanceProjectExpenseAttribution,
+    )
+
+    proj = make_project(db, code="合成项目C")
+    db.add(MaintenanceProjectExpenseAttribution(
+        expense_id="bxd:exp-1", project_id=proj.project_id,
+        expense_ref="BXD-1", expense_date=date(2026, 8, 1),
+        amount_ex_tax=Decimal("100.00"), amount_inc_tax=Decimal("113.00"),
+        tax_rate_used=Decimal("0.13"), raw_status="已结束",
+        status_mapping_state="mapped", normalized_status="approved",
+        status_mapping_version="t", version=1))
+    db.commit()
+    orders = import_wbdd(db, tmp_path, project="合成项目C", orders=1, lines_per_order=1)
+    assign(db, orders[0], proj)
+    row = _card(db, boss_client(db, username="card-cost", with_cost=True),
+                proj.project_id)
+    assert row["expense_cost_inc_tax"]["value"] == "113.00"
+    assert row["requisition_cost_inc_tax"]["state"] == "ready"  # 0 也是已知值
+
+    # 无成本权限：金额位 restricted（键集一致防侧信道）
+    row_nocost = _card(db, boss_client(db, username="card-cost-n", with_cost=False),
+                       proj.project_id)
+    assert row_nocost["expense_cost_inc_tax"]["state"] == "restricted"
+    assert row_nocost["requisition_cost_inc_tax"]["state"] == "restricted"
+
+
 def test_card_carries_salesperson_ledger_first_mode_fallback(db, tmp_path):
     """2026-08-21 客户反馈：卡片显示销售——台账 salesperson 优先，XSDD 众数兜底。"""
     from app.models.maintenance_project import MaintenanceProject

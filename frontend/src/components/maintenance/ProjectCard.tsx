@@ -42,6 +42,15 @@ function money(stat: Stat<string | number> | undefined): string {
   return statText(stat, " 元");
 }
 
+/** 金额 Stat → 数字（ready/partial/state 且有值时）；其余状态返回 null。 */
+function statNumber(stat: Stat<string | number> | undefined): number | null {
+  if (!stat) return null;
+  if (!["ready", "partial", "stale"].includes(stat.state)) return null;
+  if (stat.value === null || stat.value === "") return null;
+  const n = Number(stat.value);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** 数量位（2026-08-21 客户反馈）：千分位 + 「个」，不展示后端 Decimal 的 ".000"。 */
 function statQty(stat: Stat<string | number> | undefined): string {
   if (!stat) return "—";
@@ -78,6 +87,55 @@ const costAmount = (stat: KnownCostStat | undefined) =>
 
 const missingLines = (stat: KnownCostStat | undefined) =>
   fromCostBundle(stat, (value) => `${value.missing_lines} 行无参照价`);
+
+/** 回款进度条（2026-08-22 客户反馈）：已回款/合同额，卡片直读。
+ * 六态语义不破坏：无权限/未导入各说各的，算不出不画 0%。 */
+function CollectionBar({
+  collected,
+  contract,
+}: {
+  collected: Stat<string | number> | undefined;
+  contract: Stat<string | number> | undefined;
+}) {
+  const collectedNum = statNumber(collected);
+  const contractNum = statNumber(contract);
+  if (collectedNum === null) {
+    return (
+      <div style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
+        回款：{statText(collected)}
+      </div>
+    );
+  }
+  const pct = contractNum && contractNum > 0
+    ? Math.round((collectedNum / contractNum) * 100)
+    : null;
+  return (
+    <div style={{ marginTop: 2 }}>
+      <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.55)", marginBottom: 2 }}>
+        回款：
+        <span style={{ color: "#52c41a", fontWeight: 600 }}>
+          ¥{collectedNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}
+        </span>
+        {contractNum !== null && (
+          <span>
+            {" / "}
+            {contractNum > 0
+              ? `¥${contractNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（${pct}%）`
+              : "合同额缺失"}
+          </span>
+        )}
+      </div>
+      {pct !== null && (
+        <Progress
+          percent={Math.min(pct, 100)}
+          showInfo={false}
+          size="small"
+          strokeColor={pct >= 100 ? "#52c41a" : "#1677ff"}
+        />
+      )}
+    </div>
+  );
+}
 
 export interface ProjectCardProps {
   row: BoardProjectRow;
@@ -132,15 +190,35 @@ export function ProjectCard({ row }: ProjectCardProps) {
           </Text>
         ) : null}
 
-        <div style={{ fontSize: 11.5, lineHeight: 1.9, color: "rgba(0,0,0,.55)" }}>
+        {/* 2026-08-22 客户反馈：成本/回款要上卡且用彩色，不再灰字小号 */}
+        <div style={{ fontSize: 12.5, lineHeight: 2 }}>
           <div>
-            备件成本：含税 {costAmount(row.known_apply_cost_inc_tax)}
-            {" / "}未税 {money(row.known_apply_cost_ex_tax)}
+            <span style={{ color: "#1677ff" }}>
+              备件成本 {costAmount(row.known_apply_cost_inc_tax)}
+            </span>
+            <span style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
+              {" "}（缺失 {missingLines(row.known_apply_cost_inc_tax)}）
+            </span>
           </div>
-          <div>缺失成本：{missingLines(row.known_apply_cost_inc_tax)}</div>
-          {/* 2026-08-21 客户反馈：公式本就是「库房发货＋直采直发」，改叫发货数并按个数展示 */}
-          <div>维保备件发货数：{statQty(row.procured_qty)}</div>
-          <div>回款预览：{money(row.collection_preview_inc_tax)}</div>
+          <div>
+            <span style={{ color: "#fa8c16" }}>
+              报销成本 {money(row.expense_cost_inc_tax)}
+            </span>
+          </div>
+          <div>
+            <span style={{ color: "#722ed1" }}>
+              已领用成本 {money(row.requisition_cost_inc_tax)}
+            </span>
+          </div>
+          <div>
+            <span style={{ color: "#13c2c2" }}>
+              维保备件发货数 {statQty(row.procured_qty)}
+            </span>
+          </div>
+          <CollectionBar
+            collected={row.collection_preview_inc_tax}
+            contract={row.contract_amount_inc_tax}
+          />
         </div>
 
         {ratio === null ? (
