@@ -417,8 +417,8 @@ def backfill_site_issue_costs(
                      "sales_window", "maint_demand"])
             ).values(
                 cost_source=None, reference_side=None,
-                reference_samples=None, reference_sample_ids=None,
-                reference_sample_count=None,
+                reference_samples=[], reference_sample_ids=[],
+                reference_sample_count=0,
                 reference_window_from=None, reference_window_to=None,
                 unit_cost=None, cost_amount=None,
                 unit_cost_ex_tax=None, unit_cost_inc_tax=None,
