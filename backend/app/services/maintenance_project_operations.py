@@ -395,6 +395,63 @@ def _audit_contract(
     )
 
 
+def backfill_site_issue_costs(
+    db: Session, *, operated_by: str,
+    reason: str = "领用成本回填：采购价瀑布解析历史领用行"
+) -> dict:
+    """对没有任何成本证据的历史领用行跑成本解析瀑布（2026-08-22）。
+
+    生产 294 条领用行 cost 全空（导入链路从未跑解析），已领用成本恒「—」。
+    resolve_lines 瀰布：手工价 > 关联采购行 > 采购价±7 天窗口；解析不出
+    的行保持 NULL（不知道≠0，铁律 5）。幂等：只处理 cost 为空的行。
+    """
+    rows = db.execute(
+        select(MaintenanceSiteIssueLine, MaintenanceSiteIssue.issue_date)
+        .join(MaintenanceSiteIssue,
+              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+        .where(MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None),
+               MaintenanceSiteIssueLine.is_active.is_(True))
+        .order_by(MaintenanceSiteIssue.issue_date)
+    ).all()
+    stats = {"total": len(rows), "resolved": 0, "still_unknown": 0,
+             "projects_touched": 0}
+    resolved_by_project: dict[str, int] = defaultdict(int)
+    CHUNK = 200
+    for start in range(0, len(rows), CHUNK):
+        batch = rows[start:start + CHUNK]
+        lines = [(issue_date, line) for line, issue_date in batch]
+        try:
+            maintenance_consumption_cost.resolve_lines(db, lines=lines)
+        except maintenance_consumption_cost.CostResolutionError:
+            # 个别坏行（数量/价格越界）不拖累整批：逐行降级重试
+            for single in lines:
+                try:
+                    maintenance_consumption_cost.resolve_lines(db, lines=[single])
+                except maintenance_consumption_cost.CostResolutionError:
+                    pass
+        db.flush()
+    for line, _issue_date in rows:
+        if line.cost_amount_inc_tax is not None:
+            stats["resolved"] += 1
+        else:
+            stats["still_unknown"] += 1
+    for line, _ in rows:
+        if line.cost_amount_inc_tax is not None:
+            pid = db.scalar(
+                select(MaintenanceSiteIssue.project_id).where(
+                    MaintenanceSiteIssue.issue_id == line.issue_id))
+            if pid:
+                resolved_by_project[pid] += 1
+    stats["projects_touched"] = len(resolved_by_project)
+    for pid, n in resolved_by_project.items():
+        _fact_audit(db, project_id=pid, entity_type="site_issue_line",
+                    entity_id=f"backfill:{n}", action="recompute",
+                    before=None, after={"resolved": n}, reason=reason,
+                    operated_by=operated_by)
+    db.flush()
+    return stats
+
+
 def backfill_expense_attribution(
     db: Session, *, operated_by: str, reason: str = "报销归因回填：BXD/项目追踪导入 → 合同 → 项目"
 ) -> dict:
