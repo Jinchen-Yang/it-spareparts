@@ -131,17 +131,14 @@ export function SiteReturnTab({
   const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
-  // 行按领用行展开，同一单多行只在首行给一个作废按钮
-  const firstLineOfIssue = useMemo(() => {
-    const seen = new Set<string>();
-    const firsts = new Set<string>();
+  // 2026-08-23 体验修正：作废是整单语义，同单每一行都给按钮（用户看到
+  // 空白列会以为该单不能作废）；弹窗里写清该单共几行一起作废
+  const linesPerIssue = useMemo(() => {
+    const counts = new Map<string, number>();
     for (const row of rows) {
-      if (!seen.has(row.issue.issue_id)) {
-        seen.add(row.issue.issue_id);
-        firsts.add(row.issueLineId);
-      }
+      counts.set(row.issue.issue_id, (counts.get(row.issue.issue_id) ?? 0) + 1);
     }
-    return firsts;
+    return counts;
   }, [rows]);
 
   const confirmVoid = async () => {
@@ -237,7 +234,7 @@ export function SiteReturnTab({
                 render: (_value: unknown, item: SiteReturnRow) =>
                   item.issue.workflow_status === "void" ? (
                     <Tag>已作废</Tag>
-                  ) : firstLineOfIssue.has(item.issueLineId) ? (
+                  ) : (
                     <Button
                       size="small"
                       danger
@@ -245,14 +242,16 @@ export function SiteReturnTab({
                     >
                       作废
                     </Button>
-                  ) : null,
+                  ),
               }]
             : []),
         ]}
       />
       <Modal
         open={voidTarget !== null}
-        title={voidTarget ? `作废领用单 ${voidTarget.issue_no}` : ""}
+        title={voidTarget
+          ? `作废领用单 ${voidTarget.issue_no}（共 ${linesPerIssue.get(voidTarget.issue_id) ?? voidTarget.lines.length} 行）`
+          : ""}
         confirmLoading={voiding}
         okText="确认作废"
         okButtonProps={{ danger: true, disabled: !voidReason.trim() }}
