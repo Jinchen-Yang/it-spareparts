@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Space, Table, Tag, message } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Input, Modal, Space, Table, Tag, message } from "antd";
 import type {
   MaintenanceBadReturn,
   MaintenanceReturnObligation,
@@ -10,6 +10,7 @@ import {
   searchMaintenanceBadReturns,
   searchMaintenanceReturnObligations,
   searchSiteIssues,
+  voidSiteIssue,
 } from "../../../api/maintenanceOperations";
 import {
   SHEETS,
@@ -17,12 +18,20 @@ import {
   downloadProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import { readPermissionMap } from "../../../nav";
 import {
   ISSUE_STATUS,
   RETURN_DOCUMENT_STATUS,
   raw,
   readError,
 } from "./panelUtils";
+
+function idempotencyKey(): string {
+  const suffix = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `site-void-${suffix}`;
+}
 
 interface SiteReturnRow {
   issueLineId: string;
@@ -114,6 +123,48 @@ export function SiteReturnTab({
 
   useEffect(() => { void load(); }, [load]);
 
+  // 2026-08-23：做错的领用单可整单作废（软作废，历史与审计保留）。
+  // 门禁与后端一致：site_issue_manage 动作 + 成本可见（页面权限天然具备）。
+  const perms = readPermissionMap();
+  const canVoidIssues = !!perms.action_maintenance_site_issue_manage
+    && !!perms.data_purchase_cost;
+  const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voiding, setVoiding] = useState(false);
+  // 行按领用行展开，同一单多行只在首行给一个作废按钮
+  const firstLineOfIssue = useMemo(() => {
+    const seen = new Set<string>();
+    const firsts = new Set<string>();
+    for (const row of rows) {
+      if (!seen.has(row.issue.issue_id)) {
+        seen.add(row.issue.issue_id);
+        firsts.add(row.issueLineId);
+      }
+    }
+    return firsts;
+  }, [rows]);
+
+  const confirmVoid = async () => {
+    if (!voidTarget || !voidReason.trim()) return;
+    setVoiding(true);
+    try {
+      await voidSiteIssue(voidTarget.issue_id, {
+        project_id: voidTarget.project_id,
+        version: voidTarget.version,
+        idempotency_key: idempotencyKey(),
+        reason: voidReason.trim(),
+      });
+      message.success(`领用单 ${voidTarget.issue_no} 已作废`);
+      setVoidTarget(null);
+      setVoidReason("");
+      await load();
+    } catch (err) {
+      message.error(readError(err, "作废失败，请刷新后重试"));
+    } finally {
+      setVoiding(false);
+    }
+  };
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <WorkbookRoundTrip
@@ -178,8 +229,50 @@ export function SiteReturnTab({
               return numbers.length ? numbers.join("、") : "—";
             },
           },
+          ...(canVoidIssues
+            ? [{
+                title: "操作",
+                key: "ops",
+                width: 90,
+                render: (_value: unknown, item: SiteReturnRow) =>
+                  item.issue.workflow_status === "void" ? (
+                    <Tag>已作废</Tag>
+                  ) : firstLineOfIssue.has(item.issueLineId) ? (
+                    <Button
+                      size="small"
+                      danger
+                      onClick={() => { setVoidTarget(item.issue); setVoidReason(""); }}
+                    >
+                      作废
+                    </Button>
+                  ) : null,
+              }]
+            : []),
         ]}
       />
+      <Modal
+        open={voidTarget !== null}
+        title={voidTarget ? `作废领用单 ${voidTarget.issue_no}` : ""}
+        confirmLoading={voiding}
+        okText="确认作废"
+        okButtonProps={{ danger: true, disabled: !voidReason.trim() }}
+        cancelText="取消"
+        onCancel={() => { setVoidTarget(null); setVoidReason(""); }}
+        onOk={() => { void confirmVoid(); }}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <span style={{ fontSize: 12, color: "rgba(0,0,0,.55)" }}>
+            整单软作废：该单全部领用行退出成本与返还义务计算，历史与审计保留、可追溯。
+          </span>
+          <Input.TextArea
+            value={voidReason}
+            onChange={(event) => setVoidReason(event.target.value)}
+            placeholder="作废原因（必填），如：录错项目 / 重复录入"
+            rows={2}
+            autoFocus
+          />
+        </Space>
+      </Modal>
     </Space>
   );
 }
