@@ -407,9 +407,17 @@ def backfill_expense_attribution(
     状态映射：已结束→approved、已作废→void、其余→unmapped/unknown。
     每项目写一条汇总审计（不逐行刷 5787 条）。
     """
-    from app.models.maintenance import FProjectExpense
+    from app.models.maintenance import FProjectExpense, FMaintenanceOrder
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
     from app.config import MAINT_EXPENSE_ACTIVE_STATUS
 
+    def _keys(order_no: str) -> list[str]:
+        # 归一：报销行上「XSDD-20221008-0165」与裸「20221008-0165」两种形态都有
+        return [order_no, order_no.removeprefix("XSDD-")]
+
+    # 匹配源 1：正式合同表（当前生产基本为空，演练数据）
     contract_projects: dict[str, set[str]] = defaultdict(set)
     for contract_no, project_id in db.execute(
         select(
@@ -417,7 +425,26 @@ def backfill_expense_attribution(
             MaintenanceProjectContract.project_id,
         )
     ):
-        contract_projects[contract_no].add(project_id)
+        for key in _keys(contract_no):
+            contract_projects[key].add(project_id)
+    # 匹配源 2（主力）：挂靠关系——WBDD 单的 linked_sales_order_no（XSDD）→ 项目。
+    # 与展示板合同额的 XSDD 回退层同一口径（#51）。
+    for xsdd_no, project_id in db.execute(
+        select(
+            FMaintenanceOrder.linked_sales_order_no,
+            MaintenanceSourceOrderAssignment.project_id,
+        )
+        .join(MaintenanceSourceOrderAssignment,
+              and_(
+                  MaintenanceSourceOrderAssignment.source_order_id
+                  == FMaintenanceOrder.raw_order_id,
+                  MaintenanceSourceOrderAssignment.is_active.is_(True),
+              ))
+        .where(FMaintenanceOrder.linked_sales_order_no.isnot(None),
+               FMaintenanceOrder.linked_sales_order_no != "")
+    ):
+        for key in _keys(xsdd_no):
+            contract_projects[key].add(project_id)
     existing = {
         eid for (eid,) in db.execute(
             select(MaintenanceProjectExpenseAttribution.expense_id))
