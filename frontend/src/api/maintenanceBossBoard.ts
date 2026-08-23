@@ -111,6 +111,10 @@ export interface BoardProjectRow {
   /** 维保备件采购数＝库房发货＋直采直发（#41 业务指定公式）。 */
   procured_qty: Stat<string | number>;
   collection_preview_inc_tax: Stat<string | number>;
+  /** 报销成本（已批准报销含税，2026-08-22 上卡）。 */
+  expense_cost_inc_tax: Stat<string | number>;
+  /** 已领用成本（现场领用已知含税，2026-08-22 上卡）。 */
+  requisition_cost_inc_tax: Stat<string | number>;
   cost_ratio_pct: Stat<string | number>;
   /** 三态＝进度条颜色（#43）；算不出来是 null，不拿绿色冒充健康。 */
   card_status: CardStatus | null;

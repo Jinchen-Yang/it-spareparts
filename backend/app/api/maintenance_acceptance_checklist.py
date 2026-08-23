@@ -2,7 +2,7 @@
 
 - GET  checklist：当前生效清单 + 历史（项目可见即可读）；
 - GET  checklist/template：标准模板下载（项目可见即可读）；
-- POST checklist/preview：multipart 上传落 raw（action 键 + 幂等头）；
+- POST checklist/preview：multipart 上传落 raw（page_maintenance + 项目可见 + 幂等头）；
 - POST /acceptance-checklist/{batch_id}/apply：整表替换当前清单（仅本人批次）。
 """
 
@@ -17,7 +17,6 @@ from app.security import (
     UserContext,
     get_current_user_context,
     record_access_log,
-    require_action,
     require_page,
 )
 from app.services import import_safety
@@ -25,7 +24,10 @@ from app.services import maintenance_acceptance_checklist as checklist
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
-_ACTION_KEY = "action_maintenance_acceptance_checklist_import"
+# 2026-08-22 用户拍板：验收清单开放给所有维保页面用户（销售/项目经理/维保负责人）
+# ——「只是做个记录而已」，不再挂 action 键门禁；保留 page_maintenance + 项目
+# 可见性 + 幂等/失败关闭。action_maintenance_acceptance_checklist_import 键
+# 仍留在权限注册表（历史账号快照兼容），但不再被任何端点消费。
 
 
 def _real_operator(ident: dict) -> str:
@@ -88,7 +90,6 @@ async def preview_checklist(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
     _preflight: None = Depends(_preflight),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
@@ -179,7 +180,6 @@ def apply_checklist(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"

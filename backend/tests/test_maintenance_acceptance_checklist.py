@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
 from app.auth import hash_password
+from sqlalchemy import select
+
 from app.main import app
 from app.models.maintenance_acceptance_checklist import (
     MaintenanceAcceptanceChecklistBatch,
@@ -226,6 +228,37 @@ def test_checklist_api_permission_gate_and_roundtrip(db):
     current = got.json()["current"]
     assert current["item_rows"] == 2
     assert current["done_rows"] == 1
+
+    # 2026-08-22 开放语义：维保页面 + 项目挂靠即可导入（不再要 action 键）。
+    # 行键账号（own_maintenance_projects_only）+ primary_manager 挂靠 → 全链 200
+    from app.models.maintenance_project import MaintenanceProjectUserAssignment
+    from app.models.system import SysUser
+    from tests.boss_board_helpers import client_for
+
+    scoped = client_for(db, username="cl-scoped-manager", role="readonly", overrides={
+        "page_maintenance": True,
+        "own_maintenance_projects_only": True,
+    })
+    scoped_user = db.scalar(
+        select(SysUser).where(SysUser.username == "cl-scoped-manager"))
+    assert scoped_user is not None
+    db.add(MaintenanceProjectUserAssignment(
+        assignment_id=str(uuid.uuid4()), project_id=project.project_id,
+        responsibility_type="primary_manager", user_id=scoped_user.id,
+        source_manager_text="cl-scoped-manager", version=1, assigned_by="tester",
+        assignment_reason="test"))
+    db.commit()
+    resp = scoped.post(
+        f"{base}/preview",
+        files={"file": ("c.xlsx", _xlsx([("开放导入条目", "是")]),
+                        "application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet")},
+        headers={"Idempotency-Key": "scoped-open-key-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    applied = scoped.post(
+        f"/api/maintenance/acceptance-checklist/{resp.json()['batch_id']}/apply")
+    assert applied.status_code == 200, applied.text
 
     # 非 .xlsx 拒绝
     bad = admin.post(

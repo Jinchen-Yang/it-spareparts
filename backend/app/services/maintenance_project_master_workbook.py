@@ -1996,7 +1996,6 @@ def _expected_expense_ids(db: Session, project_id: str) -> list[str]:
 
 
 # 上传数据行（带实体ID）低于导出行数的该比例 → 疑似筛选/复制粘贴事故，整本拒绝。
-_ROW_LOSS_GUARD_RATIO = Decimal("0.5")
 
 
 def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> MasterV2Plan:
@@ -2092,28 +2091,12 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         for rid in missing_expense_ids:
             expense_voids.append(rid)
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
-        # 防呆：上传的报销数据行比导出少一半以上 → 整本拒绝，防止 Excel
-        # 筛选/局部复制后误传把整片行作废（唯一一道防呆，契约 #265）。
-        # 单行表放行：唯一一行被删是明确的业务意图（误操作影响小且有审计），
-        # 防呆目标是「批量」损失（E2E #1）。
-        if (len(export_expense_ids) >= 2
-                and Decimal(len(uploaded_expense_ids)) < Decimal(len(export_expense_ids)) * _ROW_LOSS_GUARD_RATIO):
-            raise WorkbookError(
-                "row_loss_guard",
-                f"04_费用报销上传行数（{len(uploaded_expense_ids)}）不足导出行数"
-                f"（{len(export_expense_ids)}）的一半，疑似删行过多；请确认或分批操作")
+        # 2026-08-22 用户拍板：撤销行损失防呆（原 50% 批量损失拦截）——
+        # 线上进入大批量作废期，需要能全量增删改。缺行=作废的语义与审计不变；
+        # 误传风险由前端的 will_void_rows 确认弹窗兜底。
 
     if V2_SHEET_PARTS in included:
-        # 防呆：03 上传的数据行（带实体ID）比导出少一半以上 → 整本拒绝。
-        # 注意口径是「上传的实体行数」而非「解析出的操作数」——原样回传
-        # 不产生任何操作，不能被误判为行丢失。
         export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
-        if (len(export_parts_ids) >= 2
-                and Decimal(uploaded_line_rows) < Decimal(len(export_parts_ids)) * _ROW_LOSS_GUARD_RATIO):
-            raise WorkbookError(
-                "row_loss_guard",
-                f"03_备件明细上传行数（{uploaded_line_rows}）不足导出行数"
-                f"（{len(export_parts_ids)}）的一半，疑似筛选后误传；请检查文件或分批操作")
 
     return MasterV2Plan(
         project_id=project_id,

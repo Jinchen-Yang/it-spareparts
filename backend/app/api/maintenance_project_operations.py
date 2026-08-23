@@ -1394,6 +1394,31 @@ def stable_project_operations(
     )
 
 
+@router.post("/expense-attribution/backfill")
+def backfill_expense_attribution_endpoint(
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """报销归因回填（2026-08-22）：f_project_expense → 合同 → 项目事实表。
+
+    幂等批量修复「报销成本恒 0」的数据根因（ETL 导入与事实表割裂）。
+    仅 admin：一次性数据工程入口，不开放常规运维。
+    """
+    from app.security import record_access_log
+
+    if ctx.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "报销归因回填仅管理员可执行")
+    operator = _real_operator(db, ident)
+    stats = operations_service.backfill_expense_attribution(db, operated_by=operator)
+    db.commit()
+    record_access_log(ctx, "maintenance_expense_attribution_backfill",
+                      "maintenance_project_expense_attribution", dict(stats))
+    return stats
+
+
 @router.post("/operations/search")
 def search_stable_project_operations(
     body: ProjectOperationsSearch,

@@ -781,6 +781,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     manager_names = _manager_display_names(
         db, [p.project_manager_id for p in rows])
     cost_ex = _card_cost_ex_tax(db, window, project_ids)
+    expense_costs, requisition_costs = _card_expense_and_requisition_costs(
+        db, project_ids)
     # 卡片「销售」（2026-08-21 客户反馈）：台账 salesperson 优先，XSDD 众数兜底
     sales_modes = _card_salesperson_modes(db, project_ids)
 
@@ -812,7 +814,9 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                            bundle=cost_bundles.get(proj.project_id),
                            manager_display=manager_names.get(proj.project_manager_id or ""),
                            salesperson=(proj.salesperson
-                                        or sales_modes.get(proj.project_id))),
+                                        or sales_modes.get(proj.project_id)),
+                           expense_cost=expense_costs.get(proj.project_id),
+                           requisition_cost=requisition_costs.get(proj.project_id)),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
         })
 
@@ -840,7 +844,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             # 桶不是项目：没有合同/经理/回款可言，一律 not_imported 而非 0
             **_card_fields(None, can_cost=can_cost, wbdd_ready=wbdd_ready,
                            contracts=None, procured=None, collected=None,
-                           cost_ex=None, bundle=None),
+                           cost_ex=None, bundle=None,
+                           expense_cost=None, requisition_cost=None),
             # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
             # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
             **{k: fact_not_imported() for k in FACT_FIELDS},
@@ -1095,6 +1100,65 @@ def _card_salesperson_modes(db: Session,
         db, project_ids)
 
 
+def _card_expense_and_requisition_costs(
+    db: Session, project_ids: list[str]
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """卡片「报销成本 / 已领用成本」（2026-08-22 客户反馈：上卡彩色展示）。
+
+    报销 = 归因表 mapped+approved 的含税额合计（日期 ≤ 今天）；
+    领用 = 现场领用行 mapped+confirmed/corrected 的已知含税成本合计。
+    与 workspace 指标同一口径（_project_card_from_facts），批量一次查询。
+    """
+    from app.models.maintenance_project_operations import (
+        MaintenanceProjectExpenseAttribution,
+    )
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    if not project_ids:
+        return {}, {}
+    today = business_today()
+    expense_rows = db.execute(
+        select(
+            MaintenanceProjectExpenseAttribution.project_id,
+            func.coalesce(func.sum(
+                MaintenanceProjectExpenseAttribution.amount_inc_tax), 0),
+        )
+        .where(
+            MaintenanceProjectExpenseAttribution.project_id.in_(project_ids),
+            MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
+            MaintenanceProjectExpenseAttribution.normalized_status == "approved",
+            MaintenanceProjectExpenseAttribution.expense_date <= today,
+        )
+        .group_by(MaintenanceProjectExpenseAttribution.project_id)
+    ).all()
+    requisition_rows = db.execute(
+        select(
+            MaintenanceSiteIssue.project_id,
+            func.coalesce(func.sum(
+                MaintenanceSiteIssueLine.cost_amount_inc_tax), 0),
+        )
+        .select_from(MaintenanceSiteIssueLine)
+        .join(MaintenanceSiteIssue,
+              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+        .where(
+            MaintenanceSiteIssue.project_id.in_(project_ids),
+            MaintenanceSiteIssue.status_mapping_state == "mapped",
+            MaintenanceSiteIssue.normalized_status.in_(["confirmed", "corrected"]),
+            MaintenanceSiteIssue.issue_date <= today,
+            MaintenanceSiteIssueLine.is_active.is_(True),
+            MaintenanceSiteIssueLine.cost_amount_inc_tax.isnot(None),
+        )
+        .group_by(MaintenanceSiteIssue.project_id)
+    ).all()
+    return (
+        {pid: Decimal(v or 0) for pid, v in expense_rows},
+        {pid: Decimal(v or 0) for pid, v in requisition_rows},
+    )
+
+
 def _card_procured_qty(db: Session, window: tuple[date, date],
                        project_ids: list[str]) -> dict[str, Decimal]:
     """维保备件采购数 = 库房发货 + 直采直发（REQUIREMENTS #41 业务指定公式）。
@@ -1193,7 +1257,8 @@ def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
                  contracts: dict | None, procured, collected, cost_ex,
                  bundle: dict | None,
                  manager_display: str | None = None,
-                 salesperson: str | None = None) -> dict:
+                 salesperson: str | None = None,
+                 expense_cost=None, requisition_cost=None) -> dict:
     """项目卡的补充字段（REQUIREMENTS #34/#35）。
 
     金额三件（合同额/成本未税/回款预览）挂 `data_purchase_cost`：无权限一律
@@ -1228,6 +1293,10 @@ def _card_fields(project, *, can_cost: bool, wbdd_ready: bool,
             else (restricted() if not can_cost else not_imported())),
         "procured_qty": (ready(procured if procured is not None else None)
                          if wbdd_ready and project is not None else not_imported()),
+        # 2026-08-22 客户反馈：报销/已领用成本上卡（金额位，成本权限门控，
+        # 无权限 restricted 不泄露）
+        "expense_cost_inc_tax": money(expense_cost),
+        "requisition_cost_inc_tax": money(requisition_cost),
         "collection_preview_inc_tax": money(collected),
         "cost_ratio_pct": money(ratio),
         # 三态只由成本率决定（#43）；算不出来是 None，前端显示「数据不足」

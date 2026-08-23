@@ -199,10 +199,9 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && role === "admin"
       && permissions.action_maintenance_collection_plan_import === true
       && canViewContract,
-    // 验收清单导入挂在稳定版面板（非 Beta），常规 admin 短路适用
-    canImportAcceptanceChecklist: isAdmin || (
-      permissions.action_maintenance_acceptance_checklist_import === true
-    ),
+    // 验收清单导入 2026-08-22 起开放给所有维保页面用户（用户拍板：只做记录
+    // 不审批）——后端已去 action 门禁，这里跟随页面权限
+    canImportAcceptanceChecklist: isAdmin || permissions.page_maintenance === true,
   };
 }
 

@@ -395,6 +395,101 @@ def _audit_contract(
     )
 
 
+def backfill_expense_attribution(
+    db: Session, *, operated_by: str, reason: str = "报销归因回填：BXD/项目追踪导入 → 合同 → 项目"
+) -> dict:
+    """把 ETL 落库的 f_project_expense（BXD 报销行）归因到项目事实表。
+
+    2026-08-22：生产 f_project_expense 5787 行而归因表 0 行——报销成本恒 0 的
+    根因（「报销双通道割裂」的落地一半）。匹配链：linked_sales_order_no →
+    maintenance_project_contract.contract_no → project。幂等（expense_id =
+    bxd:{raw_line_id} 已存在即跳过）；共用单（一单多项目）跳过防重复计钱；
+    状态映射：已结束→approved、已作废→void、其余→unmapped/unknown。
+    每项目写一条汇总审计（不逐行刷 5787 条）。
+    """
+    from app.models.maintenance import FProjectExpense
+    from app.config import MAINT_EXPENSE_ACTIVE_STATUS
+
+    contract_projects: dict[str, set[str]] = defaultdict(set)
+    for contract_no, project_id in db.execute(
+        select(
+            MaintenanceProjectContract.contract_no,
+            MaintenanceProjectContract.project_id,
+        )
+    ):
+        contract_projects[contract_no].add(project_id)
+    existing = {
+        eid for (eid,) in db.execute(
+            select(MaintenanceProjectExpenseAttribution.expense_id))
+    }
+
+    stats = {"total": 0, "attributed": 0, "already": 0,
+             "skipped_no_contract": 0, "skipped_ambiguous": 0,
+             "skipped_invalid": 0, "projects_touched": 0}
+    per_project: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"rows": 0, "approved": 0, "void": 0, "unknown": 0})
+    pending: list[MaintenanceProjectExpenseAttribution] = []
+    for row in db.scalars(select(FProjectExpense)):
+        stats["total"] += 1
+        expense_id = f"bxd:{row.raw_line_id}"
+        if expense_id in existing:
+            stats["already"] += 1
+            continue
+        projects = contract_projects.get(row.linked_sales_order_no or "") or set()
+        if not projects:
+            stats["skipped_no_contract"] += 1
+            continue
+        if len(projects) > 1:
+            stats["skipped_ambiguous"] += 1
+            continue
+        project_id = next(iter(projects))
+        amount_ex = row.amount_ex_tax
+        if amount_ex is None or row.expense_date is None:
+            stats["skipped_invalid"] += 1
+            continue
+        if row.data_status == MAINT_EXPENSE_ACTIVE_STATUS:
+            mapping_state, normalized = "mapped", "approved"
+        elif row.data_status in ("已作废", "作废"):
+            mapping_state, normalized = "mapped", "void"
+        else:
+            mapping_state, normalized = "unmapped", "unknown"
+        pending.append(MaintenanceProjectExpenseAttribution(
+            expense_id=expense_id,
+            project_id=project_id,
+            project_contract_id=None,
+            expense_ref=row.bxd_no or row.raw_line_id,
+            expense_date=row.expense_date,
+            applicant=row.person,
+            category=row.fee_category or row.expense_type,
+            expense_reason=(row.reason[:500] if row.reason else None),
+            amount_ex_tax=amount_ex,
+            amount_inc_tax=tax_policy.inc_from_ex(amount_ex),
+            tax_rate_used=tax_policy.TAX_RATE,
+            raw_status=row.data_status or "",
+            status_mapping_state=mapping_state,
+            normalized_status=normalized,
+            status_mapping_version="backfill-v1",
+            version=1,
+        ))
+        stats["attributed"] += 1
+        bucket = per_project[project_id]
+        bucket["rows"] += 1
+        bucket[normalized if normalized in ("approved", "void") else "unknown"] += 1
+
+    for attribution in pending:
+        db.add(attribution)
+    for project_id, summary in per_project.items():
+        stats["projects_touched"] += 1
+        _fact_audit(
+            db, project_id=project_id, entity_type="expense",
+            entity_id=f"backfill:{summary['rows']}",
+            action="bulk_create", before=None, after=summary,
+            reason=reason, operated_by=operated_by,
+        )
+    db.flush()
+    return stats
+
+
 def _fact_audit(
     db: Session,
     *,
