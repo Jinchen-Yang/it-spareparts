@@ -52,6 +52,7 @@ function describe(result: Partial<WorkbookApplyResult>): string {
   if (result.plan_voids) parts.push(`回款计划作废 ${result.plan_voids} 条`);
   if (result.site_return_flags) parts.push(`返还标记 ${result.site_return_flags} 行`);
   if (result.site_creates) parts.push(`领用新增 ${result.site_creates} 行`);
+  if (result.site_voids) parts.push(`领用作废 ${result.site_voids} 行`);
   if (result.site_updates) parts.push(`领用更新 ${result.site_updates} 行`);
   return parts.length ? parts.join("、") : "文件没有改动";
 }

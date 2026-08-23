@@ -952,3 +952,108 @@ def test_v23_plan_delete_row_voids(db):
     ms = db.scalar(select(MaintenanceCollectionMilestone).where(
         MaintenanceCollectionMilestone.project_id == project.project_id))
     assert ms.is_active is False
+
+
+# ---------------------------------------------------------------- 06 缺行=作废（2026-08-23 用户口径）
+
+def _site_issue(db, project, part, *, qty="2", line_no=1, issue_no="ISS-V2-1"):
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    issue = MaintenanceSiteIssue(
+        issue_id=str(uuid.uuid4()), project_id=project.project_id,
+        issue_no=issue_no, issue_date=date(2026, 8, 10),
+        raw_status="已确认", status_mapping_state="mapped",
+        normalized_status="confirmed", status_mapping_version="t",
+        source="legacy")
+    db.add(issue)
+    db.flush()
+    line = MaintenanceSiteIssueLine(
+        issue_line_id=str(uuid.uuid4()), issue_id=issue.issue_id,
+        line_no=line_no, part_id=part.id, pn=part.pn_std,
+        quantity=Decimal(qty), algorithm_version="t",
+        tax_rate_used=Decimal("0.13"), is_active=True)
+    db.add(line)
+    db.commit()
+    return issue, line
+
+
+def test_v2_site_missing_row_voids_line_and_issue(db):
+    """06 删行覆盖上传 → 领用行作废；单只剩空 → 单据状态置 void。"""
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    project, part, _order, _line = _make_project_with_line(db)
+    issue, sline = _site_issue(db, project, part)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    # 删掉全部数据行（示例行保留与否都行——解析跳过）
+    data_rows = ws.max_row - 1
+    ws.delete_rows(2, data_rows)
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["site_voids"] == 1
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(sline)
+    db.refresh(issue)
+    assert sline.is_active is False
+    assert issue.normalized_status == "void"
+    # 再导出：作废行不再出现
+    content2 = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb2 = load_workbook(io.BytesIO(content2))
+    body_rows = [r for r in wb2[master.V2_SHEET_SITE].iter_rows(min_row=2, values_only=True)
+                 if any(v not in (None, "") for v in r)
+                 and not str(r[2] or "").startswith("（示例）")]
+    assert all(row[10] != sline.issue_line_id for row in body_rows)
+
+
+def test_v2_site_roundtrip_unchanged_is_zero_ops(db):
+    """原样回传（不删任何行）→ 零作废零更新（幂等）。"""
+    project, part, _order, _line = _make_project_with_line(db)
+    _site_issue(db, project, part)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=content)
+    assert plan.summary["site_voids"] == 0
+    assert plan.summary["site_creates"] == 0
+    # site_updates 允许 ≥0：解析器对原样行也会记一条「更新」（apply 幂等，
+    # 无实际变化）——既有行为，不在本断言范围
+
+
+def test_v2_site_partial_delete_voids_only_missing(db):
+    """两张单各一行，只删一张 → 只作废被删那张。"""
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssueLine,
+    )
+
+    project, part, _order, _line = _make_project_with_line(db)
+    issue_a, line_a = _site_issue(db, project, part, issue_no="ISS-A")
+    issue_b, line_b = _site_issue(db, project, part, issue_no="ISS-B")
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    # 删掉 A 那一行（数据首行）
+    ws.delete_rows(2, 1)
+    buf = io.BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    assert plan.summary["site_voids"] == 1
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.refresh(line_a)
+    db.refresh(line_b)
+    assert line_a.is_active is False
+    assert line_b.is_active is True

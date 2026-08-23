@@ -170,6 +170,8 @@ class SiteReturnFlag:
     issue_line_id: str
     no_return: bool | None
     is_create: bool = False
+    # 2026-08-23：06 缺行=作废（与 03/04 同语义）——删除导出中存在的领用行
+    is_void: bool = False
     issue_id: str | None = None
     line_no: int | None = None
     part_id: int | None = None
@@ -728,7 +730,9 @@ class MasterV2Plan:
             "plan_voids": sum(x.operation == "VOID" for x in self.milestone_changes),
             "collection_updates": len(self.receipt_ops),
             "site_creates": sum(x.is_create for x in self.site_flags),
-            "site_updates": sum(not x.is_create for x in self.site_flags),
+            "site_voids": sum(x.is_void for x in self.site_flags),
+            "site_updates": sum(not x.is_create and not x.is_void
+                                for x in self.site_flags),
         }
 
 
@@ -1146,6 +1150,7 @@ def _v2_build_usage(wb) -> None:
         ("【02 回款计划】", "计划=打算什么时候收多少钱：一行一个合同期次。操作选 CREATE 新增，填合同号、期次（第几期）、计划回款日期、金额；改已有行选 UPDATE（带基础版本防冲突）；作废选 VOID。"),
         ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
         ("【06 领用返还】", "按黄底提示编辑；手工新增领用行填单号/日期/PN/数量，实体ID留空。"),
+        ("删除领用行", "2026-08-23 起：直接把该行整行删掉再上传 = 该领用行作废（退出成本与返还计算）；一张单的行全删 = 整单作废。"),
         ("【灰色示例行】", "每个数据页最后一行灰色斜体是填写示例，系统上传时自动忽略，不会入库——照着它的格式填，填完可保留或删除该行。"),
         ("", ""),
         ("【安全规则】", ""),
@@ -1236,6 +1241,16 @@ def build_project_master_v2(
     if V2_SHEET_EXPENSE in wanted:
         meta_rows.append(("expense_row_ids",
                           _encode_row_ids(_expected_expense_ids(db, project_id))))
+    if V2_SHEET_SITE in wanted:
+        site_line_ids = db.scalars(
+            select(MaintenanceSiteIssueLine.issue_line_id)
+            .join(MaintenanceSiteIssue,
+                  MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+            .where(MaintenanceSiteIssue.project_id == project_id,
+                   MaintenanceSiteIssueLine.is_active.is_(True))
+            .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)
+        ).all()
+        meta_rows.append(("site_row_ids", _encode_row_ids(site_line_ids)))
     meta = wb.create_sheet(V2_SHEET_META)
     for key, value in meta_rows:
         meta.append([key, value])
@@ -2032,7 +2047,18 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
             db, project_id, wb[V2_SHEET_PARTS])
         cost_refills = tuple(parsed_refills)
     if V2_SHEET_SITE in included:
-        site_flags = tuple(_v2_parse_site(db, project_id, wb[V2_SHEET_SITE]))
+        site_flags = list(_v2_parse_site(db, project_id, wb[V2_SHEET_SITE]))
+        # 2026-08-23：06 缺行=作废（用户口径：Excel 删行覆盖上传，没有的默认作废）
+        export_site_ids = _decode_row_ids(meta.get("site_row_ids"))
+        uploaded_site_ids = {f.issue_line_id for f in site_flags if not f.is_create}
+        missing_site_ids = [sid for sid in export_site_ids
+                            if sid not in uploaded_site_ids]
+        for sid in missing_site_ids:
+            line_row = db.get(MaintenanceSiteIssueLine, sid)
+            if line_row is not None and line_row.is_active:
+                site_flags.append(SiteReturnFlag(
+                    issue_line_id=sid, no_return=None, is_void=True))
+        site_flags = tuple(site_flags)
     if V2_SHEET_EXPENSE in included:
         expense_updates, expense_voids = _v2_parse_expenses(
             db, project_id, wb[V2_SHEET_EXPENSE])
@@ -2276,6 +2302,28 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
                          after=audit_after)
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
+        # 2026-08-23：缺行=作废——领用行软作废，退出成本与返还义务计算；
+        # 一张单全部行都作废时，单据状态同步置 void（与系统内作废同观感）
+        if flag.is_void:
+            if line is not None and line.is_active:
+                line.is_active = False
+                db.flush()
+                issue_doc = db.get(MaintenanceSiteIssue, line.issue_id)
+                if issue_doc is not None:
+                    remaining = db.scalar(
+                        select(func.count()).select_from(MaintenanceSiteIssueLine).where(
+                            MaintenanceSiteIssueLine.issue_id == issue_doc.issue_id,
+                            MaintenanceSiteIssueLine.is_active.is_(True)))
+                    if not remaining:
+                        issue_doc.normalized_status = "void"
+                        issue_doc.version += 1
+                        db.flush()
+                _write_audit(db, project_id=plan.project_id,
+                             entity_type="site_issue_line", entity_id=line.issue_line_id,
+                             action="VOID", operated_by=operated_by, reason=audit_reason,
+                             after={"issue_no": (db.get(MaintenanceSiteIssue, line.issue_id).issue_no
+                                                 if db.get(MaintenanceSiteIssue, line.issue_id) else None)})
+            continue
         if line is None and flag.is_create:
             issue = db.scalar(select(MaintenanceSiteIssue).where(
                 MaintenanceSiteIssue.project_id == plan.project_id,

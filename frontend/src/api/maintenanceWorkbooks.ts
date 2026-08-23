@@ -40,6 +40,7 @@ export interface WorkbookApplyResult {
   expense_creates?: number;
   expense_voids?: number;
   site_creates?: number;
+  site_voids?: number;
   site_updates?: number;
   cost_overrides?: number;
   line_creates?: number;
