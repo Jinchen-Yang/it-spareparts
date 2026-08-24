@@ -1,0 +1,829 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "WBDD 归属错误与验收上传下载故障修复报告",
+    "description": "上海图书馆项目个案、生产只读全量归属审计、故障根因、代码修改与验证结果。",
+    "generatedAt": "2026-08-24T16:28:27Z",
+    "cards": [
+      {
+        "id": "active_assignments_card",
+        "description": "生产库中有活跃 WBDD 项目归属的来源单总数。",
+        "dataset": "audit_summary",
+        "sourceId": "production_assignment_audit",
+        "metrics": [
+          {
+            "label": "活跃 WBDD 归属",
+            "field": "active_assignments",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "candidate_conflicts_card",
+        "description": "project_std 唯一精确指向另一活动项目的冲突候选；候选不等于确认错误。",
+        "dataset": "audit_summary",
+        "sourceId": "production_assignment_audit",
+        "metrics": [
+          {
+            "label": "归属冲突候选",
+            "field": "candidate_conflicts",
+            "format": "number"
+          },
+          {
+            "label": "候选占活跃归属",
+            "field": "candidate_share",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "affected_lines_card",
+        "description": "冲突候选 WBDD 当前关联的活动备件明细数量。",
+        "dataset": "audit_summary",
+        "sourceId": "production_assignment_audit",
+        "metrics": [
+          {
+            "label": "候选涉及活动明细",
+            "field": "affected_active_lines",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "confirmed_error_card",
+        "description": "有项目内人工认证证据、可以确认归属错误的 WBDD 数量。",
+        "dataset": "audit_summary",
+        "sourceId": "production_assignment_audit",
+        "metrics": [
+          {
+            "label": "已确认挂错",
+            "field": "confirmed_errors",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "assignment_classification_chart",
+        "title": "活跃 WBDD 归属以一致项为主",
+        "subtitle": "冲突候选只是人工复核队列，不代表已确认错误。",
+        "type": "bar",
+        "dataset": "assignment_classification",
+        "sourceId": "production_assignment_audit",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "classification",
+            "type": "nominal",
+            "label": "归属分类"
+          },
+          "y": {
+            "field": "orders",
+            "type": "quantitative",
+            "label": "WBDD 数量",
+            "format": "number"
+          }
+        },
+        "yAxisTitle": "WBDD 数量",
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "confirmed_case_table",
+        "title": "已确认个案：统一 WBDD 活跃归属与人工认证项目冲突",
+        "subtitle": "项目内人工认证是本个案的裁决证据；旧归属来自历史生产回填。",
+        "dataset": "confirmed_case",
+        "sourceId": "production_assignment_audit",
+        "defaultSort": {
+          "field": "order_no",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "order_no",
+            "label": "WBDD",
+            "type": "text"
+          },
+          {
+            "field": "sales_order_no",
+            "label": "XSDD",
+            "type": "text"
+          },
+          {
+            "field": "current_project",
+            "label": "当前错误归属",
+            "type": "text"
+          },
+          {
+            "field": "certified_project",
+            "label": "人工认证目标项目",
+            "type": "text"
+          },
+          {
+            "field": "assignment_creator",
+            "label": "当前归属创建来源",
+            "type": "text"
+          },
+          {
+            "field": "judgement",
+            "label": "结论",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "workbook_lines_table",
+        "title": "附件中待认领的四条既有备件明细",
+        "subtitle": "操作与实体 ID 均为空；四条 PN/数量与统一 WBDD 中已有活动行一一对应。",
+        "dataset": "workbook_lines",
+        "sourceId": "attached_project_workbook",
+        "defaultSort": {
+          "field": "pn",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "workbook_row",
+            "label": "工作表行",
+            "format": "number"
+          },
+          {
+            "field": "order_no",
+            "label": "WBDD",
+            "type": "text"
+          },
+          {
+            "field": "pn",
+            "label": "PN",
+            "type": "text"
+          },
+          {
+            "field": "qty",
+            "label": "需求数量",
+            "format": "number"
+          },
+          {
+            "field": "operation",
+            "label": "操作",
+            "type": "text"
+          },
+          {
+            "field": "entity_id",
+            "label": "实体 ID",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "symptom_matrix_table",
+        "title": "四条故障链路不是同一个报错",
+        "subtitle": "前端下载竞态、前端上传前异常、项目归属校验和服务端审计字段溢出需要分别修复。",
+        "dataset": "symptom_matrix",
+        "sourceId": "production_request_evidence",
+        "defaultSort": {
+          "field": "sequence",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "sequence",
+            "label": "顺序",
+            "format": "number"
+          },
+          {
+            "field": "surface",
+            "label": "入口",
+            "type": "text"
+          },
+          {
+            "field": "observed",
+            "label": "现象",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "证据",
+            "type": "text"
+          },
+          {
+            "field": "root_cause",
+            "label": "直接原因",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "top_routes_table",
+        "title": "生产全量扫描：前十条归属冲突候选路线",
+        "subtitle": "按候选 WBDD 数量降序；这些是人工复核队列，不是批量修复清单。",
+        "dataset": "top_routes",
+        "sourceId": "production_assignment_audit",
+        "defaultSort": {
+          "field": "affected_orders",
+          "direction": "desc"
+        },
+        "columns": [
+          {
+            "field": "current_project",
+            "label": "当前活跃归属",
+            "type": "text"
+          },
+          {
+            "field": "name_target_project",
+            "label": "project_std 精确目标",
+            "type": "text"
+          },
+          {
+            "field": "affected_orders",
+            "label": "候选 WBDD",
+            "format": "number"
+          },
+          {
+            "field": "affected_lines",
+            "label": "活动明细",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "change_table",
+        "title": "修改方案与作用边界",
+        "subtitle": "归属更正走既有业务服务；验收侧只修复保存、幂等键和错误呈现。",
+        "dataset": "changes",
+        "sourceId": "implementation_diff",
+        "defaultSort": {
+          "field": "sequence",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "sequence",
+            "label": "顺序",
+            "format": "number"
+          },
+          {
+            "field": "component",
+            "label": "模块",
+            "type": "text"
+          },
+          {
+            "field": "change",
+            "label": "修改",
+            "type": "text"
+          },
+          {
+            "field": "effect",
+            "label": "修改效果",
+            "type": "text"
+          },
+          {
+            "field": "guardrail",
+            "label": "安全边界",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "verification_table",
+        "title": "验证结果与未通过项",
+        "subtitle": "通过项与残留风险分开记录；生产真实用户验收需在发布后执行。",
+        "dataset": "verification",
+        "sourceId": "verification_evidence",
+        "defaultSort": {
+          "field": "sequence",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "sequence",
+            "label": "顺序",
+            "format": "number"
+          },
+          {
+            "field": "check",
+            "label": "检查",
+            "type": "text"
+          },
+          {
+            "field": "result",
+            "label": "结果",
+            "type": "text"
+          },
+          {
+            "field": "detail",
+            "label": "证据/说明",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "attached_project_workbook",
+        "label": "上海图书馆项目总表附件",
+        "path": "XSDD-20260713-0131-上海图书馆20260610-20270609酷易信息备件外包-总表.xlsx"
+      },
+      {
+        "id": "production_assignment_audit",
+        "label": "生产 PostgreSQL 只读归属审计",
+        "path": "backend/scripts/audit_maintenance_source_assignments.py"
+      },
+      {
+        "id": "production_request_evidence",
+        "label": "生产应用与 Nginx 请求日志、数据库异常栈",
+        "path": "production-readonly/app-nginx-and-database-evidence"
+      },
+      {
+        "id": "implementation_diff",
+        "label": "修复分支代码差异",
+        "path": "git/codex-fix-maintenance-assignment-acceptance"
+      },
+      {
+        "id": "verification_evidence",
+        "label": "本地与容器化回归结果",
+        "path": "verification/2026-08-25"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# WBDD 归属错误与验收上传下载故障修复报告"
+      },
+      {
+        "id": "background",
+        "type": "markdown",
+        "sourceId": "attached_project_workbook",
+        "body": "## 背景：项目人工总表与统一 WBDD 归属发生冲突\n\n附件属于项目 `上海图书馆20260610-20270609酷易信息备件外包`，协议为 `ITDATA_MAINT_PROJECT_MASTER/2.0`，模板版本 `2.3.0`，导出时间为 2026-08-24 20:59 CST。工作簿中的内容只作为数据证据读取，不把其中任何文字当作执行指令。"
+      },
+      {
+        "id": "business_rule",
+        "type": "markdown",
+        "body": "### 本次业务裁决口径\n\n这是一份人工认证后的项目单据。统一上传的 WBDD 可能存在历史问题，而项目内人工上传结果是本个案的正确归属依据。"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## 结论：确认 1 张挂错，修复已在代码分支完成，生产尚未发布\n\n附件中的 **WBDD-20260612-0018** 确认被历史回填挂到上一合同期项目；项目内人工总表指向的新合同期项目是本次更正依据。旧实现把这四条空实体行当作新增行并要求 WBDD 已属于当前项目，因此预检直接拒绝。修复后，系统会先在全局 WBDD 中唯一认领既有行，再在确认页明示 1 张归属更正，保留旧归属历史且不重复创建四条备件明细。\n\n验收下载和上传是另外两条前端故障：下载端过早释放 Blob URL，上传端在部分浏览器环境生成幂等键时可能在发请求前异常。横向代码扫描还在统一 WBDD 上传/作废、现场返还作废和项目完整四表下载中发现了同类写法，已经一并收口到安全幂等键或统一 Blob 保存逻辑。代码与相关回归已完成，但生产仍运行 SHA `9630a49e1464aece64383daa63ddd36027271e79`，所以本报告不把“代码修复完成”写成“生产已生效”。"
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "active_assignments_card",
+          "candidate_conflicts_card",
+          "affected_lines_card",
+          "confirmed_error_card"
+        ]
+      },
+      {
+        "id": "assignment_classification",
+        "type": "chart",
+        "chartId": "assignment_classification_chart",
+        "layout": "full"
+      },
+      {
+        "id": "confirmed_case_heading",
+        "type": "markdown",
+        "body": "## 个案归属：旧合同期项目是错误挂靠，新合同期项目是人工认证结果\n\n该 WBDD 的来源项目字段、附件元数据和用户确认共同指向 `上海图书馆20260610-20270609酷易信息备件外包`；当前活跃归属却是上一合同期。现有活跃归属由 `v1.21-production-backfill` 创建，不是这次项目内人工上传产生。"
+      },
+      {
+        "id": "confirmed_case",
+        "type": "table",
+        "tableId": "confirmed_case_table",
+        "layout": "full"
+      },
+      {
+        "id": "workbook_lines",
+        "type": "table",
+        "tableId": "workbook_lines_table",
+        "layout": "full"
+      },
+      {
+        "id": "symptoms_heading",
+        "type": "markdown",
+        "body": "## 现象拆分：用户看到的“都报错”包含四个独立失败点\n\n生产日志显示验收模板下载接口返回 200，但浏览器保存仍失败；验收上传在对应时段没有到达后端。项目总表则先遇到归属校验 422，另有整单作废级联时审计字段超过 64 字符导致 500。只有把四条链路分开，才能避免用一次重试掩盖不同根因。"
+      },
+      {
+        "id": "symptoms",
+        "type": "table",
+        "tableId": "symptom_matrix_table",
+        "layout": "full"
+      },
+      {
+        "id": "root_cause",
+        "type": "markdown",
+        "body": "## 根因：历史批量回填缺少人工优先规则，上传协议又没有“认领并改挂”语义\n\n1. **数据层**：本个案及 1,812 张同类候选的当前活跃归属都由 `v1.21-production-backfill` 创建。回填面对来源项目名、维护日期和合同期不一致时，留下了历史错配风险。\n2. **协议层**：旧项目总表只认识“带实体 ID 的更新”或“当前项目内 WBDD 的新增”，无法表达“项目内人工已经认证，但全局 WBDD 挂在别处”。\n3. **幂等层**：空实体的四条行被当成新行；即使放宽项目校验，也会复制全局既有明细。\n4. **审计层**：多张来源单被级联作废时，代码把多个 UUID 逗号拼到一个 `varchar(64)` 字段，事务因此 500 回滚。\n5. **浏览器层**：Blob URL 同步释放存在 WebKit/Safari 竞态；直接访问全局 `crypto.randomUUID` 在缺失该 API 的环境会在 HTTP 请求前抛错。"
+      },
+      {
+        "id": "audit_heading",
+        "type": "markdown",
+        "sourceId": "production_assignment_audit",
+        "body": "## 类似归属检查：1,813 张是候选，只有附件这一张已确认\n\n只读事务扫描了 **21,054** 张有活跃归属的 WBDD。其中 **18,139** 张与来源项目名的唯一精确目标一致，**1,102** 张没有可精确匹配的活动项目，**1,813** 张唯一精确目标与当前归属冲突，涉及 **3,235** 条活动明细、28 个 XSDD 和 32 条项目迁移路线。\n\n日期字段不能作为批量裁决：候选中维护期精确匹配目标项目的只有 528 张，精确匹配当前项目的却有 1,718 张；两边区间重叠数量又几乎相同（1,783 对 1,782），另有 29 张来源维护期本身无效。因此候选必须由项目负责人逐批人工确认。报告刻意不画“错误率”图，避免把 8.61% 的冲突候选误读为已确认错误率。"
+      },
+      {
+        "id": "top_routes",
+        "type": "table",
+        "tableId": "top_routes_table",
+        "layout": "full"
+      },
+      {
+        "id": "scope_method",
+        "type": "markdown",
+        "sourceId": "production_assignment_audit",
+        "body": "## 口径与方法：数据库强制只读，只按可复核规则分类\n\n- **总体**：`f_maintenance_order` 中有一条活动 `maintenance_source_order_assignment` 的来源单。\n- **冲突候选**：来源单 `project_std` 经过首尾空白和大小写归一后，唯一精确命中一个活动项目，但该项目不同于当前活跃归属。\n- **确认错误**：除候选条件外，还必须有项目内人工认证或等价业务证据；本轮只有附件中的一张。\n- **执行保护**：审计脚本在查询前执行 `SET TRANSACTION READ ONLY` 并核验 `transaction_read_only=on`；脚本不包含任何改挂。\n- **复现时间**：2026-08-25 00:12–00:13 CST，生产应用、前端容器运行，数据库健康。"
+      },
+      {
+        "id": "solution_heading",
+        "type": "markdown",
+        "body": "## 修改方案：让人工认证成为显式、可审计、可回滚的归属更正\n\n核心变化不是“看到项目名不一致就自动改”，而是把项目内人工回传建成一条受权限、预检、乐观锁、历史和幂等保护的业务路径。"
+      },
+      {
+        "id": "changes",
+        "type": "table",
+        "tableId": "change_table",
+        "layout": "full"
+      },
+      {
+        "id": "verification_heading",
+        "type": "markdown",
+        "body": "## 修改效果：目标路径与完整前端套件通过，生产真实验收仍是发布门\n\n后端验证覆盖“改挂、历史保留、零重复、重复上传幂等”和“多单级联审计不溢出”；前端验证覆盖下载 URL 延迟释放、缺失 `randomUUID` 的验收与统一 WBDD 上传、现场返还幂等键、项目工作簿下载和结构化错误显示。聚焦回归 **6 个文件、29 项通过**，完整前端套件 **63 个文件、638 项通过**，生产构建通过。"
+      },
+      {
+        "id": "verification",
+        "type": "table",
+        "tableId": "verification_table",
+        "layout": "full"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 限制与不确定性\n\n- 1,813 张冲突候选不是 1,813 张错误；未经业务确认不得批量改挂。\n- 本次没有直接写生产数据库，也没有用新代码修改 WBDD-20260612-0018；这是刻意保留的生产安全边界。\n- 验收下载的服务端 200 与客户端保存竞态能够解释现象，但缺少用户浏览器控制台的原始错误文本；发布后仍需用原浏览器复验。\n- 便携报告通过规范、载荷一致性和语义回退结构校验；兼容的 Chromium headless-shell 不可用，因此桌面/窄屏布局和来源弹窗没有完成浏览器级 QA。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 发布与验收步骤\n\n1. 代码评审、合并并按现有发布流程部署；确认生产 SHA 不再是 `9630a49e1464aece64383daa63ddd36027271e79`。\n2. 使用原附件在目标项目预检：页面应显示 **WBDD 归属更正 1 张**、备件新增 **0 行**。\n3. 由有全量项目权限的用户确认回传；随后核验新项目只有一条活跃归属、旧项目归属转为历史、四条备件行 ID 与数量保持不变。\n4. 在原浏览器完成验收模板下载、清单上传和验收附件下载各一次，确认均实际产生请求并成功落盘/入库。\n5. 把其余 1,812 张候选按项目迁移路线交给项目负责人分批认证；只通过同一受审计入口更正。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 后续待决问题\n\n- 32 条候选迁移路线分别由谁负责认证，是否需要项目级批次签字？\n- 统一 WBDD 导入时是否应把 `project_std`、维护期和项目期的矛盾作为阻断或告警？\n- 是否为“人工认证改挂”增加单独的运营看板，持续监控改挂量、重复上传和并发冲突？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-24T16:28:27Z",
+    "status": "ready",
+    "datasets": {
+      "audit_summary": [
+        {
+          "active_assignments": 21054,
+          "candidate_conflicts": 1813,
+          "candidate_share": 0.08611190272632278,
+          "affected_active_lines": 3235,
+          "confirmed_errors": 1
+        }
+      ],
+      "assignment_classification": [
+        {
+          "classification": "唯一精确一致",
+          "orders": 18139
+        },
+        {
+          "classification": "唯一精确冲突候选",
+          "orders": 1813
+        },
+        {
+          "classification": "无精确活动项目",
+          "orders": 1102
+        }
+      ],
+      "workbook_metadata": [
+        {
+          "protocol_id": "ITDATA_MAINT_PROJECT_MASTER/2.0",
+          "template_version": "2.3.0",
+          "project_name": "上海图书馆20260610-20270609酷易信息备件外包",
+          "exported_at": "2026-08-24T12:59:13.121610+00:00"
+        }
+      ],
+      "confirmed_case": [
+        {
+          "order_no": "WBDD-20260612-0018",
+          "sales_order_no": "XSDD-20260713-0131",
+          "current_project": "上海图书馆20250610-20260609酷易信息备件外包",
+          "certified_project": "上海图书馆20260610-20270609酷易信息备件外包",
+          "assignment_creator": "v1.21-production-backfill",
+          "judgement": "确认挂错；待发布后由项目总表受审计改挂"
+        }
+      ],
+      "workbook_lines": [
+        {
+          "workbook_row": 6,
+          "order_no": "WBDD-20260612-0018",
+          "pn": "02JE810",
+          "qty": 1,
+          "operation": "空",
+          "entity_id": "空"
+        },
+        {
+          "workbook_row": 7,
+          "order_no": "WBDD-20260612-0018",
+          "pn": "02CL762",
+          "qty": 1,
+          "operation": "空",
+          "entity_id": "空"
+        },
+        {
+          "workbook_row": 8,
+          "order_no": "WBDD-20260612-0018",
+          "pn": "03FP301",
+          "qty": 1,
+          "operation": "空",
+          "entity_id": "空"
+        },
+        {
+          "workbook_row": 9,
+          "order_no": "WBDD-20260612-0018",
+          "pn": "03LG164",
+          "qty": 1,
+          "operation": "空",
+          "entity_id": "空"
+        }
+      ],
+      "symptom_matrix": [
+        {
+          "sequence": 1,
+          "surface": "项目总表预检",
+          "observed": "上传返回 422",
+          "evidence": "第 6 行提示 WBDD 不在本项目，新增明细只能挂到本项目已有需求单",
+          "root_cause": "协议把人工认证的空实体行误判为新增，并以前置归属阻断纠错"
+        },
+        {
+          "sequence": 2,
+          "surface": "项目总表应用",
+          "observed": "部分回传返回 500",
+          "evidence": "PostgreSQL StringDataRightTruncation: value too long for varchar(64)",
+          "root_cause": "多张来源单 UUID 被逗号拼到一个审计 entity_id"
+        },
+        {
+          "sequence": 3,
+          "surface": "验收模板/附件下载",
+          "observed": "页面报错或文件保存失败",
+          "evidence": "生产 GET 返回 200；服务端模板为 5,174 bytes",
+          "root_cause": "Blob object URL 在 click 后同步 revoke，存在浏览器保存竞态"
+        },
+        {
+          "sequence": 4,
+          "surface": "验收清单/附件上传",
+          "observed": "页面报错，后端无对应 POST",
+          "evidence": "失败时段请求日志没有上传请求",
+          "root_cause": "幂等键生成直接访问 crypto.randomUUID，兼容环境可在发请求前异常"
+        }
+      ],
+      "top_routes": [
+        {
+          "current_project": "福建联通20250406-20260405新华三整体维保",
+          "name_target_project": "福建联通20250406-20260705新华三整体维保",
+          "affected_orders": 468,
+          "affected_lines": 629
+        },
+        {
+          "current_project": "腾讯整体维保项目-预交付",
+          "name_target_project": "腾讯20251016-20261015阳光雨露&整体维保",
+          "affected_orders": 290,
+          "affected_lines": 622
+        },
+        {
+          "current_project": "广东电信省管CC20250201-20250430神州数码备件维保",
+          "name_target_project": "广东电信省管CC20250201-20250331神州数码备件维保",
+          "affected_orders": 192,
+          "affected_lines": 301
+        },
+        {
+          "current_project": "上海圆通20250801-20260731北京ST维保项目",
+          "name_target_project": "上海圆通20250815-20260815北京ST维保项目",
+          "affected_orders": 155,
+          "affected_lines": 347
+        },
+        {
+          "current_project": "平安科技20250115-20260630新华三整体维保",
+          "name_target_project": "平安科技20250115-20260731新华三整体维保",
+          "affected_orders": 114,
+          "affected_lines": 183
+        },
+        {
+          "current_project": "中国农业银行20251001-20280930新华三备件维保",
+          "name_target_project": "中国农业银行20251001-20251031新华三备件维保",
+          "affected_orders": 109,
+          "affected_lines": 334
+        },
+        {
+          "current_project": "湖南联通20250501-20260430长沙中科北斗备件维保",
+          "name_target_project": "湖南联通20250606-20260606长沙中科北斗备件维保",
+          "affected_orders": 93,
+          "affected_lines": 120
+        },
+        {
+          "current_project": "阳光雨露框架项目-预交付",
+          "name_target_project": "阳光雨露框架项目2025年12月-2026年2月进单",
+          "affected_orders": 55,
+          "affected_lines": 99
+        },
+        {
+          "current_project": "国家税务总局P780小型机20231121-20261120广州盈融整体维保",
+          "name_target_project": "国家税务总局P780小型机20231017-20261017广州盈融整体维保",
+          "affected_orders": 54,
+          "affected_lines": 147
+        },
+        {
+          "current_project": "福建联通20250106-20250305神州数码整体维保",
+          "name_target_project": "福建联通20250106-20250405神州数码整体维保",
+          "affected_orders": 54,
+          "affected_lines": 70
+        }
+      ],
+      "changes": [
+        {
+          "sequence": 1,
+          "component": "项目总表解析",
+          "change": "空操作、空实体行先按 WBDD+PN+数量+退货数量认领全局既有行；SN/描述用于消歧",
+          "effect": "附件四行复用原行，不再报“WBDD 不在本项目”，也不重复新增",
+          "guardrail": "多义匹配整本拒绝；显式 CREATE 才强制新增"
+        },
+        {
+          "sequence": 2,
+          "component": "WBDD 归属更正",
+          "change": "预检展示旧项目→当前项目；应用复用来源单归属服务",
+          "effect": "保留旧归属历史、双边审计和仓库投影",
+          "guardrail": "仅管理员/全量项目账号；expected assignment/version 防并发覆盖"
+        },
+        {
+          "sequence": 3,
+          "component": "应用事务与审计",
+          "change": "归属和明细在同一事务；多单级联按 source_order_id 分行审计",
+          "effect": "任一失败整体回滚；消除 varchar(64) 溢出",
+          "guardrail": "每条审计实体 ID 独立、有界、可检索"
+        },
+        {
+          "sequence": 4,
+          "component": "验收与项目工作簿下载",
+          "change": "统一 saveBlob：链接挂入 DOM，点击后移除，延迟 1 秒 revoke",
+          "effect": "验收模板/附件、项目完整四表和错误明细下载都兼容 WebKit/Safari 异步读取",
+          "guardrail": "文件名继续做非法字符清理"
+        },
+        {
+          "sequence": 5,
+          "component": "验收、统一 WBDD 与现场返还写操作",
+          "change": "用 globalThis.crypto?.randomUUID，缺失时回退时间戳+随机数；展示 detail.message",
+          "effect": "兼容环境仍能发出验收/WBDD 请求和返还作废；后端错误不再被泛化文案吞掉",
+          "guardrail": "幂等键仍保持请求级唯一，不改变服务端权限与事务"
+        },
+        {
+          "sequence": 6,
+          "component": "相似问题审计",
+          "change": "新增强制只读的全库归属分类脚本",
+          "effect": "可重复生成候选路线与指定 WBDD 证据",
+          "guardrail": "只筛候选、无写语句，禁止自动批量改挂"
+        }
+      ],
+      "verification": [
+        {
+          "sequence": 1,
+          "check": "生产归属审计只读保护",
+          "result": "通过",
+          "detail": "transaction_read_only=on；扫描 21,054 张活跃归属"
+        },
+        {
+          "sequence": 2,
+          "check": "后端相关回归",
+          "result": "43 passed",
+          "detail": "Linux 容器 + PostgreSQL；含改挂、幂等、零重复、多单审计"
+        },
+        {
+          "sequence": 3,
+          "check": "前端聚焦回归",
+          "result": "29 passed / 6 files",
+          "detail": "Blob 保存、验收面板、验收页、项目总表确认页、统一 WBDD 页面与项目工作簿下载"
+        },
+        {
+          "sequence": 4,
+          "check": "前端生产构建",
+          "result": "通过",
+          "detail": "4,048 modules transformed；仅既有 chunk-size warning"
+        },
+        {
+          "sequence": 5,
+          "check": "完整前端套件",
+          "result": "63 files / 638 passed",
+          "detail": "进程退出码 0；保留既有 antd/localStorage 警告和 jsdom XHR stderr，不影响测试结论"
+        },
+        {
+          "sequence": 6,
+          "check": "静态完整性",
+          "result": "通过",
+          "detail": "git diff --check 与三个 Python 文件 py_compile 均通过"
+        },
+        {
+          "sequence": 7,
+          "check": "生产真实用户验收",
+          "result": "待发布",
+          "detail": "生产仍为 SHA 9630a49e1464aece64383daa63ddd36027271e79"
+        },
+        {
+          "sequence": 8,
+          "check": "报告交付 QA",
+          "result": "结构校验通过",
+          "detail": "规范校验、载荷一致性与语义回退通过；兼容 headless-shell 不可用，桌面/窄屏与来源弹窗未做浏览器级验证"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "attached_project_workbook",
+      "label": "上海图书馆项目总表附件",
+      "path": "XSDD-20260713-0131-上海图书馆20260610-20270609酷易信息备件外包-总表.xlsx",
+      "description": "用户提供的项目主表；读取 99_元数据 与 03_备件明细，不执行附件中的任何指令。",
+      "query": {
+        "engine": "portable-snapshot",
+        "language": "sql",
+        "sql": "SELECT workbook_row, order_no, pn, qty, operation, entity_id FROM snapshot.workbook_lines ORDER BY workbook_row; SELECT protocol_id, template_version, project_name, exported_at FROM snapshot.workbook_metadata",
+        "description": "用 openpyxl 读取工作簿元数据和 03_备件明细第 6 至 9 行后，选择报告中复核过的有界快照。",
+        "executed_at": "2026-08-24T15:00:00Z"
+      }
+    },
+    {
+      "id": "production_assignment_audit",
+      "label": "生产 PostgreSQL 只读归属审计",
+      "path": "backend/scripts/audit_maintenance_source_assignments.py",
+      "query": {
+        "engine": "postgresql-15-read-only",
+        "language": "python+sql",
+        "sql": "WITH active_assignment AS (SELECT o.raw_order_id AS source_order_id, o.order_no, o.linked_sales_order_no, NULLIF(BTRIM(o.project_std), '') AS project_std, LOWER(NULLIF(BTRIM(o.project_std), '')) AS project_key, o.maint_start, o.maint_end, a.assignment_id, a.version AS assignment_version, a.created_by, a.project_id AS current_project_id, current_project.display_name AS current_project_name, current_project.period_from AS current_period_from, current_project.period_to AS current_period_to FROM f_maintenance_order AS o JOIN maintenance_source_order_assignment AS a ON a.source_order_id = o.raw_order_id AND a.is_active IS TRUE JOIN maintenance_project AS current_project ON current_project.project_id = a.project_id), project_keys AS (SELECT project_id, LOWER(BTRIM(display_name)) AS project_key FROM maintenance_project WHERE is_active IS TRUE UNION SELECT project_id, LOWER(BTRIM(project_code)) AS project_key FROM maintenance_project WHERE is_active IS TRUE), exact_target_counts AS (SELECT source.source_order_id, COUNT(DISTINCT candidate.project_id) AS exact_target_count, MIN(candidate.project_id) AS exact_target_project_id FROM active_assignment AS source LEFT JOIN project_keys AS candidate ON candidate.project_key = source.project_key GROUP BY source.source_order_id), classified AS (SELECT source.*, counts.exact_target_count, target.project_id AS target_project_id, target.display_name AS target_project_name, target.period_from AS target_period_from, target.period_to AS target_period_to FROM active_assignment AS source JOIN exact_target_counts AS counts ON counts.source_order_id = source.source_order_id LEFT JOIN maintenance_project AS target ON target.project_id = counts.exact_target_project_id) SELECT * FROM classified ORDER BY source_order_id; SELECT orders.raw_order_id, COUNT(lines.id) AS active_lines FROM f_maintenance_order AS orders LEFT JOIN f_maintenance_line AS lines ON lines.order_id = orders.id AND lines.is_active IS TRUE GROUP BY orders.raw_order_id;",
+        "description": "分类全部活跃 WBDD 归属，统计来源项目名唯一精确冲突、活动明细、维护期证据和迁移路线，并展开指定 WBDD。",
+        "executed_at": "2026-08-24T16:12:00Z",
+        "tables_used": [
+          "f_maintenance_order",
+          "f_maintenance_line",
+          "maintenance_source_order_assignment",
+          "maintenance_project"
+        ],
+        "filters": [
+          "active assignment only",
+          "active project exact normalized name match",
+          "no sampling",
+          "transaction_read_only=on"
+        ],
+        "metric_definitions": {
+          "candidate_conflicts": "project_std 唯一精确命中另一个活动项目且不同于当前活跃归属",
+          "confirmed_errors": "冲突候选中另有项目内人工认证业务证据的 WBDD"
+        }
+      }
+    },
+    {
+      "id": "production_request_evidence",
+      "label": "生产应用与 Nginx 请求日志、数据库异常栈",
+      "path": "production-readonly/app-nginx-and-database-evidence",
+      "description": "只读检查验收下载/上传和项目总表请求状态；核对 422、500、200 与缺失 POST。",
+      "query": {
+        "engine": "portable-snapshot",
+        "language": "sql",
+        "sql": "SELECT sequence, surface, observed, evidence, root_cause FROM snapshot.symptom_matrix ORDER BY sequence",
+        "description": "只读获取生产应用与前端代理日志后，选择按验收和项目总表路由复核过的有界证据快照。",
+        "executed_at": "2026-08-24T15:20:00Z"
+      }
+    },
+    {
+      "id": "implementation_diff",
+      "label": "修复分支代码差异",
+      "path": "git/codex-fix-maintenance-assignment-acceptance",
+      "description": "项目总表后端、归属预览、验收前端、回归测试、需求约束和只读审计脚本。",
+      "query": {
+        "engine": "portable-snapshot",
+        "language": "sql",
+        "sql": "SELECT sequence, component, change, effect, guardrail FROM snapshot.changes ORDER BY sequence",
+        "description": "读取本修复分支相对 origin/main 的业务代码、测试、文档与审计脚本差异后，选择复核过的修改摘要。",
+        "executed_at": "2026-08-24T16:10:00Z"
+      }
+    },
+    {
+      "id": "verification_evidence",
+      "label": "本地与容器化回归结果",
+      "path": "verification/2026-08-25",
+      "description": "后端 PostgreSQL 回归、前端 Vitest 聚焦/完整套件、Vite 构建、diff check 与 Python 编译检查。",
+      "query": {
+        "engine": "portable-snapshot",
+        "language": "sql",
+        "sql": "SELECT sequence, check, result, detail FROM snapshot.verification ORDER BY sequence",
+        "description": "执行后端、前端、构建和静态完整性验证后，选择复核过的有界结果摘要。",
+        "executed_at": "2026-08-24T16:28:00Z"
+      }
+    }
+  ]
+}

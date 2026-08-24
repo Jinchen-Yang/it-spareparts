@@ -56,6 +56,7 @@ from app.models.system import SysImportBatch
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.sales import FSalesOrder
+from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_collection_milestones import write_collection_milestone
@@ -163,6 +164,23 @@ class CostRefill:
     is_create: bool = False
     order_id: int | None = None
     part_id: int | None = None
+
+
+@dataclass(frozen=True)
+class SourceOrderAssignmentChange:
+    """项目内人工回传确认的一张 WBDD 归属更正。
+
+    ``expected_*`` 把 validate 时看到的活跃挂靠版本带到 apply，避免校验后有人
+    已经改挂而本次上传又把新结果覆盖掉。旧挂靠不会删除；正式 apply 复用来源单
+    归属服务，生成不可变历史和双边审计。
+    """
+
+    source_order_id: str
+    order_no: str
+    expected_assignment_id: str | None
+    expected_version: int | None
+    previous_project_id: str | None
+    previous_project_name: str | None
 
 
 @dataclass(frozen=True)
@@ -706,7 +724,7 @@ class MasterV2Plan:
     expense_updates: tuple[ec.ExpenseUpdate, ...] = ()
     receipt_ops: tuple[ec.CollectionOp, ...] = ()
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
-    will_void_rows: list[dict] = []
+    assignment_changes: tuple[SourceOrderAssignmentChange, ...] = ()
     # 04 报销作废（#264/#267 契约）：显式 VOID 操作列 + 缺行=作废。
     expense_voids: tuple[str, ...] = ()
     will_void_rows: tuple[dict, ...] = ()
@@ -722,6 +740,7 @@ class MasterV2Plan:
                 x.unit_cost_ex_tax is not None or x.reason is not None for x in updates),
             "line_creates": sum(x.is_create for x in self.cost_refills),
             "line_voids": sum(x.operation == "VOID" for x in self.cost_refills),
+            "order_reassignments": len(self.assignment_changes),
             "expense_creates": sum(getattr(x, "is_create", False) for x in self.expense_updates),
             "expense_updates": sum(not getattr(x, "is_create", False) for x in self.expense_updates),
             "expense_voids": len(self.expense_voids),
@@ -1448,7 +1467,106 @@ def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
     return meta
 
 
-def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill], int, set[int]]:
+def _v2_refill_for_existing_line(
+    db: Session,
+    *,
+    row,
+    index: dict[str, int],
+    row_no: int,
+    line: FMaintenanceLine,
+) -> CostRefill | None:
+    """把一行人工回传与既有事实做 diff；原样行返回 ``None``。
+
+    带实体 ID 的正常回传和「人工认证后、尚未出现在本项目导出中的全局 WBDD
+    行」共用这一套字段语义，避免认领归属时顺手制造一份重复明细。
+    """
+
+    pn = None
+    part_id = None
+    pn_cell = str(_cell(row, index, "PN") or "").strip()
+    if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
+        part = _exact_part_for_pn(db, pn_cell)
+        if part is None:
+            raise WorkbookError("part_not_found",
+                                f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
+        pn = part.pn_std
+        part_id = part.id
+    desc_cell = str(_cell(row, index, "描述") or "").strip()
+    description = desc_cell if desc_cell != (line.description or "") else None
+    qty_cell = _cell(row, index, "需求数量")
+    qty_parsed = (
+        _v2_decimal(qty_cell, row_no=row_no, label="需求数量")
+        if qty_cell not in (None, "") else None
+    )
+    if qty_parsed is not None and qty_parsed <= 0:
+        raise WorkbookError("invalid_amount", f"第 {row_no} 行需求数量必须大于 0")
+    qty = (
+        qty_parsed
+        if qty_parsed is not None and qty_parsed != (line.qty or Decimal(0))
+        else None
+    )
+    raw_return = _cell(row, index, "退货数量")
+    return_parsed = (
+        _v2_decimal(raw_return, row_no=row_no, label="退货数量")
+        if raw_return not in (None, "") else None
+    )
+    return_qty = (
+        return_parsed
+        if return_parsed is not None
+        and return_parsed != (line.return_qty or Decimal(0))
+        else None
+    )
+    effective_qty = qty if qty is not None else (line.qty or Decimal(0))
+    effective_return = (
+        return_qty if return_qty is not None else (line.return_qty or Decimal(0))
+    )
+    if effective_return > effective_qty:
+        raise WorkbookError("invalid_amount",
+                            f"第 {row_no} 行退货数量不能大于需求数量")
+    sn_cell = str(_cell(row, index, "SN") or "").strip()
+    serial_numbers = sn_cell if sn_cell != (line.serial_numbers or "") else None
+    note_cell = str(_cell(row, index, "备注") or "").strip()
+    note = note_cell if note_cell != (line.line_note or "") else None
+
+    override = db.scalar(
+        select(MaintenanceManualCostOverride).where(
+            MaintenanceManualCostOverride.line_id == line.id))
+    raw_manual = _cell(row, index, "人工未税单位成本")
+    amount = inc = None
+    if raw_manual not in (None, ""):
+        parsed_amount = _v2_decimal(raw_manual, row_no=row_no,
+                                    label="人工未税单位成本", required=True)
+        if override is None or parsed_amount != (override.unit_cost_ex_tax or Decimal(0)):
+            amount = parsed_amount
+            inc = (amount * (Decimal("1") + TAX_RATE)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+    reason_cell = str(_cell(row, index, "人工成本原因") or "").strip() or None
+    reason = reason_cell if reason_cell != (override.reason if override else None) else None
+
+    if (pn is None and description is None and qty is None
+            and return_qty is None and serial_numbers is None and note is None
+            and amount is None and reason is None):
+        return None
+    return CostRefill(
+        line_id=line.id, operation="UPDATE",
+        pn=pn, part_id=part_id,
+        description=description, qty=qty, return_qty=return_qty,
+        serial_numbers=serial_numbers,
+        unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
+        reason=reason, note=note,
+    )
+
+
+def _v2_parse_parts(
+    db: Session,
+    project_id: str,
+    ws,
+) -> tuple[
+    list[CostRefill],
+    int,
+    set[int],
+    tuple[SourceOrderAssignmentChange, ...],
+]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
     required = {"操作", "维保单号", "PN", "需求数量", "人工未税单位成本",
@@ -1459,6 +1577,8 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
     out: list[CostRefill] = []
     uploaded_entity_rows = 0
     uploaded_entity_ids: set[int] = set()
+    claimed_existing_line_ids: set[int] = set()
+    assignment_changes: dict[str, SourceOrderAssignmentChange] = {}
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
@@ -1472,7 +1592,12 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
             uploaded_entity_ids.add(int(raw_id))
 
         if not has_entity:
-            # 新增行：操作可空或 CREATE；空白占位行（单号/PN/数量全空）跳过
+            # 空实体行有两种明确语义：
+            # - 操作留空：优先唯一识别全局 WBDD 的既有行（人工认证/幂等回传）；
+            #   无匹配才新增。
+            # - 显式 CREATE：强制新增。
+            # 一旦该 WBDD 当前挂在别的项目，本项目内人工回传就是改挂确认；apply
+            # 阶段仍经来源单归属服务做权限、乐观锁、历史和审计。
             order_no = str(_cell(row, index, "维保单号") or "").strip()
             pn_raw = str(_cell(row, index, "PN") or "").strip()
             qty_raw = _cell(row, index, "需求数量")
@@ -1483,22 +1608,27 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
                                     f"第 {row_no} 行无实体ID，只能填 CREATE 或留空")
             if not order_no:
                 raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写维保单号")
-            # 维保单号必须已存在且归属本项目
-            order = db.scalar(
+            from app.services.query_filters import active_beta_maintenance_orders
+
+            order_stmt = (
                 select(FMaintenanceOrder)
-                .join(MaintenanceSourceOrderAssignment,
-                      (MaintenanceSourceOrderAssignment.source_order_id
-                       == FMaintenanceOrder.raw_order_id)
-                      & MaintenanceSourceOrderAssignment.is_active.is_(True))
-                .where(FMaintenanceOrder.order_no == order_no,
-                       MaintenanceSourceOrderAssignment.project_id == project_id)
-                .limit(1)
+                .where(FMaintenanceOrder.order_no == order_no)
+                .order_by(FMaintenanceOrder.raw_order_id)
             )
-            if order is None:
+            orders = list(db.scalars(
+                active_beta_maintenance_orders(order_stmt, FMaintenanceOrder)
+            ).all())
+            if not orders:
                 raise WorkbookError(
-                    "order_not_in_project",
-                    f"第 {row_no} 行维保单号 {order_no!r} 不在本项目，"
-                    "新增明细只能挂到本项目已有需求单")
+                    "order_not_found",
+                    f"第 {row_no} 行维保单号 {order_no!r} 尚未导入统一 WBDD，"
+                    "请先导入原始 WBDD，再回传项目总表")
+            if len(orders) > 1:
+                raise WorkbookError(
+                    "order_no_ambiguous",
+                    f"第 {row_no} 行维保单号 {order_no!r} 对应多张活动来源单，"
+                    "无法安全确认归属，请管理员核查来源 ID")
+            order = orders[0]
             if not pn_raw:
                 raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写 PN")
             part = _exact_part_for_pn(db, pn_raw)
@@ -1514,6 +1644,95 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
             if return_qty > qty:
                 raise WorkbookError("invalid_amount",
                                     f"第 {row_no} 行退货数量不能大于需求数量")
+            current_assignment = db.scalar(
+                select(MaintenanceSourceOrderAssignment).where(
+                    MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
+                    MaintenanceSourceOrderAssignment.is_active.is_(True),
+                )
+            )
+            if current_assignment is None or current_assignment.project_id != project_id:
+                previous_project = (
+                    db.get(MaintenanceProject, current_assignment.project_id)
+                    if current_assignment is not None else None
+                )
+                change = SourceOrderAssignmentChange(
+                    source_order_id=order.raw_order_id,
+                    order_no=order_no,
+                    expected_assignment_id=(
+                        current_assignment.assignment_id
+                        if current_assignment is not None else None
+                    ),
+                    expected_version=(
+                        current_assignment.version
+                        if current_assignment is not None else None
+                    ),
+                    previous_project_id=(
+                        current_assignment.project_id
+                        if current_assignment is not None else None
+                    ),
+                    previous_project_name=(
+                        previous_project.display_name if previous_project is not None else None
+                    ),
+                )
+                prior = assignment_changes.get(order.raw_order_id)
+                if prior is not None and prior != change:
+                    raise WorkbookError(
+                        "stale_assignment",
+                        f"第 {row_no} 行维保单号 {order_no!r} 的项目归属已变化，"
+                        "请重新预检")
+                assignment_changes[order.raw_order_id] = change
+
+            # 操作留空时先认领已存在的全局明细。PN+数量+退货数量是基础身份；
+            # SN/描述只在出现多个候选时用于收窄，仍多义则整本拒绝。
+            existing_line: FMaintenanceLine | None = None
+            if not operation:
+                candidates = [
+                    candidate
+                    for candidate in db.scalars(
+                        select(FMaintenanceLine)
+                        .where(
+                            FMaintenanceLine.order_id == order.id,
+                            FMaintenanceLine.part_id == part.id,
+                            FMaintenanceLine.is_active.is_(True),
+                        )
+                        .order_by(FMaintenanceLine.id)
+                    ).all()
+                    if candidate.id not in claimed_existing_line_ids
+                    and (candidate.qty or Decimal(0)) == qty
+                    and (candidate.return_qty or Decimal(0)) == return_qty
+                ]
+                sn_value = str(_cell(row, index, "SN") or "").strip()
+                if len(candidates) > 1 and sn_value:
+                    candidates = [
+                        candidate for candidate in candidates
+                        if (candidate.serial_numbers or "").strip() == sn_value
+                    ]
+                description_value = str(_cell(row, index, "描述") or "").strip()
+                if len(candidates) > 1 and description_value:
+                    narrowed = [
+                        candidate for candidate in candidates
+                        if (candidate.description or "").strip() == description_value
+                    ]
+                    if narrowed:
+                        candidates = narrowed
+                if len(candidates) > 1:
+                    raise WorkbookError(
+                        "manual_line_ambiguous",
+                        f"第 {row_no} 行 {order_no}/{part.pn_std} 在统一 WBDD 中有"
+                        "多条相同数量明细，无法唯一认领；请保留实体ID或明确填 CREATE")
+                if candidates:
+                    existing_line = candidates[0]
+
+            if existing_line is not None:
+                claimed_existing_line_ids.add(existing_line.id)
+                uploaded_entity_rows += 1
+                uploaded_entity_ids.add(existing_line.id)
+                refill = _v2_refill_for_existing_line(
+                    db, row=row, index=index, row_no=row_no, line=existing_line)
+                if refill is not None:
+                    out.append(refill)
+                continue
+
             raw_manual = _cell(row, index, "人工未税单位成本")
             amount = inc = None
             if raw_manual not in (None, ""):
@@ -1569,71 +1788,16 @@ def _v2_parse_parts(db: Session, project_id: str, ws) -> tuple[list[CostRefill],
             raise WorkbookError("invalid_operation",
                                 f"第 {row_no} 行操作只能是 UPDATE、VOID 或留空")
 
-        # UPDATE：逐字段与现值比对，只有变化的字段下发——原样上传不重写、
-        # 不标 workbook_manual、不重算金额、不写假审计（幂等）。
-        pn = None
-        part_id = None
-        pn_cell = str(_cell(row, index, "PN") or "").strip()
-        if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
-            part = _exact_part_for_pn(db, pn_cell)
-            if part is None:
-                raise WorkbookError("part_not_found",
-                                    f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
-            pn = part.pn_std
-            part_id = part.id
-        desc_cell = str(_cell(row, index, "描述") or "").strip()
-        description = desc_cell if desc_cell != (line.description or "") else None
-        qty_cell = _cell(row, index, "需求数量")
-        qty_parsed = _v2_decimal(qty_cell, row_no=row_no, label="需求数量") if qty_cell not in (None, "") else None
-        if qty_parsed is not None and qty_parsed <= 0:
-            raise WorkbookError("invalid_amount", f"第 {row_no} 行需求数量必须大于 0")
-        qty = qty_parsed if qty_parsed is not None and qty_parsed != (line.qty or Decimal(0)) else None
-        return_parsed = (
-            _v2_decimal(_cell(row, index, "退货数量"), row_no=row_no, label="退货数量")
-            if _cell(row, index, "退货数量") not in (None, "") else None)
-        return_qty = (return_parsed if return_parsed is not None
-                      and return_parsed != (line.return_qty or Decimal(0)) else None)
-        # 用「变更后生效值」校验退货不超需求（只改退货数量时也要校验）。
-        effective_qty = qty if qty is not None else (line.qty or Decimal(0))
-        effective_return = return_qty if return_qty is not None else (line.return_qty or Decimal(0))
-        if effective_return > effective_qty:
-            raise WorkbookError("invalid_amount",
-                                f"第 {row_no} 行退货数量不能大于需求数量")
-        sn_cell = str(_cell(row, index, "SN") or "").strip()
-        serial_numbers = sn_cell if sn_cell != (line.serial_numbers or "") else None
-        note_cell = str(_cell(row, index, "备注") or "").strip()
-        note = note_cell if note_cell != (line.line_note or "") else None
-
-        # 人工成本两列导出时对已有 override 预填；与现值比对防止原样上传重写。
-        override = db.scalar(
-            select(MaintenanceManualCostOverride).where(
-                MaintenanceManualCostOverride.line_id == line.id))
-        raw_manual = _cell(row, index, "人工未税单位成本")
-        amount = inc = None
-        if raw_manual not in (None, ""):
-            parsed_amount = _v2_decimal(raw_manual, row_no=row_no,
-                                        label="人工未税单位成本", required=True)
-            if override is None or parsed_amount != (override.unit_cost_ex_tax or Decimal(0)):
-                amount = parsed_amount
-                inc = (amount * (Decimal("1") + TAX_RATE)).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP)
-        reason_cell = str(_cell(row, index, "人工成本原因") or "").strip() or None
-        reason = (reason_cell if reason_cell != (override.reason if override else None)
-                  else None)
-
-        if (pn is None and description is None and qty is None
-                and return_qty is None and serial_numbers is None and note is None
-                and amount is None and reason is None):
-            continue
-        out.append(CostRefill(
-            line_id=line.id, operation="UPDATE",
-            pn=pn, part_id=part_id,
-            description=description, qty=qty, return_qty=return_qty,
-            serial_numbers=serial_numbers,
-            unit_cost_ex_tax=amount, unit_cost_inc_tax=inc,
-            reason=reason, note=note,
-        ))
-    return out, uploaded_entity_rows, uploaded_entity_ids
+        refill = _v2_refill_for_existing_line(
+            db, row=row, index=index, row_no=row_no, line=line)
+        if refill is not None:
+            out.append(refill)
+    return (
+        out,
+        uploaded_entity_rows,
+        uploaded_entity_ids,
+        tuple(assignment_changes.values()),
+    )
 
 
 def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
@@ -2022,7 +2186,13 @@ def _expected_expense_ids(db: Session, project_id: str) -> list[str]:
 # 上传数据行（带实体ID）低于导出行数的该比例 → 疑似筛选/复制粘贴事故，整本拒绝。
 
 
-def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> MasterV2Plan:
+def validate_project_master_v2(
+    db: Session,
+    *,
+    project_id: str,
+    data: bytes,
+    user_ctx: UserContext | None = None,
+) -> MasterV2Plan:
     try:
         wb = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:
@@ -2042,10 +2212,17 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
     will_void_rows: list[dict] = []
     uploaded_line_rows = 0
     uploaded_line_ids: set[int] = set()
+    assignment_changes: tuple[SourceOrderAssignmentChange, ...] = ()
     if V2_SHEET_PARTS in included:
-        parsed_refills, uploaded_line_rows, uploaded_line_ids = _v2_parse_parts(
+        (parsed_refills, uploaded_line_rows, uploaded_line_ids,
+         assignment_changes) = _v2_parse_parts(
             db, project_id, wb[V2_SHEET_PARTS])
         cost_refills = tuple(parsed_refills)
+        if (assignment_changes and user_ctx is not None
+                and user_ctx.role not in FULL_SCOPE_ROLES):
+            raise WorkbookError(
+                "assignment_permission_denied",
+                "这份项目总表会更正统一 WBDD 的项目归属，仅管理员或全量项目账号可确认")
     if V2_SHEET_SITE in included:
         site_flags = list(_v2_parse_site(db, project_id, wb[V2_SHEET_SITE]))
         # 2026-08-23：06 缺行=作废（用户口径：Excel 删行覆盖上传，没有的默认作废）
@@ -2141,14 +2318,48 @@ def validate_project_master_v2(db: Session, *, project_id: str, data: bytes) -> 
         expense_updates=tuple(expense_updates),
         receipt_ops=receipt_ops,
         milestone_changes=milestone_changes,
+        assignment_changes=assignment_changes,
         expense_voids=tuple(expense_voids),
         will_void_rows=tuple(will_void_rows),
     )
 
 
-def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str, import_batch_id: str) -> dict:
+def apply_project_master_v2(
+    db: Session,
+    plan: MasterV2Plan,
+    *,
+    operated_by: str,
+    import_batch_id: str,
+    user_ctx: UserContext | None = None,
+) -> dict:
     # All mutations deliberately happen on this one Session transaction.
     audit_reason = f"项目总表应用 {import_batch_id[:8]}"
+    if plan.assignment_changes:
+        if user_ctx is None:
+            raise WorkbookError(
+                "assignment_permission_denied",
+                "本次回传包含 WBDD 项目归属更正，缺少可审计的登录身份")
+        from app.services import maintenance_source_assignments as source_assignments
+
+        try:
+            source_assignments.assign_source_orders(
+                db,
+                project_id=plan.project_id,
+                items=[{
+                    "source_order_id": change.source_order_id,
+                    "expected_assignment_id": change.expected_assignment_id,
+                    "expected_version": change.expected_version,
+                } for change in plan.assignment_changes],
+                reason=f"项目总表人工认证更正 WBDD 归属（{import_batch_id[:8]}）",
+                operated_by=operated_by,
+                user_ctx=user_ctx,
+            )
+        except source_assignments.SourceAssignmentConflict as exc:
+            raise WorkbookError("stale_assignment", str(exc)) from exc
+        except source_assignments.SourceAssignmentPermissionError as exc:
+            raise WorkbookError("assignment_permission_denied", str(exc)) from exc
+        except source_assignments.SourceAssignmentError as exc:
+            raise WorkbookError("assignment_invalid", str(exc)) from exc
     # 手工新增行需要一个 import_batch（NOT NULL FK）
     manual_batch: SysImportBatch | None = None
     if any(r.is_create for r in plan.cost_refills):
@@ -2295,11 +2506,22 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
             reason=f"{audit_reason}（行全部作废级联）",
         )
         if cascaded:
-            audit_after = {"cascaded_orders": cascaded}
-            _write_audit(db, project_id=plan.project_id,
-                         entity_type="maintenance_order", entity_id=",".join(cascaded),
-                         action="VOID", operated_by=operated_by, reason=audit_reason,
-                         after=audit_after)
+            # entity_id 是 varchar(64)，不能把多张 source_order_id 逗号拼接到一行。
+            # 每张单独立审计也让后续检索/追责无需再拆字符串。
+            for source_order_id in cascaded:
+                _write_audit(
+                    db,
+                    project_id=plan.project_id,
+                    entity_type="maintenance_order",
+                    entity_id=source_order_id,
+                    action="VOID",
+                    operated_by=operated_by,
+                    reason=audit_reason,
+                    after={
+                        "cascaded_order": source_order_id,
+                        "cascade_count": len(cascaded),
+                    },
+                )
     # 2026-08-24：工作簿建行/改量后立即取价——此前建行不调取价，新行成本
     # 为空要等下一次全局回填才恢复（8-24 两个项目新增 38 行无价的根因）。
     pricing_entries: list[tuple[date, MaintenanceSiteIssueLine]] = []

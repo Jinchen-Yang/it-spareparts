@@ -2,7 +2,12 @@ import { useState } from "react";
 import { Alert, Button, List, Modal, Space, Typography, Upload, message } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
-import type { WillVoidRow, WorkbookApplyResult, WorkbookValidateResult } from "../../api/maintenanceWorkbooks";
+import type {
+  WillReassignOrder,
+  WillVoidRow,
+  WorkbookApplyResult,
+  WorkbookValidateResult,
+} from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 
 const { Text } = Typography;
@@ -40,6 +45,9 @@ function describe(result: Partial<WorkbookApplyResult>): string {
     parts.push(`备件更新 ${result.line_updates || result.qty_updates} 行`);
   }
   if (result.line_voids) parts.push(`备件作废 ${result.line_voids} 行`);
+  if (result.order_reassignments) {
+    parts.push(`WBDD 归属更正 ${result.order_reassignments} 张`);
+  }
   if (result.expense_creates) parts.push(`报销新增 ${result.expense_creates} 行`);
   if (result.expense_updates) parts.push(`报销更新 ${result.expense_updates} 行`);
   if (result.expense_voids) parts.push(`报销作废 ${result.expense_voids} 行`);
@@ -65,6 +73,11 @@ function describeVoidRow(row: WillVoidRow, index: number): string {
     row.reason ? String(row.reason) : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : `第 ${index + 1} 行`;
+}
+
+function describeReassignment(row: WillReassignOrder, index: number): string {
+  const order = row.order_no || row.source_order_id || `第 ${index + 1} 张`;
+  return `${order} · ${row.from_project_name || "未归属"} → 当前项目`;
 }
 
 export function WorkbookRoundTrip({
@@ -100,6 +113,7 @@ export function WorkbookRoundTrip({
   const validateThenApply = async (file: File) => {
     const preview = await onValidate!(file);
     const voidRows = preview.will_void_rows ?? [];
+    const reassignRows = preview.will_reassign_orders ?? [];
     Modal.confirm({
       title: `确认回传${title}？`,
       width: 560,
@@ -121,6 +135,25 @@ export function WorkbookRoundTrip({
                     </List.Item>
                   )}
                 />
+              }
+            />
+          ) : null}
+          {reassignRows.length ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={`以下 ${reassignRows.length} 张 WBDD 将按本次项目内人工认证更正归属`}
+              description={
+                <Space direction="vertical" size={2}>
+                  {reassignRows.map((row, index) => (
+                    <Text key={row.source_order_id || `${row.order_no}-${index}`} style={{ fontSize: 12 }}>
+                      {describeReassignment(row, index)}
+                    </Text>
+                  ))}
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    旧归属会保留为历史记录；已有明细将被复用，不会重复新增。
+                  </Text>
+                </Space>
               }
             />
           ) : null}

@@ -444,7 +444,8 @@ async def validate_project_master(
     data = await _read_upload(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
-            plan = master.validate_project_master_v2(db, project_id=project_id, data=data)
+            plan = master.validate_project_master_v2(
+                db, project_id=project_id, data=data, user_ctx=ctx)
             return {
                 "valid": True,
                 "protocol_id": master.V2_PROTOCOL_ID,
@@ -455,6 +456,13 @@ async def validate_project_master(
                 # #265 契约：作废预览（03 显式 VOID + 04 显式 VOID/缺行），
                 # apply 前对用户可见（前端 WorkbookRoundTrip 两阶段确认）。
                 "will_void_rows": [dict(r) for r in plan.will_void_rows],
+                "will_reassign_orders": [{
+                    "source_order_id": change.source_order_id,
+                    "order_no": change.order_no,
+                    "from_project_id": change.previous_project_id,
+                    "from_project_name": change.previous_project_name,
+                    "to_project_id": project_id,
+                } for change in plan.assignment_changes],
                 "warnings": [],
             }
         plan = master.validate(db, project_id=project_id, data=data)
@@ -481,9 +489,11 @@ async def apply_project_master(
     data = await _read_upload(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
-            plan = master.validate_project_master_v2(db, project_id=project_id, data=data)
+            plan = master.validate_project_master_v2(
+                db, project_id=project_id, data=data, user_ctx=ctx)
             result = master.apply_project_master_v2(
-                db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4())
+                db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4()),
+                user_ctx=ctx,
             )
         else:
             plan = master.validate(db, project_id=project_id, data=data)

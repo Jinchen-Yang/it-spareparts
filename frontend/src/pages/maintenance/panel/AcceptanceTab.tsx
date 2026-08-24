@@ -24,12 +24,13 @@ import {
 } from "../../../api/maintenanceOperations";
 import { readError } from "./panelUtils";
 import MaintenanceAcceptancePanel from "../../../components/maintenance/MaintenanceAcceptancePanel";
+import { saveBlob } from "../../../api/maintenanceWorkbooks";
 
 const { Text } = Typography;
 
 function idempotencyKey(): string {
-  const suffix = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
+  const suffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `acceptance-checklist-${suffix}`;
 }
@@ -95,12 +96,7 @@ export function AcceptanceTab({
   const downloadTemplate = async () => {
     try {
       const resp = await downloadAcceptanceChecklistTemplate(projectId);
-      const url = URL.createObjectURL(resp.data);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "验收需求清单模板.xlsx";
-      link.click();
-      URL.revokeObjectURL(url);
+      saveBlob(resp.data, "验收需求清单模板.xlsx");
     } catch (err) {
       message.error(readError(err, "模板下载失败"));
     }

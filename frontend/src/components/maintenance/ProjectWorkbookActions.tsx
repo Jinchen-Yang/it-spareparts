@@ -9,6 +9,7 @@ import {
   validateMaintenanceProjectWorkbook,
   type MaintenanceWorkbookValidation,
 } from "../../api/maintenanceOperations";
+import { saveBlob } from "../../api/maintenanceWorkbooks";
 import { readMaintenanceCapabilities } from "./maintenancePermissions";
 
 const CHANGE_LABELS: Record<string, string> = {
@@ -57,14 +58,7 @@ export default function ProjectWorkbookActions({
     setStatus(null);
     try {
       const { data } = await downloadMaintenanceProjectWorkbook(projectId);
-      const url = URL.createObjectURL(data);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${safeFilenamePart(projectCode)}_维保项目全量四表.xlsx`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      saveBlob(data, `${safeFilenamePart(projectCode)}_维保项目全量四表.xlsx`);
     } catch {
       setStatus({ type: "error", message: "完整四表下载失败，请重试" });
     } finally {
@@ -103,14 +97,7 @@ export default function ProjectWorkbookActions({
       const { data } = await downloadMaintenanceWorkbookValidationErrors(
         validation.validation_token,
       );
-      const url = URL.createObjectURL(data);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${safeFilenamePart(projectCode)}_维保工作簿错误明细.xlsx`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      saveBlob(data, `${safeFilenamePart(projectCode)}_维保工作簿错误明细.xlsx`);
     } catch {
       setStatus({ type: "error", message: "错误明细表下载失败，请重试" });
     } finally {
