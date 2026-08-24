@@ -261,6 +261,12 @@ def test_sales_fallback_persists_only_valid_samples_when_result_contains_over_li
         "_purchase_window",
         lambda *_args, **_kwargs: None,
     )
+    # 本测试用最小假 session 只喂销售查询；需求单层按同款打桩跳过。
+    monkeypatch.setattr(
+        maintenance_consumption_cost,
+        "_demand_unit_for_line",
+        lambda *_args, **_kwargs: None,
+    )
     line = MaintenanceSiteIssueLine(
         issue_line_id="issue-line-sales-valid-filter",
         issue_id="issue-sales-valid-filter",
@@ -324,7 +330,7 @@ def test_recompute_persists_t_plus_three_purchase_once_with_line_audit(db):
     assert line.cost_amount == 50
     assert line.reference_sample_ids == [line.reference_samples[0]["sample_id"]]
     assert line.reference_samples[0]["distance_days"] == 3
-    assert line.algorithm_version == "site-issue-cost-v2"
+    assert line.algorithm_version == "site-issue-cost-v2.1"
     assert line.version == 2
     state_after = db.get(MaintenanceProjectWorkbookState, project.project_id)
     assert state_after.revision == revision_before + 1

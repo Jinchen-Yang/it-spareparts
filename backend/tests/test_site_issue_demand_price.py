@@ -51,15 +51,23 @@ def _batch(db, name, file_type):
     return batch
 
 
-def _wbdd_price(db, *, project, pn, unit_ex):
-    """造一条挂靠到 project 的 WBDD 需求单行，行成本单价 = unit_ex。"""
+def _wbdd_price(db, *, project, pn, unit_ex, qty="1", return_qty=None,
+                order_no=None, order_date=None):
+    """造一条挂靠到 project 的 WBDD 需求单行，行成本单价 = unit_ex。
+
+    qty/return_qty 控制净数量口径；order_no/order_date 控制同单匹配与
+    "最新一单"挑选（2026-08-24 取价层修复回归用）。
+    """
     batch = _batch(db, f"dem-{uuid.uuid4().hex[:6]}", "maintenance")
-    rid = f"WBDD-DEM-{uuid.uuid4().hex[:8]}"
+    rid = order_no or f"WBDD-DEM-{uuid.uuid4().hex[:8]}"
     loader.load(
         db,
         f.maintenance_result(
-            {rid: f.maintenance_head(rid, order_no=rid, project=project.display_name)},
-            [f.maintenance_line(rid, f"{rid}-L1", pn, qty="1")],
+            {rid: f.maintenance_head(rid, order_no=rid,
+                                     on=order_date or date(2026, 8, 1),
+                                     project=project.display_name)},
+            [f.maintenance_line(rid, f"{rid}-L1", pn, qty=qty,
+                                return_qty=return_qty)],
         ),
         batch.id, date(2026, 8, 1), mode="upsert",
     )
@@ -76,6 +84,7 @@ def _wbdd_price(db, *, project, pn, unit_ex):
     line.cost_amount_inc_tax = (Decimal(unit_ex) * Decimal("1.13")).quantize(
         Decimal("0.01"))
     db.commit()
+    return line
 
 
 def _purchase_price(db, *, part, unit_price, order_date):
@@ -155,3 +164,93 @@ def test_no_evidence_anywhere_stays_null(db):
     db.refresh(line)
     assert line.cost_source is None
     assert line.cost_amount_inc_tax is None
+
+
+def test_partial_return_no_longer_deflates_unit_price(db):
+    """2026-08-24 修复：单价分母改净数量。
+
+    需求行 qty=10、退 4、cost_amount_ex_tax=600（真实单价 100）——
+    旧公式 600÷10=60 会把领用价压低四成，修复后必须是 100。
+    """
+    project = _project(db, "部分退货压价修复项目")
+    part = _part(db, "PN-DEM-RET")
+    _wbdd_price(db, project=project, pn="PN-DEM-RET", unit_ex="600",
+                qty="10", return_qty="4")
+    issue, line = _issue_line(db, project=project, part=part)
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "maint_demand"
+    assert line.unit_cost_ex_tax == Decimal("100.00")
+
+
+def test_fully_returned_line_provides_no_price(db):
+    """整行退净（净数量 0、成本 0）的需求行不能当价格证据——回退采购窗口。"""
+    project = _project(db, "整行退净项目")
+    part = _part(db, "PN-DEM-VOID")
+    _wbdd_price(db, project=project, pn="PN-DEM-VOID", unit_ex="0",
+                qty="2", return_qty="2")
+    _purchase_price(db, part=part, unit_price="88.00",
+                    order_date=date(2026, 8, 8))
+    issue, line = _issue_line(db, project=project, part=part)
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost_ex_tax == Decimal("88.00")
+
+
+def test_same_order_beats_latest_same_part(db):
+    """同单同 PN 优先于"最新一单"兜底。
+
+    领用单号 = 旧单 WBDD-OLD（价 200），项目里还有更新的 WBDD-NEW（价 999）
+    ——旧公式一律取最新 999；修复后按单号命中本单 200。
+    """
+    project = _project(db, "同单优先项目")
+    part = _part(db, "PN-DEM-SAME")
+    _wbdd_price(db, project=project, pn="PN-DEM-SAME", unit_ex="200",
+                order_no="WBDD-OLD", order_date=date(2026, 6, 1))
+    _wbdd_price(db, project=project, pn="PN-DEM-SAME", unit_ex="999",
+                order_no="WBDD-NEW", order_date=date(2026, 8, 5))
+    issue, line = _issue_line(db, project=project, part=part)
+    issue.issue_no = "WBDD-OLD"
+    db.commit()
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "maint_demand"
+    assert line.unit_cost_ex_tax == Decimal("200.00")
+
+
+def test_source_line_id_exact_link_wins(db):
+    """领用行显式关联的需求行优先级最高（即使同项目最新一单更贵）。"""
+    project = _project(db, "精确行关联项目")
+    part = _part(db, "PN-DEM-EXACT")
+    linked = _wbdd_price(db, project=project, pn="PN-DEM-EXACT", unit_ex="150",
+                         order_no="WBDD-LINKED", order_date=date(2026, 5, 1))
+    _wbdd_price(db, project=project, pn="PN-DEM-EXACT", unit_ex="777",
+                order_no="WBDD-LATEST", order_date=date(2026, 8, 9))
+    issue, line = _issue_line(db, project=project, part=part)
+    line.source_order_id = "WBDD-LINKED"
+    line.source_line_id = linked.raw_line_id
+    db.commit()
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "maint_demand"
+    assert line.unit_cost_ex_tax == Decimal("150.00")
+
+
+def test_resolve_line_single_path_also_uses_demand_layer(db):
+    """单行路径（补价/重算入口）与批量路径同口径：需求单层必须生效。"""
+    project = _project(db, "单行路径需求层项目")
+    part = _part(db, "PN-DEM-SINGLE")
+    _wbdd_price(db, project=project, pn="PN-DEM-SINGLE", unit_ex="355.95")
+    _purchase_price(db, part=part, unit_price="947.31",
+                    order_date=date(2026, 8, 8))
+    issue, line = _issue_line(db, project=project, part=part)
+    mcc.resolve_line(db, issue_date=issue.issue_date, line=line)
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "maint_demand"
+    assert line.unit_cost_ex_tax == Decimal("355.95")

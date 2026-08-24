@@ -2300,6 +2300,9 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
                          entity_type="maintenance_order", entity_id=",".join(cascaded),
                          action="VOID", operated_by=operated_by, reason=audit_reason,
                          after=audit_after)
+    # 2026-08-24：工作簿建行/改量后立即取价——此前建行不调取价，新行成本
+    # 为空要等下一次全局回填才恢复（8-24 两个项目新增 38 行无价的根因）。
+    pricing_entries: list[tuple[date, MaintenanceSiteIssueLine]] = []
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         # 2026-08-23：缺行=作废——领用行软作废，退出成本与返还义务计算；
@@ -2360,19 +2363,27 @@ def apply_project_master_v2(db: Session, plan: MasterV2Plan, *, operated_by: str
                 algorithm_version="workbook-manual-v1",
             )
             db.add(line)
+            pricing_entries.append((issue.issue_date, line))
             continue
         if line is None:
             raise WorkbookError("line_not_found", f"领用行 {flag.issue_line_id} 已不存在，请重新下载")
         line.no_return = flag.no_return
         if flag.pn is not None: line.pn = flag.pn
         if flag.serial_number is not None: line.serial_number = flag.serial_number
-        if flag.quantity is not None: line.quantity = flag.quantity
+        if flag.quantity is not None:
+            line.quantity = flag.quantity
+            qty_issue = db.get(MaintenanceSiteIssue, line.issue_id)
+            if qty_issue is not None:
+                pricing_entries.append((qty_issue.issue_date, line))
         if flag.remark is not None: line.remark = flag.remark
         if flag.issue_no is not None or flag.issue_date is not None:
             issue = db.get(MaintenanceSiteIssue, line.issue_id)
             if issue is not None:
                 if flag.issue_no is not None: issue.issue_no = flag.issue_no
                 if flag.issue_date is not None: issue.issue_date = flag.issue_date
+    if pricing_entries:
+        from app.services import maintenance_consumption_cost as _consumption_cost
+        _consumption_cost.resolve_lines(db, lines=pricing_entries)
     if plan.expense_updates or plan.receipt_ops:
         ec.apply(db, ec.WorkbookPlan(plan.project_id, plan.expense_updates, plan.receipt_ops),
                  operated_by=operated_by, import_batch_id=import_batch_id, commit=False)
