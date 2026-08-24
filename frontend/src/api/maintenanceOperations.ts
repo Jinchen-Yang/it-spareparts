@@ -1202,24 +1202,6 @@ export const submitMaintenanceAcceptance = (
   { headers: { "Idempotency-Key": input.idempotencyKey } },
 );
 
-export const reviewMaintenanceAcceptance = (
-  deliverableId: string,
-  input: {
-    expected_version: number;
-    decision: "approve" | "reject";
-    reason?: string;
-    idempotencyKey: string;
-  },
-) => api.post<MaintenanceAcceptanceMutationResult>(
-  `/maintenance/acceptance-deliverables/${encodeURIComponent(deliverableId)}/review`,
-  {
-    expected_version: input.expected_version,
-    decision: input.decision,
-    reason: input.reason,
-  },
-  { headers: { "Idempotency-Key": input.idempotencyKey } },
-);
-
 export const downloadMaintenanceAcceptanceAttachment = (fileId: string) =>
   api.get<Blob>(`/maintenance/acceptance-files/${encodeURIComponent(fileId)}`, {
     responseType: "blob",

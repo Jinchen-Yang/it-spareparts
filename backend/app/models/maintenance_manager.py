@@ -355,10 +355,8 @@ class MaintenanceAcceptanceDeliverable(Base):
             "approval_status = 'not_reviewed' OR submission_status = 'submitted'",
             name="ck_maintenance_acceptance_approval_requires_submission",
         ),
-        CheckConstraint(
-            "submitted_by IS NULL OR approved_by IS NULL OR submitted_by <> approved_by",
-            name="ck_maintenance_acceptance_no_self_approval",
-        ),
+        # 「提交人≠审批人」约束已随 2026-08-24 免审批改造移除（迁移
+        # a9e2f7c4d1b8）：提交即生效，提交人即生效人；审计靠操作日志。
         CheckConstraint("version >= 1", name="ck_maintenance_acceptance_version"),
         UniqueConstraint(
             "project_id",

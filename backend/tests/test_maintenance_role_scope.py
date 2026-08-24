@@ -76,15 +76,25 @@ def test_maintenance_manager_template_shape():
     tpl = permissions.ROLE_TEMPLATES["maintenance_manager"]
     assert tpl["page_maintenance"] is True
     assert tpl["own_maintenance_projects_only"] is True
+    # 2026-08-24 客户拍板：验收提交开放（提交即生效）
+    assert tpl["action_maintenance_acceptance_submit"] is True
     # 成本数据组全关（客户原话「这个权限还有点高」）
     assert not any(tpl.get(k) for k in permissions.DATA_GROUPS)
     # 其余页面/动作全关
     assert not any(v for k, v in tpl.items()
-                   if k not in ("page_maintenance", "own_maintenance_projects_only"))
-    # 既有角色模板不收敛（fail-closed）
-    for role in ("admin", "boss", "sales", "purchaser", "readonly"):
+                   if k not in ("page_maintenance", "own_maintenance_projects_only",
+                                "action_maintenance_acceptance_submit"))
+    # 既有角色模板不收敛（fail-closed）；sales 除外——2026-08-24 验收开放后
+    # 销售进维保页按"自己销售∪自己负责"收敛。
+    for role in ("admin", "boss", "purchaser", "readonly"):
         assert permissions.ROLE_TEMPLATES[role].get(
             "own_maintenance_projects_only") is not True
+    # 销售模板：维保页开 + 行键开 + 验收提交开
+    sales = permissions.ROLE_TEMPLATES["sales"]
+    assert sales["page_maintenance"] is True
+    assert sales["own_maintenance_projects_only"] is True
+    assert sales["action_maintenance_acceptance_submit"] is True
+    assert permissions.combo_errors(permissions.template_for("sales")) == []
 
 
 # ---------------------------------------------------------------- 越权矩阵

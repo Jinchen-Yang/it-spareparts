@@ -120,3 +120,19 @@
 - **全量复跑**：3648 过 / 6 跳过 / 10 失败（77:04）——9 个 https_rollback 为已知环境类（纯基线同败、CI main 绿），1 个 run_isolation 为同集群连跑残留（单独复跑即过，CI 新库不命中）。
 - 前端：631/631 + tsc 绿（Mac 本机）。
 - GitHub：三分支已推，堆叠 PR #273（workbook-ux→main）→ #274（analytics）→ #275（feedback-v124）；CI 计费仍堵（job 未启动，Billing 报错），生产前绿章以 cloudlay-ts 全量为准。
+
+## 九、2026-08-24 验收开放 + 免审批（客户微信拍板）
+
+> 客户原话：「验收这个我觉得可以开放给销售 项目经理和维保负责的人」「不需要审批」。
+
+### 实现口径
+- **开放**：sales 与 maintenance_manager（=项目经理/维保负责人账号角色）模板默认带 `action_maintenance_acceptance_submit`；sales 另开 `page_maintenance` + `own_maintenance_projects_only`（行键收敛「自己销售∪自己负责」，与 2026-08-21 反馈同口径）。验收两键移出 `ACTION_ADDITIONAL_PAGE_DEPENDENCIES`（Beta 附加依赖），前端验收面板从 canUseBeta 门改随维保页面渲染。
+- **免审批**：提交即生效——`submit_acceptance` 直接落 `approved`（approved_by=提交人，满足字段一致性 CHECK）；生效后仍可补附件/重新提交（版本乐观锁+幂等键不变）；`review_acceptance` 服务与 `/review` 端点删除；工作簿 v3 审批文案改为「提交即生效」。`action_maintenance_acceptance_review` 键留在注册表兼容历史快照（同 checklist 先例），标已废弃。
+- **迁移 a9e2f7c4d1b8**：删 `ck_maintenance_acceptance_no_self_approval`（模型同步移除）；存量 submitted+not_reviewed 整体转 approved（approved_by=提交人）；模板+账号快照（template_perms/legacy permissions）同步合并，覆盖层让位（管理员可再按账号收紧）。降级：自审行退回 not_reviewed、模板/快照回退、恢复 CHECK（有自审行则显式失败）。
+- 逾期口径（未提交且未通过才算逾期）、pending_review 系统任务/提醒筛选随「提交即 approved」自然失效，不需要改代码；工作簿 v3 表头列保留（行签名兼容），只改规则文案。
+
+### 测试（Mac Docker python:3.13-slim + 容器内 PG15，绕开 macOS conftest 拒跑）
+- 后端定向回归：acceptance_api 17 过、role_scope、beta_gate、workbook_v3、v3_migration 9 过、tracking_board、pools_api（账号 _meta）、operations_api+assignments 67 过——合计 149 过 0 失败。
+- 迁移链：upgrade head → check 双过；downgrade -1 → upgrade head 闭环过。
+- 前端：tsc + vite build 绿；vitest 632/632 绿。
+- 全量 pytest 未跑（沿用本仓纪律：发布前以 CI/全量为准）。

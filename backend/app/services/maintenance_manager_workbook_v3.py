@@ -576,7 +576,7 @@ def _acceptance_rows(snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
             acceptance.get("approved_at"),
             str(acceptance.get("approved_by") or ""),
             configuration,
-            "审批角色/附件载体待业务配置；外部链接不作为附件证据" if configuration != "configured" else "提交与审批严格分离",
+            "附件载体待业务配置；外部链接不作为附件证据" if configuration != "configured" else "提交即生效，无需独立审批（2026-08-24 起）",
         ))
     return rows
 
@@ -666,8 +666,8 @@ def build_manager_workbook(
     plan["A3"] = "留空表示保留现有值，不执行删除；实际回款由财务确认链路维护。"
     acceptance["A1"] = "验收材料状态（只读）"
     acceptance["A1"].font = Font(size=16, bold=True, color="35506B")
-    acceptance["A2"] = "提交与审批是两个状态；项目经理不能自行审批。"
-    acceptance["A3"] = "审批角色和附件载体未配置时系统关闭写入口；外部链接不视为附件。"
+    acceptance["A2"] = "提交即生效（2026-08-24 起取消独立审批）；提交人即生效人，全部实名审计。"
+    acceptance["A3"] = "附件载体未配置时系统关闭写入口；外部链接不视为附件。"
     _table(acceptance, ACCEPTANCE_TABLE, ACCEPTANCE_HEADERS, acceptance_rows, start_row=5)
 
     rules = (
@@ -675,7 +675,7 @@ def build_manager_workbook(
         ("计划与实收", "计划节点仅用于提醒；财务确认实收只读", "两条数据链不互相覆盖"),
         ("空白", "空白保留已有值；新行日期和金额都空则忽略", "不删除已存在事实"),
         ("不完整节点", "仅日期或仅金额仍保留", "预览显示黄色警告"),
-        ("验收", "提交与审批分开；经理不可自审", "未配置角色时关闭操作"),
+        ("验收", "提交即生效，可重新提交新版本", "生效后补附件走受控上传"),
         ("附件", "只接受受控文件对象；外部链接不是附件", "未配置载体时关闭操作"),
         ("应用", "先校验预览，再一次性确认应用", "任一冲突则零写入"),
         ("版本", "v3 独立；不得上传至 v2 项目工作簿入口", "跨版本整批拒绝"),
@@ -686,7 +686,7 @@ def build_manager_workbook(
     _table(dictionary, DICTIONARY_TABLE, DICTIONARY_HEADERS, (
         ("计划节点完整性", "complete / date_only / amount_only / empty"),
         ("验收提交状态", "not_submitted / submitted"),
-        ("验收审批状态", "not_reviewed / approved / rejected"),
+        ("验收生效状态", "not_reviewed / approved / rejected（提交即 approved，其余为历史存量）"),
         ("业务配置状态", "configured / pending_business_configuration"),
     ))
     _table(versions, ENTITY_VERSION_TABLE, ENTITY_VERSION_HEADERS, version_rows)

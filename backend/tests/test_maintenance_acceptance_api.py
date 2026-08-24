@@ -97,7 +97,7 @@ def _png() -> bytes:
     return output.getvalue()
 
 
-def test_manager_upload_submit_admin_review_download_are_scoped_idempotent_and_audited(db):
+def test_manager_upload_submit_download_are_scoped_idempotent_and_audited(db):
     manager, manager_user = _client(
         db,
         username="acceptance_manager",
@@ -105,13 +105,7 @@ def test_manager_upload_submit_admin_review_download_are_scoped_idempotent_and_a
         permissions={
             "page_maintenance": True,
             "action_maintenance_acceptance_submit": True,
-            "action_maintenance_acceptance_review": False,
         },
-    )
-    reviewer, _reviewer_user = _client(
-        db,
-        username="acceptance_reviewer",
-        role="admin",
     )
     owned, deliverable = _project(db, suffix="owned", manager=manager_user)
     _other, _other_deliverable = _project(db, suffix="other", manager=None)
@@ -156,6 +150,8 @@ def test_manager_upload_submit_admin_review_download_are_scoped_idempotent_and_a
     )
     assert submit.status_code == 200, submit.text
     assert submit.json()["version"] == 3
+    # 2026-08-24 客户拍板：提交即生效，无需独立审批。
+    assert submit.json()["approval_status"] == "approved"
     repeated_submit = manager.post(
         f"/api/maintenance/projects/stable/{owned.project_id}/acceptance/submit",
         json={"expected_version": 2},
@@ -164,20 +160,37 @@ def test_manager_upload_submit_admin_review_download_are_scoped_idempotent_and_a
     assert repeated_submit.status_code == 200
     assert repeated_submit.json()["replayed"] is True
 
-    denied_review = manager.post(
-        f"/api/maintenance/acceptance-deliverables/{deliverable.deliverable_id}/review",
-        json={"expected_version": 3, "decision": "approve"},
-        headers={"Idempotency-Key": "manager-must-not-review"},
-    )
-    assert denied_review.status_code == 403
+    db.expire_all()
+    current = db.get(MaintenanceAcceptanceDeliverable, deliverable.deliverable_id)
+    assert current.approval_status == "approved"
+    assert current.approved_by == current.submitted_by == "acceptance_manager"
+    assert current.approved_at is not None
 
-    approved = reviewer.post(
-        f"/api/maintenance/acceptance-deliverables/{deliverable.deliverable_id}/review",
-        json={"expected_version": 3, "decision": "approve"},
-        headers={"Idempotency-Key": "admin-approve-key-1"},
+    # 生效后仍可补充附件并重新提交新版本（审批锁定已随免审批取消）。
+    extra = manager.post(
+        f"/api/maintenance/projects/stable/{owned.project_id}/acceptance/attachments",
+        data={"expected_version": 3},
+        files={"file": ("补充材料.png", image, "image/png")},
+        headers={"Idempotency-Key": "attachment-key-2"},
     )
-    assert approved.status_code == 200, approved.text
-    assert approved.json()["approval_status"] == "approved"
+    assert extra.status_code == 200, extra.text
+    assert extra.json()["version"] == 4
+    resubmit = manager.post(
+        f"/api/maintenance/projects/stable/{owned.project_id}/acceptance/submit",
+        json={"expected_version": 4},
+        headers={"Idempotency-Key": "submit-key-2"},
+    )
+    assert resubmit.status_code == 200, resubmit.text
+    assert resubmit.json()["approval_status"] == "approved"
+    assert resubmit.json()["version"] == 5
+
+    # 审批端点已随独立审批一并移除。
+    gone = manager.post(
+        f"/api/maintenance/acceptance-deliverables/{deliverable.deliverable_id}/review",
+        json={"expected_version": 5, "decision": "approve"},
+        headers={"Idempotency-Key": "review-endpoint-removed"},
+    )
+    assert gone.status_code == 404
 
     downloaded = manager.get(
         f"/api/maintenance/acceptance-files/{uploaded['file_id']}"
@@ -188,14 +201,14 @@ def test_manager_upload_submit_admin_review_download_are_scoped_idempotent_and_a
     assert downloaded.headers["x-content-type-options"] == "nosniff"
 
     db.expire_all()
-    assert db.scalar(select(func.count()).select_from(BusinessFile)) == 1
-    assert db.scalar(select(func.count()).select_from(MaintenanceAcceptanceOperation)) == 3
+    assert db.scalar(select(func.count()).select_from(BusinessFile)) == 2
+    assert db.scalar(select(func.count()).select_from(MaintenanceAcceptanceOperation)) == 4
     audit = db.scalar(select(BusinessFileDownloadAudit))
     assert audit is not None
     assert audit.downloaded_by == "acceptance_manager"
 
 
-def test_acceptance_direct_routes_enforce_row_scope_and_block_self_approval(db):
+def test_acceptance_direct_routes_enforce_row_scope_and_submit_takes_effect(db):
     manager, manager_user = _client(
         db,
         username="acceptance_scope_manager",
@@ -203,12 +216,11 @@ def test_acceptance_direct_routes_enforce_row_scope_and_block_self_approval(db):
         permissions={
             "page_maintenance": True,
             "action_maintenance_acceptance_submit": True,
-            "action_maintenance_acceptance_review": False,
         },
     )
     administrator, _administrator_user = _client(
         db,
-        username="acceptance_self_review_admin",
+        username="acceptance_direct_admin",
         role="admin",
     )
     unowned, _unowned_deliverable = _project(
@@ -229,34 +241,30 @@ def test_acceptance_direct_routes_enforce_row_scope_and_block_self_approval(db):
     )
     assert denied_upload.status_code == 403
 
+    # 提交即生效：提交人即生效人（自审限制已随独立审批取消）。
     self_project, self_deliverable = _project(
         db,
-        suffix="self-review",
+        suffix="self-effect",
         manager=None,
     )
     uploaded = administrator.post(
         f"/api/maintenance/projects/stable/{self_project.project_id}/acceptance/attachments",
         data={"expected_version": "1"},
         files={"file": ("self-report.png", _png(), "image/png")},
-        headers={"Idempotency-Key": "self-review-upload"},
+        headers={"Idempotency-Key": "self-effect-upload"},
     )
     assert uploaded.status_code == 200, uploaded.text
     submitted = administrator.post(
         f"/api/maintenance/projects/stable/{self_project.project_id}/acceptance/submit",
         json={"expected_version": 2},
-        headers={"Idempotency-Key": "self-review-submit"},
+        headers={"Idempotency-Key": "self-effect-submit"},
     )
     assert submitted.status_code == 200, submitted.text
-    rejected = administrator.post(
-        f"/api/maintenance/acceptance-deliverables/{self_deliverable.deliverable_id}/review",
-        json={"expected_version": 3, "decision": "approve"},
-        headers={"Idempotency-Key": "self-review-must-fail"},
-    )
-    assert rejected.status_code == 409
-    assert "提交人与审批人" in rejected.json()["detail"]
+    assert submitted.json()["approval_status"] == "approved"
     db.expire_all()
     current = db.get(MaintenanceAcceptanceDeliverable, self_deliverable.deliverable_id)
-    assert current.approval_status == "not_reviewed"
+    assert current.approval_status == "approved"
+    assert current.approved_by == current.submitted_by
 
 
 def test_acceptance_attachment_rejects_bad_metadata_content_and_leaves_no_rows_or_files(db):

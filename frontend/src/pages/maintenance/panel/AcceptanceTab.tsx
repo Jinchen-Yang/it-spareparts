@@ -23,7 +23,6 @@ import {
   type MaintenanceAcceptanceChecklistPreview,
 } from "../../../api/maintenanceOperations";
 import { readError } from "./panelUtils";
-import { readMaintenanceCapabilities } from "../../../components/maintenance/maintenancePermissions";
 import MaintenanceAcceptancePanel from "../../../components/maintenance/MaintenanceAcceptancePanel";
 
 const { Text } = Typography;
@@ -247,11 +246,9 @@ export function AcceptanceTab({
         ) : null}
       </Card>
 
-      {/* 验收交付（附件+审批）是 Beta 总闸后面的既有模块：没开 Beta 的账号
-          不渲染，避免稳定版面板出现一块永远报错的区块。 */}
-      {readMaintenanceCapabilities().canUseBeta ? (
-        <MaintenanceAcceptancePanel projectId={projectId} />
-      ) : null}
+      {/* 验收交付（附件+提交即生效）2026-08-24 起随维保页面开放：
+          销售/项目经理/维保负责人都能查看，按钮层再按提交权限收敛。 */}
+      <MaintenanceAcceptancePanel projectId={projectId} />
     </Space>
   );
 }
