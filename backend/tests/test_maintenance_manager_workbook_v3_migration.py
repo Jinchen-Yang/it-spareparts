@@ -90,6 +90,11 @@ def test_acceptance_permissions_default_fail_closed_and_review_is_high_risk():
         assert key in permissions.ACTION_KEYS
         assert permissions.ACTION_PAGE_DEPENDENCIES[key] == "page_maintenance"
         assert permissions.effective("admin", None)[key] is True
+        # 2026-08-24 客户拍板：验收提交开放给销售与维保负责人（提交即生效）。
+        # 维保负责人在代码模板开；销售只经迁移 a9e2f7c4d1b8 改 DB 侧
+        # （代码兜底保持历史冻结口径，防漂移契约）。
+        assert permissions.effective("maintenance_manager", None)[
+            "action_maintenance_acceptance_submit"] is True
         for role in ("boss", "sales", "purchaser", "readonly", "guest"):
             assert permissions.effective(role, None)[key] is False
     assert "action_maintenance_manager_workbook_apply" in permissions.HIGH_RISK_KEYS
@@ -159,7 +164,7 @@ def test_acceptance_permission_upgrade_backfills_only_real_admin_role(db):
         alembic_command.upgrade(config, "head")
 
 
-def test_storage_rejects_self_approval_and_external_url_as_attachment(db):
+def test_storage_allows_self_effect_and_rejects_external_url_as_attachment(db):
     db.execute(
         text(
             "INSERT INTO maintenance_project "
@@ -170,22 +175,22 @@ def test_storage_rejects_self_approval_and_external_url_as_attachment(db):
     )
     db.commit()
 
+    # 2026-08-24 免审批改造：提交人即生效人（自审 CHECK 已随迁移删除），
+    # 合法字段组合应能落库。
     submitted_at = datetime.now(UTC)
-    with pytest.raises(DBAPIError):
-        db.execute(
-            text(
-                "INSERT INTO maintenance_acceptance_deliverable "
-                "(deliverable_id, project_id, deliverable_type, submission_status, "
-                "submitted_at, submitted_by, approval_status, approved_at, approved_by, "
-                "configuration_state) VALUES "
-                "('self-approved', 'manager-v3-storage-project', 'acceptance_report', "
-                "'submitted', :submitted_at, 'same-user', 'approved', :submitted_at, "
-                "'same-user', 'configured')"
-            ),
-            {"submitted_at": submitted_at},
-        )
-        db.flush()
-    db.rollback()
+    db.execute(
+        text(
+            "INSERT INTO maintenance_acceptance_deliverable "
+            "(deliverable_id, project_id, deliverable_type, submission_status, "
+            "submitted_at, submitted_by, approval_status, approved_at, approved_by, "
+            "configuration_state) VALUES "
+            "('self-approved', 'manager-v3-storage-project', 'acceptance_report', "
+            "'submitted', :submitted_at, 'same-user', 'approved', :submitted_at, "
+            "'same-user', 'configured')"
+        ),
+        {"submitted_at": submitted_at},
+    )
+    db.commit()
 
     with pytest.raises(DBAPIError):
         db.execute(

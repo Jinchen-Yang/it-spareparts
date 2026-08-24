@@ -3,8 +3,6 @@ import {
   Alert,
   Button,
   Descriptions,
-  Input,
-  Modal,
   Space,
   Spin,
   Tag,
@@ -15,7 +13,6 @@ import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import {
   downloadMaintenanceAcceptanceAttachment,
   getMaintenanceAcceptance,
-  reviewMaintenanceAcceptance,
   submitMaintenanceAcceptance,
   uploadMaintenanceAcceptanceAttachment,
   type MaintenanceAcceptanceDeliverable,
@@ -36,10 +33,12 @@ function safeFilename(value: string): string {
 }
 
 
-function approvalTag(status: string) {
-  if (status === "approved") return <Tag color="green">审批通过</Tag>;
-  if (status === "rejected") return <Tag color="red">已驳回</Tag>;
-  return <Tag color="gold">待审批</Tag>;
+// 2026-08-24 起提交即生效（免独立审批）：approved=已验收；
+// rejected 是历史存量驳回，重新提交后即转 approved。
+function acceptanceTag(status: string) {
+  if (status === "approved") return <Tag color="green">已验收</Tag>;
+  if (status === "rejected") return <Tag color="red">已驳回（历史）</Tag>;
+  return <Tag color="gold">待提交</Tag>;
 }
 
 
@@ -54,11 +53,9 @@ export default function MaintenanceAcceptancePanel({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [rejectOpen, setRejectOpen] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const generation = useRef(0);
-  const { canSubmitAcceptance, canReviewAcceptance } = readMaintenanceCapabilities();
+  const { canSubmitAcceptance } = readMaintenanceCapabilities();
 
   const load = async () => {
     const request = ++generation.current;
@@ -126,29 +123,6 @@ export default function MaintenanceAcceptancePanel({
     }
   };
 
-  const review = async (decision: "approve" | "reject") => {
-    if (!record?.deliverable_id) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await reviewMaintenanceAcceptance(record.deliverable_id, {
-        expected_version: record.version,
-        decision,
-        reason: decision === "reject" ? rejectReason.trim() : undefined,
-        idempotencyKey: idempotencyKey(`acceptance-${decision}`),
-      });
-      setRejectOpen(false);
-      setRejectReason("");
-      await refreshAfterMutation();
-    } catch (reason: unknown) {
-      const detail = (reason as { response?: { data?: { detail?: unknown } } } | null)
-        ?.response?.data?.detail;
-      setError(typeof detail === "string" ? detail : "验收审批失败，请刷新后重试。");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const download = async (fileId: string, filename: string) => {
     setBusy(true);
     setError(null);
@@ -173,17 +147,8 @@ export default function MaintenanceAcceptancePanel({
   if (!record) return <Alert type="error" showIcon message={error || "验收报告不可用"} />;
 
   const configured = record.configuration_state === "configured" && !!record.due_date;
-  const pendingReview = record.submission_status === "submitted"
-    && record.approval_status === "not_reviewed";
-  const canMutate = record.approval_status !== "approved";
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <Alert
-        type="warning"
-        showIcon
-        message="验收审批业务角色尚未配置"
-        description="当前采用独立高风险权限，默认仅管理员可以审批；提交人与审批人必须是不同实名账号。"
-      />
       {error && <Alert type="error" showIcon message={error} />}
       <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
         <Descriptions.Item label="验收截止日">
@@ -194,10 +159,10 @@ export default function MaintenanceAcceptancePanel({
             ? <Tag color="blue">已提交</Tag>
             : <Tag>未提交</Tag>}
         </Descriptions.Item>
-        <Descriptions.Item label="审批状态">{approvalTag(record.approval_status)}</Descriptions.Item>
+        <Descriptions.Item label="验收状态">{acceptanceTag(record.approval_status)}</Descriptions.Item>
       </Descriptions>
       {record.rejection_reason && (
-        <Alert type="error" showIcon message="驳回原因" description={record.rejection_reason} />
+        <Alert type="error" showIcon message="驳回原因（历史）" description={record.rejection_reason} />
       )}
       <Space wrap>
         {record.attachments.map((attachment) => (
@@ -213,7 +178,7 @@ export default function MaintenanceAcceptancePanel({
         {record.attachments.length === 0 && <Tag color="orange">验收附件待上传</Tag>}
       </Space>
       <Space wrap>
-        {canSubmitAcceptance && configured && canMutate && (
+        {canSubmitAcceptance && configured && (
           <>
             <Button
               icon={<UploadOutlined />}
@@ -233,42 +198,21 @@ export default function MaintenanceAcceptancePanel({
             <Button
               type="primary"
               loading={busy}
-              disabled={record.attachments.length === 0 || pendingReview}
+              disabled={record.attachments.length === 0}
               onClick={() => void submit()}
             >
-              {record.approval_status === "rejected" ? "重新提交验收报告" : "提交验收报告"}
+              {record.approval_status === "approved"
+                ? "重新提交验收报告"
+                : record.approval_status === "rejected"
+                  ? "重新提交验收报告"
+                  : "提交验收报告"}
             </Button>
-          </>
-        )}
-        {canReviewAcceptance && pendingReview && (
-          <>
-            <Button type="primary" loading={busy} onClick={() => void review("approve")}>
-              审批通过
-            </Button>
-            <Button danger disabled={busy} onClick={() => setRejectOpen(true)}>驳回</Button>
           </>
         )}
       </Space>
       {!configured && (
         <Typography.Text type="secondary">截止日未配置时，系统会保留项目卡片，但关闭附件与提交通道。</Typography.Text>
       )}
-      <Modal
-        title="驳回验收报告"
-        open={rejectOpen}
-        okText="确认驳回"
-        okButtonProps={{ danger: true, disabled: !rejectReason.trim(), loading: busy }}
-        onOk={() => void review("reject")}
-        onCancel={() => { if (!busy) setRejectOpen(false); }}
-      >
-        <Input.TextArea
-          aria-label="驳回原因"
-          value={rejectReason}
-          maxLength={1000}
-          rows={4}
-          placeholder="必须填写项目经理可见的驳回原因"
-          onChange={(event) => setRejectReason(event.target.value)}
-        />
-      </Modal>
     </Space>
   );
 }

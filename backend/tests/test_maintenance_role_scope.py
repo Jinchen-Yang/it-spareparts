@@ -76,15 +76,25 @@ def test_maintenance_manager_template_shape():
     tpl = permissions.ROLE_TEMPLATES["maintenance_manager"]
     assert tpl["page_maintenance"] is True
     assert tpl["own_maintenance_projects_only"] is True
+    # 2026-08-24 客户拍板：验收提交开放（提交即生效）
+    assert tpl["action_maintenance_acceptance_submit"] is True
     # 成本数据组全关（客户原话「这个权限还有点高」）
     assert not any(tpl.get(k) for k in permissions.DATA_GROUPS)
     # 其余页面/动作全关
     assert not any(v for k, v in tpl.items()
-                   if k not in ("page_maintenance", "own_maintenance_projects_only"))
-    # 既有角色模板不收敛（fail-closed）
+                   if k not in ("page_maintenance", "own_maintenance_projects_only",
+                                "action_maintenance_acceptance_submit"))
+    # 既有角色模板不收敛（fail-closed）——含 sales：2026-08-24 验收开放只经
+    # 迁移 a9e2f7c4d1b8 改 DB 模板+账号快照，代码兜底保持历史冻结口径
+    # （防漂移契约 test_frozen_templates_match_current_code）。
     for role in ("admin", "boss", "sales", "purchaser", "readonly"):
         assert permissions.ROLE_TEMPLATES[role].get(
             "own_maintenance_projects_only") is not True
+    # sales 的 DB 侧开放由迁移负责；代码兜底不开放（旧 token 回退口径）。
+    sales = permissions.ROLE_TEMPLATES["sales"]
+    assert sales["page_maintenance"] is False
+    assert sales["own_maintenance_projects_only"] is False
+    assert sales["action_maintenance_acceptance_submit"] is False
 
 
 # ---------------------------------------------------------------- 越权矩阵

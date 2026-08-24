@@ -142,8 +142,8 @@ LABELS: dict[str, str] = {
     "action_maintenance_demand_delete": "维保需求单安全删除",
     "action_maintenance_site_issue_manage": "现场备件领用管理",
     "action_maintenance_bad_return_manage": "维保坏件返还管理",
-    "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传",
-    "action_maintenance_acceptance_review": "维保验收报告高风险审批",
+    "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传（提交即生效）",
+    "action_maintenance_acceptance_review": "维保验收报告审批（已废弃）",
     "action_maintenance_acceptance_checklist_import": "验收需求清单 Excel 导入",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
@@ -183,11 +183,13 @@ def _maintenance_manager() -> dict[str, bool]:
     权限矩阵拍板：page_maintenance=True（主页/面板/分析共用键，零额外开发）；
     data_* 全 false（成本默认不可见——客户原话「这个权限还有点高」）；
     own_maintenance_projects_only=True（负责人∪销售并集收敛）；
+    验收提交开放（2026-08-24 客户拍板：销售/项目经理/维保负责人可提交，免审批）；
     其余页面/动作全关，管理员可在权限中心按账号微调。
     """
     d = {k: False for k in ALL_KEYS}
     d["page_maintenance"] = True
     d["own_maintenance_projects_only"] = True
+    d["action_maintenance_acceptance_submit"] = True
     return d
 
 
@@ -267,7 +269,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # page_profit=False：销售默认不开放利润分析；管理员可按账号显式授予页面权限。
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
-        # 项目成本=公司维保项目经营数据，销售不开（同 page_profit 口径）
+        # 项目成本=公司维保项目经营数据，销售代码兜底不开（历史冻结口径，
+        # 防漂移守卫契约）；2026-08-24 验收开放经由迁移 a9e2f7c4d1b8 改
+        # DB 模板+账号快照——实名账号登录即开放，旧 token/共享口令回退
+        # 仍按本兜底口径（重新登录后生效）。
         "page_maintenance": False,
         "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，销售不开
@@ -299,6 +304,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_replenishment_create": False,
         "action_replenishment_review": False,
         "own_customers_only": True,
+        # 行键保持历史冻结口径 False（防漂移契约）；销售的项目收敛同样由
+        # 迁移 a9e2f7c4d1b8 在 DB 侧开启（账号快照），代码兜底不动。
         "own_maintenance_projects_only": False,
     },
     "purchaser": {
@@ -436,8 +443,9 @@ ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_demand_delete": "page_maintenance_beta",
     "action_maintenance_site_issue_manage": "page_maintenance_beta",
     "action_maintenance_bad_return_manage": "page_maintenance_beta",
-    "action_maintenance_acceptance_submit": "page_maintenance_beta",
-    "action_maintenance_acceptance_review": "page_maintenance_beta",
+    # 验收两键 2026-08-24 起移出 Beta 附加依赖：客户拍板验收开放给销售/项目经理/
+    # 维保负责人（模板 sales 与 maintenance_manager 直接生效），保留稳定版
+    # page_maintenance 依赖即可，不再强制 Beta 白名单。
     "action_maintenance_warehouse_manage": "page_maintenance_beta",
     "action_maintenance_migration_review": "page_maintenance_beta",
     "action_maintenance_ledger_import": "page_maintenance_beta",
@@ -897,21 +905,21 @@ PERMISSION_META: dict[str, dict] = {
     },
     "action_maintenance_acceptance_submit": {
         "label": "维保验收报告提交与附件上传",
-        "summary": "允许本人负责项目上传受控附件并提交验收报告。",
-        "can": "上传通过安全校验的 PDF、Word、Excel 或图片，并把验收报告提交审核。",
-        "cannot": "不能审批自己的提交，不能访问非本人项目，也不能上传外部链接或可执行内容。",
-        "typical": ["管理员授权的项目经理"],
+        "summary": "允许本人负责项目上传受控附件并提交验收报告（2026-08-24 起提交即生效，无需独立审批）。",
+        "can": "上传通过安全校验的 PDF、Word、Excel 或图片，提交验收报告立即生效；可在生效后补充附件或重新提交新版本。",
+        "cannot": "不能访问非本人项目，也不能上传外部链接或可执行内容。",
+        "typical": ["管理员授权的项目经理", "维保负责人", "销售（2026-08-24 客户拍板开放）"],
         "sensitivity": "high",
-        "risk": "会形成正式验收提交事实和持久化附件；建议仅授权真实项目负责人。",
+        "risk": "提交即形成正式验收事实并持久化附件；全部操作实名审计，重新提交保留版本与操作日志。",
     },
     "action_maintenance_acceptance_review": {
-        "label": "维保验收报告高风险审批",
-        "summary": "允许批准或驳回已提交的维保验收报告。",
-        "can": "查看受控附件后批准或填写理由驳回；全部操作实名审计。",
-        "cannot": "不能审批本人提交、不能审批未提交或没有有效附件的报告。",
-        "typical": ["管理员（业务审批角色确定前）"],
+        "label": "维保验收报告审批（已废弃）",
+        "summary": "（已废弃 2026-08-24）验收提交即生效后，独立审批环节取消；键保留仅为兼容历史账号快照。",
+        "can": "无——审批端点已移除。",
+        "cannot": "—",
+        "typical": ["（已废弃）无适用角色"],
         "sensitivity": "critical",
-        "risk": "审批结果是正式业务结论；业务审批角色尚未配置，默认仅 admin 可用。",
+        "risk": "不再发放；存量驳回记录保留可追溯。",
     },
     "action_maintenance_acceptance_checklist_import": {
         "label": "验收需求清单 Excel 导入",

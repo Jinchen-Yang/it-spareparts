@@ -497,8 +497,8 @@ def upload_attachment(
         return replay, None
     if deliverable.version != expected_version:
         raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
-    if deliverable.approval_status == "approved":
-        raise MaintenanceAcceptanceConflict("已审批通过的验收报告不能追加附件")
+    # 2026-08-24 客户拍板：提交即生效，无需独立审批。审批锁定随之取消——
+    # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
 
     file_id = str(uuid4())
     object_key = f"maintenance_acceptance/{file_id[:2]}/{file_id}{extension}"
@@ -589,18 +589,18 @@ def submit_acceptance(
         raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
     if not _active_attachments(db, deliverable.deliverable_id):
         raise MaintenanceAcceptanceConflict("至少上传一个有效附件后才能提交")
-    if deliverable.approval_status == "approved":
-        raise MaintenanceAcceptanceConflict("验收报告已审批通过")
-    if deliverable.submission_status == "submitted" and deliverable.approval_status == "not_reviewed":
-        raise MaintenanceAcceptanceConflict("验收报告已提交，正在等待审批")
+    # 2026-08-24 客户拍板：验收开放给销售/项目经理/维保负责人，提交即生效
+    # （免独立审批）。已生效的报告可随时重新提交新版本或补充附件；
+    # 版本乐观锁 + 幂等键 + 操作日志保证可追溯。历史遗留 not_reviewed/
+    # rejected 状态同样允许直接重新提交覆盖。
 
     now = _now()
     deliverable.submission_status = "submitted"
     deliverable.submitted_at = now
     deliverable.submitted_by = operator
-    deliverable.approval_status = "not_reviewed"
-    deliverable.approved_at = None
-    deliverable.approved_by = None
+    deliverable.approval_status = "approved"
+    deliverable.approved_at = now
+    deliverable.approved_by = operator
     deliverable.rejection_reason = None
     deliverable.version += 1
     result = {
@@ -608,7 +608,7 @@ def submit_acceptance(
         "project_id": project_id,
         "deliverable_id": deliverable.deliverable_id,
         "submission_status": "submitted",
-        "approval_status": "not_reviewed",
+        "approval_status": "approved",
         "version": deliverable.version,
     }
     db.add(
@@ -619,89 +619,6 @@ def submit_acceptance(
             operation_type="submit",
             deliverable_id=deliverable.deliverable_id,
             project_id=project_id,
-            result_json=result,
-            operated_by=operator,
-        )
-    )
-    db.flush()
-    return result
-
-
-def review_acceptance(
-    db: Session,
-    *,
-    deliverable_id: str,
-    expected_version: int,
-    decision: str,
-    reason: str | None,
-    operator: str,
-    client_key: str,
-) -> dict:
-    deliverable = db.scalar(
-        select(MaintenanceAcceptanceDeliverable)
-        .where(MaintenanceAcceptanceDeliverable.deliverable_id == deliverable_id)
-        .with_for_update()
-    )
-    if deliverable is None:
-        raise MaintenanceAcceptanceNotFound("验收报告不存在")
-    if decision not in {"approve", "reject"}:
-        raise MaintenanceAcceptanceError("审批结果无效")
-    cleaned_reason = None
-    if decision == "reject":
-        cleaned_reason = _required_text(reason, "驳回原因", 1000)
-    elif str(reason or "").strip():
-        raise MaintenanceAcceptanceError("审批通过时不能填写驳回原因")
-
-    operation_key = _operation_key(
-        operator=operator,
-        operation_type=decision,
-        deliverable_id=deliverable.deliverable_id,
-        client_key=client_key,
-    )
-    payload_hash = _payload_hash(
-        {
-            "expected_version": expected_version,
-            "decision": decision,
-            "reason": cleaned_reason,
-        }
-    )
-    replay = _existing_operation(db, operation_key=operation_key, payload_hash=payload_hash)
-    if replay is not None:
-        return replay
-    if deliverable.version != expected_version:
-        raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
-    if deliverable.submission_status != "submitted":
-        raise MaintenanceAcceptanceConflict("验收报告尚未提交")
-    if not _active_attachments(db, deliverable.deliverable_id):
-        raise MaintenanceAcceptanceConflict("验收附件缺失，不能审批")
-    if deliverable.submitted_by == operator:
-        raise MaintenanceAcceptanceConflict("提交人与审批人不能是同一账号")
-    if deliverable.approval_status != "not_reviewed":
-        raise MaintenanceAcceptanceConflict("验收报告已经完成审批")
-
-    now = _now()
-    deliverable.approval_status = "approved" if decision == "approve" else "rejected"
-    deliverable.approved_at = now
-    deliverable.approved_by = operator
-    deliverable.rejection_reason = cleaned_reason
-    deliverable.version += 1
-    result = {
-        "replayed": False,
-        "project_id": deliverable.project_id,
-        "deliverable_id": deliverable.deliverable_id,
-        "submission_status": deliverable.submission_status,
-        "approval_status": deliverable.approval_status,
-        "rejection_reason": deliverable.rejection_reason,
-        "version": deliverable.version,
-    }
-    db.add(
-        MaintenanceAcceptanceOperation(
-            operation_id=str(uuid4()),
-            operation_key=operation_key,
-            payload_hash=payload_hash,
-            operation_type=decision,
-            deliverable_id=deliverable.deliverable_id,
-            project_id=deliverable.project_id,
             result_json=result,
             operated_by=operator,
         )

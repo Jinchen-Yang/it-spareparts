@@ -36,7 +36,6 @@ export interface MaintenanceCapabilities {
   canUseManagerWorkbook: boolean;
   canApplyManagerWorkbook: boolean;
   canSubmitAcceptance: boolean;
-  canReviewAcceptance: boolean;
   canManageWarehouse: boolean;
   canReviewMigration: boolean;
   canViewCollectionReminders: boolean;
@@ -159,11 +158,10 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
         permissions.action_maintenance_manager_workbook_apply === true
       )
     ),
-    canSubmitAcceptance: canUseBeta && (
+    // 验收提交 2026-08-24 起开放给销售/项目经理/维保负责人，且不再挂 Beta
+    // 白名单（后端已移出 Beta 附加依赖）；提交即生效，审批角色已取消。
+    canSubmitAcceptance: (isAdmin || permissions.page_maintenance === true) && (
       isAdmin || permissions.action_maintenance_acceptance_submit === true
-    ),
-    canReviewAcceptance: canUseBeta && (
-      isAdmin || permissions.action_maintenance_acceptance_review === true
     ),
     canManageProject: canUseBeta && (isAdmin || (
       permissions.data_purchase_cost === true

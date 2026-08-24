@@ -69,8 +69,6 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
         "action_maintenance_demand_delete",
         "action_maintenance_site_issue_manage",
         "action_maintenance_bad_return_manage",
-        "action_maintenance_acceptance_submit",
-        "action_maintenance_acceptance_review",
         "action_maintenance_warehouse_manage",
         "action_maintenance_migration_review",
         "action_maintenance_collection_follow_up",
@@ -80,6 +78,13 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
             permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES[action]
             == key
         )
+    # 2026-08-24 客户拍板：验收开放给销售/项目经理/维保负责人，两键移出
+    # Beta 附加依赖（保留稳定版 page_maintenance 依赖）。
+    for action in (
+        "action_maintenance_acceptance_submit",
+        "action_maintenance_acceptance_review",
+    ):
+        assert action not in permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES
 
 
 def test_server_gate_keeps_stable_page_live_and_beta_closed(db):

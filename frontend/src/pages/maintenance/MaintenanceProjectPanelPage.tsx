@@ -46,6 +46,7 @@ import ExpenseTab from "./panel/ExpenseTab";
 import CollectionTab from "./panel/CollectionTab";
 import SiteReturnTab from "./panel/SiteReturnTab";
 import AcceptanceTab from "./panel/AcceptanceTab";
+import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import {
   LIFECYCLE_LABEL,
   STATUS_COLOR,
@@ -175,7 +176,9 @@ export function MaintenanceProjectPanelPage() {
   const perms = readPermissionMap();
   const canUpload = !!perms.action_maintenance_expense_collection_upload;
   const canManageProject = !!perms.action_maintenance_project_manage;
-  const canImportChecklist = !!perms.action_maintenance_acceptance_checklist_import;
+  // 验收清单导入 2026-08-22 起跟随维保页面权限（与 maintenancePermissions 同口径），
+  // 不再看已停用的 action_maintenance_acceptance_checklist_import 旧键。
+  const canImportChecklist = readMaintenanceCapabilities().canImportAcceptanceChecklist;
 
   // 下载文件名 = XSDD销售订单号（取第一个） + 维保项目名 + 表单类型（2026-08-17）
   const exportBase = (() => {

@@ -1,4 +1,9 @@
-"""Controlled acceptance-report APIs for maintenance project managers."""
+"""Controlled acceptance-report APIs (submit takes effect immediately).
+
+2026-08-24 客户拍板：验收开放给销售/项目经理/维保负责人（sales 与
+maintenance_manager 模板默认带 action_maintenance_acceptance_submit），
+提交即生效，独立审批环节移除；历史驳回/审批字段仅为存量数据保留。
+"""
 
 from __future__ import annotations
 
@@ -58,14 +63,6 @@ class AcceptanceSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=1)
-
-
-class AcceptanceReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: int = Field(ge=1)
-    decision: str = Field(pattern="^(approve|reject)$")
-    reason: str | None = Field(default=None, max_length=1000)
 
 
 def _raise_http(exc: Exception) -> None:
@@ -204,52 +201,6 @@ def submit_project_acceptance(
         db.rollback()
         _raise_http(exc)
     record_access_log(ctx, "submit_maintenance_acceptance", f"maintenance_project:{project_id}")
-    return result
-
-
-@router.post("/acceptance-deliverables/{deliverable_id}/review")
-def review_project_acceptance(
-    body: AcceptanceReviewRequest,
-    deliverable_id: str = ApiPath(..., min_length=1, max_length=36),
-    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=128),
-    db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
-    _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_acceptance_review")),
-    ctx: UserContext = Depends(get_current_user_context),
-) -> dict:
-    deliverable = db.get(acceptance.MaintenanceAcceptanceDeliverable, deliverable_id)
-    if deliverable is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "验收报告不存在")
-    enforce_maintenance_project_access(
-        db,
-        project_id=deliverable.project_id,
-        ctx=ctx,
-    )
-    try:
-        result = acceptance.review_acceptance(
-            db,
-            deliverable_id=deliverable_id,
-            expected_version=body.expected_version,
-            decision=body.decision,
-            reason=body.reason,
-            operator=_real_operator(db, ident),
-            client_key=idempotency_key,
-        )
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "审批发生并发冲突，未写入") from exc
-    except Exception as exc:
-        db.rollback()
-        _raise_http(exc)
-    record_access_log(
-        ctx,
-        "review_maintenance_acceptance",
-        f"maintenance_acceptance:{deliverable_id}",
-        {"decision": body.decision},
-    )
     return result
 
 
