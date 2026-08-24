@@ -90,12 +90,12 @@ def test_acceptance_permissions_default_fail_closed_and_review_is_high_risk():
         assert key in permissions.ACTION_KEYS
         assert permissions.ACTION_PAGE_DEPENDENCIES[key] == "page_maintenance"
         assert permissions.effective("admin", None)[key] is True
-        # 2026-08-24 客户拍板：验收提交开放给销售与维保负责人（提交即生效）
-        assert permissions.effective("sales", None)[
-            "action_maintenance_acceptance_submit"] is True
+        # 2026-08-24 客户拍板：验收提交开放给销售与维保负责人（提交即生效）。
+        # 维保负责人在代码模板开；销售只经迁移 a9e2f7c4d1b8 改 DB 侧
+        # （代码兜底保持历史冻结口径，防漂移契约）。
         assert permissions.effective("maintenance_manager", None)[
             "action_maintenance_acceptance_submit"] is True
-        for role in ("boss", "purchaser", "readonly", "guest"):
+        for role in ("boss", "sales", "purchaser", "readonly", "guest"):
             assert permissions.effective(role, None)[key] is False
     assert "action_maintenance_manager_workbook_apply" in permissions.HIGH_RISK_KEYS
     assert "action_maintenance_acceptance_review" in permissions.HIGH_RISK_KEYS

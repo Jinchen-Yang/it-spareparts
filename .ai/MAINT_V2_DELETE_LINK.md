@@ -136,3 +136,7 @@
 - 迁移链：upgrade head → check 双过；downgrade -1 → upgrade head 闭环过。
 - 前端：tsc + vite build 绿；vitest 632/632 绿。
 - 全量 pytest 未跑（沿用本仓纪律：发布前以 CI/全量为准）。
+
+### CI 契约修正（2026-08-24 深夜，rm8 补丁）
+- 全量 CI 抓到 8 个契约测试失败：权限中心禁止代码模板漂移历史冻结值（test_frozen_templates / migration_reconciliation）——修正实现：**sales 的验收开放改为只走 DB**（迁移 a9e2f7c4d1b8 改模板+账号快照），代码兜底模板保持历史冻结口径（旧 token/共享口令回退不开放，重新登录后生效）；maintenance_manager 为后期新角色不受冻结约束，代码模板保留 acceptance_submit=True。
+- 其余：废弃键 typical 补非空文案；迁移链头钉死测试推进到 a9e2f7c4d1b8。

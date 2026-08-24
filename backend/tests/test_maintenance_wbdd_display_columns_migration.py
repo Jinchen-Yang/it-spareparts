@@ -29,8 +29,8 @@ def test_new_revision_is_additive_child_and_single_head():
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
     # 全链单 head（本计划两个迁移线性追加，不开分叉）。
-    # head 随链前进更新：b1d4f6a8c2e7 = 维保负责人角色+行键（客户反馈 2026-08-21）。
-    assert list(script.get_heads()) == ["b1d4f6a8c2e7"]
+    # head 随链前进更新：a9e2f7c4d1b8 = 验收开放+免审批（客户 2026-08-24）。
+    assert list(script.get_heads()) == ["a9e2f7c4d1b8"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():

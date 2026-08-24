@@ -84,17 +84,17 @@ def test_maintenance_manager_template_shape():
     assert not any(v for k, v in tpl.items()
                    if k not in ("page_maintenance", "own_maintenance_projects_only",
                                 "action_maintenance_acceptance_submit"))
-    # 既有角色模板不收敛（fail-closed）；sales 除外——2026-08-24 验收开放后
-    # 销售进维保页按"自己销售∪自己负责"收敛。
-    for role in ("admin", "boss", "purchaser", "readonly"):
+    # 既有角色模板不收敛（fail-closed）——含 sales：2026-08-24 验收开放只经
+    # 迁移 a9e2f7c4d1b8 改 DB 模板+账号快照，代码兜底保持历史冻结口径
+    # （防漂移契约 test_frozen_templates_match_current_code）。
+    for role in ("admin", "boss", "sales", "purchaser", "readonly"):
         assert permissions.ROLE_TEMPLATES[role].get(
             "own_maintenance_projects_only") is not True
-    # 销售模板：维保页开 + 行键开 + 验收提交开
+    # sales 的 DB 侧开放由迁移负责；代码兜底不开放（旧 token 回退口径）。
     sales = permissions.ROLE_TEMPLATES["sales"]
-    assert sales["page_maintenance"] is True
-    assert sales["own_maintenance_projects_only"] is True
-    assert sales["action_maintenance_acceptance_submit"] is True
-    assert permissions.combo_errors(permissions.template_for("sales")) == []
+    assert sales["page_maintenance"] is False
+    assert sales["own_maintenance_projects_only"] is False
+    assert sales["action_maintenance_acceptance_submit"] is False
 
 
 # ---------------------------------------------------------------- 越权矩阵

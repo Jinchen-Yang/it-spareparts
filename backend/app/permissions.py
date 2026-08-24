@@ -269,10 +269,11 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # page_profit=False：销售默认不开放利润分析；管理员可按账号显式授予页面权限。
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
-        # 2026-08-24 客户拍板：验收开放给销售——销售进维保页提交/查看自己项目的
-        # 验收报告；项目列表由 own_maintenance_projects_only 行键收敛到"自己销售
-        # ∪ 自己负责"，成本字段可见性仍由 data_* 控制（销售本就可见采购成本）。
-        "page_maintenance": True,
+        # 项目成本=公司维保项目经营数据，销售代码兜底不开（历史冻结口径，
+        # 防漂移守卫契约）；2026-08-24 验收开放经由迁移 a9e2f7c4d1b8 改
+        # DB 模板+账号快照——实名账号登录即开放，旧 token/共享口令回退
+        # 仍按本兜底口径（重新登录后生效）。
+        "page_maintenance": False,
         "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，销售不开
         "page_boss_board": False,
@@ -287,8 +288,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_demand_delete": False,
         "action_maintenance_site_issue_manage": False,
         "action_maintenance_bad_return_manage": False,
-        # 验收提交开放给销售（2026-08-24 客户拍板，提交即生效免审批）
-        "action_maintenance_acceptance_submit": True,
+        "action_maintenance_acceptance_submit": False,
         "action_maintenance_acceptance_review": False,
         "action_maintenance_acceptance_checklist_import": False,
         "action_maintenance_warehouse_manage": False,
@@ -304,8 +304,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_replenishment_create": False,
         "action_replenishment_review": False,
         "own_customers_only": True,
-        # 销售进维保页只看"自己销售 ∪ 自己负责"的项目（与 2026-08-21 客户反馈同口径）
-        "own_maintenance_projects_only": True,
+        # 行键保持历史冻结口径 False（防漂移契约）；销售的项目收敛同样由
+        # 迁移 a9e2f7c4d1b8 在 DB 侧开启（账号快照），代码兜底不动。
+        "own_maintenance_projects_only": False,
     },
     "purchaser": {
         "data_supplier": True, "data_customer": False,
@@ -916,7 +917,7 @@ PERMISSION_META: dict[str, dict] = {
         "summary": "（已废弃 2026-08-24）验收提交即生效后，独立审批环节取消；键保留仅为兼容历史账号快照。",
         "can": "无——审批端点已移除。",
         "cannot": "—",
-        "typical": [],
+        "typical": ["（已废弃）无适用角色"],
         "sensitivity": "critical",
         "risk": "不再发放；存量驳回记录保留可追溯。",
     },
