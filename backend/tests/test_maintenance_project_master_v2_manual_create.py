@@ -140,3 +140,59 @@ def test_v2_single_sheet_export_only_validates_that_sheet(db):
         db, project_id=project.project_id, data=content,
     )
     assert plan.sheets == (master.V2_SHEET_EXPENSE,)
+
+
+def test_v2_manual_site_create_prices_line_immediately(db):
+    """2026-08-24：工作簿建领用行后立即取价（此前不调取价，新行成本为空，
+    要等全局回填才恢复——8-24 两项目新增 38 行无价的根因）。"""
+    from app.etl import loader
+    from tests import factories as f
+    from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
+    from app.models.system import SysImportBatch
+
+    project, part = _project(db)
+    # 种一条挂靠本项目的 WBDD 需求价格（未税 300）作为最强证据层
+    batch = SysImportBatch(
+        filename="manual-dem.xlsx", file_type="maintenance",
+        file_hash=uuid.uuid4().hex.ljust(64, "0"), status="success")
+    db.add(batch)
+    db.flush()
+    rid = f"WBDD-MANUAL-{uuid.uuid4().hex[:6]}"
+    loader.load(
+        db,
+        f.maintenance_result(
+            {rid: f.maintenance_head(rid, order_no=rid, on=date(2026, 8, 10),
+                                     project=project.display_name)},
+            [f.maintenance_line(rid, f"{rid}-L1", part.pn_std, qty="1")],
+        ),
+        batch.id, date(2026, 8, 10), mode="upsert",
+    )
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == rid))
+    db.add(MaintenanceSourceOrderAssignment(
+        assignment_id=str(uuid.uuid4()), source_order_id=rid,
+        project_id=project.project_id, is_active=True, version=1,
+        created_by="tester"))
+    dem_line = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.order_id == order.id))
+    dem_line.cost_source = "direct"
+    dem_line.cost_amount_ex_tax = Decimal("300")
+    dem_line.cost_amount_inc_tax = (Decimal("300") * Decimal("1.13")).quantize(
+        Decimal("0.01"))
+    db.commit()
+
+    content = _manual_workbook(db, project.project_id)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=content)
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="manual-test", import_batch_id=str(uuid.uuid4()))
+    assert result["site_creates"] == 1
+
+    site_line = db.scalar(select(MaintenanceSiteIssueLine))
+    assert site_line is not None
+    assert site_line.cost_source == "maint_demand"
+    assert site_line.unit_cost_ex_tax == Decimal("300.00")
+    assert site_line.cost_amount_inc_tax == Decimal("339.00")

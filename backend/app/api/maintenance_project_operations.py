@@ -1413,8 +1413,8 @@ def backfill_site_issue_costs_endpoint(
     if ctx.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "领用成本回填仅管理员可执行")
     operator = _real_operator(db, ident)
-    stats = operations_service.backfill_site_issue_costs(
-        db, operated_by=operator, force=_force)
+    stats = operations.backfill_site_issue_costs(
+        db, operated_by=operator, force=force)
     db.commit()
     record_access_log(ctx, "maintenance_site_issue_cost_backfill",
                       "maintenance_site_issue_line", dict(stats))
@@ -1439,7 +1439,7 @@ def backfill_expense_attribution_endpoint(
     if ctx.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "报销归因回填仅管理员可执行")
     operator = _real_operator(db, ident)
-    stats = operations_service.backfill_expense_attribution(db, operated_by=operator)
+    stats = operations.backfill_expense_attribution(db, operated_by=operator)
     db.commit()
     record_access_log(ctx, "maintenance_expense_attribution_backfill",
                       "maintenance_project_expense_attribution", dict(stats))

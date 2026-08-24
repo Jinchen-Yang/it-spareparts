@@ -4838,3 +4838,17 @@ def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
         "XS-COST-GAP-PAGE-SCALE"
     }
     assert forty_queries <= one_queries + 1
+
+
+def test_site_issue_cost_backfill_endpoint_smoke(db):
+    """/site-issue-costs/backfill 端点级冒烟。
+
+    该端点曾因引用未定义的 operations_service 全线 500（生产 2026-08-24
+    实测，两个回填端点同病），服务层正确性另由 resolve_lines 套件覆盖——
+    这里钉住「端点本身可达且返回统计结构」。
+    """
+    client = _client(db)
+    resp = client.post("/api/maintenance/projects/stable/site-issue-costs/backfill")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {"total", "resolved", "still_unknown", "projects_touched"} <= set(body)
