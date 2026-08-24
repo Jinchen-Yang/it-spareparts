@@ -196,3 +196,82 @@ def test_v2_manual_site_create_prices_line_immediately(db):
     assert site_line.cost_source == "maint_demand"
     assert site_line.unit_cost_ex_tax == Decimal("300.00")
     assert site_line.cost_amount_inc_tax == Decimal("339.00")
+
+
+def test_v2_site_quantity_update_keeps_dual_tax_consistent(db):
+    """2026-08-25 生产回归：改量后重取价前，autoflush 会把「新数量×旧金额」
+    刷进库，撞 ck_maintenance_site_issue_line_dual_tax_amounts（金额=数量×单价）
+    ——赋新数量必须同步重算金额。"""
+    from app.etl import loader
+    from tests import factories as f
+    from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
+    from app.models.system import SysImportBatch
+
+    project, part = _project(db)
+    batch = SysImportBatch(
+        filename="qty-dem.xlsx", file_type="maintenance",
+        file_hash=uuid.uuid4().hex.ljust(64, "0"), status="success")
+    db.add(batch)
+    db.flush()
+    rid = f"WBDD-QTY-{uuid.uuid4().hex[:6]}"
+    loader.load(
+        db,
+        f.maintenance_result(
+            {rid: f.maintenance_head(rid, order_no=rid, on=date(2026, 8, 10),
+                                     project=project.display_name)},
+            [f.maintenance_line(rid, f"{rid}-L1", part.pn_std, qty="1")],
+        ),
+        batch.id, date(2026, 8, 10), mode="upsert",
+    )
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == rid))
+    db.add(MaintenanceSourceOrderAssignment(
+        assignment_id=str(uuid.uuid4()), source_order_id=rid,
+        project_id=project.project_id, is_active=True, version=1,
+        created_by="tester"))
+    dem_line = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.order_id == order.id))
+    dem_line.cost_source = "direct"
+    dem_line.cost_amount_ex_tax = Decimal("300")
+    dem_line.cost_amount_inc_tax = (Decimal("300") * Decimal("1.13")).quantize(
+        Decimal("0.01"))
+    db.commit()
+
+    content = _manual_workbook(db, project.project_id)
+    plan1 = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=content)
+    master.apply_project_master_v2(
+        db, plan1, operated_by="qty-test", import_batch_id=str(uuid.uuid4()))
+    site_line = db.scalar(select(MaintenanceSiteIssueLine))
+    assert site_line is not None
+    assert site_line.quantity == Decimal("1")
+    assert site_line.unit_cost_ex_tax == Decimal("300.00")
+
+    # 清掉会话缓存；并让改量标记后跟一个 VOID 标记——VOID 分支的显式
+    # db.flush() 会在「数量已改、金额未重算」的中间态把 UPDATE 刷进库
+    # （autoflush 全局关闭，生产 2026-08-25 即由此撞 dual_tax CHECK）。
+    db.expire_all()
+
+    plan2 = master.MasterV2Plan(
+        project_id=project.project_id,
+        sheets=(master.V2_SHEET_SITE,),
+        site_flags=(
+            master.SiteReturnFlag(
+                issue_line_id=site_line.issue_line_id, no_return=None,
+                quantity=Decimal("3")),
+            master.SiteReturnFlag(
+                issue_line_id=site_line.issue_line_id, no_return=None,
+                is_void=True),
+        ),
+    )
+    master.apply_project_master_v2(
+        db, plan2, operated_by="qty-test", import_batch_id=str(uuid.uuid4()))
+    db.refresh(site_line)
+    assert site_line.is_active is False
+    assert site_line.quantity == Decimal("3")
+    assert site_line.unit_cost_ex_tax == Decimal("300.00")
+    assert site_line.cost_amount_ex_tax == Decimal("900.00")
+    assert site_line.cost_amount_inc_tax == Decimal("1017.00")

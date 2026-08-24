@@ -2592,8 +2592,19 @@ def apply_project_master_v2(
         line.no_return = flag.no_return
         if flag.pn is not None: line.pn = flag.pn
         if flag.serial_number is not None: line.serial_number = flag.serial_number
-        if flag.quantity is not None:
+        if flag.quantity is not None and flag.quantity != line.quantity:
+            # 先把金额同步到新数量再等批量重取价——赋值后任何 autoflush 都会
+            # 把 UPDATE 刷进库，若金额停留在旧数量口径会撞
+            # ck_maintenance_site_issue_line_dual_tax_amounts（金额=数量×单价）。
             line.quantity = flag.quantity
+            if line.unit_cost_ex_tax is not None:
+                line.cost_amount_ex_tax = (
+                    Decimal(line.quantity) * line.unit_cost_ex_tax
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                line.cost_amount_inc_tax = (
+                    Decimal(line.quantity) * line.unit_cost_inc_tax
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                line.cost_amount = line.cost_amount_ex_tax
             qty_issue = db.get(MaintenanceSiteIssue, line.issue_id)
             if qty_issue is not None:
                 pricing_entries.append((qty_issue.issue_date, line))
