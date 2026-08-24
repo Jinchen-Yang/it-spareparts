@@ -26,6 +26,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.security import UserContext
 from app.services import maintenance_project_master_workbook as master
 
 
@@ -240,6 +241,138 @@ def test_v21_create_new_line_under_existing_order(db):
         MaintenanceProjectOperationAudit.entity_id == str(new_line.id),
         MaintenanceProjectOperationAudit.action == "CREATE"))
     assert audit is not None
+
+
+def test_v23_blank_manual_rows_reassign_existing_wbdd_without_duplicates(db):
+    """项目内人工回传是归属确认：复用全局行、保留旧挂靠历史、重复上传幂等。"""
+    old_project, part, order, line = _make_project_with_line(db)
+    target = MaintenanceProject(
+        project_id=str(uuid.uuid4()),
+        project_code=f"TARGET-{uuid.uuid4().hex[:8]}",
+        display_name="人工认证后的正确项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(target)
+    order.project_raw = target.display_name
+    order.project_std = target.display_name
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=target.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = ws.max_row + 1
+    ws.cell(row_no, headers["维保单号"], order.order_no)
+    ws.cell(row_no, headers["PN"], part.pn_std)
+    ws.cell(row_no, headers["描述"], line.description)
+    ws.cell(row_no, headers["需求数量"], float(line.qty))
+    ws.cell(row_no, headers["退货数量"], float(line.return_qty or 0))
+
+    data = _save(wb)
+    ctx = UserContext(user_id="assignment-admin", role="admin", is_authenticated=True)
+    plan = master.validate_project_master_v2(
+        db, project_id=target.project_id, data=data, user_ctx=ctx)
+    assert plan.summary["order_reassignments"] == 1
+    assert plan.summary["line_creates"] == 0
+    assert plan.summary["line_updates"] == 0
+    assert plan.assignment_changes[0].previous_project_id == old_project.project_id
+
+    line_count = int(db.scalar(select(func.count(FMaintenanceLine.id))) or 0)
+    master.apply_project_master_v2(
+        db, plan, operated_by="assignment-admin",
+        import_batch_id=str(uuid.uuid4()), user_ctx=ctx)
+
+    assert int(db.scalar(select(func.count(FMaintenanceLine.id))) or 0) == line_count
+    history = list(db.scalars(
+        select(MaintenanceSourceOrderAssignment)
+        .where(MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id)
+        .order_by(MaintenanceSourceOrderAssignment.created_at)
+    ).all())
+    assert len(history) == 2
+    assert sum(row.is_active for row in history) == 1
+    assert next(row for row in history if row.is_active).project_id == target.project_id
+    assert next(row for row in history if not row.is_active).project_id == old_project.project_id
+
+    # 重放同一份人工表：既有全局行已在目标项目，既不再改挂，也不重复建行。
+    replay = master.validate_project_master_v2(
+        db, project_id=target.project_id, data=data, user_ctx=ctx)
+    assert replay.summary["order_reassignments"] == 0
+    assert replay.summary["line_creates"] == 0
+    assert replay.summary["line_updates"] == 0
+    master.apply_project_master_v2(
+        db, replay, operated_by="assignment-admin",
+        import_batch_id=str(uuid.uuid4()), user_ctx=ctx)
+    assert int(db.scalar(select(func.count(FMaintenanceLine.id))) or 0) == line_count
+
+
+def test_v23_multi_order_cascade_writes_one_bounded_audit_per_order(db):
+    """多张 WBDD 同时整单作废时，审计 entity_id 不再逗号拼接溢出 varchar(64)。"""
+    project, part, first_order, _first_line = _make_project_with_line(db)
+    second_order = FMaintenanceOrder(
+        raw_order_id=f"raw-order-{uuid.uuid4()}",
+        order_no="WBDD-EDIT-002",
+        order_date=date(2026, 8, 2),
+        linked_sales_order_no="XSDD-EDIT-001",
+        project_raw=project.display_name,
+        project_std=project.display_name,
+        data_status="已生效",
+        import_batch_id=_batch(db),
+    )
+    db.add(second_order)
+    db.flush()
+    second_line = FMaintenanceLine(
+        raw_line_id=f"raw-line-{uuid.uuid4()}",
+        order_id=second_order.id,
+        line_no=1,
+        part_id=part.id,
+        pn_std=part.pn_std,
+        pn_raw=part.pn_std,
+        description=part.description,
+        qty=Decimal("1"),
+        return_qty=Decimal("0"),
+        is_active=True,
+        import_batch_id=_batch(db),
+    )
+    db.add_all([
+        second_line,
+        MaintenanceSourceOrderAssignment(
+            assignment_id=str(uuid.uuid4()),
+            project_id=project.project_id,
+            source_order_id=second_order.raw_order_id,
+            is_active=True,
+            created_by="test",
+        ),
+    ])
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PARTS]
+    entity_col = next(cell.column for cell in ws[1] if cell.value == "实体ID")
+    for row_no in range(ws.max_row, 1, -1):
+        if ws.cell(row_no, entity_col).value not in (None, ""):
+            ws.delete_rows(row_no)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert plan.summary["line_voids"] == 2
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+    order_audits = list(db.scalars(
+        select(MaintenanceProjectOperationAudit).where(
+            MaintenanceProjectOperationAudit.project_id == project.project_id,
+            MaintenanceProjectOperationAudit.entity_type == "maintenance_order",
+            MaintenanceProjectOperationAudit.action == "VOID",
+        )
+    ).all())
+    assert {row.entity_id for row in order_audits} == {
+        first_order.raw_order_id,
+        second_order.raw_order_id,
+    }
+    assert all(len(row.entity_id) <= 64 for row in order_audits)
 
 
 def test_v21_editing_locked_column_is_rejected(db):

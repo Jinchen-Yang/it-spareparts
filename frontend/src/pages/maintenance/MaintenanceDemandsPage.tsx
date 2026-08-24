@@ -31,6 +31,13 @@ const { Title, Text } = Typography;
 
 const DEMAND_PAGE_SIZE = 20;
 
+function idempotencyKey(prefix: string): string {
+  const suffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
 /**
  * 需求单与数据同步（#267 前端任务 1+2）。
  *
@@ -118,7 +125,7 @@ export function MaintenanceDemandsPage() {
   const handleWbddUpload = async (file: File) => {
     setUploading(true);
     try {
-      const resp = await uploadWbdd(file, crypto.randomUUID());
+      const resp = await uploadWbdd(file, idempotencyKey("wbdd-upload"));
       const diffCount = resp.data.snapshot_diff?.missing_orders ?? 0;
       message.success(
         `快照已同步（批次 #${resp.data.batch_id}）` +
@@ -145,7 +152,7 @@ export function MaintenanceDemandsPage() {
       const resp = await voidFastMaintenanceDemands({
         source_order_ids: voidTarget,
         reason: voidReason.trim(),
-        idempotency_key: crypto.randomUUID(),
+        idempotency_key: idempotencyKey("wbdd-void"),
       });
       const already = resp.data.results.filter(
         (r) => r.status === "already_voided",

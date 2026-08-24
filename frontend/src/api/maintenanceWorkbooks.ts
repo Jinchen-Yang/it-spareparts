@@ -47,6 +47,7 @@ export interface WorkbookApplyResult {
   line_updates?: number;
   qty_updates?: number;
   line_voids?: number;
+  order_reassignments?: number;
   plan_creates?: number;
   plan_updates?: number;
   plan_voids?: number;
@@ -64,8 +65,17 @@ export interface WillVoidRow {
   [key: string]: unknown; // 宽松解析：后端字段调整不阻塞前端
 }
 
+export interface WillReassignOrder {
+  source_order_id?: string;
+  order_no?: string;
+  from_project_id?: string | null;
+  from_project_name?: string | null;
+  to_project_id?: string;
+}
+
 export interface WorkbookValidateResult extends Partial<WorkbookApplyResult> {
   will_void_rows?: WillVoidRow[];
+  will_reassign_orders?: WillReassignOrder[];
   [key: string]: unknown;
 }
 
@@ -181,8 +191,10 @@ export function saveBlob(blob: Blob, filename: string) {
   anchor.download = filename;
   document.body.appendChild(anchor);
   anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  // Safari/WebKit 可能在 click 返回后才真正读取 object URL。同步 revoke 会出现
+  // 后端已 200、浏览器却报下载失败或落下空文件的竞态。
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 /** 回款计划行（02）+ 到款状态（对比实收累计计算）。 */

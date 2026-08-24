@@ -27,8 +27,8 @@ import {
 } from "./panelUtils";
 
 function idempotencyKey(): string {
-  const suffix = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
+  const suffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `site-void-${suffix}`;
 }

@@ -285,6 +285,23 @@ describe("需求单与数据同步页", () => {
     await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(2));
   });
 
+  it("浏览器缺少 crypto.randomUUID 时仍会上传 WBDD 并生成幂等键", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    vi.stubGlobal("crypto", undefined);
+    const { container } = render(<MaintenanceDemandsPage />);
+    await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(1));
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: {
+        files: [new File(["xlsx"], "wbdd.xlsx", { type: "application/vnd.ms-excel" })],
+      },
+    });
+
+    await waitFor(() => expect(uploadWbdd).toHaveBeenCalledTimes(1));
+    expect(uploadWbdd.mock.calls[0][1]).toMatch(/^wbdd-upload-\d+-[0-9a-f]+$/);
+  });
+
   it("无动作权限时隐藏上传与作废入口", async () => {
     render(<MaintenanceDemandsPage />);
     await screen.findByText("XQD-001");

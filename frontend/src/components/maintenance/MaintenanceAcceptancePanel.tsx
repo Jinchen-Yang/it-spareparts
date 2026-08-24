@@ -18,13 +18,25 @@ import {
   type MaintenanceAcceptanceDeliverable,
 } from "../../api/maintenanceOperations";
 import { readMaintenanceCapabilities } from "./maintenancePermissions";
+import { saveBlob } from "../../api/maintenanceWorkbooks";
 
 
 function idempotencyKey(prefix: string): string {
-  const suffix = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
+  const suffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}-${suffix}`;
+}
+
+
+function readFailure(reason: unknown, fallback: string): string {
+  const detail = (reason as { response?: { data?: { detail?: unknown } } } | null)
+    ?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  return fallback;
 }
 
 
@@ -95,9 +107,7 @@ export default function MaintenanceAcceptancePanel({
       });
       await refreshAfterMutation();
     } catch (reason: unknown) {
-      const detail = (reason as { response?: { data?: { detail?: unknown } } } | null)
-        ?.response?.data?.detail;
-      setError(typeof detail === "string" ? detail : "附件上传失败，系统未写入。请检查格式并刷新后重试。");
+      setError(readFailure(reason, "附件上传失败，系统未写入。请检查格式并刷新后重试。"));
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -115,9 +125,7 @@ export default function MaintenanceAcceptancePanel({
       });
       await refreshAfterMutation();
     } catch (reason: unknown) {
-      const detail = (reason as { response?: { data?: { detail?: unknown } } } | null)
-        ?.response?.data?.detail;
-      setError(typeof detail === "string" ? detail : "验收报告提交失败，请刷新后重试。");
+      setError(readFailure(reason, "验收报告提交失败，请刷新后重试。"));
     } finally {
       setBusy(false);
     }
@@ -128,16 +136,9 @@ export default function MaintenanceAcceptancePanel({
     setError(null);
     try {
       const { data } = await downloadMaintenanceAcceptanceAttachment(fileId);
-      const url = URL.createObjectURL(data);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = safeFilename(filename);
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch {
-      setError("附件下载被拒绝或完整性校验失败，请联系管理员核查。");
+      saveBlob(data, safeFilename(filename));
+    } catch (reason: unknown) {
+      setError(readFailure(reason, "附件下载被拒绝或完整性校验失败，请联系管理员核查。"));
     } finally {
       setBusy(false);
     }
