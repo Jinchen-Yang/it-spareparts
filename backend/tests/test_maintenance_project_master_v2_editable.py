@@ -748,13 +748,14 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
     assert meta["template_version"] == "2.3.0"
 
 
-def test_latest_missing_marks_suspicious_when_ratio_high(db):
-    """缺失占比 > 50% → suspicious=true（前端禁用批量作废）。"""
+def test_latest_missing_allows_full_sync_at_any_ratio(db):
+    """2026-08-24 用户拍板：缺失占比任意（含 >50%/100%）都不再拦截——
+    差异清单与批量作废解锁，可全量跟随修改；占比仅作展示。"""
     from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
     from app.services import maintenance_wbdd_import as wbdd
 
     project, _part, order, _line = _make_project_with_line(db)
-    # 再造 4 张同窗口、不在文件批次里的单 → 库内 5 张活跃，文件只有 1 张
+    # 再造 4 张同窗口、不在文件批次里的单 → 库内 5 张活跃，文件只有 1 张（80%）
     others = []
     for i in range(4):
         b = _batch(db)
@@ -774,8 +775,9 @@ def test_latest_missing_marks_suspicious_when_ratio_high(db):
     result = wbdd.latest_missing(db)
     assert result["missing_count"] == 4
     assert result["db_active_in_window"] == 5
-    assert result["suspicious"] is True
+    assert "suspicious" not in result
     assert result["missing_ratio"] > 0.5
+    assert len(result["missing_orders"]) == 4
 
 
 def test_e2e_fix_single_row_delete_allowed(db):
