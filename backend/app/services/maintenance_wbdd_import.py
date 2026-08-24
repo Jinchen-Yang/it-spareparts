@@ -146,7 +146,9 @@ def snapshot_diff(db: Session, file_order_nos: set[str],
 # 差异清单明细上限（#265 契约）：与 void-fast 的 MAX_DELETE_HEADERS 对齐，
 # 超出部分 truncated=true，前端提示分批作废。
 _MISSING_DETAILS_LIMIT = 1_000
-_MISSING_SUSPICIOUS_RATIO = Decimal("0.5")
+# 2026-08-24 用户拍板：解除「疑似不完整导出」50% 拦截（原 _MISSING_SUSPICIOUS_RATIO
+# = 0.5，超阈值前端禁用批量作废并收起差异清单）——需要能 100% 全量跟随修改。
+# missing_ratio 仍计算并返回，仅作展示；误传风险由前端确认弹窗与审计兜底。
 
 
 def latest_missing(db: Session) -> dict:
@@ -187,9 +189,8 @@ def latest_missing(db: Session) -> dict:
         "truncated": False,
         "db_active_in_window": None,
         "missing_ratio": None,
-        # 疑似不完整导出（2026-08-20 人工测试发现）：局部/筛选导出会把大量
-        # 活着的单误报为消失。占比超阈值时前端禁用一键批量作废并要求确认。
-        "suspicious": False,
+        # 2026-08-24 用户拍板：不再输出 suspicious——任意缺失占比都允许
+        # 全量跟随作废（含 100%），前端差异清单恒展开。
     }
     if diff["missing_orders"] == 0 or not diff.get("window"):
         return base
@@ -242,7 +243,6 @@ def latest_missing(db: Session) -> dict:
     if active_in_window:
         ratio = Decimal(diff["missing_orders"]) / Decimal(active_in_window)
         base["missing_ratio"] = float(round(ratio, 4))
-        base["suspicious"] = ratio > _MISSING_SUSPICIOUS_RATIO
     base["truncated"] = len(rows) > _MISSING_DETAILS_LIMIT
     base["missing_orders"] = [
         {

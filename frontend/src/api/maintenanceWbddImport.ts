@@ -61,10 +61,9 @@ export interface WbddMissing {
   missing_orders: WbddMissingOrder[];
   /** 库内同日期窗的活跃单总数（判断误报用）。 */
   db_active_in_window?: number | null;
-  /** 缺失占比 = missing_count / db_active_in_window。 */
+  /** 缺失占比 = missing_count / db_active_in_window（2026-08-24 起仅展示，
+   *  不再作为批量作废的禁用开关——可 100% 全量跟随修改）。 */
   missing_ratio?: number | null;
-  /** true＝疑似不完整导出（缺失占比 > 50%），批量作废被禁用。 */
-  suspicious?: boolean;
 }
 
 /**
