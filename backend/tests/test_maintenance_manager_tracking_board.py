@@ -225,6 +225,7 @@ def test_missing_manager_tracking_facts_remain_visible_as_small_labels(db):
     assert card["manager_tracking"]["service_period"]["completeness_state"] == "empty"
     assert card["manager_tracking"]["acceptance"]["configuration_state"] == "pending_business_configuration"
     assert "维保期限待补" in card["missing_data_labels"]
-    assert "验收截止日待补" in card["missing_data_labels"]
+    # 2026-08-25：验收无截止日概念——两个过时标签已取消，附件提示保留
+    assert "验收截止日待补" not in card["missing_data_labels"]
     assert "验收附件待上传" in card["missing_data_labels"]
     assert card["attachment_status"] == "missing"

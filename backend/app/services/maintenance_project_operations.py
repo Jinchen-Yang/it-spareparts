@@ -3841,12 +3841,11 @@ def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> N
     acceptance = tracking.get("acceptance") or {}
     attachment_count = int(acceptance.get("attachment_count") or 0)
     card["attachment_status"] = "available" if attachment_count else "missing"
-    if not acceptance.get("due_date"):
-        labels.append("验收截止日待补")
+    # 2026-08-25 客户拍板：验收没有截止日概念、只是个上传的地方——
+    # 「验收截止日待补」「验收业务配置待确认」两个标签随月度全量表依赖
+    # 一并取消（入口已不存在，提示是死胡同）；附件待上传提示保留。
     if attachment_count == 0:
         labels.append("验收附件待上传")
-    if acceptance.get("configuration_state") != "configured":
-        labels.append("验收业务配置待确认")
     card["missing_data_labels"] = labels
 
 
