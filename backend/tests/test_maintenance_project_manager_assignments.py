@@ -39,6 +39,7 @@ def _admin_client(db, *, username: str) -> TestClient:
     app.include_router(maintenance_project_assignments.router, prefix="/api")
     app.include_router(maintenance_manager_directory.router, prefix="/api")
     app.include_router(maintenance_project_operations.router, prefix="/api")
+    app.include_router(maintenance_projects.router, prefix="/api")
     client = TestClient(app)
     login = client.post(
         "/api/auth/login",
@@ -666,3 +667,79 @@ def test_task_filter_paginates_in_sql_and_only_builds_the_requested_page(db):
         "project-task-page-000"
     ]
     assert loaded_project_ids == ["project-task-page-000"]
+
+
+def test_project_viewer_sync_and_visibility(db):
+    """2026-08-25：项目级可见账号（基础信息编辑·多选）——viewer 挂靠计入
+    行级隔离可见集；PATCH visible_usernames 整组同步（差量+审计+账号校验）。"""
+    target = MaintenanceProject(
+        project_id="project-viewer-target",
+        project_code="PM-VIEW",
+        display_name="合成可见性项目",
+        project_manager_id="来源负责人",
+        lifecycle_status="missing",
+    )
+    viewer = SysUser(
+        username="scoped_project_viewer",
+        role="purchaser",
+        display_name="合成可见账号",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([target, viewer])
+    db.commit()
+
+    admin = _admin_client(db, username="viewer_sync_admin")
+    # PATCH 仅带 visible_usernames（不改主档字段）也应可用
+    patched = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 1,
+            "visible_usernames": [viewer.username],
+            "reason": "基础信息编辑·多选可见账号",
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert [row["username"] for row in patched.json()["visible_usernames"]] == [
+        viewer.username
+    ]
+
+    # overview 回显
+    overview = admin.get(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        params={"as_of": "2026-08-09"},
+    )
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["project"]["visible_usernames"] == [viewer.username]
+
+    # viewer 账号（无负责人挂靠、行级隔离口径下）现在能看到该项目
+    client = _existing_user_client(db, username=viewer.username)
+    directory = client.post(
+        "/api/maintenance/projects/stable/search",
+        json={"q": "PM-VIEW", "page": 1, "page_size": 50},
+    )
+    assert directory.status_code == 200, directory.text
+    assert [row["project_id"] for row in directory.json()["rows"]] == [
+        target.project_id
+    ]
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{target.project_id}/workspace",
+        params={"as_of": "2026-08-09"},
+    )
+    assert workspace.status_code == 200, workspace.text
+
+    # 整组同步：清空 → 可见性随之消失
+    cleared = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={"version": 1, "visible_usernames": [], "reason": "清空可见账号"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["visible_usernames"] == []
+
+    # 账号不存在 → 400 整组拒绝
+    bad = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={"version": 1, "visible_usernames": ["ghost-user"],
+              "reason": "校验失败路径"},
+    )
+    assert bad.status_code == 400
+    assert "ghost-user" in bad.json()["detail"]

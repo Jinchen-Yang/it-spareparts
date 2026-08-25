@@ -229,7 +229,7 @@ class MaintenanceProjectUserAssignment(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "responsibility_type = 'primary_manager'",
+            "responsibility_type IN ('primary_manager', 'viewer')",
             name="ck_maintenance_project_user_assignment_type",
         ),
         CheckConstraint(
@@ -257,6 +257,16 @@ class MaintenanceProjectUserAssignment(Base):
             unique=True,
             postgresql_where=text(
                 "archived_at IS NULL AND responsibility_type = 'primary_manager'"
+            ),
+        ),
+        # 项目级可见账号（viewer，2026-08-25）：同项目同账号同时仅一条活跃
+        Index(
+            "ux_maintenance_project_user_assignment_viewer_active",
+            "project_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text(
+                "archived_at IS NULL AND responsibility_type = 'viewer'"
             ),
         ),
         Index(
@@ -300,7 +310,7 @@ class MaintenanceProjectAuditLog(Base):
         CheckConstraint(
             "entity_type IN ("
             "'project', 'project_contract', 'manager_assignment', "
-            "'source_order_assignment'"
+            "'source_order_assignment', 'viewer_assignment'"
             ")",
             name="ck_maintenance_project_audit_entity_type",
         ),

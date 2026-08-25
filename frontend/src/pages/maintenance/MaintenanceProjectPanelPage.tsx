@@ -391,6 +391,8 @@ function EditBasicsButton({
                 proj.period_to ? dayjs(proj.period_to) : null,
               ]
             : null,
+        // 项目级可见账号（2026-08-25）：回显当前 viewer 名单
+        visible_usernames: proj.visible_usernames ?? [],
       });
       // 加载系统内账号供「维保负责人」下拉选择。2026-08-21 改走负责人搜索
       // 端点（page_maintenance 门）——原 /accounts 受 page_accounts 门，
@@ -475,6 +477,27 @@ function EditBasicsButton({
           {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
           <Form.Item name="period" label="维保期限（起止）">
             <DatePicker.RangePicker style={{ width: "100%" }} allowEmpty={[true, true]} />
+          </Form.Item>
+          {/* 2026-08-25：项目级可见账号多选——被行级隔离的账号勾选后即可
+              看到本项目（负责人∪销售∪可见账号）；管理员/老板不受影响。 */}
+          <Form.Item
+            name="visible_usernames"
+            label="项目可见账号（多选）"
+            tooltip="选中的账号无论角色都能看到本项目；不选则按默认可见性规则"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder="选择需要看到本项目的账号"
+              optionFilterProp="label"
+              options={accounts.map((account) => ({
+                value: account.username,
+                label: account.display_name
+                  ? `${account.username} · ${account.display_name}`
+                  : account.username,
+              }))}
+            />
           </Form.Item>
           <Form.Item name="version" hidden>
             <Input />

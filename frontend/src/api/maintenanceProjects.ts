@@ -11,6 +11,8 @@ export interface MaintenanceProject {
   lifecycle_status: string;
   is_active: boolean;
   version: number;
+  /** 项目级可见账号（2026-08-25）：overview 载荷回显用。 */
+  visible_usernames?: string[];
 }
 
 export interface MaintenanceProjectDirectory {
@@ -40,6 +42,8 @@ export interface MaintenanceProjectUpdateInput {
   /** 维保期限（#39/#51）：YYYY-MM-DD；起止整组提交。 */
   period_from?: string | null;
   period_to?: string | null;
+  /** 项目级可见账号（2026-08-25）：整组同步；null=不调整。 */
+  visible_usernames?: string[];
   reason: string;
 }
 

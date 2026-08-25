@@ -94,7 +94,11 @@ def resolve_owner_scope(
 
 
 def owned_project_ids(user_ctx: UserContext):
-    """Stable-project ids currently owned by the authenticated primary manager."""
+    """Stable-project ids linked to the authenticated account.
+
+    2026-08-25：primary_manager（负责人）∪ viewer（项目级可见账号，
+    「基础信息编辑」多选配置）都计入本人可见集。
+    """
 
     if not user_ctx.is_authenticated or not user_ctx.user_id:
         return select(MaintenanceProjectUserAssignment.project_id).where(false())
@@ -102,7 +106,8 @@ def owned_project_ids(user_ctx: UserContext):
         select(MaintenanceProjectUserAssignment.project_id)
         .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
         .where(
-            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.responsibility_type.in_(
+                ("primary_manager", "viewer")),
             MaintenanceProjectUserAssignment.archived_at.is_(None),
             SysUser.username == user_ctx.user_id,
             SysUser.is_active.is_(True),
@@ -152,8 +157,8 @@ def can_access_project(
             .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
             .where(
                 MaintenanceProjectUserAssignment.project_id == project_id,
-                MaintenanceProjectUserAssignment.responsibility_type
-                == "primary_manager",
+                MaintenanceProjectUserAssignment.responsibility_type.in_(
+                    ("primary_manager", "viewer")),
                 MaintenanceProjectUserAssignment.archived_at.is_(None),
                 SysUser.username == user_ctx.user_id,
                 SysUser.is_active.is_(True),
@@ -390,3 +395,113 @@ def archive_primary_manager(
     )
     db.flush()
     return after
+
+
+def project_viewers(db: Session, *, project_id: str) -> list[dict]:
+    """项目级可见账号（viewer）当前名单，展示与表单回显用。"""
+    rows = db.execute(
+        select(MaintenanceProjectUserAssignment, SysUser)
+        .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
+        .where(
+            MaintenanceProjectUserAssignment.project_id == project_id,
+            MaintenanceProjectUserAssignment.responsibility_type == "viewer",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+        .order_by(SysUser.username)
+    ).all()
+    return [
+        {"username": user.username, "display_name": user.display_name}
+        for _assignment, user in rows
+    ]
+
+
+def sync_project_viewers(
+    db: Session,
+    *,
+    project_id: str,
+    usernames: list[str],
+    operated_by: str,
+    reason: str,
+) -> list[dict]:
+    """把项目级可见账号整组同步为 ``usernames``（2026-08-25 客户需求：
+    「基础信息编辑」里多选已有账号控制项目可见性）。
+
+    差量写：新增缺失 viewer、归档多余 viewer（软删留审计，同负责人口径）。
+    账号不存在/停用 → 整组拒绝，零半截写入。
+    """
+    clean_reason = _required_text(reason, "操作原因", 500)
+    wanted = sorted({name.strip() for name in usernames if name.strip()})
+    users = {
+        user.username: user
+        for user in db.execute(
+            select(SysUser).where(
+                SysUser.username.in_(wanted), SysUser.is_active.is_(True)
+            )
+        ).scalars()
+    }
+    missing = [name for name in wanted if name not in users]
+    if missing:
+        raise MaintenanceProjectAssignmentError(
+            f"账号不存在或已停用：{', '.join(missing)}")
+
+    current = list(
+        db.execute(
+            select(MaintenanceProjectUserAssignment, SysUser)
+            .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
+            .where(
+                MaintenanceProjectUserAssignment.project_id == project_id,
+                MaintenanceProjectUserAssignment.responsibility_type == "viewer",
+                MaintenanceProjectUserAssignment.archived_at.is_(None),
+            )
+        ).all()
+    )
+    current_names = {user.username for _assignment, user in current}
+    now = datetime.now(UTC)
+    for assignment, user in current:
+        if user.username in users:
+            continue
+        before = assignment_dict(assignment, user)
+        assignment.archived_at = now
+        assignment.archived_by = operated_by
+        assignment.archive_reason = clean_reason
+        assignment.version += 1
+        db.add(
+            MaintenanceProjectAuditLog(
+                project_id=project_id,
+                entity_type="viewer_assignment",
+                entity_id=assignment.assignment_id,
+                action="archive",
+                before_json=before,
+                after_json=assignment_dict(assignment, user),
+                reason=clean_reason,
+                operated_by=operated_by,
+            )
+        )
+    for name in wanted:
+        if name in current_names:
+            continue
+        assignment = MaintenanceProjectUserAssignment(
+            assignment_id=str(uuid4()),
+            project_id=project_id,
+            responsibility_type="viewer",
+            user_id=users[name].id,
+            version=1,
+            assigned_by=operated_by,
+            assignment_reason=clean_reason,
+        )
+        db.add(assignment)
+        db.flush()
+        db.add(
+            MaintenanceProjectAuditLog(
+                project_id=project_id,
+                entity_type="viewer_assignment",
+                entity_id=assignment.assignment_id,
+                action="create",
+                before_json=None,
+                after_json=assignment_dict(assignment, users[name]),
+                reason=clean_reason,
+                operated_by=operated_by,
+            )
+        )
+    db.flush()
+    return project_viewers(db, project_id=project_id)
