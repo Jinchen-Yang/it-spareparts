@@ -204,23 +204,12 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         user_ctx=_ctx(user),
         owner_scope="me",
     )
-    monthly = next(
-        task
-        for task in directory["rows"][0]["task_summary"]["rows"]
+    # 2026-08-25：「项目经理月度更新」任务退役（工作簿入口不存在，死胡同提示）
+    assert not [
+        task for task in directory["rows"][0]["task_summary"]["rows"]
         if task["task_type"] == "项目经理月度更新"
-    )
-    assert monthly["status"] == "completed"
-    assert monthly["title"] == "已完成2026年08月月度全量工作簿"
-    completed = project_operations(
-        db,
-        as_of=date(2026, 8, 9),
-        user_ctx=_ctx(user),
-        owner_scope="me",
-        task_type="项目经理月度更新",
-        task_status="completed",
-    )
-    assert completed["total"] == 1
-    pending = project_operations(
+    ]
+    retired = project_operations(
         db,
         as_of=date(2026, 8, 9),
         user_ctx=_ctx(user),
@@ -228,7 +217,7 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         task_type="项目经理月度更新",
         task_status="pending",
     )
-    assert pending["total"] == 0
+    assert retired["total"] == 0
 
 
 def test_apply_creates_configured_acceptance_due_date_and_preview(db):
@@ -492,6 +481,7 @@ def test_applied_status_becomes_stale_when_current_scope_changes(db):
     assert current["latest_batch"]["scope_matches_current"] is False
     assert current["project_count"] == 2
 
+    # 2026-08-25：「项目经理月度更新」任务退役——pending 过滤恒为空
     directory = project_operations(
         db,
         as_of=date(2026, 8, 9),
@@ -500,12 +490,4 @@ def test_applied_status_becomes_stale_when_current_scope_changes(db):
         task_type="项目经理月度更新",
         task_status="pending",
     )
-    assert directory["total"] == 2
-    assert all(
-        next(
-            task
-            for task in row["task_summary"]["rows"]
-            if task["task_type"] == "项目经理月度更新"
-        )["status"] == "pending"
-        for row in directory["rows"]
-    )
+    assert directory["total"] == 0
