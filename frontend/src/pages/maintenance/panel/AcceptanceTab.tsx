@@ -61,7 +61,7 @@ const itemColumns: ColumnsType<{
 /**
  * 验收 tab（2026-08-21 客户反馈）：
  * 上半区「验收需求清单」——两列 Excel 导入（预览确认 → 整表替换，历史留档）；
- * 下半区复活既有验收交付面板（附件上传 + 提交审批流，原孤儿组件）。
+ * 下半区复活既有验收交付面板（附件上传 + 提交即生效免审批，原孤儿组件）。
  */
 export function AcceptanceTab({
   projectId,
@@ -211,6 +211,10 @@ export function AcceptanceTab({
           </Space>
         }
       >
+        {/* 2026-08-25 客户口径：清单与下方交付区同屏但不联动，避免误解。 */}
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+          清单仅作验收需求记录，与下方验收报告提交状态无关。
+        </Text>
         {current ? (
           <>
             <Space size={16} wrap style={{ marginBottom: 12 }}>

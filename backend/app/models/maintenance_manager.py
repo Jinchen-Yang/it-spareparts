@@ -296,7 +296,8 @@ class MaintenanceCollectionMilestone(Base):
 
 
 class MaintenanceAcceptanceDeliverable(Base):
-    """Submission and approval are stored as separate, non-self-approvable facts."""
+    """提交即生效（2026-08-24 客户拍板）：无独立审批环节，提交人即生效人；
+    审批字段仅为存量数据与审计留痕保留（迁移 a9e2f7c4d1b8）。"""
 
     __tablename__ = "maintenance_acceptance_deliverable"
 
@@ -509,7 +510,7 @@ class MaintenanceAcceptanceOperation(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "operation_type IN ('attachment_upload', 'submit', 'approve', 'reject')",
+            "operation_type IN ('attachment_upload', 'attachment_archive', 'submit', 'approve', 'reject')",
             name="ck_maintenance_acceptance_operation_type",
         ),
         CheckConstraint(

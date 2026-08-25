@@ -586,7 +586,9 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_site_issue_manage",
          "action_maintenance_bad_return_manage",
          "action_maintenance_acceptance_submit",
-         "action_maintenance_acceptance_review",
+         # 2026-08-25 摘除验收死键：review 已废弃、checklist_import 自 08-22 起
+         # 无任何端点消费，挂在权限中心是假权限（勾了没效果）。键定义
+         # （ALL_KEYS/LABELS/模板/依赖图）保留，兼容存量账号快照。
          "action_maintenance_warehouse_manage",
          "action_maintenance_collection_follow_up",
          "action_maintenance_collection_plan_import",
@@ -603,7 +605,8 @@ UI_GROUPS: list[dict] = [
                "action_maintenance_ledger_import",
                "action_maintenance_doc_import",
                "action_maintenance_wbdd_import",
-               "action_maintenance_acceptance_checklist_import",
+               # 2026-08-25 摘除 action_maintenance_acceptance_checklist_import
+               # 死键（同上：无端点消费的假权限，不再展示）。
                "action_maintenance_expense_collection_upload"]},
 ]
 
@@ -861,7 +864,7 @@ PERMISSION_META: dict[str, dict] = {
     "action_maintenance_manager_workbook_apply": {
         "label": "项目经理月度全量表确认应用",
         "summary": "允许把本人项目范围内、已通过整表校验的月度 v3 工作簿原子写入。",
-        "can": "写入维保期限、验收截止日和最多 24 期计划回款节点，并关闭对应月度任务。",
+        "can": "写入维保期限和最多 24 期计划回款节点，并关闭对应月度任务。",
         "cannot": "不能修改财务确认实收，不能越过实名项目负责人范围，也不能绕过版本冲突。",
         "typical": ["管理员授权的项目经理"],
         "sensitivity": "critical",

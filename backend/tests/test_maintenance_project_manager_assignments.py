@@ -396,21 +396,27 @@ def test_task_board_keeps_incomplete_project_and_filters_generated_tasks_in_post
     db.commit()
     client = _admin_client(db, username="task_card_admin")
 
+    # 2026-08-25：「项目经理月度更新」任务退役（工作簿入口不存在，死胡同
+    # 提示）——类型筛选为空；无过滤时项目仍在，卡片标签与任务列表不再
+    # 出现月度/验收截止日/业务配置项。
     response = client.post(
         "/api/maintenance/projects/stable/operations/search",
         json={
             "q": "PM-TASK-INCOMPLETE",
             "task_type": "项目经理月度更新",
-            "task_status": "pending",
-            "due_from": "2026-08-31",
-            "due_to": "2026-08-31",
             "as_of": "2026-08-09",
         },
     )
-
     assert response.status_code == 200, response.text
-    assert response.json()["total"] == 1
-    card = response.json()["rows"][0]
+    assert response.json()["total"] == 0
+
+    unfiltered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={"q": "PM-TASK-INCOMPLETE", "as_of": "2026-08-09"},
+    )
+    assert unfiltered.status_code == 200, unfiltered.text
+    assert unfiltered.json()["total"] == 1
+    card = unfiltered.json()["rows"][0]
     assert card["project_id"] == project.project_id
     assert card["manager_assignment"] is None
     assert card["missing_data_labels"] == [
@@ -418,59 +424,25 @@ def test_task_board_keeps_incomplete_project_and_filters_generated_tasks_in_post
         "维保期限待补",
         "合同额待补",
         "成本待补",
-        "验收截止日待补",
         "验收附件待上传",
-        "验收业务配置待确认",
     ]
     assert card["attachment_status"] == "missing"
-    monthly = next(
-        row
-        for row in card["task_summary"]["rows"]
+    assert not [
+        row for row in card["task_summary"]["rows"]
         if row["task_type"] == "项目经理月度更新"
-    )
-    assert monthly["status"] == "pending"
-    assert monthly["due_date"] == "2026-08-31"
-    assert monthly["due_state"] == "upcoming"
-    assert monthly["is_overdue"] is False
-    assert monthly["generated_by"] == "system"
-    assert monthly["owner"] is None
-    assert monthly["detail"] == "请下载本人范围全量表，追加或更新后上传校验"
-    assert monthly["close_basis"] == (
-        "项目经理本人范围的 v3 月度全量工作簿通过校验并成功应用后，"
-        "由全量上传批次自动关闭"
-    )
+    ]
 
-    db.add(
-        MaintenanceProjectWorkbookState(
-            project_id=project.project_id,
-            revision=1,
-            last_applied_at=datetime(2026, 8, 8, 8, 0, tzinfo=UTC),
-            data_version="task-card-completed-v1",
-        )
+    task_rules = {row["rule_key"] for row in card["task_summary"]["rows"]}
+    # 2026-08-25：截止日类（missing_due）与审批类（pending_review，审批入口
+    # 已删）任务退役——不再生成；未提交验收的提醒保留（新口径下唯一保留
+    # 的验收提醒），标题已无「期」概念。
+    assert "acceptance:missing_due" not in task_rules
+    assert "acceptance:pending_review" not in task_rules
+    report_due = next(
+        row for row in card["task_summary"]["rows"]
+        if row["rule_key"] == "acceptance:report_due"
     )
-    db.commit()
-    still_pending = client.post(
-        "/api/maintenance/projects/stable/operations/search",
-        json={
-            "q": "PM-TASK-INCOMPLETE",
-            "task_type": "项目经理月度更新",
-            "task_status": "pending",
-            "as_of": "2026-08-09",
-        },
-    )
-    assert still_pending.status_code == 200, still_pending.text
-    assert still_pending.json()["total"] == 1
-    completed = client.post(
-        "/api/maintenance/projects/stable/operations/search",
-        json={
-            "q": "PM-TASK-INCOMPLETE",
-            "task_type": "项目经理月度更新",
-            "task_status": "completed",
-            "as_of": "2026-08-09",
-        },
-    )
-    assert completed.status_code == 200, completed.text
-    assert completed.json()["total"] == 0
+    assert report_due["title"] == "提交验收报告"
 
     invalid_range = client.post(
         "/api/maintenance/projects/stable/operations/search",

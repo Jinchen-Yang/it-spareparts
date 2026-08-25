@@ -95,21 +95,6 @@ def _edit_plan(content: bytes, *, sequence: int, date_value=..., amount_value=..
         book.close()
 
 
-def _edit_overview(content: bytes, *, header: str, value) -> bytes:
-    book = load_workbook(io.BytesIO(content), data_only=False)
-    try:
-        sheet = book[workbook_v3.OVERVIEW_SHEET]
-        table = sheet.tables[workbook_v3.OVERVIEW_TABLE]
-        min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
-        headers = [sheet.cell(min_row, column).value for column in range(min_col, max_col + 1)]
-        sheet.cell(min_row + 1, headers.index(header) + 1, value)
-        output = io.BytesIO()
-        book.save(output)
-        return output.getvalue()
-    finally:
-        book.close()
-
-
 def _add_zip_member(content: bytes, name: str, payload: bytes) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(content), "r") as source:
@@ -222,28 +207,32 @@ class MaintenanceManagerWorkbookV3ContractTest(unittest.TestCase):
         self.assertEqual(change.completeness_state, "date_only")
         self.assertTrue(any(issue.code == "partial_plan_node" for issue in result.warnings))
 
-    def test_acceptance_due_date_is_an_editable_versioned_change(self):
+    def test_overview_has_no_acceptance_due_date_column(self):
+        # 2026-08-25 拍板：验收无截止日概念，工作簿不再提供该列与对应变更。
         snapshot = _snapshot()
         artifact = workbook_v3.build_manager_workbook(snapshot, hmac_key=HMAC_KEY)
-        edited = _edit_overview(
-            artifact.content,
-            header="验收报告截止日",
-            value=date(2026, 11, 20),
-        )
+
+        book = load_workbook(io.BytesIO(artifact.content), data_only=False)
+        try:
+            overview = book[workbook_v3.OVERVIEW_SHEET]
+            table = overview.tables[workbook_v3.OVERVIEW_TABLE]
+            min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
+            headers = [
+                overview.cell(min_row, column).value
+                for column in range(min_col, max_col + 1)
+            ]
+            self.assertNotIn("验收报告截止日", headers)
+        finally:
+            book.close()
 
         result = workbook_v3.validate_manager_workbook(
-            edited,
+            artifact.content,
             snapshot=snapshot,
             hmac_key=HMAC_KEY,
         )
 
         self.assertTrue(result.can_apply)
-        self.assertEqual(len(result.acceptance_due_date_changes), 1)
-        self.assertEqual(
-            result.acceptance_due_date_changes[0].due_date,
-            date(2026, 11, 20),
-        )
-        self.assertEqual(result.acceptance_due_date_changes[0].expected_version, 0)
+        self.assertTrue(result.unchanged)
 
     def test_manager_cannot_write_confirmed_actual_collection(self):
         snapshot = _snapshot()

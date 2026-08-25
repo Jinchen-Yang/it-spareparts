@@ -143,11 +143,9 @@ def _validation_payload(validation, batch) -> dict:
         "changes": {
             "service_periods": len(validation.service_period_changes),
             "planned_collection_milestones": len(validation.milestone_changes),
-            "acceptance_due_dates": len(validation.acceptance_due_date_changes),
             "total": (
                 len(validation.service_period_changes)
                 + len(validation.milestone_changes)
-                + len(validation.acceptance_due_date_changes)
             ),
         },
         "items": list((batch.plan_json or {}).get("preview_changes") or []),

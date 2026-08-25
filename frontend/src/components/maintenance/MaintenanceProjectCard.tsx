@@ -44,13 +44,11 @@ function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperation
 export default function MaintenanceProjectCard({
   project,
   visibility,
-  canUseManagerWorkbook = false,
   canManageAssignment = false,
   onAssignmentChanged,
 }: {
   project: MaintenanceProjectOperationsSummary;
   visibility: ProjectFinancialVisibility;
-  canUseManagerWorkbook?: boolean;
   canManageAssignment?: boolean;
   onAssignmentChanged?: () => void;
 }) {
@@ -59,11 +57,8 @@ export default function MaintenanceProjectCard({
   const assignment = project.manager_assignment;
   const primaryTask = project.task_summary?.primary;
   const missingLabels = project.missing_data_labels ?? [];
-  const taskRows = project.task_summary?.rows ?? [];
-  const taskCandidates = primaryTask ? [primaryTask, ...taskRows] : taskRows;
-  const hasPendingMonthlyUpload = taskCandidates.some(
-    (task) => task.task_type === "项目经理月度更新" && task.status !== "completed",
-  );
+  // 2026-08-25 客户拍板：「项目经理月度更新」任务随月度全量表入口退役，
+  // 「上传月度全量表」卡片链接（目标路由已重定向回维保主页）一并去掉。
   const tracking = project.manager_tracking;
   return (
     <Card
@@ -84,15 +79,6 @@ export default function MaintenanceProjectCard({
         <Link key="detail" to={`/maintenance/beta/projects/${encodeURIComponent(project.project_id)}`}>
           进入项目
         </Link>,
-        ...(hasPendingMonthlyUpload && canUseManagerWorkbook ? [
-          <Link
-            key="monthly-upload-pending"
-            to="/maintenance/beta/project-manager/monthly-workbook"
-            title="打开本人范围的月度全量工作簿"
-          >
-            上传月度全量表
-          </Link>,
-        ] : []),
         ...(canManageAssignment ? [
           <ProjectManagerAssignmentControl
             key="manager"
@@ -165,12 +151,10 @@ export default function MaintenanceProjectCard({
                   : ""}
               </Tag>
             ) : <Tag color="orange">回款计划待补</Tag>}
-            <Tag color={tracking.acceptance.approval_status === "approved"
-              ? "green"
-              : tracking.acceptance.is_overdue ? "red" : "gold"}
-            >
-              验收：{tracking.acceptance.due_date || "截止日待补"}
-              {tracking.acceptance.is_overdue ? `，逾期 ${tracking.acceptance.overdue_days} 天` : ""}
+            {/* 2026-08-25 客户拍板：验收无截止日概念、只是个上传的地方——
+                验收标签改挂提交状态，不再渲染截止日/逾期（旧口径死胡同）。 */}
+            <Tag color={tracking.acceptance.submission_status === "submitted" ? "green" : "gold"}>
+              验收：{tracking.acceptance.submission_status === "submitted" ? "已提交" : "待提交"}
             </Tag>
           </Space>
         </div>

@@ -12,7 +12,6 @@ from sqlalchemy import select
 
 from app.auth import hash_password
 from app.models.maintenance_manager import (
-    MaintenanceAcceptanceDeliverable,
     MaintenanceCollectionMilestone,
     MaintenanceManagerUploadBatch,
     MaintenanceManagerUploadBatchProject,
@@ -30,8 +29,6 @@ from app.services.maintenance_manager_workbook_adapter import (
     ManagerWorkbookConflict,
 )
 from app.services.maintenance_manager_workbook_v3 import (
-    OVERVIEW_SHEET,
-    OVERVIEW_TABLE,
     PLAN_SHEET,
     PLAN_TABLE,
     ManagerWorkbookV3Error,
@@ -146,21 +143,6 @@ def _set_plan_values(
         book.close()
 
 
-def _set_acceptance_due(content: bytes, value: date) -> bytes:
-    book = load_workbook(io.BytesIO(content), data_only=False)
-    try:
-        sheet = book[OVERVIEW_SHEET]
-        table = sheet.tables[OVERVIEW_TABLE]
-        min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
-        headers = [sheet.cell(min_row, column).value for column in range(min_col, max_col + 1)]
-        sheet.cell(min_row + 1, headers.index("验收报告截止日") + 1, value)
-        output = io.BytesIO()
-        book.save(output)
-        return output.getvalue()
-    finally:
-        book.close()
-
-
 def test_validate_then_apply_is_atomic_and_replay_safe(db):
     user, project_id, relation_id = _seed(db)
     adapter = _adapter(db, user)
@@ -204,23 +186,12 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         user_ctx=_ctx(user),
         owner_scope="me",
     )
-    monthly = next(
-        task
-        for task in directory["rows"][0]["task_summary"]["rows"]
+    # 2026-08-25：「项目经理月度更新」任务退役（工作簿入口不存在，死胡同提示）
+    assert not [
+        task for task in directory["rows"][0]["task_summary"]["rows"]
         if task["task_type"] == "项目经理月度更新"
-    )
-    assert monthly["status"] == "completed"
-    assert monthly["title"] == "已完成2026年08月月度全量工作簿"
-    completed = project_operations(
-        db,
-        as_of=date(2026, 8, 9),
-        user_ctx=_ctx(user),
-        owner_scope="me",
-        task_type="项目经理月度更新",
-        task_status="completed",
-    )
-    assert completed["total"] == 1
-    pending = project_operations(
+    ]
+    retired = project_operations(
         db,
         as_of=date(2026, 8, 9),
         user_ctx=_ctx(user),
@@ -228,53 +199,7 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         task_type="项目经理月度更新",
         task_status="pending",
     )
-    assert pending["total"] == 0
-
-
-def test_apply_creates_configured_acceptance_due_date_and_preview(db):
-    user, project_id, _relation_id = _seed(
-        db,
-        username="acceptance_due_manager",
-    )
-    adapter = _adapter(db, user)
-    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
-    validation, batch = adapter.validate(
-        date(2026, 8, 1),
-        _set_acceptance_due(artifact.content, date(2026, 10, 31)),
-        hmac_key=HMAC_KEY,
-    )
-    assert len(validation.acceptance_due_date_changes) == 1
-    assert batch.plan_json["preview_changes"] == [{
-        "kind": "acceptance_due_date",
-        "project_id": project_id,
-        "project_code": "PM-acceptance_due_manager",
-        "project_name": "合成项目经理工作簿项目",
-        "contract_no": None,
-        "sequence": None,
-        "before": {
-            "due_date": None,
-            "configuration_state": "pending_business_configuration",
-        },
-        "after": {
-            "due_date": "2026-10-31",
-            "configuration_state": "configured",
-        },
-    }]
-    db.commit()
-
-    result = adapter.apply(batch.batch_id)
-    db.commit()
-    assert result["changed_rows"] == 1
-    deliverable = db.scalar(
-        select(MaintenanceAcceptanceDeliverable).where(
-            MaintenanceAcceptanceDeliverable.project_id == project_id,
-            MaintenanceAcceptanceDeliverable.deliverable_type == "acceptance_report",
-        )
-    )
-    assert deliverable is not None
-    assert deliverable.due_date == date(2026, 10, 31)
-    assert deliverable.configuration_state == "configured"
-    assert deliverable.version == 1
+    assert retired["total"] == 0
 
 
 def test_adapter_writes_day_precision_and_pending_state_for_new_nodes(db):
@@ -492,6 +417,7 @@ def test_applied_status_becomes_stale_when_current_scope_changes(db):
     assert current["latest_batch"]["scope_matches_current"] is False
     assert current["project_count"] == 2
 
+    # 2026-08-25：「项目经理月度更新」任务退役——pending 过滤恒为空
     directory = project_operations(
         db,
         as_of=date(2026, 8, 9),
@@ -500,12 +426,4 @@ def test_applied_status_becomes_stale_when_current_scope_changes(db):
         task_type="项目经理月度更新",
         task_status="pending",
     )
-    assert directory["total"] == 2
-    assert all(
-        next(
-            task
-            for task in row["task_summary"]["rows"]
-            if task["task_type"] == "项目经理月度更新"
-        )["status"] == "pending"
-        for row in directory["rows"]
-    )
+    assert directory["total"] == 0

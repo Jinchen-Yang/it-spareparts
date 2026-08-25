@@ -3604,12 +3604,10 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert first.status_code == 200, first.text
     assert first.json() == second.json()
     assert "cost_ratio:red" in {row["rule_key"] for row in first.json()["rows"]}
-    monthly = next(
-        row for row in first.json()["rows"] if row["rule_key"] == "manager_update:2026-07"
-    )
-    assert monthly["task_type"] == "项目经理月度更新"
-    assert monthly["due_date"] == "2026-07-31"
-    assert monthly["status"] == "pending"
+    # 2026-08-25：「项目经理月度更新」任务退役——规则清单不再出现
+    assert "manager_update:2026-07" not in {
+        row["rule_key"] for row in first.json()["rows"]
+    }
 
     state = db.get(MaintenanceProjectWorkbookState, projects[2].project_id)
     state.last_applied_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
@@ -3618,12 +3616,9 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         params={"as_of": "2026-07-31"},
     ).json()
-    monthly_after_legacy_v2_apply = next(
-        row
-        for row in after_legacy_v2_apply["rows"]
-        if row["rule_key"] == "manager_update:2026-07"
-    )
-    assert monthly_after_legacy_v2_apply["status"] == "pending"
+    assert "manager_update:2026-07" not in {
+        row["rule_key"] for row in after_legacy_v2_apply["rows"]
+    }
     assert client.post(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         json={"title": "禁止用户创建"},

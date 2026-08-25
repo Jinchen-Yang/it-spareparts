@@ -3,13 +3,16 @@ import {
   Alert,
   Button,
   Descriptions,
+  Popconfirm,
   Space,
   Spin,
   Tag,
+  Typography,
 } from "antd";
-import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 
 import {
+  deleteMaintenanceAcceptanceAttachment,
   downloadMaintenanceAcceptanceAttachment,
   getMaintenanceAcceptance,
   submitMaintenanceAcceptance,
@@ -18,6 +21,8 @@ import {
 } from "../../api/maintenanceOperations";
 import { readMaintenanceCapabilities } from "./maintenancePermissions";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
+
+const { Text } = Typography;
 
 
 function idempotencyKey(prefix: string): string {
@@ -95,26 +100,42 @@ export default function MaintenanceAcceptancePanel({
   };
 
   const upload = async (file: File | undefined) => {
-    if (!file || !record || record.version < 1) return;
+    // 2026-08-25 客户口径：一个上传口——只传文件，无版本握手、无前置条件。
+    if (!file) {
+      if (inputRef.current) inputRef.current.value = "";
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await uploadMaintenanceAcceptanceAttachment(projectId, {
-        expected_version: record.version,
-        file,
-        idempotencyKey: idempotencyKey("acceptance-upload"),
-      });
+      await uploadMaintenanceAcceptanceAttachment(projectId, { file });
       await refreshAfterMutation();
     } catch (reason: unknown) {
-      setError(readFailure(reason, "附件上传失败，系统未写入。请检查格式并刷新后重试。"));
+      setError(readFailure(reason, "附件上传失败，系统未写入。请检查格式后重试。"));
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
     }
   };
 
+  const removeAttachment = async (fileId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteMaintenanceAcceptanceAttachment(projectId, fileId);
+      await refreshAfterMutation();
+    } catch (reason: unknown) {
+      setError(readFailure(reason, "附件删除失败，请刷新后重试。"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
-    if (!record || record.version < 1) return;
+    // 2026-08-25 客户口径：提交亦无前端版本守卫——version=0 空载荷是合法起点
+    // （与已修复的 upload 同款 version<1 残留）；expected_version 仅是服务端
+    // 乐观锁契约，不再作前端前置条件。
+    if (!record) return;
     setBusy(true);
     setError(null);
     try {
@@ -167,14 +188,33 @@ export default function MaintenanceAcceptancePanel({
       )}
       <Space wrap>
         {record.attachments.map((attachment) => (
-          <Button
-            key={attachment.file_id}
-            icon={<DownloadOutlined />}
-            disabled={busy}
-            onClick={() => void download(attachment.file_id, attachment.original_filename)}
-          >
-            {attachment.original_filename}
-          </Button>
+          <Space key={attachment.file_id} size={4}>
+            <Button
+              icon={<DownloadOutlined />}
+              disabled={busy}
+              onClick={() => void download(attachment.file_id, attachment.original_filename)}
+            >
+              {attachment.original_filename}
+            </Button>
+            {canSubmitAcceptance && (
+              <Popconfirm
+                title="删除该附件？"
+                description="删除后页面立即消失，可重新上传"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                disabled={busy}
+                onConfirm={() => void removeAttachment(attachment.file_id)}
+              >
+                <Button
+                  danger
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  disabled={busy}
+                  aria-label={`删除 ${attachment.original_filename}`}
+                />
+              </Popconfirm>
+            )}
+          </Space>
         ))}
         {record.attachments.length === 0 && <Tag color="orange">验收附件待上传</Tag>}
       </Space>
@@ -209,6 +249,12 @@ export default function MaintenanceAcceptancePanel({
                   : "提交验收报告"}
             </Button>
           </>
+        )}
+        {!canSubmitAcceptance && (
+          // 参照验收清单「导入需授权」：无权限用户只见橙标无入口，补一句解释。
+          <Text type="secondary">
+            上传与提交需授权（验收报告提交与附件上传），请联系管理员开通
+          </Text>
         )}
       </Space>
     </Space>

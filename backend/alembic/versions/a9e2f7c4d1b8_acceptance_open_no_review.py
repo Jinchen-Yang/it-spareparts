@@ -156,13 +156,24 @@ def downgrade() -> None:
     )
 
     # 模板/账号快照回退为关闭验收提交；覆盖层键同样移除（回到模板默认）。
+    # 只回滚 upgrade 真正加过的键：sales 模板三键，maintenance_manager 模板
+    # 仅 action_maintenance_acceptance_submit——此前两模板一刀切删三键，
+    # 会把 maintenance_manager 模板既有的 page_maintenance 一并剥掉。
     op.execute(
         """
         UPDATE sys_role_template
         SET permissions = permissions - 'page_maintenance'
                                        - 'own_maintenance_projects_only'
                                        - 'action_maintenance_acceptance_submit'
-        WHERE code IN ('sales', 'maintenance_manager')
+        WHERE code = 'sales'
+          AND jsonb_typeof(permissions) = 'object'
+        """
+    )
+    op.execute(
+        """
+        UPDATE sys_role_template
+        SET permissions = permissions - 'action_maintenance_acceptance_submit'
+        WHERE code = 'maintenance_manager'
           AND jsonb_typeof(permissions) = 'object'
         """
     )

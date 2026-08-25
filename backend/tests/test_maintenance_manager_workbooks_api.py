@@ -166,7 +166,6 @@ def test_export_validate_apply_uses_only_explicit_own_scope(db):
     assert preview["changes"] == {
         "service_periods": 0,
         "planned_collection_milestones": 1,
-        "acceptance_due_dates": 0,
         "total": 1,
     }
     assert preview["items"] == [{

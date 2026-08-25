@@ -3841,12 +3841,11 @@ def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> N
     acceptance = tracking.get("acceptance") or {}
     attachment_count = int(acceptance.get("attachment_count") or 0)
     card["attachment_status"] = "available" if attachment_count else "missing"
-    if not acceptance.get("due_date"):
-        labels.append("验收截止日待补")
+    # 2026-08-25 客户拍板：验收没有截止日概念、只是个上传的地方——
+    # 「验收截止日待补」「验收业务配置待确认」两个标签随月度全量表依赖
+    # 一并取消（入口已不存在，提示是死胡同）；附件待上传提示保留。
     if attachment_count == 0:
         labels.append("验收附件待上传")
-    if acceptance.get("configuration_state") != "configured":
-        labels.append("验收业务配置待确认")
     card["missing_data_labels"] = labels
 
 
@@ -3986,36 +3985,9 @@ def _system_tasks(
     manager_tracking: dict | None = None,
 ) -> list[dict]:
     tasks: list[dict] = []
-    due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
-    tasks.append(
-        _task(
-            project_id=project_id,
-            rule_key=f"manager_update:{as_of:%Y-%m}",
-            severity=(
-                "info"
-                if manager_update_completed or as_of < due_date
-                else "warning"
-            ),
-            title=(
-                f"已完成{as_of:%Y年%m月}月度全量工作簿"
-                if manager_update_completed
-                else f"待上传{as_of:%Y年%m月}月度全量工作簿"
-            ),
-            detail=(
-                "本人范围的 v3 工作簿已通过校验并原子应用"
-                if manager_update_completed
-                else "请下载本人范围全量表，追加或更新后上传校验"
-            ),
-            task_type="项目经理月度更新",
-            due_date=due_date,
-            task_status=("completed" if manager_update_completed else "pending"),
-            owner=None,
-            close_basis=(
-                "项目经理本人范围的 v3 月度全量工作簿通过校验并成功应用后，"
-                "由全量上传批次自动关闭"
-            ),
-        )
-    )
+    # 2026-08-25 客户拍板：「项目经理月度更新」任务退役——月度全量工作簿的
+    # 页面入口已不存在，该任务永远无法完成，是死胡同提示（每个项目每月
+    # 无条件生成一条 warning）。工作簿 API 保留，需要时恢复入口再恢复任务。
     tracking = manager_tracking or {}
     service_period = tracking.get("service_period") or {}
     service_state = service_period.get("completeness_state") or "empty"
@@ -4097,19 +4069,7 @@ def _system_tasks(
         if acceptance.get("due_date")
         else None
     )
-    if acceptance_due is None:
-        tasks.append(
-            _task(
-                project_id=project_id,
-                rule_key="acceptance:missing_due",
-                severity="warning",
-                title="补充验收报告截止日",
-                detail="截止日缺失不会隐藏项目，但无法生成到期提醒",
-                task_type="验收报告",
-                owner=None,
-                close_basis="验收报告截止日已配置",
-            )
-        )
+    # 2026-08-25：验收无截止日概念（客户拍板），missing_due 任务随之退役。
     if int(acceptance.get("attachment_count") or 0) == 0:
         tasks.append(
             _task(
@@ -4136,7 +4096,7 @@ def _system_tasks(
                 title=(
                     "验收报告提交已逾期"
                     if overdue_days
-                    else "按期提交验收报告"
+                    else "提交验收报告"
                 ),
                 detail=(
                     f"已逾期 {overdue_days} 天"
@@ -4149,19 +4109,9 @@ def _system_tasks(
                 close_basis="验收报告已实名提交",
             )
         )
-    elif approval_status == "not_reviewed":
-        tasks.append(
-            _task(
-                project_id=project_id,
-                rule_key="acceptance:pending_review",
-                severity="info",
-                title="验收报告待独立审批",
-                detail="提交人与审批人必须不同；业务审批角色未配置时仅 admin 可审批",
-                task_type="验收审批",
-                owner=None,
-                close_basis="验收报告已批准或已驳回",
-            )
-        )
+    # 2026-08-25 客户拍板：提交即生效免审批，审批入口已删——
+    # 「验收报告待独立审批」任务整体退役（存量 submitted+not_reviewed
+    # 数据再无审批出口，提示同样是死胡同）。
     elif approval_status == "rejected":
         tasks.append(
             _task(
@@ -6194,7 +6144,9 @@ def _directory_reminder_query(
         )
         .exists()
     )
-    manager_open = ~manager_completed
+    # 2026-08-25：「项目经理月度更新」任务退役（工作簿入口不存在，
+    # 死胡同提示）——SQL 侧条件恒假，全部引用点自然失效。
+    manager_open = literal(False)
     profit_visible = not is_field_hidden(user_ctx, "contract_amount")
     cost_visible = not is_field_hidden(user_ctx, "unit_cost")
     expense_visible = not is_field_hidden(user_ctx, "expense_inc")
@@ -6256,7 +6208,8 @@ def _directory_reminder_query(
             facts.c.next_milestone_date >= as_of,
         ),
     )
-    acceptance_missing_due = facts.c.acceptance_due_date.is_(None)
+    # 2026-08-25：验收无截止日概念——missing_due 条件恒假（退役）。
+    acceptance_missing_due = literal(False)
     acceptance_missing_attachment = facts.c.acceptance_attachment_count == 0
     acceptance_report_due = facts.c.acceptance_submission_status != "submitted"
     acceptance_report_overdue = and_(
@@ -6271,10 +6224,9 @@ def _directory_reminder_query(
             facts.c.acceptance_due_date >= as_of,
         ),
     )
-    acceptance_pending_review = and_(
-        facts.c.acceptance_submission_status == "submitted",
-        facts.c.acceptance_approval_status == "not_reviewed",
-    )
+    # 2026-08-25：提交即生效免审批（审批入口已删）——pending_review
+    # 条件恒假（退役），「验收审批」任务类型引用点自然失效。
+    acceptance_pending_review = literal(False)
     acceptance_rejected = facts.c.acceptance_approval_status == "rejected"
     rule_conditions = {
         f"manager_update:{as_of:%Y-%m}": manager_open,
@@ -6495,7 +6447,14 @@ def _directory_reminder_query(
                 continue
             if task_status == "open" and fact_status == "completed":
                 continue
-            if task_status in {"pending", "completed"} and fact_status != task_status:
+            # 2026-08-25：开放态事实（维保期限/验收/回款等）语义上就是待办
+            # （Python 侧任务同为 pending）——月度任务退役后 pending 过滤需
+            # 由此类事实承接，open ≡ pending。
+            if (
+                task_status in {"pending", "completed"}
+                and fact_status != task_status
+                and not (task_status == "pending" and fact_status == "open")
+            ):
                 continue
             if due_from is not None or due_to is not None:
                 if fact_due is None:
