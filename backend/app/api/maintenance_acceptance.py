@@ -62,7 +62,9 @@ class AcceptanceSearchRequest(BaseModel):
 class AcceptanceSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_version: int = Field(ge=1)
+    # ge=0：GET 空载荷 version=0（无交付行）是合法起点，服务层放行 0→1
+    # 首次自动建行跳变（2026-08-25 去截止日门）。
+    expected_version: int = Field(ge=0)
 
 
 def _raise_http(exc: Exception) -> None:
@@ -127,7 +129,7 @@ def get_project_acceptance(
 @router.post("/projects/stable/{project_id}/acceptance/attachments")
 async def upload_project_acceptance_attachment(
     project_id: str = ApiPath(..., min_length=1, max_length=36),
-    expected_version: int = Form(..., ge=1),
+    expected_version: int = Form(..., ge=0),
     file: UploadFile = File(...),
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=128),
     db: Session = Depends(get_db),

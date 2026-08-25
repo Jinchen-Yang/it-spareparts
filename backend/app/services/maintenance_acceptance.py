@@ -296,9 +296,22 @@ def _locked_deliverable(
         .with_for_update()
     )
     if row is None:
-        raise MaintenanceAcceptanceConflict("验收报告截止日尚未配置，请先通过月度全量表补齐")
-    if row.configuration_state != "configured" or row.due_date is None:
-        raise MaintenanceAcceptanceConflict("验收报告截止日尚未配置，请先补齐")
+        # 2026-08-25 客户拍板：验收"只是个上传的地方"，没有截止日概念——
+        # 首次上传自动建默认交付行，不再依赖月度全量表先配置截止日
+        # （此前"截止日未配置即关闭通道"导致业务根本无法上传）。
+        row = MaintenanceAcceptanceDeliverable(
+            deliverable_id=str(uuid4()),
+            project_id=project_id,
+            deliverable_type="acceptance_report",
+            due_date=None,
+            submission_status="not_submitted",
+            approval_status="not_reviewed",
+            configuration_state="configured",
+            version=1,
+        )
+        db.add(row)
+        db.flush()
+    # 截止日只作展示（有则显示、无则"—"），不再是上传/提交的前置条件。
     return row
 
 
@@ -339,7 +352,7 @@ def deliverable_dict(
         "rejection_reason": row.rejection_reason,
         "configuration_state": row.configuration_state,
         "version": row.version,
-        "review_policy": "admin_only_pending_business_role_configuration",
+        "review_policy": "submit_takes_effect",
         "attachments": [
             {
                 "file_id": file.file_id,
@@ -378,9 +391,9 @@ def project_acceptance(db: Session, *, project_id: str) -> dict:
             "approved_at": None,
             "approved_by": None,
             "rejection_reason": None,
-            "configuration_state": "pending_business_configuration",
+            "configuration_state": "configured",
             "version": 0,
-            "review_policy": "admin_only_pending_business_role_configuration",
+            "review_policy": "submit_takes_effect",
             "attachments": [],
         }
     return deliverable_dict(db, row)
@@ -495,7 +508,12 @@ def upload_attachment(
     )
     if replay is not None:
         return replay, None
-    if deliverable.version != expected_version:
+    if deliverable.version != expected_version and not (
+        # GET 空载荷 version=0 → 首次自动建行 version=1 的合法跳变
+        # （2026-08-25 去截止日门后，无交付行项目可直接上传）。
+        expected_version == 0 and deliverable.version == 1
+        and deliverable.submission_status == "not_submitted"
+    ):
         raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
     # 2026-08-24 客户拍板：提交即生效，无需独立审批。审批锁定随之取消——
     # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
@@ -585,7 +603,11 @@ def submit_acceptance(
     replay = _existing_operation(db, operation_key=operation_key, payload_hash=payload_hash)
     if replay is not None:
         return replay
-    if deliverable.version != expected_version:
+    if deliverable.version != expected_version and not (
+        # 同 upload：0 → 首次自动建行 1 的合法跳变。
+        expected_version == 0 and deliverable.version == 1
+        and deliverable.submission_status == "not_submitted"
+    ):
         raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
     if not _active_attachments(db, deliverable.deliverable_id):
         raise MaintenanceAcceptanceConflict("至少上传一个有效附件后才能提交")
