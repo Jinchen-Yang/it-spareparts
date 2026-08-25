@@ -533,8 +533,19 @@ def backfill_expense_attribution(
              "skipped_invalid": 0, "skipped_duplicate": 0,
              "projects_touched": 0}
     # ETL 幂等键有「数据ID」与「bxd#line」两种形态，同一逻辑行可能以不同
-    # raw_line_id 重复入库——按 (project, expense_ref) 进程内去重防 uq 冲突
-    seen_refs: set[tuple[str, str]] = set()
+    # raw_line_id 重复入库——按 (project, expense_ref) 去重防 uq 冲突。
+    # 2026-08-25：去重集必须先装**库里已有归因**（生产批次 168/175 存量即有
+    # 同单同行的重复事实行：旧行已归因、新形态行 expense_id 不同——只靠
+    # 进程内去重会在第二轮回填撞 uq_maintenance_project_expense_ref）。
+    seen_refs: set[tuple[str, str]] = {
+        (pid, ref)
+        for pid, ref in db.execute(
+            select(
+                MaintenanceProjectExpenseAttribution.project_id,
+                MaintenanceProjectExpenseAttribution.expense_ref,
+            )
+        )
+    }
     per_project: dict[str, dict[str, int]] = defaultdict(
         lambda: {"rows": 0, "approved": 0, "void": 0, "unknown": 0})
     pending: list[MaintenanceProjectExpenseAttribution] = []
