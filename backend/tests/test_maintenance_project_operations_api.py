@@ -1,5 +1,6 @@
 """Stable maintenance-project operating facts through their public API."""
 
+import uuid
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
@@ -4852,3 +4853,47 @@ def test_site_issue_cost_backfill_endpoint_smoke(db):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert {"total", "resolved", "still_unknown", "projects_touched"} <= set(body)
+
+
+def test_expense_attribution_backfill_skips_existing_ref_across_runs(db):
+    """2026-08-25 生产回归：同单同行的报销事实以不同 raw_line_id 重复入库
+    （批次 168/175 存量形态）——第二轮回填必须按库里已有 (project, ref)
+    跳过，而不是撞 uq_maintenance_project_expense_ref。"""
+    client = _client(db)
+    project = MaintenanceProject(project_id="attr-dedup-project",
+                                 project_code="ATTR-DEDUP",
+                                 display_name="归因去重项目",
+                                 lifecycle_status="ongoing")
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="attr-dedup-contract", project_id=project.project_id,
+        contract_id="XSDD-ATTR-1", contract_no="XSDD-ATTR-1",
+        status_mapping_state="mapped", status_mapping_version="t",
+        effective_from=date(2026, 1, 1), source="ledger", version=1))
+    from app.models.maintenance import FProjectExpense
+    batch_ids = []
+    for i in range(2):
+        b = SysImportBatch(filename=f"attr-dedup-{i}.xlsx", file_type="expense",
+                           file_hash=uuid.uuid4().hex.ljust(64, "0"), status="success")
+        db.add(b)
+        db.flush()
+        batch_ids.append(b.id)
+    for i, raw in enumerate(("old-raw", "new-raw")):
+        db.add(FProjectExpense(
+            raw_line_id=f"attr-dedup-{raw}", bxd_no="BXD-ATTR-0001", line_no=1,
+            expense_date=date(2026, 8, 1), person="测试", amount=Decimal("100"),
+            amount_ex_tax=Decimal("100"), amount_inc_tax=Decimal("113.00"),
+            data_status="已结束", linked_sales_order_no="XSDD-ATTR-1",
+            import_batch_id=batch_ids[i]))
+    db.commit()
+
+    first = client.post("/api/maintenance/projects/stable/expense-attribution/backfill")
+    assert first.status_code == 200, first.text
+    assert first.json()["attributed"] == 1
+    assert first.json()["skipped_duplicate"] >= 1
+
+    # 第二轮回填（库里已有同 ref 归因、事实行换 raw_line_id 形态）：跳过不撞键
+    second = client.post("/api/maintenance/projects/stable/expense-attribution/backfill")
+    assert second.status_code == 200, second.text
+    assert second.json()["attributed"] == 0
