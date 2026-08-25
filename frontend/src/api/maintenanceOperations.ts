@@ -1181,17 +1181,29 @@ export const getMaintenanceAcceptance = (projectId: string) =>
 
 export const uploadMaintenanceAcceptanceAttachment = (
   projectId: string,
-  input: { expected_version: number; file: File; idempotencyKey: string },
+  input: { file: File; idempotencyKey?: string },
 ) => {
+  // 2026-08-25 客户口径：一个上传口——只传文件本身（无版本握手）。
   const form = new FormData();
-  form.append("expected_version", String(input.expected_version));
   form.append("file", input.file);
   return api.post<MaintenanceAcceptanceMutationResult>(
     `${projectBase(projectId)}/acceptance/attachments`,
     form,
-    { headers: { "Idempotency-Key": input.idempotencyKey }, timeout: 120000 },
+    {
+      headers: input.idempotencyKey
+        ? { "Idempotency-Key": input.idempotencyKey }
+        : undefined,
+      timeout: 120000,
+    },
   );
 };
+
+export const deleteMaintenanceAcceptanceAttachment = (
+  projectId: string,
+  fileId: string,
+) => api.delete<{ file_id: string; archived: boolean }>(
+  `${projectBase(projectId)}/acceptance/attachments/${encodeURIComponent(fileId)}`,
+);
 
 export const submitMaintenanceAcceptance = (
   projectId: string,

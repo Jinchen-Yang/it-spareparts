@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -129,18 +130,23 @@ def get_project_acceptance(
 @router.post("/projects/stable/{project_id}/acceptance/attachments")
 async def upload_project_acceptance_attachment(
     project_id: str = ApiPath(..., min_length=1, max_length=36),
-    expected_version: int = Form(..., ge=0),
+    # 2026-08-25 客户口径：一个上传口——传文件即落库，不做版本握手；
+    # 字段保留为可选（旧客户端兼容），服务端忽略。幂等键同样可选
+    # （缺省由服务端生成），前端只需 POST 文件本身。
     file: UploadFile = File(...),
-    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=128),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_acceptance_submit")),
     ctx: UserContext = Depends(get_current_user_context),
+    idempotency_key: str | None = Header(
+        default=None, alias="Idempotency-Key", min_length=1, max_length=128),
 ) -> dict:
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
+    if not idempotency_key:
+        idempotency_key = f"auto-{uuid4()}"
     path: Path | None = None
     try:
         # Read one byte beyond the hard ceiling so oversize input is rejected
@@ -149,7 +155,6 @@ async def upload_project_acceptance_attachment(
         result, path = acceptance.upload_attachment(
             db,
             project_id=project_id,
-            expected_version=expected_version,
             operator=operator,
             client_key=idempotency_key,
             filename=file.filename,
@@ -170,6 +175,37 @@ async def upload_project_acceptance_attachment(
         "upload_maintenance_acceptance_attachment",
         f"maintenance_project:{project_id}",
         {"file_id": result["file_id"], "replayed": result["replayed"]},
+    )
+    return result
+
+
+@router.delete("/projects/stable/{project_id}/acceptance/attachments/{file_id}")
+def delete_project_acceptance_attachment(
+    project_id: str = ApiPath(..., min_length=1, max_length=36),
+    file_id: str = ApiPath(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_acceptance_submit")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """删除验收附件（2026-08-25 客户口径：能传也能删）——软删链接，
+    页面立即消失；文件字节与审计留痕可追溯，可重新上传。"""
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    operator = _real_operator(db, ident)
+    try:
+        result = acceptance.archive_attachment(
+            db, project_id=project_id, file_id=file_id, operator=operator)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        _raise_http(exc)
+    record_access_log(
+        ctx,
+        "delete_maintenance_acceptance_attachment",
+        f"maintenance_project:{project_id}",
+        {"file_id": file_id},
     )
     return result
 

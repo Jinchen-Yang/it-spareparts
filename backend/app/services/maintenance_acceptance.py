@@ -474,13 +474,15 @@ def upload_attachment(
     db: Session,
     *,
     project_id: str,
-    expected_version: int,
     operator: str,
     client_key: str,
     filename: str | None,
     mime_type: str | None,
     content: bytes,
 ) -> tuple[dict, Path | None]:
+    """一个上传口（2026-08-25 客户口径）：传文件即落库——自动 SHA-256、
+    自动建交付行、自动挂项目，不做版本号/乐观锁（纯追加操作无竞态可言，
+    此前的版本握手只制造了 version 0/1 跳变类 bug）。"""
     safe_name, extension, safe_mime = validate_attachment(
         filename=filename,
         mime_type=mime_type,
@@ -496,7 +498,6 @@ def upload_attachment(
     )
     payload_hash = _payload_hash(
         {
-            "expected_version": expected_version,
             "filename": safe_name,
             "mime_type": safe_mime,
             "size": len(content),
@@ -508,13 +509,6 @@ def upload_attachment(
     )
     if replay is not None:
         return replay, None
-    if deliverable.version != expected_version and not (
-        # GET 空载荷 version=0 → 首次自动建行 version=1 的合法跳变
-        # （2026-08-25 去截止日门后，无交付行项目可直接上传）。
-        expected_version == 0 and deliverable.version == 1
-        and deliverable.submission_status == "not_submitted"
-    ):
-        raise MaintenanceAcceptanceConflict("验收记录版本已变化，请刷新后重试")
     # 2026-08-24 客户拍板：提交即生效，无需独立审批。审批锁定随之取消——
     # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
 
@@ -713,3 +707,43 @@ def file_project_id(db: Session, *, file_id: str) -> str:
     if project_id is None:
         raise MaintenanceAcceptanceNotFound("验收附件不存在或已归档")
     return str(project_id)
+
+
+def archive_attachment(
+    db: Session,
+    *,
+    project_id: str,
+    file_id: str,
+    operator: str,
+) -> dict:
+    """删除验收附件（2026-08-25 客户口径：能传也能删）。
+
+    软删：归档 file ↔ 交付行 的链接（页面立即消失，CHECK 要求
+    archived_at/by/reason 三件套），文件字节与审计保留可追溯；
+    同一文件可重新上传（新链接）。
+    """
+    deliverable = _locked_deliverable(db, project_id=project_id)
+    link = db.scalar(
+        select(BusinessFileLink).where(
+            BusinessFileLink.file_id == file_id,
+            BusinessFileLink.entity_type == "maintenance_acceptance_deliverable",
+            BusinessFileLink.entity_id == deliverable.deliverable_id,
+            BusinessFileLink.archived_at.is_(None),
+        ).with_for_update()
+    )
+    if link is None:
+        raise MaintenanceAcceptanceNotFound("附件不存在或已删除")
+    now = _now()
+    link.archived_at = now
+    link.archived_by = operator
+    link.archive_reason = f"用户删除（{operator}）"
+    deliverable.version += 1
+    db.flush()
+    return {
+        "file_id": file_id,
+        "project_id": project_id,
+        "archived": True,
+        "archived_at": now.isoformat(),
+        "archived_by": operator,
+        "version": deliverable.version,
+    }
