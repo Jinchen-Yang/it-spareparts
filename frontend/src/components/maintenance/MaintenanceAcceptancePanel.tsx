@@ -6,7 +6,6 @@ import {
   Space,
   Spin,
   Tag,
-  Typography,
 } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 
@@ -147,13 +146,14 @@ export default function MaintenanceAcceptancePanel({
   if (loading && !record) return <Spin size="small" tip="正在读取验收报告状态"><span /></Spin>;
   if (!record) return <Alert type="error" showIcon message={error || "验收报告不可用"} />;
 
-  const configured = record.configuration_state === "configured" && !!record.due_date;
+  // 2026-08-25 客户拍板：验收只是个上传的地方，没有截止日概念——
+  // 随时可传随时可提交；截止日有则展示、无则"—"，不再作前置条件。
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       {error && <Alert type="error" showIcon message={error} />}
       <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
         <Descriptions.Item label="验收截止日">
-          {record.due_date || <Typography.Text type="secondary">待月度全量表补齐</Typography.Text>}
+          {record.due_date || "—"}
         </Descriptions.Item>
         <Descriptions.Item label="提交状态">
           {record.submission_status === "submitted"
@@ -179,7 +179,7 @@ export default function MaintenanceAcceptancePanel({
         {record.attachments.length === 0 && <Tag color="orange">验收附件待上传</Tag>}
       </Space>
       <Space wrap>
-        {canSubmitAcceptance && configured && (
+        {canSubmitAcceptance && (
           <>
             <Button
               icon={<UploadOutlined />}
@@ -211,9 +211,6 @@ export default function MaintenanceAcceptancePanel({
           </>
         )}
       </Space>
-      {!configured && (
-        <Typography.Text type="secondary">截止日未配置时，系统会保留项目卡片，但关闭附件与提交通道。</Typography.Text>
-      )}
     </Space>
   );
 }

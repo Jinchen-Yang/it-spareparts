@@ -363,3 +363,45 @@ def test_download_integrity_failure_is_fail_closed_and_not_audited(db):
     assert response.status_code == 409
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(BusinessFileDownloadAudit)) == 0
+
+
+def test_upload_and_submit_work_without_preconfigured_deliverable(db):
+    """2026-08-25 客户拍板：验收只是个上传的地方，没有截止日概念——
+    项目从未配置交付行（无月度全量表截止日）也能直接上传并提交。
+    此前 _locked_deliverable 因截止日未配置直接拒绝，业务根本无法上传。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_no_config_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="no-config", manager=manager_user)
+    db.query(MaintenanceAcceptanceDeliverable).filter(
+        MaintenanceAcceptanceDeliverable.project_id == project.project_id).delete()
+    db.commit()
+
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        data={"expected_version": "0"},
+        files={"file": ("验收报告.png", _png(), "image/png")},
+        headers={"Idempotency-Key": "no-config-upload-1"},
+    )
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["version"] >= 1
+
+    submit = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/submit",
+        json={"expected_version": upload.json()["version"]},
+        headers={"Idempotency-Key": "no-config-submit-1"},
+    )
+    assert submit.status_code == 200, submit.text
+    assert submit.json()["approval_status"] == "approved"
+    db.expire_all()
+    fresh = db.scalar(select(MaintenanceAcceptanceDeliverable).where(
+        MaintenanceAcceptanceDeliverable.project_id == project.project_id))
+    assert fresh is not None
+    assert fresh.due_date is None
+    assert fresh.approval_status == "approved"
