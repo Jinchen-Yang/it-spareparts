@@ -411,7 +411,10 @@ def search_acceptance(
 ) -> dict:
     filters = []
     if user_ctx.role not in FULL_SCOPE_ROLES:
-        filters.append(assignments.owned_project_condition(user_ctx))
+        # 2026-08-25 行级口径对齐：与直达路由 can_access_project 共用同一
+        # 谓词（负责人 ∪ 台账 salesperson）——此前只用负责人口径，sales
+        # 按台账销售名能直达上传/查看，却在列表里搜不到。
+        filters.append(assignments.accessible_project_condition(user_ctx))
     search = str(q or "").strip()
     if search:
         filters.append(
@@ -481,8 +484,9 @@ def upload_attachment(
     content: bytes,
 ) -> tuple[dict, Path | None]:
     """一个上传口（2026-08-25 客户口径）：传文件即落库——自动 SHA-256、
-    自动建交付行、自动挂项目，不做版本号/乐观锁（纯追加操作无竞态可言，
-    此前的版本握手只制造了 version 0/1 跳变类 bug）。"""
+    自动建交付行、自动挂项目，不做版本号/乐观锁（此前的版本握手只制造了
+    version 0/1 跳变类 bug）。幂等由两道互补机制保证：客户端幂等键
+    （可选）+ 行锁内同 sha256 内容去重（双击/超时重试不产生重复附件）。"""
     safe_name, extension, safe_mime = validate_attachment(
         filename=filename,
         mime_type=mime_type,
@@ -509,6 +513,23 @@ def upload_attachment(
     )
     if replay is not None:
         return replay, None
+    # 2026-08-25 内容去重（替代被删的版本握手）：行锁内查该交付行 active
+    # 链接中是否已有同 sha256 附件——有则按幂等回放形态直接返回存档结果
+    # （path=None 不落盘、不建行/链接），双击/超时重试不产生重复附件；
+    # 无则正常落库。保持「只传文件本身」口径，无需客户端幂等键。
+    for _dup_link, duplicate in _active_attachments(db, deliverable.deliverable_id):
+        if duplicate.sha256 == digest:
+            return {
+                "replayed": True,
+                "project_id": project_id,
+                "deliverable_id": deliverable.deliverable_id,
+                "file_id": duplicate.file_id,
+                "version": deliverable.version,
+                "original_filename": duplicate.original_filename,
+                "mime_type": duplicate.mime_type,
+                "size_bytes": duplicate.size_bytes,
+                "sha256": duplicate.sha256,
+            }, None
     # 2026-08-24 客户拍板：提交即生效，无需独立审批。审批锁定随之取消——
     # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
 
@@ -720,7 +741,9 @@ def archive_attachment(
 
     软删：归档 file ↔ 交付行 的链接（页面立即消失，CHECK 要求
     archived_at/by/reason 三件套），文件字节与审计保留可追溯；
-    同一文件可重新上传（新链接）。
+    同一文件可重新上传（新链接）。删除写操作台账
+    （operation_type='attachment_archive'）；已提交的验收至少保留
+    一份 active 附件——删最后一份返回 409，可先上传新附件再删。
     """
     deliverable = _locked_deliverable(db, project_id=project_id)
     link = db.scalar(
@@ -733,13 +756,24 @@ def archive_attachment(
     )
     if link is None:
         raise MaintenanceAcceptanceNotFound("附件不存在或已删除")
+    if deliverable.submission_status == "submitted":
+        remaining = [
+            active_file
+            for _active_link, active_file in _active_attachments(
+                db, deliverable.deliverable_id
+            )
+            if active_file.file_id != file_id
+        ]
+        if not remaining:
+            raise MaintenanceAcceptanceConflict(
+                "已提交的验收至少保留一份附件，可先上传新附件再删除"
+            )
     now = _now()
     link.archived_at = now
     link.archived_by = operator
     link.archive_reason = f"用户删除（{operator}）"
     deliverable.version += 1
-    db.flush()
-    return {
+    result = {
         "file_id": file_id,
         "project_id": project_id,
         "archived": True,
@@ -747,3 +781,24 @@ def archive_attachment(
         "archived_by": operator,
         "version": deliverable.version,
     }
+    # 操作台账（与 upload/submit 同一 helper 模式）：删除非幂等重放场景，
+    # 每次删除是独立审计事件，operation_key 以一次性键保证唯一。
+    db.add(
+        MaintenanceAcceptanceOperation(
+            operation_id=str(uuid4()),
+            operation_key=_operation_key(
+                operator=operator,
+                operation_type="attachment_archive",
+                deliverable_id=deliverable.deliverable_id,
+                client_key=f"archive-{file_id}-{uuid4()}",
+            ),
+            payload_hash=_payload_hash({"file_id": file_id}),
+            operation_type="attachment_archive",
+            deliverable_id=deliverable.deliverable_id,
+            project_id=project_id,
+            result_json=result,
+            operated_by=operator,
+        )
+    )
+    db.flush()
+    return result

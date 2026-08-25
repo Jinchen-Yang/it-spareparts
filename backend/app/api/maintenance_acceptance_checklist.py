@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
+from app.models.maintenance_acceptance_checklist import (
+    MaintenanceAcceptanceChecklistBatch,
+)
 from app.security import (
     UserContext,
     get_current_user_context,
@@ -184,6 +187,12 @@ def apply_checklist(
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     operator = _real_operator(ident)
+    # 2026-08-25 行级补齐：apply 此前只校验「本人批次」，不校验项目可见性——
+    # 越权账号拿到 batch_id 即可整表替换他人项目清单。加载批次后、整表
+    # 替换前先过项目行级范围（403，同 maintenance_acceptance.py:142 口径）。
+    batch = db.get(MaintenanceAcceptanceChecklistBatch, batch_id)
+    if batch is not None:
+        enforce_maintenance_project_access(db, project_id=batch.project_id, ctx=ctx)
     try:
         summary = checklist.apply_batch(db, batch_id, operated_by=operator)
         db.commit()

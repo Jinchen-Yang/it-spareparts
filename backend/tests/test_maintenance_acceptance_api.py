@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.models.maintenance_manager import (
     BusinessFile,
     BusinessFileDownloadAudit,
+    BusinessFileLink,
     MaintenanceAcceptanceDeliverable,
     MaintenanceAcceptanceOperation,
 )
@@ -32,11 +33,13 @@ from app.models.system import SysUser
 from app.services import maintenance_acceptance as acceptance_service
 
 
-def _client(db, *, username: str, role: str, permissions: dict | None = None) -> tuple[TestClient, SysUser]:
+def _client(db, *, username: str, role: str, permissions: dict | None = None,
+            salesperson_name: str | None = None) -> tuple[TestClient, SysUser]:
     user = SysUser(
         username=username,
         role=role,
         display_name=f"合成账号 {username}",
+        salesperson_name=salesperson_name,
         password_hash=hash_password("synthetic-password-123"),
         permissions=permissions,
     )
@@ -55,12 +58,14 @@ def _client(db, *, username: str, role: str, permissions: dict | None = None) ->
     return client, user
 
 
-def _project(db, *, suffix: str, manager: SysUser | None, configured: bool = True):
+def _project(db, *, suffix: str, manager: SysUser | None, configured: bool = True,
+             salesperson: str | None = None):
     project = MaintenanceProject(
         project_id=f"acceptance-project-{suffix}",
         project_code=f"ACC-{suffix}",
         display_name=f"合成验收项目 {suffix}",
         lifecycle_status="ongoing",
+        salesperson=salesperson,
     )
     db.add(project)
     db.flush()
@@ -91,9 +96,9 @@ def _project(db, *, suffix: str, manager: SysUser | None, configured: bool = Tru
     return project, deliverable
 
 
-def _png() -> bytes:
+def _png(*, color: tuple[int, int, int] = (35, 80, 120)) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (4, 4), color=(35, 80, 120)).save(output, format="PNG")
+    Image.new("RGB", (4, 4), color=color).save(output, format="PNG")
     return output.getvalue()
 
 
@@ -167,10 +172,11 @@ def test_manager_upload_submit_download_are_scoped_idempotent_and_audited(db):
     assert current.approved_at is not None
 
     # 生效后仍可补充附件并重新提交新版本（审批锁定已随免审批取消）。
+    # 注意换不同内容：同 sha256 会命中 2026-08-25 内容去重而回放。
     extra = manager.post(
         f"/api/maintenance/projects/stable/{owned.project_id}/acceptance/attachments",
         data={"expected_version": 3},
-        files={"file": ("补充材料.png", image, "image/png")},
+        files={"file": ("补充材料.png", _png(color=(200, 90, 40)), "image/png")},
         headers={"Idempotency-Key": "attachment-key-2"},
     )
     assert extra.status_code == 200, extra.text
@@ -383,9 +389,10 @@ def test_upload_and_submit_work_without_preconfigured_deliverable(db):
         MaintenanceAcceptanceDeliverable.project_id == project.project_id).delete()
     db.commit()
 
+    # 新契约（2026-08-25 去版本握手）：上传只 POST 文件本身，不再带
+    # expected_version 表单域（服务端忽略旧客户端残留字段）。
     upload = manager.post(
         f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
-        data={"expected_version": "0"},
         files={"file": ("验收报告.png", _png(), "image/png")},
         headers={"Idempotency-Key": "no-config-upload-1"},
     )
@@ -405,3 +412,267 @@ def test_upload_and_submit_work_without_preconfigured_deliverable(db):
     assert fresh is not None
     assert fresh.due_date is None
     assert fresh.approval_status == "approved"
+
+
+def test_sales_row_key_search_follows_salesperson_scope(db):
+    """2026-08-25 行级口径对齐：开 own_maintenance_projects_only 的 sales
+    按「负责人 ∪ 台账 salesperson」并集可见——能直达 GET 的项目也要能在
+    search 搜到（此前 search 只用负责人口径，sales 能传却搜不到）。"""
+    sales, _sales_user = _client(
+        db,
+        username="acceptance_sales",
+        role="sales",
+        permissions={
+            "page_maintenance": True,
+            "own_maintenance_projects_only": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+        salesperson_name="销售甲",
+    )
+    mine, _mine_deliverable = _project(
+        db, suffix="sales-mine", manager=None, salesperson="销售甲"
+    )
+    other, _other_deliverable = _project(
+        db, suffix="sales-other", manager=None, salesperson="销售乙"
+    )
+
+    search = sales.post("/api/maintenance/acceptance-deliverables/search", json={})
+    assert search.status_code == 200, search.text
+    assert [row["project_id"] for row in search.json()["rows"]] == [mine.project_id]
+
+    direct = sales.get(
+        f"/api/maintenance/projects/stable/{mine.project_id}/acceptance"
+    )
+    assert direct.status_code == 200, direct.text
+    denied = sales.get(
+        f"/api/maintenance/projects/stable/{other.project_id}/acceptance"
+    )
+    assert denied.status_code == 403
+
+
+def test_scoped_viewer_search_matches_direct_get(db):
+    """viewer（负责人挂靠 + 行键）的 search 结果集与直达 GET 同一并集。"""
+    viewer, viewer_user = _client(
+        db,
+        username="acceptance_viewer",
+        role="maintenance_manager",
+        permissions={
+            "page_maintenance": True,
+            "own_maintenance_projects_only": True,
+        },
+        salesperson_name="维保张三",
+    )
+    owned, _owned_deliverable = _project(db, suffix="viewer-owned", manager=viewer_user)
+    sales_side, _sales_deliverable = _project(
+        db, suffix="viewer-sales", manager=None, salesperson="维保张三"
+    )
+    other, _other_deliverable = _project(
+        db, suffix="viewer-other", manager=None, salesperson="别人"
+    )
+
+    search = viewer.post("/api/maintenance/acceptance-deliverables/search", json={})
+    assert search.status_code == 200, search.text
+    visible = {row["project_id"] for row in search.json()["rows"]}
+    assert visible == {owned.project_id, sales_side.project_id}
+    for project in (owned, sales_side):
+        got = viewer.get(
+            f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
+        )
+        assert got.status_code == 200, got.text
+    denied = viewer.get(
+        f"/api/maintenance/projects/stable/{other.project_id}/acceptance"
+    )
+    assert denied.status_code == 403
+
+
+def test_upload_requires_submit_action_even_with_page(db):
+    """page=true/action=false：能进页面 ≠ 能上传——上传必须 403。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_page_only",
+        role="purchaser",
+        permissions={"page_maintenance": True},
+    )
+    project, _deliverable = _project(db, suffix="page-only", manager=manager_user)
+
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": ("report.png", _png(), "image/png")},
+    )
+    assert upload.status_code == 403
+
+
+def test_same_content_upload_dedupes_without_idempotency_key(db):
+    """2026-08-25 内容去重（替代被删的版本握手）：同 sha256 重复上传
+    （双击/超时重试，无幂等头、不同文件名）只产生一条文件记录，第二次
+    按幂等回放形态返回 replayed=True，不落盘、不建行/链接。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_dedup_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="dedup", manager=manager_user)
+    image = _png()
+    url = f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments"
+
+    first = manager.post(url, files={"file": ("首传.png", image, "image/png")})
+    assert first.status_code == 200, first.text
+    assert first.json()["replayed"] is False
+
+    second = manager.post(url, files={"file": ("重试改名.png", image, "image/png")})
+    assert second.status_code == 200, second.text
+    assert second.json()["replayed"] is True
+    assert second.json()["file_id"] == first.json()["file_id"]
+    assert second.json()["sha256"] == first.json()["sha256"]
+
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(BusinessFile)) == 1
+    assert db.scalar(select(func.count()).select_from(BusinessFileLink)) == 1
+
+
+def test_delete_last_attachment_of_submitted_deliverable_returns_409(db):
+    """已提交验收的不变式：至少保留一份 active 附件——删最后一份 409，
+    可先上传新附件再删（守卫 fail-closed，附件不被误删）。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_guard_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="guard", manager=manager_user)
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": ("唯一附件.png", _png(), "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+    submit = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/submit",
+        json={"expected_version": upload.json()["version"]},
+        headers={"Idempotency-Key": "guard-submit-1"},
+    )
+    assert submit.status_code == 200, submit.text
+
+    delete = manager.delete(
+        f"/api/maintenance/projects/stable/{project.project_id}"
+        f"/acceptance/attachments/{upload.json()['file_id']}"
+    )
+    assert delete.status_code == 409, delete.text
+    assert "至少保留一份附件" in delete.json()["detail"]
+
+    got = manager.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
+    )
+    assert [a["file_id"] for a in got.json()["attachments"]] == [
+        upload.json()["file_id"]
+    ]
+
+
+def test_delete_attachment_writes_operation_ledger(db):
+    """删除写操作台账：operation_type='attachment_archive'，含交付行/项目/
+    操作人与结果快照（2026-08-25 起删除不再是「无痕」操作）。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_ledger_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, deliverable = _project(db, suffix="ledger", manager=manager_user)
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": ("待删.png", _png(), "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+
+    delete = manager.delete(
+        f"/api/maintenance/projects/stable/{project.project_id}"
+        f"/acceptance/attachments/{upload.json()['file_id']}"
+    )
+    assert delete.status_code == 200, delete.text
+    assert delete.json()["archived"] is True
+
+    db.expire_all()
+    operation = db.scalar(
+        select(MaintenanceAcceptanceOperation).where(
+            MaintenanceAcceptanceOperation.operation_type == "attachment_archive"
+        )
+    )
+    assert operation is not None
+    assert operation.deliverable_id == deliverable.deliverable_id
+    assert operation.project_id == project.project_id
+    assert operation.operated_by == "acceptance_ledger_manager"
+    assert operation.result_json["file_id"] == upload.json()["file_id"]
+    assert operation.result_json["archived"] is True
+
+
+def test_reupload_same_file_after_delete_succeeds(db):
+    """删除后重传同文件成功：归档链接不参与内容去重，重传落新行、
+    新 file_id，且新附件可正常下载。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_reupload_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="reupload", manager=manager_user)
+    image = _png()
+    url = f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments"
+
+    first = manager.post(url, files={"file": ("报告.png", image, "image/png")})
+    assert first.status_code == 200, first.text
+    delete = manager.delete(
+        f"/api/maintenance/projects/stable/{project.project_id}"
+        f"/acceptance/attachments/{first.json()['file_id']}"
+    )
+    assert delete.status_code == 200, delete.text
+
+    second = manager.post(url, files={"file": ("报告.png", image, "image/png")})
+    assert second.status_code == 200, second.text
+    assert second.json()["replayed"] is False
+    assert second.json()["file_id"] != first.json()["file_id"]
+
+    downloaded = manager.get(
+        f"/api/maintenance/acceptance-files/{second.json()['file_id']}"
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == image
+
+
+def test_download_deleted_attachment_returns_404(db):
+    """已删附件下载 404：软删链接即刻从受控下载通道消失（文件字节仅
+    留档审计，不再可经 API 取出）。"""
+    manager, manager_user = _client(
+        db,
+        username="acceptance_deleted_dl_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="deleted-dl", manager=manager_user)
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": ("将被删除.png", _png(), "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+    delete = manager.delete(
+        f"/api/maintenance/projects/stable/{project.project_id}"
+        f"/acceptance/attachments/{upload.json()['file_id']}"
+    )
+    assert delete.status_code == 200, delete.text
+
+    gone = manager.get(f"/api/maintenance/acceptance-files/{upload.json()['file_id']}")
+    assert gone.status_code == 404

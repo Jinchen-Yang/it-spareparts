@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   uploadMaintenanceAcceptanceAttachment: vi.fn(),
   submitMaintenanceAcceptance: vi.fn(),
   downloadMaintenanceAcceptanceAttachment: vi.fn(),
+  deleteMaintenanceAcceptanceAttachment: vi.fn(),
   saveBlob: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     uploadMaintenanceAcceptanceAttachment: mocks.uploadMaintenanceAcceptanceAttachment,
     submitMaintenanceAcceptance: mocks.submitMaintenanceAcceptance,
     downloadMaintenanceAcceptanceAttachment: mocks.downloadMaintenanceAcceptanceAttachment,
+    deleteMaintenanceAcceptanceAttachment: mocks.deleteMaintenanceAcceptanceAttachment,
   };
 });
 
@@ -45,7 +47,7 @@ const record = {
   rejection_reason: null,
   configuration_state: "configured",
   version: 1,
-  review_policy: "admin_only_pending_business_role_configuration",
+  review_policy: "submit_takes_effect",
   attachments: [],
 };
 
@@ -79,8 +81,9 @@ describe("MaintenanceAcceptancePanel", () => {
     const [projectId, payload] = mocks.uploadMaintenanceAcceptanceAttachment.mock.calls[0];
     expect(projectId).toBe("p1");
     expect(payload.file).toBe(file);
-    expect(payload.expected_version).toBe(1);
-    expect(payload.idempotencyKey).toMatch(/^acceptance-upload-/);
+    // 2026-08-25 新口径：上传只传文件本身——无版本握手、无前端幂等键
+    expect(payload).not.toHaveProperty("expected_version");
+    expect(payload).not.toHaveProperty("idempotencyKey");
   });
 
   it("展示后端结构化 message，不再吞成笼统上传失败", async () => {
@@ -95,5 +98,81 @@ describe("MaintenanceAcceptancePanel", () => {
     });
 
     expect(await screen.findByText("附件类型与扩展名不一致")).toBeInTheDocument();
+  });
+
+  // b12c5fb「首传被 version 守卫静默吞掉」回归思想移植，适配 2ebbf90 新口径：
+  // version=0 空载荷首传正常发请求、不再发 expected_version，成功后刷新。
+  it("version=0 空载荷首次上传：不发 expected_version，上传后刷新", async () => {
+    mocks.getMaintenanceAcceptance.mockResolvedValue({
+      data: {
+        ...record,
+        deliverable_id: null,
+        due_date: null,
+        version: 0,
+      },
+    });
+    mocks.uploadMaintenanceAcceptanceAttachment.mockResolvedValue({ data: {} });
+    const { container } = render(<MaintenanceAcceptancePanel projectId="p1" />);
+    await screen.findByText("上传验收附件");
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["first"], "首次验收报告.pdf", { type: "application/pdf" });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() =>
+      expect(mocks.uploadMaintenanceAcceptanceAttachment).toHaveBeenCalledTimes(1));
+    const [projectId, payload] = mocks.uploadMaintenanceAcceptanceAttachment.mock.calls[0];
+    expect(projectId).toBe("p1");
+    expect(payload.file).toBe(file);
+    expect(payload).not.toHaveProperty("expected_version");
+    // 初次 load + 上传成功后 refreshAfterMutation 各一次
+    await waitFor(() => expect(mocks.getMaintenanceAcceptance).toHaveBeenCalledTimes(2));
+    // 成功路径清空 input，否则重选同一文件不触发 onChange
+    await waitFor(() => expect(input.value).toBe(""));
+  });
+
+  it("删除附件：Popconfirm 确认后调 DELETE 并刷新列表", async () => {
+    const attachment = {
+      file_id: "file-1",
+      original_filename: "验收报告.pdf",
+      mime_type: "application/pdf",
+      size_bytes: 128,
+      sha256: "sha-1",
+      uploaded_by: "admin",
+      uploaded_at: "2026-08-25T00:00:00Z",
+    };
+    mocks.getMaintenanceAcceptance.mockResolvedValue({
+      data: { ...record, attachments: [attachment] },
+    });
+    mocks.deleteMaintenanceAcceptanceAttachment.mockResolvedValue({
+      data: { file_id: "file-1", archived: true },
+    });
+    render(<MaintenanceAcceptancePanel projectId="p1" />);
+    await screen.findByText("验收报告.pdf");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 验收报告.pdf" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^删\s*除$/ }));
+
+    await waitFor(() =>
+      expect(mocks.deleteMaintenanceAcceptanceAttachment)
+        .toHaveBeenCalledWith("p1", "file-1"));
+    await waitFor(() => expect(mocks.getMaintenanceAcceptance).toHaveBeenCalledTimes(2));
+  });
+
+  it("无提交权限：隐藏上传/提交按钮并提示联系管理员开通", async () => {
+    localStorage.setItem("role", "sales");
+    localStorage.setItem("permissions", "{}");
+    render(<MaintenanceAcceptancePanel projectId="p1" />);
+
+    expect(await screen.findByText(/请联系管理员开通/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "上传验收附件" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "提交验收报告" })).toBeNull();
+  });
+
+  it("无附件时提交按钮禁用", async () => {
+    render(<MaintenanceAcceptancePanel projectId="p1" />);
+    const submitButton = await screen.findByRole("button", { name: "提交验收报告" });
+    expect(submitButton).toBeDisabled();
+    expect(screen.getByText("验收附件待上传")).toBeInTheDocument();
   });
 });

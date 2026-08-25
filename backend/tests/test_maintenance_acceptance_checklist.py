@@ -267,3 +267,26 @@ def test_checklist_api_permission_gate_and_roundtrip(db):
         headers={"Idempotency-Key": "admin-key-67890"},
     )
     assert bad.status_code == 415
+
+
+def test_checklist_apply_enforces_project_row_scope(db):
+    """2026-08-25 行级补齐：apply 此前只校验「本人批次」，不校验项目
+    可见性——越权账号拿到 batch_id 即可整表替换他人项目清单。现在加载
+    批次后、整表替换前先 enforce 项目行级范围（403），且批次不被污染。"""
+    project = _project(db)
+    parsed = svc.parse_checklist_workbook(_xlsx([("条目", "是")]), "c.xlsx")
+    batch_id = svc.store_preview(
+        db, parsed, project_id=project.project_id,
+        uploaded_by="cl-apply-outsider", idempotency_key="apply-scope-key-1")
+    db.commit()
+
+    # 本人批次但毫无项目挂靠（readonly + 仅 page_maintenance）→ 行级 403
+    outsider = _client(db, username="cl-apply-outsider",
+                       permissions={"page_maintenance": True})
+    resp = outsider.post(f"/api/maintenance/acceptance-checklist/{batch_id}/apply")
+    assert resp.status_code == 403
+
+    db.expire_all()
+    batch = db.get(MaintenanceAcceptanceChecklistBatch, batch_id)
+    assert batch.status == "pending"
+    assert svc.project_checklist(db, project.project_id)["current"] is None

@@ -9,7 +9,6 @@ from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Mapping
-from uuid import uuid4
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -38,7 +37,6 @@ from app.services.maintenance_collection_milestones import write_collection_mile
 from app.services.maintenance_manager_workbook_v3 import (
     SCHEMA_VERSION,
     TEMPLATE_VERSION,
-    AcceptanceDueDateChange,
     ManagerWorkbookExportArtifact,
     ManagerWorkbookValidation,
     MilestoneChange,
@@ -117,7 +115,7 @@ def _issue_from_dict(value: Mapping[str, Any]) -> WorkbookIssue:
 
 
 def _change_dict(
-    change: ServicePeriodChange | MilestoneChange | AcceptanceDueDateChange,
+    change: ServicePeriodChange | MilestoneChange,
 ) -> dict:
     return _json_value(asdict(change))
 
@@ -163,27 +161,6 @@ def _preview_changes(
                     "service_start": change.service_start,
                     "service_end": change.service_end,
                     "completeness_state": change.completeness_state,
-                },
-            }
-        )
-    for change in validation.acceptance_due_date_changes:
-        project = projects.get(change.project_id) or {}
-        acceptance = project.get("acceptance") or {}
-        items.append(
-            {
-                "kind": "acceptance_due_date",
-                "project_id": change.project_id,
-                "project_code": project.get("project_code"),
-                "project_name": project.get("project_name"),
-                "contract_no": None,
-                "sequence": None,
-                "before": {
-                    "due_date": acceptance.get("due_date"),
-                    "configuration_state": acceptance.get("configuration_state"),
-                },
-                "after": {
-                    "due_date": change.due_date,
-                    "configuration_state": "configured",
                 },
             }
         )
@@ -233,10 +210,6 @@ def _validation_plan(validation: ManagerWorkbookValidation, snapshot: Mapping[st
         "milestone_changes": [
             _change_dict(change) for change in validation.milestone_changes
         ],
-        "acceptance_due_date_changes": [
-            _change_dict(change)
-            for change in validation.acceptance_due_date_changes
-        ],
         "project_scope": [
             {
                 "project_id": str(project.get("project_id") or ""),
@@ -278,15 +251,6 @@ def _validation_from_batch(batch: MaintenanceManagerUploadBatch) -> ManagerWorkb
         )
         for row in plan.get("milestone_changes") or []
     )
-    acceptance_due_date_changes = tuple(
-        AcceptanceDueDateChange(
-            project_id=str(row["project_id"]),
-            project_version=int(row["project_version"]),
-            expected_version=int(row["expected_version"]),
-            due_date=date.fromisoformat(str(row["due_date"])),
-        )
-        for row in plan.get("acceptance_due_date_changes") or []
-    )
     issues = [_issue_from_dict(row) for row in batch.issues_json or []]
     warnings = tuple(issue for issue in issues if issue.severity == "warning")
     errors = tuple(issue for issue in issues if issue.severity != "warning")
@@ -300,7 +264,6 @@ def _validation_from_batch(batch: MaintenanceManagerUploadBatch) -> ManagerWorkb
         file_sha256=batch.file_sha256,
         service_period_changes=service_changes,
         milestone_changes=milestone_changes,
-        acceptance_due_date_changes=acceptance_due_date_changes,
         warnings=warnings,
         errors=errors,
     )
@@ -787,73 +750,6 @@ class MaintenanceManagerWorkbookAdapter:
                     project_id=change.project_id,
                     entity_type="service_period",
                     entity_id=change.project_id,
-                    action="manager_workbook_apply",
-                    before_json=_json_value(before),
-                    after_json=_json_value(after),
-                    reason=reason,
-                    operated_by=self.operator,
-                )
-            )
-            changed_rows += 1
-
-        for value in plan.get("acceptance_due_date_changes") or []:
-            change = AcceptanceDueDateChange(
-                project_id=str(value["project_id"]),
-                project_version=int(value["project_version"]),
-                expected_version=int(value["expected_version"]),
-                due_date=date.fromisoformat(str(value["due_date"])),
-            )
-            current = self.db.scalar(
-                select(MaintenanceAcceptanceDeliverable)
-                .where(
-                    MaintenanceAcceptanceDeliverable.project_id
-                    == change.project_id,
-                    MaintenanceAcceptanceDeliverable.deliverable_type
-                    == "acceptance_report",
-                )
-                .with_for_update()
-            )
-            if change.expected_version == 0:
-                if current is not None:
-                    raise ManagerWorkbookConflict("验收报告截止日已被其他操作创建")
-                before = None
-                current = MaintenanceAcceptanceDeliverable(
-                    deliverable_id=str(uuid4()),
-                    project_id=change.project_id,
-                    deliverable_type="acceptance_report",
-                    due_date=change.due_date,
-                    submission_status="not_submitted",
-                    submitted_at=None,
-                    submitted_by=None,
-                    approval_status="not_reviewed",
-                    approved_at=None,
-                    approved_by=None,
-                    rejection_reason=None,
-                    configuration_state="configured",
-                    version=1,
-                )
-                self.db.add(current)
-            else:
-                if current is None or current.version != change.expected_version:
-                    raise ManagerWorkbookConflict("验收报告版本已变化")
-                before = {
-                    "due_date": current.due_date,
-                    "configuration_state": current.configuration_state,
-                    "version": current.version,
-                }
-                current.due_date = change.due_date
-                current.configuration_state = "configured"
-                current.version += 1
-            after = {
-                "due_date": current.due_date,
-                "configuration_state": current.configuration_state,
-                "version": current.version,
-            }
-            self.db.add(
-                MaintenanceProjectOperationAudit(
-                    project_id=change.project_id,
-                    entity_type="acceptance_deliverable",
-                    entity_id=current.deliverable_id,
                     action="manager_workbook_apply",
                     before_json=_json_value(before),
                     after_json=_json_value(after),

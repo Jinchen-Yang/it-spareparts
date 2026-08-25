@@ -572,7 +572,12 @@ def test_meta_has_business_language(db, admin_client):
     m = admin_client.get("/api/accounts/_meta").json()
     assert {g["key"] for g in m["groups"]} == {"page", "data", "action", "row", "admin"}
     grouped = [k for g in m["groups"] for k in g["keys"]]
-    assert sorted(grouped) == sorted(permissions.ALL_KEYS)        # 五组无遗漏无重复
+    # 2026-08-25 摘除两个验收死键（无端点消费的假权限）：不再在权限中心展示，
+    # 但键定义保留在 ALL_KEYS 兼容存量账号快照——五组 = ALL_KEYS 减去死键。
+    dead_keys = {"action_maintenance_acceptance_review",
+                 "action_maintenance_acceptance_checklist_import"}
+    assert sorted(grouped) == sorted(k for k in permissions.ALL_KEYS
+                                     if k not in dead_keys)      # 五组无遗漏无重复
     for k in permissions.ALL_KEYS:
         meta = m["meta"][k]
         for field in ("label", "summary", "can", "cannot", "typical", "sensitivity", "risk"):

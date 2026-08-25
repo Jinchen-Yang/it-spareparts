@@ -114,6 +114,25 @@ def owned_project_condition(user_ctx: UserContext):
     return MaintenanceProject.project_id.in_(owned_project_ids(user_ctx))
 
 
+def accessible_project_condition(user_ctx: UserContext):
+    """行级可见范围 SQL 谓词——与 can_access_project 同一口径（2026-08-25 抽取）。
+
+    开 own_maintenance_projects_only 行键的账号：负责人 ∪ 台账 salesperson
+    并集；未开键的受限账号：仅挂靠负责人（#205）。FULL_SCOPE 角色按
+    owned_project_condition 的使用约定由调用方不加过滤。search 列表与
+    直达路由共用此谓词为唯一事实源，避免两条路径口径漂移。
+    """
+    from app.security import is_scoped_maintenance
+
+    condition = owned_project_condition(user_ctx)
+    if is_scoped_maintenance(user_ctx) and user_ctx.salesperson_name:
+        condition = or_(
+            condition,
+            MaintenanceProject.salesperson == user_ctx.salesperson_name,
+        )
+    return condition
+
+
 def can_access_project(
     db: Session,
     *,
@@ -152,21 +171,20 @@ def maintenance_scope_project_ids(
     「我是项目维保负责人（primary_manager 挂靠本人账号）」∪
     「项目销售 = 我的销售名（台账 salesperson 事实源）」。
     两条件皆无匹配 → 空集，**绝不误放全量**。
+    2026-08-25：并集唯一事实源收敛到 accessible_project_condition
+    （search 列表同用），本函数只是其物化。
     """
     from app.security import is_scoped_maintenance
 
     if not is_scoped_maintenance(user_ctx):
         return None
-    ids: set[str] = set(db.scalars(owned_project_ids(user_ctx)).all())
-    if user_ctx.salesperson_name:
-        ids.update(
-            db.scalars(
-                select(MaintenanceProject.project_id).where(
-                    MaintenanceProject.salesperson == user_ctx.salesperson_name
-                )
-            ).all()
-        )
-    return ids
+    return set(
+        db.scalars(
+            select(MaintenanceProject.project_id).where(
+                accessible_project_condition(user_ctx)
+            )
+        ).all()
+    )
 
 
 def search_active_users(
