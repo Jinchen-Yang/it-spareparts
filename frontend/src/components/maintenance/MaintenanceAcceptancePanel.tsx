@@ -95,7 +95,13 @@ export default function MaintenanceAcceptancePanel({
   };
 
   const upload = async (file: File | undefined) => {
-    if (!file || !record || record.version < 1) return;
+    // 2026-08-25 修复：version=0 是 #283 设计的合法起点（无交付行项目的
+    // GET 空载荷），此前的 version < 1 守卫把首次上传静默吞掉——不发请求、
+    // 不报错、且不清 input value，导致再次选同一文件连 onChange 都不触发。
+    if (!file || !record) {
+      if (inputRef.current) inputRef.current.value = "";
+      return;
+    }
     setBusy(true);
     setError(null);
     try {

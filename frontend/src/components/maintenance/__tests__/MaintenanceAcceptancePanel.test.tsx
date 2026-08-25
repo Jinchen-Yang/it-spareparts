@@ -97,3 +97,38 @@ describe("MaintenanceAcceptancePanel", () => {
     expect(await screen.findByText("附件类型与扩展名不一致")).toBeInTheDocument();
   });
 });
+
+describe("MaintenanceAcceptancePanel · version=0 首次上传", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("无交付行（version=0）首次上传正常发请求（2026-08-25 静默 return 修复）", async () => {
+    mocks.getMaintenanceAcceptance.mockResolvedValue({
+      data: {
+        ...record,
+        deliverable_id: null,
+        due_date: null,
+        configuration_state: "configured",
+        version: 0,
+      },
+    });
+    mocks.uploadMaintenanceAcceptanceAttachment.mockResolvedValue({ data: {} });
+    const { container } = render(<MaintenanceAcceptancePanel projectId="p1" />);
+    await screen.findByText("上传验收附件");
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["first"], "首次验收报告.pdf", { type: "application/pdf" });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() =>
+      expect(mocks.uploadMaintenanceAcceptanceAttachment).toHaveBeenCalledTimes(1));
+    const [, payload] = mocks.uploadMaintenanceAcceptanceAttachment.mock.calls[0];
+    expect(payload.expected_version).toBe(0);
+    // 早退/成功路径都必须清空 input，否则同文件重选不触发 onChange
+    await waitFor(() => expect(input.value).toBe(""));
+  });
+
+});
