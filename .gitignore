@@ -16,3 +16,4 @@ dist/
 .monitor.lock
 monitor.log
 monitor.status
+frontend/.vite/

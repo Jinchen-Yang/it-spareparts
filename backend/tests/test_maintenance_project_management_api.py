@@ -83,7 +83,8 @@ def test_admin_can_create_project_and_read_it_back(db):
         f"/api/maintenance/projects/stable/{project['project_id']}"
     )
     assert read_back.status_code == 200, read_back.text
-    assert read_back.json()["project"] == project
+    # GET 载荷带可见账号回显键（2026-08-25 项目级可见账号多选）
+    assert read_back.json()["project"] == {**project, "visible_usernames": []}
     audit = db.scalar(select(MaintenanceProjectAuditLog))
     assert audit is not None
     assert audit.project_id == project["project_id"]
@@ -134,7 +135,7 @@ def test_project_patch_is_explicit_versioned_and_stale_safe(db):
     read_back = client.get(
         f"/api/maintenance/projects/stable/{created['project_id']}"
     ).json()["project"]
-    assert read_back == changed.json()
+    assert read_back == {**changed.json(), "visible_usernames": []}
     audits = list(
         db.scalars(
             select(MaintenanceProjectAuditLog).order_by(

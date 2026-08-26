@@ -28,6 +28,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectUserAssignment,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.models.system import SysUser
 from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
@@ -5621,6 +5622,25 @@ def _project_cards_for_ids(
             0,
         )
         cards[project.project_id] = card
+    # 2026-08-25：目录卡片与工作台载荷奇偶——visible_usernames 批量补齐
+    # （project_overview 包装层的注入只有工作台路径经过，卡片走纯组装器）。
+    viewers_by_project: dict[str, list[str]] = defaultdict(list)
+    for row_project_id, username in db.execute(
+        select(
+            MaintenanceProjectUserAssignment.project_id,
+            SysUser.username,
+        )
+        .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
+        .where(
+            MaintenanceProjectUserAssignment.project_id.in_(project_ids),
+            MaintenanceProjectUserAssignment.responsibility_type == "viewer",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+        .order_by(SysUser.username)
+    ):
+        viewers_by_project[row_project_id].append(username)
+    for row_project_id, card in cards.items():
+        card["visible_usernames"] = viewers_by_project.get(row_project_id, [])
     return cards
 
 

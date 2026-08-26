@@ -195,13 +195,23 @@ def project_overview(
         if len(project_ids) > 1
     }
 
-    return project_overview_from_facts(
+    payload = project_overview_from_facts(
         project=project,
         contracts=contracts,
         cross_project_conflicts=cross_project_conflicts,
         as_of=as_of,
         user_ctx=user_ctx,
     )
+    if payload is not None:
+        # 项目级可见账号（2026-08-25）：面板「编辑基本信息」回显用
+        # （挂在 project 子对象上，与前端 proj.visible_usernames 对齐）
+        from app.services import maintenance_project_assignments as assignments
+
+        payload["project"]["visible_usernames"] = [
+            row["username"]
+            for row in assignments.project_viewers(db, project_id=project_id)
+        ]
+    return payload
 
 
 def project_overview_from_facts(
