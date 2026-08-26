@@ -621,6 +621,7 @@ export interface MaintenanceAcceptanceAttachment {
   size_bytes: number;
   sha256: string;
   uploaded_by: string;
+  uploaded_by_name: string;
   uploaded_at: string;
 }
 

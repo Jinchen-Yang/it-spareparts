@@ -196,6 +196,10 @@ export default function MaintenanceAcceptancePanel({
             >
               {attachment.original_filename}
             </Button>
+            {/* 2026-08-26 客户口径：附件旁显示上传人姓名（无实名账号回退用户名） */}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {attachment.uploaded_by_name || attachment.uploaded_by}
+            </Text>
             {canSubmitAcceptance && (
               <Popconfirm
                 title="删除该附件？"
@@ -232,7 +236,6 @@ export default function MaintenanceAcceptancePanel({
               ref={inputRef}
               hidden
               type="file"
-              accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg"
               aria-label="选择验收报告附件"
               onChange={(event) => void upload(event.target.files?.[0])}
             />
