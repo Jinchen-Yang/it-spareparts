@@ -398,8 +398,10 @@ function EditBasicsButton({
       // 端点（page_maintenance 门）——原 /accounts 受 page_accounts 门，
       // 无该权限的角色（如维保负责人）下拉会空白。
       try {
+        // 评审阻塞点：账号列表只取前 100 无法选到后面的活跃账号——
+        // 拉满 500（后端上限），超出极端规模再考虑远程搜索。
         const accountsResp = await searchMaintenanceManagerAccounts(
-          { page: 1, page_size: 100 });
+          { page: 1, page_size: 500 });
         setAccounts(accountsResp.data.rows);
       } catch {
         setAccounts([]);

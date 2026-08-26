@@ -19,6 +19,7 @@ from app.security import (
     require_action,
     require_page,
 )
+from app.models.maintenance_project import MaintenanceProject
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_catalog as catalog
@@ -154,17 +155,30 @@ def patch_stable_project(
             if payload is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
         if body.visible_usernames is not None:
-            # 项目级可见账号整组同步（2026-08-25）；与主档字段同一事务
-            payload = {
-                **(payload or {}),
-                "visible_usernames": assignments.sync_project_viewers(
-                    db,
-                    project_id=project_id,
-                    usernames=body.visible_usernames,
-                    operated_by=operated_by,
-                    reason=body.reason,
-                ),
-            }
+            if not updates:
+                # viewer-only PATCH 也必须做乐观锁（评审阻塞点：陈旧提交静默
+                # 覆盖整份名单）——锁项目行并校验 version，与主档字段同口径。
+                project = db.scalar(
+                    select(MaintenanceProject)
+                    .where(MaintenanceProject.project_id == project_id)
+                    .with_for_update()
+                )
+                if project is None:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+                if project.version != body.version:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试")
+                payload = {
+                    **(payload or {}),
+                    "visible_usernames": assignments.sync_project_viewers(
+                        db,
+                        project_id=project_id,
+                        usernames=body.visible_usernames,
+                        operated_by=operated_by,
+                        reason=body.reason,
+                    ),
+                }
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
         db.commit()

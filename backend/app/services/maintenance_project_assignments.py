@@ -504,4 +504,11 @@ def sync_project_viewers(
             )
         )
     db.flush()
+    # 名单变更抬高项目主档版本（评审：viewer-only PATCH 需与主档字段同一
+    # 乐观锁口径，陈旧提交 409 而不是静默覆盖整份名单）。
+    project = db.scalar(select(MaintenanceProject).where(
+        MaintenanceProject.project_id == project_id))
+    if project is not None:
+        project.version += 1
+        db.flush()
     return project_viewers(db, project_id=project_id)

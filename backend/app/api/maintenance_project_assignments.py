@@ -36,7 +36,7 @@ class ManagerAccountSearch(BaseModel):
 
     q: str = ""
     page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=100)
+    page_size: int = Field(default=20, ge=1, le=500)
 
 
 class ManagerAssignmentArchive(BaseModel):

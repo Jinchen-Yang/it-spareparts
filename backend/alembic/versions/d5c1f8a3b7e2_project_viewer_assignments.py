@@ -15,7 +15,7 @@ from alembic import op
 
 
 revision: str = "d5c1f8a3b7e2"
-down_revision: str | None = "c4d9a2e7f1b0"
+down_revision: str | None = "e2f6a9c4b1d8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -56,6 +56,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    # 旧审计 CHECK 不认 viewer_assignment——先清掉本特性产生的审计行，
+    # 否则恢复约束时对存量行校验失败（评审阻塞点：downgrade 不可安全执行）。
+    op.execute(
+        "DELETE FROM maintenance_project_audit_log "
+        "WHERE entity_type = 'viewer_assignment'"
+    )
     # 审计实体类型还原
     op.drop_constraint(
         "ck_maintenance_project_audit_entity_type",

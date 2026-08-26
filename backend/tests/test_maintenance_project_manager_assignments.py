@@ -727,19 +727,46 @@ def test_project_viewer_sync_and_visibility(db):
     )
     assert workspace.status_code == 200, workspace.text
 
-    # 整组同步：清空 → 可见性随之消失
+    # 整组同步：清空 → 可见性随之消失（首次 PATCH 后版本已抬高，需带新版本）
     cleared = admin.patch(
         f"/api/maintenance/projects/stable/{target.project_id}",
-        json={"version": 1, "visible_usernames": [], "reason": "清空可见账号"},
+        json={"version": 2, "visible_usernames": [], "reason": "清空可见账号"},
     )
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["visible_usernames"] == []
 
-    # 账号不存在 → 400 整组拒绝
+    # 账号不存在 → 400 整组拒绝（带当前版本 3；旧版本会先撞 409）
     bad = admin.patch(
         f"/api/maintenance/projects/stable/{target.project_id}",
-        json={"version": 1, "visible_usernames": ["ghost-user"],
+        json={"version": 3, "visible_usernames": ["ghost-user"],
               "reason": "校验失败路径"},
     )
     assert bad.status_code == 400
     assert "ghost-user" in bad.json()["detail"]
+
+
+def test_viewer_only_patch_enforces_optimistic_lock(db):
+    """2026-08-25 评审阻塞点：viewer-only PATCH 不校验项目版本会静默覆盖名单。"""
+    target = MaintenanceProject(
+        project_id="project-viewer-lock",
+        project_code="PM-VLOCK",
+        display_name="可见账号乐观锁项目",
+        project_manager_id="来源负责人",
+        lifecycle_status="missing",
+    )
+    db.add(target)
+    db.commit()
+    admin = _admin_client(db, username="viewer_lock_admin")
+
+    stale = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={"version": 1, "visible_usernames": [], "reason": "陈旧版本"},
+    )
+    assert stale.status_code == 200, stale.text  # v1 仍是最新，首刷可过
+
+    bumped = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={"version": 1, "visible_usernames": [], "reason": "版本已被上面抬高"},
+    )
+    assert bumped.status_code == 409, bumped.text
+    assert "当前版本 2" in bumped.json()["detail"]
