@@ -776,13 +776,22 @@ def _upsert_contract(
         )
     ).scalar_one_or_none()
     if contract is None:
+        # 2026-08-26 客户拍板：合同总额一律含税——台账未给含税额时，
+        # 用销售单未税额×(1+税率) 补齐（税率缺省 0，与看板 XSDD 回退同口径）。
+        inc_from_sales = None
+        if (row.amount_inc_tax is None and sales_order is not None
+                and sales_order.amount_ex_tax is not None):
+            rate = sales_order.tax_rate if sales_order.tax_rate is not None else Decimal("0")
+            inc_from_sales = (
+                sales_order.amount_ex_tax * (Decimal("1") + rate)
+            ).quantize(Decimal("0.01"))
         contract = MaintenanceProjectContract(
             project_contract_id=str(uuid4()),
             project_id=project.project_id,
             contract_id=row.order_no,
             contract_no=row.order_no,
             contract_amount=(sales_order.amount_ex_tax if sales_order is not None else None),
-            amount_inc_tax=row.amount_inc_tax,
+            amount_inc_tax=row.amount_inc_tax if row.amount_inc_tax is not None else inc_from_sales,
             contract_status=None,
             status_mapping_state="mapped",
             status_mapping_version=LEDGER_SOURCE,

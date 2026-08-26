@@ -5733,11 +5733,17 @@ def _directory_reminder_query(
                 )
             )
             .label("missing_amount_count"),
+            # 2026-08-26 客户拍板：合同总额显示含税——amount_inc_tax 缺省时
+            # 用未税 contract_amount ×1.13 归一（台账导入写的是未税额）。
             func.coalesce(
                 func.sum(
                     func.coalesce(
                         MaintenanceProjectContract.amount_inc_tax,
-                        MaintenanceProjectContract.contract_amount,
+                        func.round(
+                            MaintenanceProjectContract.contract_amount
+                            * 1.13,
+                            2,
+                        ),
                     )
                 ).filter(effective_contract),
                 Decimal("0.00"),

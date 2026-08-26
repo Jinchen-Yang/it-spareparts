@@ -286,11 +286,19 @@ def project_overview_from_facts(
         total_amount = None
         completeness = {"status": "incomplete", "issues": issues}
     else:
+        # 2026-08-26 客户拍板：合同总额一律显示含税。台账导入的
+        # contract_amount 是对账后未税额（模型注释），回退时按 13% 归一
+        # （CONTEXT.md 双税口径）补成含税，不再把未税数当含税展示。
         total_amount = sum(
             (
                 relation.amount_inc_tax
                 if relation.amount_inc_tax is not None
-                else relation.contract_amount
+                else (
+                    (relation.contract_amount * Decimal("1.13")).quantize(
+                        Decimal("0.01"))
+                    if relation.contract_amount is not None
+                    else Decimal("0.00")
+                )
                 for relation in effective
             ),
             start=Decimal("0.00"),
@@ -320,7 +328,12 @@ def project_overview_from_facts(
                 else (
                     relation.amount_inc_tax
                     if relation.amount_inc_tax is not None
-                    else relation.contract_amount
+                    else (
+                        (relation.contract_amount * Decimal("1.13")).quantize(
+                            Decimal("0.01"))
+                        if relation.contract_amount is not None
+                        else None
+                    )
                 )
             ),
             "contract_amount_basis": "inc_tax",

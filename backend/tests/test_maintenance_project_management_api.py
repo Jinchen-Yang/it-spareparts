@@ -1,5 +1,7 @@
 """Controlled stable maintenance project master writes."""
 
+from datetime import date
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -7,7 +9,11 @@ from app import permissions
 from app.auth import _make_token, hash_password
 from app.config import get_settings
 from app.main import app
-from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAuditLog,
+    MaintenanceProjectContract,
+)
 from app.models.system import SysUser
 from app.services import maintenance_project_catalog as catalog
 
@@ -413,3 +419,49 @@ def test_project_and_audit_are_one_transaction(db, monkeypatch):
         )
     ) is None
     assert db.scalar(select(MaintenanceProjectAuditLog)) is None
+
+
+def test_contract_total_falls_back_to_inc_tax(db):
+    """2026-08-26 客户拍板：合同总额显示含税——台账只写未税 contract_amount
+    时，overview 与目录的回退必须 ×1.13 归一，不再把未税数当含税展示。"""
+    from decimal import Decimal as D
+    from fastapi.testclient import TestClient  # noqa: F401
+    project = MaintenanceProject(
+        project_id="contract-inc-fallback",
+        project_code="CONTRACT-INC",
+        display_name="含税回退口径项目",
+        lifecycle_status="ongoing",
+        period_from=date(2026, 1, 1),
+        period_to=date(2027, 12, 31),
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="contract-inc-1", project_id=project.project_id,
+        contract_id="XSDD-INC-1", contract_no="XSDD-INC-1",
+        contract_amount=D("100.00"),  # 只有未税
+        amount_inc_tax=None,
+        included_in_total=True, status_mapping_state="mapped",
+        status_mapping_version="t", effective_from=date(2026, 1, 1),
+        source="ledger", version=1))
+    db.commit()
+    client = _client(db) if "_client" in globals() else None
+    if client is None:
+        # 本文件无通用 client helper 时直接调服务层
+        from app.services import maintenance_project as mp
+        payload = mp.project_overview(
+            db, project.project_id, as_of=date(2026, 8, 1),
+            user_ctx=_admin_ctx())
+        assert payload is not None
+        assert str(payload["total_contract_amount"]) == "113.00"
+        assert str(payload["contracts"][0]["contract_amount"]) == "113.00"
+    else:
+        resp = client.get(f"/api/maintenance/projects/stable/{project.project_id}")
+        assert resp.status_code == 200
+        assert resp.json()["project"]["total_contract_amount"] == "113.00"
+
+
+def _admin_ctx():
+    from app.security import UserContext
+    return UserContext(user_id="inc-test-admin", role="admin",
+                       is_authenticated=True)
