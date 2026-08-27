@@ -25,6 +25,7 @@ import {
   downloadSparePartLines,
 } from "../../api/maintenanceWorkbooks";
 import ProjectCard from "../../components/maintenance/ProjectCard";
+import MaintenanceProjectExportButton from "../../components/maintenance/MaintenanceProjectExportButton";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
@@ -146,6 +147,14 @@ export function MaintenanceHomePage() {
             <Link to="/maintenance/demands">
               <Button>需求单与同步</Button>
             </Link>
+            <MaintenanceProjectExportButton
+              filters={{
+                lifecycle,
+                sort,
+                ...(status ? { card_status: status } : {}),
+                ...(keyword.trim() ? { q: keyword.trim() } : {}),
+              }}
+            />
             <Select
               style={{ width: 110 }}
               value={rangePreset}

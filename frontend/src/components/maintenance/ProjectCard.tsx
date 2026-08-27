@@ -184,9 +184,9 @@ export function ProjectCard({ row }: ProjectCardProps) {
             {row.contract_incomplete ? "（不完整）" : ""}
           </Text>
         </Space>
-        {row.period_from || row.period_to ? (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            期限：{row.period_from ?? "—"} ~ {row.period_to ?? "—"}
+        {!isBucket ? (
+          <Text type="secondary" style={{ fontSize: 12 }} data-testid="maintenance-period">
+            维保期限：{row.period_from ?? "起始待补"} ～ {row.period_to ?? "终止待补"}
           </Text>
         ) : null}
 

@@ -139,6 +139,17 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(screen.getByText("预交付 3 单")).toBeInTheDocument();
   });
 
+  it("始终显示维保起止期限，缺失哪端就明确提示待补", () => {
+    renderCard(makeRow({ period_from: "2026-01-01", period_to: "2026-12-31" }));
+    expect(screen.getByTestId("maintenance-period"))
+      .toHaveTextContent("维保期限：2026-01-01 ～ 2026-12-31");
+    cleanup();
+
+    renderCard(makeRow({ period_from: null, period_to: "2026-12-31", lifecycle: "missing" }));
+    expect(screen.getByTestId("maintenance-period"))
+      .toHaveTextContent("维保期限：起始待补 ～ 2026-12-31");
+  });
+
   it("「进入面板」链到项目面板；未归属桶没有这个按钮", () => {
     renderCard(makeRow());
     expect(screen.getByRole("link", { name: /进入面板/ }))
