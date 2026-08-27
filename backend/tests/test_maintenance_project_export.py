@@ -132,6 +132,8 @@ def test_financial_state_fields_do_not_call_missing_values_complete():
 
 def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
     project = make_project(db, code="=公式项目", lifecycle="ongoing")
+    project.period_from = date(2020, 1, 1)
+    project.period_to = date(2099, 12, 31)
     make_project(db, code="已结束项目", lifecycle="ended")
     relation = MaintenanceProjectContract(
         project_contract_id=str(uuid.uuid4()),
