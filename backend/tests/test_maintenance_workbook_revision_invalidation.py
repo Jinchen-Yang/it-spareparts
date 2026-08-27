@@ -438,7 +438,8 @@ def test_import_fails_closed_when_unprobed_project_appears(db, monkeypatch):
     with pytest.raises(loader.WorkbookInvalidationConflictError):
         loader.load(db, f.maintenance_result(orders, lines_v2), _batch(db),
                     date(2026, 8, 1), mode="upsert")
-    # 整批回滚：旧 qty 保留，revision 未 bump
+    # 模拟生产调用方收到并发冲突后整体回滚：旧 qty 保留，revision 未 bump。
+    db.rollback()
     line = db.execute(
         select(FMaintenanceLine).where(FMaintenanceLine.raw_line_id == "ML-K3-FC1")
     ).scalar_one()
@@ -519,6 +520,8 @@ def test_recompute_fails_closed_when_unprobed_project_appears(db, monkeypatch):
     monkeypatch.setattr(maintenance_cost, "_probe_assigned_project_ids", spy)
     with pytest.raises(maintenance_cost.WorkbookInvalidationConflictError):
         maintenance_cost.recompute(db)
+    # recompute 内核参加调用方事务；生产边界捕获冲突后负责整体回滚。
+    db.rollback()
     line = db.execute(
         select(FMaintenanceLine).where(FMaintenanceLine.raw_line_id == "ML-K3-RF1")
     ).scalar_one()

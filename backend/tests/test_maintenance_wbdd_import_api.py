@@ -8,10 +8,12 @@ from sqlalchemy import func, select
 from app import permissions
 from app.auth import hash_password
 from app.config import get_settings
+from app.etl import loader, pipeline
 from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 from app.models.system import SysUser
+from app.services import maintenance_wbdd_import as wbdd
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
 _PASSWORD = "synthetic-wbdd-password-1"
@@ -171,6 +173,14 @@ def test_idempotency_key_required(db, tmp_path):
     assert resp.json()["detail"]["code"] == "invalid_idempotency_key"
 
 
+def test_import_lock_identity_is_text_safe_and_preserves_field_boundaries():
+    identity = wbdd._import_lock_identity("operator\x00name", "key\x00value")
+    assert "\x00" not in identity
+    assert wbdd._import_lock_identity("a:b", "c") != wbdd._import_lock_identity(
+        "a", "b:c"
+    )
+
+
 def test_same_idempotency_key_replays_original_report(db, tmp_path):
     client = _client(db, username="wbdd-up5",
                      overrides={"page_maintenance": True,
@@ -274,6 +284,26 @@ def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
         assert receipt.report_json["recompute"] is not None
     finally:
         wbdd.maintenance_cost.recompute = real
+
+
+def test_assignment_race_maps_to_retryable_conflict(db, tmp_path, monkeypatch):
+    client = _client(
+        db,
+        username="wbdd-assignment-race",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+    path = _wbdd_file(tmp_path, "assignment-race.xlsx")
+
+    def conflict(*_args, **_kwargs):
+        raise loader.WorkbookInvalidationConflictError("synthetic assignment race")
+
+    monkeypatch.setattr(pipeline, "run_import", conflict)
+    response = _upload(client, path)
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["detail"]["code"] == "import_concurrency_conflict"
 
 
 def test_replay_backfills_recompute_for_legacy_half_committed_receipt(db, tmp_path):

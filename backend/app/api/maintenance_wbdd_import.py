@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.imports import _save_upload_to_temp
 from app.auth import current_role
 from app.db import get_db
-from app.etl import pipeline
+from app.etl import loader, pipeline
 from app.etl.reader import ReaderError
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
@@ -26,7 +26,10 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_wbdd_import as wbdd
-from app.services.maintenance_cost import MaintenanceCostRecomputeBusy
+from app.services.maintenance_cost import (
+    MaintenanceCostRecomputeBusy,
+    WorkbookInvalidationConflictError as CostWorkbookInvalidationConflictError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -84,6 +87,19 @@ def upload_wbdd(
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 {"code": "recompute_busy", "message": "成本重算进行中，请稍后重试"},
+                headers={"Retry-After": "5"},
+            ) from exc
+        except (
+            loader.ImportConcurrencyConflict,
+            CostWorkbookInvalidationConflictError,
+        ) as exc:
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "import_concurrency_conflict",
+                    "message": "维保数据归属在导入期间发生变化，本次导入已整体回滚，请重试",
+                },
                 headers={"Retry-After": "5"},
             ) from exc
         except pipeline.DuplicateFileError as exc:

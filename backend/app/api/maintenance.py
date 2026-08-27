@@ -160,6 +160,13 @@ def recompute(db: Session = Depends(get_db),
             detail=str(exc),
             headers={"Retry-After": "5"},
         ) from exc
+    except maintenance_cost.WorkbookInvalidationConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="维保数据归属在重算期间发生变化，本次重算已整体回滚，请重试",
+            headers={"Retry-After": "5"},
+        ) from exc
 
 
 @router.get("/projects")

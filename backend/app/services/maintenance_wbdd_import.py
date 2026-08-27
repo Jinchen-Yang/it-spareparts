@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from decimal import Decimal
@@ -32,6 +33,17 @@ _log = logging.getLogger(__name__)
 
 _LINE_ANCHOR = "需求明细.数据ID(不可修改)"
 _SNAPSHOT_DIFF_SAMPLE = 50
+
+
+def _import_lock_identity(operator: str, idempotency_key: str) -> str:
+    """Return a PostgreSQL-text-safe, unambiguous identity for the xact lock."""
+
+    composite = json.dumps(
+        [operator, idempotency_key],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return f"maintenance-wbdd-import:{composite}"
 
 
 class WbddImportError(Exception):
@@ -272,7 +284,7 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     # 幂等判定必须位于同键事务锁内；否则两个并发请求都可先看到 none，后者
     # 最终只会撞 unique/500，而不是稳定 replay 首个结果。
     db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
-        f"maintenance-wbdd-import:{operator}\x00{idempotency_key}", 0,
+        _import_lock_identity(operator, idempotency_key), 0,
     ))))
     existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key)
     if existing is not None:

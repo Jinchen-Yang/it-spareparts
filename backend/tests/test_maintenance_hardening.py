@@ -160,6 +160,33 @@ def test_recompute_fails_fast_while_import_lock_is_held(db):
     )
 
 
+def test_recompute_assignment_race_maps_to_retryable_conflict(db, monkeypatch):
+    username = "mc_recompute_assignment_race_admin"
+    db.add(SysUser(
+        username=username,
+        role="admin",
+        is_active=True,
+        password_hash=hash_password("pw_admin_123456"),
+    ))
+    db.commit()
+    token, _ = _token(username, "pw_admin_123456")
+
+    def conflict(_db):
+        raise maintenance_cost.WorkbookInvalidationConflictError(
+            "synthetic assignment race"
+        )
+
+    monkeypatch.setattr(maintenance_cost, "recompute", conflict)
+    response = TestClient(app).post(
+        "/api/maintenance/recompute",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "5"
+    assert "整体回滚" in response.json()["detail"]
+
+
 def test_readonly_template_closes_page_maintenance():
     from app import permissions
     assert permissions.template_for("readonly")["page_maintenance"] is False

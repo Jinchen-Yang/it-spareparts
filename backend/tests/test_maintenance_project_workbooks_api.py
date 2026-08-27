@@ -278,6 +278,7 @@ def test_workspace_preflight_counts_each_exported_fact_category(db, monkeypatch)
             MaintenanceProjectExpenseAttribution(
                 expense_id=f"preflight-expense-{index}",
                 project_id=project_id,
+                project_contract_id=contract["project_contract_id"],
                 expense_ref=f"BX-PREFLIGHT-{index}",
                 expense_date=date(2026, 8, index),
                 amount_ex_tax=10,
@@ -286,6 +287,8 @@ def test_workspace_preflight_counts_each_exported_fact_category(db, monkeypatch)
                 status_mapping_state="mapped",
                 normalized_status="approved",
                 status_mapping_version="synthetic-map-v1",
+                ownership_mapping_state="mapped",
+                ownership_mapping_version="synthetic-ownership-v1",
             )
             for index in (1, 2)
         ]

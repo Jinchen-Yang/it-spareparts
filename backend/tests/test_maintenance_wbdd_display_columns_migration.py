@@ -28,9 +28,9 @@ def test_new_revision_is_additive_child_and_single_head():
     script = ScriptDirectory.from_config(cfg)
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
-    # 全链单 head；后续合同额修复先撤回不安全的 f7 自动回填，再由 a9
-    # 线性追加受控审计台账，仍不得产生迁移分叉。
-    assert list(script.get_heads()) == ["a9c4e7b2d6f1"]
+    # 全链单 head；合同额修复由 a9 追加受控审计台账，再由 b6 线性追加
+    # 工作簿失效状态列，仍不得产生迁移分叉。
+    assert list(script.get_heads()) == ["b6e8d1f3a5c7"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():
