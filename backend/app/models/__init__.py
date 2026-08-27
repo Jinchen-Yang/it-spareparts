@@ -22,6 +22,10 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
     MaintenanceProjectUserAssignment,
 )
+from app.models.maintenance_contract_remediation import (
+    MaintenanceContractAmountRemediationEntry,
+    MaintenanceContractAmountRemediationRun,
+)
 from app.models.maintenance_bad_return import (
     MaintenanceBadReturn,
     MaintenanceBadReturnCommand,
@@ -164,6 +168,8 @@ __all__ = [
     "MaintenanceProjectAuditLog",
     "MaintenanceProjectContract",
     "MaintenanceProjectUserAssignment",
+    "MaintenanceContractAmountRemediationRun",
+    "MaintenanceContractAmountRemediationEntry",
     "MaintenanceReturnObligation",
     "MaintenanceBadReturn",
     "MaintenanceBadReturnLine",

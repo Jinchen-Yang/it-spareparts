@@ -66,13 +66,16 @@ const itemColumns: ColumnsType<{
 export function AcceptanceTab({
   projectId,
   canImport,
+  onChanged,
 }: {
   projectId: string;
   canImport: boolean;
+  onChanged?: () => Promise<boolean>;
 }) {
   const [data, setData] = useState<MaintenanceAcceptanceChecklist | null>(null);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const generation = useRef(0);
 
   const load = async () => {
@@ -81,8 +84,11 @@ export function AcceptanceTab({
     try {
       const resp = await getMaintenanceAcceptanceChecklist(projectId);
       if (seq === generation.current) setData(resp.data);
+      return seq === generation.current;
     } catch (err) {
+      if (seq === generation.current) setData(null);
       message.error(readError(err, "验收清单加载失败"));
+      return false;
     } finally {
       if (seq === generation.current) setLoading(false);
     }
@@ -102,8 +108,9 @@ export function AcceptanceTab({
     }
   };
 
-  const confirmApply = (preview: MaintenanceAcceptanceChecklistPreview) => {
-    Modal.confirm({
+  const confirmApply = (preview: MaintenanceAcceptanceChecklistPreview) =>
+    new Promise<void>((resolve) => {
+      Modal.confirm({
       title: "应用验收清单",
       width: 560,
       content: (
@@ -126,20 +133,40 @@ export function AcceptanceTab({
       ),
       okText: "替换生效",
       cancelText: "取消",
+      onCancel: () => resolve(),
       onOk: async () => {
         setImporting(true);
+        let committed = false;
         try {
           await applyMaintenanceAcceptanceChecklist(preview.batch_id);
-          message.success(`验收清单已生效（${preview.item_rows} 条）`);
-          await load();
+          committed = true;
+          const localReady = await load();
+          let parentReady = true;
+          try {
+            parentReady = onChanged ? (await onChanged()) !== false : true;
+          } catch {
+            parentReady = false;
+          }
+          if (localReady && parentReady) {
+            message.success(`验收清单已生效并刷新（${preview.item_rows} 条）`);
+          } else {
+            message.warning("验收清单已生效，但页面刷新失败；旧数据已失效，请重试。");
+          }
+          resolve();
         } catch (err) {
-          message.error(readError(err, "应用失败"));
+          if (committed) {
+            message.warning("验收清单已生效，但页面刷新失败；旧数据已失效，请重试。");
+            resolve();
+            return;
+          }
+          message.error(readError(err, "应用失败，系统未写入"));
+          resolve();
         } finally {
           setImporting(false);
         }
       },
+      });
     });
-  };
 
   const beforeUpload = async (file: File) => {
     setImporting(true);
@@ -162,12 +189,15 @@ export function AcceptanceTab({
           ),
         });
       } else {
-        confirmApply(preview);
+        await confirmApply(preview);
       }
     } catch (err) {
       message.error(readError(err, "清单解析失败"));
     } finally {
       setImporting(false);
+      // 浏览器不会为同一个 file input 连续触发同文件的 change；预检失败或
+      // 用户取消确认后重建 Upload，避免“再点同一文件没有反应”。
+      setUploadInputVersion((current) => current + 1);
     }
     return false; // 阻止 antd 自动上传
   };
@@ -190,6 +220,7 @@ export function AcceptanceTab({
             </Button>
             {canImport ? (
               <Upload
+                key={`acceptance-checklist-upload-${uploadInputVersion}`}
                 accept=".xlsx"
                 maxCount={1}
                 showUploadList={false}
@@ -248,7 +279,7 @@ export function AcceptanceTab({
 
       {/* 验收交付（附件+提交即生效）2026-08-24 起随维保页面开放：
           销售/项目经理/维保负责人都能查看，按钮层再按提交权限收敛。 */}
-      <MaintenanceAcceptancePanel projectId={projectId} />
+      <MaintenanceAcceptancePanel projectId={projectId} onChanged={onChanged} />
     </Space>
   );
 }

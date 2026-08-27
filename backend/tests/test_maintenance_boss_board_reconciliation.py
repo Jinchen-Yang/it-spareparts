@@ -40,7 +40,9 @@ def test_status_columns_never_enter_aggregation(db):
     assert board.PROCURED_QTY_COLUMNS == {"warehouse_shipped_qty", "direct_ship_qty"}
     assert board.AGGREGATE_SOURCE_COLUMNS & board.STATUS_ONLY_COLUMNS == frozenset()
     # 白名单确实覆盖了需求侧数量与成本列
-    assert {"qty", "return_qty", "cost_amount_inc_tax"} <= board.AGGREGATE_SOURCE_COLUMNS
+    assert {
+        "qty", "return_qty", "cost_amount", "cost_amount_inc_tax",
+    } <= board.AGGREGATE_SOURCE_COLUMNS
     # 状态列域＝mapping 定义减去被明文豁免的两列
     assert (set(mapping.MAINTENANCE_LINE_DISPLAY_FIELDS) - board.PROCURED_QTY_COLUMNS
             <= board.STATUS_ONLY_COLUMNS)
@@ -101,9 +103,15 @@ def test_cost_bundle_internal_identities(db, tmp_path):
     import_wbdd(db, tmp_path, orders=2, lines_per_order=2)
     lines = db.execute(select(FMaintenanceLine)).scalars().all()
     # 2 实际 / 1 估算 / 1 缺价
-    lines[0].cost_source, lines[0].cost_amount_inc_tax = "direct", Decimal("100")
-    lines[1].cost_source, lines[1].cost_amount_inc_tax = "window", Decimal("50")
-    lines[2].cost_source, lines[2].cost_amount_inc_tax = "pool_sales", Decimal("25")
+    for line, source, amount in (
+        (lines[0], "direct", Decimal("100")),
+        (lines[1], "window", Decimal("50")),
+        (lines[2], "pool_sales", Decimal("25")),
+    ):
+        line.cost_source = source
+        line.cost_tax_basis = "inc"
+        line.cost_amount = amount
+        line.cost_amount_inc_tax = amount
     lines[3].cost_source, lines[3].cost_amount_inc_tax = "none", None
     db.commit()
     client = boss_client(db)

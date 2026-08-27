@@ -24,6 +24,7 @@ from app.models.maintenance_manager import (
 )
 from app.models.maintenance_project import (
     MaintenanceProject,
+    MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
     MaintenanceProjectUserAssignment,
 )
@@ -33,7 +34,11 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysUser
 from app.security import UserContext, is_field_hidden
+from app.services import maintenance_periods
+from app.services import maintenance_project_catalog as catalog
+from app.services import maintenance_project_operations as operations
 from app.services.maintenance_collection_milestones import write_collection_milestone
+from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_manager_workbook_v3 import (
     SCHEMA_VERSION,
     TEMPLATE_VERSION,
@@ -287,15 +292,13 @@ class MaintenanceManagerWorkbookAdapter:
         if not self.operator:
             raise ManagerWorkbookPermissionError("缺少可审计的操作人")
 
-    def _owner(self, *, lock: bool = False) -> SysUser:
+    def _owner(self) -> SysUser:
         if not self.user_ctx.is_authenticated or not self.user_ctx.user_id:
             raise ManagerWorkbookPermissionError("请先登录")
         statement = select(SysUser).where(
             SysUser.username == self.user_ctx.user_id,
             SysUser.is_active.is_(True),
         )
-        if lock:
-            statement = statement.with_for_update()
         owner = self.db.scalar(statement)
         if owner is None:
             raise ManagerWorkbookPermissionError("当前项目经理账号不存在或已停用")
@@ -305,10 +308,44 @@ class MaintenanceManagerWorkbookAdapter:
             )
         return owner
 
-    def load_snapshot(self, report_month: date, *, lock: bool = False) -> dict:
-        report_month = _month(report_month)
-        owner = self._owner(lock=lock)
-        assignment_statement = (
+    def _lock_owner_operation(self, owner: SysUser) -> None:
+        """Serialize validate/apply without taking the ``sys_user`` row early.
+
+        Both operations may write the same upload-batch row.  A dedicated
+        transaction advisory lock keeps their order stable while remaining
+        independent from direct assignment's canonical
+        state→project→assignment→user row-lock chain.
+        """
+
+        self.db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"maintenance-manager-workbook-owner:{owner.id}", 0
+                    )
+                )
+            )
+        )
+
+    def _scope_assignment_rows(
+        self,
+        owner: SysUser,
+        *,
+        lock: bool,
+    ) -> list:
+        """Owner scope 的 assignment+project 行。
+
+        lock=True 时按全局锁序冻结 scope：全部 workbook states（project_id
+        排序逐行）→ 全部 projects（排序逐行）→ assignments → owner
+        user。direct assign 同样是 state → project → assignment → target
+        user，因此 manager workbook 不得在 state 之前持有 owner user 锁。
+
+        owner user 锁到手后再无锁复核 scope：若有 direct assign 在首次
+        probe 与 owner 锁之间插入了新挂靠，必须 409 fail closed，不能
+        将未持有 state 锁的新项目混入本次快照。
+        """
+
+        statement = (
             select(MaintenanceProjectUserAssignment, MaintenanceProject)
             .join(
                 MaintenanceProject,
@@ -326,9 +363,57 @@ class MaintenanceManagerWorkbookAdapter:
                 MaintenanceProjectUserAssignment.assignment_id,
             )
         )
-        if lock:
-            assignment_statement = assignment_statement.with_for_update()
-        assignment_rows = list(self.db.execute(assignment_statement))
+        if not lock:
+            return list(self.db.execute(statement))
+        probe = list(self.db.execute(statement))
+        if not probe:
+            raise ManagerWorkbookPermissionError(
+                "当前账号未分配任何有效维保项目，不能使用项目经理月度工作簿"
+            )
+        project_ids = sorted({project.project_id for _assignment, project in probe})
+        operations.lock_workbook_states(self.db, project_ids=project_ids)
+        for project_id in project_ids:
+            self.db.scalar(
+                select(MaintenanceProject)
+                .where(MaintenanceProject.project_id == project_id)
+                .with_for_update()
+            )
+        rows = list(self.db.execute(statement.with_for_update()))
+        probe_keys = [(a.assignment_id, p.project_id) for a, p in probe]
+        if [(a.assignment_id, p.project_id) for a, p in rows] != probe_keys:
+            raise ManagerWorkbookConflict("本人负责项目范围已变化，请重新下载")
+
+        # 最后才锁 owner：这与 assign_primary_manager 的 target-user 锁位置
+        # 一致。用 id 确认仍是同一个活动账号，避免身份字段并发变化。
+        locked_owner = self.db.scalar(
+            select(SysUser)
+            .where(
+                SysUser.id == owner.id,
+                SysUser.username == self.user_ctx.user_id,
+                SysUser.is_active.is_(True),
+            )
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if locked_owner is None:
+            raise ManagerWorkbookPermissionError("当前项目经理账号不存在或已停用")
+
+        # 此处不能 FOR UPDATE：若 scope 扩张，新项目的 state/project 尚未
+        # 按序加锁；只读比较后直接失败才不会制造新的锁序倒置。
+        stable_rows = list(self.db.execute(statement))
+        if [
+            (assignment.assignment_id, project.project_id)
+            for assignment, project in stable_rows
+        ] != probe_keys:
+            raise ManagerWorkbookConflict("本人负责项目范围已变化，请重新下载")
+        return rows
+
+    def load_snapshot(self, report_month: date, *, lock: bool = False) -> dict:
+        report_month = _month(report_month)
+        # lock=True 时 owner 必须在 scope 的 state/project/assignment 之后
+        # 才加锁；_scope_assignment_rows 负责末尾锁定与复核。
+        owner = self._owner()
+        assignment_rows = self._scope_assignment_rows(owner, lock=lock)
         if not assignment_rows:
             raise ManagerWorkbookPermissionError(
                 "当前账号未分配任何有效维保项目，不能使用项目经理月度工作簿"
@@ -359,6 +444,8 @@ class MaintenanceManagerWorkbookAdapter:
             contract_rows = list(self.db.scalars(contract_statement))
         contract_ids = [row.project_contract_id for row in contract_rows]
 
+        # 锁序（lock=True）：states → projects → assignments（上方已冻结）→
+        # contracts → service rows → 其余明细（milestones/collections/acceptance）。
         service_periods: dict[str, MaintenanceServicePeriod] = {}
         milestones: list[MaintenanceCollectionMilestone] = []
         acceptance_rows: list[MaintenanceAcceptanceDeliverable] = []
@@ -369,21 +456,11 @@ class MaintenanceManagerWorkbookAdapter:
                 .where(MaintenanceServicePeriod.project_id.in_(project_ids))
                 .order_by(MaintenanceServicePeriod.project_id)
             )
-            acceptance_statement = (
-                select(MaintenanceAcceptanceDeliverable)
-                .where(MaintenanceAcceptanceDeliverable.project_id.in_(project_ids))
-                .order_by(
-                    MaintenanceAcceptanceDeliverable.project_id,
-                    MaintenanceAcceptanceDeliverable.deliverable_type,
-                )
-            )
             if lock:
                 period_statement = period_statement.with_for_update()
-                acceptance_statement = acceptance_statement.with_for_update()
             service_periods = {
                 row.project_id: row for row in self.db.scalars(period_statement)
             }
-            acceptance_rows = list(self.db.scalars(acceptance_statement))
         if contract_ids:
             milestone_statement = (
                 select(MaintenanceCollectionMilestone)
@@ -413,6 +490,18 @@ class MaintenanceManagerWorkbookAdapter:
                 collection_statement = collection_statement.with_for_update()
             milestones = list(self.db.scalars(milestone_statement))
             collection_rows = list(self.db.scalars(collection_statement))
+        if project_ids:
+            acceptance_statement = (
+                select(MaintenanceAcceptanceDeliverable)
+                .where(MaintenanceAcceptanceDeliverable.project_id.in_(project_ids))
+                .order_by(
+                    MaintenanceAcceptanceDeliverable.project_id,
+                    MaintenanceAcceptanceDeliverable.deliverable_type,
+                )
+            )
+            if lock:
+                acceptance_statement = acceptance_statement.with_for_update()
+            acceptance_rows = list(self.db.scalars(acceptance_statement))
 
         attachments_by_deliverable: dict[str, int] = defaultdict(int)
         deliverable_ids = [row.deliverable_id for row in acceptance_rows]
@@ -445,6 +534,10 @@ class MaintenanceManagerWorkbookAdapter:
             if deliverable.deliverable_type == "acceptance_report":
                 acceptance_by_project[deliverable.project_id] = deliverable
 
+        # 项目卡、项目总表与经理月表共用同一套“当前合同事实完整性”：未映射、
+        # 缺含税额、同项目重复稳定合同、跨项目共享都不得计算合同总额及回款率。
+        contract_facts = _card_contracts(self.db, project_ids)
+
         projects: list[dict] = []
         for assignment, project in assignment_rows:
             period = service_periods.get(project.project_id)
@@ -456,7 +549,10 @@ class MaintenanceManagerWorkbookAdapter:
                     {
                         "project_contract_id": contract.project_contract_id,
                         "contract_no": contract.contract_no,
-                        "contract_amount": contract.contract_amount,
+                        # V3 workbook headers and all downstream ratios define
+                        # this field as tax-inclusive. contract_amount is the
+                        # separate ex-tax reconciliation column.
+                        "contract_amount": contract.amount_inc_tax,
                         "contract_version": contract.version,
                         "confirmed_received_amount": (
                             actual.cumulative_amount if actual is not None else Decimal("0")
@@ -485,9 +581,17 @@ class MaintenanceManagerWorkbookAdapter:
                     "project_version": project.version,
                     "assignment_id": assignment.assignment_id,
                     "assignment_version": assignment.version,
-                    "service_start": period.service_start if period else None,
-                    "service_end": period.service_end if period else None,
+                    # 期限双源 P1：project.period_* 是唯一业务事实，工作簿快照的
+                    # 起止日期读 project；projection 仅提供 OCC 版本号。
+                    "service_start": project.period_from,
+                    "service_end": project.period_to,
                     "service_period_version": period.version if period else 0,
+                    "contract_facts_complete": bool(
+                        contract_payload
+                        and (fact := contract_facts.get(project.project_id))
+                        and not fact.get("contract_incomplete")
+                        and fact.get("amount_inc_tax") is not None
+                    ),
                     "contracts": contract_payload,
                     "acceptance": {
                         "deliverable_id": deliverable.deliverable_id if deliverable else None,
@@ -567,9 +671,10 @@ class MaintenanceManagerWorkbookAdapter:
         hmac_key: bytes,
     ) -> tuple[ManagerWorkbookValidation, MaintenanceManagerUploadBatch]:
         report_month = _month(report_month)
-        # Serialize validation per owner so identical uploads cannot race the
-        # operation-key uniqueness guard across multiple API workers.
-        owner = self._owner(lock=True)
+        # Serialize validation/apply per owner without holding sys_user before
+        # any project state row (the latter would invert direct-assign order).
+        owner = self._owner()
+        self._lock_owner_operation(owner)
         file_sha256 = hashlib.sha256(content).hexdigest()
         existing = self.db.scalar(
             select(MaintenanceManagerUploadBatch)
@@ -663,7 +768,10 @@ class MaintenanceManagerWorkbookAdapter:
         return validation, batch
 
     def apply(self, batch_id: str, *, data_version: str | None = None) -> dict:
-        owner = self._owner(lock=True)
+        # 仅做身份 probe；真正的 owner FOR UPDATE 由
+        # load_snapshot(lock=True) 在 state/project/assignment 之后获取。
+        owner = self._owner()
+        self._lock_owner_operation(owner)
         batch = self.db.scalar(
             select(MaintenanceManagerUploadBatch)
             .where(MaintenanceManagerUploadBatch.batch_id == batch_id)
@@ -696,6 +804,25 @@ class MaintenanceManagerWorkbookAdapter:
         plan = batch.plan_json
         changed_rows = 0
         reason = f"项目经理 {batch.report_month:%Y-%m} 月度全量工作簿 v3 应用"
+        # 项目级合并写入登记：每个项目无论 service/milestone 变化多少条，
+        # project.version / 审计 / workbook revision 只 bump 一次。
+        project_before: dict[str, dict] = {}
+
+        def _locked_project(project_id: str) -> MaintenanceProject:
+            # load_snapshot(lock=True) 已按锁序持有全部行锁，此处只是取回实例。
+            project = self.db.scalar(
+                select(MaintenanceProject)
+                .where(MaintenanceProject.project_id == project_id)
+                .with_for_update()
+            )
+            if project is None:
+                raise ManagerWorkbookConflict("本人负责项目范围已变化，请重新下载")
+            return project
+
+        def _touch(project: MaintenanceProject) -> None:
+            if project.project_id not in project_before:
+                project_before[project.project_id] = catalog.project_dict(project)
+
         for value in plan.get("service_period_changes") or []:
             change = ServicePeriodChange(
                 project_id=str(value["project_id"]),
@@ -705,6 +832,8 @@ class MaintenanceManagerWorkbookAdapter:
                 service_end=date.fromisoformat(value["service_end"]) if value.get("service_end") else None,
                 completeness_state=str(value["completeness_state"]),
             )
+            project = _locked_project(change.project_id)
+            # 隐藏的 service_period_version OCC：投影版本必须与世面快照一致。
             current = self.db.scalar(
                 select(MaintenanceServicePeriod)
                 .where(MaintenanceServicePeriod.project_id == change.project_id)
@@ -713,46 +842,30 @@ class MaintenanceManagerWorkbookAdapter:
             if change.expected_version == 0:
                 if current is not None:
                     raise ManagerWorkbookConflict("维保期限已被其他操作更新")
-                before = None
-                current = MaintenanceServicePeriod(
-                    project_id=change.project_id,
-                    service_start=change.service_start,
-                    service_end=change.service_end,
-                    completeness_state=change.completeness_state,
-                    source="manager_workbook_v3",
-                    source_batch_id=batch.batch_id,
-                    version=1,
-                )
-                self.db.add(current)
-            else:
-                if current is None or current.version != change.expected_version:
-                    raise ManagerWorkbookConflict("维保期限版本已变化")
-                before = {
-                    "service_start": current.service_start,
-                    "service_end": current.service_end,
-                    "completeness_state": current.completeness_state,
-                    "version": current.version,
-                }
-                current.service_start = change.service_start
-                current.service_end = change.service_end
-                current.completeness_state = change.completeness_state
-                current.source = "manager_workbook_v3"
-                current.source_batch_id = batch.batch_id
-                current.version += 1
-            after = {
-                "service_start": change.service_start,
-                "service_end": change.service_end,
-                "completeness_state": change.completeness_state,
-                "version": current.version,
-            }
+            elif current is None or current.version != change.expected_version:
+                raise ManagerWorkbookConflict("维保期限版本已变化")
+            _touch(project)
+            # project.period_* 是唯一事实源：service 变化经 canonical helper
+            # 同步 project 日期+lifecycle 与 projection（含互斥 provenance 清理）。
+            result = maintenance_periods.apply_canonical_period_locked(
+                self.db,
+                project=project,
+                period_from=change.service_start,
+                period_to=change.service_end,
+                source=maintenance_periods.SOURCE_MANAGER_WORKBOOK,
+                source_batch_id=batch.batch_id,
+                as_of=self.as_of,
+                operated_by=self.operator,
+                reason=reason,
+            )
             self.db.add(
                 MaintenanceProjectOperationAudit(
                     project_id=change.project_id,
                     entity_type="service_period",
                     entity_id=change.project_id,
                     action="manager_workbook_apply",
-                    before_json=_json_value(before),
-                    after_json=_json_value(after),
+                    before_json=_json_value(result["before"]["projection"]),
+                    after_json=_json_value(result["after"]["projection"]),
                     reason=reason,
                     operated_by=self.operator,
                 )
@@ -784,6 +897,7 @@ class MaintenanceManagerWorkbookAdapter:
                 if current is not None:
                     raise ManagerWorkbookConflict("计划回款节点已被其他操作创建")
                 before = None
+                _touch(_locked_project(change.project_id))
                 current = write_collection_milestone(
                     self.db,
                     project_id=change.project_id,
@@ -806,6 +920,7 @@ class MaintenanceManagerWorkbookAdapter:
                     "completeness_state": current.completeness_state,
                     "version": current.version,
                 }
+                _touch(_locked_project(change.project_id))
                 current = write_collection_milestone(
                     self.db,
                     project_id=change.project_id,
@@ -838,6 +953,31 @@ class MaintenanceManagerWorkbookAdapter:
                 )
             )
             changed_rows += 1
+
+        # 项目级合并 bump：service 与 milestone 变化合并后，每个项目
+        # project.version / 主档审计 / workbook revision 本事务只增一次。
+        for project_id in sorted(project_before):
+            project = _locked_project(project_id)
+            project.version += 1
+            self.db.flush()
+            self.db.add(
+                MaintenanceProjectAuditLog(
+                    project_id=project_id,
+                    entity_type="project",
+                    entity_id=project_id,
+                    action="update",
+                    before_json=project_before[project_id],
+                    after_json=catalog.project_dict(project),
+                    reason=reason,
+                    operated_by=self.operator,
+                )
+            )
+            state = operations.get_or_create_workbook_state(
+                self.db,
+                project_id=project_id,
+                lock=True,
+            )
+            operations.bump_locked_workbook_revision(self.db, state=state)
 
         for project in plan.get("project_scope") or []:
             self.db.add(

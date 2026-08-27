@@ -8,6 +8,7 @@ facts added by the stable-project workspace.
 from __future__ import annotations
 
 from calendar import monthrange
+from collections.abc import Iterable
 from collections import defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -16,11 +17,11 @@ import json
 import re
 from uuid import uuid4
 
-from sqlalchemy import and_, case, func, literal, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import FMaintenanceOrder, FProjectExpense
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
@@ -48,14 +49,14 @@ from app.models.maintenance_manager import (
     MaintenanceCollectionMilestone,
     MaintenanceManagerUploadBatch,
     MaintenanceManagerUploadBatchProject,
-    MaintenanceServicePeriod,
 )
 from app.business_time import business_today
-from app.config import get_settings
+from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
 from app.services import maintenance_bad_returns
 from app.services import maintenance_consumption_cost
+from app.services import maintenance_periods
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
 from app.services import maintenance_warehouse_site_issue_bridge
@@ -230,6 +231,21 @@ def _money_amount(value: Decimal | str, *, label: str) -> Decimal:
     return normalized
 
 
+def _signed_money_amount(value: Decimal | str, *, label: str) -> Decimal:
+    """Normalize a signed accounting amount; reversals are legitimate facts."""
+
+    try:
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise InvalidOperation
+        normalized = parsed.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as exc:
+        raise MaintenanceOperationError(f"{label}超出允许范围") from exc
+    if abs(normalized) >= _MONEY_MAX_EXCLUSIVE:
+        raise MaintenanceOperationError(f"{label}超出允许范围")
+    return normalized
+
+
 def _money(value: Decimal | None) -> str | None:
     return format(value, ".2f") if value is not None else None
 
@@ -296,6 +312,30 @@ def get_or_create_workbook_state(
     return db.execute(statement).scalar_one()
 
 
+def lock_workbook_states(
+    db: Session,
+    *,
+    project_ids: Iterable[str | None],
+) -> dict[str, MaintenanceProjectWorkbookState]:
+    """Create and lock project workbook states in one canonical order.
+
+    Callers must invoke this before locking project/order/assignment/detail
+    facts.  Lock one row at a time: ``ORDER BY`` on a multi-row ``FOR UPDATE``
+    query does not itself guarantee the physical row-lock acquisition order.
+    """
+
+    states: dict[str, MaintenanceProjectWorkbookState] = {}
+    for project_id in sorted(
+        {str(value).strip() for value in project_ids if str(value or "").strip()}
+    ):
+        states[project_id] = get_or_create_workbook_state(
+            db,
+            project_id=project_id,
+            lock=True,
+        )
+    return states
+
+
 def bump_workbook_revision(
     db: Session,
     *,
@@ -312,11 +352,31 @@ def bump_locked_workbook_revision(
     *,
     state: MaintenanceProjectWorkbookState,
 ) -> MaintenanceProjectWorkbookState:
-    """Bump a state row the caller already locked with ``FOR UPDATE``."""
+    """Bump a locked state at most once per root Session transaction.
+
+    ``Session.info`` outlives a commit, so the registry is paired with the
+    actual root ``SessionTransaction`` object.  A later transaction receives a
+    fresh set even when the same Session instance is reused.
+    """
+
+    transaction = db.get_transaction()
+    registry_key = "_maintenance_workbook_revision_bumps"
+    registry = db.info.get(registry_key)
+    if (
+        not isinstance(registry, tuple)
+        or len(registry) != 2
+        or registry[0] is not transaction
+    ):
+        registry = (transaction, set())
+        db.info[registry_key] = registry
+    bumped_project_ids = registry[1]
+    if state.project_id in bumped_project_ids:
+        return state
 
     state.revision += 1
     state.data_version = _workbook_data_version(state.project_id, state.revision)
     db.flush()
+    bumped_project_ids.add(state.project_id)
     return state
 
 
@@ -326,7 +386,11 @@ def contract_dict(row: MaintenanceProjectContract) -> dict:
         "project_id": row.project_id,
         "contract_id": row.contract_id,
         "contract_no": row.contract_no,
-        "contract_amount": _money(row.contract_amount),
+        # 兼容字段 contract_amount 历史上被 API 标成含税：现在明确返回权威
+        # amount_inc_tax；未税对账额另列，禁止同名字段继续承载两种语义。
+        "contract_amount": _money(row.amount_inc_tax),
+        "amount_ex_tax": _money(row.contract_amount),
+        "amount_inc_tax": _money(row.amount_inc_tax),
         "contract_amount_basis": "inc_tax",
         "contract_status": row.contract_status,
         "status_mapping_state": row.status_mapping_state,
@@ -406,70 +470,61 @@ def backfill_site_issue_costs(
     resolve_lines 瀰布：手工价 > 关联采购行 > 采购价±7 天窗口；解析不出
     的行保持 NULL（不知道≠0，铁律 5）。幂等：只处理 cost 为空的行。
     """
-    if force:
-        # 强制重算：清掉算法产生的历史解析结果（manual 输入保留——解析器会
-        # 按新瀑布重新套用），让新算法（如 v2 的需求单价格优先）全量生效
-        from sqlalchemy import update
-
-        db.execute(
-            update(MaintenanceSiteIssueLine).where(
-                MaintenanceSiteIssueLine.cost_source.in_(
-                    ["direct_purchase", "purchase_window",
-                     "sales_window", "maint_demand"])
-            ).values(
-                cost_source=None, reference_side=None,
-                reference_samples=[], reference_sample_ids=[],
-                reference_sample_count=0,
-                reference_window_from=None, reference_window_to=None,
-                unit_cost=None, cost_amount=None,
-                unit_cost_ex_tax=None, unit_cost_inc_tax=None,
-                cost_amount_ex_tax=None, cost_amount_inc_tax=None,
-            )
+    candidate_filters = (
+        MaintenanceSiteIssue.status_mapping_state == "mapped",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+        MaintenanceSiteIssueLine.is_active.is_(True),
+    )
+    total = int(db.scalar(
+        select(func.count())
+        .select_from(MaintenanceSiteIssueLine)
+        .join(
+            MaintenanceSiteIssue,
+            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
         )
-        db.flush()
-    rows = db.execute(
-        select(MaintenanceSiteIssueLine, MaintenanceSiteIssue.issue_date)
-        .join(MaintenanceSiteIssue,
-              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-        .where(MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None),
-               MaintenanceSiteIssueLine.is_active.is_(True))
-        .order_by(MaintenanceSiteIssue.issue_date)
-    ).all()
-    stats = {"total": len(rows), "resolved": 0, "still_unknown": 0,
-             "projects_touched": 0}
-    resolved_by_project: dict[str, int] = defaultdict(int)
-    CHUNK = 200
-    for start in range(0, len(rows), CHUNK):
-        batch = rows[start:start + CHUNK]
-        lines = [(issue_date, line) for line, issue_date in batch]
-        try:
-            maintenance_consumption_cost.resolve_lines(db, lines=lines)
-        except maintenance_consumption_cost.CostResolutionError:
-            # 个别坏行（数量/价格越界）不拖累整批：逐行降级重试
-            for single in lines:
-                try:
-                    maintenance_consumption_cost.resolve_lines(db, lines=[single])
-                except maintenance_consumption_cost.CostResolutionError:
-                    pass
-        db.flush()
-    for line, _issue_date in rows:
-        if line.cost_amount_inc_tax is not None:
-            stats["resolved"] += 1
-        else:
-            stats["still_unknown"] += 1
-    for line, _ in rows:
-        if line.cost_amount_inc_tax is not None:
-            pid = db.scalar(
-                select(MaintenanceSiteIssue.project_id).where(
-                    MaintenanceSiteIssue.issue_id == line.issue_id))
-            if pid:
-                resolved_by_project[pid] += 1
-    stats["projects_touched"] = len(resolved_by_project)
-    for pid, n in resolved_by_project.items():
-        _fact_audit(db, project_id=pid, entity_type="site_issue_line",
-                    entity_id=f"backfill:{n}", action="recompute",
-                    before=None, after={"resolved": n}, reason=reason,
-                    operated_by=operated_by)
+        .where(*candidate_filters)
+    ) or 0)
+    project_ids = list(db.scalars(
+        select(MaintenanceSiteIssue.project_id)
+        .join(
+            MaintenanceSiteIssueLine,
+            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+        )
+        .where(*candidate_filters)
+        .distinct()
+        .order_by(MaintenanceSiteIssue.project_id)
+    ))
+    resolved = 0
+    projects_touched = 0
+    for project_id in project_ids:
+        result = recompute_cost_gaps(
+            db,
+            project_id=project_id,
+            reason=reason,
+            operated_by=operated_by,
+            allow_downgrade=force,
+        )
+        if result and result["resolved"]:
+            resolved += int(result["resolved"])
+            projects_touched += 1
+    still_unknown = int(db.scalar(
+        select(func.count())
+        .select_from(MaintenanceSiteIssueLine)
+        .join(
+            MaintenanceSiteIssue,
+            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+        )
+        .where(
+            *candidate_filters,
+            MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None),
+        )
+    ) or 0)
+    stats = {
+        "total": total,
+        "resolved": resolved,
+        "still_unknown": still_unknown,
+        "projects_touched": projects_touched,
+    }
     db.flush()
     return stats
 
@@ -486,11 +541,22 @@ def backfill_expense_attribution(
     状态映射：已结束→approved、已作废→void、其余→unmapped/unknown。
     每项目写一条汇总审计（不逐行刷 5787 条）。
     """
+    from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY
     from app.models.maintenance import FProjectExpense, FMaintenanceOrder
     from app.models.maintenance_source_assignment import (
         MaintenanceSourceOrderAssignment,
     )
-    from app.config import MAINT_EXPENSE_ACTIVE_STATUS
+    from app.services.maintenance_expense_integrity import (
+        ExpenseIntegrityError,
+        OwnershipConflictError,
+        expense_id_for,
+        expense_ref_for,
+        sync_attribution_from_raw,
+    )
+
+    # Assignment/tombstone/workbook writers use this as their outermost lock.
+    # Backfill must stabilize the same ownership graph before probing it.
+    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
 
     def _keys(order_no: str) -> list[str]:
         # 归一：报销行上「XSDD-20221008-0165」与裸「20221008-0165」两种形态都有
@@ -524,12 +590,14 @@ def backfill_expense_attribution(
     ):
         for key in _keys(xsdd_no):
             contract_projects[key].add(project_id)
-    existing = {
-        eid for (eid,) in db.execute(
-            select(MaintenanceProjectExpenseAttribution.expense_id))
-    }
+    existing_rows = list(db.scalars(
+        select(MaintenanceProjectExpenseAttribution).order_by(
+            MaintenanceProjectExpenseAttribution.expense_id
+        )
+    ))
+    existing_by_id = {row.expense_id: row for row in existing_rows}
 
-    stats = {"total": 0, "attributed": 0, "already": 0,
+    stats = {"total": 0, "attributed": 0, "updated": 0, "already": 0,
              "skipped_no_contract": 0, "skipped_ambiguous": 0,
              "skipped_invalid": 0, "skipped_duplicate": 0,
              "projects_touched": 0}
@@ -547,14 +615,16 @@ def backfill_expense_attribution(
             )
         )
     }
-    per_project: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"rows": 0, "approved": 0, "void": 0, "unknown": 0})
-    pending: list[MaintenanceProjectExpenseAttribution] = []
-    for row in db.scalars(select(FProjectExpense)):
+    planned: list[tuple[str, str]] = []
+    raw_rows = list(db.scalars(
+        select(FProjectExpense).order_by(FProjectExpense.raw_line_id)
+    ))
+    for row in raw_rows:
         stats["total"] += 1
-        expense_id = f"bxd:{row.raw_line_id}"
-        if expense_id in existing:
-            stats["already"] += 1
+        try:
+            expense_id = expense_id_for(row.raw_line_id)
+        except ExpenseIntegrityError:
+            stats["skipped_invalid"] += 1
             continue
         projects = contract_projects.get(row.linked_sales_order_no or "") or set()
         if not projects:
@@ -564,57 +634,112 @@ def backfill_expense_attribution(
             stats["skipped_ambiguous"] += 1
             continue
         project_id = next(iter(projects))
-        amount_ex = row.amount_ex_tax
-        if amount_ex is None or row.expense_date is None:
+        if (
+            row.amount_ex_tax is None
+            or row.amount_inc_tax is None
+            or row.expense_date is None
+        ):
             stats["skipped_invalid"] += 1
             continue
-        ref = (
-            f"{row.bxd_no}#{row.line_no}"
-            if row.bxd_no and row.line_no is not None
-            else (row.bxd_no or row.raw_line_id))
-        if (project_id, ref) in seen_refs:
+        ref = expense_ref_for(row)
+        existing = existing_by_id.get(expense_id)
+        if existing is None and (project_id, ref) in seen_refs:
             stats["skipped_duplicate"] += 1
             continue
         seen_refs.add((project_id, ref))
-        if row.data_status == MAINT_EXPENSE_ACTIVE_STATUS:
-            mapping_state, normalized = "mapped", "approved"
-        elif row.data_status in ("已作废", "作废"):
-            mapping_state, normalized = "mapped", "void"
-        else:
-            mapping_state, normalized = "unmapped", "unknown"
-        pending.append(MaintenanceProjectExpenseAttribution(
-            expense_id=expense_id,
-            project_id=project_id,
-            project_contract_id=None,
-            expense_ref=ref,
-            expense_date=row.expense_date,
-            applicant=row.person,
-            category=row.fee_category or row.expense_type,
-            expense_reason=(row.reason[:500] if row.reason else None),
-            amount_ex_tax=amount_ex,
-            amount_inc_tax=tax_policy.inc_from_ex(amount_ex),
-            tax_rate_used=tax_policy.TAX_RATE,
-            raw_status=row.data_status or "",
-            status_mapping_state=mapping_state,
-            normalized_status=normalized,
-            status_mapping_version="backfill-v1",
-            version=1,
-        ))
-        stats["attributed"] += 1
+        planned.append((row.raw_line_id, project_id))
+
+    # Canonical lock order: all states → all projects → contracts → attribution
+    # identities/rows → raw rows.  Include existing owners because a correction
+    # can move one attribution and both old/new project workbooks must go stale.
+    lock_project_ids = {
+        project_id for _raw_line_id, project_id in planned
+    } | {
+        row.project_id
+        for row in existing_rows
+        if row.expense_id in {expense_id_for(raw_id) for raw_id, _pid in planned}
+    }
+    states = lock_workbook_states(db, project_ids=lock_project_ids)
+    for project_id in sorted(lock_project_ids):
+        project = db.scalar(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id == project_id)
+            .with_for_update()
+        )
+        if project is None:
+            raise MaintenanceOperationConflict("报销归因项目已不存在，请重试")
+    list(db.scalars(
+        select(MaintenanceProjectContract)
+        .where(MaintenanceProjectContract.project_id.in_(sorted(lock_project_ids)))
+        .order_by(MaintenanceProjectContract.project_contract_id)
+        .with_for_update()
+    ))
+    planned_ids = sorted({raw_id for raw_id, _project_id in planned})
+    for raw_line_id in planned_ids:
+        db.execute(select(func.pg_advisory_xact_lock(
+            func.hashtextextended(f"maintenance-expense-row:{raw_line_id}", 0)
+        )))
+    expense_ids = [expense_id_for(raw_id) for raw_id in planned_ids]
+    list(db.scalars(
+        select(MaintenanceProjectExpenseAttribution)
+        .where(MaintenanceProjectExpenseAttribution.expense_id.in_(expense_ids))
+        .order_by(MaintenanceProjectExpenseAttribution.expense_id)
+        .with_for_update()
+    ))
+    locked_raw_by_id = {
+        row.raw_line_id: row
+        for row in db.scalars(
+            select(FProjectExpense)
+            .where(FProjectExpense.raw_line_id.in_(planned_ids))
+            .order_by(FProjectExpense.raw_line_id)
+            .with_for_update()
+        )
+    }
+
+    per_project: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"rows": 0, "created": 0, "updated": 0})
+    changed_project_ids: set[str] = set()
+    for raw_line_id, project_id in planned:
+        raw = locked_raw_by_id.get(raw_line_id)
+        if raw is None:
+            raise MaintenanceOperationConflict("报销原始行已变化，请重试")
+        try:
+            result = sync_attribution_from_raw(
+                db,
+                raw=raw,
+                project_id=project_id,
+                status_mapping_version="backfill-v2",
+            )
+        except OwnershipConflictError as exc:
+            raise MaintenanceOperationConflict(
+                "报销历史合同归属与项目挂靠冲突，整批未写入"
+            ) from exc
+        except ExpenseIntegrityError:
+            stats["skipped_invalid"] += 1
+            continue
+        if not result.changed:
+            stats["already"] += 1
+            continue
         bucket = per_project[project_id]
         bucket["rows"] += 1
-        bucket[normalized if normalized in ("approved", "void") else "unknown"] += 1
+        if result.created:
+            stats["attributed"] += 1
+            bucket["created"] += 1
+        else:
+            stats["updated"] += 1
+            bucket["updated"] += 1
+        changed_project_ids.update(result.affected_project_ids)
 
-    for attribution in pending:
-        db.add(attribution)
-    for project_id, summary in per_project.items():
-        stats["projects_touched"] += 1
+    for project_id, project_summary in per_project.items():
         _fact_audit(
             db, project_id=project_id, entity_type="expense",
-            entity_id=f"backfill:{summary['rows']}",
-            action="bulk_create", before=None, after=summary,
+            entity_id=f"backfill:{project_summary['rows']}",
+            action="bulk_sync", before=None, after=project_summary,
             reason=reason, operated_by=operated_by,
         )
+    for project_id in sorted(changed_project_ids):
+        bump_locked_workbook_revision(db, state=states[project_id])
+    stats["projects_touched"] = len(changed_project_ids)
     db.flush()
     return stats
 
@@ -711,6 +836,11 @@ def _validate_confirmed_collection_monotonicity(
 
 _COST_EVIDENCE_META = {
     None: ("missing", False, "待补价格"),
+    "maint_demand": (
+        "maintenance_demand_evidence",
+        False,
+        "关联维保需求单价",
+    ),
     "direct_purchase": ("purchase_evidence", False, "关联采购单价"),
     "purchase_window": (
         "purchase_evidence",
@@ -827,11 +957,13 @@ def expense_dict(row: MaintenanceProjectExpenseAttribution) -> dict:
         "expense_id": row.expense_id,
         "project_id": row.project_id,
         "project_contract_id": row.project_contract_id,
+        "raw_expense_line_id": row.raw_expense_line_id,
         "expense_ref": row.expense_ref,
         "expense_date": row.expense_date.isoformat(),
         "applicant": row.applicant,
         "category": row.category,
         "expense_reason": row.expense_reason,
+        "tax_basis": row.tax_basis,
         "amount_ex_tax": _money(row.amount_ex_tax),
         "amount_inc_tax": _money(row.amount_inc_tax),
         "tax_rate_used": _rate(row.tax_rate_used),
@@ -839,6 +971,8 @@ def expense_dict(row: MaintenanceProjectExpenseAttribution) -> dict:
         "status_mapping_state": row.status_mapping_state,
         "normalized_status": row.normalized_status,
         "status_mapping_version": row.status_mapping_version,
+        "ownership_mapping_state": row.ownership_mapping_state,
+        "ownership_mapping_version": row.ownership_mapping_version,
         "version": row.version,
     }
 
@@ -875,8 +1009,8 @@ def create_expense(
         raise MaintenanceOperationError("mapped 报销不能使用 unknown 标准状态")
     if status_mapping_state != "mapped" and normalized_status != "unknown":
         raise MaintenanceOperationError("未映射报销必须使用 unknown 标准状态")
-    amount_ex_tax = _money_amount(amount_ex_tax, label="报销未税金额")
-    amount_inc_tax = _money_amount(
+    amount_ex_tax = _signed_money_amount(amount_ex_tax, label="报销未税金额")
+    amount_inc_tax = _signed_money_amount(
         tax_policy.inc_from_ex(amount_ex_tax),
         label="报销含税金额",
     )
@@ -893,6 +1027,7 @@ def create_expense(
         expense_id=_required(expense_id, "报销稳定编号"),
         project_id=project_id,
         project_contract_id=project_contract_id,
+        raw_expense_line_id=None,
         expense_ref=_required(expense_ref, "报销单号", 128),
         expense_date=expense_date,
         applicant=applicant.strip() if applicant and applicant.strip() else None,
@@ -902,6 +1037,7 @@ def create_expense(
             if expense_reason and expense_reason.strip()
             else None
         ),
+        tax_basis="default_ex",
         amount_ex_tax=amount_ex_tax,
         amount_inc_tax=amount_inc_tax,
         tax_rate_used=tax_policy.TAX_RATE,
@@ -909,6 +1045,10 @@ def create_expense(
         status_mapping_state=status_mapping_state,
         normalized_status=normalized_status,
         status_mapping_version=_required(status_mapping_version, "状态映射版本"),
+        ownership_mapping_state=(
+            "mapped" if project_contract_id is not None else "unmapped"
+        ),
+        ownership_mapping_version="manual-v1",
         version=1,
     )
     db.add(row)
@@ -2905,13 +3045,19 @@ def list_cost_gaps(
     }
 
 
-_AUTOMATIC_COST_SOURCES = {"direct_purchase", "purchase_window", "sales_window"}
+_AUTOMATIC_COST_SOURCES = {
+    "maint_demand",
+    "direct_purchase",
+    "purchase_window",
+    "sales_window",
+}
 _COST_SOURCE_PRIORITY = {
     None: 0,
     "manual": 1,
     "sales_window": 2,
     "purchase_window": 3,
     "direct_purchase": 4,
+    "maint_demand": 5,
 }
 _COST_RESOLUTION_FIELDS = (
     "unit_cost",
@@ -2958,6 +3104,7 @@ def recompute_cost_gaps(
     project_id: str,
     reason: str,
     operated_by: str,
+    allow_downgrade: bool = False,
 ) -> dict | None:
     """Persist newly available deterministic evidence for unresolved issue lines.
 
@@ -3036,7 +3183,10 @@ def recompute_cost_gaps(
             candidate_resolution = _cost_resolution_snapshot(line)
             candidate_priority = _cost_source_priority(line.cost_source)
             if (
-                candidate_priority < priority_by_line[line.issue_line_id]
+                (
+                    not allow_downgrade
+                    and candidate_priority < priority_by_line[line.issue_line_id]
+                )
                 or candidate_resolution == prior_resolution
             ):
                 _restore_cost_resolution(line, prior_resolution)
@@ -3181,6 +3331,298 @@ def fill_manual_cost(
     }
 
 
+def _normalized_contract_sql(column):
+    """PostgreSQL expression matching expense-integrity contract identity."""
+
+    return func.regexp_replace(
+        func.upper(func.regexp_replace(func.btrim(column), r"\s+", "", "g")),
+        "^XSDD-",
+        "",
+    )
+
+
+def _prepare_contract_expense_resync(
+    db: Session,
+    *,
+    contract_nos: Iterable[str | None],
+    target_project_ids: Iterable[str],
+) -> dict:
+    """Lock the full contract→BXD projection envelope before contract writes."""
+
+    from app.services.maintenance_expense_integrity import (
+        expense_id_for,
+        normalize_contract_no,
+    )
+
+    original_nos = {
+        str(value).strip() for value in contract_nos if str(value or "").strip()
+    }
+    identities = {
+        normalize_contract_no(value)
+        for value in original_nos
+        if normalize_contract_no(value)
+    }
+    # Same outer serialization as normal imports/assignment changes.  Per-
+    # identity locks additionally serialize ledger apply, which intentionally
+    # does not take the broad data-change lock.
+    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
+    advisory_names = set(original_nos)
+    for identity in identities:
+        advisory_names.update({identity, f"XSDD-{identity}"})
+    for contract_no in sorted(advisory_names):
+        db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"maintenance-ledger-contract:{contract_no}", 0
+                    )
+                )
+            )
+        )
+
+    raw_ids = (
+        list(
+            db.scalars(
+                select(FProjectExpense.raw_line_id)
+                .where(
+                    FProjectExpense.linked_sales_order_no.is_not(None),
+                    _normalized_contract_sql(
+                        FProjectExpense.linked_sales_order_no
+                    ).in_(sorted(identities)),
+                )
+                .order_by(FProjectExpense.raw_line_id)
+            )
+        )
+        if identities
+        else []
+    )
+    expense_ids = [expense_id_for(raw_id) for raw_id in raw_ids]
+    existing_owner_ids = (
+        set(
+            db.scalars(
+                select(MaintenanceProjectExpenseAttribution.project_id).where(
+                    or_(
+                        MaintenanceProjectExpenseAttribution.raw_expense_line_id.in_(
+                            raw_ids
+                        ),
+                        MaintenanceProjectExpenseAttribution.expense_id.in_(
+                            expense_ids
+                        ),
+                    )
+                )
+            )
+        )
+        if raw_ids
+        else set()
+    )
+    matching_contract_project_ids = (
+        set(
+            db.scalars(
+                select(MaintenanceProjectContract.project_id).where(
+                    _normalized_contract_sql(
+                        MaintenanceProjectContract.contract_no
+                    ).in_(sorted(identities))
+                )
+            )
+        )
+        if identities
+        else set()
+    )
+    project_ids = {
+        str(value) for value in target_project_ids if str(value or "").strip()
+    } | existing_owner_ids | matching_contract_project_ids
+    states = lock_workbook_states(db, project_ids=project_ids)
+    projects: dict[str, MaintenanceProject] = {}
+    for project_id in sorted(project_ids):
+        project = db.scalar(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id == project_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if project is None:
+            raise MaintenanceOperationConflict("合同关联项目已不存在，请重试")
+        projects[project_id] = project
+    contracts = (
+        list(
+            db.scalars(
+                select(MaintenanceProjectContract)
+                .where(
+                    MaintenanceProjectContract.project_id.in_(
+                        sorted(project_ids)
+                    )
+                )
+                .order_by(MaintenanceProjectContract.project_contract_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if project_ids
+        else []
+    )
+    return {
+        "raw_ids": raw_ids,
+        "states": states,
+        "projects": projects,
+        "contracts": {
+            contract.project_contract_id: contract for contract in contracts
+        },
+    }
+
+
+def _resync_contract_expenses_locked(
+    db: Session,
+    *,
+    envelope: dict,
+    reason: str,
+    operated_by: str,
+) -> dict:
+    """Re-resolve all BXD projections in a prelocked contract envelope."""
+
+    from app.services.maintenance_expense_integrity import (
+        ExpenseIntegrityError,
+        OwnershipConflictError,
+        expense_id_for,
+        expense_ref_for,
+        find_ownership_candidates,
+        sync_attribution_from_raw,
+    )
+
+    raw_ids = list(envelope["raw_ids"])
+    if not raw_ids:
+        return {"rows": 0, "changed": 0, "projects": 0}
+    for raw_id in raw_ids:
+        db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"maintenance-expense-row:{raw_id}", 0
+                    )
+                )
+            )
+        )
+    expense_ids = [expense_id_for(raw_id) for raw_id in raw_ids]
+    list(
+        db.scalars(
+            select(MaintenanceProjectExpenseAttribution)
+            .where(
+                or_(
+                    MaintenanceProjectExpenseAttribution.raw_expense_line_id.in_(
+                        raw_ids
+                    ),
+                    MaintenanceProjectExpenseAttribution.expense_id.in_(expense_ids),
+                )
+            )
+            .order_by(MaintenanceProjectExpenseAttribution.expense_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    raws = {
+        raw.raw_line_id: raw
+        for raw in db.scalars(
+            select(FProjectExpense)
+            .where(FProjectExpense.raw_line_id.in_(raw_ids))
+            .order_by(FProjectExpense.raw_line_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    }
+    if set(raws) != set(raw_ids):
+        raise MaintenanceOperationConflict("合同更新期间报销原始行已变化，请重试")
+
+    changed_project_ids: set[str] = set()
+    per_project: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"created": 0, "updated": 0}
+    )
+    changed_rows = 0
+    for raw_id in raw_ids:
+        raw = raws[raw_id]
+        expense_id = expense_id_for(raw_id)
+        existing = db.get(MaintenanceProjectExpenseAttribution, expense_id)
+        if raw.expense_date is None:
+            if existing is not None:
+                raise MaintenanceOperationError(
+                    "合同变更会影响一条缺少报销日期的既有费用，已拒绝整次修改"
+                )
+            continue
+        candidates = find_ownership_candidates(
+            db,
+            linked_sales_order_no=raw.linked_sales_order_no,
+            expense_date=raw.expense_date,
+        )
+        candidate_projects = {candidate.project_id for candidate in candidates}
+        if len(candidate_projects) == 1:
+            target_project_id = next(iter(candidate_projects))
+        elif existing is not None:
+            # Keep the stable container, but sync clears the mapped contract so
+            # ambiguous/unmapped money immediately stops contributing to cards.
+            target_project_id = existing.project_id
+        else:
+            continue
+        if target_project_id not in envelope["states"]:
+            raise MaintenanceOperationConflict(
+                "合同变更产生了预锁范围外的报销归属，请重试"
+            )
+        duplicate = db.scalar(
+            select(MaintenanceProjectExpenseAttribution.expense_id).where(
+                MaintenanceProjectExpenseAttribution.project_id
+                == target_project_id,
+                MaintenanceProjectExpenseAttribution.expense_ref
+                == expense_ref_for(raw),
+                MaintenanceProjectExpenseAttribution.expense_id != expense_id,
+            )
+        )
+        if duplicate is not None:
+            raise MaintenanceOperationError(
+                "合同变更命中同项目重复报销单号与明细序号，请先治理重复费用"
+            )
+        try:
+            result = sync_attribution_from_raw(
+                db,
+                raw=raw,
+                project_id=target_project_id,
+                status_mapping_version="contract-resync-v1",
+            )
+        except OwnershipConflictError as exc:
+            raise MaintenanceOperationConflict(
+                "合同变更后的报销归属与项目冲突，请重试"
+            ) from exc
+        except ExpenseIntegrityError as exc:
+            raise MaintenanceOperationError(
+                "合同变更命中的报销行缺少完整日期或双税金额，已拒绝整次修改"
+            ) from exc
+        if not result.changed:
+            continue
+        changed_rows += 1
+        changed_project_ids.update(result.affected_project_ids)
+        for project_id in result.affected_project_ids:
+            per_project[project_id][
+                "created" if result.created else "updated"
+            ] += 1
+    for project_id, counts in per_project.items():
+        _fact_audit(
+            db,
+            project_id=project_id,
+            entity_type="expense",
+            entity_id="contract-resync",
+            action="bulk_sync",
+            before=None,
+            after=counts,
+            reason=reason,
+            operated_by=operated_by,
+        )
+    for project_id in sorted(changed_project_ids):
+        bump_locked_workbook_revision(
+            db, state=envelope["states"][project_id]
+        )
+    return {
+        "rows": len(raw_ids),
+        "changed": changed_rows,
+        "projects": len(changed_project_ids),
+    }
+
+
 def create_contract(
     db: Session,
     *,
@@ -3198,7 +3640,12 @@ def create_contract(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    project = _lock_project_for_fact_write(db, project_id)
+    envelope = _prepare_contract_expense_resync(
+        db,
+        contract_nos={contract_no},
+        target_project_ids={project_id},
+    )
+    project = envelope["projects"].get(project_id)
     if project is None:
         return None
     if not project.is_active:
@@ -3216,7 +3663,10 @@ def create_contract(
         project_id=project_id,
         contract_id=_required(contract_id, "合同稳定编号"),
         contract_no=_required(contract_no, "合同编号"),
-        contract_amount=contract_amount,
+        # 直接项目合同 API 的历史契约把 contract_amount 标成 inc_tax；为兼容
+        # 调用方但终止存储混用，旧入参从现在起只写权威含税列。未税未知就保持 NULL。
+        contract_amount=None,
+        amount_inc_tax=contract_amount,
         contract_status=(str(contract_status).strip() if contract_status else None),
         status_mapping_state=status_mapping_state,
         status_mapping_version=_required(status_mapping_version, "状态映射版本"),
@@ -3238,7 +3688,14 @@ def create_contract(
         reason=reason,
         operated_by=operated_by,
     )
-    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    _resync_contract_expenses_locked(
+        db,
+        envelope=envelope,
+        reason=f"合同创建后重算报销归属：{reason}",
+        operated_by=operated_by,
+    )
+    bump_locked_workbook_revision(db, state=envelope["states"][project_id])
     db.flush()
     return payload
 
@@ -3252,24 +3709,28 @@ def update_contract(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    project_id = db.scalar(
-        select(MaintenanceProjectContract.project_id).where(
+    probe = db.execute(
+        select(
+            MaintenanceProjectContract.project_id,
+            MaintenanceProjectContract.contract_no,
+        ).where(
             MaintenanceProjectContract.project_contract_id == project_contract_id
         )
-    )
-    if project_id is None:
+    ).one_or_none()
+    if probe is None:
         return None
-    get_or_create_workbook_state(db, project_id=project_id, lock=True)
-    project = _project(db, project_id)
+    project_id, old_contract_no = probe
+    envelope = _prepare_contract_expense_resync(
+        db,
+        contract_nos={old_contract_no, updates.get("contract_no")},
+        target_project_ids={project_id},
+    )
+    project = envelope["projects"].get(project_id)
     if project is None:
         return None
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
-    row = db.scalar(
-        select(MaintenanceProjectContract)
-        .where(MaintenanceProjectContract.project_contract_id == project_contract_id)
-        .with_for_update()
-    )
+    row = envelope["contracts"].get(project_contract_id)
     if row is None:
         return None
     if row.version != version:
@@ -3301,6 +3762,9 @@ def update_contract(
     }
     if any(key in values and values[key] is None for key in non_nullable):
         raise MaintenanceOperationError("合同关系必填字段不能清空")
+    # 兼容旧 API 字段名：它的公开 basis 一直是 inc_tax，不能再写进未税列。
+    if "contract_amount" in values:
+        values["amount_inc_tax"] = values.pop("contract_amount")
     for key, value in values.items():
         if key in {"contract_no", "status_mapping_version", "source"}:
             value = _required(value, {
@@ -3310,7 +3774,7 @@ def update_contract(
             }[key])
         elif key == "contract_status":
             value = str(value).strip() if value else None
-        elif key == "contract_amount" and value is not None:
+        elif key == "amount_inc_tax" and value is not None:
             value = _money_amount(value, label="合同金额")
         setattr(row, key, value)
     if row.status_mapping_state not in {"mapped", "unmapped"}:
@@ -3333,7 +3797,14 @@ def update_contract(
         reason=reason,
         operated_by=operated_by,
     )
-    bump_workbook_revision(db, project_id=row.project_id)
+    db.flush()
+    _resync_contract_expenses_locked(
+        db,
+        envelope=envelope,
+        reason=f"合同修改后重算报销归属：{reason}",
+        operated_by=operated_by,
+    )
+    bump_locked_workbook_revision(db, state=envelope["states"][row.project_id])
     db.flush()
     return after
 
@@ -3347,24 +3818,28 @@ def archive_contract(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    project_id = db.scalar(
-        select(MaintenanceProjectContract.project_id).where(
+    probe = db.execute(
+        select(
+            MaintenanceProjectContract.project_id,
+            MaintenanceProjectContract.contract_no,
+        ).where(
             MaintenanceProjectContract.project_contract_id == project_contract_id
         )
-    )
-    if project_id is None:
+    ).one_or_none()
+    if probe is None:
         return None
-    get_or_create_workbook_state(db, project_id=project_id, lock=True)
-    project = _project(db, project_id)
+    project_id, contract_no = probe
+    envelope = _prepare_contract_expense_resync(
+        db,
+        contract_nos={contract_no},
+        target_project_ids={project_id},
+    )
+    project = envelope["projects"].get(project_id)
     if project is None:
         return None
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
-    row = db.scalar(
-        select(MaintenanceProjectContract)
-        .where(MaintenanceProjectContract.project_contract_id == project_contract_id)
-        .with_for_update()
-    )
+    row = envelope["contracts"].get(project_contract_id)
     if row is None:
         return None
     if row.version != version:
@@ -3386,7 +3861,14 @@ def archive_contract(
         reason=reason,
         operated_by=operated_by,
     )
-    bump_workbook_revision(db, project_id=row.project_id)
+    db.flush()
+    _resync_contract_expenses_locked(
+        db,
+        envelope=envelope,
+        reason=f"合同归档后重算报销归属：{reason}",
+        operated_by=operated_by,
+    )
+    bump_locked_workbook_revision(db, state=envelope["states"][row.project_id])
     db.flush()
     return after
 
@@ -3661,12 +4143,15 @@ def _manager_tracking_facts(
     }
     if not project_ids:
         return facts
-    for period in db.scalars(
-        select(MaintenanceServicePeriod).where(
-            MaintenanceServicePeriod.project_id.in_(project_ids)
-        )
+    # 期限双源 P1：展示一律以 project.period_* 为准，projection 不再参与。
+    for project_id, period_from, period_to in db.execute(
+        select(
+            MaintenanceProject.project_id,
+            MaintenanceProject.period_from,
+            MaintenanceProject.period_to,
+        ).where(MaintenanceProject.project_id.in_(project_ids))
     ):
-        facts[period.project_id]["service_period"] = period
+        facts[project_id]["service_period"] = (period_from, period_to)
     for milestone in db.scalars(
         select(MaintenanceCollectionMilestone)
         .where(MaintenanceCollectionMilestone.project_id.in_(project_ids))
@@ -3719,11 +4204,14 @@ def _manager_tracking_payload(
     hide_financial: bool,
 ) -> dict:
     facts = facts or {}
-    period: MaintenanceServicePeriod | None = facts.get("service_period")
+    period_pair = facts.get("service_period")
+    period_from, period_to = period_pair if period_pair else (None, None)
     service_period = {
-        "service_start": period.service_start.isoformat() if period and period.service_start else None,
-        "service_end": period.service_end.isoformat() if period and period.service_end else None,
-        "completeness_state": period.completeness_state if period else "empty",
+        "service_start": period_from.isoformat() if period_from else None,
+        "service_end": period_to.isoformat() if period_to else None,
+        "completeness_state": maintenance_periods.completeness_state(
+            period_from, period_to
+        ),
     }
     contract_numbers = {
         row["project_contract_id"]: row.get("contract_no")
@@ -4821,6 +5309,8 @@ def project_workspace(
     expense_eligible = and_(
         MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
         MaintenanceProjectExpenseAttribution.normalized_status == "approved",
+        MaintenanceProjectExpenseAttribution.ownership_mapping_state == "mapped",
+        MaintenanceProjectExpenseAttribution.project_contract_id.is_not(None),
     )
     expense_fact = db.execute(
         select(
@@ -4832,6 +5322,9 @@ def project_workspace(
                     != "mapped",
                     MaintenanceProjectExpenseAttribution.normalized_status
                     == "unknown",
+                    MaintenanceProjectExpenseAttribution.ownership_mapping_state
+                    != "mapped",
+                    MaintenanceProjectExpenseAttribution.project_contract_id.is_(None),
                 )
             )
             .label("unmapped_expense_count"),
@@ -5353,6 +5846,7 @@ def _project_cards_for_ids(
     )
     contracts_by_project: dict[str, list[MaintenanceProjectContract]] = defaultdict(list)
     effective_contract_ids: set[str] = set()
+    effective_contract_nos: set[str] = set()
     effective_relation_project: dict[str, str] = {}
     for contract in contracts:
         contracts_by_project[contract.project_id].append(contract)
@@ -5360,16 +5854,26 @@ def _project_cards_for_ids(
             contract.effective_to is None or as_of < contract.effective_to
         ):
             effective_contract_ids.add(contract.contract_id)
+            effective_contract_nos.add(contract.contract_no)
             effective_relation_project[contract.project_contract_id] = contract.project_id
 
-    projects_by_contract: dict[str, set[str]] = defaultdict(set)
-    if effective_contract_ids:
-        for contract_id, related_project_id in db.execute(
+    projects_by_contract_id: dict[str, set[str]] = defaultdict(set)
+    projects_by_contract_no: dict[str, set[str]] = defaultdict(set)
+    if effective_contract_ids or effective_contract_nos:
+        for contract_id, contract_no, related_project_id in db.execute(
             select(
                 MaintenanceProjectContract.contract_id,
+                MaintenanceProjectContract.contract_no,
                 MaintenanceProjectContract.project_id,
             ).where(
-                MaintenanceProjectContract.contract_id.in_(effective_contract_ids),
+                or_(
+                    MaintenanceProjectContract.contract_id.in_(
+                        effective_contract_ids
+                    ),
+                    MaintenanceProjectContract.contract_no.in_(
+                        effective_contract_nos
+                    ),
+                ),
                 MaintenanceProjectContract.included_in_total.is_(True),
                 MaintenanceProjectContract.effective_from <= as_of,
                 or_(
@@ -5378,10 +5882,16 @@ def _project_cards_for_ids(
                 ),
             )
         ):
-            projects_by_contract[contract_id].add(related_project_id)
+            projects_by_contract_id[contract_id].add(related_project_id)
+            projects_by_contract_no[contract_no].add(related_project_id)
     cross_project_contract_ids = {
         contract_id
-        for contract_id, related_project_ids in projects_by_contract.items()
+        for contract_id, related_project_ids in projects_by_contract_id.items()
+        if len(related_project_ids) > 1
+    }
+    cross_project_contract_nos = {
+        contract_no
+        for contract_no, related_project_ids in projects_by_contract_no.items()
         if len(related_project_ids) > 1
     }
 
@@ -5488,6 +5998,8 @@ def _project_cards_for_ids(
         project_id,
         mapping_state,
         normalized_status,
+        ownership_mapping_state,
+        project_contract_id,
         amount_ex_tax,
         amount_inc_tax,
     ) in db.execute(
@@ -5495,6 +6007,8 @@ def _project_cards_for_ids(
             MaintenanceProjectExpenseAttribution.project_id,
             MaintenanceProjectExpenseAttribution.status_mapping_state,
             MaintenanceProjectExpenseAttribution.normalized_status,
+            MaintenanceProjectExpenseAttribution.ownership_mapping_state,
+            MaintenanceProjectExpenseAttribution.project_contract_id,
             MaintenanceProjectExpenseAttribution.amount_ex_tax,
             MaintenanceProjectExpenseAttribution.amount_inc_tax,
         ).where(
@@ -5503,9 +6017,19 @@ def _project_cards_for_ids(
         )
     ):
         facts = expense_facts[project_id]
-        if mapping_state != "mapped" or normalized_status == "unknown":
+        if (
+            mapping_state != "mapped"
+            or normalized_status == "unknown"
+            or ownership_mapping_state != "mapped"
+            or project_contract_id is None
+        ):
             facts["unmapped_expense_count"] += 1
-        if mapping_state == "mapped" and normalized_status == "approved":
+        if (
+            mapping_state == "mapped"
+            and normalized_status == "approved"
+            and ownership_mapping_state == "mapped"
+            and project_contract_id is not None
+        ):
             facts["approved_expense_ex_tax"] += Decimal(amount_ex_tax)
             facts["approved_expense_inc_tax"] += Decimal(amount_inc_tax)
 
@@ -5567,7 +6091,8 @@ def _project_cards_for_ids(
             cross_project_conflicts={
                 contract.contract_id
                 for contract in contracts_by_project[project.project_id]
-                if contract.contract_id in cross_project_contract_ids
+                if (contract.contract_id in cross_project_contract_ids
+                    or contract.contract_no in cross_project_contract_nos)
                 and contract.included_in_total
                 and contract.effective_from <= as_of
                 and (contract.effective_to is None or as_of < contract.effective_to)
@@ -5674,16 +6199,25 @@ def _directory_reminder_query(
             MaintenanceProjectContract.project_id,
             MaintenanceProjectContract.project_contract_id,
             MaintenanceProjectContract.contract_id,
+            MaintenanceProjectContract.contract_no,
         )
         .where(effective_contract)
         .cte("directory_effective_contract")
     )
-    duplicate_contracts = (
-        select(effective.c.project_id, effective.c.contract_id)
+    duplicate_contract_ids = (
+        select(effective.c.project_id)
         .group_by(effective.c.project_id, effective.c.contract_id)
         .having(func.count() > 1)
-        .cte("directory_duplicate_contract")
     )
+    duplicate_contract_nos = (
+        select(effective.c.project_id)
+        .group_by(effective.c.project_id, effective.c.contract_no)
+        .having(func.count() > 1)
+    )
+    duplicate_contracts = union_all(
+        duplicate_contract_ids,
+        duplicate_contract_nos,
+    ).cte("directory_duplicate_contract")
     duplicate_by_project = (
         select(
             duplicate_contracts.c.project_id,
@@ -5692,22 +6226,44 @@ def _directory_reminder_query(
         .group_by(duplicate_contracts.c.project_id)
         .cte("directory_duplicate_by_project")
     )
-    conflicting_contracts = (
+    conflicting_contract_ids = (
         select(effective.c.contract_id)
         .group_by(effective.c.contract_id)
         .having(func.count(func.distinct(effective.c.project_id)) > 1)
-        .cte("directory_conflicting_contract")
+        .cte("directory_conflicting_contract_id")
     )
+    conflicting_contract_nos = (
+        select(effective.c.contract_no)
+        .group_by(effective.c.contract_no)
+        .having(func.count(func.distinct(effective.c.project_id)) > 1)
+        .cte("directory_conflicting_contract_no")
+    )
+    conflict_contract_id_projects = (
+        select(effective.c.project_id)
+        .join(
+            conflicting_contract_ids,
+            conflicting_contract_ids.c.contract_id == effective.c.contract_id,
+        )
+        .group_by(effective.c.project_id, effective.c.contract_id)
+    )
+    conflict_contract_no_projects = (
+        select(effective.c.project_id)
+        .join(
+            conflicting_contract_nos,
+            conflicting_contract_nos.c.contract_no == effective.c.contract_no,
+        )
+        .group_by(effective.c.project_id, effective.c.contract_no)
+    )
+    conflicting_contracts = union_all(
+        conflict_contract_id_projects,
+        conflict_contract_no_projects,
+    ).cte("directory_conflicting_contract")
     conflict_by_project = (
         select(
-            effective.c.project_id,
+            conflicting_contracts.c.project_id,
             func.count().label("conflict_count"),
         )
-        .join(
-            conflicting_contracts,
-            conflicting_contracts.c.contract_id == effective.c.contract_id,
-        )
-        .group_by(effective.c.project_id)
+        .group_by(conflicting_contracts.c.project_id)
         .cte("directory_conflict_by_project")
     )
     contract_by_project = (
@@ -5729,22 +6285,12 @@ def _directory_reminder_query(
                 and_(
                     effective_contract,
                     MaintenanceProjectContract.amount_inc_tax.is_(None),
-                    MaintenanceProjectContract.contract_amount.is_(None),
                 )
             )
             .label("missing_amount_count"),
-            # 2026-08-26 客户拍板：合同总额显示含税——amount_inc_tax 缺省时
-            # 用未税 contract_amount ×1.13 归一（台账导入写的是未税额）。
             func.coalesce(
                 func.sum(
-                    func.coalesce(
-                        MaintenanceProjectContract.amount_inc_tax,
-                        func.round(
-                            MaintenanceProjectContract.contract_amount
-                            * 1.13,
-                            2,
-                        ),
-                    )
+                    MaintenanceProjectContract.amount_inc_tax
                 ).filter(effective_contract),
                 Decimal("0.00"),
             ).label("total_contract_amount"),
@@ -5861,6 +6407,9 @@ def _directory_reminder_query(
                     != "mapped",
                     MaintenanceProjectExpenseAttribution.normalized_status
                     == "unknown",
+                    MaintenanceProjectExpenseAttribution.ownership_mapping_state
+                    != "mapped",
+                    MaintenanceProjectExpenseAttribution.project_contract_id.is_(None),
                 )
             )
             .label("unmapped_expense_count"),
@@ -5873,6 +6422,9 @@ def _directory_reminder_query(
                                 == "mapped",
                                 MaintenanceProjectExpenseAttribution.normalized_status
                                 == "approved",
+                                MaintenanceProjectExpenseAttribution.ownership_mapping_state
+                                == "mapped",
+                                MaintenanceProjectExpenseAttribution.project_contract_id.is_not(None),
                             ),
                             MaintenanceProjectExpenseAttribution.amount_inc_tax,
                         ),
@@ -6050,9 +6602,11 @@ def _directory_reminder_query(
                 expense_by_project.c.approved_expense, Decimal("0.00")
             ).label("approved_expense"),
             MaintenanceProjectWorkbookState.expense_ready_through,
-            func.coalesce(
-                MaintenanceServicePeriod.completeness_state,
-                "empty",
+            # 期限双源 P1：任务规则按 project.period_* 计算（SQL 四态），
+            # 不再 join projection 投影表。
+            maintenance_periods.completeness_case(
+                MaintenanceProject.period_from,
+                MaintenanceProject.period_to,
             ).label("service_period_state"),
             func.coalesce(milestone_by_project.c.milestone_count, 0).label(
                 "milestone_count"
@@ -6113,10 +6667,6 @@ def _directory_reminder_query(
             MaintenanceProjectWorkbookState,
             MaintenanceProjectWorkbookState.project_id
             == MaintenanceProject.project_id,
-        )
-        .outerjoin(
-            MaintenanceServicePeriod,
-            MaintenanceServicePeriod.project_id == MaintenanceProject.project_id,
         )
         .outerjoin(
             milestone_by_project,
@@ -6539,7 +7089,14 @@ def project_operations(
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
     if lifecycle != "all":
-        filters.append(MaintenanceProject.lifecycle_status == lifecycle)
+        filters.append(
+            maintenance_periods.lifecycle_case(
+                MaintenanceProject.period_from,
+                MaintenanceProject.period_to,
+                as_of=as_of,
+            )
+            == lifecycle
+        )
     if q_text and (search := q_text.strip()):
         filters.append(
             or_(

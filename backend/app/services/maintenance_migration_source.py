@@ -37,6 +37,7 @@ class MaintenanceMigrationSourceError(ValueError):
 
 _COST_EVIDENCE_META = {
     None: ("missing", False, "待补价格"),
+    "maint_demand": ("maintenance_demand_evidence", False, "关联维保需求单价"),
     "direct_purchase": ("purchase_evidence", False, "关联采购单价"),
     "purchase_window": ("purchase_evidence", False, "采购前后 7 天数量加权"),
     "sales_window": ("sales_estimate", True, "估算（销售前后 7 天数量加权）"),
@@ -44,6 +45,8 @@ _COST_EVIDENCE_META = {
 }
 _SAMPLE_EVIDENCE_FIELDS = (
     "sample_id",
+    "source_line_id",
+    "source_line_pk",
     "document_no",
     "document_date",
     "distance_days",
@@ -51,6 +54,7 @@ _SAMPLE_EVIDENCE_FIELDS = (
     "unit_price_raw",
     "unit_price_ex_tax",
     "tax_conversion",
+    "basis",
 )
 _MAX_SITE_ISSUE_LINES_PER_PROJECT = 200_000
 _MAX_EXPENSE_ROWS_PER_PROJECT = 200_000
@@ -394,6 +398,13 @@ def _cost_resolution_clone(line: MaintenanceSiteIssueLine) -> SimpleNamespace:
     """Clone only waterfall inputs; the resolver must never mutate ORM facts."""
 
     return SimpleNamespace(
+        # The maintenance-demand layer is scoped by both the owning project of
+        # the parent issue and the stable raw demand-line identity.  Omitting
+        # either field silently skipped that layer while building a migration
+        # snapshot and made the snapshot disagree with the live card.
+        issue_id=getattr(line, "issue_id", None),
+        source_line_id=getattr(line, "source_line_id", None),
+        source_order_id=getattr(line, "source_order_id", None),
         part_id=line.part_id,
         linked_purchase_line_id=getattr(line, "linked_purchase_line_id", None),
         manual_unit_cost=getattr(line, "manual_unit_cost", None),

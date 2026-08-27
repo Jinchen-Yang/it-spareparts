@@ -96,6 +96,7 @@ app/models/maintenance_bad_return.py
 app/models/maintenance_bad_salvage.py
 app/models/maintenance_ckd_import.py
 app/models/maintenance_collection_evidence.py
+app/models/maintenance_contract_remediation.py
 app/models/maintenance_doc_import.py
 app/models/maintenance_front_stock.py
 app/models/maintenance_ledger.py
@@ -149,6 +150,7 @@ app/services/maintenance_cost_reference.py
 app/services/maintenance_demands.py
 app/services/maintenance_doc_import.py
 app/services/maintenance_expense_collection_workbook.py
+app/services/maintenance_expense_integrity.py
 app/services/maintenance_expense_reconcile.py
 app/services/maintenance_export.py
 app/services/maintenance_front_stock.py
@@ -164,6 +166,7 @@ app/services/maintenance_migration_legacy.py
 app/services/maintenance_migration_runs.py
 app/services/maintenance_migration_source.py
 app/services/maintenance_migration_warehouse.py
+app/services/maintenance_periods.py
 app/services/maintenance_project.py
 app/services/maintenance_project_assignments.py
 app/services/maintenance_project_catalog.py
@@ -239,6 +242,7 @@ tests/test_change_password.py
 tests/test_chat_hub.py
 tests/test_chat_store.py
 tests/test_classify.py
+tests/test_contract_amount_remediation.py
 tests/test_dashboard_kpi.py
 tests/test_dashboard_masking.py
 tests/test_dashboard_order_filters.py
@@ -280,6 +284,7 @@ tests/test_maintenance_acceptance_api.py
 tests/test_maintenance_acceptance_checklist.py
 tests/test_maintenance_ai_fallback.py
 tests/test_maintenance_analytics.py
+tests/test_maintenance_assignment_workbook_occ.py
 tests/test_maintenance_bad_return_migration.py
 tests/test_maintenance_bad_returns_api.py
 tests/test_maintenance_bad_returns_logic.py
@@ -318,6 +323,8 @@ tests/test_maintenance_doc_import.py
 tests/test_maintenance_doc_relink_projects.py
 tests/test_maintenance_download_object_semantics.py
 tests/test_maintenance_expense_collection_workbook.py
+tests/test_maintenance_expense_integrity.py
+tests/test_maintenance_expense_loader_sync.py
 tests/test_maintenance_expense_reconcile.py
 tests/test_maintenance_export_headers.py
 tests/test_maintenance_front_stock.py
@@ -345,6 +352,7 @@ tests/test_maintenance_migration_warehouse.py
 tests/test_maintenance_no_return_chain.py
 tests/test_maintenance_no_return_rules.py
 tests/test_maintenance_order_export.py
+tests/test_maintenance_period_canonical.py
 tests/test_maintenance_owner_backfill.py
 tests/test_maintenance_permission_structure.py
 tests/test_maintenance_profit_export.py
@@ -386,6 +394,7 @@ tests/test_maintenance_wbdd_import_api.py
 tests/test_maintenance_wbdd_import_layouts.py
 tests/test_maintenance_wbdd_reconciliation.py
 tests/test_maintenance_workbook_export.py
+tests/test_maintenance_workbook_revision_invalidation.py
 tests/test_master_data.py
 tests/test_master_edit.py
 tests/test_merge.py

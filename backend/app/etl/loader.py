@@ -29,9 +29,12 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceContractWorkbookState,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAuditLog
+from app.services import maintenance_cost_invalidation
+from app.services import maintenance_project_operations as _project_ops
 
 _log = logging.getLogger("loader")
 _CHUNK = 1000  # 每批行数，控制单语句参数数 < PostgreSQL 65535 上限
@@ -39,6 +42,10 @@ _MERGE_CHAIN_LIMIT = 10
 # 覆盖留痕（🥉/§3）：upsert/库存覆盖既有行时写 before/after，超量只记汇总防审计爆量。
 _AUDIT_OVERWRITE_MAX = 2000
 _AUDIT_IGNORE = {"import_batch_id"}   # 变化检测忽略（每次导入必变，非业务冲突）
+# 采购/销售行的导入自有 flag（anomaly.line_flags 决策树根只产出这两个）；
+# profit.recompute 会追加派生 flag（no_cost/neg_margin/excluded_*），重导时
+# 被覆盖回导入子集——该 flap 不算语义变化（changed_keys 判定的 compare_subset）。
+_ORDER_LINE_IMPORT_FLAGS = frozenset({"zero_price", "amount_mismatch"})
 
 
 def _jsonable(v):
@@ -72,6 +79,77 @@ def _audit_overwrites(session: Session, entity_type: str, table: str,
 
 class MergeChainError(Exception):
     """merged_into_id 链超限/成环（数据损坏），拒绝整批导入。"""
+
+
+class ImportConcurrencyConflict(RuntimeError):
+    """A concurrent ownership change invalidated the import lock envelope."""
+
+
+class ImportIntegrityError(ValueError):
+    """Imported facts cannot be projected without guessing or stale data."""
+
+
+class WorkbookInvalidationConflictError(ImportConcurrencyConflict):
+    """写后复核发现归属项目超出 upsert 前的预锁集合——fail closed，整批回滚。"""
+
+
+def _probe_assigned_project_ids(session: Session,
+                                source_order_ids) -> set[str]:
+    """当前生效挂靠 probe（只读不加锁）：source_order_id → 稳定项目 ID 集合。"""
+    ids = sorted({str(s) for s in source_order_ids if s})
+    if not ids:
+        return set()
+    out: set[str] = set()
+    for chunk in _chunks(ids):
+        out.update(session.scalars(
+            select(MaintenanceSourceOrderAssignment.project_id).where(
+                MaintenanceSourceOrderAssignment.source_order_id.in_(chunk),
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ))
+    return out
+
+
+def _prelock_workbook_states(session: Session, source_order_ids) -> dict:
+    """事实写入前：按解析到的 source order IDs probe 归属项目并排序预锁 state。
+
+    全局锁序要求（K3 writer-side workbook revision invalidation）：workbook state
+    必须先于任何 order/line 事实行锁获取；禁止在事实行锁之后再拿新 state 锁。
+    """
+    return _project_ops.lock_workbook_states(
+        session,
+        project_ids=_probe_assigned_project_ids(session, source_order_ids),
+    )
+
+
+def _bump_workbooks_for_changed_orders(
+    session: Session,
+    *,
+    prelocked: dict,
+    source_order_ids,
+    changed_source_order_ids,
+) -> list[str]:
+    """写后复核 + 精确失效：语义变化的归属项目在同事务各 bump 一次。
+
+    复核只读比对：若当前挂靠里出现预锁集合外的项目（导入期间被并发挂靠），
+    此处绝不能新拿 state 锁（order/line 行锁已持有，反序即死锁面）——直接
+    回滚整批 fail closed，调用方重试即可收敛。无业务字段变化（仅
+    import_batch_id/时间戳刷新）的项目不 bump。
+    """
+    unexpected = _probe_assigned_project_ids(session, source_order_ids) - set(prelocked)
+    if unexpected:
+        raise WorkbookInvalidationConflictError(
+            "导入期间出现预锁集合外的项目挂靠（并发变更），请重试："
+            f"{sorted(unexpected)}"
+        )
+    bumped: list[str] = []
+    for pid in sorted(_probe_assigned_project_ids(session, changed_source_order_ids)):
+        state = prelocked.get(pid)
+        if state is None:
+            continue  # 不可能分支：changed ⊆ probe 范围，且上面已 fail closed
+        _project_ops.bump_locked_workbook_revision(session, state=state)
+        bumped.append(pid)
+    return bumped
 
 
 def _chunks(seq: list, n: int = _CHUNK):
@@ -271,7 +349,9 @@ def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: lis
 
 
 def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
-                  update_cols: list[str] | None = None, audit: tuple | None = None) -> dict:
+                  update_cols: list[str] | None = None, audit: tuple | None = None,
+                  track_changed: bool = False,
+                  compare_subset: dict[str, frozenset] | None = None) -> dict:
     """事实表幂等写入。
 
     - update_cols=None(默认 skip)：ON CONFLICT DO NOTHING；返回 {inserted, skipped}。
@@ -279,20 +359,40 @@ def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
       预先点一下已存在的键以区分新增/更新；返回 {inserted, updated}。
     - audit=(operated_by, batch_id)（仅 upsert 有意义）：覆盖既有行时把 before/after 写 SysAuditLog，
       只记业务字段确有变化的行（忽略 import_batch_id），供「后到覆盖先到」回溯（🥉/§3）。
+    - track_changed=True：额外返回 changed_keys——本批发生**语义**写入的冲突键集合
+      （新插入，或 upsert 后业务字段确有变化；import_batch_id 等每批必变的非业务
+      字段单独变化不算）。供调用方做「事实变了才失效下游缓存」的精确判定。
+    - compare_subset={列: 允许集}：该列在 changed_keys 判定中只比较导入自有的
+      子集。anomaly_flags 是混合所有权列——导入写 import 期 flag，recompute
+      会叠加派生 flag；全量比较会把「重导清掉派生 flag」误判为业务变化。
+      audit 留痕仍按原值全量比较（既有语义不变）。
     """
     if not rows:
-        return {"inserted": 0, "updated": 0, "skipped": 0}
+        return {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
     if update_cols is None:
         inserted = 0
+        changed_keys: set = set()
         for chunk in _chunks(rows):
             stmt = pg_insert(model).values(chunk).on_conflict_do_nothing(index_elements=[conflict_col])
-            inserted += len(session.execute(stmt.returning(conflict_col)).all())
-        return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted}
+            got = session.execute(stmt.returning(conflict_col)).all()
+            inserted += len(got)
+            if track_changed:
+                changed_keys.update(r[0] for r in got)
+        return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted,
+                "changed_keys": changed_keys}
+
+    def _cmp_value(col: str, value):
+        """changed_keys 判定用的归一值：compare_subset 命中的列只留导入自有子集。"""
+        if compare_subset and col in compare_subset:
+            return sorted(v for v in (value or []) if v in compare_subset[col])
+        return value
+
     # upsert 模式
     key_name = conflict_col.name
     keys = [r[key_name] for r in rows]
     before_by_key: dict = {}
-    if audit is not None:   # 取既有行 id + 旧值（存原值，比较按数值/对象，避免 Decimal 标度误判）
+    if audit is not None or track_changed:
+        # 取既有行 id + 旧值（存原值，比较按数值/对象，避免 Decimal 标度误判）
         sel_cols = [conflict_col, model.id, *[getattr(model, c) for c in update_cols]]
         for chunk in _chunks(keys):
             for row in session.execute(select(*sel_cols).where(conflict_col.in_(chunk))).all():
@@ -309,20 +409,32 @@ def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
         stmt = pg_insert(model).values(chunk)
         set_ = {c: getattr(stmt.excluded, c) for c in update_cols}
         session.execute(stmt.on_conflict_do_update(index_elements=[conflict_col], set_=set_))
-    if audit is not None and before_by_key:
-        op_by, b_id = audit
-        entries = []
+    changed_keys = set()
+    entries = []
+    if audit is not None or track_changed:
         for r in rows:
             prev = before_by_key.get(r[key_name])
             if prev is None:
+                changed_keys.add(r[key_name])      # 新插入：必然是语义写入
                 continue
             eid, before = prev          # before: 原值（Decimal/date/...）
             after = {c: r.get(c) for c in update_cols}
-            if any(before.get(c) != after.get(c) for c in update_cols if c not in _AUDIT_IGNORE):
+            if audit is not None and any(
+                _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c))
+                for c in update_cols if c not in _AUDIT_IGNORE
+            ):
                 entries.append((eid, {c: _jsonable(v) for c, v in before.items()},
                                 {c: _jsonable(v) for c, v in after.items()}))
+            if track_changed and any(
+                _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c))
+                for c in update_cols if c not in _AUDIT_IGNORE
+            ):
+                changed_keys.add(r[key_name])
+    if audit is not None and entries:
+        op_by, b_id = audit
         _audit_overwrites(session, "import_overwrite", model.__tablename__, entries, op_by, b_id)
-    return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0}
+    return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0,
+            "changed_keys": changed_keys if track_changed else set()}
 
 
 # 可更新字段(upsert 修复模式)：排除主键 raw_*_id 与利润派生字段(recompute 专属)
@@ -367,6 +479,21 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
     return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
 
 
+def _wbdd_raw_ids_linked_to_sales(session: Session, sales_order_nos) -> list[str]:
+    """XSDD 回退层（boss board #51）的桥：销售单号 → 挂靠它的 WBDD raw_order_id。"""
+    nos = sorted({str(n) for n in sales_order_nos if n})
+    if not nos:
+        return []
+    out: list[str] = []
+    for chunk in _chunks(nos):
+        out.extend(session.scalars(
+            select(FMaintenanceOrder.raw_order_id).where(
+                FMaintenanceOrder.linked_sales_order_no.in_(chunk),
+            )
+        ))
+    return out
+
+
 def _load_orders(session: Session, result: TransformResult, batch_id: int,
                  mode: str = "skip", operated_by: str | None = None,
                  audit_overwrites: bool = False) -> dict:
@@ -374,6 +501,45 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     # 仅 upsert(覆盖)模式需留痕；skip 模式 ON CONFLICT DO NOTHING 不覆盖既有行
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
     is_sales = result.file_type == mapping.SALES
+    # 0) K3 sales fallback：合同台账缺位项目的合同额证据来自挂靠 XSDD 的销售事实
+    #    （boss board 回退层），销售头/行的业务字段实际变化使归属项目旧总表
+    #    stale——与 WBDD 路径同一规则：先 probe+排序预锁 state，写后复核+bump。
+    #    采购不写 V2 可见的项目合同/成本事实（成本只经 maintenance_cost.recompute
+    #    派生，由 recompute 同事务 bump 覆盖），故此路径不挂 workbook 失效。
+    linked_wbdd_raw_ids: list[str] = []
+    prelocked_states: dict = {}
+    previous_order_no_by_raw: dict[str, str] = {}
+    previous_line_order_no_by_raw: dict[str, str] = {}
+    if is_sales:
+        incoming_order_raw_ids = sorted(result.orders)
+        if incoming_order_raw_ids:
+            previous_order_no_by_raw = dict(session.execute(
+                select(FSalesOrder.raw_order_id, FSalesOrder.order_no).where(
+                    FSalesOrder.raw_order_id.in_(incoming_order_raw_ids)
+                )
+            ).all())
+        incoming_line_raw_ids = sorted(
+            str(line["raw_line_id"])
+            for line in result.lines
+            if line.get("raw_line_id")
+        )
+        if incoming_line_raw_ids:
+            previous_line_order_no_by_raw = dict(session.execute(
+                select(FSalesLine.raw_line_id, FSalesOrder.order_no)
+                .join(FSalesOrder, FSalesOrder.id == FSalesLine.order_id)
+                .where(FSalesLine.raw_line_id.in_(incoming_line_raw_ids))
+            ).all())
+        # 同一 raw_order_id/raw_line_id 可在 upsert 中被修正到新销售单号。
+        # 旧单号的回退证据会同时消失，故预锁集合必须覆盖 old+new；只锁新单号
+        # 会漏掉仍引用旧单号的 WBDD 项目，使旧工作簿继续显示过期合同额。
+        candidate_order_nos = {
+            str(order["order_no"])
+            for order in result.orders.values()
+            if order.get("order_no")
+        } | set(previous_order_no_by_raw.values()) | set(previous_line_order_no_by_raw.values())
+        linked_wbdd_raw_ids = _wbdd_raw_ids_linked_to_sales(
+            session, candidate_order_nos)
+        prelocked_states = _prelock_workbook_states(session, linked_wbdd_raw_ids)
     # 1) 商品身份解析（别名/合并重定向 + 建档）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales)
     _upsert_aliases(session, result.lines, resolution)
@@ -428,7 +594,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         order_rows.append(base)
     order_upd_cols = (_SALES_ORDER_UPD if is_sales else _PURCHASE_ORDER_UPD) if upsert else None
     order_stats = _upsert_facts(session, order_model, order_rows, order_model.raw_order_id,
-                                order_upd_cols, audit=audit)
+                                order_upd_cols, audit=audit, track_changed=is_sales)
     # raw_order_id -> id（含已存在的）
     raw_ids = [o["raw_order_id"] for o in orders.values()]
     oid_map = dict(session.execute(
@@ -458,7 +624,47 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         line_rows.append(base)
     line_upd_cols = (_SALES_LINE_UPD if is_sales else _PURCHASE_LINE_UPD) if upsert else None
     line_stats = _upsert_facts(session, line_model, line_rows, line_model.raw_line_id,
-                               line_upd_cols, audit=audit)
+                               line_upd_cols, audit=audit, track_changed=is_sales,
+                               compare_subset=(
+                                   {"anomaly_flags": _ORDER_LINE_IMPORT_FLAGS}
+                                   if is_sales else None
+                               ))
+
+    # 5) sales fallback 失效：变化单号 → 挂靠 WBDD → 归属项目各 bump 一次（写后复核
+    #    发现预锁集合外项目则 fail closed 整批回滚，见 _bump_workbooks_for_changed_orders）。
+    bumped_projects: list[str] = []
+    if is_sales:
+        line_order_raw = {ln["raw_line_id"]: ln["_order_raw_id"] for ln in result.lines}
+        current_order_no_by_raw = dict(session.execute(
+            select(FSalesOrder.raw_order_id, FSalesOrder.order_no).where(
+                FSalesOrder.raw_order_id.in_(sorted(line_order_raw.values()))
+            )
+        ).all())
+        current_line_order_no_by_raw = dict(session.execute(
+            select(FSalesLine.raw_line_id, FSalesOrder.order_no)
+            .join(FSalesOrder, FSalesOrder.id == FSalesLine.order_id)
+            .where(FSalesLine.raw_line_id.in_(sorted(line_order_raw)))
+        ).all()) if line_order_raw else {}
+        changed_nos: set[str] = set()
+        for raw in order_stats["changed_keys"]:
+            if current := current_order_no_by_raw.get(raw):
+                changed_nos.add(current)
+            if previous := previous_order_no_by_raw.get(raw):
+                changed_nos.add(previous)
+        for raw_line_id in line_stats["changed_keys"]:
+            # skip 模式可能保留既有 header，却插入一个来自“新单号”文件的
+            # 新 line；此时 input order_no 不是数据库真正 parent。必须读回
+            # current parent，不能按 incoming payload 推断。
+            if current := current_line_order_no_by_raw.get(raw_line_id):
+                changed_nos.add(current)
+            if previous := previous_line_order_no_by_raw.get(raw_line_id):
+                changed_nos.add(previous)
+        bumped_projects = _bump_workbooks_for_changed_orders(
+            session,
+            prelocked=prelocked_states,
+            source_order_ids=linked_wbdd_raw_ids,
+            changed_source_order_ids=_wbdd_raw_ids_linked_to_sales(session, changed_nos),
+        )
 
     return {
         "source_rows_total": result.rows_total,
@@ -471,6 +677,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         "orders_updated": order_stats["updated"],
         "import_mode": mode,
         "new_parts": new_parts,
+        "workbook_projects_bumped": len(bumped_projects),
     }
 
 
@@ -480,9 +687,33 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     """维保出库（WBDD）入库：与订单路径同套路——商品身份解析 + 客户维度 + 头/行幂等 upsert。
 
     成本回填字段不在 upsert 白名单内（maintenance_cost.recompute 专属），重导不冲成本。
+
+    工作簿失效（K3）：WBDD 头/行业务字段的实际 insert/update 会让所有当前归属项目
+    的旧总表 stale——upsert 前先 probe+排序预锁 workbook state，写后复核并在
+    同事务对语义变化的归属项目各 bump 一次 revision（仅 import_batch_id 刷新不 bump）。
     """
     upsert = (mode == "upsert")
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    # 0) 归属项目预锁必须先于任何 order/line 行锁（全局锁序：state → 事实行）
+    incoming_line_raw_ids = sorted(
+        str(line["raw_line_id"])
+        for line in result.lines
+        if line.get("raw_line_id")
+    )
+    previous_line_order_raw: dict[str, str] = {}
+    if incoming_line_raw_ids:
+        previous_line_order_raw = dict(session.execute(
+            select(FMaintenanceLine.raw_line_id, FMaintenanceOrder.raw_order_id)
+            .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .where(FMaintenanceLine.raw_line_id.in_(incoming_line_raw_ids))
+        ).all())
+    # raw_line_id 在 upsert 修复中可跨 WBDD 重挂；旧、新 parent 的项目都必须
+    # 在事实行锁之前进入 state 预锁集合。
+    source_order_ids = sorted(
+        {o["raw_order_id"] for o in result.orders.values()}
+        | set(previous_line_order_raw.values())
+    )
+    prelocked_states = _prelock_workbook_states(session, source_order_ids)
     # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
     _upsert_aliases(session, result.lines, resolution)
@@ -512,7 +743,8 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     } for o in orders.values()]
     order_stats = _upsert_facts(session, FMaintenanceOrder, order_rows,
                                 FMaintenanceOrder.raw_order_id,
-                                _MAINT_ORDER_UPD if upsert else None, audit=audit)
+                                _MAINT_ORDER_UPD if upsert else None, audit=audit,
+                                track_changed=True)
     raw_ids = [o["raw_order_id"] for o in orders.values()]
     oid_map = dict(session.execute(
         select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
@@ -532,7 +764,32 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     } for ln in result.lines]
     line_stats = _upsert_facts(session, FMaintenanceLine, line_rows,
                                FMaintenanceLine.raw_line_id,
-                               _MAINT_LINE_UPD if upsert else None, audit=audit)
+                               _MAINT_LINE_UPD if upsert else None, audit=audit,
+                               track_changed=True,
+                               compare_subset={
+                                   "anomaly_flags":
+                                       maintenance_cost_invalidation.IMPORT_ANOMALY_FLAGS,
+                               })
+
+    # 5) 工作簿 revision 失效：写后复核（probe 外项目 → fail closed 整批回滚），
+    #    再让「头或行确有业务字段变化」的单据归属项目各 bump 一次。
+    current_line_order_raw = dict(session.execute(
+        select(FMaintenanceLine.raw_line_id, FMaintenanceOrder.raw_order_id)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .where(FMaintenanceLine.raw_line_id.in_(incoming_line_raw_ids))
+    ).all()) if incoming_line_raw_ids else {}
+    changed_orders = set(order_stats["changed_keys"])
+    for raw_line_id in line_stats["changed_keys"]:
+        if current := current_line_order_raw.get(raw_line_id):
+            changed_orders.add(current)
+        if previous := previous_line_order_raw.get(raw_line_id):
+            changed_orders.add(previous)
+    bumped_projects = _bump_workbooks_for_changed_orders(
+        session,
+        prelocked=prelocked_states,
+        source_order_ids=source_order_ids,
+        changed_source_order_ids=changed_orders,
+    )
 
     return {
         "source_rows_total": result.rows_total,
@@ -549,6 +806,8 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "headless_orders": len(result.headless_order_ids),
         "headless_order_ids_sample": result.headless_order_ids[:50],
         "rows_display_issue": result.rows_display_issue,
+        # K3：本次语义写入导致 workbook revision 失效的项目数（仅归属项目各一次）
+        "workbook_projects_bumped": len(bumped_projects),
     }
 
 
@@ -602,61 +861,345 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                   audit_overwrites: bool = False) -> dict:
     """报销明细入库：单表平铺，按 raw_line_id 幂等（§16.3/§17.4）。
 
-    不建商品/客户维度（费用行无 PN）；项目归集靠 linked_sales_order_no(XSDD) 查询时 join。
-    模式语义（§17.4）——skip=增量（只进新行）；upsert=**以本表为准**：对本次文件出现的
-    每个 XSDD，先删该合同全部报销行再插入（表单=该合同费用的全量真值；内容派生键下
-    "改了一行金额"才不会留下旧行残影）。删除数进报告 expense_rows_replaced。
+    不建商品/客户维度（费用行无 PN）。项目归集以“发生日命中的唯一历史合同”为
+    权威；没有正式合同证据时只允许沿稳定 WBDD 挂靠留下 unmapped 待治理事实，绝不
+    猜合同。skip=增量；upsert=本文件覆盖所含 XSDD：文件里消失的旧行软作废，保留
+    raw/FK/审计链，不再物理删除。
+
+    raw、canonical attribution、项目工作簿 revision 在同一事务完成；因此导入成功
+    后卡片/工作区下一次请求立即读取新成本，任一步失败则整批回滚。
     """
+    from app.models.maintenance_project import (
+        MaintenanceProject,
+        MaintenanceProjectContract,
+    )
+    from app.models.maintenance_project_operations import (
+        MaintenanceProjectExpenseAttribution,
+    )
+    from app.services.maintenance_expense_integrity import (
+        ExpenseIntegrityError,
+        OwnershipConflictError,
+        expense_id_for,
+        expense_ref_for,
+        find_ownership_candidates,
+        normalize_contract_no,
+        sync_attribution_from_raw,
+    )
+
     upsert = (mode == "upsert")
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    incoming_by_id = {
+        str(line["raw_line_id"]): line
+        for line in result.lines
+        if line.get("raw_line_id")
+    }
     contracts = {
         ln["linked_sales_order_no"]
         for ln in result.lines
         if ln.get("linked_sales_order_no")
     }
-    if upsert:
-        changed_contracts = set(contracts)
-    else:
-        raw_ids = [ln["raw_line_id"] for ln in result.lines]
-        existing_raw_ids = set(
-            session.scalars(
-                select(FProjectExpense.raw_line_id).where(
-                    FProjectExpense.raw_line_id.in_(raw_ids),
-                ),
+    incoming_ids = sorted(incoming_by_id)
+    existing_scope: dict[str, FProjectExpense] = {}
+    if incoming_ids:
+        existing_scope.update({
+            row.raw_line_id: row
+            for row in session.scalars(
+                select(FProjectExpense).where(
+                    FProjectExpense.raw_line_id.in_(incoming_ids)
+                )
             )
-        ) if raw_ids else set()
-        changed_contracts = {
-            ln["linked_sales_order_no"]
-            for ln in result.lines
-            if (
-                ln.get("linked_sales_order_no")
-                and ln["raw_line_id"] not in existing_raw_ids
+        })
+    if upsert and contracts:
+        existing_scope.update({
+            row.raw_line_id: row
+            for row in session.scalars(
+                select(FProjectExpense).where(
+                    FProjectExpense.linked_sales_order_no.in_(sorted(contracts))
+                )
             )
-        }
-    replaced = 0
-    if upsert and result.lines:
-        if contracts:
-            # 替换前留痕：被删行的 before 快照进审计（金额数据的回溯能力，超量只记总数）
-            if audit:
-                olds = session.scalars(
-                    select(FProjectExpense)
-                    .where(FProjectExpense.linked_sales_order_no.in_(contracts))
-                ).all()
-                _audit_overwrites(session, "f_project_expense", "f_project_expense(替换删除)",
-                                  [(o.id,
-                                    {"raw_line_id": o.raw_line_id,
-                                     **{c: _jsonable(getattr(o, c)) for c in _EXPENSE_UPD}},
-                                    None) for o in olds],
-                                  operated_by, batch_id)
-            replaced = session.execute(
-                delete(FProjectExpense)
-                .where(FProjectExpense.linked_sales_order_no.in_(contracts))
-            ).rowcount or 0
+        })
+    affected_ids = sorted(set(incoming_ids) | set(existing_scope))
+    affected_expense_ids = [expense_id_for(raw_id) for raw_id in affected_ids]
+    existing_attributions = list(session.scalars(
+        select(MaintenanceProjectExpenseAttribution).where(
+            or_(
+                MaintenanceProjectExpenseAttribution.raw_expense_line_id.in_(affected_ids),
+                MaintenanceProjectExpenseAttribution.expense_id.in_(affected_expense_ids),
+            )
+        )
+    )) if affected_ids else []
+    existing_attr_by_raw = {
+        (row.raw_expense_line_id or row.expense_id.removeprefix("bxd:")): row
+        for row in existing_attributions
+    }
+
+    # WBDD fallback is project evidence only, never a contract mapping.  Build it
+    # once using the same normalized XSDD identity as historical contract lookup.
+    fallback_projects: dict[str, set[str]] = {}
+    for linked_no, project_id in session.execute(
+        select(
+            FMaintenanceOrder.linked_sales_order_no,
+            MaintenanceSourceOrderAssignment.project_id,
+        )
+        .join(
+            MaintenanceSourceOrderAssignment,
+            MaintenanceSourceOrderAssignment.source_order_id
+            == FMaintenanceOrder.raw_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+        )
+    ):
+        key = normalize_contract_no(linked_no)
+        if key:
+            fallback_projects.setdefault(key, set()).add(project_id)
+
+    def _candidate_project_ids(linked_no, expense_date) -> set[str]:
+        if not linked_no or expense_date is None:
+            return set()
+        candidates = find_ownership_candidates(
+            session,
+            linked_sales_order_no=linked_no,
+            expense_date=expense_date,
+        )
+        if candidates:
+            return {candidate.project_id for candidate in candidates}
+        return set(fallback_projects.get(normalize_contract_no(linked_no), ()))
+
+    # Probe every possible old/new owner before facts.  Later revalidation rejects
+    # a project that appeared outside this envelope instead of taking a late state
+    # lock (which would invert the global state→project→contract→attribution→raw order).
+    lock_project_ids = {row.project_id for row in existing_attributions}
+    for raw_id in affected_ids:
+        incoming = incoming_by_id.get(raw_id)
+        existing = existing_scope.get(raw_id)
+        linked_no = (
+            incoming.get("linked_sales_order_no")
+            if incoming is not None
+            else existing.linked_sales_order_no if existing is not None else None
+        )
+        expense_date = (
+            incoming.get("expense_date")
+            if incoming is not None
+            else existing.expense_date if existing is not None else None
+        )
+        lock_project_ids.update(_candidate_project_ids(linked_no, expense_date))
+    states = _project_ops.lock_workbook_states(
+        session, project_ids=lock_project_ids
+    )
+    for project_id in sorted(lock_project_ids):
+        project = session.scalar(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id == project_id)
+            .with_for_update()
+        )
+        if project is None:
+            raise WorkbookInvalidationConflictError(
+                "报销导入期间项目已不存在，整批未写入，请重试"
+            )
+    if lock_project_ids:
+        list(session.scalars(
+            select(MaintenanceProjectContract)
+            .where(MaintenanceProjectContract.project_id.in_(sorted(lock_project_ids)))
+            .order_by(MaintenanceProjectContract.project_contract_id)
+            .with_for_update()
+        ))
+    for raw_id in affected_ids:
+        session.execute(select(func.pg_advisory_xact_lock(
+            func.hashtextextended(f"maintenance-expense-row:{raw_id}", 0)
+        )))
+    if affected_expense_ids:
+        list(session.scalars(
+            select(MaintenanceProjectExpenseAttribution)
+            .where(MaintenanceProjectExpenseAttribution.expense_id.in_(affected_expense_ids))
+            .order_by(MaintenanceProjectExpenseAttribution.expense_id)
+            .with_for_update()
+            # These entities were loaded during the pre-lock ownership probe.
+            # A concurrent ledger apply may have committed while we waited for
+            # state/advisory locks; overwrite the identity-map snapshot with the
+            # row version that is actually locked.
+            .execution_options(populate_existing=True)
+        ))
+    if affected_ids:
+        list(session.scalars(
+            select(FProjectExpense)
+            .where(FProjectExpense.raw_line_id.in_(affected_ids))
+            .order_by(FProjectExpense.raw_line_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ))
+
+    # Re-read after locks: an unlocked probe is never mutation authority.
+    locked_existing = {
+        row.raw_line_id: row
+        for row in session.scalars(
+            select(FProjectExpense).where(
+                FProjectExpense.raw_line_id.in_(affected_ids)
+            )
+            .execution_options(populate_existing=True)
+        )
+    } if affected_ids else {}
+    missing_ids = (
+        set(locked_existing) - set(incoming_ids)
+        if upsert else set()
+    )
+    replaced = len(locked_existing) if upsert else 0
+    voided = 0
+    changed_raw_ids: set[str] = set()
+    void_audits: list[tuple] = []
+    for raw_id in sorted(missing_ids):
+        row = locked_existing[raw_id]
+        if row.data_status in {"已作废", "作废"}:
+            continue
+        before = {c: _jsonable(getattr(row, c)) for c in _EXPENSE_UPD}
+        row.data_status = "已作废"
+        row.import_batch_id = batch_id
+        changed_raw_ids.add(raw_id)
+        voided += 1
+        if audit:
+            after = {c: _jsonable(getattr(row, c)) for c in _EXPENSE_UPD}
+            void_audits.append((row.id, before, after))
+    if audit and void_audits:
+        _audit_overwrites(
+            session,
+            "import_overwrite",
+            "f_project_expense(缺行作废)",
+            void_audits,
+            operated_by,
+            batch_id,
+        )
     rows = [{**ln, "import_batch_id": batch_id} for ln in result.lines]
     stats = _upsert_facts(session, FProjectExpense, rows, FProjectExpense.raw_line_id,
-                          _EXPENSE_UPD if upsert else None, audit=audit)
+                          _EXPENSE_UPD if upsert else None, audit=audit,
+                          track_changed=True)
+    changed_raw_ids.update(stats["changed_keys"])
+
+    session.flush()
+    current_raw_by_id = {
+        row.raw_line_id: row
+        for row in session.scalars(
+            select(FProjectExpense)
+            .where(FProjectExpense.raw_line_id.in_(affected_ids))
+            .order_by(FProjectExpense.raw_line_id)
+            # _upsert_facts uses PostgreSQL Core INSERT .. ON CONFLICT and does
+            # not synchronize ORM instances already present in the Session.
+            # Without populate_existing, attribution sync mirrors the pre-upsert
+            # amount/status and cards stay stale until a later import.
+            .execution_options(populate_existing=True)
+        )
+    } if affected_ids else {}
+    changed_project_ids: set[str] = set()
+    attribution_counts: dict[str, dict[str, int]] = {}
+    attributions_synced = 0
+    attribution_duplicates_skipped = 0
+    attribution_unowned_skipped = 0
+    for raw_id in affected_ids:
+        raw = current_raw_by_id.get(raw_id)
+        if raw is None:
+            raise WorkbookInvalidationConflictError(
+                "报销导入行在应用期间消失，整批未写入，请重试"
+            )
+        candidates = (
+            find_ownership_candidates(
+                session,
+                linked_sales_order_no=raw.linked_sales_order_no,
+                expense_date=raw.expense_date,
+            )
+            if raw.expense_date is not None else ()
+        )
+        candidate_projects = {candidate.project_id for candidate in candidates}
+        current_attr = session.get(
+            MaintenanceProjectExpenseAttribution, expense_id_for(raw_id)
+        )
+        target_project_id: str | None = None
+        if len(candidate_projects) == 1:
+            target_project_id = next(iter(candidate_projects))
+        elif current_attr is not None:
+            target_project_id = current_attr.project_id
+        else:
+            fallback = fallback_projects.get(
+                normalize_contract_no(raw.linked_sales_order_no), set()
+            )
+            if len(fallback) == 1:
+                target_project_id = next(iter(fallback))
+        if target_project_id is None:
+            attribution_unowned_skipped += 1
+            continue
+        if target_project_id not in states:
+            raise WorkbookInvalidationConflictError(
+                "报销导入期间出现预锁集合外的项目归属，整批未写入，请重试"
+            )
+        duplicate = session.scalar(
+            select(MaintenanceProjectExpenseAttribution.expense_id).where(
+                MaintenanceProjectExpenseAttribution.project_id == target_project_id,
+                MaintenanceProjectExpenseAttribution.expense_ref == expense_ref_for(raw),
+                MaintenanceProjectExpenseAttribution.expense_id
+                != expense_id_for(raw_id),
+            )
+        )
+        if duplicate is not None:
+            # Never leave an older canonical attribution counting after its raw
+            # line changed onto a duplicate business identity.  The database
+            # uniqueness constraint would reject the eventual sync anyway; make
+            # this a controlled whole-batch conflict instead of silently keeping
+            # stale approved cost on the card/workbook.
+            attribution_duplicates_skipped += 1
+            raise ImportIntegrityError(
+                "报销导入出现同项目重复费用单号与序号，整批未写入，请先治理重复行"
+            )
+        try:
+            sync_result = sync_attribution_from_raw(
+                session,
+                raw=raw,
+                project_id=target_project_id,
+                status_mapping_version="expense-import-v2",
+            )
+        except OwnershipConflictError as exc:
+            raise ImportIntegrityError(
+                "报销历史合同与项目归属冲突，整批未写入，请先治理合同归属"
+            ) from exc
+        except ExpenseIntegrityError as exc:
+            # Once a project owner is known, omitting its canonical row would hide
+            # a real completeness gap; for existing rows it would additionally
+            # preserve a stale mapped+approved amount.  Keep raw, attribution and
+            # workbook revision atomic by rejecting the whole batch.
+            raise ImportIntegrityError(
+                "报销导入行缺少日期或完整税额，无法安全刷新项目归因，整批未写入"
+            ) from exc
+        if not sync_result.changed:
+            continue
+        attributions_synced += 1
+        changed_project_ids.update(sync_result.affected_project_ids)
+        for project_id in sync_result.affected_project_ids:
+            bucket = attribution_counts.setdefault(
+                project_id, {"created": 0, "updated": 0}
+            )
+            bucket["created" if sync_result.created else "updated"] += 1
+    for project_id in sorted(changed_project_ids):
+        _project_ops._fact_audit(
+            session,
+            project_id=project_id,
+            entity_type="expense",
+            entity_id=f"import:{batch_id}",
+            action="bulk_sync",
+            before=None,
+            after=attribution_counts.get(project_id, {}),
+            reason=f"报销导入同步项目归因（batch {batch_id}）",
+            operated_by=operated_by or "system",
+        )
+        _project_ops.bump_locked_workbook_revision(
+            session, state=states[project_id]
+        )
+
+    previous_contracts = {
+        row.linked_sales_order_no
+        for row in existing_scope.values()
+        if row.linked_sales_order_no
+    }
+    changed_contracts = set(contracts) | previous_contracts
     if changed_contracts and (
-        stats["inserted"] or stats["updated"] or replaced
+        changed_raw_ids or voided
     ):
         _invalidate_expense_snapshot_state(
             session,
@@ -672,12 +1215,22 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
         "rows_inactive": result.rows_inactive,
         "expense_rows_replaced": replaced,
+        "expense_rows_voided": voided,
+        # Count canonical rows, not project-side invalidations.  One attribution
+        # moved P→Q touches two revisions/audits but is still one synced row.
+        "expense_attributions_synced": attributions_synced,
+        "expense_attribution_duplicates_skipped": attribution_duplicates_skipped,
+        "expense_attribution_unowned_skipped": attribution_unowned_skipped,
+        "workbook_projects_bumped": len(changed_project_ids),
         "import_mode": mode,
     }
 
 
 def _load_inventory(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
                     operated_by: str | None = None, audit_overwrites: bool = False) -> dict:
+    # K3 核查：库存快照只进 inventory 表，不是任何项目工作簿（V2）可见事实——
+    # 项目成本口径只由 maintenance_cost.recompute 从采购/销售事实派生，故本路径
+    # 不挂 workbook revision 失效（写了也只是冗余 bump）。
     # 1) 商品身份解析（与订单路径同口径：别名/合并重定向）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.inventory, is_sales=False)
     _upsert_aliases(session, result.inventory, resolution)

@@ -9,11 +9,15 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.writer.excel import ExcelWriter
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
 from app import config
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceManualCostOverride,
+)
 from app.security import UserContext, apply_field_visibility, is_field_hidden
 from app.services import maintenance_cost_quality, maintenance_demands
 
@@ -244,8 +248,19 @@ def _build_workbook(
         lines.append(LINE_HEADERS)
 
         statement = (
-            select(FMaintenanceOrder, FMaintenanceLine)
+            select(
+                FMaintenanceOrder,
+                FMaintenanceLine,
+                MaintenanceManualCostOverride,
+            )
             .outerjoin(FMaintenanceLine, FMaintenanceLine.order_id == FMaintenanceOrder.id)
+            .outerjoin(
+                MaintenanceManualCostOverride,
+                and_(
+                    MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+                    MaintenanceManualCostOverride.active.is_(True),
+                ),
+            )
             .where(*_date_filters(date_from, date_to))
             .order_by(FMaintenanceOrder.id, FMaintenanceLine.id)
             .execution_options(stream_results=True, yield_per=1000)
@@ -253,7 +268,7 @@ def _build_workbook(
         previous_order_id = None
         order_count = 0
         line_count = 0
-        for order, line in db.execute(statement):
+        for order, line, override in db.execute(statement):
             if order.id != previous_order_id:
                 order_count += 1
                 if order_count > MAX_DATA_ROWS_PER_SHEET:
@@ -272,36 +287,78 @@ def _build_workbook(
                 line_count += 1
                 if line_count > MAX_DATA_ROWS_PER_SHEET:
                     raise ExcelRowLimitExceeded("订单明细超过 Excel 单 Sheet 数据行上限 1048575")
-                cost_tier = maintenance_cost_quality.source_tier(
-                    line.cost_source,
-                    line.cost_tax_basis,
-                    line.cost_amount,
+                cost_fact = maintenance_cost_quality.resolved_line_cost_fields(
+                    source=line.cost_source,
+                    tax_basis=line.cost_tax_basis,
+                    legacy_unit_cost=line.unit_cost,
+                    legacy_amount=line.cost_amount,
+                    unit_cost_inc_tax=line.unit_cost_inc_tax,
+                    unit_cost_ex_tax=line.unit_cost_ex_tax,
+                    cost_amount_inc_tax=line.cost_amount_inc_tax,
+                    cost_amount_ex_tax=line.cost_amount_ex_tax,
+                    anomaly_flags=line.anomaly_flags,
+                    confidence=line.confidence,
+                    qty=line.qty,
+                    return_qty=line.return_qty,
+                    manual_unit_cost_inc_tax=(
+                        override.unit_cost_inc_tax if override is not None else None
+                    ),
+                    manual_unit_cost_ex_tax=(
+                        override.unit_cost_ex_tax if override is not None else None
+                    ),
+                    manual_active=override is not None and override.active is True,
                 )
+                cost_tier = cost_fact["tier"]
                 has_known_cost = cost_tier != "missing"
+                manual_fallback = cost_fact["manual_fallback"]
                 cost = apply_field_visibility({
-                    "unit_cost": line.unit_cost if has_known_cost else None,
-                    "cost_amount": line.cost_amount if has_known_cost else None,
-                    "unit_cost_inc_tax": line.unit_cost_inc_tax if has_known_cost else None,
-                    "unit_cost_ex_tax": line.unit_cost_ex_tax if has_known_cost else None,
-                    "cost_amount_inc_tax": line.cost_amount_inc_tax if has_known_cost else None,
-                    "cost_amount_ex_tax": line.cost_amount_ex_tax if has_known_cost else None,
+                    "unit_cost": cost_fact["unit_cost"] if has_known_cost else None,
+                    "cost_amount": cost_fact["cost_amount"] if has_known_cost else None,
+                    "unit_cost_inc_tax": (
+                        cost_fact["unit_cost_inc_tax"] if has_known_cost else None
+                    ),
+                    "unit_cost_ex_tax": (
+                        cost_fact["unit_cost_ex_tax"] if has_known_cost else None
+                    ),
+                    "cost_amount_inc_tax": (
+                        cost_fact["cost_amount_inc_tax"] if has_known_cost else None
+                    ),
+                    "cost_amount_ex_tax": (
+                        cost_fact["cost_amount_ex_tax"] if has_known_cost else None
+                    ),
                     "cost_tier": cost_tier,
-                    "cost_source": line.cost_source,
-                    "cost_tax_basis": line.cost_tax_basis,
-                    "price_month": line.price_month,
-                    "trace_months": line.trace_months,
-                    "linked_purchase_order_no": line.linked_purchase_order_no,
-                    "price_distance_days": line.price_distance_days,
-                    "confidence": line.confidence,
-                    "reference_side": line.reference_side,
-                    "reference_pool_group_id": line.reference_pool_group_id,
-                    "reference_pool_version": line.reference_pool_version,
-                    "reference_sample_count": line.reference_sample_count,
-                    "reference_from_date": line.reference_from_date,
-                    "reference_to_date": line.reference_to_date,
-                    "reference_latest_date": line.reference_latest_date,
+                    "cost_source": cost_fact["source"],
+                    "cost_tax_basis": cost_fact["tax_basis"],
+                    "price_month": None if manual_fallback else line.price_month,
+                    "trace_months": None if manual_fallback else line.trace_months,
+                    "linked_purchase_order_no": (
+                        None if manual_fallback else line.linked_purchase_order_no
+                    ),
+                    "price_distance_days": (
+                        None if manual_fallback else line.price_distance_days
+                    ),
+                    "confidence": cost_fact["confidence"],
+                    "reference_side": None if manual_fallback else line.reference_side,
+                    "reference_pool_group_id": (
+                        None if manual_fallback else line.reference_pool_group_id
+                    ),
+                    "reference_pool_version": (
+                        None if manual_fallback else line.reference_pool_version
+                    ),
+                    "reference_sample_count": (
+                        None if manual_fallback else line.reference_sample_count
+                    ),
+                    "reference_from_date": (
+                        None if manual_fallback else line.reference_from_date
+                    ),
+                    "reference_to_date": (
+                        None if manual_fallback else line.reference_to_date
+                    ),
+                    "reference_latest_date": (
+                        None if manual_fallback else line.reference_latest_date
+                    ),
                 }, user_ctx)
-                anomaly_flags = line.anomaly_flags or []
+                anomaly_flags = cost_fact["anomaly_flags"]
                 if is_field_hidden(user_ctx, "unit_cost"):
                     anomaly_flags = [flag for flag in anomaly_flags if flag not in _COST_ANOMALY_FLAGS]
                 lines.append(_formatted_row(lines, (

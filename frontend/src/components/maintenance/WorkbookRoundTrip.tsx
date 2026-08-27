@@ -28,6 +28,11 @@ export interface WorkbookRoundTripProps {
   filename: string;
   onDownload: () => Promise<Blob>;
   onApply: (file: File) => Promise<WorkbookApplyResult>;
+  /**
+   * 落库成功后的读回校验。返回 false/抛错都只表示“刷新失败”，不能把已经
+   * commit 的上传误报成上传失败；调用方应同时失效页面里的旧快照。
+   */
+  onAfterApply?: () => Promise<boolean | void>;
   /** 传入即启用「预检 → 作废预览 → 确认 → 落库」两阶段（项目总表 2.1）。 */
   onValidate?: (file: File) => Promise<WorkbookValidateResult>;
   /** 无上传动作键时只给下载（只读对账的人也该能把表拉下来核对）。 */
@@ -48,6 +53,7 @@ function describe(result: Partial<WorkbookApplyResult>): string {
   if (result.order_reassignments) {
     parts.push(`WBDD 归属更正 ${result.order_reassignments} 张`);
   }
+  if (result.contract_updates) parts.push(`项目合同总额更新 ${result.contract_updates} 项`);
   if (result.expense_creates) parts.push(`报销新增 ${result.expense_creates} 行`);
   if (result.expense_updates) parts.push(`报销更新 ${result.expense_updates} 行`);
   if (result.expense_voids) parts.push(`报销作废 ${result.expense_voids} 行`);
@@ -86,12 +92,14 @@ export function WorkbookRoundTrip({
   filename,
   onDownload,
   onApply,
+  onAfterApply,
   onValidate,
   canUpload,
   size = "middle",
 }: WorkbookRoundTripProps) {
   const [downloading, setDownloading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [uploadInputVersion, setUploadInputVersion] = useState(0);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -106,7 +114,21 @@ export function WorkbookRoundTrip({
 
   const applyDirectly = async (file: File) => {
     const result = await onApply(file);
-    message.success(describe(result) === "文件没有改动" ? "文件没有改动，未写入任何数据" : `已覆盖：${describe(result)}`);
+    if (onAfterApply) {
+      try {
+        const refreshed = await onAfterApply();
+        if (refreshed === false) {
+          message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
+          return;
+        }
+      } catch {
+        message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
+        return;
+      }
+    }
+    message.success(describe(result) === "文件没有改动"
+      ? "文件没有改动，未写入任何数据"
+      : `${onAfterApply ? "已覆盖并刷新" : "已覆盖"}：${describe(result)}`);
   };
 
   /** 两阶段：预检 → 摆变更摘要和作废预览 → 用户确认才落库。 */
@@ -114,10 +136,11 @@ export function WorkbookRoundTrip({
     const preview = await onValidate!(file);
     const voidRows = preview.will_void_rows ?? [];
     const reassignRows = preview.will_reassign_orders ?? [];
-    Modal.confirm({
-      title: `确认回传${title}？`,
-      width: 560,
-      content: (
+    await new Promise<void>((resolve, reject) => {
+      Modal.confirm({
+        title: `确认回传${title}？`,
+        width: 560,
+        content: (
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Text>{describe(preview)}</Text>
           {voidRows.length ? (
@@ -158,10 +181,20 @@ export function WorkbookRoundTrip({
             />
           ) : null}
         </Space>
-      ),
-      okText: "确认回传",
-      cancelText: "取消",
-      onOk: () => applyDirectly(file),
+        ),
+        okText: "确认回传",
+        cancelText: "取消",
+        onCancel: () => resolve(),
+        onOk: async () => {
+          try {
+            await applyDirectly(file);
+            resolve();
+          } catch (error) {
+            reject(error);
+            throw error;
+          }
+        },
+      });
     });
   };
 
@@ -179,6 +212,9 @@ export function WorkbookRoundTrip({
       message.error(readError(error, "上传失败"));
     } finally {
       setApplying(false);
+      // 浏览器不会为同一个原生 file input 的同文件重选再次触发 change。
+      // 无论成功、失败还是预检弹窗取消，都重建 input，让用户能直接重试原文件。
+      setUploadInputVersion((current) => current + 1);
     }
     return false;
   };
@@ -196,6 +232,7 @@ export function WorkbookRoundTrip({
         </Button>
         {canUpload ? (
           <Upload
+            key={`workbook-upload-${uploadInputVersion}`}
             accept=".xlsx"
             maxCount={1}
             showUploadList={false}

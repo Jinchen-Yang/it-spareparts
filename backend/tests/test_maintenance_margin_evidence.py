@@ -16,10 +16,11 @@ def _batch(
     *,
     suffix: str = "",
     uploaded_at: datetime | None = None,
+    file_type: str = "sales",
 ) -> SysImportBatch:
     batch = SysImportBatch(
         filename=f"margin-evidence{suffix}.xlsx",
-        file_type="sales",
+        file_type=file_type,
         file_hash=f"margin-evidence{suffix}",
         status="success",
         uploaded_at=uploaded_at,
@@ -90,21 +91,49 @@ def test_revenue_evidence_selects_latest_effective_version(db):
         batch.id,
         date(2026, 7, 28),
     )
+    wrong_type_batch = _batch(
+        db,
+        suffix="-wrong-type",
+        file_type="maintenance",
+    )
+    loader.load(
+        db,
+        f.sales_result(
+            {
+                "S-WRONG-TYPE": f.sales_head(
+                    "S-WRONG-TYPE",
+                    order_no="XS-WRONG-TYPE",
+                    amount_ex_tax=Decimal("9999"),
+                    tax_rate=Decimal("0.13"),
+                ),
+            },
+            [],
+        ),
+        wrong_type_batch.id,
+        date(2026, 7, 28),
+    )
     db.commit()
 
     evidence = maintenance_margin_evidence.load_contract_revenue_evidence(
         db,
-        ["XS-A", "XS-B", "XS-C", "XS-D", "XS-MISSING"],
+        [
+            "XS-A",
+            "XS-B",
+            "XS-C",
+            "XS-D",
+            "XS-MISSING",
+            "XS-WRONG-TYPE",
+        ],
     )
 
     assert evidence["XS-A"] == maintenance_margin_evidence.RevenueEvidence(
         revenue_ex=Decimal("1000.00"),
-        tax_rate=Decimal("0.13"),
+        tax_rate=Decimal("0.0600"),
         tax_rate_ambiguous=False,
         ambiguous_inc=False,
         ambiguous_ex=False,
         record_count=2,
-        legacy_contract_amount_inc=Decimal("1130.00"),
+        legacy_contract_amount_inc=Decimal("1060.00"),
     )
     assert evidence["XS-B"].ambiguous_inc is False
     assert evidence["XS-B"].ambiguous_ex is False
@@ -113,16 +142,19 @@ def test_revenue_evidence_selects_latest_effective_version(db):
     assert evidence["XS-B"].tax_rate == Decimal("0.13")
     assert evidence["XS-B"].legacy_contract_amount_inc == Decimal("1356.00")
     assert evidence["XS-C"].revenue_ex == Decimal("900.00")
-    assert evidence["XS-C"].tax_rate == Decimal("0.13")
+    assert evidence["XS-C"].tax_rate is None
+    assert evidence["XS-C"].legacy_contract_amount_inc is None
     assert evidence["XS-D"].revenue_ex == Decimal("700.00")
-    assert evidence["XS-D"].tax_rate == Decimal("0.13")
+    assert evidence["XS-D"].tax_rate == Decimal("0.06")
+    assert evidence["XS-D"].legacy_contract_amount_inc == Decimal("742.00")
     assert evidence["XS-D"].tax_rate_ambiguous is False
     assert evidence["XS-D"].ambiguous_inc is False
     assert evidence["XS-D"].ambiguous_ex is False
     assert "XS-MISSING" not in evidence
+    assert "XS-WRONG-TYPE" not in evidence
 
 
-def test_compatibility_summary_also_uses_fixed_tax_rate():
+def test_compatibility_summary_uses_only_supplied_reliable_tax_rate():
     evidence = maintenance_margin_evidence.summarize_revenue_candidates([
         (Decimal("1000"), Decimal("0.06")),
         (Decimal("1200"), Decimal("0.06")),
@@ -132,7 +164,8 @@ def test_compatibility_summary_also_uses_fixed_tax_rate():
     assert evidence.ambiguous_inc is True
     assert evidence.ambiguous_ex is True
     assert evidence.tax_rate_ambiguous is False
-    assert evidence.tax_rate == Decimal("0.13")
+    assert evidence.tax_rate == Decimal("0.06")
+    assert evidence.legacy_contract_amount_inc is None
 
 
 def test_expense_snapshot_completeness_requires_flag_and_watermark_coverage(db):
@@ -234,7 +267,7 @@ def test_latest_revenue_uses_batch_id_to_break_timestamp_ties(db):
         ["XS-TIE"],
     )["XS-TIE"]
     assert evidence.revenue_ex == Decimal("1200.00")
-    assert evidence.legacy_contract_amount_inc == Decimal("1356.00")
+    assert evidence.legacy_contract_amount_inc == Decimal("1272.00")
     assert evidence.record_count == 2
 
 

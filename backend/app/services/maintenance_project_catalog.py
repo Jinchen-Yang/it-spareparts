@@ -13,6 +13,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
 )
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
+from app.services import maintenance_periods, project_names
 from app.services import maintenance_project_operations as operations
 
 
@@ -132,6 +133,7 @@ def create_project(
         max_length=64,
     )
     clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
+    project_names.lock_display_name_identities(db, [clean_name])
 
     project = MaintenanceProject(
         project_id=str(uuid4()),
@@ -173,6 +175,21 @@ def update_project(
     reason: str,
     operated_by: str,
 ) -> dict | None:
+    allowed = {key: value for key, value in updates.items() if key in {
+        "display_name", "project_manager_id", "period_from", "period_to"
+    }}
+    if not allowed:
+        raise MaintenanceProjectCatalogError("没有可修改的项目字段")
+    clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
+    if "display_name" in allowed:
+        allowed["display_name"] = _clean_required(
+            allowed["display_name"],
+            label="项目名称",
+            max_length=256,
+        )
+        # 新名称 identity 必须在 state/project 之前锁，避免与 auto-create
+        # 形成 name→state / state→name 反序。
+        project_names.lock_display_name_identities(db, [allowed["display_name"]])
     project, state = _lock_project_for_master_write(db, project_id=project_id)
     if project is None or state is None:
         return None
@@ -182,40 +199,36 @@ def update_project(
         raise MaintenanceProjectCatalogConflict(
             f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试"
         )
-    allowed = {key: value for key, value in updates.items() if key in {
-        "display_name", "project_manager_id", "period_from", "period_to"
-    }}
-    if not allowed:
-        raise MaintenanceProjectCatalogError("没有可修改的项目字段")
-    clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
     before = project_dict(project)
     if "display_name" in allowed:
-        project.display_name = _clean_required(
-            allowed["display_name"],
-            label="项目名称",
-            max_length=256,
-        )
+        project.display_name = allowed["display_name"]
     if "project_manager_id" in allowed:
         project.project_manager_id = _clean_optional(
             allowed["project_manager_id"],
             label="项目经理标识",
             max_length=64,
         )
-    # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交），起>止拒绝；
-    # 改动后按新期限重算 lifecycle（快照语义，与台账导入同口径）。
+    # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交）。期限双源 P1 修复后
+    # project.period_* 是唯一事实源：统一走 canonical helper 同步 projection 投影，
+    # lifecycle 按新期限快照口径重算；起>止由 helper 拒绝。
     if "period_from" in allowed or "period_to" in allowed:
         new_from = allowed.get("period_from", project.period_from)
         new_to = allowed.get("period_to", project.period_to)
-        if new_from is not None and new_to is not None and new_from > new_to:
-            raise MaintenanceProjectCatalogError("维保期限起始日期不能晚于终止日期")
-        project.period_from = new_from
-        project.period_to = new_to
         from app.business_time import business_today
-        from app.services.maintenance_ledger import _lifecycle_status
 
-        status = _lifecycle_status(new_from, new_to, business_today())
-        # 期限被清空时不打回 missing 之外的状态——按口径就是 missing
-        project.lifecycle_status = status
+        try:
+            maintenance_periods.apply_canonical_period_locked(
+                db,
+                project=project,
+                period_from=new_from,
+                period_to=new_to,
+                source=maintenance_periods.SOURCE_DIRECT_API,
+                as_of=business_today(),
+                operated_by=operated_by,
+                reason=clean_reason,
+            )
+        except maintenance_periods.MaintenancePeriodError as exc:
+            raise MaintenanceProjectCatalogError(str(exc)) from exc
     changed = project_dict(project) != before
     if not changed:
         return before

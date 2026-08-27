@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Space, Table, message } from "antd";
 import type { ProjectExpenseRow } from "../../../api/maintenanceWorkbooks";
 import {
@@ -9,35 +9,53 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
-import { raw, readError } from "./panelUtils";
+import { type RegisterPanelRefresh, raw, readError } from "./panelUtils";
 
 /** 报销 tab：04 表的 web 呈现（含备注，#47）+ 下载上传（两阶段回传）。只展示，不散改。 */
 export function ExpenseTab({
   projectId,
   exportBase,
   canUpload,
+  onChanged,
+  registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
   canUpload: boolean;
+  onChanged: () => Promise<boolean>;
+  registerRefresh: RegisterPanelRefresh;
 }) {
   const [rows, setRows] = useState<ProjectExpenseRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      setRows((await listProjectExpenseRows(projectId)).rows);
+      const nextRows = (await listProjectExpenseRows(projectId)).rows;
+      if (seq !== requestSeq.current) return false;
+      setRows(nextRows);
+      return true;
     } catch (err) {
-      message.error(readError(err, "报销明细加载失败"));
+      if (seq === requestSeq.current) {
+        setRows([]);
+        message.error(readError(err, "报销明细加载失败"));
+      }
+      return false;
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
+    registerRefresh("expense", load);
     void load();
-  }, [load]);
+    return () => {
+      requestSeq.current += 1;
+      registerRefresh("expense", null);
+    };
+  }, [load, registerRefresh]);
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -49,11 +67,8 @@ export function ExpenseTab({
         hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={async (file) => {
-          const result = await applyProjectMaster(projectId, file);
-          await load();          // 上传覆盖后立刻回读，页面不留旧值
-          return result;
-        }}
+        onApply={(file) => applyProjectMaster(projectId, file)}
+        onAfterApply={onChanged}
       />
       <Table<ProjectExpenseRow>
         rowKey="raw_line_id"

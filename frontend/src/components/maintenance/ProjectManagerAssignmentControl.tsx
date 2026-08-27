@@ -9,14 +9,19 @@ import {
   type MaintenanceProjectOperationsSummary,
 } from "../../api/maintenanceOperations";
 
+type ManagerProjectContext = Pick<
+  MaintenanceProjectOperationsSummary,
+  "project_id" | "project_manager_id" | "manager_assignment"
+>;
+
 export default function ProjectManagerAssignmentControl({
   project,
   canManage,
   onChanged,
 }: {
-  project: MaintenanceProjectOperationsSummary;
+  project: ManagerProjectContext;
   canManage: boolean;
-  onChanged: () => void;
+  onChanged: () => Promise<boolean> | boolean | void;
 }) {
   const [open, setOpen] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
@@ -69,9 +74,14 @@ export default function ProjectManagerAssignmentControl({
         expected_assignment_version: project.manager_assignment?.version ?? null,
         reason: cleanedReason,
       });
-      message.success(project.manager_assignment ? "项目负责人已改派" : "项目负责人已映射");
+      const action = project.manager_assignment ? "项目负责人已改派" : "项目负责人已映射";
+      const refreshed = await onChanged();
       close();
-      onChanged();
+      if (refreshed === false) {
+        message.warning(`${action}，但页面刷新失败；旧数据已失效，请重试。`);
+      } else {
+        message.success(`${action}并刷新`);
+      }
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status;
       message.error(status === 409 ? "负责人关系已变化，请刷新后重试" : "负责人映射失败");
@@ -89,9 +99,13 @@ export default function ProjectManagerAssignmentControl({
         version: assignment.version,
         reason: cleanedReason,
       });
-      message.success("负责人关系已归档");
+      const refreshed = await onChanged();
       close();
-      onChanged();
+      if (refreshed === false) {
+        message.warning("负责人关系已归档，但页面刷新失败；旧数据已失效，请重试。");
+      } else {
+        message.success("负责人关系已归档并刷新");
+      }
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status;
       message.error(status === 409 ? "负责人关系已变化，请刷新后重试" : "负责人关系归档失败");

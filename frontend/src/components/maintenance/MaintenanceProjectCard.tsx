@@ -76,7 +76,7 @@ export default function MaintenanceProjectCard({
       )}
       extra={<Tag color={lifecycle.color}>{lifecycle.label}</Tag>}
       actions={[
-        <Link key="detail" to={`/maintenance/beta/projects/${encodeURIComponent(project.project_id)}`}>
+        <Link key="detail" to={`/maintenance/projects/${encodeURIComponent(project.project_id)}`}>
           进入项目
         </Link>,
         ...(canManageAssignment ? [

@@ -1,6 +1,7 @@
 """Explicit, auditable maintenance-project manager account assignments (#205)."""
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from sqlalchemy import false, func, or_, select
@@ -13,6 +14,11 @@ from app.models.maintenance_project import (
 )
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
+
+if TYPE_CHECKING:
+    from app.models.maintenance_project_operations import (
+        MaintenanceProjectWorkbookState,
+    )
 
 
 class MaintenanceProjectAssignmentError(Exception):
@@ -248,9 +254,29 @@ def assign_primary_manager(
     expected_assignment_version: int | None,
     reason: str,
     operated_by: str,
+    _prelocked_state: "MaintenanceProjectWorkbookState | None" = None,
+    _skip_workbook_bump: bool = False,
 ) -> dict | None:
     reason = _required_text(reason, "改派原因", 1000)
     operated_by = _required_text(operated_by, "操作人", 64)
+    # Probe before taking any lock so a 404 never leaves an orphan workbook
+    # state row behind, then lock state -> project -> assignment in the
+    # canonical writer order.  Internal callers (owner backfill) pass an
+    # already-locked state via ``_prelocked_state``; this function must never
+    # take a late state lock after the project row.
+    if db.scalar(
+        select(MaintenanceProject.project_id).where(
+            MaintenanceProject.project_id == project_id
+        )
+    ) is None:
+        return None
+    from app.services import maintenance_project_operations as operations
+
+    state = _prelocked_state
+    if state is None and not _skip_workbook_bump:
+        state = operations.lock_workbook_states(
+            db, project_ids=[project_id]
+        )[project_id]
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
@@ -260,14 +286,10 @@ def assign_primary_manager(
         return None
     if not project.is_active:
         raise MaintenanceProjectAssignmentError("项目主档已归档")
-    target_user = db.scalar(
-        select(SysUser).where(SysUser.id == user_id).with_for_update()
-    )
-    if target_user is None:
-        raise MaintenanceProjectAssignmentError("负责人账号不存在")
-    if not target_user.is_active:
-        raise MaintenanceProjectAssignmentError("负责人账号已停用")
-
+    # 先锁/校验当前 assignment，再决定是否需要锁 target user。
+    # manager workbook 已收口为相同的 state → project → assignment →
+    # owner user；same-user/陈旧请求仍必须在 target-user 锁之前结束，
+    # 保持 no-op/OCC 零额外等待、零写入。
     current = db.scalar(
         select(MaintenanceProjectUserAssignment)
         .where(
@@ -287,12 +309,21 @@ def assign_primary_manager(
             or expected_assignment_version != current.version
         ):
             raise MaintenanceProjectAssignmentConflict("项目负责人已变化，请刷新后重试")
-        if current.user_id == target_user.id:
+        if current.user_id == user_id:
             raise MaintenanceProjectAssignmentError("所选账号已是当前主负责人")
         current_user = db.get(SysUser, current.user_id)
         if current_user is None:
             raise MaintenanceProjectAssignmentError("当前负责人账号记录缺失")
         before = assignment_dict(current, current_user)
+
+    target_user = db.scalar(
+        select(SysUser).where(SysUser.id == user_id).with_for_update()
+    )
+    if target_user is None:
+        raise MaintenanceProjectAssignmentError("负责人账号不存在")
+    if not target_user.is_active:
+        raise MaintenanceProjectAssignmentError("负责人账号已停用")
+    if current is not None:
         archived_at = datetime.now(UTC)
         current.archived_at = archived_at
         current.archived_by = operated_by
@@ -327,6 +358,10 @@ def assign_primary_manager(
         )
     )
     db.flush()
+    if state is not None:
+        # primary_manager 是导出投影（旧 V2 task owner）的输入：真实变更抬高
+        # 同一根事务 revision 恰好一次（bump 内部按事务去重）。
+        operations.bump_locked_workbook_revision(db, state=state)
     return after
 
 
@@ -340,9 +375,10 @@ def archive_primary_manager(
 ) -> dict | None:
     reason = _required_text(reason, "归档原因", 1000)
     operated_by = _required_text(operated_by, "操作人", 64)
-    # Resolve the project first, then take locks in the same project ->
-    # assignment order as ``assign_primary_manager``.  This avoids a lock-order
-    # inversion when an archive races with a reassignment.
+    # Resolve the project first (unlocked probe), then take locks in the
+    # canonical state -> project -> assignment order shared with
+    # ``assign_primary_manager``.  This avoids a lock-order inversion when an
+    # archive races with a reassignment.
     assignment = db.scalar(
         select(MaintenanceProjectUserAssignment)
         .where(MaintenanceProjectUserAssignment.assignment_id == assignment_id)
@@ -350,6 +386,11 @@ def archive_primary_manager(
     if assignment is None:
         return None
     project_id = assignment.project_id
+    from app.services import maintenance_project_operations as operations
+
+    state = operations.lock_workbook_states(db, project_ids=[project_id])[
+        project_id
+    ]
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
@@ -394,6 +435,7 @@ def archive_primary_manager(
         )
     )
     db.flush()
+    operations.bump_locked_workbook_revision(db, state=state)
     return after
 
 
@@ -422,7 +464,7 @@ def sync_project_viewers(
     usernames: list[str],
     operated_by: str,
     reason: str,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """把项目级可见账号整组同步为 ``usernames``（2026-08-25 客户需求：
     「基础信息编辑」里多选已有账号控制项目可见性）。
 
@@ -456,6 +498,9 @@ def sync_project_viewers(
         ).all()
     )
     current_names = {user.username for _assignment, user in current}
+    changed = current_names != set(wanted)
+    if not changed:
+        return project_viewers(db, project_id=project_id), False
     now = datetime.now(UTC)
     for assignment, user in current:
         if user.username in users:
@@ -504,11 +549,6 @@ def sync_project_viewers(
             )
         )
     db.flush()
-    # 名单变更抬高项目主档版本（评审：viewer-only PATCH 需与主档字段同一
-    # 乐观锁口径，陈旧提交 409 而不是静默覆盖整份名单）。
-    project = db.scalar(select(MaintenanceProject).where(
-        MaintenanceProject.project_id == project_id))
-    if project is not None:
-        project.version += 1
-        db.flush()
-    return project_viewers(db, project_id=project_id)
+    # project.version 与 workbook revision 由 API 与同次主档 PATCH 聚合：
+    # 混合修改最多 +1，viewer-only 真实变化 +1，全 no-op +0。
+    return project_viewers(db, project_id=project_id), True

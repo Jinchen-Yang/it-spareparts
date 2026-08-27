@@ -76,23 +76,49 @@ def _decimal_key(value: Decimal | None):
     return normalized.normalize()
 
 
+def _reliable_tax_rate(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        normalized = Decimal(value)
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if (
+        not normalized.is_finite()
+        or normalized < _ZERO
+        or normalized > Decimal("1")
+    ):
+        return None
+    return normalized
+
+
 def _legacy_contract_amount_inc(
     amount: Decimal | None,
     tax_rate: Decimal | None,
 ) -> Decimal | None:
-    del tax_rate
-    if amount is None:
+    """Convert legacy ex-tax revenue only when its own rate is trustworthy.
+
+    This field is compatibility evidence only.  It must never revive the old
+    global 13% assumption when the source sale has no usable tax rate.
+    """
+    rate_value = _reliable_tax_rate(tax_rate)
+    if amount is None or rate_value is None:
         return None
-    amount_value = Decimal(amount)
+    try:
+        amount_value = Decimal(amount)
+    except (ArithmeticError, TypeError, ValueError):
+        return None
     if not amount_value.is_finite():
         return None
-    return tax_policy.inc_from_ex(amount_value)
+    return tax_policy.round_money(
+        amount_value * (Decimal("1") + rate_value)
+    )
 
 
 def summarize_revenue_candidates(
     candidates: Iterable[tuple[Decimal | None, Decimal | None]],
 ) -> RevenueEvidence | None:
-    """兼容纯函数：重复候选仍按金额冲突门禁，税率固定为 13%。
+    """兼容纯函数：金额或税率证据不唯一时均失败关闭。
 
     数据库生产路径不调用本函数决定版本；统一由
     :func:`load_contract_revenue_evidence` 的 latest-effective 排序选择。
@@ -100,28 +126,36 @@ def summarize_revenue_candidates(
     candidates = list(candidates)
     if not candidates:
         return None
-    legacy_values = [
-        legacy
-        for amount, tax_rate in candidates
-        if (legacy := _legacy_contract_amount_inc(amount, tax_rate)) is not None
-    ]
-    # 兼容旧预算看板：历史实现以 0 为 max 初值，负向销售/冲销不会生成负预算。
-    legacy_contract_amount_inc = (
-        max([_ZERO, *legacy_values])
-        if legacy_values else None
-    )
     distinct_ex = {
         _decimal_key(amount)
         for amount, _tax_rate in candidates
     }
+    distinct_tax_rates = {
+        _decimal_key(tax_rate)
+        for _amount, tax_rate in candidates
+    }
     ambiguous_ex = len(distinct_ex) != 1
-    ambiguous_inc = ambiguous_ex
+    tax_rate_ambiguous = len(distinct_tax_rates) != 1
     amount_ex_tax = None if ambiguous_ex else candidates[0][0]
+    tax_rate = (
+        _reliable_tax_rate(candidates[0][1])
+        if not tax_rate_ambiguous
+        else None
+    )
+    legacy_value = (
+        _legacy_contract_amount_inc(amount_ex_tax, tax_rate)
+        if not ambiguous_ex else None
+    )
+    # 兼容旧预算看板：负向销售/冲销仍以 0 为下限，但只有完整、唯一的
+    # amount+tax_rate 证据才允许产生 legacy 含税值。
+    legacy_contract_amount_inc = (
+        max(_ZERO, legacy_value) if legacy_value is not None else None
+    )
     return RevenueEvidence(
         revenue_ex=amount_ex_tax,
-        tax_rate=tax_policy.TAX_RATE,
-        tax_rate_ambiguous=False,
-        ambiguous_inc=ambiguous_inc,
+        tax_rate=tax_rate,
+        tax_rate_ambiguous=tax_rate_ambiguous,
+        ambiguous_inc=ambiguous_ex or tax_rate_ambiguous,
         ambiguous_ex=ambiguous_ex,
         record_count=len(candidates),
         legacy_contract_amount_inc=legacy_contract_amount_inc,
@@ -189,6 +223,7 @@ def _latest_effective_revenue_rows(contract_nos: list[str]):
         select(
             FSalesOrder.order_no.label("order_no"),
             FSalesOrder.amount_ex_tax.label("amount_ex_tax"),
+            FSalesOrder.tax_rate.label("tax_rate"),
             func.count().over(
                 partition_by=FSalesOrder.order_no,
             ).label("record_count"),
@@ -209,6 +244,7 @@ def _latest_effective_revenue_rows(contract_nos: list[str]):
         .where(
             FSalesOrder.order_no.in_(contract_nos),
             FSalesOrder.data_status == config.ACTIVE_STATUS,
+            SysImportBatch.file_type == "sales",
             SysImportBatch.status == "success",
         )
         .subquery()
@@ -216,6 +252,7 @@ def _latest_effective_revenue_rows(contract_nos: list[str]):
     return select(
         ranked.c.order_no,
         ranked.c.amount_ex_tax,
+        ranked.c.tax_rate,
         ranked.c.record_count,
     ).where(ranked.c.version_rank == 1)
 
@@ -229,16 +266,17 @@ def load_contract_revenue_evidence(
     if not contract_nos:
         return {}
     result: dict[str, RevenueEvidence] = {}
-    for contract_no, amount_ex_tax, record_count in db.execute(
+    for contract_no, amount_ex_tax, tax_rate, record_count in db.execute(
         _latest_effective_revenue_rows(contract_nos),
     ):
         legacy_amount = _legacy_contract_amount_inc(
             amount_ex_tax,
-            tax_policy.TAX_RATE,
+            tax_rate,
         )
+        reliable_tax_rate = _reliable_tax_rate(tax_rate)
         result[contract_no] = RevenueEvidence(
             revenue_ex=amount_ex_tax,
-            tax_rate=tax_policy.TAX_RATE,
+            tax_rate=reliable_tax_rate,
             tax_rate_ambiguous=False,
             ambiguous_inc=False,
             ambiguous_ex=False,

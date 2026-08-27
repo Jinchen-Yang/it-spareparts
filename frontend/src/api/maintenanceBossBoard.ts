@@ -26,7 +26,8 @@ export interface Stat<T = number | string | null> {
 export interface KnownCostValue {
   actual_amount: string | number;
   estimated_amount: string | number;
-  known_amount: string | number;
+  /** null = 没有有效需求明细，不能把 SQL 聚合单位元 0 当成真实成本。 */
+  known_amount: string | number | null;
   missing_lines: number;
   coverage_pct: number | null;
   quality: "actual_only" | "contains_estimate" | "incomplete";
@@ -242,6 +243,10 @@ export const searchBoardProjects = (body: {
   sort?: string;
   card_status?: CardStatus;
 }) => api.post<BoardProjects>(`${BASE}/projects/search`, body);
+
+/** 详情页按稳定 ID 取聚合卡，避免名称模糊搜索第 1 页漏掉同名项目。 */
+export const getBoardProject = (projectId: string) =>
+  api.get<BoardProjectRow>(`${BASE}/projects/${encodeURIComponent(projectId)}`);
 
 export const getBoardProjectOrders = (
   projectId: string,

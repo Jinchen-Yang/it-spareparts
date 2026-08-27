@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app import auth
 from app import permissions as _perms
@@ -335,6 +335,41 @@ def test_reconcile_limit_offset_pagination(db):
     ]
 
 
+def test_reconcile_pushes_page_to_sql_before_loading_source_details(db):
+    """小页请求先 SQL UNION 分页，随后三个来源都只按本页 key 取明细。"""
+    _ledger_batch(db, batch_id="rc-ledger-sql-page")
+    for index in range(4):
+        _ledger_row(
+            db,
+            row_id=f"rc-ler-sql-page-{index}",
+            batch_id="rc-ledger-sql-page",
+            bxd_no=f"BXD-20260425-2{index:03d}",
+            amount="100.00",
+        )
+    db.commit()
+
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", capture)
+    try:
+        page = reconcile.expense_reconcile_rows(db, limit=1, offset=2)
+    finally:
+        event.remove(db.bind, "before_cursor_execute", capture)
+
+    assert [row["bxd_no"] for row in page] == ["BXD-20260425-2002"]
+    candidate_queries = [sql for sql in statements if " UNION " in sql.upper()]
+    assert len(candidate_queries) == 1
+    assert " LIMIT " in candidate_queries[0].upper()
+    assert " OFFSET " in candidate_queries[0].upper()
+    detail_queries = [sql for sql in statements if " UNION " not in sql.upper()]
+    assert len(detail_queries) == 3
+    assert all(" IN (" in sql.upper() for sql in detail_queries)
+
+
 def test_reconcile_mismatch_and_retransmit_dedup(db):
     """台账 1200 ≠ 正式 1000 → mismatch；同文件重传两个 applied 批次只计最新（round-6 Blocker 8）。"""
     from datetime import timedelta
@@ -368,3 +403,60 @@ def test_reconcile_mismatch_and_retransmit_dedup(db):
     assert row["status"] == "mismatch"
     assert row["ledger_amount"] == 1200.0  # 只计最新批次，旧批次 999 被去重
     assert row["formal_amount"] == 1000.0
+
+
+def test_reconcile_latest_bxd_head_without_lines_does_not_fallback(db):
+    """最新重传只有 head 时，不能从旧批次捞 line 伪造 BXD 证据。"""
+    from datetime import timedelta
+
+    for batch_id, applied_at in (
+        ("rc-bxd-zero-lines-old", APPLIED_AT),
+        ("rc-bxd-zero-lines-new", APPLIED_AT + timedelta(days=1)),
+    ):
+        db.add(
+            MaintenanceDocImportBatch(
+                batch_id=batch_id,
+                doc_type="bxd_expense",
+                file_hash="same-bxd-zero-lines-retransmit",
+                filename="报销.xlsx",
+                idempotency_key=f"key-{batch_id}",
+                uploaded_by="合成管理员",
+                status="applied",
+                applied_by="合成管理员",
+                applied_at=applied_at,
+            )
+        )
+    db.flush()
+    _bxd_head_and_lines(
+        db,
+        batch_id="rc-bxd-zero-lines-old",
+        head_id="rc-head-zero-lines-old",
+        head_no="BXD-20260425-0010",
+        amounts=["100.00"],
+    )
+    db.add(
+        MaintenanceDocHeadRow(
+            row_id="rc-head-zero-lines-new",
+            batch_id="rc-bxd-zero-lines-new",
+            row_no=3,
+            raw_json={"费用单号": "BXD-20260425-0010"},
+            head_no="BXD-20260425-0010",
+            issues=[],
+        )
+    )
+    _formal_row(
+        db,
+        raw_line_id="rc-fpe-zero-lines",
+        bxd_no="BXD-20260425-0010",
+        amount_inc_tax="100.00",
+    )
+    db.commit()
+
+    rows = {r["bxd_no"]: r for r in reconcile.expense_reconcile_rows(db)}
+    row = rows["BXD-20260425-0010"]
+    assert row["status"] == "formal_only"
+    assert row["formal_amount"] == 100.0
+    assert row["bxd_present"] is False
+    assert row["bxd_amount"] is None
+    assert row["bxd_line_count"] == 0
+    assert row["bxd_aligned"] is False

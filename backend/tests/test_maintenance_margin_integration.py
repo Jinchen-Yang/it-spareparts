@@ -10,6 +10,13 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceContractWorkbookState,
 )
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
+from app.models.maintenance_source_assignment import (
+    MaintenanceSourceOrderAssignment,
+)
 from app.models.sales import FSalesOrder
 from app.models.system import SysImportBatch
 from app.services import maintenance_cost, maintenance_workbook_renderer
@@ -23,13 +30,25 @@ def _load_complete_contract(
     purchase_is_tax_inclusive: bool = False,
     purchase_unit_price: Decimal = Decimal("100"),
 ):
-    batch = SysImportBatch(
+    sales_batch = SysImportBatch(
+        filename="margin-integration-sales.xlsx",
+        file_type="sales",
+        file_hash="margin-integration-sales",
+        status="success",
+    )
+    purchase_batch = SysImportBatch(
+        filename="margin-integration-purchase.xlsx",
+        file_type="purchase",
+        file_hash="margin-integration-purchase",
+        status="success",
+    )
+    maintenance_batch = SysImportBatch(
         filename="margin-integration.xlsx",
         file_type="maintenance",
         file_hash="margin-integration",
         status="success",
     )
-    db.add(batch)
+    db.add_all([sales_batch, purchase_batch, maintenance_batch])
     db.flush()
     loader.load(
         db,
@@ -44,7 +63,7 @@ def _load_complete_contract(
             },
             [],
         ),
-        batch.id,
+        sales_batch.id,
         date(2026, 7, 28),
     )
     loader.load(
@@ -70,7 +89,7 @@ def _load_complete_contract(
                 ),
             ],
         ),
-        batch.id,
+        purchase_batch.id,
         date(2026, 7, 28),
     )
     loader.load(
@@ -95,12 +114,44 @@ def _load_complete_contract(
                 ),
             ],
         ),
-        batch.id,
+        maintenance_batch.id,
         date(2026, 7, 28),
     )
+    project = MaintenanceProject(
+        project_id="margin-integration-project",
+        project_code="MARGIN-INTEGRATION",
+        display_name="双口径毛利项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    db.add(project)
+    db.flush()
+    db.add_all([
+        MaintenanceProjectContract(
+            project_contract_id="margin-integration-contract",
+            project_id=project.project_id,
+            contract_id="margin-integration-contract-id",
+            contract_no="XS-MARGIN",
+            amount_inc_tax=Decimal("1130.00"),
+            status_mapping_state="mapped",
+            status_mapping_version="test-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            source="ledger",
+            version=1,
+        ),
+        MaintenanceSourceOrderAssignment(
+            assignment_id="margin-integration-assignment",
+            project_id=project.project_id,
+            source_order_id="M1",
+            is_active=True,
+            created_by="test",
+        ),
+    ])
     db.commit()
     maintenance_cost.recompute(db)
-    return batch
+    # Existing callers use the returned batch for additional sales evidence.
+    return sales_batch
 
 
 def _row(db):
@@ -476,7 +527,7 @@ def test_contract_workbook_uses_latest_effective_sales_version(
     data = maintenance_cost.contract_workbook_data(db, "XS-MARGIN")
 
     assert data["contract_tax_status"] == "available"
-    assert data["contract_tax_rate"] == Decimal("0.13")
+    assert data["contract_tax_rate"] is None
     assert "sales_order" not in data
     assert data["margin"]["parts_profit_status_inc"] == "complete_actual"
     assert data["margin"]["parts_profit_status_ex"] == "complete_actual"
@@ -495,8 +546,8 @@ def test_contract_workbook_uses_latest_effective_sales_version(
             if cell.value == "税率"
         )
         tax_cell = sheet.cell(tax_label.row, tax_label.column + 1)
-        assert tax_cell.value == 0.13
-        assert tax_cell.number_format == "0.00%"
+        assert tax_cell.value == "—"
+        assert tax_cell.number_format == "General"
     finally:
         workbook.close()
 
@@ -517,10 +568,11 @@ def test_contract_workbook_uses_latest_amount_without_duplicate_ambiguity(db):
     data = maintenance_cost.contract_workbook_data(db, "XS-MARGIN")
 
     assert data["contract_tax_status"] == "available"
-    assert data["contract_tax_rate"] == Decimal("0.13")
+    assert data["contract_tax_rate"] is None
     assert data["margin"]["revenue_ex"] == Decimal("1200")
-    assert data["margin"]["revenue_inc"] == Decimal("1356.00")
-    assert data["margin"]["parts_gross_profit_inc"] == Decimal("1130.00")
+    # 含税合同额只认当前项目合同台账；销售版本只更新未税收入证据。
+    assert data["margin"]["revenue_inc"] == Decimal("1130.00")
+    assert data["margin"]["parts_gross_profit_inc"] == Decimal("904.00")
     assert data["margin"]["parts_gross_profit_ex"] == Decimal("1000.00")
     assert data["margin"]["parts_profit_status_inc"] == "complete_actual"
     assert data["margin"]["parts_profit_status_ex"] == "complete_actual"
@@ -539,8 +591,8 @@ def test_contract_workbook_uses_latest_amount_without_duplicate_ambiguity(db):
             if cell.value == "税率"
         )
         tax_cell = sheet.cell(tax_label.row, tax_label.column + 1)
-        assert tax_cell.value == 0.13
-        assert tax_cell.number_format == "0.00%"
+        assert tax_cell.value == "—"
+        assert tax_cell.number_format == "General"
     finally:
         workbook.close()
 
@@ -571,6 +623,28 @@ def test_empty_contract_workbook_does_not_fabricate_zero_cost_margin(db):
         batch.id,
         date(2026, 7, 28),
     )
+    project = MaintenanceProject(
+        project_id="margin-empty-project",
+        project_code="MARGIN-EMPTY",
+        display_name="空合同毛利项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="margin-empty-contract",
+        project_id=project.project_id,
+        contract_id="margin-empty-contract-id",
+        contract_no="XS-EMPTY-MARGIN",
+        amount_inc_tax=Decimal("1130.00"),
+        status_mapping_state="mapped",
+        status_mapping_version="test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        source="ledger",
+        version=1,
+    ))
     db.commit()
 
     data = maintenance_cost.contract_workbook_data(db, "XS-EMPTY-MARGIN")

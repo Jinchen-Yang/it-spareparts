@@ -1,10 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getBoardProjects = vi.fn();
 const searchBoardProjects = vi.fn();
 const downloadSparePartLines = vi.fn();
+const validateSparePartLines = vi.fn();
+const applySparePartLines = vi.fn();
 
 vi.mock("../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -24,7 +26,8 @@ vi.mock("../../../api/maintenanceWorkbooks", async () => {
   return {
     ...actual,
     downloadSparePartLines: (...args: unknown[]) => downloadSparePartLines(...args),
-    applySparePartLines: vi.fn(),
+    validateSparePartLines: (...args: unknown[]) => validateSparePartLines(...args),
+    applySparePartLines: (...args: unknown[]) => applySparePartLines(...args),
     saveBlob: vi.fn(),
   };
 });
@@ -79,6 +82,14 @@ beforeEach(() => {
     };
   getBoardProjects.mockResolvedValue(page([row("p1", "项目一"), row("p2", "项目二")]));
   searchBoardProjects.mockResolvedValue(page([row("p2", "项目二")]));
+  validateSparePartLines.mockResolvedValue({ valid: true });
+  applySparePartLines.mockResolvedValue({
+    cost_refills: 1,
+    site_return_flags: 0,
+    expense_updates: 0,
+    collection_creates: 0,
+    collection_voids: 0,
+  });
 });
 
 afterEach(cleanup);
@@ -157,6 +168,47 @@ describe("维保主页（项目卡墙）", () => {
       }));
   });
 
+  it("状态筛选第一页零命中时仍继续拉取后续候选页", async () => {
+    let intersect: ((entries: Array<{ isIntersecting: boolean }>) => void) | null = null;
+    (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
+      class {
+        constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+          intersect = callback;
+        }
+        observe() {}
+        disconnect() {}
+      };
+    const alertRow = { ...row("p-alert", "第二页报警项目"), card_status: "alert" as const };
+    getBoardProjects.mockImplementation((params: { page: number; card_status?: string }) => {
+      if (params.card_status !== "alert") return Promise.resolve(page([row("p1")]));
+      return Promise.resolve({
+        data: {
+          rows: params.page === 2 ? [alertRow] : [],
+          total: 40,
+          page: params.page,
+          page_size: 20,
+          sort: "name",
+          window: { from: "2026-01-01", to: "2026-08-16" },
+        },
+      });
+    });
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
+    fireEvent.mouseDown(screen.getByText("全部状态"));
+    fireEvent.click(await screen.findByTitle("报警"));
+    await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({
+      page: 1,
+      card_status: "alert",
+    }));
+    await waitFor(() => expect(intersect).not.toBeNull());
+    (intersect as unknown as (entries: Array<{ isIntersecting: boolean }>) => void)([
+      { isIntersecting: true },
+    ]);
+
+    expect(await screen.findByText("第二页报警项目")).toBeInTheDocument();
+    expect(lastArg(getBoardProjects)).toMatchObject({ page: 2, card_status: "alert" });
+  });
+
   it("无上传动作键时只给下载按钮（#38 下载谁都能，上传要键）", async () => {
     renderPage();
     expect(await screen.findByRole("button", { name: /下载全项目备件行级表/ }))
@@ -171,6 +223,29 @@ describe("维保主页（项目卡墙）", () => {
     );
     renderPage();
     expect(await screen.findByRole("button", { name: /上传覆盖/ })).toBeInTheDocument();
+  });
+
+  it("上传确认期间切换筛选，应用后只刷新最新筛选", async () => {
+    localStorage.setItem(
+      "permissions",
+      JSON.stringify({ action_maintenance_expense_collection_upload: true }),
+    );
+    const { container } = renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["xlsx"], "parts.xlsx")] },
+    });
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByText("已结束"));
+    await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({ lifecycle: "ended" }));
+    const callsBeforeApply = getBoardProjects.mock.calls.length;
+    fireEvent.click(within(dialog).getByRole("button", { name: /确认回传/ }));
+
+    await waitFor(() => expect(applySparePartLines).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getBoardProjects.mock.calls.length).toBeGreaterThan(callsBeforeApply));
+    expect(lastArg(getBoardProjects)).toMatchObject({ lifecycle: "ended" });
   });
 
   it("下载按当前时间预设取数（#38）", async () => {

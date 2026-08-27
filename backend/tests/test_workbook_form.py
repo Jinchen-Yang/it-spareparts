@@ -7,6 +7,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import func, select
 
+from app import config
 from app.etl import mapping, pipeline, reader
 from app.etl.transform import SOFT_ERROR_TYPES, transform
 from app.models.maintenance import FProjectExpense
@@ -368,9 +369,26 @@ def test_run_import_upsert_replaces_contract(db, tmp_path):
     b2 = pipeline.run_import(db, p2, "wb4b.xlsx", mode="upsert")
     db.commit()
     assert b2.report_json["expense_rows_replaced"] == 2
-    amts = db.scalars(select(FProjectExpense.amount)
-                      .where(FProjectExpense.linked_sales_order_no == "XSDD-1")).all()
-    assert amts == [Decimal("150")]                                 # 无旧行残影
+    assert b2.report_json["expense_rows_voided"] == 2
+    facts = db.execute(
+        select(FProjectExpense.amount, FProjectExpense.data_status)
+        .where(FProjectExpense.linked_sales_order_no == "XSDD-1")
+        .order_by(FProjectExpense.amount)
+    ).all()
+    # Raw lineage remains recoverable for the exact FK/audit chain; stable
+    # consumers see only the current row and therefore have no old-line ghost.
+    assert facts == [
+        (Decimal("100"), "已作废"),
+        (Decimal("150"), config.MAINT_EXPENSE_ACTIVE_STATUS),
+        (Decimal("200"), "已作废"),
+    ]
+    active_amounts = db.scalars(
+        select(FProjectExpense.amount).where(
+            FProjectExpense.linked_sales_order_no == "XSDD-1",
+            FProjectExpense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
+        )
+    ).all()
+    assert active_amounts == [Decimal("150")]
 
 
 def test_workbook_without_expense_falls_back_to_first_sheet(db, tmp_path):

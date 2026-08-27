@@ -1,7 +1,7 @@
 """Public workflow tests for maintenance bad-part return obligations."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from time import monotonic
 from uuid import uuid4
 
@@ -885,6 +885,14 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
         project_id="project-bad-return-lifecycle",
         suffix="lifecycle",
     )
+    # Directory lifecycle filtering is derived from the canonical period dates,
+    # not the legacy lifecycle_status snapshot.  Seed a genuinely ongoing
+    # project for the 2026-08-09 directory assertion below.
+    project = db.get(MaintenanceProject, obligation.project_id)
+    assert project is not None
+    project.period_from = date(2026, 1, 1)
+    project.period_to = date(2026, 12, 31)
+    db.commit()
     issue_line = db.get(MaintenanceSiteIssueLine, confirmed["lines"][0]["issue_line_id"])
     inventory = Inventory(
         raw_inventory_id="synthetic-return-inventory",
@@ -996,8 +1004,6 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     assert confirmed_rate["official_basis"] == "rkd_not_imported"
     assert confirmed_rate["official_rate_pct"] is None
 
-    project = db.get(MaintenanceProject, obligation.project_id)
-    assert project is not None
     # The rate is part of both the project workspace and directory card, not a
     # hidden download-only fact.
     workspace = client.get(

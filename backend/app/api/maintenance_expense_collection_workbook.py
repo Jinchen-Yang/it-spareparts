@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 from sqlalchemy.orm import Session
 
+from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.security import (
@@ -104,6 +105,7 @@ def download_workbook(
     # 下载即看到金额：只挂数据组，不要求上传动作键（只读对账的人也能下载）
     _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ):
     content = wbk.build_workbook(db, project_id=project_id)
     if content is None:
@@ -130,6 +132,7 @@ async def validate_workbook(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """无副作用预演：返回将要发生的改动条数，不写库。"""
     response.headers["Cache-Control"] = "no-store"
@@ -149,6 +152,7 @@ async def apply_workbook(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """上传覆盖：整份事务应用；任何一行不合法则整份 422，不部分写入。"""
     response.headers["Cache-Control"] = "no-store"

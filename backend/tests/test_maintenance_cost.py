@@ -5,6 +5,7 @@
 """
 from datetime import date
 from decimal import Decimal
+import uuid
 
 import pandas as pd
 import pytest
@@ -12,9 +13,19 @@ from sqlalchemy import select
 
 from app.etl import loader, mapping
 from app.etl.transform import transform
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceManualCostOverride,
+)
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysImportBatch
-from app.services import maintenance_cost, maintenance_cost_quality
+from app.services import (
+    maintenance_cost,
+    maintenance_cost_quality,
+    maintenance_workbook_renderer,
+)
 from tests import factories as f
 
 
@@ -149,6 +160,109 @@ def test_none_no_cost_flag(db, batch):
     assert "no_cost" in ln.anomaly_flags
 
 
+def test_legacy_contract_workbook_merges_unsynced_active_manual_override(
+    db,
+    batch,
+):
+    """历史 override 未镜像进主行时，旧合同工作簿仍展示同一份成本事实。"""
+    contract = "XS-MANUAL-WORKBOOK"
+    _load_maintenance(
+        db,
+        batch,
+        {
+            "M-MANUAL-WORKBOOK": f.maintenance_head(
+                "M-MANUAL-WORKBOOK",
+                order_no="WBDD-MANUAL-WORKBOOK",
+                on=date(2026, 3, 1),
+                sales_order=contract,
+            ),
+        },
+        [
+            f.maintenance_line(
+                "M-MANUAL-WORKBOOK",
+                "ML-MANUAL-WORKBOOK",
+                "PN-MANUAL-WORKBOOK",
+                qty="5",
+                return_qty="2",
+            ),
+        ],
+    )
+    db.commit()
+    maintenance_cost.recompute(db)
+    line = _line(db, "ML-MANUAL-WORKBOOK")
+    assert line.cost_source == "none"
+    assert line.cost_amount is None
+    db.add(MaintenanceManualCostOverride(
+        line_id=line.id,
+        unit_cost_ex_tax=Decimal("10.00"),
+        unit_cost_inc_tax=Decimal("11.30"),
+        reason="历史人工成本依据",
+        active=True,
+        updated_by="test",
+    ))
+    db.commit()
+
+    data = maintenance_cost.contract_workbook_data(db, contract)
+
+    # 读取链只合并事实视图，不偷偷改写生产主行。
+    db.refresh(line)
+    assert line.cost_source == "none"
+    assert line.cost_amount is None
+    assert data["doc_total"]["WBDD-MANUAL-WORKBOOK"] == Decimal("30.00")
+    assert data["monthly_parts"]["2026-03"] == Decimal("30.00")
+    assert data["cost_summary"]["actual_cost_ex"] == Decimal("30.00")
+    assert data["cost_summary"]["known_cost_total"] == Decimal("30.00")
+    assert data["cost_summary"]["cost_quality"] == "actual_only"
+    assert data["dual_cost_summary"]["parts_cost_inc_tax"] == Decimal("33.90")
+    assert data["dual_cost_summary"]["parts_cost_ex_tax"] == Decimal("30.00")
+    assert data["line_cost_tiers"][line.id] == "actual"
+    assert data["line_cost_display"][line.id] == {
+        "tier": "actual",
+        "inc_tier": "actual",
+        "ex_tier": "actual",
+        "source": "manual",
+        "tax_basis": "ex",
+        "confidence": "high",
+        "unit_cost": Decimal("10.00"),
+        "cost_amount": Decimal("30.00"),
+        "unit_cost_inc_tax": Decimal("11.30"),
+        "unit_cost_ex_tax": Decimal("10.00"),
+        "cost_amount_inc_tax": Decimal("33.90"),
+        "cost_amount_ex_tax": Decimal("30.00"),
+        "anomaly_flags": ["has_return"],
+        "manual_fallback": True,
+    }
+    detail = maintenance_cost.project_lines(db, "测试维保项目")["rows"][0]
+    assert detail["cost_source"] == "manual"
+    assert detail["cost_tax_basis"] == "ex"
+    assert detail["cost_tier"] == "actual"
+    assert detail["cost_amount"] == 30.0
+    assert detail["cost_amount_inc_tax"] == 33.9
+    assert detail["cost_amount_ex_tax"] == 30.0
+    assert detail["anomaly_flags"] == ["has_return"]
+
+    workbook = maintenance_workbook_renderer.render_contract_workbook(
+        contract,
+        data,
+        lambda value: value,
+    )
+    try:
+        row = workbook["备件明细-氚云"][2]
+        assert row[12].value == 30
+        assert row[16].value == 10
+        assert row[17].value == 30
+        assert row[18].value == 11.3
+        assert row[19].value == 10
+        assert row[20].value == 33.9
+        assert row[21].value == 30
+        assert row[22].value == "实际·人工回填"
+        assert row[23].value == "高"
+        assert row[26].value == "ex"
+        assert row[27].value == "实际采购参考"
+    finally:
+        workbook.close()
+
+
 # ---------- 口径细节 ----------
 
 def test_tax_preference_inc_first(db, batch):
@@ -239,6 +353,39 @@ def test_recompute_idempotent_and_upsert_preserves_cost(db, batch):
     assert (_line(db, "ML1").unit_cost, _line(db, "ML1").cost_source) == first
 
 
+def test_bounded_recompute_only_invalidates_requested_lines(db, batch):
+    """工作簿单行改 PN 不能顺带重写其他项目/其他行的派生成本。"""
+    _load_purchases(db, batch, {
+        "P1": f.purchase_head("P1", on=date(2026, 3, 2)),
+    }, [
+        f.purchase_line("P1", "PL1", "PN-BOUND-A", qty="1", price="40"),
+        f.purchase_line("P1", "PL2", "PN-BOUND-B", qty="1", price="80"),
+    ])
+    _load_maintenance(db, batch, {
+        "M1": f.maintenance_head("M1", on=date(2026, 3, 9)),
+        "M2": f.maintenance_head("M2", on=date(2026, 3, 9)),
+    }, [
+        f.maintenance_line("M1", "ML-BOUND-A", "PN-BOUND-A", qty="1"),
+        f.maintenance_line("M2", "ML-BOUND-B", "PN-BOUND-B", qty="1"),
+    ])
+    db.commit()
+    maintenance_cost.recompute(db)
+    target = _line(db, "ML-BOUND-A")
+    unrelated = _line(db, "ML-BOUND-B")
+
+    target.unit_cost = Decimal("999.00")
+    target.cost_amount = Decimal("999.00")
+    unrelated.unit_cost = Decimal("777.00")
+    unrelated.cost_amount = Decimal("777.00")
+    db.commit()
+
+    stats = maintenance_cost.recompute(db, line_ids={target.id})
+    db.expire_all()
+    assert stats["lines_in_scope"] == 1
+    assert _line(db, "ML-BOUND-A").unit_cost == Decimal("40.00")
+    assert _line(db, "ML-BOUND-B").unit_cost == Decimal("777.00")
+
+
 # ---------- 项目聚合 ----------
 
 def test_projects_aggregate_shared_contract(db, batch):
@@ -273,13 +420,192 @@ def test_projects_aggregate_shared_contract(db, batch):
     maintenance_cost.recompute(db)
     data = maintenance_cost.projects_aggregate(db, lifecycle="all")
     rows = {r["project"]: r for r in data["rows"]}
-    assert rows["项目甲"]["cost_ex"] == 200.0 and rows["项目甲"]["cost_inc"] == 0.0
+    # 原始采购价是未税实际价；成本域按既有统一 13% 业务政策确定性生成双口径，
+    # 因而两侧都是 actual，不能再用 0 伪装成“没有含税成本”。合同额不复用此规则。
+    assert rows["项目甲"]["cost_ex"] == 200.0
+    assert rows["项目甲"]["cost_inc"] == 226.0
+    assert rows["项目甲"]["parts_cost_ex_tax_quality"] == "actual_only"
+    assert rows["项目甲"]["parts_cost_inc_tax_quality"] == "actual_only"
+    assert rows["项目甲"]["actual_cost_inc"] == 226.0
+    assert rows["项目甲"]["estimated_cost_inc"] == 0.0
     assert rows["项目甲"]["coverage_pct"] == 100.0
     assert rows["项目乙"]["by_source"]["none"] == 1
     assert rows["项目乙"]["coverage_pct"] == 50.0
-    # 同一 XSDD 挂两个项目 → 共用标记；合同额统一按 13%=1000×1.13
+    # 同一 XSDD 挂两个项目 → 共用标记；无当前合同台账不得从销售未税额猜含税。
     assert rows["项目甲"]["contract_shared"] and rows["项目乙"]["contract_shared"]
-    assert rows["项目甲"]["contract_amount"] == 1130.0
+    assert rows["项目甲"]["contract_amount"] is None
+    assert rows["项目甲"]["contract_incomplete"] is True
+
+
+def test_projects_aggregate_reads_live_current_contract_amount(db, batch):
+    _load_maintenance(db, batch, {
+        "M1": f.maintenance_head(
+            "M1", on=date(2026, 3, 9), project="合同改单项目",
+            sales_order="XSDD-LIVE-CONTRACT",
+        ),
+    }, [f.maintenance_line("M1", "ML-LIVE-CONTRACT", "PN-LIVE", qty="1")])
+    order = db.scalar(select(FMaintenanceOrder).where(FMaintenanceOrder.order_no == "M1"))
+    project = MaintenanceProject(
+        project_id=str(uuid.uuid4()), project_code="LIVE-CONTRACT",
+        display_name="合同改单项目", lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    relation = MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()), project_id=project.project_id,
+        contract_id="LIVE-CONTRACT-ID", contract_no="XSDD-LIVE-CONTRACT",
+        amount_inc_tax=Decimal("123.45"), included_in_total=True,
+        status_mapping_state="mapped", status_mapping_version="v1",
+        effective_from=date(2026, 1, 1), source="ledger", version=1,
+    )
+    db.add_all([
+        relation,
+        MaintenanceSourceOrderAssignment(
+            assignment_id=str(uuid.uuid4()), project_id=project.project_id,
+            source_order_id=order.raw_order_id, is_active=True,
+            created_by="test",
+        ),
+    ])
+    db.commit()
+
+    first = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
+    assert first["contract_amount_inc_tax"] == 123.45
+    assert first["contract_amount_basis"] == "inc_tax"
+    assert first["contract_amount"] == 123.45
+    relation.amount_inc_tax = Decimal("456.78")
+    db.commit()
+    second = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
+    assert second["contract_amount_inc_tax"] == 456.78
+    assert second["contract_amount_basis"] == "inc_tax"
+    assert second["contract_amount"] == 456.78
+
+
+def test_projects_aggregate_marks_missing_contract_fact_incomplete(db, batch):
+    _load_maintenance(db, batch, {
+        "M-NO-CONTRACT": f.maintenance_head(
+            "M-NO-CONTRACT", on=date(2026, 3, 9),
+            project="无合同事实项目", sales_order=None,
+        ),
+    }, [f.maintenance_line(
+        "M-NO-CONTRACT", "ML-NO-CONTRACT", "PN-NO-CONTRACT", qty="1",
+    )])
+    db.commit()
+
+    row = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
+    assert row["contract_amount_inc_tax"] is None
+    assert row["contract_amount_basis"] == "inc_tax"
+    assert row["contract_amount"] is None
+    assert row["contract_incomplete"] is True
+
+
+def test_projects_aggregate_hides_partial_amount_from_explicit_and_alias_fields(
+    db, batch, monkeypatch,
+):
+    """已知小计不能伪装成完整合同总额；新旧字段保持同一失败关闭语义。"""
+    from app.services import maintenance_boss_board
+
+    test_projects_aggregate_reads_live_current_contract_amount(db, batch)
+    project = db.scalar(select(MaintenanceProject))
+    monkeypatch.setattr(
+        maintenance_boss_board,
+        "_card_contracts",
+        lambda _db, _project_ids: {
+            project.project_id: {
+                "contract_nos": ["XSDD-LIVE-CONTRACT"],
+                "amount_inc_tax": Decimal("456.78"),
+                "contract_shared": False,
+                "contract_incomplete": True,
+            }
+        },
+    )
+
+    row = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
+    assert row["contract_amount_inc_tax"] is None
+    assert row["contract_amount_basis"] == "inc_tax"
+    assert row["contract_amount"] is None
+    assert row["contract_incomplete"] is True
+
+
+def test_projects_aggregate_scoped_sales_cannot_traverse_project_contracts(
+    db, batch, monkeypatch,
+):
+    from app import config, permissions
+    from app.security import UserContext
+
+    test_projects_aggregate_reads_live_current_contract_amount(db, batch)
+    monkeypatch.setattr(config, "ENABLE_RBAC", True)
+    graph = permissions.effective("sales", None)
+    graph.update({
+        "own_customers_only": True,
+        "data_profit": True,
+        "data_purchase_cost": True,
+    })
+    rows = maintenance_cost.projects_aggregate(
+        db,
+        lifecycle="all",
+        user_ctx=UserContext(
+            user_id="own-sales",
+            role="sales",
+            salesperson_name="测试销售",
+            permissions=graph,
+            is_authenticated=True,
+        ),
+    )["rows"]
+    assert len(rows) == 1
+    assert rows[0]["contract_amount_inc_tax"] is None
+    assert rows[0]["contract_amount_basis"] == "inc_tax"
+    assert rows[0]["contract_amount"] is None
+    assert rows[0]["contract_incomplete"] is None
+
+
+def test_contract_amounts_fail_closed_for_cross_project_shared_relation(db, batch):
+    from app.models.maintenance import MaintenanceContractWorkbookState
+
+    projects = [
+        MaintenanceProject(
+            project_id=str(uuid.uuid4()), project_code=f"SHARED-{index}",
+            display_name=f"共享项目{index}", lifecycle_status="ongoing",
+        )
+        for index in range(2)
+    ]
+    db.add_all(projects)
+    db.flush()
+    for index, project in enumerate(projects):
+        db.add(MaintenanceProjectContract(
+            project_contract_id=str(uuid.uuid4()), project_id=project.project_id,
+            contract_id="SHARED-CONTRACT-ID", contract_no="XSDD-SHARED-CANONICAL",
+            amount_inc_tax=Decimal("1000.00"), included_in_total=True,
+            status_mapping_state="mapped", status_mapping_version="v1",
+            effective_from=date(2026, 1, 1), source="ledger", version=1,
+        ))
+    db.commit()
+
+    assert maintenance_cost._contract_amounts(
+        db, ["XSDD-SHARED-CANONICAL"]
+    ) == {}
+    _load_maintenance(db, batch, {
+        "M-SHARED": f.maintenance_head(
+            "M-SHARED", on=date(2026, 3, 9), project="共享项目0",
+            sales_order="XSDD-SHARED-CANONICAL",
+        ),
+    }, [f.maintenance_line("M-SHARED", "ML-SHARED", "PN-SHARED", qty="1")])
+    line = _line(db, "ML-SHARED")
+    line.cost_source = "direct"
+    line.cost_tax_basis = "inc"
+    line.cost_amount = Decimal("10")
+    line.cost_amount_inc_tax = Decimal("10")
+    line.cost_amount_ex_tax = Decimal("8.85")
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XSDD-SHARED-CANONICAL",
+        expense_snapshot_complete=True,
+        expense_complete_through=date(2099, 1, 1),
+        updated_by="test",
+    ))
+    db.commit()
+
+    row = maintenance_cost.board(db, lifecycle="all")["rows"][0]
+    assert row["budget"] is None
+    assert row["decision_status"] == "no_budget"
 
 
 # ---------- 导入识别 / 转换 ----------

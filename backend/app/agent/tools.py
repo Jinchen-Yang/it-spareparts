@@ -343,6 +343,8 @@ TOOLS: list[dict] = [
                 "trace_avg=估算追溯均价、sales_ref=估算销售参考、"
                 "pool_purchase/pool_sales=互通池同伴历史均价、"
                 "purchase_history/sales_history=本PN历史参考、none=成本缺失)/关联销售订单与合同额参考。"
+                "合同额以 contract_amount_inc_tax 明确返回含税事实，contract_amount_basis 固定为 inc_tax；"
+                "contract_amount 仅为兼容别名。contract_incomplete=true 时金额为空，不得按 0 使用。"
                 "合同额参考仅按利润权限返回，空值不等于源数据缺失。"
                 "无成本权限时按项目名排序后再截取 top，不按隐藏成本排名。"
                 "需要项目成本页面权限。"

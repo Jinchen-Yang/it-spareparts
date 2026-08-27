@@ -86,6 +86,17 @@ describe("MaintenanceAcceptancePanel", () => {
     expect(payload).not.toHaveProperty("idempotencyKey");
   });
 
+  it("点击上传按钮会调用隐藏文件输入框，打开原生文件选择器", async () => {
+    const { container } = render(<MaintenanceAcceptancePanel projectId="p1" />);
+    const button = await screen.findByRole("button", { name: /上传验收附件/ });
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+
+    fireEvent.click(button);
+
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
   it("展示后端结构化 message，不再吞成笼统上传失败", async () => {
     mocks.uploadMaintenanceAcceptanceAttachment.mockRejectedValue({
       response: { data: { detail: { message: "附件类型与扩展名不一致" } } },
@@ -129,6 +140,21 @@ describe("MaintenanceAcceptancePanel", () => {
     await waitFor(() => expect(mocks.getMaintenanceAcceptance).toHaveBeenCalledTimes(2));
     // 成功路径清空 input，否则重选同一文件不触发 onChange
     await waitFor(() => expect(input.value).toBe(""));
+  });
+
+  it("附件已写入但父级读回失败时传播失败并失效旧验收状态", async () => {
+    mocks.uploadMaintenanceAcceptanceAttachment.mockResolvedValue({ data: {} });
+    const onChanged = vi.fn().mockResolvedValue(false);
+    const { container } = render(
+      <MaintenanceAcceptancePanel projectId="p1" onChanged={onChanged} />,
+    );
+    await screen.findByText("上传验收附件");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["report"], "验收报告.pdf", { type: "application/pdf" })] },
+    });
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/操作已写入，但验收页面刷新失败/)).toBeInTheDocument();
   });
 
   it("删除附件：Popconfirm 确认后调 DELETE 并刷新列表", async () => {

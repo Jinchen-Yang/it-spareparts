@@ -80,8 +80,7 @@ def test_save_evidence_writes_file_yml_and_md5_row(db, seeded_milestone, tmp_pat
         mime_type="image/png",
         content=content,
     )
-    db.commit()
-    # 文件落盘在 DB commit 之后（round-6 Blocker 6：DB 行先定案）
+    # 生产 API 会在 DB commit 前完成这一步；服务层测试显式保持同一顺序。
     evidence_service.write_evidence_files(
         file_id=payload["file_id"],
         object_key=payload["object_key"],
@@ -99,6 +98,7 @@ def test_save_evidence_writes_file_yml_and_md5_row(db, seeded_milestone, tmp_pat
             "storage": "local",
         },
     )
+    db.commit()
     assert payload["replayed"] is False
     assert payload["md5"] == hashlib.md5(content).hexdigest()
     assert payload["sha256"] == hashlib.sha256(content).hexdigest()
@@ -210,6 +210,128 @@ def test_upload_closes_reminder_and_replay_stays_idempotent(db, seeded_milestone
     assert len(rows) == 1
     assert rows[0]["md5"] == hashlib.md5(content).hexdigest()
     assert rows[0]["original_filename"] == "巡检报告.png"
+
+
+def test_file_write_failure_rolls_back_evidence_and_keeps_reminder_open(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """磁盘失败不能先关闭提醒；DB 新行与状态转换必须一起保持未提交。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_disk_failure")
+
+    def fail_write(**_kwargs):
+        raise OSError("synthetic disk failure")
+
+    monkeypatch.setattr(evidence_service, "write_evidence_files", fail_write)
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("巡检报告.png", _png_bytes(), "image/png")},
+    )
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"]["code"] == "file_write_failed"
+
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    db.expire_all()
+    milestone = db.get(
+        MaintenanceCollectionMilestone, seeded_milestone["milestone_id"]
+    )
+    assert milestone.follow_up_status != "handled"
+    assert evidence_service.active_evidence_count(
+        db, seeded_milestone["milestone_id"]
+    ) == 0
+
+
+def test_replay_repairs_missing_files_before_closing_reminder(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """兼容旧异常：DB 已有 active 行但磁盘缺失时，同内容重放先修文件再关闭。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    content = _png_bytes("blue")
+    orphan = evidence_service.save_evidence(
+        db,
+        milestone_id=seeded_milestone["milestone_id"],
+        operator="历史上传人",
+        filename="历史凭证.png",
+        mime_type="image/png",
+        content=content,
+    )
+    db.commit()
+    data_path, meta_path = evidence_service.evidence_paths(
+        orphan["file_id"], orphan["object_key"]
+    )
+    assert not data_path.exists()
+    assert not meta_path.exists()
+
+    client = _evidence_client(db, username="evidence_repair")
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("重传凭证.png", content, "image/png")},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["replayed"] is True
+    assert response.json()["closed"] is True
+    assert data_path.read_bytes() == content
+    assert meta_path.exists()
+
+
+def test_replay_sidecar_failure_restores_existing_binary_and_sidecar(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """重放的第二次 rename 失败时，不能删除 DB active 行对应的旧文件对。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    content = _png_bytes("green")
+    existing = evidence_service.save_evidence(
+        db,
+        milestone_id=seeded_milestone["milestone_id"],
+        operator="历史上传人",
+        filename="历史凭证.png",
+        mime_type="image/png",
+        content=content,
+    )
+    evidence_service.write_evidence_files(
+        file_id=existing["file_id"],
+        object_key=existing["object_key"],
+        content=content,
+        meta={
+            "file_id": existing["file_id"],
+            "milestone_id": seeded_milestone["milestone_id"],
+            "original_filename": existing["original_filename"],
+            "mime_type": existing["mime_type"],
+            "size_bytes": existing["size_bytes"],
+            "md5": existing["md5"],
+            "sha256": existing["sha256"],
+            "uploaded_by": existing["uploaded_by"],
+            "uploaded_at": existing["uploaded_at"],
+            "storage": "local",
+        },
+    )
+    db.commit()
+    data_path, meta_path = evidence_service.evidence_paths(
+        existing["file_id"], existing["object_key"]
+    )
+    old_data_inode = data_path.stat().st_ino
+    old_meta = meta_path.read_bytes()
+
+    def fail_sidecar(_file_id, _meta):
+        raise OSError("synthetic sidecar failure after binary replace")
+
+    monkeypatch.setattr(evidence_service, "_write_meta_sidecar", fail_sidecar)
+    client = _evidence_client(db, username="evidence_replay_disk_failure")
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("历史凭证-重传.png", content, "image/png")},
+    )
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"]["code"] == "file_write_failed"
+
+    assert data_path.read_bytes() == content
+    assert data_path.stat().st_ino == old_data_inode
+    assert meta_path.read_bytes() == old_meta
+    assert evidence_service.active_evidence_count(
+        db, seeded_milestone["milestone_id"]
+    ) == 1
+    assert not list(data_path.parent.glob("*.rollback"))
 
 
 def test_upload_rejects_wrong_mime_and_missing_milestone(db, seeded_milestone, tmp_path, monkeypatch):

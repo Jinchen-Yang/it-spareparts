@@ -63,6 +63,7 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(screen.getByText("XSDD-20251230-0027")).toBeInTheDocument();
     expect(screen.getByText(/王销售/)).toBeInTheDocument();
     expect(screen.queryByText(/项目经理/)).not.toBeInTheDocument();
+    expect(screen.getByText(/合同总额（含税）/)).toBeInTheDocument();
     expect(screen.getByText(/100000\.00 元/)).toBeInTheDocument();
   });
 
@@ -92,6 +93,32 @@ describe("项目卡（#34/#35/#43）", () => {
     // 只剩成本率一条进度条（回款条不画）
     expect(container.querySelectorAll(".ant-progress").length).toBe(1);
     expect(text).toContain("报销成本 无权限");
+  });
+
+  it("合同额 partial 只展示已知小计，不作为回款率分母", () => {
+    const { container } = renderCard(makeRow({
+      contract_amount_inc_tax: {
+        state: "partial",
+        value: "80000.00",
+        as_of: null,
+      },
+    }));
+    const text = container.textContent ?? "";
+    expect(text).toContain("已知小计 ¥80,000（合同事实不完整）");
+    expect(text).not.toContain("（38%）");
+    // 只保留成本率进度条；不完整合同额不得生成回款进度条。
+    expect(container.querySelectorAll(".ant-progress")).toHaveLength(1);
+  });
+
+  it("完整合同额为 0 时明确展示真实零，不伪装成缺失", () => {
+    const { container } = renderCard(makeRow({
+      contract_amount_inc_tax: ready("0.00"),
+    }));
+    const text = container.textContent ?? "";
+    expect(text).toContain("合同额 ¥0（真实零，无法计算比例）");
+    expect(text).not.toContain("合同额缺失");
+    // 真实零不能作为比例分母，因此仍只保留成本率进度条。
+    expect(container.querySelectorAll(".ant-progress")).toHaveLength(1);
   });
 
   it("三态标签随成本率变化", () => {
@@ -126,6 +153,72 @@ describe("项目卡（#34/#35/#43）", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("无权限");
     expect(text).not.toMatch(/(^|[^\d])0([^\d.]|$)/);
+  });
+
+  it("全部缺价时显示待补价而不是备件成本 0", () => {
+    const { container } = renderCard(makeRow({
+      card_status: null,
+      cost_ratio_pct: ready(null as unknown as string),
+      known_apply_cost_inc_tax: {
+        state: "partial",
+        value: {
+          actual_amount: "0.00",
+          estimated_amount: "0.00",
+          known_amount: "0.00",
+          missing_lines: 2,
+          coverage_pct: 0,
+          quality: "incomplete",
+        },
+        as_of: null,
+      },
+    }));
+    expect(container.textContent).toContain("暂无可计算成本");
+    expect(container.textContent).toContain("缺失 2 行无参照价");
+    expect(container.textContent).not.toContain("备件成本 0.00 元");
+  });
+
+  it("只有需求单头没有有效明细时不显示备件成本 0 或绿色正常", () => {
+    const { container } = renderCard(makeRow({
+      card_status: null,
+      cost_ratio_pct: ready(null as unknown as string),
+      known_apply_cost_inc_tax: {
+        state: "partial",
+        value: {
+          actual_amount: "0.00",
+          estimated_amount: "0.00",
+          known_amount: null,
+          missing_lines: 0,
+          coverage_pct: null,
+          quality: "incomplete",
+        },
+        as_of: null,
+      },
+    }));
+    expect(container.textContent).toContain("暂无可计算成本");
+    expect(container.textContent).toContain("暂无有效需求明细");
+    expect(container.textContent).not.toContain("备件成本 0.00 元");
+    expect(container.textContent).not.toContain("正常");
+  });
+
+  it("部分缺价时把金额和成本率明确标成已知下限", () => {
+    const { container } = renderCard(makeRow({
+      card_status: "warning",
+      cost_ratio_pct: ready("85.0"),
+      known_apply_cost_inc_tax: {
+        state: "partial",
+        value: {
+          actual_amount: "85000.00",
+          estimated_amount: "0.00",
+          known_amount: "85000.00",
+          missing_lines: 1,
+          coverage_pct: 80,
+          quality: "incomplete",
+        },
+        as_of: null,
+      },
+    }));
+    expect(container.textContent).toContain("85000.00 元（已知下限）");
+    expect(container.textContent).toContain("85%（已知下限）");
   });
 
   it("三源事实未导入时显示「尚未导入」而不是 0", () => {

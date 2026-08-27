@@ -163,6 +163,8 @@ _TABLES = [
     "maintenance_historical_cost_baseline",
     "maintenance_project_cutover_plan",
     "maintenance_migration_run",
+    "maintenance_contract_amount_remediation_entry",
+    "maintenance_contract_amount_remediation_run",
     "maintenance_project_audit_log",
     "business_file_download_audit", "maintenance_acceptance_operation",
     "business_file_link", "business_file", "maintenance_acceptance_deliverable",

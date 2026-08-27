@@ -151,6 +151,12 @@ def board_projects(
             {"code": "sort_requires_cost_permission",
              "message": "按成本排序需要成本数据权限"},
         ) from exc
+    except board.BoardCostContractNotPermitted as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "cost_contract_permission_required",
+             "message": "成本及合同财务数据权限"},
+        ) from exc
 
 
 @router.post("/projects/search")
@@ -177,6 +183,43 @@ def board_projects_search(
             {"code": "sort_requires_cost_permission",
              "message": "按成本排序需要成本数据权限"},
         ) from exc
+    except board.BoardCostContractNotPermitted as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "cost_contract_permission_required",
+             "message": "成本及合同财务数据权限"},
+        ) from exc
+
+
+@router.get("/projects/{project_id}")
+def board_project(
+    response: Response,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    ctx: UserContext = Depends(require_board_view),
+) -> dict:
+    """按稳定项目 ID 读取一张聚合卡；详情页不得靠名称搜索第 1 页猜项目。"""
+    response.headers["Cache-Control"] = "no-store"
+    allowed = _allowed_scope(db, ctx)
+    if allowed is not None and project_id not in allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在或无权查看")
+    result = board.projects(
+        db,
+        user_ctx=ctx,
+        page=1,
+        page_size=1,
+        lifecycle="all",
+        allowed_project_ids={project_id},
+    )
+    row = next(
+        (item for item in result["rows"] if item["project_id"] == project_id),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在或无权查看")
+    record_access_log(ctx, "boss_board_project", project_id, {})
+    return row
 
 
 @router.get("/projects/{project_id}/orders")

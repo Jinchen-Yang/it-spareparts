@@ -22,7 +22,7 @@ from app.security import (
     require_page,
 )
 from app.services import inventory, maintenance_cost, master_data, profit
-from app.etl import pipeline, precheck as import_precheck
+from app.etl import loader, pipeline, precheck as import_precheck
 from app.etl.reader import ReaderError
 from app.etl.transform import SOFT_ERROR_TYPES
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
@@ -35,8 +35,9 @@ router = APIRouter(
 _log = logging.getLogger("imports")
 
 _PROFIT_REFRESH_ERROR = "利润重算失败，请到利润页手动重算"
-_MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成本页手动重算"
 _INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
+_IMPORT_CONFLICT_ERROR = "导入期间数据归属发生并发变化，本次已整体回滚，请重试"
+_IMPORT_INTEGRITY_ERROR = "导入数据无法通过费用归属完整性校验，本次已整体回滚，请先修正数据"
 # Starlette 0.37.2 只有旧名称、新版又会对旧名称发弃用警告；数值 413 是稳定 HTTP 契约。
 _HTTP_REQUEST_ENTITY_TOO_LARGE = 413
 
@@ -91,10 +92,16 @@ def _save_upload_to_temp(file: UploadFile, name: str) -> str:
     return tmp
 
 
-def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inventory: bool,
-                         did_maintenance_cost: bool = False) -> dict | None:
-    """导入后置刷新（采购/销售→重算利润；采购/库存→回填成本；采购/销售/维保→重算维保
-    项目成本；总是刷新主数据）。失败不影响导入。"""
+def _post_import_refresh(
+    db: Session,
+    did_purchase_sales: bool,
+    did_purchase_inventory: bool,
+) -> dict | None:
+    """非原子派生刷新：利润、库存与主数据。
+
+    维保成本不得在这里接回：它必须在源事实 commit 前由
+    ``_maintenance_recompute_in_import_transaction`` 完成。
+    """
     recompute_stats = None
     if did_purchase_sales:
         try:
@@ -109,25 +116,32 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
         except Exception:  # noqa: BLE001
             _log.exception("post-import inventory cost backfill failed")
             db.rollback()
-    if did_maintenance_cost:
-        try:
-            maintenance_cost.recompute(db)
-        except Exception:  # noqa: BLE001
-            _log.exception("post-import maintenance cost recompute failed")
-            db.rollback()
-            err = _MAINTENANCE_REFRESH_ERROR
-            if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
-                recompute_stats["error"] += f"；{err}"
-            elif recompute_stats is None:
-                recompute_stats = {"error": err}
-            else:
-                recompute_stats = {**recompute_stats, "error": err}
     try:
         master_data.refresh(db)
     except Exception:  # noqa: BLE001
         _log.exception("post-import master data refresh failed")
         db.rollback()
     return recompute_stats
+
+
+def _maintenance_recompute_in_import_transaction(db: Session, file_type: str) -> dict | None:
+    """在源事实提交前完成维保成本派生，避免新事实/旧成本的可见窗口。"""
+    if file_type not in ("purchase", "sales", "maintenance"):
+        return None
+    return maintenance_cost.recompute(db, commit=False)
+
+
+def _prefer_maintenance_recompute_stats(
+    maintenance_stats: dict | None,
+    post_stats: dict | None,
+) -> dict | None:
+    """保持既有响应口径：有维保重算时返回其统计，同时保留后置刷新错误。"""
+    if maintenance_stats is None:
+        return post_stats
+    result = dict(maintenance_stats)
+    if isinstance(post_stats, dict) and post_stats.get("error"):
+        result["error"] = post_stats["error"]
+    return result
 
 
 @router.post("/upload")
@@ -142,14 +156,65 @@ def upload(
     record_access_log(ctx, "upload", "import", {"filename": name, "mode": mode})
     tmp = _save_upload_to_temp(file, name)
     try:
+        maintenance_recompute_stats = None
         try:
             # 审计：登录身份(token sub，RBAC 开启时即用户名)落 batch.uploaded_by → 每条数据可追溯到人。
             batch = pipeline.run_import(db, tmp, name, uploaded_by=ctx.user_id, mode=mode)
+            try:
+                maintenance_recompute_stats = _maintenance_recompute_in_import_transaction(
+                    db, batch.file_type,
+                )
+                if maintenance_recompute_stats is not None:
+                    batch.report_json = {
+                        **(batch.report_json or {}),
+                        "maintenance_recompute": maintenance_recompute_stats,
+                    }
+            except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+                db.rollback()
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "维保项目成本重算进行中，本次导入已整体回滚，请稍后重试",
+                    headers={"Retry-After": "5"},
+                ) from exc
+            except maintenance_cost.WorkbookInvalidationConflictError as exc:
+                db.rollback()
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    _IMPORT_CONFLICT_ERROR,
+                    headers={
+                        "Retry-After": "5",
+                        "X-Error-Code": "import_concurrency_conflict",
+                    },
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 — 对外只返回固定业务文案
+                db.rollback()
+                _log.exception("maintenance recompute failed before import commit")
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "维保项目成本重算失败，本次导入已整体回滚",
+                ) from exc
             db.commit()
         except pipeline.DuplicateFileError as exc:
             db.rollback()
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 f"该文件已成功导入（batch {exc.batch_id}）") from exc
+        except loader.ImportConcurrencyConflict as exc:
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                _IMPORT_CONFLICT_ERROR,
+                headers={
+                    "Retry-After": "5",
+                    "X-Error-Code": "import_concurrency_conflict",
+                },
+            ) from exc
+        except loader.ImportIntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                _IMPORT_INTEGRITY_ERROR,
+                headers={"X-Error-Code": "import_integrity_error"},
+            ) from exc
         except pipeline.ArchiveError as exc:
             db.rollback()
             _log.exception("raw archive failed")
@@ -166,13 +231,25 @@ def upload(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "文件中存在超出字段范围的数据（如金额过大或文本过长），整批未导入，请修正后重试。"
             ) from exc
-        recompute_stats = _post_import_refresh(
+        post_recompute_stats = _post_import_refresh(
             db, batch.file_type in ("purchase", "sales"),
             batch.file_type in ("purchase", "inventory"),
-            batch.file_type in ("purchase", "sales", "maintenance"))
+        )
+        recompute_stats = _prefer_maintenance_recompute_stats(
+            maintenance_recompute_stats,
+            post_recompute_stats,
+        )
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
-                "recompute": apply_profit_recompute_visibility(recompute_stats, ctx)}
+                # recompute 保留旧兼容口径；两个显式命名字段避免调用方再猜
+                # “这是利润重算还是维保成本重算”。
+                "recompute": apply_profit_recompute_visibility(recompute_stats, ctx),
+                "profit_recompute": apply_profit_recompute_visibility(
+                    post_recompute_stats, ctx,
+                ),
+                "maintenance_recompute": apply_profit_recompute_visibility(
+                    maintenance_recompute_stats, ctx,
+                )}
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -259,22 +336,23 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
 
     与对话流式 worker 同模式（独立 SessionLocal、daemon 线程），客户端只需轮询 /import/jobs/{id}。
     成功/解析失败的批次都带 import_job_id 入库；重复文件不建批次，计入 note。
-    全部文件处理完后做一次利润重算/成本回填/主数据刷新（避免逐文件重复重算）。
+    每个文件在源事实提交前完成维保成本重算；全部文件处理完后只做利润、库存与
+    主数据刷新，避免暴露「新源事实 + 旧维保成本」。
     """
     db = SessionLocal()
     notes: list[str] = []
     done = errored = 0
-    did_ps = did_pi = did_mc = False
+    did_ps = did_pi = False
     try:
         for tmp, name in files:
             try:
                 batch = pipeline.run_import(db, tmp, name, uploaded_by=created_by,
                                             mode=mode, import_job_id=job_id)
+                _maintenance_recompute_in_import_transaction(db, batch.file_type)
                 db.commit()
                 done += 1
                 did_ps = did_ps or batch.file_type in ("purchase", "sales")
                 did_pi = did_pi or batch.file_type in ("purchase", "inventory")
-                did_mc = did_mc or batch.file_type in ("purchase", "sales", "maintenance")
             except pipeline.DuplicateFileError as exc:
                 db.rollback()
                 errored += 1
@@ -283,6 +361,18 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.commit()  # 失败批次已建并带 job_id，提交留痕
                 errored += 1
                 notes.append(f"解析失败：{name}（{str(exc)[:300]}）")
+            except loader.ImportConcurrencyConflict:
+                db.rollback()
+                errored += 1
+                notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
+            except loader.ImportIntegrityError:
+                db.rollback()
+                errored += 1
+                notes.append(f"完整性失败：{name}（{_IMPORT_INTEGRITY_ERROR}）")
+            except maintenance_cost.WorkbookInvalidationConflictError:
+                db.rollback()
+                errored += 1
+                notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 errored += 1
@@ -295,7 +385,8 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.execute(update(SysImportJob).where(SysImportJob.id == job_id)
                            .values(done_files=done, error_files=errored))
                 db.commit()
-        recompute_stats = _post_import_refresh(db, did_ps, did_pi, did_mc)
+        # 维保成本已逐文件与源事实同事务提交；这里只刷新利润/库存/主数据。
+        recompute_stats = _post_import_refresh(db, did_ps, did_pi)
         if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
             notes.append(recompute_stats["error"])
         job_status = "done" if errored == 0 else ("failed" if done == 0 else "partial")

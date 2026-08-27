@@ -20,9 +20,13 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceContractWorkbookState,
 )
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.models.sales import FSalesOrder
 from app.models.system import SysUser
-from app.services import maintenance_margin_evidence
+from app.services import maintenance_cost, maintenance_margin_evidence
 from tests.test_maintenance_export_headers import (
     _admin_client,
     _cost_blind_maintenance_client,
@@ -221,6 +225,28 @@ def _four_carriers(
     return board_rows[0], _csv_row(csv_response), single_summary, bundled_summary
 
 
+def test_contract_detail_and_csv_use_canonical_inc_revenue(db):
+    _load_complete_contract(db)
+    relation = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.contract_no == "XS-MARGIN",
+    ))
+    assert relation is not None
+    relation.amount_inc_tax = Decimal("1200.00")
+    db.commit()
+
+    detail = maintenance_cost.contract_workbook_data(db, "XS-MARGIN")
+    assert detail["margin"]["revenue_inc"] == Decimal("1200.00")
+    assert detail["margin"]["revenue_ex"] == Decimal("1000.00")
+
+    response = _admin_client(db).get(
+        "/api/maintenance/board/export", params={"lifecycle": "all"},
+    )
+    assert response.status_code == 200, response.text
+    csv_row = _csv_row(response)
+    assert Decimal(csv_row["revenue_inc"]) == Decimal("1200.00")
+    assert Decimal(csv_row["revenue_ex"]) == Decimal("1000.00")
+
+
 def test_rounding_boundary_has_decimal_parity_across_all_four_carriers(db):
     batch = _load_complete_contract(
         db,
@@ -261,14 +287,15 @@ def test_rounding_boundary_has_decimal_parity_across_all_four_carriers(db):
     assert board["contribution_status_ex"] == "complete"
     assert csv_data["成本证据状态"] == "actual_only"
     assert csv_data["费用证据状态"] == "complete"
-    assert _quantized(board["revenue_inc"], _CENT) == Decimal("1130.06")
+    # 销售未税版本变化不再反推/覆盖 canonical 含税合同额。
+    assert _quantized(board["revenue_inc"], _CENT) == Decimal("1130.00")
     assert _quantized(board["revenue_ex"], _CENT) == Decimal("1000.05")
     assert _quantized(board["parts_cost_inc_tax"], _CENT) == Decimal("226.02")
     assert _quantized(board["parts_cost_ex_tax"], _CENT) == Decimal("200.02")
     assert _quantized(board["expense_inc"], _CENT) == Decimal("0.06")
     assert _quantized(board["expense_ex"], _CENT) == Decimal("0.05")
     assert _quantized(board["contribution_profit_inc"], _CENT) == Decimal(
-        "903.98",
+        "903.92",
     )
     assert _quantized(board["contribution_profit_ex"], _CENT) == Decimal(
         "799.98",
@@ -718,7 +745,7 @@ def test_project_carriers_keep_mixed_detail_orders_and_fail_cost_closed(db):
     assert project["missing_detail_orders"] == 1
     assert project["structure_complete"] is False
     assert project["lines"] == 1
-    assert project["known_cost_total"] == 200.0
+    assert project["known_cost_total"] == 226.0
     assert project["cost_quality"] == "incomplete"
     assert project["parts_cost_inc_tax"] == 226.0
     assert project["parts_cost_ex_tax"] == 200.0
@@ -730,7 +757,7 @@ def test_project_carriers_keep_mixed_detail_orders_and_fail_cost_closed(db):
     assert csv_data["无明细订单数"] == "1"
     assert csv_data["订单结构完整性"] == "不完整"
     assert csv_data["成本完整性"] == "成本不完整，需补数据"
-    assert csv_data["已知成本参考(混合原值)"] == "200.0"
+    assert csv_data["已知成本参考(混合原值)"] == "226.0"
     assert csv_data["合同额证据状态"] == "完整"
 
     agent_project = agent_data["rows"][0]
@@ -840,17 +867,19 @@ def test_project_carriers_exclude_blank_contract_without_dropping_known_cost(db)
     assert csv_response.status_code == 200, csv_response.text
     project = projects_response.json()["rows"][0]
     assert project["project"] == "双口径毛利项目"
-    assert project["known_cost_total"] == 200.0
+    assert project["known_cost_total"] == 226.0
     assert project["cost_quality"] == "actual_only"
-    assert project["sales_orders"] == []
-    assert project["contract_amount"] is None
+    assert project["sales_orders"] == ["XS-MARGIN"]
+    assert project["contract_amount_inc_tax"] == 1130.0
+    assert project["contract_amount_basis"] == "inc_tax"
+    assert project["contract_amount"] == 1130.0
     assert project["contract_incomplete"] is False
 
     csv_data = _csv_row(csv_response)
-    assert csv_data["已知成本参考(混合原值)"] == "200.0"
-    assert csv_data["关联销售订单"] == ""
-    assert csv_data["合同额(含税参考)"] == ""
-    assert csv_data["合同额证据状态"] == "未关联合同"
+    assert csv_data["已知成本参考(混合原值)"] == "226.0"
+    assert csv_data["关联销售订单"] == "XS-MARGIN"
+    assert csv_data["合同额(含税参考)"] == "1130.0"
+    assert csv_data["合同额证据状态"] == "完整"
 
     restricted_response = _profit_blind_maintenance_client(db).get(
         "/api/maintenance/export",
@@ -859,12 +888,14 @@ def test_project_carriers_exclude_blank_contract_without_dropping_known_cost(db)
     assert restricted_response.status_code == 200, restricted_response.text
     restricted_csv_data = _csv_row(restricted_response)
     assert restricted_csv_data["合同额(含税参考)"] == ""
-    assert restricted_csv_data["合同额证据状态"] == "未关联合同"
+    assert restricted_csv_data["合同额证据状态"] == "受限"
 
     agent_project = agent_data["rows"][0]
     assert agent_project["known_cost_total"] == project["known_cost_total"]
-    assert agent_project["sales_orders"] == []
-    assert agent_project["contract_amount"] is None
+    assert agent_project["sales_orders"] == ["XS-MARGIN"]
+    assert agent_project["contract_amount_inc_tax"] == 1130.0
+    assert agent_project["contract_amount_basis"] == "inc_tax"
+    assert agent_project["contract_amount"] == 1130.0
 
 
 def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
@@ -899,16 +930,16 @@ def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
     assert projects_response.status_code == 200, projects_response.text
     assert csv_response.status_code == 200, csv_response.text
     project = projects_response.json()["rows"][0]
-    assert project["known_cost_total"] == 200.0
+    assert project["known_cost_total"] == 226.0
     assert project["sales_orders"] == ["XS-MARGIN"]
-    assert project["contract_amount"] is None
-    assert project["contract_incomplete"] is True
+    assert project["contract_amount"] == 1130.0
+    assert project["contract_incomplete"] is False
 
     csv_data = _csv_row(csv_response)
-    assert csv_data["已知成本参考(混合原值)"] == "200.0"
+    assert csv_data["已知成本参考(混合原值)"] == "226.0"
     assert csv_data["关联销售订单"] == "XS-MARGIN"
-    assert csv_data["合同额(含税参考)"] == ""
-    assert csv_data["合同额证据状态"] == "不完整"
+    assert csv_data["合同额(含税参考)"] == "1130.0"
+    assert csv_data["合同额证据状态"] == "完整"
 
     restricted_response = _profit_blind_maintenance_client(db).get(
         "/api/maintenance/export",
@@ -917,13 +948,13 @@ def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
     assert restricted_response.status_code == 200, restricted_response.text
     restricted_csv_data = _csv_row(restricted_response)
     assert restricted_csv_data["合同额(含税参考)"] == ""
-    assert restricted_csv_data["合同额证据状态"] == "不完整"
+    assert restricted_csv_data["合同额证据状态"] == "受限"
 
     agent_project = agent_data["rows"][0]
     assert agent_project["known_cost_total"] == project["known_cost_total"]
     assert agent_project["sales_orders"] == ["XS-MARGIN"]
-    assert agent_project["contract_amount"] is None
-    assert agent_project["contract_incomplete"] is True
+    assert agent_project["contract_amount"] == 1130.0
+    assert agent_project["contract_incomplete"] is False
 
 
 def test_project_summary_csv_marks_partial_contract_revenue_incomplete_without_dropping_known_amount(
@@ -959,22 +990,65 @@ def test_project_summary_csv_marks_partial_contract_revenue_incomplete_without_d
     assert response.status_code == 200, response.text
     csv_data = _csv_row(response)
     assert Decimal(csv_data["合同额(含税参考)"]) == Decimal("1130.0")
-    assert csv_data["合同额证据状态"] == "不完整"
+    assert csv_data["合同额证据状态"] == "完整"
 
 
 def test_project_summary_csv_marks_scoped_sales_contract_evidence_restricted(db):
     _load_complete_contract(db)
 
-    response = _scoped_sales_maintenance_client(db).get(
+    client = _scoped_sales_maintenance_client(db)
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    response = client.get(
         "/api/maintenance/export",
         params={"lifecycle": "all"},
     )
 
+    assert projects_response.status_code == 200, projects_response.text
+    project = projects_response.json()["rows"][0]
+    assert project["contract_amount_inc_tax"] is None
+    assert project["contract_amount_basis"] == "inc_tax"
+    assert project["contract_amount"] is None
+    assert project["contract_incomplete"] is None
+    scoped_overrides = {
+        "page_maintenance": True,
+        "own_customers_only": True,
+    }
+    scoped_ctx = security.UserContext(
+        user_id="maintenance_profit_export_scoped_sales",
+        role="sales",
+        salesperson_name="测试销售",
+        permissions=permissions.effective_from_snapshot(
+            permissions.effective("sales", None),
+            scoped_overrides,
+        ),
+        is_authenticated=True,
+    )
+    service_project = maintenance_cost.projects_aggregate(
+        db,
+        lifecycle="all",
+        user_ctx=scoped_ctx,
+    )["rows"][0]
+    assert service_project["contract_amount_inc_tax"] is None
+    assert service_project["contract_amount_basis"] == "inc_tax"
+    assert service_project["contract_amount"] is None
+    assert service_project["contract_incomplete"] is None
     assert response.status_code == 200, response.text
     csv_data = _csv_row(response)
     assert csv_data["关联销售订单"] == "XS-MARGIN"
     assert csv_data["合同额(含税参考)"] == ""
     assert csv_data["合同额证据状态"] == "受限"
+    # 合同级看板和工作簿必须在服务入口即拒绝，不能只靠前端隐藏。
+    assert client.get(
+        "/api/maintenance/board",
+        params={"lifecycle": "all"},
+    ).status_code == 403
+    assert client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XS-MARGIN"},
+    ).status_code == 403
 
 
 def test_project_summary_csv_marks_hidden_contract_amount_restricted(db):
@@ -1227,15 +1301,15 @@ def test_date_filter_preserves_missing_revenue_across_all_four_carriers(db):
         },
     )
 
-    assert board["parts_profit_status_inc"] == "missing_revenue"
+    assert board["parts_profit_status_inc"] == "filtered_scope"
     assert board["parts_profit_status_ex"] == "missing_revenue"
-    assert board["contribution_status_inc"] == "missing_revenue"
+    assert board["contribution_status_inc"] == "filtered_scope"
     assert board["contribution_status_ex"] == "missing_revenue"
-    assert csv_data["收入证据状态-含税"] == "missing_revenue"
+    assert csv_data["收入证据状态-含税"] == "available"
     assert csv_data["收入证据状态-未税"] == "missing_revenue"
-    assert single["含税备件毛利状态"] == "合同收入缺失"
+    assert single["含税备件毛利状态"] == "日期筛选下暂不计算"
     assert single["未税备件毛利状态"] == "合同收入缺失"
-    assert bundled["含税备件毛利状态"] == "合同收入缺失"
+    assert bundled["含税备件毛利状态"] == "日期筛选下暂不计算"
     assert bundled["未税备件毛利状态"] == "合同收入缺失"
     _assert_numeric_parity(board, csv_data, single, bundled)
 
@@ -1281,15 +1355,15 @@ def test_date_filter_preserves_ambiguous_revenue_across_all_four_carriers(
         },
     )
 
-    assert board["parts_profit_status_inc"] == "ambiguous_revenue"
+    assert board["parts_profit_status_inc"] == "filtered_scope"
     assert board["parts_profit_status_ex"] == "ambiguous_revenue"
-    assert board["contribution_status_inc"] == "ambiguous_revenue"
+    assert board["contribution_status_inc"] == "filtered_scope"
     assert board["contribution_status_ex"] == "ambiguous_revenue"
-    assert csv_data["收入证据状态-含税"] == "ambiguous_revenue"
+    assert csv_data["收入证据状态-含税"] == "available"
     assert csv_data["收入证据状态-未税"] == "ambiguous_revenue"
-    assert single["含税备件毛利状态"] == "重复合同收入冲突"
+    assert single["含税备件毛利状态"] == "日期筛选下暂不计算"
     assert single["未税备件毛利状态"] == "重复合同收入冲突"
-    assert bundled["含税备件毛利状态"] == "重复合同收入冲突"
+    assert bundled["含税备件毛利状态"] == "日期筛选下暂不计算"
     assert bundled["未税备件毛利状态"] == "重复合同收入冲突"
     _assert_numeric_parity(board, csv_data, single, bundled)
 

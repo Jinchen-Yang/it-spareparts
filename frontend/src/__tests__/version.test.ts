@@ -1,27 +1,42 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.24.0 release notes", () => {
-  it("publishes the customer-feedback display fixes (2026-08-21)", () => {
-    expect(APP_VERSION).toBe("1.24.0");
+describe("v1.25.0 release notes", () => {
+  it("publishes the maintenance contract, cost and refresh fixes", () => {
+    expect(APP_VERSION).toBe("1.25.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-08-21");
+    expect(LATEST.date).toBe("2026-08-27");
 
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/合同总额.*明确的含税金额/);
+    expect(notes).toMatch(/不再按固定税率猜值/);
+    expect(notes).toMatch(/Excel 中修改合同总额/);
+    expect(notes).toMatch(/真实 0、部分缺失与全部缺失/);
+    expect(notes).toMatch(/同文件重试.*即时刷新/);
+  });
+
+  it("keeps prior releases archived in the changelog", () => {
+    const versions = CHANGELOG.map((entry) => entry.version);
+    expect(versions).toContain("1.24.0");
+    expect(versions).toContain("1.23.0");
+    expect(versions).toContain("1.21.0");
+    // 数组按新→旧排列
+    expect(versions[0]).toBe("1.25.0");
+  });
+});
+
+describe("v1.24.0 release notes (archived)", () => {
+  const v124 = CHANGELOG.find((entry) => entry.version === "1.24.0")!;
+
+  it("keeps the customer-feedback display fixes (2026-08-21)", () => {
+    expect(v124.date).toBe("2026-08-21");
+    const notes = v124.items.join("\n");
     expect(notes).toMatch(/项目卡改显「销售」/);
     expect(notes).toMatch(/不再显示项目经理/);
     expect(notes).toMatch(/维保备件发货数/);
     expect(notes).toMatch(/3,446 个/);
     expect(notes).toMatch(/日期倒序/);
-  });
-
-  it("keeps prior releases archived in the changelog", () => {
-    const versions = CHANGELOG.map((entry) => entry.version);
-    expect(versions).toContain("1.23.0");
-    expect(versions).toContain("1.21.0");
-    // 数组按新→旧排列
-    expect(versions[0]).toBe("1.24.0");
   });
 });
 

@@ -1,17 +1,23 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Modal, message } from "antd";
 
-const searchBoardProjects = vi.fn();
+const getBoardProject = vi.fn();
 const getBoardProjectOrders = vi.fn();
 const getBoardOrderLines = vi.fn();
 const getMaintenanceProject = vi.fn();
+const updateMaintenanceProject = vi.fn();
 const listMaintenanceSourceOrders = vi.fn();
 const assignMaintenanceSourceOrders = vi.fn();
 const downloadProjectMaster = vi.fn();
+const validateProjectMaster = vi.fn();
+const applyProjectMaster = vi.fn();
+const getCollectionPlan = vi.fn();
 const listProjectExpenseRows = vi.fn();
 const listProjectPartsRows = vi.fn();
 const getMaintenanceProjectWorkspace = vi.fn();
+const searchMaintenanceManagerAccounts = vi.fn();
 const searchSiteIssues = vi.fn();
 const searchMaintenanceReturnObligations = vi.fn();
 const searchMaintenanceBadReturns = vi.fn();
@@ -22,14 +28,14 @@ vi.mock("../../../api/maintenanceBossBoard", async () => {
   );
   return {
     ...actual,
-    searchBoardProjects: (...a: unknown[]) => searchBoardProjects(...a),
+    getBoardProject: (...a: unknown[]) => getBoardProject(...a),
     getBoardProjectOrders: (...a: unknown[]) => getBoardProjectOrders(...a),
     getBoardOrderLines: (...a: unknown[]) => getBoardOrderLines(...a),
   };
 });
 vi.mock("../../../api/maintenanceProjects", () => ({
   getMaintenanceProject: (...a: unknown[]) => getMaintenanceProject(...a),
-  updateMaintenanceProject: vi.fn(),
+  updateMaintenanceProject: (...a: unknown[]) => updateMaintenanceProject(...a),
 }));
 vi.mock("../../../api/maintenanceSourceAssignments", () => ({
   listMaintenanceSourceOrders: (...a: unknown[]) => listMaintenanceSourceOrders(...a),
@@ -42,9 +48,11 @@ vi.mock("../../../api/maintenanceWorkbooks", async () => {
   return {
     ...actual,
     downloadProjectMaster: (...a: unknown[]) => downloadProjectMaster(...a),
+    getCollectionPlan: (...a: unknown[]) => getCollectionPlan(...a),
     listProjectExpenseRows: (...a: unknown[]) => listProjectExpenseRows(...a),
     listProjectPartsRows: (...a: unknown[]) => listProjectPartsRows(...a),
-    applyProjectMaster: vi.fn(),
+    validateProjectMaster: (...a: unknown[]) => validateProjectMaster(...a),
+    applyProjectMaster: (...a: unknown[]) => applyProjectMaster(...a),
     saveBlob: vi.fn(),
   };
 });
@@ -55,6 +63,8 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   return {
     ...actual,
     getMaintenanceProjectWorkspace: (...a: unknown[]) => getMaintenanceProjectWorkspace(...a),
+    searchMaintenanceManagerAccounts: (...a: unknown[]) =>
+      searchMaintenanceManagerAccounts(...a),
     searchSiteIssues: (...a: unknown[]) => searchSiteIssues(...a),
     searchMaintenanceReturnObligations: (...a: unknown[]) =>
       searchMaintenanceReturnObligations(...a),
@@ -99,7 +109,7 @@ const orderRow = {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  searchBoardProjects.mockResolvedValue({ data: { rows: [projectRow], total: 1 } });
+  getBoardProject.mockResolvedValue({ data: projectRow });
   // 与后端真实契约同形（MaintenanceProjectOverview = {project: {...}}）——旧 mock 的
   // 扁平形状曾掩盖「按 UUID 搜卡墙永远搜不到」的取数缺陷（2026-08-17 生产实发）。
   getMaintenanceProject.mockResolvedValue({
@@ -114,8 +124,11 @@ beforeEach(() => {
   getBoardProjectOrders.mockResolvedValue({ data: { rows: [orderRow], total: 1 } });
   getBoardOrderLines.mockResolvedValue({ data: { rows: [], total: 0 } });
   listMaintenanceSourceOrders.mockResolvedValue({ data: { rows: [] } });
+  searchMaintenanceManagerAccounts.mockResolvedValue({ data: { rows: [] } });
+  updateMaintenanceProject.mockResolvedValue({ data: {} });
   listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
   listProjectPartsRows.mockResolvedValue({ rows: [], total: 0, sheet: "03_备件订单" });
+  getCollectionPlan.mockResolvedValue({ rows: [], total: 0 });
   getMaintenanceProjectWorkspace.mockResolvedValue({
     data: {
       project: { metrics: {
@@ -135,13 +148,26 @@ beforeEach(() => {
   searchMaintenanceBadReturns.mockResolvedValue({
     data: { project_id: "p1", rows: [], total: 0, page: 1, page_size: 100 },
   });
+  validateProjectMaster.mockResolvedValue({
+    expense_updates: 1,
+    will_void_rows: [],
+    will_reassign_orders: [],
+  });
+  applyProjectMaster.mockResolvedValue({ expense_updates: 1 });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  Modal.destroyAll();
+  message.destroy();
+});
 
-function renderPanel() {
+function renderPanel(withProjectSwitcher = false) {
   return render(
     <MemoryRouter initialEntries={["/maintenance/projects/p1"]}>
+      {withProjectSwitcher ? (
+        <Link to="/maintenance/projects/p2">切到项目B</Link>
+      ) : null}
       <Routes>
         <Route path="/maintenance/projects/:projectId"
                element={<MaintenanceProjectPanelPage />} />
@@ -151,6 +177,46 @@ function renderPanel() {
 }
 
 describe("项目面板", () => {
+  it("切换项目后旧项目的晚到响应不会回写新项目", async () => {
+    let resolveOldSearch!: (value: unknown) => void;
+    const oldSearch = new Promise((resolve) => { resolveOldSearch = resolve; });
+    const projectB = {
+      ...projectRow,
+      project_id: "p2",
+      project_code: "合成项目B",
+      display_name: "合成项目B",
+      contract_nos: ["XSDD-B"],
+    };
+    getMaintenanceProject.mockImplementation((id: string) => Promise.resolve({
+      data: {
+        project: {
+          project_id: id,
+          project_code: id === "p1" ? "合成项目A" : "合成项目B",
+          display_name: id === "p1" ? "合成项目A" : "合成项目B",
+          project_manager_id: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 1,
+        },
+      },
+    }));
+    getBoardProject.mockImplementation((id: string) =>
+      id === "p1"
+        ? oldSearch
+        : Promise.resolve({ data: projectB }));
+
+    renderPanel(true);
+    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "切到项目B" }));
+    expect(await screen.findByRole("heading", { name: "合成项目B" })).toBeInTheDocument();
+
+    resolveOldSearch({ data: projectRow });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "合成项目A" })).toBeNull();
+      expect(screen.getByRole("heading", { name: "合成项目B" })).toBeInTheDocument();
+    });
+  });
+
   it("页头展示项目名、状态 Tag 和总表下载（主操作提到页头）", async () => {
     renderPanel();
     expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
@@ -166,7 +232,7 @@ describe("项目面板", () => {
     // antd Statistic 会把带小数的值拆成整数/小数两个 span 并加千分位，按 textContent 断言
     const bandText = () => (band.textContent ?? "").replace(/,/g, "");
     await waitFor(() => expect(bandText()).toContain("1000.00"));
-    expect(bandText()).toContain("合同额");
+    expect(bandText()).toContain("合同总额（含税）");
     expect(bandText()).toContain("累计已回款");
     expect(bandText()).toContain("¥100.00");
     expect(bandText()).toContain("回款进度");
@@ -175,8 +241,52 @@ describe("项目面板", () => {
     expect(bandText()).toContain("50.0%");
   });
 
+  it("健康带把 partial 合同额明确标为已知小计而非完整总额", async () => {
+    getBoardProject.mockResolvedValue({
+      data: {
+        ...projectRow,
+        contract_amount_inc_tax: {
+          state: "partial",
+          value: "800.00",
+          as_of: null,
+        },
+      },
+    });
+    renderPanel();
+    const band = await screen.findByTestId("panel-health-band");
+    await waitFor(() => expect((band.textContent ?? "").replace(/,/g, ""))
+      .toContain("800.00（已知小计，合同事实不完整）"));
+  });
+
+  it("部分缺价时健康带把备件成本与成本率标成已知下限", async () => {
+    getBoardProject.mockResolvedValue({
+      data: {
+        ...projectRow,
+        cost_ratio_pct: stat("85.0"),
+        known_apply_cost_inc_tax: {
+          state: "partial",
+          value: {
+            actual_amount: "850.00",
+            estimated_amount: "0.00",
+            known_amount: "850.00",
+            missing_lines: 1,
+            coverage_pct: 80,
+            quality: "incomplete",
+          },
+          as_of: null,
+        },
+      },
+    });
+    renderPanel();
+    const band = await screen.findByTestId("panel-health-band");
+    await waitFor(() =>
+      expect((band.textContent ?? "").replace(/,/g, ""))
+        .toContain("¥850.00（已知下限）"));
+    expect(band.textContent).toContain("85.0%（已知下限）");
+  });
+
   it("聚合行缺失时健康带说「聚合数据暂缺」，页面不报错、基础信息走 stable 回退", async () => {
-    searchBoardProjects.mockResolvedValue({ data: { rows: [], total: 0 } });
+    getBoardProject.mockRejectedValue(new Error("aggregate unavailable"));
     renderPanel();
     const band = await screen.findByTestId("panel-health-band");
     await waitFor(() =>
@@ -252,6 +362,47 @@ describe("项目面板", () => {
     expect(within(band).getByText("60%")).toBeInTheDocument();
   });
 
+  it("workspace 回款按 total 拉取后续页", async () => {
+    const snapshot = (id: string, reference: string) => ({
+      collection_id: id,
+      project_contract_id: "PC-1",
+      contract_no: "XSDD-1",
+      report_month: "2026-08-01",
+      cumulative_amount: 600,
+      receipt_reference: reference,
+      status: "confirmed",
+      remark: null,
+      version: 1,
+    });
+    getMaintenanceProjectWorkspace.mockImplementation((_id: string, params: { collection_page?: number }) =>
+      Promise.resolve({
+        data: {
+          project: { metrics: {
+            received_amount: 600,
+            total_contract_amount: 1000,
+            collection_progress_pct: 60,
+          } },
+          collection_snapshots: {
+            rows: params.collection_page === 2
+              ? [snapshot("COL-2", "REC-PAGE-2")]
+              : [snapshot("COL-1", "REC-PAGE-1")],
+            total: 2,
+            page: params.collection_page ?? 1,
+            page_size: 100,
+          },
+        },
+      }));
+
+    renderPanel();
+    await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ collection_page: 2, collection_page_size: 100 }),
+    ));
+    fireEvent.click(await screen.findByRole("tab", { name: "回款" }));
+    expect(await screen.findByText("REC-PAGE-1")).toBeInTheDocument();
+    expect(screen.getByText("REC-PAGE-2")).toBeInTheDocument();
+  });
+
   it("领用与返还 tab 合并领用、返还义务和返还单状态", async () => {
     searchSiteIssues.mockResolvedValue({
       data: {
@@ -315,6 +466,58 @@ describe("项目面板", () => {
     expect(screen.getByText("HJFH-1")).toBeInTheDocument();
   });
 
+  it("领用、返还义务和返还单都按 total 拉取后续页", async () => {
+    const issue = (index: number) => ({
+      issue_id: `ISSUE-${index}`,
+      project_id: "p1",
+      issue_no: `CKD-PAGE-${index}`,
+      issue_date: "2026-08-18",
+      workflow_status: "confirmed",
+      lines: [{
+        issue_line_id: `LINE-${index}`,
+        part_id: index,
+        pn: `PN-${index}`,
+        serial_number: null,
+        quantity: "1",
+        no_return: false,
+      }],
+    });
+    const obligation = (index: number) => ({
+      obligation_id: `OB-${index}`,
+      issue_line_id: `LINE-${index}`,
+      classification: "required",
+      required_quantity: "1",
+      registered_quantity: "1",
+      warehouse_confirmed_quantity: "1",
+      remaining_quantity: "0",
+    });
+    const returned = (index: number) => ({
+      return_id: `RET-${index}`,
+      return_no: `HJFH-PAGE-${index}`,
+      status: "warehouse_confirmed",
+      lines: [{ obligation_id: `OB-${index}` }],
+    });
+    searchSiteIssues.mockImplementation((input: { page: number }) => Promise.resolve({
+      data: { rows: [issue(input.page)], total: 2, page: input.page, page_size: 100 },
+    }));
+    searchMaintenanceReturnObligations.mockImplementation((input: { page: number }) => Promise.resolve({
+      data: { rows: [obligation(input.page)], total: 2, page: input.page, page_size: 200 },
+    }));
+    searchMaintenanceBadReturns.mockImplementation((input: { page: number }) => Promise.resolve({
+      data: { rows: [returned(input.page)], total: 2, page: input.page, page_size: 100 },
+    }));
+
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
+    expect(await screen.findByText("CKD-PAGE-2")).toBeInTheDocument();
+    expect(screen.getByText("HJFH-PAGE-2")).toBeInTheDocument();
+    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page_size: 100 }));
+    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    expect(searchMaintenanceReturnObligations)
+      .toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    expect(searchMaintenanceBadReturns).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
   it("多合同项目在「备件与需求单」tab 给出合同筛选（#39）", async () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
@@ -368,6 +571,82 @@ describe("项目面板", () => {
       project_id: "p1",
       items: [{ source_order_id: "RAW-9" }],
     });
+    await waitFor(() => expect(getMaintenanceProjectWorkspace.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("基础信息不再把来源负责人原文伪装成账号改派", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    expect(within(dialog).queryByLabelText("维保负责人")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("project_manager_id");
+  });
+
+  it("只有实名 admin 且有管理动作键时显示真实负责人 OCC 控件", async () => {
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProjectWorkspace.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_code: "合成项目A",
+          display_name: "合成项目A",
+          project_manager_id: "来源负责人原文",
+          manager_assignment: {
+            assignment_id: "MA-1",
+            project_id: "p1",
+            responsibility_type: "primary_manager",
+            user_id: 8,
+            username: "manager-a",
+            display_name: "真实负责人",
+            account_status: "active",
+            source_manager_text: "来源负责人原文",
+            version: 3,
+            assigned_at: "2026-08-27T00:00:00Z",
+            archived_at: null,
+          },
+          metrics: {
+            received_amount: 100,
+            total_contract_amount: 1000,
+            collection_progress_pct: 10,
+          },
+        },
+        collection_snapshots: { rows: [], total: 0, page: 1, page_size: 100 },
+      },
+    });
+    renderPanel();
+    expect(await screen.findByRole("button", { name: "管理负责人" })).toBeInTheDocument();
+    expect(await screen.findByText("真实负责人")).toBeInTheDocument();
+    expect(screen.getAllByText("来源负责人原文").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("非 admin 即使拥有项目管理动作键也不显示负责人账号改派", async () => {
+    localStorage.setItem("role", "maintenance_manager");
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProjectWorkspace.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_manager_id: "来源负责人原文",
+          manager_assignment: null,
+          metrics: {
+            received_amount: 100,
+            total_contract_amount: 1000,
+            collection_progress_pct: 10,
+          },
+        },
+        collection_snapshots: { rows: [], total: 0, page: 1, page_size: 100 },
+      },
+    });
+    renderPanel();
+    await screen.findByTestId("panel-health-band");
+    expect(screen.queryByRole("button", { name: "映射负责人" })).toBeNull();
   });
 
   it("明细 PN 为主：全量直出、PN+描述主列、单价两档、成本来源四分类配色（2026-08-20）", async () => {
@@ -480,10 +759,64 @@ describe("报销 tab 展示备注（#47）", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 
-  it("上传覆盖后回读，页面不留旧值", async () => {
-    listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
-    renderPanel();
+  it("页头总表必须等当前报销 tab 读回完成后才报刷新成功", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+    let resolveReadback!: (value: { rows: never[]; total: number }) => void;
+    const { container } = renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
-    await waitFor(() => expect(listProjectExpenseRows).toHaveBeenCalledWith("p1"));
+    await waitFor(() => expect(listProjectExpenseRows).toHaveBeenCalledTimes(1));
+    listProjectExpenseRows.mockImplementationOnce(() =>
+      new Promise((resolve) => { resolveReadback = resolve; }));
+
+    const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(inputs[0], {
+      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /确认回传/ }));
+
+    await waitFor(() => expect(applyProjectMaster).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listProjectExpenseRows).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/已覆盖并刷新/)).toBeNull();
+
+    await act(async () => resolveReadback({ rows: [], total: 0 }));
+    expect(await screen.findByText(/已覆盖并刷新：报销更新 1 行/)).toBeInTheDocument();
+  });
+
+  it("页头总表落库后报销读回失败会清空旧行并明确提示刷新失败", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+    listProjectExpenseRows
+      .mockResolvedValueOnce({
+        rows: [{
+          raw_line_id: "BXD-OLD#1",
+          bxd_no: "BXD-OLD",
+          expense_date: null,
+          person: null,
+          expense_type: null,
+          fee_category: null,
+          reason: null,
+          contract_no: null,
+          amount_ex_tax: "100.00",
+          amount_inc_tax: "113.00",
+          data_status: "已结束",
+          remark: "旧快照",
+        }],
+        total: 1,
+      })
+      .mockRejectedValueOnce(new Error("readback failed"));
+    const { container } = renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    await screen.findByText("BXD-OLD");
+
+    const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(inputs[0], {
+      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /确认回传/ }));
+
+    expect(await screen.findByText(/数据已写入，但页面刷新失败/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("BXD-OLD")).toBeNull());
+    expect(screen.queryByText(/已覆盖并刷新/)).toBeNull();
   });
 });

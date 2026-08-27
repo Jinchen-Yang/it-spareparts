@@ -21,6 +21,7 @@ from app.models.maintenance_project import (
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_demands
+from app.services import maintenance_source_assignments as source_assignments
 from tests import factories as f
 
 
@@ -105,6 +106,23 @@ def _project(db, *, project_id: str, project_code: str, display_name: str):
     db.add(project)
     db.commit()
     return project
+
+
+def test_auto_assign_concurrency_conflict_is_retryable_409(db, monkeypatch):
+    client = _admin_client(db, "source_assignment_auto_conflict_admin")
+
+    def _conflict(*_args, **_kwargs):
+        raise source_assignments.SourceAssignmentConflict(
+            "目标项目已变化，请刷新后重试"
+        )
+
+    monkeypatch.setattr(source_assignments, "auto_assign_unassigned", _conflict)
+    response = client.post(
+        "/api/maintenance/project-assignments/orders/auto-assign"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "目标项目已变化，请刷新后重试"
 
 
 def test_real_admin_assigns_unassigned_source_order_and_directory_reads_it(db):

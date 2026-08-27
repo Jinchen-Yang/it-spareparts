@@ -14,7 +14,24 @@
 """
 import re
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 PRE_DELIVERY_PREFIX = re.compile(r"^预交付[-—－–]")
+
+
+def display_name_identity(name: str) -> str:
+    """并发身份键；比业务精确匹配更保守，大小写/空白变体共用一把锁。"""
+    return " ".join(str(name).split()).casefold()
+
+
+def lock_display_name_identities(db: Session, names) -> None:
+    """项目 create/rename/auto-create 共用的名称 advisory，必须先于 state 锁。"""
+    identities = sorted({display_name_identity(name) for name in names if str(name).strip()})
+    for identity in identities:
+        db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+            f"maintenance-project-display-name:{identity}", 0,
+        ))))
 
 
 def strip_pre_delivery(name: str) -> str:

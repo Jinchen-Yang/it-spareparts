@@ -21,6 +21,7 @@ from app.models.maintenance_project import (
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
@@ -55,7 +56,7 @@ def _seed(db):
         status_mapping_state="mapped",
         status_mapping_version="synthetic-v1",
         included_in_total=True,
-        effective_from=date(2026, 6, 8),
+        effective_from=date(2026, 6, 9),
         effective_to=date(2029, 12, 5),
         source="synthetic-test",
     )
@@ -121,6 +122,28 @@ def _seed(db):
             amount_inc_tax=Decimal("800"),
             tax_basis="inc",
             import_batch_id=import_batch.id,
+        )
+    )
+    db.add(
+        MaintenanceProjectExpenseAttribution(
+            expense_id="bxd:wb3-fpe-1",
+            project_id="wb3-project-1",
+            project_contract_id="wb3-pc-1",
+            raw_expense_line_id="wb3-fpe-1",
+            expense_ref="BXD-20260721-0019:1",
+            expense_date=date(2026, 7, 27),
+            applicant="罗汇康",
+            category="外援费用",
+            expense_reason="北京2026年6月外援费用",
+            amount_ex_tax=Decimal("707.96"),
+            amount_inc_tax=Decimal("799.99"),
+            tax_rate_used=Decimal("0.13"),
+            raw_status="已结束",
+            status_mapping_state="mapped",
+            normalized_status="approved",
+            status_mapping_version="synthetic-v1",
+            ownership_mapping_state="mapped",
+            ownership_mapping_version="synthetic-v1",
         )
     )
     db.add(
@@ -222,7 +245,8 @@ def test_build_workbook_sheets_and_data(db):
     ws04 = workbook["04_报销订单"]
     rows = list(ws04.iter_rows(values_only=True))
     assert rows[1][0] == "BXD-20260721-0019"
-    assert rows[1][8] == 800.0
+    # 展示 canonical attribution 金额，不信任可漂移的 raw 报销金额。
+    assert rows[1][8] == 799.99
 
     ws05 = workbook["05_项目经理回款单"]
     rows = list(ws05.iter_rows(values_only=True))
@@ -249,6 +273,136 @@ def test_editable_columns_follow_header_fill_contract(db):
     assert editable_01 == []  # 全只读
     editable_06 = workbook_v3.parse_editable_header_fills(workbook["06_现场领用与返还"])
     assert editable_06 == ["是否应返还(行级)", "备注"]
+
+
+def test_v3_overview_does_not_turn_missing_site_cost_into_zero(db):
+    _seed(db)
+
+    def metrics():
+        data = workbook_v3.build_project_workbook(db, "wb3-project-1")
+        sheet = load_workbook(io.BytesIO(data), data_only=True)["02_概览数据"]
+        return {
+            row[0].value: row[1].value
+            for row in sheet.iter_rows(min_col=1, max_col=2)
+            if row[0].value
+        }
+
+    missing = metrics()
+    assert missing["项目已计成本(含税)"] is None
+    assert missing["缺失成本行数"] == 1
+
+    line = db.get(MaintenanceSiteIssueLine, "wb3-issue-line-1")
+    line.cost_source = "manual"
+    line.price_basis = "ex_tax"
+    line.unit_cost = Decimal("0")
+    line.cost_amount = Decimal("0")
+    line.unit_cost_ex_tax = Decimal("0")
+    line.unit_cost_inc_tax = Decimal("0")
+    line.cost_amount_ex_tax = Decimal("0")
+    line.cost_amount_inc_tax = Decimal("0")
+    db.commit()
+    complete = metrics()
+    # 现场合法 0 + 已知 canonical 报销 799.99，不能因 falsy-zero 被抹成缺失。
+    assert complete["项目已计成本(含税)"] == 799.99
+    assert complete["缺失成本行数"] == 0
+
+
+def test_v3_overview_without_any_cost_evidence_stays_blank(db):
+    _seed(db)
+    db.delete(db.get(MaintenanceSiteIssueLine, "wb3-issue-line-1"))
+    db.delete(db.get(
+        MaintenanceProjectExpenseAttribution, "bxd:wb3-fpe-1"
+    ))
+    db.commit()
+
+    data = workbook_v3.build_project_workbook(db, "wb3-project-1")
+    sheet = load_workbook(io.BytesIO(data), data_only=True)["02_概览数据"]
+    metrics = {
+        row[0].value: row[1].value
+        for row in sheet.iter_rows(min_col=1, max_col=2)
+        if row[0].value
+    }
+    assert metrics["项目已计成本(含税)"] is None
+    assert metrics["成本率"] is None
+    assert metrics["缺失成本行数"] == 0
+    assert "暂无成本事实" in metrics["数据完整性提示"]
+
+
+def test_v3_shared_current_contract_fails_closed_for_expense_rows(db):
+    _seed(db)
+    other = MaintenanceProject(
+        project_id="wb3-project-shared",
+        project_code="WB3-SHARED",
+        display_name="WB3共享合同项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    db.add(other)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="wb3-pc-shared",
+        project_id=other.project_id,
+        contract_id="wb3-contract-1",
+        contract_no="XSDD-20260731-0086",
+        amount_inc_tax=Decimal("44756.00"),
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-v1",
+        included_in_total=True,
+        effective_from=date(2026, 6, 8),
+        effective_to=date(2029, 12, 5),
+        source="synthetic-test",
+    ))
+    line = db.get(MaintenanceSiteIssueLine, "wb3-issue-line-1")
+    line.cost_source = "manual"
+    line.price_basis = "ex_tax"
+    line.unit_cost = Decimal("0")
+    line.cost_amount = Decimal("0")
+    line.unit_cost_ex_tax = Decimal("0")
+    line.unit_cost_inc_tax = Decimal("0")
+    line.cost_amount_ex_tax = Decimal("0")
+    line.cost_amount_inc_tax = Decimal("0")
+    db.commit()
+
+    data = workbook_v3.build_project_workbook(db, "wb3-project-1")
+    workbook = load_workbook(io.BytesIO(data), data_only=True)
+    expense_rows = list(workbook["04_报销订单"].iter_rows(values_only=True))
+    assert all(row[0] != "BXD-20260721-0019" for row in expense_rows[1:])
+    metrics = {
+        row[0].value: row[1].value
+        for row in workbook["02_概览数据"].iter_rows(min_col=1, max_col=2)
+        if row[0].value
+    }
+    assert metrics["项目已计成本(含税)"] == 0
+
+
+def test_v3_overview_rejects_duplicate_current_contract_relationship(db):
+    _seed(db)
+    db.add(MaintenanceProjectContract(
+        project_contract_id="wb3-pc-duplicate",
+        project_id="wb3-project-1",
+        contract_id="wb3-contract-1",
+        contract_no="XSDD-20260731-0086",
+        contract_amount=Decimal("39607.08"),
+        amount_inc_tax=Decimal("44756.00"),
+        contract_status="active",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-v1",
+        included_in_total=True,
+        effective_from=date(2026, 6, 8),
+        effective_to=date(2029, 12, 5),
+        source="synthetic-test",
+    ))
+    db.commit()
+
+    data = workbook_v3.build_project_workbook(db, "wb3-project-1")
+    sheet = load_workbook(io.BytesIO(data), data_only=True)["02_概览数据"]
+    metrics = {
+        row[0].value: row[1].value
+        for row in sheet.iter_rows(min_col=1, max_col=2)
+        if row[0].value
+    }
+    assert metrics["合同总额(含税)"] is None
+    assert "重复" in metrics["数据完整性提示"]
 
 
 def test_workbook_v3_api_export_and_404(db):

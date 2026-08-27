@@ -446,7 +446,7 @@ def export(
                      r.get("parts_cost_ex_tax_missing_lines"),
                      *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
-                     r["contract_amount"],
+                     r["contract_amount_inc_tax"],
                      (
                          "未关联合同"
                          if not r["sales_orders"]

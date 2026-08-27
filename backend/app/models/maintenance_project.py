@@ -186,6 +186,14 @@ class MaintenanceProjectContract(Base):
             "effective_from",
             name="uq_maintenance_project_contract_identity",
         ),
+        # Referenced by the composite project/contract FK on expense
+        # attributions.  Keep ORM metadata in parity with migration b6e8... so
+        # fresh ``Base.metadata.create_all`` databases are valid too.
+        UniqueConstraint(
+            "project_id",
+            "project_contract_id",
+            name="uq_maintenance_project_contract_project",
+        ),
         Index("ix_maintenance_project_contract_project", "project_id"),
         Index("ix_maintenance_project_contract_contract", "contract_id"),
         Index(

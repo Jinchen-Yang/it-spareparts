@@ -278,8 +278,8 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
         db,
         lifecycle="all",
     )["rows"][0]
-    # legacy 仍按原始税口径分桶，不改旧字段含义。
-    assert (project["cost_inc"], project["cost_ex"]) == (0.0, 300.0)
+    # 兼容汇总字段与明确双税字段保持同一口径，不能把已证明的含税成本丢成 0。
+    assert (project["cost_inc"], project["cost_ex"]) == (339.0, 300.0)
     assert project["parts_cost_inc_tax"] == 339.0
     assert project["parts_cost_ex_tax"] == 300.0
     assert project["parts_cost_inc_tax_complete"] is True

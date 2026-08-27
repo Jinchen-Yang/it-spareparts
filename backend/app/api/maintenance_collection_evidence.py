@@ -1,7 +1,5 @@
 """回款提醒凭证 API（F6）：上传凭证 = 回款提醒关闭依据。"""
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -108,8 +106,39 @@ async def upload_milestone_evidence(
                 code="not_found",
                 message="资源不存在或不可见",
             )
+        # 文件必须先可靠落盘，再允许同一事务关闭提醒和提交凭证事实。若写文件
+        # 失败，下面的 rollback 会同时撤销新凭证行，提醒仍保持原状态。重放也
+        # 重写同一 object_key，以修复历史上“DB 活跃但文件缺失”的异常记录。
+        try:
+            collection_evidence.write_evidence_files(
+                file_id=payload["file_id"],
+                object_key=payload["object_key"],
+                content=content,
+                meta={
+                    "file_id": payload["file_id"],
+                    "milestone_id": milestone_id,
+                    "original_filename": payload["original_filename"],
+                    "mime_type": payload["mime_type"],
+                    "size_bytes": payload["size_bytes"],
+                    "md5": payload["md5"],
+                    "sha256": payload["sha256"],
+                    "uploaded_by": payload["uploaded_by"],
+                    "uploaded_at": payload["uploaded_at"],
+                    "storage": "local",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {
+                    "code": "file_write_failed",
+                    "message": f"凭证文件落盘失败：{type(exc).__name__}",
+                },
+            ) from exc
+
         # 上传凭证 = 回款提醒关闭（同事务；重放也重试关闭——首次可能因节点
-        # 状态未关闭，状态修复后重放应自动闭环，round-6 Blocker 6）
+        # 状态未关闭，状态修复后重放应自动闭环）。
         closed = collection_evidence.try_close_milestone_after_upload(
             db,
             milestone_id=milestone_id,
@@ -121,35 +150,6 @@ async def upload_milestone_evidence(
         payload["closed"] = bool(closed["closed"])
         payload["close_reason"] = None if closed["closed"] else closed.get("reason")
         db.commit()
-        # DB 行已定案后落盘；落盘失败 → 凭证置 inactive 补偿（不留指向缺失文件的活跃行）
-        if not payload.get("replayed"):
-            try:
-                collection_evidence.write_evidence_files(
-                    file_id=payload["file_id"],
-                    object_key=payload["object_key"],
-                    content=content,
-                    meta={
-                        "file_id": payload["file_id"],
-                        "milestone_id": milestone_id,
-                        "original_filename": payload["original_filename"],
-                        "mime_type": payload["mime_type"],
-                        "size_bytes": len(content),
-                        "md5": payload["md5"],
-                        "sha256": payload["sha256"],
-                        "uploaded_by": operator,
-                        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                        "storage": "local",
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                _archive_failed_evidence(db, payload["evidence_id"], operator)
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    {
-                        "code": "file_write_failed",
-                        "message": f"凭证文件落盘失败：{type(exc).__name__}",
-                    },
-                ) from exc
         return payload
     except MaintenanceAcceptanceTooLarge as exc:
         db.rollback()
@@ -171,18 +171,3 @@ async def upload_milestone_evidence(
     except Exception as exc:
         db.rollback()
         _raise_http(exc)
-
-
-def _archive_failed_evidence(db: Session, evidence_id: str, operator: str) -> None:
-    """落盘失败补偿：把已提交的凭证置 inactive（事实保留，防止活跃行指向缺失文件）。"""
-    try:
-        evidence = db.get(
-            collection_evidence.MaintenanceCollectionEvidence, evidence_id
-        )
-        if evidence is not None and evidence.is_active:
-            evidence.is_active = False
-            evidence.archived_by = operator[:64]
-            evidence.archived_at = datetime.now(timezone.utc)
-            db.commit()
-    except Exception:  # noqa: BLE001
-        db.rollback()

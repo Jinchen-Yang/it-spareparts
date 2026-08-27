@@ -762,11 +762,107 @@ def test_viewer_only_patch_enforces_optimistic_lock(db):
         f"/api/maintenance/projects/stable/{target.project_id}",
         json={"version": 1, "visible_usernames": [], "reason": "陈旧版本"},
     )
-    assert stale.status_code == 200, stale.text  # v1 仍是最新，首刷可过
+    assert stale.status_code == 200, stale.text
+    assert stale.json()["version"] == 1  # 相同空名单是 no-op：+0
 
-    bumped = admin.patch(
+    repeated_noop = admin.patch(
         f"/api/maintenance/projects/stable/{target.project_id}",
-        json={"version": 1, "visible_usernames": [], "reason": "版本已被上面抬高"},
+        json={"version": 1, "visible_usernames": [], "reason": "重复空名单"},
     )
-    assert bumped.status_code == 409, bumped.text
-    assert "当前版本 2" in bumped.json()["detail"]
+    assert repeated_noop.status_code == 200, repeated_noop.text
+    assert repeated_noop.json()["version"] == 1
+
+
+def test_mixed_project_and_viewer_patch_applies_both_and_bumps_once(db):
+    target = MaintenanceProject(
+        project_id="project-viewer-mixed",
+        project_code="PM-VMIX",
+        display_name="混合修改前",
+        project_manager_id="来源负责人",
+        lifecycle_status="missing",
+    )
+    viewer = SysUser(
+        username="mixed_project_viewer",
+        role="purchaser",
+        display_name="混合修改可见账号",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([target, viewer])
+    db.commit()
+    admin = _admin_client(db, username="viewer_mixed_admin")
+
+    changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 1,
+            "display_name": "混合修改后",
+            "visible_usernames": [viewer.username],
+            "reason": "同次保存基础信息与可见账号",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["display_name"] == "混合修改后"
+    assert changed.json()["version"] == 2
+    assert [row["username"] for row in changed.json()["visible_usernames"]] == [
+        viewer.username
+    ]
+    db.expire_all()
+    assert db.get(MaintenanceProject, target.project_id).version == 2
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 1
+
+    noop = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 2,
+            "display_name": "混合修改后",
+            "visible_usernames": [viewer.username],
+            "reason": "完全相同重放",
+        },
+    )
+    assert noop.status_code == 200, noop.text
+    assert noop.json()["version"] == 2
+    assert [row["username"] for row in noop.json()["visible_usernames"]] == [
+        viewer.username
+    ]
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 1
+
+    # 同时带基本字段与 viewer，但只有 viewer 发生变化：仍只 +1。
+    viewers_only_changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 2,
+            "display_name": "混合修改后",
+            "visible_usernames": [],
+            "reason": "混合提交中仅可见账号变化",
+        },
+    )
+    assert viewers_only_changed.status_code == 200, viewers_only_changed.text
+    assert viewers_only_changed.json()["version"] == 3
+    assert viewers_only_changed.json()["visible_usernames"] == []
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 2
+
+    # 反向真值组合：基本字段改、viewer 名单不改，也只 +1。
+    master_only_changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 3,
+            "display_name": "混合修改最终值",
+            "visible_usernames": [],
+            "reason": "混合提交中仅基本字段变化",
+        },
+    )
+    assert master_only_changed.status_code == 200, master_only_changed.text
+    assert master_only_changed.json()["version"] == 4
+    assert master_only_changed.json()["visible_usernames"] == []
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 3

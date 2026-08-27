@@ -16,7 +16,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
 )
 from app.security import UserContext, is_field_hidden
-from app.services import maintenance_project_assignments
+from app.services import maintenance_periods, maintenance_project_assignments
 
 
 def _payload_token(payload: dict) -> str:
@@ -88,7 +88,8 @@ def project_directory(
                 MaintenanceProject.project_code,
                 MaintenanceProject.display_name,
                 MaintenanceProject.project_manager_id,
-                MaintenanceProject.lifecycle_status,
+                MaintenanceProject.period_from,
+                MaintenanceProject.period_to,
                 MaintenanceProject.is_active,
                 MaintenanceProject.version,
             )
@@ -115,7 +116,11 @@ def project_directory(
             # 维保期限主数据（#39/#51），与 overview/catalog 的键集一致
             "period_from": project.period_from.isoformat() if project.period_from else None,
             "period_to": project.period_to.isoformat() if project.period_to else None,
-            "lifecycle_status": project.lifecycle_status,
+            "lifecycle_status": maintenance_periods.lifecycle_status(
+                project.period_from,
+                project.period_to,
+                as_of,
+            ),
             "is_active": project.is_active,
             "version": project.version,
         }
@@ -158,19 +163,24 @@ def project_overview(
     )
     effective = [relation for relation in contracts if _is_effective(relation, as_of)]
     effective_ids = sorted({relation.contract_id for relation in effective})
+    effective_nos = sorted({relation.contract_no for relation in effective})
 
-    cross_relationships: list[tuple[str, str, str]] = []
-    if effective_ids:
+    cross_relationships: list[tuple[str, str, str, str]] = []
+    if effective_ids or effective_nos:
         cross_relationships = [
-            (contract_id, project_contract_id, related_project_id)
-            for contract_id, project_contract_id, related_project_id in db.execute(
+            (contract_id, contract_no, project_contract_id, related_project_id)
+            for contract_id, contract_no, project_contract_id, related_project_id in db.execute(
                 select(
                     MaintenanceProjectContract.contract_id,
+                    MaintenanceProjectContract.contract_no,
                     MaintenanceProjectContract.project_contract_id,
                     MaintenanceProjectContract.project_id,
                 )
                 .where(
-                    MaintenanceProjectContract.contract_id.in_(effective_ids),
+                    or_(
+                        MaintenanceProjectContract.contract_id.in_(effective_ids),
+                        MaintenanceProjectContract.contract_no.in_(effective_nos),
+                    ),
                     MaintenanceProjectContract.included_in_total.is_(True),
                     MaintenanceProjectContract.effective_from <= as_of,
                     or_(
@@ -180,19 +190,40 @@ def project_overview(
                 )
                 .order_by(
                     MaintenanceProjectContract.contract_id,
+                    MaintenanceProjectContract.contract_no,
                     MaintenanceProjectContract.project_id,
                     MaintenanceProjectContract.project_contract_id,
                 )
             ).all()
         ]
 
-    projects_by_contract: dict[str, set[str]] = {}
-    for contract_id, _relationship_id, related_project_id in cross_relationships:
-        projects_by_contract.setdefault(contract_id, set()).add(related_project_id)
-    cross_project_conflicts = {
+    projects_by_contract_id: dict[str, set[str]] = {}
+    projects_by_contract_no: dict[str, set[str]] = {}
+    for (contract_id, contract_no, _relationship_id,
+         related_project_id) in cross_relationships:
+        projects_by_contract_id.setdefault(contract_id, set()).add(
+            related_project_id)
+        projects_by_contract_no.setdefault(contract_no, set()).add(
+            related_project_id)
+    conflicting_ids = {
         contract_id
-        for contract_id, project_ids in projects_by_contract.items()
+        for contract_id, project_ids in projects_by_contract_id.items()
         if len(project_ids) > 1
+    }
+    conflicting_nos = {
+        contract_no
+        for contract_no, project_ids in projects_by_contract_no.items()
+        if len(project_ids) > 1
+    }
+    # Keep the public issue payload keyed by this project's internal contract
+    # references, while treating either the internal ID or the XSDD business
+    # identity as a global conflict.  Otherwise two projects can use different
+    # synthetic IDs for the same XSDD and both report a complete denominator.
+    cross_project_conflicts = {
+        relation.contract_id
+        for relation in effective
+        if (relation.contract_id in conflicting_ids
+            or relation.contract_no in conflicting_nos)
     }
 
     payload = project_overview_from_facts(
@@ -238,11 +269,25 @@ def project_overview_from_facts(
     if not effective:
         issues.append({"code": "no_effective_contracts", "contract_ids": []})
 
-    repeated = sorted(
+    repeated_ids = {
         contract_id
-        for contract_id, count in Counter(row.contract_id for row in effective).items()
+        for contract_id, count in Counter(
+            row.contract_id for row in effective
+        ).items()
         if count > 1
-    )
+    }
+    repeated_nos = {
+        contract_no
+        for contract_no, count in Counter(
+            row.contract_no for row in effective
+        ).items()
+        if count > 1
+    }
+    repeated = sorted({
+        row.contract_id
+        for row in effective
+        if row.contract_id in repeated_ids or row.contract_no in repeated_nos
+    })
     if repeated:
         issues.append(
             {"code": "duplicate_effective_contract", "contract_ids": repeated}
@@ -262,7 +307,7 @@ def project_overview_from_facts(
         {
             row.contract_id
             for row in effective
-            if row.amount_inc_tax is None and row.contract_amount is None
+            if row.amount_inc_tax is None
         }
     )
     if missing_amount:
@@ -286,21 +331,8 @@ def project_overview_from_facts(
         total_amount = None
         completeness = {"status": "incomplete", "issues": issues}
     else:
-        # 2026-08-26 客户拍板：合同总额一律显示含税。台账导入的
-        # contract_amount 是对账后未税额（模型注释），回退时按 13% 归一
-        # （CONTEXT.md 双税口径）补成含税，不再把未税数当含税展示。
         total_amount = sum(
-            (
-                relation.amount_inc_tax
-                if relation.amount_inc_tax is not None
-                else (
-                    (relation.contract_amount * Decimal("1.13")).quantize(
-                        Decimal("0.01"))
-                    if relation.contract_amount is not None
-                    else Decimal("0.00")
-                )
-                for relation in effective
-            ),
+            (relation.amount_inc_tax for relation in effective),
             start=Decimal("0.00"),
         )
         completeness = {"status": "complete", "issues": []}
@@ -313,7 +345,11 @@ def project_overview_from_facts(
         # 维保期限主数据（#39/#51）：面板显示与编辑回读都走这份 payload
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
-        "lifecycle_status": project.lifecycle_status,
+        "lifecycle_status": maintenance_periods.lifecycle_status(
+            project.period_from,
+            project.period_to,
+            as_of,
+        ),
         "is_active": project.is_active,
         "version": project.version,
     }
@@ -325,17 +361,10 @@ def project_overview_from_facts(
             "contract_amount": (
                 None
                 if amount_restricted
-                else (
-                    relation.amount_inc_tax
-                    if relation.amount_inc_tax is not None
-                    else (
-                        (relation.contract_amount * Decimal("1.13")).quantize(
-                            Decimal("0.01"))
-                        if relation.contract_amount is not None
-                        else None
-                    )
-                )
+                else relation.amount_inc_tax
             ),
+            "amount_ex_tax": None if amount_restricted else relation.contract_amount,
+            "amount_inc_tax": None if amount_restricted else relation.amount_inc_tax,
             "contract_amount_basis": "inc_tax",
             "contract_status": relation.contract_status,
             "status_mapping_state": relation.status_mapping_state,

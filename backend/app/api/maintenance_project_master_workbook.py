@@ -27,6 +27,11 @@ from app.api.maintenance_expense_collection_workbook import (
     _read_upload,
     _require_profit_visibility,
 )
+from app.api.maintenance_project_scope import (
+    require_maintenance_project_access,
+    resolve_visible_project_ids,
+)
+from app import config
 from app.auth import current_identity, current_role
 from app.config import get_settings
 from app.db import get_db
@@ -49,6 +54,30 @@ _MASTER = "/projects/stable/{project_id}/master-workbook"
 _GLOBAL = "/spare-part-lines"
 
 
+def _require_contract_amount_manage(ctx: UserContext, ident: dict) -> None:
+    """合同额改单元格比普通报销/回款回传更高权，按变更内容条件检查。"""
+
+    # 合同额会直接改变回款率、成本率和经营提醒。共享 ADMIN_PASSWORD 虽然
+    # 角色名也是 admin，但没有可追责的 SysUser 身份，不能借 admin 短路改金额。
+    if (ident.get("authn") != "sys_user" or ident.get("fb")
+            or not ident.get("sub")):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "修改项目合同总额必须使用实名系统账号",
+        )
+    if not config.ENABLE_RBAC:
+        return
+    from app import permissions as _perm
+
+    perms = ctx.permissions if ctx.permissions is not None else _perm.effective(ctx.role, None)
+    if not (perms.get("action_maintenance_project_manage", False)
+            and perms.get("data_profit", False)):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "修改项目合同总额需要维保项目主档管理权限和经营数据权限",
+        )
+
+
 def _xlsx(content: bytes, filename: str) -> StreamingResponse:
     from urllib.parse import quote
     ascii_name = re.sub(r'[^\x20-\x7e]', '_', filename)
@@ -67,9 +96,16 @@ def _xlsx(content: bytes, filename: str) -> StreamingResponse:
 
 
 def _fail(exc: ec.WorkbookError):
+    busy = exc.code == "cost_recompute_busy"
+    stale = exc.code in {
+        "stale_cost_override",
+        "stale_cost_fact",
+        "stale_workbook",
+    }
     raise HTTPException(
-        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status.HTTP_409_CONFLICT if (busy or stale) else status.HTTP_422_UNPROCESSABLE_CONTENT,
         {"code": exc.code, "message": exc.message, "issues": exc.issues},
+        headers={"Retry-After": "5"} if busy else None,
     ) from exc
 
 
@@ -118,9 +154,15 @@ def download_global_lines(
 
     parsed_from = _date.fromisoformat(date_from) if date_from else None
     parsed_to = _date.fromisoformat(date_to) if date_to else None
+    visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
         content = master.build_global_lines(
-            db, preset=range_preset, date_from=parsed_from, date_to=parsed_to)
+            db,
+            preset=range_preset,
+            date_from=parsed_from,
+            date_to=parsed_to,
+            allowed_project_ids=visible_project_ids,
+        )
     except ec.WorkbookError as exc:
         _fail(exc)
     record_access_log(ctx, "download", "maintenance_spare_part_lines",
@@ -133,6 +175,7 @@ async def validate_global_lines(
     request: Request = None,
     response: Response = None,
     db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
@@ -140,8 +183,13 @@ async def validate_global_lines(
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
+    visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
-        plan = master.validate_global(db, data=data)
+        plan = master.validate_global(
+            db,
+            data=data,
+            allowed_project_ids=visible_project_ids,
+        )
     except ec.WorkbookError as exc:
         _fail(exc)
     return {"valid": True, **plan.summary}
@@ -161,10 +209,23 @@ async def apply_global_lines(
     """改价/补价上传覆盖＝真实源（#38）。整份事务，任何一行不合法则整份 422。"""
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
+    visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
-        plan = master.validate_global(db, data=data)
-        result = master.apply(db, plan, operated_by=_operator(ident),
-                              import_batch_id=str(uuid.uuid4()))
+        plan = master.validate_global(
+            db,
+            data=data,
+            allowed_project_ids=visible_project_ids,
+        )
+        # validate 后项目负责人/销售范围可能已变化；apply 前重新物化一次，
+        # service 还会逐行复核，确保范围收缩时整份零写入。
+        visible_project_ids = resolve_visible_project_ids(db, ctx)
+        result = master.apply_global_lines(
+            db,
+            plan,
+            operated_by=_operator(ident),
+            import_batch_id=str(uuid.uuid4()),
+            allowed_project_ids=visible_project_ids,
+        )
     except ec.WorkbookError as exc:
         db.rollback()
         _fail(exc)
@@ -183,14 +244,15 @@ def list_project_expense_rows(
     _page: None = Depends(require_page("page_maintenance")),
     _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """项目面板「报销」tab 的只读行（含备注，#47）。
 
-    与 04_报销订单 sheet 同源同口径（都走 ec._expenses 按合同号归集），
+    与 04_报销订单 sheet 同源同口径（稳定 attribution + 当前唯一合同），
     页面只**展示**——改金额/备注仍只能走「下载 → 改 → 上传覆盖」（#40）。
     """
     response.headers["Cache-Control"] = "no-store"
-    rows = ec._expenses(db, master.project_sales_order_nos(db, project_id))
+    rows = ec.project_expenses(db, project_id)
     total = len(rows)
     window = rows[(page - 1) * page_size: page * page_size]
     return {
@@ -229,6 +291,7 @@ def download_project_master(
     _page: None = Depends(require_page("page_maintenance")),
     _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ):
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
@@ -265,7 +328,9 @@ def get_collection_plan(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """回款计划（02）+ 到款状态：计划期次对比实收累计，供回款 tab 展示待回款。"""
     from app.models.maintenance_manager import MaintenanceCollectionMilestone
@@ -332,6 +397,7 @@ def list_master_rows(
     _page: None = Depends(require_page("page_maintenance")),
     _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
     if (get_settings().maintenance_project_master_v2_enabled
@@ -340,13 +406,32 @@ def list_master_rows(
         line_ids = [line.id for line, _order, _pid in rows]
         overrides = {
             item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
-                MaintenanceManualCostOverride.line_id.in_(line_ids)
+                MaintenanceManualCostOverride.line_id.in_(line_ids),
+                MaintenanceManualCostOverride.active.is_(True),
             ))
         } if line_ids else {}
-        return {
-            "sheet": sheet,
-            "total": len(rows),
-            "rows": [{
+
+        def _v2_row(line, order):
+            override = overrides.get(line.id)
+            inc = master._line_cost_evidence(line, override, basis="inc")
+            ex = master._line_cost_evidence(line, override, basis="ex")
+            known = inc["tier"] != "missing"
+            resolved_source = inc["source"] if known else (line.cost_source or "none")
+            can_refill = (
+                not known
+                and line.cost_source in (None, "none")
+                and override is None
+            )
+            missing_kind = None
+            if not known:
+                missing_kind = (
+                    "out_of_scope"
+                    if line.cost_source is None
+                    else "none"
+                    if line.cost_source == "none"
+                    else "invalid_cost_fact"
+                )
+            return {
                 "line_id": line.id,
                 "part_id": line.part_id,
                 "order_no": order.order_no,
@@ -356,29 +441,36 @@ def list_master_rows(
                 "qty": str(line.qty) if line.qty is not None else None,
                 "return_qty": str(line.return_qty) if line.return_qty is not None else None,
                 "cost_amount_inc_tax": (
-                    str(line.cost_amount_inc_tax)
-                    if line.cost_amount_inc_tax is not None else None),
+                    str(inc["amount"]) if inc["amount"] is not None else None
+                ),
                 "warehouse": order.warehouse or "",
-                # 2026-08-19：面板展示须合并人工成本覆盖——主表 unit_cost_ex_tax 为 NULL
-                # 时，人工回填（override 表）应显示为成本并标记来源 manual；
-                # 其余来源沿用渲染器统一中文映射
-                "cost_source": (
-                    "manual"
-                    if (line.unit_cost_ex_tax is None and line.id in overrides)
-                    else (line.cost_source or "none")),
-                "cost_source_label": (
-                    "人工回填"
-                    if (line.unit_cost_ex_tax is None and line.id in overrides)
-                    else maintenance_workbook_renderer.SOURCE_LABELS.get(
-                        line.cost_source, "成本缺失")),
-                "confidence": line.confidence or "none",
-                "unit_cost_ex_tax": str(overrides[line.id].unit_cost_ex_tax) if (line.unit_cost_ex_tax is None and line.id in overrides) else (str(line.unit_cost_ex_tax) if line.unit_cost_ex_tax is not None else None),
-                "unit_cost_inc_tax": str(overrides[line.id].unit_cost_inc_tax) if (line.unit_cost_ex_tax is None and line.id in overrides) else (str(line.unit_cost_inc_tax) if line.unit_cost_inc_tax is not None else None),
-                "missing_kind": "out_of_scope" if line.cost_source is None and line.unit_cost_ex_tax is None and line.id not in overrides else ("none" if line.unit_cost_ex_tax is None and line.id not in overrides else None),
-                "can_refill": line.unit_cost_ex_tax is None and line.id not in overrides,
-                "manual_unit_cost_ex_tax": str(overrides[line.id].unit_cost_ex_tax) if line.id in overrides else None,
-                "manual_reason": overrides[line.id].reason if line.id in overrides else None,
-            } for line, order, _pid in rows],
+                "cost_source": resolved_source,
+                "cost_source_label": maintenance_workbook_renderer.SOURCE_LABELS.get(
+                    resolved_source, "成本事实异常" if not known else "成本缺失"
+                ),
+                "confidence": (
+                    "high" if resolved_source == "manual"
+                    else line.confidence if known
+                    else "none"
+                ),
+                "unit_cost_ex_tax": (
+                    str(ex["unit_cost"]) if ex["unit_cost"] is not None else None
+                ),
+                "unit_cost_inc_tax": (
+                    str(inc["unit_cost"]) if inc["unit_cost"] is not None else None
+                ),
+                "missing_kind": missing_kind,
+                "can_refill": can_refill,
+                "manual_unit_cost_ex_tax": (
+                    str(override.unit_cost_ex_tax) if override else None
+                ),
+                "manual_reason": override.reason if override else None,
+            }
+
+        return {
+            "sheet": sheet,
+            "total": len(rows),
+            "rows": [_v2_row(line, order) for line, order, _pid in rows],
         }
     if sheet not in {master.SHEET_PARTS}:
         raise HTTPException(
@@ -392,40 +484,49 @@ def list_master_rows(
     if line_ids:
         for override in db.execute(
             select(MaintenanceManualCostOverride)
-            .where(MaintenanceManualCostOverride.line_id.in_(line_ids))
+            .where(
+                MaintenanceManualCostOverride.line_id.in_(line_ids),
+                MaintenanceManualCostOverride.active.is_(True),
+            )
         ).scalars():
             overrides[override.line_id] = override
     record_access_log(ctx, "download", "maintenance_project_master_rows",
                       {"project_id": project_id, "sheet": sheet})
+
+    def _legacy_row(line, order):
+        override = overrides.get(line.id)
+        inc = master._line_cost_evidence(line, override, basis="inc")
+        ex = master._line_cost_evidence(line, override, basis="ex")
+        return {
+            "line_id": line.id,
+            "order_no": order.order_no,
+            "order_date": order.order_date.isoformat() if order.order_date else None,
+            "sales_order_no": order.linked_sales_order_no or "",
+            "project_raw": order.project_raw or "",
+            "pn_std": line.pn_std or line.pn_raw or "",
+            "description": line.description or "",
+            "qty": float(line.qty) if line.qty is not None else None,
+            "return_qty": float(line.return_qty) if line.return_qty is not None else None,
+            "serial_numbers": line.serial_numbers or "",
+            "warehouse": order.warehouse or "",
+            "cost_source": inc["source"] if inc["tier"] != "missing" else "",
+            "unit_cost_ex_tax": (
+                float(ex["unit_cost"]) if ex["unit_cost"] is not None else None
+            ),
+            "unit_cost_inc_tax": (
+                float(inc["unit_cost"]) if inc["unit_cost"] is not None else None
+            ),
+            "cost_amount_inc_tax": (
+                float(inc["amount"]) if inc["amount"] is not None else None
+            ),
+            "cost_quality": inc["tier"],
+            "change_reason": override.reason or "" if override is not None else "",
+        }
+
     return {
         "sheet": sheet,
         "total": len(rows),
-        "rows": [
-            {
-                "line_id": line.id,
-                "order_no": order.order_no,
-                "order_date": order.order_date.isoformat() if order.order_date else None,
-                "sales_order_no": order.linked_sales_order_no or "",
-                "project_raw": order.project_raw or "",
-                "pn_std": line.pn_std or line.pn_raw or "",
-                "description": line.description or "",
-                "qty": float(line.qty) if line.qty is not None else None,
-                "return_qty": float(line.return_qty) if line.return_qty is not None else None,
-                "serial_numbers": line.serial_numbers or "",
-                "warehouse": order.warehouse or "",
-                "cost_source": line.cost_source or "",
-                "unit_cost_ex_tax": (
-                    float(line.unit_cost_ex_tax)
-                    if line.unit_cost_ex_tax is not None else None),
-                "unit_cost_inc_tax": (
-                    float(line.unit_cost_inc_tax)
-                    if line.unit_cost_inc_tax is not None else None),
-                "change_reason": (
-                    override.reason or ""
-                    if (override := overrides.get(line.id)) is not None else ""),
-            }
-            for line, order, _pid in rows
-        ],
+        "rows": [_legacy_row(line, order) for line, order, _pid in rows],
     }
 
 
@@ -435,10 +536,12 @@ async def validate_project_master(
     request: Request = None,
     response: Response = None,
     db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
@@ -446,6 +549,8 @@ async def validate_project_master(
         if get_settings().maintenance_project_master_v2_enabled:
             plan = master.validate_project_master_v2(
                 db, project_id=project_id, data=data, user_ctx=ctx)
+            if plan.contract_amount_change is not None:
+                _require_contract_amount_manage(ctx, ident)
             return {
                 "valid": True,
                 "protocol_id": master.V2_PROTOCOL_ID,
@@ -483,6 +588,7 @@ async def apply_project_master(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。"""
     response.headers["Cache-Control"] = "no-store"
@@ -491,6 +597,8 @@ async def apply_project_master(
         if get_settings().maintenance_project_master_v2_enabled:
             plan = master.validate_project_master_v2(
                 db, project_id=project_id, data=data, user_ctx=ctx)
+            if plan.contract_amount_change is not None:
+                _require_contract_amount_manage(ctx, ident)
             result = master.apply_project_master_v2(
                 db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4()),
                 user_ctx=ctx,

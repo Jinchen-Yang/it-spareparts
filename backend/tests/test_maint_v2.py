@@ -13,6 +13,10 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceContractWorkbookState,
 )
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.models.system import SysImportBatch
 from app.services import maintenance_cost, maintenance_workbook_renderer
 from tests import factories as f
@@ -46,6 +50,38 @@ def _load_sales(db, b, orders, lines):
 def _line(db, raw_line_id) -> FMaintenanceLine:
     return db.execute(select(FMaintenanceLine)
                       .where(FMaintenanceLine.raw_line_id == raw_line_id)).scalar_one()
+
+
+def _add_canonical_contract_budget(
+    db,
+    *,
+    contract_no: str,
+    amount_ex_tax: Decimal,
+    amount_inc_tax: Decimal,
+) -> None:
+    """测试预算必须来自稳定合同台账，不能从销售单金额猜含税值。"""
+    suffix = contract_no.removeprefix("XS-")
+    project = MaintenanceProject(
+        project_id=f"test-project-{suffix}",
+        project_code=f"TEST-{suffix}",
+        display_name=f"测试项目-{suffix}",
+        lifecycle_status="ongoing",
+    )
+    relation = MaintenanceProjectContract(
+        project_contract_id=f"test-pc-{suffix}",
+        project_id=project.project_id,
+        contract_id=f"test-contract-{suffix}",
+        contract_no=contract_no,
+        contract_amount=amount_ex_tax,
+        amount_inc_tax=amount_inc_tax,
+        contract_status="active",
+        status_mapping_state="mapped",
+        status_mapping_version="test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        source="test",
+    )
+    db.add_all([project, relation])
 
 
 # ---------- window 层（§16.1）----------
@@ -142,6 +178,12 @@ def _one_contract(db, batch, tag: str, budget: str, cost: str):
     _load_sales(db, batch, {f"S-{tag}": f.sales_head(
         f"S-{tag}", order_no=f"XS-{tag}", amount_ex_tax=Decimal(budget))},
         [f.sales_line(f"S-{tag}", f"SL-{tag}", f"PN-{tag}", qty="1", price="1")])
+    _add_canonical_contract_budget(
+        db,
+        contract_no=f"XS-{tag}",
+        amount_ex_tax=Decimal(budget),
+        amount_inc_tax=Decimal(budget),
+    )
     _load_purchases(db, batch, {
         f"P-{tag}": f.purchase_head(f"P-{tag}", on=date(2026, 3, 5), source_type="维保需求",
                                     linked_maintenance_order_no=f"WBDD-{tag}"),
@@ -277,6 +319,12 @@ def test_workbook_doc_level_backfill(db, batch):
     _load_sales(db, batch, {"S-W": f.sales_head("S-W", order_no="XS-W",
                                                 amount_ex_tax=Decimal("5000"))},
                 [f.sales_line("S-W", "SL-W", "PN-WB", qty="1", price="1")])
+    _add_canonical_contract_budget(
+        db,
+        contract_no="XS-W",
+        amount_ex_tax=Decimal("5000.00"),
+        amount_inc_tax=Decimal("5650.00"),
+    )
     _load_purchases(db, batch, {
         "P-W": f.purchase_head("P-W", on=date(2026, 3, 5), source_type="维保需求",
                                linked_maintenance_order_no="WBDD-WB"),
@@ -383,6 +431,12 @@ def test_date_scoped_workbook_keeps_period_facts_but_blocks_budget_decision(
             ),
         },
         [f.sales_line("S-SCOPED", "SL-SCOPED", "PN-SCOPED", qty="1")],
+    )
+    _add_canonical_contract_budget(
+        db,
+        contract_no=contract,
+        amount_ex_tax=Decimal("884.96"),
+        amount_inc_tax=Decimal("1000.00"),
     )
     for suffix, order_date, cost in (
         ("OLD", date(2026, 3, 10), "800"),

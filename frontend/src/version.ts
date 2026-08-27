@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.24.0";
+export const APP_VERSION = "1.25.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.25.0",
+    date: "2026-08-27",
+    items: [
+      "维保合同总额统一使用明确的含税金额；证据不足时显示不完整，不再按固定税率猜值，项目卡片、面板、老板看板与导出保持同一口径",
+      "项目总表升级：唯一当前合同可在 Excel 中修改合同总额（含税），上传先预检再以版本校验和审计记录原子写入，过期工作簿不会覆盖新数据",
+      "项目备件成本改按全生命周期需求单汇总，区分真实 0、部分缺失与全部缺失；修复上传入口、同文件重试及提交后各页签即时刷新",
+    ],
+  },
   {
     version: "1.24.0",
     date: "2026-08-21",

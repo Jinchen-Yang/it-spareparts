@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Modal, Space, Table, Tag, message } from "antd";
 import type {
   MaintenanceBadReturn,
@@ -16,11 +16,13 @@ import {
   SHEETS,
   applyProjectMaster,
   downloadProjectMaster,
+  validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../../nav";
 import {
   ISSUE_STATUS,
+  type RegisterPanelRefresh,
   RETURN_DOCUMENT_STATUS,
   raw,
   readError,
@@ -39,6 +41,23 @@ interface SiteReturnRow {
   line: SiteIssueLine;
   obligation: MaintenanceReturnObligation | null;
   returns: MaintenanceBadReturn[];
+}
+
+async function fetchAllRows<T>(
+  loadPage: (page: number) => Promise<{ data: { rows: T[]; total: number } }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let page = 1;
+  let total = 0;
+  do {
+    const response = await loadPage(page);
+    total = response.data.total;
+    const nextRows = response.data.rows;
+    if (!nextRows.length) break;
+    rows.push(...nextRows);
+    page += 1;
+  } while (rows.length < total);
+  return rows;
 }
 
 function returnStatus(row: SiteReturnRow): { label: string; color: string } {
@@ -70,39 +89,55 @@ export function SiteReturnTab({
   projectId,
   exportBase,
   canUpload,
+  onChanged,
+  registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
   canUpload: boolean;
+  onChanged: () => Promise<boolean>;
+  registerRefresh: RegisterPanelRefresh;
 }) {
   const [rows, setRows] = useState<SiteReturnRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const [issuesResponse, obligationsResponse, returnsResponse] = await Promise.all([
-        searchSiteIssues({ project_id: projectId, page: 1, page_size: 100 }),
-        searchMaintenanceReturnObligations({
+      const [issues, obligationRows, returnDocuments] = await Promise.all([
+        fetchAllRows<SiteIssueDocument>((page) => searchSiteIssues({
+          project_id: projectId,
+          page,
+          // SiteIssueSearch 的服务端上限是 100；200 会让整个 Promise.all 直接 422。
+          page_size: 100,
+        })),
+        fetchAllRows<MaintenanceReturnObligation>((page) => searchMaintenanceReturnObligations({
           project_id: projectId,
           active_only: false,
-          page: 1,
+          page,
           page_size: 200,
-        }),
-        searchMaintenanceBadReturns({ project_id: projectId, page: 1, page_size: 100 }),
+        })),
+        fetchAllRows<MaintenanceBadReturn>((page) => searchMaintenanceBadReturns({
+          project_id: projectId,
+          page,
+          page_size: 100,
+        })),
       ]);
+      if (seq !== requestSeq.current) return false;
       const obligations = new Map(
-        obligationsResponse.data.rows.map((item) => [item.issue_line_id, item]),
+        obligationRows.map((item) => [item.issue_line_id, item]),
       );
       const returns = new Map<string, MaintenanceBadReturn[]>();
-      for (const document of returnsResponse.data.rows) {
+      for (const document of returnDocuments) {
         for (const line of document.lines) {
           const current = returns.get(line.obligation_id) ?? [];
           current.push(document);
           returns.set(line.obligation_id, current);
         }
       }
-      setRows(issuesResponse.data.rows.flatMap((issue) =>
+      setRows(issues.flatMap((issue) =>
         issue.lines.map((line) => {
           const obligation = obligations.get(line.issue_line_id) ?? null;
           return {
@@ -114,14 +149,26 @@ export function SiteReturnTab({
           };
         }),
       ));
+      return true;
     } catch (err) {
-      message.error(readError(err, "维保领用与返还状态加载失败"));
+      if (seq === requestSeq.current) {
+        setRows([]);
+        message.error(readError(err, "维保领用与返还状态加载失败"));
+      }
+      return false;
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [projectId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    registerRefresh("site", load);
+    void load();
+    return () => {
+      requestSeq.current += 1;
+      registerRefresh("site", null);
+    };
+  }, [load, registerRefresh]);
 
   // 2026-08-23：做错的领用单可整单作废（软作废，历史与审计保留）。
   // 门禁与后端一致：site_issue_manage 动作 + 成本可见（页面权限天然具备）。
@@ -151,10 +198,14 @@ export function SiteReturnTab({
         idempotency_key: idempotencyKey(),
         reason: voidReason.trim(),
       });
-      message.success(`领用单 ${voidTarget.issue_no} 已作废`);
+      const issueNo = voidTarget.issue_no;
       setVoidTarget(null);
       setVoidReason("");
-      await load();
+      if (await onChanged()) {
+        message.success(`领用单 ${issueNo} 已作废并刷新`);
+      } else {
+        message.warning(`领用单 ${issueNo} 已作废，但页面刷新失败；旧数据已失效，请重试。`);
+      }
     } catch (err) {
       message.error(readError(err, "作废失败，请刷新后重试"));
     } finally {
@@ -171,11 +222,9 @@ export function SiteReturnTab({
         canUpload={canUpload}
         hint="可回填领用事实和是否应返还；上传后页面立即刷新"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
-        onApply={async (file) => {
-          const result = await applyProjectMaster(projectId, file);
-          await load();
-          return result;
-        }}
+        onValidate={(file) => validateProjectMaster(projectId, file)}
+        onApply={(file) => applyProjectMaster(projectId, file)}
+        onAfterApply={onChanged}
       />
       <Table<SiteReturnRow>
         rowKey="issueLineId"

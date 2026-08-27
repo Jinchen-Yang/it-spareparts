@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   getMaintenanceAcceptanceChecklist: vi.fn(),
   downloadAcceptanceChecklistTemplate: vi.fn(),
   previewMaintenanceAcceptanceChecklist: vi.fn(),
+  applyMaintenanceAcceptanceChecklist: vi.fn(),
   saveBlob: vi.fn(),
 }));
 
@@ -20,6 +21,8 @@ vi.mock("../../../../api/maintenanceOperations", async () => {
       mocks.downloadAcceptanceChecklistTemplate,
     previewMaintenanceAcceptanceChecklist:
       mocks.previewMaintenanceAcceptanceChecklist,
+    applyMaintenanceAcceptanceChecklist:
+      mocks.applyMaintenanceAcceptanceChecklist,
   };
 });
 
@@ -148,5 +151,73 @@ describe("验收 tab（2026-08-21 客户反馈）", () => {
     const [, payload] = mocks.previewMaintenanceAcceptanceChecklist.mock.calls[0];
     expect(payload.file).toBe(file);
     expect(payload.idempotencyKey).toMatch(/^acceptance-checklist-/);
+  });
+
+  it("预检结束后重建文件输入框，允许再次选择同一个清单", async () => {
+    mocks.getMaintenanceAcceptanceChecklist.mockResolvedValue({
+      data: { current: null, history: [] },
+    });
+    mocks.previewMaintenanceAcceptanceChecklist.mockResolvedValue({
+      data: {
+        batch_id: "preview-invalid",
+        item_rows: 0,
+        done_rows: 0,
+        todo_rows: 0,
+        issue_rows: 1,
+        will_replace_rows: 0,
+        issues: ["测试问题行"],
+      },
+    });
+    const { container } = render(<AcceptanceTab projectId="p1" canImport />);
+    await screen.findByText(/尚未导入验收清单/);
+    const file = new File(["xlsx"], "验收.xlsx");
+    const firstInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(firstInput, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(mocks.previewMaintenanceAcceptanceChecklist).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const nextInput = container.querySelector('input[type="file"]');
+      expect(nextInput).not.toBe(firstInput);
+    });
+
+    const secondInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(secondInput, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(mocks.previewMaintenanceAcceptanceChecklist).toHaveBeenCalledTimes(2));
+  });
+
+  it("清单已落库但父级读回失败时只提示已生效但刷新失败", async () => {
+    mocks.getMaintenanceAcceptanceChecklist
+      .mockResolvedValueOnce({ data: { current: null, history: [] } })
+      .mockResolvedValue({ data: loaded });
+    mocks.previewMaintenanceAcceptanceChecklist.mockResolvedValue({
+      data: {
+        batch_id: "preview-1",
+        item_rows: 2,
+        done_rows: 1,
+        todo_rows: 1,
+        issue_rows: 0,
+        will_replace_rows: 0,
+        issues: [],
+      },
+    });
+    mocks.applyMaintenanceAcceptanceChecklist.mockResolvedValue({ data: {} });
+    const onChanged = vi.fn().mockResolvedValue(false);
+    const { container } = render(
+      <AcceptanceTab projectId="p1" canImport onChanged={onChanged} />,
+    );
+    await screen.findByText(/尚未导入验收清单/);
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "验收.xlsx")] },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /替换生效/ }));
+
+    await waitFor(() =>
+      expect(mocks.applyMaintenanceAcceptanceChecklist).toHaveBeenCalledWith("preview-1"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/验收清单已生效，但页面刷新失败/)).toBeInTheDocument();
+    expect(screen.queryByText(/验收清单已生效并刷新/)).toBeNull();
   });
 });

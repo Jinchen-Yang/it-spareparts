@@ -9,6 +9,7 @@ from sqlalchemy import (
     Date,
     LargeBinary,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -356,7 +357,7 @@ class MaintenanceSiteIssueLine(Base):
             name="ck_maintenance_site_issue_line_unit_cost",
         ),
         CheckConstraint(
-            "cost_source IS NULL OR cost_source IN ('direct_purchase', 'purchase_window', 'sales_window', 'manual')",
+            "cost_source IS NULL OR cost_source IN ('direct_purchase', 'purchase_window', 'sales_window', 'manual', 'maint_demand')",
             name="ck_maintenance_site_issue_line_cost_source",
         ),
         CheckConstraint(
@@ -496,22 +497,48 @@ class MaintenanceSiteIssueReturnEvent(Base):
 
 
 class MaintenanceProjectExpenseAttribution(Base):
-    """Canonical expense attribution; only mapped+approved facts count."""
+    """Canonical expense attribution; only mapped+approved facts count.
+
+    Two strictly separated mapping axes:
+
+    - approval axis (``status_mapping_state``/``normalized_status``): what the
+      raw BXD workflow status means;
+    - ownership axis (``ownership_mapping_state``): which historical contract
+      the expense belongs to.  Raw-backed rows keep the exact 1:1 link to
+      ``f_project_expense.raw_line_id``; standalone rows leave it NULL.
+    """
 
     __tablename__ = "maintenance_project_expense_attribution"
 
-    expense_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expense_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     project_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
     project_contract_id: Mapped[str | None] = mapped_column(
         ForeignKey("maintenance_project_contract.project_contract_id")
     )
+    raw_expense_line_id: Mapped[str | None] = mapped_column(
+        String(80),
+        ForeignKey(
+            "f_project_expense.raw_line_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_maintenance_project_expense_raw_line",
+        ),
+    )
     expense_ref: Mapped[str] = mapped_column(String(128), nullable=False)
     expense_date: Mapped[date] = mapped_column(Date, nullable=False)
     applicant: Mapped[str | None] = mapped_column(String(64))
     category: Mapped[str | None] = mapped_column(String(64))
     expense_reason: Mapped[str | None] = mapped_column(Text)
+    tax_basis: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="default_ex",
+        server_default="default_ex",
+    )
+    # Signed money: negative rows are legitimate reversed/corrected expenses.
     amount_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     amount_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     tax_rate_used: Mapped[Decimal] = mapped_column(
@@ -524,6 +551,13 @@ class MaintenanceProjectExpenseAttribution(Base):
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
     normalized_status: Mapped[str] = mapped_column(String(16), nullable=False)
     status_mapping_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    ownership_mapping_state: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="unmapped",
+        server_default="unmapped",
+    )
+    ownership_mapping_version: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -546,15 +580,38 @@ class MaintenanceProjectExpenseAttribution(Base):
             name="ck_maintenance_project_expense_unmapped_unknown",
         ),
         CheckConstraint(
-            "amount_ex_tax >= 0 AND amount_ex_tax < 1000000000000",
+            "tax_basis IN ('default_ex', 'ex', 'inc')",
+            name="ck_maintenance_project_expense_tax_basis",
+        ),
+        CheckConstraint(
+            "ownership_mapping_state IN ('mapped', 'unmapped', 'ambiguous')",
+            name="ck_maintenance_project_expense_ownership_state",
+        ),
+        CheckConstraint(
+            "ownership_mapping_version IS NULL OR "
+            "char_length(btrim(ownership_mapping_version)) > 0",
+            name="ck_maintenance_project_expense_ownership_version",
+        ),
+        # A raw-backed row may only claim mapped ownership when it actually
+        # points at a contract; ambiguous/unmapped rows never guess one.
+        CheckConstraint(
+            "raw_expense_line_id IS NULL OR ownership_mapping_state <> 'mapped' "
+            "OR project_contract_id IS NOT NULL",
+            name="ck_maintenance_project_expense_raw_mapped_contract",
+        ),
+        CheckConstraint(
+            "amount_ex_tax > -1000000000000 AND amount_ex_tax < 1000000000000",
             name="ck_maintenance_project_expense_amount",
         ),
         CheckConstraint(
-            "amount_inc_tax >= 0 AND amount_inc_tax < 1000000000000",
+            "amount_inc_tax > -1000000000000 AND amount_inc_tax < 1000000000000",
             name="ck_maintenance_project_expense_amount_inc_tax",
         ),
         CheckConstraint(
-            "amount_inc_tax = round(amount_ex_tax * NUMERIC '1.13', 2)",
+            "(tax_basis IN ('default_ex', 'ex') "
+            "AND amount_inc_tax = round(amount_ex_tax * NUMERIC '1.13', 2)) OR "
+            "(tax_basis = 'inc' "
+            "AND amount_ex_tax = round(amount_inc_tax / NUMERIC '1.13', 2))",
             name="ck_maintenance_project_expense_dual_tax_amounts",
         ),
         CheckConstraint(
@@ -562,6 +619,23 @@ class MaintenanceProjectExpenseAttribution(Base):
             name="ck_maintenance_project_expense_tax_rate_used",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_project_expense_version"),
+        # Database-enforced project consistency: an attribution may only point
+        # at a contract version of its own project (composite unique on the
+        # contract table is created by the expense-integrity migration).
+        ForeignKeyConstraint(
+            ["project_id", "project_contract_id"],
+            [
+                "maintenance_project_contract.project_id",
+                "maintenance_project_contract.project_contract_id",
+            ],
+            name="fk_maintenance_project_expense_contract_project",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        UniqueConstraint(
+            "raw_expense_line_id",
+            name="uq_maintenance_project_expense_raw_line",
+        ),
         UniqueConstraint("project_id", "expense_ref", name="uq_maintenance_project_expense_ref"),
         Index(
             "ix_maintenance_project_expense_project_date",

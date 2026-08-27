@@ -69,24 +69,33 @@ function statQty(stat: Stat<string | number> | undefined): string {
   }
 }
 
-/** 成本五件套：ready 时取指定字段，其余状态照六态语义说话（不落回 0）。 */
+/** 成本五件套：partial/stale 仍可展示已知下限；阻塞态绝不落回 0。 */
 function fromCostBundle(
   stat: KnownCostStat | undefined,
   pick: (value: NonNullable<KnownCostStat["value"]>) => string,
 ): string {
   if (!stat) return "—";
-  if (stat.state !== "ready" || stat.value === null) {
-    // 只借它的 state 说话，值一律置空——非 ready 状态本来就没有数字可显示
+  if (!["ready", "partial", "stale"].includes(stat.state) || stat.value === null) {
     return statText({ state: stat.state, value: null, as_of: stat.as_of });
   }
   return pick(stat.value);
 }
 
 const costAmount = (stat: KnownCostStat | undefined) =>
-  fromCostBundle(stat, (value) => `${value.known_amount} 元`);
+  fromCostBundle(stat, (value) => {
+    if (value.known_amount == null
+        || (value.quality === "incomplete"
+        && value.missing_lines > 0
+        && Number(value.coverage_pct ?? 0) === 0)) {
+      return "暂无可计算成本";
+    }
+    return `${value.known_amount} 元${value.quality === "incomplete" ? "（已知下限）" : ""}`;
+  });
 
 const missingLines = (stat: KnownCostStat | undefined) =>
-  fromCostBundle(stat, (value) => `${value.missing_lines} 行无参照价`);
+  fromCostBundle(stat, (value) => value.known_amount == null
+    ? "暂无有效需求明细"
+    : `${value.missing_lines} 行无参照价`);
 
 /** 回款进度条（2026-08-22 客户反馈）：已回款/合同额，卡片直读。
  * 六态语义不破坏：无权限/未导入各说各的，算不出不画 0%。 */
@@ -98,7 +107,9 @@ function CollectionBar({
   contract: Stat<string | number> | undefined;
 }) {
   const collectedNum = statNumber(collected);
-  const contractNum = statNumber(contract);
+  // 回款率的分母必须是完整、当前的合同事实。partial/stale 即使携带数值，
+  // 也只能作为已知小计/过期参考展示，不能参与百分比计算。
+  const contractNum = contract?.state === "ready" ? statNumber(contract) : null;
   if (collectedNum === null) {
     return (
       <div style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
@@ -109,6 +120,21 @@ function CollectionBar({
   const pct = contractNum && contractNum > 0
     ? Math.round((collectedNum / contractNum) * 100)
     : null;
+  let contractDetail: string;
+  if (contract?.state === "partial") {
+    const knownSubtotal = statNumber(contract);
+    contractDetail = knownSubtotal === null
+      ? "合同事实不完整（暂无已知小计）"
+      : `已知小计 ¥${knownSubtotal.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（合同事实不完整）`;
+  } else if (contract?.state === "stale") {
+    contractDetail = "合同额数据已过期";
+  } else if (contractNum !== null) {
+    contractDetail = contractNum > 0
+      ? `¥${contractNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（${pct}%）`
+      : "合同额 ¥0（真实零，无法计算比例）";
+  } else {
+    contractDetail = `合同额${statText(contract)}`;
+  }
   return (
     <div style={{ marginTop: 2 }}>
       <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.55)", marginBottom: 2 }}>
@@ -116,14 +142,7 @@ function CollectionBar({
         <span style={{ color: "#52c41a", fontWeight: 600 }}>
           ¥{collectedNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}
         </span>
-        {contractNum !== null && (
-          <span>
-            {" / "}
-            {contractNum > 0
-              ? `¥${contractNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（${pct}%）`
-              : "合同额缺失"}
-          </span>
-        )}
+        <span>{" / "}{contractDetail}</span>
       </div>
       {pct !== null && (
         <Progress
@@ -149,6 +168,8 @@ export function ProjectCard({ row }: ProjectCardProps) {
     ratioRaw?.state === "ready" && ratioRaw.value !== null
       ? Number(ratioRaw.value)
       : null;
+  const ratioIsLowerBound = row.known_apply_cost_inc_tax.value?.quality === "incomplete"
+    && Number(row.known_apply_cost_inc_tax.value?.coverage_pct ?? 0) > 0;
 
   return (
     <Card
@@ -178,7 +199,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
           {/* 2026-08-21 客户反馈：卡片显示销售名称，不再显示项目经理 */}
           <Text>销售：{row.salesperson || "—"}</Text>
           <Text>
-            合同总额：{money(row.contract_amount_inc_tax)}
+            合同总额（含税）：{money(row.contract_amount_inc_tax)}
             {/* #51 诚实标注：XSDD 回退层的共用单/缺单，金额仅参考 */}
             {row.contract_shared ? "（共用单）" : ""}
             {row.contract_incomplete ? "（不完整）" : ""}
@@ -231,7 +252,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
             percent={Math.min(ratio, 100)}
             strokeColor={status?.color}
             size="small"
-            format={() => `${ratio}%`}
+            format={() => `${ratio}%${ratioIsLowerBound ? "（已知下限）" : ""}`}
           />
         )}
 

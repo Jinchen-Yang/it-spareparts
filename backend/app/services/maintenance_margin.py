@@ -43,6 +43,7 @@ def _complete_status(cost_quality: str) -> str:
 
 def calculate_contract_margin(
     *,
+    revenue_inc: Decimal | None,
     revenue_ex: Decimal | None,
     tax_rate: Decimal | None,
     parts_cost_inc_tax: Decimal | None,
@@ -59,11 +60,15 @@ def calculate_contract_margin(
 ) -> dict[str, Decimal | str | None]:
     """计算合同级含税、未税备件毛利与合同级贡献毛利。
 
-    合同收入统一按 13% 从未税值生成含税值，传入的原始 ``tax_rate`` 只为兼容旧调用，
-    不参与业务计算。``unknown_expense_total`` 同样只兼容迁移前的未拆税费用证据。
+    两套收入必须由各自的事实源显式传入；本函数绝不跨税口径反推金额。
+    ``tax_rate`` 只为兼容旧调用，不参与业务计算；``unknown_expense_total``
+    同样只兼容迁移前的未拆税费用证据。
     """
     del tax_rate
+    revenue_inc = _money(revenue_inc)
     revenue_ex = _money(revenue_ex)
+    if revenue_ambiguous_inc:
+        revenue_inc = None
     parts_cost_inc_tax = _money(parts_cost_inc_tax)
     parts_cost_ex_tax = _money(parts_cost_ex_tax)
     expense_inc = _money(expense_inc)
@@ -84,12 +89,8 @@ def calculate_contract_margin(
         "ex": expense_data_available and expense_ex is None,
     }
 
-    revenue_inc = None
-    if not revenue_ambiguous_inc and revenue_ex is not None:
-        revenue_inc = tax_policy.inc_from_ex(revenue_ex)
-
     result: dict[str, Decimal | str | None] = {
-        "revenue_inc": revenue_inc,
+        "revenue_inc": None if revenue_ambiguous_inc else revenue_inc,
         "revenue_ex": None if revenue_ambiguous_ex else revenue_ex,
         "parts_cost_inc_tax": parts_cost_inc_tax,
         "parts_cost_ex_tax": parts_cost_ex_tax,
@@ -113,6 +114,7 @@ def calculate_contract_margin(
         for basis in ("inc", "ex"):
             parts_cost = parts_cost_inc_tax if basis == "inc" else parts_cost_ex_tax
             cost_quality = cost_quality_inc if basis == "inc" else cost_quality_ex
+            revenue = revenue_inc if basis == "inc" else revenue_ex
             revenue_ambiguous = (
                 revenue_ambiguous_inc if basis == "inc" else revenue_ambiguous_ex
             )
@@ -120,7 +122,7 @@ def calculate_contract_margin(
                 "ambiguous_revenue"
                 if revenue_ambiguous
                 else "missing_revenue"
-                if revenue_ex is None
+                if revenue is None
                 else "incomplete_cost"
                 if cost_quality not in _COMPLETE_QUALITIES or parts_cost is None
                 else "filtered_scope"
@@ -158,7 +160,7 @@ def calculate_contract_margin(
 
     if revenue_ambiguous_inc:
         result["parts_profit_status_inc"] = "ambiguous_revenue"
-    elif revenue_ex is None:
+    elif revenue_inc is None:
         result["parts_profit_status_inc"] = "missing_revenue"
     elif not cost_complete_inc or parts_cost_inc_tax is None:
         result["parts_profit_status_inc"] = "incomplete_cost"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   Alert,
@@ -23,7 +23,7 @@ import {
 import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { BoardProjectRow } from "../../api/maintenanceBossBoard";
-import { searchBoardProjects } from "../../api/maintenanceBossBoard";
+import { getBoardProject } from "../../api/maintenanceBossBoard";
 import {
   applyProjectMaster,
   downloadProjectMaster,
@@ -36,8 +36,10 @@ import {
 import type { MaintenanceProject } from "../../api/maintenanceProjects";
 import { getMaintenanceProjectWorkspace } from "../../api/maintenanceOperations";
 import type { MaintenanceCollectionSnapshotRow } from "../../api/maintenanceOperations";
+import type { MaintenanceProjectOperationsSummary } from "../../api/maintenanceOperations";
 import { searchMaintenanceManagerAccounts } from "../../api/maintenanceOperations";
 import type { MaintenanceManagerAccount } from "../../api/maintenanceOperations";
+import ProjectManagerAssignmentControl from "../../components/maintenance/ProjectManagerAssignmentControl";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 import OverviewTab from "./panel/OverviewTab";
@@ -49,6 +51,8 @@ import AcceptanceTab from "./panel/AcceptanceTab";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import {
   LIFECYCLE_LABEL,
+  type PanelRefresh,
+  type RegisterPanelRefresh,
   STATUS_COLOR,
   readError,
   safeFilenamePart,
@@ -60,12 +64,12 @@ const { Text, Title } = Typography;
 interface HealthMetrics {
   received: number | null;
   progress: number | null;
-  /** 四类成本（2026-08-20 用户拍板）：缺口径/缺数据一律显示 0，后期补齐。 */
+  /** 四类成本：null=当前没有可靠口径，不能用 0 冒充。 */
   costs: {
-    parts: number;
-    expense: number;
-    issued: number;
-    returned: number;
+    parts: number | null;
+    expense: number | null;
+    issued: number | null;
+    returned: number | null;
   };
 }
 
@@ -77,7 +81,18 @@ const HEALTH_VALUE_STYLE = { fontSize: 18, fontWeight: 600 } as const;
  * 聚合行缺失（撞名/未入板）整格「聚合数据暂缺」，不影响下方明细。
  */
 function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: HealthMetrics }) {
-  const contractText = row ? statText(row.contract_amount_inc_tax) : "聚合数据暂缺";
+  const contractStat = row?.contract_amount_inc_tax;
+  const contractText = !row
+    ? "聚合数据暂缺"
+    : contractStat?.state === "partial"
+      ? contractStat.value === null || contractStat.value === ""
+        ? "合同事实不完整（暂无已知小计）"
+        : `${statText(contractStat)}（已知小计，合同事实不完整）`
+      : statText(contractStat);
+  const costValue = row?.known_apply_cost_inc_tax.value;
+  const partsIsLowerBound = costValue?.quality === "incomplete"
+    && costValue.known_amount != null
+    && Number(costValue.coverage_pct ?? 0) > 0;
 
   let ratioText: string;
   let ratioColor: string | undefined;
@@ -87,29 +102,36 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
     if (row.cost_ratio_pct.value === null || row.cost_ratio_pct.value === "") {
       ratioText = "数据不足";
     } else {
-      ratioText = `${row.cost_ratio_pct.value}%`;
+      ratioText = `${row.cost_ratio_pct.value}%${partsIsLowerBound ? "（已知下限）" : ""}`;
       ratioColor = row.card_status ? STATUS_COLOR[row.card_status] : undefined;
     }
   } else {
     ratioText = statText(row.cost_ratio_pct);
   }
 
-  const costLines: { label: string; value: number; color: string; hint?: string }[] = [
+  const costLines: {
+    label: string;
+    value: number | null;
+    color: string;
+    hint?: string;
+    lowerBound?: boolean;
+  }[] = [
     { label: "备件成本", value: metrics.costs.parts, color: "#1677ff",
+      lowerBound: partsIsLowerBound,
       hint: "本项目挂靠需求单明细的已知备件成本（含税）" },
     { label: "报销成本", value: metrics.costs.expense, color: "#fa8c16",
       hint: "已批准报销（含税）" },
     { label: "已领用成本", value: metrics.costs.issued, color: "#722ed1",
       hint: "现场领用（已确认/已更正）的已知成本（含税）" },
     { label: "返还成本", value: metrics.costs.returned, color: "#13c2c2",
-      hint: "返还成本口径建设中，暂计 0，后期补上" },
+      hint: "返还成本口径建设中，当前不提供猜测值" },
   ];
 
   return (
     <Card size="small" data-testid="panel-health-band">
       <Row gutter={16}>
         <Col xs={12} sm={6}>
-          <Statistic title="合同额" value={contractText} valueStyle={HEALTH_VALUE_STYLE} />
+          <Statistic title="合同总额（含税）" value={contractText} valueStyle={HEALTH_VALUE_STYLE} />
         </Col>
         <Col xs={12} sm={6}>
           <Statistic
@@ -142,7 +164,9 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
             <Col span={18}>
               <Tooltip title={line.hint}>
                 <Text strong style={{ color: line.color, fontSize: 16 }}>
-                  ¥{line.value.toFixed(2)}
+                  {line.value == null
+                    ? "数据不足"
+                    : `¥${line.value.toFixed(2)}${line.lowerBound ? "（已知下限）" : ""}`}
                 </Text>
               </Tooltip>
             </Col>
@@ -163,14 +187,25 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
  */
 export function MaintenanceProjectPanelPage() {
   const { projectId = "" } = useParams();
+  // React Router 会复用同一个 route element。以项目 ID 强制重建内部状态，确保
+  // A 项目的在途请求、tab 筛选和旧金额都不能进入 B 项目的操作上下文。
+  return <MaintenanceProjectPanelContent key={projectId} projectId={projectId} />;
+}
+
+function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const [row, setRow] = useState<BoardProjectRow | null>(null);
   const [project, setProject] = useState<MaintenanceProject | null>(null);
+  const [operationsProject, setOperationsProject] =
+    useState<MaintenanceProjectOperationsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [collectionRows, setCollectionRows] = useState<MaintenanceCollectionSnapshotRow[]>([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
+  const projectRequestSeq = useRef(0);
+  const workspaceRequestSeq = useRef(0);
+  const tabRefreshers = useRef(new Map<string, PanelRefresh>());
   const [metrics, setMetrics] = useState<HealthMetrics>({
     received: null, progress: null,
-    costs: { parts: 0, expense: 0, issued: 0, returned: 0 },
+    costs: { parts: null, expense: null, issued: null, returned: null },
   });
 
   const perms = readPermissionMap();
@@ -188,70 +223,170 @@ export function MaintenanceProjectPanelPage() {
   })();
 
   const loadProject = useCallback(async () => {
+    const seq = ++projectRequestSeq.current;
     setError(null);
     try {
       const detail = await getMaintenanceProject(projectId);
       const stable = detail.data?.project ?? null;
+      if (seq !== projectRequestSeq.current) return false;
       setProject(stable);
       let hit: BoardProjectRow | null = null;
-      if (stable?.display_name) {
-        const resp = await searchBoardProjects({
-          q: stable.display_name.slice(0, 128),
-          page_size: 50,
-        });
-        hit = resp.data.rows.find((item) => item.project_id === projectId) ?? null;
+      let aggregateReady = true;
+      if (stable) {
+        try {
+          hit = (await getBoardProject(projectId)).data;
+        } catch {
+          // stable 项目仍可展示基础信息；聚合卡可能因归档无活动或来源暂不可用
+          // 而不存在，不能让整个详情页随之白屏。
+          hit = null;
+          aggregateReady = false;
+        }
       }
-      const knownParts = hit?.known_apply_cost_inc_tax?.state === "ready"
-        ? hit.known_apply_cost_inc_tax.value?.known_amount
+      if (seq !== projectRequestSeq.current) return false;
+      const costStat = hit?.known_apply_cost_inc_tax;
+      const costValue = costStat?.value;
+      const noLines = costValue?.known_amount == null;
+      const allMissing = costValue?.quality === "incomplete"
+        && Number(costValue.coverage_pct ?? 0) === 0
+        && costValue.missing_lines > 0;
+      const knownParts = costStat
+        && ["ready", "partial", "stale"].includes(costStat.state)
+        && costValue != null
+        && !noLines
+        && !allMissing
+        ? Number(costValue.known_amount)
         : null;
-      if (knownParts != null) {
-        setMetrics((prev) => ({
-          ...prev,
-          costs: { ...prev.costs, parts: Number(knownParts) },
-        }));
-      }
+      setMetrics((prev) => ({
+        ...prev,
+        costs: {
+          ...prev.costs,
+          parts: knownParts != null && Number.isFinite(knownParts) ? knownParts : null,
+        },
+      }));
       setRow(hit);
       if (!hit && !stable) setError("项目不存在或无权查看");
+      return Boolean(stable) && aggregateReady;
     } catch (err) {
-      setError(readError(err, "项目面板加载失败"));
+      if (seq === projectRequestSeq.current) {
+        // 读回失败必须失效旧项目快照；否则刚落库的新值旁边还会显示旧金额。
+        setProject(null);
+        setRow(null);
+        setMetrics((prev) => ({
+          ...prev,
+          costs: { ...prev.costs, parts: null },
+        }));
+        setError(readError(err, "项目面板加载失败"));
+      }
+      return false;
     }
   }, [projectId]);
 
   // 回款指标 + 快照行：健康带与「回款」tab 共用同一份 workspace 数据。
   const loadWorkspace = useCallback(async () => {
+    const seq = ++workspaceRequestSeq.current;
     setCollectionLoading(true);
     try {
+      const pageSize = 100;
       const response = await getMaintenanceProjectWorkspace(projectId, {
         collection_page: 1,
-        collection_page_size: 100,
+        collection_page_size: pageSize,
         requisition_page_size: 1,
         expense_page_size: 1,
       });
-      setCollectionRows(response.data.collection_snapshots.rows);
+      if (seq !== workspaceRequestSeq.current) return false;
+      const collectionRows = [...response.data.collection_snapshots.rows];
+      let collectionTotal = response.data.collection_snapshots.total;
+      let page = 2;
+      while (collectionRows.length < collectionTotal) {
+        const next = await getMaintenanceProjectWorkspace(projectId, {
+          collection_page: page,
+          collection_page_size: pageSize,
+          requisition_page_size: 1,
+          expense_page_size: 1,
+        });
+        if (seq !== workspaceRequestSeq.current) return false;
+        const nextRows = next.data.collection_snapshots.rows;
+        collectionTotal = next.data.collection_snapshots.total;
+        if (!nextRows.length) break;
+        collectionRows.push(...nextRows);
+        page += 1;
+      }
+      setCollectionRows(collectionRows);
+      setOperationsProject(response.data.project);
       const wsMetrics = response.data.project.metrics;
-      setMetrics({
+      // 函数式更新：workspace 与 boss-board 并发完成时，绝不能用闭包里的初始
+      // parts=0/null 覆盖 loadProject 刚写入的真实成本。
+      setMetrics((prev) => ({
         received: wsMetrics.received_amount,
         progress: wsMetrics.collection_progress_pct,
         costs: {
-          parts: metrics.costs.parts, // 备件成本来自 boss 聚合行，loadProject 里回填
-          expense: Number(wsMetrics.approved_expense_inc_tax ?? 0),
-          issued: Number(wsMetrics.site_requisition_known_cost_inc_tax ?? 0),
-          returned: 0, // 返还成本口径建设中，暂计 0（后期补上）
+          ...prev.costs,
+          expense: wsMetrics.approved_expense_inc_tax == null
+            ? null : Number(wsMetrics.approved_expense_inc_tax),
+          issued: wsMetrics.site_requisition_known_cost_inc_tax == null
+            ? null : Number(wsMetrics.site_requisition_known_cost_inc_tax),
+          returned: null,
         },
-      });
+      }));
+      return true;
     } catch (err) {
-      message.error(readError(err, "回款状态加载失败"));
+      if (seq === workspaceRequestSeq.current) {
+        setCollectionRows([]);
+        setOperationsProject(null);
+        setMetrics((prev) => ({
+          received: null,
+          progress: null,
+          costs: {
+            ...prev.costs,
+            expense: null,
+            issued: null,
+            returned: null,
+          },
+        }));
+        message.error(readError(err, "回款状态加载失败"));
+      }
+      return false;
     } finally {
-      setCollectionLoading(false);
+      if (seq === workspaceRequestSeq.current) setCollectionLoading(false);
     }
   }, [projectId]);
+
+  const registerTabRefresh = useCallback<RegisterPanelRefresh>((key, refresh) => {
+    if (refresh) tabRefreshers.current.set(key, refresh);
+    else tabRefreshers.current.delete(key);
+  }, []);
+
+  const refreshProject = useCallback(async () => {
+    // 快照在调用开始时固定：父级两个读回 + 当前已挂载 tab 的读回都结束，才允许
+    // WorkbookRoundTrip 报“已覆盖并刷新”。某个 tab 失败时它负责清空自己的旧值。
+    const refreshers: PanelRefresh[] = [
+      loadProject,
+      loadWorkspace,
+      ...tabRefreshers.current.values(),
+    ];
+    const results = await Promise.allSettled(refreshers.map((refresh) => refresh()));
+    return results.every((result) =>
+      result.status === "fulfilled" && result.value !== false);
+  }, [loadProject, loadWorkspace]);
+
+  const refreshAfterChange = useCallback(async () => {
+    if (!(await refreshProject())) {
+      message.warning("操作已写入，但页面刷新失败；旧数据已失效，请点击重试。");
+    }
+  }, [refreshProject]);
 
   useEffect(() => {
     void loadProject();
     void loadWorkspace();
+    return () => {
+      projectRequestSeq.current += 1;
+      workspaceRequestSeq.current += 1;
+    };
   }, [loadProject, loadWorkspace]);
 
   const lifecycle = row?.lifecycle ?? project?.lifecycle_status;
+  const canManageManagerAssignment =
+    localStorage.getItem("role") === "admin" && canManageProject;
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -266,8 +401,15 @@ export function MaintenanceProjectPanelPage() {
           <EditBasicsButton
             projectId={projectId}
             disabled={!canManageProject}
-            onSaved={loadProject}
+            onSaved={() => { void refreshAfterChange(); }}
           />
+          {operationsProject ? (
+            <ProjectManagerAssignmentControl
+              project={operationsProject}
+              canManage={canManageManagerAssignment}
+              onChanged={refreshProject}
+            />
+          ) : null}
         </Space>
         <WorkbookRoundTrip
           size="small"
@@ -277,11 +419,8 @@ export function MaintenanceProjectPanelPage() {
           hint="六 sheet 一次下载，回填后整份上传覆盖"
           onDownload={() => downloadProjectMaster(projectId)}
           onValidate={(file) => validateProjectMaster(projectId, file)}
-          onApply={async (file) => {
-            const result = await applyProjectMaster(projectId, file);
-            await Promise.all([loadProject(), loadWorkspace()]);
-            return result;
-          }}
+          onApply={(file) => applyProjectMaster(projectId, file)}
+          onAfterApply={refreshProject}
         />
       </Flex>
 
@@ -299,8 +438,10 @@ export function MaintenanceProjectPanelPage() {
                 projectId={projectId}
                 row={row}
                 project={project}
+                operationsProject={operationsProject}
                 canAssign={canManageProject}
-                onAssigned={loadProject}
+                onAssigned={refreshProject}
+                registerRefresh={registerTabRefresh}
               />
             ),
           },
@@ -313,6 +454,8 @@ export function MaintenanceProjectPanelPage() {
                 exportBase={exportBase}
                 canUpload={canUpload}
                 contractNos={row?.contract_nos ?? []}
+                onChanged={refreshProject}
+                registerRefresh={registerTabRefresh}
               />
             ),
           },
@@ -320,7 +463,13 @@ export function MaintenanceProjectPanelPage() {
             key: "expense",
             label: "报销",
             children: (
-              <ExpenseTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+              <ExpenseTab
+                projectId={projectId}
+                exportBase={exportBase}
+                canUpload={canUpload}
+                onChanged={refreshProject}
+                registerRefresh={registerTabRefresh}
+              />
             ),
           },
           {
@@ -333,7 +482,8 @@ export function MaintenanceProjectPanelPage() {
                 canUpload={canUpload}
                 rows={collectionRows}
                 loading={collectionLoading}
-                onRefresh={loadWorkspace}
+                onRefresh={refreshProject}
+                registerRefresh={registerTabRefresh}
               />
             ),
           },
@@ -341,7 +491,13 @@ export function MaintenanceProjectPanelPage() {
             key: "site",
             label: "领用与返还",
             children: (
-              <SiteReturnTab projectId={projectId} exportBase={exportBase} canUpload={canUpload} />
+              <SiteReturnTab
+                projectId={projectId}
+                exportBase={exportBase}
+                canUpload={canUpload}
+                onChanged={refreshProject}
+                registerRefresh={registerTabRefresh}
+              />
             ),
           },
           {
@@ -351,6 +507,7 @@ export function MaintenanceProjectPanelPage() {
               <AcceptanceTab
                 projectId={projectId}
                 canImport={canImportChecklist}
+                onChanged={refreshProject}
               />
             ),
           },
@@ -360,7 +517,7 @@ export function MaintenanceProjectPanelPage() {
   );
 }
 
-/** 项目名旁的编辑入口：改起止时间/负责人等，与表 6 sheet 01 联通（#39）。 */
+/** 项目名旁的编辑入口：改名称、期限与可见账号；负责人账号走独立 OCC 接口。 */
 function EditBasicsButton({
   projectId,
   disabled,
@@ -382,7 +539,6 @@ function EditBasicsButton({
       const proj = resp.data.project;
       form.setFieldsValue({
         display_name: proj.display_name,
-        project_manager_id: proj.project_manager_id,
         version: proj.version,
         period:
           proj.period_from || proj.period_to
@@ -394,9 +550,8 @@ function EditBasicsButton({
         // 项目级可见账号（2026-08-25）：回显当前 viewer 名单
         visible_usernames: proj.visible_usernames ?? [],
       });
-      // 加载系统内账号供「维保负责人」下拉选择。2026-08-21 改走负责人搜索
-      // 端点（page_maintenance 门）——原 /accounts 受 page_accounts 门，
-      // 无该权限的角色（如维保负责人）下拉会空白。
+      // 加载系统内账号供项目可见范围选择。负责人账号改派由页头独立的
+      // primary_manager OCC 控件完成，不能伪装成基础字段更新。
       try {
         // 评审阻塞点：账号列表只取前 100 无法选到后面的活跃账号——
         // 拉满 500（后端上限），超出极端规模再考虑远程搜索。
@@ -461,20 +616,6 @@ function EditBasicsButton({
         <Form form={form} layout="vertical">
           <Form.Item name="display_name" label="项目名称">
             <Input />
-          </Form.Item>
-          <Form.Item name="project_manager_id" label="维保负责人">
-            <Select
-              allowClear
-              showSearch
-              placeholder="选择系统内账号/人名"
-              optionFilterProp="label"
-              options={accounts.map((account) => ({
-                value: account.username,
-                label: account.display_name
-                  ? `${account.username} · ${account.display_name}`
-                  : account.username,
-              }))}
-            />
           </Form.Item>
           {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
           <Form.Item name="period" label="维保期限（起止）">

@@ -89,6 +89,7 @@ def test_admin_can_create_project_and_read_it_back(db):
         f"/api/maintenance/projects/stable/{project['project_id']}"
     )
     assert read_back.status_code == 200, read_back.text
+    assert read_back.headers["cache-control"] == "no-store"
     # GET 载荷带可见账号回显键（2026-08-25 项目级可见账号多选）
     assert read_back.json()["project"] == {**project, "visible_usernames": []}
     audit = db.scalar(select(MaintenanceProjectAuditLog))
@@ -421,9 +422,8 @@ def test_project_and_audit_are_one_transaction(db, monkeypatch):
     assert db.scalar(select(MaintenanceProjectAuditLog)) is None
 
 
-def test_contract_total_falls_back_to_inc_tax(db):
-    """2026-08-26 客户拍板：合同总额显示含税——台账只写未税 contract_amount
-    时，overview 与目录的回退必须 ×1.13 归一，不再把未税数当含税展示。"""
+def test_contract_total_does_not_guess_inc_tax_from_ex_tax(db):
+    """未税对账额不能证明含税合同额；overview 必须保留未税证据并失败关闭。"""
     from decimal import Decimal as D
     from fastapi.testclient import TestClient  # noqa: F401
     project = MaintenanceProject(
@@ -453,12 +453,24 @@ def test_contract_total_falls_back_to_inc_tax(db):
             db, project.project_id, as_of=date(2026, 8, 1),
             user_ctx=_admin_ctx())
         assert payload is not None
-        assert str(payload["total_contract_amount"]) == "113.00"
-        assert str(payload["contracts"][0]["contract_amount"]) == "113.00"
+        assert payload["total_contract_amount"] is None
+        assert payload["contracts"][0]["contract_amount"] is None
+        assert payload["contracts"][0]["amount_inc_tax"] is None
+        assert payload["contracts"][0]["amount_ex_tax"] == D("100.00")
+        assert payload["completeness"]["status"] == "incomplete"
+        assert payload["completeness"]["issues"] == [{
+            "code": "missing_contract_amount",
+            "contract_ids": ["XSDD-INC-1"],
+        }]
     else:
         resp = client.get(f"/api/maintenance/projects/stable/{project.project_id}")
         assert resp.status_code == 200
-        assert resp.json()["project"]["total_contract_amount"] == "113.00"
+        body = resp.json()["project"]
+        assert body["total_contract_amount"] is None
+        assert body["contracts"][0]["contract_amount"] is None
+        assert body["contracts"][0]["amount_inc_tax"] is None
+        assert body["contracts"][0]["amount_ex_tax"] == "100.00"
+        assert body["completeness"]["status"] == "incomplete"
 
 
 def _admin_ctx():

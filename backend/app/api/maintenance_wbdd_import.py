@@ -79,7 +79,8 @@ def upload_wbdd(
                 {"code": exc.code, "message": exc.message},
             ) from exc
         except MaintenanceCostRecomputeBusy as exc:
-            # 导入已提交（upsert 幂等）；仅成本重算在忙。客户端可整体重试。
+            # 源事实、回执与重算同事务；busy 时整批回滚，客户端整体重试。
+            db.rollback()
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 {"code": "recompute_busy", "message": "成本重算进行中，请稍后重试"},
