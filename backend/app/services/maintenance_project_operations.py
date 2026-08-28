@@ -59,6 +59,7 @@ from app.services import maintenance_consumption_cost
 from app.services import maintenance_periods
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
+from app.services import maintenance_project_identity
 from app.services import maintenance_warehouse_site_issue_bridge
 from app.services.query_filters import active_beta_maintenance_orders
 
@@ -3640,6 +3641,24 @@ def create_contract(
     reason: str,
     operated_by: str,
 ) -> dict | None:
+    if db.scalar(select(MaintenanceProject.project_id).where(
+        MaintenanceProject.project_id == project_id
+    )) is None:
+        return None
+    # Every XSDD writer follows one global order: data-change -> XSDD ->
+    # workbook/project rows.  _prepare_contract_expense_resync reacquires the
+    # same transaction lock, so taking it here closes the global/XSDD AB-BA
+    # window without changing the downstream envelope.
+    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
+    try:
+        maintenance_project_identity.claim_xsdd_project(
+            db,
+            value=contract_no,
+            project_id=project_id,
+            source="contract_create_api",
+        )
+    except maintenance_project_identity.XsddProjectConflict as exc:
+        raise MaintenanceOperationConflict(str(exc)) from exc
     envelope = _prepare_contract_expense_resync(
         db,
         contract_nos={contract_no},

@@ -182,6 +182,15 @@ export function ProjectCard({ row }: ProjectCardProps) {
         <Title level={5} style={{ margin: 0 }} ellipsis={{ tooltip: row.display_name }}>
           {row.display_name}
         </Title>
+        {row.aliases?.length ? (
+          <Text
+            type="secondary"
+            style={{ fontSize: 11.5 }}
+            data-testid="maintenance-project-aliases"
+          >
+            其他名称：{row.aliases.join("、")}
+          </Text>
+        ) : null}
         <Space size={4} wrap>
           {status ? <Tag color={status.color}>{status.label}</Tag> : null}
           {/* R5：台账没给项目周期时以明确状态示人，不让卡片看起来「什么都没说」 */}

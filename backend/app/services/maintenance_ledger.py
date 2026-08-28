@@ -846,6 +846,8 @@ def _upsert_project(
     ``changed`` 只表达既有项目的字段级真实变化（新建不算 field change），
     供 apply_batch 汇总决定是否 bump 工作簿版本；本子函数不做任何 bump。
     """
+    from app.services import maintenance_project_identity
+
     code = _project_code_for_row(row)
     project = db.execute(
         select(MaintenanceProject).where(
@@ -890,6 +892,12 @@ def _upsert_project(
             raise LedgerBatchError(
                 f"项目编号「{code}」被并发创建，整批未应用，请重试"
             ) from exc
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=display_name,
+            source=LEDGER_SOURCE,
+        )
         db.add(
             MaintenanceProjectAuditLog(
                 project_id=project.project_id,
@@ -932,7 +940,19 @@ def _upsert_project(
     }
     after = dict(before)
     if project.display_name != display_name:
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=project.display_name,
+            source=LEDGER_SOURCE,
+        )
         project.display_name = display_name
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=display_name,
+            source=LEDGER_SOURCE,
+        )
         after["display_name"] = display_name
         changed = True
     # 台账/名称给出了期限才覆盖（#51）；项目列是唯一业务事实，service-period
@@ -1736,11 +1756,20 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         .all()
     )
     # Global order for contract evidence writers/readers:
-    # import batch -> contract advisory -> project-code advisory -> workbook
-    # states (one sorted pass) -> projects (sorted) -> contracts/milestones.
+    # import batch -> XSDD advisory -> contract advisory -> project-code
+    # advisory -> workbook states (one sorted pass) -> projects (sorted) ->
+    # contracts/milestones.  Direct contract writes use the same XSDD ->
+    # contract-advisory order, avoiding an AB-BA deadlock on the two identities.
     # The remediation utility uses the same advisory identities after it has
     # locked the matching batch/row evidence envelope, so neither side can hold
     # workbook state while waiting for the other's batch lock.
+    from app.services import maintenance_project_identity
+
+    # XSDD identity must be locked before workbook/project rows.  Otherwise
+    # the database trigger would first acquire it during contract INSERT while
+    # this transaction already holds project locks, inverting the lock order
+    # used by manual assignment and master-workbook apply.
+    maintenance_project_identity.lock_xsdd_identities(db, contract_order_nos)
     _lock_contract_evidence_identities(db, contract_order_nos)
     locked_project_ids, workbook_states, related_by_contract = _lock_target_projects(
         db,
@@ -1778,6 +1807,15 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             new_project_ids.add(project.project_id)
         if project_changed:
             changed_project_ids.add(project.project_id)
+        try:
+            maintenance_project_identity.claim_xsdd_project(
+                db,
+                value=row.order_no,
+                project_id=project.project_id,
+                source=LEDGER_SOURCE,
+            )
+        except maintenance_project_identity.XsddProjectConflict as exc:
+            raise LedgerBatchError(str(exc)) from exc
         contract, contract_changed, ownership_changed = _upsert_contract(
             db,
             row,

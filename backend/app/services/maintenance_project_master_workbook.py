@@ -62,7 +62,7 @@ from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.sales import FSalesOrder
 from app.security import FULL_SCOPE_ROLES, UserContext
-from app.services import maintenance_cost_quality
+from app.services import maintenance_cost_quality, maintenance_project_identity
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_collection_milestones import write_collection_milestone
@@ -3495,6 +3495,15 @@ def _ensure_contract_for_xsdd_apply(
     """Create one current fallback relation inside the locked apply transaction."""
 
     contract_id = f"xsdd-{contract_no}"
+    try:
+        maintenance_project_identity.claim_xsdd_project(
+            db,
+            value=contract_no,
+            project_id=project.project_id,
+            source="project_master_workbook",
+        )
+    except maintenance_project_identity.XsddProjectConflict as exc:
+        raise WorkbookError("contract_shared", str(exc)) from exc
     # Serialize this stable identity across projects; project row locks alone do
     # not protect two different projects from concurrently claiming one XSDD.
     db.execute(select(func.pg_advisory_xact_lock(
@@ -4285,6 +4294,42 @@ def apply_project_master_v2(
     assignment_source_ids = {
         change.source_order_id for change in plan.assignment_changes
     }
+    prestate_contract_nos = {
+        change.contract_no for change in plan.milestone_changes
+    } | {
+        operation.contract_no for operation in plan.receipt_ops
+    } | {
+        update.contract_no for update in plan.expense_updates
+        if update.contract_no
+    }
+    prestate_assignment_xsdds = list(db.scalars(
+        select(FMaintenanceOrder.linked_sales_order_no).where(
+            FMaintenanceOrder.raw_order_id.in_(assignment_source_ids or {""}),
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+        )
+    ))
+    # VOID is identity-bound, so its contract comes from the raw fact, never
+    # from an editable workbook cell.  This unlocked pre-read only defines the
+    # advisory-lock envelope; the value is re-read after the expense row lock.
+    prelock_void_contract_nos = {
+        str(value)
+        for value in db.scalars(
+            select(FProjectExpense.linked_sales_order_no).where(
+                FProjectExpense.raw_line_id.in_(plan.expense_voids),
+                FProjectExpense.linked_sales_order_no.is_not(None),
+            )
+        ).all()
+        if value
+    } if plan.expense_voids else set()
+    # XSDD advisory identities are absent-row locks and therefore precede every
+    # workbook/project row lock.  Later contract/assignment triggers reacquire
+    # the same transaction locks without creating a state -> identity inversion.
+    maintenance_project_identity.lock_xsdd_identities(
+        db,
+        prestate_contract_nos
+        | set(prestate_assignment_xsdds)
+        | prelock_void_contract_nos,
+    )
     if assignment_source_ids:
         state_project_ids.update(
             value
@@ -4402,27 +4447,7 @@ def apply_project_master_v2(
             "stale_workbook",
             "项目数据已被其他操作更新；本次上传未写入任何数据，请重新下载后再改。",
         )
-    plan_contract_nos = {
-        change.contract_no for change in plan.milestone_changes
-    } | {
-        operation.contract_no for operation in plan.receipt_ops
-    } | {
-        update.contract_no for update in plan.expense_updates
-        if update.contract_no
-    }
-    # VOID is identity-bound, so its contract comes from the locked raw fact,
-    # never from the editable workbook cell.  This pre-read only determines
-    # the order-lock envelope; the value is re-read after the expense lock.
-    prelock_void_contract_nos = {
-        str(value)
-        for value in db.scalars(
-            select(FProjectExpense.linked_sales_order_no).where(
-                FProjectExpense.raw_line_id.in_(plan.expense_voids),
-                FProjectExpense.linked_sales_order_no.is_not(None),
-            )
-        ).all()
-        if value
-    } if plan.expense_voids else set()
+    plan_contract_nos = prestate_contract_nos
     prelock_contract_nos = plan_contract_nos | prelock_void_contract_nos
     # The plan may have been validated minutes earlier.  Rebuild all live
     # ownership sets and lock the target facts before *any* contract, demand,

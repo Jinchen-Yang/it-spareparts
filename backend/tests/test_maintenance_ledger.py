@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.models.maintenance import FProjectExpense
 from app.models.maintenance_ledger import (
@@ -1305,8 +1305,8 @@ def test_new_project_gets_service_period(db):
     assert period.ledger_batch_id is not None
 
 
-def test_shared_contract_change_bumps_both_projects_and_cards_fail_closed(db):
-    """同号合同挂在 A/B 两项目：改 A 的合同，两边都 bump，且卡片 fail-closed。"""
+def test_shared_contract_change_is_blocked_and_cards_fail_closed(db):
+    """历史同号合同挂在 A/B：治理前拒绝改写，卡片继续 fail-closed。"""
     from app.services.maintenance_boss_board import _card_contracts
 
     project_a = MaintenanceProject(
@@ -1327,38 +1327,59 @@ def test_shared_contract_change_bumps_both_projects_and_cards_fail_closed(db):
     )
     db.add_all([project_a, project_b])
     db.flush()
-    for project in (project_a, project_b):
-        db.add(
-            MaintenanceProjectContract(
-                project_contract_id=str(uuid4()),
-                project_id=project.project_id,
-                contract_id="XSDD-20260731-3001",
-                contract_no="XSDD-20260731-3001",
-                contract_amount=None,
-                amount_inc_tax=Decimal("5000.00"),
-                contract_status=None,
-                status_mapping_state="mapped",
-                status_mapping_version="project_manager_xls_v1",
-                included_in_total=True,
-                effective_from=date(2026, 1, 1),
-                effective_to=None,
-                source="project_manager_xls_v1",
-                version=1,
+    # This fixture represents duplicate historical rows that pre-date the
+    # XSDD ownership trigger.  New writes are deliberately unable to create
+    # this state, so disable only that user trigger while seeding the legacy
+    # conflict and restore it before exercising application behavior.
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    try:
+        for project in (project_a, project_b):
+            db.add(
+                MaintenanceProjectContract(
+                    project_contract_id=str(uuid4()),
+                    project_id=project.project_id,
+                    contract_id="XSDD-20260731-3001",
+                    contract_no="XSDD-20260731-3001",
+                    contract_amount=None,
+                    amount_inc_tax=Decimal("5000.00"),
+                    contract_status=None,
+                    status_mapping_state="mapped",
+                    status_mapping_version="project_manager_xls_v1",
+                    included_in_total=True,
+                    effective_from=date(2026, 1, 1),
+                    effective_to=None,
+                    source="project_manager_xls_v1",
+                    version=1,
+                )
             )
-        )
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
     db.commit()
 
-    summary = _apply_workbook(
-        db,
-        _ledger_workbook_with_rows([
-            _occ_row("XSDD-20260731-3001", "共享项目甲20260608-20291205", 6000),
-        ]),
-        "occ-shared-1",
-    )
-    assert summary["contracts_updated"] == 1
+    with pytest.raises(ledger.LedgerBatchError, match="历史归并预检"):
+        _apply_workbook(
+            db,
+            _ledger_workbook_with_rows([
+                _occ_row(
+                    "XSDD-20260731-3001",
+                    "共享项目甲20260608-20291205",
+                    6000,
+                ),
+            ]),
+            "occ-shared-1",
+        )
+    db.rollback()
     db.expire_all()
-    assert _workbook_revision(db, project_a.project_id) == 1
-    assert _workbook_revision(db, project_b.project_id) == 1
+    assert set(db.scalars(select(MaintenanceProjectContract.amount_inc_tax).where(
+        MaintenanceProjectContract.contract_no == "XSDD-20260731-3001"
+    ))) == {Decimal("5000.00")}
 
     cards = _card_contracts(db, [project_a.project_id, project_b.project_id])
     for project_id in (project_a.project_id, project_b.project_id):

@@ -93,6 +93,8 @@ export interface BoardProjectRow {
   project_id: string;
   project_code: string;
   display_name: string;
+  /** 同一 canonical 项目的历史/来源名称，仅用于展示和搜索。 */
+  aliases?: string[];
   lifecycle: "ongoing" | "ended" | "missing";
   /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
   period_from: string | null;

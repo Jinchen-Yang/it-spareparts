@@ -64,6 +64,7 @@
 | 08-17 | 53 | **项目范围 fail closed**：admin 只列全部 active 项目；sales 只列 `maintenance_project.salesperson == sys_user.salesperson_name` 的精确匹配，缺销售映射返回 0 项；不存在、停用或越权项目一律不可提交且不泄露存在性。相同 owner＋`client_request_id`＋相同 payload 幂等返回原单，不同 payload 返回 409；并发与任一校验失败不得留下部分申请/版本/行/审计。 | 已实现（#260 候选分支，待发布） | GitHub #260 |
 | 08-17 | 54 | 新补库申请原始状态仍为 `submitted`，由 `workflow_mode=system_screening`、`stage=screening_complete` 表达「三查事实已冻结」，**不产生 approved/rejected 语义**。系统在同一事务冻结三查、最近销售、提交时池底价和 `as_of`；`system-screening.xlsx` 只读冻结证据、不回查实时表、只陈述事实与需注意项。历史无项目申请显式标为 legacy/unbound、永久只读且导出返回 409；旧草稿/改单/评审/WBDD/evidence/purchase-list 写入口退役为 410/404。 | 已实现（#260 候选分支，待发布） | GitHub #260 |
 | 08-24 | 55 | **项目内人工回传是 WBDD 归属认证来源**：当空实体行能按维保单号＋PN＋数量唯一识别统一 WBDD 既有明细、且活跃归属与当前项目冲突时，预检必须明示改挂；确认后保留旧归属历史与双边审计，复用既有行、不得重复新增，并用预检版本防止并发覆盖。显式 `CREATE` 才强制新增；多义匹配整本拒绝。全量扫描发现的其他冲突只列人工复核候选，未经项目内人工认证不得批量改写。 | 已实现（本分支，待发布） | 业务确认（2026-08-24） |
+| 08-28 | 56 | **XSDD 是项目归并键**：同一规范化 XSDD 只能归属一个 canonical 项目；一个项目仍可挂多个 XSDD。不同来源项目名只作为 aliases，在页面以灰字展示并可搜索，不再据名称拆项目。历史同 XSDD 多项目先只读 preview；合同、回款或其他事实冲突必须人工裁决，禁止自动求和/去重。 | 第一阶段已编码，待验证；历史归并未执行 | 业务确认（2026-08-28），详见 `bugs/2026-08-28-xsdd-project-identity.md` |
 
 ## 状态约定
 
