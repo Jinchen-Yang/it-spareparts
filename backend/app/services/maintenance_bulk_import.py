@@ -78,6 +78,10 @@ class BulkImportNotFound(BulkImportError):
     pass
 
 
+class BulkImportScopeDenied(BulkImportError):
+    pass
+
+
 @dataclass(frozen=True)
 class DetectedSheet:
     name: str
@@ -2592,11 +2596,33 @@ def _transfer_summary(rows: list[dict]) -> dict:
     }
 
 
+def _enforce_project_scope(
+    operations: list[dict],
+    allowed_project_ids: set[str] | None,
+) -> None:
+    """Fail closed before preview exposure or apply writes.
+
+    ``None`` is the shared full-scope sentinel.  A scoped account cannot create
+    a project because the not-yet-created id cannot belong to its current
+    visible set.  Missing or out-of-scope target ids reject the whole batch.
+    """
+
+    if allowed_project_ids is None:
+        return
+    for operation in operations:
+        if operation.get("action") == "create_project":
+            raise BulkImportScopeDenied("范围账号不能通过批量导入创建新项目")
+        project_id = operation.get("project_id")
+        if not project_id or str(project_id) not in allowed_project_ids:
+            raise BulkImportScopeDenied("批次包含当前账号无权访问的项目，整批拒绝")
+
+
 def preview_transfer(
     db: Session,
     files: list[tuple[str, bytes]],
     *,
     operated_by: str,
+    allowed_project_ids: set[str] | None = None,
 ) -> dict:
     if not files or len(files) > MAX_TRANSFER_FILES:
         raise BulkImportInvalid(f"一次必须上传 1–{MAX_TRANSFER_FILES} 个文件")
@@ -2604,6 +2630,14 @@ def preview_transfer(
     if total_bytes > MAX_TRANSFER_TOTAL_BYTES:
         raise BulkImportInvalid("批量上传总大小超过 64 MiB")
     artifacts = [build_preview(db, data, filename) for filename, data in files]
+    _enforce_project_scope(
+        [
+            operation
+            for artifact in artifacts
+            for operation in artifact.plan.get("operations") or []
+        ],
+        allowed_project_ids,
+    )
     hashes = [artifact.file_hash for artifact in artifacts]
     if len(hashes) != len(set(hashes)):
         raise BulkImportInvalid("同一批次包含内容完全相同的重复文件")
@@ -2850,6 +2884,7 @@ def apply_transfer(
     row_keys: list[str],
     operated_by: str,
     allow_admin: bool = False,
+    allowed_project_ids: set[str] | None = None,
 ) -> dict:
     batch_id = _batch_id_from_transfer_token(preview_token)
     batch = db.scalar(
@@ -2870,16 +2905,38 @@ def apply_transfer(
         raise BulkImportConflict("预览 payload hash 不匹配")
     if not hmac.compare_digest(str(report.get("data_version") or ""), str(data_version)):
         raise BulkImportConflict("预览数据版本不匹配")
+    selected = list(dict.fromkeys(str(key) for key in row_keys))
+    if not selected or len(selected) != len(row_keys):
+        raise BulkImportInvalid("必须选择至少一行，且 row_keys 不能重复")
     if batch.status == "success":
-        return report["result"]
+        applied = [str(key) for key in report.get("selected_row_keys") or []]
+        if not applied or sorted(selected) != sorted(applied):
+            raise BulkImportConflict("该批次已应用，row_keys 与原应用选择不一致")
+        expected_selection_hash = _canonical_hash(
+            {"payload_hash": payload_hash, "row_keys": sorted(applied)}
+        )
+        if not hmac.compare_digest(
+            str(report.get("selection_hash") or ""),
+            expected_selection_hash,
+        ):
+            raise BulkImportConflict("已应用批次的选择证据不完整")
+        result = dict(report.get("result") or {})
+        _enforce_project_scope(
+            [
+                {
+                    "action": "replay",
+                    "project_id": row.get("project_id"),
+                }
+                for row in result.get("rows") or []
+            ],
+            allowed_project_ids,
+        )
+        return result
     if batch.status != "processing":
         raise BulkImportConflict("该预览已失败或失效，请重新上传预览")
     expires_at = datetime.fromisoformat(str(report["expires_at"]))
     if expires_at <= datetime.now(timezone.utc):
         raise BulkImportConflict("预览已过期，请重新上传预览")
-    selected = list(dict.fromkeys(str(key) for key in row_keys))
-    if not selected or len(selected) != len(row_keys):
-        raise BulkImportInvalid("必须选择至少一行，且 row_keys 不能重复")
     row_map = report.get("row_map") or {}
     if any(key not in row_map for key in selected):
         raise BulkImportInvalid("包含不可提交、未知或已阻断的 row_key")
@@ -2891,6 +2948,21 @@ def apply_transfer(
         for key in selected
     ):
         raise BulkImportInvalid("只能提交预览状态为 ready 的行")
+
+    plans = report.get("plans") or []
+    selected_by_plan: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for row_key in selected:
+        mapping = row_map[row_key]
+        selected_by_plan[int(mapping["plan_index"])].append(
+            (row_key, int(mapping["operation_index"]))
+        )
+
+    selected_operations = [
+        plans[plan_index]["plan"]["operations"][operation_index]
+        for plan_index, mappings in selected_by_plan.items()
+        for _row_key, operation_index in mappings
+    ]
+    _enforce_project_scope(selected_operations, allowed_project_ids)
 
     selection_hash = _canonical_hash(
         {"payload_hash": payload_hash, "row_keys": sorted(selected)}
@@ -2908,15 +2980,19 @@ def apply_transfer(
         .limit(1)
     )
     if already is not None:
-        return dict((already.report_json or {}).get("result") or {})
-
-    plans = report.get("plans") or []
-    selected_by_plan: dict[int, list[tuple[str, int]]] = defaultdict(list)
-    for row_key in selected:
-        mapping = row_map[row_key]
-        selected_by_plan[int(mapping["plan_index"])].append(
-            (row_key, int(mapping["operation_index"]))
-        )
+        already_report = dict(already.report_json or {})
+        already_selected = [
+            str(key) for key in already_report.get("selected_row_keys") or []
+        ]
+        if (
+            sorted(already_selected) != sorted(selected)
+            or not hmac.compare_digest(
+                str(already_report.get("selection_hash") or ""),
+                selection_hash,
+            )
+        ):
+            raise BulkImportConflict("幂等批次的已应用行选择证据不一致")
+        return dict(already_report.get("result") or {})
 
     project_ids: set[str] = set()
     audit_reason = f"全项目批量传输 batch={batch.id} payload={payload_hash}"

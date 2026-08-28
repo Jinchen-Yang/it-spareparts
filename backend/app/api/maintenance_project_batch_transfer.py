@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app import config, permissions
 from app.auth import current_identity, current_role
+from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.business_time import business_today
 from app.db import get_db
 from app.maintenance_boss import require_maintenance_boss
@@ -293,14 +294,30 @@ async def preview_transfer(
             ) from exc
         payloads.append((filename, data))
     operator = _operator(ident)
+    allowed_project_ids = resolve_visible_project_ids(db, ctx)
     record_access_log(
         ctx,
         "maintenance_project_batch_preview",
         "maintenance",
-        {"file_count": len(payloads), "filenames": [name for name, _ in payloads]},
+        {
+            "file_count": len(payloads),
+            "filenames": [name for name, _ in payloads],
+            "scope": "full" if allowed_project_ids is None else "owned",
+        },
     )
     try:
-        return bulk.preview_transfer(db, payloads, operated_by=operator)
+        return bulk.preview_transfer(
+            db,
+            payloads,
+            operated_by=operator,
+            allowed_project_ids=allowed_project_ids,
+        )
+    except bulk.BulkImportScopeDenied as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": str(exc)},
+        ) from exc
     except bulk.BulkImportConflict as exc:
         db.rollback()
         raise HTTPException(
@@ -333,6 +350,7 @@ def apply_transfer(
 ) -> dict:
     operator = _operator(ident)
     allow_admin = ctx.role in {"admin", "boss"}
+    allowed_project_ids = resolve_visible_project_ids(db, ctx)
     record_access_log(
         ctx,
         "maintenance_project_batch_apply",
@@ -348,7 +366,14 @@ def apply_transfer(
             row_keys=body.row_keys,
             operated_by=operator,
             allow_admin=allow_admin,
+            allowed_project_ids=allowed_project_ids,
         )
+    except bulk.BulkImportScopeDenied as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": str(exc)},
+        ) from exc
     except bulk.BulkImportInvalid as exc:
         db.rollback()
         raise HTTPException(
