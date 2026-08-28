@@ -26,6 +26,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
 )
 from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookOperation,
@@ -1833,6 +1834,167 @@ def test_e2e_fix_single_row_delete_allowed(db):
         db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
     db.refresh(_expense)
     assert _expense.data_status == "已作废"
+
+
+def _project_with_receipt(db):
+    project, _part, _order, _line = _make_project_with_line(db)
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id
+    ))
+    snapshot = MaintenanceCollectionSnapshot(
+        collection_id=str(uuid.uuid4()),
+        project_id=project.project_id,
+        project_contract_id=contract.project_contract_id,
+        report_month=date(2026, 6, 1),
+        cumulative_amount=Decimal("82325.40"),
+        status="confirmed",
+        receipt_reference="SKD-20260630-0007",
+        remark=None,
+        source="direct_api",
+        import_batch_id=None,
+        version=1,
+    )
+    db.add(snapshot)
+    db.commit()
+    return project, contract, snapshot
+
+
+def test_receipt_row_deleted_from_export_is_voided_on_upload(db):
+    """05 实收回款删行覆盖：只作废导出签名 envelope 中消失的稳定行。"""
+
+    project, _contract, snapshot = _project_with_receipt(db)
+
+    content = master.build_project_master_v2(
+        db,
+        project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,),
+    )
+    workbook = load_workbook(io.BytesIO(content))
+    sheet = workbook[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in sheet[1]}
+    row_no = next(
+        row
+        for row in range(2, sheet.max_row + 1)
+        if sheet.cell(row, headers["实体ID"]).value == snapshot.collection_id
+    )
+    sheet.delete_rows(row_no, 1)
+
+    plan = master.validate_project_master_v2(
+        db,
+        project_id=project.project_id,
+        data=_save(workbook),
+    )
+    assert plan.summary["collection_voids"] == 1
+    assert plan.will_void_rows == ({
+        "sheet": master.V2_SHEET_RECEIPTS,
+        "entity_id": snapshot.collection_id,
+        "label": "XSDD-EDIT-001 2026-06",
+        "reason": "上传文件缺行",
+    },)
+
+    master.apply_project_master_v2(
+        db,
+        plan,
+        operated_by="receipt-delete-test",
+        import_batch_id=str(uuid.uuid4()),
+    )
+    db.refresh(snapshot)
+    assert snapshot.status == "void"
+
+
+def test_unchanged_receipt_export_is_not_voided(db):
+    project, _contract, snapshot = _project_with_receipt(db)
+    content = master.build_project_master_v2(
+        db,
+        project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,),
+    )
+
+    plan = master.validate_project_master_v2(
+        db,
+        project_id=project.project_id,
+        data=content,
+    )
+    assert plan.summary["collection_voids"] == 0
+    assert plan.will_void_rows == ()
+
+    master.apply_project_master_v2(
+        db,
+        plan,
+        operated_by="receipt-unchanged-test",
+        import_batch_id=str(uuid.uuid4()),
+    )
+    db.refresh(snapshot)
+    assert snapshot.status == "confirmed"
+
+
+def test_receipt_created_after_export_is_not_voided_by_old_file(db):
+    project, contract, snapshot = _project_with_receipt(db)
+    content = master.build_project_master_v2(
+        db,
+        project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,),
+    )
+    later_snapshot = MaintenanceCollectionSnapshot(
+        collection_id=str(uuid.uuid4()),
+        project_id=project.project_id,
+        project_contract_id=contract.project_contract_id,
+        report_month=date(2026, 7, 1),
+        cumulative_amount=Decimal("100000.00"),
+        status="confirmed",
+        receipt_reference="SKD-20260731-0008",
+        remark="导出后新增",
+        source="direct_api",
+        import_batch_id=None,
+        version=1,
+    )
+    db.add(later_snapshot)
+    db.commit()
+
+    plan = master.validate_project_master_v2(
+        db,
+        project_id=project.project_id,
+        data=content,
+    )
+    assert plan.summary["collection_voids"] == 0
+    master.apply_project_master_v2(
+        db,
+        plan,
+        operated_by="receipt-later-test",
+        import_batch_id=str(uuid.uuid4()),
+    )
+    db.refresh(snapshot)
+    db.refresh(later_snapshot)
+    assert snapshot.status == "confirmed"
+    assert later_snapshot.status == "confirmed"
+
+
+def test_receipt_row_without_exported_identity_fails_closed(db):
+    project, _contract, snapshot = _project_with_receipt(db)
+    content = master.build_project_master_v2(
+        db,
+        project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,),
+    )
+    workbook = load_workbook(io.BytesIO(content))
+    sheet = workbook[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in sheet[1]}
+    row_no = next(
+        row
+        for row in range(2, sheet.max_row + 1)
+        if sheet.cell(row, headers["实体ID"]).value == snapshot.collection_id
+    )
+    sheet.cell(row_no, headers["实体ID"]).value = None
+
+    with pytest.raises(master.WorkbookError) as exc:
+        master.validate_project_master_v2(
+            db,
+            project_id=project.project_id,
+            data=_save(workbook),
+        )
+    assert exc.value.code == "receipt_identity_lost"
+    db.refresh(snapshot)
+    assert snapshot.status == "confirmed"
 
 
 def test_e2e_fix_summary_distinguishes_qty_from_cost(db):

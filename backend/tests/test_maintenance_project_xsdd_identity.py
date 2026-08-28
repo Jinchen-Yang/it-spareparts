@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.etl import loader
 from app.models.maintenance import FMaintenanceOrder
@@ -15,6 +15,10 @@ from app.models.maintenance_project import (
     MaintenanceProjectAlias,
     MaintenanceProjectContract,
     MaintenanceProjectXsdd,
+)
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectWorkbookOperation,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysImportBatch
@@ -282,3 +286,135 @@ def test_ledger_apply_rejects_cross_project_xsdd_without_partial_write(db):
         MaintenanceProjectContract.project_id != existing.project_id,
         MaintenanceProjectContract.contract_no == "XSDD-20260828-0202",
     )) is None
+
+
+def test_preview_marks_only_full_business_duplicates_for_deletion(db):
+    """同额不够；完整可见业务字段一致才进入 exact duplicate 删除计划。"""
+
+    first = _project(db, "xsdd-preview-a", "PREVIEW-A", "腾讯TCE名称")
+    second = _project(db, "xsdd-preview-b", "PREVIEW-B", "腾讯预交付名称")
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    try:
+        contracts = [
+            MaintenanceProjectContract(
+                project_contract_id="xsdd-preview-contract-a",
+                project_id=first.project_id,
+                contract_id="xsdd-XSDD-20251017-0036",
+                contract_no="XSDD-20251017-0036",
+                contract_amount=Decimal("1575471.70"),
+                amount_inc_tax=Decimal("1780283.02"),
+                contract_status="正常",
+                status_mapping_state="mapped",
+                status_mapping_version="workbook-v2-xsdd",
+                included_in_total=True,
+                effective_from=date(2025, 10, 16),
+                effective_to=None,
+                source="sales_fallback",
+                version=1,
+            ),
+            MaintenanceProjectContract(
+                project_contract_id="xsdd-preview-contract-b",
+                project_id=second.project_id,
+                contract_id="xsdd-XSDD-20251017-0036",
+                contract_no="XSDD-20251017-0036",
+                contract_amount=Decimal("1575471.70"),
+                amount_inc_tax=Decimal("1670000.00"),
+                contract_status="正常",
+                status_mapping_state="mapped",
+                status_mapping_version="workbook-v2-xsdd",
+                included_in_total=True,
+                effective_from=date(2025, 10, 16),
+                effective_to=None,
+                source="sales_fallback",
+                version=3,
+            ),
+        ]
+        db.add_all(contracts)
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    db.add_all([
+        MaintenanceCollectionSnapshot(
+            collection_id="xsdd-preview-collection-a",
+            project_id=first.project_id,
+            project_contract_id=contracts[0].project_contract_id,
+            report_month=date(2026, 6, 1),
+            cumulative_amount=Decimal("82325.40"),
+            status="confirmed",
+            receipt_reference="SKD-20260630-0007",
+            remark=None,
+            source="workbook",
+            import_batch_id="preview-batch-a",
+            version=1,
+        ),
+        MaintenanceCollectionSnapshot(
+            collection_id="xsdd-preview-collection-b",
+            project_id=second.project_id,
+            project_contract_id=contracts[1].project_contract_id,
+            report_month=date(2026, 6, 1),
+            cumulative_amount=Decimal("82325.40"),
+            status="confirmed",
+            receipt_reference="SKD-20260630-0007",
+            remark=None,
+            source="direct_api",
+            import_batch_id=None,
+            version=7,
+        ),
+    ])
+    db.add(MaintenanceProjectWorkbookOperation(
+        project_id=second.project_id,
+        export_id=None,
+        file_sha256="a" * 64,
+        operation_key="xsdd-preview-collection-operation",
+        payload_hash="b" * 64,
+        operation_type="collection_create",
+        entity_id="xsdd-preview-collection-b",
+        operated_by="xsdd-admin",
+    ))
+    db.commit()
+
+    preview = maintenance_project_identity.preview_historical_conflicts(db)
+    conflict = next(
+        row for row in preview["conflicts"]
+        if row["xsdd_norm"] == "20251017-0036"
+    )
+    # 合同含税额不同，因此两条都保留。
+    assert conflict["exact_duplicate_candidates"]["contracts"] == []
+    # 回款可见业务字段完全一致；source/import_batch/version 是技术 provenance。
+    receipt_clusters = conflict["exact_duplicate_candidates"]["collections"]
+    assert len(receipt_clusters) == 1
+    assert receipt_clusters[0]["survivor_id"] == "xsdd-preview-collection-a"
+    assert receipt_clusters[0]["duplicate_ids"] == [
+        "xsdd-preview-collection-b"
+    ]
+    assert conflict["canonical_project_id"] == first.project_id
+
+    result = maintenance_project_identity.apply_exact_collection_dedupe(
+        db,
+        xsdd="XSDD-20251017-0036",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+    assert result["deleted_collection_ids"] == [
+        "xsdd-preview-collection-b"
+    ]
+    assert result["repointed_operation_count"] == 1
+    assert db.get(
+        MaintenanceCollectionSnapshot,
+        "xsdd-preview-collection-b",
+    ) is None
+    assert db.get(
+        MaintenanceCollectionSnapshot,
+        "xsdd-preview-collection-a",
+    ) is not None
+    operation = db.scalar(select(MaintenanceProjectWorkbookOperation).where(
+        MaintenanceProjectWorkbookOperation.operation_key
+        == "xsdd-preview-collection-operation"
+    ))
+    assert operation.entity_id == "xsdd-preview-collection-a"

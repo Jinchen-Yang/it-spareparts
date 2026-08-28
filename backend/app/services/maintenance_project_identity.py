@@ -1,12 +1,15 @@
 """Canonical XSDD ownership and project display aliases.
 
 Business invariant: one normalized XSDD belongs to exactly one maintenance
-project; one project may still own several XSDDs.  Existing ambiguous evidence
-is never guessed or silently rewritten.
+project; one project may still own several XSDDs. Historical splits use a
+deterministic canonical candidate and only exact visible-business duplicates
+may be physically removed with audit.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from uuid import uuid4
 
@@ -17,6 +20,7 @@ from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
+    MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
     MaintenanceProjectXsdd,
 )
@@ -24,6 +28,7 @@ from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectWorkbookOperation,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import project_names
@@ -31,6 +36,10 @@ from app.services import project_names
 
 class XsddProjectConflict(Exception):
     """One normalized XSDD already has evidence for another/multiple projects."""
+
+
+class XsddExactDedupeConflict(Exception):
+    """The locked facts no longer match a reviewed exact-duplicate plan."""
 
 
 _XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{4}$")
@@ -205,6 +214,89 @@ def aliases_by_project(db: Session, project_ids: list[str]) -> dict[str, list[st
     return out
 
 
+def _business_fingerprint(values: dict) -> str:
+    """Stable exact-business fingerprint; technical provenance is excluded upstream."""
+
+    payload = json.dumps(
+        values,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _contract_business_values(row: MaintenanceProjectContract) -> dict:
+    return {
+        "contract_no": normalize_xsdd(row.contract_no) or row.contract_no.strip().upper(),
+        "contract_id": row.contract_id,
+        "contract_amount": (
+            str(row.contract_amount) if row.contract_amount is not None else None
+        ),
+        "amount_inc_tax": (
+            str(row.amount_inc_tax) if row.amount_inc_tax is not None else None
+        ),
+        "contract_status": row.contract_status,
+        "status_mapping_state": row.status_mapping_state,
+        "included_in_total": row.included_in_total,
+        "effective_from": row.effective_from.isoformat(),
+        "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+    }
+
+
+def _collection_business_values(
+    row: MaintenanceCollectionSnapshot,
+    *,
+    contract: MaintenanceProjectContract,
+) -> dict:
+    """Visible receipt fact; source/import/version are technical provenance."""
+
+    return {
+        "contract_no": normalize_xsdd(contract.contract_no) or contract.contract_no.strip().upper(),
+        "contract_effective_from": contract.effective_from.isoformat(),
+        "report_month": row.report_month.isoformat(),
+        "cumulative_amount": str(row.cumulative_amount),
+        "status": row.status,
+        "receipt_reference": row.receipt_reference,
+        "remark": row.remark,
+    }
+
+
+def _exact_duplicate_clusters(
+    rows,
+    *,
+    project_id_for,
+    entity_id_for,
+    values_for,
+    canonical_project_id: str,
+) -> list[dict]:
+    grouped: dict[str, list[tuple[object, dict]]] = {}
+    for row in rows:
+        values = values_for(row)
+        grouped.setdefault(_business_fingerprint(values), []).append((row, values))
+    out: list[dict] = []
+    for fingerprint, items in grouped.items():
+        project_ids = {project_id_for(row) for row, _values in items}
+        if len(items) < 2 or len(project_ids) < 2:
+            continue
+        ordered = sorted(
+            items,
+            key=lambda item: (
+                project_id_for(item[0]) != canonical_project_id,
+                entity_id_for(item[0]),
+            ),
+        )
+        survivor = ordered[0][0]
+        out.append({
+            "fingerprint": fingerprint,
+            "business_values": ordered[0][1],
+            "survivor_id": entity_id_for(survivor),
+            "duplicate_ids": [entity_id_for(row) for row, _values in ordered[1:]],
+            "project_ids": sorted(project_ids),
+        })
+    return sorted(out, key=lambda item: item["fingerprint"])
+
+
 def preview_historical_conflicts(db: Session) -> dict:
     """Read-only XSDD conflict manifest; never chooses or mutates a survivor."""
 
@@ -295,7 +387,7 @@ def preview_historical_conflicts(db: Session) -> dict:
     ).all())
 
     contracts_by_project: dict[str, list[dict]] = {}
-    for row in db.execute(
+    contract_rows = list(db.execute(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_id.in_(project_ids or {""}))
         .order_by(
@@ -303,7 +395,9 @@ def preview_historical_conflicts(db: Session) -> dict:
             MaintenanceProjectContract.contract_no,
             MaintenanceProjectContract.project_contract_id,
         )
-    ).scalars():
+    ).scalars())
+    contract_by_id = {row.project_contract_id: row for row in contract_rows}
+    for row in contract_rows:
         contracts_by_project.setdefault(row.project_id, []).append({
             "project_contract_id": row.project_contract_id,
             "contract_no": row.contract_no,
@@ -317,7 +411,7 @@ def preview_historical_conflicts(db: Session) -> dict:
             ),
         })
     collections_by_project: dict[str, list[dict]] = {}
-    for row in db.execute(
+    collection_rows = list(db.execute(
         select(MaintenanceCollectionSnapshot)
         .where(MaintenanceCollectionSnapshot.project_id.in_(project_ids or {""}))
         .order_by(
@@ -325,7 +419,8 @@ def preview_historical_conflicts(db: Session) -> dict:
             MaintenanceCollectionSnapshot.report_month,
             MaintenanceCollectionSnapshot.collection_id,
         )
-    ).scalars():
+    ).scalars())
+    for row in collection_rows:
         collections_by_project.setdefault(row.project_id, []).append({
             "collection_id": row.collection_id,
             "project_contract_id": row.project_contract_id,
@@ -341,6 +436,25 @@ def preview_historical_conflicts(db: Session) -> dict:
         grouped.setdefault(xsdd_norm, []).append(project_id)
     rows: list[dict] = []
     for xsdd_norm, member_ids in grouped.items():
+        mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+        if mapped is not None and mapped.project_id in member_ids:
+            canonical_project_id = mapped.project_id
+        else:
+            canonical_project_id = sorted(
+                member_ids,
+                key=lambda project_id: (
+                    not projects[project_id].is_active,
+                    -int(active_order_counts.get(project_id, 0)),
+                    -sum((
+                        int(contract_counts.get(project_id, 0)),
+                        int(collection_counts.get(project_id, 0)),
+                        int(milestone_counts.get(project_id, 0)),
+                        int(expense_counts.get(project_id, 0)),
+                    )),
+                    projects[project_id].created_at,
+                    project_id,
+                ),
+            )[0]
         members = []
         for project_id in member_ids:
             project = projects[project_id]
@@ -363,8 +477,28 @@ def preview_historical_conflicts(db: Session) -> dict:
             })
         rows.append({
             "xsdd_norm": xsdd_norm,
-            "canonical_project_id": None,
-            "requires_human_decision": True,
+            "canonical_project_id": canonical_project_id,
+            "canonical_rule": "mapped_owner_else_active_orders_facts_created_at_id_v1",
+            "requires_human_decision": False,
+            "exact_duplicate_candidates": {
+                "contracts": _exact_duplicate_clusters(
+                    [row for row in contract_rows if row.project_id in member_ids],
+                    project_id_for=lambda row: row.project_id,
+                    entity_id_for=lambda row: row.project_contract_id,
+                    values_for=_contract_business_values,
+                    canonical_project_id=canonical_project_id,
+                ),
+                "collections": _exact_duplicate_clusters(
+                    [row for row in collection_rows if row.project_id in member_ids],
+                    project_id_for=lambda row: row.project_id,
+                    entity_id_for=lambda row: row.collection_id,
+                    values_for=lambda row: _collection_business_values(
+                        row,
+                        contract=contract_by_id[row.project_contract_id],
+                    ),
+                    canonical_project_id=canonical_project_id,
+                ),
+            },
             "projects": members,
         })
     return {
@@ -372,4 +506,166 @@ def preview_historical_conflicts(db: Session) -> dict:
         "conflict_count": len(rows),
         "project_count": len(project_ids),
         "conflicts": rows,
+    }
+
+
+def apply_exact_collection_dedupe(
+    db: Session,
+    *,
+    xsdd: str,
+    operated_by: str,
+) -> dict:
+    """Delete only exact visible-business duplicate collection snapshots.
+
+    This is the first guarded write step of project-container consolidation.
+    It never sums money and never chooses between differing facts.  The caller
+    owns commit/rollback so the deletion and audit remain one transaction.
+    """
+
+    from app import config
+
+    xsdd_norm = normalize_xsdd(xsdd)
+    if not xsdd_norm:
+        raise XsddExactDedupeConflict("XSDD 格式无效")
+    clean_operator = str(operated_by or "").strip()
+    if not clean_operator:
+        raise XsddExactDedupeConflict("操作人不能为空")
+
+    db.execute(select(func.pg_advisory_xact_lock(
+        config.DATA_CHANGE_ADVISORY_LOCK_KEY
+    )))
+    lock_xsdd_identities(db, [xsdd_norm])
+    manifest = preview_historical_conflicts(db)
+    conflict = next(
+        (
+            row for row in manifest["conflicts"]
+            if row["xsdd_norm"] == xsdd_norm
+        ),
+        None,
+    )
+    if conflict is None:
+        return {
+            "xsdd_norm": xsdd_norm,
+            "canonical_project_id": None,
+            "deleted_collection_ids": [],
+            "repointed_operation_count": 0,
+        }
+
+    member_ids = sorted(
+        member["project_id"] for member in conflict["projects"]
+    )
+    locked_projects = list(db.scalars(
+        select(MaintenanceProject)
+        .where(MaintenanceProject.project_id.in_(member_ids))
+        .order_by(MaintenanceProject.project_id)
+        .with_for_update()
+    ))
+    if [row.project_id for row in locked_projects] != member_ids:
+        raise XsddExactDedupeConflict("归并项目集合已变化，请重新预览")
+
+    candidate_clusters = conflict["exact_duplicate_candidates"]["collections"]
+    candidate_ids = sorted({
+        entity_id
+        for cluster in candidate_clusters
+        for entity_id in [cluster["survivor_id"], *cluster["duplicate_ids"]]
+    })
+    locked_snapshots = {
+        row.collection_id: row
+        for row in db.scalars(
+            select(MaintenanceCollectionSnapshot)
+            .where(MaintenanceCollectionSnapshot.collection_id.in_(candidate_ids or {""}))
+            .order_by(MaintenanceCollectionSnapshot.collection_id)
+            .with_for_update()
+        )
+    }
+    contract_ids = {
+        row.project_contract_id for row in locked_snapshots.values()
+    }
+    locked_contracts = {
+        row.project_contract_id: row
+        for row in db.scalars(
+            select(MaintenanceProjectContract)
+            .where(MaintenanceProjectContract.project_contract_id.in_(contract_ids or {""}))
+            .order_by(MaintenanceProjectContract.project_contract_id)
+            .with_for_update()
+        )
+    }
+
+    deleted_ids: list[str] = []
+    audit_deleted: list[dict] = []
+    repointed_operations = 0
+    for cluster in candidate_clusters:
+        survivor_id = cluster["survivor_id"]
+        survivor = locked_snapshots.get(survivor_id)
+        if survivor is None:
+            raise XsddExactDedupeConflict("exact duplicate survivor 已变化")
+        expected_fingerprint = cluster["fingerprint"]
+        survivor_contract = locked_contracts.get(survivor.project_contract_id)
+        if (
+            survivor_contract is None
+            or _business_fingerprint(_collection_business_values(
+                survivor,
+                contract=survivor_contract,
+            )) != expected_fingerprint
+        ):
+            raise XsddExactDedupeConflict("exact duplicate survivor 字段已变化")
+        for duplicate_id in cluster["duplicate_ids"]:
+            duplicate = locked_snapshots.get(duplicate_id)
+            duplicate_contract = (
+                locked_contracts.get(duplicate.project_contract_id)
+                if duplicate is not None else None
+            )
+            if (
+                duplicate is None
+                or duplicate_contract is None
+                or _business_fingerprint(_collection_business_values(
+                    duplicate,
+                    contract=duplicate_contract,
+                )) != expected_fingerprint
+            ):
+                raise XsddExactDedupeConflict(
+                    f"exact duplicate {duplicate_id} 字段已变化"
+                )
+            repointed_operations += db.query(MaintenanceProjectWorkbookOperation).filter(
+                MaintenanceProjectWorkbookOperation.entity_id == duplicate_id
+            ).update(
+                {MaintenanceProjectWorkbookOperation.entity_id: survivor_id},
+                synchronize_session=False,
+            )
+            audit_deleted.append({
+                "collection_id": duplicate.collection_id,
+                "project_id": duplicate.project_id,
+                "project_contract_id": duplicate.project_contract_id,
+                **_collection_business_values(
+                    duplicate,
+                    contract=duplicate_contract,
+                ),
+            })
+            deleted_ids.append(duplicate_id)
+            db.delete(duplicate)
+
+    canonical_project_id = conflict["canonical_project_id"]
+    if deleted_ids:
+        db.add(MaintenanceProjectAuditLog(
+            project_id=canonical_project_id,
+            entity_type="project",
+            entity_id=canonical_project_id,
+            action="xsdd_exact_dedupe",
+            before_json={"deleted_collections": audit_deleted},
+            after_json={
+                "xsdd_norm": xsdd_norm,
+                "survivor_collection_ids": [
+                    cluster["survivor_id"] for cluster in candidate_clusters
+                ],
+                "repointed_operation_count": repointed_operations,
+            },
+            reason="同一 XSDD 项目容器归并：删除完整业务指纹一致的重复实收回款",
+            operated_by=clean_operator[:64],
+        ))
+        db.flush()
+    return {
+        "xsdd_norm": xsdd_norm,
+        "canonical_project_id": canonical_project_id,
+        "deleted_collection_ids": deleted_ids,
+        "repointed_operation_count": repointed_operations,
     }

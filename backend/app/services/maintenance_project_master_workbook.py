@@ -1782,7 +1782,12 @@ class MasterV2Plan:
             "plan_creates": sum(x.operation == "CREATE" for x in self.milestone_changes),
             "plan_updates": sum(x.operation == "UPDATE" for x in self.milestone_changes),
             "plan_voids": sum(x.operation == "VOID" for x in self.milestone_changes),
-            "collection_updates": len(self.receipt_ops),
+            "collection_updates": sum(
+                operation.operation != "VOID" for operation in self.receipt_ops
+            ),
+            "collection_voids": sum(
+                operation.operation == "VOID" for operation in self.receipt_ops
+            ),
             "site_creates": sum(x.is_create for x in self.site_flags),
             "site_voids": sum(x.is_void for x in self.site_flags),
             "site_updates": sum(not x.is_create and not x.is_void
@@ -1815,7 +1820,8 @@ def _v2_hash(values: list[object]) -> str:
 def _v2_metadata_signature(metadata: dict[str, str], hmac_key: bytes) -> str:
     """Bind the complete export identity set to a server-only key.
 
-    ``parts_row_ids`` / ``site_row_ids`` / ``expense_row_ids`` drive the
+    ``parts_row_ids`` / ``site_row_ids`` / ``expense_row_ids`` /
+    ``receipt_row_ids`` drive the
     destructive "missing row = VOID" reconciliation.  Merely hiding those
     cells is not an integrity boundary, so every metadata field (including
     project and included sheets) is signed as one canonical envelope.
@@ -2487,6 +2493,14 @@ def build_project_master_v2(
     if V2_SHEET_EXPENSE in wanted:
         meta_rows.append(("expense_row_ids",
                           _encode_row_ids(_expected_expense_ids(db, project_id))))
+    if V2_SHEET_RECEIPTS in wanted:
+        receipt_ids = db.scalars(
+            select(MaintenanceCollectionSnapshot.collection_id).where(
+                MaintenanceCollectionSnapshot.project_id == project_id,
+                MaintenanceCollectionSnapshot.status == "confirmed",
+            )
+        ).all()
+        meta_rows.append(("receipt_row_ids", _encode_row_ids(receipt_ids)))
     if V2_SHEET_SITE in wanted:
         site_line_ids = db.scalars(
             select(MaintenanceSiteIssueLine.issue_line_id)
@@ -4098,7 +4112,82 @@ def validate_project_master_v2(
         expense_updates, expense_voids = _v2_parse_expenses(
             db, project_id, wb[V2_SHEET_EXPENSE])
     if V2_SHEET_RECEIPTS in included:
-        receipt_ops = tuple(_v2_parse_receipts(db, project_id, wb[V2_SHEET_RECEIPTS]))
+        receipt_ws = wb[V2_SHEET_RECEIPTS]
+        receipt_ops = tuple(_v2_parse_receipts(db, project_id, receipt_ws))
+        # 05 缺行=作废：只允许命中导出时由 HMAC 签名的稳定 collection_id。
+        # 导出之后新产生的回款不在 envelope 中，不能被旧文件误删。
+        export_receipt_ids = _decode_row_ids(meta.get("receipt_row_ids"))
+        receipt_headers = [str(cell.value or "") for cell in receipt_ws[1]]
+        try:
+            entity_index = receipt_headers.index("实体ID")
+        except ValueError as exc:
+            raise WorkbookError(
+                "template_column_missing",
+                "05_实收回款缺少隐藏实体ID列，请重新下载项目总表",
+            ) from exc
+        uploaded_receipt_ids = {
+            str(row[entity_index]).strip()
+            for row in receipt_ws.iter_rows(min_row=2, values_only=True)
+            if row and row[entity_index] not in (None, "")
+        }
+        missing_receipt_ids = sorted(export_receipt_ids - uploaded_receipt_ids)
+        if missing_receipt_ids:
+            contracts_by_id = {
+                contract.project_contract_id: contract
+                for contract in _current_contracts(db, project_id)
+            }
+            parsed_receipt_keys = {
+                (operation.project_contract_id, operation.report_month)
+                for operation in receipt_ops
+                if operation.project_contract_id
+            }
+            implicit_voids: list[ec.CollectionOp] = []
+            for collection_id in missing_receipt_ids:
+                snapshot = db.get(MaintenanceCollectionSnapshot, collection_id)
+                if (
+                    snapshot is None
+                    or snapshot.project_id != project_id
+                    or snapshot.status != "confirmed"
+                ):
+                    raise WorkbookError(
+                        "collection_not_found",
+                        "导出后的实收回款已不存在、已作废或不属于本项目，请重新下载",
+                    )
+                contract = contracts_by_id.get(snapshot.project_contract_id)
+                if contract is None:
+                    raise WorkbookError(
+                        "collection_contract_not_current",
+                        "导出后的实收回款关联合同已失效，请重新下载并先处理合同关系",
+                    )
+                if (
+                    snapshot.project_contract_id,
+                    snapshot.report_month,
+                ) in parsed_receipt_keys:
+                    raise WorkbookError(
+                        "receipt_identity_lost",
+                        "05_实收回款中仍有相同合同和月份的行，但隐藏实体ID已丢失；"
+                        "为避免把保留的回款误作废，请重新下载项目总表后修改",
+                    )
+                implicit_voids.append(ec.CollectionOp(
+                    operation="VOID",
+                    project_contract_id=contract.project_contract_id,
+                    contract_no=contract.contract_no,
+                    report_month=snapshot.report_month,
+                    cumulative_amount=None,
+                    receipt_reference=None,
+                    remark=None,
+                    collection_status=None,
+                ))
+                will_void_rows.append({
+                    "sheet": V2_SHEET_RECEIPTS,
+                    "entity_id": collection_id,
+                    "label": (
+                        f"{contract.contract_no} "
+                        f"{snapshot.report_month:%Y-%m}"
+                    ),
+                    "reason": "上传文件缺行",
+                })
+            receipt_ops = receipt_ops + tuple(implicit_voids)
     if V2_SHEET_PLAN in included:
         plan_ws = wb[V2_SHEET_PLAN]
         milestone_changes = tuple(_v2_parse_plan(db, project_id, plan_ws))
