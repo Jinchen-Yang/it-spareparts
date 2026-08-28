@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app import auth
 from app.api import maintenance_project_workbook_v3
@@ -339,19 +339,41 @@ def test_v3_shared_current_contract_fails_closed_for_expense_rows(db):
     )
     db.add(other)
     db.flush()
-    db.add(MaintenanceProjectContract(
-        project_contract_id="wb3-pc-shared",
-        project_id=other.project_id,
-        contract_id="wb3-contract-1",
-        contract_no="XSDD-20260731-0086",
-        amount_inc_tax=Decimal("44756.00"),
-        status_mapping_state="mapped",
-        status_mapping_version="synthetic-v1",
-        included_in_total=True,
-        effective_from=date(2026, 6, 8),
-        effective_to=date(2029, 12, 5),
-        source="synthetic-test",
+    # Seed a legacy cross-project conflict while keeping the production guard
+    # enabled for the behavior exercised below.
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
     ))
+    try:
+        db.add(MaintenanceProjectContract(
+            project_contract_id="wb3-pc-shared",
+            project_id=other.project_id,
+            contract_id="wb3-contract-1",
+            contract_no="XSDD-20260731-0086",
+            amount_inc_tax=Decimal("44756.00"),
+            status_mapping_state="mapped",
+            status_mapping_version="synthetic-v1",
+            included_in_total=True,
+            effective_from=date(2026, 6, 8),
+            effective_to=date(2029, 12, 5),
+            source="synthetic-test",
+        ))
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    assert db.scalar(text(
+        "SELECT tgenabled FROM pg_trigger "
+        "WHERE tgrelid = 'maintenance_project_contract'::regclass "
+        "AND tgname = 'trg_maintenance_contract_claim_xsdd'"
+    )) == "O"
+    assert db.scalar(text(
+        "SELECT count(*) FROM maintenance_project_xsdd "
+        "WHERE xsdd_norm = '20260731-0086'"
+    )) == 1
     line = db.get(MaintenanceSiteIssueLine, "wb3-issue-line-1")
     line.cost_source = "manual"
     line.price_basis = "ex_tax"

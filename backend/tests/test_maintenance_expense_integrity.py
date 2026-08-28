@@ -588,18 +588,42 @@ def test_resolve_historical_ownership_candidate_counts(db):
     with engine.begin() as connection:
         _seed_project(connection, "ei-own-p1", "EI-OWN-P1")
         _seed_project(connection, "ei-own-p2", "EI-OWN-P2")
-        _seed_contract(connection, "ei-own-c1", "ei-own-p1", "XSDD-20221008-0165")
-        # Overlapping window, same normalized number → second candidate.
-        _seed_contract(
-            connection, "ei-own-c2", "ei-own-p1", "20221008-0165",
-            effective_from=date(2026, 2, 1), effective_to=date(2026, 4, 1),
-        )
-        # Same number, other project → unique cross-project candidate once the
-        # two p1 contracts are out of window.
-        _seed_contract(
-            connection, "ei-own-c3", "ei-own-p2", "xsdd-20221008-0165",
-            effective_from=date(2026, 4, 1), effective_to=None,
-        )
+        # This fixture represents a cross-project conflict that predates the
+        # canonical XSDD ownership trigger.  New writes cannot create this
+        # state, but the resolver must still fail closed for historical rows.
+        connection.execute(text(
+            "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+        try:
+            _seed_contract(
+                connection, "ei-own-c1", "ei-own-p1", "XSDD-20221008-0165"
+            )
+            # Overlapping window, same normalized number → second candidate.
+            _seed_contract(
+                connection, "ei-own-c2", "ei-own-p1", "20221008-0165",
+                effective_from=date(2026, 2, 1), effective_to=date(2026, 4, 1),
+            )
+            # Same number, other project → unique cross-project candidate once
+            # the two p1 contracts are out of window.
+            _seed_contract(
+                connection, "ei-own-c3", "ei-own-p2", "xsdd-20221008-0165",
+                effective_from=date(2026, 4, 1), effective_to=None,
+            )
+        finally:
+            connection.execute(text(
+                "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+                "trg_maintenance_contract_claim_xsdd"
+            ))
+        assert connection.scalar(text(
+            "SELECT tgenabled FROM pg_trigger "
+            "WHERE tgrelid = 'maintenance_project_contract'::regclass "
+            "AND tgname = 'trg_maintenance_contract_claim_xsdd'"
+        )) == "O"
+        assert connection.scalar(text(
+            "SELECT count(*) FROM maintenance_project_xsdd "
+            "WHERE xsdd_norm = '20221008-0165'"
+        )) == 0
 
     # 0 candidates → unmapped.
     resolution = ei.resolve_historical_ownership(
