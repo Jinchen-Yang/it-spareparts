@@ -67,6 +67,17 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(screen.getByText(/100000\.00 元/)).toBeInTheDocument();
   });
 
+  it("主名称下用灰字展示同一项目的其他来源名称", () => {
+    renderCard(makeRow({
+      aliases: ["腾讯整体维保项目-预交付", "腾讯20251016-20261015整体维保"],
+    }));
+    const aliases = screen.getByTestId("maintenance-project-aliases");
+    expect(aliases).toHaveTextContent(
+      "其他名称：腾讯整体维保项目-预交付、腾讯20251016-20261015整体维保",
+    );
+    expect(aliases).toHaveClass("ant-typography-secondary");
+  });
+
   it("成本彩色上卡：备件/报销/领用/发货数 + 回款进度条（2026-08-22）", () => {
     const { container } = renderCard(makeRow());
     const text = container.textContent ?? "";
