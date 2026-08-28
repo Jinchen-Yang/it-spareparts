@@ -1434,6 +1434,11 @@ def _serialize_project_line(
         "description": ln.description,
         "qty": _f(ln.qty),
         "return_qty": _f(ln.return_qty),
+        # WBDD 源表流转状态，只供用户/Agent 对照展示。成本事实仍只把
+        # return_qty（退货冲抵）传给 resolved_line_cost_fields；不得把
+        # returned_qty（已返旧件等状态）混入净量或成本计算。
+        "returned_qty": _f(ln.returned_qty),
+        "pending_return_qty": _f(ln.pending_return_qty),
         "unit_cost": _f(cost_fact["unit_cost"]) if has_known_cost else None,
         "cost_amount": _f(cost_fact["cost_amount"]) if has_known_cost else None,
         "unit_cost_inc_tax": (

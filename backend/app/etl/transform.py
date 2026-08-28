@@ -178,6 +178,16 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "amount_inc_tax": _safe_money(g("amount_inc_tax")),
         })
     else:  # sales
+        tax_amount = _safe_money(g("tax_amount"))
+        amount_inc_tax = _safe_money(g("amount_inc_tax"))
+        is_tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
+        # 真实销售导出经常把税率列写成带“(必填)”的采购同名列；reader 已按
+        # 文件类型合并别名。仍缺税率时，只允许用同一行显式未税额和税金反推，
+        # 绝不把 NULL 税率当 0 后把未税额冒充含税额。
+        if head["tax_rate"] is None:
+            head["tax_rate"] = cleaner.derive_tax_rate(
+                head["amount_ex_tax"], tax_amount
+            )
         head.update({
             "salesperson": cleaner.clean_str(g("salesperson")),
             "customer_name": cleaner.clean_str(g("customer_name")),
@@ -186,6 +196,9 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "customer_city": cleaner.clean_str(g("customer_city")),
             "business_type": cleaner.clean_str(g("business_type")),
             "warehouse": cleaner.clean_str(g("warehouse")),
+            "is_tax_inclusive": is_tax_inclusive,
+            "tax_amount": tax_amount,
+            "amount_inc_tax": amount_inc_tax,
         })
     return head
 

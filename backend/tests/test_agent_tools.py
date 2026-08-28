@@ -71,6 +71,17 @@ def test_schema_registry_consistent():
     assert names == set(tools._REGISTRY)
 
 
+def test_maintenance_lines_contract_separates_return_status_from_cost_offset():
+    spec = next(
+        item["function"] for item in tools.TOOLS
+        if item["function"]["name"] == "get_maintenance_lines"
+    )
+    description = spec["description"]
+    assert "returned_qty（已返数量）" in description
+    assert "pending_return_qty（待返数量）" in description
+    assert "不参与净量或成本核减" in description
+
+
 def test_new_data_tools_smoke(db, ctx):
     r = tools.dispatch(db, "get_purchase_analysis", {"days": 7, "top": 5}, ctx)
     assert "kpi" in r and "rows" in r

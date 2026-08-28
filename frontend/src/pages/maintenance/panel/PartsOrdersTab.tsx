@@ -160,6 +160,8 @@ export function PartsOrdersTab({
     { title: "维保单号", dataIndex: "order_no", width: 170, render: raw },
     { title: "需求数量", dataIndex: "qty", width: 90, render: raw },
     { title: "退货数量", dataIndex: "return_qty", width: 90, render: raw },
+    { title: "已返数量", dataIndex: "returned_qty", width: 90, render: raw },
+    { title: "待返数量", dataIndex: "pending_return_qty", width: 90, render: raw },
     {
       title: "未税单价",
       dataIndex: "unit_cost_ex_tax",
@@ -230,13 +232,16 @@ export function PartsOrdersTab({
             {selectedOrderNo ? `｜当前过滤：${selectedOrderNo}（再点单号取消）` : ""}
           </Text>
         </Space>
+        <Text type="secondary" style={{ display: "block", fontSize: 11.5 }}>
+          已返数量、待返数量是 WBDD 源表流转状态，仅作展示；净量和成本仍只按需求数量减退货数量。
+        </Text>
         <Table<ProjectPartsRow>
           rowKey="line_id"
           size="small"
           loading={loading}
           dataSource={shownLines}
           columns={lineColumns}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1380 }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
         />
       </Card>

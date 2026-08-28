@@ -440,6 +440,13 @@ def list_master_rows(
                 "description": line.description or "",
                 "qty": str(line.qty) if line.qty is not None else None,
                 "return_qty": str(line.return_qty) if line.return_qty is not None else None,
+                "returned_qty": (
+                    str(line.returned_qty) if line.returned_qty is not None else None
+                ),
+                "pending_return_qty": (
+                    str(line.pending_return_qty)
+                    if line.pending_return_qty is not None else None
+                ),
                 "cost_amount_inc_tax": (
                     str(inc["amount"]) if inc["amount"] is not None else None
                 ),
@@ -507,6 +514,13 @@ def list_master_rows(
             "description": line.description or "",
             "qty": float(line.qty) if line.qty is not None else None,
             "return_qty": float(line.return_qty) if line.return_qty is not None else None,
+            "returned_qty": (
+                float(line.returned_qty) if line.returned_qty is not None else None
+            ),
+            "pending_return_qty": (
+                float(line.pending_return_qty)
+                if line.pending_return_qty is not None else None
+            ),
             "serial_numbers": line.serial_numbers or "",
             "warehouse": order.warehouse or "",
             "cost_source": inc["source"] if inc["tier"] != "missing" else "",

@@ -363,9 +363,13 @@ TOOLS: list[dict] = [
         "function": {
             "name": "get_maintenance_lines",
             "description": (
-                "单个维保项目的出库明细（追单据用）：维保单号/日期/需求类型/仓库/PN/数量/退货/"
+                "单个维保项目的出库明细（追单据用）：维保单号/日期/需求类型/仓库/PN/"
+                "需求数量/退货数量/已返数量/待返数量/"
                 "单价/金额/cost_tier(actual|estimated|missing)/原始成本来源与税口径/"
                 "置信度(high|medium|low)/取价月/距采购天数/关联采购单/异常标记。"
+                "return_qty（退货数量）才是净量/成本冲抵字段；returned_qty（已返数量）和"
+                "pending_return_qty（待返数量）仅为源表流转状态展示，不参与净量或成本核减，"
+                "禁止混用。"
                 "cost_tier 是权威事实层级；missing 时单价和金额为空，原始来源/税口径仅供诊断，"
                 "不得据此自行恢复金额或重判 actual/estimated。"
                 "project 必须是 get_maintenance_projects 返回的准确项目名。需要项目成本页面权限。"

@@ -6,12 +6,14 @@
 （响应键集恒定、成本排序 422 而非静默降级）。
 """
 from datetime import date
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
+from app.business_time import business_today
 from app.db import get_db
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
@@ -21,6 +23,7 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_boss_board as board
+from app.services import maintenance_project_export as project_export
 
 router = APIRouter(
     prefix="/maintenance/boss-board",
@@ -72,6 +75,19 @@ class ProjectSearch(BaseModel):
     lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
     sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$")
     card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
+
+
+class ProjectExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fields: list[str] = Field(min_length=1, max_length=len(project_export.EXPORT_FIELDS))
+    q: str | None = Field(default=None, max_length=128)
+    lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
+    card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
+    sort: str = Field(
+        default="name",
+        pattern=r"^(attention|orders|name|known_cost|cost_ratio)$",
+    )
 
 
 @router.get("/health")
@@ -189,6 +205,101 @@ def board_projects_search(
             {"code": "cost_contract_permission_required",
              "message": "成本及合同财务数据权限"},
         ) from exc
+
+
+@router.get("/projects/export/options")
+def board_project_export_options(
+    response: Response,
+    _auth: str = Depends(current_role),
+    ctx: UserContext = Depends(require_board_view),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return project_export.export_options(ctx)
+
+
+@router.post("/projects/export")
+def board_project_export(
+    payload: ProjectExportRequest,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    ctx: UserContext = Depends(require_board_view),
+) -> Response:
+    record_access_log(
+        ctx,
+        "boss_board_projects_export",
+        "maintenance",
+        {
+            "field_count": len(payload.fields),
+            "searched": bool(payload.q and payload.q.strip()),
+            "lifecycle": payload.lifecycle,
+            "card_status": payload.card_status,
+            "sort": payload.sort,
+        },
+    )
+    try:
+        content, row_count = project_export.build_project_export(
+            db,
+            user_ctx=ctx,
+            field_keys=payload.fields,
+            q_text=payload.q,
+            lifecycle=payload.lifecycle,
+            card_status=payload.card_status,
+            sort=payload.sort,
+            allowed_project_ids=_allowed_scope(db, ctx),
+        )
+    except project_export.UnknownProjectExportField as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "code": "invalid_export_fields",
+                "message": "包含服务端白名单之外的导出字段",
+                "fields": exc.fields,
+            },
+        ) from exc
+    except project_export.ForbiddenProjectExportField as exc:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {
+                "code": "export_field_permission_denied",
+                "message": "所选字段超出当前账号的数据权限",
+                "fields": exc.fields,
+            },
+        ) from exc
+    except project_export.ProjectExportTooLarge as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "project_export_too_large", "message": str(exc)},
+        ) from exc
+    except board.BoardSortNotPermitted as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "sort_requires_cost_permission",
+             "message": "按成本排序需要成本数据权限"},
+        ) from exc
+    except board.BoardCostContractNotPermitted as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "cost_contract_permission_required",
+             "message": "成本及合同财务数据权限"},
+        ) from exc
+
+    stamp = business_today().strftime("%Y%m%d")
+    ascii_name = f"maintenance-projects-{stamp}.xlsx"
+    utf8_name = quote(f"维保项目清单-{stamp}.xlsx")
+    return Response(
+        content=content,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{utf8_name}"
+            ),
+            "X-Export-Row-Count": str(row_count),
+        },
+    )
 
 
 @router.get("/projects/{project_id}")

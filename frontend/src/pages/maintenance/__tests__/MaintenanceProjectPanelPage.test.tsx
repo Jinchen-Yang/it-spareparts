@@ -655,9 +655,10 @@ describe("项目面板", () => {
       sheet: "03_备件订单",
       rows: [
         { line_id: 1, pn_std: "PN-1", order_no: "WBDD-1",
-          description: "系统关联行", qty: "3", return_qty: "0",
+          description: "系统关联行", qty: "2", return_qty: "0",
+          returned_qty: "2", pending_return_qty: "1",
           unit_cost_ex_tax: "88.50", unit_cost_inc_tax: "100.00",
-          cost_amount_inc_tax: "300.00",
+          cost_amount_inc_tax: "200.00",
           cost_source: "direct", confidence: "high" },
         { line_id: 2, pn_std: "PN-2", order_no: "WBDD-2",
           description: "人工回填行", qty: "1", return_qty: "0",
@@ -681,6 +682,14 @@ describe("项目面板", () => {
     // PN 主列：加粗 PN + 描述副行
     expect(screen.getByText("PN-1")).toBeInTheDocument();
     expect(screen.getByText("系统关联行")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "已返数量" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "待返数量" })).toBeInTheDocument();
+    const firstLine = screen.getByText("PN-1").closest("tr");
+    expect(firstLine).not.toBeNull();
+    expect(within(firstLine!).getAllByText("2")).toHaveLength(2);
+    expect(within(firstLine!).getByText("0")).toBeInTheDocument();
+    expect(within(firstLine!).getByText("1")).toBeInTheDocument();
+    expect(screen.getByText(/已返数量、待返数量.*仅作展示/)).toBeInTheDocument();
     // 单价两档渲染
     expect(screen.getByText("88.50")).toBeInTheDocument();
     // 分类彩标：direct=绿标、manual=紫标、none=红标

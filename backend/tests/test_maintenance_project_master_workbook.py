@@ -23,6 +23,7 @@ from app.models.maintenance_project import MaintenanceProjectContract
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.security import UserContext
 from app.services import maintenance_expense_collection_workbook as ec
+from app.services import maintenance_cost
 from app.services import maintenance_demands
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_project_operations as operations
@@ -359,17 +360,23 @@ def test_master_rows_api_uses_strict_cost_and_active_manual_net_qty(
         master_api.get_settings(), "maintenance_project_master_v2_enabled", True)
     rows = master._assigned_lines(
         db, project_id=project_with_lines.project_id, window=None)
-    first, second = rows[0][0], rows[1][0]
-    first.qty = Decimal("3")
-    first.return_qty = Decimal("1")
+    first, first_order, _project_id = rows[0]
+    second = rows[1][0]
+    # 「已返」是旧件返还等流转状态，不是需求退货冲抵。即使已返=需求=2，
+    # 净量仍应是 qty(2)-return_qty(0)=2，绝不能被冲成 0。
+    first.qty = Decimal("2")
+    first.return_qty = Decimal("0")
+    first.returned_qty = Decimal("2")
+    first.pending_return_qty = Decimal("1")
     first.cost_source = None
-    db.add(MaintenanceManualCostOverride(
+    override = MaintenanceManualCostOverride(
         line_id=first.id,
         unit_cost_ex_tax=Decimal("8"),
         unit_cost_inc_tax=Decimal("9.04"),
         active=True,
         updated_by="test",
-    ))
+    )
+    db.add(override)
     second.cost_source = "future_source"
     second.cost_tax_basis = "inc"
     second.cost_amount = Decimal("999")
@@ -385,8 +392,24 @@ def test_master_rows_api_uses_strict_cost_and_active_manual_net_qty(
     by_id = {row["line_id"]: row for row in response.json()["rows"]}
     assert by_id[first.id]["cost_amount_inc_tax"] == "18.08"
     assert by_id[first.id]["cost_source"] == "manual"
+    assert by_id[first.id]["qty"] == "2.000"
+    assert by_id[first.id]["return_qty"] == "0.000"
+    assert by_id[first.id]["returned_qty"] == "2.000"
+    assert by_id[first.id]["pending_return_qty"] == "1.000"
     assert by_id[second.id]["cost_amount_inc_tax"] is None
     assert by_id[second.id]["missing_kind"] == "invalid_cost_fact"
+
+    agent_row = maintenance_cost._serialize_project_line(
+        first,
+        first_order,
+        override,
+        hide_cost_signals=False,
+    )
+    assert agent_row["qty"] == 2.0
+    assert agent_row["return_qty"] == 0.0
+    assert agent_row["returned_qty"] == 2.0
+    assert agent_row["pending_return_qty"] == 1.0
+    assert agent_row["cost_amount_inc_tax"] == 18.08
 
 
 def test_unknown_sheet_name_is_422(db, project_with_lines):

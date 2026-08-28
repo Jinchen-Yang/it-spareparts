@@ -186,7 +186,12 @@ export interface ProjectPartsRow {
   pn_std: string | null;
   description: string | null;
   qty: number | string | null;
+  /** 退货冲抵数量：净量/成本使用 qty - return_qty。 */
   return_qty?: number | string | null;
+  /** WBDD 源表流转状态，仅展示，不参与净量或成本核减。 */
+  returned_qty?: number | string | null;
+  /** WBDD 源表流转状态，仅展示，不参与净量或成本核减。 */
+  pending_return_qty?: number | string | null;
   serial_numbers?: string | null;
   warehouse: string | null;
   cost_source: string | null;

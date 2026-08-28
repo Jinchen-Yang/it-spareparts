@@ -1,4 +1,6 @@
 """列名容差归一：氚云非标导出视图让列丢 (必填) 注解（实测 #25 采购订单整文件 empty_pn）。"""
+from decimal import Decimal
+
 import openpyxl
 import pandas as pd
 import pytest
@@ -38,6 +40,43 @@ def test_purchase_tax_marker_alias_is_not_shadowed_by_expense_loose_column():
 
     assert list(frame.columns) == ["是否含税(必填)"]
     assert frame["是否含税(必填)"].iloc[0] == "是"
+
+
+def test_sales_tax_block_is_resolved_within_sales_document_type(tmp_path):
+    """销售税字段不能被采购同名 canonical key 截走并静默落成 NULL。"""
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [
+        "订单编号(必填)", "数据ID(不可修改)", "订单日期(必填)",
+        "销售人员(必填)", "客户名称", "业务类型#", "订单金额",
+        "是否含税(必填)", "税率(必填)", "税金", "不含税金额", "数据状态",
+        "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+        "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+    ]
+    ws.append([f"F{i:07d}" for i in range(1, len(headers) + 1)])
+    ws.append(headers)
+    ws.append([
+        "XSDD-20240708-0093", "RAW-SALES-TAX", "2024-07-08",
+        "王雪菲", "测试客户", "算力运维", 31_440_000,
+        "含税", "13.0%", Decimal("3616991.15"), Decimal("27823008.85"),
+        "已生效", "RAW-SALES-TAX-L1", "TEST-PN", 1, 31_440_000, 31_440_000,
+    ])
+    path = tmp_path / "sales-tax-block.xlsx"
+    wb.save(path)
+
+    frame, file_type = reader.read_excel(str(path))
+    result = transform.transform(frame, file_type)
+    order = result.orders["RAW-SALES-TAX"]
+
+    assert file_type == mapping.SALES
+    assert "税率" in frame.columns and "税率(必填)" not in frame.columns
+    assert "是否含税" in frame.columns and "是否含税(必填)" not in frame.columns
+    assert order["amount_inc_tax"] == Decimal("31440000.00")
+    assert order["amount_ex_tax"] == Decimal("27823008.85")
+    assert order["tax_amount"] == Decimal("3616991.15")
+    assert order["tax_rate"] == Decimal("0.1300")
+    assert order["is_tax_inclusive"] is True
 
 
 def test_detect_file_type_tolerant():
