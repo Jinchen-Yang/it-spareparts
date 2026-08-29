@@ -150,6 +150,18 @@ def restore_collection_milestones(
     if set(milestone_by_id) != set(entity_ids):
         raise MilestoneRestoreNotFound("部分回款计划不存在，整批未恢复")
 
+    restore_audits = list(db.scalars(
+        select(MaintenanceProjectOperationAudit).where(
+            MaintenanceProjectOperationAudit.project_id == project_id,
+            MaintenanceProjectOperationAudit.entity_type == "collection_milestone",
+            MaintenanceProjectOperationAudit.entity_id.in_(entity_ids),
+            MaintenanceProjectOperationAudit.action == "RESTORE",
+        )
+    ))
+    audits_by_entity: dict[str, list[MaintenanceProjectOperationAudit]] = {}
+    for audit in restore_audits:
+        audits_by_entity.setdefault(audit.entity_id, []).append(audit)
+
     restored: list[dict] = []
     replayed: list[dict] = []
     for spec in specs:
@@ -177,12 +189,27 @@ def restore_collection_milestones(
                 f"合同 {spec.contract_no} 第 {spec.sequence} 期与 Excel 不一致，整批未恢复"
             )
 
-        # 安全重放：首次成功把 version 从 N 改为 N+1。相同请求再次到达时，
-        # 目标已 active 且事实一致，返回 no-op，不重复 bump 或写审计。
+        # 安全重放：除了 active、事实一致和 version=N+1，还必须有本接口
+        # 留下的 N->N+1 RESTORE 审计。这样不会把一个原本就有效的节点误报为
+        # “恢复成功”。相同请求再次到达时返回 no-op，不重复 bump 或写审计。
         if milestone.is_active:
             if milestone.version != spec.expected_version + 1:
                 raise MilestoneRestoreConflict(
                     f"合同 {spec.contract_no} 第 {spec.sequence} 期已被其他操作更新"
+                )
+            current_snapshot = _facts(milestone)
+            has_restore_receipt = any(
+                audit.before_json is not None
+                and audit.after_json is not None
+                and audit.before_json.get("is_active") is False
+                and audit.before_json.get("version") == spec.expected_version
+                and audit.after_json == current_snapshot
+                for audit in audits_by_entity.get(milestone.milestone_id, [])
+            )
+            if not has_restore_receipt:
+                raise MilestoneRestoreConflict(
+                    f"合同 {spec.contract_no} 第 {spec.sequence} 期已有效，"
+                    "但没有可验证的恢复审计"
                 )
             replayed.append({
                 "entity_id": milestone.milestone_id,

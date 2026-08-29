@@ -7,6 +7,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import func, select
@@ -196,6 +197,28 @@ def test_api_rolls_back_entire_batch_when_one_excel_fact_mismatches(db):
     assert db.scalar(select(func.count()).select_from(
         MaintenanceProjectOperationAudit).where(
             MaintenanceProjectOperationAudit.project_id == project.project_id,
+    )) == 0
+
+
+def test_active_row_without_restore_audit_is_not_accepted_as_replay(db):
+    project, contract, milestones = _seed(db)
+    milestones[0].is_active = True
+    milestones[0].version = 3
+    db.commit()
+
+    with pytest.raises(restore.MilestoneRestoreConflict, match="没有可验证的恢复审计"):
+        restore.restore_collection_milestones(
+            db,
+            project_id=project.project_id,
+            specs=_specs(contract, [milestones[0]]),
+            reason="尝试重放一条没有恢复回执的计划",
+            operated_by="restore-admin",
+        )
+    db.rollback()
+    assert db.scalar(select(func.count()).select_from(
+        MaintenanceProjectOperationAudit).where(
+            MaintenanceProjectOperationAudit.project_id == project.project_id,
+            MaintenanceProjectOperationAudit.action == "RESTORE",
         )) == 0
 
 
