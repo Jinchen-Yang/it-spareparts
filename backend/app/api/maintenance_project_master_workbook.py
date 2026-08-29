@@ -13,10 +13,12 @@
 """
 import re
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,7 +34,7 @@ from app.api.maintenance_project_scope import (
     resolve_visible_project_ids,
 )
 from app import config
-from app.auth import current_identity, current_role
+from app.auth import current_identity, current_role, require_admin
 from app.config import get_settings
 from app.db import get_db
 from app.models.maintenance import MaintenanceManualCostOverride
@@ -45,6 +47,7 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_expense_collection_workbook as ec
+from app.services import maintenance_collection_milestone_restore as milestone_restore
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_workbook_renderer
 
@@ -52,6 +55,21 @@ router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 _MASTER = "/projects/stable/{project_id}/master-workbook"
 _GLOBAL = "/spare-part-lines"
+
+
+class MilestoneRestoreItem(BaseModel):
+    entity_id: str = Field(min_length=1, max_length=36)
+    expected_version: int = Field(ge=1)
+    contract_no: str = Field(min_length=1, max_length=64)
+    sequence: int = Field(ge=1, le=24)
+    planned_date: date
+    planned_amount: Decimal = Field(gt=0, lt=Decimal("1000000000000"))
+    date_precision: str = Field(pattern="^(day|month)$")
+
+
+class MilestoneRestoreRequest(BaseModel):
+    reason: str = Field(min_length=4, max_length=500)
+    items: list[MilestoneRestoreItem] = Field(min_length=1, max_length=24)
 
 
 def _require_contract_amount_manage(ctx: UserContext, ident: dict) -> None:
@@ -75,6 +93,22 @@ def _require_contract_amount_manage(ctx: UserContext, ident: dict) -> None:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "修改项目合同总额需要维保项目主档管理权限和经营数据权限",
+        )
+
+
+def _require_real_admin_restore(ctx: UserContext, ident: dict) -> None:
+    """恢复已作废节点必须是可追责的实名管理员，不接受共享口令 token。"""
+
+    if (
+        ident.get("authn") != "sys_user"
+        or ident.get("fb")
+        or not ident.get("sub")
+        or ident.get("sub") != ctx.user_id
+        or ctx.role != "admin"
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "恢复已作废回款计划必须使用实名管理员账号",
         )
 
 
@@ -386,6 +420,79 @@ def get_collection_plan(
             "version": m.version,
         })
     return {"total": len(rows), "rows": rows}
+
+
+@router.post("/projects/stable/{project_id}/collection-milestones/restore")
+def restore_collection_milestones(
+    body: MilestoneRestoreRequest,
+    response: Response,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _admin: str = Depends(require_admin),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(_ACTION_KEY, require_data="data_profit")
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
+) -> dict:
+    """实名管理员整批恢复已作废的回款计划；事实必须与 Excel 完全一致。"""
+
+    response.headers["Cache-Control"] = "no-store"
+    _require_real_admin_restore(ctx, ident)
+    try:
+        payload = milestone_restore.restore_collection_milestones(
+            db,
+            project_id=project_id,
+            specs=[
+                milestone_restore.MilestoneRestoreSpec(
+                    entity_id=item.entity_id,
+                    expected_version=item.expected_version,
+                    contract_no=item.contract_no,
+                    sequence=item.sequence,
+                    planned_date=item.planned_date,
+                    planned_amount=item.planned_amount,
+                    date_precision=item.date_precision,
+                )
+                for item in body.items
+            ],
+            reason=body.reason,
+            operated_by=_operator(ident),
+        )
+        db.commit()
+    except milestone_restore.MilestoneRestoreNotFound as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "milestone_restore_not_found", "message": str(exc)},
+        ) from exc
+    except milestone_restore.MilestoneRestoreConflict as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "milestone_restore_conflict", "message": str(exc)},
+        ) from exc
+    except milestone_restore.MilestoneRestoreInvalid as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "milestone_restore_invalid", "message": str(exc)},
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
+    record_access_log(
+        ctx,
+        "restore",
+        "maintenance_collection_milestones",
+        {
+            "project_id": project_id,
+            "restored_count": payload["restored_count"],
+            "idempotent_replay_count": payload["idempotent_replay_count"],
+        },
+    )
+    return payload
 
 
 @router.get(_MASTER + "/rows")

@@ -18,9 +18,11 @@ from app.models.maintenance import (
 )
 from app.models.maintenance_project import (
     MaintenanceProject,
+    MaintenanceProjectAlias,
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
     MaintenanceProjectUserAssignment,
+    MaintenanceProjectXsdd,
 )
 from app.models.maintenance_contract_remediation import (
     MaintenanceContractAmountRemediationEntry,

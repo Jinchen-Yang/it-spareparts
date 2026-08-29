@@ -99,6 +99,95 @@ class MaintenanceProject(Base):
     )
 
 
+class MaintenanceProjectXsdd(Base):
+    """Canonical owner of one normalized XSDD sales-order identity.
+
+    One project may own multiple XSDDs, but one normalized XSDD may own only
+    one project.  Historical conflicts are deliberately *not* backfilled into
+    this table; writers fail closed until a reviewed merge resolves them.
+    """
+
+    __tablename__ = "maintenance_project_xsdd"
+
+    xsdd_norm: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(xsdd_norm)) > 0",
+            name="ck_maintenance_project_xsdd_norm",
+        ),
+        CheckConstraint(
+            "char_length(btrim(source)) > 0",
+            name="ck_maintenance_project_xsdd_source",
+        ),
+        Index("ix_maintenance_project_xsdd_project", "project_id"),
+    )
+
+
+class MaintenanceProjectAlias(Base):
+    """Searchable display alias; aliases never become relationship keys."""
+
+    __tablename__ = "maintenance_project_alias"
+
+    alias_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"),
+        nullable=False,
+    )
+    alias_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    alias_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(alias_name)) > 0",
+            name="ck_maintenance_project_alias_name",
+        ),
+        CheckConstraint(
+            "char_length(btrim(alias_key)) > 0",
+            name="ck_maintenance_project_alias_key",
+        ),
+        CheckConstraint(
+            "char_length(btrim(source)) > 0",
+            name="ck_maintenance_project_alias_source",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "alias_key",
+            name="uq_maintenance_project_alias_identity",
+        ),
+        Index("ix_maintenance_project_alias_project", "project_id"),
+        Index("ix_maintenance_project_alias_key", "alias_key"),
+        Index(
+            "ix_maintenance_project_alias_name_trgm",
+            alias_name,
+            postgresql_using="gin",
+            postgresql_ops={"alias_name": "gin_trgm_ops"},
+        ),
+    )
+
+
 class MaintenanceProjectContract(Base):
     """Versioned, auditable relationship between one project and one contract."""
 

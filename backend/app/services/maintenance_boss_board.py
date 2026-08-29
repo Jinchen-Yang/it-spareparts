@@ -32,6 +32,7 @@ from app.services import (
     maintenance_boss_facts,
     maintenance_cost_quality,
     maintenance_periods,
+    maintenance_project_identity,
     maintenance_source_health,
     project_names,
 )
@@ -888,17 +889,26 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     if q_text:
         needle = q_text.strip()
         # 除项目名/编号外还命中 XSDD 合同号（#37：搜项目名、项目单号）
-        from app.models.maintenance_project import MaintenanceProjectContract
+        from app.models.maintenance_project import (
+            MaintenanceProjectAlias,
+            MaintenanceProjectContract,
+        )
 
         by_contract = (
             select(MaintenanceProjectContract.project_id)
             .where(MaintenanceProjectContract.contract_no
                    .icontains(needle, autoescape=True))
         )
+        by_alias = (
+            select(MaintenanceProjectAlias.project_id)
+            .where(MaintenanceProjectAlias.alias_name
+                   .icontains(needle, autoescape=True))
+        )
         filters.append(or_(
             MaintenanceProject.project_code.icontains(needle, autoescape=True),
             MaintenanceProject.display_name.icontains(needle, autoescape=True),
             MaintenanceProject.project_id.in_(by_contract),
+            MaintenanceProject.project_id.in_(by_alias),
         ))
 
     # 窗口内的每项目计数/成本子查询：既用于 has_activity 过滤，也用于真实排序。
@@ -1039,6 +1049,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         db, project_ids)
     # 卡片「销售」（2026-08-21 客户反馈）：台账 salesperson 优先，XSDD 众数兜底
     sales_modes = _card_salesperson_modes(db, project_ids)
+    aliases = maintenance_project_identity.aliases_by_project(db, project_ids)
 
     out_rows = []
     for proj in rows:
@@ -1047,6 +1058,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_id": proj.project_id,
             "project_code": proj.project_code,
             "display_name": proj.display_name,
+            "aliases": [
+                name for name in aliases.get(proj.project_id, [])
+                if project_names.display_name_identity(name)
+                != project_names.display_name_identity(proj.display_name)
+            ],
             "lifecycle": maintenance_periods.lifecycle_status(
                 proj.period_from,
                 proj.period_to,
@@ -1088,6 +1104,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_id": UNASSIGNED_BUCKET,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
+            "aliases": [],
             "lifecycle": "missing",
             "period_from": None,       # 桶不是项目，没有期限可言
             "period_to": None,

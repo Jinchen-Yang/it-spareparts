@@ -13,8 +13,12 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
 )
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
-from app.services import maintenance_periods, project_names
-from app.services import maintenance_project_operations as operations
+from app.services import (
+    maintenance_periods,
+    maintenance_project_identity,
+    maintenance_project_operations as operations,
+    project_names,
+)
 
 
 class MaintenanceProjectCatalogError(Exception):
@@ -152,6 +156,12 @@ def create_project(
         raise MaintenanceProjectCatalogConflict(
             f"稳定项目编号「{clean_code}」已存在，请勿重复建档"
         ) from exc
+    maintenance_project_identity.record_alias(
+        db,
+        project_id=project.project_id,
+        alias_name=clean_name,
+        source="project_create",
+    )
     payload = project_dict(project)
     _audit(
         db,
@@ -199,6 +209,7 @@ def update_project(
         raise MaintenanceProjectCatalogConflict(
             f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试"
         )
+    previous_display_name = project.display_name
     before = project_dict(project)
     if "display_name" in allowed:
         project.display_name = allowed["display_name"]
@@ -232,6 +243,19 @@ def update_project(
     changed = project_dict(project) != before
     if not changed:
         return before
+    if project.display_name != previous_display_name:
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=previous_display_name,
+            source="project_rename_previous",
+        )
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=project.display_name,
+            source="project_rename_current",
+        )
     project.version += 1
     db.flush()
     after = project_dict(project)

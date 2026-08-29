@@ -13,6 +13,7 @@ from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
+    MaintenanceProjectAlias,
     MaintenanceProjectAuditLog,
     MaintenanceProjectUserAssignment,
 )
@@ -23,7 +24,11 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.business_time import business_today
-from app.services import maintenance_project_assignments, project_names
+from app.services import (
+    maintenance_project_assignments,
+    maintenance_project_identity,
+    project_names,
+)
 from app.services.maintenance_ledger import (
     _lifecycle_status,
     _period_from_display_name,
@@ -330,6 +335,29 @@ def assign_source_orders(
     if _prelocked_states is None:
         _lock_data_change(db)
 
+    # XSDD identity locks precede workbook/project row locks.  Manual assignment
+    # may not split one XSDD across projects; reviewed whole-project merge is a
+    # separate operation and is intentionally not smuggled through this API.
+    preflight_xsdds = [
+        value
+        for value in db.scalars(
+            select(FMaintenanceOrder.linked_sales_order_no).where(
+                FMaintenanceOrder.raw_order_id.in_(source_ids)
+            )
+        )
+        if maintenance_project_identity.normalize_xsdd(value)
+    ]
+    maintenance_project_identity.lock_xsdd_identities(db, preflight_xsdds)
+    for xsdd in preflight_xsdds:
+        try:
+            owner = maintenance_project_identity.resolve_xsdd_project(db, xsdd)
+        except maintenance_project_identity.XsddProjectConflict as exc:
+            raise SourceAssignmentConflict(str(exc)) from exc
+        if owner is not None and owner != project_id:
+            raise SourceAssignmentConflict(
+                f"XSDD {xsdd} 已归属于其他项目，不能拆分挂靠"
+            )
+
     # Probe before taking any fact lock, then acquire every old/new workbook
     # state in one sorted pass.  The locked reread below rejects an owner that
     # appeared after this probe instead of taking a late state lock and
@@ -452,6 +480,17 @@ def assign_source_orders(
                 raise SourceAssignmentConflict(
                     f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
                 )
+
+    for xsdd in preflight_xsdds:
+        try:
+            maintenance_project_identity.claim_xsdd_project(
+                db,
+                value=xsdd,
+                project_id=project.project_id,
+                source="manual_assign",
+            )
+        except maintenance_project_identity.XsddProjectConflict as exc:
+            raise SourceAssignmentConflict(str(exc)) from exc
 
     requires_assignment_change = any(
         current.get(source_id) is None
@@ -954,41 +993,114 @@ def auto_assign_unassigned(
         db.flush()
         return result
 
-    # 2. 按归一化项目名（project_std 去预交付前缀）分组
-    grouped: dict[str, list[FMaintenanceOrder]] = {}
-    for order in unassigned:
-        key = project_names.strip_pre_delivery(order.project_std or "") or (
+    # 2. XSDD 是项目归并键；只有无 XSDD 的罕见旧单才按项目名兜底。
+    # 同一 XSDD 下的不同 project_std 不再各建一个 AUTO 项目，而是作为
+    # 同一 canonical 项目的展示 aliases 留存。
+    GroupKey = tuple[str, str]
+
+    def _name_for(order: FMaintenanceOrder) -> str:
+        return project_names.strip_pre_delivery(order.project_std or "") or (
             project_names.strip_pre_delivery(order.project_raw or "") or ""
         )
-        if not key:
+
+    def _group_key(order: FMaintenanceOrder) -> GroupKey | None:
+        xsdd = maintenance_project_identity.normalize_xsdd(
+            order.linked_sales_order_no
+        )
+        if xsdd:
+            return ("xsdd", xsdd)
+        name = _name_for(order)
+        return ("name", name) if name else None
+
+    grouped: dict[GroupKey, list[FMaintenanceOrder]] = {}
+    group_names: dict[GroupKey, set[str]] = {}
+    for order in unassigned:
+        key = _group_key(order)
+        if key is None:
             continue
         grouped.setdefault(key, []).append(order)
+        name = _name_for(order)
+        if name:
+            group_names.setdefault(key, set()).add(name)
 
-    # create/rename/auto-create 在 DB 项目查询与 state 锁之前按同一名称 identity
-    # 串行，封住“规划时不存在、创建时复用并发人工项目”的窗口。
-    project_names.lock_display_name_identities(db, grouped)
+    def _primary_name(key: GroupKey) -> str:
+        counts: dict[str, int] = {}
+        for order in grouped[key]:
+            name = _name_for(order)
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        if counts:
+            return sorted(counts, key=lambda name: (-counts[name], name))[0]
+        return f"XSDD-{key[1]}" if key[0] == "xsdd" else key[1]
 
-    # 3. 只读规划：每组目标已有项目（唯一才挂）、待新建名、歧义跳过；
+    def _matched_project_ids(names: set[str]) -> set[str]:
+        if not names:
+            return set()
+        identity_keys = {
+            project_names.display_name_identity(name) for name in names
+        }
+        direct = set(db.scalars(select(MaintenanceProject.project_id).where(
+            MaintenanceProject.display_name.in_(sorted(names)),
+            MaintenanceProject.is_active.is_(True),
+        )))
+        aliased = set(db.scalars(
+            select(MaintenanceProjectAlias.project_id)
+            .join(
+                MaintenanceProject,
+                MaintenanceProject.project_id == MaintenanceProjectAlias.project_id,
+            )
+            .where(
+                MaintenanceProjectAlias.alias_key.in_(sorted(identity_keys)),
+                MaintenanceProject.is_active.is_(True),
+            )
+        ))
+        return direct | aliased
+
+    # XSDD/name advisory 均必须先于 state/project 锁。全局数据锁在更前面，
+    # 与人工挂靠、作废/恢复保持同一锁序。
+    maintenance_project_identity.lock_xsdd_identities(
+        db, [key[1] for key in grouped if key[0] == "xsdd"]
+    )
+    project_names.lock_display_name_identities(
+        db, {name for names in group_names.values() for name in names}
+    )
+
+    # 3. 只读规划：XSDD 已有唯一 owner 时优先；无 XSDD 证据才允许
+    # 名称/alias 辅助选择。历史同号多项目一律跳过，绝不继续制造新分裂。
     # owner 回填候选也在此探明，与挂靠目标并集一次性排序锁，绝不晚锁。
-    planned_existing: dict[str, str] = {}  # project_name -> project_id
-    create_names: set[str] = set()
-    ambiguous_names: set[str] = set()
-    for project_name in grouped:
-        matched_ids = list(
-            db.scalars(
+    planned_existing: dict[GroupKey, str] = {}
+    create_groups: set[GroupKey] = set()
+    ambiguous_groups: set[GroupKey] = set()
+    for key in grouped:
+        resolved: str | None = None
+        if key[0] == "xsdd":
+            try:
+                resolved = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
+                )
+            except maintenance_project_identity.XsddProjectConflict:
+                ambiguous_groups.add(key)
+                continue
+            if resolved is not None and db.scalar(
                 select(MaintenanceProject.project_id).where(
-                    MaintenanceProject.display_name == project_name,
+                    MaintenanceProject.project_id == resolved,
                     MaintenanceProject.is_active.is_(True),
                 )
-            )
-        )
-        if len(matched_ids) > 1:
-            # display_name 重复：不能确定挂哪个，跳过（保守）
-            ambiguous_names.add(project_name)
+            ) is None:
+                ambiguous_groups.add(key)
+                continue
+        matched_ids = _matched_project_ids(group_names.get(key, set()))
+        if resolved is not None:
+            if matched_ids and matched_ids != {resolved}:
+                ambiguous_groups.add(key)
+            else:
+                planned_existing[key] = resolved
+        elif len(matched_ids) > 1:
+            ambiguous_groups.add(key)
         elif matched_ids:
-            planned_existing[project_name] = matched_ids[0]
+            planned_existing[key] = next(iter(matched_ids))
         else:
-            create_names.add(project_name)
+            create_groups.add(key)
     backfill_candidate_ids = set(
         db.scalars(
             select(MaintenanceProject.project_id).where(
@@ -1022,31 +1134,33 @@ def auto_assign_unassigned(
         if set(locked_projects) != union_ids:
             raise SourceAssignmentConflict("项目主档已变化，请刷新后重试")
 
-    # 5. 锁后复核（fail closed）：目标仍唯一且活跃、待建名仍无项目、
+    # 5. 锁后复核（fail closed）：XSDD owner、名称 alias、待建组与来源单
     # 单据仍未归属——任一被并发改变则整体回滚，零半截写入。
-    for project_name, planned_id in planned_existing.items():
-        current_ids = list(
-            db.scalars(
-                select(MaintenanceProject.project_id).where(
-                    MaintenanceProject.display_name == project_name,
-                    MaintenanceProject.is_active.is_(True),
+    for key, planned_id in planned_existing.items():
+        current_ids = _matched_project_ids(group_names.get(key, set()))
+        if key[0] == "xsdd":
+            try:
+                current_owner = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
                 )
-            )
-        )
-        if current_ids != [planned_id]:
-            raise SourceAssignmentConflict(
-                "目标项目已变化，请刷新后重试"
-            )
-    for project_name in create_names:
-        if db.scalar(
-            select(MaintenanceProject.project_id).where(
-                MaintenanceProject.display_name == project_name,
-                MaintenanceProject.is_active.is_(True),
-            )
-        ) is not None:
-            raise SourceAssignmentConflict(
-                "目标项目已变化，请刷新后重试"
-            )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+            if current_owner not in {None, planned_id}:
+                raise SourceAssignmentConflict("XSDD 项目归属已变化，请刷新后重试")
+        if current_ids and current_ids != {planned_id}:
+            raise SourceAssignmentConflict("目标项目已变化，请刷新后重试")
+    for key in create_groups:
+        if _matched_project_ids(group_names.get(key, set())):
+            raise SourceAssignmentConflict("目标项目已变化，请刷新后重试")
+        if key[0] == "xsdd":
+            try:
+                current_owner = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
+                )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+            if current_owner is not None:
+                raise SourceAssignmentConflict("XSDD 项目归属已变化，请刷新后重试")
     order_ids = sorted(order.raw_order_id for order in unassigned)
     locked_orders = {
         order.raw_order_id: order
@@ -1072,13 +1186,10 @@ def auto_assign_unassigned(
         raise SourceAssignmentConflict(
             "来源维保单的项目归属已变化，请刷新后重试"
         )
-    for project_name, orders in grouped.items():
+    for key, orders in grouped.items():
         for order in orders:
             locked = locked_orders[order.raw_order_id]
-            current_key = project_names.strip_pre_delivery(
-                locked.project_std or ""
-            ) or (project_names.strip_pre_delivery(locked.project_raw or "") or "")
-            if current_key != project_name:
+            if _group_key(locked) != key:
                 raise SourceAssignmentConflict(
                     "来源维保单已变化，请刷新后重试"
                 )
@@ -1090,22 +1201,46 @@ def auto_assign_unassigned(
     created_project_ids: set[str] = set()
     changed_existing: set[str] = set()
     skipped_groups = 0
-    for project_name, orders in grouped.items():
-        if project_name in ambiguous_names:
+    for key, orders in grouped.items():
+        if key in ambiguous_groups:
             continue
-        if project_name in planned_existing:
-            project = locked_projects[planned_existing[project_name]]
+        primary_name = _primary_name(key)
+        if key in planned_existing:
+            project = locked_projects[planned_existing[key]]
             matched_projects.add(project.project_id)
         else:
-            # 2026-08-18 全自动：对不上已有项目 → 用 project_std 自动建项目主档
-            period_from, period_to = _period_from_display_name(project_name)
+            # 一个新 XSDD 至多创建一个 AUTO 项目，其他来源名全部成为 alias。
+            period_from, period_to = _period_from_display_name(primary_name)
             project = _create_auto_project(
-                db, display_name=project_name,
+                db, display_name=primary_name,
                 period_from=period_from, period_to=period_to,
                 lifecycle=_lifecycle_status(period_from, period_to, today),
             )
             created_projects += 1
             created_project_ids.add(project.project_id)
+        if key[0] == "xsdd":
+            try:
+                maintenance_project_identity.claim_xsdd_project(
+                    db,
+                    value=key[1],
+                    project_id=project.project_id,
+                    source="auto_assign",
+                )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=project.display_name,
+            source="project_primary",
+        )
+        for alias_name in sorted(group_names.get(key, set())):
+            maintenance_project_identity.record_alias(
+                db,
+                project_id=project.project_id,
+                alias_name=alias_name,
+                source="source_order",
+            )
         for order in orders:
             assignment = MaintenanceSourceOrderAssignment(
                 assignment_id=str(uuid4()),
@@ -1164,7 +1299,7 @@ def auto_assign_unassigned(
         "matched_projects": len(matched_projects),
         "created_projects": created_projects,
         "skipped_groups": skipped_groups,
-        "skipped_ambiguous": len(ambiguous_names),
+        "skipped_ambiguous": len(ambiguous_groups),
         **owner,
     }
 
