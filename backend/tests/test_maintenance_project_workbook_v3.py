@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app import auth
 from app.api import maintenance_project_workbook_v3
@@ -339,40 +340,23 @@ def test_v3_shared_current_contract_fails_closed_for_expense_rows(db):
     )
     db.add(other)
     db.flush()
-    db.add(MaintenanceProjectContract(
-        project_contract_id="wb3-pc-shared",
-        project_id=other.project_id,
-        contract_id="wb3-contract-1",
-        contract_no="XSDD-20260731-0086",
-        amount_inc_tax=Decimal("44756.00"),
-        status_mapping_state="mapped",
-        status_mapping_version="synthetic-v1",
-        included_in_total=True,
-        effective_from=date(2026, 6, 8),
-        effective_to=date(2029, 12, 5),
-        source="synthetic-test",
-    ))
-    line = db.get(MaintenanceSiteIssueLine, "wb3-issue-line-1")
-    line.cost_source = "manual"
-    line.price_basis = "ex_tax"
-    line.unit_cost = Decimal("0")
-    line.cost_amount = Decimal("0")
-    line.unit_cost_ex_tax = Decimal("0")
-    line.unit_cost_inc_tax = Decimal("0")
-    line.cost_amount_ex_tax = Decimal("0")
-    line.cost_amount_inc_tax = Decimal("0")
-    db.commit()
-
-    data = workbook_v3.build_project_workbook(db, "wb3-project-1")
-    workbook = load_workbook(io.BytesIO(data), data_only=True)
-    expense_rows = list(workbook["04_报销订单"].iter_rows(values_only=True))
-    assert all(row[0] != "BXD-20260721-0019" for row in expense_rows[1:])
-    metrics = {
-        row[0].value: row[1].value
-        for row in workbook["02_概览数据"].iter_rows(min_col=1, max_col=2)
-        if row[0].value
-    }
-    assert metrics["项目已计成本(含税)"] == 0
+    with pytest.raises(IntegrityError):
+        db.add(MaintenanceProjectContract(
+            project_contract_id="wb3-pc-shared",
+            project_id=other.project_id,
+            contract_id="wb3-contract-1",
+            contract_no="XSDD-20260731-0086",
+            amount_inc_tax=Decimal("44756.00"),
+            status_mapping_state="mapped",
+            status_mapping_version="synthetic-v1",
+            included_in_total=True,
+            effective_from=date(2026, 6, 8),
+            effective_to=date(2029, 12, 5),
+            source="synthetic-test",
+        ))
+        db.commit()
+    db.rollback()
+    assert db.get(MaintenanceProjectContract, "wb3-pc-shared") is None
 
 
 def test_v3_overview_rejects_duplicate_current_contract_relationship(db):

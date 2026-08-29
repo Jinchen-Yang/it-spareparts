@@ -594,12 +594,15 @@ def test_resolve_historical_ownership_candidate_counts(db):
             connection, "ei-own-c2", "ei-own-p1", "20221008-0165",
             effective_from=date(2026, 2, 1), effective_to=date(2026, 4, 1),
         )
-        # Same number, other project → unique cross-project candidate once the
-        # two p1 contracts are out of window.
-        _seed_contract(
-            connection, "ei-own-c3", "ei-own-p2", "xsdd-20221008-0165",
-            effective_from=date(2026, 4, 1), effective_to=None,
-        )
+    # The canonical XSDD registry now rejects the former cross-project fixture
+    # at write time.  Keep this assertion here because ownership resolution may
+    # no longer depend on a database state that production itself forbids.
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            _seed_contract(
+                connection, "ei-own-c3", "ei-own-p2", "xsdd-20221008-0165",
+                effective_from=date(2026, 4, 1), effective_to=None,
+            )
 
     # 0 candidates → unmapped.
     resolution = ei.resolve_historical_ownership(
@@ -616,12 +619,13 @@ def test_resolve_historical_ownership_candidate_counts(db):
     assert {c.project_contract_id for c in resolution.candidates} == {
         "ei-own-c1", "ei-own-c2"}
 
-    # effective_to is exclusive: at 2026-04-01 only c1 and c3 remain windows…
-    # c1 (open-ended) and c3 both match → ambiguous.
+    # effective_to is exclusive: at 2026-04-01 c2 is out of window and the
+    # forbidden cross-project c3 was never persisted, so c1 maps uniquely.
     resolution = ei.resolve_historical_ownership(
         db, project_id="ei-own-p1", linked_sales_order_no="20221008-0165",
         expense_date=date(2026, 4, 1))
-    assert resolution.state == "ambiguous"
+    assert resolution.state == "mapped"
+    assert resolution.project_contract_id == "ei-own-c1"
 
     # Exactly one candidate on the same project → mapped.
     resolution = ei.resolve_historical_ownership(
