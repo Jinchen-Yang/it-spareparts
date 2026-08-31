@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
 describe("v1.26.0 release notes", () => {
-  it("publishes the attachment upload and uploader name updates", () => {
+  it("publishes the attachment and maintenance salesperson updates", () => {
     expect(APP_VERSION).toBe("1.26.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
@@ -11,6 +11,8 @@ describe("v1.26.0 release notes", () => {
     const notes = LATEST.items.join("\n");
     expect(notes).toMatch(/任意常见文件均可上传/);
     expect(notes).toMatch(/显示上传人姓名.*显示账号名/);
+    expect(notes).toMatch(/销售人员.*手工.*清空/);
+    expect(notes).toMatch(/负责人.*改派.*同步销售人员/);
   });
 
   it("keeps prior releases archived in the changelog", () => {

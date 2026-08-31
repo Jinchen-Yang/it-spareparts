@@ -517,7 +517,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   );
 }
 
-/** 项目名旁的编辑入口：改名称、期限与可见账号；负责人账号走独立 OCC 接口。 */
+/** 项目名旁的编辑入口：改名称、销售、期限与可见账号；负责人账号走独立 OCC 接口。 */
 function EditBasicsButton({
   projectId,
   disabled,
@@ -539,6 +539,7 @@ function EditBasicsButton({
       const proj = resp.data.project;
       form.setFieldsValue({
         display_name: proj.display_name,
+        salesperson: proj.salesperson,
         version: proj.version,
         period:
           proj.period_from || proj.period_to
@@ -616,6 +617,9 @@ function EditBasicsButton({
         <Form form={form} layout="vertical">
           <Form.Item name="display_name" label="项目名称">
             <Input />
+          </Form.Item>
+          <Form.Item name="salesperson" label="销售人员">
+            <Input allowClear maxLength={64} placeholder="可手工填写或清空" />
           </Form.Item>
           {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
           <Form.Item name="period" label="维保期限（起止）">

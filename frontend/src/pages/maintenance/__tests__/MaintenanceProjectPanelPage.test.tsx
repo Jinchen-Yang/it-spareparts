@@ -586,6 +586,79 @@ describe("项目面板", () => {
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("project_manager_id");
   });
 
+  it("基础信息回显并提交可手工编辑的销售人员", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_code: "合成项目A",
+          display_name: "合成项目A",
+          salesperson: "王销售",
+          project_manager_id: "来源负责人原文",
+          period_from: null,
+          period_to: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 4,
+          visible_usernames: [],
+        },
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    const salesperson = within(dialog).getByRole("textbox", { name: "销售人员" });
+    expect(salesperson).toHaveValue("王销售");
+
+    fireEvent.change(salesperson, { target: { value: "赵销售" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({
+        version: 4,
+        salesperson: "赵销售",
+        reason: "面板编辑基本信息",
+      }),
+    ));
+  });
+
+  it("基础信息允许清空销售人员并显式提交空值", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_code: "合成项目A",
+          display_name: "合成项目A",
+          salesperson: "待清空销售",
+          project_manager_id: null,
+          period_from: null,
+          period_to: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 5,
+          visible_usernames: [],
+        },
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    const salesperson = within(dialog).getByRole("textbox", { name: "销售人员" });
+
+    fireEvent.change(salesperson, { target: { value: "" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ version: 5, salesperson: "" }),
+    ));
+  });
+
   it("只有实名 admin 且有管理动作键时显示真实负责人 OCC 控件", async () => {
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions",

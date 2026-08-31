@@ -14,6 +14,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
 )
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.system import SysUser
 from app.services import maintenance_project_catalog as catalog
 
@@ -177,6 +178,83 @@ def test_project_patch_only_changes_explicit_fields(db):
     assert changed.status_code == 200, changed.text
     assert changed.json()["display_name"] == "只修改项目名称"
     assert changed.json()["project_manager_id"] == "manager-must-stay"
+
+
+def test_project_patch_can_set_and_clear_salesperson_with_one_revision_per_change(db):
+    client = _admin_client(db, "project_master_salesperson_admin")
+    created = client.post(
+        "/api/maintenance/projects/stable",
+        json={
+            "project_code": "MAINT-SYNTH-MASTER-SALESPERSON",
+            "display_name": "销售人员可编辑项目",
+            "reason": "建立销售人员编辑测试主档",
+        },
+    ).json()
+
+    set_salesperson = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 1,
+            "salesperson": "  王销售  ",
+            "reason": "手工确认项目销售人员",
+        },
+    )
+
+    assert set_salesperson.status_code == 200, set_salesperson.text
+    assert set_salesperson.json()["salesperson"] == "王销售"
+    assert set_salesperson.json()["version"] == 2
+    state = db.scalar(
+        select(MaintenanceProjectWorkbookState).where(
+            MaintenanceProjectWorkbookState.project_id == created["project_id"]
+        )
+    )
+    assert state is not None
+    assert state.revision == 1
+
+    cleared = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 2,
+            "salesperson": "",
+            "reason": "清空错误销售人员",
+        },
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["salesperson"] is None
+    assert cleared.json()["version"] == 3
+    db.refresh(state)
+    assert state.revision == 2
+
+    unchanged = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 3,
+            "salesperson": " ",
+            "reason": "重复保存空销售人员",
+        },
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["version"] == 3
+    db.refresh(state)
+    assert state.revision == 2
+
+    updates = list(
+        db.scalars(
+            select(MaintenanceProjectAuditLog)
+            .where(
+                MaintenanceProjectAuditLog.project_id == created["project_id"],
+                MaintenanceProjectAuditLog.entity_type == "project",
+                MaintenanceProjectAuditLog.action == "update",
+            )
+            .order_by(MaintenanceProjectAuditLog.id)
+        )
+    )
+    assert len(updates) == 2
+    assert updates[0].before_json["salesperson"] is None
+    assert updates[0].after_json["salesperson"] == "王销售"
+    assert updates[1].before_json["salesperson"] == "王销售"
+    assert updates[1].after_json["salesperson"] is None
 
 
 def test_project_archive_and_restore_preserve_history(db):

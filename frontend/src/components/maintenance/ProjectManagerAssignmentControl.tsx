@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Input, Modal, Select, Space, Tag, Typography, message } from "antd";
+import { Button, Checkbox, Input, Modal, Select, Space, Tag, Typography, message } from "antd";
 
 import {
   archiveMaintenanceProjectManager,
@@ -27,6 +27,7 @@ export default function ProjectManagerAssignmentControl({
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<number>();
   const [reason, setReason] = useState("");
+  const [syncSalesperson, setSyncSalesperson] = useState(true);
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
   const searchController = useRef<AbortController | null>(null);
@@ -62,6 +63,7 @@ export default function ProjectManagerAssignmentControl({
     setOpen(false);
     setSelectedUserId(undefined);
     setReason("");
+    setSyncSalesperson(true);
   };
   const saveAssignment = async () => {
     const cleanedReason = reason.trim();
@@ -72,6 +74,7 @@ export default function ProjectManagerAssignmentControl({
         user_id: selectedUserId,
         expected_assignment_id: project.manager_assignment?.assignment_id ?? null,
         expected_assignment_version: project.manager_assignment?.version ?? null,
+        sync_salesperson: syncSalesperson,
         reason: cleanedReason,
       });
       const action = project.manager_assignment ? "项目负责人已改派" : "项目负责人已映射";
@@ -170,6 +173,12 @@ export default function ProjectManagerAssignmentControl({
             placeholder="必填：说明映射、改派或归档原因"
             onChange={(event) => setReason(event.target.value)}
           />
+          <Checkbox
+            checked={syncSalesperson}
+            onChange={(event) => setSyncSalesperson(event.target.checked)}
+          >
+            同时同步销售人员
+          </Checkbox>
           <Space style={{ justifyContent: "flex-end", width: "100%" }}>
             {project.manager_assignment && (
               <Button

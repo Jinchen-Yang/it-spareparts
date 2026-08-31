@@ -252,6 +252,7 @@ def assign_primary_manager(
     user_id: int,
     expected_assignment_id: str | None,
     expected_assignment_version: int | None,
+    sync_salesperson: bool = False,
     reason: str,
     operated_by: str,
     _prelocked_state: "MaintenanceProjectWorkbookState | None" = None,
@@ -323,6 +324,39 @@ def assign_primary_manager(
         raise MaintenanceProjectAssignmentError("负责人账号不存在")
     if not target_user.is_active:
         raise MaintenanceProjectAssignmentError("负责人账号已停用")
+    if sync_salesperson:
+        from app.services import maintenance_project_catalog as catalog
+
+        synced_salesperson = next(
+            (
+                cleaned
+                for value in (
+                    target_user.salesperson_name,
+                    target_user.display_name,
+                    target_user.username,
+                )
+                if (cleaned := str(value or "").strip())
+            ),
+            target_user.username,
+        )
+        if project.salesperson != synced_salesperson:
+            project_before = catalog.project_dict(project)
+            project.salesperson = synced_salesperson
+            project.version += 1
+            db.flush()
+            project_after = catalog.project_dict(project)
+            db.add(
+                MaintenanceProjectAuditLog(
+                    project_id=project.project_id,
+                    entity_type="project",
+                    entity_id=project.project_id,
+                    action="update",
+                    before_json=project_before,
+                    after_json=project_after,
+                    reason=reason,
+                    operated_by=operated_by,
+                )
+            )
     if current is not None:
         archived_at = datetime.now(UTC)
         current.archived_at = archived_at

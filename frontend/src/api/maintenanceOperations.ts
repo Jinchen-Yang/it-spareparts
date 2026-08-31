@@ -1040,6 +1040,8 @@ export interface MaintenanceManagerAssignmentInput {
   user_id: number;
   expected_assignment_id?: string | null;
   expected_assignment_version?: number | null;
+  /** 后端默认 false 兼容旧客户端；当前 UI 显式发送用户选择。 */
+  sync_salesperson?: boolean;
   reason: string;
 }
 

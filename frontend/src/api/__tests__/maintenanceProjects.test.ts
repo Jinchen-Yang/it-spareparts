@@ -74,16 +74,18 @@ describe("maintenance project master API", () => {
     });
   });
 
-  it("updates by version and forwards explicit null only when clearing the manager", () => {
+  it("updates by version and forwards explicit null when clearing salesperson and manager", () => {
     updateMaintenanceProject("project-1", {
       version: 3,
       display_name: "更正后的项目名",
+      salesperson: null,
       project_manager_id: null,
       reason: "负责人离任",
     });
     expect(patch).toHaveBeenCalledWith("/maintenance/projects/stable/project-1", {
       version: 3,
       display_name: "更正后的项目名",
+      salesperson: null,
       project_manager_id: null,
       reason: "负责人离任",
     });
