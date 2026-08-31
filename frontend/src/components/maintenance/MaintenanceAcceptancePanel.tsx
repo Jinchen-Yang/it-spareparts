@@ -139,7 +139,7 @@ export default function MaintenanceAcceptancePanel({
     try {
       await runMutation(
         () => uploadMaintenanceAcceptanceAttachment(projectId, { file }),
-        "附件上传失败，系统未写入。请检查格式后重试。",
+        "附件上传失败，请刷新核对附件列表后重试。",
       );
     } finally {
       setBusy(false);

@@ -270,9 +270,10 @@ def download_project_acceptance_file(
         f"maintenance_file:{file_id}",
         {"project_id": project_id},
     )
-    ascii_name = "acceptance-report" + (Path(file_row.original_filename).suffix or ".bin")
+    # Arbitrary extensions may contain Unicode or header parameter delimiters.
+    # Keep the legacy fallback ASCII-only; filename* preserves the complete name.
     disposition = (
-        f"attachment; filename={ascii_name}; "
+        "attachment; filename=acceptance-report.bin; "
         f"filename*=UTF-8''{quote(file_row.original_filename, safe='')}"
     )
     return Response(

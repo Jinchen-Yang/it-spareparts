@@ -111,6 +111,20 @@ describe("MaintenanceAcceptancePanel", () => {
     expect(await screen.findByText("附件类型与扩展名不一致")).toBeInTheDocument();
   });
 
+  it("任意格式上传失败不再提示检查格式", async () => {
+    mocks.uploadMaintenanceAcceptanceAttachment.mockRejectedValue(new Error("Network Error"));
+    const { container } = render(<MaintenanceAcceptancePanel projectId="p1" />);
+    await screen.findByText("上传验收附件");
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input).not.toHaveAttribute("accept");
+    fireEvent.change(input, {
+      target: { files: [new File(["report"], "验收报告.签字扫描")] },
+    });
+
+    expect(await screen.findByText("附件上传失败，请刷新核对附件列表后重试。")).toBeInTheDocument();
+    expect(screen.queryByText(/检查格式/)).not.toBeInTheDocument();
+  });
+
   // b12c5fb「首传被 version 守卫静默吞掉」回归思想移植，适配 2ebbf90 新口径：
   // version=0 空载荷首传正常发请求、不再发 expected_version，成功后刷新。
   it("version=0 空载荷首次上传：不发 expected_version，上传后刷新", async () => {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import io
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 import zipfile
 
@@ -357,6 +358,57 @@ def test_acceptance_upload_preserves_256_character_name_with_long_suffix(db):
     )
     assert download.status_code == 200, download.text
     assert download.content == content
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["验收报告.签字扫描", "report.📄", "report.data;name=other", "验收报告"],
+    ids=["chinese-extension", "emoji-extension", "semicolon-extension", "no-extension"],
+)
+def test_acceptance_arbitrary_filename_upload_download_roundtrip(db, filename):
+    manager, manager_user = _client(
+        db,
+        username="acceptance_filename_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="free-name", manager=manager_user)
+    content = b"arbitrary-acceptance-file"
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded = upload.json()
+    assert uploaded["original_filename"] == filename
+    assert uploaded["uploaded_by_name"] == manager_user.display_name
+
+    current = manager.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
+    )
+    assert current.status_code == 200, current.text
+    assert current.json()["attachments"][0]["original_filename"] == filename
+
+    download = manager.get(
+        f"/api/maintenance/acceptance-files/{uploaded['file_id']}"
+    )
+    assert download.status_code == 200, download.text
+    assert download.content == content
+    assert download.headers["content-disposition"] == (
+        "attachment; filename=acceptance-report.bin; "
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    assert download.headers["content-disposition"].isascii()
+    assert download.headers["cache-control"] == "no-store"
+    assert download.headers["x-content-type-options"] == "nosniff"
+    assert download.headers["content-security-policy"] == "sandbox"
+    db.expire_all()
+    audit = db.scalar(select(BusinessFileDownloadAudit))
+    assert audit is not None
+    assert audit.downloaded_by == manager_user.username
 
 
 def test_acceptance_content_validation_keeps_filename_safety_and_oversize():
