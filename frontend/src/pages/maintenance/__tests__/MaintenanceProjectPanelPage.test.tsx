@@ -586,6 +586,42 @@ describe("项目面板", () => {
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("project_manager_id");
   });
 
+  it("历史销售为空时仅修改项目名称不会提交 salesperson", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_code: "合成项目A",
+          display_name: "合成项目A",
+          salesperson: null,
+          project_manager_id: null,
+          period_from: null,
+          period_to: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 3,
+          visible_usernames: [],
+        },
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目名称" }), {
+      target: { value: "合成项目A（更名）" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
+    expect(updateMaintenanceProject.mock.calls[0][1]).toEqual(expect.objectContaining({
+      version: 3,
+      display_name: "合成项目A（更名）",
+    }));
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("salesperson");
+  });
+
   it("基础信息回显并提交可手工编辑的销售人员", async () => {
     localStorage.setItem("permissions",
       JSON.stringify({ action_maintenance_project_manage: true }));
@@ -625,7 +661,7 @@ describe("项目面板", () => {
     ));
   });
 
-  it("基础信息允许清空销售人员并显式提交空值", async () => {
+  it("基础信息允许清空销售人员并显式提交 null", async () => {
     localStorage.setItem("permissions",
       JSON.stringify({ action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({
@@ -655,8 +691,58 @@ describe("项目面板", () => {
 
     await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith(
       "p1",
-      expect.objectContaining({ version: 5, salesperson: "" }),
+      expect.objectContaining({ version: 5, salesperson: null }),
     ));
+  });
+
+  it("重新打开基础信息不会沿用上一次销售编辑标记", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1",
+          project_code: "合成项目A",
+          display_name: "合成项目A",
+          salesperson: "王销售",
+          project_manager_id: null,
+          period_from: null,
+          period_to: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 6,
+          visible_usernames: [],
+        },
+      },
+    });
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    let dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "销售人员" }), {
+      target: { value: "赵销售" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
+    expect(updateMaintenanceProject.mock.calls[0][1]).toEqual(expect.objectContaining({
+      salesperson: "赵销售",
+    }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "编辑项目基本信息" })).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /编辑基本信息/ }));
+    dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目名称" }), {
+      target: { value: "第二次只改名称" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(2));
+    expect(updateMaintenanceProject.mock.calls[1][1]).toEqual(expect.objectContaining({
+      display_name: "第二次只改名称",
+    }));
+    expect(updateMaintenanceProject.mock.calls[1][1]).not.toHaveProperty("salesperson");
   });
 
   it("只有实名 admin 且有管理动作键时显示真实负责人 OCC 控件", async () => {

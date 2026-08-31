@@ -531,12 +531,17 @@ function EditBasicsButton({
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
+  const salespersonEditedRef = useRef(false);
 
   const openModal = async () => {
     try {
       const resp = await getMaintenanceProject(projectId);
       // 后端契约是 {project: {...}}（MaintenanceProjectOverview）
       const proj = resp.data.project;
+      // Form 实例跨 Modal 开关持久存在；每次回显前清掉上一次编辑的值和
+      // touched 元数据，避免旧会话的销售编辑污染本次 PATCH。
+      form.resetFields();
+      salespersonEditedRef.current = false;
       form.setFieldsValue({
         display_name: proj.display_name,
         salesperson: proj.salesperson,
@@ -570,11 +575,14 @@ function EditBasicsButton({
 
   const submit = async () => {
     const values = await form.validateFields();
-    const { period, ...rest } = values as {
+    const { period, salesperson, ...rest } = values as {
       period?: [Dayjs | null, Dayjs | null] | null;
     } & Record<string, unknown>;
     const payload = {
       ...rest,
+      ...(salespersonEditedRef.current
+        ? { salesperson: salesperson === "" || salesperson == null ? null : salesperson }
+        : {}),
       // 期限整组提交（#39/#51）；清空即回 missing
       period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
       period_to: period?.[1] ? period[1].format("YYYY-MM-DD") : null,
@@ -614,7 +622,15 @@ function EditBasicsButton({
         confirmLoading={saving}
         destroyOnHidden
       >
-        <Form form={form} layout="vertical">
+        <Form
+          form={form}
+          layout="vertical"
+          onValuesChange={(changedValues) => {
+            if (Object.prototype.hasOwnProperty.call(changedValues, "salesperson")) {
+              salespersonEditedRef.current = true;
+            }
+          }}
+        >
           <Form.Item name="display_name" label="项目名称">
             <Input />
           </Form.Item>
