@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import tempfile
-import unicodedata
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
@@ -26,9 +25,15 @@ from app.models.maintenance_project import MaintenanceProject
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_project_assignments as assignments
+from app.services.maintenance_attachment_validation import (
+    AttachmentTooLarge,
+    AttachmentValidationError,
+    MAX_MAINTENANCE_ATTACHMENT_BYTES,
+    validate_acceptance_attachment,
+)
 
 
-MAX_ACCEPTANCE_FILE_BYTES = 20 * 1024 * 1024
+MAX_ACCEPTANCE_FILE_BYTES = MAX_MAINTENANCE_ATTACHMENT_BYTES
 
 
 class MaintenanceAcceptanceError(Exception):
@@ -66,20 +71,6 @@ def _required_text(value: str | None, label: str, limit: int) -> str:
     return cleaned
 
 
-def _safe_filename(filename: str | None) -> tuple[str, str]:
-    normalized = unicodedata.normalize("NFC", str(filename or "")).strip()
-    if (
-        not normalized
-        or len(normalized) > 256
-        or normalized in {".", ".."}
-        or "/" in normalized
-        or "\\" in normalized
-        or any(unicodedata.category(char).startswith("C") for char in normalized)
-    ):
-        raise MaintenanceAcceptanceUnsupported("附件文件名不安全")
-    return normalized, Path(normalized).suffix.lower()
-
-
 def validate_attachment(
     *,
     filename: str | None,
@@ -90,15 +81,18 @@ def validate_attachment(
     （含带外部链接/宏的 Office 文件、扫描件等）。保留的防线只有：
     文件名安全净化（路径穿越/控制字符）、非空、20MB 上限。
     存储 MIME 取客户端申报值，缺失时回退 application/octet-stream。"""
-    safe_name, extension = _safe_filename(filename)
-    if not content:
-        raise MaintenanceAcceptanceUnsupported("附件内容为空")
-    if len(content) > MAX_ACCEPTANCE_FILE_BYTES:
-        raise MaintenanceAcceptanceTooLarge("单个验收附件不得超过 20MB")
-    stored_mime = str(mime_type or "").split(";", 1)[0].strip().lower()
-    if not stored_mime:
-        stored_mime = "application/octet-stream"
-    return safe_name, extension, stored_mime
+    try:
+        return validate_acceptance_attachment(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+    except AttachmentTooLarge as exc:
+        raise MaintenanceAcceptanceTooLarge(
+            "单个验收附件不得超过 20MB"
+        ) from exc
+    except AttachmentValidationError as exc:
+        raise MaintenanceAcceptanceUnsupported(str(exc)) from exc
 
 
 def _root() -> Path:

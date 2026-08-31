@@ -305,6 +305,21 @@ def test_acceptance_attachment_accepts_any_type_and_reports_uploader_name(db):
     )
     assert blocked_pdf.status_code == 200, blocked_pdf.text
 
+    custom_file = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        data={"expected_version": "1"},
+        files={
+            "file": (
+                "客户原始材料.evidence",
+                b"customer-controlled-arbitrary-content",
+                "application/x-maintenance-evidence",
+            )
+        },
+        headers={"Idempotency-Key": "any-type-custom"},
+    )
+    assert custom_file.status_code == 200, custom_file.text
+    assert custom_file.json()["mime_type"] == "application/x-maintenance-evidence"
+
     current = manager.get(
         f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
     ).json()

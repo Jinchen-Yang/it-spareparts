@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import zipfile
 from datetime import date
 
 import pytest
@@ -50,6 +51,20 @@ def _evidence_client(db, *, username: str) -> TestClient:
 def _png_bytes(color: str = "white") -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _jpeg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _office_bytes(required_member: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as package:
+        package.writestr("[Content_Types].xml", "<Types/>")
+        package.writestr(required_member, "<document/>")
     return buffer.getvalue()
 
 
@@ -348,3 +363,105 @@ def test_upload_rejects_wrong_mime_and_missing_milestone(db, seeded_milestone, t
         files={"file": ("巡检报告.png", _png_bytes(), "image/png")},
     )
     assert missing.status_code == 404
+
+
+def test_upload_rejects_empty_and_oversized_collection_evidence(
+    db, seeded_milestone, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_size")
+    url = (
+        f"/api/maintenance/collection-milestones/"
+        f"{seeded_milestone['milestone_id']}/evidence"
+    )
+
+    empty = client.post(
+        url,
+        files={"file": ("空凭证.pdf", b"", "application/pdf")},
+    )
+    assert empty.status_code == 422, empty.text
+
+    oversized = client.post(
+        url,
+        files={
+            "file": (
+                "超大凭证.pdf",
+                b"%PDF-" + b"x" * (20 * 1024 * 1024),
+                "application/pdf",
+            )
+        },
+    )
+    assert oversized.status_code == 413, oversized.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "mime_type"),
+    [
+        ("伪造巡检图.png", b"\x89PNG\r\n\x1a\nnot-an-image", "image/png"),
+        (
+            "含启动动作.pdf",
+            b"%PDF-1.7\n1 0 obj<</OpenAction 2 0 R>>endobj\n%%EOF",
+            "application/pdf",
+        ),
+    ],
+)
+def test_upload_rejects_forged_or_active_collection_evidence(
+    db,
+    seeded_milestone,
+    tmp_path,
+    monkeypatch,
+    filename,
+    content,
+    mime_type,
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_unsafe")
+
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": (filename, content, mime_type)},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "mime_type"),
+    [
+        ("巡检报告.pdf", b"%PDF-1.7\n%%EOF", "application/pdf"),
+        (
+            "巡检报告.docx",
+            _office_bytes("word/document.xml"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        (
+            "巡检台账.xlsx",
+            _office_bytes("xl/workbook.xml"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("现场照片.png", _png_bytes(), "image/png"),
+        ("现场照片.jpg", _jpeg_bytes(), "image/jpeg"),
+        ("现场照片.jpeg", _jpeg_bytes(), "image/jpeg"),
+    ],
+)
+def test_upload_accepts_documented_collection_evidence_types(
+    db,
+    seeded_milestone,
+    tmp_path,
+    monkeypatch,
+    filename,
+    content,
+    mime_type,
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_supported")
+
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": (filename, content, mime_type)},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["original_filename"] == filename
+    assert response.json()["mime_type"] == mime_type

@@ -1,7 +1,7 @@
 """回款提醒凭证（F6）：上传 → 独立目录文件 + yml sidecar + DB 只记 md5。
 
-复用 business_file 元数据层（sha256/大小/MIME/上传人）与验收附件校验
-（validate_attachment：扩展名/MIME/内容一致性、20MB 上限、PDF 脚本剥离检测）。
+复用 business_file 元数据层（sha256/大小/MIME/上传人），但使用回款凭证
+自己的严格附件策略；验收附件的“任意类型可传”口径不会影响本域。
 """
 from __future__ import annotations
 
@@ -26,12 +26,40 @@ from app.models.maintenance_manager import (
     BusinessFile,
     MaintenanceCollectionMilestone,
 )
-from app.services.maintenance_acceptance import validate_attachment
+from app.services.maintenance_attachment_validation import (
+    AttachmentTooLarge,
+    AttachmentValidationError,
+    validate_collection_evidence_attachment,
+)
 from sqlalchemy.exc import IntegrityError
 
 
 class CollectionEvidenceError(RuntimeError):
     """回款凭证业务错误。"""
+
+
+class CollectionEvidenceTooLarge(CollectionEvidenceError):
+    """回款凭证超过 20 MB。"""
+
+
+class CollectionEvidenceUnsupported(CollectionEvidenceError):
+    """回款凭证类型、内容或文件名不符合要求。"""
+
+
+def validate_attachment(
+    *, filename: str | None, mime_type: str | None, content: bytes
+) -> tuple[str, str, str]:
+    """Translate shared validation errors into collection-domain errors."""
+    try:
+        return validate_collection_evidence_attachment(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+    except AttachmentTooLarge as exc:
+        raise CollectionEvidenceTooLarge("单个回款凭证不得超过 20MB") from exc
+    except AttachmentValidationError as exc:
+        raise CollectionEvidenceUnsupported(str(exc)) from exc
 
 
 def _active_evidence_payload(

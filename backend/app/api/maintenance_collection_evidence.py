@@ -17,10 +17,6 @@ from app.db import get_db
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.security import UserContext, get_current_user_context, require_page
 from app.services import maintenance_collection_evidence as collection_evidence
-from app.services.maintenance_acceptance import (
-    MaintenanceAcceptanceTooLarge,
-    MaintenanceAcceptanceUnsupported,
-)
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
@@ -151,14 +147,14 @@ async def upload_milestone_evidence(
         payload["close_reason"] = None if closed["closed"] else closed.get("reason")
         db.commit()
         return payload
-    except MaintenanceAcceptanceTooLarge as exc:
+    except collection_evidence.CollectionEvidenceTooLarge as exc:
         db.rollback()
         _domain_error(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             code="file_too_large",
             message=str(exc),
         )
-    except MaintenanceAcceptanceUnsupported as exc:
+    except collection_evidence.CollectionEvidenceUnsupported as exc:
         db.rollback()
         _domain_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
