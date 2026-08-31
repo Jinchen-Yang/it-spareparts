@@ -33,6 +33,7 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_project_assignments as pa
+from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_source_assignments as sa
 from app.services.maintenance_manager_workbook_adapter import (
@@ -330,6 +331,29 @@ def test_auto_assign_existing_project_multi_changes_single_bump(db):
     assert result["manager_filled_projects"] == 1
     assert result["assignments_created"] == 1
     assert _revision(db, project.project_id) == 1
+    db.refresh(project)
+    assert project.version == 2
+    owner_audit = db.scalar(
+        select(MaintenanceProjectAuditLog).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id,
+            MaintenanceProjectAuditLog.entity_type == "project",
+            MaintenanceProjectAuditLog.action == "update",
+        )
+    )
+    assert owner_audit is not None
+    assert owner_audit.before_json["version"] == 1
+    assert owner_audit.after_json["version"] == 2
+
+    with pytest.raises(catalog.MaintenanceProjectCatalogConflict):
+        catalog.update_project(
+            db,
+            project_id=project.project_id,
+            version=1,
+            updates={"project_manager_id": "过期负责人"},
+            reason="验证旧版本不能覆盖自动回填",
+            operated_by="occ-admin",
+        )
+    db.rollback()
 
     # 幂等重跑：无未归属单、字段已满 → 全部零增量，revision 不动
     again = sa.auto_assign_unassigned(
@@ -386,8 +410,19 @@ def test_auto_assign_new_project_stays_revision_zero(db):
     assert result["created_projects"] == 1
     assert result["assignments_created"] == 1
     # 新建项目首次完整成形（挂靠 + 回填 + 指派）保持 revision 0：
-    # state 行不创建或 revision 仍为 0
+    # state 行不创建或 revision 仍为 0，project OCC 仍是初始 version 1。
     assert _revision(db, project.project_id) == 0
+    assert project.version == 1
+    owner_audit = db.scalar(
+        select(MaintenanceProjectAuditLog).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id,
+            MaintenanceProjectAuditLog.entity_type == "project",
+            MaintenanceProjectAuditLog.action == "update",
+        )
+    )
+    assert owner_audit is not None
+    assert owner_audit.before_json["version"] == 1
+    assert owner_audit.after_json["version"] == 1
 
 
 def test_auto_assign_fails_closed_when_assignment_appears_concurrently(

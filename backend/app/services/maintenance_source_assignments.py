@@ -773,7 +773,8 @@ def _backfill_project_owner(
 ) -> dict:
     """维保负责人/销售自动回填——**只补空，绝不覆盖人工编辑**（幂等）。
 
-    - `project.salesperson` 为空且未被人工覆盖时补销售众数；人工明确清空不回填；
+    - `project.salesperson` 为空且未被人工覆盖时补销售众数；人工明确清空后，
+      销售、负责人原文和 primary_manager 均不得再由 WBDD 销售派生；
     - `project.project_manager_id`（维保负责人原文）为空时同值回填；
     - 文本与销售一致且尚无活跃 primary_manager 时，按
       `sys_user.salesperson_name` 匹配活跃账号自动建账号级指派
@@ -782,16 +783,27 @@ def _backfill_project_owner(
     任一字段/指派真实改变 → 同事务 workbook revision +1（bump 按根事务去重，
     多处变更仍只 +1）；全 no-op → +0。``_prelocked_state`` 由调用方按
     state(sorted)→project(sorted) 锁序传入，本函数不得在项目锁后再晚锁 state；
-    ``_skip_workbook_bump`` 用于 auto 新建项目的首次成形（保持 revision 0）。
+    ``_skip_workbook_bump`` 用于 auto 新建项目的首次成形（保持 project version 1、
+    workbook revision 0）。
     """
     stats = {"sales_filled": False, "manager_filled": False, "assignment_created": False}
     salesperson = salesperson.strip()
     if not salesperson:
         return stats
+    if (
+        project.salesperson_override_active
+        and not (project.salesperson or "").strip()
+    ):
+        # An explicit empty override is a permission-bearing manual decision.
+        # Do not recreate the cleared salesperson indirectly as manager text or
+        # as a primary-manager assignment, even if this project was selected by
+        # a stale pre-lock candidate probe.
+        return stats
     before = {
         "salesperson": project.salesperson,
         "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
+        "version": project.version,
     }
     if (
         not project.salesperson_override_active
@@ -805,6 +817,11 @@ def _backfill_project_owner(
         manager_text = salesperson[:64]
         stats["manager_filled"] = True
     if stats["sales_filled"] or stats["manager_filled"]:
+        if not _skip_workbook_bump:
+            # Existing project-master facts participate in the same OCC token as
+            # manual edits.  Auto-created projects are still being formed inside
+            # their creation transaction and intentionally remain at version 1.
+            project.version += 1
         db.flush()
         db.add(
             MaintenanceProjectAuditLog(
@@ -819,6 +836,7 @@ def _backfill_project_owner(
                         project.salesperson_override_active
                     ),
                     "project_manager_id": project.project_manager_id,
+                    "version": project.version,
                 },
                 reason=reason,
                 operated_by=operated_by,
@@ -872,13 +890,19 @@ def _backfill_project_owner(
 
 
 def _owner_backfill_candidate_condition():
-    """Only missing, non-overridden sales fields remain auto-fill candidates."""
-    return or_(
-        and_(
-            MaintenanceProject.salesperson_override_active.is_(False),
-            func.coalesce(MaintenanceProject.salesperson, "") == "",
+    """Keep legacy blanks eligible while excluding explicit empty overrides."""
+    return and_(
+        ~and_(
+            MaintenanceProject.salesperson_override_active.is_(True),
+            func.btrim(func.coalesce(MaintenanceProject.salesperson, "")) == "",
         ),
-        func.coalesce(MaintenanceProject.project_manager_id, "") == "",
+        or_(
+            and_(
+                MaintenanceProject.salesperson_override_active.is_(False),
+                func.coalesce(MaintenanceProject.salesperson, "") == "",
+            ),
+            func.coalesce(MaintenanceProject.project_manager_id, "") == "",
+        ),
     )
 
 
