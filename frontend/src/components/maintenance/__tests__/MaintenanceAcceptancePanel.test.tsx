@@ -165,6 +165,7 @@ describe("MaintenanceAcceptancePanel", () => {
       size_bytes: 128,
       sha256: "sha-1",
       uploaded_by: "admin",
+      uploaded_by_name: "李呈辉",
       uploaded_at: "2026-08-25T00:00:00Z",
     };
     mocks.getMaintenanceAcceptance.mockResolvedValue({
@@ -175,6 +176,8 @@ describe("MaintenanceAcceptancePanel", () => {
     });
     render(<MaintenanceAcceptancePanel projectId="p1" />);
     await screen.findByText("验收报告.pdf");
+    // 2026-08-26 客户口径：附件旁显示上传人姓名
+    expect(screen.getByText("李呈辉")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "删除 验收报告.pdf" }));
     fireEvent.click(await screen.findByRole("button", { name: /^删\s*除$/ }));

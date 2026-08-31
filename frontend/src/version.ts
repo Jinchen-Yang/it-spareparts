@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.25.0";
+export const APP_VERSION = "1.26.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.26.0",
+    date: "2026-08-31",
+    items: [
+      "验收附件放开类型限制：不再限定 pdf/docx/xlsx/图片，任意常见文件均可上传",
+      "验收附件旁显示上传人姓名（无实名信息时显示账号名）",
+    ],
+  },
   {
     version: "1.25.0",
     date: "2026-08-27",
