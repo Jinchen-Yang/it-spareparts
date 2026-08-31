@@ -36,6 +36,12 @@ class MaintenanceProject(Base):
     business_type: Mapped[str | None] = mapped_column(String(64))
     cmo_name: Mapped[str | None] = mapped_column(String(128))
     salesperson: Mapped[str | None] = mapped_column(String(64))
+    salesperson_override_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
     # 项目级不返还默认值（行级默认：领用行可覆盖，见 c3b5d9e1f7a2）
     no_return_default: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"

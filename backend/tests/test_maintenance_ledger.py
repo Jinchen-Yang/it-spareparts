@@ -31,6 +31,7 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysImportBatch
 from app.services import maintenance_ledger as ledger
+from app.services import maintenance_project_catalog as project_catalog
 from app.services import maintenance_project_operations as project_operations_service
 
 
@@ -861,6 +862,109 @@ def test_upsert_project_reuses_case_insensitive_identity_after_prelock(db):
     assert changed is False
     assert summary["projects_created"] == 0
     assert len(db.scalars(select(MaintenanceProject)).all()) == 1
+
+
+def test_nonempty_ledger_salesperson_releases_manual_override_even_when_same(db):
+    project = MaintenanceProject(
+        project_id=str(uuid4()),
+        project_code="LEDGER-SALESPERSON-OVERRIDE",
+        display_name="LEDGER-SALESPERSON-OVERRIDE",
+        salesperson="台账确认销售",
+        salesperson_override_active=True,
+        lifecycle_status="missing",
+        is_active=True,
+        version=3,
+    )
+    db.add(project)
+    db.commit()
+    row = SimpleNamespace(
+        project_name=project.display_name,
+        project_name_raw=project.display_name,
+        project_period_from=None,
+        project_period_to=None,
+        manager=None,
+        business_type=None,
+        cmo=None,
+        salesperson_raw="台账确认销售",
+    )
+    ledger._lock_target_projects(db, [row])
+    summary = {"projects_created": 0, "projects_updated": 0}
+
+    resolved, changed = ledger._upsert_project(
+        db,
+        row,
+        operated_by="合成管理员",
+        summary=summary,
+        today=date(2026, 8, 31),
+        ledger_batch_id="ledger-salesperson-override-reset",
+    )
+    db.flush()
+
+    assert resolved.salesperson == "台账确认销售"
+    assert resolved.salesperson_override_active is False
+    assert changed is True
+    assert resolved.version == 4
+    assert summary["projects_updated"] == 1
+    audit = db.scalar(
+        select(MaintenanceProjectAuditLog).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id,
+            MaintenanceProjectAuditLog.action == "ledger_update",
+        )
+    )
+    assert audit.before_json["salesperson_override_active"] is True
+    assert audit.after_json["salesperson_override_active"] is False
+
+
+def test_ledger_override_reset_bumps_project_and_workbook_once(db):
+    parsed = ledger.parse_ledger_workbook(
+        _old_ledger_workbook_bytes(),
+        "维保台账.xlsx",
+    )
+    first_batch = ledger.store_preview(
+        db,
+        parsed,
+        "合成管理员",
+        idempotency_key="ledger-salesperson-reset-first",
+    )
+    ledger.apply_batch(db, first_batch, "合成管理员")
+    project = db.scalar(select(MaintenanceProject).order_by(MaintenanceProject.project_id))
+    assert project is not None
+    assert project.salesperson
+
+    manually_confirmed = project_catalog.update_project(
+        db,
+        project_id=project.project_id,
+        version=project.version,
+        updates={"salesperson": project.salesperson},
+        reason="人工确认销售人员",
+        operated_by="实名管理员",
+    )
+    db.commit()
+    assert manually_confirmed is not None
+    assert manually_confirmed["salesperson_override_active"] is True
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state is not None
+    version_before_ledger = manually_confirmed["version"]
+    revision_before_ledger = state.revision
+
+    parsed_again = ledger.parse_ledger_workbook(
+        _old_ledger_workbook_bytes(),
+        "维保台账.xlsx",
+    )
+    second_batch = ledger.store_preview(
+        db,
+        parsed_again,
+        "合成管理员",
+        idempotency_key="ledger-salesperson-reset-second",
+    )
+    summary = ledger.apply_batch(db, second_batch, "合成管理员")
+
+    db.refresh(project)
+    db.refresh(state)
+    assert project.salesperson_override_active is False
+    assert project.version == version_before_ledger + 1
+    assert state.revision == revision_before_ledger + 1
+    assert summary["projects_updated"] == 1
 
 
 def test_ledger_reimport_preserves_workbook_contract_total_override(db):

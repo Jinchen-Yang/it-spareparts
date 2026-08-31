@@ -23,6 +23,7 @@ from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectUserAssignment,
 )
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
@@ -162,6 +163,76 @@ def test_backfill_never_overwrites_manual_values(db):
     assert project.project_manager_id == "手工负责人"
     assert _active_assignment(db, project.project_id) is None
     assert result["assignments_created"] == 0
+
+
+def test_manual_salesperson_clear_blocks_sales_backfill_but_allows_manager(db):
+    project = MaintenanceProject(
+        project_id="bf-salesperson-override-clear",
+        project_code="BF-SALESPERSON-OVERRIDE-CLEAR",
+        display_name="人工清空销售回填保护项目",
+        lifecycle_status="ongoing",
+        salesperson=None,
+        salesperson_override_active=True,
+        project_manager_id=None,
+    )
+    db.add(
+        SysUser(
+            username="salesperson-override-manager",
+            role="readonly",
+            display_name="人工清空项目负责人",
+            salesperson_name="测试销售",
+            password_hash=hash_password(_PASSWORD),
+            is_active=True,
+        )
+    )
+    db.add(project)
+    db.commit()
+    orders = _load_orders(db, project=project.display_name, n=1)
+    _assign(db, orders[0], project)
+
+    result = sa.auto_assign_unassigned(
+        db,
+        operated_by="bf-admin",
+        user_ctx=_admin_ctx(),
+    )
+    db.commit()
+
+    db.refresh(project)
+    assert project.salesperson is None
+    assert project.salesperson_override_active is True
+    assert project.project_manager_id == "测试销售"
+    assert result["sales_filled_projects"] == 0
+    assert result["manager_filled_projects"] == 1
+    assert result["assignments_created"] == 1
+    assert _active_assignment(db, project.project_id) is not None
+
+
+def test_complete_override_project_is_not_an_auto_backfill_candidate(db):
+    project = MaintenanceProject(
+        project_id="bf-salesperson-override-complete",
+        project_code="BF-SALESPERSON-OVERRIDE-COMPLETE",
+        display_name="人工清空销售且已有负责人项目",
+        lifecycle_status="ongoing",
+        salesperson=None,
+        salesperson_override_active=True,
+        project_manager_id="人工负责人",
+    )
+    db.add(project)
+    db.commit()
+    orders = _load_orders(db, project=project.display_name, n=1)
+    _assign(db, orders[0], project)
+
+    result = sa.auto_assign_unassigned(
+        db,
+        operated_by="bf-admin",
+        user_ctx=_admin_ctx(),
+    )
+    db.commit()
+
+    assert result["sales_filled_projects"] == 0
+    assert result["manager_filled_projects"] == 0
+    assert result["assignments_created"] == 0
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id) is None
 
 
 def test_backfill_without_matching_account_keeps_text_only(db):

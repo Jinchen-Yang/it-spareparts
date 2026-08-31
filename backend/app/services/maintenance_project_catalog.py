@@ -35,6 +35,7 @@ def project_dict(project: MaintenanceProject) -> dict:
         "project_code": project.project_code,
         "display_name": project.display_name,
         "salesperson": project.salesperson,
+        "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
         # 维保期限主数据（#51）：面板可显示、可编辑（#39）
         "period_from": project.period_from.isoformat() if project.period_from else None,
@@ -220,6 +221,7 @@ def update_project(
             label="销售人员",
             max_length=64,
         )
+        project.salesperson_override_active = True
     if "project_manager_id" in allowed:
         project.project_manager_id = _clean_optional(
             allowed["project_manager_id"],

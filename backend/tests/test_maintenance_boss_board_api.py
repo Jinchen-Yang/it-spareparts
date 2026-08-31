@@ -16,6 +16,7 @@ from tests.boss_board_helpers import (
     add_ckd,
     assign,
     boss_client,
+    client_for,
     import_wbdd,
     make_project,
     purchaser_client,
@@ -830,6 +831,7 @@ def test_card_carries_salesperson_ledger_first_mode_fallback(db, tmp_path):
 
     # 路径一：台账没给 salesperson → 回落需求单销售众数（夹具「销售人员」=合成销售）
     proj = make_project(db, code="合成项目B")
+    assert proj.salesperson_override_active is False
     orders = import_wbdd(db, tmp_path, project="合成项目B", orders=1, lines_per_order=1)
     assign(db, orders[0], proj)
     row = _card(db, boss_client(db, username="card-sales-fallback"), proj.project_id)
@@ -841,6 +843,44 @@ def test_card_carries_salesperson_ledger_first_mode_fallback(db, tmp_path):
     db.commit()
     row = _card(db, boss_client(db, username="card-sales-ledger"), proj.project_id)
     assert row["salesperson"] == "台账销售"
+
+
+def test_manual_salesperson_clear_suppresses_order_mode_fallback(db, tmp_path):
+    """显式清空是人工结论，老板看板不得再把 WBDD 旧销售显示回来。"""
+    proj = make_project(db, code="人工清空销售项目")
+    orders = import_wbdd(
+        db,
+        tmp_path,
+        project="人工清空销售项目",
+        orders=1,
+        lines_per_order=1,
+    )
+    assign(db, orders[0], proj)
+    proj.salesperson = "待清空销售"
+    db.commit()
+
+    admin = client_for(
+        db,
+        username="card-sales-clear-admin",
+        role="admin",
+    )
+    cleared = admin.patch(
+        f"/api/maintenance/projects/stable/{proj.project_id}",
+        json={
+            "version": 1,
+            "salesperson": None,
+            "reason": "人工确认项目暂无销售人员",
+        },
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["salesperson"] is None
+
+    row = _card(
+        db,
+        boss_client(db, username="card-sales-clear-boss"),
+        proj.project_id,
+    )
+    assert row["salesperson"] is None
 
 
 def test_card_status_is_green_yellow_red_by_cost_ratio(db, tmp_path):

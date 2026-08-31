@@ -5,6 +5,7 @@ export interface MaintenanceProject {
   project_code: string;
   display_name: string;
   salesperson: string | null;
+  salesperson_override_active: boolean;
   project_manager_id: string | null;
   /** 维保期限主数据（#39/#51）：可显示、可在面板编辑。 */
   period_from: string | null;

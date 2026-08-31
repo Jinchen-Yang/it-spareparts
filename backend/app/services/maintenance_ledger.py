@@ -936,6 +936,7 @@ def _upsert_project(
         "business_type": project.business_type,
         "cmo_name": project.cmo_name,
         "salesperson": project.salesperson,
+        "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
     }
     after = dict(before)
@@ -994,10 +995,17 @@ def _upsert_project(
         project.cmo_name = row.cmo[:128]
         after["cmo_name"] = row.cmo[:128]
         changed = True
-    if row.salesperson_raw and project.salesperson != row.salesperson_raw[:64]:
-        project.salesperson = row.salesperson_raw[:64]
-        after["salesperson"] = row.salesperson_raw[:64]
-        changed = True
+    if row.salesperson_raw:
+        ledger_salesperson = row.salesperson_raw[:64]
+        if (
+            project.salesperson != ledger_salesperson
+            or project.salesperson_override_active
+        ):
+            project.salesperson = ledger_salesperson
+            project.salesperson_override_active = False
+            after["salesperson"] = ledger_salesperson
+            after["salesperson_override_active"] = False
+            changed = True
     if changed:
         project.version += 1
         db.add(

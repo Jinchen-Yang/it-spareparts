@@ -353,6 +353,7 @@ def test_reassign_can_sync_salesperson_from_account_in_the_same_revision(db):
     assert reassigned.status_code == 201, reassigned.text
     db.refresh(project)
     assert project.salesperson == "目标销售姓名"
+    assert project.salesperson_override_active is True
     assert project.project_manager_id == "来源负责人原文"
     assert project.version == 2
     state = db.get(MaintenanceProjectWorkbookState, project.project_id)
@@ -372,6 +373,8 @@ def test_reassign_can_sync_salesperson_from_account_in_the_same_revision(db):
     assert project_audits[0].reason == "负责人交接并同步销售人员"
     assert project_audits[0].before_json["salesperson"] == "原销售"
     assert project_audits[0].after_json["salesperson"] == "目标销售姓名"
+    assert project_audits[0].before_json["salesperson_override_active"] is False
+    assert project_audits[0].after_json["salesperson_override_active"] is True
     assert project_audits[0].before_json["version"] == 1
     assert project_audits[0].after_json["version"] == 2
 
@@ -453,6 +456,7 @@ def test_sync_false_and_stale_sync_request_preserve_existing_salesperson(db):
         project_code="PM-SALESPERSON-PRESERVE",
         display_name="负责人销售保留项目",
         salesperson="必须保留的销售",
+        salesperson_override_active=True,
         lifecycle_status="ongoing",
     )
     first = SysUser(
@@ -492,6 +496,7 @@ def test_sync_false_and_stale_sync_request_preserve_existing_salesperson(db):
     assert stale.status_code == 409, stale.text
     db.refresh(project)
     assert project.salesperson == "必须保留的销售"
+    assert project.salesperson_override_active is True
     assert project.version == 1
 
     reassigned = client.post(
@@ -507,6 +512,7 @@ def test_sync_false_and_stale_sync_request_preserve_existing_salesperson(db):
     assert reassigned.status_code == 201, reassigned.text
     db.refresh(project)
     assert project.salesperson == "必须保留的销售"
+    assert project.salesperson_override_active is True
     assert project.version == 1
     state = db.get(MaintenanceProjectWorkbookState, project.project_id)
     assert state is not None
@@ -550,6 +556,7 @@ def test_sync_same_salesperson_does_not_bump_project_version(db):
     assert assigned.status_code == 201, assigned.text
     db.refresh(project)
     assert project.salesperson == "相同销售"
+    assert project.salesperson_override_active is False
     assert project.version == 1
     state = db.get(MaintenanceProjectWorkbookState, project.project_id)
     assert state is not None

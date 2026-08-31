@@ -1914,7 +1914,7 @@ def _v2_header(ws, headers: list[str], editable: set[int] = set()) -> None:
 def _project_order_salesperson(db: Session, project_id: str) -> str | None:
     """项目销售人员（2026-08-20 用户口径）：本项目挂靠需求单上的销售众数。
 
-    台账 salesperson 优先（project.salesperson），缺省回落到订单侧自动回填。
+    调用方仅可在 canonical salesperson 未人工覆盖时使用这个遗留兜底值。
     """
     from app.services import maintenance_demands
 
@@ -2068,11 +2068,22 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     values = [
         ("项目编号", project.project_code), ("项目名称", project.display_name),
         ("生命周期", project.lifecycle_status), ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
-        # 2026-08-20 用户口径：负责人＝项目经理（显示人名）；销售人员＝台账优先、
-        # 缺省自动回填为挂靠需求单的销售众数；CMO＝台账来源（无台账则缺）。
+        # 负责人＝项目经理（显示人名）；销售人员＝canonical 优先，未人工覆盖的
+        # 遗留空值才回落到挂靠需求单众数；CMO＝台账来源（无台账则缺）。
         ("项目经理（负责人）",
          _account_display_name(db, project.project_manager_id) or "未关联账号"),
-        ("销售人员", project.salesperson or _project_order_salesperson(db, project.project_id) or "—"),
+        (
+            "销售人员",
+            (
+                project.salesperson
+                if project.salesperson_override_active
+                else (
+                    project.salesperson
+                    or _project_order_salesperson(db, project.project_id)
+                )
+            )
+            or "—",
+        ),
         ("CMO", project.cmo_name or "—"),
         ("合同编号", "、".join(c.contract_no for c in contracts) or "—"),
         ("合同总额（含税）", str(total_contract) if total_contract is not None else "—"),

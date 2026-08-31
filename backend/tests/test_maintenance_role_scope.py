@@ -21,6 +21,7 @@ from app.models.maintenance_project import (
 from app.models.system import SysUser
 from app.security import UserContext
 from app.services import maintenance_project_assignments as assignments
+from app.services import maintenance_project_catalog as catalog
 
 _PASSWORD = "synthetic-role-scope-1"
 
@@ -141,6 +142,35 @@ def test_scope_union_salesperson_and_assignment(db):
     assert assignments.maintenance_scope_project_ids(db, ctx) == set()
     assert not assignments.can_access_project(
         db, project_id=proj_a.project_id, user_ctx=ctx)
+
+
+def test_explicit_salesperson_clear_removes_sales_scope(db):
+    project = _project(db, "销售范围人工清空项目", salesperson="销售A")
+    salesperson = _user(db, "sales-clear-scope", salesperson_name="销售A")
+    ctx = _ctx(salesperson, {"own_maintenance_projects_only": True})
+    assert assignments.maintenance_scope_project_ids(db, ctx) == {
+        project.project_id
+    }
+
+    changed = catalog.update_project(
+        db,
+        project_id=project.project_id,
+        version=project.version,
+        updates={"salesperson": None},
+        reason="人工确认项目暂无销售人员",
+        operated_by="scope-admin",
+    )
+    db.commit()
+
+    assert changed is not None
+    assert changed["salesperson"] is None
+    assert changed["salesperson_override_active"] is True
+    assert assignments.maintenance_scope_project_ids(db, ctx) == set()
+    assert not assignments.can_access_project(
+        db,
+        project_id=project.project_id,
+        user_ctx=ctx,
+    )
 
 
 def test_boss_board_projects_scoped_by_row_key(db):

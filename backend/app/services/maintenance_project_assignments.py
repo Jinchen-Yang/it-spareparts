@@ -342,6 +342,7 @@ def assign_primary_manager(
         if project.salesperson != synced_salesperson:
             project_before = catalog.project_dict(project)
             project.salesperson = synced_salesperson
+            project.salesperson_override_active = True
             project.version += 1
             db.flush()
             project_after = catalog.project_dict(project)

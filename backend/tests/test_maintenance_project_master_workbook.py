@@ -336,6 +336,38 @@ def test_v2_validate_contract_total_uses_authenticated_identity(
     assert response.json()["contract_updates"] == 1
 
 
+def test_v2_overview_respects_explicit_empty_salesperson_override(
+    db,
+    project_with_lines,
+    monkeypatch,
+):
+    """项目总表不得把人工清空覆盖成 WBDD 众数。"""
+    monkeypatch.setattr(
+        master_api.get_settings(), "maintenance_project_master_v2_enabled", True
+    )
+    project_with_lines.salesperson = None
+    project_with_lines.salesperson_override_active = True
+    db.commit()
+
+    workbook = load_workbook(
+        io.BytesIO(
+            _download_master(
+                uploader(db, "master-salesperson-override"),
+                project_with_lines,
+            )
+        ),
+        data_only=True,
+    )
+    overview = workbook[master.V2_SHEET_OVERVIEW]
+    salesperson = next(
+        row[1].value
+        for row in overview.iter_rows(min_col=1, max_col=2)
+        if row[0].value == "销售人员"
+    )
+
+    assert salesperson == "—"
+
+
 # ---------- 项目总表：六 sheet ----------
 
 def test_master_workbook_has_all_six_sheets(db, project_with_lines):

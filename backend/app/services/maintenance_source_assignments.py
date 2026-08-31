@@ -773,7 +773,7 @@ def _backfill_project_owner(
 ) -> dict:
     """维保负责人/销售自动回填——**只补空，绝不覆盖人工编辑**（幂等）。
 
-    - `project.salesperson`（台账商务线事实源）为空时补销售众数；
+    - `project.salesperson` 为空且未被人工覆盖时补销售众数；人工明确清空不回填；
     - `project.project_manager_id`（维保负责人原文）为空时同值回填；
     - 文本与销售一致且尚无活跃 primary_manager 时，按
       `sys_user.salesperson_name` 匹配活跃账号自动建账号级指派
@@ -790,9 +790,13 @@ def _backfill_project_owner(
         return stats
     before = {
         "salesperson": project.salesperson,
+        "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
     }
-    if not (project.salesperson or "").strip():
+    if (
+        not project.salesperson_override_active
+        and not (project.salesperson or "").strip()
+    ):
         project.salesperson = salesperson[:64]
         stats["sales_filled"] = True
     manager_text = (project.project_manager_id or "").strip()
@@ -811,6 +815,9 @@ def _backfill_project_owner(
                 before_json=before,
                 after_json={
                     "salesperson": project.salesperson,
+                    "salesperson_override_active": (
+                        project.salesperson_override_active
+                    ),
                     "project_manager_id": project.project_manager_id,
                 },
                 reason=reason,
@@ -864,6 +871,17 @@ def _backfill_project_owner(
     return stats
 
 
+def _owner_backfill_candidate_condition():
+    """Only missing, non-overridden sales fields remain auto-fill candidates."""
+    return or_(
+        and_(
+            MaintenanceProject.salesperson_override_active.is_(False),
+            func.coalesce(MaintenanceProject.salesperson, "") == "",
+        ),
+        func.coalesce(MaintenanceProject.project_manager_id, "") == "",
+    )
+
+
 def backfill_owner_fields(
     db: Session,
     *,
@@ -873,8 +891,8 @@ def backfill_owner_fields(
 ) -> dict:
     """存量项目销售/维保负责人补齐（幂等：只填空，不动人工编辑）。
 
-    auto-assign 运维按钮顺带执行：销售或负责人原文为空的项目按活单销售
-    众数回填；台账事实源已给值的项目不动（salesperson 以台账为准）。
+    auto-assign 运维按钮顺带执行：未人工覆盖的空销售或空负责人原文按活单销售
+    众数回填；台账事实源与人工覆盖均不被自动销售回填改写。
 
     锁序：候选项目只读探明 → state(sorted) → project(sorted) → 指派行。
     ``_prelocked_states`` 由 auto_assign 在并集排序锁后传入；候选集出现
@@ -891,10 +909,7 @@ def backfill_owner_fields(
         db.scalars(
             select(MaintenanceProject.project_id).where(
                 MaintenanceProject.is_active.is_(True),
-                or_(
-                    func.coalesce(MaintenanceProject.salesperson, "") == "",
-                    func.coalesce(MaintenanceProject.project_manager_id, "") == "",
-                ),
+                _owner_backfill_candidate_condition(),
             )
         )
     )
@@ -1105,10 +1120,7 @@ def auto_assign_unassigned(
         db.scalars(
             select(MaintenanceProject.project_id).where(
                 MaintenanceProject.is_active.is_(True),
-                or_(
-                    func.coalesce(MaintenanceProject.salesperson, "") == "",
-                    func.coalesce(MaintenanceProject.project_manager_id, "") == "",
-                ),
+                _owner_backfill_candidate_condition(),
             )
         )
     )

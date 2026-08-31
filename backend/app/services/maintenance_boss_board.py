@@ -1047,7 +1047,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     cost_ex = _card_cost_ex_tax(db, window, project_ids)
     expense_costs, requisition_costs = _card_expense_and_requisition_costs(
         db, project_ids)
-    # 卡片「销售」（2026-08-21 客户反馈）：台账 salesperson 优先，XSDD 众数兜底
+    # 卡片「销售」：canonical salesperson 优先；未人工覆盖的遗留空值才用 WBDD 众数兜底。
     sales_modes = _card_salesperson_modes(db, project_ids)
     aliases = maintenance_project_identity.aliases_by_project(db, project_ids)
 
@@ -1088,8 +1088,14 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                            cost_ex=cost_ex.get(proj.project_id),
                            bundle=cost_bundles.get(proj.project_id),
                            manager_display=manager_names.get(proj.project_manager_id or ""),
-                           salesperson=(proj.salesperson
-                                        or sales_modes.get(proj.project_id)),
+                           salesperson=(
+                               proj.salesperson
+                               if proj.salesperson_override_active
+                               else (
+                                   proj.salesperson
+                                   or sales_modes.get(proj.project_id)
+                               )
+                           ),
                            expense_cost=expense_costs.get(proj.project_id),
                            requisition_cost=requisition_costs.get(proj.project_id)),
             **_fact_envelopes(fact_totals.get(proj.project_id), source_states),

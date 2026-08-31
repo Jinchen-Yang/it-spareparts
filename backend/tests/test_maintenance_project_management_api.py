@@ -81,6 +81,7 @@ def test_admin_can_create_project_and_read_it_back(db):
     project = created.json()
     assert project["project_code"] == "MAINT-SYNTH-MASTER-001"
     assert project["display_name"] == "合成维保项目甲"
+    assert project["salesperson_override_active"] is False
     assert project["project_manager_id"] == "manager-synth-001"
     assert project["is_active"] is True
     assert project["version"] == 1
@@ -177,6 +178,7 @@ def test_project_patch_only_changes_explicit_fields(db):
 
     assert changed.status_code == 200, changed.text
     assert changed.json()["display_name"] == "只修改项目名称"
+    assert changed.json()["salesperson_override_active"] is False
     assert changed.json()["project_manager_id"] == "manager-must-stay"
 
 
@@ -202,6 +204,7 @@ def test_project_patch_can_set_and_clear_salesperson_with_one_revision_per_chang
 
     assert set_salesperson.status_code == 200, set_salesperson.text
     assert set_salesperson.json()["salesperson"] == "王销售"
+    assert set_salesperson.json()["salesperson_override_active"] is True
     assert set_salesperson.json()["version"] == 2
     state = db.scalar(
         select(MaintenanceProjectWorkbookState).where(
@@ -222,6 +225,7 @@ def test_project_patch_can_set_and_clear_salesperson_with_one_revision_per_chang
 
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["salesperson"] is None
+    assert cleared.json()["salesperson_override_active"] is True
     assert cleared.json()["version"] == 3
     db.refresh(state)
     assert state.revision == 2
@@ -253,8 +257,41 @@ def test_project_patch_can_set_and_clear_salesperson_with_one_revision_per_chang
     assert len(updates) == 2
     assert updates[0].before_json["salesperson"] is None
     assert updates[0].after_json["salesperson"] == "王销售"
+    assert updates[0].before_json["salesperson_override_active"] is False
+    assert updates[0].after_json["salesperson_override_active"] is True
     assert updates[1].before_json["salesperson"] == "王销售"
     assert updates[1].after_json["salesperson"] is None
+    assert updates[1].before_json["salesperson_override_active"] is True
+    assert updates[1].after_json["salesperson_override_active"] is True
+
+
+def test_explicit_null_salesperson_activates_override_and_revision(db):
+    client = _admin_client(db, "project_master_salesperson_null_admin")
+    created = client.post(
+        "/api/maintenance/projects/stable",
+        json={
+            "project_code": "MAINT-SYNTH-MASTER-SALESPERSON-NULL",
+            "display_name": "销售人员显式空值项目",
+            "reason": "建立显式空值测试主档",
+        },
+    ).json()
+
+    cleared = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 1,
+            "salesperson": None,
+            "reason": "人工确认当前无销售人员",
+        },
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["salesperson"] is None
+    assert cleared.json()["salesperson_override_active"] is True
+    assert cleared.json()["version"] == 2
+    state = db.get(MaintenanceProjectWorkbookState, created["project_id"])
+    assert state is not None
+    assert state.revision == 1
 
 
 def test_project_archive_and_restore_preserve_history(db):

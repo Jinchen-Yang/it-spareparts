@@ -113,6 +113,7 @@ def project_directory(
             "project_code": project.project_code,
             "display_name": project.display_name,
             "salesperson": project.salesperson,
+            "salesperson_override_active": project.salesperson_override_active,
             "project_manager_id": project.project_manager_id,
             # 维保期限主数据（#39/#51），与 overview/catalog 的键集一致
             "period_from": project.period_from.isoformat() if project.period_from else None,
@@ -343,6 +344,7 @@ def project_overview_from_facts(
         "project_code": project.project_code,
         "display_name": project.display_name,
         "salesperson": project.salesperson,
+        "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
         # 维保期限主数据（#39/#51）：面板显示与编辑回读都走这份 payload
         "period_from": project.period_from.isoformat() if project.period_from else None,
