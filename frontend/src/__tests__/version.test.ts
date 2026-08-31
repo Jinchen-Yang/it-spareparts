@@ -1,28 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.25.0 release notes", () => {
-  it("publishes the maintenance contract, cost and refresh fixes", () => {
-    expect(APP_VERSION).toBe("1.25.0");
+describe("v1.26.0 release notes", () => {
+  it("publishes the attachment upload and uploader name updates", () => {
+    expect(APP_VERSION).toBe("1.26.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-08-27");
+    expect(LATEST.date).toBe("2026-08-31");
 
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/任意常见文件均可上传/);
+    expect(notes).toMatch(/显示上传人姓名.*显示账号名/);
+  });
+
+  it("keeps prior releases archived in the changelog", () => {
+    const versions = CHANGELOG.map((entry) => entry.version);
+    expect(versions).toContain("1.25.0");
+    expect(versions).toContain("1.24.0");
+    expect(versions).toContain("1.23.0");
+    expect(versions).toContain("1.21.0");
+    // 数组按新→旧排列
+    expect(versions[0]).toBe("1.26.0");
+  });
+});
+
+describe("v1.25.0 release notes (archived)", () => {
+  const v125 = CHANGELOG.find((entry) => entry.version === "1.25.0")!;
+
+  it("keeps the maintenance contract, cost and refresh fixes (2026-08-27)", () => {
+    expect(v125.date).toBe("2026-08-27");
+    const notes = v125.items.join("\n");
     expect(notes).toMatch(/合同总额.*明确的含税金额/);
     expect(notes).toMatch(/不再按固定税率猜值/);
     expect(notes).toMatch(/Excel 中修改合同总额/);
     expect(notes).toMatch(/真实 0、部分缺失与全部缺失/);
     expect(notes).toMatch(/同文件重试.*即时刷新/);
-  });
-
-  it("keeps prior releases archived in the changelog", () => {
-    const versions = CHANGELOG.map((entry) => entry.version);
-    expect(versions).toContain("1.24.0");
-    expect(versions).toContain("1.23.0");
-    expect(versions).toContain("1.21.0");
-    // 数组按新→旧排列
-    expect(versions[0]).toBe("1.25.0");
   });
 });
 
