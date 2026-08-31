@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 from openpyxl import Workbook
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.etl import loader
 from app.models.maintenance import FMaintenanceOrder
@@ -87,6 +88,45 @@ def _load_same_xsdd_different_names(db) -> list[FMaintenanceOrder]:
     return list(db.scalars(select(FMaintenanceOrder).where(
         FMaintenanceOrder.raw_order_id.in_(sorted(heads))
     )))
+
+
+def _upsert_wbdd_xsdd(
+    db,
+    *,
+    raw_order_id: str,
+    sales_order: str | None,
+    batch_key: str,
+) -> None:
+    batch = SysImportBatch(
+        filename=f"{batch_key}.xlsx",
+        file_type="maintenance",
+        file_hash=batch_key.ljust(64, "0")[:64],
+        status="success",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.maintenance_result(
+            {
+                raw_order_id: f.maintenance_head(
+                    raw_order_id,
+                    project="WBDD XSDD guard project",
+                    sales_order=sales_order,
+                )
+            },
+            [
+                f.maintenance_line(
+                    raw_order_id,
+                    f"{raw_order_id}-L1",
+                    "PN-XSDD-GUARD",
+                )
+            ],
+        ),
+        batch.id,
+        date(2026, 8, 31),
+        mode="upsert",
+    )
 
 
 def _ledger_bytes(*, order_no: str, project_name: str) -> bytes:
@@ -180,6 +220,109 @@ def test_cross_project_contract_claim_fails_closed(db):
             operated_by="xsdd-admin",
         )
     db.rollback()
+
+
+def test_wbdd_upsert_rejects_xsdd_owned_by_another_project(db):
+    project_a = _project(db, "xsdd-wbdd-project-a", "XSDD-WBDD-A", "WBDD项目甲")
+    project_b = _project(db, "xsdd-wbdd-project-b", "XSDD-WBDD-B", "WBDD项目乙")
+    raw_order_id = "WBDD-XSDD-GUARD-001"
+    claimed_xsdd = "XSDD-20991231-0001"
+
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=None,
+        batch_key="xsdd-wbdd-guard-initial",
+    )
+    assignments.assign_source_orders(
+        db,
+        project_id=project_a.project_id,
+        items=[{"source_order_id": raw_order_id}],
+        reason="建立项目甲的 active assignment",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+    operations.create_contract(
+        db,
+        project_id=project_b.project_id,
+        contract_id="xsdd-wbdd-project-b-contract",
+        contract_no=claimed_xsdd,
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="建立项目乙的既有 XSDD 归属",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+
+    with pytest.raises(IntegrityError):
+        _upsert_wbdd_xsdd(
+            db,
+            raw_order_id=raw_order_id,
+            sales_order=claimed_xsdd,
+            batch_key="xsdd-wbdd-guard-conflict",
+        )
+    db.rollback()
+
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == raw_order_id
+    ))
+    assert order is not None and order.linked_sales_order_no is None
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert assignment is not None and assignment.project_id == project_a.project_id
+    mapping = db.get(MaintenanceProjectXsdd, "20991231-0001")
+    assert mapping is not None and mapping.project_id == project_b.project_id
+
+
+def test_wbdd_upsert_claims_unowned_xsdd_for_assigned_project(db):
+    project_a = _project(
+        db,
+        "xsdd-wbdd-project-unowned-a",
+        "XSDD-WBDD-UNOWNED-A",
+        "WBDD未认领项目甲",
+    )
+    raw_order_id = "WBDD-XSDD-GUARD-UNOWNED-001"
+    new_xsdd = "XSDD-20991231-0002"
+
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=None,
+        batch_key="xsdd-wbdd-guard-unowned-initial",
+    )
+    assignments.assign_source_orders(
+        db,
+        project_id=project_a.project_id,
+        items=[{"source_order_id": raw_order_id}],
+        reason="建立新 XSDD 写入前的 active assignment",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=new_xsdd,
+        batch_key="xsdd-wbdd-guard-unowned-update",
+    )
+    db.commit()
+
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == raw_order_id
+    ))
+    assert order is not None and order.linked_sales_order_no == new_xsdd
+    mapping = db.get(MaintenanceProjectXsdd, "20991231-0002")
+    assert mapping is not None and mapping.project_id == project_a.project_id
 
 
 def test_one_project_may_own_multiple_xsdds(db):

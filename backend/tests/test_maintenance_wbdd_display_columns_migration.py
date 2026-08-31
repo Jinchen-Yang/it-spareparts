@@ -28,9 +28,8 @@ def test_new_revision_is_additive_child_and_single_head():
     script = ScriptDirectory.from_config(cfg)
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
-    # 全链单 head；b6 后由 d2 线性追加 canonical XSDD identity，仍不得
-    # 产生迁移分叉。
-    assert list(script.get_heads()) == ["d2c7e9f1a4b6"]
+    # 全链单 head；d2 后线性追加 WBDD XSDD guard，仍不得产生迁移分叉。
+    assert list(script.get_heads()) == ["e4a8c2f6b1d9"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():
