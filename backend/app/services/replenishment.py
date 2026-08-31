@@ -22,6 +22,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app import permissions
 from app.business_time import business_today
 from app.config import get_settings
 from app.models.dimensions import DimPart
@@ -36,7 +37,12 @@ from app.models.replenishment import (
     ReplenishmentReviewLine,
 )
 from app.models.system import SysUser
-from app.services import pool_price_analysis, replenishment_screening
+from app.security import UserContext
+from app.services import (
+    maintenance_project_assignments,
+    pool_price_analysis,
+    replenishment_screening,
+)
 from app.services.query_filters import col_matches_any, keyword_groups_or_substr
 from app.services.part_resolver import resolve as resolve_part
 
@@ -99,6 +105,68 @@ def _integer_quantity(value: Any) -> Decimal:
     return result.quantize(Decimal("0.001"))
 
 
+def _revision_request_digest(
+    *,
+    application_id: str,
+    expected_application_version: int,
+    mode: str,
+    items: list[dict],
+) -> str:
+    """Bind a revision idempotency key to one canonical request payload."""
+    if mode == "full_lines":
+        canonical_items = [
+            {
+                "part_id": int(item["part_id"]),
+                "quantity": str(_integer_quantity(item["quantity"])),
+                "special_note": _clean_optional(
+                    item.get("special_note"), maximum=4000
+                ),
+            }
+            for item in items
+        ]
+    elif mode == "resolutions":
+        canonical_items = sorted(
+            [
+                {
+                    "request_line_id": str(item.get("request_line_id") or ""),
+                    "action": str(item.get("action") or ""),
+                    "part_id": (
+                        int(item["part_id"])
+                        if item.get("part_id") is not None
+                        else None
+                    ),
+                    "quantity": (
+                        str(_integer_quantity(item["quantity"]))
+                        if item.get("quantity") is not None
+                        else None
+                    ),
+                    "special_note": _clean_optional(
+                        item.get("special_note"), maximum=4000
+                    ),
+                }
+                for item in items
+            ],
+            key=lambda item: (
+                item["request_line_id"],
+                item["action"],
+                str(item["part_id"]),
+                str(item["quantity"]),
+                str(item["special_note"]),
+            ),
+        )
+    else:  # pragma: no cover - internal caller contract
+        raise ValueError(f"unsupported revision mode: {mode}")
+    return _digest(
+        {
+            "schema_version": 1,
+            "application_id": application_id,
+            "expected_application_version": expected_application_version,
+            "revision_mode": mode,
+            "items": canonical_items,
+        }
+    )
+
+
 def _json_value(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
@@ -135,6 +203,45 @@ def _audit(
             operated_by=actor,
         )
     )
+
+
+def _revision_idempotent_replay(
+    db: Session,
+    *,
+    app: ReplenishmentApplication,
+    username: str,
+    role: str,
+    client_request_id: str,
+    request_digest: str,
+) -> dict | None:
+    """Return an exact prior revision retry; reject key reuse with new content."""
+    for event in db.scalars(
+        select(ReplenishmentAuditEvent).where(
+            ReplenishmentAuditEvent.application_id == app.application_id,
+            ReplenishmentAuditEvent.action == "revision_started",
+        )
+    ):
+        after = event.after_json or {}
+        if after.get("client_request_id") != client_request_id:
+            continue
+        if after.get("request_digest") != request_digest:
+            # Historical events without a digest cannot be safely replayed: the
+            # same key may have represented different content.
+            raise ReplenishmentError(
+                "相同 client_request_id 对应了不同复提内容",
+                code="idempotency_conflict",
+                status_code=409,
+            )
+        result = get_application(
+            db,
+            app.application_id,
+            username=username,
+            role=role,
+        )
+        result["idempotent"] = True
+        db.commit()
+        return result
+    return None
 
 
 def _application_scope(
@@ -298,16 +405,14 @@ def _price_snapshot(db: Session, part_id: int, *, as_of: date | None = None) -> 
     }
 
 
-def available_projects(db: Session, *, username: str, role: str) -> list[dict]:
-    user = _actor(db, username)
+def available_projects(
+    db: Session,
+    *,
+    visible_project_ids: set[str] | None,
+) -> list[dict]:
     predicate = [MaintenanceProject.is_active.is_(True)]
-    if role == "sales":
-        salesperson = user.salesperson_name
-        if not salesperson or not salesperson.strip():
-            return []
-        predicate.append(MaintenanceProject.salesperson == salesperson)
-    elif role != "admin":
-        return []
+    if visible_project_ids is not None:
+        predicate.append(MaintenanceProject.project_id.in_(visible_project_ids))
     projects = db.scalars(
         select(MaintenanceProject)
         .where(*predicate)
@@ -323,32 +428,169 @@ def available_projects(db: Session, *, username: str, role: str) -> list[dict]:
     ]
 
 
+def _verify_current_identity(username: str, user_ctx: UserContext) -> None:
+    if (
+        not user_ctx.is_authenticated
+        or not user_ctx.user_id
+        or user_ctx.user_id != username
+    ):
+        raise ReplenishmentError(
+            "该操作必须使用当前实名账号的认证范围",
+            code="identity_required",
+            status_code=403,
+        )
+
+
+def _current_replenishment_context(
+    db: Session,
+    *,
+    username: str,
+    lock: bool = False,
+) -> UserContext:
+    """Read the live account scope, optionally holding it stable to commit."""
+    stmt = (
+        select(SysUser)
+        .where(
+            SysUser.username == username,
+            SysUser.is_active.is_(True),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if lock:
+        # Project -> user is the canonical order shared with maintenance
+        # assignment mutations.  FOR SHARE linearizes this transaction against
+        # role/permission/salesperson revocation without turning concurrent
+        # reads into exclusive account writes.
+        stmt = stmt.with_for_update(read=True)
+    user = db.scalar(stmt)
+    if user is None:
+        raise ReplenishmentError(
+            "该操作必须使用当前实名账号的认证范围",
+            code="identity_required",
+            status_code=403,
+        )
+    return UserContext(
+        user_id=user.username,
+        role=user.role,
+        salesperson_name=user.salesperson_name,
+        permissions=permissions.runtime_safe(permissions.effective_for_user(user)),
+        is_authenticated=True,
+    )
+
+
+def _require_current_replenishment_permissions(
+    user_ctx: UserContext,
+    *,
+    write: bool,
+) -> None:
+    graph = user_ctx.permissions if isinstance(user_ctx.permissions, dict) else {}
+    allowed = (
+        permissions.page_permission_allowed(
+            role=user_ctx.role,
+            permission_map=graph,
+            page_key="page_replenishment_beta",
+        )
+        and bool(graph.get("data_pool_price_governance", False))
+        and (not write or bool(graph.get("action_replenishment_create", False)))
+    )
+    if not allowed:
+        raise ReplenishmentError(
+            "补库页面、价格或创建权限已变化，请重新登录后再试",
+            code="permission_revoked",
+            status_code=403,
+        )
+
+
 def _authorized_project(
-    db: Session, *, project_id: str, user: SysUser, role: str
-) -> MaintenanceProject:
-    if role not in {"admin", "sales"}:
+    db: Session,
+    *,
+    project_id: str,
+    username: str,
+    user_ctx: UserContext,
+    read_only: bool = False,
+) -> tuple[MaintenanceProject, UserContext]:
+    _verify_current_identity(username, user_ctx)
+    current_ctx = _current_replenishment_context(db, username=username)
+    _require_current_replenishment_permissions(
+        current_ctx,
+        write=not read_only,
+    )
+
+    # Reject an out-of-scope target before taking its project-row lock.  The
+    # second check below runs after the lock so a concurrent assignment change
+    # either linearizes before this write (and is observed) or waits until the
+    # write commits; an unauthorized caller never gets a project lock merely
+    # by guessing an active project id.
+    if not maintenance_project_assignments.can_access_project(
+        db,
+        project_id=project_id,
+        user_ctx=current_ctx,
+    ):
         raise ReplenishmentError(
             "项目不存在或不可选", code="project_unavailable", status_code=404
         )
-    predicate = [
+    project_stmt = select(MaintenanceProject).where(
         MaintenanceProject.project_id == project_id,
         MaintenanceProject.is_active.is_(True),
-    ]
-    if role == "sales":
-        salesperson = user.salesperson_name
-        if not salesperson or not salesperson.strip():
-            raise ReplenishmentError(
-                "项目不存在或不可选", code="project_unavailable", status_code=404
-            )
-        predicate.append(MaintenanceProject.salesperson == salesperson)
-    project = db.scalar(
-        select(MaintenanceProject).where(*predicate).with_for_update()
     )
+    # Reads take a shared project lock, writes an exclusive lock.  Both modes
+    # therefore linearize against project disablement and assignment changes.
+    project_stmt = project_stmt.with_for_update(read=read_only)
+    project = db.scalar(project_stmt)
     if project is None:
         raise ReplenishmentError(
             "项目不存在或不可选", code="project_unavailable", status_code=404
         )
-    return project
+    current_ctx = _current_replenishment_context(
+        db,
+        username=username,
+        lock=True,
+    )
+    _require_current_replenishment_permissions(
+        current_ctx,
+        write=not read_only,
+    )
+    if not maintenance_project_assignments.can_access_project(
+        db,
+        project_id=project_id,
+        user_ctx=current_ctx,
+    ):
+        raise ReplenishmentError(
+            "项目不存在或不可选", code="project_unavailable", status_code=404
+        )
+    return project, current_ctx
+
+
+def _revision_target_project(
+    db: Session,
+    *,
+    application_id: str,
+    username: str,
+    user_ctx: UserContext,
+) -> str:
+    """Resolve a revision target without trusting the request's role snapshot."""
+    _verify_current_identity(username, user_ctx)
+    current_ctx = _current_replenishment_context(db, username=username)
+    _require_current_replenishment_permissions(current_ctx, write=True)
+    target = db.execute(
+        select(
+            ReplenishmentApplication.project_id,
+            ReplenishmentApplication.owner_username,
+        ).where(ReplenishmentApplication.application_id == application_id)
+    ).one_or_none()
+    if target is None or (
+        current_ctx.role != "admin" and target.owner_username != username
+    ):
+        raise ReplenishmentError(
+            "补库申请不存在", code="not_found", status_code=404
+        )
+    if target.project_id is None:
+        raise ReplenishmentError(
+            "项目不存在或不可选",
+            code="project_unavailable",
+            status_code=404,
+        )
+    return str(target.project_id)
 
 
 def _line_snapshot(db: Session, part: DimPart, *, as_of: date | None = None) -> dict:
@@ -968,7 +1210,7 @@ def submit_application_atomic(
     db: Session,
     *,
     username: str,
-    role: str,
+    user_ctx: UserContext,
     client_request_id: str,
     project_id: str,
     lines: list[dict],
@@ -1010,6 +1252,22 @@ def submit_application_atomic(
             ],
         }
         request_digest = _digest(canonical)
+        # All first-submit paths use one lock order: project row first, then
+        # the owner/request idempotency advisory lock.  Cart submission already
+        # holds this same project row before locking its draft; PostgreSQL row
+        # locks are transaction-reentrant, so its nested check preserves
+        # project -> draft -> project -> advisory without an inversion against
+        # direct submission or cart replacement.
+        #
+        # This check must also precede the idempotent-return branch: losing the
+        # current project scope preserves history reads, not write-endpoint
+        # replay success.
+        project, current_ctx = _authorized_project(
+            db,
+            project_id=project_id,
+            username=username,
+            user_ctx=user_ctx,
+        )
         db.execute(
             select(
                 func.pg_advisory_xact_lock(
@@ -1031,14 +1289,16 @@ def submit_application_atomic(
                     status_code=409,
                 )
             result = get_application(
-                db, existing.application_id, username=username, role=role
+                db,
+                existing.application_id,
+                username=username,
+                role=current_ctx.role,
             )
             result["idempotent"] = True
             if commit:
                 db.commit()
             return result
 
-        project = _authorized_project(db, project_id=project_id, user=user, role=role)
         parts = list(
             db.scalars(
                 select(DimPart)
@@ -1227,7 +1487,12 @@ def submit_application_atomic(
         )
         if commit:
             db.commit()
-        result = get_application(db, application_id, username=username, role=role)
+        result = get_application(
+            db,
+            application_id,
+            username=username,
+            role=current_ctx.role,
+        )
         result["idempotent"] = False
         return result
     except Exception:
@@ -1538,7 +1803,7 @@ def apply_revision_atomic(
     application_id: str,
     *,
     username: str,
-    role: str,
+    user_ctx: UserContext,
     expected_application_version: int,
     client_request_id: str,
     lines: list[dict] | None = None,
@@ -1547,25 +1812,80 @@ def apply_revision_atomic(
     """打回后重新提交（2026-08-18，双模式）：
     - lines：完整期望行集合——「退回编辑」全量重编辑（可添加/删减/换 PN/改数量/填备注）
     - resolutions：仅逐条处理打回行（旧交互，兼容）"""
+    if (lines is None) == (resolutions is None):
+        raise ReplenishmentError(
+            "lines（完整重编辑）与 resolutions（逐条处理）必须且只能提供一种",
+            code="revision_mode_required",
+            status_code=422,
+        )
+    selected_items = lines if lines is not None else resolutions
+    if selected_items is None or not 1 <= len(selected_items) <= MAX_LINES:
+        # Keep the service boundary as strict as the Pydantic request model;
+        # internal callers must not be able to create an empty or oversized
+        # immutable revision by bypassing the HTTP layer.
+        raise ReplenishmentError(
+            f"复提明细必须为 1-{MAX_LINES} 条",
+            code="revision_content_required",
+            status_code=422,
+        )
     if lines is not None:
         return _apply_revision_full_lines(
-            db, application_id=application_id, username=username, role=role,
+            db,
+            application_id=application_id,
+            username=username,
+            user_ctx=user_ctx,
             expected_application_version=expected_application_version,
             client_request_id=client_request_id, lines=lines,
         )
-    if not resolutions:
-        raise ReplenishmentError(
-            "必须提供 lines（完整重编辑）或 resolutions（逐条处理打回行）",
-            code="revision_content_required", status_code=422)
     """Resolve exactly the rejected request lines without reopening approved facts."""
     key = (client_request_id or "").strip()
     if not 8 <= len(key) <= 128:
         raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+    request_digest = _revision_request_digest(
+        application_id=application_id,
+        expected_application_version=expected_application_version,
+        mode="resolutions",
+        items=resolutions,
+    )
     try:
         db.execute(select(func.pg_advisory_xact_lock(
             func.hashtextextended(f"replenishment-revision:{application_id}:{key}", 0)
         )))
-        app = _application_scope(db, application_id, username=username, role=role, lock=True)
+        target_project_id = _revision_target_project(
+            db,
+            application_id=application_id,
+            username=username,
+            user_ctx=user_ctx,
+        )
+        _project, current_ctx = _authorized_project(
+            db,
+            project_id=target_project_id,
+            username=username,
+            user_ctx=user_ctx,
+        )
+        app = _application_scope(
+            db,
+            application_id,
+            username=username,
+            role=current_ctx.role,
+            lock=True,
+        )
+        if app.project_id != target_project_id:
+            raise ReplenishmentError(
+                "项目不存在或不可选",
+                code="project_unavailable",
+                status_code=404,
+            )
+        replay = _revision_idempotent_replay(
+            db,
+            app=app,
+            username=username,
+            role=current_ctx.role,
+            client_request_id=key,
+            request_digest=request_digest,
+        )
+        if replay is not None:
+            return replay
         if app.version != expected_application_version:
             raise ReplenishmentError("申请已被其他操作更新，请刷新后重试", code="version_conflict", status_code=409)
         previous = _latest_version(db, app, lock=True)
@@ -1591,16 +1911,6 @@ def apply_revision_atomic(
         actions = {str(item.get("request_line_id")): item for item in resolutions}
         if set(actions) != rejected_ids or len(actions) != len(resolutions):
             raise ReplenishmentError("必须逐一处理全部打回行，不能遗漏或重复", code="revision_line_required", status_code=422)
-        for event in db.scalars(select(ReplenishmentAuditEvent).where(
-            ReplenishmentAuditEvent.application_id == app.application_id,
-            ReplenishmentAuditEvent.action == "revision_started",
-        )):
-            if (event.after_json or {}).get("client_request_id") == key:
-                result = get_application(db, app.application_id, username=username, role=role)
-                result["idempotent"] = True
-                db.commit()
-                return result
-
         replacements = [item for item in actions.values() if item.get("action") == "replace"]
         replacement_ids = [int(item.get("part_id") or 0) for item in replacements]
         if len(replacement_ids) != len(set(replacement_ids)):
@@ -1639,7 +1949,11 @@ def apply_revision_atomic(
                 if item.get("action") == "remove":
                     continue
                 part = parts_by_id[int(item["part_id"])]
-                quantity = _integer_quantity(item.get("quantity", source.quantity))
+                quantity = _integer_quantity(
+                    source.quantity
+                    if item.get("quantity") is None
+                    else item["quantity"]
+                )
                 as_of = business_today()
                 lower = as_of - timedelta(days=PRICE_WINDOW_DAYS - 1)
                 facts = pool_price_analysis.aggregate_part_price_facts(db, [part.id], date_from=lower, date_to=as_of)
@@ -1733,10 +2047,20 @@ def apply_revision_atomic(
         _audit(
             db, app, "revision_started", username, "处理自动审核打回行并重新提交",
             version_id=version.version_id,
-            after={"client_request_id": key, "line_count": len(final_lines)},
+            after={
+                "client_request_id": key,
+                "request_digest": request_digest,
+                "line_count": len(final_lines),
+                "revision_mode": "resolutions",
+            },
         )
         db.commit()
-        result = get_application(db, app.application_id, username=username, role=role)
+        result = get_application(
+            db,
+            app.application_id,
+            username=username,
+            role=current_ctx.role,
+        )
         result["idempotent"] = False
         return result
     except Exception:
@@ -1749,7 +2073,7 @@ def _apply_revision_full_lines(
     *,
     application_id: str,
     username: str,
-    role: str,
+    user_ctx: UserContext,
     expected_application_version: int,
     client_request_id: str,
     lines: list[dict],
@@ -1760,27 +2084,57 @@ def _apply_revision_full_lines(
     key = (client_request_id or "").strip()
     if not 8 <= len(key) <= 128:
         raise ReplenishmentError("client_request_id 长度必须为 8-128 个字符")
+    request_digest = _revision_request_digest(
+        application_id=application_id,
+        expected_application_version=expected_application_version,
+        mode="full_lines",
+        items=lines,
+    )
     try:
         db.execute(select(func.pg_advisory_xact_lock(
             func.hashtextextended(f"replenishment-revision:{application_id}:{key}", 0)
         )))
-        app = _application_scope(db, application_id, username=username, role=role, lock=True)
+        target_project_id = _revision_target_project(
+            db,
+            application_id=application_id,
+            username=username,
+            user_ctx=user_ctx,
+        )
+        _project, current_ctx = _authorized_project(
+            db,
+            project_id=target_project_id,
+            username=username,
+            user_ctx=user_ctx,
+        )
+        app = _application_scope(
+            db,
+            application_id,
+            username=username,
+            role=current_ctx.role,
+            lock=True,
+        )
+        if app.project_id != target_project_id:
+            raise ReplenishmentError(
+                "项目不存在或不可选",
+                code="project_unavailable",
+                status_code=404,
+            )
+        replay = _revision_idempotent_replay(
+            db,
+            app=app,
+            username=username,
+            role=current_ctx.role,
+            client_request_id=key,
+            request_digest=request_digest,
+        )
+        if replay is not None:
+            return replay
         if app.version != expected_application_version:
             raise ReplenishmentError("申请已被其他操作更新，请刷新后重试", code="version_conflict", status_code=409)
         previous = _latest_version(db, app, lock=True)
         review = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.version_id == previous.version_id))
         if review is None or app.status != "needs_revision":
             raise ReplenishmentError("当前申请没有待处理的打回条目", code="invalid_state", status_code=409)
-        for event in db.scalars(select(ReplenishmentAuditEvent).where(
-            ReplenishmentAuditEvent.application_id == app.application_id,
-            ReplenishmentAuditEvent.action == "revision_started",
-        )):
-            if (event.after_json or {}).get("client_request_id") == key:
-                result = get_application(db, app.application_id, username=username, role=role)
-                result["idempotent"] = True
-                db.commit()
-                return result
-
         cleaned_items = [
             {
                 "part_id": int(item["part_id"]),
@@ -1921,11 +2275,20 @@ def _apply_revision_full_lines(
         _audit(
             db, app, "revision_started", username, "退回编辑后全量重新提交",
             version_id=version.version_id,
-            after={"client_request_id": key, "line_count": len(final_lines),
-                   "revision_mode": "full_lines"},
+            after={
+                "client_request_id": key,
+                "request_digest": request_digest,
+                "line_count": len(final_lines),
+                "revision_mode": "full_lines",
+            },
         )
         db.commit()
-        result = get_application(db, app.application_id, username=username, role=role)
+        result = get_application(
+            db,
+            app.application_id,
+            username=username,
+            role=current_ctx.role,
+        )
         result["idempotent"] = False
         return result
     except Exception:

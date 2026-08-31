@@ -181,7 +181,7 @@ export const searchReplenishmentCatalog = (q: string, page = 1, pageSize = 20) =
     { params: { q: q || undefined, page, page_size: pageSize } },
   );
 
-/** 当前账号可选的维保项目（销售经理=本人项目；admin=全部活动项目）。 */
+/** 当前账号按统一维保行级范围可选的活动项目。 */
 export const getReplenishmentProjects = () =>
   api.get<{ items: ReplenishmentProject[] }>("/replenishment-beta/projects");
 
@@ -231,10 +231,14 @@ export const deleteReplenishmentCartDraft = (projectId: string, expectedVersion?
     { params: expectedVersion ? { expected_version: expectedVersion } : undefined },
   );
 
-export const submitReplenishmentCartDraft = (projectId: string, expectedVersion: number) =>
+export const submitReplenishmentCartDraft = (
+  projectId: string,
+  expectedVersion: number,
+  clientRequestId: string,
+) =>
   api.post<ReplenishmentApplication & { idempotent?: boolean }>(
     `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}/submit`,
-    { expected_version: expectedVersion },
+    { expected_version: expectedVersion, client_request_id: clientRequestId },
   );
 
 export const applyReplenishmentRevision = (applicationId: string, input: {

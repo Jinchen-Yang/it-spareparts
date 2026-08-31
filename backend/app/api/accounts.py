@@ -123,8 +123,15 @@ def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
     }
 
 
-def _get(db: Session, username: str) -> SysUser:
-    u = db.scalar(select(SysUser).where(SysUser.username == username))
+def _get(db: Session, username: str, *, lock: bool = False) -> SysUser:
+    stmt = select(SysUser).where(SysUser.username == username)
+    if lock:
+        # current_identity / action dependencies may already have this same
+        # account in the Session identity map.  The row lock serializes
+        # writers; populate_existing makes the winner after a wait observe the
+        # committed token_version/permissions instead of reusing that snapshot.
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    u = db.scalar(stmt)
     if u is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"账号不存在: {username}")
     return u
@@ -165,6 +172,23 @@ def _apply_template(u: SysUser, tpl: SysRoleTemplate, overrides: dict | None = N
 
 def _bump_token(u: SysUser) -> None:
     u.token_version = (u.token_version or 0) + 1
+
+
+def _lock_active_admin_roster(db: Session) -> None:
+    """Serialize every transaction that can remove an active admin.
+
+    Locking only the target account is insufficient: two administrators can
+    concurrently remove different rows after both observe a count of two.
+    The transaction-scoped advisory lock turns the count-and-remove decision
+    into one global critical section without locking unrelated account edits.
+    """
+    db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended("accounts:active-admin-roster", 0)
+            )
+        )
+    )
 
 
 # ---------- 守护规则（防锁死/防提权，单改与批量共用） ----------
@@ -216,8 +240,10 @@ def _guard_admin_role_change(ident: dict, db: Session, u: SysUser, new_role: str
     if u.role == "admin" and new_role != "admin":
         if ident.get("sub") == u.username:
             raise HTTPException(400, "不能降级当前登录账号自己，请由另一位管理员操作")
-        if u.is_active and _active_admin_count(db) <= 1:
-            raise HTTPException(400, "这是最后一个启用状态的管理员，不能降级——请先增设另一位管理员")
+        if u.is_active:
+            _lock_active_admin_roster(db)
+            if _active_admin_count(db) <= 1:
+                raise HTTPException(400, "这是最后一个启用状态的管理员，不能降级——请先增设另一位管理员")
 
 
 def _combo_or_400(eff: dict, who: str | None = None) -> None:
@@ -348,9 +374,13 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
 def update_account(username: str, body: UpdateAccount, db: Session = Depends(get_db),
                    ident: dict = Depends(current_identity),
                    _: None = Depends(_write_gate)) -> dict:
-    u = _get(db, username)
+    u = _get(db, username, lock=True)
     perm_change = (body.role is not None or body.template_code is not None
                    or body.overrides is not None or body.permissions is not None)
+    salesperson_scope_change = (
+        body.salesperson_name is not None
+        and body.salesperson_name != u.salesperson_name
+    )
     if perm_change:
         _guard_touch(ident, u)
     elif u.username == "admin":
@@ -401,8 +431,11 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
             # 400 时依赖 get_db 关闭会话丢弃未提交改动，账号保持原样
             _combo_or_400(after_eff)
 
+    if perm_change or salesperson_scope_change:
+        # salesperson_name participates in maintenance/replenishment row scope,
+        # so changing it must invalidate JWTs carrying the previous mapping.
+        _bump_token(u)
     if perm_change:
-        _bump_token(u)   # 权限变了 → 吊销旧 token 即时生效
         _dual_write_legacy(u)
     _audit(db, u.id, "account_update", before, _acct_snapshot(u), ident["sub"])
     db.commit()
@@ -417,7 +450,7 @@ def reset_password(username: str, body: PasswordReset, db: Session = Depends(get
                    _: None = Depends(_write_gate)) -> dict:
     if len(body.password or "") < 6:
         raise HTTPException(400, "密码至少 6 位")
-    u = _get(db, username)
+    u = _get(db, username, lock=True)
     if u.role == "admin" and not _op_is_admin(ident):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可操作管理员账号")
     u.password_hash = hash_password(body.password)
@@ -432,13 +465,15 @@ def reset_password(username: str, body: PasswordReset, db: Session = Depends(get
 def set_active(username: str, body: ActiveToggle, db: Session = Depends(get_db),
                ident: dict = Depends(current_identity),
                _: None = Depends(_write_gate)) -> dict:
-    u = _get(db, username)
+    u = _get(db, username, lock=True)
     _guard_touch(ident, u)
     if not body.is_active:
         if ident.get("sub") == u.username:
             raise HTTPException(400, "不能停用当前登录账号自己，请由另一位管理员操作")
-        if u.role == "admin" and u.is_active and _active_admin_count(db) <= 1:
-            raise HTTPException(400, "这是最后一个启用状态的管理员，不能停用——请先增设另一位管理员")
+        if u.role == "admin" and u.is_active:
+            _lock_active_admin_roster(db)
+            if _active_admin_count(db) <= 1:
+                raise HTTPException(400, "这是最后一个启用状态的管理员，不能停用——请先增设另一位管理员")
     before = _acct_snapshot(u)
     u.is_active = body.is_active
     if not body.is_active:
@@ -484,8 +519,20 @@ def _plan_bulk(db: Session, ident: dict, body: BulkBody) -> tuple[list[dict], st
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 "批量操作包含账号管理高风险权限，仅管理员可执行")
 
-    users = {u.username: u for u in db.execute(
-        select(SysUser).where(SysUser.username.in_(usernames))).scalars().all()}
+    users_stmt = (
+        select(SysUser)
+        .where(SysUser.username.in_(usernames))
+        .order_by(SysUser.username)
+    )
+    if not body.dry_run:
+        # Canonical row order + FOR UPDATE prevents concurrent single/bulk
+        # changes from collapsing two token_version increments into one.
+        users_stmt = users_stmt.with_for_update().execution_options(
+            populate_existing=True
+        )
+    users = {
+        u.username: u for u in db.execute(users_stmt).scalars().all()
+    }
     tpls = _template_map(db)
 
     errors: list[dict] = []
@@ -645,17 +692,19 @@ def delete_account(
     安全护栏：内置 admin 不可删；不能删自己；不能删最后一个启用管理员；
     仅管理员可删 admin 角色账号（_write_gate 已保证，这里再明确拒绝普通账号删他人）。
     """
-    u = _get(db, username)
+    u = _get(db, username, lock=True)
     if u.deleted_at is not None:
         raise HTTPException(400, "该账号已删除")
     if u.username == "admin":
         raise HTTPException(400, "内置 admin 账号不可删除")
     if ident.get("sub") == u.username:
         raise HTTPException(400, "不能删除当前登录账号自己，请由另一位管理员操作")
-    if u.role == "admin" and u.is_active and _active_admin_count(db) <= 1:
-        raise HTTPException(400, "这是最后一个启用状态的管理员，不能删除——请先增设另一位管理员")
     if not _op_is_admin(ident) and u.role == "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可删除管理员账号")
+    if u.role == "admin" and u.is_active:
+        _lock_active_admin_roster(db)
+        if _active_admin_count(db) <= 1:
+            raise HTTPException(400, "这是最后一个启用状态的管理员，不能删除——请先增设另一位管理员")
 
     before = _acct_snapshot(u)
     u.is_active = False

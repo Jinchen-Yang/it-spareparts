@@ -1,14 +1,19 @@
 """Token 即时吊销（PR-B）：改密/停用/改权限递增 token_version → 旧 token 立即失效。"""
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app import permissions
+from app import auth, permissions
 from app.api import accounts
 from app.auth import _make_token, _sign, hash_password, verify_token_db
+from app.db import SessionLocal
+from app.main import app
 from app.models.system import SysUser
 
 
@@ -71,6 +76,137 @@ def test_displayname_change_does_not_revoke(db):
                             ident={"sub": "admin"}, _="admin")
     db.expire_all()
     assert verify_token_db(tok, db)["sub"] == "bob"           # 仅改显示名不踢线
+
+
+def test_salesperson_mapping_change_revokes_old_token(db):
+    user = _user(db)
+    user.salesperson_name = "原销售"
+    db.commit()
+    tok = _token_for(db)
+
+    accounts.update_account(
+        "bob",
+        accounts.UpdateAccount(salesperson_name="新销售"),
+        db,
+        ident={"sub": "admin"},
+        _="admin",
+    )
+
+    db.expire_all()
+    with pytest.raises(HTTPException) as exc:
+        verify_token_db(tok, db)
+    assert exc.value.status_code == 401
+
+
+def test_concurrent_scope_changes_preserve_every_token_version_increment(db, monkeypatch):
+    _user(db, username="concurrent_scope_user")
+    start = Barrier(2)
+    original_get = accounts._get
+
+    def synchronized_get(session, username, *, lock=False):
+        # With the required row lock both workers start the SELECT together and
+        # then serialize.  If a future change drops lock=True, force both
+        # unlocked reads to capture the same token_version before either write.
+        if lock:
+            start.wait(timeout=5)
+            return original_get(session, username, lock=True)
+        user = original_get(session, username)
+        start.wait(timeout=5)
+        return user
+
+    monkeypatch.setattr(accounts, "_get", synchronized_get)
+
+    def change_salesperson(value: str) -> None:
+        with SessionLocal() as session:
+            # Mirror the real dependency path: authentication/action checks may
+            # preload this same account before the writer takes its row lock.
+            assert session.scalar(
+                select(SysUser).where(
+                    SysUser.username == "concurrent_scope_user"
+                )
+            ) is not None
+            accounts.update_account(
+                "concurrent_scope_user",
+                accounts.UpdateAccount(salesperson_name=value),
+                session,
+                ident={"sub": "admin"},
+                _="admin",
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(change_salesperson, "并发销售甲"),
+            executor.submit(change_salesperson, "并发销售乙"),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    db.expire_all()
+    user = db.scalar(
+        select(SysUser).where(SysUser.username == "concurrent_scope_user")
+    )
+    assert user is not None
+    assert user.token_version == 2
+    assert user.salesperson_name in {"并发销售甲", "并发销售乙"}
+
+
+def test_concurrent_login_cannot_survive_password_reset_with_stale_claims(
+    db,
+    monkeypatch,
+):
+    _user(
+        db,
+        username="concurrent_login_user",
+        pw="login-old-password",
+    )
+    password_check_entered = Event()
+    release_password_check = Event()
+    reset_started = Event()
+    original_verify = auth.verify_password
+
+    def blocking_verify(candidate: str, encoded: str) -> bool:
+        if candidate == "login-old-password":
+            password_check_entered.set()
+            assert release_password_check.wait(timeout=10)
+        return original_verify(candidate, encoded)
+
+    monkeypatch.setattr(auth, "verify_password", blocking_verify)
+
+    def run_login():
+        with TestClient(app) as client:
+            return client.post(
+                "/api/auth/login",
+                json={
+                    "username": "concurrent_login_user",
+                    "password": "login-old-password",
+                },
+            )
+
+    def reset_password() -> None:
+        reset_started.set()
+        with SessionLocal() as session:
+            accounts.reset_password(
+                "concurrent_login_user",
+                accounts.PasswordReset(password="login-new-password"),
+                session,
+                ident={"sub": "admin", "role": "admin"},
+                _="admin",
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        login_future = executor.submit(run_login)
+        assert password_check_entered.wait(timeout=10)
+        reset_future = executor.submit(reset_password)
+        assert reset_started.wait(timeout=10)
+        release_password_check.set()
+        response = login_future.result(timeout=15)
+        reset_future.result(timeout=15)
+
+    assert response.status_code == 200, response.text
+    with SessionLocal() as session:
+        with pytest.raises(HTTPException) as exc:
+            verify_token_db(response.json()["token"], session)
+    assert exc.value.status_code == 401
 
 
 def test_fallback_token_skips_revocation(db):

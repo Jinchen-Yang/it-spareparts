@@ -20,6 +20,7 @@ from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.maintenance_project import MaintenanceProject
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysImportBatch, SysUser
+from app.security import UserContext
 from app.services import replenishment
 from app.services import replenishment_screening as screening
 
@@ -178,8 +179,23 @@ def test_pool_floor_returns_current_policy(db):
 # ---------- 导出 ----------
 
 def _owner(db, username="cart_owner") -> SysUser:
-    user = SysUser(username=username, password_hash=hash_password(_PASSWORD),
-                   role="admin", display_name="销售经理", is_active=True)
+    template = permissions.effective("admin", None)
+    template["page_replenishment_beta"] = False
+    user = SysUser(
+        username=username,
+        password_hash=hash_password(_PASSWORD),
+        role="admin",
+        display_name="销售经理",
+        is_active=True,
+        template_code="admin",
+        template_version=1,
+        template_perms=template,
+        perm_overrides={
+            "page_replenishment_beta": True,
+            "action_replenishment_create": True,
+            "data_pool_price_governance": True,
+        },
+    )
     db.add(user)
     db.flush()
     return user
@@ -198,7 +214,12 @@ def _submitted_application(db, part, owner):
     return replenishment.submit_application_atomic(
         db,
         username=owner.username,
-        role=owner.role,
+        user_ctx=UserContext(
+            user_id=owner.username,
+            role=owner.role,
+            salesperson_name=owner.salesperson_name,
+            is_authenticated=True,
+        ),
         client_request_id=f"screening-{owner.username}-{part.id}",
         project_id=project.project_id,
         lines=[{"part_id": part.id, "quantity": 3}],

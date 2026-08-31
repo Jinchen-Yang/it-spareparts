@@ -165,7 +165,12 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         # 登录事件审计（成功/失败/锁定/停用拦截）→ sys_access_log，带源 IP，供暴力破解排查
         security.record_security_event(req.username, role, action, "auth", detail, ip, ua)
 
-    user = db.scalar(select(SysUser).where(SysUser.username == req.username))
+    user = db.scalar(
+        select(SysUser)
+        .where(SysUser.username == req.username)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if user is not None:
         # 已存在的账号一律在此处理——停用也绝不跌入下面的共享口令回退（否则停用账号可凭
         # ADMIN_PASSWORD 复活登录，且 fb token 绕过 #15 的吊销/停用校验 → 永久有效）。
@@ -184,30 +189,56 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
             just_locked = user.failed_attempts >= _LOGIN_MAX_FAILS
             if just_locked:
                 user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
+            failed_attempts = user.failed_attempts
+            role = user.role
+            locked_until = user.locked_until
             db.commit()
-            _ev("login_failed", user.role, {"failed_attempts": user.failed_attempts})
+            _ev("login_failed", role, {"failed_attempts": failed_attempts})
             if just_locked:
-                _ev("login_locked", user.role,
-                    {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
+                _ev(
+                    "login_locked",
+                    role,
+                    {
+                        "reason": "too_many_failures",
+                        "minutes": _LOGIN_LOCK_MINUTES,
+                        "locked_until": locked_until.isoformat()
+                        if locked_until is not None
+                        else None,
+                    },
+                )
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
         # 成功：清零失败计数与锁定。权限中心 v2：有效权限=模板快照⊕个别调整
         perms = permissions.runtime_safe(permissions.effective_for_user(user))
+        role = user.role
+        username = user.username
+        salesperson_name = user.salesperson_name
+        display_name = user.display_name
+        token_version = user.token_version or 0
+        # Freeze every JWT/response claim while the account row lock is held.
+        # If a password or permission writer commits next, its token_version
+        # bump invalidates this token; login must never mix old permissions
+        # with a post-commit refreshed token_version.
+        token, exp = _make_token(
+            role,
+            username,
+            salesperson_name,
+            perms=perms,
+            token_version=token_version,
+            authn="sys_user",
+        )
         user.failed_attempts = 0
         user.locked_until = None
         user.last_login_at = now
         db.commit()
-        _ev("login_success", user.role)
-        token, exp = _make_token(user.role, user.username, user.salesperson_name,
-                                 perms=perms, token_version=user.token_version or 0,
-                                 authn="sys_user")
+        _ev("login_success", role)
         return LoginResponse(
             token=token,
-            role=user.role,
-            name=user.display_name or user.salesperson_name,
+            role=role,
+            name=display_name or salesperson_name,
             expires_at=exp,
             permissions=perms,
             beta_features=beta_feature_availability(
-                role=user.role,
+                role=role,
                 permission_map=perms,
                 real_identity=True,
             ),
@@ -361,7 +392,12 @@ def change_password(req: ChangePasswordRequest, request: Request,
         _ev("change_password_rejected", ident.get("role"), {"reason": "shared_password"})
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "当前为共享口令登录，无法自助改密；请用独立账号登录或联系管理员")
-    user = db.scalar(select(SysUser).where(SysUser.username == sub))
+    user = db.scalar(
+        select(SysUser)
+        .where(SysUser.username == sub)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if user is None:
         # 无 fb 标记但也无实名行：ADMIN_PASSWORD 登录的 admin（sub='admin' 但未建号）
         _ev("change_password_rejected", ident.get("role"), {"reason": "no_account_row"})
@@ -401,7 +437,12 @@ def change_password_unauth(req: PreauthChangePasswordRequest, request: Request,
     def _ev(action: str, role: str | None, detail: dict | None = None) -> None:
         security.record_security_event(req.username, role, action, "auth", detail, ip, ua)
 
-    user = db.scalar(select(SysUser).where(SysUser.username == req.username))
+    user = db.scalar(
+        select(SysUser)
+        .where(SysUser.username == req.username)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if user is None:
         # 未知用户名 / 仅靠 ADMIN_PASSWORD 登录的账号（无实名行）：时序抹平 + 不泄露存在性
         verify_password(req.current_password, _DUMMY_PW_HASH)

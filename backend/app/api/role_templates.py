@@ -278,7 +278,13 @@ def sync_template(code: str, body: SyncBody, db: Session = Depends(get_db),
                             f"模板「{t.name}」含账号管理高风险权限，仅管理员可同步")
 
     q = select(SysUser).where(SysUser.template_code == code, SysUser.role != "admin",
-                              SysUser.username != "admin").order_by(SysUser.id)
+                              SysUser.username != "admin").order_by(SysUser.username)
+    if not body.dry_run:
+        # Share the account writer order with /accounts/bulk.  The execution
+        # pass must recompute its fingerprint from locked, freshly populated
+        # rows so a concurrent individual edit cannot be overwritten and two
+        # token_version increments cannot collapse into one.
+        q = q.with_for_update().execution_options(populate_existing=True)
     users = db.execute(q).scalars().all()
     if body.usernames is not None:
         wanted = set(body.usernames)

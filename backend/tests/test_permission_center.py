@@ -4,12 +4,15 @@
 """
 import importlib.util
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import permissions, security
+from app.api import accounts
 from app.auth import hash_password
 from app.db import SessionLocal
 from app.main import app
@@ -382,6 +385,111 @@ def test_last_admin_protection(db):
     ghost.post("/api/accounts", json={"username": "adm2", "password": "pw123456", "role": "admin"})
     assert ghost.put("/api/accounts/onlyadm/active",
                      json={"is_active": False}).status_code == 200
+
+
+@pytest.mark.parametrize("operation", ["deactivate", "demote", "delete"])
+def test_concurrent_admin_removals_leave_one_active_admin(
+    db,
+    monkeypatch,
+    operation,
+):
+    for username in ("concurrent_admin_a", "concurrent_admin_b"):
+        db.add(
+            SysUser(
+                username=username,
+                role="admin",
+                password_hash=hash_password("pw123456"),
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    targets_locked = Barrier(2)
+    first_count_entered = Event()
+    second_count_entered = Event()
+    release_first_count = Event()
+    count_lock = Lock()
+    count_calls = 0
+    original_get = accounts._get
+    original_count = accounts._active_admin_count
+
+    def synchronized_get(session, username, *, lock=False):
+        user = original_get(session, username, lock=lock)
+        if lock and username.startswith("concurrent_admin_"):
+            targets_locked.wait(timeout=10)
+        return user
+
+    def controlled_count(session):
+        nonlocal count_calls
+        value = original_count(session)
+        with count_lock:
+            count_calls += 1
+            call_number = count_calls
+        if call_number == 1:
+            first_count_entered.set()
+            assert release_first_count.wait(timeout=10)
+        else:
+            second_count_entered.set()
+        return value
+
+    monkeypatch.setattr(accounts, "_get", synchronized_get)
+    monkeypatch.setattr(accounts, "_active_admin_count", controlled_count)
+
+    def remove_admin(target: str, actor: str) -> int:
+        with SessionLocal() as session:
+            try:
+                if operation == "deactivate":
+                    accounts.set_active(
+                        target,
+                        accounts.ActiveToggle(is_active=False),
+                        session,
+                        ident={"sub": actor, "role": "admin"},
+                        _="admin",
+                    )
+                elif operation == "demote":
+                    accounts.update_account(
+                        target,
+                        accounts.UpdateAccount(role="sales"),
+                        session,
+                        ident={"sub": actor, "role": "admin"},
+                        _="admin",
+                    )
+                else:
+                    accounts.delete_account(
+                        target,
+                        session,
+                        ident={"sub": actor, "role": "admin"},
+                        _="admin",
+                    )
+            except HTTPException as exc:
+                session.rollback()
+                return exc.status_code
+            return 200
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                remove_admin,
+                "concurrent_admin_a",
+                "concurrent_admin_b",
+            ),
+            executor.submit(
+                remove_admin,
+                "concurrent_admin_b",
+                "concurrent_admin_a",
+            ),
+        ]
+        assert first_count_entered.wait(timeout=10)
+        # The second transaction has already locked its distinct target row,
+        # but it must not enter the roster count until the first transaction
+        # releases the global advisory lock by committing.
+        assert not second_count_entered.wait(timeout=1)
+        release_first_count.set()
+        statuses = sorted(future.result(timeout=15) for future in futures)
+
+    assert statuses == [200, 400]
+    with SessionLocal() as session:
+        assert original_count(session) == 1
 
 
 def test_cannot_operate_self(db, admin_client):

@@ -11,7 +11,7 @@
 
 **后事实数据展示板**：业务发生之后，用已有的 Excel 数据让老板看清每个维保项目的「货」和「钱」——
 重点是**项目成本**和**备件申请**。不是业务流程系统、不做闭环、不替代氚云，也不替代审批流
-（补库申请只冻结系统三查事实，仍不做审批，见 §9）。
+（补库申请冻结系统三查事实并可执行系统规则裁决，但不建模人工审批，见 §9）。
 
 ## 2. 角色与权限
 
@@ -19,8 +19,9 @@
 | --- | --- | --- |
 | 老板/管理层 | `page_maintenance_boss` | 展示板全套、全部项目 |
 | 项目经理 | `page_maintenance` | **全部项目**（M0-B ①，2026-08-16 改判；勾选名单制，被勾选者整套可见） |
-| 销售经理 | 购物车动作键 | 仅可选择 `salesperson` 与本人销售映射精确匹配的 active 项目；缺映射即 0 项 |
-| admin | 购物车动作键 | 可选择全部 active 项目 |
+| 补库只读用户 | `page_replenishment_beta`＋`data_pool_price_governance` | 当前维保项目范围内查看本人云端草稿，并按 owner 规则查看申请历史 |
+| 补库创建/复提用户 | 再加 `action_replenishment_create` | 在当前统一维保项目范围内维护草稿、提交不可变版本、处理打回并导出冻结复核包 |
+| admin / boss | 补库项目范围 | 可选全部 active 项目；申请 owner 隔离仅 admin 保留既有例外，boss 不继承 |
 | admin | 维护动作键 | 数据维护（项目主档/归属/异常单/仓库核对/缺价补录/迁移核对） |
 | 数据权限 | `data_purchase_cost` / `data_profit` | 无权限时字段整块显示「受限」，**不显示 0、不显示空值占位** |
 
@@ -34,7 +35,7 @@
 | 入库单（RKD，坏品/废品返件类） | 氚云导出 | 预览 → 应用 |
 | 台账工作簿 | 商务线手工维护 Excel | 预览 → 应用；项目/合同/期限/回款计划**唯一事实源** |
 | 报销/回款工作簿 | 业务手工维护 Excel（AB-3，v1 新增） | `04_报销订单`＋`05_项目经理回款单` **两张 sheet 合一**，下载 → 本地增删改 → 上传覆盖 |
-| 补库购物车申请 | 浏览器本地草稿＋一次原子提交（#260） | 独立记录、挂真实项目、与项目其他内容**隔离**、只作记录展示、不进计算与对账 |
+| 补库购物车申请 | owner＋项目唯一的云端草稿、乐观锁版本＋原子提交 | 独立记录、挂真实项目、与项目其他内容**隔离**、只作记录展示、不进计算与对账 |
 | 互通池 | 系统维护 | PN 池归属、池内最低价 |
 | 项目身份 | **台账项目名（Excel 写法为准）** | 预交付＝单据前缀，剥前缀挂真实合同展示（不叫「合并」），打「预交付」徽标 |
 
@@ -87,7 +88,7 @@
 - **②项目面板**：出库明细（按时间筛选；多合同并排或筛选）＋子 tab（基础信息/备件成本/报销/回款＝
   项目总表的 web 呈现）＋下载本项目总表（多 sheet）＋各 tab 下载对应单 sheet；项目名旁编辑基本信息。
 - **一张总表改所有数据**：缺价/报销/回款都走下载→改→上传覆盖。
-- 项目面板的维保备件订单区：当前本地申请优先、历史申请折叠；销售经理按本人销售映射选 active 项目，admin 可选全部 active 项目。
+- 项目面板的维保备件订单区：当前云端草稿优先、历史申请折叠；项目目录统一复用维保行级范围，admin/boss 可选全部 active 项目。
 - 原始单据上传（需求单/发货/返库/入库/台账）走 admin 既有「数据中心→数据导入」入口，不新建上传台；
   回填类下载上传只在主页和项目 tab 页。
 - 旧页面（工作台 9 页、旧版 3 页、旧展示板 5 页、数据维护 5 页）**代码已删除**，新 2 页已替换上线；
@@ -100,32 +101,41 @@
 ## 9. 补库订单边界（GitHub #260）
 
 ```text
-浏览器 localSelectedProject / localCart / isDirty
-  └─ 唯一写入口 POST /replenishment-beta/applications
-       └─ 单事务：锁定并复核项目与 PN → 冻结系统三查事实
-            └─ Application + Version + Lines + Audit（全成或全败）
-                 └─ 只读详情 / system-screening.xlsx 人工复核包
+owner＋project 唯一云端草稿（version 乐观锁）
+  └─ 提交：project lock → account scope SHARE lock → draft lock → owner/request 幂等锁
+       └─ 单事务复核当前项目范围与 PN → 冻结系统三查事实 → 删除草稿
+            └─ Application + immutable Version + Lines + Audit（全成或全败）
+                 ├─ approved → 只读详情 / system-screening.xlsx 冻结复核包
+                 └─ needs_revision → 当前项目范围重验 → 新不可变版本
 ```
 
-- 选择项目、增删 PN、修改数量和备注只改浏览器状态，数据库没有「服务端草稿」。提交必须包含稳定的
-  `client_request_id`、真实 `project_id`、1–200 个不重复 PN、正整数数量和有界备注；失败保留本地输入。
-- 项目目录和提交共用一条授权规则：admin 为全部 active 项目；sales 为项目 `salesperson` 与
-  `sys_user.salesperson_name` 精确相等；缺映射、停用、不存在或越权均 fail closed。提交时对项目与 PN
-  加锁复核，避免校验通过后被并发停用、合并或排除。
-- owner＋`client_request_id` 是幂等键：同 payload 返回原单，不同 payload 为 409；申请、版本、明细、
-  冻结证据和审计必须处于同一事务，任何失败为零部分记录。
-- 新单数据库原始状态保持兼容值 `submitted`，对外以 `workflow_mode=system_screening` 和
-  `stage=screening_complete` 表示三查完成；capabilities 固定 `can_review=false`，无 approved/rejected 新语义。
+- 云端草稿按 owner＋project 唯一保存；首次写入必须显式表示 create-if-absent，已有草稿的 replace 必须携带
+  精确 `expected_version`，空版本不得静默覆盖另一页面的内容。提交必须包含稳定 `client_request_id`、真实
+  `project_id`、1–200 个不重复 PN、正整数数量和有界备注。
+- 非 admin 账号的页面、价格数据和创建动作是三层门禁；admin 保留平台既有动作/数据全开兼容语义，但仍须
+  实名补库页面白名单。项目目录与每次写入共用统一维保范围：FULL_SCOPE（admin/boss）为全部 active 项目；
+  其余账号为负责人/viewer 挂靠，并在启用既有行级收紧键时并入 `salesperson_name` 精确匹配项目。空范围、
+  缺映射、停用、不存在或越权均 fail closed；读写均在项目锁前后复核，并持有账号共享锁至事务结束，
+  因而负责人撤销、账号权限/角色/销售映射变更与补库操作有明确先后顺序；PN 也在提交事务内加锁。
+- 首次提交以 owner＋`client_request_id` 幂等，复提以 application＋`client_request_id` 幂等；键均绑定规范化请求
+  摘要，同内容重试返回原结果，不同内容复用返回 409。云端草稿提交把自身 key 一并发给服务端，因此首次
+  成功已删除草稿、但客户端丢失响应时，重试仍能找回原申请。
+- 自动审核开启时，系统按冻结的池归属与近 182 天购销事实把申请置为 `approved` 或 `needs_revision`；这只是
+  系统规则裁决，不是人工审批、不会写库存或采购事实。打回后的全量编辑或逐条处理均生成下一份不可变版本，
+  并在执行前重验 owner 的当前项目范围。申请历史在失去项目范围后仍按 owner 规则可读，但不能借历史复提；
+  对应云端草稿继续留存，但原 owner 在范围恢复前对其读取、更新、提交和删除均得到同一 404，避免形成页面外
+  的隐蔽能力；仅 admin 保留跨 owner 申请历史的既有查看例外，boss 不继承。
 - 每行 `screening_json` 固定提交时三查、最近销售点、池底价、`as_of` 和异常数，并进入内容摘要。
-  导出只读这些冻结值，不回查实时销售/池价，不写审计，只陈述事实和需注意项，不代表系统批准。
+  导出只读这些冻结值，不回查实时销售/池价，不写审计；导出权限随创建动作发放，但不要求项目仍在当前
+  可写范围，因为它只复现 owner 已可见的历史冻结事实。
 - **当前一致性边界**：采购/销售聚合与 `recent_activity`、`niche_pn` 复用同一份已物化结果，
   不会在一次提交内二次聚合漂移；最近销售点和池底价仍是在同一事务内后续读取。数据库当前为
   `READ COMMITTED`，因此并发事实源提交可能让这两类读取来自稍晚的 statement snapshot；系统会如实
   冻结实际读到的值，但本期不宣称它们是严格同一瞬时快照。若业务要求严格同刻，需另行引入
   `REPEATABLE READ` 提交通道或等价的一次性事实查询。
 - 升级前已有申请显式迁为 `project_id=NULL`＋`is_legacy_project_unbound=true`，不猜项目、不改历史摘要，
-  且永久只读；无项目历史单导出为 409。旧草稿、改单、评审、manual-review、WBDD subset、evidence、
-  purchase-list 等写/导出入口统一退役为 410/404。
+  且永久只读；无项目历史单导出为 409。旧 application-draft/改单/manual-review/WBDD subset/evidence/
+  purchase-list 等入口统一退役为 410/404；当前云端购物车使用独立的 cart-draft 表与端点。
 - 数据库触发器是最后防线：新单只能以 bound draft 插入；版本须在每行冻结证据完整且数量为正整数后
   才能 draft→submitted；申请只能在最新版本已合法 submitted 后提交，此后状态和项目身份不可变。
 

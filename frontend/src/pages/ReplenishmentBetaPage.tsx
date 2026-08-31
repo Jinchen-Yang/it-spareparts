@@ -293,6 +293,7 @@ function RevisionPanel({
     special_note?: string;
   }>>({});
   const [saving, setSaving] = useState(false);
+  const revisionRequestId = useRef(newRevisionRequestId());
   if (application.status !== "needs_revision" || !version || !rejected.length) return null;
   const setChoice = (requestLineId: string, patch: Partial<{ action: "replace" | "remove"; part_id?: number; quantity?: number; special_note?: string }>) => {
     setChoices((prev) => ({ ...prev, [requestLineId]: { ...prev[requestLineId], ...patch } }));
@@ -303,7 +304,7 @@ function RevisionPanel({
     try {
       const { data } = await applyReplenishmentRevision(application.application_id, {
         expected_application_version: application.version,
-        client_request_id: newRevisionRequestId(),
+        client_request_id: revisionRequestId.current,
         resolutions: rejected.map((line) => {
           const choice = choices[line.request_line_id];
           // remove 只传 action；replace 传 part_id + 可调数量/特殊情况备注
@@ -392,13 +393,22 @@ export default function ReplenishmentBetaPage() {
   const [working, setWorking] = useState(false);
 
   const [projects, setProjects] = useState<ReplenishmentProject[]>([]);
+  const currentProjectIds = useRef<Set<string>>(new Set());
+  const projectRequestSequence = useRef(0);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [requestNote, setRequestNote] = useState("");
   const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
   const [draftVersion, setDraftVersion] = useState<number | null>(null);
+  const [cartHydrating, setCartHydrating] = useState(false);
   const [editingRevision, setEditingRevision] = useState<ReplenishmentApplication | null>(null);
   const hydratingCart = useRef(false);
   const cartSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCartSubmit = useRef<{
+    projectId: string;
+    version: number;
+    clientRequestId: string;
+  } | null>(null);
+  const pendingRevisionRequestId = useRef<string | null>(null);
 
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState<CatalogPart[]>([]);
@@ -414,6 +424,10 @@ export default function ReplenishmentBetaPage() {
   const [historyDetail, setHistoryDetail] = useState<ReplenishmentApplication | null>(null);
 
   const exportCurrent = async (application?: ReplenishmentApplication) => {
+    if (!capabilities?.can_create) {
+      message.warning("当前账号无导出权限，仅可查看");
+      return;
+    }
     const target = application ?? current;
     if (!target) return;
     setExporting(true);
@@ -429,17 +443,27 @@ export default function ReplenishmentBetaPage() {
   };
 
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId) || null;
+  currentProjectIds.current = new Set(projects.map((project) => project.project_id));
 
   useEffect(() => {
-    if (!selectedProjectId) return;
+    if (!selectedProjectId) {
+      setCartHydrating(false);
+      return;
+    }
     // #10：退回编辑模式不加载云端草稿——行来自被打回申请，避免覆盖预填内容
-    if (editingRevision) return;
+    if (editingRevision) {
+      setCartHydrating(false);
+      return;
+    }
+    let active = true;
     hydratingCart.current = true;
+    setCartHydrating(true);
     setDraftVersion(null);
     setRequestNote("");
     setDraftLines([]);
     void getReplenishmentCartDraft(selectedProjectId)
       .then(({ data }) => {
+        if (!active) return;
         const draft = data.draft;
         setDraftVersion(draft?.version ?? null);
         setRequestNote(draft?.request_note ?? "");
@@ -452,16 +476,38 @@ export default function ReplenishmentBetaPage() {
           special_note: line.special_note ?? "",
         })));
       })
-      .catch((error) => message.error(errorText(error)))
-      .finally(() => { hydratingCart.current = false; });
-    return () => { hydratingCart.current = true; };
+      .catch((error) => {
+        if (active) message.error(errorText(error));
+      })
+      .finally(() => {
+        if (!active) return;
+        hydratingCart.current = false;
+        setCartHydrating(false);
+      });
+    return () => {
+      active = false;
+      hydratingCart.current = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, editingRevision]);
 
   useEffect(() => {
     // #10：退回编辑模式不写云端草稿（编辑的是申请行，提交走 revisions）
-    if (!selectedProjectId || hydratingCart.current || editingRevision) return undefined;
-    if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
+    if (cartSaveTimer.current) {
+      clearTimeout(cartSaveTimer.current);
+      cartSaveTimer.current = null;
+    }
+    if (
+      !capabilities?.can_create
+      || !selectedProject
+      || hydratingCart.current
+      || editingRevision
+    ) {
+      return undefined;
+    }
+    // Any user edit supersedes a previously flushed submit attempt. A pure
+    // response-loss retry does not rerun this effect, so it keeps the same key.
+    pendingCartSubmit.current = null;
     if (!draftLines.length) {
       if (draftVersion == null) return undefined;
       cartSaveTimer.current = setTimeout(() => {
@@ -488,10 +534,12 @@ export default function ReplenishmentBetaPage() {
     return () => {
       if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
     };
-  }, [selectedProjectId, draftLines, requestNote]);
+  }, [capabilities?.can_create, selectedProject?.project_id, selectedProjectId, draftLines, requestNote]);
 
-  const flushCart = async (): Promise<number> => {
-    if (!selectedProjectId) throw new Error("请先选择维保项目");
+  const flushCart = async (): Promise<{ version: number; clientRequestId: string }> => {
+    if (!selectedProject || !currentProjectIds.current.has(selectedProjectId)) {
+      throw new Error("所选项目已不在当前维保范围，请刷新后重选");
+    }
     if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
     const { data } = await replaceReplenishmentCartDraft(selectedProjectId, {
       expected_version: draftVersion,
@@ -503,7 +551,10 @@ export default function ReplenishmentBetaPage() {
       })),
     });
     setDraftVersion(data.draft.version);
-    return data.draft.version;
+    return {
+      version: data.draft.version,
+      clientRequestId: data.draft.client_request_id,
+    };
   };
 
   const refreshList = async (preferredId?: string, page = applicationPage) => {
@@ -525,6 +576,27 @@ export default function ReplenishmentBetaPage() {
     setCatalog(data.items);
     setCatalogTotal(data.total);
     setCatalogPage(data.page);
+  };
+
+  const refreshProjects = async () => {
+    const requestSequence = ++projectRequestSequence.current;
+    const { data } = await getReplenishmentProjects();
+    if (requestSequence !== projectRequestSequence.current) return data.items;
+    setProjects(data.items);
+    setSelectedProjectId((currentId) => (
+      currentId && !data.items.some((project) => project.project_id === currentId)
+        ? ""
+        : currentId
+    ));
+    return data.items;
+  };
+
+  const refreshScopeAndList = async () => {
+    try {
+      await Promise.all([refreshProjects(), refreshList()]);
+    } catch (error) {
+      message.error(errorText(error));
+    }
   };
 
   useEffect(() => {
@@ -555,6 +627,7 @@ export default function ReplenishmentBetaPage() {
   }, []);
 
   const addDraftLine = (part: CatalogPart, quantity: number) => {
+    if (!capabilities?.can_create || !selectedProject || cartHydrating) return;
     if (draftLines.some((line) => line.part_id === part.part_id)) {
       message.info(`${part.pn_std} 已在申请中`);
       return;
@@ -573,18 +646,24 @@ export default function ReplenishmentBetaPage() {
   };
 
   const updateDraftLine = (partId: number, patch: Partial<Pick<DraftLine, "quantity" | "special_note">>) => {
+    if (!capabilities?.can_create || !selectedProject) return;
     setDraftLines((lines) => lines.map((line) => (
       line.part_id === partId ? { ...line, ...patch } : line
     )));
   };
 
   const removeDraftLine = (partId: number) => {
+    if (!capabilities?.can_create || !selectedProject) return;
     setDraftLines((lines) => lines.filter((line) => line.part_id !== partId));
   };
 
   const submitApplication = () => {
-    if (!selectedProjectId) {
-      message.warning("请先选择维保项目");
+    if (!capabilities?.can_create) {
+      message.warning("当前账号无提交权限，仅可查看");
+      return;
+    }
+    if (!selectedProject) {
+      message.warning("所选项目已不在当前维保范围，请刷新后重选");
       return;
     }
     if (!draftLines.length) {
@@ -606,13 +685,30 @@ export default function ReplenishmentBetaPage() {
   };
 
   const runSubmit = async () => {
+    if (!capabilities?.can_create) {
+      message.warning("当前账号无提交权限，仅可查看");
+      return;
+    }
+    const targetProjectId = editingRevision?.project?.project_id || selectedProjectId;
+    if (
+      !targetProjectId
+      || !currentProjectIds.current.has(targetProjectId)
+      || !selectedProject
+      || (editingRevision && targetProjectId !== selectedProject.project_id)
+    ) {
+      message.warning("该申请项目已不在当前维保范围，只能查看历史");
+      return;
+    }
     setWorking(true);
     try {
       if (editingRevision) {
         // #10 退回编辑后重新提交：原申请新版本 + 全量行重新审核
+        if (!pendingRevisionRequestId.current) {
+          pendingRevisionRequestId.current = newRevisionRequestId();
+        }
         const { data } = await applyReplenishmentRevision(editingRevision.application_id, {
           expected_application_version: editingRevision.version,
-          client_request_id: newRevisionRequestId(),
+          client_request_id: pendingRevisionRequestId.current,
           lines: draftLines.map((line) => ({
             part_id: line.part_id,
             quantity: line.quantity,
@@ -620,6 +716,7 @@ export default function ReplenishmentBetaPage() {
           })),
         });
         setCurrent(data);
+        pendingRevisionRequestId.current = null;
         setEditingRevision(null);
         setDraftLines([]);
         setRequestNote("");
@@ -628,8 +725,22 @@ export default function ReplenishmentBetaPage() {
         message.success(data.idempotent ? "已返回既有申请" : `已重新提交 ${data.application_no}`);
         return;
       }
-      const version = await flushCart();
-      const { data } = await submitReplenishmentCartDraft(selectedProjectId, version);
+      let pending = pendingCartSubmit.current;
+      if (!pending || pending.projectId !== selectedProjectId) {
+        const saved = await flushCart();
+        pending = {
+          projectId: selectedProjectId,
+          version: saved.version,
+          clientRequestId: saved.clientRequestId,
+        };
+        pendingCartSubmit.current = pending;
+      }
+      const { data } = await submitReplenishmentCartDraft(
+        pending.projectId,
+        pending.version,
+        pending.clientRequestId,
+      );
+      pendingCartSubmit.current = null;
       setCurrent(data);
       setDraftLines([]);
       setRequestNote("");
@@ -645,7 +756,19 @@ export default function ReplenishmentBetaPage() {
 
   /** #10：打回申请「退回编辑」——把原申请行载入购物车编辑态（打回行标红+推荐）。 */
   const startEditingRevision = (application: ReplenishmentApplication) => {
+    if (!capabilities?.can_create) {
+      message.warning("当前账号无提交权限，仅可查看");
+      return;
+    }
+    if (
+      !application.project
+      || !projects.some((project) => project.project_id === application.project?.project_id)
+    ) {
+      message.warning("该申请已不在当前维保项目范围内，只能查看历史");
+      return;
+    }
     const version = application.versions[0];
+    pendingRevisionRequestId.current = newRevisionRequestId();
     const lines = (version?.lines ?? []).map((line) => ({
       part_id: line.part_id,
       pn_std: line.pn_std,
@@ -664,6 +787,7 @@ export default function ReplenishmentBetaPage() {
   };
 
   const cancelEditingRevision = () => {
+    pendingRevisionRequestId.current = null;
     setEditingRevision(null);
     setDraftLines([]);
     setRequestNote("");
@@ -693,6 +817,14 @@ export default function ReplenishmentBetaPage() {
     );
   }
 
+  const canReviseHistory = Boolean(
+    capabilities.can_create
+    && historyDetail?.project
+    && projects.some(
+      (project) => project.project_id === historyDetail.project?.project_id,
+    )
+  );
+
   return (
     <div className="replenishment-beta-page">
       <PageHeader
@@ -700,7 +832,7 @@ export default function ReplenishmentBetaPage() {
         subtitle="选择维保项目、选购 PN 后一次性提交；系统三查与半年价格证据在提交时冻结，不会自动定价或改变库存。"
         extra={(
           <Space wrap>
-            <Button icon={<ReloadOutlined />} onClick={() => void refreshList()}>刷新</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => void refreshScopeAndList()}>刷新</Button>
           </Space>
         )}
       />
@@ -727,7 +859,7 @@ export default function ReplenishmentBetaPage() {
                 <CatalogCard
                   key={part.part_id}
                   part={part}
-                  disabled={!capabilities.can_create || working || !selectedProjectId}
+                  disabled={!capabilities.can_create || working || cartHydrating || !selectedProject}
                   onAdd={(quantity) => addDraftLine(part, quantity)}
                 />
               ))}
@@ -776,13 +908,13 @@ export default function ReplenishmentBetaPage() {
           </Space>
         )}
       >
-        <Spin spinning={working}>
+        <Spin spinning={working || cartHydrating}>
           {projects.length === 0 ? (
             <Alert
               showIcon
               type="warning"
               message="当前账号没有可选的维保项目"
-              description="销售经理需要先在账号中配置销售人员映射并挂维保项目；管理员可见全部活动项目。"
+              description="项目范围按统一维保口径提供：负责人/viewer 挂靠可见；启用“只看自己维保项目”的账号再并入销售映射项目；老板和管理员按既有规则查看全范围。"
             />
           ) : (
             <>
@@ -802,7 +934,7 @@ export default function ReplenishmentBetaPage() {
                   />
                   <Input.TextArea
                     value={requestNote}
-                    disabled={working}
+                    disabled={!capabilities.can_create || !selectedProject || working || cartHydrating}
                     maxLength={4000}
                     autoSize={{ minRows: 1, maxRows: 4 }}
                     placeholder="整单备注（选填）"
@@ -834,6 +966,7 @@ export default function ReplenishmentBetaPage() {
                               size="small"
                               type="primary"
                               ghost
+                              disabled={!capabilities.can_create || !selectedProject || working}
                               onClick={() => {
                                 const source = draftLines.find((d) => d.part_id === line.part_id);
                                 setDraftLines((lines) => {
@@ -864,7 +997,7 @@ export default function ReplenishmentBetaPage() {
                             max={999999}
                             precision={0}
                             value={line.quantity}
-                            disabled={working}
+                            disabled={!capabilities.can_create || !selectedProject || working}
                             onChange={(value) => updateDraftLine(line.part_id, { quantity: Number(value || 1) })}
                             style={{ width: 96 }}
                           />
@@ -873,7 +1006,7 @@ export default function ReplenishmentBetaPage() {
                         <Input
                           value={line.special_note}
                           maxLength={4000}
-                          disabled={working}
+                          disabled={!capabilities.can_create || !selectedProject || working}
                           placeholder="特殊情况说明（选填）"
                           onChange={(event) => updateDraftLine(line.part_id, { special_note: event.target.value })}
                         />
@@ -881,7 +1014,7 @@ export default function ReplenishmentBetaPage() {
                           danger
                           type="text"
                           icon={<DeleteOutlined />}
-                          disabled={working}
+                          disabled={!capabilities.can_create || !selectedProject || working}
                           onClick={() => removeDraftLine(line.part_id)}
                         />
                       </div>
@@ -899,8 +1032,8 @@ export default function ReplenishmentBetaPage() {
                   <Button
                     type="primary"
                     icon={<SendOutlined />}
-                    disabled={!selectedProjectId || !draftLines.length || working}
-                    title={!selectedProjectId ? "先选择维保项目" : !draftLines.length ? "先加入至少一个 PN" : undefined}
+                    disabled={!capabilities.can_create || !selectedProject || !draftLines.length || working || cartHydrating}
+                    title={!selectedProject ? "先选择当前范围内的维保项目" : !draftLines.length ? "先加入至少一个 PN" : undefined}
                     onClick={submitApplication}
                   >
                     提交补库申请
@@ -942,11 +1075,17 @@ export default function ReplenishmentBetaPage() {
           setHistoryDetail(null);
         }}
         extra={historyDetail ? (
-          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} onClick={() => void exportCurrent(historyDetail)}>
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            disabled={!capabilities.can_create}
+            onClick={() => void exportCurrent(historyDetail)}
+          >
             导出复核包 Excel
           </Button>
         ) : (
-          <Button onClick={() => void refreshList()}>刷新</Button>
+          <Button onClick={() => void refreshScopeAndList()}>刷新</Button>
         )}
       >
         {historyDetail ? (
@@ -974,14 +1113,23 @@ export default function ReplenishmentBetaPage() {
               <Alert
                 showIcon
                 type="warning"
-                message="申请被自动审核打回——可退回编辑后重新提交"
-                description="退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
+                message={canReviseHistory
+                  ? "申请被自动审核打回——可退回编辑后重新提交"
+                  : "申请被自动审核打回——当前仅可查看历史"}
+                description={canReviseHistory
+                  ? "退回编辑后可添加/删减备件、更换 PN、调整数量或填写特殊情况说明，重新提交将生成新版本并重新审核。"
+                  : "当前账号没有该项目的现行补库写入范围或创建权限；历史冻结版本仍可查看，但不能据此复提。"}
                 action={(
-                  <Button type="primary" danger onClick={() => {
+                  <Button
+                    type="primary"
+                    danger
+                    disabled={!canReviseHistory}
+                    onClick={() => {
                     startEditingRevision(historyDetail);
                     setHistoryOpen(false);
                     setHistoryDetail(null);
-                  }}>
+                    }}
+                  >
                     退回编辑
                   </Button>
                 )}

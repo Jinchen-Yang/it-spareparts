@@ -1,10 +1,11 @@
 method	path	page_keys	action_keys	data_keys
+POST	/api/maintenance/acceptance-checklist/{batch_id}/apply	page_maintenance
 POST	/api/maintenance/acceptance-deliverables/search	page_maintenance		
-POST	/api/maintenance/acceptance-deliverables/{deliverable_id}/review	page_maintenance	action_maintenance_acceptance_review	
 GET	/api/maintenance/acceptance-files/{file_id}	page_maintenance		
 GET	/api/maintenance/ai-fallback/proposals	page_maintenance		
 POST	/api/maintenance/ai-fallback/propose	page_maintenance		
 POST	/api/maintenance/ai-fallback/{proposal_id}/accept	page_maintenance		
+GET	/api/maintenance/analytics/pn-ranking	page_maintenance
 GET	/api/maintenance/as-of	page_maintenance		
 POST	/api/maintenance/bad-returns	page_maintenance	action_maintenance_bad_return_manage	
 POST	/api/maintenance/bad-returns/search	page_maintenance		
@@ -18,7 +19,10 @@ GET	/api/maintenance/boss-board/attention
 GET	/api/maintenance/boss-board/health			
 GET	/api/maintenance/boss-board/orders/{source_order_id}/lines			
 GET	/api/maintenance/boss-board/projects			
+POST	/api/maintenance/boss-board/projects/export
+GET	/api/maintenance/boss-board/projects/export/options
 POST	/api/maintenance/boss-board/projects/search			
+GET	/api/maintenance/boss-board/projects/{project_id}
 GET	/api/maintenance/boss-board/projects/{project_id}/orders			
 GET	/api/maintenance/boss-board/summary			
 POST	/api/maintenance/ckd-imports/preview	page_maintenance	_ACTION_KEY	data_purchase_cost
@@ -38,6 +42,7 @@ POST	/api/maintenance/demands/delete-intents/{intent_id}/arm	page_maintenance	ac
 POST	/api/maintenance/demands/delete-intents/{intent_id}/cancel	page_maintenance	action_maintenance_demand_delete	
 POST	/api/maintenance/demands/delete-intents/{intent_id}/execute	page_maintenance	action_maintenance_demand_delete	
 POST	/api/maintenance/demands/search	page_maintenance		
+POST	/api/maintenance/demands/void-fast	page_maintenance	action_maintenance_demand_delete
 POST	/api/maintenance/demands/{source_order_id}/restore	page_maintenance	action_maintenance_demand_delete	
 POST	/api/maintenance/doc-imports/relink-projects	page_maintenance	_ACTION_KEY	data_purchase_cost
 GET	/api/maintenance/doc-imports/{batch_id}	page_maintenance	_ACTION_KEY	data_purchase_cost
@@ -61,8 +66,13 @@ GET	/api/maintenance/migration-runs/{run_id}/projects/{project_id}/evidence
 POST	/api/maintenance/migration-runs/{run_id}/reconcile			
 GET	/api/maintenance/orders/export	page_maintenance		
 GET	/api/maintenance/project-assignments/orders	page_maintenance		
+POST	/api/maintenance/project-assignments/orders/auto-assign	page_maintenance	action_maintenance_project_manage	data_profit
 POST	/api/maintenance/project-assignments/orders/assign	page_maintenance	action_maintenance_project_manage	data_profit
 POST	/api/maintenance/project-assignments/orders/unassign	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/project-batch-transfer/apply	page_maintenance	action_maintenance_ledger_import	data_profit
+POST	/api/maintenance/project-batch-transfer/download
+GET	/api/maintenance/project-batch-transfer/options
+POST	/api/maintenance/project-batch-transfer/preview	page_maintenance	action_maintenance_ledger_import	data_profit
 POST	/api/maintenance/project-manager-assignments/search	page_maintenance	action_maintenance_project_manage	data_profit
 POST	/api/maintenance/project-manager-assignments/{assignment_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
 GET	/api/maintenance/project-manager/workbooks/v3	page_maintenance		
@@ -75,18 +85,25 @@ POST	/api/maintenance/projects/stable	page_maintenance	action_maintenance_projec
 PATCH	/api/maintenance/projects/stable/collections/{collection_id}	page_maintenance	action_maintenance_roundtrip_apply	data_profit
 PATCH	/api/maintenance/projects/stable/contracts/{project_contract_id}	page_maintenance	action_maintenance_project_manage	data_profit
 POST	/api/maintenance/projects/stable/contracts/{project_contract_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
+POST	/api/maintenance/projects/stable/expense-attribution/backfill	page_maintenance
 PATCH	/api/maintenance/projects/stable/expenses/{expense_id}/status	page_maintenance	action_maintenance_roundtrip_apply	data_profit
 GET	/api/maintenance/projects/stable/operations	page_maintenance		
 POST	/api/maintenance/projects/stable/operations/search	page_maintenance		
 POST	/api/maintenance/projects/stable/search	page_maintenance		
+POST	/api/maintenance/projects/stable/site-issue-costs/backfill	page_maintenance
 PATCH	/api/maintenance/projects/stable/site-issues/{issue_id}/status	page_maintenance	action_maintenance_site_issue_manage	data_purchase_cost
 GET	/api/maintenance/projects/stable/{project_id}	page_maintenance		
 PATCH	/api/maintenance/projects/stable/{project_id}	page_maintenance	action_maintenance_project_manage	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/acceptance	page_maintenance		
 POST	/api/maintenance/projects/stable/{project_id}/acceptance/attachments	page_maintenance	action_maintenance_acceptance_submit	
+DELETE	/api/maintenance/projects/stable/{project_id}/acceptance/attachments/{file_id}	page_maintenance	action_maintenance_acceptance_submit
+GET	/api/maintenance/projects/stable/{project_id}/acceptance/checklist
+POST	/api/maintenance/projects/stable/{project_id}/acceptance/checklist/preview	page_maintenance
+GET	/api/maintenance/projects/stable/{project_id}/acceptance/checklist/template
 POST	/api/maintenance/projects/stable/{project_id}/acceptance/submit	page_maintenance	action_maintenance_acceptance_submit	
 POST	/api/maintenance/projects/stable/{project_id}/archive	page_maintenance	action_maintenance_project_manage	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/collection-milestones	page_maintenance		
+POST	/api/maintenance/projects/stable/{project_id}/collection-milestones/restore	page_maintenance	_ACTION_KEY	data_profit
 POST	/api/maintenance/projects/stable/{project_id}/collections	page_maintenance	action_maintenance_roundtrip_apply	data_profit
 POST	/api/maintenance/projects/stable/{project_id}/contracts	page_maintenance	action_maintenance_project_manage	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/cost-gaps	page_maintenance		
@@ -102,6 +119,8 @@ GET	/api/maintenance/projects/stable/{project_id}/front-stock	page_maintenance
 POST	/api/maintenance/projects/stable/{project_id}/manager-assignment	page_maintenance	action_maintenance_project_manage	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/master-workbook.xlsx	page_maintenance		
 POST	/api/maintenance/projects/stable/{project_id}/master-workbook/apply	page_maintenance	_ACTION_KEY	data_profit
+GET	/api/maintenance/projects/stable/{project_id}/master-workbook/collection-plan	page_maintenance		data_profit
+GET	/api/maintenance/projects/stable/{project_id}/master-workbook/rows	page_maintenance		data_profit
 POST	/api/maintenance/projects/stable/{project_id}/master-workbook/validate	page_maintenance	_ACTION_KEY	data_profit
 GET	/api/maintenance/projects/stable/{project_id}/purchases	page_maintenance		
 GET	/api/maintenance/projects/stable/{project_id}/recovery-summary	page_maintenance		
@@ -143,21 +162,28 @@ POST	/api/maintenance/warehouse-imports/{import_id}/apply	page_maintenance	actio
 POST	/api/maintenance/warehouse-integrations/reconcile	page_maintenance	action_maintenance_warehouse_manage	
 POST	/api/maintenance/wbdd-imports	page_maintenance	_ACTION_KEY	
 GET	/api/maintenance/wbdd-imports/latest	page_maintenance		
+GET	/api/maintenance/wbdd-imports/latest/missing	page_maintenance	_ACTION_KEY
 GET	/api/maintenance/workbook-validations/{validation_id}/errors.xlsx	page_maintenance	action_maintenance_roundtrip_apply	data_profit
-GET	/api/replenishment-beta/applications			
-POST	/api/replenishment-beta/applications		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}			
-PATCH	/api/replenishment-beta/applications/{application_id}		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}/evidence		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}/exports/system-screening.xlsx		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx		action_replenishment_create	data_pool_price_governance
-POST	/api/replenishment-beta/applications/{application_id}/lines		action_replenishment_create	data_pool_price_governance
-DELETE	/api/replenishment-beta/applications/{application_id}/lines/{line_id}		action_replenishment_create	data_pool_price_governance
-PATCH	/api/replenishment-beta/applications/{application_id}/lines/{line_id}		action_replenishment_create	data_pool_price_governance
-POST	/api/replenishment-beta/applications/{application_id}/review-results		action_replenishment_review	
-POST	/api/replenishment-beta/applications/{application_id}/revision		action_replenishment_create	data_pool_price_governance
-POST	/api/replenishment-beta/applications/{application_id}/submit		action_replenishment_create	data_pool_price_governance
-GET	/api/replenishment-beta/capabilities			
-GET	/api/replenishment-beta/catalog			
+GET	/api/replenishment-beta/applications	page_replenishment_beta		data_pool_price_governance
+POST	/api/replenishment-beta/applications	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}	page_replenishment_beta		data_pool_price_governance
+PATCH	/api/replenishment-beta/applications/{application_id}	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/evidence	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/system-screening.xlsx	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/lines	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+DELETE	/api/replenishment-beta/applications/{application_id}/lines/{line_id}	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+PATCH	/api/replenishment-beta/applications/{application_id}/lines/{line_id}	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/review-results	page_replenishment_beta	action_replenishment_review
+POST	/api/replenishment-beta/applications/{application_id}/revision	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/revisions	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/applications/{application_id}/submit	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/capabilities	page_replenishment_beta
+GET	/api/replenishment-beta/cart-drafts/{project_id}	page_replenishment_beta		data_pool_price_governance
+PUT	/api/replenishment-beta/cart-drafts/{project_id}	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+DELETE	/api/replenishment-beta/cart-drafts/{project_id}	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+POST	/api/replenishment-beta/cart-drafts/{project_id}/submit	page_replenishment_beta	action_replenishment_create	data_pool_price_governance
+GET	/api/replenishment-beta/catalog	page_replenishment_beta		data_pool_price_governance
+GET	/api/replenishment-beta/projects	page_replenishment_beta		data_pool_price_governance
