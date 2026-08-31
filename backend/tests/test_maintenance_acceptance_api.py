@@ -312,6 +312,38 @@ def test_acceptance_attachment_accepts_any_type_and_reports_uploader_name(db):
     assert names == {"合成账号 acceptance_security_manager"}  # _client 的 display_name
 
 
+def test_acceptance_upload_preserves_256_character_name_with_long_suffix(db):
+    manager, manager_user = _client(
+        db,
+        username="acceptance_long_suffix_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="long-suffix", manager=manager_user)
+    filename = "a." + "x" * 254
+    mime_type = "application/x-long-suffix"
+    content = b"long-suffix-storage-regression"
+    assert len(filename) == 256
+
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": (filename, content, mime_type)},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded = upload.json()
+    assert uploaded["original_filename"] == filename
+    assert uploaded["mime_type"] == mime_type
+
+    download = manager.get(
+        f"/api/maintenance/acceptance-files/{uploaded['file_id']}"
+    )
+    assert download.status_code == 200, download.text
+    assert download.content == content
+
+
 def test_acceptance_content_validation_keeps_filename_safety_and_oversize():
     with pytest.raises(acceptance_service.MaintenanceAcceptanceUnsupported, match="文件名"):
         acceptance_service.validate_attachment(

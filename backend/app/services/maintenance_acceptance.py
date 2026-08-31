@@ -384,7 +384,7 @@ def upload_attachment(
     自动建交付行、自动挂项目，不做版本号/乐观锁（此前的版本握手只制造了
     version 0/1 跳变类 bug）。幂等由两道互补机制保证：客户端幂等键
     （可选）+ 行锁内同 sha256 内容去重（双击/超时重试不产生重复附件）。"""
-    safe_name, extension, safe_mime = validate_attachment(
+    safe_name, _extension, safe_mime = validate_attachment(
         filename=filename,
         mime_type=mime_type,
         content=content,
@@ -436,7 +436,7 @@ def upload_attachment(
     # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
 
     file_id = str(uuid4())
-    object_key = f"maintenance_acceptance/{file_id[:2]}/{file_id}{extension}"
+    object_key = f"maintenance_acceptance/{file_id[:2]}/{file_id}"
     path = _resolved_object_path(object_key)
     file_row = BusinessFile(
         file_id=file_id,
