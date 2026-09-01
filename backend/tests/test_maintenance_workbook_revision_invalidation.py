@@ -88,30 +88,35 @@ def _import_wbdd(db, path: str, key: str) -> dict:
 # ---------- WBDD：qty 2→3 必须 +1；no-op 必须 +0；旧总表 stale；新 qty 保留 ----------
 
 def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
-    # 首导 qty=2（尚无挂靠，无项目可 bump）；随后挂靠项目并取基线 revision=0
+    # 首导 qty=2 会自动创建唯一项目并挂靠，取挂靠完成后的 revision 基线
     path_v1 = _wbdd_workbook(tmp_path, "v1.xlsx", "2")
     _import_wbdd(db, path_v1, key=f"k3-{uuid.uuid4()}")
     order = db.execute(
         select(FMaintenanceOrder).where(FMaintenanceOrder.order_no == "WBDD-20260001")
     ).scalar_one()
-    project = _make_project(db, tag="QTY", source_order_id=order.raw_order_id)
-    ops.get_or_create_workbook_state(db, project_id=project.project_id)
-    db.commit()
+    assignment = db.execute(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ).scalar_one()
+    project = db.get(MaintenanceProject, assignment.project_id)
+    assert project is not None
     base = _state(db, project.project_id)
-    assert base.revision == 0
+    base_revision = base.revision
     base_version = base.data_version
 
     # no-op 重导（同内容新 Idempotency-Key，upsert 幂等）：仅 import_batch_id
     # 变化 → 不算语义变化，revision +0
     _import_wbdd(db, path_v1, key=f"k3-{uuid.uuid4()}")
-    assert _state(db, project.project_id).revision == 0
+    assert _state(db, project.project_id).revision == base_revision
 
     # qty 2→3：语义变化 → 归属项目 revision 恰 +1（loader 与同事务 recompute
     # 都去重后各至多一次），data_version 变化（旧总表 stale），新 qty 保留
     path_v2 = _wbdd_workbook(tmp_path, "v2.xlsx", "3")
     report = _import_wbdd(db, path_v2, key=f"k3-{uuid.uuid4()}")
     state = _state(db, project.project_id)
-    assert state.revision == 1, "qty 2→3 必须让归属项目 revision 恰好 +1"
+    assert state.revision == base_revision + 1, "qty 2→3 必须让归属项目 revision 恰好 +1"
     assert state.data_version != base_version, "旧总表必须 stale（data_version 变化）"
     assert report["workbook_projects_bumped"] == 1
     line = db.execute(
@@ -120,12 +125,34 @@ def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
     assert line.qty == Decimal("3"), "新 qty 必须保留"
 
 
-def test_wbdd_import_without_assignment_bumps_nobody(tmp_path, db):
-    """无挂靠项目的单：导入正常完成，不创建任何 workbook state。"""
+def test_wbdd_import_auto_creates_assignment_without_bump(tmp_path, db):
+    """无现有项目的单：自动建项目并唯一挂靠，初始 state 不计 bump。"""
     path = _wbdd_workbook(tmp_path, "lonely.xlsx", "2")
     report = _import_wbdd(db, path, key=f"k3-{uuid.uuid4()}")
     assert report["workbook_projects_bumped"] == 0
-    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == []
+    order = db.execute(
+        select(FMaintenanceOrder).where(FMaintenanceOrder.order_no == "WBDD-20260001")
+    ).scalar_one()
+    assignment = db.execute(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ).scalar_one()
+    project = db.get(MaintenanceProject, assignment.project_id)
+    assert project is not None
+    state = db.execute(
+        select(MaintenanceProjectWorkbookState).where(
+            MaintenanceProjectWorkbookState.project_id == project.project_id
+        )
+    ).scalar_one()
+    assert db.scalars(select(MaintenanceProject)).all() == [project]
+    assert db.scalars(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.is_active.is_(True)
+        )
+    ).all() == [assignment]
+    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == [state]
 
 
 # ---------- 通用 maintenance import 路径（loader.load 直调，skip/upsert 双模式） ----------

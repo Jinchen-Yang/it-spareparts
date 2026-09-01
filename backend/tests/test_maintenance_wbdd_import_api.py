@@ -11,8 +11,17 @@ from app.config import get_settings
 from app.etl import loader, pipeline
 from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAlias,
+    MaintenanceProjectXsdd,
+)
+from app.models.maintenance_source_assignment import (
+    MaintenanceSourceOrderAssignment,
+)
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
-from app.models.system import SysUser
+from app.models.system import SysImportBatch, SysUser
+from app.services import maintenance_source_assignments as source_assignments
 from app.services import maintenance_wbdd_import as wbdd
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
@@ -105,6 +114,185 @@ def test_upload_allowed_with_page_and_action(db, tmp_path):
     assert body["orders_inserted"] == 1
     assert "recompute" in body and "snapshot_diff" in body
     assert body["replayed"] is False
+
+
+def test_upload_auto_assigns_only_current_batch_by_xsdd(db, tmp_path):
+    """只投影本批：已有 XSDD 挂靠；新 XSDD 合建；历史未归属单保持不动。"""
+    existing = MaintenanceProject(
+        project_id="wbdd-existing-project",
+        project_code="WBDD-EXISTING",
+        display_name="已有维保项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    # 名称恰好命中另一个项目也不能推翻 XSDD 唯一 owner；名称只会成为灰字 alias。
+    name_collision = MaintenanceProject(
+        project_id="wbdd-name-collision-project",
+        project_code="WBDD-NAME-COLLISION",
+        display_name="已有维保项目-别名一",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add_all([existing, name_collision])
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20990101-0001",
+        project_id=existing.project_id,
+        source="test",
+    ))
+    db.commit()
+
+    # 先留一张不属于本次上传的历史未归属单；新导入不得顺手扫描全库。
+    historical_rows = make_rows(orders=1, lines_per_order=1,
+                                project="历史未归属项目")
+    historical_rows[0].update({
+        "数据ID(不可修改)": "HIST-O-001",
+        "需求单号": "WBDD-HIST-001",
+        "销售订单": "XSDD-20990101-0099",
+        "需求明细.数据ID(不可修改)": "HIST-L-001",
+    })
+    historical_path = write_workbook(
+        str(tmp_path / "historical-unassigned.xlsx"),
+        COLUMNS_91,
+        historical_rows,
+    )
+    pipeline.run_import(
+        db,
+        historical_path,
+        "historical-unassigned.xlsx",
+        uploaded_by="fixture",
+        mode="upsert",
+    )
+    db.commit()
+
+    rows = make_rows(orders=4, lines_per_order=1)
+    cases = [
+        ("CUR-O-001", "CUR-L-001", "WBDD-CUR-001",
+         "XSDD-20990101-0001", "已有维保项目-别名一"),
+        ("CUR-O-002", "CUR-L-002", "WBDD-CUR-002",
+         "XSDD-20990101-0001", "已有维保项目-别名二"),
+        ("CUR-O-003", "CUR-L-003", "WBDD-CUR-003",
+         "XSDD-20990101-0002", "同号新项目名称一"),
+        ("CUR-O-004", "CUR-L-004", "WBDD-CUR-004",
+         "XSDD-20990101-0002", "同号新项目名称二"),
+    ]
+    for row, (order_id, line_id, order_no, xsdd, project_name) in zip(rows, cases):
+        row.update({
+            "数据ID(不可修改)": order_id,
+            "需求单号": order_no,
+            "销售订单": xsdd,
+            "销售人员": "导入不应回填负责人",
+            "项目名": project_name,
+            "需求明细.数据ID(不可修改)": line_id,
+        })
+    current_path = write_workbook(
+        str(tmp_path / "current-batch.xlsx"), COLUMNS_91, rows
+    )
+    client = _client(
+        db,
+        username="wbdd-scoped-auto-link",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+    response = _upload(client, current_path)
+    assert response.status_code == 200, response.text
+    assert response.json()["auto_assignment"] == {
+        "assigned_orders": 4,
+        "matched_projects": 2,
+        "created_projects": 1,
+        "skipped_groups": 0,
+        "skipped_ambiguous": 0,
+        "sales_filled_projects": 0,
+        "manager_filled_projects": 0,
+        "assignments_created": 0,
+    }
+
+    db.expire_all()
+    assignments = {
+        source_id: project_id
+        for source_id, project_id in db.execute(
+            select(
+                MaintenanceSourceOrderAssignment.source_order_id,
+                MaintenanceSourceOrderAssignment.project_id,
+            ).where(MaintenanceSourceOrderAssignment.is_active.is_(True))
+        )
+    }
+    assert "HIST-O-001" not in assignments
+    assert assignments["CUR-O-001"] == existing.project_id
+    assert assignments["CUR-O-002"] == existing.project_id
+    new_project_id = assignments["CUR-O-003"]
+    assert assignments["CUR-O-004"] == new_project_id
+    assert new_project_id != existing.project_id
+    assert (
+        db.get(MaintenanceProjectXsdd, "20990101-0001").project_id
+        == existing.project_id
+    )
+    assert db.get(MaintenanceProjectXsdd, "20990101-0002").project_id == new_project_id
+    assert db.get(MaintenanceProjectXsdd, "20990101-0099") is None
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 3
+    db.refresh(existing)
+    assert existing.salesperson is None
+    assert existing.project_manager_id is None
+
+
+def test_skip_mode_assigns_from_current_head_identity(db, tmp_path):
+    """skip 保留旧头时，自动归属必须使用 DB 当前 XSDD，不得按上传新值建错项目。"""
+    project = MaintenanceProject(
+        project_id="wbdd-skip-current-project",
+        project_code="WBDD-SKIP-CURRENT",
+        display_name="旧头项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20990104-0001",
+        project_id=project.project_id,
+        source="test",
+    ))
+    db.commit()
+
+    original = make_rows(orders=1, lines_per_order=1, project="旧头项目")
+    original[0]["销售订单"] = "XSDD-20990104-0001"
+    original_path = write_workbook(
+        str(tmp_path / "skip-original.xlsx"), COLUMNS_91, original
+    )
+    pipeline.run_import(
+        db,
+        original_path,
+        "skip-original.xlsx",
+        uploaded_by="fixture",
+        mode="upsert",
+    )
+    db.commit()
+
+    incoming = make_rows(orders=1, lines_per_order=1, project="上传新头项目")
+    incoming[0]["销售订单"] = "XSDD-20990104-0002"
+    incoming[0]["修改时间(必填)"] = "2026-07-17 12:00"
+    incoming_path = write_workbook(
+        str(tmp_path / "skip-incoming.xlsx"), COLUMNS_91, incoming
+    )
+    batch = pipeline.run_import(
+        db,
+        incoming_path,
+        "skip-incoming.xlsx",
+        uploaded_by="fixture",
+        mode="skip",
+        auto_assign_maintenance_projects=True,
+    )
+    db.commit()
+
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == "SYN-O001"
+    ))
+    assert order.linked_sales_order_no == "XSDD-20990104-0001"
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment))
+    assert assignment.project_id == project.project_id
+    assert db.get(MaintenanceProjectXsdd, "20990104-0002") is None
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 1
+    assert batch.report_json["auto_assignment"]["assigned_orders"] == 1
 
 
 def test_wbdd_only_account_cannot_use_generic_import(db, tmp_path):
@@ -251,7 +439,11 @@ def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
     client = _client(db, username="wbdd-replay",
                      overrides={"page_maintenance": True,
                                 "action_maintenance_wbdd_import": True})
-    path = _wbdd_file(tmp_path)
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["销售订单"] = "XSDD-20990102-0001"
+    path = write_workbook(
+        str(tmp_path / "recompute-rollback.xlsx"), COLUMNS_91, rows
+    )
     key = f"idem-{uuid.uuid4()}"
 
     calls = {"n": 0}
@@ -270,8 +462,15 @@ def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
         assert first.json()["detail"]["code"] == "recompute_busy"
         # fail closed：事实/回执都没有落库（会话已被端点依赖关闭，重查确认）
         assert _zero_rows(db)
+        assert db.scalar(select(func.count(SysImportBatch.id))) == 0
         assert db.execute(select(func.count(MaintenanceWbddImportReceipt.id))
                           ).scalar_one() == 0
+        assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 0
+        assert db.scalar(select(func.count(MaintenanceProjectXsdd.xsdd_norm))) == 0
+        assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 0
+        assert db.scalar(select(func.count(
+            MaintenanceSourceOrderAssignment.assignment_id
+        ))) == 0
 
         second = _upload(client, path, key=key)
         assert second.status_code == 200, second.text
@@ -282,6 +481,13 @@ def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
         db.expire_all()
         receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
         assert receipt.report_json["recompute"] is not None
+        assert db.scalar(select(func.count(SysImportBatch.id))) == 1
+        assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 1
+        assert db.scalar(select(func.count(MaintenanceProjectXsdd.xsdd_norm))) == 1
+        assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 1
+        assert db.scalar(select(func.count(
+            MaintenanceSourceOrderAssignment.assignment_id
+        ))) == 1
     finally:
         wbdd.maintenance_cost.recompute = real
 
@@ -304,6 +510,145 @@ def test_assignment_race_maps_to_retryable_conflict(db, tmp_path, monkeypatch):
     assert response.status_code == 409
     assert response.headers["retry-after"] == "5"
     assert response.json()["detail"]["code"] == "import_concurrency_conflict"
+
+
+def test_auto_assign_service_conflict_rolls_back_and_maps_to_409(
+    db, tmp_path, monkeypatch
+):
+    """归属服务在 facts 写入后报 OCC：API 409，整批项目与事实零写入。"""
+    client = _client(
+        db,
+        username="wbdd-auto-assign-conflict",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+    path = _wbdd_file(tmp_path, "auto-assign-conflict.xlsx")
+
+    def conflict(*_args, **_kwargs):
+        raise source_assignments.SourceAssignmentConflict(
+            "synthetic auto assignment conflict"
+        )
+
+    monkeypatch.setattr(
+        source_assignments,
+        "auto_assign_imported_orders",
+        conflict,
+    )
+    response = _upload(client, path)
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["detail"]["code"] == "import_concurrency_conflict"
+    db.expire_all()
+    assert _zero_rows(db)
+    assert db.scalar(select(func.count(SysImportBatch.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceWbddImportReceipt.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 0
+    assert db.scalar(select(func.count(MaintenanceProjectXsdd.xsdd_norm))) == 0
+    assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 0
+    assert db.scalar(select(func.count(
+        MaintenanceSourceOrderAssignment.assignment_id
+    ))) == 0
+
+
+def test_auto_assign_target_escape_uses_real_envelope_guard(
+    db, tmp_path, monkeypatch
+):
+    """实际目标不在导入前信封时，subset guard 必须 409 并回滚 facts。"""
+    project = MaintenanceProject(
+        project_id="wbdd-envelope-target",
+        project_code="WBDD-ENVELOPE",
+        display_name="信封外目标项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20990103-0001",
+        project_id=project.project_id,
+        source="test",
+    ))
+    db.commit()
+
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["销售订单"] = "XSDD-20990103-0001"
+    path = write_workbook(
+        str(tmp_path / "envelope-escape.xlsx"), COLUMNS_91, rows
+    )
+    client = _client(
+        db,
+        username="wbdd-envelope-escape",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+
+    # 模拟 prelock 之后才出现目标：apply 使用真实 subset guard 拒绝补晚锁。
+    monkeypatch.setattr(
+        source_assignments,
+        "prelock_import_assignment_targets",
+        lambda *_args, **_kwargs: set(),
+    )
+    response = _upload(client, path)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "import_concurrency_conflict"
+    db.expire_all()
+    assert _zero_rows(db)
+    assert db.scalar(select(func.count(SysImportBatch.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceWbddImportReceipt.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 1
+    assert db.get(MaintenanceProjectXsdd, "20990103-0001").project_id == project.project_id
+    assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 0
+    assert db.scalar(select(func.count(
+        MaintenanceSourceOrderAssignment.assignment_id
+    ))) == 0
+
+
+def test_unresolvable_xsdd_rolls_back_instead_of_succeeding_unassigned(
+    db, tmp_path
+):
+    """唯一 owner 已停用时不能静默跳过；专用上传必须 409 且事实零写入。"""
+    inactive = MaintenanceProject(
+        project_id="wbdd-inactive-xsdd-owner",
+        project_code="WBDD-INACTIVE",
+        display_name="已停用历史项目",
+        lifecycle_status="ended",
+        is_active=False,
+        version=1,
+    )
+    db.add(inactive)
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20990105-0001",
+        project_id=inactive.project_id,
+        source="test",
+    ))
+    db.commit()
+
+    rows = make_rows(orders=1, lines_per_order=1, project="上传项目名")
+    rows[0]["销售订单"] = "XSDD-20990105-0001"
+    path = write_workbook(
+        str(tmp_path / "inactive-xsdd-owner.xlsx"), COLUMNS_91, rows
+    )
+    client = _client(
+        db,
+        username="wbdd-inactive-xsdd-owner",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+    response = _upload(client, path)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "import_concurrency_conflict"
+    db.expire_all()
+    assert _zero_rows(db)
+    assert db.scalar(select(func.count(SysImportBatch.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceWbddImportReceipt.id))) == 0
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 1
+    assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 0
+    assert db.scalar(select(func.count(
+        MaintenanceSourceOrderAssignment.assignment_id
+    ))) == 0
 
 
 def test_replay_backfills_recompute_for_legacy_half_committed_receipt(db, tmp_path):
