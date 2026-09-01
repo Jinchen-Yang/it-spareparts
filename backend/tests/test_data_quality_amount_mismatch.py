@@ -5,7 +5,7 @@ import shutil
 import threading
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pandas as pd
@@ -780,20 +780,34 @@ def test_automatic_issue_keeps_existing_page_and_price_visibility_gates(db, tmp_
     ])
     db.commit()
     issue = db.scalar(select(FactDataQualityIssue))
+    timestamp_containing_price_digits = datetime(
+        2026, 9, 1, 4, 52, 17, 540999, tzinfo=UTC
+    )
+    issue.created_at = timestamp_containing_price_digits
+    issue.updated_at = timestamp_containing_price_digits
+    db.commit()
 
     masked = _login("dq_masked")
     listed = masked.get("/api/data-quality/issues")
     assert listed.status_code == 200
-    assert "999" not in listed.text and "2500" not in listed.text
+    listed_payload = listed.json()
+    assert listed_payload["price_restricted"] is True
+    assert len(listed_payload["items"]) == 1
+    listed_issue = listed_payload["items"][0]
+    assert listed_issue["fact"]["unit_price"] is None
+    assert listed_issue["fact"]["line_amount"] is None
+    assert "evidence" not in listed_issue
+    assert "source_fingerprint" not in listed_issue
+    assert "review_note" not in listed_issue
     detail = masked.get(f"/api/data-quality/issues/{issue.id}")
     assert detail.status_code == 200
     payload = detail.json()
+    assert payload["price_restricted"] is True
     assert payload["evidence"] is None
     assert payload["evidence_restricted"] is True
     assert payload["fact"]["unit_price"] is None
     assert payload["fact"]["line_amount"] is None
     assert "source_fingerprint" not in payload
-    assert "999" not in detail.text and "2500" not in detail.text
 
     no_page = _login("dq_no_page")
     assert no_page.get("/api/data-quality/issues").status_code == 403
