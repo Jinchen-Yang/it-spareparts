@@ -19,24 +19,48 @@ from app.models.maintenance import FProjectExpense
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
 )
-from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+)
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_expense_collection_workbook as wbk
+from app.services import maintenance_project_operations as operations
 
 _PASSWORD = "synthetic-wbk-password-1"
 _BASE = "/api/maintenance/projects/stable"
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _client(db, *, username, overrides) -> TestClient:
+def _client(
+    db,
+    *,
+    username,
+    overrides,
+    assign_existing_projects: bool = True,
+) -> TestClient:
     base = permissions.effective("readonly", None)
-    db.add(SysUser(
+    user = SysUser(
         username=username, role="readonly", display_name=username,
         password_hash=hash_password(_PASSWORD), is_active=True,
         template_code="readonly", template_version=1, template_perms=base,
         perm_overrides=overrides,
-        permissions=permissions.effective_from_snapshot(base, overrides)))
+        permissions=permissions.effective_from_snapshot(base, overrides))
+    db.add(user)
+    db.flush()
+    if assign_existing_projects:
+        for project_id in db.scalars(select(MaintenanceProject.project_id)):
+            db.add(MaintenanceProjectUserAssignment(
+                assignment_id=str(uuid.uuid4()),
+                project_id=project_id,
+                responsibility_type="viewer",
+                user_id=user.id,
+                version=1,
+                assigned_by="synthetic-workbook-test",
+                assignment_reason="往返工作簿测试项目可见范围",
+            ))
     db.commit()
     client = TestClient(app)
     login = client.post("/api/auth/login",
@@ -46,16 +70,28 @@ def _client(db, *, username, overrides) -> TestClient:
     return client
 
 
-def uploader(db, username="wbk-uploader") -> TestClient:
+def uploader(
+    db,
+    username="wbk-uploader",
+    *,
+    assign_existing_projects: bool = True,
+) -> TestClient:
     return _client(db, username=username, overrides={
         "page_maintenance": True, "data_purchase_cost": True, "data_profit": True,
-        "action_maintenance_expense_collection_upload": True})
+        "action_maintenance_expense_collection_upload": True},
+        assign_existing_projects=assign_existing_projects)
 
 
-def reader(db, username="wbk-reader") -> TestClient:
+def reader(
+    db,
+    username="wbk-reader",
+    *,
+    assign_existing_projects: bool = True,
+) -> TestClient:
     """能看金额但不能传（只读对账）。"""
     return _client(db, username=username, overrides={
-        "page_maintenance": True, "data_purchase_cost": True, "data_profit": True})
+        "page_maintenance": True, "data_purchase_cost": True, "data_profit": True},
+        assign_existing_projects=assign_existing_projects)
 
 
 @pytest.fixture()
@@ -80,14 +116,39 @@ def _expense(db, *, raw_line_id="BXD-1#1", contract_no="HT-001",
                            file_hash=uuid.uuid4().hex * 2, status="success")
     db.add(batch)
     db.flush()
-    db.add(FProjectExpense(
+    expense = FProjectExpense(
         raw_line_id=raw_line_id, bxd_no="BXD-20260101-1", line_no=1,
         data_status="已结束", expense_date=date(2026, 7, 1), person="张三",
         expense_type="差旅", fee_category="交通", reason="现场维保",
         linked_sales_order_no=contract_no,
         amount=Decimal(ex_tax), amount_ex_tax=Decimal(ex_tax),
         amount_inc_tax=(Decimal(ex_tax) * Decimal("1.13")).quantize(Decimal("0.01")),
-        tax_basis="ex", tax_rate_used=Decimal("0.13"), import_batch_id=batch.id))
+        tax_basis="ex", tax_rate_used=Decimal("0.13"), import_batch_id=batch.id)
+    db.add(expense)
+    contract = db.scalars(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.contract_no == contract_no
+    )).one()
+    db.add(MaintenanceProjectExpenseAttribution(
+        expense_id=f"bxd:{raw_line_id}",
+        project_id=contract.project_id,
+        project_contract_id=contract.project_contract_id,
+        raw_expense_line_id=expense.raw_line_id,
+        expense_ref=f"{expense.bxd_no}#{expense.line_no}",
+        expense_date=expense.expense_date,
+        applicant=expense.person,
+        category=expense.fee_category,
+        expense_reason=expense.reason,
+        amount_ex_tax=expense.amount_ex_tax,
+        amount_inc_tax=expense.amount_inc_tax,
+        tax_rate_used=Decimal("0.13"),
+        raw_status=expense.data_status,
+        status_mapping_state="mapped",
+        normalized_status="approved",
+        status_mapping_version="synthetic-expense-workbook",
+        ownership_mapping_state="mapped",
+        ownership_mapping_version="synthetic-expense-workbook",
+        version=1,
+    ))
     db.commit()
 
 
@@ -130,10 +191,29 @@ def test_download_requires_profit_visibility_but_not_upload_action(db, project):
     ).status_code == 403
 
 
-def test_unknown_project_is_404(db):
+def test_unknown_project_fails_closed_for_scoped_account(db):
     assert uploader(db, "wbk-404").get(
         f"{_BASE}/{uuid.uuid4()}/expense-collection-workbook.xlsx"
-    ).status_code == 404
+    ).status_code == 403
+
+
+@pytest.mark.parametrize("action", ["download", "validate", "apply"])
+def test_unassigned_account_cannot_access_any_workbook_route(db, project, action):
+    """下载、预演、应用必须共用同一项目行权限，不能只封写端。"""
+    authorized = uploader(db, f"wbk-scope-source-{action}")
+    content = _download(authorized, project)
+    denied = uploader(
+        db,
+        f"wbk-scope-denied-{action}",
+        assign_existing_projects=False,
+    )
+    if action == "download":
+        response = denied.get(
+            f"{_BASE}/{project.project_id}/expense-collection-workbook.xlsx"
+        )
+    else:
+        response = _upload(denied, project, content, action=action)
+    assert response.status_code == 403
 
 
 # ---------- 报销：未税可改，含税由系统算 ----------
@@ -158,6 +238,41 @@ def test_expense_inc_tax_is_computed_not_accepted_from_the_sheet(db, project):
     assert expense.tax_basis == "ex"
 
 
+def test_negative_reversal_preserves_inc_tax_source_basis(db, project):
+    """冲销允许负数；编辑展示未税值时仍保留来源的含税金额口径。"""
+    _expense(db, ex_tax="100.00")
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution, f"bxd:{expense.raw_line_id}"
+    )
+    expense.tax_basis = "inc"
+    expense.amount = Decimal("113.00")
+    attribution.tax_basis = "inc"
+    db.commit()
+
+    client = uploader(db)
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.cell(row=2, column=8, value=-200)
+    buf = io.BytesIO()
+    wb.save(buf)
+    resp = _upload(client, project, buf.getvalue())
+
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution, f"bxd:{expense.raw_line_id}"
+    )
+    assert expense.tax_basis == "inc"
+    assert expense.amount == Decimal("-226.00")
+    assert expense.amount_ex_tax == Decimal("-200.00")
+    assert expense.amount_inc_tax == Decimal("-226.00")
+    assert attribution.tax_basis == "inc"
+    assert attribution.amount_ex_tax == Decimal("-200.00")
+    assert attribution.amount_inc_tax == Decimal("-226.00")
+
+
 def test_manual_expense_row_without_entity_id_is_created(db, project):
     """人工回填兼容：空实体 ID 的完整报销行由后端生成稳定键并新增。"""
     _expense(db)
@@ -176,6 +291,123 @@ def test_manual_expense_row_without_entity_id_is_created(db, project):
     assert rows[1].bxd_no == "BXD-NEW"
     assert rows[1].amount_ex_tax == Decimal("50.00")
     assert rows[1].raw_line_id.startswith("EXP:")
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution,
+        f"bxd:{rows[1].raw_line_id}",
+    )
+    assert attribution is not None
+    assert attribution.project_id == project.project_id
+
+
+def test_shared_current_contract_hides_expense_from_workbook_and_rows_api(db, project):
+    """同一 XSDD 被两个项目当前占用时，合同号不能再充当项目授权边界。"""
+    _expense(db)
+    other = MaintenanceProject(
+        project_id=str(uuid.uuid4()), project_code="合成项目B",
+        display_name="合成项目B", lifecycle_status="ongoing",
+    )
+    db.add(other)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()), project_id=other.project_id,
+        contract_id="C-SHARED-B", contract_no="HT-001",
+        amount_inc_tax=Decimal("1.00"), included_in_total=True,
+        status_mapping_state="mapped", status_mapping_version="v1",
+        effective_from=date(2026, 1, 1), source="ledger", version=1,
+    ))
+    db.commit()
+
+    client = uploader(db, "shared-contract-reader")
+    workbook = load_workbook(io.BytesIO(_download(client, project)))
+    assert workbook[wbk.SHEET_EXPENSE].max_row == 1
+    response = client.get(
+        f"{_BASE}/{project.project_id}/expense-rows",
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == []
+
+
+def test_crafted_foreign_raw_line_id_is_rejected_at_validation(db, project):
+    other = MaintenanceProject(
+        project_id=str(uuid.uuid4()), project_code="合成项目B",
+        display_name="合成项目B", lifecycle_status="ongoing",
+    )
+    db.add(other)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()), project_id=other.project_id,
+        contract_id="C-B", contract_no="HT-002",
+        amount_inc_tax=Decimal("1.00"), included_in_total=True,
+        status_mapping_state="mapped", status_mapping_version="v1",
+        effective_from=date(2026, 1, 1), source="ledger", version=1,
+    ))
+    db.commit()
+    _expense(db, raw_line_id="FOREIGN-BXD#1", contract_no="HT-002")
+
+    client = uploader(db, "foreign-expense-crafter")
+    workbook = load_workbook(io.BytesIO(_download(client, project)))
+    row = ["BXD-FOREIGN", "2026-07-01", "外部", "差旅", "交通", "越权",
+           "HT-001", 999, "", "已结束", ""]
+    workbook[wbk.SHEET_EXPENSE].append(row + ["FOREIGN-BXD#1"])
+    payload = io.BytesIO()
+    workbook.save(payload)
+
+    response = _upload(client, project, payload.getvalue(), action="validate")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "expense_not_in_project"
+
+
+def test_apply_rechecks_expense_attribution_after_validation(db, project):
+    _expense(db, ex_tax="100.00")
+    workbook = load_workbook(io.BytesIO(wbk.build_workbook(
+        db, project_id=project.project_id)))
+    workbook[wbk.SHEET_EXPENSE].cell(row=2, column=8, value=250)
+    payload = io.BytesIO()
+    workbook.save(payload)
+    plan = wbk.validate(db, project_id=project.project_id, data=payload.getvalue())
+
+    other = MaintenanceProject(
+        project_id=str(uuid.uuid4()), project_code="归因改派项目",
+        display_name="归因改派项目", lifecycle_status="ongoing",
+    )
+    db.add(other)
+    db.flush()
+    other_contract = MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()),
+        project_id=other.project_id,
+        contract_id=f"C-{uuid.uuid4().hex[:8]}",
+        contract_no="HT-OTHER",
+        amount_inc_tax=Decimal("100000.00"),
+        included_in_total=True,
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-scope-recheck",
+        effective_from=date(2026, 1, 1),
+        source="synthetic-test",
+        version=1,
+    )
+    db.add(other_contract)
+    attribution = db.get(MaintenanceProjectExpenseAttribution, "bxd:BXD-1#1")
+    attribution.project_id = other.project_id
+    attribution.project_contract_id = other_contract.project_contract_id
+    raw_expense = db.scalar(select(FProjectExpense).where(
+        FProjectExpense.raw_line_id == "BXD-1#1",
+    ))
+    raw_expense.linked_sales_order_no = other_contract.contract_no
+    db.commit()
+
+    with pytest.raises(wbk.WorkbookError) as raised:
+        wbk.apply(
+            db,
+            plan,
+            operated_by="scope-recheck",
+            import_batch_id=str(uuid.uuid4()),
+        )
+    assert raised.value.code == "expense_not_in_project"
+    db.rollback()
+    db.expire_all()
+    expense = db.scalar(select(FProjectExpense).where(
+        FProjectExpense.raw_line_id == "BXD-1#1"))
+    assert expense.amount_ex_tax == Decimal("100.00")
 
 
 def test_blank_amount_leaves_the_row_untouched(db, project):
@@ -186,6 +418,29 @@ def test_blank_amount_leaves_the_row_untouched(db, project):
     db.expire_all()
     assert db.execute(select(FProjectExpense)).scalars().one().amount_ex_tax \
         == Decimal("100.00")
+
+
+def test_standalone_apply_bumps_project_workbook_revision_once(db, project):
+    """04/05 standalone writes invalidate older project-workbook snapshots."""
+
+    _expense(db, ex_tax="100.00")
+    state = operations.get_or_create_workbook_state(
+        db, project_id=project.project_id)
+    db.commit()
+    before = state.revision
+
+    client = uploader(db, "revision-standalone")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    wb[wbk.SHEET_EXPENSE].cell(row=2, column=8, value=125)
+    buf = io.BytesIO()
+    wb.save(buf)
+    response = _upload(client, project, buf.getvalue())
+    assert response.status_code == 200, response.text
+
+    db.expire_all()
+    state = operations.get_or_create_workbook_state(
+        db, project_id=project.project_id)
+    assert state.revision == before + 1
 
 
 # ---------- 回款：月度累计快照 ----------

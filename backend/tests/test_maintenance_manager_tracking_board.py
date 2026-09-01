@@ -40,6 +40,10 @@ def test_directory_card_uses_manager_tracking_facts_and_real_attachment_state(db
         project_id="tracking-board-project",
         project_code="PM-TRACKING-BOARD",
         display_name="合成跟踪看板项目",
+        # 期限双源 P1：展示以 project.period_* 为准；下方 projection 行仅为
+        # OCC 兼容投影，与事实源保持一致。
+        period_from=date(2026, 1, 1),
+        period_to=date(2026, 12, 31),
         lifecycle_status="ongoing",
     )
     db.add_all([user, project])

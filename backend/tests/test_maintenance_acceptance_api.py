@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import io
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 import zipfile
 
@@ -273,7 +274,9 @@ def test_acceptance_direct_routes_enforce_row_scope_and_submit_takes_effect(db):
     assert current.approved_by == current.submitted_by
 
 
-def test_acceptance_attachment_rejects_bad_metadata_content_and_leaves_no_rows_or_files(db):
+def test_acceptance_attachment_accepts_any_type_and_reports_uploader_name(db):
+    """2026-08-26 客户口径：附件不做类型/内容限制——MIME 与扩展名不一致、
+    含启动动作的 PDF（此前都会 415）现在照常入库；同时上传人姓名进列表。"""
     manager, manager_user = _client(
         db,
         username="acceptance_security_manager",
@@ -284,15 +287,15 @@ def test_acceptance_attachment_rejects_bad_metadata_content_and_leaves_no_rows_o
         },
     )
     project, _deliverable = _project(db, suffix="security", manager=manager_user)
-    before_paths = set(Path(get_settings().raw_file_dir).rglob("*"))
 
     wrong_mime = manager.post(
         f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
         data={"expected_version": "1"},
-        files={"file": ("report.png", _png(), "application/pdf")},
-        headers={"Idempotency-Key": "bad-mime"},
+        files={"file": ("报告.zip", b"PK\x03\x04arbitrary-bytes", "application/x-zip-compressed")},
+        headers={"Idempotency-Key": "any-type-zip"},
     )
-    assert wrong_mime.status_code == 415
+    assert wrong_mime.status_code == 200, wrong_mime.text
+    assert wrong_mime.json()["uploaded_by_name"]
 
     active_pdf = b"%PDF-1.7\n1 0 obj<</OpenAction 2 0 R>>endobj\n%%EOF"
     blocked_pdf = manager.post(
@@ -301,16 +304,114 @@ def test_acceptance_attachment_rejects_bad_metadata_content_and_leaves_no_rows_o
         files={"file": ("report.pdf", active_pdf, "application/pdf")},
         headers={"Idempotency-Key": "active-pdf"},
     )
-    assert blocked_pdf.status_code == 415
+    assert blocked_pdf.status_code == 200, blocked_pdf.text
 
+    custom_file = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        data={"expected_version": "1"},
+        files={
+            "file": (
+                "客户原始材料.evidence",
+                b"customer-controlled-arbitrary-content",
+                "application/x-maintenance-evidence",
+            )
+        },
+        headers={"Idempotency-Key": "any-type-custom"},
+    )
+    assert custom_file.status_code == 200, custom_file.text
+    assert custom_file.json()["mime_type"] == "application/x-maintenance-evidence"
+
+    current = manager.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
+    ).json()
+    names = {item["uploaded_by_name"] for item in current["attachments"]}
+    assert names == {"合成账号 acceptance_security_manager"}  # _client 的 display_name
+
+
+def test_acceptance_upload_preserves_256_character_name_with_long_suffix(db):
+    manager, manager_user = _client(
+        db,
+        username="acceptance_long_suffix_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="long-suffix", manager=manager_user)
+    filename = "a." + "x" * 254
+    mime_type = "application/x-long-suffix"
+    content = b"long-suffix-storage-regression"
+    assert len(filename) == 256
+
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": (filename, content, mime_type)},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded = upload.json()
+    assert uploaded["original_filename"] == filename
+    assert uploaded["mime_type"] == mime_type
+
+    download = manager.get(
+        f"/api/maintenance/acceptance-files/{uploaded['file_id']}"
+    )
+    assert download.status_code == 200, download.text
+    assert download.content == content
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["验收报告.签字扫描", "report.📄", "report.data;name=other", "验收报告"],
+    ids=["chinese-extension", "emoji-extension", "semicolon-extension", "no-extension"],
+)
+def test_acceptance_arbitrary_filename_upload_download_roundtrip(db, filename):
+    manager, manager_user = _client(
+        db,
+        username="acceptance_filename_manager",
+        role="purchaser",
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_acceptance_submit": True,
+        },
+    )
+    project, _deliverable = _project(db, suffix="free-name", manager=manager_user)
+    content = b"arbitrary-acceptance-file"
+    upload = manager.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance/attachments",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded = upload.json()
+    assert uploaded["original_filename"] == filename
+    assert uploaded["uploaded_by_name"] == manager_user.display_name
+
+    current = manager.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/acceptance"
+    )
+    assert current.status_code == 200, current.text
+    assert current.json()["attachments"][0]["original_filename"] == filename
+
+    download = manager.get(
+        f"/api/maintenance/acceptance-files/{uploaded['file_id']}"
+    )
+    assert download.status_code == 200, download.text
+    assert download.content == content
+    assert download.headers["content-disposition"] == (
+        "attachment; filename=acceptance-report.bin; "
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    assert download.headers["content-disposition"].isascii()
+    assert download.headers["cache-control"] == "no-store"
+    assert download.headers["x-content-type-options"] == "nosniff"
+    assert download.headers["content-security-policy"] == "sandbox"
     db.expire_all()
-    assert db.scalar(select(func.count()).select_from(BusinessFile)) == 0
-    assert db.scalar(select(func.count()).select_from(MaintenanceAcceptanceOperation)) == 0
-    after_paths = set(Path(get_settings().raw_file_dir).rglob("*"))
-    assert {path for path in after_paths - before_paths if path.is_file()} == set()
+    audit = db.scalar(select(BusinessFileDownloadAudit))
+    assert audit is not None
+    assert audit.downloaded_by == manager_user.username
 
 
-def test_acceptance_content_validation_rejects_path_names_external_office_and_oversize():
+def test_acceptance_content_validation_keeps_filename_safety_and_oversize():
     with pytest.raises(acceptance_service.MaintenanceAcceptanceUnsupported, match="文件名"):
         acceptance_service.validate_attachment(
             filename="../report.png",
@@ -318,6 +419,7 @@ def test_acceptance_content_validation_rejects_path_names_external_office_and_ov
             content=_png(),
         )
 
+    # 2026-08-26 客户口径：带外部链接的 Office 文件不再被拒——原样通过。
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
@@ -326,12 +428,21 @@ def test_acceptance_content_validation_rejects_path_names_external_office_and_ov
             "word/_rels/document.xml.rels",
             '<Relationships><Relationship TargetMode = "External" Target="https://example.invalid"/></Relationships>',
         )
-    with pytest.raises(acceptance_service.MaintenanceAcceptanceUnsupported, match="外部链接"):
-        acceptance_service.validate_attachment(
-            filename="report.docx",
-            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            content=package.getvalue(),
-        )
+    safe_name, extension, stored_mime = acceptance_service.validate_attachment(
+        filename="report.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content=package.getvalue(),
+    )
+    assert (safe_name, extension, stored_mime) == (
+        "report.docx",
+        ".docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    # 缺失 MIME 时回退 octet-stream（浏览器/客户端偶尔不申报）。
+    assert acceptance_service.validate_attachment(
+        filename="扫描件.dat", mime_type=None, content=b"\x00\x01",
+    )[2] == "application/octet-stream"
 
     with pytest.raises(acceptance_service.MaintenanceAcceptanceTooLarge):
         acceptance_service.validate_attachment(

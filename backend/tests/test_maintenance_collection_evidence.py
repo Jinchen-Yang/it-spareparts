@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import zipfile
 from datetime import date
 
 import pytest
@@ -53,6 +54,20 @@ def _png_bytes(color: str = "white") -> bytes:
     return buffer.getvalue()
 
 
+def _jpeg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _office_bytes(required_member: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as package:
+        package.writestr("[Content_Types].xml", "<Types/>")
+        package.writestr(required_member, "<document/>")
+    return buffer.getvalue()
+
+
 @pytest.fixture()
 def seeded_milestone(db):
     admin = _sys_user(
@@ -80,8 +95,7 @@ def test_save_evidence_writes_file_yml_and_md5_row(db, seeded_milestone, tmp_pat
         mime_type="image/png",
         content=content,
     )
-    db.commit()
-    # 文件落盘在 DB commit 之后（round-6 Blocker 6：DB 行先定案）
+    # 生产 API 会在 DB commit 前完成这一步；服务层测试显式保持同一顺序。
     evidence_service.write_evidence_files(
         file_id=payload["file_id"],
         object_key=payload["object_key"],
@@ -99,6 +113,7 @@ def test_save_evidence_writes_file_yml_and_md5_row(db, seeded_milestone, tmp_pat
             "storage": "local",
         },
     )
+    db.commit()
     assert payload["replayed"] is False
     assert payload["md5"] == hashlib.md5(content).hexdigest()
     assert payload["sha256"] == hashlib.sha256(content).hexdigest()
@@ -212,6 +227,128 @@ def test_upload_closes_reminder_and_replay_stays_idempotent(db, seeded_milestone
     assert rows[0]["original_filename"] == "巡检报告.png"
 
 
+def test_file_write_failure_rolls_back_evidence_and_keeps_reminder_open(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """磁盘失败不能先关闭提醒；DB 新行与状态转换必须一起保持未提交。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_disk_failure")
+
+    def fail_write(**_kwargs):
+        raise OSError("synthetic disk failure")
+
+    monkeypatch.setattr(evidence_service, "write_evidence_files", fail_write)
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("巡检报告.png", _png_bytes(), "image/png")},
+    )
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"]["code"] == "file_write_failed"
+
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    db.expire_all()
+    milestone = db.get(
+        MaintenanceCollectionMilestone, seeded_milestone["milestone_id"]
+    )
+    assert milestone.follow_up_status != "handled"
+    assert evidence_service.active_evidence_count(
+        db, seeded_milestone["milestone_id"]
+    ) == 0
+
+
+def test_replay_repairs_missing_files_before_closing_reminder(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """兼容旧异常：DB 已有 active 行但磁盘缺失时，同内容重放先修文件再关闭。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    content = _png_bytes("blue")
+    orphan = evidence_service.save_evidence(
+        db,
+        milestone_id=seeded_milestone["milestone_id"],
+        operator="历史上传人",
+        filename="历史凭证.png",
+        mime_type="image/png",
+        content=content,
+    )
+    db.commit()
+    data_path, meta_path = evidence_service.evidence_paths(
+        orphan["file_id"], orphan["object_key"]
+    )
+    assert not data_path.exists()
+    assert not meta_path.exists()
+
+    client = _evidence_client(db, username="evidence_repair")
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("重传凭证.png", content, "image/png")},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["replayed"] is True
+    assert response.json()["closed"] is True
+    assert data_path.read_bytes() == content
+    assert meta_path.exists()
+
+
+def test_replay_sidecar_failure_restores_existing_binary_and_sidecar(
+    db, seeded_milestone, tmp_path, monkeypatch,
+):
+    """重放的第二次 rename 失败时，不能删除 DB active 行对应的旧文件对。"""
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    content = _png_bytes("green")
+    existing = evidence_service.save_evidence(
+        db,
+        milestone_id=seeded_milestone["milestone_id"],
+        operator="历史上传人",
+        filename="历史凭证.png",
+        mime_type="image/png",
+        content=content,
+    )
+    evidence_service.write_evidence_files(
+        file_id=existing["file_id"],
+        object_key=existing["object_key"],
+        content=content,
+        meta={
+            "file_id": existing["file_id"],
+            "milestone_id": seeded_milestone["milestone_id"],
+            "original_filename": existing["original_filename"],
+            "mime_type": existing["mime_type"],
+            "size_bytes": existing["size_bytes"],
+            "md5": existing["md5"],
+            "sha256": existing["sha256"],
+            "uploaded_by": existing["uploaded_by"],
+            "uploaded_at": existing["uploaded_at"],
+            "storage": "local",
+        },
+    )
+    db.commit()
+    data_path, meta_path = evidence_service.evidence_paths(
+        existing["file_id"], existing["object_key"]
+    )
+    old_data_inode = data_path.stat().st_ino
+    old_meta = meta_path.read_bytes()
+
+    def fail_sidecar(_file_id, _meta):
+        raise OSError("synthetic sidecar failure after binary replace")
+
+    monkeypatch.setattr(evidence_service, "_write_meta_sidecar", fail_sidecar)
+    client = _evidence_client(db, username="evidence_replay_disk_failure")
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("历史凭证-重传.png", content, "image/png")},
+    )
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"]["code"] == "file_write_failed"
+
+    assert data_path.read_bytes() == content
+    assert data_path.stat().st_ino == old_data_inode
+    assert meta_path.read_bytes() == old_meta
+    assert evidence_service.active_evidence_count(
+        db, seeded_milestone["milestone_id"]
+    ) == 1
+    assert not list(data_path.parent.glob("*.rollback"))
+
+
 def test_upload_rejects_wrong_mime_and_missing_milestone(db, seeded_milestone, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
     client = _evidence_client(db, username="evidence_api_bad")
@@ -226,3 +363,105 @@ def test_upload_rejects_wrong_mime_and_missing_milestone(db, seeded_milestone, t
         files={"file": ("巡检报告.png", _png_bytes(), "image/png")},
     )
     assert missing.status_code == 404
+
+
+def test_upload_rejects_empty_and_oversized_collection_evidence(
+    db, seeded_milestone, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_size")
+    url = (
+        f"/api/maintenance/collection-milestones/"
+        f"{seeded_milestone['milestone_id']}/evidence"
+    )
+
+    empty = client.post(
+        url,
+        files={"file": ("空凭证.pdf", b"", "application/pdf")},
+    )
+    assert empty.status_code == 422, empty.text
+
+    oversized = client.post(
+        url,
+        files={
+            "file": (
+                "超大凭证.pdf",
+                b"%PDF-" + b"x" * (20 * 1024 * 1024),
+                "application/pdf",
+            )
+        },
+    )
+    assert oversized.status_code == 413, oversized.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "mime_type"),
+    [
+        ("伪造巡检图.png", b"\x89PNG\r\n\x1a\nnot-an-image", "image/png"),
+        (
+            "含启动动作.pdf",
+            b"%PDF-1.7\n1 0 obj<</OpenAction 2 0 R>>endobj\n%%EOF",
+            "application/pdf",
+        ),
+    ],
+)
+def test_upload_rejects_forged_or_active_collection_evidence(
+    db,
+    seeded_milestone,
+    tmp_path,
+    monkeypatch,
+    filename,
+    content,
+    mime_type,
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_unsafe")
+
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": (filename, content, mime_type)},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "mime_type"),
+    [
+        ("巡检报告.pdf", b"%PDF-1.7\n%%EOF", "application/pdf"),
+        (
+            "巡检报告.docx",
+            _office_bytes("word/document.xml"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        (
+            "巡检台账.xlsx",
+            _office_bytes("xl/workbook.xml"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("现场照片.png", _png_bytes(), "image/png"),
+        ("现场照片.jpg", _jpeg_bytes(), "image/jpeg"),
+        ("现场照片.jpeg", _jpeg_bytes(), "image/jpeg"),
+    ],
+)
+def test_upload_accepts_documented_collection_evidence_types(
+    db,
+    seeded_milestone,
+    tmp_path,
+    monkeypatch,
+    filename,
+    content,
+    mime_type,
+):
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
+    client = _evidence_client(db, username="evidence_api_supported")
+
+    response = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": (filename, content, mime_type)},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["original_filename"] == filename
+    assert response.json()["mime_type"] == mime_type

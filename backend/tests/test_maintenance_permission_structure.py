@@ -546,7 +546,8 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
     assert {"revenue_inc", "revenue_ex"}.isdisjoint(profit_amount_fields)
     assert "decision_status" in profit_amount_fields
     assert {
-        "contract_amount", "budget", "remaining", "remaining_pct",
+        "contract_amount", "contract_amount_inc_tax", "budget", "remaining",
+        "remaining_pct",
     } <= profit_amount_fields
     assert "status" not in {
         field

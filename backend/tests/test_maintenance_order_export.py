@@ -19,7 +19,11 @@ from app.auth import hash_password
 from app.db import SessionLocal
 from app.etl import loader
 from app.main import app
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceManualCostOverride,
+)
 from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_cost_quality, maintenance_export
@@ -168,6 +172,69 @@ def _seed_orders(db, specs):
         )
     loader.load(db, f.maintenance_result(orders, lines), batch.id, date(2026, 7, 1))
     db.commit()
+
+
+def test_order_export_merges_unsynced_active_manual_override(db):
+    """逐单总导出不得把仍只存在 override 表中的历史人工成本显示为 0/空。"""
+    _seed_orders(db, [
+        ("MANUAL-EXPORT", date(2026, 7, 1), "已生效", None, 1),
+    ])
+    line = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.raw_line_id == "LINE-MANUAL-EXPORT-1",
+    ))
+    assert line is not None
+    line.qty = Decimal("5")
+    line.return_qty = Decimal("2")
+    line.cost_source = "none"
+    line.cost_tax_basis = None
+    line.unit_cost = None
+    line.cost_amount = None
+    line.unit_cost_inc_tax = None
+    line.unit_cost_ex_tax = None
+    line.cost_amount_inc_tax = None
+    line.cost_amount_ex_tax = None
+    line.confidence = None
+    line.price_month = "2026-01"
+    line.anomaly_flags = ["no_cost"]
+    db.add(MaintenanceManualCostOverride(
+        line_id=line.id,
+        unit_cost_ex_tax=Decimal("10.00"),
+        unit_cost_inc_tax=Decimal("11.30"),
+        reason="历史人工成本依据",
+        active=True,
+        updated_by="test",
+    ))
+    db.commit()
+
+    output = maintenance_export.build_workbook(
+        db,
+        UserContext(user_id="admin", role="admin"),
+    )
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        sheet = workbook["订单明细"]
+        headers = [cell.value for cell in sheet[1]]
+        values = [cell.value for cell in sheet[2]]
+        exported = dict(zip(headers, values, strict=True))
+        assert exported["单价"] == 10
+        assert exported["金额"] == 30
+        assert exported["含税单位成本"] == 11.3
+        assert exported["未税单位成本"] == 10
+        assert exported["含税成本金额"] == 33.9
+        assert exported["未税成本金额"] == 30
+        assert exported["成本事实层级"] == "实际采购参考"
+        assert exported["成本来源"] == "manual"
+        assert exported["含税口径"] == "ex"
+        assert exported["置信度"] == "high"
+        assert exported["取价月"] is None
+        assert exported["异常标记"] in (None, "")
+    finally:
+        workbook.close()
+        output.close()
+
+    db.refresh(line)
+    assert line.cost_source == "none"
+    assert line.cost_amount is None
 
 
 def test_empty_export_returns_clear_422_without_generating_an_xlsx(db):

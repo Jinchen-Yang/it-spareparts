@@ -14,7 +14,7 @@ from decimal import Decimal
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -30,12 +30,15 @@ from app.models.maintenance_project import (
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_front_stock as front_stock
+from app.services import maintenance_cost_quality
 from app.services import maintenance_project_operations as operations
+from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_workbook_export import safe_xlsx_text
 
 WORKBOOK_PROTOCOL_VERSION = "maintenance-project-workbook-v3.2"
@@ -81,27 +84,72 @@ def _blank(ws, ncols: int) -> None:
 
 
 def _contracts(db: Session, project_id: str) -> list[MaintenanceProjectContract]:
+    today = business_today()
     return list(
         db.execute(
             select(MaintenanceProjectContract)
-            .where(MaintenanceProjectContract.project_id == project_id)
+            .where(
+                MaintenanceProjectContract.project_id == project_id,
+                MaintenanceProjectContract.effective_from <= today,
+                or_(
+                    MaintenanceProjectContract.effective_to.is_(None),
+                    MaintenanceProjectContract.effective_to > today,
+                ),
+            )
             .order_by(MaintenanceProjectContract.effective_from)
         ).scalars()
     )
 
 
-def _expenses(db: Session, contract_nos: list[str]) -> list[FProjectExpense]:
-    if not contract_nos:
+def _expenses(
+    db: Session,
+    project_id: str,
+    contracts: list[MaintenanceProjectContract],
+) -> list[tuple[FProjectExpense, MaintenanceProjectExpenseAttribution]]:
+    """已稳定归属本项目、且指向唯一当前合同关系的 approved 费用。"""
+    if not contracts:
+        return []
+    today = business_today()
+    candidate_identities = {contract.contract_id for contract in contracts}
+    current_relations = list(db.scalars(
+        select(MaintenanceProjectContract).where(
+            MaintenanceProjectContract.contract_id.in_(candidate_identities),
+            MaintenanceProjectContract.effective_from <= today,
+            or_(
+                MaintenanceProjectContract.effective_to.is_(None),
+                MaintenanceProjectContract.effective_to > today,
+            ),
+        )
+    ))
+    by_identity: dict[str, list[MaintenanceProjectContract]] = {}
+    for relation in current_relations:
+        by_identity.setdefault(relation.contract_id, []).append(relation)
+    safe_contract_ids = {
+        relation.project_contract_id
+        for relation in contracts
+        if len(by_identity.get(relation.contract_id, ())) == 1
+    }
+    if not safe_contract_ids:
         return []
     return list(
         db.execute(
-            select(FProjectExpense)
+            select(FProjectExpense, MaintenanceProjectExpenseAttribution)
+            .join(
+                MaintenanceProjectExpenseAttribution,
+                MaintenanceProjectExpenseAttribution.raw_expense_line_id
+                == FProjectExpense.raw_line_id,
+            )
             .where(
-                FProjectExpense.linked_sales_order_no.in_(contract_nos),
-                FProjectExpense.data_status == "已结束",
+                MaintenanceProjectExpenseAttribution.project_id == project_id,
+                MaintenanceProjectExpenseAttribution.project_contract_id.in_(
+                    safe_contract_ids
+                ),
+                MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
+                MaintenanceProjectExpenseAttribution.normalized_status == "approved",
+                MaintenanceProjectExpenseAttribution.ownership_mapping_state == "mapped",
             )
             .order_by(FProjectExpense.expense_date)
-        ).scalars()
+        ).all()
     )
 
 
@@ -250,21 +298,28 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     if project is None:
         return None
     contracts = _contracts(db, project_id)
-    contract_nos = [c.contract_no for c in contracts]
-    expenses = _expenses(db, contract_nos)
+    expenses = _expenses(db, project_id, contracts)
     wbdd = _wbdd_lines(db, project_id)
     as_of = business_today()
-    collections = list(
-        db.execute(
-            select(MaintenanceCollectionSnapshot)
-            .where(
-                MaintenanceCollectionSnapshot.project_id == project_id,
-                MaintenanceCollectionSnapshot.status == "confirmed",
-                # 未来月度快照不得进入当前导出（round-6 Blocker 7）
-                MaintenanceCollectionSnapshot.report_month <= as_of,
-            )
-            .order_by(MaintenanceCollectionSnapshot.report_month)
-        ).scalars()
+    current_contract_ids = [contract.project_contract_id for contract in contracts]
+    collections = (
+        list(
+            db.execute(
+                select(MaintenanceCollectionSnapshot)
+                .where(
+                    MaintenanceCollectionSnapshot.project_id == project_id,
+                    MaintenanceCollectionSnapshot.project_contract_id.in_(
+                        current_contract_ids
+                    ),
+                    MaintenanceCollectionSnapshot.status == "confirmed",
+                    # 未来月度快照不得进入当前导出（round-6 Blocker 7）
+                    MaintenanceCollectionSnapshot.report_month <= as_of,
+                )
+                .order_by(MaintenanceCollectionSnapshot.report_month)
+            ).scalars()
+        )
+        if current_contract_ids
+        else []
     )
     # 每份合同取最新 confirmed 快照（月份升序覆盖），再跨合同求和（round-5 Blocker 6）
     latest_by_contract: dict[str, MaintenanceCollectionSnapshot] = {}
@@ -340,10 +395,14 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     missing_amount_nos = [
         c.contract_no for c in included if c.amount_inc_tax is None
     ]
-    # 任一计入合同缺金额：总额与派生比率一律 null（缺失不按 0、不出部分和）
+    contract_card = _card_contracts(db, [project_id]).get(project_id)
+    # 只认当前、mapped、计入总额且不存在重复关系/跨项目共享冲突的台账事实。
     total_inc = (
-        sum(c.amount_inc_tax for c in included)
-        if included and not missing_amount_nos
+        contract_card.get("amount_inc_tax")
+        if contracts
+        and contract_card
+        and not contract_card.get("contract_incomplete")
+        and not contract_card.get("contract_shared")
         else None
     )
     cumulative = (
@@ -351,40 +410,81 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         if latest_by_contract
         else None
     )
-    site_cost = db.scalar(
-        select(func.coalesce(func.sum(MaintenanceSiteIssueLine.cost_amount_inc_tax), 0))
-        .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+    site_known = and_(
+        MaintenanceSiteIssueLine.cost_source.in_((
+            "maint_demand",
+            "direct_purchase",
+            "purchase_window",
+            "sales_window",
+            "manual",
+        )),
+        MaintenanceSiteIssueLine.price_basis == "ex_tax",
+        maintenance_cost_quality.sql_amount_is_valid(
+            MaintenanceSiteIssueLine.cost_amount_ex_tax
+        ),
+        maintenance_cost_quality.sql_amount_is_valid(
+            MaintenanceSiteIssueLine.cost_amount_inc_tax
+        ),
+    )
+    site_fact = db.execute(
+        select(
+            func.count(MaintenanceSiteIssueLine.issue_line_id),
+            func.count().filter(site_known),
+            func.coalesce(
+                func.sum(case(
+                    (site_known, MaintenanceSiteIssueLine.cost_amount_inc_tax),
+                    else_=Decimal("0"),
+                )),
+                Decimal("0"),
+            ),
+        )
+        .select_from(MaintenanceSiteIssueLine)
+        .join(MaintenanceSiteIssue,
+              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
         .where(
             MaintenanceSiteIssue.project_id == project_id,
+            MaintenanceSiteIssue.status_mapping_state == "mapped",
             MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
             MaintenanceSiteIssueLine.is_active.is_(True),
         )
-    ) or Decimal("0")
-    expense_cost = sum(
-        (expense.amount_inc_tax or Decimal("0")) for expense in expenses
-    )
-    cost_total = site_cost + expense_cost
-    missing_cost_lines = int(
-        db.scalar(
-            select(func.count())
-            .select_from(MaintenanceSiteIssueLine)
-            .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-            .where(
-                MaintenanceSiteIssue.project_id == project_id,
-                MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
-                MaintenanceSiteIssueLine.unit_cost_inc_tax.is_(None),
-                MaintenanceSiteIssueLine.is_active.is_(True),
-            )
+    ).one()
+    site_total_lines, site_known_lines, site_cost = site_fact
+    site_cost = Decimal(site_cost or 0)
+    missing_site_cost_lines = int(site_total_lines) - int(site_known_lines)
+    expense_cost = Decimal("0")
+    missing_expense_cost_lines = 0
+    for _expense, attribution in expenses:
+        tier = maintenance_cost_quality.normalized_tax_tier(
+            source="direct",
+            tax_basis="inc",
+            legacy_amount=attribution.amount_inc_tax,
+            normalized_amount=attribution.amount_inc_tax,
+            normalized_basis="inc",
+            anomaly_flags=(),
         )
-        or 0
-    )
+        if tier == "missing":
+            missing_expense_cost_lines += 1
+        else:
+            expense_cost += Decimal(attribution.amount_inc_tax)
+    cost_total = site_cost + expense_cost
+    missing_cost_lines = missing_site_cost_lines + missing_expense_cost_lines
+    has_cost_evidence = int(site_total_lines) > 0 or bool(expenses)
     completeness_notes = []
     if missing_amount_nos:
         completeness_notes.append(f"{len(missing_amount_nos)} 份合同缺含税金额")
+    if contract_card and (
+        contract_card.get("contract_incomplete")
+        or contract_card.get("contract_shared")
+    ):
+        completeness_notes.append("当前合同存在未映射、重复或跨项目共享冲突")
     if not values_inc or not complete_inc:
         completeness_notes.append("前置库存在缺成本件")
-    if missing_cost_lines:
-        completeness_notes.append(f"{missing_cost_lines} 行领用缺成本")
+    if missing_site_cost_lines:
+        completeness_notes.append(f"{missing_site_cost_lines} 行领用缺成本")
+    if missing_expense_cost_lines:
+        completeness_notes.append(f"{missing_expense_cost_lines} 行费用缺含税金额")
+    if not has_cost_evidence:
+        completeness_notes.append("暂无成本事实")
     metrics = [
         ("合同总额(含税)", round(float(total_inc), 2) if total_inc is not None else ""),
         ("累计回款(含税)", float(cumulative) if cumulative is not None else ""),
@@ -393,11 +493,16 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
             if cumulative is not None and total_inc is not None and total_inc > 0
             else ""
         )),
-        ("项目已计成本(含税)", round(float(cost_total), 2)),
+        # 完整且为 0 是真实零；存在缺口时不把已知下限伪装为完整项目成本。
+        ("项目已计成本(含税)", (
+            round(float(cost_total), 2)
+            if has_cost_evidence and missing_cost_lines == 0 else ""
+        )),
         # 成本率：缺成本行或总额不完整时不发布（缺失只展示下界，round-6 Blocker 7）
         ("成本率", (
             f"{float(cost_total) / float(total_inc) * 100:.1f}%"
-            if total_inc is not None and total_inc > 0 and missing_cost_lines == 0
+            if total_inc is not None and total_inc > 0
+            and has_cost_evidence and missing_cost_lines == 0
             else ""
         )),
         ("缺失成本行数", missing_cost_lines),
@@ -445,7 +550,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
                "合同编号", "未税金额", "含税金额(系统计算)", "流程状态", "备注"]
     colors = [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY, _EDITABLE]
     _style_header(ws, headers, colors)
-    for expense in expenses:
+    for expense, attribution in expenses:
         _append_safe(ws, [
             expense.bxd_no or "",
             expense.expense_date.isoformat() if expense.expense_date else "",
@@ -455,8 +560,8 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
             (expense.reason or "")[:120],
             expense.linked_sales_order_no or "",
             "",
-            float(expense.amount_inc_tax) if expense.amount_inc_tax is not None else "",
-            expense.data_status or "",
+            float(attribution.amount_inc_tax),
+            attribution.raw_status or expense.data_status or "",
             "",
         ])
     _add_blank_rows(ws, len(headers), 10, ws.max_row + 1)

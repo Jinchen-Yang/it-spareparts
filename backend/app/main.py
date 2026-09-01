@@ -47,6 +47,7 @@ from app.api import (
     maintenance_expense_collection_workbook,
     maintenance_analytics,
     maintenance_project_master_workbook,
+    maintenance_project_batch_transfer,
     maintenance_wbdd_import,
     parts,
     pool_analysis,
@@ -112,6 +113,7 @@ app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
 app.include_router(maintenance_expense_collection_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
+app.include_router(maintenance_project_batch_transfer.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
 # 新 2 页（卡墙/项目面板，plan v1.3）依赖的 router 随 boss 总闸走：beta 总闸在 v1.23

@@ -10,6 +10,13 @@ from app import permissions, security
 from app.agent import tools
 from app.etl import loader
 from app.models.maintenance import FMaintenanceLine
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
+from app.models.maintenance_source_assignment import (
+    MaintenanceSourceOrderAssignment,
+)
 from app.models.system import SysImportBatch
 from app.services import maintenance_cost, maintenance_workbook_renderer
 from app.services import maintenance_cost_quality
@@ -219,6 +226,47 @@ def test_cost_sources_are_classified_into_actual_estimated_or_missing():
         "known_cost_total": Decimal("240.00"),
         "cost_quality": "incomplete",
     }
+
+
+@pytest.mark.parametrize(
+    (
+        "source",
+        "tax_basis",
+        "legacy_amount",
+        "normalized_amount",
+        "flags",
+        "expected",
+    ),
+    [
+        ("direct", "inc", "100", "100", [], "actual"),
+        ("direct", "ex", "100", "113", ["inc_tax_estimated"], "estimated"),
+        ("sales_ref", "ex", "50", "56.50", [], "estimated"),
+        ("direct", "inc", None, "100", [], "missing"),
+        ("direct", None, "100", "100", [], "missing"),
+        ("direct", "inc", "100", None, [], "missing"),
+        ("future_source", "inc", "100", "100", [], "missing"),
+    ],
+)
+def test_normalized_inc_tier_is_strict_and_demotes_tax_estimates(
+    source,
+    tax_basis,
+    legacy_amount,
+    normalized_amount,
+    flags,
+    expected,
+):
+    assert maintenance_cost_quality.normalized_tax_tier(
+        source=source,
+        tax_basis=tax_basis,
+        legacy_amount=(
+            Decimal(legacy_amount) if legacy_amount is not None else None
+        ),
+        normalized_amount=(
+            Decimal(normalized_amount) if normalized_amount is not None else None
+        ),
+        normalized_basis="inc",
+        anomaly_flags=flags,
+    ) == expected
 
 
 @pytest.mark.parametrize(
@@ -447,9 +495,13 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
     lines["ML-A"].cost_source = "direct"
     lines["ML-A"].cost_tax_basis = "inc"
     lines["ML-A"].cost_amount = Decimal("100.00")
+    lines["ML-A"].cost_amount_inc_tax = Decimal("100.00")
+    lines["ML-A"].cost_amount_ex_tax = Decimal("88.50")
     lines["ML-E"].cost_source = "trace_avg"
     lines["ML-E"].cost_tax_basis = "ex"
     lines["ML-E"].cost_amount = Decimal("50.00")
+    lines["ML-E"].cost_amount_inc_tax = Decimal("56.50")
+    lines["ML-E"].cost_amount_ex_tax = Decimal("50.00")
     lines["ML-M"].cost_source = "none"
     lines["ML-NULL"].cost_source = "direct"
     lines["ML-NULL"].cost_tax_basis = "inc"
@@ -477,6 +529,8 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
     lines["ML-ZERO"].cost_tax_basis = "ex"
     lines["ML-ZERO"].unit_cost = Decimal("0.00")
     lines["ML-ZERO"].cost_amount = Decimal("0.00")
+    lines["ML-ZERO"].cost_amount_inc_tax = Decimal("0.00")
+    lines["ML-ZERO"].cost_amount_ex_tax = Decimal("0.00")
     db.commit()
 
     for line in lines.values():
@@ -495,13 +549,13 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
 
     assert "cost_bucket" not in row
     assert row["actual_cost_inc"] == 100.0
-    assert row["actual_cost_ex"] == 0.0
-    assert row["estimated_cost_inc"] == 0.0
+    assert row["actual_cost_ex"] == 88.5
+    assert row["estimated_cost_inc"] == 56.5
     assert row["estimated_cost_ex"] == 50.0
     assert row["actual_lines"] == 2
     assert row["estimated_lines"] == 1
     assert row["missing_cost_lines"] == 7
-    assert row["known_cost_total"] == row["cost_total"] == 150.0
+    assert row["known_cost_total"] == row["cost_total"] == 156.5
     assert row["cost_quality"] == "incomplete"
     assert (
         row["actual_lines"]
@@ -524,10 +578,10 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
         }
     assert sum(row["by_source"].values()) == row["lines"]
     assert row["by_source"]["none"] == row["missing_cost_lines"]
-    # 历史手工事实没有新双税列，normalized 口径必须 fail-closed 为不完整，不能拿
-    # legacy 原始税口径静默冒充双税结果。
-    assert row["parts_cost_inc_tax"] == 0.0
-    assert row["parts_cost_ex_tax"] == 0.0
+    # 只有显式归一双税列的三条事实进入双口径小计；其余七条即便夹带 legacy
+    # 金额也必须 fail-closed，不能静默冒充双税结果。
+    assert row["parts_cost_inc_tax"] == 156.5
+    assert row["parts_cost_ex_tax"] == 138.5
     assert row["parts_cost_inc_tax_complete"] is False
     assert row["parts_cost_ex_tax_complete"] is False
     assert row["parts_cost_inc_tax_quality"] == "incomplete"
@@ -602,13 +656,19 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
 
 
 def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
-    batch = SysImportBatch(
+    sales_batch = SysImportBatch(
+        filename="contract-quality-sales.xlsx",
+        file_type="sales",
+        file_hash="issue156-contract-quality-sales",
+        status="success",
+    )
+    maintenance_batch = SysImportBatch(
         filename="contract-quality.xlsx",
         file_type="maintenance",
         file_hash="issue156-contract-quality",
         status="success",
     )
-    db.add(batch)
+    db.add_all([sales_batch, maintenance_batch])
     db.flush()
     loader.load(
         db,
@@ -630,7 +690,7 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
                 f.sales_line("S2", "SL2", "PN-SALE-2", qty="1", price="1000"),
             ],
         ),
-        batch.id,
+        sales_batch.id,
         date(2026, 6, 1),
     )
     loader.load(
@@ -662,7 +722,7 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
                 f.maintenance_line("M3", "ML-COMPLETE", "PN-COMPLETE", qty="1"),
             ],
         ),
-        batch.id,
+        maintenance_batch.id,
         date(2026, 6, 1),
     )
     lines = {
@@ -671,7 +731,11 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
     }
     lines["ML-KNOWN"].cost_source = "direct"
     lines["ML-KNOWN"].cost_tax_basis = "inc"
+    lines["ML-KNOWN"].unit_cost_inc_tax = Decimal("100.00")
+    lines["ML-KNOWN"].unit_cost_ex_tax = Decimal("100.00")
     lines["ML-KNOWN"].cost_amount = Decimal("100.00")
+    lines["ML-KNOWN"].cost_amount_inc_tax = Decimal("100.00")
+    lines["ML-KNOWN"].cost_amount_ex_tax = Decimal("100.00")
     lines["ML-MISSING"].cost_source = "future_source"
     lines["ML-MISSING"].cost_tax_basis = "inc"
     lines["ML-MISSING"].unit_cost = Decimal("999.00")
@@ -679,7 +743,76 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
     lines["ML-MISSING"].confidence = "low"
     lines["ML-COMPLETE"].cost_source = "direct"
     lines["ML-COMPLETE"].cost_tax_basis = "inc"
+    lines["ML-COMPLETE"].unit_cost_inc_tax = Decimal("100.00")
+    lines["ML-COMPLETE"].unit_cost_ex_tax = Decimal("100.00")
     lines["ML-COMPLETE"].cost_amount = Decimal("100.00")
+    lines["ML-COMPLETE"].cost_amount_inc_tax = Decimal("100.00")
+    lines["ML-COMPLETE"].cost_amount_ex_tax = Decimal("100.00")
+    shared_project = MaintenanceProject(
+        project_id="quality-shared-project",
+        project_code="QUALITY-SHARED",
+        display_name="共享合同项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    complete_project = MaintenanceProject(
+        project_id="quality-complete-project",
+        project_code="QUALITY-COMPLETE",
+        display_name="完整成本项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+    )
+    db.add_all([shared_project, complete_project])
+    db.flush()
+    db.add_all([
+        MaintenanceProjectContract(
+            project_contract_id="quality-shared-contract",
+            project_id=shared_project.project_id,
+            contract_id="quality-shared-contract-id",
+            contract_no="XS-QUALITY",
+            amount_inc_tax=Decimal("1130.00"),
+            included_in_total=True,
+            status_mapping_state="mapped",
+            status_mapping_version="test-v1",
+            effective_from=date(2026, 1, 1),
+            source="ledger",
+            version=1,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="quality-complete-contract",
+            project_id=complete_project.project_id,
+            contract_id="quality-complete-contract-id",
+            contract_no="XS-COMPLETE",
+            amount_inc_tax=Decimal("1130.00"),
+            included_in_total=True,
+            status_mapping_state="mapped",
+            status_mapping_version="test-v1",
+            effective_from=date(2026, 1, 1),
+            source="ledger",
+            version=1,
+        ),
+        MaintenanceSourceOrderAssignment(
+            assignment_id="quality-shared-assignment-1",
+            project_id=shared_project.project_id,
+            source_order_id="M1",
+            is_active=True,
+            created_by="test",
+        ),
+        MaintenanceSourceOrderAssignment(
+            assignment_id="quality-shared-assignment-2",
+            project_id=shared_project.project_id,
+            source_order_id="M2",
+            is_active=True,
+            created_by="test",
+        ),
+        MaintenanceSourceOrderAssignment(
+            assignment_id="quality-complete-assignment",
+            project_id=complete_project.project_id,
+            source_order_id="M3",
+            is_active=True,
+            created_by="test",
+        ),
+    ])
     db.commit()
 
     all_rows = maintenance_cost.board(db, lifecycle="all")["rows"]
@@ -736,8 +869,9 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         )["rows"]
     finally:
         event.remove(engine, "before_cursor_execute", before_execute)
-    # 双口径贡献毛利新增合同费用快照水位查询；仍保持固定查询数，不随项目数增长。
-    assert select_count <= 4
+    # 双口径贡献毛利、费用快照与 canonical 含税合同额均为批量查询；
+    # 查询数仍固定，不随项目数增长。
+    assert select_count <= 5
     assert [item["contract"] for item in searched_rows] == ["XS-QUALITY"]
     assert {project["project"] for project in searched_rows[0]["projects"]} == {
         "共享合同项目甲",

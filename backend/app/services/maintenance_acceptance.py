@@ -4,17 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import hashlib
-import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import tempfile
-import unicodedata
 from uuid import uuid4
-import xml.etree.ElementTree as ElementTree
-import zipfile
 
-from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -27,30 +22,18 @@ from app.models.maintenance_manager import (
     MaintenanceAcceptanceOperation,
 )
 from app.models.maintenance_project import MaintenanceProject
+from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_project_assignments as assignments
-
-
-MAX_ACCEPTANCE_FILE_BYTES = 20 * 1024 * 1024
-_MAX_ZIP_MEMBERS = 1024
-_MAX_ZIP_EXPANDED_BYTES = 100 * 1024 * 1024
-_MAX_ZIP_RATIO = 100
-_ALLOWED_TYPES = {
-    ".pdf": "application/pdf",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-}
-_PDF_ACTIVE_TOKENS = (
-    b"/javascript",
-    b"/js",
-    b"/launch",
-    b"/embeddedfile",
-    b"/openaction",
-    b"/richmedia",
+from app.services.maintenance_attachment_validation import (
+    AttachmentTooLarge,
+    AttachmentValidationError,
+    MAX_MAINTENANCE_ATTACHMENT_BYTES,
+    validate_acceptance_attachment,
 )
+
+
+MAX_ACCEPTANCE_FILE_BYTES = MAX_MAINTENANCE_ATTACHMENT_BYTES
 
 
 class MaintenanceAcceptanceError(Exception):
@@ -88,138 +71,28 @@ def _required_text(value: str | None, label: str, limit: int) -> str:
     return cleaned
 
 
-def _safe_filename(filename: str | None) -> tuple[str, str, str]:
-    normalized = unicodedata.normalize("NFC", str(filename or "")).strip()
-    if (
-        not normalized
-        or len(normalized) > 256
-        or normalized in {".", ".."}
-        or "/" in normalized
-        or "\\" in normalized
-        or any(unicodedata.category(char).startswith("C") for char in normalized)
-    ):
-        raise MaintenanceAcceptanceUnsupported("附件文件名不安全")
-    extension = Path(normalized).suffix.lower()
-    expected_mime = _ALLOWED_TYPES.get(extension)
-    if expected_mime is None:
-        raise MaintenanceAcceptanceUnsupported(
-            "仅支持 PDF、DOCX、XLSX、PNG、JPG/JPEG 验收附件"
-        )
-    return normalized, extension, expected_mime
-
-
-def _assert_safe_zip(data: bytes, *, extension: str) -> None:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as package:
-            infos = package.infolist()
-            if not infos or len(infos) > _MAX_ZIP_MEMBERS:
-                raise MaintenanceAcceptanceUnsupported("Office 附件结构异常")
-            expanded = 0
-            names: set[str] = set()
-            for info in infos:
-                name = info.filename
-                path = PurePosixPath(name)
-                if (
-                    not name
-                    or name.startswith(("/", "\\"))
-                    or "\\" in name
-                    or ".." in path.parts
-                    or info.flag_bits & 0x1
-                ):
-                    raise MaintenanceAcceptanceUnsupported("Office 附件包含不安全路径或加密内容")
-                expanded += info.file_size
-                if expanded > _MAX_ZIP_EXPANDED_BYTES:
-                    raise MaintenanceAcceptanceUnsupported("Office 附件解压后体积异常")
-                if info.file_size and info.compress_size == 0:
-                    raise MaintenanceAcceptanceUnsupported("Office 附件压缩结构异常")
-                if info.compress_size and info.file_size / info.compress_size > _MAX_ZIP_RATIO:
-                    raise MaintenanceAcceptanceUnsupported("Office 附件压缩比异常")
-                lower_name = name.lower()
-                if lower_name in names:
-                    raise MaintenanceAcceptanceUnsupported("Office 附件包含重复文件成员")
-                names.add(lower_name)
-
-            required = "word/document.xml" if extension == ".docx" else "xl/workbook.xml"
-            if "[content_types].xml" not in names or required not in names:
-                raise MaintenanceAcceptanceUnsupported("Office 附件类型与扩展名不匹配")
-            forbidden_parts = (
-                "vbaproject.bin",
-                "/embeddings/",
-                "/externallinks/",
-                "connections.xml",
-                "customui/",
-            )
-            if any(any(marker in name for marker in forbidden_parts) for name in names):
-                raise MaintenanceAcceptanceUnsupported("Office 附件含宏、嵌入对象或外部数据连接")
-
-            for info in infos:
-                lower = info.filename.lower()
-                if not lower.endswith((".xml", ".rels")):
-                    continue
-                payload = package.read(info)
-                folded = payload.lower()
-                if b"<!doctype" in folded or b"<!entity" in folded:
-                    raise MaintenanceAcceptanceUnsupported("Office 附件包含不安全 XML 声明")
-                try:
-                    root = ElementTree.fromstring(payload)
-                except ElementTree.ParseError as exc:
-                    raise MaintenanceAcceptanceUnsupported(
-                        "Office 附件包含损坏的 XML"
-                    ) from exc
-                if lower.endswith(".rels") and any(
-                    attribute.rsplit("}", 1)[-1].lower() == "targetmode"
-                    and str(value).strip().lower() == "external"
-                    for element in root.iter()
-                    for attribute, value in element.attrib.items()
-                ):
-                    raise MaintenanceAcceptanceUnsupported("Office 附件包含外部链接")
-    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError) as exc:
-        raise MaintenanceAcceptanceUnsupported("Office 附件内容损坏或格式不正确") from exc
-
-
 def validate_attachment(
     *,
     filename: str | None,
     mime_type: str | None,
     content: bytes,
 ) -> tuple[str, str, str]:
-    safe_name, extension, expected_mime = _safe_filename(filename)
-    actual_mime = str(mime_type or "").split(";", 1)[0].strip().lower()
-    if actual_mime != expected_mime:
-        raise MaintenanceAcceptanceUnsupported("附件扩展名与 MIME 类型不匹配")
-    if not content:
-        raise MaintenanceAcceptanceUnsupported("附件内容为空")
-    if len(content) > MAX_ACCEPTANCE_FILE_BYTES:
-        raise MaintenanceAcceptanceTooLarge("单个验收附件不得超过 20MB")
-
-    if extension == ".pdf":
-        folded = content.lower()
-        if not content.startswith(b"%PDF-") or b"%%EOF" not in content[-2048:]:
-            raise MaintenanceAcceptanceUnsupported("PDF 内容损坏或格式不正确")
-        if any(token in folded for token in _PDF_ACTIVE_TOKENS):
-            raise MaintenanceAcceptanceUnsupported("PDF 含脚本、启动动作或嵌入文件")
-    elif extension in {".docx", ".xlsx"}:
-        _assert_safe_zip(content, extension=extension)
-    else:
-        try:
-            with Image.open(io.BytesIO(content)) as image:
-                image.verify()
-            with Image.open(io.BytesIO(content)) as image:
-                if getattr(image, "n_frames", 1) != 1:
-                    raise MaintenanceAcceptanceUnsupported("不接受多帧图片附件")
-                if image.width <= 0 or image.height <= 0 or image.width * image.height > 40_000_000:
-                    raise MaintenanceAcceptanceUnsupported("图片像素尺寸异常")
-                expected_format = "PNG" if extension == ".png" else "JPEG"
-                if image.format != expected_format:
-                    raise MaintenanceAcceptanceUnsupported("图片内容与扩展名不匹配")
-        except (
-            Image.DecompressionBombError,
-            UnidentifiedImageError,
-            OSError,
-            ValueError,
-        ) as exc:
-            raise MaintenanceAcceptanceUnsupported("图片内容损坏或格式不正确") from exc
-    return safe_name, extension, expected_mime
+    """2026-08-26 客户口径：附件不做类型/内容限制——任何格式都可上传
+    （含带外部链接/宏的 Office 文件、扫描件等）。保留的防线只有：
+    文件名安全净化（路径穿越/控制字符）、非空、20MB 上限。
+    存储 MIME 取客户端申报值，缺失时回退 application/octet-stream。"""
+    try:
+        return validate_acceptance_attachment(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+    except AttachmentTooLarge as exc:
+        raise MaintenanceAcceptanceTooLarge(
+            "单个验收附件不得超过 20MB"
+        ) from exc
+    except AttachmentValidationError as exc:
+        raise MaintenanceAcceptanceUnsupported(str(exc)) from exc
 
 
 def _root() -> Path:
@@ -333,11 +206,28 @@ def _active_attachments(
     )
 
 
+def _uploader_names(db: Session, usernames: set[str]) -> dict[str, str]:
+    """用户名 → 姓名（2026-08-26 客户口径：附件列表显示上传人姓名；
+    无实名账号（如系统导入）回退用户名本身）。"""
+    if not usernames:
+        return {}
+    rows = db.execute(
+        select(SysUser.username, SysUser.display_name).where(
+            SysUser.username.in_(usernames),
+            SysUser.display_name.is_not(None),
+        )
+    ).all()
+    return {username: display_name for username, display_name in rows}
+
+
 def deliverable_dict(
     db: Session,
     row: MaintenanceAcceptanceDeliverable,
 ) -> dict:
     attachments = _active_attachments(db, row.deliverable_id)
+    names = _uploader_names(
+        db, {file.uploaded_by for _link, file in attachments if file.uploaded_by}
+    )
     return {
         "deliverable_id": row.deliverable_id,
         "project_id": row.project_id,
@@ -361,6 +251,7 @@ def deliverable_dict(
                 "size_bytes": file.size_bytes,
                 "sha256": file.sha256,
                 "uploaded_by": file.uploaded_by,
+                "uploaded_by_name": names.get(file.uploaded_by or "") or file.uploaded_by,
                 "uploaded_at": file.uploaded_at.isoformat(),
             }
             for _link, file in attachments
@@ -487,7 +378,7 @@ def upload_attachment(
     自动建交付行、自动挂项目，不做版本号/乐观锁（此前的版本握手只制造了
     version 0/1 跳变类 bug）。幂等由两道互补机制保证：客户端幂等键
     （可选）+ 行锁内同 sha256 内容去重（双击/超时重试不产生重复附件）。"""
-    safe_name, extension, safe_mime = validate_attachment(
+    safe_name, _extension, safe_mime = validate_attachment(
         filename=filename,
         mime_type=mime_type,
         content=content,
@@ -519,6 +410,9 @@ def upload_attachment(
     # 无则正常落库。保持「只传文件本身」口径，无需客户端幂等键。
     for _dup_link, duplicate in _active_attachments(db, deliverable.deliverable_id):
         if duplicate.sha256 == digest:
+            dup_name = _uploader_names(
+                db, {duplicate.uploaded_by} if duplicate.uploaded_by else set()
+            ).get(duplicate.uploaded_by or "", "")
             return {
                 "replayed": True,
                 "project_id": project_id,
@@ -529,12 +423,14 @@ def upload_attachment(
                 "mime_type": duplicate.mime_type,
                 "size_bytes": duplicate.size_bytes,
                 "sha256": duplicate.sha256,
+                "uploaded_by": duplicate.uploaded_by,
+                "uploaded_by_name": dup_name or duplicate.uploaded_by,
             }, None
     # 2026-08-24 客户拍板：提交即生效，无需独立审批。审批锁定随之取消——
     # 生效后仍可补充附件（走下方提交/版本链），完整操作留审计。
 
     file_id = str(uuid4())
-    object_key = f"maintenance_acceptance/{file_id[:2]}/{file_id}{extension}"
+    object_key = f"maintenance_acceptance/{file_id[:2]}/{file_id}"
     path = _resolved_object_path(object_key)
     file_row = BusinessFile(
         file_id=file_id,
@@ -558,6 +454,7 @@ def upload_attachment(
         created_by=operator,
     )
     deliverable.version += 1
+    operator_display = _uploader_names(db, {operator}).get(operator, "")
     result = {
         "replayed": False,
         "project_id": project_id,
@@ -568,6 +465,8 @@ def upload_attachment(
         "mime_type": safe_mime,
         "size_bytes": len(content),
         "sha256": digest,
+        "uploaded_by": operator,
+        "uploaded_by_name": operator_display or operator,
     }
     operation = MaintenanceAcceptanceOperation(
         operation_id=str(uuid4()),

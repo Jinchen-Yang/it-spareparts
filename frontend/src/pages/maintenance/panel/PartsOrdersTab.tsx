@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
@@ -15,6 +15,7 @@ import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip
 import {
   COST_CATEGORY_LEGEND,
   CostSourceTag,
+  type RegisterPanelRefresh,
   raw,
   readError,
   statText,
@@ -32,10 +33,14 @@ export function PartsOrdersTab({
   exportBase,
   canUpload,
   contractNos,
+  onChanged,
+  registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
   canUpload: boolean;
+  onChanged: () => Promise<boolean>;
+  registerRefresh: RegisterPanelRefresh;
   /** 项目全部 XSDD 合同号（聚合行供给）；多于一个时给出合同筛选（#39）。 */
   contractNos: string[];
 }) {
@@ -45,26 +50,58 @@ export function PartsOrdersTab({
   const [selectedOrderNo, setSelectedOrderNo] = useState<string | null>(null);
   const [lines, setLines] = useState<ProjectPartsRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestSeq = useRef(0);
 
   const loadOrders = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
+      const loadAllProjectOrders = async () => {
+        const pageSize = 200;
+        const all: BoardOrderRow[] = [];
+        let page = 1;
+        let total = 0;
+        do {
+          const response = await getBoardProjectOrders(projectId, {
+            page,
+            page_size: pageSize,
+          });
+          if (seq !== requestSeq.current) return all;
+          total = response.data.total;
+          all.push(...response.data.rows);
+          if (!response.data.rows.length) break;
+          page += 1;
+        } while (all.length < total);
+        return all;
+      };
       const [ordersResp, partsResp] = await Promise.all([
-        getBoardProjectOrders(projectId, { page_size: 200 }),
+        loadAllProjectOrders(),
         listProjectPartsRows(projectId),
       ]);
-      setOrders(ordersResp.data.rows);
+      if (seq !== requestSeq.current) return false;
+      setOrders(ordersResp);
       setLines(partsResp.rows);
+      return true;
     } catch (err) {
-      message.error(readError(err, "需求单/备件明细加载失败"));
+      if (seq === requestSeq.current) {
+        setOrders([]);
+        setLines([]);
+        message.error(readError(err, "需求单/备件明细加载失败"));
+      }
+      return false;
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
+    registerRefresh("parts-orders", loadOrders);
     void loadOrders();
-  }, [loadOrders]);
+    return () => {
+      requestSeq.current += 1;
+      registerRefresh("parts-orders", null);
+    };
+  }, [loadOrders, registerRefresh]);
 
   const shownOrders = contractFilter
     ? orders.filter((order) => order.order_no.includes(contractFilter)
@@ -87,8 +124,13 @@ export function PartsOrdersTab({
     {
       title: "已知申请估算成本(含税)",
       render: (_: unknown, order) =>
-        order.known_apply_cost_inc_tax.state === "ready"
-          ? String(order.known_apply_cost_inc_tax.value?.known_amount ?? "—")
+        ["ready", "partial", "stale"].includes(order.known_apply_cost_inc_tax.state)
+          ? (order.known_apply_cost_inc_tax.value?.quality === "incomplete"
+              && Number(order.known_apply_cost_inc_tax.value.coverage_pct ?? 0) === 0
+            ? (order.known_apply_cost_inc_tax.value.known_amount == null
+                ? "暂无可计算成本（无有效需求明细）"
+                : `暂无可计算成本（缺价 ${order.known_apply_cost_inc_tax.value.missing_lines} 行）`)
+            : `${String(order.known_apply_cost_inc_tax.value?.known_amount ?? "—")}${order.known_apply_cost_inc_tax.value?.quality === "incomplete" ? "（已知下限）" : ""}`)
           : statText(order.known_apply_cost_inc_tax),
     },
     {
@@ -118,6 +160,8 @@ export function PartsOrdersTab({
     { title: "维保单号", dataIndex: "order_no", width: 170, render: raw },
     { title: "需求数量", dataIndex: "qty", width: 90, render: raw },
     { title: "退货数量", dataIndex: "return_qty", width: 90, render: raw },
+    { title: "已返数量", dataIndex: "returned_qty", width: 90, render: raw },
+    { title: "待返数量", dataIndex: "pending_return_qty", width: 90, render: raw },
     {
       title: "未税单价",
       dataIndex: "unit_cost_ex_tax",
@@ -153,11 +197,8 @@ export function PartsOrdersTab({
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={async (file) => {
-          const result = await applyProjectMaster(projectId, file);
-          await loadOrders();      // 上传覆盖后立刻回读，页面不留旧值
-          return result;
-        }}
+        onApply={(file) => applyProjectMaster(projectId, file)}
+        onAfterApply={onChanged}
       />
       <Card
         size="small"
@@ -191,13 +232,16 @@ export function PartsOrdersTab({
             {selectedOrderNo ? `｜当前过滤：${selectedOrderNo}（再点单号取消）` : ""}
           </Text>
         </Space>
+        <Text type="secondary" style={{ display: "block", fontSize: 11.5 }}>
+          已返数量、待返数量是 WBDD 源表流转状态，仅作展示；净量和成本仍只按需求数量减退货数量。
+        </Text>
         <Table<ProjectPartsRow>
           rowKey="line_id"
           size="small"
           loading={loading}
           dataSource={shownLines}
           columns={lineColumns}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1380 }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
         />
       </Card>

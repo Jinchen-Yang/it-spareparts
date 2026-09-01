@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ from app.models.maintenance_project import MaintenanceProject
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_catalog as catalog
+from app.services import maintenance_project_operations as operations
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 
@@ -41,6 +42,7 @@ class StableProjectPatch(BaseModel):
 
     version: int = Field(ge=1)
     display_name: str | None = Field(default=None, max_length=256)
+    salesperson: str | None = Field(default=None, max_length=64)
     project_manager_id: str | None = Field(default=None, max_length=64)
     # 维保期限（#39/#51）：面板「编辑基本信息」可改起止日期
     period_from: date | None = None
@@ -143,6 +145,9 @@ def patch_stable_project(
     )
     try:
         payload = None
+        master_changed = False
+        project = None
+        state = None
         if updates:
             payload = catalog.update_project(
                 db,
@@ -154,10 +159,21 @@ def patch_stable_project(
             )
             if payload is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+            master_changed = payload["version"] != body.version
         if body.visible_usernames is not None:
             if not updates:
                 # viewer-only PATCH 也必须做乐观锁（评审阻塞点：陈旧提交静默
-                # 覆盖整份名单）——锁项目行并校验 version，与主档字段同口径。
+                # 覆盖整份名单）——按 state→project 锁序，与主档字段同口径。
+                exists = db.scalar(
+                    select(MaintenanceProject.project_id).where(
+                        MaintenanceProject.project_id == project_id
+                    )
+                )
+                if exists is None:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+                state = operations.lock_workbook_states(
+                    db, project_ids=[project_id]
+                )[project_id]
                 project = db.scalar(
                     select(MaintenanceProject)
                     .where(MaintenanceProject.project_id == project_id)
@@ -169,16 +185,34 @@ def patch_stable_project(
                     raise HTTPException(
                         status.HTTP_409_CONFLICT,
                         f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试")
-                payload = {
-                    **(payload or {}),
-                    "visible_usernames": assignments.sync_project_viewers(
-                        db,
-                        project_id=project_id,
-                        usernames=body.visible_usernames,
-                        operated_by=operated_by,
-                        reason=body.reason,
-                    ),
-                }
+            else:
+                # catalog.update_project 已在本事务按 state→project 持锁。
+                project = db.scalar(select(MaintenanceProject).where(
+                    MaintenanceProject.project_id == project_id
+                ))
+                state = operations.get_or_create_workbook_state(
+                    db, project_id=project_id, lock=True
+                )
+            viewers, viewers_changed = assignments.sync_project_viewers(
+                db,
+                project_id=project_id,
+                usernames=body.visible_usernames,
+                operated_by=operated_by,
+                reason=body.reason,
+            )
+            patch_changed = master_changed or viewers_changed
+            if patch_changed:
+                if not master_changed:
+                    project.version += 1
+                # catalog.update_project 已 bump 的路径在同一根事务内
+                # 会被 bump_locked_workbook_revision 去重；因此两类变更
+                # 无论如何组合都是真实变更 +1、全 no-op +0。
+                operations.bump_locked_workbook_revision(db, state=state)
+                db.flush()
+            payload = {
+                **catalog.project_dict(project),
+                "visible_usernames": viewers,
+            }
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
         db.commit()
@@ -365,6 +399,7 @@ def search_stable_project_directory(
 
 @router.get("/{project_id}")
 def stable_project_overview(
+    response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
     as_of: date | None = Query(None),
     db: Session = Depends(get_db),
@@ -373,6 +408,7 @@ def stable_project_overview(
     _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
     effective_as_of = as_of or business_today()
     record_access_log(
         ctx,

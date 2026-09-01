@@ -15,7 +15,7 @@ from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.config import MAINT_EXPENSE_ACTIVE_STATUS
@@ -52,11 +52,161 @@ def _latest_batch_ids(rows: list[tuple], file_hash_pos: int, at_pos: int) -> dic
     return latest
 
 
+def _latest_bxd_heads(
+    *, page_keys: list[str] | None = None, alias: str,
+):
+    """Latest applied BXD head timestamp per ``(bxd_no, file_hash)``.
+
+    Both candidate selection and detail loading must start from heads.  If the
+    newest retransmission contains a head with zero detail lines, deriving
+    ``latest`` from an inner-joined line set would silently fall back to an old
+    snapshot.
+    """
+    statement = (
+        select(
+            MaintenanceDocHeadRow.head_no.label("bxd_no"),
+            MaintenanceDocImportBatch.file_hash.label("file_hash"),
+            func.max(MaintenanceDocImportBatch.applied_at).label("applied_at"),
+        )
+        .join(
+            MaintenanceDocImportBatch,
+            MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id,
+        )
+        .where(
+            MaintenanceDocHeadRow.head_no.is_not(None),
+            MaintenanceDocImportBatch.doc_type == "bxd_expense",
+            MaintenanceDocImportBatch.status == "applied",
+        )
+    )
+    if page_keys is not None:
+        statement = statement.where(MaintenanceDocHeadRow.head_no.in_(page_keys))
+    return statement.group_by(
+        MaintenanceDocHeadRow.head_no,
+        MaintenanceDocImportBatch.file_hash,
+    ).subquery(alias)
+
+
+def _candidate_bxd_page(
+    db: Session, *, limit: int | None, offset: int,
+) -> list[str]:
+    """Page the effective three-source key union in SQL before loading details.
+
+    “Effective” deliberately mirrors the detail rules below: for each
+    ``(bxd_no, file_hash)`` only batches tied at the latest ``applied_at`` are
+    eligible, and an issue-free row/line must exist.  This prevents an invalid
+    retransmission from falling back to an older valid snapshot while also
+    avoiding the old full-table materialisation for a one-row page.
+    """
+    ledger_latest = (
+        select(
+            MaintenanceLedgerExpenseRow.bxd_no.label("bxd_no"),
+            MaintenanceLedgerImportBatch.file_hash.label("file_hash"),
+            func.max(MaintenanceLedgerImportBatch.applied_at).label("applied_at"),
+        )
+        .join(
+            MaintenanceLedgerImportBatch,
+            MaintenanceLedgerImportBatch.batch_id
+            == MaintenanceLedgerExpenseRow.batch_id,
+        )
+        .where(
+            MaintenanceLedgerExpenseRow.bxd_no.is_not(None),
+            MaintenanceLedgerImportBatch.status == "applied",
+        )
+        .group_by(
+            MaintenanceLedgerExpenseRow.bxd_no,
+            MaintenanceLedgerImportBatch.file_hash,
+        )
+        .subquery("expense_reconcile_latest_ledger")
+    )
+    ledger_keys = (
+        select(MaintenanceLedgerExpenseRow.bxd_no.label("bxd_no"))
+        .join(
+            MaintenanceLedgerImportBatch,
+            MaintenanceLedgerImportBatch.batch_id
+            == MaintenanceLedgerExpenseRow.batch_id,
+        )
+        .join(
+            ledger_latest,
+            and_(
+                ledger_latest.c.bxd_no == MaintenanceLedgerExpenseRow.bxd_no,
+                ledger_latest.c.file_hash
+                == MaintenanceLedgerImportBatch.file_hash,
+                ledger_latest.c.applied_at
+                == MaintenanceLedgerImportBatch.applied_at,
+            ),
+        )
+        .where(
+            MaintenanceLedgerImportBatch.status == "applied",
+            func.coalesce(
+                func.cardinality(MaintenanceLedgerExpenseRow.issues), 0,
+            ) == 0,
+        )
+        .distinct()
+    )
+
+    bxd_latest = _latest_bxd_heads(
+        alias="expense_reconcile_latest_bxd",
+    )
+    bxd_keys = (
+        select(MaintenanceDocHeadRow.head_no.label("bxd_no"))
+        .join(
+            MaintenanceDocLineRow,
+            MaintenanceDocLineRow.head_row_id == MaintenanceDocHeadRow.row_id,
+        )
+        .join(
+            MaintenanceDocImportBatch,
+            MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id,
+        )
+        .join(
+            bxd_latest,
+            and_(
+                bxd_latest.c.bxd_no == MaintenanceDocHeadRow.head_no,
+                bxd_latest.c.file_hash == MaintenanceDocImportBatch.file_hash,
+                bxd_latest.c.applied_at == MaintenanceDocImportBatch.applied_at,
+            ),
+        )
+        .where(
+            MaintenanceDocImportBatch.doc_type == "bxd_expense",
+            MaintenanceDocImportBatch.status == "applied",
+            func.coalesce(func.cardinality(MaintenanceDocHeadRow.issues), 0) == 0,
+            func.coalesce(func.cardinality(MaintenanceDocLineRow.issues), 0) == 0,
+        )
+        .distinct()
+    )
+
+    formal_keys = (
+        select(FProjectExpense.bxd_no.label("bxd_no"))
+        .join(SysImportBatch, SysImportBatch.id == FProjectExpense.import_batch_id)
+        .where(
+            FProjectExpense.bxd_no.is_not(None),
+            FProjectExpense.data_status == MAINT_EXPENSE_ACTIVE_STATUS,
+            SysImportBatch.status == "success",
+        )
+        .distinct()
+    )
+    candidates = ledger_keys.union(bxd_keys, formal_keys).subquery(
+        "expense_reconcile_candidates"
+    )
+    statement = (
+        select(candidates.c.bxd_no)
+        .order_by(candidates.c.bxd_no)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
+    return list(db.scalars(statement))
+
+
 def expense_reconcile_rows(
     db: Session, *, limit: int | None = None, offset: int = 0
 ) -> list[dict]:
     """三源全集逐费用单号对账（台账↔正式为结论，BXD 为证据）。"""
-    # 台账：已应用批次、无 issue 行；同文件重传取最新批次
+    page_keys = _candidate_bxd_page(db, limit=limit, offset=offset)
+    if not page_keys:
+        return []
+
+    # 台账：已应用批次、无 issue 行；同文件重传取最新批次。这里只取 SQL
+    # 已分页出来的 key，避免小页请求扫描并物化整个历史。
     ledger_rows = db.execute(
         select(
             MaintenanceLedgerExpenseRow.bxd_no,
@@ -74,6 +224,7 @@ def expense_reconcile_rows(
         )
         .where(
             MaintenanceLedgerExpenseRow.bxd_no.is_not(None),
+            MaintenanceLedgerExpenseRow.bxd_no.in_(page_keys),
             MaintenanceLedgerImportBatch.status == "applied",
         )
     ).all()
@@ -101,6 +252,10 @@ def expense_reconcile_rows(
             ledger_projects[bxd_no] = project_name
 
     # BXD：已应用批次、头/明细无 issue；同文件重传取最新批次
+    latest_bxd_page = _latest_bxd_heads(
+        page_keys=page_keys,
+        alias="expense_reconcile_latest_bxd_page",
+    )
     bxd_rows = db.execute(
         select(
             MaintenanceDocHeadRow.head_no,
@@ -119,10 +274,21 @@ def expense_reconcile_rows(
             MaintenanceDocImportBatch,
             MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id,
         )
+        .join(
+            latest_bxd_page,
+            and_(
+                latest_bxd_page.c.bxd_no == MaintenanceDocHeadRow.head_no,
+                latest_bxd_page.c.file_hash
+                == MaintenanceDocImportBatch.file_hash,
+                latest_bxd_page.c.applied_at
+                == MaintenanceDocImportBatch.applied_at,
+            ),
+        )
         .where(
             MaintenanceDocImportBatch.doc_type == "bxd_expense",
             MaintenanceDocImportBatch.status == "applied",
             MaintenanceDocHeadRow.head_no.is_not(None),
+            MaintenanceDocHeadRow.head_no.in_(page_keys),
         )
     ).all()
     latest_bxd = _latest_batch_ids(
@@ -155,6 +321,7 @@ def expense_reconcile_rows(
         )
         .where(
             FProjectExpense.bxd_no.is_not(None),
+            FProjectExpense.bxd_no.in_(page_keys),
             FProjectExpense.data_status == MAINT_EXPENSE_ACTIVE_STATUS,
         )
     ).all()
@@ -172,13 +339,8 @@ def expense_reconcile_rows(
         elif not facts["has_null"]:
             facts["amount"] = (facts["amount"] or Decimal("0")) + amount_inc_tax
 
-    keys = sorted(set(ledger_facts) | set(bxd_facts) | set(formal_facts))
-    if offset:
-        keys = keys[offset:]
-    if limit is not None:
-        keys = keys[:limit]
     result: list[dict] = []
-    for bxd_no in keys:
+    for bxd_no in page_keys:
         ledger_fact = ledger_facts.get(bxd_no)
         bxd_fact = bxd_facts.get(bxd_no)
         formal_fact = formal_facts.get(bxd_no)

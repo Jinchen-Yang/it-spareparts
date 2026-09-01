@@ -39,7 +39,13 @@ _WAREHOUSE_MOVEMENT_MAP = {
     "return": "return_registration",
 }
 MAX_COST_REFERENCE_SAMPLES_PER_LINE = 1_000
-_COST_SOURCES = {"direct_purchase", "purchase_window", "sales_window", "manual"}
+_COST_SOURCES = {
+    "maint_demand",
+    "direct_purchase",
+    "purchase_window",
+    "sales_window",
+    "manual",
+}
 _WINDOW_COST_SOURCES = {"purchase_window", "sales_window"}
 SITE_ISSUE_COST_RESOLUTION_FIELDS = (
     "cost_amount_ex_tax",
@@ -415,7 +421,11 @@ def validate_site_issue_cost_evidence(row: Mapping[str, Any]) -> None:
     ):
         raise MigrationControlError("成本样本数量或稳定编号不一致")
 
-    expected_side = "sales" if source == "sales_window" else "purchase"
+    expected_side = (
+        "maint"
+        if source == "maint_demand"
+        else "sales" if source == "sales_window" else "purchase"
+    )
     for index, sample in enumerate(raw_samples, start=1):
         if not isinstance(sample, Mapping):
             raise MigrationControlError(f"成本样本 {index} 结构无效")
@@ -423,18 +433,23 @@ def validate_site_issue_cost_evidence(row: Mapping[str, Any]) -> None:
             sample.get("sample_id"), f"成本样本 {index} 稳定编号", max_length=128
         )
         evidence_ids.append(sample_id)
-        if not sample_id.startswith(f"{expected_side}:"):
+        if source == "maint_demand":
+            source_line_id = _required_text(
+                sample.get("source_line_id"),
+                f"成本样本 {index} 需求明细编号",
+                max_length=80,
+            )
+            if sample_id != f"maintenance-demand:{source_line_id}":
+                raise MigrationControlError(
+                    f"成本样本 {index} 需求明细稳定编号不一致"
+                )
+        elif not sample_id.startswith(f"{expected_side}:"):
             raise MigrationControlError(f"成本样本 {index} 来源侧不一致")
         _required_text(
             sample.get("document_no"), f"成本样本 {index} 单据号", max_length=128
         )
         sample_quantity = _positive_decimal(
             sample.get("quantity"), f"成本样本 {index} 数量", upper=_QTY_MAX_EXCLUSIVE
-        )
-        raw_unit_price = _positive_decimal(
-            sample.get("unit_price_raw"),
-            f"成本样本 {index} 原始单价",
-            upper=_MONEY_MAX_EXCLUSIVE,
         )
         sample_unit_ex = _positive_decimal(
             sample.get("unit_price_ex_tax"),
@@ -444,17 +459,32 @@ def validate_site_issue_cost_evidence(row: Mapping[str, Any]) -> None:
         tax_conversion = sample.get("tax_conversion")
         if tax_conversion not in {"none", "divide_1.13"}:
             raise MigrationControlError(f"成本样本 {index} 税额换算无效")
+        if source == "maint_demand" and tax_conversion != "none":
+            raise MigrationControlError(f"成本样本 {index} 需求单价不得税额换算")
         if expected_side == "sales" and tax_conversion != "divide_1.13":
             raise MigrationControlError(f"成本样本 {index} 销售价格必须按含税价换算")
-        expected_sample_unit_ex = (
-            raw_unit_price / tax_policy.TAX_FACTOR
-            if tax_conversion == "divide_1.13"
-            else _money(raw_unit_price, f"成本样本 {index} 原始未税单价")
-        )
-        if source == "direct_purchase":
-            expected_sample_unit_ex = _money(
-                expected_sample_unit_ex, f"成本样本 {index} 直连采购未税单价"
+        if source == "maint_demand":
+            if sample.get("unit_price_raw") not in (None, ""):
+                raise MigrationControlError(
+                    f"成本样本 {index} 需求单价不得伪装成采购/销售原价"
+                )
+            expected_sample_unit_ex = sample_unit_ex
+        else:
+            raw_unit_price = _positive_decimal(
+                sample.get("unit_price_raw"),
+                f"成本样本 {index} 原始单价",
+                upper=_MONEY_MAX_EXCLUSIVE,
             )
+            expected_sample_unit_ex = (
+                raw_unit_price / tax_policy.TAX_FACTOR
+                if tax_conversion == "divide_1.13"
+                else _money(raw_unit_price, f"成本样本 {index} 原始未税单价")
+            )
+            if source == "direct_purchase":
+                expected_sample_unit_ex = _money(
+                    expected_sample_unit_ex,
+                    f"成本样本 {index} 直连采购未税单价",
+                )
         if sample_unit_ex != expected_sample_unit_ex:
             raise MigrationControlError(f"成本样本 {index} 未税单价无法由原始单价复算")
         normalized_samples.append((sample_quantity, sample_unit_ex))
@@ -462,7 +492,10 @@ def validate_site_issue_cost_evidence(row: Mapping[str, Any]) -> None:
             sample.get("document_date"), f"成本样本 {index} 单据日期"
         )
         raw_distance = sample.get("distance_days")
-        if source in _WINDOW_COST_SOURCES:
+        if source == "maint_demand":
+            if raw_distance not in (None, ""):
+                raise MigrationControlError("维保需求样本不得携带价格窗口距离")
+        elif source in _WINDOW_COST_SOURCES:
             if sample_date is None:
                 raise MigrationControlError(f"成本样本 {index} 缺少单据日期")
             try:
@@ -493,7 +526,31 @@ def validate_site_issue_cost_evidence(row: Mapping[str, Any]) -> None:
     window_from = _optional_date(row.get("reference_window_from"), "成本样本窗口起点")
     window_to = _optional_date(row.get("reference_window_to"), "成本样本窗口终点")
     expected_unit_cost_ex: Decimal
-    if source == "direct_purchase":
+    if source == "maint_demand":
+        if sample_count == 0:
+            raise MigrationControlError("维保需求取价缺少可复算样本")
+        if row.get("reference_side") != "maint":
+            raise MigrationControlError("维保需求取价 reference_side 无效")
+        if window_from is not None or window_to is not None:
+            raise MigrationControlError("维保需求取价不得携带采购/销售价格窗口")
+        if row.get("linked_purchase_line_id") is not None:
+            raise MigrationControlError("维保需求取价不得绑定采购明细")
+        total_sample_quantity = sum(
+            (quantity for quantity, _unit_price in normalized_samples),
+            start=Decimal("0"),
+        )
+        expected_unit_cost_ex = _money(
+            sum(
+                (
+                    quantity * unit_price
+                    for quantity, unit_price in normalized_samples
+                ),
+                start=Decimal("0"),
+            )
+            / total_sample_quantity,
+            "维保需求数量加权未税成本单价",
+        )
+    elif source == "direct_purchase":
         linked_id = row.get("linked_purchase_line_id")
         try:
             normalized_linked_id = int(linked_id)

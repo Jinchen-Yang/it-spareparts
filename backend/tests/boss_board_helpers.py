@@ -43,23 +43,36 @@ def client_for(db, *, username: str, role: str = "readonly",
     return client
 
 
-def boss_client(db, username="board-boss", *, with_cost: bool = True) -> TestClient:
-    """老板：全范围；with_cost=False 用于隔离「成本维度」的无侧信道断言。
+def boss_client(db, username="board-boss", *, with_cost: bool = True,
+                with_profit: bool = True) -> TestClient:
+    """老板：全范围；成本/利润维度可独立开关，用于无侧信道断言。
 
     注意 role 用 readonly 而非 boss —— boss/admin 在 _allowed_scope 中恒为全范围，
-    但成本可见性仍由 data_purchase_cost 决定；这里显式给 page_maintenance_boss
-    以取得全范围，同时让成本组可关，从而单独验证成本维度。
+    但金额可见性由 data_purchase_cost / data_profit 决定；这里显式给
+    page_maintenance_boss 以取得全范围，同时让两组数据权限可独立关断。
     """
     return client_for(db, username=username, role="readonly", overrides={
         "page_maintenance": True, "page_maintenance_boss": True,
         "data_purchase_cost": with_cost,
+        "data_profit": with_profit,
     })
 
 
-def manager_client(db, username="board-manager", *, with_cost=True) -> TestClient:
-    """项目经理：本人范围（无 page_maintenance_boss）。"""
+def manager_client(db, username="board-manager", *, with_cost=True,
+                   with_profit=True) -> TestClient:
+    """项目经理：本人范围（无 page_maintenance_boss）；金额权限可独立开关。"""
     return client_for(db, username=username, role="readonly", overrides={
-        "page_maintenance": True, "data_purchase_cost": with_cost,
+        "page_maintenance": True,
+        "data_purchase_cost": with_cost,
+        "data_profit": with_profit,
+    })
+
+
+def purchaser_client(db, username="board-purchaser", *, with_cost=True) -> TestClient:
+    """真实采购员：有成本无利润（data_purchase_cost=True, data_profit=False）。"""
+    return client_for(db, username=username, role="purchaser", overrides={
+        "page_maintenance": True,
+        "data_purchase_cost": with_cost,
     })
 
 
@@ -68,8 +81,16 @@ def no_access_client(db, username="board-none") -> TestClient:
 
 
 def make_project(db, code="合成项目A", lifecycle="ongoing") -> MaintenanceProject:
+    period_from = date(2020, 1, 1) if lifecycle in {"ongoing", "ended"} else None
+    period_to = (
+        date(2099, 12, 31)
+        if lifecycle == "ongoing"
+        else date(2020, 12, 31) if lifecycle == "ended" else None
+    )
     proj = MaintenanceProject(
         project_id=str(uuid.uuid4()), project_code=code, display_name=code,
+        period_from=period_from, period_to=period_to,
+        # 兼容快照也保留，测试数据同时满足新旧 schema 读者。
         lifecycle_status=lifecycle)
     db.add(proj)
     db.commit()
@@ -121,6 +142,9 @@ def set_costs(db, *, source="direct", amount="100.00"):
     lines = db.execute(select(FMaintenanceLine)).scalars().all()
     for ln in lines:
         ln.cost_source = source
+        # normalized 双税金额只有在 legacy 成本事实本身完整时才是已知成本；夹具
+        # 模拟 recompute 成功结果，不能只填展示列而留下一个现实中不可能的半成品。
+        ln.cost_amount = Decimal(amount)
         ln.cost_amount_inc_tax = Decimal(amount)
         ln.cost_tax_basis = "inc"
         ln.confidence = "high"

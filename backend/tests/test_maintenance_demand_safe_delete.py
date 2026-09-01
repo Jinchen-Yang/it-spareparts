@@ -881,6 +881,91 @@ def test_restore_rejects_overlong_reason_without_reflection_log_or_audit(db, cap
     assert all(sentinel not in str(row.detail) for row in access_rows)
 
 
+def test_restored_demand_can_be_voided_again_without_tombstone_pk_collision(db):
+    raw_id = _seed_demands(db, count=1, lines_each=1)[0]
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    first = maintenance_demands.void_fast(
+        db,
+        source_order_ids=[raw_id],
+        reason="首次作废",
+        operated_by="demand-delete-admin",
+        idempotency_key="restore-revoid-first",
+        now=now,
+    )
+    db.commit()
+    first_intent_id = first["intent_id"]
+    maintenance_demands.restore_demand(
+        db,
+        source_order_id=raw_id,
+        reason="确认恢复",
+        operated_by="demand-delete-admin",
+        now=now + timedelta(minutes=1),
+    )
+    db.commit()
+
+    second = maintenance_demands.void_fast(
+        db,
+        source_order_ids=[raw_id],
+        reason="恢复后再次作废",
+        operated_by="demand-delete-admin",
+        idempotency_key="restore-revoid-second",
+        now=now + timedelta(minutes=2),
+    )
+    db.commit()
+    assert second["voided"] == 1 and second["already_voided"] == 0
+    tombstone = db.get(MaintenanceDemandTombstone, raw_id)
+    assert tombstone.delete_intent_id != first_intent_id
+    assert tombstone.delete_intent_id == second["intent_id"]
+    assert tombstone.deleted_by == "demand-delete-admin"
+    assert tombstone.delete_reason == "恢复后再次作废"
+    assert tombstone.restored_by is None
+    assert tombstone.restore_reason is None
+    assert tombstone.restored_at is None
+    assert tombstone.version == 3
+
+
+def test_void_fast_old_idempotency_key_cannot_fake_success_after_restore(db):
+    raw_id = _seed_demands(db, count=1, lines_each=1)[0]
+    now = datetime(2026, 8, 9, 13, 0, tzinfo=timezone.utc)
+    maintenance_demands.void_fast(
+        db,
+        source_order_ids=[raw_id],
+        reason="同键状态测试",
+        operated_by="demand-delete-admin",
+        idempotency_key="restore-revoid-same-key",
+        now=now,
+    )
+    db.commit()
+    maintenance_demands.restore_demand(
+        db,
+        source_order_id=raw_id,
+        reason="恢复后验证旧键",
+        operated_by="demand-delete-admin",
+        now=now + timedelta(minutes=1),
+    )
+    db.commit()
+
+    with pytest.raises(
+        maintenance_demands.DeleteIntentConflict,
+        match="历史作废已被恢复",
+    ):
+        maintenance_demands.void_fast(
+            db,
+            source_order_ids=[raw_id],
+            reason="同键状态测试",
+            operated_by="demand-delete-admin",
+            idempotency_key="restore-revoid-same-key",
+            now=now + timedelta(minutes=2),
+        )
+    db.rollback()
+
+    tombstone = db.get(MaintenanceDemandTombstone, raw_id)
+    assert tombstone.restored_at is not None
+    assert db.scalar(select(func.count()).select_from(
+        MaintenanceDemandDeleteIntent
+    )) == 1
+
+
 def test_restore_rejects_overlong_source_id_without_reflection_or_audit(db, caplog):
     username = "demand-restore-private-source-admin"
     client = _admin_client(db, username=username)

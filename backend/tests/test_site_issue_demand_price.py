@@ -5,14 +5,19 @@
 """
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from app.etl import loader
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceDemandDeleteIntent,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
@@ -24,6 +29,7 @@ from app.models.maintenance_source_assignment import (
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysImportBatch
 from app.services import maintenance_consumption_cost as mcc
+from app.services import maintenance_cost
 from tests import factories as f
 
 
@@ -102,6 +108,30 @@ def _purchase_price(db, *, part, unit_price, order_date):
         qty=Decimal("1"), unit_price=Decimal(unit_price),
         import_batch_id=batch.id))
     db.commit()
+
+
+def _append_wbdd_price_line(db, *, first_line, amount_ex, qty, suffix):
+    """Append another priced line to the same demand order and PN."""
+    line = FMaintenanceLine(
+        raw_line_id=f"{first_line.raw_line_id}-{suffix}",
+        order_id=first_line.order_id,
+        line_no=(first_line.line_no or 1) + 1,
+        part_id=first_line.part_id,
+        pn_std=first_line.pn_std,
+        pn_raw=first_line.pn_raw,
+        qty=Decimal(qty),
+        return_qty=Decimal("0"),
+        cost_source="direct",
+        cost_amount_ex_tax=Decimal(amount_ex),
+        cost_amount_inc_tax=(Decimal(amount_ex) * Decimal("1.13")).quantize(
+            Decimal("0.01")
+        ),
+        import_batch_id=first_line.import_batch_id,
+        is_active=True,
+    )
+    db.add(line)
+    db.commit()
+    return line
 
 
 def _issue_line(db, *, project, part):
@@ -254,3 +284,167 @@ def test_resolve_line_single_path_also_uses_demand_layer(db):
     db.refresh(line)
     assert line.cost_source == "maint_demand"
     assert line.unit_cost_ex_tax == Decimal("355.95")
+
+
+def test_same_order_same_part_uses_all_lines_weighted_with_stable_evidence(db):
+    project = _project(db, "同单同型号加权项目")
+    part = _part(db, "PN-DEM-WEIGHT")
+    first = _wbdd_price(
+        db,
+        project=project,
+        pn=part.pn_std,
+        unit_ex="200",
+        qty="2",
+        order_no="WBDD-WEIGHT",
+        order_date=date(2026, 8, 1),
+    )
+    second = _append_wbdd_price_line(
+        db, first_line=first, amount_ex="300", qty="1", suffix="L2"
+    )
+    issue, line = _issue_line(db, project=project, part=part)
+    issue.issue_no = "WBDD-WEIGHT"
+    db.commit()
+
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+
+    # (200 + 300) / (2 + 1), rounded to cents.  Evidence identities must be
+    # source-stable raw ids, never database PKs or the mutable part id.
+    assert line.unit_cost_ex_tax == Decimal("166.67")
+    assert line.reference_sample_count == 2
+    assert line.reference_sample_ids == [
+        f"maintenance-demand:{second.raw_line_id}",
+        f"maintenance-demand:{first.raw_line_id}",
+    ]
+
+
+def test_exact_source_line_cannot_cross_project_ownership(db):
+    project_a = _project(db, "需求证据项目A")
+    project_b = _project(db, "需求证据项目B")
+    part = _part(db, "PN-DEM-SCOPE")
+    foreign = _wbdd_price(
+        db, project=project_a, pn=part.pn_std, unit_ex="777",
+        order_no="WBDD-A", order_date=date(2026, 8, 2),
+    )
+    _wbdd_price(
+        db, project=project_b, pn=part.pn_std, unit_ex="123",
+        order_no="WBDD-B", order_date=date(2026, 8, 3),
+    )
+    issue, line = _issue_line(db, project=project_b, part=part)
+    line.source_line_id = foreign.raw_line_id
+    db.commit()
+
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+
+    assert line.unit_cost_ex_tax == Decimal("123.00")
+    assert line.reference_sample_ids != [
+        f"maintenance-demand:{foreign.raw_line_id}"
+    ]
+
+
+def test_inactive_demand_header_is_not_price_evidence(db, monkeypatch):
+    monkeypatch.setattr(mcc.config, "ACTIVE_STATUS_ONLY", True)
+    project = _project(db, "无效需求单排除项目")
+    part = _part(db, "PN-DEM-INACTIVE")
+    demand = _wbdd_price(
+        db, project=project, pn=part.pn_std, unit_ex="999",
+        order_no="WBDD-INACTIVE", order_date=date(2026, 8, 2),
+    )
+    order = db.get(FMaintenanceOrder, demand.order_id)
+    order.data_status = "已作废"
+    _purchase_price(db, part=part, unit_price="88", order_date=date(2026, 8, 9))
+    issue, line = _issue_line(db, project=project, part=part)
+
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost_ex_tax == Decimal("88.00")
+
+
+def test_cutover_tombstone_excludes_demand_price(db, monkeypatch):
+    from app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", True)
+    project = _project(db, "墓碑需求单排除项目")
+    part = _part(db, "PN-DEM-TOMBSTONE")
+    demand = _wbdd_price(
+        db, project=project, pn=part.pn_std, unit_ex="999",
+        order_no="WBDD-TOMBSTONE", order_date=date(2026, 8, 2),
+    )
+    order = db.get(FMaintenanceOrder, demand.order_id)
+    now = datetime.now(timezone.utc)
+    intent = MaintenanceDemandDeleteIntent(
+        intent_id=str(uuid.uuid4()),
+        idempotency_key=f"site-price-{uuid.uuid4()}",
+        request_digest="a" * 64,
+        selection_digest="b" * 64,
+        status="executed",
+        reason="测试墓碑",
+        operated_by="tester",
+        header_count=1,
+        line_count=1,
+        created_at=now,
+        expires_at=now,
+    )
+    db.add(intent)
+    db.flush()
+    db.add(MaintenanceDemandTombstone(
+        source_order_id=order.raw_order_id,
+        delete_intent_id=intent.intent_id,
+        version_digest="c" * 64,
+        deleted_by="tester",
+        delete_reason="测试墓碑",
+        deleted_at=now,
+        version=1,
+    ))
+    _purchase_price(db, part=part, unit_price="66", order_date=date(2026, 8, 9))
+    issue, line = _issue_line(db, project=project, part=part)
+
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    db.refresh(line)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost_ex_tax == Decimal("66.00")
+
+
+def test_as_of_excludes_future_demand_evidence(db):
+    project = _project(db, "需求证据快照项目")
+    part = _part(db, "PN-DEM-ASOF")
+    old = _wbdd_price(
+        db, project=project, pn=part.pn_std, unit_ex="100",
+        order_no="WBDD-ASOF-OLD", order_date=date(2026, 8, 1),
+    )
+    future = _wbdd_price(
+        db, project=project, pn=part.pn_std, unit_ex="900",
+        order_no="WBDD-ASOF-FUTURE", order_date=date(2026, 8, 9),
+    )
+    issue, line = _issue_line(db, project=project, part=part)
+
+    mcc.resolve_lines(
+        db,
+        lines=[(issue.issue_date, line)],
+        as_of=date(2026, 8, 5),
+    )
+    db.commit()
+    db.refresh(line)
+    assert line.unit_cost_ex_tax == Decimal("100.00")
+    assert line.reference_sample_ids == [f"maintenance-demand:{old.raw_line_id}"]
+    assert f"maintenance-demand:{future.raw_line_id}" not in line.reference_sample_ids
+
+
+def test_global_cost_recompute_skips_archived_site_issue_projects(db):
+    """Archived historical issues must not make every later import/recompute fail."""
+    project = _project(db, "已归档领用历史项目")
+    part = _part(db, "PN-DEM-ARCHIVED")
+    _issue_line(db, project=project, part=part)
+    project.is_active = False
+    db.commit()
+
+    result = maintenance_cost.recompute(db, commit=False)
+
+    assert result["site_projects_repriced"] == 0

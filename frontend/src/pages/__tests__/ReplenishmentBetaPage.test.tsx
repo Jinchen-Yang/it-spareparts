@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,8 +9,10 @@ const getApplication = vi.fn();
 const getProjects = vi.fn();
 const getCartDraft = vi.fn();
 const replaceCartDraft = vi.fn();
+const deleteCartDraft = vi.fn();
 const submitCartDraft = vi.fn();
 const applyRevision = vi.fn();
+const downloadWorkbook = vi.fn();
 
 vi.mock("../../api/replenishment", () => ({
   getReplenishmentCapabilities: (...args: unknown[]) => getCapabilities(...args),
@@ -21,9 +23,9 @@ vi.mock("../../api/replenishment", () => ({
   getReplenishmentCartDraft: (...args: unknown[]) => getCartDraft(...args),
   replaceReplenishmentCartDraft: (...args: unknown[]) => replaceCartDraft(...args),
   submitReplenishmentCartDraft: (...args: unknown[]) => submitCartDraft(...args),
-  deleteReplenishmentCartDraft: vi.fn(),
+  deleteReplenishmentCartDraft: (...args: unknown[]) => deleteCartDraft(...args),
   applyReplenishmentRevision: (...args: unknown[]) => applyRevision(...args),
-  downloadSystemScreeningWorkbook: vi.fn(),
+  downloadSystemScreeningWorkbook: (...args: unknown[]) => downloadWorkbook(...args),
 }));
 
 import ReplenishmentBetaPage from "../ReplenishmentBetaPage";
@@ -121,6 +123,35 @@ const submittedApplication = {
   }],
 };
 
+const needsRevisionApplication = {
+  ...submittedApplication,
+  application_id: "app-needs-revision-readonly",
+  application_no: "BLK-20260831-READONLY",
+  status: "needs_revision",
+  stage: "needs_revision",
+  version: 2,
+  versions: [{
+    ...submittedApplication.versions[0],
+    lines: [{
+      ...submittedApplication.versions[0].lines[0],
+      review: { decision: "rejected", reason: "no_purchase_or_sales_in_182_days" },
+      screening: {
+        ...submittedApplication.versions[0].lines[0].screening,
+        anomaly_count: 1,
+        recommendations: [{
+          part_id: 8,
+          pn_std: "POOL-PN-READONLY",
+          description: "只读推荐 PN",
+          pool_group_id: 1,
+          pool_name: "测试池",
+          score: 0.9,
+          match_reason: "同池相似",
+        }],
+      },
+    }],
+  }],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   getCapabilities.mockResolvedValue({ data: capabilities });
@@ -129,9 +160,18 @@ beforeEach(() => {
     data: { items: [], total: 0, page: 1, page_size: 20 },
   });
   getApplication.mockReset();
+  getCartDraft.mockReset();
   getCartDraft.mockResolvedValue({ data: { draft: null } });
-  replaceCartDraft.mockResolvedValue({ data: { draft: { version: 1 } } });
+  replaceCartDraft.mockResolvedValue({
+    data: {
+      draft: {
+        version: 1,
+        client_request_id: "cart-submit-request-001",
+      },
+    },
+  });
   submitCartDraft.mockReset();
+  downloadWorkbook.mockReset();
   searchCatalog.mockResolvedValue({
     data: { total: 1, page: 1, page_size: 20, items: [noPoolPart] },
   });
@@ -164,11 +204,458 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(getProjects).not.toHaveBeenCalled();
   });
 
+  it("没有创建权限时仍可按项目查看价格、云端草稿和本人历史，写入口保持只读", async () => {
+    getCapabilities.mockResolvedValueOnce({
+      data: { ...capabilities, can_create: false },
+    });
+    getCartDraft.mockResolvedValueOnce({
+      data: {
+        draft: {
+          draft_id: "draft-readonly-navigation",
+          project_id: project.project_id,
+          request_note: "可查看的云端草稿",
+          client_request_id: "draft-readonly-navigation-request",
+          version: 3,
+          created_at: "2026-08-30T00:00:00Z",
+          updated_at: "2026-08-30T01:00:00Z",
+          lines: [{
+            draft_line_id: "draft-line-readonly-navigation",
+            line_no: 1,
+            part_id: noPoolPart.part_id,
+            pn_std: noPoolPart.pn_std,
+            description: noPoolPart.description,
+            brand: null,
+            unit: noPoolPart.unit,
+            quantity: 2,
+            special_note: "只读行",
+          }],
+        },
+      },
+    });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    expect(await screen.findByText("NO-POOL-001")).toBeInTheDocument();
+    expect(screen.getAllByText("半年内无有效样本")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /申请记录/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /加入申请/ })).toBeDisabled();
+    const projectSelect = screen.getByRole("combobox");
+    expect(projectSelect).toBeEnabled();
+
+    fireEvent.mouseDown(projectSelect);
+    fireEvent.click(await screen.findByText(/WX-2026-001/));
+
+    const requestNote = await screen.findByDisplayValue("可查看的云端草稿");
+    expect(getCartDraft).toHaveBeenCalledWith(project.project_id);
+    const cart = screen.getByText("新建维保补库申请").closest(".ant-card");
+    expect(cart).not.toBeNull();
+    const cartUi = within(cart as HTMLElement);
+    expect(requestNote).toBeDisabled();
+    expect(cartUi.getByDisplayValue("只读行")).toBeDisabled();
+    expect(cartUi.getByRole("spinbutton")).toBeDisabled();
+    expect(cartUi.getByRole("button", { name: /提交补库申请/ })).toBeDisabled();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    expect(replaceCartDraft).not.toHaveBeenCalled();
+    expect(submitCartDraft).not.toHaveBeenCalled();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
+  it("已有草稿在创建权限收回后保持只读，篡改控件也不会保存或提交", async () => {
+    const mutableCapabilities = { ...capabilities };
+    getCapabilities.mockResolvedValueOnce({ data: mutableCapabilities });
+    getCartDraft.mockResolvedValueOnce({
+      data: {
+        draft: {
+          draft_id: "draft-readonly",
+          project_id: project.project_id,
+          request_note: "只读草稿备注",
+          client_request_id: "draft-readonly-request",
+          version: 4,
+          created_at: "2026-08-30T00:00:00Z",
+          updated_at: "2026-08-30T01:00:00Z",
+          lines: [{
+            draft_line_id: "draft-line-readonly",
+            line_no: 1,
+            part_id: noPoolPart.part_id,
+            pn_std: noPoolPart.pn_std,
+            description: noPoolPart.description,
+            brand: null,
+            unit: noPoolPart.unit,
+            quantity: 2,
+            special_note: "只读行备注",
+          }],
+        },
+      },
+    });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.mouseDown(await screen.findByRole("combobox"));
+    fireEvent.click(await screen.findByText(/WX-2026-001/));
+    const requestNote = await screen.findByDisplayValue("只读草稿备注");
+    await waitFor(() => expect(getCartDraft).toHaveBeenCalledWith(project.project_id));
+    replaceCartDraft.mockClear();
+    deleteCartDraft.mockClear();
+
+    mutableCapabilities.can_create = false;
+    fireEvent.click(screen.getByRole("button", { name: /申请记录/ }));
+
+    const cart = screen.getByText("新建维保补库申请").closest(".ant-card");
+    expect(cart).not.toBeNull();
+    const cartUi = within(cart as HTMLElement);
+    const line = cartUi.getByText(noPoolPart.pn_std).closest(".replenishment-cart-line");
+    expect(line).not.toBeNull();
+    const lineUi = within(line as HTMLElement);
+    const quantity = lineUi.getByRole("spinbutton");
+    const lineNote = lineUi.getByPlaceholderText("特殊情况说明（选填）");
+    const remove = lineUi.getByRole("button", { name: /delete/i });
+    const submit = cartUi.getByRole("button", { name: /提交补库申请/ });
+
+    expect(cartUi.getByRole("combobox")).toBeEnabled();
+    expect(requestNote).toBeDisabled();
+    expect(quantity).toBeDisabled();
+    expect(lineNote).toBeDisabled();
+    expect(remove).toBeDisabled();
+    expect(submit).toBeDisabled();
+
+    // UI 属性被人为移除时，自动保存与提交函数仍须 fail closed。
+    requestNote.removeAttribute("disabled");
+    fireEvent.change(requestNote, { target: { value: "不得保存的新备注" } });
+    quantity.removeAttribute("disabled");
+    fireEvent.change(quantity, { target: { value: "3" } });
+    lineNote.removeAttribute("disabled");
+    fireEvent.change(lineNote, { target: { value: "不得保存的新行备注" } });
+    submit.removeAttribute("disabled");
+    fireEvent.click(submit);
+    const confirm = screen.queryByRole("button", { name: /确认提交/ });
+    if (confirm) fireEvent.click(confirm);
+    remove.removeAttribute("disabled");
+    fireEvent.click(remove);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    expect(replaceCartDraft).not.toHaveBeenCalled();
+    expect(deleteCartDraft).not.toHaveBeenCalled();
+    expect(submitCartDraft).not.toHaveBeenCalled();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
+  it("needs_revision 在没有创建权限时只可查看，退回编辑与导出入口均禁用", async () => {
+    getCapabilities.mockResolvedValueOnce({
+      data: { ...capabilities, can_create: false },
+    });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    const revise = await screen.findByRole("button", { name: /退回编辑/ });
+    const exportButton = screen.getByRole("button", { name: /导出复核包/ });
+    expect(revise).toBeDisabled();
+    expect(exportButton).toBeDisabled();
+
+    revise.removeAttribute("disabled");
+    fireEvent.click(revise);
+    expect(screen.queryByText(/编辑被打回申请/)).toBeNull();
+    expect(downloadWorkbook).not.toHaveBeenCalled();
+    expect(replaceCartDraft).not.toHaveBeenCalled();
+    expect(submitCartDraft).not.toHaveBeenCalled();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
+  it("申请项目已退出当前范围时历史仍可查看和导出，但不能退回编辑", async () => {
+    getProjects.mockResolvedValueOnce({ data: { items: [] } });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+
+    expect(await screen.findByRole("button", { name: /退回编辑/ })).toBeDisabled();
+    expect(screen.getByText("申请被自动审核打回——当前仅可查看历史")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /导出复核包/ })).toBeEnabled();
+  });
+
+  it("刷新会同步最新项目范围，撤权后的历史复提入口立即变为只读", async () => {
+    getProjects
+      .mockResolvedValueOnce({ data: { items: [project] } })
+      .mockResolvedValueOnce({ data: { items: [] } });
+    listApplications.mockResolvedValue({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    await waitFor(() => expect(getProjects).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: /刷新/ }));
+    await waitFor(() => expect(getProjects).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+
+    expect(await screen.findByRole("button", { name: /退回编辑/ })).toBeDisabled();
+    expect(screen.getByText("申请被自动审核打回——当前仅可查看历史")).toBeInTheDocument();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
+  it("并发刷新乱序返回时只接受最后一次项目范围结果", async () => {
+    let resolveOlder!: (value: { data: { items: (typeof project)[] } }) => void;
+    let resolveNewer!: (value: { data: { items: (typeof project)[] } }) => void;
+    const older = new Promise<{ data: { items: (typeof project)[] } }>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<{ data: { items: (typeof project)[] } }>((resolve) => {
+      resolveNewer = resolve;
+    });
+    getProjects
+      .mockResolvedValueOnce({ data: { items: [project] } })
+      .mockReturnValueOnce(older)
+      .mockReturnValueOnce(newer);
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    await waitFor(() => expect(getProjects).toHaveBeenCalledTimes(1));
+    const refresh = await screen.findByRole("button", { name: /刷新/ });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    await waitFor(() => expect(getProjects).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      resolveNewer({ data: { items: [] } });
+      await newer;
+    });
+    expect(await screen.findByText("当前账号没有可选的维保项目")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOlder({ data: { items: [project] } });
+      await older;
+    });
+    expect(screen.getByText("当前账号没有可选的维保项目")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("没有创建权限时已提交详情的导出复核包入口禁用", async () => {
+    getCapabilities.mockResolvedValueOnce({
+      data: { ...capabilities, can_create: false },
+    });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: submittedApplication.application_id,
+          application_no: submittedApplication.application_no,
+          owner_display_name: submittedApplication.owner_display_name,
+          project,
+          status: "submitted",
+          workflow_mode: "system_screening",
+          stage: "screening_complete",
+          version: 1,
+          latest_version_no: 1,
+          updated_at: submittedApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: submittedApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+
+    expect(await screen.findByRole("button", { name: /导出复核包/ })).toBeDisabled();
+    expect(downloadWorkbook).not.toHaveBeenCalled();
+  });
+
+  it("needs_revision 导出点击前创建权限被收回时，exportCurrent 不得发起下载", async () => {
+    const mutableCapabilities = { ...capabilities };
+    getCapabilities.mockResolvedValueOnce({ data: mutableCapabilities });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    const exportButton = await screen.findByRole("button", { name: /导出复核包/ });
+    expect(exportButton).toBeEnabled();
+
+    // 模拟按钮渲染后权限被服务端收回；函数级 guard 必须独立于 disabled 属性。
+    mutableCapabilities.can_create = false;
+    fireEvent.click(exportButton);
+
+    expect(downloadWorkbook).not.toHaveBeenCalled();
+  });
+
+  it("复提编辑期间权限被收回时，推荐替换和全部草稿控件立即只读", async () => {
+    const mutableCapabilities = { ...capabilities };
+    getCapabilities.mockResolvedValueOnce({ data: mutableCapabilities });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /退回编辑/ }));
+    const recommendation = await screen.findByRole("button", {
+      name: /替换为 POOL-PN-READONLY/,
+    });
+
+    mutableCapabilities.can_create = false;
+    fireEvent.click(screen.getByRole("button", { name: /申请记录/ }));
+
+    const cart = screen.getByText(/编辑被打回申请/).closest(".ant-card");
+    expect(cart).not.toBeNull();
+    const cartUi = within(cart as HTMLElement);
+    expect(cartUi.getByRole("combobox")).toBeEnabled();
+    expect(cartUi.getByPlaceholderText("整单备注（选填）")).toBeDisabled();
+    expect(cartUi.getByRole("spinbutton")).toBeDisabled();
+    expect(cartUi.getByPlaceholderText("特殊情况说明（选填）")).toBeDisabled();
+    expect(cartUi.getByRole("button", { name: /delete/i })).toBeDisabled();
+    expect(cartUi.getByRole("button", { name: /提交补库申请/ })).toBeDisabled();
+    expect(recommendation).toBeDisabled();
+    expect(replaceCartDraft).not.toHaveBeenCalled();
+    expect(submitCartDraft).not.toHaveBeenCalled();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
+  it("复提确认框打开后权限被收回时，执行函数不得调用 applyRevision", async () => {
+    const mutableCapabilities = { ...capabilities };
+    getCapabilities.mockResolvedValueOnce({ data: mutableCapabilities });
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: needsRevisionApplication.application_id,
+          application_no: needsRevisionApplication.application_no,
+          owner_display_name: needsRevisionApplication.owner_display_name,
+          project,
+          status: "needs_revision",
+          workflow_mode: "system_screening",
+          stage: "needs_revision",
+          version: 2,
+          latest_version_no: 1,
+          updated_at: needsRevisionApplication.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: needsRevisionApplication });
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /查看详情/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /退回编辑/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /提交补库申请/ }));
+    const confirm = await screen.findByRole("button", { name: /确认提交/ });
+
+    mutableCapabilities.can_create = false;
+    fireEvent.click(confirm);
+
+    expect(replaceCartDraft).not.toHaveBeenCalled();
+    expect(submitCartDraft).not.toHaveBeenCalled();
+    expect(applyRevision).not.toHaveBeenCalled();
+  });
+
   it("没有可选维保项目时给出明确指引", async () => {
     getProjects.mockResolvedValueOnce({ data: { items: [] } });
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     expect(await screen.findByText("当前账号没有可选的维保项目")).toBeInTheDocument();
+    expect(screen.getByText(/负责人\/viewer 挂靠/)).toBeInTheDocument();
+    expect(screen.getByText(/只看自己维保项目.*销售映射/)).toBeInTheDocument();
+    expect(screen.getByText(/老板和管理员.*全范围/)).toBeInTheDocument();
+    expect(screen.queryByText(/销售经理需要先/)).toBeNull();
   });
 
   it("以购物卡片展示无池无价 PN，按钮为加入申请", async () => {
@@ -182,8 +669,10 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(screen.getByRole("button", { name: /提交补库申请/ })).toBeDisabled();
   });
 
-  it("选择项目并加入 PN 后一次性原子提交，展示冻结结果", async () => {
-    submitCartDraft.mockResolvedValue({ data: submittedApplication });
+  it("选择项目后原子提交；响应丢失重试复用云端草稿 key 并展示冻结结果", async () => {
+    submitCartDraft
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce({ data: submittedApplication });
     listApplications.mockResolvedValue({
       data: {
         total: 1, page: 1, page_size: 20,
@@ -210,7 +699,9 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(screen.getAllByText(/WX-2026-001/).length).toBeGreaterThan(0);
 
     // 加入 PN
-    fireEvent.click(screen.getByRole("button", { name: /加入申请/ }));
+    const addButton = screen.getByRole("button", { name: /加入申请/ });
+    await waitFor(() => expect(addButton).toBeEnabled());
+    fireEvent.click(addButton);
 
     // 提交
     fireEvent.click(screen.getByRole("button", { name: /提交补库申请/ }));
@@ -220,13 +711,25 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
       expect(replaceCartDraft).toHaveBeenCalled();
       expect(submitCartDraft).toHaveBeenCalledTimes(1);
     });
+    const replaceCountAfterFirstAttempt = replaceCartDraft.mock.calls.length;
+    const submitButton = screen.getByRole("button", { name: /提交补库申请/ });
+    await waitFor(() => expect(submitButton).toBeEnabled());
+    fireEvent.click(submitButton);
+    fireEvent.click(await screen.findByRole("button", { name: /确认提交/ }));
+    await waitFor(() => expect(submitCartDraft).toHaveBeenCalledTimes(2));
+    expect(replaceCartDraft).toHaveBeenCalledTimes(replaceCountAfterFirstAttempt);
     const calls = replaceCartDraft.mock.calls;
     const [projectId, payload] = calls[calls.length - 1];
     expect(projectId).toBe("proj-a");
     expect(payload).toMatchObject({
       lines: [{ part_id: 7, quantity: 1, special_note: null }],
     });
-    expect(submitCartDraft.mock.calls[0]).toEqual(["proj-a", 1]);
+    expect(submitCartDraft.mock.calls[0]).toEqual([
+      "proj-a",
+      1,
+      "cart-submit-request-001",
+    ]);
+    expect(submitCartDraft.mock.calls[1]).toEqual(submitCartDraft.mock.calls[0]);
 
     // 提交成功：打开「申请记录」Drawer，详情展示单号 + 项目 + 已提交 + 冻结证据
     fireEvent.click(screen.getByRole("button", { name: /申请记录/ }));
@@ -329,7 +832,9 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
         review: null,
       }],
     };
-    applyRevision.mockResolvedValue({ data: { ...submittedApplication, application_id: "app-rejected", application_no: "BLK-20260818-REJECT001" } });
+    applyRevision
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce({ data: { ...submittedApplication, application_id: "app-rejected", application_no: "BLK-20260818-REJECT001" } });
     listApplications.mockResolvedValueOnce({
       data: {
         total: 1, page: 1, page_size: 20,
@@ -371,12 +876,22 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     await waitFor(() => {
       expect(applyRevision).toHaveBeenCalledTimes(1);
     });
+    // 首次请求若服务端已成功、但客户端丢失响应，原样重试必须复用同一 key。
+    const revisionSubmit = screen.getByRole("button", { name: /提交补库申请/ });
+    await waitFor(() => expect(revisionSubmit).toBeEnabled());
+    fireEvent.click(revisionSubmit);
+    fireEvent.click(await screen.findByRole("button", { name: /确认提交/ }));
+    await waitFor(() => {
+      expect(applyRevision).toHaveBeenCalledTimes(2);
+    });
     const [applicationId, payload] = applyRevision.mock.calls[0];
+    const [, retryPayload] = applyRevision.mock.calls[1];
     expect(applicationId).toBe("app-rejected");
     expect(payload).toMatchObject({
       expected_application_version: 2,
       lines: [{ part_id: 7671, quantity: 1, special_note: null }],
     });
     expect(payload.client_request_id).toMatch(/^.{8,128}$/);
+    expect(retryPayload.client_request_id).toBe(payload.client_request_id);
   });
 });

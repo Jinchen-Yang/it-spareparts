@@ -436,6 +436,9 @@ class MaintenanceProjectWorkbookAdapter:
                     == "mapped",
                     MaintenanceProjectExpenseAttribution.normalized_status
                     == "approved",
+                    MaintenanceProjectExpenseAttribution.ownership_mapping_state
+                    == "mapped",
+                    MaintenanceProjectExpenseAttribution.project_contract_id.is_not(None),
                 )
                 .scalar_subquery()
                 .label("expenses"),

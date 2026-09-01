@@ -12,7 +12,7 @@ import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 from uuid import uuid4
 
 from sqlalchemy import exists, func, or_, select, text, true
@@ -29,6 +29,11 @@ from app.models.maintenance import (
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_invalidation
+
+if TYPE_CHECKING:
+    from app.models.maintenance_project_operations import (
+        MaintenanceProjectWorkbookState,
+    )
 
 
 MAX_DELETE_HEADERS = 1_000
@@ -237,25 +242,14 @@ def _load_snapshots(
     )
     if active_only:
         statement = statement.where(beta_active_demand_condition())
+    statement = statement.order_by(
+        FMaintenanceOrder.raw_order_id,
+        FMaintenanceOrder.id,
+    )
     if lock:
         statement = statement.with_for_update()
     orders = list(db.scalars(statement))
     internal_ids = [order.id for order in orders]
-    lines_by_order: dict[int, list[FMaintenanceLine]] = defaultdict(list)
-    if internal_ids:
-        line_statement = (
-            select(FMaintenanceLine)
-            .where(
-                FMaintenanceLine.order_id.in_(internal_ids),
-                # 2026-08-19：用户作废的明细行不出现在需求快照/搜索/详情（#55）
-                FMaintenanceLine.is_active.is_(True),
-            )
-            .order_by(FMaintenanceLine.order_id, FMaintenanceLine.raw_line_id)
-        )
-        if lock:
-            line_statement = line_statement.with_for_update()
-        for line in db.scalars(line_statement):
-            lines_by_order[line.order_id].append(line)
     assignment_statement = (
         select(MaintenanceSourceOrderAssignment)
         .where(
@@ -272,6 +266,24 @@ def _load_snapshots(
         assignment.source_order_id: assignment
         for assignment in db.scalars(assignment_statement)
     }
+    # All maintenance writers use the same hierarchy:
+    # order -> active assignment -> detail line.  Keep the snapshot path in
+    # that order as well; global refill locks the same rows before overrides.
+    lines_by_order: dict[int, list[FMaintenanceLine]] = defaultdict(list)
+    if internal_ids:
+        line_statement = (
+            select(FMaintenanceLine)
+            .where(
+                FMaintenanceLine.order_id.in_(internal_ids),
+                # 2026-08-19：用户作废的明细行不出现在需求快照/搜索/详情（#55）
+                FMaintenanceLine.is_active.is_(True),
+            )
+            .order_by(FMaintenanceLine.order_id, FMaintenanceLine.raw_line_id)
+        )
+        if lock:
+            line_statement = line_statement.with_for_update()
+        for line in db.scalars(line_statement):
+            lines_by_order[line.order_id].append(line)
     return {
         order.raw_order_id: _snapshot(
             order,
@@ -697,6 +709,72 @@ def _mark_conflicted(
     db.flush()
 
 
+def _lock_workbook_states_for_owners(
+    db: Session,
+    source_order_ids: list[str],
+    *,
+    prelocked_states: dict[str, MaintenanceProjectWorkbookState] | None = None,
+) -> tuple[dict[str, MaintenanceProjectWorkbookState], set[str]]:
+    """OCC 写者失效：无锁 probe 当前 active 归属 → 按序锁工作簿状态。
+
+    全局写锁顺序：data-change advisory → workbook states(sorted) → order →
+    assignment → line。probe 不加任何事实锁；锁后重读若出现 probe 之外的
+    归属，调用方必须以 Conflict 零写拒绝，绝不在持锁后补拿新 state
+    （与 assign_source_orders 同一约定）。
+
+    调用方（master V2 级联）已持 global+states 时通过 ``prelocked_states``
+    传入，此时只复用并做覆盖校验，不拿新 state。返回
+    ``(locked_states, probed_owner_ids)``。
+    """
+
+    probed_owner_ids: set[str] = set()
+    if source_order_ids:
+        probed_owner_ids = {
+            value
+            for value in db.scalars(
+                select(MaintenanceSourceOrderAssignment.project_id).where(
+                    MaintenanceSourceOrderAssignment.source_order_id.in_(
+                        source_order_ids
+                    ),
+                    MaintenanceSourceOrderAssignment.is_active.is_(True),
+                )
+            ).all()
+            if value
+        }
+    from app.services import maintenance_project_operations as operations
+
+    if prelocked_states is None:
+        locked_states = operations.lock_workbook_states(
+            db, project_ids=probed_owner_ids
+        )
+    else:
+        locked_states = prelocked_states
+        if not probed_owner_ids.issubset(locked_states):
+            raise DeleteIntentConflict("需求单项目归属已变化，请刷新后重试")
+    return locked_states, probed_owner_ids
+
+
+def _bump_workbook_revisions(
+    db: Session,
+    locked_states: dict[str, MaintenanceProjectWorkbookState],
+    changed_project_ids: set[str],
+) -> None:
+    """只为本次实际 tombstone/挂靠停用的项目 +1；state 必须已预锁。
+
+    bump_locked_workbook_revision 已按当前根事务去重，幂等重放/already_voided
+    路径根本不会走到这里（changed 为空 → +0）。
+    """
+
+    if not changed_project_ids:
+        return
+    from app.services import maintenance_project_operations as operations
+
+    for project_id in sorted(changed_project_ids):
+        operations.bump_locked_workbook_revision(
+            db, state=locked_states[project_id]
+        )
+
+
 def execute_delete_intent(
     db: Session,
     *,
@@ -725,6 +803,11 @@ def execute_delete_intent(
 
     expected_items = _intent_items(db, intent.intent_id)
     source_order_ids = [item.source_order_id for item in expected_items]
+    # OCC 写者失效：无锁 probe 当前归属 → 按序锁工作簿状态 → 再加锁重读
+    # 订单/挂靠（全局顺序 advisory → states → order → assignment → line）。
+    locked_states, probed_owner_ids = _lock_workbook_states_for_owners(
+        db, source_order_ids
+    )
     current = _load_snapshots(
         db,
         source_order_ids,
@@ -739,6 +822,15 @@ def execute_delete_intent(
             if current[expected.source_order_id]["version_digest"] != expected.version_digest:
                 conflict_cause = f"version_changed:{expected.source_order_id}"
                 break
+        if conflict_cause is None:
+            # probe 之后新出现的归属：其 state 未预锁，整批冲突零写，
+            # 不允许持锁后补拿新 state。
+            for source_id in source_order_ids:
+                assignment = current[source_id].get("active_project_assignment")
+                owner = assignment.get("project_id") if assignment else None
+                if owner is not None and owner not in probed_owner_ids:
+                    conflict_cause = f"assignment_changed:{source_id}"
+                    break
     if conflict_cause:
         _mark_conflicted(
             db,
@@ -762,38 +854,27 @@ def execute_delete_intent(
                 )
 
     for item in expected_items:
-        tombstone = db.get(MaintenanceDemandTombstone, item.source_order_id)
-        if tombstone is None:
-            tombstone = MaintenanceDemandTombstone(
-                source_order_id=item.source_order_id,
-                delete_intent_id=intent.intent_id,
-                version_digest=item.version_digest,
-                deleted_by=operated_by,
-                delete_reason=intent.reason,
-                deleted_at=now,
-                version=1,
-            )
-            db.add(tombstone)
-        else:
-            tombstone.delete_intent_id = intent.intent_id
-            tombstone.version_digest = item.version_digest
-            tombstone.deleted_by = operated_by
-            tombstone.delete_reason = intent.reason
-            tombstone.deleted_at = now
-            tombstone.restored_by = None
-            tombstone.restore_reason = None
-            tombstone.restored_at = None
-            tombstone.version += 1
+        _upsert_active_tombstone(
+            db,
+            source_order_id=item.source_order_id,
+            delete_intent_id=intent.intent_id,
+            version_digest=item.version_digest,
+            deleted_by=operated_by,
+            delete_reason=intent.reason,
+            deleted_at=now,
+        )
 
     # 两阶段执行同样停用挂靠（#267 读侧修复 2）：否则墓碑单继续通过
     # assignment join 出现在项目总表/概览。
-    _deactivate_assignments(
+    changed_project_ids = _deactivate_assignments(
         db,
         source_order_ids=source_order_ids,
         operated_by=operated_by,
         reason=intent.reason,
         now=now,
     )
+    # 只为本次实际停用了挂靠的项目 bump OCC 版本（重放路径提前返回，+0）。
+    _bump_workbook_revisions(db, locked_states, changed_project_ids)
 
     result = {
         "intent_id": intent.intent_id,
@@ -861,6 +942,27 @@ def cancel_delete_intent(
     return _intent_payload(db, intent)
 
 
+def _cascade_candidate(db: Session, source_order_id: str) -> bool:
+    """无锁 probe：该单是否满足级联打墓碑条件（存在、未墓碑、活动行归零）。"""
+
+    order_id = db.scalar(
+        select(FMaintenanceOrder.id).where(
+            FMaintenanceOrder.raw_order_id == source_order_id)
+    )
+    if order_id is None:
+        return False
+    already = db.get(MaintenanceDemandTombstone, source_order_id)
+    if already is not None and already.restored_at is None:
+        return False
+    active_lines = int(db.scalar(
+        select(func.count(FMaintenanceLine.id)).where(
+            FMaintenanceLine.order_id == order_id,
+            FMaintenanceLine.is_active.is_(True),
+        )
+    ) or 0)
+    return active_lines == 0
+
+
 def cascade_tombstone_orders(
     db: Session,
     *,
@@ -868,12 +970,19 @@ def cascade_tombstone_orders(
     operated_by: str,
     reason: str,
     now: datetime | None = None,
+    _prelocked_states: dict[str, MaintenanceProjectWorkbookState] | None = None,
 ) -> list[str]:
     """总表行级作废的级联：某需求单的活动行归零 → 整单打墓碑（#264 增强）。
 
     与 void-fast 同构（intent 锚 + 墓碑 + 挂靠停用 + 事件），但不做行数/范围
     校验——调用方（工作簿 apply）已完成行级校验，这里只负责收尾整单状态。
     返回实际打了墓碑的单（本来就没有活动行的跳过）。
+
+    OCC 写者失效：DATA_CHANGE advisory → 无锁 probe 新作废单归属 →
+    lock_workbook_states(sorted) → 锁后重读 order/assignment。master V2 在
+    已持 global+states 后调用本函数时应传入 ``_prelocked_states``；传入时
+    只复用并做覆盖校验，锁后出现未预锁 owner 立即 Conflict 零写，绝不补拿
+    新 state。默认（None）保持独立调用兼容。
     """
     now = now or _utc_now()
     reason = (reason or "总表行全部作废").strip()[:MAX_REASON_LENGTH]
@@ -884,13 +993,46 @@ def cascade_tombstone_orders(
         text("SELECT pg_advisory_xact_lock(:k)"),
         {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
     )
-    for source_id in source_order_ids:
-        order = db.scalar(
-            select(FMaintenanceOrder).where(
-                FMaintenanceOrder.raw_order_id == source_id)
+    candidates = [
+        source_id
+        for source_id in source_order_ids
+        if _cascade_candidate(db, source_id)
+    ]
+    if not candidates:
+        return tombstoned_now
+    locked_states, probed_owner_ids = _lock_workbook_states_for_owners(
+        db, candidates, prelocked_states=_prelocked_states
+    )
+    # 锁后按层级重读（order -> assignment）：probe 之后新出现的归属直接
+    # Conflict 零写，绝不在持锁后补拿新 state。
+    locked_orders = {
+        order.raw_order_id: order
+        for order in db.scalars(
+            select(FMaintenanceOrder)
+            .where(FMaintenanceOrder.raw_order_id.in_(candidates))
+            .order_by(FMaintenanceOrder.raw_order_id)
+            .with_for_update()
         )
+    }
+    locked_assignments = list(db.scalars(
+        select(MaintenanceSourceOrderAssignment)
+        .where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(candidates),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .order_by(MaintenanceSourceOrderAssignment.source_order_id)
+        .with_for_update()
+    ))
+    if any(
+        assignment.project_id not in probed_owner_ids
+        for assignment in locked_assignments
+    ):
+        raise DeleteIntentConflict("需求单项目归属已变化，级联作废已取消")
+    for source_id in candidates:
+        order = locked_orders.get(source_id)
         if order is None:
             continue
+        # 锁后复核：并发探头期的候选可能在持锁后已墓碑或重新有活动行。
         already = db.get(MaintenanceDemandTombstone, source_id)
         if already is not None and already.restored_at is None:
             continue
@@ -919,16 +1061,15 @@ def cascade_tombstone_orders(
         )
         db.add(intent)
         db.flush()
-        tombstone = MaintenanceDemandTombstone(
+        _upsert_active_tombstone(
+            db,
             source_order_id=source_id,
             delete_intent_id=intent.intent_id,
             version_digest=_digest({"cascade": source_id, "at": now.isoformat()}),
             deleted_by=operated_by,
             delete_reason=reason,
             deleted_at=now,
-            version=1,
         )
-        db.add(tombstone)
         result = {"intent_id": intent.intent_id, "status": "executed",
                   "mode": "workbook_cascade", "source_order_id": source_id,
                   "order_no": order.order_no, "executed_at": now.isoformat()}
@@ -947,10 +1088,12 @@ def cascade_tombstone_orders(
         tombstoned_now.append(source_id)
     db.flush()
     if tombstoned_now:
-        _deactivate_assignments(
+        changed_project_ids = _deactivate_assignments(
             db, source_order_ids=tombstoned_now,
             operated_by=operated_by, reason=reason, now=now,
         )
+        # 只为本次实际打墓碑/停用挂靠的项目 bump OCC 版本。
+        _bump_workbook_revisions(db, locked_states, changed_project_ids)
         from app.services import maintenance_warehouse
 
         maintenance_warehouse.reconcile_project_assignment_links(
@@ -967,15 +1110,18 @@ def _deactivate_assignments(
     operated_by: str,
     reason: str,
     now: datetime,
-) -> int:
+) -> set[str]:
     """作废/删除时同步停用挂靠关系（#267 读侧修复 2）。
 
     未停用的 assignment 会绕过墓碑过滤（项目总表 join 只看 is_active），
     导致已作废单的行继续出现在总表/概览。restore 不逆向复活挂靠——
     重新挂靠走正常 assign 流程，保持「恢复后以人工重挂为准」。
+
+    返回本次实际停用了挂靠的归属项目集合（调用方只为这些项目 bump OCC
+    版本；已是墓碑/无活动挂靠的单返回空集 → +0）。
     """
     if not source_order_ids:
-        return 0
+        return set()
     from app.models.maintenance_project import MaintenanceProjectAuditLog
 
     assignments = db.scalars(
@@ -984,7 +1130,7 @@ def _deactivate_assignments(
             MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
     )
-    deactivated = 0
+    deactivated_projects: set[str] = set()
     for assignment in assignments:
         before = {
             "assignment_id": assignment.assignment_id,
@@ -1018,9 +1164,49 @@ def _deactivate_assignments(
                 operated_by=operated_by,
             )
         )
-        deactivated += 1
+        deactivated_projects.add(assignment.project_id)
     db.flush()
-    return deactivated
+    return deactivated_projects
+
+
+def _upsert_active_tombstone(
+    db: Session,
+    *,
+    source_order_id: str,
+    delete_intent_id: str,
+    version_digest: str,
+    deleted_by: str,
+    delete_reason: str,
+    deleted_at: datetime,
+) -> MaintenanceDemandTombstone:
+    """创建墓碑，或把已恢复墓碑推进为新一代 active tombstone。
+
+    restore→revoid 不能 INSERT 同一主键，也不能保留 restored_*；三条作废
+    入口统一走这里，确保 delete intent、摘要、审计人与版本一起换代。
+    """
+    tombstone = db.get(MaintenanceDemandTombstone, source_order_id)
+    if tombstone is None:
+        tombstone = MaintenanceDemandTombstone(
+            source_order_id=source_order_id,
+            delete_intent_id=delete_intent_id,
+            version_digest=version_digest,
+            deleted_by=deleted_by,
+            delete_reason=delete_reason,
+            deleted_at=deleted_at,
+            version=1,
+        )
+        db.add(tombstone)
+        return tombstone
+    tombstone.delete_intent_id = delete_intent_id
+    tombstone.version_digest = version_digest
+    tombstone.deleted_by = deleted_by
+    tombstone.delete_reason = delete_reason
+    tombstone.deleted_at = deleted_at
+    tombstone.restored_by = None
+    tombstone.restore_reason = None
+    tombstone.restored_at = None
+    tombstone.version += 1
+    return tombstone
 
 
 def void_fast(
@@ -1070,6 +1256,34 @@ def void_fast(
             if existing.request_digest != request_digest:
                 raise DeleteIntentConflict("幂等键已被另一份作废请求使用")
             replay = dict(existing.result_json or {})
+            if existing.status != "executed" or replay.get("mode") != "void_fast":
+                raise DeleteIntentConflict("幂等键已被另一种删除流程使用")
+            # 与 restore 共用全局数据变更锁后再判断当前状态。旧作废成功后若
+            # 已被恢复，盲目返回历史 result 会向前端谎报“仍已作废”；同键只能
+            # 重放同一代状态，恢复后的新一代作废必须使用新幂等键。
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:k)"),
+                {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+            )
+            replay_source_ids = {
+                str(value)
+                for value in replay.get("source_order_ids", ())
+                if value
+            }
+            active_tombstones = set(
+                db.scalars(
+                    select(MaintenanceDemandTombstone.source_order_id).where(
+                        MaintenanceDemandTombstone.source_order_id.in_(
+                            sorted(replay_source_ids)
+                        ),
+                        MaintenanceDemandTombstone.restored_at.is_(None),
+                    )
+                )
+            ) if replay_source_ids else set()
+            if active_tombstones != replay_source_ids:
+                raise DeleteIntentConflict(
+                    "该幂等键对应的历史作废已被恢复；如需再次作废请使用新幂等键"
+                )
             replay.setdefault("intent_id", existing.intent_id)
             replay.setdefault("status", existing.status)
             replay["replayed"] = True
@@ -1090,12 +1304,23 @@ def void_fast(
         ).scalars().all()
     )
     unknown = [sid for sid in source_order_ids if sid not in tombstoned]
+    # OCC 写者失效：无锁 probe 新作废单的当前归属 → 按序锁工作簿状态 →
+    # 加锁重读订单/挂靠（全局顺序 advisory → states → order → assignment）。
+    # already_voided 的单不 probe 也不补停用——幂等路径必须 +0。
+    locked_states, probed_owner_ids = _lock_workbook_states_for_owners(db, unknown)
     snapshots = _load_snapshots(db, unknown, lock=True, active_only=True) if unknown else {}
     missing = [sid for sid in unknown if sid not in snapshots]
     if missing:
         raise MaintenanceDemandNotFound(
             "所选 WBDD 已不存在或状态发生变化，整批未作废"
         )
+    # probe 之后新出现的归属：其 state 未预锁，整批冲突零写，
+    # 不允许持锁后补拿新 state。
+    for item in snapshots.values():
+        assignment = item.get("active_project_assignment")
+        owner = assignment.get("project_id") if assignment else None
+        if owner is not None and owner not in probed_owner_ids:
+            raise DeleteIntentConflict("所选 WBDD 项目归属已变化，整批未作废")
 
     items = [snapshots[sid] for sid in unknown]
     if allowed_project_ids is not None:
@@ -1141,28 +1366,27 @@ def void_fast(
     db.flush()
 
     for item in items:
-        tombstone = db.get(MaintenanceDemandTombstone, item["source_order_id"])
-        if tombstone is None:
-            tombstone = MaintenanceDemandTombstone(
-                source_order_id=item["source_order_id"],
-                delete_intent_id=intent.intent_id,
-                version_digest=item["version_digest"],
-                deleted_by=operated_by,
-                delete_reason=normalized_reason,
-                deleted_at=now,
-                version=1,
-            )
-            db.add(tombstone)
+        _upsert_active_tombstone(
+            db,
+            source_order_id=item["source_order_id"],
+            delete_intent_id=intent.intent_id,
+            version_digest=item["version_digest"],
+            deleted_by=operated_by,
+            delete_reason=normalized_reason,
+            deleted_at=now,
+        )
 
     # 作废同步停用挂靠关系：未停用的 assignment 会绕过墓碑过滤（读侧 join
     # 只看 is_active），且 restore 依赖挂靠重建归属（#267 读侧修复 2）。
-    _deactivate_assignments(
+    # 只对本次新作废的单停用——already_voided 的幂等路径不产生任何 bump。
+    changed_project_ids = _deactivate_assignments(
         db,
-        source_order_ids=source_order_ids,
+        source_order_ids=unknown,
         operated_by=operated_by,
         reason=normalized_reason,
         now=now,
     )
+    _bump_workbook_revisions(db, locked_states, changed_project_ids)
 
     order_no_by_source = {
         item["source_order_id"]: item.get("order_no") for item in items
@@ -1245,6 +1469,19 @@ def restore_demand(
     )
     if order_id is None:
         raise MaintenanceDemandNotFound("WBDD 来源单不存在")
+    # restore 明确不复活 assignment（重挂走正常 assign 流程），正常路径
+    # 不动任何项目工作簿版本（+0）。若发现历史脏数据——已墓碑单上仍存在
+    # active 挂靠——fail closed 拒绝恢复，而不是带病放行出双口径。
+    dirty_assignment = db.scalar(
+        select(MaintenanceSourceOrderAssignment.assignment_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id == source_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    )
+    if dirty_assignment is not None:
+        raise MaintenanceDemandError(
+            "该 WBDD 仍存在有效项目挂靠，恢复已拒绝，请先核对挂靠数据"
+        )
     cutover_enabled = get_settings().maintenance_cutover_enabled
     if cutover_enabled:
         # Once tombstones are the canonical production boundary, a restored

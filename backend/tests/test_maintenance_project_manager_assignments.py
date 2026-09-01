@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
@@ -300,6 +301,328 @@ def test_reassign_and_archive_preserve_history_reasons_and_optimistic_lock(db):
         "项目暂停，暂时归档负责人关系",
     ]
     assert {row.operated_by for row in audits} == {"manager_reassignment_admin"}
+
+
+def test_reassign_can_sync_salesperson_from_account_in_the_same_revision(db):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-sync",
+        project_code="PM-SALESPERSON-SYNC",
+        display_name="负责人销售同步项目",
+        project_manager_id="来源负责人原文",
+        salesperson="原销售",
+        lifecycle_status="ongoing",
+    )
+    first = SysUser(
+        username="manager_salesperson_sync_first",
+        role="purchaser",
+        display_name="第一负责人",
+        salesperson_name="第一销售",
+        password_hash=hash_password(_PASSWORD),
+    )
+    second = SysUser(
+        username="manager_salesperson_sync_second",
+        role="purchaser",
+        display_name="第二负责人",
+        salesperson_name="目标销售姓名",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, first, second])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_sync_admin")
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={"user_id": first.id, "reason": "首次映射负责人"},
+    )
+    assert created.status_code == 201, created.text
+    db.refresh(project)
+    assert project.salesperson == "原销售"
+    assert project.version == 1
+
+    reassigned = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": second.id,
+            "expected_assignment_id": created.json()["assignment_id"],
+            "expected_assignment_version": created.json()["version"],
+            "sync_salesperson": True,
+            "reason": "负责人交接并同步销售人员",
+        },
+    )
+
+    assert reassigned.status_code == 201, reassigned.text
+    db.refresh(project)
+    assert project.salesperson == "目标销售姓名"
+    assert project.salesperson_override_active is True
+    assert project.project_manager_id == "来源负责人原文"
+    assert project.version == 2
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state is not None
+    assert state.revision == 2
+
+    project_audits = list(
+        db.scalars(
+            select(MaintenanceProjectAuditLog).where(
+                MaintenanceProjectAuditLog.project_id == project.project_id,
+                MaintenanceProjectAuditLog.entity_type == "project",
+            )
+        )
+    )
+    assert len(project_audits) == 1
+    assert project_audits[0].action == "update"
+    assert project_audits[0].reason == "负责人交接并同步销售人员"
+    assert project_audits[0].before_json["salesperson"] == "原销售"
+    assert project_audits[0].after_json["salesperson"] == "目标销售姓名"
+    assert project_audits[0].before_json["salesperson_override_active"] is False
+    assert project_audits[0].after_json["salesperson_override_active"] is True
+    assert project_audits[0].before_json["version"] == 1
+    assert project_audits[0].after_json["version"] == 2
+
+
+def test_salesperson_sync_falls_back_to_manager_display_name(db):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-fallback",
+        project_code="PM-SALESPERSON-FALLBACK",
+        display_name="负责人销售回退项目",
+        salesperson="原销售",
+        lifecycle_status="ongoing",
+    )
+    manager = SysUser(
+        username="manager_salesperson_fallback",
+        role="purchaser",
+        display_name="显示姓名负责人",
+        salesperson_name=None,
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, manager])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_fallback_admin")
+
+    assigned = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": manager.id,
+            "sync_salesperson": True,
+            "reason": "映射负责人并按显示姓名同步销售",
+        },
+    )
+
+    assert assigned.status_code == 201, assigned.text
+    db.refresh(project)
+    assert project.salesperson == "显示姓名负责人"
+    assert project.version == 2
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state is not None
+    assert state.revision == 1
+
+
+def test_salesperson_sync_falls_back_to_manager_username(db):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-username",
+        project_code="PM-SALESPERSON-USERNAME",
+        display_name="负责人账号名回退项目",
+        salesperson=None,
+        lifecycle_status="ongoing",
+    )
+    manager = SysUser(
+        username="manager_salesperson_username",
+        role="purchaser",
+        display_name=None,
+        salesperson_name=None,
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, manager])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_username_admin")
+
+    assigned = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": manager.id,
+            "sync_salesperson": True,
+            "reason": "映射负责人并按账号名同步销售",
+        },
+    )
+
+    assert assigned.status_code == 201, assigned.text
+    db.refresh(project)
+    assert project.salesperson == "manager_salesperson_username"
+    assert project.version == 2
+
+
+def test_sync_false_and_stale_sync_request_preserve_existing_salesperson(db):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-preserve",
+        project_code="PM-SALESPERSON-PRESERVE",
+        display_name="负责人销售保留项目",
+        salesperson="必须保留的销售",
+        salesperson_override_active=True,
+        lifecycle_status="ongoing",
+    )
+    first = SysUser(
+        username="manager_salesperson_preserve_first",
+        role="purchaser",
+        display_name="第一负责人",
+        salesperson_name="第一销售",
+        password_hash=hash_password(_PASSWORD),
+    )
+    second = SysUser(
+        username="manager_salesperson_preserve_second",
+        role="purchaser",
+        display_name="第二负责人",
+        salesperson_name="第二销售",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, first, second])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_preserve_admin")
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={"user_id": first.id, "reason": "旧客户端不传同步字段"},
+    )
+    assert created.status_code == 201, created.text
+
+    stale = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": second.id,
+            "expected_assignment_id": created.json()["assignment_id"],
+            "expected_assignment_version": 99,
+            "sync_salesperson": True,
+            "reason": "陈旧请求不得留下销售变更",
+        },
+    )
+    assert stale.status_code == 409, stale.text
+    db.refresh(project)
+    assert project.salesperson == "必须保留的销售"
+    assert project.salesperson_override_active is True
+    assert project.version == 1
+
+    reassigned = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": second.id,
+            "expected_assignment_id": created.json()["assignment_id"],
+            "expected_assignment_version": created.json()["version"],
+            "sync_salesperson": False,
+            "reason": "明确只改负责人不改销售",
+        },
+    )
+    assert reassigned.status_code == 201, reassigned.text
+    db.refresh(project)
+    assert project.salesperson == "必须保留的销售"
+    assert project.salesperson_override_active is True
+    assert project.version == 1
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state is not None
+    assert state.revision == 2
+    assert db.scalar(
+        select(MaintenanceProjectAuditLog.id).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id,
+            MaintenanceProjectAuditLog.entity_type == "project",
+        )
+    ) is None
+
+
+def test_sync_same_salesperson_does_not_bump_project_version(db):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-noop",
+        project_code="PM-SALESPERSON-NOOP",
+        display_name="负责人销售无变化项目",
+        salesperson="相同销售",
+        lifecycle_status="ongoing",
+    )
+    manager = SysUser(
+        username="manager_salesperson_noop",
+        role="purchaser",
+        display_name="负责人显示名",
+        salesperson_name="相同销售",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, manager])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_noop_admin")
+
+    assigned = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+        json={
+            "user_id": manager.id,
+            "sync_salesperson": True,
+            "reason": "负责人映射时销售已一致",
+        },
+    )
+
+    assert assigned.status_code == 201, assigned.text
+    db.refresh(project)
+    assert project.salesperson == "相同销售"
+    assert project.salesperson_override_active is False
+    assert project.version == 1
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state is not None
+    assert state.revision == 1
+    assert db.scalar(
+        select(MaintenanceProjectAuditLog.id).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id,
+            MaintenanceProjectAuditLog.entity_type == "project",
+        )
+    ) is None
+
+
+def test_salesperson_sync_and_manager_assignment_roll_back_together(db, monkeypatch):
+    project = MaintenanceProject(
+        project_id="project-manager-salesperson-atomic",
+        project_code="PM-SALESPERSON-ATOMIC",
+        display_name="负责人销售原子项目",
+        salesperson="事务前销售",
+        lifecycle_status="ongoing",
+    )
+    manager = SysUser(
+        username="manager_salesperson_atomic",
+        role="purchaser",
+        display_name="事务目标负责人",
+        salesperson_name="事务目标销售",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([project, manager])
+    db.commit()
+    client = _admin_client(db, username="manager_salesperson_atomic_admin")
+
+    def fail_revision(*_args, **_kwargs):
+        raise RuntimeError("synthetic workbook revision failure")
+
+    monkeypatch.setattr(
+        operations_service,
+        "bump_locked_workbook_revision",
+        fail_revision,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic workbook revision failure"):
+        client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
+            json={
+                "user_id": manager.id,
+                "sync_salesperson": True,
+                "reason": "验证负责人和销售同事务回滚",
+            },
+        )
+
+    db.expire_all()
+    restored = db.get(MaintenanceProject, project.project_id)
+    assert restored is not None
+    assert restored.salesperson == "事务前销售"
+    assert restored.version == 1
+    assert db.scalar(
+        select(MaintenanceProjectUserAssignment.assignment_id).where(
+            MaintenanceProjectUserAssignment.project_id == project.project_id
+        )
+    ) is None
+    assert db.scalar(
+        select(MaintenanceProjectAuditLog.id).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id
+        )
+    ) is None
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id) is None
 
 
 def test_project_manager_scope_filters_cards_and_denies_guessed_project_ids(db):
@@ -762,11 +1085,107 @@ def test_viewer_only_patch_enforces_optimistic_lock(db):
         f"/api/maintenance/projects/stable/{target.project_id}",
         json={"version": 1, "visible_usernames": [], "reason": "陈旧版本"},
     )
-    assert stale.status_code == 200, stale.text  # v1 仍是最新，首刷可过
+    assert stale.status_code == 200, stale.text
+    assert stale.json()["version"] == 1  # 相同空名单是 no-op：+0
 
-    bumped = admin.patch(
+    repeated_noop = admin.patch(
         f"/api/maintenance/projects/stable/{target.project_id}",
-        json={"version": 1, "visible_usernames": [], "reason": "版本已被上面抬高"},
+        json={"version": 1, "visible_usernames": [], "reason": "重复空名单"},
     )
-    assert bumped.status_code == 409, bumped.text
-    assert "当前版本 2" in bumped.json()["detail"]
+    assert repeated_noop.status_code == 200, repeated_noop.text
+    assert repeated_noop.json()["version"] == 1
+
+
+def test_mixed_project_and_viewer_patch_applies_both_and_bumps_once(db):
+    target = MaintenanceProject(
+        project_id="project-viewer-mixed",
+        project_code="PM-VMIX",
+        display_name="混合修改前",
+        project_manager_id="来源负责人",
+        lifecycle_status="missing",
+    )
+    viewer = SysUser(
+        username="mixed_project_viewer",
+        role="purchaser",
+        display_name="混合修改可见账号",
+        password_hash=hash_password(_PASSWORD),
+    )
+    db.add_all([target, viewer])
+    db.commit()
+    admin = _admin_client(db, username="viewer_mixed_admin")
+
+    changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 1,
+            "display_name": "混合修改后",
+            "visible_usernames": [viewer.username],
+            "reason": "同次保存基础信息与可见账号",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["display_name"] == "混合修改后"
+    assert changed.json()["version"] == 2
+    assert [row["username"] for row in changed.json()["visible_usernames"]] == [
+        viewer.username
+    ]
+    db.expire_all()
+    assert db.get(MaintenanceProject, target.project_id).version == 2
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 1
+
+    noop = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 2,
+            "display_name": "混合修改后",
+            "visible_usernames": [viewer.username],
+            "reason": "完全相同重放",
+        },
+    )
+    assert noop.status_code == 200, noop.text
+    assert noop.json()["version"] == 2
+    assert [row["username"] for row in noop.json()["visible_usernames"]] == [
+        viewer.username
+    ]
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 1
+
+    # 同时带基本字段与 viewer，但只有 viewer 发生变化：仍只 +1。
+    viewers_only_changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 2,
+            "display_name": "混合修改后",
+            "visible_usernames": [],
+            "reason": "混合提交中仅可见账号变化",
+        },
+    )
+    assert viewers_only_changed.status_code == 200, viewers_only_changed.text
+    assert viewers_only_changed.json()["version"] == 3
+    assert viewers_only_changed.json()["visible_usernames"] == []
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 2
+
+    # 反向真值组合：基本字段改、viewer 名单不改，也只 +1。
+    master_only_changed = admin.patch(
+        f"/api/maintenance/projects/stable/{target.project_id}",
+        json={
+            "version": 3,
+            "display_name": "混合修改最终值",
+            "visible_usernames": [],
+            "reason": "混合提交中仅基本字段变化",
+        },
+    )
+    assert master_only_changed.status_code == 200, master_only_changed.text
+    assert master_only_changed.json()["version"] == 4
+    assert master_only_changed.json()["visible_usernames"] == []
+    db.expire_all()
+    assert db.get(
+        MaintenanceProjectWorkbookState, target.project_id
+    ).revision == 3

@@ -58,6 +58,7 @@ from app.models.maintenance_project_operations import MaintenanceProjectOperatio
 from app.models.system import SysUser
 from app.schemas.maintenance_collection_reminders import ApplyBinding
 from app.security import UserContext, record_access_log
+from app.services import maintenance_project_operations as operations
 from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_collection_plan_xls import (
     CONTRACT_VERSION,
@@ -943,14 +944,31 @@ def apply_collection_plan_import(
                     "灰度期间仅允许 canary 项目应用回款计划"
                 )
 
-    # 稳定锁顺序：batch（已锁）→ projects → contracts → bindings → milestones。
+    # 稳定锁顺序：batch（已锁）→ workbook states(sorted) →
+    # projects(sorted) → contracts → bindings → milestones。  Milestones are
+    # exported by both project workbook protocols, so the state lock must be
+    # held before any domain row is locked or changed.
     project_ids = {binding.project_id for binding in effective_bindings}
     contract_ids = {binding.project_contract_id for binding in effective_bindings}
+    existing_project_ids = set(
+        db.scalars(
+            select(MaintenanceProject.project_id).where(
+                MaintenanceProject.project_id.in_(project_ids)
+            )
+        )
+    )
+    if existing_project_ids != project_ids:
+        raise CollectionPlanImportNotFound("项目不存在或不可见")
+    workbook_states = operations.lock_workbook_states(
+        db,
+        project_ids=project_ids,
+    )
     projects = {
         project.project_id: project
         for project in db.scalars(
             select(MaintenanceProject)
             .where(MaintenanceProject.project_id.in_(project_ids))
+            .order_by(MaintenanceProject.project_id)
             .with_for_update()
         )
     }
@@ -959,6 +977,7 @@ def apply_collection_plan_import(
         for contract in db.scalars(
             select(MaintenanceProjectContract)
             .where(MaintenanceProjectContract.project_contract_id.in_(contract_ids))
+            .order_by(MaintenanceProjectContract.project_contract_id)
             .with_for_update()
         )
     }
@@ -972,6 +991,7 @@ def apply_collection_plan_import(
                     {binding.external_order_no for binding in effective_bindings}
                 ),
             )
+            .order_by(MaintenanceCollectionPlanSourceBinding.external_order_no)
             .with_for_update()
         )
     }
@@ -981,6 +1001,10 @@ def apply_collection_plan_import(
             select(MaintenanceCollectionMilestone)
             .where(
                 MaintenanceCollectionMilestone.project_contract_id.in_(contract_ids)
+            )
+            .order_by(
+                MaintenanceCollectionMilestone.project_contract_id,
+                MaintenanceCollectionMilestone.sequence,
             )
             .with_for_update()
         )
@@ -993,6 +1017,7 @@ def apply_collection_plan_import(
         "source_missing": 0,
         "needs_review": 0,
     }
+    changed_project_ids: set[str] = set()
     now = datetime.now(UTC)
     for binding in effective_bindings:
         order = plan_orders[binding.row_key]
@@ -1119,7 +1144,11 @@ def apply_collection_plan_import(
             if current is not None:
                 original_facts = (
                     current.planned_date,
-                    Decimal(str(current.planned_amount)),
+                    (
+                        Decimal(str(current.planned_amount))
+                        if current.planned_amount is not None
+                        else None
+                    ),
                     current.completeness_state,
                     current.date_precision,
                 )
@@ -1140,6 +1169,7 @@ def apply_collection_plan_import(
             )
             if original_facts is None:
                 counts["created"] += 1
+                changed_project_ids.add(binding.project_id)
             elif original_facts == (
                 planned_date,
                 Decimal(node["planned_amount"]),
@@ -1149,6 +1179,7 @@ def apply_collection_plan_import(
                 counts["unchanged"] += 1
             else:
                 counts["updated"] += 1
+                changed_project_ids.add(binding.project_id)
                 if was_handled:
                     counts["needs_review"] += 1
 
@@ -1170,6 +1201,11 @@ def apply_collection_plan_import(
     batch.applied_by = operator
     batch.applied_at = now
     db.flush()
+    for project_id in sorted(changed_project_ids):
+        operations.bump_locked_workbook_revision(
+            db,
+            state=workbook_states[project_id],
+        )
     return {
         "batch_id": batch.batch_id,
         "batch_version": batch.version,

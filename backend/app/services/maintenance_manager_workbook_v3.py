@@ -447,7 +447,13 @@ def _overview_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -
     for project_id, project in sorted(projects.items()):
         contracts = list(project.get("contracts") or [])
         known_amounts = [Decimal(str(row["contract_amount"])) for row in contracts if row.get("contract_amount") is not None]
-        contract_complete = bool(contracts) and len(known_amounts) == len(contracts)
+        contract_complete = (
+            bool(contracts)
+            and len(known_amounts) == len(contracts)
+            # 旧的纯函数夹具未带该字段，默认保持向后兼容；数据库 adapter 会
+            # 显式提供 canonical 门禁，阻断 unmapped/duplicate/shared 合同。
+            and project.get("contract_facts_complete", True) is True
+        )
         total_contract = sum(known_amounts, Decimal("0")) if contract_complete else None
         actual = sum(
             (Decimal(str(row.get("confirmed_received_amount") or 0)) for row in contracts),
@@ -477,9 +483,17 @@ def _overview_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -
             _money(total_contract),
             "complete" if contract_complete else "missing",
             _money(actual),
-            float(actual / total_contract) if total_contract else None,
+            # Excel stores IEEE-754 numbers and may round the last bit on a
+            # load/save cycle.  Persist a bounded business precision before
+            # signing the read-only projection, otherwise perfectly valid
+            # ratios such as 30000/113000 trip the tamper digest after upload.
+            float((actual / total_contract).quantize(
+                Decimal("0.0000000001"), rounding=ROUND_HALF_UP,
+            )) if total_contract else None,
             _money(planned),
-            float(planned / total_contract) if total_contract else None,
+            float((planned / total_contract).quantize(
+                Decimal("0.0000000001"), rounding=ROUND_HALF_UP,
+            )) if total_contract else None,
             str(acceptance.get("submission_status") or "not_submitted"),
             str(acceptance.get("approval_status") or "not_reviewed"),
             str(acceptance.get("configuration_state") or "pending_business_configuration"),

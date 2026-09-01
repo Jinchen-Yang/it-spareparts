@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -60,6 +60,9 @@ export function MaintenanceDemandsPage() {
   const [missing, setMissing] = useState<WbddMissing | null>(null);
   const [missingLoading, setMissingLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadInputVersion, setUploadInputVersion] = useState(0);
+  const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const missingRequestSeq = useRef(0);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
 
   // ---- 区块二：需求单查询 ----
@@ -69,6 +72,8 @@ export function MaintenanceDemandsPage() {
   const [demandsTotal, setDemandsTotal] = useState(0);
   const [demandPage, setDemandPage] = useState(1);
   const [demandsLoading, setDemandsLoading] = useState(false);
+  const demandRequestSeq = useRef(0);
+  const latestDemandQuery = useRef({ page: 1, keyword: "", includeVoided: false });
 
   // ---- 作废原因弹窗（批量与单张共用） ----
   const [voidTarget, setVoidTarget] = useState<string[] | null>(null);
@@ -80,23 +85,38 @@ export function MaintenanceDemandsPage() {
   const [restoreReason, setRestoreReason] = useState("");
   const [restoring, setRestoring] = useState(false);
 
-  const loadMissing = useCallback(async () => {
+  const loadMissing = useCallback(async (
+    notifyFailure = true,
+    acceptNotFound = true,
+  ) => {
+    const seq = ++missingRequestSeq.current;
     setMissingLoading(true);
     try {
       const resp = await getWbddMissing();
+      if (seq !== missingRequestSeq.current) return false;
       setMissing(resp.data);
       // 清单已重算，旧勾选可能已不在清单里，直接清空
       setSelectedRowKeys([]);
-    } catch {
-      // 还没传过快照（404）或拉取失败：按空清单展示，空态文案引导用户先传快照
+      return true;
+    } catch (error) {
+      if (seq !== missingRequestSeq.current) return false;
+      // 还没传过快照（404）是合法空态；其他失败也必须失效旧差异清单。
       setMissing(null);
+      setSelectedRowKeys([]);
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status !== 404 && notifyFailure) {
+        message.error(readError(error, "差异清单加载失败"));
+      }
+      return status === 404 && acceptNotFound;
     } finally {
-      setMissingLoading(false);
+      if (seq === missingRequestSeq.current) setMissingLoading(false);
     }
   }, []);
 
   const loadDemands = useCallback(
-    async (page: number, q: string, withVoided: boolean) => {
+    async (page: number, q: string, withVoided: boolean, notifyFailure = true) => {
+      const seq = ++demandRequestSeq.current;
+      latestDemandQuery.current = { page, keyword: q, includeVoided: withVoided };
       setDemandsLoading(true);
       try {
         const resp = await searchMaintenanceDemands({
@@ -105,37 +125,80 @@ export function MaintenanceDemandsPage() {
           ...(q.trim() ? { q: q.trim() } : {}),
           ...(withVoided ? { include_voided: true } : {}),
         });
-        setDemands(resp.data.items);
-        setDemandsTotal(resp.data.total);
-        setDemandPage(resp.data.page ?? page);
+        if (seq === demandRequestSeq.current) {
+          setDemands(resp.data.items);
+          setDemandsTotal(resp.data.total);
+          setDemandPage(resp.data.page ?? page);
+        }
+        return seq === demandRequestSeq.current;
       } catch (error) {
-        message.error(readError(error, "需求单列表加载失败"));
+        if (seq === demandRequestSeq.current) {
+          setDemands([]);
+          setDemandsTotal(0);
+          setDemandPage(page);
+          if (notifyFailure) message.error(readError(error, "需求单列表加载失败"));
+        }
+        return false;
       } finally {
-        setDemandsLoading(false);
+        if (seq === demandRequestSeq.current) setDemandsLoading(false);
       }
     },
     [],
   );
 
+  const refreshLatestDemands = useCallback((notifyFailure = true) => {
+    const latest = latestDemandQuery.current;
+    return loadDemands(latest.page, latest.keyword, latest.includeVoided, notifyFailure);
+  }, [loadDemands]);
+
+  const refreshAfterCommit = useCallback(async (
+    includeMissing: boolean,
+    requireMissingSnapshot = false,
+  ) => {
+    const refreshes = [refreshLatestDemands(false)];
+    if (includeMissing) refreshes.push(loadMissing(false, !requireMissingSnapshot));
+    const results = await Promise.allSettled(refreshes);
+    return results.every((result) =>
+      result.status === "fulfilled" && result.value !== false);
+  }, [loadMissing, refreshLatestDemands]);
+
   useEffect(() => {
     void loadMissing();
     void loadDemands(1, "", false);
+    return () => {
+      demandRequestSeq.current += 1;
+      missingRequestSeq.current += 1;
+    };
   }, [loadMissing, loadDemands]);
 
   const handleWbddUpload = async (file: File) => {
     setUploading(true);
+    const fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
+    if (uploadAttempt.current?.fingerprint !== fingerprint) {
+      uploadAttempt.current = {
+        fingerprint,
+        key: idempotencyKey("wbdd-upload"),
+      };
+    }
     try {
-      const resp = await uploadWbdd(file, idempotencyKey("wbdd-upload"));
+      const resp = await uploadWbdd(file, uploadAttempt.current.key);
       const diffCount = resp.data.snapshot_diff?.missing_orders ?? 0;
-      message.success(
-        `快照已同步（批次 #${resp.data.batch_id}）` +
-          (diffCount ? `，发现 ${diffCount} 张消失的单，请核对下方差异清单` : ""),
-      );
-      await loadMissing();
+      const summary = `快照已同步（批次 #${resp.data.batch_id}）` +
+        (diffCount ? `，发现 ${diffCount} 张消失的单，请核对下方差异清单` : "");
+      uploadAttempt.current = null;
+      // 上传接口刚返回 batch_id，此时 missing 读回 404 不能当合法空态。
+      if (await refreshAfterCommit(true, true)) {
+        message.success(`${summary}，页面已刷新`);
+      } else {
+        message.warning(`${summary}，但页面刷新失败；旧列表已失效，请重试。`);
+      }
     } catch (error) {
       message.error(readError(error, "快照上传失败"));
     } finally {
       setUploading(false);
+      // antd Upload 会保留原生 input 的 value；失败后若用户重选同一文件，浏览器
+      // 不再触发 change。重建 input，同时保留上面的幂等键供安全重放。
+      setUploadInputVersion((current) => current + 1);
     }
     return false;
   };
@@ -157,15 +220,15 @@ export function MaintenanceDemandsPage() {
       const already = resp.data.results.filter(
         (r) => r.status === "already_voided",
       ).length;
-      message.success(
-        `已作废 ${resp.data.voided} 张需求单` +
-          (already ? `（其中 ${already} 张此前已是作废状态）` : ""),
-      );
+      const summary = `已作废 ${resp.data.voided} 张需求单` +
+        (already ? `（其中 ${already} 张此前已是作废状态）` : "");
       setVoidTarget(null);
-      await Promise.all([
-        loadMissing(),
-        loadDemands(demandPage, keyword, includeVoided),
-      ]);
+      // 从差异清单发起作废时，提交前已有快照；读回 404 同样属于刷新失败。
+      if (await refreshAfterCommit(true, missing !== null)) {
+        message.success(`${summary}，页面已刷新`);
+      } else {
+        message.warning(`${summary}，但页面刷新失败；旧列表已失效，请重试。`);
+      }
     } catch (error) {
       message.error(readVoidError(error));
     } finally {
@@ -182,10 +245,14 @@ export function MaintenanceDemandsPage() {
     if (!restoreTarget) return;
     setRestoring(true);
     try {
+      const orderNo = restoreTarget.order_no;
       await restoreMaintenanceDemand(restoreTarget.source_order_id, restoreReason.trim());
-      message.success(`已恢复需求单 ${restoreTarget.order_no}`);
       setRestoreTarget(null);
-      await loadDemands(demandPage, keyword, includeVoided);
+      if (await refreshAfterCommit(false)) {
+        message.success(`已恢复需求单 ${orderNo}，页面已刷新`);
+      } else {
+        message.warning(`已恢复需求单 ${orderNo}，但页面刷新失败；旧列表已失效，请重试。`);
+      }
     } catch (error) {
       message.error(readError(error, "恢复失败"));
     } finally {
@@ -273,6 +340,7 @@ export function MaintenanceDemandsPage() {
           <Space wrap size={12} align="center">
             {canImport ? (
               <Upload
+                key={`wbdd-upload-${uploadInputVersion}`}
                 accept=".xlsx"
                 maxCount={1}
                 showUploadList={false}

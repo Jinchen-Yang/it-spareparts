@@ -7,7 +7,7 @@
 from decimal import Decimal
 from typing import Iterable
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, case, false, func, or_, true
 
 
 ACTUAL_SOURCES = frozenset({"direct", "window", "month_avg", "manual"})
@@ -135,6 +135,190 @@ def normalized_tax_tier(
         if f"{normalized_basis}_tax_estimated" in flags
         else "actual"
     )
+
+
+def effective_manual_cost(
+    *,
+    qty: Decimal | None,
+    return_qty: Decimal | None,
+    unit_cost: Decimal | None,
+) -> Decimal | None:
+    """Resolve one active manual override with the canonical net-quantity rule.
+
+    A real zero is evidence (``qty == return_qty`` or ``unit_cost == 0``), while
+    a missing/invalid quantity or unit price remains missing.  This mirrors the
+    SQL helper below so workbook/API renderers cannot drift from aggregations.
+    """
+    try:
+        quantity = Decimal(qty) if qty is not None else None
+        returned = Decimal(return_qty or _ZERO)
+        unit = Decimal(unit_cost) if unit_cost is not None else None
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if quantity is None or unit is None:
+        return None
+    if (
+        not quantity.is_finite()
+        or not returned.is_finite()
+        or not unit.is_finite()
+        or quantity < _ZERO
+        or returned < _ZERO
+        or unit < _ZERO
+        or quantity >= _MAX_AMOUNT_EXCLUSIVE
+        or returned >= _MAX_AMOUNT_EXCLUSIVE
+        or unit >= _MAX_AMOUNT_EXCLUSIVE
+    ):
+        return None
+    amount = unit * max(quantity - returned, _ZERO)
+    if not amount.is_finite() or amount >= _MAX_AMOUNT_EXCLUSIVE:
+        return None
+    return amount.quantize(_CENT)
+
+
+def normalized_line_cost(
+    *,
+    source: str | None,
+    tax_basis: str | None,
+    legacy_amount: Decimal | None,
+    normalized_amount: Decimal | None,
+    normalized_basis: str,
+    anomaly_flags: Iterable[str] | None,
+    qty: Decimal | None,
+    return_qty: Decimal | None,
+    manual_unit_cost: Decimal | None,
+    manual_active: bool,
+) -> dict:
+    """Return one normalized cost fact, including the active-manual fallback.
+
+    Automatic evidence always wins.  A manual override is eligible only for an
+    unresolved ``NULL``/``none`` source; it cannot launder an unknown dirty
+    source into a known cost.  The returned shape is intentionally small so it
+    can be shared by workbooks, row APIs, and evidence drill-downs.
+    """
+    tier = normalized_tax_tier(
+        source=source,
+        tax_basis=tax_basis,
+        legacy_amount=legacy_amount,
+        normalized_amount=normalized_amount,
+        normalized_basis=normalized_basis,
+        anomaly_flags=anomaly_flags,
+    )
+    if tier != "missing":
+        return {
+            "amount": Decimal(normalized_amount).quantize(_CENT),
+            "tier": tier,
+            "source": source,
+        }
+    if manual_active and source in (None, "none"):
+        amount = effective_manual_cost(
+            qty=qty,
+            return_qty=return_qty,
+            unit_cost=manual_unit_cost,
+        )
+        if amount is not None:
+            return {"amount": amount, "tier": "actual", "source": "manual"}
+    return {"amount": None, "tier": "missing", "source": source}
+
+
+def resolved_line_cost_fields(
+    *,
+    source: str | None,
+    tax_basis: str | None,
+    legacy_unit_cost: Decimal | None,
+    legacy_amount: Decimal | None,
+    unit_cost_inc_tax: Decimal | None,
+    unit_cost_ex_tax: Decimal | None,
+    cost_amount_inc_tax: Decimal | None,
+    cost_amount_ex_tax: Decimal | None,
+    anomaly_flags: Iterable[str] | None,
+    confidence: str | None,
+    qty: Decimal | None,
+    return_qty: Decimal | None,
+    manual_unit_cost_inc_tax: Decimal | None,
+    manual_unit_cost_ex_tax: Decimal | None,
+    manual_active: bool,
+) -> dict:
+    """Resolve the row-shaped cost view shared by exports and workbooks.
+
+    Some historical active manual overrides predate the recompute that mirrors
+    them into ``f_maintenance_line``.  Read consumers must therefore merge the
+    override at query time, using exactly the same net-quantity and automatic-
+    evidence precedence as the aggregate helpers.  This function intentionally
+    returns a display projection and never mutates the persisted line.
+    """
+    inc = normalized_line_cost(
+        source=source,
+        tax_basis=tax_basis,
+        legacy_amount=legacy_amount,
+        normalized_amount=cost_amount_inc_tax,
+        normalized_basis="inc",
+        anomaly_flags=anomaly_flags,
+        qty=qty,
+        return_qty=return_qty,
+        manual_unit_cost=manual_unit_cost_inc_tax,
+        manual_active=manual_active,
+    )
+    ex = normalized_line_cost(
+        source=source,
+        tax_basis=tax_basis,
+        legacy_amount=legacy_amount,
+        normalized_amount=cost_amount_ex_tax,
+        normalized_basis="ex",
+        anomaly_flags=anomaly_flags,
+        qty=qty,
+        return_qty=return_qty,
+        manual_unit_cost=manual_unit_cost_ex_tax,
+        manual_active=manual_active,
+    )
+    manual_fallback = (
+        source in (None, "none")
+        and inc["source"] == "manual"
+        and inc["tier"] == "actual"
+        and ex["source"] == "manual"
+        and ex["tier"] == "actual"
+    )
+    if manual_fallback:
+        return {
+            "tier": "actual",
+            "inc_tier": "actual",
+            "ex_tier": "actual",
+            "source": "manual",
+            "tax_basis": "ex",
+            "confidence": "high",
+            "unit_cost": Decimal(manual_unit_cost_ex_tax).quantize(_CENT),
+            "cost_amount": ex["amount"],
+            "unit_cost_inc_tax": Decimal(manual_unit_cost_inc_tax).quantize(_CENT),
+            "unit_cost_ex_tax": Decimal(manual_unit_cost_ex_tax).quantize(_CENT),
+            "cost_amount_inc_tax": inc["amount"],
+            "cost_amount_ex_tax": ex["amount"],
+            "anomaly_flags": [
+                flag for flag in (anomaly_flags or ())
+                if flag not in COST_DERIVED_ANOMALY_FLAGS
+            ],
+            "manual_fallback": True,
+        }
+
+    legacy_tier = source_tier(source, tax_basis, legacy_amount)
+    return {
+        "tier": legacy_tier,
+        "inc_tier": inc["tier"],
+        "ex_tier": ex["tier"],
+        "source": source,
+        "tax_basis": tax_basis,
+        "confidence": confidence,
+        "unit_cost": legacy_unit_cost if legacy_tier != "missing" else None,
+        "cost_amount": legacy_amount if legacy_tier != "missing" else None,
+        "unit_cost_inc_tax": (
+            unit_cost_inc_tax if inc["tier"] != "missing" else None
+        ),
+        "unit_cost_ex_tax": (
+            unit_cost_ex_tax if ex["tier"] != "missing" else None
+        ),
+        "cost_amount_inc_tax": inc["amount"],
+        "cost_amount_ex_tax": ex["amount"],
+        "anomaly_flags": list(anomaly_flags or ()),
+        "manual_fallback": False,
+    }
 
 
 def summarize_records(
@@ -286,6 +470,126 @@ def sql_tier_predicates(source_column, tax_basis_column, amount_column):
         source_column.notin_(tuple(sorted(KNOWN_SOURCES))),
     )
     return actual, estimated, missing
+
+
+def sql_normalized_tax_tier_predicates(
+    source_column,
+    tax_basis_column,
+    legacy_amount_column,
+    normalized_amount_column,
+    *,
+    normalized_basis: str,
+    anomaly_flags_column,
+):
+    """返回与 :func:`normalized_tax_tier` 一致的 SQL 分级条件。
+
+    归一含/未税金额不能仅凭 ``cost_source`` 和自身非空就成为已知成本：它必须先
+    通过 legacy 来源、原始税口径与原始金额的严格校验。实际来源若目标税口径由
+    缺失税率换算（``<basis>_tax_estimated``），只降级为 estimated，不能计入
+    actual。三个返回条件互斥且穷尽，适合直接用于聚合 ``FILTER``/``CASE``。
+    """
+    if normalized_basis not in TAX_BASES:
+        return false(), false(), true()
+
+    legacy_actual, legacy_estimated, legacy_missing = sql_tier_predicates(
+        source_column,
+        tax_basis_column,
+        legacy_amount_column,
+    )
+    normalized_valid = sql_amount_is_valid(normalized_amount_column)
+    normalized_missing = or_(
+        normalized_amount_column.is_(None),
+        normalized_amount_column < _ZERO,
+        normalized_amount_column >= _MAX_AMOUNT_EXCLUSIVE,
+    )
+    # anomaly_flags 的模型约束为 NOT NULL；COALESCE 仍兼容迁移前历史行，并与
+    # normalized_tax_tier(anomaly_flags=None) 将其解释为空集合的行为一致。
+    tax_estimated = func.coalesce(
+        anomaly_flags_column.any(f"{normalized_basis}_tax_estimated"),
+        false(),
+    )
+    actual = and_(legacy_actual, normalized_valid, ~tax_estimated)
+    estimated = and_(
+        normalized_valid,
+        or_(legacy_estimated, and_(legacy_actual, tax_estimated)),
+    )
+    missing = or_(legacy_missing, normalized_missing)
+    return actual, estimated, missing
+
+
+def sql_effective_manual_cost(
+    *,
+    source_column,
+    qty_column,
+    return_qty_column,
+    unit_cost_column,
+    active_column,
+):
+    """SQL twin of :func:`effective_manual_cost` plus source/active gating."""
+    effective_qty = func.greatest(
+        func.coalesce(qty_column, _ZERO)
+        - func.coalesce(return_qty_column, _ZERO),
+        _ZERO,
+    )
+    amount = unit_cost_column * effective_qty
+    known = and_(
+        or_(source_column.is_(None), source_column == "none"),
+        active_column.is_(True),
+        sql_amount_is_valid(qty_column),
+        sql_amount_is_valid(func.coalesce(return_qty_column, _ZERO)),
+        sql_amount_is_valid(unit_cost_column),
+        sql_amount_is_valid(amount),
+    )
+    return amount, known
+
+
+def sql_normalized_line_cost(
+    *,
+    source_column,
+    tax_basis_column,
+    legacy_amount_column,
+    normalized_amount_column,
+    normalized_basis: str,
+    anomaly_flags_column,
+    qty_column,
+    return_qty_column,
+    manual_unit_cost_column,
+    manual_active_column,
+):
+    """Build one normalized amount expression and its strict tier predicates.
+
+    The tuple is ``(amount, actual, estimated, missing)``.  ``amount`` is NULL
+    when evidence is missing, but remains numeric zero for a valid zero-cost
+    line.  Consumers should aggregate this expression rather than raw
+    ``cost_amount_*`` columns.
+    """
+    automatic_actual, automatic_estimated, _automatic_missing = (
+        sql_normalized_tax_tier_predicates(
+            source_column,
+            tax_basis_column,
+            legacy_amount_column,
+            normalized_amount_column,
+            normalized_basis=normalized_basis,
+            anomaly_flags_column=anomaly_flags_column,
+        )
+    )
+    manual_amount, manual_known = sql_effective_manual_cost(
+        source_column=source_column,
+        qty_column=qty_column,
+        return_qty_column=return_qty_column,
+        unit_cost_column=manual_unit_cost_column,
+        active_column=manual_active_column,
+    )
+    automatic_known = or_(automatic_actual, automatic_estimated)
+    actual = or_(automatic_actual, manual_known)
+    estimated = automatic_estimated
+    missing = ~or_(actual, estimated)
+    amount = case(
+        (automatic_known, normalized_amount_column),
+        (manual_known, manual_amount),
+        else_=None,
+    )
+    return amount, actual, estimated, missing
 
 
 def budget_decision(

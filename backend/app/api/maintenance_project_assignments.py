@@ -28,6 +28,7 @@ class ManagerAssignmentCreate(BaseModel):
     user_id: int = Field(ge=1)
     expected_assignment_id: str | None = Field(default=None, max_length=36)
     expected_assignment_version: int | None = Field(default=None, ge=1)
+    sync_salesperson: bool = False
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -101,6 +102,7 @@ def assign_project_manager(
             user_id=body.user_id,
             expected_assignment_id=body.expected_assignment_id,
             expected_assignment_version=body.expected_assignment_version,
+            sync_salesperson=body.sync_salesperson,
             reason=body.reason,
             operated_by=operator,
         )
@@ -133,6 +135,7 @@ def assign_project_manager(
             "project_id": project_id,
             "assignment_id": payload["assignment_id"],
             "target_user_id": body.user_id,
+            "sync_salesperson": body.sync_salesperson,
         },
     )
     return payload

@@ -10,6 +10,7 @@ from app.models.maintenance import (
     FMaintenanceLine,
     FMaintenanceOrder,
     MaintenanceDemandTombstone,
+    MaintenanceManualCostOverride,
 )
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
@@ -51,13 +52,55 @@ def _line(db, project, part, *, order_no, order_date, qty, return_qty=Decimal("0
         raw_line_id=f"rl-{uuid.uuid4()}", order_id=order.id, line_no=1,
         part_id=part.id, pn_std=part.pn_std, pn_raw=part.pn_std,
         description=part.description, qty=qty, return_qty=return_qty,
+        cost_amount=(cost_inc if cost_inc is not None else cost_ex),
         cost_amount_inc_tax=cost_inc, cost_amount_ex_tax=cost_ex,
         cost_source="direct" if cost_inc is not None else None,
+        cost_tax_basis=("inc" if cost_inc is not None else "ex" if cost_ex is not None else None),
         is_active=active, import_batch_id=b,
     )
     db.add(line)
     db.flush()
     return line
+
+
+def test_ranking_strict_cost_evidence_keeps_zero_and_active_manual_net_qty(db):
+    proj = _project(db, "STRICT")
+    part = _part(db, "ANA-STRICT")
+    zero = _line(
+        db, proj, part, order_no="WBDD-ZERO", order_date=date(2026, 8, 1),
+        qty=Decimal("1"), cost_inc=Decimal("0"), cost_ex=Decimal("0"),
+    )
+    dirty = _line(
+        db, proj, part, order_no="WBDD-DIRTY", order_date=date(2026, 8, 2),
+        qty=Decimal("1"), cost_inc=Decimal("999"), cost_ex=Decimal("888"),
+    )
+    dirty.cost_source = "future_source"
+    bad_basis = _line(
+        db, proj, part, order_no="WBDD-BASIS", order_date=date(2026, 8, 3),
+        qty=Decimal("1"), cost_inc=Decimal("777"), cost_ex=Decimal("666"),
+    )
+    bad_basis.cost_tax_basis = "bad"
+    manual = _line(
+        db, proj, part, order_no="WBDD-MANUAL", order_date=date(2026, 8, 4),
+        qty=Decimal("3"), return_qty=Decimal("1"),
+    )
+    db.add(MaintenanceManualCostOverride(
+        line_id=manual.id,
+        unit_cost_ex_tax=Decimal("8"),
+        unit_cost_inc_tax=Decimal("9.04"),
+        active=True,
+        updated_by="test",
+    ))
+    db.commit()
+
+    row = ana.pn_ranking(
+        db, range_="all", sort="cost_inc", can_cost=True,
+    )["rows"][0]
+
+    assert row["cost_inc"]["value"] == "18.08"
+    assert row["cost_ex"]["value"] == "16.00"
+    assert row["missing_lines"] == 2
+    assert zero.cost_amount_inc_tax == Decimal("0")
 
 
 def _part(db, pn: str, desc: str = "") -> DimPart:

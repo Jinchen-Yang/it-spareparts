@@ -104,7 +104,8 @@ def test_all_sources_not_imported_on_empty_db(db):
         assert source["as_of"] is None and source["unlinked_rows"] is None, key
 
 
-def test_wbdd_ready_after_import(db, tmp_path):
+def test_wbdd_ready_after_import(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(health, "business_today", lambda: date(2026, 8, 15))
     path = write_workbook(str(tmp_path / "w.xlsx"), COLUMNS_91,
                           make_rows(orders=1, lines_per_order=1))
     pipeline.run_import(db, path, "w.xlsx", uploaded_by="tester", mode="upsert")

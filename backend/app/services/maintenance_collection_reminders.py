@@ -32,7 +32,6 @@ from app.config import get_settings
 from app.models.maintenance_manager import (
     MaintenanceCollectionMilestone,
     MaintenanceCollectionMilestoneOperation,
-    MaintenanceServicePeriod,
 )
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
 from app.models.maintenance_project import (
@@ -42,6 +41,7 @@ from app.models.maintenance_project import (
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_collection_evidence as collection_evidence
+from app.services import maintenance_periods
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 
@@ -322,13 +322,16 @@ def _manager_assignment(assignment_view: dict | None) -> dict:
     }
 
 
-def _service_period_dict(period: MaintenanceServicePeriod | None) -> dict:
-    if period is None:
-        return {"service_start": None, "service_end": None, "completeness_state": "empty"}
+def _service_period_dict(project: MaintenanceProject) -> dict:
+    """期限展示读唯一事实源 project.period_*（projection 只是 OCC 投影）。"""
     return {
-        "service_start": period.service_start.isoformat() if period.service_start else None,
-        "service_end": period.service_end.isoformat() if period.service_end else None,
-        "completeness_state": period.completeness_state,
+        "service_start": (
+            project.period_from.isoformat() if project.period_from else None
+        ),
+        "service_end": project.period_to.isoformat() if project.period_to else None,
+        "completeness_state": maintenance_periods.completeness_state(
+            project.period_from, project.period_to
+        ),
     }
 
 
@@ -490,14 +493,6 @@ def search_collection_reminders(
     contracts_by_project: dict[str, list[MaintenanceProjectContract]] = {}
     for contract in contracts:
         contracts_by_project.setdefault(contract.project_id, []).append(contract)
-    periods = {
-        period.project_id: period
-        for period in db.scalars(
-            select(MaintenanceServicePeriod).where(
-                MaintenanceServicePeriod.project_id.in_(project_ids)
-            )
-        )
-    }
     assignment_views = assignments.active_assignment_views(db, project_ids=project_ids)
     milestones = list(
         db.scalars(
@@ -549,14 +544,16 @@ def search_collection_reminders(
                     "project_id": project.project_id,
                     "project_code": project.project_code,
                     "display_name": project.display_name,
-                    "lifecycle_status": project.lifecycle_status,
+                    "lifecycle_status": maintenance_periods.lifecycle_status(
+                        project.period_from,
+                        project.period_to,
+                        as_of,
+                    ),
                     "version": project.version,
                     "manager_assignment": _manager_assignment(
                         assignment_views.get(project.project_id)
                     ),
-                    "service_period": _service_period_dict(
-                        periods.get(project.project_id)
-                    ),
+                    "service_period": _service_period_dict(project),
                     "contracts": [
                         _contract_ref(contract, as_of=as_of)
                         for contract in project_contracts
@@ -627,11 +624,6 @@ def get_project_collection_milestones(
         )
     )
     contract_no_by_id = {c.project_contract_id: c.contract_no for c in contracts}
-    period = db.scalar(
-        select(MaintenanceServicePeriod).where(
-            MaintenanceServicePeriod.project_id == project_id
-        )
-    )
     assignment_views = assignments.active_assignment_views(db, project_ids=[project_id])
     milestones = list(
         db.scalars(
@@ -693,12 +685,16 @@ def get_project_collection_milestones(
             "project_id": project.project_id,
             "project_code": project.project_code,
             "display_name": project.display_name,
-            "lifecycle_status": project.lifecycle_status,
+            "lifecycle_status": maintenance_periods.lifecycle_status(
+                project.period_from,
+                project.period_to,
+                as_of,
+            ),
             "version": project.version,
             "manager_assignment": _manager_assignment(
                 assignment_views.get(project.project_id)
             ),
-            "service_period": _service_period_dict(period),
+            "service_period": _service_period_dict(project),
             "contracts": [_contract_ref(contract, as_of=as_of) for contract in contracts],
         },
         "summary": _reminder_counts(states),
@@ -967,4 +963,8 @@ def follow_up_collection_milestone(
             payload_hash=payload_hash,
             user_ctx=user_ctx,
         )
+    # The reminder fields are part of both project workbook projections.  The
+    # idempotency replay returned before this lock/write block, so only the
+    # first successful semantic action invalidates the workbook snapshot.
+    operations.bump_locked_workbook_revision(db, state=state)
     return payload

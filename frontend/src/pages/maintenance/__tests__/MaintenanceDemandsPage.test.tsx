@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { message } from "antd";
 
 const searchMaintenanceDemands = vi.fn();
 const voidFastMaintenanceDemands = vi.fn();
@@ -114,7 +115,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  message.destroy();
+});
 
 describe("需求单与数据同步页", () => {
   it("渲染两个区块，进入页面即拉差异清单与需求单列表", async () => {
@@ -215,6 +219,23 @@ describe("需求单与数据同步页", () => {
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
 
+  it("作废已提交但列表读回失败时清空旧行，只提示写成功但刷新失败", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    searchMaintenanceDemands
+      .mockResolvedValueOnce(demandPage([demandRow("RAW-9", "XQD-009")]))
+      .mockRejectedValueOnce(new Error("readback failed"));
+    render(<MaintenanceDemandsPage />);
+
+    await screen.findByText("XQD-009");
+    fireEvent.click(screen.getByRole("button", { name: /^作\s*废$/ }));
+    await confirmVoidWithReason("重复导入");
+
+    expect(await screen.findByText(/已作废 1 张需求单，但页面刷新失败/))
+      .toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("XQD-009")).toBeNull());
+    expect(screen.queryByText(/已作废 1 张需求单，页面已刷新/)).toBeNull();
+  });
+
   it("作废行灰显并给「恢复」入口；恢复需填原因（后端强制 reason 非空 + admin）", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     localStorage.setItem("role", "admin");
@@ -240,6 +261,29 @@ describe("需求单与数据同步页", () => {
         "误作废，氚云侧单仍然有效",
       ));
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+  });
+
+  it("恢复已提交但列表读回失败时清空旧作废行并明确提示", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    localStorage.setItem("role", "admin");
+    searchMaintenanceDemands
+      .mockResolvedValueOnce(
+        demandPage([demandRow("RAW-9", "XQD-009", { is_voided: true })]),
+      )
+      .mockRejectedValueOnce(new Error("readback failed"));
+    render(<MaintenanceDemandsPage />);
+
+    await screen.findByText("已作废");
+    fireEvent.click(screen.getByRole("button", { name: /^恢\s*复$/ }));
+    fireEvent.change(screen.getByPlaceholderText(/恢复原因/), {
+      target: { value: "误作废" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /确认恢复/ }));
+
+    expect(await screen.findByText(/已恢复需求单 XQD-009，但页面刷新失败/))
+      .toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("XQD-009")).toBeNull());
+    expect(screen.queryByText(/已恢复需求单 XQD-009，页面已刷新/)).toBeNull();
   });
 
   it("非 admin 看不到「恢复」入口（后端 require_admin，给了也只会 403）", async () => {
@@ -268,7 +312,23 @@ describe("需求单与数据同步页", () => {
     });
   });
 
-  it("上传氚云快照成功后刷新差异清单", async () => {
+  it("较早的查询晚到时不能覆盖最新筛选结果", async () => {
+    let resolveOld!: (value: unknown) => void;
+    searchMaintenanceDemands
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(demandPage([demandRow("RAW-NEW", "XQD-NEW")]));
+    render(<MaintenanceDemandsPage />);
+
+    fireEvent.click(screen.getByRole("switch"));
+    expect(await screen.findByText("XQD-NEW")).toBeInTheDocument();
+    await act(async () => {
+      resolveOld(demandPage([demandRow("RAW-OLD", "XQD-OLD")]));
+    });
+    expect(screen.getByText("XQD-NEW")).toBeInTheDocument();
+    expect(screen.queryByText("XQD-OLD")).toBeNull();
+  });
+
+  it("上传氚云快照成功后同时刷新差异清单与需求单列表", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     const { container } = render(<MaintenanceDemandsPage />);
     await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(1));
@@ -283,6 +343,78 @@ describe("需求单与数据同步页", () => {
     await waitFor(() => expect(uploadWbdd).toHaveBeenCalledTimes(1));
     expect(uploadWbdd.mock.calls[0][1]).toBeTruthy(); // 幂等键
     await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+  });
+
+  it("快照已同步但需求单读回失败时清空旧列表，不误报上传失败", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    searchMaintenanceDemands
+      .mockResolvedValueOnce(demandPage([demandRow("RAW-9", "XQD-009")]))
+      .mockRejectedValueOnce(new Error("readback failed"));
+    const { container } = render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "wbdd.xlsx")] },
+    });
+
+    expect(await screen.findByText(/快照已同步（批次 #8）.*但页面刷新失败/))
+      .toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("XQD-009")).toBeNull());
+    expect(screen.queryByText("快照上传失败")).toBeNull();
+  });
+
+  it("上传期间切换筛选，成功后按最新筛选刷新", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    let resolveUpload!: (value: unknown) => void;
+    uploadWbdd.mockImplementationOnce(() => new Promise((resolve) => { resolveUpload = resolve; }));
+    const { container } = render(<MaintenanceDemandsPage />);
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(1));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["xlsx"], "wbdd.xlsx")] },
+    });
+    await waitFor(() => expect(uploadWbdd).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      resolveUpload({
+        data: { batch_id: 8, snapshot_diff: { missing_orders: 0 } },
+      });
+    });
+
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(3));
+    expect(lastArg(searchMaintenanceDemands)).toMatchObject({
+      page: 1,
+      include_voided: true,
+    });
+  });
+
+  it("重算忙后重传同一文件复用原幂等键，允许后端补跑成本", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    uploadWbdd
+      .mockRejectedValueOnce({
+        response: { data: { detail: { code: "recompute_busy", message: "成本重算进行中" } } },
+      })
+      .mockResolvedValueOnce({
+        data: { batch_id: 8, replayed: true, snapshot_diff: { missing_orders: 0 } },
+      });
+    const { container } = render(<MaintenanceDemandsPage />);
+    await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(1));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["xlsx"], "wbdd.xlsx", {
+      type: "application/vnd.ms-excel",
+      lastModified: 1234,
+    });
+
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(uploadWbdd).toHaveBeenCalledTimes(1));
+    const retryInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(retryInput, { target: { files: [file] } });
+    await waitFor(() => expect(uploadWbdd).toHaveBeenCalledTimes(2));
+
+    expect(uploadWbdd.mock.calls[1][1]).toBe(uploadWbdd.mock.calls[0][1]);
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
 
   it("浏览器缺少 crypto.randomUUID 时仍会上传 WBDD 并生成幂等键", async () => {

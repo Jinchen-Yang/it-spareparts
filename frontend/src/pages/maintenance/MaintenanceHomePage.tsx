@@ -23,8 +23,11 @@ import {
   RANGE_LABELS,
   applySparePartLines,
   downloadSparePartLines,
+  validateSparePartLines,
 } from "../../api/maintenanceWorkbooks";
 import ProjectCard from "../../components/maintenance/ProjectCard";
+import MaintenanceBatchTransferButton from "../../components/maintenance/MaintenanceBatchTransferButton";
+import MaintenanceProjectExportButton from "../../components/maintenance/MaintenanceProjectExportButton";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
@@ -88,22 +91,29 @@ export function MaintenanceHomePage() {
           ? await searchBoardProjects({ q: keyword.trim(), ...params })
           : await getBoardProjects(params);
         const body = resp.data;
-        if (seq !== requestSeq.current) return;      // 已被更新的筛选取代
+        if (seq !== requestSeq.current) return false;      // 已被更新的筛选取代
         setRows((prev) => (replace ? body.rows : [...prev, ...body.rows]));
         setPage(nextPage);
-        // 桶行是后端额外置顶、不计入 total 的一行，所以以「本页拿到多少真实行」
-        // 判断是否到底，而不是拿 total 做算术（那会少算或多算一页）。
-        setDone(body.rows.length < PAGE_SIZE);
+        // card_status 在后端按候选页计算后过滤：某页可以 0 命中、下一页仍有命中。
+        // 因此必须按候选 total 继续拉，不能用过滤后的 rows.length 提前截断。
+        setDone(nextPage * body.page_size >= body.total);
+        return true;
       } catch (err) {
-        if (seq !== requestSeq.current) return;
+        if (seq !== requestSeq.current) return false;
+        if (replace) setRows([]);
         setError(readError(err));
         setDone(true);
+        return false;
       } finally {
         if (seq === requestSeq.current) setLoading(false);
       }
     },
     [lifecycle, status, keyword, sort],
   );
+  // 上传流程跨越“预检 → 人工确认”，期间筛选可能已变化。旧 onApply 闭包只
+  // 通过这个 ref 调用当前 render 的 load，避免旧筛选主动成为最新请求。
+  const latestLoad = useRef(load);
+  latestLoad.current = load;
 
   useEffect(() => {
     void load(1, true);
@@ -146,6 +156,23 @@ export function MaintenanceHomePage() {
             <Link to="/maintenance/demands">
               <Button>需求单与同步</Button>
             </Link>
+            <MaintenanceBatchTransferButton
+              filters={{
+                lifecycle,
+                sort,
+                ...(status ? { card_status: status } : {}),
+                ...(keyword.trim() ? { q: keyword.trim() } : {}),
+              }}
+              onApplied={() => latestLoad.current(1, true)}
+            />
+            <MaintenanceProjectExportButton
+              filters={{
+                lifecycle,
+                sort,
+                ...(status ? { card_status: status } : {}),
+                ...(keyword.trim() ? { q: keyword.trim() } : {}),
+              }}
+            />
             <Select
               style={{ width: 110 }}
               value={rangePreset}
@@ -168,7 +195,9 @@ export function MaintenanceHomePage() {
               canUpload={canUpload}
               hint="下载 → 改价/补价 → 上传覆盖＝真实源"
               onDownload={async () => downloadSparePartLines(rangeParams())}
-              onApply={(file) => applySparePartLines(file)}
+              onValidate={validateSparePartLines}
+              onApply={applySparePartLines}
+              onAfterApply={() => latestLoad.current(1, true)}
             />
           </Space>
         </Col>
@@ -212,7 +241,7 @@ export function MaintenanceHomePage() {
           />
           <Input.Search
             allowClear
-            placeholder="搜项目名 / XSDD 单号"
+            placeholder="搜项目名 / XSDD 单号 / 销售姓名"
             style={{ width: 260 }}
             onSearch={setKeyword}
           />

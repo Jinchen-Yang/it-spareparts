@@ -46,14 +46,21 @@ export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; 
   }
   const value = stat.value;
   const incomplete = value.quality === "incomplete";
+  const noLines = incomplete && value.known_amount == null;
+  const allMissing = incomplete && !noLines
+    && value.missing_lines > 0 && Number(value.coverage_pct ?? 0) === 0;
   return (
     <Space direction="vertical" size={0} data-testid="cost-ready">
       <Text strong style={{ fontSize: compact ? 14 : 19 }}>
-        {money(value.known_amount)}
-        {incomplete ? " ≥" : ""}
+        {allMissing || noLines ? "暂无可计算成本" : money(value.known_amount)}
+        {incomplete && !allMissing && !noLines ? " ≥" : ""}
       </Text>
       <Text type={incomplete ? "warning" : "secondary"} style={{ fontSize: 11.5 }}>
-        {QUALITY_TEXT[value.quality] ?? value.quality}
+        {noLines
+          ? "暂无有效需求明细"
+          : allMissing
+            ? "全部缺价 · 待补价"
+            : QUALITY_TEXT[value.quality] ?? value.quality}
         {value.missing_lines > 0 ? ` · 缺价 ${value.missing_lines} 行` : ""}
       </Text>
       {!compact && value.coverage_pct !== null ? (

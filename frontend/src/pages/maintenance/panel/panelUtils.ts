@@ -2,6 +2,16 @@ import { createElement } from "react";
 import { Tag } from "antd";
 
 /**
+ * 项目总表落库后的读回屏障：每个已挂载 tab 向父页登记自己的真实加载函数。
+ * 返回 false 表示该 tab 已主动清空旧快照，但本次读回没有完成。
+ */
+export type PanelRefresh = () => Promise<boolean>;
+export type RegisterPanelRefresh = (
+  key: string,
+  refresh: PanelRefresh | null,
+) => void;
+
+/**
  * 项目面板各 tab 的共享渲染件（2026-08-19 面板重设计拆出）：
  * 非 ready 状态一律说人话、绝不落 0（铁律 5）；流转状态列只展示不计算（铁律 3）。
  */

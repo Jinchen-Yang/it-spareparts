@@ -5,6 +5,7 @@ from app.services import maintenance_margin
 
 def _calculate(**overrides):
     values = {
+        "revenue_inc": Decimal("1130"),
         "revenue_ex": Decimal("1000"),
         "tax_rate": Decimal("0.06"),
         "parts_cost_inc_tax": Decimal("226"),
@@ -54,7 +55,7 @@ def test_estimated_cost_is_visible_but_never_labeled_actual():
     assert result["contribution_status_ex"] == "complete"
 
 
-def test_missing_contract_tax_rate_does_not_override_fixed_policy():
+def test_missing_contract_tax_rate_does_not_override_explicit_inc_revenue():
     result = _calculate(tax_rate=None)
 
     assert result["revenue_inc"] == Decimal("1130.00")
@@ -67,6 +68,16 @@ def test_missing_contract_tax_rate_does_not_override_fixed_policy():
     assert result["parts_profit_status_ex"] == "complete_actual"
     assert result["contribution_profit_ex"] == Decimal("800.00")
     assert result["contribution_status_ex"] == "complete"
+
+
+def test_inc_revenue_is_never_inferred_from_ex_revenue():
+    result = _calculate(revenue_inc=None, revenue_ex=Decimal("1000"))
+
+    assert result["revenue_inc"] is None
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_profit_status_inc"] == "missing_revenue"
+    assert result["revenue_ex"] == Decimal("1000.00")
+    assert result["parts_gross_profit_ex"] == Decimal("800.00")
 
 
 def test_conflicting_duplicate_revenue_fails_closed_with_explicit_status():
@@ -104,7 +115,7 @@ def test_tax_only_duplicate_conflict_blocks_inc_but_not_ex_basis():
     assert result["contribution_status_ex"] == "complete"
 
 
-def test_raw_contract_tax_rate_never_overrides_fixed_policy():
+def test_raw_contract_tax_rate_never_overrides_explicit_revenues():
     for invalid_rate in (Decimal("1"), Decimal("1.3"), Decimal("NaN")):
         result = _calculate(tax_rate=invalid_rate)
 
@@ -214,7 +225,9 @@ def test_invalid_expense_amount_is_never_silently_treated_as_zero():
 
 
 def test_nonfinite_revenue_and_cost_fail_closed_instead_of_raising():
-    invalid_revenue = _calculate(revenue_ex=Decimal("NaN"))
+    invalid_revenue = _calculate(
+        revenue_inc=Decimal("NaN"), revenue_ex=Decimal("NaN"),
+    )
     assert invalid_revenue["parts_profit_status_inc"] == "missing_revenue"
     assert invalid_revenue["parts_profit_status_ex"] == "missing_revenue"
     assert invalid_revenue["contribution_status_inc"] == "missing_revenue"
@@ -277,6 +290,7 @@ def test_date_filtered_scope_preserves_unavailable_expense_evidence_failure():
 def test_date_filtered_scope_preserves_missing_revenue_evidence_failure():
     result = _calculate(
         date_filtered=True,
+        revenue_inc=None,
         revenue_ex=None,
     )
 
@@ -332,6 +346,7 @@ def test_date_filtered_scope_preserves_incomplete_cost_evidence_failure():
 
 def test_nonpositive_revenue_keeps_amount_but_not_margin_rate():
     result = _calculate(
+        revenue_inc=Decimal("0"),
         revenue_ex=Decimal("0"),
         tax_rate=Decimal("0"),
         parts_cost_inc_tax=Decimal("10"),

@@ -160,6 +160,13 @@ def recompute(db: Session = Depends(get_db),
             detail=str(exc),
             headers={"Retry-After": "5"},
         ) from exc
+    except maintenance_cost.WorkbookInvalidationConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="维保数据归属在重算期间发生变化，本次重算已整体回滚，请重试",
+            headers={"Retry-After": "5"},
+        ) from exc
 
 
 @router.get("/projects")
@@ -446,7 +453,7 @@ def export(
                      r.get("parts_cost_ex_tax_missing_lines"),
                      *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
-                     r["contract_amount"],
+                     r["contract_amount_inc_tax"],
                      (
                          "未关联合同"
                          if not r["sales_orders"]

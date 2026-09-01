@@ -8,8 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
-from app.models.replenishment import ReplenishmentCartDraft, ReplenishmentCartDraftLine
+from app.models.replenishment import (
+    ReplenishmentApplication,
+    ReplenishmentCartDraft,
+    ReplenishmentCartDraftLine,
+)
 from app.models.system import SysUser
+from app.security import UserContext
 from app.services import replenishment
 
 
@@ -58,8 +63,21 @@ def _payload(db: Session, draft: ReplenishmentCartDraft | None) -> dict | None:
     }
 
 
-def get_cart_draft(db: Session, *, username: str, project_id: str) -> dict | None:
+def get_cart_draft(
+    db: Session,
+    *,
+    username: str,
+    user_ctx: UserContext,
+    project_id: str,
+) -> dict | None:
     user = _owner(db, username)
+    replenishment._authorized_project(
+        db,
+        project_id=project_id,
+        username=username,
+        user_ctx=user_ctx,
+        read_only=True,
+    )
     draft = db.scalar(select(ReplenishmentCartDraft).where(
         ReplenishmentCartDraft.owner_user_id == user.id,
         ReplenishmentCartDraft.project_id == project_id,
@@ -71,14 +89,19 @@ def replace_cart_draft(
     db: Session,
     *,
     username: str,
-    role: str,
+    user_ctx: UserContext,
     project_id: str,
     expected_version: int | None,
     request_note: str | None,
     lines: list[dict],
 ) -> dict:
     user = _owner(db, username)
-    project = replenishment._authorized_project(db, project_id=project_id, user=user, role=role)
+    project, _current_ctx = replenishment._authorized_project(
+        db,
+        project_id=project_id,
+        username=username,
+        user_ctx=user_ctx,
+    )
     if not lines or len(lines) > replenishment.MAX_LINES:
         raise replenishment.ReplenishmentError("购物车明细必须为 1-200 条")
     cleaned: list[dict] = []
@@ -114,9 +137,13 @@ def replace_cart_draft(
         )
         db.add(draft)
         db.flush()
-    elif expected_version is not None and draft.version != expected_version:
+    elif expected_version in (None, 0):
+        # Missing/zero means create-if-absent, never an unconditional overwrite
+        # of a draft another tab may already have saved.
+        raise replenishment.ReplenishmentError("草稿已存在，请重新加载", code="version_conflict", status_code=409)
+    elif draft.version != expected_version:
         raise replenishment.ReplenishmentError("草稿已在其他页面更新，请重新加载", code="version_conflict", status_code=409)
-    elif expected_version is not None:
+    else:
         draft.version += 1
     draft.request_note = replenishment._clean_optional(request_note, maximum=4000)
     db.query(ReplenishmentCartDraftLine).filter(
@@ -134,9 +161,20 @@ def replace_cart_draft(
 
 
 def delete_cart_draft(
-    db: Session, *, username: str, project_id: str, expected_version: int | None = None
+    db: Session,
+    *,
+    username: str,
+    user_ctx: UserContext,
+    project_id: str,
+    expected_version: int | None = None,
 ) -> bool:
     user = _owner(db, username)
+    replenishment._authorized_project(
+        db,
+        project_id=project_id,
+        username=username,
+        user_ctx=user_ctx,
+    )
     draft = db.scalar(select(ReplenishmentCartDraft).where(
         ReplenishmentCartDraft.owner_user_id == user.id,
         ReplenishmentCartDraft.project_id == project_id,
@@ -151,15 +189,60 @@ def delete_cart_draft(
 
 
 def submit_cart_draft_atomic(
-    db: Session, *, username: str, role: str, project_id: str, expected_version: int
+    db: Session,
+    *,
+    username: str,
+    user_ctx: UserContext,
+    project_id: str,
+    expected_version: int,
+    client_request_id: str,
 ) -> dict:
     user = _owner(db, username)
+    retry_key = client_request_id.strip()
+    if not 8 <= len(retry_key) <= 128:
+        raise replenishment.ReplenishmentError(
+            "client_request_id 长度必须为 8-128 个字符"
+        )
+    _project, current_ctx = replenishment._authorized_project(
+        db,
+        project_id=project_id,
+        username=username,
+        user_ctx=user_ctx,
+    )
     draft = db.scalar(select(ReplenishmentCartDraft).where(
         ReplenishmentCartDraft.owner_user_id == user.id,
         ReplenishmentCartDraft.project_id == project_id,
     ).with_for_update())
     if draft is None:
+        existing = db.scalar(
+            select(ReplenishmentApplication).where(
+                ReplenishmentApplication.owner_username == username,
+                ReplenishmentApplication.client_request_id == retry_key,
+            )
+        )
+        if existing is not None:
+            if existing.project_id != project_id:
+                raise replenishment.ReplenishmentError(
+                    "相同 client_request_id 对应了不同项目",
+                    code="idempotency_conflict",
+                    status_code=409,
+                )
+            result = replenishment.get_application(
+                db,
+                existing.application_id,
+                username=username,
+                role=current_ctx.role,
+            )
+            result["idempotent"] = True
+            db.commit()
+            return result
         raise replenishment.ReplenishmentError("购物车不存在", code="cart_not_found", status_code=404)
+    if retry_key != draft.client_request_id:
+        raise replenishment.ReplenishmentError(
+            "client_request_id 与当前购物车不一致",
+            code="idempotency_conflict",
+            status_code=409,
+        )
     if draft.version != expected_version:
         raise replenishment.ReplenishmentError("草稿已在其他页面更新，请重新加载", code="version_conflict", status_code=409)
     lines = list(db.scalars(select(ReplenishmentCartDraftLine).where(
@@ -168,7 +251,10 @@ def submit_cart_draft_atomic(
     if not lines:
         raise replenishment.ReplenishmentError("购物车为空，不能提交", code="empty_cart", status_code=422)
     result = replenishment.submit_application_atomic(
-        db, username=username, role=role, client_request_id=draft.client_request_id,
+        db,
+        username=username,
+        user_ctx=user_ctx,
+        client_request_id=draft.client_request_id,
         project_id=project_id, request_note=draft.request_note,
         lines=[{"part_id": line.part_id, "quantity": line.quantity, "special_note": line.special_note} for line in lines],
         commit=False,

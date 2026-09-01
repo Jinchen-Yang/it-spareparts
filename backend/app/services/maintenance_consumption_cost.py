@@ -10,6 +10,7 @@ fact chain and therefore never offset consumption.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
@@ -344,15 +345,22 @@ def _apply_resolution(
     return line
 
 
+@dataclass(frozen=True)
+class _DemandEvidence:
+    unit_cost_ex_tax: Decimal
+    samples: tuple[dict, ...]
+
+
 def _demand_price_maps(
     db: Session,
     *,
     project_ids: set[str],
     part_ids: set[int],
+    as_of: date | None = None,
 ) -> tuple[
-    dict[str, tuple[int, Decimal]],
-    dict[tuple[str, str, int], Decimal],
-    dict[tuple[str, int], Decimal],
+    dict[tuple[str, str], tuple[int, _DemandEvidence]],
+    dict[tuple[str, str, int], _DemandEvidence],
+    dict[tuple[str, int], _DemandEvidence],
 ]:
     """需求单价格层的三级匹配索引（2026-08-24 修复版）。
 
@@ -364,25 +372,46 @@ def _demand_price_maps(
     (project_id, part_id)→最新一单单价)。消费侧按 精确行 → 同单同 PN →
     同项目同 PN 最新 的优先级取值。
     """
-    by_raw_line: dict[str, tuple[int, Decimal]] = {}
-    by_order: dict[tuple[str, str, int], Decimal] = {}
-    by_part: dict[tuple[str, int], Decimal] = {}
+    # Raw line ids are source-stable, but the assignment is the business
+    # ownership boundary.  Include project_id so a forged/stale source_line_id
+    # can never borrow another project's demand price.
+    by_raw_line: dict[tuple[str, str], tuple[int, _DemandEvidence]] = {}
+    by_order: dict[tuple[str, str, int], _DemandEvidence] = {}
+    by_part: dict[tuple[str, int], _DemandEvidence] = {}
     if not project_ids or not part_ids:
         return by_raw_line, by_order, by_part
-    from app.models.maintenance_project import MaintenanceProject  # noqa: F401
     from app.models.maintenance_source_assignment import (
         MaintenanceSourceOrderAssignment,
     )
+    from app.services import maintenance_demands
 
+    filters = [
+        MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+        FMaintenanceLine.part_id.in_(part_ids),
+        FMaintenanceLine.is_active.is_(True),
+        FMaintenanceLine.cost_amount_ex_tax.isnot(None),
+        maintenance_demands.active_demand_condition(FMaintenanceOrder),
+    ]
+    if config.ACTIVE_STATUS_ONLY:
+        filters.append(FMaintenanceOrder.data_status == config.ACTIVE_STATUS)
+    if as_of is not None:
+        # A NULL-dated demand cannot prove it existed at a frozen snapshot.
+        filters.extend([
+            FMaintenanceOrder.order_date.is_not(None),
+            FMaintenanceOrder.order_date <= as_of,
+        ])
     demand_rows = db.execute(
         select(
             MaintenanceSourceOrderAssignment.project_id,
             FMaintenanceLine.raw_line_id,
+            FMaintenanceLine.id,
             FMaintenanceLine.part_id,
             FMaintenanceLine.cost_amount_ex_tax,
             FMaintenanceLine.qty,
             FMaintenanceLine.return_qty,
             FMaintenanceOrder.order_no,
+            FMaintenanceOrder.raw_order_id,
+            FMaintenanceOrder.order_date,
         )
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder,
@@ -392,15 +421,28 @@ def _demand_price_maps(
             == FMaintenanceOrder.raw_order_id,
             MaintenanceSourceOrderAssignment.is_active.is_(True),
         ))
-        .where(
-            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-            FMaintenanceLine.part_id.in_(part_ids),
-            FMaintenanceLine.is_active.is_(True),
-            FMaintenanceLine.cost_amount_ex_tax.isnot(None),
+        .where(*filters)
+        .order_by(
+            FMaintenanceOrder.order_date.desc().nulls_last(),
+            FMaintenanceOrder.raw_order_id.desc(),
+            FMaintenanceLine.id.desc(),
         )
-        .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceLine.id.desc())
     ).all()
-    for pid, raw_line_id, part_id, amount_ex, qty, return_qty, order_no in demand_rows:
+    order_samples: dict[tuple[str, str, int], list[dict]] = defaultdict(list)
+    raw_order_samples: dict[tuple[str, str, int], list[dict]] = defaultdict(list)
+    latest_order_identity: dict[tuple[str, int], tuple[date, str]] = {}
+    for (
+        pid,
+        raw_line_id,
+        line_id,
+        part_id,
+        amount_ex,
+        qty,
+        return_qty,
+        order_no,
+        raw_order_id,
+        order_date,
+    ) in demand_rows:
         net_qty = Decimal(qty or 0) - Decimal(return_qty or 0)
         if net_qty <= 0:
             continue
@@ -408,9 +450,43 @@ def _demand_price_maps(
         if not _valid(net_qty, price):
             continue
         normalized = _amount(price)
-        by_raw_line.setdefault(raw_line_id, (part_id, normalized))
-        by_order.setdefault((pid, order_no, part_id), normalized)
-        by_part.setdefault((pid, part_id), normalized)
+        sample = {
+            "sample_id": f"maintenance-demand:{raw_line_id}",
+            "source_line_id": raw_line_id,
+            "source_line_pk": line_id,
+            "document_no": order_no,
+            "document_date": order_date.isoformat() if order_date else None,
+            "quantity": format(net_qty, "f"),
+            "unit_price_ex_tax": format(normalized, "f"),
+            "tax_conversion": "none",
+        }
+        by_raw_line[(pid, raw_line_id)] = (
+            part_id,
+            _DemandEvidence(normalized, (sample,)),
+        )
+        order_samples[(pid, order_no or "", part_id)].append(sample)
+        raw_key = (pid, raw_order_id, part_id)
+        raw_order_samples[raw_key].append(sample)
+        if order_date is not None:
+            latest_key = (pid, part_id)
+            identity = (order_date, raw_order_id)
+            if identity > latest_order_identity.get(latest_key, (date.min, "")):
+                latest_order_identity[latest_key] = identity
+
+    def _evidence(samples: list[dict]) -> _DemandEvidence | None:
+        price = _weighted(samples)
+        if price is None:
+            return None
+        return _DemandEvidence(price, tuple(samples))
+
+    for key, samples in order_samples.items():
+        evidence = _evidence(samples)
+        if evidence is not None:
+            by_order[key] = evidence
+    for (pid, part_id), (_order_date, raw_order_id) in latest_order_identity.items():
+        evidence = _evidence(raw_order_samples[(pid, raw_order_id, part_id)])
+        if evidence is not None:
+            by_part[(pid, part_id)] = evidence
     return by_raw_line, by_order, by_part
 
 
@@ -420,24 +496,38 @@ def _pick_demand_unit(
     project_id: str | None,
     issue_no: str | None,
     maps: tuple[
-        dict[str, tuple[int, Decimal]],
-        dict[tuple[str, str, int], Decimal],
-        dict[tuple[str, int], Decimal],
+        dict[tuple[str, str], tuple[int, _DemandEvidence]],
+        dict[tuple[str, str, int], _DemandEvidence],
+        dict[tuple[str, int], _DemandEvidence],
     ],
-) -> tuple[Decimal, str] | None:
+) -> tuple[Decimal, str, list[dict]] | None:
     """单条领用行的需求单价格挑选：精确行 → 同单同 PN → 同项目最新一单。"""
     by_raw_line, by_order, by_part = maps
     if not project_id:
         return None
-    exact = by_raw_line.get(getattr(line, "source_line_id", None) or "")
+    exact = by_raw_line.get(
+        (project_id, getattr(line, "source_line_id", None) or "")
+    )
     if exact is not None and exact[0] == line.part_id:
-        return exact[1], "维保需求单精确行（领用行关联的需求行）"
+        return (
+            exact[1].unit_cost_ex_tax,
+            "维保需求单精确行（领用行关联的需求行）",
+            list(exact[1].samples),
+        )
     same_order = by_order.get((project_id, issue_no or "", line.part_id))
     if same_order is not None:
-        return same_order, f"维保需求单同单同 PN（{issue_no}）"
+        return (
+            same_order.unit_cost_ex_tax,
+            f"维保需求单同单同 PN（{issue_no}）",
+            list(same_order.samples),
+        )
     fallback = by_part.get((project_id, line.part_id))
     if fallback is not None:
-        return fallback, "维保需求单同 PN 最新一单（兜底）"
+        return (
+            fallback.unit_cost_ex_tax,
+            "维保需求单同 PN 最新一单（兜底）",
+            list(fallback.samples),
+        )
     return None
 
 
@@ -482,7 +572,7 @@ def resolve_lines(
         issue_no_by_id[issue_id] = issue_no
     project_ids = set(issue_project.values())
     demand_maps = _demand_price_maps(
-        db, project_ids=project_ids, part_ids=part_ids)
+        db, project_ids=project_ids, part_ids=part_ids, as_of=as_of)
     linked_ids = {
         line.linked_purchase_line_id
         for _issue_date, line in entries
@@ -582,14 +672,13 @@ def resolve_lines(
             maps=demand_maps,
         )
         if demand_pick is not None:
-            demand_unit, demand_basis = demand_pick
+            demand_unit, demand_basis, demand_samples = demand_pick
             source, side = "maint_demand", "maint"
             unit_cost = demand_unit
-            samples = [{
-                "sample_id": f"wbdd:{line.part_id}",
-                "basis": demand_basis,
-                "unit_price_ex_tax": format(demand_unit, "f"),
-            }]
+            samples = [
+                {**sample, "basis": demand_basis}
+                for sample in demand_samples
+            ]
         elif (
             direct := direct_by_id.get(line.linked_purchase_line_id)
         ) is not None and (
@@ -644,7 +733,7 @@ def resolve_lines(
 
 def _demand_unit_for_line(
     db: Session, line: MaintenanceSiteIssueLine
-) -> tuple[Decimal, str] | None:
+) -> tuple[Decimal, str, list[dict]] | None:
     """单条领用行的需求单价格（批量路径之外的独立入口）。
 
     独立成函数便于单测按 _direct_purchase/_purchase_window 同款打桩。
@@ -692,11 +781,10 @@ def resolve_line(
     if demand_pick is not None:
         source, side = "maint_demand", "maint"
         unit_cost = demand_pick[0]
-        samples = [{
-            "sample_id": f"wbdd:{line.part_id}",
-            "basis": demand_pick[1],
-            "unit_price_ex_tax": format(demand_pick[0], "f"),
-        }]
+        samples = [
+            {**sample, "basis": demand_pick[1]}
+            for sample in demand_pick[2]
+        ]
     else:
         direct = _direct_purchase(db, line, issue_date=issue_date)
         if direct is not None:

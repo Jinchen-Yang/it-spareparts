@@ -216,6 +216,7 @@ def test_profit_and_dashboard_api_keep_small_value_inc_profit_identity(db):
 
 def test_maintenance_contribution_subtracts_rounded_basis_components():
     result = maintenance_margin.calculate_contract_margin(
+        revenue_inc=Decimal("0.57"),
         revenue_ex=Decimal("0.50"),
         tax_rate=Decimal("0.13"),
         parts_cost_inc_tax=Decimal("0.55"),

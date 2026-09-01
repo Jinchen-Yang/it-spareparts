@@ -192,6 +192,11 @@ def _milestone(
 
 
 def _service_period(db, *, project_id: str) -> None:
+    # 期限双源 P1：project.period_* 是唯一事实源（展示/筛选读它）；
+    # projection 行仅为 manager workbook OCC 兼容投影，两者保持一致。
+    project = db.get(MaintenanceProject, project_id)
+    project.period_from = date(2026, 1, 1)
+    project.period_to = date(2027, 1, 1)
     db.add(
         MaintenanceServicePeriod(
             project_id=project_id,

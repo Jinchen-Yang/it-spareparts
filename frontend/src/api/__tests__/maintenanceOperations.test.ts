@@ -322,6 +322,7 @@ describe("maintenance operations API", () => {
       user_id: 9,
       expected_assignment_id: "assignment-1",
       expected_assignment_version: 2,
+      sync_salesperson: true,
       reason: "项目交接",
     });
     archiveMaintenanceProjectManager("assignment/1", {
@@ -341,6 +342,7 @@ describe("maintenance operations API", () => {
         user_id: 9,
         expected_assignment_id: "assignment-1",
         expected_assignment_version: 2,
+        sync_salesperson: true,
         reason: "项目交接",
       },
     );

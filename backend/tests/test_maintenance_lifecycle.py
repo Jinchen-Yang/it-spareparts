@@ -59,6 +59,10 @@ def lifecycle_data(db):
     ):
         line.unit_cost = Decimal(i * 10)
         line.cost_amount = Decimal(i * 10)
+        line.unit_cost_inc_tax = Decimal(i * 10)
+        line.unit_cost_ex_tax = Decimal(i * 10)
+        line.cost_amount_inc_tax = Decimal(i * 10)
+        line.cost_amount_ex_tax = Decimal(i * 10)
         line.cost_source = "direct"
         line.cost_tax_basis = "ex"
         line.confidence = "high"
@@ -112,13 +116,19 @@ def test_projects_default_ongoing_counts_precede_lifecycle_filter_and_keep_amoun
 
 def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
     as_of = business_today()
+    sales_batch = SysImportBatch(
+        filename="sales-lifecycle-shared.xlsx",
+        file_type="sales",
+        file_hash="sales-lifecycle-shared",
+        status="success",
+    )
     batch = SysImportBatch(
         filename="maintenance-lifecycle-shared.xlsx",
         file_type="maintenance",
         file_hash="maintenance-lifecycle-shared",
         status="success",
     )
-    db.add(batch)
+    db.add_all([sales_batch, batch])
     db.flush()
     loader.load(
         db,
@@ -129,7 +139,7 @@ def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
             )},
             [f.sales_line("S", "SL", "PN-SHARED", qty="1", price="1130")],
         ),
-        batch.id,
+        sales_batch.id,
         as_of,
     )
     orders = {
@@ -159,6 +169,10 @@ def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
     db.flush()
     for line in db.execute(select(FMaintenanceLine)).scalars():
         line.cost_amount = Decimal("100")
+        line.unit_cost_inc_tax = Decimal("100")
+        line.unit_cost_ex_tax = Decimal("100")
+        line.cost_amount_inc_tax = Decimal("100")
+        line.cost_amount_ex_tax = Decimal("100")
         line.cost_source = "direct"
         line.cost_tax_basis = "ex"
         line.confidence = "high"
@@ -168,14 +182,18 @@ def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
     assert [row["project"] for row in default["rows"]] == ["项目-仍在维保"]
     row = default["rows"][0]
     assert row["contract_shared"] is True
-    assert row["contract_amount"] == 1130.0
+    # 销售单即使同时具备未税额与明确税率，也不是当前项目合同台账；项目合同额
+    # 必须 fail-closed，不能由销售事实回退推导。
+    assert row["contract_amount"] is None
+    assert row["contract_incomplete"] is True
 
     all_rows = _rows_by_project(
         maintenance_cost.projects_aggregate(db, lifecycle="all", as_of=as_of)
     )
     assert all_rows["项目-仍在维保"]["contract_shared"] is True
     assert all_rows["项目-已经结束"]["contract_shared"] is True
-    assert all_rows["项目-仍在维保"]["contract_amount"] == row["contract_amount"]
+    assert all_rows["项目-仍在维保"]["contract_amount"] is None
+    assert all_rows["项目-已经结束"]["contract_amount"] is None
 
     full_board = maintenance_cost.board(db, lifecycle="all", as_of=as_of)
     shared_full = next(r for r in full_board["rows"] if r["contract"] == "XS-SHARED")
@@ -330,8 +348,9 @@ def test_lifecycle_filters_keep_query_count_constant(db, lifecycle_data):
         lambda: maintenance_cost.board(db, lifecycle="missing", as_of=lifecycle_data)
     )
     assert project_all == project_one <= 2
-    # 合同费用快照完整性是独立证据水位，新增一条固定查询但不随合同数增长。
-    assert board_all == board_one <= 4
+    # 收入、费用、费用快照与 canonical 当前合同额均是独立证据水位；这些都是
+    # 固定批量查询，不随合同数或 lifecycle 结果数增长。
+    assert board_all == board_one <= 5
 
 
 def _admin_client(db) -> TestClient:

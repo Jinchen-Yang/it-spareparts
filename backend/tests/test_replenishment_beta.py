@@ -242,6 +242,8 @@ def test_price_facts_require_data_permission_even_when_page_is_granted(db):
         assert capability.json()["can_create"] is False
         calls = [
             ("get", "/api/replenishment-beta/catalog", None),
+            ("get", "/api/replenishment-beta/projects", None),
+            ("get", "/api/replenishment-beta/cart-drafts/not-real", None),
             ("get", "/api/replenishment-beta/applications", None),
             ("get", "/api/replenishment-beta/applications/not-real", None),
             ("post", "/api/replenishment-beta/applications", {}),

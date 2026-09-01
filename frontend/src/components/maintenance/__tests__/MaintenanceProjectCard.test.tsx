@@ -125,7 +125,14 @@ describe("运维项目卡（2026-08-25 验收/月度口径清尾）", () => {
       task_summary: { primary: legacyMonthly, open_count: 1, overdue_count: 0, rows: [legacyMonthly] },
     }));
     expect(screen.queryByRole("link", { name: /上传月度全量表/ })).toBeNull();
-    expect(screen.getByRole("link", { name: /进入项目/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /进入项目/ }))
+      .toHaveAttribute("href", "/maintenance/projects/p1");
+  });
+
+  it("项目详情入口使用正式路由并安全编码 project_id", () => {
+    renderCard(makeProject({ project_id: "project/含空格" }));
+    expect(screen.getByRole("link", { name: /进入项目/ }))
+      .toHaveAttribute("href", "/maintenance/projects/project%2F%E5%90%AB%E7%A9%BA%E6%A0%BC");
   });
 
   it("验收标签挂提交状态：无截止日概念，不再渲染「截止日待补」/逾期", () => {

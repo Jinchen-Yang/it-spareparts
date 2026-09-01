@@ -26,7 +26,12 @@ _SIGNING_KEY = b"synthetic-migration-signing-key-v1"
 _SIGNING_KEY_ID = "synthetic-v1"
 
 
-def _seed_project(db, project_id="migration-run-project"):
+def _seed_project(
+    db,
+    project_id="migration-run-project",
+    *,
+    expense_ready_through: date | None = None,
+):
     db.add_all(
         [
             MaintenanceProject(
@@ -40,7 +45,9 @@ def _seed_project(db, project_id="migration-run-project"):
                 project_id=project_id,
                 revision=0,
                 data_version=f"{project_id}-version-0",
-                expense_ready_through=business_today().replace(day=1),
+                expense_ready_through=(
+                    expense_ready_through or business_today().replace(day=1)
+                ),
             ),
         ]
     )
@@ -400,7 +407,7 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
 
 
 def test_run_freezes_one_as_of_across_midnight_and_all_projects(db, monkeypatch):
-    _seed_project(db)
+    _seed_project(db, expense_ready_through=date(2026, 8, 1))
     second_project_id = "migration-run-project-2"
     db.add_all(
         [

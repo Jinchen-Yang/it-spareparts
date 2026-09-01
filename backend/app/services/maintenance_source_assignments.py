@@ -5,21 +5,30 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
+    MaintenanceProjectAlias,
     MaintenanceProjectAuditLog,
     MaintenanceProjectUserAssignment,
+)
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectWorkbookState,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.business_time import business_today
-from app.services import maintenance_project_assignments, project_names
+from app.services import (
+    maintenance_project_assignments,
+    maintenance_project_identity,
+    project_names,
+)
 from app.services.maintenance_ledger import (
     _lifecycle_status,
     _period_from_display_name,
@@ -37,6 +46,14 @@ class SourceAssignmentConflict(Exception):
 
 class SourceAssignmentPermissionError(Exception):
     """The caller is outside the full project-assignment write scope."""
+
+
+def _lock_data_change(db: Session) -> None:
+    """与需求单作废/恢复共用的事务锁，必须位于任何 DB probe/state 锁前。"""
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
 
 
 def assignment_dict(row: MaintenanceSourceOrderAssignment) -> dict:
@@ -301,9 +318,81 @@ def assign_source_orders(
     reason: str,
     operated_by: str,
     user_ctx: UserContext,
+    _prelocked_states: dict[str, MaintenanceProjectWorkbookState] | None = None,
+    _changed_project_ids: set[str] | None = None,
 ) -> list[dict]:
     _require_full_scope(user_ctx)
     clean_reason = _clean_reason(reason)
+    normalized_items = [
+        {**item, "source_order_id": str(item["source_order_id"]).strip()}
+        for item in items
+    ]
+    source_ids = [item["source_order_id"] for item in normalized_items]
+    if any(not source_id for source_id in source_ids):
+        raise SourceAssignmentError("来源维保单 ID 不能为空")
+    if len(set(source_ids)) != len(source_ids):
+        raise SourceAssignmentError("同一批次不能重复提交来源维保单")
+    if _prelocked_states is None:
+        _lock_data_change(db)
+
+    # XSDD identity locks precede workbook/project row locks.  Manual assignment
+    # may not split one XSDD across projects; reviewed whole-project merge is a
+    # separate operation and is intentionally not smuggled through this API.
+    preflight_xsdds = [
+        value
+        for value in db.scalars(
+            select(FMaintenanceOrder.linked_sales_order_no).where(
+                FMaintenanceOrder.raw_order_id.in_(source_ids)
+            )
+        )
+        if maintenance_project_identity.normalize_xsdd(value)
+    ]
+    maintenance_project_identity.lock_xsdd_identities(db, preflight_xsdds)
+    for xsdd in preflight_xsdds:
+        try:
+            owner = maintenance_project_identity.resolve_xsdd_project(db, xsdd)
+        except maintenance_project_identity.XsddProjectConflict as exc:
+            raise SourceAssignmentConflict(str(exc)) from exc
+        if owner is not None and owner != project_id:
+            raise SourceAssignmentConflict(
+                f"XSDD {xsdd} 已归属于其他项目，不能拆分挂靠"
+            )
+
+    # Probe before taking any fact lock, then acquire every old/new workbook
+    # state in one sorted pass.  The locked reread below rejects an owner that
+    # appeared after this probe instead of taking a late state lock and
+    # creating an order->state inversion.
+    if db.scalar(
+        select(MaintenanceProject.project_id).where(
+            MaintenanceProject.project_id == project_id
+        )
+    ) is None:
+        raise SourceAssignmentError("目标项目主档不存在")
+    probed_project_ids = {project_id}
+    probed_project_ids.update(
+        value
+        for value in db.scalars(
+            select(MaintenanceSourceOrderAssignment.project_id).where(
+                MaintenanceSourceOrderAssignment.source_order_id.in_(source_ids),
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ).all()
+        if value
+    )
+    from app.services import maintenance_project_operations as operations
+
+    if _prelocked_states is None:
+        locked_states = operations.lock_workbook_states(
+            db,
+            project_ids=probed_project_ids,
+        )
+    else:
+        locked_states = _prelocked_states
+        if not probed_project_ids.issubset(locked_states):
+            raise SourceAssignmentConflict(
+                "来源维保单的项目归属已变化，请刷新后重试"
+            )
+
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
@@ -318,15 +407,6 @@ def assign_source_orders(
     ):
         raise SourceAssignmentPermissionError("无权访问目标维保项目")
 
-    normalized_items = [
-        {**item, "source_order_id": str(item["source_order_id"]).strip()}
-        for item in items
-    ]
-    source_ids = [item["source_order_id"] for item in normalized_items]
-    if any(not source_id for source_id in source_ids):
-        raise SourceAssignmentError("来源维保单 ID 不能为空")
-    if len(set(source_ids)) != len(source_ids):
-        raise SourceAssignmentError("同一批次不能重复提交来源维保单")
     source_statement = (
         select(FMaintenanceOrder)
         .where(FMaintenanceOrder.raw_order_id.in_(source_ids))
@@ -351,6 +431,13 @@ def assign_source_orders(
             .with_for_update()
         )
     }
+    if any(
+        assignment.project_id not in probed_project_ids
+        for assignment in current.values()
+    ):
+        raise SourceAssignmentConflict(
+            "来源维保单的项目归属已变化，请刷新后重试"
+        )
     for current_assignment in current.values():
         if not maintenance_project_assignments.can_access_project(
             db,
@@ -394,6 +481,17 @@ def assign_source_orders(
                     f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
                 )
 
+    for xsdd in preflight_xsdds:
+        try:
+            maintenance_project_identity.claim_xsdd_project(
+                db,
+                value=xsdd,
+                project_id=project.project_id,
+                source="manual_assign",
+            )
+        except maintenance_project_identity.XsddProjectConflict as exc:
+            raise SourceAssignmentConflict(str(exc)) from exc
+
     requires_assignment_change = any(
         current.get(source_id) is None
         or current[source_id].project_id != project.project_id
@@ -403,6 +501,7 @@ def assign_source_orders(
         raise SourceAssignmentError("目标项目主档已归档，不能新增项目归属")
 
     changed_current: dict[str, MaintenanceSourceOrderAssignment] = {}
+    changed_projects: set[str] = set()
     for source_id, current_assignment in current.items():
         if current_assignment.project_id == project.project_id:
             continue
@@ -425,6 +524,7 @@ def assign_source_orders(
             )
         )
         changed_current[source_id] = current_assignment
+        changed_projects.add(current_assignment.project_id)
     if changed_current:
         db.flush()
 
@@ -447,6 +547,7 @@ def assign_source_orders(
         )
         db.add(assignment)
         db.flush()
+        changed_projects.add(project.project_id)
         after = assignment_dict(assignment)
         db.add(
             MaintenanceProjectAuditLog(
@@ -462,6 +563,13 @@ def assign_source_orders(
         )
         resulting[source_id] = assignment
     db.flush()
+    for changed_project_id in sorted(changed_projects):
+        operations.bump_locked_workbook_revision(
+            db,
+            state=locked_states[changed_project_id],
+        )
+    if _changed_project_ids is not None:
+        _changed_project_ids.update(changed_projects)
     # A source-order assignment is also the only stable project edge allowed
     # for warehouse shipment candidates.  Repair that projection in the same
     # transaction so reassignment can never leave an actionable old-project
@@ -500,6 +608,7 @@ def unassign_source_orders(
         raise SourceAssignmentError("项目归属 ID 不能为空")
     if len(set(assignment_ids)) != len(assignment_ids):
         raise SourceAssignmentError("同一批次不能重复提交项目归属")
+    _lock_data_change(db)
 
     probes = list(
         db.execute(
@@ -522,6 +631,12 @@ def unassign_source_orders(
             user_ctx=user_ctx,
         ):
             raise SourceAssignmentPermissionError("无权访问来源维保单当前所属项目")
+    from app.services import maintenance_project_operations as operations
+
+    locked_states = operations.lock_workbook_states(
+        db,
+        project_ids={project_id for _, _, project_id in probes},
+    )
     source_ids = sorted({source_order_id for _, source_order_id, _ in probes})
     source_statement = (
         select(FMaintenanceOrder)
@@ -549,6 +664,8 @@ def unassign_source_orders(
         )
     }
     if len(locked) != len(assignment_ids):
+        raise SourceAssignmentConflict("项目归属已变化，请刷新后重试")
+    if any(row.project_id not in locked_states for row in locked.values()):
         raise SourceAssignmentConflict("项目归属已变化，请刷新后重试")
     for item in items:
         row = locked.get(str(item["assignment_id"]).strip())
@@ -578,6 +695,11 @@ def unassign_source_orders(
         )
         archived.append(row)
     db.flush()
+    for project_id in sorted({row.project_id for row in archived}):
+        operations.bump_locked_workbook_revision(
+            db,
+            state=locked_states[project_id],
+        )
     from app.services import maintenance_warehouse
 
     maintenance_warehouse.reconcile_project_assignment_links(
@@ -646,24 +768,47 @@ def _backfill_project_owner(
     salesperson: str,
     operated_by: str,
     reason: str = AUTO_OWNER_BACKFILL_REASON,
+    _prelocked_state: MaintenanceProjectWorkbookState | None = None,
+    _skip_workbook_bump: bool = False,
 ) -> dict:
     """维保负责人/销售自动回填——**只补空，绝不覆盖人工编辑**（幂等）。
 
-    - `project.salesperson`（台账商务线事实源）为空时补销售众数；
+    - `project.salesperson` 为空且未被人工覆盖时补销售众数；人工明确清空后，
+      销售、负责人原文和 primary_manager 均不得再由 WBDD 销售派生；
     - `project.project_manager_id`（维保负责人原文）为空时同值回填；
     - 文本与销售一致且尚无活跃 primary_manager 时，按
       `sys_user.salesperson_name` 匹配活跃账号自动建账号级指派
       （锁/审计走 assign_primary_manager 既有链路）。
+
+    任一字段/指派真实改变 → 同事务 workbook revision +1（bump 按根事务去重，
+    多处变更仍只 +1）；全 no-op → +0。``_prelocked_state`` 由调用方按
+    state(sorted)→project(sorted) 锁序传入，本函数不得在项目锁后再晚锁 state；
+    ``_skip_workbook_bump`` 用于 auto 新建项目的首次成形（保持 project version 1、
+    workbook revision 0）。
     """
     stats = {"sales_filled": False, "manager_filled": False, "assignment_created": False}
     salesperson = salesperson.strip()
     if not salesperson:
         return stats
+    if (
+        project.salesperson_override_active
+        and not (project.salesperson or "").strip()
+    ):
+        # An explicit empty override is a permission-bearing manual decision.
+        # Do not recreate the cleared salesperson indirectly as manager text or
+        # as a primary-manager assignment, even if this project was selected by
+        # a stale pre-lock candidate probe.
+        return stats
     before = {
         "salesperson": project.salesperson,
+        "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
+        "version": project.version,
     }
-    if not (project.salesperson or "").strip():
+    if (
+        not project.salesperson_override_active
+        and not (project.salesperson or "").strip()
+    ):
         project.salesperson = salesperson[:64]
         stats["sales_filled"] = True
     manager_text = (project.project_manager_id or "").strip()
@@ -672,6 +817,11 @@ def _backfill_project_owner(
         manager_text = salesperson[:64]
         stats["manager_filled"] = True
     if stats["sales_filled"] or stats["manager_filled"]:
+        if not _skip_workbook_bump:
+            # Existing project-master facts participate in the same OCC token as
+            # manual edits.  Auto-created projects are still being formed inside
+            # their creation transaction and intentionally remain at version 1.
+            project.version += 1
         db.flush()
         db.add(
             MaintenanceProjectAuditLog(
@@ -682,13 +832,26 @@ def _backfill_project_owner(
                 before_json=before,
                 after_json={
                     "salesperson": project.salesperson,
+                    "salesperson_override_active": (
+                        project.salesperson_override_active
+                    ),
                     "project_manager_id": project.project_manager_id,
+                    "version": project.version,
                 },
                 reason=reason,
                 operated_by=operated_by,
             )
         )
         db.flush()
+        if not _skip_workbook_bump:
+            from app.services import maintenance_project_operations as operations
+
+            state = _prelocked_state
+            if state is None:
+                state = operations.lock_workbook_states(
+                    db, project_ids=[project.project_id]
+                )[project.project_id]
+            operations.bump_locked_workbook_revision(db, state=state)
     # 账号级指派：仅当负责人文本就是销售（含刚回填）且当前无人负责
     if manager_text != (salesperson[:64]):
         return stats
@@ -719,39 +882,102 @@ def _backfill_project_owner(
         expected_assignment_version=None,
         reason=reason,
         operated_by=operated_by,
+        _prelocked_state=_prelocked_state,
+        _skip_workbook_bump=_skip_workbook_bump,
     )
     stats["assignment_created"] = True
     return stats
 
 
-def backfill_owner_fields(db: Session, *, operated_by: str) -> dict:
+def _owner_backfill_candidate_condition():
+    """Keep legacy blanks eligible while excluding explicit empty overrides."""
+    return and_(
+        ~and_(
+            MaintenanceProject.salesperson_override_active.is_(True),
+            func.btrim(func.coalesce(MaintenanceProject.salesperson, "")) == "",
+        ),
+        or_(
+            and_(
+                MaintenanceProject.salesperson_override_active.is_(False),
+                func.coalesce(MaintenanceProject.salesperson, "") == "",
+            ),
+            func.coalesce(MaintenanceProject.project_manager_id, "") == "",
+        ),
+    )
+
+
+def backfill_owner_fields(
+    db: Session,
+    *,
+    operated_by: str,
+    _prelocked_states: dict[str, MaintenanceProjectWorkbookState] | None = None,
+    _no_bump_project_ids: set[str] | None = None,
+) -> dict:
     """存量项目销售/维保负责人补齐（幂等：只填空，不动人工编辑）。
 
-    auto-assign 运维按钮顺带执行：销售或负责人原文为空的项目按活单销售
-    众数回填；台账事实源已给值的项目不动（salesperson 以台账为准）。
+    auto-assign 运维按钮顺带执行：未人工覆盖的空销售或空负责人原文按活单销售
+    众数回填；台账事实源与人工覆盖均不被自动销售回填改写。
+
+    锁序：候选项目只读探明 → state(sorted) → project(sorted) → 指派行。
+    ``_prelocked_states`` 由 auto_assign 在并集排序锁后传入；候选集出现
+    未覆盖的项目（并发新建）→ fail closed，绝不晚锁 state。
+    ``_no_bump_project_ids`` 是同事务内新建的 auto 项目：首次完整成形保持
+    revision 0。
     """
     stats = {"sales_filled_projects": 0, "manager_filled_projects": 0,
              "assignments_created": 0}
-    projects = list(
+    if _prelocked_states is None:
+        _lock_data_change(db)
+    no_bump = set(_no_bump_project_ids or ())
+    candidate_ids = list(
         db.scalars(
-            select(MaintenanceProject).where(
+            select(MaintenanceProject.project_id).where(
                 MaintenanceProject.is_active.is_(True),
-                or_(
-                    func.coalesce(MaintenanceProject.salesperson, "") == "",
-                    func.coalesce(MaintenanceProject.project_manager_id, "") == "",
-                ),
+                _owner_backfill_candidate_condition(),
             )
         )
     )
-    if not projects:
+    if not candidate_ids:
         return stats
-    modes = salesperson_modes_by_project(db, [p.project_id for p in projects])
-    for project in projects:
-        salesperson = modes.get(project.project_id)
+    from app.services import maintenance_project_operations as operations
+
+    if _prelocked_states is None:
+        locked_states = operations.lock_workbook_states(
+            db, project_ids=candidate_ids
+        )
+    else:
+        locked_states = _prelocked_states
+        if not set(candidate_ids).issubset(set(locked_states) | no_bump):
+            raise SourceAssignmentConflict("项目主档已变化，请刷新后重试")
+    modes = salesperson_modes_by_project(db, candidate_ids)
+    projects = list(
+        db.scalars(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id.in_(candidate_ids))
+            .order_by(MaintenanceProject.project_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    locked_by_id = {project.project_id: project for project in projects}
+    if set(locked_by_id) != set(candidate_ids):
+        raise SourceAssignmentConflict("项目主档已变化，请刷新后重试")
+    for project_id in sorted(candidate_ids):
+        project = locked_by_id[project_id]
+        if not project.is_active:
+            # 锁后复核：并发归档 → fail closed（本轮整体回滚，不写半截）
+            raise SourceAssignmentConflict("项目主档已变化，请刷新后重试")
+        salesperson = modes.get(project_id)
         if not salesperson:
             continue
         one = _backfill_project_owner(
-            db, project=project, salesperson=salesperson, operated_by=operated_by)
+            db,
+            project=project,
+            salesperson=salesperson,
+            operated_by=operated_by,
+            _prelocked_state=locked_states.get(project_id),
+            _skip_workbook_bump=project_id in no_bump,
+        )
         stats["sales_filled_projects"] += int(one["sales_filled"])
         stats["manager_filled_projects"] += int(one["manager_filled"])
         stats["assignments_created"] += int(one["assignment_created"])
@@ -780,6 +1006,7 @@ def auto_assign_unassigned(
     _require_full_scope(user_ctx)
     clean_reason = "自动补挂靠：project_std 精确匹配项目主档"
     today = business_today()
+    _lock_data_change(db)
 
     # 1. 未归属单（assignment_id IS NULL 且未删）
     unassigned_stmt = (
@@ -805,57 +1032,252 @@ def auto_assign_unassigned(
         db.flush()
         return result
 
-    # 2. 按归一化项目名（project_std 去预交付前缀）分组
-    grouped: dict[str, list[FMaintenanceOrder]] = {}
-    for order in unassigned:
-        key = project_names.strip_pre_delivery(order.project_std or "") or (
+    # 2. XSDD 是项目归并键；只有无 XSDD 的罕见旧单才按项目名兜底。
+    # 同一 XSDD 下的不同 project_std 不再各建一个 AUTO 项目，而是作为
+    # 同一 canonical 项目的展示 aliases 留存。
+    GroupKey = tuple[str, str]
+
+    def _name_for(order: FMaintenanceOrder) -> str:
+        return project_names.strip_pre_delivery(order.project_std or "") or (
             project_names.strip_pre_delivery(order.project_raw or "") or ""
         )
-        if not key:
+
+    def _group_key(order: FMaintenanceOrder) -> GroupKey | None:
+        xsdd = maintenance_project_identity.normalize_xsdd(
+            order.linked_sales_order_no
+        )
+        if xsdd:
+            return ("xsdd", xsdd)
+        name = _name_for(order)
+        return ("name", name) if name else None
+
+    grouped: dict[GroupKey, list[FMaintenanceOrder]] = {}
+    group_names: dict[GroupKey, set[str]] = {}
+    for order in unassigned:
+        key = _group_key(order)
+        if key is None:
             continue
         grouped.setdefault(key, []).append(order)
+        name = _name_for(order)
+        if name:
+            group_names.setdefault(key, set()).add(name)
 
-    # 3. 每组匹配：已有项目直接挂；无项目则自动建项目再挂
+    def _primary_name(key: GroupKey) -> str:
+        counts: dict[str, int] = {}
+        for order in grouped[key]:
+            name = _name_for(order)
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        if counts:
+            return sorted(counts, key=lambda name: (-counts[name], name))[0]
+        return f"XSDD-{key[1]}" if key[0] == "xsdd" else key[1]
+
+    def _matched_project_ids(names: set[str]) -> set[str]:
+        if not names:
+            return set()
+        identity_keys = {
+            project_names.display_name_identity(name) for name in names
+        }
+        direct = set(db.scalars(select(MaintenanceProject.project_id).where(
+            MaintenanceProject.display_name.in_(sorted(names)),
+            MaintenanceProject.is_active.is_(True),
+        )))
+        aliased = set(db.scalars(
+            select(MaintenanceProjectAlias.project_id)
+            .join(
+                MaintenanceProject,
+                MaintenanceProject.project_id == MaintenanceProjectAlias.project_id,
+            )
+            .where(
+                MaintenanceProjectAlias.alias_key.in_(sorted(identity_keys)),
+                MaintenanceProject.is_active.is_(True),
+            )
+        ))
+        return direct | aliased
+
+    # XSDD/name advisory 均必须先于 state/project 锁。全局数据锁在更前面，
+    # 与人工挂靠、作废/恢复保持同一锁序。
+    maintenance_project_identity.lock_xsdd_identities(
+        db, [key[1] for key in grouped if key[0] == "xsdd"]
+    )
+    project_names.lock_display_name_identities(
+        db, {name for names in group_names.values() for name in names}
+    )
+
+    # 3. 只读规划：XSDD 已有唯一 owner 时优先；无 XSDD 证据才允许
+    # 名称/alias 辅助选择。历史同号多项目一律跳过，绝不继续制造新分裂。
+    # owner 回填候选也在此探明，与挂靠目标并集一次性排序锁，绝不晚锁。
+    planned_existing: dict[GroupKey, str] = {}
+    create_groups: set[GroupKey] = set()
+    ambiguous_groups: set[GroupKey] = set()
+    for key in grouped:
+        resolved: str | None = None
+        if key[0] == "xsdd":
+            try:
+                resolved = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
+                )
+            except maintenance_project_identity.XsddProjectConflict:
+                ambiguous_groups.add(key)
+                continue
+            if resolved is not None and db.scalar(
+                select(MaintenanceProject.project_id).where(
+                    MaintenanceProject.project_id == resolved,
+                    MaintenanceProject.is_active.is_(True),
+                )
+            ) is None:
+                ambiguous_groups.add(key)
+                continue
+        matched_ids = _matched_project_ids(group_names.get(key, set()))
+        if resolved is not None:
+            if matched_ids and matched_ids != {resolved}:
+                ambiguous_groups.add(key)
+            else:
+                planned_existing[key] = resolved
+        elif len(matched_ids) > 1:
+            ambiguous_groups.add(key)
+        elif matched_ids:
+            planned_existing[key] = next(iter(matched_ids))
+        else:
+            create_groups.add(key)
+    backfill_candidate_ids = set(
+        db.scalars(
+            select(MaintenanceProject.project_id).where(
+                MaintenanceProject.is_active.is_(True),
+                _owner_backfill_candidate_condition(),
+            )
+        )
+    )
+    target_ids = set(planned_existing.values())
+
+    # 4. 锁序铁律：state(sorted) → project(sorted) → 单据/指派行。
+    from app.services import maintenance_project_operations as operations
+
+    union_ids = target_ids | backfill_candidate_ids
+    locked_states = operations.lock_workbook_states(db, project_ids=union_ids)
+    locked_projects: dict[str, MaintenanceProject] = {}
+    if union_ids:
+        locked_projects = {
+            project.project_id: project
+            for project in db.scalars(
+                select(MaintenanceProject)
+                .where(MaintenanceProject.project_id.in_(union_ids))
+                .order_by(MaintenanceProject.project_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        if set(locked_projects) != union_ids:
+            raise SourceAssignmentConflict("项目主档已变化，请刷新后重试")
+
+    # 5. 锁后复核（fail closed）：XSDD owner、名称 alias、待建组与来源单
+    # 单据仍未归属——任一被并发改变则整体回滚，零半截写入。
+    for key, planned_id in planned_existing.items():
+        current_ids = _matched_project_ids(group_names.get(key, set()))
+        if key[0] == "xsdd":
+            try:
+                current_owner = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
+                )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+            if current_owner not in {None, planned_id}:
+                raise SourceAssignmentConflict("XSDD 项目归属已变化，请刷新后重试")
+        if current_ids and current_ids != {planned_id}:
+            raise SourceAssignmentConflict("目标项目已变化，请刷新后重试")
+    for key in create_groups:
+        if _matched_project_ids(group_names.get(key, set())):
+            raise SourceAssignmentConflict("目标项目已变化，请刷新后重试")
+        if key[0] == "xsdd":
+            try:
+                current_owner = maintenance_project_identity.resolve_xsdd_project(
+                    db, key[1]
+                )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+            if current_owner is not None:
+                raise SourceAssignmentConflict("XSDD 项目归属已变化，请刷新后重试")
+    order_ids = sorted(order.raw_order_id for order in unassigned)
+    locked_orders = {
+        order.raw_order_id: order
+        for order in db.scalars(
+            active_beta_maintenance_orders(
+                select(FMaintenanceOrder)
+                .where(FMaintenanceOrder.raw_order_id.in_(order_ids))
+                .order_by(FMaintenanceOrder.raw_order_id)
+                .with_for_update()
+                .execution_options(populate_existing=True),
+                FMaintenanceOrder,
+            )
+        )
+    }
+    if set(locked_orders) != set(order_ids):
+        raise SourceAssignmentConflict("来源维保单已变化，请刷新后重试")
+    if db.scalar(
+        select(MaintenanceSourceOrderAssignment.assignment_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(order_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ) is not None:
+        raise SourceAssignmentConflict(
+            "来源维保单的项目归属已变化，请刷新后重试"
+        )
+    for key, orders in grouped.items():
+        for order in orders:
+            locked = locked_orders[order.raw_order_id]
+            if _group_key(locked) != key:
+                raise SourceAssignmentConflict(
+                    "来源维保单已变化，请刷新后重试"
+                )
+
+    # 6. 实际挂靠：已有项目直接挂；无项目则自动建项目再挂
     assigned_orders = 0
     matched_projects: set[str] = set()
     created_projects = 0
+    created_project_ids: set[str] = set()
+    changed_existing: set[str] = set()
     skipped_groups = 0
-    skipped_ambiguous = 0
-    for project_name, orders in grouped.items():
-        projects = list(
-            db.scalars(
-                select(MaintenanceProject).where(
-                    MaintenanceProject.display_name == project_name,
-                    MaintenanceProject.is_active.is_(True),
-                )
-            )
-        )
-        if len(projects) > 1:
-            # display_name 重复：不能确定挂哪个，跳过（保守）
-            skipped_ambiguous += 1
+    for key, orders in grouped.items():
+        if key in ambiguous_groups:
             continue
-        if not projects:
-            # 2026-08-18 全自动：对不上已有项目 → 用 project_std 自动建项目主档
-            period_from, period_to = _period_from_display_name(project_name)
+        primary_name = _primary_name(key)
+        if key in planned_existing:
+            project = locked_projects[planned_existing[key]]
+            matched_projects.add(project.project_id)
+        else:
+            # 一个新 XSDD 至多创建一个 AUTO 项目，其他来源名全部成为 alias。
+            period_from, period_to = _period_from_display_name(primary_name)
             project = _create_auto_project(
-                db, display_name=project_name,
+                db, display_name=primary_name,
                 period_from=period_from, period_to=period_to,
                 lifecycle=_lifecycle_status(period_from, period_to, today),
             )
             created_projects += 1
-        else:
-            project = projects[0]
-            matched_projects.add(project.project_id)
-        for order in orders:
-            existing = db.scalar(
-                select(MaintenanceSourceOrderAssignment).where(
-                    MaintenanceSourceOrderAssignment.source_order_id
-                    == order.raw_order_id,
-                    MaintenanceSourceOrderAssignment.is_active.is_(True),
+            created_project_ids.add(project.project_id)
+        if key[0] == "xsdd":
+            try:
+                maintenance_project_identity.claim_xsdd_project(
+                    db,
+                    value=key[1],
+                    project_id=project.project_id,
+                    source="auto_assign",
                 )
+            except maintenance_project_identity.XsddProjectConflict as exc:
+                raise SourceAssignmentConflict(str(exc)) from exc
+        maintenance_project_identity.record_alias(
+            db,
+            project_id=project.project_id,
+            alias_name=project.display_name,
+            source="project_primary",
+        )
+        for alias_name in sorted(group_names.get(key, set())):
+            maintenance_project_identity.record_alias(
+                db,
+                project_id=project.project_id,
+                alias_name=alias_name,
+                source="source_order",
             )
-            if existing is not None:
-                continue
+        for order in orders:
             assignment = MaintenanceSourceOrderAssignment(
                 assignment_id=str(uuid4()),
                 source_order_id=order.raw_order_id,
@@ -880,10 +1302,24 @@ def auto_assign_unassigned(
             )
             assigned_orders += 1
             matched_projects.add(project.project_id)
+            if project.project_id not in created_project_ids:
+                changed_existing.add(project.project_id)
     db.flush()
+    # 既有项目导出投影真实改变 → 同事务 revision 恰好 +1（bump 内部按根事务
+    # 去重，与后续 owner 回填的 bump 合并）；新建项目首次成形保持 revision 0。
+    for changed_project_id in sorted(changed_existing):
+        operations.bump_locked_workbook_revision(
+            db,
+            state=locked_states[changed_project_id],
+        )
     # 2026-08-21 客户反馈：存量与新建项目的销售/维保负责人自动回填（只补空，
     # 不覆盖台账与人工编辑；新建项目在此刻已落库，可与存量一并处理）
-    owner = backfill_owner_fields(db, operated_by=operated_by)
+    owner = backfill_owner_fields(
+        db,
+        operated_by=operated_by,
+        _prelocked_states=locked_states,
+        _no_bump_project_ids=created_project_ids,
+    )
     # 同步仓配候选投影（与 assign_source_orders 一致）
     if assigned_orders:
         from app.services import maintenance_warehouse
@@ -899,7 +1335,7 @@ def auto_assign_unassigned(
         "matched_projects": len(matched_projects),
         "created_projects": created_projects,
         "skipped_groups": skipped_groups,
-        "skipped_ambiguous": skipped_ambiguous,
+        "skipped_ambiguous": len(ambiguous_groups),
         **owner,
     }
 
@@ -912,7 +1348,7 @@ def _create_auto_project(
     period_to,
     lifecycle: str,
 ) -> MaintenanceProject:
-    """自动创建项目主档：编号 AUTO- 递增（幂等：同 display_name 已存在则复用）。"""
+    """自动创建项目主档；名称锁已由调用方持有，后来出现项目即 OCC 冲突。"""
     existing = db.scalar(
         select(MaintenanceProject).where(
             MaintenanceProject.display_name == display_name,
@@ -920,7 +1356,7 @@ def _create_auto_project(
         )
     )
     if existing is not None:
-        return existing
+        raise SourceAssignmentConflict("目标项目已变化，请刷新后重试")
     prefix = "AUTO-"
     max_seq = db.scalar(
         select(func.max(MaintenanceProject.project_code))
@@ -943,5 +1379,10 @@ def _create_auto_project(
         version=1,
     )
     db.add(project)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # project_code 仍受 DB 唯一约束保护；任何并发身份变化都作为整批
+        # 可重试冲突暴露，禁止把外部项目误标为 created_here。
+        raise SourceAssignmentConflict("自动项目创建发生并发变化，请刷新后重试") from exc
     return project

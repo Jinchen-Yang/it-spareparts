@@ -15,7 +15,7 @@ from app import config
 from app.api import imports as imports_api
 from app.auth import hash_password
 from app.config import get_settings
-from app.etl import pipeline, reader, sheet_selection
+from app.etl import loader, pipeline, reader, sheet_selection
 from app.main import app
 from app.models.inventory import Inventory
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
@@ -866,6 +866,46 @@ def test_single_upload_size_limit_returns_http_413(import_client, monkeypatch):
     )
 
     assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_code", "retry_after"),
+    [
+        (
+            loader.ImportConcurrencyConflict("synthetic ownership race"),
+            409,
+            "import_concurrency_conflict",
+            "5",
+        ),
+        (
+            loader.ImportIntegrityError("synthetic incomplete attribution"),
+            422,
+            "import_integrity_error",
+            None,
+        ),
+    ],
+)
+def test_single_upload_returns_stable_import_failure_contract(
+    import_client,
+    monkeypatch,
+    failure,
+    expected_status,
+    expected_code,
+    retry_after,
+):
+    def _fail_import(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(pipeline, "run_import", _fail_import)
+    response = import_client.post(
+        "/api/import/upload",
+        files={"file": ("failure.xlsx", b"synthetic", _XLSX_CONTENT_TYPE)},
+    )
+
+    assert response.status_code == expected_status
+    assert response.headers["X-Error-Code"] == expected_code
+    assert response.headers.get("Retry-After") == retry_after
+    assert "synthetic" not in response.text
 
 
 def test_batch_upload_size_limit_returns_http_413(db, import_client, monkeypatch):

@@ -23,9 +23,10 @@ from sqlalchemy.orm import Session
 from app.business_time import business_today
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.services import query_filters
+from app.services import maintenance_cost_quality, query_filters
 from app.services.maintenance_boss_board import not_imported, ready, restricted, wbdd_imported
 
 RANGES = ("ytd", "12m", "all", "custom")
@@ -94,6 +95,35 @@ def pn_ranking(
     start, end = resolve_window(range_, date_from, date_to)
     months = _window_months(start, end)
 
+    cost_inc, _actual_inc, _estimated_inc, missing_inc = (
+        maintenance_cost_quality.sql_normalized_line_cost(
+            source_column=FMaintenanceLine.cost_source,
+            tax_basis_column=FMaintenanceLine.cost_tax_basis,
+            legacy_amount_column=FMaintenanceLine.cost_amount,
+            normalized_amount_column=FMaintenanceLine.cost_amount_inc_tax,
+            normalized_basis="inc",
+            anomaly_flags_column=FMaintenanceLine.anomaly_flags,
+            qty_column=FMaintenanceLine.qty,
+            return_qty_column=FMaintenanceLine.return_qty,
+            manual_unit_cost_column=MaintenanceManualCostOverride.unit_cost_inc_tax,
+            manual_active_column=MaintenanceManualCostOverride.active,
+        )
+    )
+    cost_ex, _actual_ex, _estimated_ex, _missing_ex = (
+        maintenance_cost_quality.sql_normalized_line_cost(
+            source_column=FMaintenanceLine.cost_source,
+            tax_basis_column=FMaintenanceLine.cost_tax_basis,
+            legacy_amount_column=FMaintenanceLine.cost_amount,
+            normalized_amount_column=FMaintenanceLine.cost_amount_ex_tax,
+            normalized_basis="ex",
+            anomaly_flags_column=FMaintenanceLine.anomaly_flags,
+            qty_column=FMaintenanceLine.qty,
+            return_qty_column=FMaintenanceLine.return_qty,
+            manual_unit_cost_column=MaintenanceManualCostOverride.unit_cost_ex_tax,
+            manual_active_column=MaintenanceManualCostOverride.active,
+        )
+    )
+
     # ---- 主聚合：WBDD 明细按 PN 分组（单查询，无 N+1） ----
     stmt = (
         select(
@@ -106,16 +136,20 @@ def pn_ranking(
                 MaintenanceSourceOrderAssignment.project_id)).label("project_count"),
             func.coalesce(func.sum(FMaintenanceLine.qty), Decimal("0")).label("qty"),
             func.coalesce(func.sum(FMaintenanceLine.return_qty), Decimal("0")).label("return_qty"),
-            func.sum(FMaintenanceLine.cost_amount_inc_tax).label("cost_inc"),
-            func.sum(FMaintenanceLine.cost_amount_ex_tax).label("cost_ex"),
-            func.count().filter(
-                FMaintenanceLine.cost_amount_inc_tax.is_(None)).label("missing_lines"),
+            func.sum(cost_inc).label("cost_inc"),
+            func.sum(cost_ex).label("cost_ex"),
+            func.count().filter(missing_inc).label("missing_lines"),
             func.min(FMaintenanceOrder.order_date).label("first_date"),
             func.max(FMaintenanceOrder.order_date).label("last_date"),
         )
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .outerjoin(DimPart, DimPart.id == FMaintenanceLine.part_id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            (MaintenanceManualCostOverride.line_id == FMaintenanceLine.id)
+            & MaintenanceManualCostOverride.active.is_(True),
+        )
         .outerjoin(
             MaintenanceSourceOrderAssignment,
             (MaintenanceSourceOrderAssignment.source_order_id
@@ -172,8 +206,14 @@ def pn_ranking(
             "qty": r.qty,
             "return_qty": r.return_qty,
             "effective_qty": effective,
-            "cost_inc": r.cost_inc,
-            "cost_ex": r.cost_ex,
+            "cost_inc": (
+                Decimal(r.cost_inc).quantize(Decimal("0.01"))
+                if r.cost_inc is not None else None
+            ),
+            "cost_ex": (
+                Decimal(r.cost_ex).quantize(Decimal("0.01"))
+                if r.cost_ex is not None else None
+            ),
             "missing_lines": int(r.missing_lines),
             "bad_return_qty": bad_qty,
             "first_date": r.first_date.isoformat() if r.first_date else None,

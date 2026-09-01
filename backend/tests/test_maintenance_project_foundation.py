@@ -101,6 +101,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
                 contract_id="contract-synth-a",
                 contract_no="CONTRACT-SYNTH-A",
                 contract_amount=Decimal("100.10"),
+                amount_inc_tax=Decimal("113.11"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -114,6 +115,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
                 contract_id="contract-synth-b",
                 contract_no="CONTRACT-SYNTH-B",
                 contract_amount=Decimal("200.20"),
+                amount_inc_tax=Decimal("226.23"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -138,7 +140,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
     assert payload["project"]["project_id"] == project.project_id
     assert payload["project"]["project_code"] == "MAINT-SYNTH-001"
     assert payload["effective_contract_count"] == 2
-    assert Decimal(str(payload["total_contract_amount"])) == Decimal("300.30")
+    assert Decimal(str(payload["total_contract_amount"])) == Decimal("339.34")
     assert [contract["contract_no"] for contract in payload["contracts"]] == [
         "CONTRACT-SYNTH-A",
         "CONTRACT-SYNTH-B",
@@ -156,7 +158,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
         "10000000-0000-4000-8000-000000000001",
     )
     assert amount_changed_without_version_bump is not None
-    amount_changed_without_version_bump.contract_amount = Decimal("101.10")
+    amount_changed_without_version_bump.amount_inc_tax = Decimal("114.11")
     db.commit()
     changed = _get(
         TestClient(app),
@@ -165,7 +167,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
         as_of="2026-08-08",
     ).json()
     assert changed["data_version"] != payload["data_version"]
-    assert Decimal(str(changed["total_contract_amount"])) == Decimal("301.30")
+    assert Decimal(str(changed["total_contract_amount"])) == Decimal("340.34")
 
 
 def test_directory_data_version_covers_as_of_and_all_filtered_pages(db):
@@ -233,6 +235,7 @@ def test_overview_data_version_covers_as_of_and_cross_project_relations(db):
         contract_id="contract-version-cross-scope",
         contract_no="CONTRACT-VERSION-CROSS-SCOPE",
         contract_amount=Decimal("100.00"),
+        amount_inc_tax=Decimal("113.00"),
         contract_status="effective",
         status_mapping_state="mapped",
         status_mapping_version="contract-status-map-v1",
@@ -263,6 +266,7 @@ def test_overview_data_version_covers_as_of_and_cross_project_relations(db):
         contract_id=target_relation.contract_id,
         contract_no=target_relation.contract_no,
         contract_amount=Decimal("100.00"),
+        amount_inc_tax=Decimal("113.00"),
         contract_status="effective",
         status_mapping_state="mapped",
         status_mapping_version="contract-status-map-v1",
@@ -352,6 +356,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_id="contract-synth-current",
                 contract_no="CONTRACT-SYNTH-CURRENT",
                 contract_amount=Decimal("400.00"),
+                amount_inc_tax=Decimal("452.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -365,6 +370,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_id="contract-synth-expired",
                 contract_no="CONTRACT-SYNTH-EXPIRED",
                 contract_amount=Decimal("900.00"),
+                amount_inc_tax=Decimal("1017.00"),
                 contract_status="expired",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -379,6 +385,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_id="contract-synth-excluded",
                 contract_no="CONTRACT-SYNTH-EXCLUDED",
                 contract_amount=Decimal("800.00"),
+                amount_inc_tax=Decimal("904.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -402,7 +409,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
     payload = response.json()
     assert payload["contract_count"] == 3
     assert payload["effective_contract_count"] == 1
-    assert Decimal(str(payload["total_contract_amount"])) == Decimal("400.00")
+    assert Decimal(str(payload["total_contract_amount"])) == Decimal("452.00")
     effective_by_id = {
         contract["contract_id"]: contract["is_effective"]
         for contract in payload["contracts"]
@@ -475,6 +482,7 @@ def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
                 contract_id="contract-synth-mapped-included",
                 contract_no="CONTRACT-SYNTH-MAPPED-INCLUDED",
                 contract_amount=Decimal("100.00"),
+                amount_inc_tax=Decimal("113.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -488,6 +496,7 @@ def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
                 contract_id="contract-synth-unmapped-excluded",
                 contract_no="CONTRACT-SYNTH-UNMAPPED-EXCLUDED",
                 contract_amount=Decimal("200.00"),
+                amount_inc_tax=Decimal("226.00"),
                 contract_status="来源状态尚未映射",
                 status_mapping_state="unmapped",
                 status_mapping_version="contract-status-map-v1",
@@ -578,6 +587,7 @@ def test_overlapping_duplicate_contract_relationships_never_double_count(db):
                 contract_id="contract-synth-duplicate",
                 contract_no="CONTRACT-SYNTH-DUPLICATE",
                 contract_amount=Decimal("600.00"),
+                amount_inc_tax=Decimal("678.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -591,6 +601,7 @@ def test_overlapping_duplicate_contract_relationships_never_double_count(db):
                 contract_id="contract-synth-duplicate",
                 contract_no="CONTRACT-SYNTH-DUPLICATE",
                 contract_amount=Decimal("600.00"),
+                amount_inc_tax=Decimal("678.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -684,6 +695,7 @@ def test_cross_project_contract_conflict_fails_closed_and_is_auditable(db):
                 contract_id="contract-synth-cross-project",
                 contract_no="CONTRACT-SYNTH-CROSS-PROJECT",
                 contract_amount=Decimal("800.00"),
+                amount_inc_tax=Decimal("904.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -748,6 +760,7 @@ def test_cross_project_conflict_includes_inactive_project_relationships(
                 contract_id="contract-synth-cross-inactive",
                 contract_no="CONTRACT-SYNTH-CROSS-INACTIVE",
                 contract_amount=Decimal("850.00"),
+                amount_inc_tax=Decimal("960.50"),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -780,6 +793,75 @@ def test_cross_project_conflict_includes_inactive_project_relationships(
     ]
 
 
+def test_contract_business_identity_fails_closed_when_internal_ids_differ(db):
+    """XSDD is a contract identity even when two rows use different IDs."""
+
+    duplicate_project = MaintenanceProject(
+        project_id="identity-duplicate-project",
+        project_code="IDENTITY-DUPLICATE",
+        display_name="业务合同号重复项目",
+        lifecycle_status="active",
+    )
+    shared_project = MaintenanceProject(
+        project_id="identity-shared-project",
+        project_code="IDENTITY-SHARED",
+        display_name="业务合同号共享项目",
+        lifecycle_status="active",
+    )
+    db.add_all([duplicate_project, shared_project])
+    common = {
+        "contract_no": "XSDD-SAME-BUSINESS-IDENTITY",
+        "amount_inc_tax": Decimal("100.00"),
+        "contract_status": "effective",
+        "status_mapping_state": "mapped",
+        "status_mapping_version": "contract-status-map-v1",
+        "included_in_total": True,
+        "effective_from": date(2026, 1, 1),
+        "source": "synthetic-test",
+    }
+    db.add_all([
+        MaintenanceProjectContract(
+            project_contract_id="identity-duplicate-relation-a",
+            project_id=duplicate_project.project_id,
+            contract_id="identity-internal-a",
+            **common,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="identity-duplicate-relation-b",
+            project_id=duplicate_project.project_id,
+            contract_id="identity-internal-b",
+            **common,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="identity-shared-relation-c",
+            project_id=shared_project.project_id,
+            contract_id="identity-internal-c",
+            **common,
+        ),
+    ])
+    db.commit()
+    token = _token(db, username="contract_business_identity_admin")
+
+    payload = _get(
+        TestClient(app),
+        f"/api/maintenance/projects/stable/{duplicate_project.project_id}",
+        token,
+        as_of="2026-08-08",
+    ).json()
+
+    assert payload["total_contract_amount"] is None
+    assert payload["completeness"]["issues"] == [
+        {
+            "code": "duplicate_effective_contract",
+            "contract_ids": ["identity-internal-a", "identity-internal-b"],
+        },
+        {
+            "code": "cross_project_contract_conflict",
+            "contract_ids": ["identity-internal-a", "identity-internal-b"],
+        },
+    ]
+
+
 def test_same_display_name_projects_stay_independent_and_rename_keeps_relationships(db):
     first = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000009",
@@ -805,6 +887,7 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
                 contract_id=f"contract-synth-same-{index}",
                 contract_no=f"CONTRACT-SYNTH-SAME-{index}",
                 contract_amount=Decimal(amount),
+                amount_inc_tax=(Decimal(amount) * Decimal("1.13")),
                 contract_status="effective",
                 status_mapping_state="mapped",
                 status_mapping_version="contract-status-map-v1",
@@ -850,8 +933,8 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
         token,
         as_of="2026-08-08",
     ).json()
-    assert Decimal(str(first_overview["total_contract_amount"])) == Decimal("900.00")
-    assert Decimal(str(second_overview["total_contract_amount"])) == Decimal("1000.00")
+    assert Decimal(str(first_overview["total_contract_amount"])) == Decimal("1017.00")
+    assert Decimal(str(second_overview["total_contract_amount"])) == Decimal("1130.00")
 
     first.display_name = "已更名但身份不变"
     first.version += 1

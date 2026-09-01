@@ -2,8 +2,10 @@
 
 流程（单步端点，fail-closed）：
   幂等重放检查 → 零写入预检（文件类型门 + 90/91 布局门）→ 通用管线快照 upsert
-  → 快照差异报告 → 提交 → 成本回填（复用 maintenance_cost.recompute，引擎零改动）
-  → 回执落库（同 Idempotency-Key 重放返回原报告）。
+  → 快照差异报告 → 回执落库 → 成本回填（复用 maintenance_cost.recompute(commit=False)，
+  引擎零改动）→ 单次提交（同 Idempotency-Key 重放返回原报告）。
+  2026-08-26 起导入事实、回执、成本重算与项目工作簿 revision bump 在同一事务：
+  任一步失败整体回滚，不留「新事实 + 旧成本」的可见窗口。
 
 布局规则（事实档案 §1.1）：
   91 列（当前年度版）：头段 [0..6]∪[44..90]，明细段 [7..43]；
@@ -14,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from decimal import Decimal
@@ -30,6 +33,17 @@ _log = logging.getLogger(__name__)
 
 _LINE_ANCHOR = "需求明细.数据ID(不可修改)"
 _SNAPSHOT_DIFF_SAMPLE = 50
+
+
+def _import_lock_identity(operator: str, idempotency_key: str) -> str:
+    """Return a PostgreSQL-text-safe, unambiguous identity for the xact lock."""
+
+    composite = json.dumps(
+        [operator, idempotency_key],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return f"maintenance-wbdd-import:{composite}"
 
 
 class WbddImportError(Exception):
@@ -261,21 +275,31 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
                 operator: str, idempotency_key: str) -> tuple[dict, bool]:
     """执行导入并返回 (报告, replayed)。调用方负责 HTTP 错误映射与临时文件清理。
 
-    提交语义：导入（含批次/事实/回执）先 commit；recompute 随后独立执行——
-    与 /api/import/upload 的 _post_import_refresh 一致，重算失败不影响已完成导入；
-    重算忙（另一重算进行中）由调用方映射 409 recompute_busy（导入已提交，
-    upsert 幂等，客户端整体重试安全）。
+    提交语义（2026-08-26 单事务化）：导入批次/事实、快照差异、回执与成本重算
+    （recompute(commit=False)，含项目工作簿 revision bump）在同一事务一次提交；
+    任一步失败整体回滚（fail closed），不留「新事实 + 旧成本」可见窗口。
+    upsert 幂等，客户端整体重试安全。重算失败的回滚在本函数内完成，调用方
+    拿到异常时会话已是干净的。
     """
+    # 幂等判定必须位于同键事务锁内；否则两个并发请求都可先看到 none，后者
+    # 最终只会撞 unique/500，而不是稳定 replay 首个结果。
+    db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+        _import_lock_identity(operator, idempotency_key), 0,
+    ))))
     existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key)
     if existing is not None:
         report = dict(existing.report_json or {})
         if report.get("recompute") is None:
-            # 首次调用在 recompute 处 409（重算忙）时，回执已提交但成本回填未完成。
+            # 只可能命中单事务化之前两半提交留下的历史回执（事实已提交、重算缺失）。
             # 若重放只回放报告，这批单的成本会永远停在导入前的口径——报告看起来还
             # 是成功的（静默）。重放时补跑重算（导入本身仍幂等，不会重复入库）。
-            report["recompute"] = maintenance_cost.recompute(db)
-            existing.report_json = report
-            db.commit()
+            try:
+                report["recompute"] = maintenance_cost.recompute(db, commit=False)
+                existing.report_json = dict(report)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
         return report, True
 
     layout = precheck_wbdd_file(file_path)  # 零写入门：非 WBDD / 布局不符在此拒绝
@@ -310,15 +334,25 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
         uploaded_by=operator,
         file_hash=batch.file_hash,
         layout=layout,
-        report_json=report,
+        # 与函数返回的可变 report 隔离。否则下方追加 recompute 会先原地改掉
+        # ORM 当前值，随后赋一份相等的新 dict 仍会被 flush 判为净变化 0。
+        report_json=dict(report),
     )
     db.add(receipt)
-    db.commit()
+    db.flush()
 
-    # 成本回填接线（铁律 2：只接线不重写）。busy 上抛由 API 映射 409。
-    recompute_stats = maintenance_cost.recompute(db)
+    # 成本回填接线（铁律 2：只接线不重写）。与导入同事务（commit=False），
+    # 重算异常 → 整体回滚，绝不提交半截状态。run_import 已持有数据变更 advisory
+    # 锁（同会话 xact 锁可重入），此处 pg_try_advisory_xact_lock 必成功，busy 仅
+    # 可能来自测试注入等异常路径——同样整体回滚后上抛，由 API 映射 409。
+    try:
+        recompute_stats = maintenance_cost.recompute(db, commit=False)
+    except Exception:
+        db.rollback()
+        raise
     report["recompute"] = recompute_stats
-    receipt.report_json = report
+    # 赋独立新对象，使 JSONB 变化可被 ORM 稳定检测并写入 receipt。
+    receipt.report_json = dict(report)
     db.commit()
     return report, False
 

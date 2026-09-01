@@ -1,5 +1,7 @@
 """Controlled stable maintenance project master writes."""
 
+from datetime import date
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -7,7 +9,12 @@ from app import permissions
 from app.auth import _make_token, hash_password
 from app.config import get_settings
 from app.main import app
-from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectAuditLog
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAuditLog,
+    MaintenanceProjectContract,
+)
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.system import SysUser
 from app.services import maintenance_project_catalog as catalog
 
@@ -74,6 +81,7 @@ def test_admin_can_create_project_and_read_it_back(db):
     project = created.json()
     assert project["project_code"] == "MAINT-SYNTH-MASTER-001"
     assert project["display_name"] == "合成维保项目甲"
+    assert project["salesperson_override_active"] is False
     assert project["project_manager_id"] == "manager-synth-001"
     assert project["is_active"] is True
     assert project["version"] == 1
@@ -83,6 +91,7 @@ def test_admin_can_create_project_and_read_it_back(db):
         f"/api/maintenance/projects/stable/{project['project_id']}"
     )
     assert read_back.status_code == 200, read_back.text
+    assert read_back.headers["cache-control"] == "no-store"
     # GET 载荷带可见账号回显键（2026-08-25 项目级可见账号多选）
     assert read_back.json()["project"] == {**project, "visible_usernames": []}
     audit = db.scalar(select(MaintenanceProjectAuditLog))
@@ -169,7 +178,120 @@ def test_project_patch_only_changes_explicit_fields(db):
 
     assert changed.status_code == 200, changed.text
     assert changed.json()["display_name"] == "只修改项目名称"
+    assert changed.json()["salesperson_override_active"] is False
     assert changed.json()["project_manager_id"] == "manager-must-stay"
+
+
+def test_project_patch_can_set_and_clear_salesperson_with_one_revision_per_change(db):
+    client = _admin_client(db, "project_master_salesperson_admin")
+    created = client.post(
+        "/api/maintenance/projects/stable",
+        json={
+            "project_code": "MAINT-SYNTH-MASTER-SALESPERSON",
+            "display_name": "销售人员可编辑项目",
+            "reason": "建立销售人员编辑测试主档",
+        },
+    ).json()
+
+    set_salesperson = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 1,
+            "salesperson": "  王销售  ",
+            "reason": "手工确认项目销售人员",
+        },
+    )
+
+    assert set_salesperson.status_code == 200, set_salesperson.text
+    assert set_salesperson.json()["salesperson"] == "王销售"
+    assert set_salesperson.json()["salesperson_override_active"] is True
+    assert set_salesperson.json()["version"] == 2
+    state = db.scalar(
+        select(MaintenanceProjectWorkbookState).where(
+            MaintenanceProjectWorkbookState.project_id == created["project_id"]
+        )
+    )
+    assert state is not None
+    assert state.revision == 1
+
+    cleared = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 2,
+            "salesperson": "",
+            "reason": "清空错误销售人员",
+        },
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["salesperson"] is None
+    assert cleared.json()["salesperson_override_active"] is True
+    assert cleared.json()["version"] == 3
+    db.refresh(state)
+    assert state.revision == 2
+
+    unchanged = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 3,
+            "salesperson": " ",
+            "reason": "重复保存空销售人员",
+        },
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["version"] == 3
+    db.refresh(state)
+    assert state.revision == 2
+
+    updates = list(
+        db.scalars(
+            select(MaintenanceProjectAuditLog)
+            .where(
+                MaintenanceProjectAuditLog.project_id == created["project_id"],
+                MaintenanceProjectAuditLog.entity_type == "project",
+                MaintenanceProjectAuditLog.action == "update",
+            )
+            .order_by(MaintenanceProjectAuditLog.id)
+        )
+    )
+    assert len(updates) == 2
+    assert updates[0].before_json["salesperson"] is None
+    assert updates[0].after_json["salesperson"] == "王销售"
+    assert updates[0].before_json["salesperson_override_active"] is False
+    assert updates[0].after_json["salesperson_override_active"] is True
+    assert updates[1].before_json["salesperson"] == "王销售"
+    assert updates[1].after_json["salesperson"] is None
+    assert updates[1].before_json["salesperson_override_active"] is True
+    assert updates[1].after_json["salesperson_override_active"] is True
+
+
+def test_explicit_null_salesperson_activates_override_and_revision(db):
+    client = _admin_client(db, "project_master_salesperson_null_admin")
+    created = client.post(
+        "/api/maintenance/projects/stable",
+        json={
+            "project_code": "MAINT-SYNTH-MASTER-SALESPERSON-NULL",
+            "display_name": "销售人员显式空值项目",
+            "reason": "建立显式空值测试主档",
+        },
+    ).json()
+
+    cleared = client.patch(
+        f"/api/maintenance/projects/stable/{created['project_id']}",
+        json={
+            "version": 1,
+            "salesperson": None,
+            "reason": "人工确认当前无销售人员",
+        },
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["salesperson"] is None
+    assert cleared.json()["salesperson_override_active"] is True
+    assert cleared.json()["version"] == 2
+    state = db.get(MaintenanceProjectWorkbookState, created["project_id"])
+    assert state is not None
+    assert state.revision == 1
 
 
 def test_project_archive_and_restore_preserve_history(db):
@@ -413,3 +535,60 @@ def test_project_and_audit_are_one_transaction(db, monkeypatch):
         )
     ) is None
     assert db.scalar(select(MaintenanceProjectAuditLog)) is None
+
+
+def test_contract_total_does_not_guess_inc_tax_from_ex_tax(db):
+    """未税对账额不能证明含税合同额；overview 必须保留未税证据并失败关闭。"""
+    from decimal import Decimal as D
+    from fastapi.testclient import TestClient  # noqa: F401
+    project = MaintenanceProject(
+        project_id="contract-inc-fallback",
+        project_code="CONTRACT-INC",
+        display_name="含税回退口径项目",
+        lifecycle_status="ongoing",
+        period_from=date(2026, 1, 1),
+        period_to=date(2027, 12, 31),
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="contract-inc-1", project_id=project.project_id,
+        contract_id="XSDD-INC-1", contract_no="XSDD-INC-1",
+        contract_amount=D("100.00"),  # 只有未税
+        amount_inc_tax=None,
+        included_in_total=True, status_mapping_state="mapped",
+        status_mapping_version="t", effective_from=date(2026, 1, 1),
+        source="ledger", version=1))
+    db.commit()
+    client = _client(db) if "_client" in globals() else None
+    if client is None:
+        # 本文件无通用 client helper 时直接调服务层
+        from app.services import maintenance_project as mp
+        payload = mp.project_overview(
+            db, project.project_id, as_of=date(2026, 8, 1),
+            user_ctx=_admin_ctx())
+        assert payload is not None
+        assert payload["total_contract_amount"] is None
+        assert payload["contracts"][0]["contract_amount"] is None
+        assert payload["contracts"][0]["amount_inc_tax"] is None
+        assert payload["contracts"][0]["amount_ex_tax"] == D("100.00")
+        assert payload["completeness"]["status"] == "incomplete"
+        assert payload["completeness"]["issues"] == [{
+            "code": "missing_contract_amount",
+            "contract_ids": ["XSDD-INC-1"],
+        }]
+    else:
+        resp = client.get(f"/api/maintenance/projects/stable/{project.project_id}")
+        assert resp.status_code == 200
+        body = resp.json()["project"]
+        assert body["total_contract_amount"] is None
+        assert body["contracts"][0]["contract_amount"] is None
+        assert body["contracts"][0]["amount_inc_tax"] is None
+        assert body["contracts"][0]["amount_ex_tax"] == "100.00"
+        assert body["completeness"]["status"] == "incomplete"
+
+
+def _admin_ctx():
+    from app.security import UserContext
+    return UserContext(user_id="inc-test-admin", role="admin",
+                       is_authenticated=True)

@@ -26,7 +26,8 @@ export interface Stat<T = number | string | null> {
 export interface KnownCostValue {
   actual_amount: string | number;
   estimated_amount: string | number;
-  known_amount: string | number;
+  /** null = 没有有效需求明细，不能把 SQL 聚合单位元 0 当成真实成本。 */
+  known_amount: string | number | null;
   missing_lines: number;
   coverage_pct: number | null;
   quality: "actual_only" | "contains_estimate" | "incomplete";
@@ -88,10 +89,15 @@ export interface BoardAttention {
 /** 卡片三态（#35/#43）：<80% 正常 / 80–100% 提醒 / >100% 报警。 */
 export type CardStatus = "normal" | "warning" | "alert";
 
+export type BoardProjectLifecycle = "ongoing" | "ended" | "missing" | "all";
+export type BoardProjectSort = "attention" | "orders" | "name" | "known_cost" | "cost_ratio";
+
 export interface BoardProjectRow {
   project_id: string;
   project_code: string;
   display_name: string;
+  /** 同一 canonical 项目的历史/来源名称，仅用于展示和搜索。 */
+  aliases?: string[];
   lifecycle: "ongoing" | "ended" | "missing";
   /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
   period_from: string | null;
@@ -135,6 +141,35 @@ export interface BoardProjects {
   page_size: number;
   sort: string;
   window: BoardWindow;
+}
+
+/**
+ * 项目清单导出的字段目录由服务端按当前账号权限下发。前端不得自行补充 key，
+ * 也不得把未返回的数据库字段渲染成可选项。
+ */
+export interface BoardProjectExportField {
+  key: string;
+  label: string;
+  group: string;
+  default_selected: boolean;
+}
+
+export interface BoardProjectExportOptions {
+  fields: BoardProjectExportField[];
+  default_fields: string[];
+}
+
+export interface BoardProjectExportInput {
+  fields: string[];
+  q?: string;
+  lifecycle?: BoardProjectLifecycle;
+  card_status?: CardStatus;
+  sort?: BoardProjectSort;
+}
+
+export interface BoardProjectExportDownload {
+  blob: Blob;
+  filename: string;
 }
 
 export interface BoardOrderRow {
@@ -242,6 +277,34 @@ export const searchBoardProjects = (body: {
   sort?: string;
   card_status?: CardStatus;
 }) => api.post<BoardProjects>(`${BASE}/projects/search`, body);
+
+export const getBoardProjectExportOptions = () =>
+  api.get<BoardProjectExportOptions>(`${BASE}/projects/export/options`);
+
+/** 下载当前筛选命中的全部项目（不是只下载当前已经滚动加载的卡片）。 */
+export const downloadBoardProjectsExport = async (
+  body: BoardProjectExportInput,
+): Promise<BoardProjectExportDownload> => {
+  const response = await api.post<Blob>(`${BASE}/projects/export`, body, {
+    responseType: "blob",
+  });
+  const disposition = String(response.headers["content-disposition"] ?? "");
+  const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition)?.[1];
+  let filename = plain || "maintenance-projects.xlsx";
+  if (encoded) {
+    try {
+      filename = decodeURIComponent(encoded.replace(/^"|"$/g, ""));
+    } catch {
+      // 非法 percent-encoding 时使用安全的 ASCII filename / 固定回退名。
+    }
+  }
+  return { blob: response.data, filename };
+};
+
+/** 详情页按稳定 ID 取聚合卡，避免名称模糊搜索第 1 页漏掉同名项目。 */
+export const getBoardProject = (projectId: string) =>
+  api.get<BoardProjectRow>(`${BASE}/projects/${encodeURIComponent(projectId)}`);
 
 export const getBoardProjectOrders = (
   projectId: string,

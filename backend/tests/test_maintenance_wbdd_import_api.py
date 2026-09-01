@@ -8,10 +8,12 @@ from sqlalchemy import func, select
 from app import permissions
 from app.auth import hash_password
 from app.config import get_settings
+from app.etl import loader, pipeline
 from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 from app.models.system import SysUser
+from app.services import maintenance_wbdd_import as wbdd
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
 _PASSWORD = "synthetic-wbdd-password-1"
@@ -171,6 +173,14 @@ def test_idempotency_key_required(db, tmp_path):
     assert resp.json()["detail"]["code"] == "invalid_idempotency_key"
 
 
+def test_import_lock_identity_is_text_safe_and_preserves_field_boundaries():
+    identity = wbdd._import_lock_identity("operator\x00name", "key\x00value")
+    assert "\x00" not in identity
+    assert wbdd._import_lock_identity("a:b", "c") != wbdd._import_lock_identity(
+        "a", "b:c"
+    )
+
+
 def test_same_idempotency_key_replays_original_report(db, tmp_path):
     client = _client(db, username="wbdd-up5",
                      overrides={"page_maintenance": True,
@@ -227,12 +237,13 @@ def test_latest_health_before_and_after_upload(db, tmp_path):
     assert after["layout"] == "91"
 
 
-def test_replay_after_recompute_busy_finishes_the_cost_backfill(db, tmp_path):
-    """回放必须把首次 409 时没跑完的成本回填补上（否则成本永远停在导入前）。
+def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
+    """单事务化（2026-08-26）：重算忙/失败 → 事实、回执、批次整体回滚（fail closed）。
 
-    首调用在 recompute 处撞上「另一重算进行中」→ API 返回 409，但回执已经提交。
-    若回放只把原报告读回来，这批单的成本就永久停在旧口径，而报告看起来是成功的
-    ——静默的错，最难发现。回放时必须补跑重算。
+    旧两半提交语义下，首调用 409 时回执已提交而成本回填缺失，需要回放补跑；
+    现在导入事实、回执、成本重算与 revision bump 同一事务——重算失败即整体
+    回滚，绝不留下「新事实 + 旧成本」的可见窗口。upsert 幂等，客户端同
+    Idempotency-Key 整体重试安全（重试是全新导入，不是回放）。
     """
     from app.services.maintenance_cost import MaintenanceCostRecomputeBusy
     from app.services import maintenance_wbdd_import as wbdd
@@ -246,31 +257,88 @@ def test_replay_after_recompute_busy_finishes_the_cost_backfill(db, tmp_path):
     calls = {"n": 0}
     real = wbdd.maintenance_cost.recompute
 
-    def flaky(session):
+    def flaky(session, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise MaintenanceCostRecomputeBusy("另一重算进行中")
-        return real(session)
+        return real(session, **kw)
 
     wbdd.maintenance_cost.recompute = flaky
     try:
         first = _upload(client, path, key=key)
         assert first.status_code == 409
         assert first.json()["detail"]["code"] == "recompute_busy"
-        # 回执已落库，但重算没跑完
-        receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
-        db.refresh(receipt)
-        assert receipt.report_json.get("recompute") is None
+        # fail closed：事实/回执都没有落库（会话已被端点依赖关闭，重查确认）
+        assert _zero_rows(db)
+        assert db.execute(select(func.count(MaintenanceWbddImportReceipt.id))
+                          ).scalar_one() == 0
 
         second = _upload(client, path, key=key)
         assert second.status_code == 200, second.text
         body = second.json()
-        assert body["replayed"] is True
-        assert body["recompute"] is not None, "回放没有补跑成本回填"
-        assert calls["n"] == 2, "回放应当再调一次 recompute"
+        assert body["replayed"] is False, "首调用整体回滚后，重试是全新导入而非回放"
+        assert body["recompute"] is not None
+        assert calls["n"] == 2
         db.expire_all()
         receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
         assert receipt.report_json["recompute"] is not None
+    finally:
+        wbdd.maintenance_cost.recompute = real
+
+
+def test_assignment_race_maps_to_retryable_conflict(db, tmp_path, monkeypatch):
+    client = _client(
+        db,
+        username="wbdd-assignment-race",
+        overrides={"page_maintenance": True,
+                   "action_maintenance_wbdd_import": True},
+    )
+    path = _wbdd_file(tmp_path, "assignment-race.xlsx")
+
+    def conflict(*_args, **_kwargs):
+        raise loader.WorkbookInvalidationConflictError("synthetic assignment race")
+
+    monkeypatch.setattr(pipeline, "run_import", conflict)
+    response = _upload(client, path)
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["detail"]["code"] == "import_concurrency_conflict"
+
+
+def test_replay_backfills_recompute_for_legacy_half_committed_receipt(db, tmp_path):
+    """历史半提交回执（2026-08-26 单事务化之前：事实已提交、recompute 缺失）：
+    重放仍必须补跑成本回填，否则那批单的成本永远停在导入前口径。"""
+    from app.services import maintenance_wbdd_import as wbdd
+
+    client = _client(db, username="wbdd-legacy",
+                     overrides={"page_maintenance": True,
+                                "action_maintenance_wbdd_import": True})
+    path = _wbdd_file(tmp_path)
+    key = f"idem-{uuid.uuid4()}"
+    assert _upload(client, path, key=key).status_code == 200
+
+    # 模拟单事务化之前留下的历史回执：report_json 里没有 recompute
+    receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
+    legacy_report = {k: v for k, v in (receipt.report_json or {}).items()
+                     if k != "recompute"}
+    receipt.report_json = legacy_report
+    db.commit()
+
+    calls = {"n": 0}
+    real = wbdd.maintenance_cost.recompute
+
+    def counted(session, **kw):
+        calls["n"] += 1
+        assert kw.get("commit") is False
+        return real(session, **kw)
+
+    wbdd.maintenance_cost.recompute = counted
+    try:
+        again = _upload(client, path, key=key)
+        assert again.status_code == 200 and again.json()["replayed"] is True
+        assert again.json()["recompute"] is not None, "历史回执重放必须补跑成本回填"
+        assert calls["n"] == 1
     finally:
         wbdd.maintenance_cost.recompute = real
 
@@ -289,9 +357,9 @@ def test_replay_does_not_rerun_recompute_when_already_done(db, tmp_path):
     calls = {"n": 0}
     real = wbdd.maintenance_cost.recompute
 
-    def counted(session):
+    def counted(session, **kw):
         calls["n"] += 1
-        return real(session)
+        return real(session, **kw)
 
     wbdd.maintenance_cost.recompute = counted
     try:

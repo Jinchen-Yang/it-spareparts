@@ -152,7 +152,7 @@ export default function CollectionReminderDetail({
                 {detail.project.display_name}
               </h3>
               {detail.project.project_id && (
-                <Link to={`/maintenance/beta/projects/${encodeURIComponent(detail.project.project_id)}`}>
+                <Link to={`/maintenance/projects/${encodeURIComponent(detail.project.project_id)}`}>
                   {COLLECTION_PAGE.viewFullProject}
                 </Link>
               )}

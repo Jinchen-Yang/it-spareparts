@@ -11,11 +11,12 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import permissions
+from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.auth import current_identity
 from app.beta_access import replenishment_beta_whitelisted
 from app.config import get_settings
@@ -147,6 +148,9 @@ class CartReplace(StrictModel):
 
 class CartSubmit(StrictModel):
     expected_version: int = Field(ge=1)
+    # Stable cloud-draft key lets a response-loss retry recover the application
+    # after the first successful transaction has deleted the submitted cart.
+    client_request_id: str = Field(min_length=8, max_length=128)
 
 
 class RevisionResolution(StrictModel):
@@ -165,6 +169,14 @@ class RevisionCreate(StrictModel):
     # - resolutions：仅逐条处理打回行（旧交互，兼容）
     lines: list[AtomicLineWrite] | None = Field(None, min_length=1, max_length=200)
     resolutions: list[RevisionResolution] | None = Field(None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def exactly_one_revision_mode(self) -> "RevisionCreate":
+        if (self.lines is None) == (self.resolutions is None):
+            raise ValueError(
+                "lines（完整重编辑）与 resolutions（逐条处理）必须且只能提供一种"
+            )
+        return self
 
 
 @router.get("/capabilities")
@@ -225,12 +237,19 @@ def projects(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
-    username, role = _identity(db, ident)
-    return {"items": replenishment.available_projects(db, username=username, role=role)}
+    _identity(db, ident)
+    _require_price_data(ctx)
+    return {
+        "items": replenishment.available_projects(
+            db,
+            visible_project_ids=resolve_visible_project_ids(db, ctx),
+        )
+    }
 
 
 @router.get("/cart-drafts/{project_id}")
@@ -239,13 +258,20 @@ def get_cart_draft(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
     username, _role = _identity(db, ident)
+    _require_price_data(ctx)
     try:
-        return {"draft": replenishment_cart.get_cart_draft(db, username=username, project_id=project_id)}
+        return {"draft": replenishment_cart.get_cart_draft(
+            db,
+            username=username,
+            user_ctx=ctx,
+            project_id=project_id,
+        )}
     except replenishment.ReplenishmentError as exc:
         _raise_domain(exc)
 
@@ -257,15 +283,19 @@ def put_cart_draft(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
-    username, role = _identity(db, ident)
+    username, _role = _identity(db, ident)
     try:
         return {"draft": replenishment_cart.replace_cart_draft(
-            db, username=username, role=role, project_id=project_id,
+            db,
+            username=username,
+            user_ctx=ctx,
+            project_id=project_id,
             expected_version=body.expected_version, request_note=body.request_note,
             lines=[line.model_dump() for line in body.lines],
         )}
@@ -280,6 +310,7 @@ def remove_cart_draft(
     expected_version: int | None = Query(None, ge=1),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
@@ -288,7 +319,11 @@ def remove_cart_draft(
     username, _role = _identity(db, ident)
     try:
         return {"deleted": replenishment_cart.delete_cart_draft(
-            db, username=username, project_id=project_id, expected_version=expected_version
+            db,
+            username=username,
+            user_ctx=ctx,
+            project_id=project_id,
+            expected_version=expected_version,
         )}
     except replenishment.ReplenishmentError as exc:
         _raise_domain(exc)
@@ -301,16 +336,21 @@ def submit_cart_draft(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
-    username, role = _identity(db, ident)
+    username, _role = _identity(db, ident)
     try:
         return replenishment_cart.submit_cart_draft_atomic(
-            db, username=username, role=role, project_id=project_id,
+            db,
+            username=username,
+            user_ctx=ctx,
+            project_id=project_id,
             expected_version=body.expected_version,
+            client_request_id=body.client_request_id,
         )
     except replenishment.ReplenishmentError as exc:
         _raise_domain(exc)
@@ -339,17 +379,18 @@ def create_application(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
-    username, role = _identity(db, ident)
+    username, _role = _identity(db, ident)
     try:
         return replenishment.submit_application_atomic(
             db,
             username=username,
-            role=role,
+            user_ctx=ctx,
             client_request_id=body.client_request_id,
             project_id=body.project_id,
             request_note=body.request_note,
@@ -447,25 +488,24 @@ def apply_application_revision(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
     _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
-    username, role = _identity(db, ident)
+    username, _role = _identity(db, ident)
     for item in body.resolutions or []:
         if item.action == "replace" and item.part_id is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {
                 "code": "replacement_part_required", "message": "replace 必须提供 part_id"
             })
-    if not body.lines and not body.resolutions:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {
-            "code": "revision_content_required",
-            "message": "必须提供 lines（完整重编辑）或 resolutions（逐条处理打回行）",
-        })
     try:
         return replenishment.apply_revision_atomic(
-            db, application_id, username=username, role=role,
+            db,
+            application_id,
+            username=username,
+            user_ctx=ctx,
             expected_application_version=body.expected_application_version,
             client_request_id=body.client_request_id,
             lines=[item.model_dump() for item in body.lines]

@@ -214,6 +214,9 @@ def auto_assign_unassigned_orders(
             {"result": payload},
         )
         return {"result": payload}
+    except assignments.SourceAssignmentConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except assignments.SourceAssignmentError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

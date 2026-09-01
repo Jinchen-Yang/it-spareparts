@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DataError, ProgrammingError
 
 from app import permissions
@@ -20,7 +20,7 @@ from app.auth import hash_password
 from app.config import get_settings
 from app.main import app
 from app.models.dimensions import DimPart
-from app.models.system import SysAuditLog, SysImportJob, SysUser
+from app.models.system import SysAuditLog, SysImportBatch, SysImportJob, SysUser
 
 
 @pytest.fixture()
@@ -240,6 +240,8 @@ def test_import_and_governance_recompute_stats_follow_data_permissions(
                                         report_json={"rows": 1}))
     monkeypatch.setattr("app.api.imports._post_import_refresh", lambda *_args, **_kwargs:
                         dict(raw_stats))
+    monkeypatch.setattr("app.api.imports.maintenance_cost.recompute", lambda *_args, **_kwargs:
+                        dict(raw_stats))
     uploaded = client.post(
         "/api/import/upload",
         files={"file": ("permission.xlsx", b"not-read-by-mock",
@@ -247,6 +249,8 @@ def test_import_and_governance_recompute_stats_follow_data_permissions(
     )
     assert uploaded.status_code == 200, uploaded.text
     assert uploaded.json()["recompute"] == expected_stats
+    assert uploaded.json()["profit_recompute"] == expected_stats
+    assert uploaded.json()["maintenance_recompute"] == expected_stats
 
     monkeypatch.setattr("app.api.governance.merge.merge_parts", lambda *_args, **_kwargs: {
         "source_pn": "SOURCE-PN", "target_pn": "TARGET-PN",
@@ -294,13 +298,10 @@ def test_import_and_governance_never_return_internal_exception_details(
         files={"file": ("safe-error.xlsx", b"not-read-by-mock",
                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
-    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.status_code == 500, uploaded.text
     assert secret not in uploaded.text
     assert "secret_finance_table" not in uploaded.text
-    assert uploaded.json()["recompute"]["error"] == (
-        "利润重算失败，请到利润页手动重算；"
-        "维保项目成本重算失败，请到项目成本页手动重算"
-    )
+    assert uploaded.json()["detail"] == "维保项目成本重算失败，本次导入已整体回滚"
 
     job = SysImportJob(
         created_by="safe-errors", status="processing", mode="skip", total_files=1,
@@ -340,6 +341,46 @@ def test_import_and_governance_never_return_internal_exception_details(
         assert response.json()["recompute_failed"] == (
             "治理操作已完成，但后置重算失败，请联系管理员处理"
         )
+
+
+def test_import_rolls_back_batch_when_atomic_maintenance_recompute_fails(
+    db, admin_client, monkeypatch,
+):
+    client = _account(admin_client, "atomic-import", "readonly", {"page_import": True})
+
+    def fake_import(session, *_args, **_kwargs):
+        batch = SysImportBatch(
+            filename="atomic-import.xlsx",
+            file_type="purchase",
+            file_hash="atomic-import-rollback",
+            status="success",
+        )
+        session.add(batch)
+        session.flush()
+        return batch
+
+    def fail_recompute(*_args, **_kwargs):
+        raise RuntimeError("injected downstream failure")
+
+    monkeypatch.setattr("app.api.imports.pipeline.run_import", fake_import)
+    monkeypatch.setattr("app.api.imports.maintenance_cost.recompute", fail_recompute)
+    response = client.post(
+        "/api/import/upload",
+        files={
+            "file": (
+                "atomic-import.xlsx",
+                b"not-read-by-mock",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] == "维保项目成本重算失败，本次导入已整体回滚"
+    assert db.scalar(
+        select(func.count()).select_from(SysImportBatch).where(
+            SysImportBatch.file_hash == "atomic-import-rollback"
+        )
+    ) == 0
 
 
 def test_page_governance_grant_allows_work_masks_sensitive_fields_and_audits_username(

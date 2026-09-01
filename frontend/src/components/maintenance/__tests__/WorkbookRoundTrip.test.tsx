@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Modal, message } from "antd";
 
 const { saveBlob } = vi.hoisted(() => ({ saveBlob: vi.fn() }));
 
@@ -17,11 +18,16 @@ const makeFile = () => new File(["xlsx"], "回填.xlsx", { type: "application/vn
 function uploadFile(container: HTMLElement, file: File) {
   const input = container.querySelector('input[type="file"]') as HTMLInputElement;
   fireEvent.change(input, { target: { files: [file] } });
+  return input;
 }
 
 describe("WorkbookRoundTrip", () => {
   beforeEach(() => vi.clearAllMocks());
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    Modal.destroyAll();
+    message.destroy();
+  });
 
   it("hides the upload button without the upload permission", () => {
     render(
@@ -48,9 +54,36 @@ describe("WorkbookRoundTrip", () => {
         onApply={onApply}
       />,
     );
-    uploadFile(container, makeFile());
+    const file = makeFile();
+    const firstInput = uploadFile(container, file);
     await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/已覆盖：补价 2 行/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
+    uploadFile(container, file);
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not claim the upload failed or the stale UI refreshed after commit succeeds", async () => {
+    const onApply = vi.fn().mockResolvedValue({ contract_updates: 1 });
+    const onAfterApply = vi.fn().mockResolvedValue(false);
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表"
+        filename="a.xlsx"
+        canUpload
+        onDownload={vi.fn()}
+        onApply={onApply}
+        onAfterApply={onAfterApply}
+      />,
+    );
+
+    uploadFile(container, makeFile());
+
+    await waitFor(() => expect(onAfterApply).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/数据已写入，但页面刷新失败/)).toBeInTheDocument();
+    expect(screen.queryByText(/已覆盖并刷新/)).toBeNull();
+    expect(screen.queryByText("上传失败")).toBeNull();
   });
 
   it("two-phase: shows the void preview and applies only after confirm", async () => {
@@ -101,11 +134,19 @@ describe("WorkbookRoundTrip", () => {
         onApply={onApply}
       />,
     );
-    uploadFile(container, makeFile());
-    fireEvent.click(await screen.findByRole("button", { name: /取\s*消/ }));
+    const file = makeFile();
+    const firstInput = uploadFile(container, file);
+    const cancelButtons = await screen.findAllByRole("button", { name: /取\s*消/ });
+    fireEvent.click(cancelButtons[cancelButtons.length - 1]);
     // 弹窗关闭有动画，等一拍再断言——本用例的要点是「取消绝不落库」
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(onApply).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
+    uploadFile(container, file);
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
+    const retryCancelButtons = await screen.findAllByRole("button", { name: /取\s*消/ });
+    fireEvent.click(retryCancelButtons[retryCancelButtons.length - 1]);
   });
 
   it("two-phase: a rejected validation never reaches apply and shows the backend line error", async () => {
@@ -123,8 +164,13 @@ describe("WorkbookRoundTrip", () => {
         onApply={onApply}
       />,
     );
-    uploadFile(container, makeFile());
+    const file = makeFile();
+    const firstInput = uploadFile(container, file);
     expect(await screen.findByText(/第 12 行：上传行数不足/)).toBeInTheDocument();
     expect(onApply).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
+    uploadFile(container, file);
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
   });
 });

@@ -1,13 +1,15 @@
 """回款提醒凭证（F6）：上传 → 独立目录文件 + yml sidecar + DB 只记 md5。
 
-复用 business_file 元数据层（sha256/大小/MIME/上传人）与验收附件校验
-（validate_attachment：扩展名/MIME/内容一致性、20MB 上限、PDF 脚本剥离检测）。
+复用 business_file 元数据层（sha256/大小/MIME/上传人），但使用回款凭证
+自己的严格附件策略；验收附件的“任意类型可传”口径不会影响本域。
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -24,12 +26,88 @@ from app.models.maintenance_manager import (
     BusinessFile,
     MaintenanceCollectionMilestone,
 )
-from app.services.maintenance_acceptance import validate_attachment
+from app.services.maintenance_attachment_validation import (
+    AttachmentTooLarge,
+    AttachmentValidationError,
+    validate_collection_evidence_attachment,
+)
 from sqlalchemy.exc import IntegrityError
 
 
 class CollectionEvidenceError(RuntimeError):
     """回款凭证业务错误。"""
+
+
+class CollectionEvidenceTooLarge(CollectionEvidenceError):
+    """回款凭证超过 20 MB。"""
+
+
+class CollectionEvidenceUnsupported(CollectionEvidenceError):
+    """回款凭证类型、内容或文件名不符合要求。"""
+
+
+def validate_attachment(
+    *, filename: str | None, mime_type: str | None, content: bytes
+) -> tuple[str, str, str]:
+    """Translate shared validation errors into collection-domain errors."""
+    try:
+        return validate_collection_evidence_attachment(
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+    except AttachmentTooLarge as exc:
+        raise CollectionEvidenceTooLarge("单个回款凭证不得超过 20MB") from exc
+    except AttachmentValidationError as exc:
+        raise CollectionEvidenceUnsupported(str(exc)) from exc
+
+
+def _active_evidence_payload(
+    db: Session,
+    *,
+    milestone_id: str,
+    md5_digest: str,
+    sha256_digest: str,
+    size_bytes: int,
+) -> dict | None:
+    """Return a replayable active row, refusing an MD5-only collision.
+
+    The database uniqueness key is the historical ``(milestone_id, md5)``
+    index.  SHA-256 and byte length are therefore rechecked before an upload is
+    treated as an idempotent replay.  The full storage projection is returned
+    so the API can verify/repair the files *before* closing the milestone.
+    """
+    pair = db.execute(
+        select(MaintenanceCollectionEvidence, BusinessFile)
+        .join(BusinessFile, BusinessFile.file_id == MaintenanceCollectionEvidence.file_id)
+        .where(
+            MaintenanceCollectionEvidence.milestone_id == milestone_id,
+            MaintenanceCollectionEvidence.md5 == md5_digest,
+            MaintenanceCollectionEvidence.is_active.is_(True),
+        )
+        .order_by(MaintenanceCollectionEvidence.uploaded_at.desc())
+    ).first()
+    if pair is None:
+        return None
+    evidence, file_row = pair
+    if file_row.sha256 != sha256_digest or int(file_row.size_bytes) != size_bytes:
+        raise CollectionEvidenceError(
+            "凭证 MD5 与既有文件冲突，SHA-256 或文件大小不一致，已拒绝重放"
+        )
+    return {
+        "evidence_id": evidence.evidence_id,
+        "file_id": file_row.file_id,
+        "object_key": file_row.object_key,
+        "milestone_id": milestone_id,
+        "md5": md5_digest,
+        "sha256": file_row.sha256,
+        "size_bytes": int(file_row.size_bytes),
+        "original_filename": file_row.original_filename,
+        "mime_type": file_row.mime_type,
+        "uploaded_by": evidence.uploaded_by,
+        "uploaded_at": evidence.uploaded_at.isoformat(),
+        "replayed": True,
+    }
 
 
 def _root() -> Path:
@@ -73,6 +151,48 @@ def _write_meta_sidecar(file_id: str, meta: dict) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+@contextmanager
+def _evidence_write_lock(file_id: str, directory: Path):
+    """Serialize repair/replay writes for one evidence object across workers.
+
+    The lock file is intentionally retained.  Removing a flock file after
+    unlock allows a waiter on the old inode and a new opener on a replacement
+    inode to enter concurrently.
+    """
+    lock_path = directory / f".{file_id}.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _restore_file_snapshot(*, target: Path, backup: Path, existed: bool) -> None:
+    """Restore the pre-write inode, or remove only this locked new object."""
+    if existed:
+        # POSIX rename is a no-op when both names already reference the same
+        # inode; explicitly drop the backup name in that case.
+        if target.exists() and os.path.samefile(backup, target):
+            os.unlink(backup)
+            return
+        os.replace(backup, target)
+        return
+    try:
+        os.unlink(target)
+    except FileNotFoundError:
+        pass
+
+
+def _discard_file_snapshot(backup: Path) -> None:
+    try:
+        os.unlink(backup)
+    except FileNotFoundError:
+        pass
 
 
 def active_evidence_count(db: Session, milestone_id: str) -> int:
@@ -143,23 +263,15 @@ def save_evidence(
     )
     md5_digest = hashlib.md5(content).hexdigest()
     sha256_digest = hashlib.sha256(content).hexdigest()
-    existing = db.execute(
-        select(MaintenanceCollectionEvidence)
-        .where(
-            MaintenanceCollectionEvidence.milestone_id == milestone_id,
-            MaintenanceCollectionEvidence.md5 == md5_digest,
-            MaintenanceCollectionEvidence.is_active.is_(True),
-        )
-        .order_by(MaintenanceCollectionEvidence.uploaded_at.desc())
-    ).scalars().first()
+    existing = _active_evidence_payload(
+        db,
+        milestone_id=milestone_id,
+        md5_digest=md5_digest,
+        sha256_digest=sha256_digest,
+        size_bytes=len(content),
+    )
     if existing is not None:
-        return {
-            "evidence_id": existing.evidence_id,
-            "file_id": existing.file_id,
-            "milestone_id": milestone_id,
-            "md5": md5_digest,
-            "replayed": True,
-        }
+        return existing
     file_id = str(uuid4())
     object_key = f"collection_evidence/{file_id[:2]}/{file_id}{extension}"
     path = _resolved_path(object_key)
@@ -190,25 +302,20 @@ def save_evidence(
     except IntegrityError:
         # 并发同 md5：DB 部分唯一索引兜底，回滚本笔后稳定重放既有凭证（round-5 Blocker 5）
         db.rollback()
-        existing = db.execute(
-            select(MaintenanceCollectionEvidence)
-            .where(
-                MaintenanceCollectionEvidence.milestone_id == milestone_id,
-                MaintenanceCollectionEvidence.md5 == md5_digest,
-                MaintenanceCollectionEvidence.is_active.is_(True),
-            )
-        ).scalars().first()
+        existing = _active_evidence_payload(
+            db,
+            milestone_id=milestone_id,
+            md5_digest=md5_digest,
+            sha256_digest=sha256_digest,
+            size_bytes=len(content),
+        )
         if existing is None:
             raise
-        return {
-            "evidence_id": existing.evidence_id,
-            "file_id": existing.file_id,
-            "milestone_id": milestone_id,
-            "md5": md5_digest,
-            "replayed": True,
-        }
-    # 文件落盘推迟到 API 的 DB commit 之后（round-6 Blocker 6）：
-    # DB 行先定案，文件失败可把凭证置 inactive 补偿，不产生指向缺失文件的活跃行。
+        return existing
+    # API 必须先把 binary + sidecar 原子落盘，再关闭提醒并提交本行。这样文件
+    # 失败时整笔数据库事务回滚，不会留下“提醒已关闭但没有有效凭证”的状态。
+    # 若最终 DB commit 的确认丢失，磁盘上最多留下不可见孤儿文件；不能反向删除，
+    # 否则可能把实际上已经提交成功的凭证删掉。
     return {
         "evidence_id": evidence_row.evidence_id,
         "file_id": file_id,
@@ -219,6 +326,8 @@ def save_evidence(
         "size_bytes": len(content),
         "original_filename": safe_name,
         "mime_type": safe_mime,
+        "uploaded_by": evidence_row.uploaded_by,
+        "uploaded_at": evidence_row.uploaded_at.isoformat(),
         "replayed": False,
     }
 
@@ -233,31 +342,83 @@ def evidence_paths(file_id: str, object_key: str) -> tuple[Path, Path]:
 def write_evidence_files(
     *, file_id: str, object_key: str, content: bytes, meta: dict
 ) -> None:
-    """DB 已 commit 后落盘凭证（binary → yml；任一步失败补偿清理，不留半套文件）。"""
+    """DB commit 前写入 binary + sidecar；失败恢复已有完整文件对。
+
+    A replay writes the same ``object_key`` as the active database row.  Each
+    individual rename is atomic, but the two renames are not one filesystem
+    transaction.  A per-object cross-process lock plus hard-link snapshots
+    therefore preserve the old pair until both replacements have succeeded.
+    """
     path = _resolved_path(object_key)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temp_name = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, path)
-    except BaseException:
+    meta_path = _root() / file_id[:2] / f"{file_id}.yml"
+    meta_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data_backup = path.parent / f".{file_id}.data.rollback"
+    meta_backup = meta_path.parent / f".{file_id}.meta.rollback"
+
+    with _evidence_write_lock(file_id, path.parent):
+        # A killed worker may leave a rollback hard link behind.  Restoring it
+        # before taking a new snapshot gives the next replay a known-good base.
+        if data_backup.exists():
+            _restore_file_snapshot(
+                target=path,
+                backup=data_backup,
+                existed=True,
+            )
+        if meta_backup.exists():
+            _restore_file_snapshot(
+                target=meta_path,
+                backup=meta_backup,
+                existed=True,
+            )
+
+        data_existed = path.exists()
+        meta_existed = meta_path.exists()
         try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
-        raise
-    try:
-        _write_meta_sidecar(file_id, meta)
-    except BaseException:
+            if data_existed:
+                os.link(path, data_backup)
+            if meta_existed:
+                os.link(meta_path, meta_backup)
+        except BaseException:
+            _discard_file_snapshot(data_backup)
+            _discard_file_snapshot(meta_backup)
+            raise
+
+        descriptor, temp_name = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
         try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        raise
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, path)
+            _write_meta_sidecar(file_id, meta)
+        except BaseException as exc:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+            restore_errors: list[BaseException] = []
+            for target, backup, existed in (
+                (path, data_backup, data_existed),
+                (meta_path, meta_backup, meta_existed),
+            ):
+                try:
+                    _restore_file_snapshot(
+                        target=target,
+                        backup=backup,
+                        existed=existed,
+                    )
+                except BaseException as restore_exc:  # pragma: no cover - fatal I/O
+                    restore_errors.append(restore_exc)
+            if restore_errors:
+                raise CollectionEvidenceError(
+                    "凭证写入失败，且旧文件恢复失败，需要人工检查存储目录"
+                ) from exc
+            raise
+        else:
+            _discard_file_snapshot(data_backup)
+            _discard_file_snapshot(meta_backup)
 
 
 def try_close_milestone_after_upload(

@@ -48,6 +48,7 @@ export interface WorkbookApplyResult {
   qty_updates?: number;
   line_voids?: number;
   order_reassignments?: number;
+  contract_updates?: number;
   plan_creates?: number;
   plan_updates?: number;
   plan_voids?: number;
@@ -100,8 +101,15 @@ export const downloadSparePartLines = (params: {
   to?: string;
 }) => download(`${BASE}/spare-part-lines.xlsx`, params);
 
-export const validateSparePartLines = (file: File) =>
-  upload(`${BASE}/spare-part-lines/validate`, file);
+export const validateSparePartLines = async (file: File) => {
+  const body = new FormData();
+  body.append("file", file);
+  const resp = await api.post<WorkbookValidateResult>(
+    `${BASE}/spare-part-lines/validate`,
+    body,
+  );
+  return resp.data;
+};
 
 export const applySparePartLines = (file: File) =>
   upload(`${BASE}/spare-part-lines/apply`, file);
@@ -142,10 +150,29 @@ export interface ProjectExpenseRow {
 }
 
 export const listProjectExpenseRows = async (projectId: string) => {
-  const resp = await api.get<{ rows: ProjectExpenseRow[]; total: number }>(
-    `${BASE}/projects/stable/${encodeURIComponent(projectId)}/expense-rows`,
-  );
-  return resp.data;
+  const pageSize = 200;
+  const rows: ProjectExpenseRow[] = [];
+  let page = 1;
+  let total = 0;
+
+  // 项目报销并非天然少于一页。必须把服务端分页完整拉取，否则表格与下载的
+  // 04 sheet 会使用不同母集，人工会误以为后半段报销“上传后没生效”。
+  do {
+    const resp = await api.get<{
+      rows: ProjectExpenseRow[];
+      total: number;
+      page: number;
+      page_size: number;
+    }>(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/expense-rows`, {
+      params: { page, page_size: pageSize },
+    });
+    total = resp.data.total;
+    rows.push(...resp.data.rows);
+    if (!resp.data.rows.length) break;
+    page += 1;
+  } while (rows.length < total);
+
+  return { rows, total };
 };
 
 /** 03 备件明细行级（PN）只读数据源——兼容 V1/V2 协议。 */
@@ -159,7 +186,12 @@ export interface ProjectPartsRow {
   pn_std: string | null;
   description: string | null;
   qty: number | string | null;
+  /** 退货冲抵数量：净量/成本使用 qty - return_qty。 */
   return_qty?: number | string | null;
+  /** WBDD 源表流转状态，仅展示，不参与净量或成本核减。 */
+  returned_qty?: number | string | null;
+  /** WBDD 源表流转状态，仅展示，不参与净量或成本核减。 */
+  pending_return_qty?: number | string | null;
   serial_numbers?: string | null;
   warehouse: string | null;
   cost_source: string | null;

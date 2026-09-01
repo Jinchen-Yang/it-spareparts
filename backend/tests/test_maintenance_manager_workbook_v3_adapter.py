@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from openpyxl import load_workbook
@@ -29,6 +30,7 @@ from app.services.maintenance_manager_workbook_adapter import (
     ManagerWorkbookConflict,
 )
 from app.services.maintenance_manager_workbook_v3 import (
+    OVERVIEW_SHEET,
     PLAN_SHEET,
     PLAN_TABLE,
     ManagerWorkbookV3Error,
@@ -70,6 +72,7 @@ def _seed(db, *, username: str = "synthetic_manager") -> tuple[SysUser, str, str
         contract_id=f"contract-{username}",
         contract_no=f"XS-{username}",
         contract_amount=100000,
+        amount_inc_tax=113000,
         contract_status="active",
         status_mapping_state="mapped",
         status_mapping_version="synthetic-v1",
@@ -200,6 +203,104 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         task_status="pending",
     )
     assert retired["total"] == 0
+
+
+def test_manager_snapshot_and_workbook_use_inc_tax_contract_amount(db):
+    user, _project_id, relation_id = _seed(
+        db, username="inc_tax_contract_manager")
+    adapter = _adapter(db, user)
+    artifact, snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+
+    contract = snapshot["projects"][0]["contracts"][0]
+    assert contract["project_contract_id"] == relation_id
+    assert contract["contract_amount"] == 113000
+
+    book = load_workbook(io.BytesIO(artifact.content), data_only=True)
+    try:
+        overview = book[OVERVIEW_SHEET]
+        values = list(overview.values)
+        assert any(Decimal(str(cell)) == Decimal("113000")
+                   for row in values for cell in row if isinstance(cell, (int, float)))
+    finally:
+        book.close()
+
+
+def test_manager_workbook_fails_closed_for_unmapped_contract_fact(db):
+    """经理月表不得绕过项目卡的 canonical 合同完整性门禁计算回款率。"""
+    user, project_id, relation_id = _seed(
+        db, username="unmapped_contract_manager")
+    contract = db.get(MaintenanceProjectContract, relation_id)
+    contract.status_mapping_state = "unmapped"
+    contract.included_in_total = False
+    db.commit()
+
+    artifact, snapshot = _adapter(db, user).export(
+        date(2026, 8, 1), hmac_key=HMAC_KEY)
+
+    project = snapshot["projects"][0]
+    assert project["project_id"] == project_id
+    assert project["contract_facts_complete"] is False
+    book = load_workbook(io.BytesIO(artifact.content), data_only=True)
+    try:
+        overview = book[OVERVIEW_SHEET]
+        row = list(overview.iter_rows(min_row=6, max_row=6, values_only=True))[0]
+        assert row[6] is None                 # 全部合同额（含税）
+        assert row[7] == "missing"           # 合同额完整性
+        assert row[9] is None                 # 实收/合同额
+        assert row[11] is None                # 计划/合同额
+    finally:
+        book.close()
+
+
+@pytest.mark.parametrize("conflict_kind", ["duplicate", "shared"])
+def test_manager_workbook_fails_closed_for_duplicate_or_shared_contract(
+    db, conflict_kind,
+):
+    username = "dup_mgr" if conflict_kind == "duplicate" else "shared_mgr"
+    user, project_id, relation_id = _seed(db, username=username)
+    original = db.get(MaintenanceProjectContract, relation_id)
+    other_project_id = project_id
+    if conflict_kind == "shared":
+        other = MaintenanceProject(
+            project_id=f"project-{conflict_kind}-other",
+            project_code=f"PM-{conflict_kind}-other",
+            display_name="共享合同的另一个项目",
+            lifecycle_status="ongoing",
+        )
+        db.add(other)
+        db.flush()
+        other_project_id = other.project_id
+    db.add(MaintenanceProjectContract(
+        project_contract_id=f"pc-{conflict_kind}-other",
+        project_id=other_project_id,
+        contract_id=original.contract_id,
+        contract_no=f"XS-{conflict_kind}-other",
+        contract_amount=Decimal("100000.00"),
+        amount_inc_tax=Decimal("113000.00"),
+        contract_status="active",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-v1",
+        included_in_total=True,
+        effective_from=(date(2026, 2, 1)
+                        if conflict_kind == "duplicate" else date(2026, 1, 1)),
+        source="synthetic-test",
+    ))
+    db.commit()
+
+    artifact, snapshot = _adapter(db, user).export(
+        date(2026, 8, 1), hmac_key=HMAC_KEY)
+
+    assert snapshot["projects"][0]["contract_facts_complete"] is False
+    book = load_workbook(io.BytesIO(artifact.content), data_only=True)
+    try:
+        row = list(book[OVERVIEW_SHEET].iter_rows(
+            min_row=6, max_row=6, values_only=True))[0]
+        assert row[6] is None
+        assert row[7] == "missing"
+        assert row[9] is None
+        assert row[11] is None
+    finally:
+        book.close()
 
 
 def test_adapter_writes_day_precision_and_pending_state_for_new_nodes(db):

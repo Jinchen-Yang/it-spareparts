@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.orm import Session, aliased
 
 from app import config, security, tax_policy
@@ -36,6 +36,7 @@ from app.models.maintenance import (
     FProjectExpense,
     MaintenanceManualCostOverride,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import (
@@ -45,6 +46,7 @@ from app.services import (
     maintenance_demands,
     maintenance_margin,
     maintenance_margin_evidence,
+    maintenance_project_operations,
 )
 from app.services.maintenance_match_keys import exact_match_key
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
@@ -75,6 +77,45 @@ _CONFIDENCE = {"direct": "high", "window": "high", "month_avg": "medium",
                "pool_purchase": "low", "pool_sales": "low",
                "purchase_history": "low", "sales_history": "low",
                "manual": "high"}
+
+# recompute 写回的派生成本字段全集（与下方 updates 字典键一致；anomaly_flags 单列）。
+# 「实际成本变化」判定 = 写前读库快照 vs 内存计算结果逐字段比对；只有语义变化
+# 才 bump 归属项目 workbook revision——import_batch_id/时间戳类不在比对集。
+_TRACKED_COST_FIELDS = (
+    "unit_cost", "cost_amount",
+    "unit_cost_inc_tax", "unit_cost_ex_tax",
+    "cost_amount_inc_tax", "cost_amount_ex_tax",
+    "cost_source", "cost_tax_basis",
+    "price_month", "trace_months", "linked_purchase_order_no",
+    "price_distance_days", "confidence",
+    "reference_side", "reference_pool_group_id", "reference_pool_version",
+    "reference_sample_count", "reference_from_date", "reference_to_date",
+    "reference_latest_date",
+)
+
+
+def _import_owned_flags(flags) -> list[str]:
+    """flag 中的导入自有子集（变化判定用；派生 flag 是取价结果的纯函数）。"""
+
+    return sorted(f for f in (flags or []) if f in _IMPORT_FLAGS)
+
+
+def _probe_assigned_project_ids(db: Session, source_order_ids) -> set[str]:
+    """当前生效挂靠 probe（只读不加锁）：source_order_id → 稳定项目 ID 集合。
+
+    与 etl.loader 的导入侧 probe 同一口径；锁/ bump 一律走
+    maintenance_project_operations 的公共 helper（lock_workbook_states /
+    bump_locked_workbook_revision），本模块不另造锁序逻辑。
+    """
+    ids = sorted({str(s) for s in source_order_ids if s})
+    if not ids:
+        return set()
+    return set(db.scalars(
+        select(MaintenanceSourceOrderAssignment.project_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ))
 
 
 def _ym(d: date) -> str:
@@ -338,13 +379,27 @@ class MaintenanceCostRecomputeBusy(RuntimeError):
     """导入或另一轮重算正在持有数据变更锁。"""
 
 
-def recompute(db: Session, *, commit: bool = True) -> dict:
-    """重算所有作用域内维保出库行的成本，批量回填。返回各来源计数。
+class WorkbookInvalidationConflictError(RuntimeError):
+    """写后复核发现归属项目超出预锁集合（并发挂靠）——fail closed，本轮回滚。"""
+
+
+def recompute(
+    db: Session,
+    *,
+    commit: bool = True,
+    line_ids: set[int] | None = None,
+) -> dict:
+    """重算作用域内维保出库行的成本，批量回填。返回各来源计数。
 
     作用域 = 已生效 且 order_date ≥ MAINT_COST_START_DATE；起算日前/无日期 → 不计价（cost_source=NULL）；
     在期但 qty 缺失 → none + missing_qty 标记（可见可查，不静默丢）。
     先尝试取得与导入共用的 advisory lock；忙时立即拒绝，取得后再整体清零，
     防止并发重算/导入交错且避免管理员请求无限排队。
+
+    写序两阶段（K3 writer-side workbook revision invalidation）：阶段一纯读
+    （取价在内存完成）并做「实际成本变化」判定；只有确有变化的行的归属项目
+    才进入阶段二——先排序预锁其 workbook state，再写行（失效清零 + 批量
+    回填），最后同事务各 bump 一次 revision。禁止 line→state 反序。
     """
     acquired = db.scalar(
         text("SELECT pg_try_advisory_xact_lock(:k)"),
@@ -363,30 +418,30 @@ def recompute(db: Session, *, commit: bool = True) -> dict:
         daily_samples,
         monthly_samples,
     ) = _purchase_pools(db)
-    # 清零未删除来源单的成本字段并把 anomaly_flags 收敛到仅导入期
-    # flag（no_cost/has_return/cost_overflow 每轮重挂）。已逻辑删除行保留为
-    # 历史快照；恢复事务会先单独清空并标记 pending，绝不会直接重新生效旧价。
-    maintenance_cost_invalidation.invalidate_line_costs(
-        db,
-        condition=FMaintenanceLine.order_id.in_(
-            select(FMaintenanceOrder.id).where(
-                maintenance_demands.active_demand_condition()
-            )
-        ),
-        pending_recompute=False,
-    )
 
+    # 阶段一（纯读）：连当前派生成本字段一并取出作为 before 快照；失效清零
+    # （UPDATE 行）推迟到 state 预锁之后，保证全局锁序 state → 事实行。
     q = (
         select(FMaintenanceLine.id, FMaintenanceLine.part_id,
                FMaintenanceLine.qty, FMaintenanceLine.return_qty,
                FMaintenanceLine.anomaly_flags,
-               FMaintenanceOrder.order_no, FMaintenanceOrder.order_date)
+               FMaintenanceOrder.order_no, FMaintenanceOrder.order_date,
+               FMaintenanceOrder.raw_order_id,
+               *[getattr(FMaintenanceLine, c) for c in _TRACKED_COST_FIELDS])
         .join(FMaintenanceOrder, FMaintenanceLine.order_id == FMaintenanceOrder.id)
         # 2026-08-19：作废行不参与取价重算（#55）
         .where(FMaintenanceLine.is_active.is_(True))
     )
     q = active_orders(q, FMaintenanceOrder)
+    if line_ids is not None:
+        q = q.where(FMaintenanceLine.id.in_(sorted(line_ids)))
     rows = db.execute(q).all()
+    before_costs = {
+        row.id: {c: row._mapping[c] for c in _TRACKED_COST_FIELDS}
+        for row in rows
+    }
+    before_flags = {row.id: list(row.anomaly_flags or []) for row in rows}
+    line_order_raw = {row.id: row.raw_order_id for row in rows}
 
     start = config.MAINT_COST_START_DATE
     window_days = config.MAINT_PRICE_WINDOW_DAYS
@@ -439,10 +494,13 @@ def recompute(db: Session, *, commit: bool = True) -> dict:
              "direct": 0, "window": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0,
              "pool_purchase": 0, "pool_sales": 0,
              "purchase_history": 0, "sales_history": 0,
-             "manual": 0, "none": 0, "cost_overflow": 0}
+             "manual": 0, "none": 0, "cost_overflow": 0,
+             "projects_workbook_bumped": 0}
     updates = []
-    for lid, part, qty, rqty, flags, order_no, odate in rows:
-        if odate is None or odate < start:      # 起算日外：不计价，flags 已由上面 SQL 收敛
+    for row in rows:
+        lid, part, qty, rqty = row.id, row.part_id, row.qty, row.return_qty
+        flags, order_no, odate = row.anomaly_flags, row.order_no, row.order_date
+        if odate is None or odate < start:      # 起算日外：不计价，flags 由下方失效清零收敛
             stats["out_of_scope"] += 1
             continue
         stats["lines_in_scope"] += 1
@@ -589,8 +647,135 @@ def recompute(db: Session, *, commit: bool = True) -> dict:
             "anomaly_flags": base_flags,
         })
 
-    for i in range(0, len(updates), 1000):
-        db.execute(update(FMaintenanceLine), updates[i:i + 1000])
+    # —— 阶段一收尾：实际成本变化判定（before 读库快照 vs 内存计算结果）——
+    # 起算日外行的 after = 失效清零态（派生字段全 NULL + 仅导入期 flag）。
+    updates_by_id = {u["id"]: u for u in updates}
+    changed_line_ids: set[int] = set()
+    physical_write_line_ids: set[int] = set()
+    for row in rows:
+        upd = updates_by_id.get(row.id)
+        if upd is None:
+            after = {c: None for c in _TRACKED_COST_FIELDS}
+            after_flags = [
+                fl for fl in (row.anomaly_flags or []) if fl in _IMPORT_FLAGS
+            ]
+        else:
+            after = {c: upd[c] for c in _TRACKED_COST_FIELDS}
+            after_flags = list(upd["anomaly_flags"])
+        before = before_costs[row.id]
+        # flag 只比较导入自有子集：派生 flag 是取价结果的纯函数（成本字段变化
+        # 必然同步体现），且导入 upsert 会在同事务内先把派生 flag 剥掉再由
+        # 本函数重挂——全量比较会让 no-op 重导产生假变化。
+        tracked_changed = any(
+            before[c] != after[c] for c in _TRACKED_COST_FIELDS
+        )
+        if tracked_changed or before_flags[row.id] != after_flags:
+            # derived flag 被 loader 暂时剥离时，最终业务语义可能是 no-op，
+            # 但仍需把它重挂；只物理写这些真正不同的行，避免每轮全表 WAL/行锁。
+            physical_write_line_ids.add(row.id)
+        if (
+            tracked_changed
+            or _import_owned_flags(before_flags[row.id])
+            != _import_owned_flags(after_flags)
+        ):
+            changed_line_ids.add(row.id)
+
+    # 阶段二前置：所有即将物理写入行的归属项目都先排序锁 state；revision
+    # 只对业务语义变化行对应项目 bump。这样 loader 派生 flag flap 的恢复写入
+    # 也不会形成 line→state 反序。
+    changed_raw_ids = sorted({line_order_raw[lid] for lid in changed_line_ids})
+    physical_write_raw_ids = sorted({
+        line_order_raw[lid] for lid in physical_write_line_ids
+    })
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+    from app.models.maintenance_project import MaintenanceProject
+
+    # Purchase/sales/WBDD changes can alter the deterministic waterfall of an
+    # already-confirmed site issue even when no demand-line amount changes.  Lock
+    # every affected project state before the first cost fact write; production
+    # currently has only hundreds of such rows, so correctness beats a late-lock
+    # optimization that would reopen state→fact deadlocks.
+    site_project_ids = set(db.scalars(
+        select(MaintenanceSiteIssue.project_id)
+        .join(
+            MaintenanceSiteIssueLine,
+            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+        )
+        .join(
+            MaintenanceProject,
+            MaintenanceProject.project_id == MaintenanceSiteIssue.project_id,
+        )
+        .where(
+            MaintenanceProject.is_active.is_(True),
+            MaintenanceSiteIssue.status_mapping_state == "mapped",
+            MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+            MaintenanceSiteIssueLine.is_active.is_(True),
+        )
+        .distinct()
+    ))
+    locked_states = maintenance_project_operations.lock_workbook_states(
+        db,
+        project_ids=(
+            _probe_assigned_project_ids(db, physical_write_raw_ids)
+            | site_project_ids
+        ),
+    )
+    initial_revisions = {
+        project_id: state.revision for project_id, state in locked_states.items()
+    }
+
+    # 只清本轮阶段一真实读取到的 active 行。按“所有 active order”批量清会把
+    # inactive line 的历史成本也抹掉；并且会写到未进入 before/after、未预锁
+    # 归属项目的行，破坏 revision 证明。
+    if physical_write_line_ids:
+        invalidation_condition = FMaintenanceLine.id.in_(sorted(physical_write_line_ids))
+        maintenance_cost_invalidation.invalidate_line_costs(
+            db,
+            condition=invalidation_condition,
+            pending_recompute=False,
+        )
+
+    write_updates = [u for u in updates if u["id"] in physical_write_line_ids]
+    for i in range(0, len(write_updates), 1000):
+        db.execute(update(FMaintenanceLine), write_updates[i:i + 1000])
+    db.flush()
+
+    site_lines_repriced = 0
+    site_projects_repriced = 0
+    for project_id in sorted(site_project_ids):
+        site_result = maintenance_project_operations.recompute_cost_gaps(
+            db,
+            project_id=project_id,
+            reason="上游采购/销售/维保需求成本变化，自动刷新现场领用取价证据",
+            operated_by="system:maintenance-cost-recompute",
+            allow_downgrade=True,
+        )
+        if site_result and site_result["resolved"]:
+            site_lines_repriced += int(site_result["resolved"])
+            site_projects_repriced += 1
+    # 写后复核（只读）：若归属项目超出预锁集合（重算期间被并发挂靠），绝不
+    # 新拿 state 锁（行锁已持有，反序即死锁面）——fail closed 整体回滚。
+    unexpected = _probe_assigned_project_ids(db, physical_write_raw_ids) - set(locked_states)
+    if unexpected:
+        raise WorkbookInvalidationConflictError(
+            "成本重算期间出现预锁集合外的项目挂靠（并发变更），请重试："
+            f"{sorted(unexpected)}"
+        )
+    # 实际成本变化的归属项目同事务各 bump 一次（helper 保证每事务每项目至多一次）
+    revision_project_ids = _probe_assigned_project_ids(db, changed_raw_ids)
+    for project_id in sorted(revision_project_ids):
+        state = locked_states[project_id]
+        maintenance_project_operations.bump_locked_workbook_revision(db, state=state)
+    stats["site_lines_repriced"] = site_lines_repriced
+    stats["site_projects_repriced"] = site_projects_repriced
+    stats["projects_workbook_bumped"] = sum(
+        1
+        for project_id, state in locked_states.items()
+        if state.revision != initial_revisions[project_id]
+    )
     if commit:
         db.commit()
     else:
@@ -718,42 +903,98 @@ def _parts_tax_basis_summary(
     }
 
 
-def _dual_cost_aggregate_columns(ml, actual_bucket, estimated_bucket):
+def _normalized_cost_expressions(ml, *, basis: str):
+    """Return strict normalized cost evidence, including active manual fallback."""
+    normalized_amount = (
+        ml.cost_amount_inc_tax if basis == "inc" else ml.cost_amount_ex_tax
+    )
+    manual_unit = (
+        MaintenanceManualCostOverride.unit_cost_inc_tax
+        if basis == "inc"
+        else MaintenanceManualCostOverride.unit_cost_ex_tax
+    )
+    return maintenance_cost_quality.sql_normalized_line_cost(
+        source_column=ml.cost_source,
+        tax_basis_column=ml.cost_tax_basis,
+        legacy_amount_column=ml.cost_amount,
+        normalized_amount_column=normalized_amount,
+        normalized_basis=basis,
+        anomaly_flags_column=ml.anomaly_flags,
+        qty_column=ml.qty,
+        return_qty_column=ml.return_qty,
+        manual_unit_cost_column=manual_unit,
+        manual_active_column=MaintenanceManualCostOverride.active,
+    )
+
+
+def _dual_cost_aggregate_columns(ml, _actual_bucket=None, _estimated_bucket=None):
     """返回项目/合同查询共用的 normalized 双税聚合列。"""
     columns = []
-    for basis, amount in (
-        ("inc", ml.cost_amount_inc_tax),
-        ("ex", ml.cost_amount_ex_tax),
-    ):
-        valid = and_(
-            amount.is_not(None),
-            amount >= _ZERO,
-            amount < _MONEY_MAX,
+    for basis in ("inc", "ex"):
+        amount, normalized_actual, normalized_estimated, _missing = (
+            _normalized_cost_expressions(ml, basis=basis)
         )
-        # legacy cost_bucket 只表达原始价格来源，不能承载双税换算质量。
-        # 实际来源若缺税率，仅把由税率换算出来的那个口径降为 estimated；
-        # 原始税口径仍保持 actual，避免两套毛利互相污染。
-        basis_tax_estimated = ml.anomaly_flags.any(
-            f"{basis}_tax_estimated",
-        )
-        normalized_actual = and_(actual_bucket, ~basis_tax_estimated)
-        normalized_estimated = or_(
-            estimated_bucket,
-            and_(actual_bucket, basis_tax_estimated),
-        )
-        known = and_(or_(actual_bucket, estimated_bucket), valid)
+        known = or_(normalized_actual, normalized_estimated)
         columns.extend([
             func.coalesce(func.sum(amount).filter(known), 0).label(
                 f"parts_cost_{basis}_tax"
             ),
-            func.count().filter(and_(normalized_actual, valid)).label(
+            func.count().filter(normalized_actual).label(
                 f"parts_cost_{basis}_tax_actual_lines"
             ),
-            func.count().filter(and_(normalized_estimated, valid)).label(
+            func.count().filter(normalized_estimated).label(
                 f"parts_cost_{basis}_tax_estimated_lines"
             ),
         ])
     return columns
+
+
+def _normalized_cost_summary(
+    *,
+    lines: int,
+    actual_cost_inc,
+    actual_cost_ex,
+    estimated_cost_inc,
+    estimated_cost_ex,
+    actual_lines: int,
+    estimated_lines: int,
+) -> dict:
+    """Compatibility summary whose decision total is canonical inc-tax cost."""
+    actual_lines = int(actual_lines)
+    estimated_lines = int(estimated_lines)
+    missing_lines = max(0, int(lines) - actual_lines - estimated_lines)
+    quality = (
+        "incomplete"
+        if lines <= 0 or missing_lines
+        else "contains_estimate"
+        if estimated_lines
+        else "actual_only"
+    )
+    actual_inc = Decimal(actual_cost_inc or 0).quantize(_CENT)
+    estimated_inc = Decimal(estimated_cost_inc or 0).quantize(_CENT)
+    return {
+        "actual_cost_inc": actual_inc,
+        "actual_cost_ex": Decimal(actual_cost_ex or 0).quantize(_CENT),
+        "estimated_cost_inc": estimated_inc,
+        "estimated_cost_ex": Decimal(estimated_cost_ex or 0).quantize(_CENT),
+        "actual_lines": actual_lines,
+        "estimated_lines": estimated_lines,
+        "missing_cost_lines": missing_lines,
+        "known_cost_total": (actual_inc + estimated_inc).quantize(_CENT),
+        "cost_quality": quality,
+    }
+
+
+def _normalized_cost_summary_from_row(row, *, lines: int) -> dict:
+    return _normalized_cost_summary(
+        lines=lines,
+        actual_cost_inc=row.actual_cost_inc,
+        actual_cost_ex=row.actual_cost_ex,
+        estimated_cost_inc=row.estimated_cost_inc,
+        estimated_cost_ex=row.estimated_cost_ex,
+        actual_lines=row.parts_cost_inc_tax_actual_lines,
+        estimated_lines=row.parts_cost_inc_tax_estimated_lines,
+    )
 
 
 def _dual_cost_summary_from_row(row, *, lines: int) -> dict:
@@ -777,36 +1018,30 @@ def projects_aggregate(db: Session, date_from: date | None = None,
                        as_of: date | None = None) -> dict:
     """项目维度聚合：成本按税口径分列小计（Q4：不混加），来源分布、覆盖率、合同额参考。
 
-    合同额 = 项目关联 XSDD 在销售表的订单金额（含税≈不含税×(1+税率)，参考值）；
-    同一 XSDD 挂多个项目时 contract_shared=true——Q5：本期不出毛利，合同额仅参考。
-    部分/全部关联单号未在销售表时 contract_incomplete=true（避免按 0 静默低估）。
+    合同额只认当前稳定项目合同台账的 ``amount_inc_tax``；未映射、缺金额、重复或
+    跨项目共享均 fail-closed，不再从销售未税金额猜含税参考。
     """
     lifecycle = _normalize_lifecycle(lifecycle)
     as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     proj = func.coalesce(mo.project_std, "(未填项目)")
-    bucket = ml.cost_bucket
-    missing_bucket = maintenance_cost_quality.COST_BUCKET_MISSING
-    actual_bucket = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
-        maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
+    inc_amount, inc_actual, inc_estimated, inc_missing = (
+        _normalized_cost_expressions(ml, basis="inc")
     )
-    estimated_bucket = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+    ex_amount, ex_actual, ex_estimated, _ex_missing = (
+        _normalized_cost_expressions(ml, basis="ex")
     )
-    estimated_inc = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_OTHER,
-    )
-    estimated_ex = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+    resolved_source = case(
+        (and_(
+            inc_actual,
+            or_(ml.cost_source.is_(None), ml.cost_source == "none"),
+        ), "manual"),
+        else_=ml.cost_source,
     )
     src_cols = [
         func.count().filter(
-            bucket != missing_bucket,
-            ml.cost_source == source,
+            ~inc_missing,
+            resolved_source == source,
         ).label(f"src_{source}")
         for source in COSTED_SOURCES
     ]
@@ -819,18 +1054,14 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             ).label("missing_detail_orders"),
             func.count(ml.id).label("lines"),
             func.coalesce(func.sum(ml.qty), 0).label("qty"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
-            ), 0).label("actual_cost_inc"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
-            ), 0).label("actual_cost_ex"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                estimated_inc,
-            ), 0).label("estimated_cost_inc"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                estimated_ex,
-            ), 0).label("estimated_cost_ex"),
+            func.coalesce(func.sum(inc_amount).filter(inc_actual), 0).label(
+                "actual_cost_inc"),
+            func.coalesce(func.sum(ex_amount).filter(ex_actual), 0).label(
+                "actual_cost_ex"),
+            func.coalesce(func.sum(inc_amount).filter(inc_estimated), 0).label(
+                "estimated_cost_inc"),
+            func.coalesce(func.sum(ex_amount).filter(ex_estimated), 0).label(
+                "estimated_cost_ex"),
             func.count(func.distinct(func.date_trunc("month", mo.order_date))).label("months"),
             func.count(func.distinct(mo.id)).filter(
                 mo.maint_end.is_(None),
@@ -841,11 +1072,18 @@ def projects_aggregate(db: Session, date_from: date | None = None,
                     mo.linked_sales_order_no.is_not(None),
                     func.btrim(mo.linked_sales_order_no) != "",
                 ).label("sales_orders"),
-            *_dual_cost_aggregate_columns(ml, actual_bucket, estimated_bucket),
+            *_dual_cost_aggregate_columns(ml),
             *src_cols,
         )
         .select_from(mo)
         .outerjoin(ml, ml.order_id == mo.id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            and_(
+                MaintenanceManualCostOverride.line_id == ml.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ),
+        )
         .group_by(proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
@@ -882,57 +1120,98 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     for r, _lifecycle in classified:
         for ono in (r.sales_orders or []):
             order_no_projects[ono].add(r.project)
-    contract: dict[str, Decimal] = {}
-    all_orders = list(order_no_projects.keys())
-    if all_orders and not scoped_sales:
-        contract = {
-            order_no: evidence.legacy_contract_amount_inc
-            for order_no, evidence in
-            maintenance_margin_evidence.load_contract_revenue_evidence(
-                db,
-                all_orders,
-            ).items()
-            if evidence.legacy_contract_amount_inc is not None
-        }
+    project_stable_ids: dict[str, set[str]] = defaultdict(set)
+    project_contract_facts: dict[str, dict] = {}
+    canonical_contract_project_ids: set[str] = set()
+    # 受限销售账号只能用本人可见的 WBDD 行做项目召回，不能据此穿透到
+    # 项目级 canonical 合同台账（同项目还可能包含其他销售的合同事实）。
+    if classified and not scoped_sales:
+        active_assignment = and_(
+            MaintenanceSourceOrderAssignment.source_order_id == mo.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        stable_stmt = (
+            select(
+                proj.label("project"),
+                MaintenanceSourceOrderAssignment.project_id,
+            )
+            .select_from(mo)
+            .join(MaintenanceSourceOrderAssignment, active_assignment)
+            .group_by(proj, MaintenanceSourceOrderAssignment.project_id)
+        )
+        stable_stmt = _scoped_filters(stable_stmt, date_from, date_to)
+        if q_text and q_text.strip():
+            for group in keyword_groups_or_substr(q_text):
+                stable_stmt = stable_stmt.where(col_matches_any(mo.project_std, group))
+        for project_name, stable_id in db.execute(stable_stmt):
+            project_stable_ids[project_name].add(stable_id)
+        stable_ids = sorted({
+            stable_id
+            for ids in project_stable_ids.values()
+            for stable_id in ids
+        })
+        if stable_ids:
+            from app.models.maintenance_project import MaintenanceProjectContract
+            from app.services.maintenance_boss_board import _card_contracts
+
+            project_contract_facts = _card_contracts(db, stable_ids)
+            canonical_contract_project_ids = set(db.scalars(
+                select(MaintenanceProjectContract.project_id).where(
+                    MaintenanceProjectContract.project_id.in_(stable_ids),
+                    MaintenanceProjectContract.effective_from <= as_of,
+                    or_(
+                        MaintenanceProjectContract.effective_to.is_(None),
+                        MaintenanceProjectContract.effective_to > as_of,
+                    ),
+                ).distinct()
+            ))
 
     rows = []
     for r, lifecycle_status in raw:
         sales_orders = sorted(r.sales_orders or [])
         by_source = {s: getattr(r, f"src_{s}") for s in COSTED_SOURCES}
-        actual_lines = sum(
-            by_source[source]
-            for source in maintenance_cost_quality.ACTUAL_SOURCES
-        )
-        estimated_lines = sum(
-            by_source[source]
-            for source in maintenance_cost_quality.ESTIMATED_SOURCES
-        )
+        cost_summary = _normalized_cost_summary_from_row(r, lines=r.lines)
+        actual_lines = cost_summary["actual_lines"]
+        estimated_lines = cost_summary["estimated_lines"]
         missing_cost_lines = r.lines - actual_lines - estimated_lines
         by_source["none"] = missing_cost_lines
-        missing = (
-            []
-            if scoped_sales
-            else [o for o in sales_orders if o not in contract]
+        stable_ids = project_stable_ids.get(r.project, set())
+        contract_fact = (
+            project_contract_facts.get(next(iter(stable_ids)))
+            if len(stable_ids) == 1
+            and next(iter(stable_ids)) in canonical_contract_project_ids
+            else None
         )
-        known_contract_amounts = [
-            contract[order_no]
-            for order_no in sales_orders
-            if order_no in contract
-        ]
+        if (
+            not scoped_sales
+            and contract_fact
+            and contract_fact.get("contract_nos")
+        ):
+            # 金额来自稳定合同台账时，随行合同号也必须来自同一事实源；否则
+            # 旧 WBDD 的空/陈旧 XSDD 会造成“有合同额却显示未关联合同”。
+            sales_orders = sorted(set(contract_fact["contract_nos"]))
         contract_amt = (
             None
-            if scoped_sales or not known_contract_amounts
-            else sum(known_contract_amounts, _ZERO)
+            if scoped_sales
+            else contract_fact.get("amount_inc_tax") if contract_fact else None
         )
-        cost_summary = maintenance_cost_quality.summarize_aggregate(
-            lines=r.lines,
-            actual_cost_inc=r.actual_cost_inc,
-            actual_cost_ex=r.actual_cost_ex,
-            estimated_cost_inc=r.estimated_cost_inc,
-            estimated_cost_ex=r.estimated_cost_ex,
-            actual_lines=actual_lines,
-            estimated_lines=estimated_lines,
-            missing_cost_lines=missing_cost_lines,
+        # ``None`` is an explicit unknown canonical amount, including projects
+        # which have no XSDD/current contract relationship at all.
+        contract_incomplete = (
+            None
+            if scoped_sales
+            else (
+                contract_fact is None
+                or bool(contract_fact.get("contract_incomplete"))
+                or bool(contract_fact.get("contract_shared"))
+            )
+        )
+        # Public contract amounts use an explicit tax basis.  The historical
+        # ``contract_amount`` key remains an exact compatibility alias, but a
+        # partial/ambiguous contract envelope must not surface as a precise
+        # amount under either name.
+        explicit_contract_amt = (
+            contract_amt if contract_incomplete is False else None
         )
         if r.missing_detail_orders:
             cost_summary["cost_quality"] = "incomplete"
@@ -977,16 +1256,27 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "by_source": by_source,
             "months": r.months,
             "sales_orders": sales_orders,
-            "contract_amount": (
-                _f(contract_amt)
-                if contract_amt is not None else None
+            "contract_amount_inc_tax": (
+                _f(explicit_contract_amt)
+                if explicit_contract_amt is not None else None
             ),
-            "contract_shared": any(len(order_no_projects[o]) > 1 for o in sales_orders),
-            # 部分/全部关联单号未在销售表中找到金额 → 合同额被低估，前端标注
-            "contract_incomplete": (
-                None
+            "contract_amount_basis": "inc_tax",
+            "contract_amount": (
+                _f(explicit_contract_amt)
+                if explicit_contract_amt is not None else None
+            ),
+            "contract_shared": (
+                any(len(order_no_projects[o]) > 1 for o in sales_orders)
                 if scoped_sales
-                else bool(sales_orders) and len(missing) > 0
+                else (
+                    bool(contract_fact and contract_fact.get("contract_shared"))
+                    or len(stable_ids) > 1
+                    or any(len(order_no_projects[o]) > 1 for o in sales_orders)
+                )
+            ),
+            # 只读当前台账含税事实；缺主档、未映射、重复或跨项目共享均不回退猜税。
+            "contract_incomplete": (
+                contract_incomplete
             ),
             "maint_end": (
                 r.latest_maint_end.isoformat()
@@ -995,9 +1285,13 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "lifecycle_status": lifecycle_status,
         })
     cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
-    budget_restricted = security.is_field_hidden(user_ctx, "contract_amount")
+    budget_restricted = (
+        scoped_sales
+        or security.is_field_hidden(user_ctx, "contract_amount")
+    )
     if budget_restricted:
         for row in rows:
+            row["contract_amount_inc_tax"] = None
             row["contract_amount"] = None
     if cost_restricted:
         # 叶子金额置 null 还不够：按隐藏 cost_total 排序本身会泄漏相对成本，Agent
@@ -1023,7 +1317,17 @@ def _project_lines_query(
     user_ctx: security.UserContext | None = None,
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    base = select(ml, mo).join(mo, ml.order_id == mo.id)
+    base = (
+        select(ml, mo, MaintenanceManualCostOverride)
+        .join(mo, ml.order_id == mo.id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            and_(
+                MaintenanceManualCostOverride.line_id == ml.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ),
+        )
+    )
     # E2E #3：行级作废默认不进全局行列表（与总表/看板同口径）。
     base = base.where(ml.is_active.is_(True))
     base = base.where(mo.project_std == project if project != "(未填项目)"
@@ -1083,16 +1387,35 @@ def project_exists(
 def _serialize_project_line(
     ln: FMaintenanceLine,
     order: FMaintenanceOrder,
+    override: MaintenanceManualCostOverride | None = None,
     *,
     hide_cost_signals: bool,
 ) -> dict:
-    cost_tier = maintenance_cost_quality.source_tier(
-        ln.cost_source,
-        ln.cost_tax_basis,
-        ln.cost_amount,
+    cost_fact = maintenance_cost_quality.resolved_line_cost_fields(
+        source=ln.cost_source,
+        tax_basis=ln.cost_tax_basis,
+        legacy_unit_cost=ln.unit_cost,
+        legacy_amount=ln.cost_amount,
+        unit_cost_inc_tax=ln.unit_cost_inc_tax,
+        unit_cost_ex_tax=ln.unit_cost_ex_tax,
+        cost_amount_inc_tax=ln.cost_amount_inc_tax,
+        cost_amount_ex_tax=ln.cost_amount_ex_tax,
+        anomaly_flags=ln.anomaly_flags,
+        confidence=ln.confidence,
+        qty=ln.qty,
+        return_qty=ln.return_qty,
+        manual_unit_cost_inc_tax=(
+            override.unit_cost_inc_tax if override is not None else None
+        ),
+        manual_unit_cost_ex_tax=(
+            override.unit_cost_ex_tax if override is not None else None
+        ),
+        manual_active=override is not None and override.active is True,
     )
+    cost_tier = cost_fact["tier"]
     has_known_cost = cost_tier != "missing"
-    flags = ln.anomaly_flags or []
+    manual_fallback = cost_fact["manual_fallback"]
+    flags = cost_fact["anomaly_flags"]
     if hide_cost_signals:
         flags = [flag for flag in flags if flag not in _COST_DERIVED_FLAGS]
     public_id = hmac.new(
@@ -1111,35 +1434,56 @@ def _serialize_project_line(
         "description": ln.description,
         "qty": _f(ln.qty),
         "return_qty": _f(ln.return_qty),
-        "unit_cost": _f(ln.unit_cost) if has_known_cost else None,
-        "cost_amount": _f(ln.cost_amount) if has_known_cost else None,
-        "unit_cost_inc_tax": _f(ln.unit_cost_inc_tax) if has_known_cost else None,
-        "unit_cost_ex_tax": _f(ln.unit_cost_ex_tax) if has_known_cost else None,
-        "cost_amount_inc_tax": _f(ln.cost_amount_inc_tax) if has_known_cost else None,
-        "cost_amount_ex_tax": _f(ln.cost_amount_ex_tax) if has_known_cost else None,
+        # WBDD 源表流转状态，只供用户/Agent 对照展示。成本事实仍只把
+        # return_qty（退货冲抵）传给 resolved_line_cost_fields；不得把
+        # returned_qty（已返旧件等状态）混入净量或成本计算。
+        "returned_qty": _f(ln.returned_qty),
+        "pending_return_qty": _f(ln.pending_return_qty),
+        "unit_cost": _f(cost_fact["unit_cost"]) if has_known_cost else None,
+        "cost_amount": _f(cost_fact["cost_amount"]) if has_known_cost else None,
+        "unit_cost_inc_tax": (
+            _f(cost_fact["unit_cost_inc_tax"]) if has_known_cost else None
+        ),
+        "unit_cost_ex_tax": (
+            _f(cost_fact["unit_cost_ex_tax"]) if has_known_cost else None
+        ),
+        "cost_amount_inc_tax": (
+            _f(cost_fact["cost_amount_inc_tax"]) if has_known_cost else None
+        ),
+        "cost_amount_ex_tax": (
+            _f(cost_fact["cost_amount_ex_tax"]) if has_known_cost else None
+        ),
         "cost_tier": cost_tier,
-        "cost_source": ln.cost_source,
-        "cost_tax_basis": ln.cost_tax_basis,
-        "price_month": ln.price_month,
-        "trace_months": ln.trace_months,
-        "linked_purchase_order_no": ln.linked_purchase_order_no,
-        "price_distance_days": ln.price_distance_days,
-        "confidence": ln.confidence,
-        "reference_side": ln.reference_side,
-        "reference_pool_group_id": ln.reference_pool_group_id,
-        "reference_pool_version": ln.reference_pool_version,
-        "reference_sample_count": ln.reference_sample_count,
+        "cost_source": cost_fact["source"],
+        "cost_tax_basis": cost_fact["tax_basis"],
+        "price_month": None if manual_fallback else ln.price_month,
+        "trace_months": None if manual_fallback else ln.trace_months,
+        "linked_purchase_order_no": (
+            None if manual_fallback else ln.linked_purchase_order_no
+        ),
+        "price_distance_days": None if manual_fallback else ln.price_distance_days,
+        "confidence": cost_fact["confidence"],
+        "reference_side": None if manual_fallback else ln.reference_side,
+        "reference_pool_group_id": (
+            None if manual_fallback else ln.reference_pool_group_id
+        ),
+        "reference_pool_version": (
+            None if manual_fallback else ln.reference_pool_version
+        ),
+        "reference_sample_count": (
+            None if manual_fallback else ln.reference_sample_count
+        ),
         "reference_from_date": (
             ln.reference_from_date.isoformat()
-            if ln.reference_from_date else None
+            if not manual_fallback and ln.reference_from_date else None
         ),
         "reference_to_date": (
             ln.reference_to_date.isoformat()
-            if ln.reference_to_date else None
+            if not manual_fallback and ln.reference_to_date else None
         ),
         "reference_latest_date": (
             ln.reference_latest_date.isoformat()
-            if ln.reference_latest_date else None
+            if not manual_fallback and ln.reference_latest_date else None
         ),
         "anomaly_flags": flags,
     }
@@ -1168,10 +1512,13 @@ def iter_project_lines(
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
     result = db.execute(statement)
     try:
-        for ln, order in result:
+        for row in result:
+            ln, order = row[0], row[1]
+            override = row[2] if len(row) > 2 else None
             yield _serialize_project_line(
                 ln,
                 order,
+                override,
                 hide_cost_signals=hide_cost_signals,
             )
     finally:
@@ -1198,8 +1545,13 @@ def project_lines(db: Session, project: str, month: str | None = None,
     ).offset((page - 1) * page_size).limit(page_size)
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
     rows = [
-        _serialize_project_line(ln, order, hide_cost_signals=hide_cost_signals)
-        for ln, order in db.execute(paged)
+        _serialize_project_line(
+            row[0],
+            row[1],
+            row[2] if len(row) > 2 else None,
+            hide_cost_signals=hide_cost_signals,
+        )
+        for row in db.execute(paged)
     ]
     return {"total": total, "page": page, "page_size": page_size, "rows": rows}
 
@@ -1209,16 +1561,47 @@ def project_lines(db: Session, project: str, month: str | None = None,
 # ============================================================
 
 def _contract_amounts(db: Session, order_nos: list[str]) -> dict[str, Decimal]:
-    """XSDD → 最新有效版本的 13% 含税合同额。"""
-    return {
-        order_no: evidence.legacy_contract_amount_inc
-        for order_no, evidence in
-        maintenance_margin_evidence.load_contract_revenue_evidence(
-            db,
-            order_nos,
-        ).items()
-        if evidence.legacy_contract_amount_inc is not None
-    }
+    """XSDD → current mapped canonical ``amount_inc_tax`` (fail closed)."""
+    from app.models.maintenance_project import MaintenanceProjectContract
+
+    if not order_nos:
+        return {}
+    today = business_today()
+    rows = db.execute(
+        select(MaintenanceProjectContract)
+        .where(
+            MaintenanceProjectContract.contract_no.in_(order_nos),
+            MaintenanceProjectContract.effective_from <= today,
+            or_(
+                MaintenanceProjectContract.effective_to.is_(None),
+                MaintenanceProjectContract.effective_to > today,
+            ),
+        )
+    ).scalars().all()
+    grouped: dict[str, list] = defaultdict(list)
+    for relation in rows:
+        grouped[relation.contract_no].append(relation)
+    out: dict[str, Decimal] = {}
+    for contract_no, relations in grouped.items():
+        included = [relation for relation in relations if relation.included_in_total]
+        identities = {relation.contract_id for relation in included}
+        amounts = {relation.amount_inc_tax for relation in included}
+        duplicate_relationship = len({
+            (relation.project_id, relation.contract_id)
+            for relation in included
+        }) != len(included)
+        if (
+            not included
+            or any(relation.status_mapping_state != "mapped" for relation in relations)
+            or len(identities) != 1
+            or len({relation.project_id for relation in included}) != 1
+            or duplicate_relationship
+            or None in amounts
+            or len(amounts) != 1
+        ):
+            continue
+        out[contract_no] = Decimal(next(iter(amounts)))
+    return out
 
 
 def _expense_by_contract(db: Session, date_from: date | None = None,
@@ -1246,7 +1629,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
           q_text: str | None = None) -> dict:
     """合同级预算消耗参考看板。
 
-    预算 = 合同(XSDD)金额（含税参考）；已知支出 = 已知备件成本(混合原值参考)
+    预算 = 当前 mapped 合同台账 ``amount_inc_tax``；已知支出 = 归一含税备件成本
     + 生效报销费用。任一成本行缺失时优先返回 ``incomplete_cost``，不计算余额或
     红黄绿；完整且无正预算才返回 ``no_budget``。
     """
@@ -1256,26 +1639,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     contract_col = mo.linked_sales_order_no
     proj = func.coalesce(mo.project_std, "(未填项目)")
-    bucket = ml.cost_bucket
-    actual_bucket = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
-        maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
+    inc_amount, inc_actual, inc_estimated, _inc_missing = (
+        _normalized_cost_expressions(ml, basis="inc")
     )
-    estimated_bucket = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
-    )
-    estimated_inc = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_OTHER,
-    )
-    estimated_ex = bucket.between(
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
-        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
-    )
-    estimated_low = or_(
-        bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
-        bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
+    ex_amount, ex_actual, ex_estimated, _ex_missing = (
+        _normalized_cost_expressions(ml, basis="ex")
     )
     stmt = (
         select(
@@ -1285,24 +1653,21 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 ml.id.is_(None),
             ).label("missing_detail_orders"),
             func.count(ml.id).label("lines"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
-            ), 0).label("actual_cost_inc"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
-            ), 0).label("actual_cost_ex"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                estimated_inc,
-            ), 0).label("estimated_cost_inc"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                estimated_ex,
-            ), 0).label("estimated_cost_ex"),
-            func.count().filter(actual_bucket).label("actual_lines"),
-            func.count().filter(estimated_bucket).label("estimated_lines"),
-            func.coalesce(func.sum(ml.cost_amount).filter(
-                estimated_low,
+            func.coalesce(func.sum(inc_amount).filter(inc_actual), 0).label(
+                "actual_cost_inc"),
+            func.coalesce(func.sum(ex_amount).filter(ex_actual), 0).label(
+                "actual_cost_ex"),
+            func.coalesce(func.sum(inc_amount).filter(inc_estimated), 0).label(
+                "estimated_cost_inc"),
+            func.coalesce(func.sum(ex_amount).filter(ex_estimated), 0).label(
+                "estimated_cost_ex"),
+            func.count().filter(inc_actual).label("actual_lines"),
+            func.count().filter(inc_estimated).label("estimated_lines"),
+            func.coalesce(func.sum(inc_amount).filter(
+                inc_estimated,
+                ml.confidence == "low",
             ), 0).label("low_conf"),
-            *_dual_cost_aggregate_columns(ml, actual_bucket, estimated_bucket),
+            *_dual_cost_aggregate_columns(ml),
             func.min(mo.maint_start).label("mstart"), func.max(mo.maint_end).label("mend"),
             func.count(func.distinct(mo.id)).filter(
                 mo.maint_end.is_(None),
@@ -1311,6 +1676,13 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         )
         .select_from(mo)
         .outerjoin(ml, ml.order_id == mo.id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            and_(
+                MaintenanceManualCostOverride.line_id == ml.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ),
+        )
         .where(
             mo.linked_sales_order_no.is_not(None),
             func.btrim(mo.linked_sales_order_no) != "",
@@ -1330,17 +1702,8 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
     profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
     for r in raw:
-        missing_cost_lines = r.lines - r.actual_lines - r.estimated_lines
-        project_summary = maintenance_cost_quality.summarize_aggregate(
-            lines=r.lines,
-            actual_cost_inc=r.actual_cost_inc,
-            actual_cost_ex=r.actual_cost_ex,
-            estimated_cost_inc=r.estimated_cost_inc,
-            estimated_cost_ex=r.estimated_cost_ex,
-            actual_lines=r.actual_lines,
-            estimated_lines=r.estimated_lines,
-            missing_cost_lines=missing_cost_lines,
-        )
+        project_summary = _normalized_cost_summary_from_row(r, lines=r.lines)
+        missing_cost_lines = project_summary["missing_cost_lines"]
         if r.missing_detail_orders:
             project_summary["cost_quality"] = "incomplete"
         project_dual_summary = _dual_cost_summary_from_row(r, lines=r.lines)
@@ -1446,13 +1809,9 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             required_through=date_to or as_of,
         )
     )
-    # 旧预算看板继续使用历史“含税参考取最大、费用净额”语义；正式双口径毛利
-    # 同时复用同两次查询里的严格证据，不新增查询也不暗改兼容结果。
-    contracts = {
-        contract_no: evidence.legacy_contract_amount_inc
-        for contract_no, evidence in revenue_evidence.items()
-        if evidence.legacy_contract_amount_inc is not None
-    }
+    # 预算/含税收入只认当前合同台账 amount_inc_tax；销售表仍只为未税毛利证据，
+    # 绝不能再用固定税率猜出含税合同额覆盖工作簿修改。
+    contracts = _contract_amounts(db, contract_nos)
     expenses = {
         contract_no: evidence.legacy_raw_total
         for contract_no, evidence in expense_evidence.items()
@@ -1462,7 +1821,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     for cno, g in groups.items():
         cost_summary = g["single_project_summary"]
         if cost_summary is None:
-            cost_summary = maintenance_cost_quality.summarize_aggregate(
+            cost_summary = _normalized_cost_summary(
                 lines=g["lines"],
                 actual_cost_inc=g["actual_cost_inc"],
                 actual_cost_ex=g["actual_cost_ex"],
@@ -1470,7 +1829,6 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 estimated_cost_ex=g["estimated_cost_ex"],
                 actual_lines=g["actual_lines"],
                 estimated_lines=g["estimated_lines"],
-                missing_cost_lines=g["missing_cost_lines"],
             )
         if g["missing_detail_orders"]:
             cost_summary["cost_quality"] = "incomplete"
@@ -1514,6 +1872,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             )
         )
         margin_result = maintenance_margin.calculate_contract_margin(
+            revenue_inc=budget,
             revenue_ex=(
                 contract_revenue.revenue_ex
                 if contract_revenue is not None else None
@@ -1536,10 +1895,9 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             ),
             expense_data_available=expense_data_available,
             date_filtered=date_filtered,
-            revenue_ambiguous_inc=(
-                contract_revenue.ambiguous_inc
-                if contract_revenue is not None else False
-            ),
+            # 含税收入只认 canonical current amount_inc_tax；销售表的重复/税率
+            # 证据只影响未税侧，不能覆盖或污染含税侧。
+            revenue_ambiguous_inc=False,
             revenue_ambiguous_ex=(
                 contract_revenue.ambiguous_ex
                 if contract_revenue is not None else False
@@ -1744,28 +2102,64 @@ def contract_workbook_data(
     orders_with_details = len({order.id for _line, order in lines})
     missing_detail_orders = order_count - orders_with_details
 
+    line_ids = [line.id for line, _order in lines]
+    active_overrides = {
+        override.line_id: override
+        for override in db.scalars(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id.in_(line_ids),
+                MaintenanceManualCostOverride.active.is_(True),
+            )
+        )
+    } if line_ids else {}
+    line_cost_display = {}
+    for line, _order in lines:
+        override = active_overrides.get(line.id)
+        line_cost_display[line.id] = maintenance_cost_quality.resolved_line_cost_fields(
+            source=line.cost_source,
+            tax_basis=line.cost_tax_basis,
+            legacy_unit_cost=line.unit_cost,
+            legacy_amount=line.cost_amount,
+            unit_cost_inc_tax=line.unit_cost_inc_tax,
+            unit_cost_ex_tax=line.unit_cost_ex_tax,
+            cost_amount_inc_tax=line.cost_amount_inc_tax,
+            cost_amount_ex_tax=line.cost_amount_ex_tax,
+            anomaly_flags=line.anomaly_flags,
+            confidence=line.confidence,
+            qty=line.qty,
+            return_qty=line.return_qty,
+            manual_unit_cost_inc_tax=(
+                override.unit_cost_inc_tax if override is not None else None
+            ),
+            manual_unit_cost_ex_tax=(
+                override.unit_cost_ex_tax if override is not None else None
+            ),
+            manual_active=override is not None and override.active is True,
+        )
+
     # 单据级已知成本参考；脏历史行同样走统一 fail-closed 分类，未知来源金额不纳入。
     doc_total: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     doc_records: dict[str, list] = defaultdict(list)
     for ln, o in lines:
-        record = (ln.cost_source, ln.cost_tax_basis, ln.cost_amount)
+        fact = line_cost_display[ln.id]
+        record = (fact["source"], fact["tax_basis"], fact["cost_amount"])
         doc_records[o.order_no].append(record)
-        if maintenance_cost_quality.source_tier(*record) != "missing":
-            doc_total[o.order_no] += ln.cost_amount
+        if fact["tier"] != "missing":
+            doc_total[o.order_no] += fact["cost_amount"]
     doc_cost_summary = {
         order_no: maintenance_cost_quality.summarize_records(records)
         for order_no, records in doc_records.items()
     }
     line_cost_tiers = {
-        ln.id: maintenance_cost_quality.source_tier(
-            ln.cost_source,
-            ln.cost_tax_basis,
-            ln.cost_amount,
-        )
+        ln.id: line_cost_display[ln.id]["tier"]
         for ln, _order in lines
     }
     cost_summary = maintenance_cost_quality.summarize_records(
-        (ln.cost_source, ln.cost_tax_basis, ln.cost_amount)
+        (
+            line_cost_display[ln.id]["source"],
+            line_cost_display[ln.id]["tax_basis"],
+            line_cost_display[ln.id]["cost_amount"],
+        )
         for ln, _order in lines
     )
     if missing_detail_orders:
@@ -1778,15 +2172,9 @@ def contract_workbook_data(
         actual_lines = estimated_lines = 0
         amount = _ZERO
         for ln, _order in lines:
-            value = getattr(ln, field)
-            tier = maintenance_cost_quality.normalized_tax_tier(
-                source=ln.cost_source,
-                tax_basis=ln.cost_tax_basis,
-                legacy_amount=ln.cost_amount,
-                normalized_amount=value,
-                normalized_basis=basis,
-                anomaly_flags=ln.anomaly_flags,
-            )
+            fact = line_cost_display[ln.id]
+            value = fact[field]
+            tier = fact[f"{basis}_tier"]
             if tier == "missing":
                 continue
             amount += Decimal(value)
@@ -1831,15 +2219,12 @@ def contract_workbook_data(
     for ln, o in lines:
         if not o.order_date:
             continue
-        tier = maintenance_cost_quality.source_tier(
-            ln.cost_source,
-            ln.cost_tax_basis,
-            ln.cost_amount,
-        )
+        fact = line_cost_display[ln.id]
+        tier = fact["tier"]
         if tier == "missing":
             monthly_missing[_ym(o.order_date)] += 1
         else:
-            monthly_parts[_ym(o.order_date)] += ln.cost_amount
+            monthly_parts[_ym(o.order_date)] += fact["cost_amount"]
     for e in exp_rows:
         if (e.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
                 and e.amount is not None and e.expense_date):
@@ -1851,17 +2236,10 @@ def contract_workbook_data(
         db,
         [contract],
     ).get(contract)
-    contract_tax_rate = (
-        tax_policy.TAX_RATE
-        if revenue_evidence is not None else None
-    )
-    contract_tax_status = (
-        "available" if revenue_evidence is not None else "missing"
-    )
-    budget = (
-        revenue_evidence.legacy_contract_amount_inc
-        if revenue_evidence is not None else None
-    )
+    budget = _contract_amounts(db, [contract]).get(contract)
+    # canonical amount_inc_tax does not prove a tax rate; do not synthesize 13%.
+    contract_tax_rate = None
+    contract_tax_status = "available" if budget is not None else "missing"
     expense_total = sum(
         (
             expense.amount
@@ -1912,6 +2290,7 @@ def contract_workbook_data(
         expense_inc = active_expense_evidence.expense_inc
         expense_ex = active_expense_evidence.expense_ex
     margin_result = maintenance_margin.calculate_contract_margin(
+        revenue_inc=budget,
         revenue_ex=(
             revenue_evidence.revenue_ex
             if revenue_evidence is not None else None
@@ -1934,10 +2313,7 @@ def contract_workbook_data(
         ),
         expense_data_available=expense_data_available,
         date_filtered=date_filtered,
-        revenue_ambiguous_inc=(
-            revenue_evidence.ambiguous_inc
-            if revenue_evidence is not None else False
-        ),
+        revenue_ambiguous_inc=False,
         revenue_ambiguous_ex=(
             revenue_evidence.ambiguous_ex
             if revenue_evidence is not None else False
@@ -1955,6 +2331,7 @@ def contract_workbook_data(
             "lines": lines, "doc_total": doc_total,
             "doc_cost_summary": doc_cost_summary,
             "line_cost_tiers": line_cost_tiers,
+            "line_cost_display": line_cost_display,
             "cost_summary": cost_summary,
             "dual_cost_summary": dual_cost_summary,
             "margin": margin_result,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { MaintenanceCollectionSnapshotRow } from "../../../api/maintenanceOperations";
@@ -7,10 +7,16 @@ import {
   applyProjectMaster,
   downloadProjectMaster,
   getCollectionPlan,
+  validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import type { CollectionPlanRow } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
-import { COLLECTION_STATUS, raw, readError } from "./panelUtils";
+import {
+  COLLECTION_STATUS,
+  type RegisterPanelRefresh,
+  raw,
+  readError,
+} from "./panelUtils";
 
 const { Text } = Typography;
 
@@ -33,6 +39,7 @@ export function CollectionTab({
   rows,
   loading,
   onRefresh,
+  registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
@@ -40,23 +47,36 @@ export function CollectionTab({
   rows: MaintenanceCollectionSnapshotRow[];
   loading: boolean;
   /** 上传覆盖后回读（含健康带指标 + 计划状态）。 */
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
+  registerRefresh: RegisterPanelRefresh;
 }) {
   const [planRows, setPlanRows] = useState<CollectionPlanRow[]>([]);
+  const requestSeq = useRef(0);
 
-  const loadPlan = async () => {
+  const loadPlan = useCallback(async () => {
+    const seq = ++requestSeq.current;
     try {
       const resp = await getCollectionPlan(projectId);
+      if (seq !== requestSeq.current) return false;
       setPlanRows(resp.rows);
+      return true;
     } catch (err) {
-      message.error(readError(err, "回款计划加载失败"));
+      if (seq === requestSeq.current) {
+        setPlanRows([]);
+        message.error(readError(err, "回款计划加载失败"));
+      }
+      return false;
     }
-  };
+  }, [projectId]);
 
   useEffect(() => {
+    registerRefresh("collection", loadPlan);
     void loadPlan();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+    return () => {
+      requestSeq.current += 1;
+      registerRefresh("collection", null);
+    };
+  }, [loadPlan, registerRefresh]);
 
   const planColumns: ColumnsType<CollectionPlanRow> = [
     { title: "合同编号", dataIndex: "contract_no", render: raw },
@@ -98,12 +118,9 @@ export function CollectionTab({
         canUpload={canUpload}
         hint="下载后可回填累计实收、状态、凭证号和备注"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
-        onApply={async (file) => {
-          const result = await applyProjectMaster(projectId, file);
-          await onRefresh();
-          await loadPlan();
-          return result;
-        }}
+        onValidate={(file) => validateProjectMaster(projectId, file)}
+        onApply={(file) => applyProjectMaster(projectId, file)}
+        onAfterApply={onRefresh}
       />
       <Card
         size="small"

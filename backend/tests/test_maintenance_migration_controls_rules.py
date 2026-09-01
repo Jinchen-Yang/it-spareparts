@@ -53,6 +53,35 @@ def _sales_cost_evidence():
     }
 
 
+def _maintenance_demand_cost_evidence():
+    return {
+        "cost_source": "maint_demand",
+        "manual_evidence": None,
+        "unit_cost_ex_tax": "10.00",
+        "unit_cost_inc_tax": "11.30",
+        "reference_side": "maint",
+        "reference_sample_ids": ["maintenance-demand:demand-line-101"],
+        "reference_sample_count": 1,
+        "reference_samples": [
+            {
+                "sample_id": "maintenance-demand:demand-line-101",
+                "source_line_id": "demand-line-101",
+                "document_no": "WBDD-101",
+                "document_date": "2026-08-02",
+                "distance_days": None,
+                "quantity": "2",
+                "unit_price_raw": None,
+                "unit_price_ex_tax": "10.00",
+                "tax_conversion": "none",
+                "basis": "same_order",
+            }
+        ],
+        "reference_window_from": None,
+        "reference_window_to": None,
+        "linked_purchase_line_id": None,
+    }
+
+
 def _historical_baseline(**overrides):
     baseline = {
         "amount_ex_tax": "100.00",
@@ -473,6 +502,46 @@ def test_sales_window_estimate_is_aggregated_and_explicitly_labeled():
         preview["cost"]["cost_progress_label"] == "priced_cost_including_sales_estimate"
     )
     assert preview["can_approve"] is True
+
+
+def test_maintenance_demand_cost_evidence_is_independently_reproducible():
+    payload = _project()
+    payload["post_cutover_site_issues"][0].update(
+        _maintenance_demand_cost_evidence()
+    )
+
+    preview = _preview(payload)
+
+    assert preview["cost"]["post_cutover_consumption_ex_tax"] == "20.00"
+    assert preview["cost"]["post_cutover_consumption_inc_tax"] == "22.60"
+    assert preview["cost"]["sales_estimate_lines"] == 0
+    assert preview["can_approve"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sample_id", "maintenance-demand:other-line"),
+        ("source_line_id", "other-line"),
+        ("distance_days", 0),
+        ("unit_price_raw", "10.00"),
+        ("unit_price_ex_tax", "9.99"),
+        ("tax_conversion", "divide_1.13"),
+    ],
+)
+def test_maintenance_demand_cost_evidence_rejects_tampered_sample(field, value):
+    payload = _project()
+    evidence = _maintenance_demand_cost_evidence()
+    evidence["reference_samples"][0][field] = value
+    payload["post_cutover_site_issues"][0].update(evidence)
+
+    preview = _preview(payload)
+
+    assert preview["cost"]["post_cutover_consumption_ex_tax"] == "0.00"
+    assert preview["can_approve"] is False
+    assert "site_issue_invalid_cost_evidence" in {
+        blocker["code"] for blocker in preview["approval_blockers"]
+    }
 
 
 def test_cost_evidence_recomputes_sample_unit_weighted_unit_and_issue_amount():

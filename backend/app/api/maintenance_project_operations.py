@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -1161,6 +1161,7 @@ def patch_project_cost_gap(
 
 @router.get("/{project_id}/workspace")
 def stable_project_workspace(
+    response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
     as_of: date | None = None,
     collection_page: int = Query(1, ge=1),
@@ -1175,6 +1176,7 @@ def stable_project_workspace(
     _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
     effective_as_of = as_of or business_today()
     payload = operations.project_workspace(
         db,

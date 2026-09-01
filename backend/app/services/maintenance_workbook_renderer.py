@@ -533,8 +533,31 @@ def _populate_contract_workbook(
             band = not band
         previous_order = order.order_no
         document_cost = data["doc_total"].get(order.order_no)
-        tier = data["line_cost_tiers"][line.id]
+        display = data.get("line_cost_display", {}).get(line.id)
+        tier = (
+            display["tier"]
+            if display is not None
+            else data["line_cost_tiers"][line.id]
+        )
         known_line = tier != "missing"
+        manual_fallback = bool(display and display.get("manual_fallback"))
+        source = display["source"] if display is not None else line.cost_source
+        confidence = (
+            display["confidence"] if display is not None else line.confidence
+        )
+        tax_basis = (
+            display["tax_basis"] if display is not None else line.cost_tax_basis
+        )
+
+        def displayed_cost(field: str):
+            if not known_line:
+                return None
+            return (
+                display[field]
+                if display is not None
+                else getattr(line, field)
+            )
+
         parts_sheet.append([
             safe_text(order.order_no),
             order.order_date.isoformat() if order.order_date else None,
@@ -552,29 +575,34 @@ def _populate_contract_workbook(
             None,
             None,
             safe_text(line.serial_numbers),
-            float(line.unit_cost) if known_line and line.unit_cost is not None else None,
-            float(line.cost_amount) if known_line and line.cost_amount is not None else None,
-            float(line.unit_cost_inc_tax)
-            if known_line and line.unit_cost_inc_tax is not None else None,
-            float(line.unit_cost_ex_tax)
-            if known_line and line.unit_cost_ex_tax is not None else None,
-            float(line.cost_amount_inc_tax)
-            if known_line and line.cost_amount_inc_tax is not None else None,
-            float(line.cost_amount_ex_tax)
-            if known_line and line.cost_amount_ex_tax is not None else None,
-            safe_text(SOURCE_LABELS.get(line.cost_source, line.cost_source)),
-            safe_text(CONFIDENCE_LABELS.get(line.confidence, line.confidence or "")),
-            safe_text(line.price_month),
-            line.price_distance_days,
-            safe_text(line.cost_tax_basis),
+            float(displayed_cost("unit_cost"))
+            if displayed_cost("unit_cost") is not None else None,
+            float(displayed_cost("cost_amount"))
+            if displayed_cost("cost_amount") is not None else None,
+            float(displayed_cost("unit_cost_inc_tax"))
+            if displayed_cost("unit_cost_inc_tax") is not None else None,
+            float(displayed_cost("unit_cost_ex_tax"))
+            if displayed_cost("unit_cost_ex_tax") is not None else None,
+            float(displayed_cost("cost_amount_inc_tax"))
+            if displayed_cost("cost_amount_inc_tax") is not None else None,
+            float(displayed_cost("cost_amount_ex_tax"))
+            if displayed_cost("cost_amount_ex_tax") is not None else None,
+            safe_text(SOURCE_LABELS.get(source, source)),
+            safe_text(CONFIDENCE_LABELS.get(confidence, confidence or "")),
+            safe_text(None if manual_fallback else line.price_month),
+            None if manual_fallback else line.price_distance_days,
+            safe_text(tax_basis),
             safe_text(_TIER_LABELS[tier]),
-            safe_text(line.reference_side),
-            line.reference_pool_group_id,
-            line.reference_pool_version,
-            line.reference_sample_count,
-            line.reference_from_date.isoformat() if line.reference_from_date else None,
-            line.reference_to_date.isoformat() if line.reference_to_date else None,
-            line.reference_latest_date.isoformat() if line.reference_latest_date else None,
+            safe_text(None if manual_fallback else line.reference_side),
+            None if manual_fallback else line.reference_pool_group_id,
+            None if manual_fallback else line.reference_pool_version,
+            None if manual_fallback else line.reference_sample_count,
+            line.reference_from_date.isoformat()
+            if not manual_fallback and line.reference_from_date else None,
+            line.reference_to_date.isoformat()
+            if not manual_fallback and line.reference_to_date else None,
+            line.reference_latest_date.isoformat()
+            if not manual_fallback and line.reference_latest_date else None,
         ])
         rendered_row = parts_sheet.max_row
         for column in range(1, len(part_headers) + 1):
@@ -588,7 +616,7 @@ def _populate_contract_workbook(
             document_cost_cell = parts_sheet.cell(row=rendered_row, column=13)
             document_cost_cell.fill = _DOC_FILL
             document_cost_cell.font = Font(bold=True)
-        if line.confidence == "low":
+        if confidence == "low":
             parts_sheet.cell(row=rendered_row, column=24).font = Font(
                 color="B8860B",
                 bold=True,

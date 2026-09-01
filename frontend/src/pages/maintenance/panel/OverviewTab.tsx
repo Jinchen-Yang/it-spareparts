@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   Card,
@@ -12,13 +12,20 @@ import {
 } from "antd";
 import type { BoardProjectRow } from "../../../api/maintenanceBossBoard";
 import type { MaintenanceProject } from "../../../api/maintenanceProjects";
+import type { MaintenanceProjectOperationsSummary } from "../../../api/maintenanceOperations";
 import {
   assignMaintenanceSourceOrders,
   autoAssignMaintenanceSourceOrders,
   listMaintenanceSourceOrders,
 } from "../../../api/maintenanceSourceAssignments";
 import type { MaintenanceSourceOrderRow } from "../../../api/maintenanceSourceAssignments";
-import { LIFECYCLE_LABEL, raw, readError, statText } from "./panelUtils";
+import {
+  LIFECYCLE_LABEL,
+  type RegisterPanelRefresh,
+  raw,
+  readError,
+  statText,
+} from "./panelUtils";
 
 const { Text } = Typography;
 
@@ -30,20 +37,31 @@ export function OverviewTab({
   projectId,
   row,
   project,
+  operationsProject,
   canAssign,
   onAssigned,
+  registerRefresh,
 }: {
   projectId: string;
   row: BoardProjectRow | null;
   /** stable 目录的基础信息——boss-board 聚合行缺位时的回退源（数据源不同，字段较少）。 */
   project: MaintenanceProject | null;
+  /** workspace 中的权威负责人账号映射；project_manager_id 仅是来源原文。 */
+  operationsProject?: MaintenanceProjectOperationsSummary | null;
   canAssign: boolean;
-  onAssigned: () => void;
+  onAssigned: () => Promise<boolean>;
+  registerRefresh: RegisterPanelRefresh;
 }) {
   const [candidates, setCandidates] = useState<MaintenanceSourceOrderRow[]>([]);
   const [busy, setBusy] = useState(false);
+  const requestSeq = useRef(0);
 
   const loadCandidates = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    if (!canAssign) {
+      setCandidates([]);
+      return true;
+    }
     try {
       // #48：让后端按本项目 XSDD 集合排序——前端只拿一页，若在前端筛会漏掉
       // 命中但排在 20 条之外的单。多合同项目的全部 XSDD 都由后端从台账取。
@@ -51,15 +69,23 @@ export function OverviewTab({
         page: 1, page_size: 20, assignment_status: "unassigned",
         xsdd_project_id: projectId,
       });
+      if (seq !== requestSeq.current) return false;
       setCandidates(resp.data.rows ?? []);
+      return true;
     } catch {
-      setCandidates([]);
+      if (seq === requestSeq.current) setCandidates([]);
+      return false;
     }
-  }, [projectId]);
+  }, [canAssign, projectId]);
 
   useEffect(() => {
-    if (canAssign) void loadCandidates();
-  }, [canAssign, loadCandidates]);
+    registerRefresh("overview", loadCandidates);
+    void loadCandidates();
+    return () => {
+      requestSeq.current += 1;
+      registerRefresh("overview", null);
+    };
+  }, [loadCandidates, registerRefresh]);
 
   const confirm = async (sourceOrderId: string) => {
     setBusy(true);
@@ -69,9 +95,11 @@ export function OverviewTab({
         items: [{ source_order_id: sourceOrderId }],
         reason: "项目面板确认挂靠",
       });
-      message.success("已确认挂靠");
-      await loadCandidates();
-      onAssigned();
+      if (await onAssigned()) {
+        message.success("已确认挂靠并刷新");
+      } else {
+        message.warning("挂靠已写入，但页面刷新失败；旧数据已失效，请重试。");
+      }
     } catch (err) {
       message.error(readError(err, "挂靠失败"));
     } finally {
@@ -84,14 +112,15 @@ export function OverviewTab({
     try {
       const { data } = await autoAssignMaintenanceSourceOrders();
       const r = data.result;
-      message.success(
-        `自动挂靠完成：${r.assigned_orders} 张单` +
+      const summary = `自动挂靠完成：${r.assigned_orders} 张单` +
           (r.matched_projects ? `，挂到 ${r.matched_projects} 个已有项目` : "") +
           (r.created_projects ? `，自动新建 ${r.created_projects} 个项目` : "") +
-          (r.skipped_groups ? `；${r.skipped_groups} 个无项目名已跳过` : ""),
-      );
-      await loadCandidates();
-      onAssigned();
+          (r.skipped_groups ? `；${r.skipped_groups} 个无项目名已跳过` : "");
+      if (await onAssigned()) {
+        message.success(`${summary}，页面已刷新`);
+      } else {
+        message.warning(`${summary}，但页面刷新失败；旧数据已失效，请重试。`);
+      }
     } catch (err) {
       message.error(readError(err, "自动挂靠失败"));
     } finally {
@@ -111,11 +140,15 @@ export function OverviewTab({
         <Descriptions.Item label="合同号(XSDD)">
           {row?.contract_nos.length ? row.contract_nos.join("、") : "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="项目经理（负责人）">
-          {/* boss 聚合行给显示人名；缺失回退账号；编辑保存后 loadProject 刷新 */}
-          {row?.project_manager ?? project?.project_manager_id ?? "—"}
+        <Descriptions.Item label="维保负责人账号">
+          {operationsProject?.manager_assignment?.display_name
+            ?? operationsProject?.manager_assignment?.username
+            ?? "未映射系统账号"}
         </Descriptions.Item>
-        <Descriptions.Item label="合同总额">
+        <Descriptions.Item label="来源负责人原文">
+          {operationsProject?.project_manager_id ?? project?.project_manager_id ?? "—"}
+        </Descriptions.Item>
+        <Descriptions.Item label="合同总额（含税）">
           <Space size={6}>
             <span>{statText(row?.contract_amount_inc_tax)}</span>
             {row?.contract_shared ? (

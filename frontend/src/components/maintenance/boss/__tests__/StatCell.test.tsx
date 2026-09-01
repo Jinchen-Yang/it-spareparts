@@ -91,6 +91,51 @@ describe("KnownCostCell 成本五件套", () => {
     expect(node).toHaveTextContent("缺价 3 行");
   });
 
+  it("全部缺价时显示待补价而不是把聚合单位元 0 当成成本", () => {
+    const allMissing: KnownCostStat = {
+      ...base,
+      state: "partial",
+      value: {
+        ...base.value!,
+        actual_amount: "0.00",
+        estimated_amount: "0.00",
+        known_amount: "0.00",
+        missing_lines: 3,
+        coverage_pct: 0,
+        quality: "incomplete",
+      },
+    };
+    render(<KnownCostCell stat={allMissing} />);
+    const node = screen.getByTestId("cost-ready");
+    expect(node).toHaveTextContent("暂无可计算成本");
+    expect(node).toHaveTextContent("全部缺价 · 待补价");
+    expect(node).toHaveTextContent("缺价 3 行");
+    expect(node).not.toHaveTextContent("0.00");
+    expect(node).not.toHaveTextContent("≥");
+  });
+
+  it("零有效需求明细时显示数据不足而不是成本 0", () => {
+    const noLines: KnownCostStat = {
+      ...base,
+      state: "partial",
+      value: {
+        ...base.value!,
+        actual_amount: "0.00",
+        estimated_amount: "0.00",
+        known_amount: null,
+        missing_lines: 0,
+        coverage_pct: null,
+        quality: "incomplete",
+      },
+    };
+    render(<KnownCostCell stat={noLines} />);
+    const node = screen.getByTestId("cost-ready");
+    expect(node).toHaveTextContent("暂无可计算成本");
+    expect(node).toHaveTextContent("暂无有效需求明细");
+    expect(node).not.toHaveTextContent("0.00");
+    expect(node).not.toHaveTextContent("≥");
+  });
+
   it("无成本权限时显示受限且无金额", () => {
     const restricted: KnownCostStat = {
       state: "restricted",

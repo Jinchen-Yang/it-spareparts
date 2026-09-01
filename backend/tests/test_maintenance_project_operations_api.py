@@ -18,6 +18,7 @@ from sqlalchemy import event, select
 from app import auth
 from app.auth import hash_password
 from app.api import maintenance_project_operations
+from app.models.maintenance import FProjectExpense
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectContract,
@@ -349,6 +350,7 @@ def test_legacy_service_site_issue_exposes_history_provenance(db):
         params={"as_of": "2026-08-31"},
     )
     assert workspace.status_code == 200, workspace.text
+    assert workspace.headers["cache-control"] == "no-store"
     requisition = workspace.json()["requisitions"]["rows"][0]
     assert requisition["source"] == "direct_api"
     assert requisition["import_batch_id"] is None
@@ -1383,6 +1385,103 @@ def test_contract_relationship_update_and_archive_use_optimistic_lock(db):
     assert archived.status_code == 200, archived.text
     assert archived.json()["effective_to"] == "2026-08-01"
     assert archived.json()["version"] == 3
+
+
+def test_contract_identity_window_changes_recompute_expense_ownership_atomically(db):
+    project = _project(db, project_id="project-contract-expense-resync")
+    batch = _batch(db, "contract-expense-resync")
+    raw = FProjectExpense(
+        raw_line_id="raw-contract-expense-resync",
+        bxd_no="BXD-20260827-9001",
+        line_no=1,
+        data_status="已结束",
+        expense_date=date(2026, 6, 1),
+        person="费用归属测试",
+        fee_category="交通",
+        reason="合同窗口重算",
+        linked_sales_order_no="XSDD-20260101-9001",
+        amount=Decimal("100.00"),
+        amount_ex_tax=Decimal("100.00"),
+        amount_inc_tax=Decimal("113.00"),
+        tax_basis="default_ex",
+        tax_rate_used=Decimal("0.13"),
+        import_batch_id=batch.id,
+    )
+    db.add(raw)
+    db.commit()
+    client = _client(db, username="contract_expense_resync_admin")
+
+    def create(contract_id: str):
+        response = client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+            json={
+                "contract_id": contract_id,
+                "contract_no": "20260101-9001",
+                "contract_amount": "1000.00",
+                "contract_status": "synthetic-active",
+                "status_mapping_state": "mapped",
+                "status_mapping_version": "synthetic-map-v1",
+                "included_in_total": True,
+                "effective_from": "2026-01-01",
+                "source": "synthetic-test",
+                "reason": "验证合同变化即时重算费用归属",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    first = create("contract-expense-resync-1")
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution,
+        "bxd:raw-contract-expense-resync",
+    )
+    assert attribution is not None
+    assert attribution.raw_expense_line_id == raw.raw_line_id
+    assert attribution.ownership_mapping_state == "mapped"
+    assert attribution.project_contract_id == first["project_contract_id"]
+
+    second = create("contract-expense-resync-2")
+    db.expire_all()
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution,
+        "bxd:raw-contract-expense-resync",
+    )
+    assert attribution.ownership_mapping_state == "ambiguous"
+    assert attribution.project_contract_id is None
+
+    close_second = client.post(
+        f"/api/maintenance/projects/stable/contracts/{second['project_contract_id']}/archive",
+        json={
+            "version": second["version"],
+            "effective_to": "2026-06-01",
+            "reason": "排除第二个重叠窗口",
+        },
+    )
+    assert close_second.status_code == 200, close_second.text
+    db.expire_all()
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution,
+        "bxd:raw-contract-expense-resync",
+    )
+    assert attribution.ownership_mapping_state == "mapped"
+    assert attribution.project_contract_id == first["project_contract_id"]
+
+    close_first = client.post(
+        f"/api/maintenance/projects/stable/contracts/{first['project_contract_id']}/archive",
+        json={
+            "version": first["version"],
+            "effective_to": "2026-06-01",
+            "reason": "截短唯一合同窗口",
+        },
+    )
+    assert close_first.status_code == 200, close_first.text
+    db.expire_all()
+    attribution = db.get(
+        MaintenanceProjectExpenseAttribution,
+        "bxd:raw-contract-expense-resync",
+    )
+    assert attribution.ownership_mapping_state == "unmapped"
+    assert attribution.project_contract_id is None
 
 
 def test_direct_collection_api_exposes_server_owned_provenance(db):
@@ -3769,6 +3868,8 @@ def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):
             project_id=f"directory-query-{index:03d}",
             project_code=f"DIRECTORY-{index:03d}",
             display_name=f"目录查询项目 {index:03d}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
             lifecycle_status="ongoing",
         )
         for index in range(2)
@@ -3790,6 +3891,8 @@ def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):
             project_id=f"directory-query-{index:03d}",
             project_code=f"DIRECTORY-{index:03d}",
             display_name=f"目录查询项目 {index:03d}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
             lifecycle_status="ongoing",
         )
         for index in range(2, 32)
@@ -3809,6 +3912,8 @@ def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(
             project_id=f"directory-reminder-{index:03d}",
             project_code=f"REMINDER-{index:03d}",
             display_name=f"提醒目录项目 {index:03d}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
             lifecycle_status="ongoing",
         )
         for index in range(2)
@@ -3849,6 +3954,8 @@ def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(
             project_id=f"directory-reminder-{index:03d}",
             project_code=f"REMINDER-{index:03d}",
             display_name=f"提醒目录项目 {index:03d}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
             lifecycle_status="ongoing",
         )
         for index in range(2, 32)
@@ -4433,6 +4540,89 @@ def test_operations_directory_accepts_declared_reminder_selectors(db):
         assert response.status_code == 200, (selector, response.text)
 
 
+def test_directory_contract_identity_uses_id_or_xsdd_for_fail_closed_filters(db):
+    client = _client(db, username="directory_contract_identity_admin")
+    projects = [
+        MaintenanceProject(
+            project_id=f"directory-identity-{suffix}",
+            project_code=f"DIRECTORY-IDENTITY-{suffix.upper()}",
+            display_name=f"目录合同身份 {suffix}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
+            lifecycle_status="ongoing",
+        )
+        for suffix in ("shared-a", "shared-b", "duplicate")
+    ]
+    db.add_all(projects)
+    common = {
+        "amount_inc_tax": Decimal("100.00"),
+        "contract_status": "synthetic-active",
+        "status_mapping_state": "mapped",
+        "status_mapping_version": "synthetic-map-v1",
+        "included_in_total": True,
+        "effective_from": date(2026, 1, 1),
+        "source": "synthetic-test",
+    }
+    db.add_all([
+        MaintenanceProjectContract(
+            project_contract_id="directory-shared-relation-a",
+            project_id=projects[0].project_id,
+            contract_id="directory-shared-internal-a",
+            contract_no="XSDD-DIRECTORY-SHARED",
+            **common,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="directory-shared-relation-b",
+            project_id=projects[1].project_id,
+            contract_id="directory-shared-internal-b",
+            contract_no="XSDD-DIRECTORY-SHARED",
+            **common,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="directory-duplicate-relation-a",
+            project_id=projects[2].project_id,
+            contract_id="directory-duplicate-internal-a",
+            contract_no="XSDD-DIRECTORY-DUPLICATE",
+            **common,
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="directory-duplicate-relation-b",
+            project_id=projects[2].project_id,
+            contract_id="directory-duplicate-internal-b",
+            contract_no="XSDD-DIRECTORY-DUPLICATE",
+            **common,
+        ),
+    ])
+    db.commit()
+
+    conflict = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "reminder": "completeness:cross_project_contract_conflict",
+            "page_size": 10,
+        },
+    )
+    duplicate = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "reminder": "completeness:duplicate_effective_contract",
+            "page_size": 10,
+        },
+    )
+
+    assert conflict.status_code == 200, conflict.text
+    assert {row["project_id"] for row in conflict.json()["rows"]} == {
+        projects[0].project_id,
+        projects[1].project_id,
+    }
+    assert duplicate.status_code == 200, duplicate.text
+    assert {row["project_id"] for row in duplicate.json()["rows"]} == {
+        projects[2].project_id,
+    }
+
+
 def test_operations_directory_query_count_is_constant_across_page_sizes(db):
     client = _client(db, username="directory_page_scale_admin")
     db.add_all(
@@ -4440,6 +4630,8 @@ def test_operations_directory_query_count_is_constant_across_page_sizes(db):
             project_id=f"directory-page-scale-{index:03d}",
             project_code=f"PAGE-SCALE-{index:03d}",
             display_name=f"目录分页项目 {index:03d}",
+            period_from=date(2026, 1, 1),
+            period_to=date(2026, 12, 31),
             lifecycle_status="ongoing",
         )
         for index in range(200)
@@ -4470,6 +4662,8 @@ def test_operations_directory_query_count_is_constant_across_page_sizes(db):
 
 def test_operations_directory_card_matches_workspace_summary(db):
     project = _project(db, project_id="project-directory-card-parity")
+    project.period_from = date(2026, 1, 1)
+    project.period_to = date(2026, 12, 31)
     project.lifecycle_status = "ongoing"
     db.commit()
     client = _client(db, username="directory_card_parity_admin")
@@ -4626,13 +4820,39 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
                 status="confirmed",
             )
         )
+    expense_batch = SysImportBatch(
+        filename="workspace-expenses.xlsx",
+        file_type="expense",
+        file_hash=hashlib.sha256(b"workspace-expenses").hexdigest(),
+        status="success",
+    )
+    db.add(expense_batch)
+    db.flush()
     for row_no in range(1, 51):
         approved = row_no <= 45
+        raw_line_id = f"workspace-expense-raw-{row_no:03d}"
+        db.add(
+            FProjectExpense(
+                raw_line_id=raw_line_id,
+                bxd_no=f"BXD-WORKSPACE-{row_no:03d}",
+                line_no=1,
+                data_status="已结束" if approved else "已驳回",
+                expense_date=date(2026, 8, 3),
+                linked_sales_order_no=contract.contract_no,
+                amount=Decimal("2.00"),
+                amount_ex_tax=Decimal("2.00"),
+                amount_inc_tax=Decimal("2.26"),
+                tax_basis="ex",
+                tax_rate_used=Decimal("0.13"),
+                import_batch_id=expense_batch.id,
+            )
+        )
         db.add(
             MaintenanceProjectExpenseAttribution(
                 expense_id=f"workspace-expense-{row_no:03d}",
                 project_id=project.project_id,
                 project_contract_id=contract.project_contract_id,
+                raw_expense_line_id=raw_line_id,
                 expense_ref=f"BXD-WORKSPACE-{row_no:03d}",
                 expense_date=date(2026, 8, 3),
                 amount_ex_tax=Decimal("2.00"),
@@ -4641,6 +4861,8 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
                 status_mapping_state="mapped",
                 normalized_status="approved" if approved else "rejected",
                 status_mapping_version="synthetic-map-v1",
+                ownership_mapping_state="mapped",
+                ownership_mapping_version="synthetic-map-v1",
             )
         )
     db.commit()

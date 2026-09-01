@@ -124,7 +124,8 @@ SKILLS: dict[str, dict] = {
    sales_ref=销售参考、pool_purchase/pool_sales=互通池同伴历史均价、
    purchase_history/sales_history=本PN历史参考、none=无成本）。
 3. get_maintenance_lines(project=..., month=...)：逐单据明细——大额出库行、成本来源/
-   置信度/关联采购单，一行行可核。
+   置信度/关联采购单，一行行可核。净量只按需求数量 qty − 退货数量 return_qty；
+   已返数量 returned_qty、待返数量 pending_return_qty 是源表流转状态，只展示、不核减成本。
 
 ## 怎么分析
 - incomplete_cost：只报告实际/估算/缺失事实和补数动作；禁止用已知部分自行计算余额、

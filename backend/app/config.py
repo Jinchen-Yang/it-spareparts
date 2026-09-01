@@ -567,7 +567,8 @@ FIELD_GROUPS = {
                       "contribution_profit_inc", "contribution_profit_ex",
                       "contribution_status_inc", "contribution_status_ex",
                       # 维保预算消耗参考决策；禁止登记通用 status（会误伤流程状态）
-                      "decision_status", "contract_amount", "total_contract_amount",
+                      "decision_status", "contract_amount", "contract_amount_inc_tax",
+                      "total_contract_amount",
                       "budget", "remaining", "remaining_pct"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",

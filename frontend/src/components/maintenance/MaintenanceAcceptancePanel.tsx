@@ -63,7 +63,7 @@ export default function MaintenanceAcceptancePanel({
   onChanged,
 }: {
   projectId: string;
-  onChanged?: () => void;
+  onChanged?: () => Promise<boolean>;
 }) {
   const [record, setRecord] = useState<MaintenanceAcceptanceDeliverable | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,8 +80,13 @@ export default function MaintenanceAcceptancePanel({
     try {
       const { data } = await getMaintenanceAcceptance(projectId);
       if (request === generation.current) setRecord(data);
+      return request === generation.current;
     } catch {
-      if (request === generation.current) setError("验收报告状态加载失败，请重试。");
+      if (request === generation.current) {
+        setRecord(null);
+        setError("验收报告状态加载失败，请重试。");
+      }
+      return false;
     } finally {
       if (request === generation.current) setLoading(false);
     }
@@ -95,8 +100,32 @@ export default function MaintenanceAcceptancePanel({
   }, [projectId]);
 
   const refreshAfterMutation = async () => {
-    await load();
-    onChanged?.();
+    const localReady = await load();
+    let parentReady = true;
+    try {
+      parentReady = onChanged ? (await onChanged()) !== false : true;
+    } catch {
+      parentReady = false;
+    }
+    return localReady && parentReady;
+  };
+
+  const runMutation = async (
+    action: () => Promise<unknown>,
+    writeFailure: string,
+  ) => {
+    let committed = false;
+    try {
+      await action();
+      committed = true;
+      if (!(await refreshAfterMutation())) {
+        setError("操作已写入，但验收页面刷新失败；旧数据已失效，请重试。");
+      }
+    } catch (reason: unknown) {
+      setError(committed
+        ? "操作已写入，但验收页面刷新失败；旧数据已失效，请重试。"
+        : readFailure(reason, writeFailure));
+    }
   };
 
   const upload = async (file: File | undefined) => {
@@ -108,10 +137,10 @@ export default function MaintenanceAcceptancePanel({
     setBusy(true);
     setError(null);
     try {
-      await uploadMaintenanceAcceptanceAttachment(projectId, { file });
-      await refreshAfterMutation();
-    } catch (reason: unknown) {
-      setError(readFailure(reason, "附件上传失败，系统未写入。请检查格式后重试。"));
+      await runMutation(
+        () => uploadMaintenanceAcceptanceAttachment(projectId, { file }),
+        "附件上传失败，请刷新核对附件列表后重试。",
+      );
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -122,10 +151,10 @@ export default function MaintenanceAcceptancePanel({
     setBusy(true);
     setError(null);
     try {
-      await deleteMaintenanceAcceptanceAttachment(projectId, fileId);
-      await refreshAfterMutation();
-    } catch (reason: unknown) {
-      setError(readFailure(reason, "附件删除失败，请刷新后重试。"));
+      await runMutation(
+        () => deleteMaintenanceAcceptanceAttachment(projectId, fileId),
+        "附件删除失败，请刷新后重试。",
+      );
     } finally {
       setBusy(false);
     }
@@ -139,13 +168,13 @@ export default function MaintenanceAcceptancePanel({
     setBusy(true);
     setError(null);
     try {
-      await submitMaintenanceAcceptance(projectId, {
-        expected_version: record.version,
-        idempotencyKey: idempotencyKey("acceptance-submit"),
-      });
-      await refreshAfterMutation();
-    } catch (reason: unknown) {
-      setError(readFailure(reason, "验收报告提交失败，请刷新后重试。"));
+      await runMutation(
+        () => submitMaintenanceAcceptance(projectId, {
+          expected_version: record.version,
+          idempotencyKey: idempotencyKey("acceptance-submit"),
+        }),
+        "验收报告提交失败，请刷新后重试。",
+      );
     } finally {
       setBusy(false);
     }
@@ -196,6 +225,10 @@ export default function MaintenanceAcceptancePanel({
             >
               {attachment.original_filename}
             </Button>
+            {/* 2026-08-26 客户口径：附件旁显示上传人姓名（无实名账号回退用户名） */}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {attachment.uploaded_by_name || attachment.uploaded_by}
+            </Text>
             {canSubmitAcceptance && (
               <Popconfirm
                 title="删除该附件？"
@@ -232,7 +265,6 @@ export default function MaintenanceAcceptancePanel({
               ref={inputRef}
               hidden
               type="file"
-              accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg"
               aria-label="选择验收报告附件"
               onChange={(event) => void upload(event.target.files?.[0])}
             />
