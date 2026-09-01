@@ -893,6 +893,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             MaintenanceProjectAlias,
             MaintenanceProjectContract,
         )
+        from app.services import maintenance_demands
 
         by_contract = (
             select(MaintenanceProjectContract.project_id)
@@ -904,11 +905,36 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             .where(MaintenanceProjectAlias.alias_name
                    .icontains(needle, autoescape=True))
         )
+        active_assignment = and_(
+            MaintenanceSourceOrderAssignment.source_order_id
+            == FMaintenanceOrder.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        by_order_salesperson = (
+            select(MaintenanceSourceOrderAssignment.project_id)
+            .select_from(FMaintenanceOrder)
+            .join(MaintenanceSourceOrderAssignment, active_assignment)
+            .where(
+                FMaintenanceOrder.salesperson.icontains(
+                    needle, autoescape=True
+                ),
+                maintenance_demands.active_demand_condition(),
+            )
+        )
         filters.append(or_(
             MaintenanceProject.project_code.icontains(needle, autoescape=True),
             MaintenanceProject.display_name.icontains(needle, autoescape=True),
+            MaintenanceProject.salesperson.icontains(needle, autoescape=True),
             MaintenanceProject.project_id.in_(by_contract),
             MaintenanceProject.project_id.in_(by_alias),
+            and_(
+                MaintenanceProject.salesperson_override_active.is_(False),
+                or_(
+                    MaintenanceProject.salesperson.is_(None),
+                    MaintenanceProject.salesperson == "",
+                ),
+                MaintenanceProject.project_id.in_(by_order_salesperson),
+            ),
         ))
 
     # 窗口内的每项目计数/成本子查询：既用于 has_activity 过滤，也用于真实排序。

@@ -241,7 +241,7 @@ export function MaintenanceHomePage() {
           />
           <Input.Search
             allowClear
-            placeholder="搜项目名 / XSDD 单号"
+            placeholder="搜项目名 / XSDD 单号 / 销售姓名"
             style={{ width: 260 }}
             onSearch={setKeyword}
           />

@@ -283,6 +283,54 @@ def test_get_projects_with_q_rejects_and_search_works(db, tmp_path):
     assert [r["project_code"] for r in found["rows"]] == ["平安银行整体维保"]
 
 
+def test_project_search_matches_the_displayed_salesperson_source(db, tmp_path):
+    canonical = make_project(db, code="检索项目甲")
+    fallback = make_project(db, code="检索项目乙")
+    canonical_over_wbdd = make_project(db, code="检索项目丙")
+    manually_cleared = make_project(db, code="检索项目丁")
+
+    canonical.salesperson = "台账销售甲"
+    canonical_over_wbdd.salesperson = "台账销售丙"
+    canonical_over_wbdd.salesperson_override_active = True
+    manually_cleared.salesperson = None
+    manually_cleared.salesperson_override_active = True
+    db.commit()
+
+    orders = sorted(
+        import_wbdd(
+            db,
+            tmp_path,
+            project="仅作需求单来源",
+            orders=4,
+            lines_per_order=1,
+        ),
+        key=lambda order: order.raw_order_id,
+    )
+    projects = [canonical, fallback, canonical_over_wbdd, manually_cleared]
+    order_salespeople = ["旧销售甲", "需求销售乙", "旧销售丙", "旧销售丁"]
+    for order, project, salesperson in zip(
+        orders, projects, order_salespeople, strict=True
+    ):
+        order.salesperson = salesperson
+        assign(db, order, project)
+    db.commit()
+
+    client = boss_client(db)
+
+    def found_ids(q: str) -> list[str]:
+        response = client.post(
+            "/api/maintenance/boss-board/projects/search", json={"q": q}
+        )
+        assert response.status_code == 200, response.text
+        return [row["project_id"] for row in response.json()["rows"]]
+
+    assert found_ids("台账销售甲") == [canonical.project_id]
+    assert found_ids("需求销售乙") == [fallback.project_id]
+    # canonical 非空时不应再命中 WBDD 旧销售；人工显式清空也不回退旧值。
+    assert found_ids("旧销售丙") == []
+    assert found_ids("旧销售丁") == []
+
+
 def test_order_and_line_drilldown(db, tmp_path):
     proj = make_project(db)
     orders = import_wbdd(db, tmp_path, orders=1, lines_per_order=2)

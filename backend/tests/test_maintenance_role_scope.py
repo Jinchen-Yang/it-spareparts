@@ -173,9 +173,11 @@ def test_explicit_salesperson_clear_removes_sales_scope(db):
     )
 
 
-def test_boss_board_projects_scoped_by_row_key(db):
-    proj_a = _project(db, "板销售A项目", salesperson="销售A")
-    _project(db, "板销售B项目", salesperson="销售B")
+def test_boss_board_card_wall_scope_for_manager_and_scoped_accounts(db):
+    proj_a = _project(db, "板项目甲", salesperson="销售A")
+    proj_b = _project(db, "板项目乙", salesperson="销售B")
+
+    # 普通本人范围账号：GET/POST 都只能看到自己的销售项目。
     user = _user(db, "board-sales-a", salesperson_name="销售A", perms={
         "page_maintenance": True, "own_maintenance_projects_only": True})
     client = TestClient(app)
@@ -186,13 +188,58 @@ def test_boss_board_projects_scoped_by_row_key(db):
 
     body = client.get("/api/maintenance/boss-board/projects").json()
     names = [r["display_name"] for r in body["rows"]]
-    assert names == ["板销售A项目"]
+    assert names == ["板项目甲"]
     assert body["total"] == 1
+    scoped_search = client.post(
+        "/api/maintenance/boss-board/projects/search",
+        json={"q": "销售B"},
+    ).json()
+    assert scoped_search["rows"] == []
+    assert scoped_search["total"] == 0
     # 未归属桶不出现（无主数据不属于任何人）
     assert all(r["project_id"] != "unassigned" for r in body["rows"])
     # 需关注队列同样收敛：范围内没有需关注项目 → 空队列（不泄露他人项目）
     attention = client.get("/api/maintenance/boss-board/attention").json()
     assert attention["items"] == []
+
+    # 维保负责人只在卡片墙 GET/POST 获得全量核对能力；详情仍按原指派范围。
+    manager = _user(
+        db,
+        "board-maintenance-manager",
+        role="maintenance_manager",
+        perms={
+            "page_maintenance": True,
+            "own_maintenance_projects_only": True,
+            "data_purchase_cost": True,
+            "data_profit": True,
+        },
+    )
+    _assign_manager(db, proj_a, manager)
+    manager_client = TestClient(app)
+    login = manager_client.post(
+        "/api/auth/login",
+        json={"username": manager.username, "password": _PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    manager_client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+
+    manager_body = manager_client.get(
+        "/api/maintenance/boss-board/projects"
+    ).json()
+    assert {
+        row["project_id"] for row in manager_body["rows"]
+        if row["project_id"] != "unassigned"
+    } == {proj_a.project_id, proj_b.project_id}
+    manager_search = manager_client.post(
+        "/api/maintenance/boss-board/projects/search",
+        json={"q": "销售B"},
+    ).json()
+    assert [row["project_id"] for row in manager_search["rows"]] == [
+        proj_b.project_id
+    ]
+    assert manager_client.get(
+        f"/api/maintenance/boss-board/projects/{proj_b.project_id}"
+    ).status_code == 404
 
 
 def test_boss_board_full_scope_unchanged_without_row_key(db):

@@ -110,6 +110,11 @@ function CollectionBar({
   // 回款率的分母必须是完整、当前的合同事实。partial/stale 即使携带数值，
   // 也只能作为已知小计/过期参考展示，不能参与百分比计算。
   const contractNum = contract?.state === "ready" ? statNumber(contract) : null;
+  const receivableNum = collected?.state === "ready"
+    && contractNum !== null
+    && collectedNum !== null
+    ? contractNum - collectedNum
+    : null;
   if (collectedNum === null) {
     return (
       <div style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
@@ -144,6 +149,15 @@ function CollectionBar({
         </span>
         <span>{" / "}{contractDetail}</span>
       </div>
+      {receivableNum !== null ? (
+        <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.55)", marginBottom: 2 }}>
+          应收：
+          <span style={{ color: receivableNum < 0 ? "#fa8c16" : "#1677ff", fontWeight: 600 }}>
+            {receivableNum < 0 ? "-" : ""}¥{Math.abs(receivableNum).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}
+          </span>
+          {receivableNum < 0 ? "（超额回款）" : ""}
+        </div>
+      ) : null}
       {pct !== null && (
         <Progress
           percent={Math.min(pct, 100)}

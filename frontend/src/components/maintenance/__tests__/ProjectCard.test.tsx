@@ -90,6 +90,7 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(text).not.toContain("12.000");
     // 回款进度条：已回款 / 合同额（千分位）+ 百分比
     expect(text).toContain("¥30,000 / ¥100,000（30%）");
+    expect(text).toContain("应收：¥70,000");
     // 成本率条 + 回款条 = 2 条进度条
     expect(container.querySelectorAll(".ant-progress").length).toBe(2);
   });
@@ -101,6 +102,7 @@ describe("项目卡（#34/#35/#43）", () => {
     }));
     const text = container.textContent ?? "";
     expect(text).toContain("回款：无权限");
+    expect(text).not.toContain("应收：");
     // 只剩成本率一条进度条（回款条不画）
     expect(container.querySelectorAll(".ant-progress").length).toBe(1);
     expect(text).toContain("报销成本 无权限");
@@ -117,8 +119,16 @@ describe("项目卡（#34/#35/#43）", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("已知小计 ¥80,000（合同事实不完整）");
     expect(text).not.toContain("（38%）");
+    expect(text).not.toContain("应收：");
     // 只保留成本率进度条；不完整合同额不得生成回款进度条。
     expect(container.querySelectorAll(".ant-progress")).toHaveLength(1);
+  });
+
+  it("超额回款时如实显示负应收，不改写成 0", () => {
+    const { container } = renderCard(makeRow({
+      collection_preview_inc_tax: ready("110000.25"),
+    }));
+    expect(container.textContent).toContain("应收：-¥10,000.25（超额回款）");
   });
 
   it("完整合同额为 0 时明确展示真实零，不伪装成缺失", () => {

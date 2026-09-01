@@ -66,6 +66,13 @@ def _allowed_scope(db: Session, ctx: UserContext) -> set[str] | None:
     return maintenance_project_assignments.maintenance_scope_project_ids(db, ctx)
 
 
+def _project_card_scope(db: Session, ctx: UserContext) -> set[str] | None:
+    """维保负责人可在卡片墙核对全部项目；其余入口仍沿用本人范围。"""
+    if ctx.role == "maintenance_manager":
+        return None
+    return _allowed_scope(db, ctx)
+
+
 class ProjectSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -159,7 +166,7 @@ def board_projects(
             db, user_ctx=ctx, page=page, page_size=page_size, lifecycle=lifecycle,
             sort=sort, has_activity=has_activity, card_status_filter=card_status,
             date_from=date_from, date_to=date_to,
-            allowed_project_ids=_allowed_scope(db, ctx),
+            allowed_project_ids=_project_card_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:
         raise HTTPException(
@@ -191,7 +198,7 @@ def board_projects_search(
             db, user_ctx=ctx, page=payload.page, page_size=payload.page_size,
             lifecycle=payload.lifecycle, sort=payload.sort, q_text=payload.q,
             card_status_filter=payload.card_status,
-            allowed_project_ids=_allowed_scope(db, ctx),
+            allowed_project_ids=_project_card_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:
         raise HTTPException(

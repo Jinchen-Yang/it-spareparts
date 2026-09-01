@@ -150,7 +150,7 @@ describe("维保主页（项目卡墙）", () => {
   it("有关键字时改走搜索端点（GET 不接自由文本）", async () => {
     renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
-    const box = screen.getByPlaceholderText("搜项目名 / XSDD 单号");
+    const box = screen.getByPlaceholderText("搜项目名 / XSDD 单号 / 销售姓名");
     fireEvent.change(box, { target: { value: "XSDD-p2" } });
     fireEvent.keyDown(box, { key: "Enter", code: "Enter", keyCode: 13 });
     await waitFor(() => expect(searchBoardProjects).toHaveBeenCalled());
