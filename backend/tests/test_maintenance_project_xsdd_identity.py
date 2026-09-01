@@ -1,12 +1,12 @@
 """XSDD is the canonical maintenance-project identity (#56)."""
 
 import io
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.etl import loader
@@ -14,15 +14,18 @@ from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
+    MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
     MaintenanceProjectXsdd,
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectWorkbookOperation,
+    MaintenanceProjectWorkbookState,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_boss_board
@@ -147,6 +150,85 @@ def _ledger_bytes(*, order_no: str, project_name: str) -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _seed_mergeable_contract_conflict(db, *, suffix: str):
+    first = _project(db, f"merge-a-{suffix}", f"MERGE-A-{suffix}", "腾讯TCE名称")
+    second = _project(db, f"merge-b-{suffix}", f"MERGE-B-{suffix}", "腾讯预交付名称")
+    xsdd = f"20251017-{suffix}"
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    try:
+        current = MaintenanceProjectContract(
+            project_contract_id=f"merge-contract-current-{suffix}",
+            project_id=first.project_id,
+            contract_id=f"xsdd-XSDD-{xsdd}",
+            contract_no=f"XSDD-{xsdd}",
+            contract_amount=Decimal("1575471.70"),
+            amount_inc_tax=Decimal("1780283.02"),
+            contract_status="正常",
+            status_mapping_state="mapped",
+            status_mapping_version="merge-test-v1",
+            included_in_total=True,
+            effective_from=date(2025, 10, 16),
+            effective_to=None,
+            source="sales_fallback",
+            version=1,
+        )
+        historical = MaintenanceProjectContract(
+            project_contract_id=f"merge-contract-history-{suffix}",
+            project_id=second.project_id,
+            contract_id=f"xsdd-XSDD-{xsdd}",
+            contract_no=f"XSDD-{xsdd}",
+            contract_amount=Decimal("1575471.70"),
+            amount_inc_tax=Decimal("1670000.00"),
+            contract_status="正常",
+            status_mapping_state="mapped",
+            status_mapping_version="merge-test-v1",
+            included_in_total=True,
+            effective_from=date(2025, 10, 16),
+            effective_to=None,
+            source="sales_fallback",
+            version=2,
+        )
+        db.add_all([current, historical])
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    survivor = MaintenanceCollectionSnapshot(
+        collection_id=f"merge-collection-current-{suffix}",
+        project_id=first.project_id,
+        project_contract_id=current.project_contract_id,
+        report_month=date(2026, 6, 1),
+        cumulative_amount=Decimal("82325.40"),
+        status="confirmed",
+        receipt_reference="SKD-20260630-0007",
+        remark=None,
+        source="direct_api",
+        import_batch_id=None,
+        version=1,
+    )
+    duplicate = MaintenanceCollectionSnapshot(
+        collection_id=f"merge-collection-history-{suffix}",
+        project_id=second.project_id,
+        project_contract_id=historical.project_contract_id,
+        report_month=date(2026, 6, 1),
+        cumulative_amount=Decimal("82325.40"),
+        status="confirmed",
+        receipt_reference="SKD-20260630-0007",
+        remark=None,
+        source="direct_api",
+        import_batch_id=None,
+        version=9,
+    )
+    db.add_all([survivor, duplicate])
+    db.commit()
+    return first, second, current, historical, survivor, duplicate, xsdd
 
 
 def test_auto_assign_groups_same_xsdd_and_retains_names_as_aliases(db):
@@ -561,3 +643,380 @@ def test_preview_marks_only_full_business_duplicates_for_deletion(db):
         == "xsdd-preview-collection-operation"
     ))
     assert operation.entity_id == "xsdd-preview-collection-a"
+
+
+def test_reviewed_merge_preserves_contracts_and_archives_source_container(db):
+    (
+        canonical,
+        source,
+        current,
+        historical,
+        survivor,
+        duplicate,
+        xsdd,
+    ) = _seed_mergeable_contract_conflict(db, suffix="9101")
+    preview = maintenance_project_identity.preview_historical_conflicts(db)
+    conflict = next(
+        row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
+    )
+    assert conflict["canonical_project_id"] == canonical.project_id
+    assert conflict["requires_human_decision"] is False
+
+    result = maintenance_project_identity.apply_historical_project_merge(
+        db,
+        xsdd=xsdd,
+        expected_manifest_hash=conflict["manifest_hash"],
+        expected_canonical_project_id=canonical.project_id,
+        expected_member_project_ids=[canonical.project_id, source.project_id],
+        operated_by="xsdd-admin",
+        contract_resolution={
+            "current_project_contract_id": current.project_contract_id,
+            "archive_contracts": [{
+                "project_contract_id": historical.project_contract_id,
+                "effective_to": "2026-09-01",
+            }],
+            "collection_contract_repoints": [{
+                "collection_id": survivor.collection_id,
+                "target_project_contract_id": current.project_contract_id,
+            }],
+        },
+    )
+    db.commit()
+
+    assert result["canonical_project_id"] == canonical.project_id
+    assert result["source_project_ids"] == [source.project_id]
+    assert result["deleted_exact_collections"][0]["collection_id"] == duplicate.collection_id
+    source_after = db.get(MaintenanceProject, source.project_id)
+    assert source_after is not None and source_after.is_active is False
+    contracts = list(db.scalars(
+        select(MaintenanceProjectContract)
+        .where(MaintenanceProjectContract.project_id == canonical.project_id)
+        .order_by(MaintenanceProjectContract.amount_inc_tax)
+    ))
+    assert len(contracts) == 2
+    current_after = db.get(MaintenanceProjectContract, current.project_contract_id)
+    historical_after = db.get(
+        MaintenanceProjectContract,
+        historical.project_contract_id,
+    )
+    assert current_after.contract_no == f"XSDD-{xsdd}"
+    assert current_after.amount_inc_tax == Decimal("1780283.02")
+    assert current_after.included_in_total is True
+    assert current_after.effective_to is None
+    assert historical_after.contract_no == f"XSDD-{xsdd}"
+    assert historical_after.amount_inc_tax == Decimal("1670000.00")
+    assert historical_after.included_in_total is False
+    assert historical_after.effective_to == date(2026, 9, 1)
+    assert historical_after.contract_id != current_after.contract_id
+    assert db.get(MaintenanceCollectionSnapshot, duplicate.collection_id) is None
+    survivor_after = db.get(MaintenanceCollectionSnapshot, survivor.collection_id)
+    assert survivor_after.project_id == canonical.project_id
+    assert survivor_after.project_contract_id == current.project_contract_id
+    assert db.get(MaintenanceProjectXsdd, xsdd).project_id == canonical.project_id
+    aliases = set(db.scalars(select(MaintenanceProjectAlias.alias_name).where(
+        MaintenanceProjectAlias.project_id == canonical.project_id
+    )))
+    assert aliases >= {canonical.display_name, source.display_name}
+    audit = db.scalar(
+        select(MaintenanceProjectAuditLog)
+        .where(MaintenanceProjectAuditLog.action == "xsdd_container_merge")
+        .order_by(MaintenanceProjectAuditLog.id.desc())
+    )
+    assert audit is not None
+    assert audit.after_json["manifest_hash"] == conflict["manifest_hash"]
+
+
+def test_merge_uses_real_immutable_generations_and_preserves_permissions(db):
+    (
+        canonical,
+        source,
+        current,
+        historical,
+        survivor,
+        _duplicate,
+        xsdd,
+    ) = _seed_mergeable_contract_conflict(db, suffix="9103")
+
+    # Seed a legacy split without disabling either immutable-history trigger.
+    # The order receives its XSDD only after the historical generations exist;
+    # the merge itself must then pass the real XSDD claim trigger when it
+    # creates the canonical generation.
+    raw_order_id = "WBDD-MERGE-9103"
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=None,
+        batch_key="merge-generations-9103",
+    )
+    active_order_assignment = MaintenanceSourceOrderAssignment(
+        assignment_id="merge-order-active-9103",
+        source_order_id=raw_order_id,
+        project_id=source.project_id,
+        is_active=True,
+        version=1,
+        created_by="legacy-import",
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    archived_order_assignment = MaintenanceSourceOrderAssignment(
+        assignment_id="merge-order-archived-9103",
+        source_order_id=raw_order_id,
+        project_id=source.project_id,
+        is_active=False,
+        version=3,
+        created_by="legacy-import",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        archived_by="legacy-admin",
+        archived_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
+    )
+    db.add_all([active_order_assignment, archived_order_assignment])
+    db.flush()
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == raw_order_id
+    ))
+    # Only this guard is paused to manufacture the legacy split.  The merge
+    # below executes with the order/assignment XSDD guards and both immutable
+    # history triggers enabled.
+    db.execute(text(
+        "ALTER TABLE f_maintenance_order DISABLE TRIGGER "
+        "trg_maintenance_order_claim_xsdd"
+    ))
+    try:
+        order.linked_sales_order_no = f"XSDD-{xsdd}"
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE f_maintenance_order ENABLE TRIGGER "
+            "trg_maintenance_order_claim_xsdd"
+        ))
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm=xsdd,
+        project_id=canonical.project_id,
+        source="reviewed_legacy_owner",
+    ))
+
+    users = [
+        SysUser(
+            id=91031,
+            username="merge-user-primary-9103",
+            password_hash="not-a-login-secret",
+            role="maintenance_manager",
+            is_active=True,
+        ),
+        SysUser(
+            id=91032,
+            username="merge-user-viewer-9103",
+            password_hash="not-a-login-secret",
+            role="readonly",
+            is_active=True,
+        ),
+    ]
+    db.add_all(users)
+    db.flush()
+    source_user_assignments = [
+        MaintenanceProjectUserAssignment(
+            assignment_id="merge-user-primary-assignment-9103",
+            project_id=source.project_id,
+            responsibility_type="primary_manager",
+            user_id=users[0].id,
+            source_manager_text="原负责人",
+            version=1,
+            assigned_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            assigned_by="legacy-admin",
+            assignment_reason="历史负责人",
+        ),
+        MaintenanceProjectUserAssignment(
+            assignment_id="merge-user-viewer-primary-9103",
+            project_id=source.project_id,
+            responsibility_type="viewer",
+            user_id=users[0].id,
+            source_manager_text="原负责人兼查看人",
+            version=1,
+            assigned_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            assigned_by="legacy-admin",
+            assignment_reason="历史查看权限",
+        ),
+        MaintenanceProjectUserAssignment(
+            assignment_id="merge-user-viewer-9103",
+            project_id=source.project_id,
+            responsibility_type="viewer",
+            user_id=users[1].id,
+            source_manager_text="原查看人",
+            version=1,
+            assigned_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            assigned_by="legacy-admin",
+            assignment_reason="历史查看权限",
+        ),
+    ]
+    db.add_all(source_user_assignments)
+    source_state = operations.get_or_create_workbook_state(
+        db,
+        project_id=source.project_id,
+    )
+    source_state.revision = 7
+    source_state.data_version = "source-state-before-merge"
+    provenance_audit = MaintenanceProjectAuditLog(
+        project_id=source.project_id,
+        entity_type="project",
+        entity_id=source.project_id,
+        action="legacy_provenance",
+        before_json=None,
+        after_json={"marker": "must-stay-on-source"},
+        reason="验证历史审计保留在 source 容器",
+        operated_by="legacy-admin",
+    )
+    db.add(provenance_audit)
+    db.commit()
+    provenance_audit_id = provenance_audit.id
+
+    preview = maintenance_project_identity.preview_historical_conflicts(db)
+    conflict = next(
+        row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
+    )
+    source_user_assignment_ids = sorted(
+        row.assignment_id for row in source_user_assignments
+    )
+    result = maintenance_project_identity.apply_historical_project_merge(
+        db,
+        xsdd=xsdd,
+        expected_manifest_hash=conflict["manifest_hash"],
+        expected_canonical_project_id=canonical.project_id,
+        expected_member_project_ids=[canonical.project_id, source.project_id],
+        operated_by="xsdd-admin",
+        contract_resolution={
+            "current_project_contract_id": current.project_contract_id,
+            "archive_contracts": [{
+                "project_contract_id": historical.project_contract_id,
+                "effective_to": "2026-09-01",
+            }],
+            "collection_contract_repoints": [{
+                "collection_id": survivor.collection_id,
+                "target_project_contract_id": current.project_contract_id,
+            }],
+        },
+        user_assignment_resolution={
+            "keep_assignment_ids": [],
+            "archive_assignment_ids": source_user_assignment_ids,
+            "create_on_canonical": [
+                {
+                    "source_assignment_id": row.assignment_id,
+                    "responsibility_type": row.responsibility_type,
+                    "user_id": row.user_id,
+                }
+                for row in source_user_assignments
+            ],
+        },
+    )
+    db.commit()
+
+    active_after = db.get(
+        MaintenanceSourceOrderAssignment,
+        active_order_assignment.assignment_id,
+    )
+    archived_after = db.get(
+        MaintenanceSourceOrderAssignment,
+        archived_order_assignment.assignment_id,
+    )
+    assert active_after.project_id == source.project_id
+    assert active_after.is_active is False
+    assert active_after.version == 2
+    assert active_after.archived_by == "xsdd-admin"
+    assert archived_after.project_id == source.project_id
+    assert archived_after.is_active is False
+    assert archived_after.version == 3
+    canonical_order_generations = list(db.scalars(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id == raw_order_id,
+            MaintenanceSourceOrderAssignment.project_id == canonical.project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ))
+    assert len(canonical_order_generations) == 1
+    assert canonical_order_generations[0].version == 1
+    assert canonical_order_generations[0].assignment_id != active_after.assignment_id
+
+    archived_user_rows = list(db.scalars(
+        select(MaintenanceProjectUserAssignment)
+        .where(MaintenanceProjectUserAssignment.assignment_id.in_(
+            source_user_assignment_ids
+        ))
+        .order_by(MaintenanceProjectUserAssignment.assignment_id)
+    ))
+    assert all(row.project_id == source.project_id for row in archived_user_rows)
+    assert all(row.archived_at is not None for row in archived_user_rows)
+    assert all(row.version == 2 for row in archived_user_rows)
+    canonical_users = list(db.scalars(
+        select(MaintenanceProjectUserAssignment).where(
+            MaintenanceProjectUserAssignment.project_id == canonical.project_id,
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+    ))
+    assert {
+        (row.responsibility_type, row.user_id) for row in canonical_users
+    } == {
+        ("primary_manager", users[0].id),
+        ("viewer", users[0].id),
+        ("viewer", users[1].id),
+    }
+    assert all(row.version == 1 for row in canonical_users)
+    assert not ({row.assignment_id for row in canonical_users} & set(
+        source_user_assignment_ids
+    ))
+
+    assert db.get(MaintenanceProjectAuditLog, provenance_audit_id).project_id == source.project_id
+    assert db.get(
+        MaintenanceProjectWorkbookState,
+        source.project_id,
+    ).revision == 7
+    assert db.get(
+        MaintenanceProjectWorkbookState,
+        canonical.project_id,
+    ).revision == 1
+    assert db.get(MaintenanceProjectXsdd, xsdd).project_id == canonical.project_id
+    assert result["source_order_assignment_resolution"][
+        "created_canonical_generations"
+    ][0]["source_assignment_id"] == active_order_assignment.assignment_id
+
+
+def test_merge_rejects_stale_manifest_before_any_write(db):
+    canonical, source, current, historical, survivor, _duplicate, xsdd = (
+        _seed_mergeable_contract_conflict(db, suffix="9102")
+    )
+    preview = maintenance_project_identity.preview_historical_conflicts(db)
+    conflict = next(
+        row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
+    )
+    source.display_name = "并发修改后的名称"
+    source.version += 1
+    db.commit()
+
+    with pytest.raises(
+        maintenance_project_identity.XsddProjectMergeConflict,
+        match="manifest 已漂移",
+    ):
+        maintenance_project_identity.apply_historical_project_merge(
+            db,
+            xsdd=xsdd,
+            expected_manifest_hash=conflict["manifest_hash"],
+            expected_canonical_project_id=canonical.project_id,
+            expected_member_project_ids=[canonical.project_id, source.project_id],
+            operated_by="xsdd-admin",
+            contract_resolution={
+                "current_project_contract_id": current.project_contract_id,
+                "archive_contracts": [{
+                    "project_contract_id": historical.project_contract_id,
+                    "effective_to": "2026-09-01",
+                }],
+                "collection_contract_repoints": [{
+                    "collection_id": survivor.collection_id,
+                    "target_project_contract_id": current.project_contract_id,
+                }],
+            },
+        )
+    db.rollback()
+
+    assert db.get(MaintenanceProject, source.project_id).is_active is True
+    assert db.get(MaintenanceProjectContract, historical.project_contract_id).project_id == source.project_id
+    assert db.get(MaintenanceProjectXsdd, xsdd) is None
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectAuditLog).where(
+        MaintenanceProjectAuditLog.action == "xsdd_container_merge"
+    )) == 0

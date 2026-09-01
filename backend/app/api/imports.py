@@ -159,7 +159,14 @@ def upload(
         maintenance_recompute_stats = None
         try:
             # 审计：登录身份(token sub，RBAC 开启时即用户名)落 batch.uploaded_by → 每条数据可追溯到人。
-            batch = pipeline.run_import(db, tmp, name, uploaded_by=ctx.user_id, mode=mode)
+            batch = pipeline.run_import(
+                db,
+                tmp,
+                name,
+                uploaded_by=ctx.user_id,
+                mode=mode,
+                auto_assign_maintenance_projects=True,
+            )
             try:
                 maintenance_recompute_stats = _maintenance_recompute_in_import_transaction(
                     db, batch.file_type,
@@ -346,8 +353,15 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
     try:
         for tmp, name in files:
             try:
-                batch = pipeline.run_import(db, tmp, name, uploaded_by=created_by,
-                                            mode=mode, import_job_id=job_id)
+                batch = pipeline.run_import(
+                    db,
+                    tmp,
+                    name,
+                    uploaded_by=created_by,
+                    mode=mode,
+                    import_job_id=job_id,
+                    auto_assign_maintenance_projects=True,
+                )
                 _maintenance_recompute_in_import_transaction(db, batch.file_type)
                 db.commit()
                 done += 1

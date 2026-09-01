@@ -305,7 +305,12 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     layout = precheck_wbdd_file(file_path)  # 零写入门：非 WBDD / 布局不符在此拒绝
 
     batch = pipeline.run_import(
-        db, file_path, original_name, uploaded_by=operator, mode="upsert"
+        db,
+        file_path,
+        original_name,
+        uploaded_by=operator,
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
     )
     report_counts = dict(batch.report_json or {})
 

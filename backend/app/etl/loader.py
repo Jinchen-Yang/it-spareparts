@@ -12,6 +12,7 @@
 追溯与合并回滚归属判定的前提；商品身份只体现在 part_id。
 """
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -28,6 +29,10 @@ from app.models.maintenance import (
     FMaintenanceOrder,
     FProjectExpense,
     MaintenanceContractWorkbookState,
+)
+from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectWorkbookState,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -91,6 +96,15 @@ class ImportIntegrityError(ValueError):
 
 class WorkbookInvalidationConflictError(ImportConcurrencyConflict):
     """写后复核发现归属项目超出 upsert 前的预锁集合——fail closed，整批回滚。"""
+
+
+@dataclass
+class MaintenanceImportLockEnvelope:
+    """WBDD 导入前预锁的自动归属目标；load 后只允许复用，不得补锁。"""
+
+    target_project_ids: set[str]
+    states: dict[str, MaintenanceProjectWorkbookState] = field(default_factory=dict)
+    projects: dict[str, MaintenanceProject] = field(default_factory=dict)
 
 
 def _probe_assigned_project_ids(session: Session,
@@ -468,12 +482,21 @@ _MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
 
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
          mode: str = "skip", operated_by: str | None = None,
-         audit_overwrites: bool = False) -> dict:
+         audit_overwrites: bool = False,
+         maintenance_lock_envelope: MaintenanceImportLockEnvelope | None = None) -> dict:
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date,
                                operated_by, audit_overwrites)
     if result.file_type == mapping.MAINTENANCE:
-        return _load_maintenance(session, result, batch_id, mode, operated_by, audit_overwrites)
+        return _load_maintenance(
+            session,
+            result,
+            batch_id,
+            mode,
+            operated_by,
+            audit_overwrites,
+            maintenance_lock_envelope,
+        )
     if result.file_type == mapping.EXPENSE:
         return _load_expense(session, result, batch_id, mode, operated_by, audit_overwrites)
     return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
@@ -683,7 +706,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
 
 def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
                       mode: str = "skip", operated_by: str | None = None,
-                      audit_overwrites: bool = False) -> dict:
+                      audit_overwrites: bool = False,
+                      lock_envelope: MaintenanceImportLockEnvelope | None = None) -> dict:
     """维保出库（WBDD）入库：与订单路径同套路——商品身份解析 + 客户维度 + 头/行幂等 upsert。
 
     成本回填字段不在 upsert 白名单内（maintenance_cost.recompute 专属），重导不冲成本。
@@ -713,7 +737,37 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         {o["raw_order_id"] for o in result.orders.values()}
         | set(previous_line_order_raw.values())
     )
-    prelocked_states = _prelock_workbook_states(session, source_order_ids)
+    current_project_ids = _probe_assigned_project_ids(session, source_order_ids)
+    target_project_ids = set(
+        lock_envelope.target_project_ids if lock_envelope is not None else ()
+    )
+    prelocked_states = _project_ops.lock_workbook_states(
+        session,
+        project_ids=current_project_ids | target_project_ids,
+    )
+    if lock_envelope is not None:
+        # 自动归属的既有目标也必须在事实行之前按 canonical 顺序锁住。
+        # load 后的 apply 只能复用本信封，发现目标逃逸即整批 409 回滚。
+        # PostgreSQL 不承诺一条 ``WHERE id IN (...) ORDER BY id FOR UPDATE``
+        # 的实际加锁顺序；与 state 工具一致，逐 ID 获取项目锁，固定并发顺序。
+        locked_projects = []
+        for project_id in sorted(target_project_ids):
+            project = session.scalar(
+                select(MaintenanceProject)
+                .where(MaintenanceProject.project_id == project_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if project is not None:
+                locked_projects.append(project)
+        lock_envelope.states = {
+            project_id: prelocked_states[project_id]
+            for project_id in target_project_ids
+            if project_id in prelocked_states
+        }
+        lock_envelope.projects = {
+            project.project_id: project for project in locked_projects
+        }
     # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
     _upsert_aliases(session, result.lines, resolution)

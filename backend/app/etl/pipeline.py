@@ -221,7 +221,8 @@ def _archive(src_path: str, file_hash: str) -> str:
 
 def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
-               import_job_id: int | None = None) -> SysImportBatch:
+               import_job_id: int | None = None,
+               auto_assign_maintenance_projects: bool = False) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
@@ -358,8 +359,50 @@ def run_import(session: Session, file_path: str, original_name: str,
                 f"修复模式（以本表为准）要求报销页无错误行：发现 {len(result.errors)} 行错误"
                 "（详见批次错误明细），本次未导入。请修正后重试，或改用「跳过」模式仅补新行。")
 
-        counts = loader.load(session, result, batch.id, snapshot, mode=mode,
-                             operated_by=uploaded_by, audit_overwrites=True)
+        maintenance_lock_envelope = None
+        assignment_service = None
+        warehouse_service = None
+        if auto_assign_maintenance_projects and result.file_type == mapping.MAINTENANCE:
+            # 身份锁与所有可能既有目标必须早于 WBDD 事实行锁；load 后只能
+            # 在此信封内 apply，禁止 order/line → workbook_state 反序。
+            from app.services import maintenance_source_assignments as assignment_service
+            from app.services import maintenance_warehouse as warehouse_service
+
+            target_project_ids = assignment_service.prelock_import_assignment_targets(
+                session,
+                order_heads=result.orders.values(),
+            )
+            maintenance_lock_envelope = loader.MaintenanceImportLockEnvelope(
+                target_project_ids=set(target_project_ids)
+            )
+
+        counts = loader.load(
+            session,
+            result,
+            batch.id,
+            snapshot,
+            mode=mode,
+            operated_by=uploaded_by,
+            audit_overwrites=True,
+            maintenance_lock_envelope=maintenance_lock_envelope,
+        )
+        auto_assignment = None
+        if maintenance_lock_envelope is not None and assignment_service is not None:
+            try:
+                auto_assignment = assignment_service.auto_assign_imported_orders(
+                    session,
+                    operated_by=uploaded_by or "system",
+                    source_order_ids=set(result.orders),
+                    prelocked_states=maintenance_lock_envelope.states,
+                    prelocked_projects=maintenance_lock_envelope.projects,
+                )
+            except (
+                assignment_service.SourceAssignmentConflict,
+                warehouse_service.MaintenanceWarehouseConflict,
+            ) as exc:
+                raise loader.ImportConcurrencyConflict(
+                    "WBDD 自动归属在导入期间发生变化，请重试"
+                ) from exc
         detection = data_quality_amount_mismatch.detect_imported_lines(
             session,
             file_type=result.file_type,
@@ -378,6 +421,8 @@ def run_import(session: Session, file_path: str, original_name: str,
                       {"row_no": e.row_no, "error_type": e.error_type, "detail": e.error_detail}
                       for e in result.errors[:10]
                   ]}
+        if auto_assignment is not None:
+            report["auto_assignment"] = auto_assignment
         batch.rows_total = counts["source_rows_total"]
         batch.rows_inserted = counts["fact_rows_inserted"]
         batch.rows_skipped = counts["fact_rows_skipped"]
