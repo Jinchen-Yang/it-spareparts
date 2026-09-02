@@ -1149,7 +1149,7 @@ def _auto_assign_unassigned_core(
 
     销售订单/合同是项目归属的唯一事实来源：
     - 有效 XSDD → 只挂销售合同建立的 contract-backed owner，无合同 owner
-      fail closed（系统投影跳过待处理；人工全局按钮直接冲突报错）；
+      一律跳过并保持待处理；
     - 无 XSDD 或非法 XSDD → 一律跳过保持待处理，绝不按名称匹配已有项目，
       也绝不新建 AUTO 项目（项目名只是展示 alias，不是归属依据）。
 
@@ -1273,10 +1273,6 @@ def _auto_assign_unassigned_core(
                     raise SourceAssignmentConflict(str(exc)) from exc
                 ambiguous_groups.add(key)
                 continue
-            if resolved is None and not system_projection:
-                raise SourceAssignmentConflict(
-                    f"XSDD {key[1]} 尚无销售合同 owner，自动补挂不能建项目"
-                )
             if resolved is not None and db.scalar(
                 select(MaintenanceProject.project_id).where(
                     MaintenanceProject.project_id == resolved,
@@ -1288,7 +1284,7 @@ def _auto_assign_unassigned_core(
                 ambiguous_groups.add(key)
                 continue
         if resolved is None:
-            # 无/非法 XSDD，或（仅系统投影）XSDD 尚无合同 owner：跳过待处理。
+            # 无/非法 XSDD，或 XSDD 尚无合同 owner：跳过待处理。
             pending_owner_groups.add(key)
         else:
             planned_existing[key] = resolved
@@ -1521,7 +1517,8 @@ def auto_assign_unassigned(
     user_ctx: UserContext,
 ) -> dict:
     """人工全局补挂靠：只挂销售合同 XSDD owner；权限、全库扫描和存量 owner
-    回填语义保持不变。无/非法 XSDD 一律跳过待处理，绝不按名称匹配或建项。"""
+    回填语义保持不变。无/非法 XSDD 及尚无合同 owner 的合法 XSDD 一律
+    跳过待处理，绝不按名称匹配或建项。"""
     _require_full_scope(user_ctx)
     return _auto_assign_unassigned_core(db, operated_by=operated_by)
 

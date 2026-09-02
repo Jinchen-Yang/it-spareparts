@@ -390,6 +390,10 @@ def resolve_contract_xsdd_owner(db: Session, value: str | None) -> str | None:
         raise XsddProjectConflict(
             f"XSDD {value} 的映射与销售合同 owner 冲突"
         )
+    if mapped is not None and owner is None:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 canonical 映射、没有销售合同 owner，需先修复"
+        )
     if owner is None and assignment_ids:
         raise XsddProjectConflict(
             f"XSDD {value} 只有 WBDD 归属、没有销售合同 owner，需先修复"

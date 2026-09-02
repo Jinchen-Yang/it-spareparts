@@ -26,6 +26,7 @@ from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
     MaintenanceProjectUserAssignment,
+    MaintenanceProjectXsdd,
 )
 from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
@@ -469,6 +470,73 @@ def test_auto_assign_skips_missing_or_invalid_xsdd_without_creating(db):
     ).first() is None
     # 零写：同名项目没有被挂靠改变，revision 不动
     assert _revision(db, existing.project_id) == 0
+
+
+def test_global_auto_assign_keeps_ownerless_xsdd_pending_without_blocking(db):
+    """WBDD-first 保持 pending；非法 map 跳过；两者都不拖累正常组。"""
+
+    project = _contract_owner_project(
+        db,
+        project_id="occ-mixed-owner",
+        code="OCC-MIXED-OWNER",
+        name="OCC已有销售合同项目",
+        xsdd="20260826-0003",
+    )
+    owned = _load_orders(
+        db,
+        project="OCC可挂靠组",
+        sales_order="XSDD-20260826-0003",
+    )[0]
+    pending = _load_orders(
+        db,
+        project="OCC待销售合同组",
+        sales_order="XSDD-20260826-0004",
+    )[0]
+    map_only_project = MaintenanceProject(
+        project_id="occ-mixed-map-only",
+        project_code="OCC-MIXED-MAP-ONLY",
+        display_name="OCC非法仅映射项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(map_only_project)
+    db.flush()
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20260826-0005",
+        project_id=map_only_project.project_id,
+        source="test-map-only",
+    ))
+    db.commit()
+    map_only = _load_orders(
+        db,
+        project="OCC非法仅映射组",
+        sales_order="XSDD-20260826-0005",
+    )[0]
+
+    result = sa.auto_assign_unassigned(
+        db, operated_by="occ-admin", user_ctx=_admin_ctx()
+    )
+    db.commit()
+
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == owned.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert assignment is not None and assignment.project_id == project.project_id
+    assert db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == pending.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )) is None
+    assert db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == map_only.raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    )) is None
+    assert result["assigned_orders"] == 1
+    assert result["matched_projects"] == 1
+    assert result["created_projects"] == 0
+    assert result["skipped_groups"] == 1
+    assert result["skipped_ambiguous"] == 1
+    assert result["pending_owner_order_ids"] == [pending.raw_order_id]
+    assert result["skipped_order_ids"] == [map_only.raw_order_id]
 
 
 def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
