@@ -1930,6 +1930,26 @@ def _apply_locked_project_merge(
         ))
     db.flush()
 
+    # Source WBDD generations are now archived, so the reviewed canonical
+    # project is the sole active WBDD owner.  Claim the missing map before
+    # staging a source contract: the database contract-removal guard requires
+    # that map to prove the surviving owner during the intermediate state.
+    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+    if mapped is None:
+        mapped = MaintenanceProjectXsdd(
+            xsdd_norm=xsdd_norm,
+            project_id=canonical_id,
+            source="xsdd_container_merge",
+        )
+        db.add(mapped)
+    elif mapped.project_id != canonical_id:
+        raise XsddProjectMergeConflict(
+            "归并中的 XSDD mapping 与已验证 canonical owner 冲突"
+        )
+    else:
+        mapped.source = "xsdd_container_merge"
+    db.flush()
+
     contracts = list(db.scalars(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_id.in_(member_ids))
@@ -2044,26 +2064,6 @@ def _apply_locked_project_merge(
             )
             .values(contract_no=contract_no)
         )
-    # The current source generations are already archived and every contract
-    # now belongs to the reviewed canonical container.  Establish the missing
-    # identity map before inserting replacement generations; the database
-    # assignment guard can therefore verify, rather than guess, their owner.
-    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
-    if mapped is None:
-        mapped = MaintenanceProjectXsdd(
-            xsdd_norm=xsdd_norm,
-            project_id=canonical_id,
-            source="xsdd_container_merge",
-        )
-        db.add(mapped)
-    elif mapped.project_id != canonical_id:
-        raise XsddProjectMergeConflict(
-            "归并中的 XSDD mapping 与已验证 canonical owner 冲突"
-        )
-    else:
-        mapped.source = "xsdd_container_merge"
-    db.flush()
-
     created_source_assignments: list[dict] = []
     for archived in active_source_assignments:
         assignment = MaintenanceSourceOrderAssignment(
