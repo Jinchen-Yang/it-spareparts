@@ -12,7 +12,7 @@ from app.db import engine
 _ROOT = Path(__file__).resolve().parents[1]
 _REVISION = "b4c8d2e6f1a3"
 _PREVIOUS = "f1b3d5e7a9c2"
-_HEAD = "a7c2e9f4b1d6"
+_HEAD = "b8d4f6a2c9e1"
 
 
 def _load_migration():

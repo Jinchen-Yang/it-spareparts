@@ -12,7 +12,7 @@ from app.db import engine
 _ROOT = Path(__file__).resolve().parents[1]
 _REVISION = "f6b1d3e8a2c4"
 _PREVIOUS = "e4a8c2f6b1d9"
-_HEAD = "a7c2e9f4b1d6"
+_HEAD = "b8d4f6a2c9e1"
 
 
 def test_salesperson_override_revision_is_linear_single_head():
