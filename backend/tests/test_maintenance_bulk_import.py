@@ -834,8 +834,11 @@ def test_ordinary_sales_upload_creates_one_xsdd_project_and_retains_peer_names(
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 2
 
 
-def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
+def test_sales_upload_auto_merges_contract_wbdd_split_without_map(
+    db, tmp_path, monkeypatch
+):
     xsdd = "20260902-0030"
+    lower_xsdd = "20260902-0029"
     wbdd_id = "sales-auto-merge-wbdd"
     wbdd_path = _ordinary_wbdd_workbook(
         tmp_path,
@@ -872,20 +875,39 @@ def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
         "trg_maintenance_assignment_claim_xsdd"
     ))
     try:
-        db.add(MaintenanceProjectContract(
-            project_contract_id="sales-auto-merge-contract",
-            project_id=contract_owner.project_id,
-            contract_id="sales-auto-merge-contract-id",
-            contract_no=f"XSDD-{xsdd}",
-            amount_inc_tax=Decimal("113.00"),
-            contract_status="已生效",
-            status_mapping_state="mapped",
-            status_mapping_version="test-v1",
-            included_in_total=True,
-            effective_from=date(2026, 1, 1),
-            source="historical-fixture",
-            version=1,
-        ))
+        db.add_all([
+            MaintenanceProjectContract(
+                project_contract_id="sales-auto-merge-contract",
+                project_id=contract_owner.project_id,
+                contract_id="sales-auto-merge-contract-id",
+                contract_no=f"XSDD-{xsdd}",
+                amount_inc_tax=Decimal("113.00"),
+                contract_status="已生效",
+                status_mapping_state="mapped",
+                status_mapping_version="test-v1",
+                included_in_total=True,
+                effective_from=date(2026, 1, 1),
+                source="historical-fixture",
+                version=1,
+            ),
+            # The source container owns another lower-sorted XSDD.  Sales
+            # auto-merge must include it in the first lock acquisition rather
+            # than first taking ``xsdd`` and expanding the envelope later.
+            MaintenanceProjectContract(
+                project_contract_id="sales-auto-merge-lower-contract",
+                project_id=wbdd_owner.project_id,
+                contract_id="sales-auto-merge-lower-contract-id",
+                contract_no=f"XSDD-{lower_xsdd}",
+                amount_inc_tax=Decimal("226.00"),
+                contract_status="已生效",
+                status_mapping_state="mapped",
+                status_mapping_version="test-v1",
+                included_in_total=True,
+                effective_from=date(2026, 1, 1),
+                source="historical-fixture",
+                version=1,
+            ),
+        ])
         db.add(MaintenanceSourceOrderAssignment(
             assignment_id="sales-auto-merge-assignment",
             source_order_id=wbdd_id,
@@ -907,6 +929,24 @@ def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
     db.commit()
     assert db.get(MaintenanceProjectXsdd, xsdd) is None
 
+    lock_calls: list[list[str]] = []
+    original_lock = maintenance_project_identity.lock_xsdd_identities
+
+    def capture_lock(session, values):
+        normalized = sorted({
+            identity
+            for value in values
+            if (identity := maintenance_project_identity.normalize_xsdd(value))
+        })
+        lock_calls.append(normalized)
+        return original_lock(session, values)
+
+    monkeypatch.setattr(
+        maintenance_project_identity,
+        "lock_xsdd_identities",
+        capture_lock,
+    )
+
     sales_path = _ordinary_sales_workbook(
         tmp_path,
         order_no=f"XSDD-{xsdd}",
@@ -926,6 +966,7 @@ def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
     mapping = db.get(MaintenanceProjectXsdd, xsdd)
     assert mapping is not None
     assert mapping.project_id == contract_owner.project_id
+    assert lock_calls[0] == [lower_xsdd, xsdd]
     assert db.get(MaintenanceProject, wbdd_owner.project_id).is_active is False
     current_assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
         MaintenanceSourceOrderAssignment.source_order_id == wbdd_id,

@@ -2297,6 +2297,7 @@ def apply_historical_project_merge_batch(
     *,
     plans: list[dict],
     operated_by: str,
+    _prelocked_xsdd_identities: set[str] | None = None,
 ) -> dict:
     """Atomically CAS-check, then merge a reviewed set of disjoint XSDDs.
 
@@ -2365,7 +2366,22 @@ def apply_historical_project_merge_batch(
         db,
         all_project_ids,
     )
-    lock_xsdd_identities(db, sorted(all_xsdd_identities))
+    if _prelocked_xsdd_identities is None:
+        locked_xsdd_identities = set(lock_xsdd_identities(
+            db, sorted(all_xsdd_identities)
+        ))
+    else:
+        locked_xsdd_identities = {
+            identity
+            for value in _prelocked_xsdd_identities
+            if (identity := normalize_xsdd(value))
+        }
+        missing_locks = all_xsdd_identities - locked_xsdd_identities
+        if missing_locks:
+            raise XsddProjectMergeConflict(
+                "归并 XSDD 锁集合已扩展，请重试: "
+                f"{sorted(missing_locks)}"
+            )
     locked_states = operations.lock_workbook_states(
         db,
         project_ids=all_project_ids,
@@ -2380,6 +2396,20 @@ def apply_historical_project_merge_batch(
         if project is None:
             raise XsddProjectMergeConflict("归并项目集合已变化，请重新预览")
         locked_projects[project_id] = project
+
+    # A caller may precompute the envelope before project row locks.  Recheck
+    # after those rows are frozen, and fail instead of acquiring a newly
+    # discovered lower-sorted XSDD while already holding the original set.
+    frozen_xsdd_identities = set(seen_xsdds) | _xsdd_identities_for_projects(
+        db,
+        all_project_ids,
+    )
+    missing_locks = frozen_xsdd_identities - locked_xsdd_identities
+    if missing_locks:
+        raise XsddProjectMergeConflict(
+            "归并 XSDD 锁集合在加锁后发生变化，请重试: "
+            f"{sorted(missing_locks)}"
+        )
 
     preview = preview_historical_conflicts(db)
     conflicts_by_xsdd = {
@@ -2515,8 +2545,6 @@ def auto_merge_sales_xsdd_conflicts(
     db.execute(select(func.pg_advisory_xact_lock(
         config.DATA_CHANGE_ADVISORY_LOCK_KEY
     )))
-    lock_xsdd_identities(db, sorted(incoming))
-
     preview = preview_historical_conflicts(db)
     relevant = [
         conflict
@@ -2718,11 +2746,29 @@ def auto_merge_sales_xsdd_conflicts(
             "user_assignment_resolution": user_assignment_resolution,
         })
 
+    # A member project may carry identities beyond the incoming conflict.
+    # Compute that complete envelope before the first XSDD lock and acquire it
+    # once in global sort order.  The batch primitive receives the frozen set
+    # and must fail, not extend it, if concurrent evidence changed the graph.
+    merge_project_ids = sorted({
+        project_id
+        for plan in plans
+        for project_id in plan["expected_member_project_ids"]
+    })
+    complete_xsdd_envelope = set(incoming) | _xsdd_identities_for_projects(
+        db,
+        merge_project_ids,
+    )
+    locked_xsdd_identities = set(lock_xsdd_identities(
+        db, sorted(complete_xsdd_envelope)
+    ))
+
     result = (
         apply_historical_project_merge_batch(
             db,
             plans=plans,
             operated_by=operated_by,
+            _prelocked_xsdd_identities=locked_xsdd_identities,
         )
         if plans
         else {"merged_group_count": 0, "groups": []}

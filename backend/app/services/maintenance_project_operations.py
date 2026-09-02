@@ -3342,6 +3342,17 @@ def _normalized_contract_sql(column):
     )
 
 
+def _prelock_contract_xsdd_identities(
+    db: Session,
+    *,
+    contract_nos: Iterable[str | None],
+) -> list[str]:
+    """Take the global lock before sorted XSDD locks for contract writes."""
+
+    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
+    return maintenance_project_identity.lock_xsdd_identities(db, contract_nos)
+
+
 def _prepare_contract_expense_resync(
     db: Session,
     *,
@@ -3649,7 +3660,7 @@ def create_contract(
     # workbook/project rows.  _prepare_contract_expense_resync reacquires the
     # same transaction lock, so taking it here closes the global/XSDD AB-BA
     # window without changing the downstream envelope.
-    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
+    _prelock_contract_xsdd_identities(db, contract_nos={contract_no})
     try:
         maintenance_project_identity.claim_xsdd_project(
             db,
@@ -3728,6 +3739,10 @@ def update_contract(
     reason: str,
     operated_by: str,
 ) -> dict | None:
+    # Freeze the old identity before probing it.  Otherwise another update
+    # could change contract_no while this transaction waits for DATA_CHANGE,
+    # leaving the later trigger to acquire an identity that was not prelocked.
+    db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
     probe = db.execute(
         select(
             MaintenanceProjectContract.project_id,
@@ -3739,6 +3754,12 @@ def update_contract(
     if probe is None:
         return None
     project_id, old_contract_no = probe
+    # Ledger apply locks XSDD identities before contract advisories.  Match
+    # that order for both the old and requested identities before the resync
+    # envelope acquires its contract advisory locks.
+    maintenance_project_identity.lock_xsdd_identities(
+        db, {old_contract_no, updates.get("contract_no")}
+    )
     envelope = _prepare_contract_expense_resync(
         db,
         contract_nos={old_contract_no, updates.get("contract_no")},
