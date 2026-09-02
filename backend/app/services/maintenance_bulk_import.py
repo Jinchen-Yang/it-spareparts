@@ -1055,6 +1055,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
             period_to_raw = _text(_value(sheet, values, "period_to"))
             source_period_from: date | None = None
             source_period_to: date | None = None
+            inverted_period_warning: dict | None = None
             try:
                 explicit_maintenance = _is_explicit_maintenance_row(sheet, values)
             except BulkImportInvalid as exc:
@@ -1081,13 +1082,22 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         sheet, values
                     )
                 except BulkImportInvalid as exc:
-                    issue = _row_issue(
-                        row_no, "invalid_maintenance_period", str(exc)
-                    )
-                    base.update(action="error", issues=[issue])
-                    source_rows.append(base)
-                    hard_issues.append(issue)
-                    continue
+                    if str(exc) == "维保终止日期不能早于起始日期":
+                        inverted_period_warning = _row_issue(
+                            row_no,
+                            "inverted_maintenance_period_preserved",
+                            "销售源维保期限倒置；已有项目将保留原期限，"
+                            "本次仍同步 XSDD 身份与合同金额",
+                            severity="warning",
+                        )
+                    else:
+                        issue = _row_issue(
+                            row_no, "invalid_maintenance_period", str(exc)
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
             duplicate = seen.get(norm)
             signature = (
                 inc,
@@ -1181,10 +1191,14 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     source_period_to.isoformat() if source_period_to else None
                 ),
                 "source_period_from_present": bool(
-                    explicit_maintenance and "period_from" in sheet.field_indexes
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_from" in sheet.field_indexes
                 ),
                 "source_period_to_present": bool(
-                    explicit_maintenance and "period_to" in sheet.field_indexes
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_to" in sheet.field_indexes
                 ),
                 "sales_order_id": sales.id if sync_sales else None,
                 "sales_raw_order_id": sales.raw_order_id if sync_sales else None,
@@ -1356,6 +1370,16 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
+                    if inverted_period_warning is not None:
+                        issue = _row_issue(
+                            row_no,
+                            "invalid_maintenance_period",
+                            "维保终止日期不能早于起始日期；新项目无法建立可信期限",
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
                     try:
                         metadata = _maintenance_project_metadata(
                             sheet, values, row_no=row_no, norm=norm
@@ -1401,6 +1425,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     }
                     action = "create_project"
 
+            if inverted_period_warning is not None:
+                base["issues"].append(inverted_period_warning)
             base.update(
                 action=action,
                 project_id=operation.get("project_id"),

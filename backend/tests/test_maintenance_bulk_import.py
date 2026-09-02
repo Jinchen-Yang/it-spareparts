@@ -1665,6 +1665,58 @@ def test_ordinary_sales_inverted_period_rolls_back_all_facts(db, tmp_path):
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
 
 
+def test_existing_sales_owner_preserves_period_when_source_period_is_inverted(
+    db, tmp_path
+):
+    order_no = "XSDD-20260902-0019"
+    raw_order_id = "sales-inverted-existing-owner"
+    original = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name="已有期限维保项目",
+        period_from=date(2026, 1, 1),
+        period_to=date(2026, 12, 31),
+    )
+    pipeline.run_import(
+        db,
+        original,
+        "sales-valid-period.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    inverted = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name="已有期限维保项目",
+        period_from=date(2027, 1, 1),
+        period_to=date(2026, 1, 1),
+        order_amount="226",
+        tax_amount="26",
+        amount_ex_tax="200",
+    )
+    pipeline.run_import(
+        db,
+        inverted,
+        "sales-inverted-existing-period.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    owner = db.get(MaintenanceProjectXsdd, "20260902-0019")
+    project = db.get(MaintenanceProject, owner.project_id)
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id
+    ))
+    assert project.period_from == date(2026, 1, 1)
+    assert project.period_to == date(2026, 12, 31)
+    assert contract.amount_inc_tax == Decimal("226.00")
+
+
 def test_ordinary_non_maintenance_sales_upload_never_creates_project(db, tmp_path):
     path = _ordinary_sales_workbook(
         tmp_path,
