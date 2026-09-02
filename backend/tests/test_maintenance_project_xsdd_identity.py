@@ -1,5 +1,6 @@
 """XSDD is the canonical maintenance-project identity (#56)."""
 
+import hashlib
 import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -161,7 +162,9 @@ def _seed_dirty_wbdd_assignment(
     ))
     try:
         db.add(MaintenanceSourceOrderAssignment(
-            assignment_id=f"dirty-assignment-{raw_order_id}",
+            assignment_id=hashlib.sha256(
+                f"dirty-assignment:{raw_order_id}".encode("utf-8")
+            ).hexdigest()[:36],
             source_order_id=raw_order_id,
             project_id=project.project_id,
             is_active=True,
@@ -169,7 +172,11 @@ def _seed_dirty_wbdd_assignment(
             created_by="historical-fixture",
         ))
         db.flush()
-    finally:
+    except Exception:
+        # ALTER TABLE is transactional: rollback also restores the trigger.
+        db.rollback()
+        raise
+    else:
         db.execute(text(
             "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
             "trg_maintenance_assignment_claim_xsdd"
