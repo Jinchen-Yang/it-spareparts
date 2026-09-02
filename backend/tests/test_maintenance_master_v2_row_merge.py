@@ -267,14 +267,17 @@ def test_site_pn_flexible_resolution_and_warnings(db):
     wb = load_workbook(io.BytesIO(content))
     ws = wb[master.V2_SHEET_SITE]
     headers = {c.value: c.column for c in ws[1]}
-    ws.cell(2, headers["领用单号"], "LY-001")
-    ws.cell(2, headers["领用日期"], "2026-09-01")
-    ws.cell(2, headers["PN"], "AL15SEB120N V0231E4000000000")
-    ws.cell(2, headers["领用数量"], 1)
-    ws.cell(3, headers["领用单号"], "LY-002")
-    ws.cell(3, headers["领用日期"], "2026-09-01")
-    ws.cell(3, headers["PN"], "6200288")
-    ws.cell(3, headers["领用数量"], 1)
+    # 写到示例行之后的干净行：示例行带【示例】备注，直接覆盖其部分
+    # 单元格会被 _is_example_row 整行跳过（数据静默丢失）。
+    base = ws.max_row + 1
+    ws.cell(base, headers["领用单号"], "LY-001")
+    ws.cell(base, headers["领用日期"], "2026-09-01")
+    ws.cell(base, headers["PN"], "AL15SEB120N V0231E4000000000")
+    ws.cell(base, headers["领用数量"], 1)
+    ws.cell(base + 1, headers["领用单号"], "LY-002")
+    ws.cell(base + 1, headers["领用日期"], "2026-09-01")
+    ws.cell(base + 1, headers["PN"], "6200288")
+    ws.cell(base + 1, headers["领用数量"], 1)
     plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(wb))
     assert not plan.conflicts
@@ -293,11 +296,12 @@ def test_unmatched_pns_reported_in_batch(db):
     wb = load_workbook(io.BytesIO(content))
     ws = wb[master.V2_SHEET_SITE]
     headers = {c.value: c.column for c in ws[1]}
-    for r, no in ((2, "LY-A"), (3, "LY-B")):
-        ws.cell(r, headers["领用单号"], no)
-        ws.cell(r, headers["领用日期"], "2026-09-01")
-        ws.cell(r, headers["PN"], f"TOTALLY-UNKNOWN-{no}")
-        ws.cell(r, headers["领用数量"], 1)
+    base = ws.max_row + 1
+    for offset, no in ((0, "LY-A"), (1, "LY-B")):
+        ws.cell(base + offset, headers["领用单号"], no)
+        ws.cell(base + offset, headers["领用日期"], "2026-09-01")
+        ws.cell(base + offset, headers["PN"], f"TOTALLY-UNKNOWN-{no}")
+        ws.cell(base + offset, headers["领用数量"], 1)
     with pytest.raises(master.WorkbookError) as raised:
         master.validate_project_master_v2(
             db, project_id=project.project_id, data=_save(wb))
