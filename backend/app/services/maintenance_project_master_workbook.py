@@ -3187,18 +3187,27 @@ def _v2_refill_for_existing_line(
     index: dict[str, int],
     row_no: int,
     line: FMaintenanceLine,
+    resolved_part: DimPart | None = None,
 ) -> CostRefill | None:
     """把一行人工回传与既有事实做 diff；原样行返回 ``None``。
 
     带实体 ID 的正常回传和「人工认证后、尚未出现在本项目导出中的全局 WBDD
     行」共用这一套字段语义，避免认领归属时顺手制造一份重复明细。
+
+    ``resolved_part``：认领分支的 PN 已由 :func:`_resolve_part_flexible` 解析过
+    （可能做了空格归一/补前导零/粘连取首段），调用方把结果传进来复用。否则这里
+    会拿**原始单元格**再做一次严格匹配，柔性解析刚命中的行必定 part_not_found
+    且当场中断整本上传——正好废掉柔性解析要解决的场景（2026-09-03 契约）。
     """
 
     pn = None
     part_id = None
     pn_cell = str(_cell(row, index, "PN") or "").strip()
     if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
-        part = _exact_part_for_pn(db, pn_cell)
+        part = (
+            resolved_part if resolved_part is not None
+            else _exact_part_for_pn(db, pn_cell)
+        )
         if part is None:
             raise WorkbookError("part_not_found",
                                 f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
@@ -3444,7 +3453,8 @@ def _v2_parse_parts(
                 uploaded_entity_rows += 1
                 uploaded_entity_ids.add(existing_line.id)
                 refill = _v2_refill_for_existing_line(
-                    db, row=row, index=index, row_no=row_no, line=existing_line)
+                    db, row=row, index=index, row_no=row_no, line=existing_line,
+                    resolved_part=part)
                 if refill is not None:
                     out.append(refill)
                 continue

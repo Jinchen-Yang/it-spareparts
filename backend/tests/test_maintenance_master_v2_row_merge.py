@@ -360,3 +360,44 @@ def test_duplicate_manual_rows_rejected_not_500(db):
         master.validate_project_master_v2(
             db, project_id=project.project_id, data=_save(wb))
     assert raised.value.code == "duplicate_expense_row"
+
+def test_manual_row_claiming_existing_line_accepts_normalized_pn(db):
+    """2026-09-03 契约：柔性解析命中的 PN，在「认领既有明细」路径上不得被二次严格匹配打死。
+
+    真实场景（中国电信云 1028 行领用实录）：客户手工补一行明细，PN 带 WWN 粘连；
+    对应明细在下载之后才由 WBDD 导入落库，因此该行走「认领已存在全局明细」分支。
+    _resolve_part_flexible 已把粘连 PN 解析成标准 PN，但
+    _v2_refill_for_existing_line 会重新读原始单元格做 _exact_part_for_pn——
+    必然 part_not_found 且当场中断整本上传，正好废掉柔性解析要解决的场景。
+    """
+    from app.models.dimensions import DimPart
+
+    project, _part, order, _line = _make_project_with_line(db)
+    _content, wb = _download_parts(db, project.project_id)
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {c.value: c.column for c in ws[1]}
+
+    # 下载之后才落库的一条明细——不在本次导出里，只能走认领分支
+    glued_part = DimPart(pn_std="AL15SEB120N", description="粘连PN备件")
+    db.add(glued_part)
+    db.commit()
+    late_line = _add_line(db, order, glued_part, qty=Decimal("7"))
+
+    row = ws.max_row + 1
+    ws.cell(row, headers["维保单号"], order.order_no)
+    ws.cell(row, headers["PN"], "AL15SEB120N V0231E4000000000")
+    ws.cell(row, headers["需求数量"], 7)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert any("粘连" in w for w in plan.warnings), plan.warnings
+    master.apply_project_master_v2(
+        db, plan, operated_by="claim-flex", import_batch_id=str(uuid.uuid4()))
+    db.refresh(late_line)
+    # 认领的是既有明细，不得凭空再造一条
+    assert late_line.pn_std == "AL15SEB120N"
+    assert db.scalar(select(func.count()).select_from(FMaintenanceLine).where(
+        FMaintenanceLine.order_id == order.id,
+        FMaintenanceLine.part_id == glued_part.id,
+        FMaintenanceLine.is_active.is_(True),
+    )) == 1
