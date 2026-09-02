@@ -185,9 +185,28 @@ def upgrade() -> None:
         DECLARE
             owner_project_id text;
         BEGIN
+            -- Reimport may refresh hidden WBDD facts, including XSDD.  Keep
+            -- them hidden without requiring an owner; the tombstone reveal
+            -- trigger validates the final value when it becomes effective.
+            IF EXISTS (
+                SELECT 1
+                FROM maintenance_demand_tombstone AS tombstone
+                WHERE tombstone.source_order_id = NEW.raw_order_id
+                  AND tombstone.restored_at IS NULL
+            ) THEN
+                RETURN NEW;
+            END IF;
+            IF NEW.data_status IS DISTINCT FROM '已生效' THEN
+                RETURN NEW;
+            END IF;
             IF maintenance_normalize_xsdd(NEW.linked_sales_order_no)
                = maintenance_normalize_xsdd(OLD.linked_sales_order_no) THEN
-                RETURN NEW;
+                IF NOT (
+                    OLD.data_status IS DISTINCT FROM '已生效'
+                    AND NEW.data_status = '已生效'
+                ) THEN
+                    RETURN NEW;
+                END IF;
             END IF;
             SELECT assignment.project_id INTO owner_project_id
             FROM maintenance_source_order_assignment AS assignment
@@ -201,6 +220,67 @@ def upgrade() -> None:
             RETURN NEW;
         END
         $function$
+        """
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_maintenance_order_claim_xsdd "
+        "ON f_maintenance_order"
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_maintenance_order_claim_xsdd
+        BEFORE UPDATE OF linked_sales_order_no, data_status
+        ON f_maintenance_order
+        FOR EACH ROW EXECUTE FUNCTION maintenance_order_claim_xsdd_trigger()
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION maintenance_tombstone_reveal_xsdd_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        DECLARE
+            source_id text := OLD.source_order_id;
+            raw_xsdd text;
+            order_status text;
+            owner_project_id text;
+        BEGIN
+            IF TG_OP = 'UPDATE'
+               AND NOT (OLD.restored_at IS NULL AND NEW.restored_at IS NOT NULL) THEN
+                RETURN NEW;
+            END IF;
+            IF TG_OP = 'DELETE' AND OLD.restored_at IS NOT NULL THEN
+                RETURN OLD;
+            END IF;
+            SELECT linked_sales_order_no, data_status
+            INTO raw_xsdd, order_status
+            FROM f_maintenance_order
+            WHERE raw_order_id = source_id
+            FOR UPDATE;
+            IF order_status IS DISTINCT FROM '已生效' THEN
+                RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+            END IF;
+            SELECT assignment.project_id INTO owner_project_id
+            FROM maintenance_source_order_assignment AS assignment
+            WHERE assignment.source_order_id = source_id
+              AND assignment.is_active IS TRUE;
+            IF owner_project_id IS NOT NULL THEN
+                PERFORM maintenance_require_contract_xsdd_owner(
+                    raw_xsdd, owner_project_id
+                );
+            END IF;
+            RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_maintenance_tombstone_reveal_xsdd
+        BEFORE DELETE OR UPDATE OF restored_at
+        ON maintenance_demand_tombstone
+        FOR EACH ROW EXECUTE FUNCTION maintenance_tombstone_reveal_xsdd_trigger()
         """
     )
     op.execute(
@@ -378,6 +458,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute(
+        "DROP TRIGGER IF EXISTS trg_maintenance_tombstone_reveal_xsdd "
+        "ON maintenance_demand_tombstone"
+    )
+    op.execute(
+        "DROP FUNCTION IF EXISTS maintenance_tombstone_reveal_xsdd_trigger()"
+    )
+    op.execute(
         "DROP TRIGGER IF EXISTS trg_maintenance_xsdd_map_preserve_evidence "
         "ON maintenance_project_xsdd"
     )
@@ -447,6 +534,18 @@ def downgrade() -> None:
             RETURN NEW;
         END
         $function$
+        """
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_maintenance_order_claim_xsdd "
+        "ON f_maintenance_order"
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_maintenance_order_claim_xsdd
+        BEFORE UPDATE OF linked_sales_order_no
+        ON f_maintenance_order
+        FOR EACH ROW EXECUTE FUNCTION maintenance_order_claim_xsdd_trigger()
         """
     )
     op.execute(

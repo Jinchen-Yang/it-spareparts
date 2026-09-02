@@ -181,6 +181,15 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
         tax_amount = _safe_money(g("tax_amount"))
         amount_inc_tax = _safe_money(g("amount_inc_tax"))
         is_tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
+        maintenance_period_from = g("maintenance_period_from")
+        maintenance_period_to = g("maintenance_period_to")
+        # The generic reader represents empty Excel date cells as pandas NaT.
+        # Keep real/invalid source values for the maintenance adapter to
+        # validate, but never turn NaT into the literal non-empty text "NaT".
+        if pd.isna(maintenance_period_from):
+            maintenance_period_from = None
+        if pd.isna(maintenance_period_to):
+            maintenance_period_to = None
         # 真实销售导出经常把税率列写成带“(必填)”的采购同名列；reader 已按
         # 文件类型合并别名。仍缺税率时，只允许用同一行显式未税额和税金反推，
         # 绝不把 NULL 税率当 0 后把未税额冒充含税额。
@@ -199,8 +208,8 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "maintenance_project_name": cleaner.clean_str(
                 g("maintenance_project_name")
             ),
-            "maintenance_period_from": g("maintenance_period_from"),
-            "maintenance_period_to": g("maintenance_period_to"),
+            "maintenance_period_from": maintenance_period_from,
+            "maintenance_period_to": maintenance_period_to,
             "warehouse": cleaner.clean_str(g("warehouse")),
             "is_tax_inclusive": is_tax_inclusive,
             "tax_amount": tax_amount,

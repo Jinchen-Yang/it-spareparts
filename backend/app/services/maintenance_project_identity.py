@@ -851,7 +851,15 @@ def preview_historical_conflicts(db: Session) -> dict:
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
             ),
         )
-        .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
+        .where(
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
+        )
     )
     contract_evidence = select(
         normalized_xsdd_sql(MaintenanceProjectContract.contract_no).label(
@@ -894,9 +902,21 @@ def preview_historical_conflicts(db: Session) -> dict:
             MaintenanceSourceOrderAssignment.project_id,
             func.count(),
         )
+        .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(project_ids or {""}),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all())
@@ -1427,7 +1447,15 @@ def _validate_source_xsdd_scope(
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
             ),
         )
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(source_project_ids))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(source_project_ids),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
+        )
     )
     identities = {
         normalized
@@ -1834,9 +1862,20 @@ def _apply_locked_project_merge(
 
     active_source_assignments = list(db.scalars(
         select(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
         .order_by(MaintenanceSourceOrderAssignment.assignment_id)
         .with_for_update()
@@ -2083,9 +2122,20 @@ def _apply_locked_project_merge(
     active_source_assignment_count = int(db.scalar(
         select(func.count())
         .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
     ) or 0)
     active_source_user_count = int(db.scalar(
