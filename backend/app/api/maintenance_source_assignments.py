@@ -198,7 +198,7 @@ def auto_assign_unassigned_orders(
     ),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """人工全局补挂：有效 XSDD 服从销售合同 owner；旧 name-only 单保留兼容。"""
+    """人工全局补挂：只挂销售合同 XSDD owner；无/非法 XSDD 跳过留人工。"""
     operated_by = _real_operator(db, ident)
     try:
         payload = assignments.auto_assign_unassigned(

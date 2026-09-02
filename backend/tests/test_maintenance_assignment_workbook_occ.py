@@ -3,8 +3,8 @@
 覆盖：
 1. 直接 assign/archive primary_manager：每次真实变更 revision 恰好 +1；
 2. 冲突/no-op（陈旧版本、同人重复指派）：零写、revision 不变；
-3. auto_assign 命中已有项目：挂靠 + 销售/负责人回填 + 账号指派多变更同
-   事务仍只 +1；新建 auto 项目首次成形保持 revision 0（无 state 行）；
+3. auto_assign 只认销售合同 XSDD owner：挂靠 + 销售/负责人回填 + 账号指派
+   多变更同事务仍只 +1；无/非法 XSDD 一律跳过，绝不按名称匹配或新建项目；
 4. backfill 全 no-op：+0；
 5. 锁序/并发：规划后归属并发出现 / prelocked states 未覆盖候选 →
    fail closed（SourceAssignmentConflict），零半截写入。
@@ -12,6 +12,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
+from decimal import Decimal
 import threading
 
 import pytest
@@ -42,11 +43,13 @@ from app.services.maintenance_manager_workbook_adapter import (
 from tests import factories as f
 
 
-def _load_orders(db, *, project: str, n: int = 1) -> list[FMaintenanceOrder]:
+def _load_orders(
+    db, *, project: str, n: int = 1, sales_order: str | None = None
+) -> list[FMaintenanceOrder]:
     batch = SysImportBatch(
         filename=f"synthetic-occ-{project}.xlsx",
         file_type="maintenance",
-        file_hash=f"occ-{project}-{n}".ljust(64, "0"),
+        file_hash=f"occ-{project}-{n}-{sales_order}".ljust(64, "0"),
         status="success",
     )
     db.add(batch)
@@ -55,7 +58,8 @@ def _load_orders(db, *, project: str, n: int = 1) -> list[FMaintenanceOrder]:
     for i in range(n):
         raw_id = f"WBDD-OCC-{project}-{i}"
         heads[raw_id] = f.maintenance_head(
-            raw_id, order_no=f"NO-OCC-{project}-{i}", project=project
+            raw_id, order_no=f"NO-OCC-{project}-{i}", project=project,
+            sales_order=sales_order,
         )
     lines = [f.maintenance_line(rid, f"{rid}-L1", "PN-OCC-001") for rid in heads]
     loader.load(db, f.maintenance_result(heads, lines), batch.id,
@@ -68,6 +72,36 @@ def _load_orders(db, *, project: str, n: int = 1) -> list[FMaintenanceOrder]:
             )
         ).scalars()
     )
+
+
+def _contract_owner_project(
+    db, *, project_id: str, code: str, name: str, xsdd: str
+) -> MaintenanceProject:
+    """显式人工建项目 + 销售合同建立 XSDD owner（合同是唯一事实来源）。"""
+    project = MaintenanceProject(
+        project_id=project_id, project_code=code,
+        display_name=name, lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()  # 测试会话 autoflush=False；create_contract 先按 project_id 查主档
+    operations.create_contract(
+        db,
+        project_id=project_id,
+        contract_id=f"{project_id}-contract",
+        contract_no=f"XSDD-{xsdd}",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="occ-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="销售合同先建立 XSDD owner",
+        operated_by="occ-contract-setup",
+    )
+    db.commit()
+    return project
 
 
 def _admin_ctx() -> UserContext:
@@ -307,17 +341,20 @@ def test_manager_snapshot_waits_for_state_without_holding_owner_user(db):
 
 
 def test_auto_assign_existing_project_multi_changes_single_bump(db):
-    project = MaintenanceProject(
-        project_id="occ-auto-existing", project_code="OCC-AUTO-EX",
-        display_name="OCC自动挂靠既有项目", lifecycle_status="ongoing",
+    # 有效 XSDD：严格挂销售合同 owner 项目（名称不同也不能推翻 owner）
+    project = _contract_owner_project(
+        db,
+        project_id="occ-auto-existing",
+        code="OCC-AUTO-EX",
+        name="OCC自动挂靠既有项目",
+        xsdd="20260826-0001",
     )
-    db.add(project)
     _user(db, "occ_auto_sales", salesperson_name="测试销售")
-    # 预置 state：等价于该项目此前已被工作簿使用
-    operations.lock_workbook_states(db, project_ids=[project.project_id])
-    db.commit()
-    assert _revision(db, project.project_id) == 0
-    _load_orders(db, project="OCC自动挂靠既有项目", n=2)
+    # 合同创建本身已落 state 并 bump 一次；以此刻为基线验证 auto_assign 只 +1
+    base_revision = _revision(db, project.project_id)
+    _load_orders(
+        db, project="OCC预交付-任意别名", n=2, sales_order="XSDD-20260826-0001"
+    )
 
     result = sa.auto_assign_unassigned(
         db, operated_by="occ-admin", user_ctx=_admin_ctx()
@@ -327,10 +364,11 @@ def test_auto_assign_existing_project_multi_changes_single_bump(db):
     # 一次运行里同时发生：2 张单挂靠 + 销售回填 + 负责人回填 + 账号级指派，
     # 同一根事务 revision 恰好 +1
     assert result["assigned_orders"] == 2
+    assert result["created_projects"] == 0
     assert result["sales_filled_projects"] == 1
     assert result["manager_filled_projects"] == 1
     assert result["assignments_created"] == 1
-    assert _revision(db, project.project_id) == 1
+    assert _revision(db, project.project_id) == base_revision + 1
     db.refresh(project)
     assert project.version == 2
     owner_audit = db.scalar(
@@ -364,7 +402,7 @@ def test_auto_assign_existing_project_multi_changes_single_bump(db):
     assert again["sales_filled_projects"] == 0
     assert again["manager_filled_projects"] == 0
     assert again["assignments_created"] == 0
-    assert _revision(db, project.project_id) == 1
+    assert _revision(db, project.project_id) == base_revision + 1
 
 
 def test_backfill_noop_keeps_revision_zero(db):
@@ -392,51 +430,64 @@ def test_backfill_noop_keeps_revision_zero(db):
     assert _revision(db, project.project_id) == 0
 
 
-def test_auto_assign_new_project_stays_revision_zero(db):
-    _user(db, "occ_new_sales", salesperson_name="测试销售")
-    _load_orders(db, project="OCC自动新建项目", n=1)
+def test_auto_assign_skips_missing_or_invalid_xsdd_without_creating(db):
+    """无/非法 XSDD 的 WBDD：只跳过保持待处理，绝不按名称匹配既有项目，
+    也绝不新建 AUTO 项目——即使项目名与既有项目完全一致。"""
+    existing = MaintenanceProject(
+        project_id="occ-name-only-existing", project_code="OCC-NAME-ONLY",
+        display_name="OCC同名已有项目", lifecycle_status="ongoing",
+    )
+    db.add(existing)
+    db.commit()
+    no_xsdd = _load_orders(db, project="OCC同名已有项目", n=2)
+    invalid_xsdd = _load_orders(
+        db, project="OCC非法单号项目", n=1, sales_order="XSDD-非法单号"
+    )
 
     result = sa.auto_assign_unassigned(
         db, operated_by="occ-admin", user_ctx=_admin_ctx()
     )
     db.commit()
 
-    project = db.scalar(
+    # 不建项、不挂靠：全部 3 张单保持未归属，没有任何新项目出现
+    assert result["assigned_orders"] == 0
+    assert result["created_projects"] == 0
+    assert result["matched_projects"] == 0
+    assert result["skipped_groups"] == 2
+    assert db.scalar(
+        select(MaintenanceSourceOrderAssignment.assignment_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(
+                [order.raw_order_id for order in [*no_xsdd, *invalid_xsdd]]
+            ),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ) is None
+    assert db.scalars(
         select(MaintenanceProject).where(
-            MaintenanceProject.display_name == "OCC自动新建项目"
+            MaintenanceProject.project_id != existing.project_id
         )
-    )
-    assert project is not None
-    assert result["created_projects"] == 1
-    assert result["assignments_created"] == 1
-    # 新建项目首次完整成形（挂靠 + 回填 + 指派）保持 revision 0：
-    # state 行不创建或 revision 仍为 0，project OCC 仍是初始 version 1。
-    assert _revision(db, project.project_id) == 0
-    assert project.version == 1
-    owner_audit = db.scalar(
-        select(MaintenanceProjectAuditLog).where(
-            MaintenanceProjectAuditLog.project_id == project.project_id,
-            MaintenanceProjectAuditLog.entity_type == "project",
-            MaintenanceProjectAuditLog.action == "update",
-        )
-    )
-    assert owner_audit is not None
-    assert owner_audit.before_json["version"] == 1
-    assert owner_audit.after_json["version"] == 1
+    ).first() is None
+    # 零写：同名项目没有被挂靠改变，revision 不动
+    assert _revision(db, existing.project_id) == 0
 
 
 def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
     db, monkeypatch
 ):
     """规划（只读）之后、锁之前归属被并发写入 → fail closed，零半截写入。"""
-    project = MaintenanceProject(
-        project_id="occ-race", project_code="OCC-RACE",
-        display_name="OCC并发归属项目", lifecycle_status="ongoing",
+    project = _contract_owner_project(
+        db,
+        project_id="occ-race",
+        code="OCC-RACE",
+        name="OCC并发归属项目",
+        xsdd="20260826-0002",
     )
-    db.add(project)
-    db.commit()
-    orders = _load_orders(db, project="OCC并发归属项目", n=1)
+    orders = _load_orders(
+        db, project="OCC并发归属项目", n=1, sales_order="XSDD-20260826-0002"
+    )
     raw_id = orders[0].raw_order_id
+    # 合同建立 owner 已 bump 一次；fail closed 要求 auto_assign 自身零增量
+    base_revision = _revision(db, project.project_id)
 
     real_lock = operations.lock_workbook_states
     injected = {"done": False}
@@ -444,18 +495,15 @@ def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
     def racy_lock(session, *, project_ids):
         if not injected["done"]:
             injected["done"] = True
-            # 另一连接并发提交：同一单据在活动事务锁前被人工归属
-            other = SessionLocal()
-            try:
-                other.add(MaintenanceSourceOrderAssignment(
-                    assignment_id="occ-race-concurrent",
-                    source_order_id=raw_id,
-                    project_id=project.project_id,
-                    is_active=True, version=1, created_by="concurrent",
-                ))
-                other.commit()
-            finally:
-                other.close()
+            # 全局数据锁已把真实第二连接序列化；在同一事务中注入锁后状态
+            # 漂移，验证后续复核仍会 fail closed，且回滚不留半截写入。
+            session.add(MaintenanceSourceOrderAssignment(
+                assignment_id="occ-race-injected",
+                source_order_id=raw_id,
+                project_id=project.project_id,
+                is_active=True, version=1, created_by="concurrent",
+            ))
+            session.flush()
         return real_lock(session, project_ids=project_ids)
 
     monkeypatch.setattr(operations, "lock_workbook_states", racy_lock)
@@ -477,14 +525,14 @@ def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
             MaintenanceProject.project_code.like("AUTO-%")
         )
     ) is None
-    assert _revision(db, project.project_id) == 0
-    # 并发写入的那条归属仍在（不属于本事务，回滚不动它）
+    assert _revision(db, project.project_id) == base_revision
+    # 注入的状态漂移与本事务一起回滚，不留下任何活动归属。
     assert db.scalar(
         select(MaintenanceSourceOrderAssignment).where(
-            MaintenanceSourceOrderAssignment.assignment_id
-            == "occ-race-concurrent"
+            MaintenanceSourceOrderAssignment.source_order_id == raw_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
-    ) is not None
+    ) is None
 
 
 def test_backfill_prelocked_states_must_cover_candidates(db):
