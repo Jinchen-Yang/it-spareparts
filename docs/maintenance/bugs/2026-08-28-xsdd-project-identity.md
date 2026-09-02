@@ -2,7 +2,7 @@
 title: 同一 XSDD 被拆成多个维保项目
 date: 2026-08-28
 severity: P1
-status: implementing-write-guard-and-exact-dedupe
+status: implementing-sales-authority-and-write-guard
 ---
 
 # 同一 XSDD 被拆成多个维保项目
@@ -11,7 +11,16 @@ status: implementing-write-guard-and-exact-dedupe
 
 - [[XSDD 销售订单]] 是项目归并键：同一规范化 XSDD 必须指向同一个 canonical `project_id`。
 - 一个项目允许挂多个不同 XSDD，不能反向加一对一约束。
-- `project_raw`、`project_std`、台账项目名和人工改名前名称只作为 [[项目别名]]；页面在主名称下以灰字展示，搜索需命中别名。
+- 名称不是身份键。同一 XSDD 的销售订单原始名称（含预交付名、正式名）是平等的 `peer_names`；人工改名、迁移名等普通 [[项目别名]] 仍以灰字展示，搜索均需命中。
+
+## 最新业务裁定（2026-09-02，取代旧自动建项口径）
+
+- 普通销售订单是维保项目与合同的唯一自动事实入口。只有源表明确为已生效、明确是维保业务、XSDD 合法且项目名称存在的行，才能在一个事务内幂等新建或补齐项目、canonical XSDD owner 与合同；期限允许全空或单侧，已知值照实保存、缺侧保持 NULL，双侧倒置仍整批拒绝。
+- WBDD 是需求事实，不是项目身份或合同金额权威。系统导入只能按既有、合同支撑的 XSDD owner 挂靠；销售尚未建立 owner 时，WBDD 正常入库但留在未归属桶，不按名称建项目，也不反向认领 XSDD。
+- WBDD 先到时，后到的销售订单在同一事务建 owner/合同，并只补挂已预锁且 XSDD 完全相同的未归属 WBDD；销售先到时，后到 WBDD 直接挂该 owner。历史多 owner、归档 owner 或合同/映射冲突一律整批失败关闭。
+- 人工挂靠与历史全局修复入口同样只能服从已有合同 owner。无/非法 XSDD 一律留未归属，不能按名称匹配、不能自动建项目；显式人工新建项目与显式指定挂靠仍走各自受控入口。
+- 不同 XSDD 不按名称自动合并，也不因重名阻断建档；一个项目拥有多个 XSDD 的既有明确关系继续保留。
+- 页面只把可由 `xsdd_container_merge`，或由当前 canonical 映射＋销售合同共同验证的销售来源名称提升为 `peer_names`。无法证明同一 XSDD 的人工/迁移 alias 继续灰显，禁止按“预交付”字样猜来源。
 
 ## 生产证据（只读，2026-08-28 17:00–17:20 CST）
 
@@ -49,7 +58,7 @@ status: implementing-write-guard-and-exact-dedupe
 - 新增 `maintenance_project_xsdd`：每个规范化 XSDD 唯一指向一个项目；迁移只回填证据唯一的 XSDD。
 - 新增 `maintenance_project_alias`：保存主名、旧名和来源名。
 - 合同和活跃来源单归属通过数据库 trigger 认领 XSDD；跨项目或历史多项目证据统一 fail closed。
-- 自动挂靠改为 XSDD 优先分组；无 XSDD 才按名称兜底。
+- 自动挂靠只按合法 XSDD 的既有合同 owner；无/非法 XSDD 或缺 owner 时留未归属，不按名称兜底，也不创建 `AUTO-*` 项目。
 - 看板 API 返回 aliases，项目卡灰字展示，搜索命中 aliases。
 - 历史 6 组只生成 preview，不在本变更中移动、归档或删除任何项目和事实。
 - 项目总表 `05_实收回款` 新增签名 `receipt_row_ids` envelope；删除已导出行等价于 VOID，导出后新增行不受旧文件影响。
@@ -58,14 +67,16 @@ status: implementing-write-guard-and-exact-dedupe
 
 ## 验收标准
 
-1. 同一规范化 XSDD、不同项目名的两张未归属单，自动挂到一个项目，只创建一个 canonical mapping。
+1. WBDD-first 在没有销售合同 owner 时不建项目、不建合同、不挂靠；随后销售订单创建唯一 owner 后，只补挂同 XSDD 的未归属 WBDD。sales-first 后同 XSDD WBDD 直接挂靠。
 2. 同一 XSDD 已归项目 A 后，项目 B 新建合同或活跃归属必须返回受控冲突，不能写入半截数据。
 3. 同一项目挂两个不同 XSDD 正常通过。
-4. 项目改名前后名称和来源名称均作为 aliases 返回；前端灰字展示并可搜索。
+4. 同 XSDD 的预交付名与正式名作为 `peer_names` 同字重展示；普通人工/迁移 aliases 仍灰显，二者均可搜索。
 5. 历史冲突 preview 列出 canonical 候选、各事实表数量和逐条冲突；preview 前后数据库零写入。
 6. 迁移只回填唯一证据；现有冲突不猜 owner，部署前后业务事实行数与金额合计不变。
 7. 删除总表中一条已导出实收回款后上传，该 `collection_id` 变为 `void`；原样重传不作废，导出后新增行不被旧文件作废。
 8. 历史去重仅删除完整业务指纹一致的重复行；含税额等任一字段不同的合同全部保留。
+9. 普通销售导入不得二次展开原始 XLSX；复用已通过 ZIP/行数/选页边界的 transform 结果。`维保业务=是` 或业务类型含维保/运维/维修任一命中即为维保（生产存在合法的“否＋单次维修”）；标记无法识别、Status 缺失、非法 XSDD 或补挂冲突时，销售事实、项目、合同、映射、alias、WBDD 归属和审计全部回滚。
+10. 数据库写侧要求 active WBDD 归属同时存在同项目的 canonical XSDD 映射和销售合同；存量 map-only 数据不迁移、不回填，但后续变更失败关闭，直到销售合同补齐。
 
 ## 发布结论
 

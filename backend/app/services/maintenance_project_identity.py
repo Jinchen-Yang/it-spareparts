@@ -15,12 +15,17 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import MetaData, Table, and_, case, func, select, text, union_all, update
+from sqlalchemy import MetaData, Table, and_, case, exists, func, or_, select, text, union_all, update
 from sqlalchemy.orm import Session
 
+from app import config
 from app.business_time import business_today
 from app.db import Base
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
@@ -54,8 +59,28 @@ class XsddProjectMergeConflict(Exception):
     """A reviewed project-container merge plan is stale or unsafe to apply."""
 
 
-_XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{4}$")
+_XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{3,4}$")
 _ASCII_WHITESPACE_RE = re.compile(r"[ \t\n\r\f\v]+")
+_PEER_ALIAS_SOURCES = frozenset({"xsdd_container_merge"})
+_SALES_ALIAS_SOURCE_PREFIX = "sales_order_import:"
+
+
+def sales_alias_source(value: str | None) -> str:
+    """Embed the reviewed XSDD reference in an alias provenance value."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        raise XsddProjectConflict("销售项目名称缺少有效 XSDD 来源")
+    return f"{_SALES_ALIAS_SOURCE_PREFIX}{xsdd_norm}"
+
+
+def _peer_source_candidate(source: str) -> str | None:
+    if source in _PEER_ALIAS_SOURCES:
+        return ""
+    if source.startswith(_SALES_ALIAS_SOURCE_PREFIX):
+        xsdd_norm = normalize_xsdd(source.removeprefix(_SALES_ALIAS_SOURCE_PREFIX))
+        return xsdd_norm or None
+    return None
 
 # This is deliberately explicit.  A schema migration which adds another
 # direct maintenance_project FK must update this reviewed list; merge apply
@@ -209,7 +234,7 @@ def normalized_xsdd_sql(column):
         "",
     )
     return case(
-        (normalized.op("~")(r"^[0-9]{8}-[0-9]{4}$"), normalized),
+        (normalized.op("~")(r"^[0-9]{8}-[0-9]{3,4}$"), normalized),
         else_="",
     )
 
@@ -244,6 +269,12 @@ def evidence_project_ids(db: Session, xsdd_norm: str) -> set[str]:
         .where(
             FMaintenanceOrder.linked_sales_order_no.is_not(None),
             normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm,
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
     ))
     # ``contract_id`` is an internal relation id and may retain a synthetic
@@ -276,6 +307,102 @@ def resolve_xsdd_project(db: Session, value: str | None) -> str | None:
             f"XSDD {value} 已关联多个项目，需先完成历史归并预检"
         )
     return next(iter(evidence), None)
+
+
+def _xsdd_owner_evidence(
+    db: Session,
+    xsdd_norm: str,
+) -> tuple[MaintenanceProjectXsdd | None, set[str], set[str]]:
+    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+    contract_ids = set(db.scalars(
+        select(MaintenanceProjectContract.project_id).where(
+            normalized_xsdd_sql(MaintenanceProjectContract.contract_no) == xsdd_norm
+        )
+    ))
+    assignment_ids = set(db.scalars(
+        select(MaintenanceSourceOrderAssignment.project_id)
+        .select_from(FMaintenanceOrder)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .where(
+            normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm,
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
+        )
+    ))
+    return mapped, contract_ids, assignment_ids
+
+
+def resolve_sales_xsdd_project(db: Session, value: str | None) -> str | None:
+    """Resolve a sales-side project without treating WBDD as owner evidence."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        return None
+    mapped, contract_ids, assignment_ids = _xsdd_owner_evidence(db, xsdd_norm)
+    owner_ids = set(contract_ids)
+    if mapped is not None:
+        owner_ids.add(mapped.project_id)
+    if len(owner_ids) > 1 or (owner_ids and assignment_ids - owner_ids):
+        raise XsddProjectConflict(
+            f"XSDD {value} 已关联多个项目，需先完成历史归并预检"
+        )
+    if not owner_ids and assignment_ids:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 WBDD 归属、没有销售合同 owner，需先修复"
+        )
+    return next(iter(owner_ids), None)
+
+
+def resolve_contract_xsdd_owner(db: Session, value: str | None) -> str | None:
+    """Return the unique contract-backed owner; WBDD/mapping alone is insufficient."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        return None
+    mapped, contract_ids, assignment_ids = _xsdd_owner_evidence(db, xsdd_norm)
+    if mapped is not None:
+        mapped_project = db.get(MaintenanceProject, mapped.project_id)
+        if mapped_project is None or not mapped_project.is_active:
+            raise XsddProjectConflict(
+                f"XSDD {value} 的 canonical owner 项目已停用或不存在"
+            )
+    if len(contract_ids) > 1:
+        raise XsddProjectConflict(
+            f"XSDD {value} 存在多个销售合同 owner，需先完成历史归并预检"
+        )
+    owner = next(iter(contract_ids), None)
+    if owner is not None and mapped is None:
+        raise XsddProjectConflict(
+            f"XSDD {value} 有销售合同但缺少 canonical owner 映射，需先修复"
+        )
+    if mapped is not None and owner is not None and mapped.project_id != owner:
+        raise XsddProjectConflict(
+            f"XSDD {value} 的映射与销售合同 owner 冲突"
+        )
+    if mapped is not None and owner is None:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 canonical 映射、没有销售合同 owner，需先修复"
+        )
+    if owner is None and assignment_ids:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 WBDD 归属、没有销售合同 owner，需先修复"
+        )
+    if owner is not None and assignment_ids - {owner}:
+        raise XsddProjectConflict(
+            f"XSDD {value} 的 WBDD 归属与销售合同 owner 冲突"
+        )
+    return owner
 
 
 def claim_xsdd_project(
@@ -313,19 +440,28 @@ def record_alias(
     project_id: str,
     alias_name: str | None,
     source: str,
-) -> None:
+) -> bool:
     """Idempotently retain a human-facing name without changing identity."""
 
     clean = " ".join(str(alias_name or "").split())
     if not clean:
-        return
+        return False
     alias_key = project_names.display_name_identity(clean)
-    exists = db.scalar(select(MaintenanceProjectAlias.alias_id).where(
+    exists = db.scalar(select(MaintenanceProjectAlias).where(
         MaintenanceProjectAlias.project_id == project_id,
         MaintenanceProjectAlias.alias_key == alias_key,
     ))
     if exists is not None:
-        return
+        # Later sales/XSDD evidence may upgrade an old generic alias into a
+        # proven peer name.  Never downgrade a proven source.
+        if (
+            _peer_source_candidate(source) is not None
+            and _peer_source_candidate(exists.source) is None
+        ):
+            exists.source = source
+            db.flush()
+            return True
+        return False
     db.add(MaintenanceProjectAlias(
         alias_id=str(uuid4()),
         project_id=project_id,
@@ -334,6 +470,7 @@ def record_alias(
         source=source,
     ))
     db.flush()
+    return True
 
 
 def aliases_by_project(db: Session, project_ids: list[str]) -> dict[str, list[str]]:
@@ -349,6 +486,74 @@ def aliases_by_project(db: Session, project_ids: list[str]) -> dict[str, list[st
     ).all()
     out: dict[str, list[str]] = {}
     for project_id, alias_name in rows:
+        bucket = out.setdefault(project_id, [])
+        if alias_name not in bucket:
+            bucket.append(alias_name)
+    return out
+
+
+def peer_names_by_project(db: Session, project_ids: list[str]) -> dict[str, list[str]]:
+    """Names whose provenance proves they describe the same XSDD owner."""
+
+    if not project_ids:
+        return {}
+    aliases = list(db.execute(
+        select(
+            MaintenanceProjectAlias.project_id,
+            MaintenanceProjectAlias.alias_name,
+            MaintenanceProjectAlias.alias_key,
+            MaintenanceProjectAlias.source,
+        )
+        .where(MaintenanceProjectAlias.project_id.in_(project_ids))
+        .order_by(MaintenanceProjectAlias.project_id, MaintenanceProjectAlias.alias_name)
+    ))
+    referenced_xsdds = {
+        xsdd_norm
+        for _project_id, _alias_name, _alias_key, source in aliases
+        if (xsdd_norm := _peer_source_candidate(source))
+    }
+    mapped_pairs: set[tuple[str, str]] = set()
+    contract_pairs: set[tuple[str, str]] = set()
+    if referenced_xsdds:
+        mapped_pairs = {
+            (project_id, xsdd_norm)
+            for project_id, xsdd_norm in db.execute(
+                select(
+                    MaintenanceProjectXsdd.project_id,
+                    MaintenanceProjectXsdd.xsdd_norm,
+                ).where(
+                    MaintenanceProjectXsdd.xsdd_norm.in_(sorted(referenced_xsdds))
+                )
+            )
+        }
+        contract_norm = normalized_xsdd_sql(
+            MaintenanceProjectContract.contract_no
+        ).label("xsdd_norm")
+        contract_pairs = {
+            (project_id, xsdd_norm)
+            for project_id, xsdd_norm in db.execute(
+                select(MaintenanceProjectContract.project_id, contract_norm).where(
+                    contract_norm.in_(sorted(referenced_xsdds))
+                )
+            )
+        }
+    out: dict[str, list[str]] = {}
+    for project_id, alias_name, _alias_key, source in aliases:
+        # ``source_order`` has no source_ref column, so it cannot prove which
+        # WBDD row supplied an old alias.  Keep it secondary instead of
+        # guessing from equal text.  Sales import and XSDD container merge are
+        # the two provenance paths that do establish the same XSDD identity.
+        xsdd_norm = _peer_source_candidate(source)
+        if xsdd_norm is None:
+            continue
+        if xsdd_norm and (
+            (project_id, xsdd_norm) not in mapped_pairs
+            or (project_id, xsdd_norm) not in contract_pairs
+        ):
+            # A source string is only a claim.  The current canonical map and
+            # sales contract must both prove the same project before UI may
+            # promote this alias to a peer name.
+            continue
         bucket = out.setdefault(project_id, [])
         if alias_name not in bucket:
             bucket.append(alias_name)
@@ -650,7 +855,15 @@ def preview_historical_conflicts(db: Session) -> dict:
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
             ),
         )
-        .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
+        .where(
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
+        )
     )
     contract_evidence = select(
         normalized_xsdd_sql(MaintenanceProjectContract.contract_no).label(
@@ -693,9 +906,21 @@ def preview_historical_conflicts(db: Session) -> dict:
             MaintenanceSourceOrderAssignment.project_id,
             func.count(),
         )
+        .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(project_ids or {""}),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     ).all())
@@ -771,8 +996,27 @@ def preview_historical_conflicts(db: Session) -> dict:
     rows: list[dict] = []
     for xsdd_norm, member_ids in grouped.items():
         mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
-        if mapped is not None and mapped.project_id in member_ids:
+        contract_owner_project_ids = sorted({
+            row.project_id
+            for row in contract_rows
+            if normalize_xsdd(row.contract_no) == xsdd_norm
+        })
+        unique_contract_owner = (
+            contract_owner_project_ids[0]
+            if len(contract_owner_project_ids) == 1
+            else None
+        )
+        mapping_contract_conflict = bool(
+            unique_contract_owner is not None
+            and mapped is not None
+            and mapped.project_id != unique_contract_owner
+        )
+        if unique_contract_owner is not None:
+            canonical_project_id = unique_contract_owner
+            canonical_rule = "unique_contract_owner_v1"
+        elif mapped is not None and mapped.project_id in member_ids:
             canonical_project_id = mapped.project_id
+            canonical_rule = "mapped_owner_else_active_orders_facts_created_at_id_v1"
         else:
             canonical_project_id = sorted(
                 member_ids,
@@ -789,6 +1033,7 @@ def preview_historical_conflicts(db: Session) -> dict:
                     project_id,
                 ),
             )[0]
+            canonical_rule = "mapped_owner_else_active_orders_facts_created_at_id_v1"
         members = []
         for project_id in member_ids:
             project = projects[project_id]
@@ -812,8 +1057,13 @@ def preview_historical_conflicts(db: Session) -> dict:
         conflict = {
             "xsdd_norm": xsdd_norm,
             "canonical_project_id": canonical_project_id,
-            "canonical_rule": "mapped_owner_else_active_orders_facts_created_at_id_v1",
-            "requires_human_decision": False,
+            "canonical_rule": canonical_rule,
+            "mapped_project_id": mapped.project_id if mapped is not None else None,
+            "contract_owner_project_ids": contract_owner_project_ids,
+            # No automatic or reviewed merge may silently overturn an
+            # existing map which disagrees with the unique sales-contract
+            # owner.  That inconsistency needs an explicit repair path.
+            "requires_human_decision": mapping_contract_conflict,
             "exact_duplicate_candidates": {
                 "contracts": _exact_duplicate_clusters(
                     [row for row in contract_rows if row.project_id in member_ids],
@@ -1226,7 +1476,9 @@ def _validate_source_xsdd_scope(
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
             ),
         )
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(source_project_ids))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(source_project_ids),
+        )
     )
     identities = {
         normalized
@@ -1631,8 +1883,17 @@ def _apply_locked_project_merge(
             "version": 1,
         })
 
+    # ``is_active`` is the assignment generation boundary.  Visibility of the
+    # WBDD fact (data_status/tombstone) is independent: a hidden current
+    # generation must move with the container or a later reveal would still
+    # claim the archived source project and fail the contract-backed guard.
     active_source_assignments = list(db.scalars(
         select(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
@@ -1671,6 +1932,26 @@ def _apply_locked_project_merge(
             reason="同一 XSDD 项目容器归并：归档 source WBDD 归属代次",
             operated_by=operated_by[:64],
         ))
+    db.flush()
+
+    # Source WBDD generations are now archived, so the reviewed canonical
+    # project is the sole active WBDD owner.  Claim the missing map before
+    # staging a source contract: the database contract-removal guard requires
+    # that map to prove the surviving owner during the intermediate state.
+    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+    if mapped is None:
+        mapped = MaintenanceProjectXsdd(
+            xsdd_norm=xsdd_norm,
+            project_id=canonical_id,
+            source="xsdd_container_merge",
+        )
+        db.add(mapped)
+    elif mapped.project_id != canonical_id:
+        raise XsddProjectMergeConflict(
+            "归并中的 XSDD mapping 与已验证 canonical owner 冲突"
+        )
+    else:
+        mapped.source = "xsdd_container_merge"
     db.flush()
 
     contracts = list(db.scalars(
@@ -1882,6 +2163,11 @@ def _apply_locked_project_merge(
     active_source_assignment_count = int(db.scalar(
         select(func.count())
         .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
@@ -2011,6 +2297,7 @@ def apply_historical_project_merge_batch(
     *,
     plans: list[dict],
     operated_by: str,
+    _prelocked_xsdd_identities: set[str] | None = None,
 ) -> dict:
     """Atomically CAS-check, then merge a reviewed set of disjoint XSDDs.
 
@@ -2079,7 +2366,22 @@ def apply_historical_project_merge_batch(
         db,
         all_project_ids,
     )
-    lock_xsdd_identities(db, sorted(all_xsdd_identities))
+    if _prelocked_xsdd_identities is None:
+        locked_xsdd_identities = set(lock_xsdd_identities(
+            db, sorted(all_xsdd_identities)
+        ))
+    else:
+        locked_xsdd_identities = {
+            identity
+            for value in _prelocked_xsdd_identities
+            if (identity := normalize_xsdd(value))
+        }
+        missing_locks = all_xsdd_identities - locked_xsdd_identities
+        if missing_locks:
+            raise XsddProjectMergeConflict(
+                "归并 XSDD 锁集合已扩展，请重试: "
+                f"{sorted(missing_locks)}"
+            )
     locked_states = operations.lock_workbook_states(
         db,
         project_ids=all_project_ids,
@@ -2094,6 +2396,20 @@ def apply_historical_project_merge_batch(
         if project is None:
             raise XsddProjectMergeConflict("归并项目集合已变化，请重新预览")
         locked_projects[project_id] = project
+
+    # A caller may precompute the envelope before project row locks.  Recheck
+    # after those rows are frozen, and fail instead of acquiring a newly
+    # discovered lower-sorted XSDD while already holding the original set.
+    frozen_xsdd_identities = set(seen_xsdds) | _xsdd_identities_for_projects(
+        db,
+        all_project_ids,
+    )
+    missing_locks = frozen_xsdd_identities - locked_xsdd_identities
+    if missing_locks:
+        raise XsddProjectMergeConflict(
+            "归并 XSDD 锁集合在加锁后发生变化，请重试: "
+            f"{sorted(missing_locks)}"
+        )
 
     preview = preview_historical_conflicts(db)
     conflicts_by_xsdd = {
@@ -2195,3 +2511,292 @@ def apply_historical_project_merge(
         operated_by=operated_by,
     )
     return result["groups"][0]
+
+
+def auto_merge_sales_xsdd_conflicts(
+    db: Session,
+    *,
+    incoming_amount_inc_tax_by_xsdd: dict[str, Decimal],
+    operated_by: str,
+) -> dict:
+    """Merge only incoming, contract-backed XSDD splits during sales prelock.
+
+    This deliberately delegates every write and OCC check to the reviewed
+    batch primitive.  When historical current contracts disagree, the active
+    incoming sales row may select one existing contract only by an exact,
+    unique gross-amount match on the already chosen canonical project.  Every
+    other current contract is archived, never deleted.  Source user relations
+    are copied one-for-one; the reviewed parser still rejects any primary or
+    viewer uniqueness collision before the first write.
+    """
+
+    incoming = {
+        normalized: Decimal(amount)
+        for value, amount in incoming_amount_inc_tax_by_xsdd.items()
+        if (normalized := normalize_xsdd(value))
+    }
+    if not incoming:
+        return {"merged_group_count": 0, "groups": []}
+
+    # Every downstream write path uses DATA_CHANGE -> sorted XSDD locks.
+    # Acquire that envelope even when no merge plan exists and this call only
+    # repairs a missing map, avoiding an XSDD -> DATA_CHANGE lock inversion
+    # with WBDD prelock/assignment work later in the same transaction.
+    db.execute(select(func.pg_advisory_xact_lock(
+        config.DATA_CHANGE_ADVISORY_LOCK_KEY
+    )))
+    preview = preview_historical_conflicts(db)
+    relevant = [
+        conflict
+        for conflict in preview["conflicts"]
+        if conflict["xsdd_norm"] in incoming
+    ]
+    plans: list[dict] = []
+    for conflict in relevant:
+        contract_owners = conflict.get("contract_owner_project_ids") or []
+        canonical_id = conflict["canonical_project_id"]
+        canonical = next(
+            (
+                project
+                for project in conflict["projects"]
+                if project["project_id"] == canonical_id
+            ),
+            None,
+        )
+        if conflict.get("requires_human_decision") or canonical is None or not canonical[
+            "is_active"
+        ]:
+            raise XsddProjectMergeConflict(
+                f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并"
+            )
+
+        member_ids = sorted(
+            project["project_id"] for project in conflict["projects"]
+        )
+        today = business_today()
+        current_contracts = list(db.scalars(
+            select(MaintenanceProjectContract)
+            .where(
+                MaintenanceProjectContract.project_id.in_(member_ids),
+                normalized_xsdd_sql(MaintenanceProjectContract.contract_no)
+                == conflict["xsdd_norm"],
+                MaintenanceProjectContract.effective_from <= today,
+                or_(
+                    MaintenanceProjectContract.effective_to.is_(None),
+                    MaintenanceProjectContract.effective_to > today,
+                ),
+            )
+            .order_by(MaintenanceProjectContract.project_contract_id)
+        ))
+        matching_contracts = [
+            contract
+            for contract in current_contracts
+            if contract.status_mapping_state == "mapped"
+            and contract.included_in_total
+            and contract.amount_inc_tax == incoming[conflict["xsdd_norm"]]
+        ]
+
+        contract_resolution = None
+        if len(contract_owners) == 1 and contract_owners == [canonical_id]:
+            # Preserve the original safe path when the contract-backed owner
+            # is already unique.  Only a genuinely ambiguous current set needs
+            # the sales amount to choose a survivor.
+            if len(current_contracts) > 1:
+                if len(matching_contracts) != 1:
+                    raise XsddProjectMergeConflict(
+                        f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并："
+                        "incoming 含税额未唯一匹配 current 合同"
+                    )
+        else:
+            if (
+                len(matching_contracts) != 1
+                or matching_contracts[0].project_id != canonical_id
+            ):
+                raise XsddProjectMergeConflict(
+                    f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并："
+                    "incoming 含税额未唯一匹配 locked canonical 合同"
+                )
+
+        if len(current_contracts) > 1:
+            current_contract = matching_contracts[0]
+            non_authoritative_contracts = [
+                contract
+                for contract in current_contracts
+                if contract.project_contract_id
+                != current_contract.project_contract_id
+            ]
+            if any(
+                contract.effective_from >= today
+                for contract in non_authoritative_contracts
+            ):
+                raise XsddProjectMergeConflict(
+                    f"XSDD {conflict['xsdd_norm']} 的非权威 current 合同起始日"
+                    "不早于业务日，不能无损归档"
+                )
+            archived_contract_ids = {
+                contract.project_contract_id
+                for contract in non_authoritative_contracts
+            }
+            survivor_ids = {
+                cluster["survivor_id"]
+                for cluster in conflict["exact_duplicate_candidates"]["collections"]
+            }
+            survivor_rows = list(db.scalars(
+                select(MaintenanceCollectionSnapshot).where(
+                    MaintenanceCollectionSnapshot.collection_id.in_(
+                        sorted(survivor_ids or {""})
+                    )
+                )
+            ))
+            contract_resolution = {
+                "current_project_contract_id": (
+                    current_contract.project_contract_id
+                ),
+                "archive_contracts": [
+                    {
+                        "project_contract_id": contract.project_contract_id,
+                        "effective_to": today.isoformat(),
+                    }
+                    for contract in non_authoritative_contracts
+                ],
+                "collection_contract_repoints": [
+                    {
+                        "collection_id": collection.collection_id,
+                        "target_project_contract_id": (
+                            current_contract.project_contract_id
+                        ),
+                    }
+                    for collection in survivor_rows
+                    if collection.project_contract_id in archived_contract_ids
+                ],
+            }
+
+        active_users = list(db.scalars(
+            select(MaintenanceProjectUserAssignment)
+            .where(
+                MaintenanceProjectUserAssignment.project_id.in_(member_ids),
+                MaintenanceProjectUserAssignment.archived_at.is_(None),
+            )
+            .order_by(MaintenanceProjectUserAssignment.assignment_id)
+        ))
+        canonical_users = [
+            assignment
+            for assignment in active_users
+            if assignment.project_id == canonical_id
+        ]
+        source_users = [
+            assignment
+            for assignment in active_users
+            if assignment.project_id != canonical_id
+        ]
+        user_assignment_resolution = None
+        if source_users:
+            users_by_id = {
+                user.id: user
+                for user in db.scalars(select(SysUser).where(
+                    SysUser.id.in_({assignment.user_id for assignment in active_users})
+                ))
+            }
+            invalid_user_ids = sorted({
+                assignment.user_id
+                for assignment in active_users
+                if users_by_id.get(assignment.user_id) is None
+                or not users_by_id[assignment.user_id].is_active
+            })
+            if invalid_user_ids:
+                raise XsddProjectMergeConflict(
+                    "active 项目用户关系指向停用或不存在账号，不能自动归并: "
+                    f"{invalid_user_ids}"
+                )
+            canonical_identities = {
+                (assignment.responsibility_type, assignment.user_id)
+                for assignment in canonical_users
+            }
+            source_by_identity: dict[
+                tuple[str, int], MaintenanceProjectUserAssignment
+            ] = {}
+            for assignment in source_users:
+                source_by_identity.setdefault(
+                    (assignment.responsibility_type, assignment.user_id),
+                    assignment,
+                )
+            user_assignment_resolution = {
+                "keep_assignment_ids": [
+                    assignment.assignment_id for assignment in canonical_users
+                ],
+                "archive_assignment_ids": [
+                    assignment.assignment_id for assignment in source_users
+                ],
+                "create_on_canonical": [
+                    {
+                        "source_assignment_id": assignment.assignment_id,
+                        "responsibility_type": assignment.responsibility_type,
+                        "user_id": assignment.user_id,
+                    }
+                    for identity, assignment in source_by_identity.items()
+                    if identity not in canonical_identities
+                ],
+            }
+        plans.append({
+            "xsdd": conflict["xsdd_norm"],
+            "expected_manifest_hash": conflict["manifest_hash"],
+            "expected_canonical_project_id": canonical_id,
+            "expected_member_project_ids": member_ids,
+            "contract_resolution": contract_resolution,
+            "user_assignment_resolution": user_assignment_resolution,
+        })
+
+    # A member project may carry identities beyond the incoming conflict.
+    # Compute that complete envelope before the first XSDD lock and acquire it
+    # once in global sort order.  The batch primitive receives the frozen set
+    # and must fail, not extend it, if concurrent evidence changed the graph.
+    merge_project_ids = sorted({
+        project_id
+        for plan in plans
+        for project_id in plan["expected_member_project_ids"]
+    })
+    complete_xsdd_envelope = set(incoming) | _xsdd_identities_for_projects(
+        db,
+        merge_project_ids,
+    )
+    locked_xsdd_identities = set(lock_xsdd_identities(
+        db, sorted(complete_xsdd_envelope)
+    ))
+
+    result = (
+        apply_historical_project_merge_batch(
+            db,
+            plans=plans,
+            operated_by=operated_by,
+            _prelocked_xsdd_identities=locked_xsdd_identities,
+        )
+        if plans
+        else {"merged_group_count": 0, "groups": []}
+    )
+
+    # Some pre-identity production rows already have one unambiguous sales
+    # contract owner but no mapping.  Claim that proven owner under the XSDD
+    # lock before WBDD auto-assignment; contract/WBDD disagreement still
+    # raises through the normal resolver instead of being guessed here.
+    for xsdd_norm in sorted(incoming):
+        try:
+            owner_id = resolve_sales_xsdd_project(db, xsdd_norm)
+        except XsddProjectConflict as exc:
+            raise XsddProjectMergeConflict(str(exc)) from exc
+        if owner_id is None:
+            continue
+        owner = db.get(MaintenanceProject, owner_id)
+        if owner is None or not owner.is_active:
+            raise XsddProjectMergeConflict(
+                f"XSDD {xsdd_norm} 的销售合同 owner 项目已停用或不存在"
+            )
+        try:
+            claim_xsdd_project(
+                db,
+                value=xsdd_norm,
+                project_id=owner_id,
+                source="sales_import_prelock",
+            )
+        except XsddProjectConflict as exc:
+            raise XsddProjectMergeConflict(str(exc)) from exc
+    return result

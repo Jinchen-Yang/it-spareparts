@@ -869,18 +869,25 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         else resolve_window(date_from, date_to)
     )
 
-    # 归档项目（is_active=False）**仍带着单**时必须留在列表里：它既不在项目行、
+    # 归档项目（is_active=False）**仍带着有效单**时必须留在列表里：它既不在项目行、
     # 也进不了未归属桶（归属还是活跃的），一旦滤掉，那些单就从看板上凭空消失，
     # §6.2 的母集恒等式跟着不成立——老板看到的总数会因为有人归档了一个项目而
-    # 无声变小。已经空掉的归档项目照旧隐藏，不给列表添乱。
-    carries_orders = (
+    # 无声变小。只有作废/已切换墓碑单的归档项目等同空项目，照旧隐藏。
+    carries_orders = active_orders(
         select(1)
         .select_from(MaintenanceSourceOrderAssignment)
-        .where(MaintenanceSourceOrderAssignment.project_id
-               == MaintenanceProject.project_id,
-               MaintenanceSourceOrderAssignment.is_active.is_(True))
-        .exists()
-    )
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id
+            == MaintenanceProject.project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        ),
+        FMaintenanceOrder,
+    ).exists()
     filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
     if lifecycle in ("ongoing", "ended", "missing"):
         filters.append(lifecycle_expr == lifecycle)
@@ -1076,6 +1083,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     # 卡片「销售」：canonical salesperson 优先；未人工覆盖的遗留空值才用 WBDD 众数兜底。
     sales_modes = _card_salesperson_modes(db, project_ids)
     aliases = maintenance_project_identity.aliases_by_project(db, project_ids)
+    peer_names = maintenance_project_identity.peer_names_by_project(db, project_ids)
 
     out_rows = []
     for proj in rows:
@@ -1086,6 +1094,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "display_name": proj.display_name,
             "aliases": [
                 name for name in aliases.get(proj.project_id, [])
+                if project_names.display_name_identity(name)
+                != project_names.display_name_identity(proj.display_name)
+            ],
+            "peer_names": [
+                name for name in peer_names.get(proj.project_id, [])
                 if project_names.display_name_identity(name)
                 != project_names.display_name_identity(proj.display_name)
             ],
@@ -1137,6 +1150,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
             "aliases": [],
+            "peer_names": [],
             "lifecycle": "missing",
             "period_from": None,       # 桶不是项目，没有期限可言
             "period_to": None,

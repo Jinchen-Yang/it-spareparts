@@ -226,6 +226,23 @@ def test_empty_archived_project_stays_hidden(db, tmp_path):
     assert empty.project_id not in {r["project_id"] for r in rows}
 
 
+def test_archived_project_with_only_void_order_stays_hidden(db, tmp_path):
+    """Current assignment alone must not make a void-only project look active."""
+    from app.models.maintenance_project import MaintenanceProject
+
+    archived = make_project(db, "仅作废单项目")
+    order = import_wbdd(db, tmp_path, orders=1, lines_per_order=1)[0]
+    assign(db, order, archived)
+    order.data_status = "已作废"
+    db.get(MaintenanceProject, archived.project_id).is_active = False
+    db.commit()
+
+    rows = boss_client(db, username="archive-void-boss").get(
+        "/api/maintenance/boss-board/projects"
+    ).json()["rows"]
+    assert archived.project_id not in {row["project_id"] for row in rows}
+
+
 def test_project_row_keyset_is_identical_for_bucket_and_projects(db, tmp_path):
     """桶行与项目行键集必须一致（新增 is_archived 后的形状回归）。"""
     proj = make_project(db)

@@ -67,15 +67,25 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(screen.getByText(/100000\.00 元/)).toBeInTheDocument();
   });
 
-  it("主名称下用灰字展示同一项目的其他来源名称", () => {
+  it("同 XSDD 的预交付与正式名称同等展示", () => {
     renderCard(makeRow({
-      aliases: ["腾讯整体维保项目-预交付", "腾讯20251016-20261015整体维保"],
+      peer_names: ["腾讯整体维保项目-预交付", "腾讯20251016-20261015整体维保"],
+      aliases: [
+        "腾讯整体维保项目-预交付",
+        "腾讯20251016-20261015整体维保",
+        "人工曾用名",
+      ],
     }));
-    const aliases = screen.getByTestId("maintenance-project-aliases");
-    expect(aliases).toHaveTextContent(
-      "其他名称：腾讯整体维保项目-预交付、腾讯20251016-20261015整体维保",
-    );
-    expect(aliases).toHaveClass("ant-typography-secondary");
+    const names = screen.getByTestId("maintenance-project-names");
+    expect(names).toHaveTextContent("合成项目A");
+    expect(names).toHaveTextContent("腾讯整体维保项目-预交付");
+    expect(names).toHaveTextContent("腾讯20251016-20261015整体维保");
+    expect(names).not.toHaveTextContent("其他名称");
+    expect(names.querySelector(".ant-typography-secondary")).toBeNull();
+    expect(screen.getByTestId("maintenance-project-aliases"))
+      .toHaveTextContent("其他名称：人工曾用名");
+    expect(screen.getByTestId("maintenance-project-aliases"))
+      .toHaveClass("ant-typography-secondary");
   });
 
   it("成本彩色上卡：备件/报销/领用/发货数 + 回款进度条（2026-08-22）", () => {
@@ -247,10 +257,10 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(container.textContent).toContain("尚未导入");
   });
 
-  it("归档与预交付徽标按需出现", () => {
+  it("归档徽标保留，预交付不作为项目级次徽标", () => {
     renderCard(makeRow({ is_archived: true, pre_delivery_order_count: 3 }));
     expect(screen.getByText("已归档")).toBeInTheDocument();
-    expect(screen.getByText("预交付 3 单")).toBeInTheDocument();
+    expect(screen.queryByText("预交付 3 单")).not.toBeInTheDocument();
   });
 
   it("始终显示维保起止期限，缺失哪端就明确提示待补", () => {

@@ -36,16 +36,17 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config
+from app.etl import mapping
 from app.business_time import business_today
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import FMaintenanceOrder, MaintenanceDemandTombstone
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.sales import FSalesOrder
 from app.models.system import SysAuditLog, SysImportBatch, SysImportError
 from app.services import maintenance_project_catalog as catalog
+from app.services import maintenance_project_identity
 from app.services import maintenance_project_operations as operations
-from app.services import date_loose, maintenance_periods, project_names
 
 PROTOCOL_VERSION = "maintenance-bulk-import-v1"
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
@@ -184,7 +185,9 @@ def _system_header(value: Any) -> str:
 
 
 def _text(value: Any) -> str:
-    return unicodedata.normalize("NFKC", str(value or "")).strip()
+    return unicodedata.normalize(
+        "NFKC", "" if value is None else str(value)
+    ).strip()
 
 
 def normalize_order_no(value: Any) -> str:
@@ -557,6 +560,14 @@ def _assignment_evidence(
             == MaintenanceSourceOrderAssignment.project_id,
         )
         .where(FMaintenanceOrder.linked_sales_order_no.in_(sorted(order_variants)))
+        .where(
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~select(MaintenanceDemandTombstone.source_order_id).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            ).exists(),
+        )
         .order_by(
             FMaintenanceOrder.linked_sales_order_no,
             MaintenanceSourceOrderAssignment.assignment_id,
@@ -635,7 +646,76 @@ def _is_yes(value: Any) -> bool:
     return _text(value).casefold() in {"是", "含税", "true", "yes", "1", "y"}
 
 
-def _pre_delivery_metadata(
+def _is_maintenance_business_type(value: Any) -> bool:
+    business_type = _text(value)
+    return any(word in business_type for word in ("维保", "运维", "维修"))
+
+
+def _maintenance_business_flag(
+    sheet: DetectedSheet,
+    values: tuple[Any, ...],
+) -> bool | None:
+    if "maintenance_business" not in sheet.field_indexes:
+        return None
+    raw = _text(_value(sheet, values, "maintenance_business"))
+    if not raw:
+        return None
+    if _is_yes(raw):
+        return True
+    if raw.casefold() in {"否", "false", "no", "0", "n"}:
+        return False
+    raise BulkImportInvalid(f"维保业务标记无法识别：{raw}")
+
+
+def _is_explicit_maintenance_row(
+    sheet: DetectedSheet,
+    values: tuple[Any, ...],
+) -> bool:
+    """Only explicit source facts may trigger automatic project writes."""
+
+    flag = _maintenance_business_flag(sheet, values)
+    business_type_raw = _text(_value(sheet, values, "business_type"))
+    type_is_maintenance = _is_maintenance_business_type(business_type_raw)
+    # Production exports use these as independent classifiers.  For example,
+    # 单次维修 can legitimately carry 维保业务=否, while an explicit 是 can
+    # accompany a generic sales type.  Either positive signal is sufficient.
+    return flag is True or type_is_maintenance
+
+
+def _ordinary_maintenance_rows(
+    sheet: DetectedSheet,
+) -> tuple[tuple[int, tuple[Any, ...]], ...]:
+    """Explicit, active rows eligible for the ordinary sales auto path."""
+
+    eligible: list[tuple[int, tuple[Any, ...]]] = []
+    for row_no, values in sheet.rows:
+        if not _is_explicit_maintenance_row(sheet, values):
+            continue
+        if "data_status" not in sheet.field_indexes:
+            raise BulkImportInvalid("维保销售订单自动建项要求源表包含 Status 数据状态列")
+        source_status = _text(_value(sheet, values, "data_status"))
+        if not source_status:
+            raise BulkImportInvalid("维保销售订单自动建项要求数据状态明确为已生效")
+        if source_status != config.ACTIVE_STATUS:
+            continue
+        eligible.append((row_no, values))
+    return tuple(eligible)
+
+
+def _explicit_maintenance_period(
+    sheet: DetectedSheet,
+    values: tuple[Any, ...],
+) -> tuple[date | None, date | None]:
+    raw_from = _value(sheet, values, "period_from")
+    raw_to = _value(sheet, values, "period_to")
+    period_from = _date(raw_from, label="维保起始日期") if _text(raw_from) else None
+    period_to = _date(raw_to, label="维保终止日期") if _text(raw_to) else None
+    if period_from is not None and period_to is not None and period_to < period_from:
+        raise BulkImportInvalid("维保终止日期不能早于起始日期")
+    return period_from, period_to
+
+
+def _maintenance_project_metadata(
     sheet: DetectedSheet,
     values: tuple[Any, ...],
     *,
@@ -643,42 +723,75 @@ def _pre_delivery_metadata(
     norm: str,
 ) -> dict:
     raw_name = _text(_value(sheet, values, "project_name"))
-    if not project_names.is_pre_delivery(raw_name):
-        raise BulkImportInvalid("未关联已有项目，且项目名不是明确的“预交付-”格式")
-    if not _is_yes(_value(sheet, values, "maintenance_business")):
-        raise BulkImportInvalid("预交付自动建项只接受明确标记为“是”的维保业务")
-    parsed_name = date_loose.parse_project_name(raw_name)
-    display_name = project_names.strip_pre_delivery(raw_name).strip()
-    if not display_name or display_name == raw_name:
-        raise BulkImportInvalid("预交付项目名称无法安全归一")
+    if not raw_name:
+        raise BulkImportInvalid("维保销售订单自动建项必须提供项目名称")
+    if not _is_explicit_maintenance_row(sheet, values):
+        raise BulkImportInvalid("自动建项只接受销售订单中明确的维保业务事实")
+    # Preserve the exact sales-order name.  A pre-delivery name and a later
+    # formal name for the same XSDD are peer display facts, not a hierarchy.
+    display_name = raw_name.strip()
 
-    raw_from = _value(sheet, values, "period_from")
-    raw_to = _value(sheet, values, "period_to")
-    direct_from = _date(raw_from, label="维保起始日期") if _text(raw_from) else None
-    direct_to = _date(raw_to, label="维保终止日期") if _text(raw_to) else None
-    name_from = parsed_name.get("period_from")
-    name_to = parsed_name.get("period_to")
-    if direct_from and name_from and direct_from != name_from:
-        raise BulkImportInvalid("维保起始日期与项目名称内嵌日期冲突")
-    if direct_to and name_to and direct_to != name_to:
-        raise BulkImportInvalid("维保终止日期与项目名称内嵌日期冲突")
-    period_from = direct_from or name_from
-    period_to = direct_to or name_to
-    if period_from is None or period_to is None:
-        raise BulkImportInvalid("预交付自动建项必须能确定完整维保起止日期")
-    if period_to < period_from:
+    direct_from, direct_to = _explicit_maintenance_period(sheet, values)
+    period_from = direct_from
+    period_to = direct_to
+    if period_from is not None and period_to is not None and period_to < period_from:
         raise BulkImportInvalid("维保终止日期不能早于起始日期")
     business_type = _text(_value(sheet, values, "business_type"))
-    if business_type and not any(word in business_type for word in ("维保", "运维", "维修")):
-        raise BulkImportInvalid("预交付业务类型与维保业务标记冲突")
     return {
         "row_no": row_no,
-        "project_code": f"PD-{norm}"[:64],
+        "project_code": f"XSDD-{norm}"[:64],
         "display_name": display_name[:256],
-        "period_from": period_from.isoformat(),
-        "period_to": period_to.isoformat(),
+        "period_from": period_from.isoformat() if period_from else None,
+        "period_to": period_to.isoformat() if period_to else None,
         "business_type": business_type or None,
     }
+
+
+def _apply_sales_project_period(
+    db: Session,
+    *,
+    item: dict,
+    project_id: str,
+    audit_reason: str,
+    operated_by: str,
+) -> None:
+    raw_from = item.get("source_period_from")
+    raw_to = item.get("source_period_to")
+    from_present = bool(item.get("source_period_from_present"))
+    to_present = bool(item.get("source_period_to_present"))
+    if not from_present and not to_present:
+        return
+    project = db.get(MaintenanceProject, project_id)
+    if project is None:
+        raise BulkImportConflict("项目在同步维保期限时消失")
+    desired_from = (
+        date.fromisoformat(raw_from)
+        if raw_from is not None
+        else (None if from_present else project.period_from)
+    )
+    desired_to = (
+        date.fromisoformat(raw_to)
+        if raw_to is not None
+        else (None if to_present else project.period_to)
+    )
+    if project.period_from == desired_from and project.period_to == desired_to:
+        return
+    if project.version != item.get("expected_project_version"):
+        raise BulkImportConflict("预览后的项目维保期限已变化")
+    updates = {"period_from": desired_from, "period_to": desired_to}
+    try:
+        updated = catalog.update_project(
+            db,
+            project_id=project_id,
+            version=project.version,
+            updates=updates,
+            reason=f"销售订单权威维保期限同步：{audit_reason}",
+            operated_by=operated_by,
+        )
+    except (catalog.MaintenanceProjectCatalogError, catalog.MaintenanceProjectCatalogConflict) as exc:
+        raise BulkImportConflict(str(exc)) from exc
+    if updated is None:
+        raise BulkImportConflict("项目在同步维保期限时消失")
 
 
 class SalesContractAmountAdapter(HeaderAdapter):
@@ -850,7 +963,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         for row_no, values in sheet.rows:
             raw_order_id = _text(_value(sheet, values, "raw_order_id"))
             order_no_raw = _text(_value(sheet, values, "order_no"))
-            norm = normalize_order_no(order_no_raw)
+            norm = maintenance_project_identity.normalize_xsdd(order_no_raw)
             if raw_order_id:
                 raw_ids.add(raw_order_id)
             if norm:
@@ -868,25 +981,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
         sales_by_raw = {row.raw_order_id: row for row in sales_rows}
         sales_by_order: dict[str, list[FSalesOrder]] = defaultdict(list)
         for row in sales_rows:
-            sales_by_order[normalize_order_no(row.order_no)].append(row)
+            sales_by_order[
+                maintenance_project_identity.normalize_xsdd(row.order_no)
+            ].append(row)
 
         all_projects = list(
             db.scalars(
                 select(MaintenanceProject).order_by(MaintenanceProject.project_id)
             )
         )
-        projects_by_name: dict[str, list[MaintenanceProject]] = defaultdict(list)
+        projects_by_id = {project.project_id: project for project in all_projects}
         projects_by_code: dict[str, list[MaintenanceProject]] = defaultdict(list)
         for project in all_projects:
-            projects_by_name[
-                project_names.display_name_identity(project.display_name)
-            ].append(project)
             projects_by_code[project.project_code.casefold()].append(project)
-        planned_new_names: dict[str, tuple[str, int]] = {}
 
         for row_no, values in sheet.rows:
             order_no_raw = _text(_value(sheet, values, "order_no"))
-            norm = normalize_order_no(order_no_raw)
+            norm = maintenance_project_identity.normalize_xsdd(order_no_raw)
             raw_order_id = _text(_value(sheet, values, "raw_order_id"))
             base = {
                 "row_no": row_no,
@@ -895,15 +1006,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 "issues": [],
             }
             if not norm:
-                issue = _row_issue(row_no, "missing_order_no", "销售订单号为空")
+                issue = _row_issue(
+                    row_no,
+                    "invalid_xsdd_order_no",
+                    "维保合同事实要求有效 XSDD-YYYYMMDD-NNN/NNNN 销售订单号",
+                )
                 base.update(action="error", issues=[issue])
                 source_rows.append(base)
                 hard_issues.append(issue)
                 continue
 
             source_status = _text(_value(sheet, values, "data_status"))
-            if "data_status" in sheet.field_indexes and not source_status:
-                issue = _row_issue(row_no, "missing_source_status", "销售订单数据状态为空")
+            if "data_status" not in sheet.field_indexes or not source_status:
+                issue = _row_issue(
+                    row_no,
+                    "missing_source_status",
+                    "维保合同事实要求源表包含明确的销售订单数据状态",
+                )
                 base.update(action="error", issues=[issue])
                 source_rows.append(base)
                 hard_issues.append(issue)
@@ -934,6 +1053,51 @@ class SalesContractAmountAdapter(HeaderAdapter):
             project_name_raw = _text(_value(sheet, values, "project_name"))
             period_from_raw = _text(_value(sheet, values, "period_from"))
             period_to_raw = _text(_value(sheet, values, "period_to"))
+            source_period_from: date | None = None
+            source_period_to: date | None = None
+            inverted_period_warning: dict | None = None
+            try:
+                explicit_maintenance = _is_explicit_maintenance_row(sheet, values)
+            except BulkImportInvalid as exc:
+                issue = _row_issue(
+                    row_no, "maintenance_source_conflict", str(exc)
+                )
+                base.update(action="error", issues=[issue])
+                source_rows.append(base)
+                hard_issues.append(issue)
+                continue
+            if explicit_maintenance:
+                if not project_name_raw:
+                    issue = _row_issue(
+                        row_no,
+                        "invalid_maintenance_project",
+                        "维保销售订单自动建项必须提供项目名称",
+                    )
+                    base.update(action="error", issues=[issue])
+                    source_rows.append(base)
+                    hard_issues.append(issue)
+                    continue
+                try:
+                    source_period_from, source_period_to = _explicit_maintenance_period(
+                        sheet, values
+                    )
+                except BulkImportInvalid as exc:
+                    if str(exc) == "维保终止日期不能早于起始日期":
+                        inverted_period_warning = _row_issue(
+                            row_no,
+                            "inverted_maintenance_period_preserved",
+                            "销售源维保期限倒置；已有项目将保留原期限，"
+                            "本次仍同步 XSDD 身份与合同金额",
+                            severity="warning",
+                        )
+                    else:
+                        issue = _row_issue(
+                            row_no, "invalid_maintenance_period", str(exc)
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
             duplicate = seen.get(norm)
             signature = (
                 inc,
@@ -1019,6 +1183,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
             operation = {
                 "row_no": row_no,
                 "normalized_order_no": norm,
+                "source_project_name": project_name_raw[:256] or None,
+                "source_period_from": (
+                    source_period_from.isoformat() if source_period_from else None
+                ),
+                "source_period_to": (
+                    source_period_to.isoformat() if source_period_to else None
+                ),
+                "source_period_from_present": bool(
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_from" in sheet.field_indexes
+                ),
+                "source_period_to_present": bool(
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_to" in sheet.field_indexes
+                ),
                 "sales_order_id": sales.id if sync_sales else None,
                 "sales_raw_order_id": sales.raw_order_id if sync_sales else None,
                 "sales_match_state": (
@@ -1054,6 +1235,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
             current_relations = all_contracts.get(norm, [])
             contract = safe_contracts.get(norm)
             if contract is not None:
+                contract_project = projects_by_id.get(contract.project_id)
                 before = {
                     "contract_amount_inc_tax": contract.amount_inc_tax,
                     "contract_version": contract.version,
@@ -1083,6 +1265,12 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     expected_contract_amount_inc_tax=_jsonable(
                         contract.amount_inc_tax
                     ),
+                    # Production FK guarantees the project exists.  ``None``
+                    # keeps planner-only fakes usable while apply still
+                    # resolves/locks the real project before any write.
+                    expected_project_version=(
+                        contract_project.version if contract_project else None
+                    ),
                 )
             elif current_relations:
                 issue = _row_issue(
@@ -1110,35 +1298,39 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 historical_project_ids = {
                     row["project_id"] for row in assignment_history.get(norm, [])
                 }
-                if len(active_project_ids) > 1:
+                try:
+                    sales_owner_id = (
+                        maintenance_project_identity.resolve_sales_xsdd_project(
+                            db, norm
+                        )
+                    )
+                except maintenance_project_identity.XsddProjectConflict as exc:
                     issue = _row_issue(
                         row_no,
-                        "project_assignment_ambiguous",
-                        "同一销售订单当前挂靠多个维保项目，拒绝自动建合同",
+                        "xsdd_owner_conflict",
+                        str(exc),
                     )
                     base.update(action="error", issues=[issue])
                     source_rows.append(base)
                     hard_issues.append(issue)
                     continue
-                if len(active_project_ids) == 1:
-                    project_id = next(iter(active_project_ids))
-                    if historical_project_ids - {project_id}:
+                if sales_owner_id is not None:
+                    project = projects_by_id.get(sales_owner_id)
+                    if project is None or not project.is_active:
                         issue = _row_issue(
                             row_no,
-                            "project_assignment_history_conflict",
-                            "销售订单历史上归属过其他项目，拒绝自动建合同",
+                            "xsdd_owner_project_missing",
+                            "XSDD owner 项目不存在或已归档",
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
-                    evidence = [row for row in active if row["project_id"] == project_id]
                     operation.update(
                         action="create_contract",
-                        project_id=project_id,
+                        project_id=sales_owner_id,
                         project_contract_id=None,
-                        expected_project_version=evidence[0]["project_version"],
-                        expected_assignment_fingerprint=_assignment_fingerprint(evidence),
+                        expected_project_version=project.version,
                     )
                     before = {
                         "contract_amount_inc_tax": None,
@@ -1152,71 +1344,67 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     }
                     action = "create_contract"
                 else:
-                    # Ordinary unmatched sales rows are skipped; only an
-                    # explicitly marked maintenance pre-delivery row may create
-                    # a new project, per the user's current business rule.
-                    if not project_names.is_pre_delivery(project_name_raw) or not _is_yes(
-                        _value(sheet, values, "maintenance_business")
-                    ):
+                    # Never infer a project from customer/name text.  Only an
+                    # explicit maintenance source fact may create one.
+                    if not explicit_maintenance:
                         base.update(
                             action="unmatched",
                             issues=[
                                 _row_issue(
                                     row_no,
                                     "project_not_found",
-                                    "未命中已有维保项目；非安全预交付行，本批跳过",
+                                    "未命中已有维保项目，且源行未明确标记维保业务，本批跳过",
                                     severity="warning",
                                 )
                             ],
                         )
                         source_rows.append(base)
                         continue
-                    if assignment_history.get(norm):
+                    if active_project_ids or historical_project_ids:
                         issue = _row_issue(
                             row_no,
                             "historical_assignment_conflict",
-                            "预交付销售订单存在历史项目归属，拒绝另建项目",
+                            "XSDD 只有 WBDD 归属、没有销售 owner，拒绝由 WBDD 反向建项",
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
+                    if inverted_period_warning is not None:
+                        issue = _row_issue(
+                            row_no,
+                            "invalid_maintenance_period",
+                            "维保终止日期不能早于起始日期；新项目无法建立可信期限",
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
                     try:
-                        metadata = _pre_delivery_metadata(
+                        metadata = _maintenance_project_metadata(
                             sheet, values, row_no=row_no, norm=norm
                         )
                     except BulkImportInvalid as exc:
                         issue = _row_issue(
-                            row_no, "invalid_pre_delivery_project", str(exc)
+                            row_no, "invalid_maintenance_project", str(exc)
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
-                    name_key = project_names.display_name_identity(
-                        metadata["display_name"]
-                    )
-                    existing_names = projects_by_name.get(name_key, [])
                     existing_codes = projects_by_code.get(
                         metadata["project_code"].casefold(), []
                     )
-                    prior_plan = planned_new_names.get(name_key)
-                    if existing_names or existing_codes or prior_plan is not None:
-                        detail = (
-                            "项目名称/编号已存在（含历史归档项目）"
-                            if existing_names or existing_codes
-                            else f"与第 {prior_plan[1]} 行计划创建同名项目"
-                        )
+                    if existing_codes:
                         issue = _row_issue(
                             row_no,
-                            "pre_delivery_project_identity_conflict",
-                            f"{detail}，拒绝自动创建",
+                            "maintenance_project_identity_conflict",
+                            "XSDD 稳定项目编号已存在，拒绝自动创建",
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
-                    planned_new_names[name_key] = (norm, row_no)
                     operation.update(
                         action="create_project",
                         project_id=None,
@@ -1237,6 +1425,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     }
                     action = "create_project"
 
+            if inverted_period_warning is not None:
+                base["issues"].append(inverted_period_warning)
             base.update(
                 action=action,
                 project_id=operation.get("project_id"),
@@ -1308,8 +1498,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 "amount_basis": "inc_tax",
                 "source_sync": "f_sales_order+maintenance_project_contract",
                 "missing_project_policy": (
-                    "unique_active_wbdd=create_contract;"
-                    "safe_pre_delivery=create_project;otherwise_skip"
+                    "sales_xsdd_owner=create_contract;"
+                    "explicit_maintenance=create_project;otherwise_skip"
                 ),
             },
         )
@@ -1322,6 +1512,19 @@ class SalesContractAmountAdapter(HeaderAdapter):
         operated_by: str,
         audit_reason: str,
     ) -> dict:
+        # Dedicated bulk apply and ordinary upload share the same global lock
+        # order: DATA_CHANGE -> XSDD identities -> per-order bulk locks.
+        db.execute(select(func.pg_advisory_xact_lock(
+            config.DATA_CHANGE_ADVISORY_LOCK_KEY
+        )))
+        maintenance_project_identity.lock_xsdd_identities(
+            db,
+            sorted({
+                row["normalized_order_no"]
+                for row in plan["operations"]
+                if row.get("normalized_order_no")
+            }),
+        )
         writes = 0
         noops = 0
         project_ids: set[str] = set()
@@ -1345,7 +1548,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     raise BulkImportConflict("预览后的销售订单已不存在")
                 if (
                     sales.raw_order_id != item["sales_raw_order_id"]
-                    or normalize_order_no(sales.order_no) != norm
+                    or maintenance_project_identity.normalize_xsdd(sales.order_no) != norm
                     or _jsonable(sales.amount_ex_tax)
                     != item["expected_sales_amount_ex_tax"]
                     or _jsonable(sales.tax_rate) != item["expected_sales_tax_rate"]
@@ -1387,6 +1590,24 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     != item["expected_contract_amount_inc_tax"]
                 ):
                     raise BulkImportConflict("预览后的合同金额已变化，请重新预览")
+                _apply_sales_project_period(
+                    db,
+                    item=item,
+                    project_id=contract.project_id,
+                    audit_reason=audit_reason,
+                    operated_by=operated_by,
+                )
+                alias_created = maintenance_project_identity.record_alias(
+                    db,
+                    project_id=contract.project_id,
+                    alias_name=item.get("source_project_name"),
+                    source=maintenance_project_identity.sales_alias_source(norm),
+                )
+                if alias_created:
+                    operations.bump_workbook_revision(
+                        db, project_id=contract.project_id
+                    )
+                project_ids.add(contract.project_id)
                 noops += 1
                 continue
 
@@ -1417,13 +1638,17 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 variants = {item["sales_order_no"], norm, f"XSDD-{norm}"}
                 if _all_contracts_by_order(db, variants).get(norm):
                     raise BulkImportConflict("预览后该销售订单已出现合同关系")
-                current, _history = _assignment_evidence(db, variants)
-                evidence = current.get(norm, [])
-                if _assignment_fingerprint(evidence) != item[
-                    "expected_assignment_fingerprint"
-                ]:
-                    raise BulkImportConflict("预览后的 WBDD 项目挂靠已变化")
                 project_id = item["project_id"]
+                try:
+                    current_owner = (
+                        maintenance_project_identity.resolve_sales_xsdd_project(
+                            db, norm
+                        )
+                    )
+                except maintenance_project_identity.XsddProjectConflict as exc:
+                    raise BulkImportConflict(str(exc)) from exc
+                if current_owner != project_id:
+                    raise BulkImportConflict("预览后的 XSDD owner 已变化")
                 project = db.get(MaintenanceProject, project_id)
                 if (
                     project is None
@@ -1455,21 +1680,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 variants = {item["sales_order_no"], norm, f"XSDD-{norm}"}
                 if _all_contracts_by_order(db, variants).get(norm):
                     raise BulkImportConflict("预览后该销售订单已出现合同关系")
+                try:
+                    current_owner = (
+                        maintenance_project_identity.resolve_sales_xsdd_project(
+                            db, norm
+                        )
+                    )
+                except maintenance_project_identity.XsddProjectConflict as exc:
+                    raise BulkImportConflict(str(exc)) from exc
+                if current_owner is not None:
+                    raise BulkImportConflict("预览后的 XSDD owner 已出现")
                 current, history = _assignment_evidence(db, variants)
                 if current.get(norm) or history.get(norm):
-                    raise BulkImportConflict("预览后预交付销售订单已出现项目归属")
+                    raise BulkImportConflict("预览后销售订单已出现项目归属")
                 metadata = item["new_project"]
-                name_key = project_names.display_name_identity(
-                    metadata["display_name"]
-                )
                 for existing in db.scalars(select(MaintenanceProject)):
-                    if (
-                        project_names.display_name_identity(existing.display_name)
-                        == name_key
-                        or existing.project_code.casefold()
-                        == metadata["project_code"].casefold()
-                    ):
-                        raise BulkImportConflict("预览后预交付项目名称或编号已被占用")
+                    if existing.project_code.casefold() == metadata["project_code"].casefold():
+                        raise BulkImportConflict("预览后 XSDD 稳定项目编号已被占用")
                 created = catalog.create_project(
                     db,
                     project_code=metadata["project_code"],
@@ -1479,19 +1706,22 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     operated_by=operated_by,
                 )
                 project_id = created["project_id"]
-                updated = catalog.update_project(
-                    db,
-                    project_id=project_id,
-                    version=created["version"],
-                    updates={
-                        "period_from": date.fromisoformat(metadata["period_from"]),
-                        "period_to": date.fromisoformat(metadata["period_to"]),
-                    },
-                    reason=audit_reason,
-                    operated_by=operated_by,
-                )
-                if updated is None:
-                    raise BulkImportConflict("预交付项目在创建期间消失")
+                period_updates = {
+                    key: date.fromisoformat(metadata[key])
+                    for key in ("period_from", "period_to")
+                    if metadata.get(key)
+                }
+                if period_updates:
+                    updated = catalog.update_project(
+                        db,
+                        project_id=project_id,
+                        version=created["version"],
+                        updates=period_updates,
+                        reason=audit_reason,
+                        operated_by=operated_by,
+                    )
+                    if updated is None:
+                        raise BulkImportConflict("维保项目在创建期间消失")
                 payload = operations.create_contract(
                     db,
                     project_id=project_id,
@@ -1511,9 +1741,29 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     operated_by=operated_by,
                 )
                 if payload is None:
-                    raise BulkImportConflict("预交付项目在创建合同期间消失")
+                    raise BulkImportConflict("维保项目在创建合同期间消失")
             else:
                 raise BulkImportConflict("预览计划包含未知销售订单动作")
+
+            if item["action"] != "create_project":
+                _apply_sales_project_period(
+                    db,
+                    item=item,
+                    project_id=project_id,
+                    audit_reason=audit_reason,
+                    operated_by=operated_by,
+                )
+            alias_created = maintenance_project_identity.record_alias(
+                db,
+                project_id=project_id,
+                alias_name=item.get("source_project_name"),
+                source=maintenance_project_identity.sales_alias_source(norm),
+            )
+            if alias_created:
+                # create/update contract already bumps in this transaction;
+                # the dedupe registry makes this exactly-once.  It is the sole
+                # bump for an amount-noop row that contributes a new peer name.
+                operations.bump_workbook_revision(db, project_id=project_id)
 
             if sales is not None:
                 before = {
@@ -2007,6 +2257,270 @@ def _finish_plan(
 
 register_adapter(SalesContractAmountAdapter())
 register_adapter(ReceiptCollectionAdapter())
+
+
+def transformed_sales_sheet(
+    result,
+    *,
+    source_columns: list[str],
+) -> DetectedSheet:
+    """Adapt the already-bounded generic sales transform without reopening XLSX."""
+
+    internal_by_detected = {
+        "order_no": "order_no",
+        "raw_order_id": "raw_order_id",
+        "data_status": "data_status",
+        "maintenance_business": "maintenance_business",
+        "business_type": "business_type",
+        "project_name": "maintenance_project_name",
+        "period_from": "maintenance_period_from",
+        "period_to": "maintenance_period_to",
+        "order_amount": "amount_inc_tax",
+        "tax_flag": "is_tax_inclusive",
+        "tax_rate": "tax_rate",
+        "tax_amount": "tax_amount",
+        "amount_ex_tax": "amount_ex_tax",
+    }
+    present_internal = {
+        mapping.SALES_HEAD[column]
+        for column in source_columns
+        if column in mapping.SALES_HEAD
+    }
+    fields = [
+        field
+        for field, internal in internal_by_detected.items()
+        if internal in present_internal
+    ]
+    field_indexes = {field: index for index, field in enumerate(fields)}
+    rows: list[tuple[int, tuple[Any, ...]]] = []
+    for row_no, order in enumerate(result.orders.values(), start=3):
+        values: list[Any] = []
+        for field in fields:
+            value = order.get(internal_by_detected[field])
+            if field == "tax_flag":
+                value = "含税" if value is True else (
+                    "不含税" if value is False else None
+                )
+            values.append(value)
+        rows.append((row_no, tuple(values)))
+    return DetectedSheet(
+        name="generic-sales-transform",
+        header_row=2,
+        header_rows=(1, 2),
+        headers=tuple(fields),
+        system_headers=(),
+        field_indexes=field_indexes,
+        field_matches={},
+        rows=tuple(rows),
+    )
+
+
+def prelock_uploaded_sales_sheet(
+    db: Session,
+    sheet: DetectedSheet,
+    *,
+    mode: str = "upsert",
+    operated_by: str = "system",
+) -> dict[str, list[str]]:
+    """Prelock the exact WBDD backlog a maintenance sales upload may link."""
+
+    if mode == "skip":
+        incoming_raw_ids = {
+            _text(_value(sheet, values, "raw_order_id"))
+            for _row_no, values in sheet.rows
+            if _text(_value(sheet, values, "raw_order_id"))
+        }
+        existing_raw_ids = set(db.scalars(
+            select(FSalesOrder.raw_order_id).where(
+                FSalesOrder.raw_order_id.in_(sorted(incoming_raw_ids))
+            )
+        )) if incoming_raw_ids else set()
+        sheet = DetectedSheet(
+            name=sheet.name,
+            header_row=sheet.header_row,
+            header_rows=sheet.header_rows,
+            headers=sheet.headers,
+            system_headers=sheet.system_headers,
+            field_indexes=sheet.field_indexes,
+            field_matches=sheet.field_matches,
+            rows=tuple(
+                (row_no, values)
+                for row_no, values in sheet.rows
+                if _text(_value(sheet, values, "raw_order_id"))
+                not in existing_raw_ids
+            ),
+        )
+    eligible_rows = _ordinary_maintenance_rows(sheet)
+    incoming_amounts: dict[str, set[Decimal]] = defaultdict(set)
+    for _row_no, values in eligible_rows:
+        xsdd = maintenance_project_identity.normalize_xsdd(
+            _text(_value(sheet, values, "order_no"))
+        )
+        if not xsdd:
+            raise BulkImportInvalid(
+                "维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN"
+            )
+        amount_inc_tax, _amount_ex_tax, _tax_rate = (
+            SalesContractAmountAdapter._amounts(sheet, values)
+        )
+        incoming_amounts[xsdd].add(amount_inc_tax)
+    xsdds = set(incoming_amounts)
+    if not xsdds:
+        return {}
+    ambiguous_amounts = {
+        xsdd: sorted(str(amount) for amount in amounts)
+        for xsdd, amounts in incoming_amounts.items()
+        if len(amounts) != 1
+    }
+    if ambiguous_amounts:
+        raise BulkImportInvalid(
+            f"同一 XSDD 的销售源行含税金额不唯一：{ambiguous_amounts}"
+        )
+    from app.services import maintenance_source_assignments as assignments
+
+    try:
+        maintenance_project_identity.auto_merge_sales_xsdd_conflicts(
+            db,
+            incoming_amount_inc_tax_by_xsdd={
+                xsdd: next(iter(amounts))
+                for xsdd, amounts in incoming_amounts.items()
+            },
+            operated_by=operated_by,
+        )
+        return assignments.prelock_sales_xsdd_backlog(
+            db, xsdd_values=xsdds
+        )
+    except (
+        assignments.SourceAssignmentConflict,
+        maintenance_project_identity.XsddProjectMergeConflict,
+    ) as exc:
+        raise BulkImportConflict(str(exc)) from exc
+
+
+def sync_uploaded_sales_workbook(
+    db: Session,
+    data: bytes | None,
+    filename: str,
+    *,
+    operated_by: str,
+    import_batch_id: int,
+    prelocked_xsdd_order_ids: dict[str, list[str]] | None = None,
+    detected_sheet: DetectedSheet | None = None,
+) -> dict:
+    """Project explicit maintenance sales rows during the ordinary import.
+
+    The ordinary ETL remains the sales fact writer.  This hook reuses the
+    reviewed XSDD planner/apply path, but feeds it only rows whose source
+    columns explicitly declare maintenance business.  Non-maintenance rows
+    are therefore incapable of creating/updating maintenance contracts.
+    """
+
+    if detected_sheet is None:
+        if data is None:
+            raise BulkImportInvalid("缺少销售订单投影输入")
+        try:
+            adapter, sheet = _detect(data)
+        except BulkImportInvalid as exc:
+            return {
+                "status": "not_applicable",
+                "eligible_rows": 0,
+                "reason": str(exc),
+            }
+        if adapter.key != "sales_contract_amount":
+            return {
+                "status": "not_applicable",
+                "eligible_rows": 0,
+                "reason": "未识别为销售订单合同事实表",
+            }
+    else:
+        adapter = _ADAPTERS["sales_contract_amount"]
+        sheet = detected_sheet
+    written_raw_ids = set(db.scalars(select(FSalesOrder.raw_order_id).where(
+        FSalesOrder.import_batch_id == import_batch_id
+    )))
+    written_sheet = DetectedSheet(
+        name=sheet.name,
+        header_row=sheet.header_row,
+        header_rows=sheet.header_rows,
+        headers=sheet.headers,
+        system_headers=sheet.system_headers,
+        field_indexes=sheet.field_indexes,
+        field_matches=sheet.field_matches,
+        rows=tuple(
+            (row_no, values)
+            for row_no, values in sheet.rows
+            if _text(_value(sheet, values, "raw_order_id")) in written_raw_ids
+        ),
+    )
+    ordinary_eligible_rows = _ordinary_maintenance_rows(written_sheet)
+    if any(
+        not maintenance_project_identity.normalize_xsdd(
+            _text(_value(written_sheet, values, "order_no"))
+        )
+        for _row_no, values in ordinary_eligible_rows
+    ):
+        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN")
+    eligible_rows = ordinary_eligible_rows
+    if not eligible_rows:
+        return {"status": "no_maintenance_rows", "eligible_rows": 0}
+    maintenance_sheet = DetectedSheet(
+        name=sheet.name,
+        header_row=sheet.header_row,
+        header_rows=sheet.header_rows,
+        headers=sheet.headers,
+        system_headers=sheet.system_headers,
+        field_indexes=sheet.field_indexes,
+        field_matches=sheet.field_matches,
+        rows=eligible_rows,
+    )
+    plan = adapter.build_plan(db, maintenance_sheet)
+    blocking = int((plan.get("summary") or {}).get("blocking_errors") or 0)
+    if blocking:
+        raise BulkImportInvalid(
+            f"维保销售订单自动建项有 {blocking} 个阻断错误",
+            issues=plan.get("issues") or [],
+        )
+    result = adapter.apply_plan(
+        db,
+        plan,
+        operated_by=operated_by,
+        audit_reason=(
+            f"普通销售订单导入自动建维保项目 "
+            f"batch={import_batch_id} filename={filename[:128]}"
+        ),
+    )
+    eligible_xsdds = {
+        maintenance_project_identity.normalize_xsdd(
+            _text(_value(maintenance_sheet, values, "order_no"))
+        )
+        for _row_no, values in maintenance_sheet.rows
+    }
+    candidate_order_ids = {
+        raw_order_id
+        for xsdd in eligible_xsdds
+        for raw_order_id in (prelocked_xsdd_order_ids or {}).get(xsdd, [])
+    }
+    linked_wbdd = None
+    if candidate_order_ids:
+        from app.services import maintenance_source_assignments as assignments
+
+        try:
+            linked_wbdd = assignments.auto_assign_existing_orders(
+                db,
+                operated_by=operated_by,
+                source_order_ids=candidate_order_ids,
+            )
+        except assignments.SourceAssignmentConflict as exc:
+            raise BulkImportConflict(str(exc)) from exc
+    response = {
+        "status": "applied",
+        "eligible_rows": len(eligible_rows),
+        "source_actions": (plan.get("summary") or {}).get("source_actions") or {},
+        **result,
+    }
+    if linked_wbdd is not None:
+        response["linked_wbdd"] = linked_wbdd
+    return response
 
 
 def build_preview(db: Session, data: bytes, filename: str) -> PreviewArtifact:

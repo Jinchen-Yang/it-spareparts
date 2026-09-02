@@ -4,11 +4,12 @@
 1. salesperson_modes_by_project：活单销售众数（含并列稳定）；
 2. _backfill_project_owner / backfill_owner_fields：只补空、不覆盖人工编辑、
    账号匹配才建 primary_manager 指派、幂等重跑不重复建；
-3. auto_assign_unassigned 端到端：自动建项目即带销售/负责人/指派；
-   负责人账号搜索端点放宽到 page_maintenance。
+3. auto_assign_unassigned 端到端：挂销售合同 XSDD owner 后即带销售/负责人/
+   指派回填；负责人账号搜索端点放宽到 page_maintenance。
 """
 
 from datetime import date
+from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -29,6 +30,7 @@ from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_project_assignments as project_assignments
 from app.services import maintenance_project_catalog as project_catalog
+from app.services import maintenance_project_operations as operations
 from app.services import maintenance_source_assignments as sa
 from tests import factories as f
 
@@ -36,12 +38,13 @@ _PASSWORD = "synthetic-owner-backfill-1"
 
 
 def _load_orders(db, *, project: str, n: int = 1,
-                 salesperson: str | None = None) -> list[FMaintenanceOrder]:
+                 salesperson: str | None = None,
+                 sales_order: str | None = None) -> list[FMaintenanceOrder]:
     """造 n 张未归属的活需求单（salesperson 可覆盖，默认夹具值=测试销售）。"""
     batch = SysImportBatch(
         filename=f"synthetic-bf-{project}.xlsx",
         file_type="maintenance",
-        file_hash=f"bf-{project}-{n}".ljust(64, "0"),
+        file_hash=f"bf-{project}-{n}-{sales_order}".ljust(64, "0"),
         status="success",
     )
     db.add(batch)
@@ -50,7 +53,7 @@ def _load_orders(db, *, project: str, n: int = 1,
     for i in range(n):
         raw_id = f"WBDD-BF-{project}-{i}"
         heads[raw_id] = f.maintenance_head(raw_id, order_no=f"NO-{project}-{i}",
-                                           project=project)
+                                           project=project, sales_order=sales_order)
     lines = [f.maintenance_line(rid, f"{rid}-L1", "PN-BF-001") for rid in heads]
     loader.load(db, f.maintenance_result(heads, lines), batch.id,
                 date(2026, 8, 21), mode="upsert")
@@ -71,6 +74,36 @@ def _assign(db, order: FMaintenanceOrder, project: MaintenanceProject) -> None:
         project_id=project.project_id, is_active=True, version=1,
         created_by="tester"))
     db.commit()
+
+
+def _contract_owner_project(
+    db, *, project_id: str, code: str, name: str, xsdd: str
+) -> MaintenanceProject:
+    """显式人工建项目 + 销售合同建立 XSDD owner（合同是唯一事实来源）。"""
+    project = MaintenanceProject(
+        project_id=project_id, project_code=code,
+        display_name=name, lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()  # 测试会话 autoflush=False；create_contract 先按 project_id 查主档
+    operations.create_contract(
+        db,
+        project_id=project_id,
+        contract_id=f"{project_id}-contract",
+        contract_no=f"XSDD-{xsdd}",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="bf-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="销售合同先建立 XSDD owner",
+        operated_by="bf-contract-setup",
+    )
+    db.commit()
+    return project
 
 
 def _admin_ctx() -> UserContext:
@@ -113,20 +146,25 @@ def test_auto_assign_backfills_salesperson_manager_and_assignment(db):
                    salesperson_name="测试销售",
                    password_hash=hash_password(_PASSWORD), is_active=True))
     db.commit()
-    _load_orders(db, project="回填测试项目甲", n=2)
+    # 显式建项目 + 销售合同建立 XSDD owner；WBDD 凭 XSDD 挂靠
+    project = _contract_owner_project(
+        db, project_id="bf-p-auto", code="BF-P-AUTO",
+        name="回填测试项目甲", xsdd="20260821-0001",
+    )
+    _load_orders(db, project="回填测试项目甲-预交付", n=2,
+                 sales_order="XSDD-20260821-0001")
 
     result = sa.auto_assign_unassigned(db, operated_by="bf-admin",
                                        user_ctx=_admin_ctx())
     db.commit()
 
-    project = db.scalar(select(MaintenanceProject).where(
-        MaintenanceProject.display_name == "回填测试项目甲"))
-    assert project is not None
-    assert result["created_projects"] == 1
+    assert result["created_projects"] == 0
+    assert result["assigned_orders"] == 2
     assert result["sales_filled_projects"] >= 1
     assert result["manager_filled_projects"] >= 1
     assert result["assignments_created"] == 1
     # 三字段：销售、负责人原文、账号级指派
+    db.refresh(project)
     assert project.salesperson == "测试销售"
     assert project.project_manager_id == "测试销售"
     user = db.scalar(select(SysUser).where(SysUser.username == "sales-t"))
@@ -276,13 +314,17 @@ def test_complete_override_project_is_not_an_auto_backfill_candidate(db):
 
 def test_backfill_without_matching_account_keeps_text_only(db):
     # 有销售众数、但没有 salesperson_name 对齐的账号：只回填文本，不建指派
-    _load_orders(db, project="回填无账号项目", n=1)
+    project = _contract_owner_project(
+        db, project_id="bf-p-noacct", code="BF-P-NOACCT",
+        name="回填无账号项目", xsdd="20260821-0002",
+    )
+    _load_orders(db, project="回填无账号项目", n=1,
+                 sales_order="XSDD-20260821-0002")
     result = sa.auto_assign_unassigned(db, operated_by="bf-admin",
                                        user_ctx=_admin_ctx())
     db.commit()
-    project = db.scalar(select(MaintenanceProject).where(
-        MaintenanceProject.display_name == "回填无账号项目"))
-    assert project is not None
+    db.refresh(project)
+    assert result["assigned_orders"] == 1
     assert project.salesperson == "测试销售"
     assert project.project_manager_id == "测试销售"
     assert _active_assignment(db, project.project_id) is None

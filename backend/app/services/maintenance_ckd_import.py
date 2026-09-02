@@ -35,7 +35,7 @@ from app.services import maintenance_front_stock as front_stock
 MAX_PREVIEW_BYTES = 256 * 1024 * 1024  # 真实文件含内嵌图片，允许大文件
 _CKD_RE = re.compile(r"(CKD-\d{8}-\d{4})")
 _WBDD_RE = re.compile(r"(WBDD-\d{8}-\d{4})")
-_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{4})")
+_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{3,4})(?!\d)")
 
 _HEAD_COLUMNS = [
     "出库单号", "出库日期", "出库类别", "出库备件/整机", "出库仓库", "仓储中心",

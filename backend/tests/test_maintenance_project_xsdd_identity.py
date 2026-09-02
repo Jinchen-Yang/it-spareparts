@@ -1,5 +1,6 @@
 """XSDD is the canonical maintenance-project identity (#56)."""
 
+import hashlib
 import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -10,7 +11,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.etl import loader
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceOrder,
+    MaintenanceDemandDeleteIntent,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
@@ -132,6 +137,54 @@ def _upsert_wbdd_xsdd(
     )
 
 
+def _seed_dirty_wbdd_assignment(
+    db,
+    *,
+    raw_order_id: str,
+    sales_order: str,
+    project: MaintenanceProject,
+    data_status: str,
+) -> FMaintenanceOrder:
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=sales_order,
+        batch_key=f"dirty-{raw_order_id}",
+    )
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == raw_order_id
+    ))
+    order.data_status = data_status
+    db.flush()
+    db.execute(text(
+        "ALTER TABLE maintenance_source_order_assignment DISABLE TRIGGER "
+        "trg_maintenance_assignment_claim_xsdd"
+    ))
+    try:
+        db.add(MaintenanceSourceOrderAssignment(
+            assignment_id=hashlib.sha256(
+                f"dirty-assignment:{raw_order_id}".encode("utf-8")
+            ).hexdigest()[:36],
+            source_order_id=raw_order_id,
+            project_id=project.project_id,
+            is_active=True,
+            version=1,
+            created_by="historical-fixture",
+        ))
+        db.flush()
+    except Exception:
+        # ALTER TABLE is transactional: rollback also restores the trigger.
+        db.rollback()
+        raise
+    else:
+        db.execute(text(
+            "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
+            "trg_maintenance_assignment_claim_xsdd"
+        ))
+    db.commit()
+    return order
+
+
 def _ledger_bytes(*, order_no: str, project_name: str) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -232,6 +285,29 @@ def _seed_mergeable_contract_conflict(db, *, suffix: str):
 
 
 def test_auto_assign_groups_same_xsdd_and_retains_names_as_aliases(db):
+    project = _project(
+        db,
+        "xsdd-auto-contract-owner",
+        "XSDD-AUTO-CONTRACT",
+        "腾讯销售合同项目",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-auto-contract-owner-contract",
+        contract_no="XSDD-20251017-0036",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2025, 10, 16),
+        effective_to=None,
+        source="test",
+        reason="销售合同先建立 XSDD owner",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
     orders = _load_same_xsdd_different_names(db)
 
     result = assignments.auto_assign_unassigned(
@@ -249,7 +325,8 @@ def test_auto_assign_groups_same_xsdd_and_retains_names_as_aliases(db):
     )))
     assert len(owner_ids) == 1
     project_id = next(iter(owner_ids))
-    assert result["created_projects"] == 1
+    assert project_id == project.project_id
+    assert result["created_projects"] == 0
     assert result["assigned_orders"] == 2
     mapping = db.get(MaintenanceProjectXsdd, "20251017-0036")
     assert mapping is not None and mapping.project_id == project_id
@@ -365,7 +442,7 @@ def test_wbdd_upsert_rejects_xsdd_owned_by_another_project(db):
     assert mapping is not None and mapping.project_id == project_b.project_id
 
 
-def test_wbdd_upsert_claims_unowned_xsdd_for_assigned_project(db):
+def test_wbdd_upsert_cannot_claim_unowned_xsdd_for_assigned_project(db):
     project_a = _project(
         db,
         "xsdd-wbdd-project-unowned-a",
@@ -391,20 +468,297 @@ def test_wbdd_upsert_claims_unowned_xsdd_for_assigned_project(db):
     )
     db.commit()
 
-    _upsert_wbdd_xsdd(
-        db,
-        raw_order_id=raw_order_id,
-        sales_order=new_xsdd,
-        batch_key="xsdd-wbdd-guard-unowned-update",
-    )
-    db.commit()
+    with pytest.raises(IntegrityError):
+        _upsert_wbdd_xsdd(
+            db,
+            raw_order_id=raw_order_id,
+            sales_order=new_xsdd,
+            batch_key="xsdd-wbdd-guard-unowned-update",
+        )
+    db.rollback()
 
     order = db.scalar(select(FMaintenanceOrder).where(
         FMaintenanceOrder.raw_order_id == raw_order_id
     ))
-    assert order is not None and order.linked_sales_order_no == new_xsdd
+    assert order is not None and order.linked_sales_order_no is None
     mapping = db.get(MaintenanceProjectXsdd, "20991231-0002")
-    assert mapping is not None and mapping.project_id == project_a.project_id
+    assert mapping is None
+
+
+def test_assignment_requires_matching_contract_owner_even_if_map_exists(db):
+    project = _project(db, "xsdd-map-only-project", "XSDD-MAP-ONLY", "仅映射项目")
+    raw_order_id = "WBDD-XSDD-MAP-ONLY"
+    xsdd = "XSDD-20991231-0003"
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=xsdd,
+        batch_key="xsdd-map-only-order",
+    )
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20991231-0003",
+        project_id=project.project_id,
+        source="test-map-only",
+    ))
+    db.commit()
+
+    db.add(MaintenanceSourceOrderAssignment(
+        assignment_id="xsdd-map-only-assignment",
+        source_order_id=raw_order_id,
+        project_id=project.project_id,
+        is_active=True,
+        version=1,
+        created_by="xsdd-admin",
+    ))
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    assert db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == raw_order_id
+    )) is None
+    mapping = db.get(MaintenanceProjectXsdd, "20991231-0003")
+    assert mapping is not None and mapping.project_id == project.project_id
+
+
+def test_assignment_allows_matching_contract_owner(db):
+    project = _project(db, "xsdd-contract-owner", "XSDD-CONTRACT", "合同 owner 项目")
+    raw_order_id = "WBDD-XSDD-CONTRACT-OWNER"
+    xsdd = "XSDD-20991231-0004"
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=xsdd,
+        batch_key="xsdd-contract-owner-order",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-contract-owner-contract",
+        contract_no=xsdd,
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="建立合同 owner",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+
+    assignments.assign_source_orders(
+        db,
+        project_id=project.project_id,
+        items=[{"source_order_id": raw_order_id}],
+        reason="匹配合同 owner 后挂靠",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert assignment is not None and assignment.project_id == project.project_id
+
+
+def test_inactive_dirty_wbdd_cannot_become_effective_without_contract_owner(db):
+    project = _project(
+        db,
+        "xsdd-reactivate-guard",
+        "XSDD-REACTIVATE-GUARD",
+        "WBDD 重新生效守卫",
+    )
+    order = _seed_dirty_wbdd_assignment(
+        db,
+        raw_order_id="WBDD-XSDD-REACTIVATE-GUARD",
+        sales_order="XSDD-20991231-0008",
+        project=project,
+        data_status="已作废",
+    )
+
+    order.linked_sales_order_no = "XSDD-20991231-0011"
+    db.commit()
+    order.data_status = "已生效"
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == "WBDD-XSDD-REACTIVATE-GUARD"
+    ))
+    assert order.data_status == "已作废"
+    assert db.get(MaintenanceProjectXsdd, "20991231-0008") is None
+    assert db.get(MaintenanceProjectXsdd, "20991231-0011") is None
+
+
+def test_dirty_tombstoned_wbdd_cannot_be_restored_without_contract_owner(db):
+    project = _project(
+        db,
+        "xsdd-tombstone-restore-guard",
+        "XSDD-TOMBSTONE-RESTORE-GUARD",
+        "WBDD 墓碑恢复守卫",
+    )
+    raw_order_id = "WBDD-XSDD-TOMBSTONE-RESTORE-GUARD"
+    _seed_dirty_wbdd_assignment(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order="XSDD-20991231-0009",
+        project=project,
+        data_status="已生效",
+    )
+    now = datetime.now(timezone.utc)
+    intent = MaintenanceDemandDeleteIntent(
+        intent_id="xsdd-tombstone-restore-intent",
+        idempotency_key="xsdd-tombstone-restore-key",
+        request_digest="a" * 64,
+        selection_digest="b" * 64,
+        status="executed",
+        reason="测试墓碑恢复守卫",
+        operated_by="xsdd-admin",
+        header_count=1,
+        line_count=1,
+        created_at=now,
+        expires_at=now,
+    )
+    db.add(intent)
+    db.flush()
+    tombstone = MaintenanceDemandTombstone(
+        source_order_id=raw_order_id,
+        delete_intent_id=intent.intent_id,
+        version_digest="c" * 64,
+        deleted_by="xsdd-admin",
+        delete_reason="测试墓碑恢复守卫",
+        deleted_at=now,
+        version=1,
+    )
+    db.add(tombstone)
+    db.commit()
+
+    # Hidden reimport may refresh the source XSDD without inventing an owner;
+    # the final value is validated only when the tombstone is revealed.
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == raw_order_id
+    ))
+    order.linked_sales_order_no = "XSDD-20991231-0010"
+    db.commit()
+
+    tombstone.restored_at = now
+    tombstone.restored_by = "xsdd-admin"
+    tombstone.restore_reason = "直写恢复应被拒绝"
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    tombstone = db.get(MaintenanceDemandTombstone, raw_order_id)
+    assert tombstone is not None and tombstone.restored_at is None
+    assert db.get(MaintenanceProjectXsdd, "20991231-0009") is None
+    assert db.get(MaintenanceProjectXsdd, "20991231-0010") is None
+
+
+def test_last_matching_contract_cannot_orphan_active_wbdd(db):
+    project = _project(db, "xsdd-contract-guard", "XSDD-CONTRACT-GUARD", "合同删除守卫")
+    xsdd = "XSDD-20991231-0005"
+    contracts = []
+    for suffix in ("a", "b"):
+        payload = operations.create_contract(
+            db,
+            project_id=project.project_id,
+            contract_id=f"xsdd-contract-guard-{suffix}",
+            contract_no=xsdd,
+            contract_amount=Decimal("100.00"),
+            contract_status="正常",
+            status_mapping_state="mapped",
+            status_mapping_version="xsdd-test-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            effective_to=None,
+            source="test",
+            reason="建立可替代合同 owner",
+            operated_by="xsdd-admin",
+        )
+        contracts.append(payload["project_contract_id"])
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id="WBDD-XSDD-CONTRACT-GUARD",
+        sales_order=xsdd,
+        batch_key="xsdd-contract-guard-order",
+    )
+    assignments.assign_source_orders(
+        db,
+        project_id=project.project_id,
+        items=[{"source_order_id": "WBDD-XSDD-CONTRACT-GUARD"}],
+        reason="建立 active WBDD evidence",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+
+    first = db.get(MaintenanceProjectContract, contracts[0])
+    db.delete(first)
+    db.commit()
+    assert db.get(MaintenanceProjectContract, contracts[0]) is None
+
+    last = db.get(MaintenanceProjectContract, contracts[1])
+    last.contract_no = "XSDD-20991231-0999"
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    last = db.get(MaintenanceProjectContract, contracts[1])
+    db.delete(last)
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    assert db.get(MaintenanceProjectContract, contracts[1]) is not None
+
+
+def test_xsdd_map_delete_requires_no_contract_or_active_wbdd_evidence(db):
+    project = _project(db, "xsdd-map-guard", "XSDD-MAP-GUARD", "映射删除守卫")
+    other_project = _project(
+        db,
+        "xsdd-map-guard-other",
+        "XSDD-MAP-GUARD-OTHER",
+        "映射移动守卫",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-map-guard-contract",
+        contract_no="XSDD-20991231-0006",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="建立映射证据",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+    mapped = db.get(MaintenanceProjectXsdd, "20991231-0006")
+    mapped.project_id = other_project.project_id
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+    mapped = db.get(MaintenanceProjectXsdd, "20991231-0006")
+    db.delete(mapped)
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+    empty = MaintenanceProjectXsdd(
+        xsdd_norm="20991231-0007",
+        project_id=project.project_id,
+        source="test-no-evidence",
+    )
+    db.add(empty)
+    db.commit()
+    db.delete(empty)
+    db.commit()
+    assert db.get(MaintenanceProjectXsdd, "20991231-0007") is None
 
 
 def test_one_project_may_own_multiple_xsdds(db):
@@ -452,6 +806,28 @@ def test_board_returns_aliases_and_searches_by_old_name(db):
     row = next(item for item in result["rows"] if item["project_id"] == project.project_id)
     assert row["display_name"] == "腾讯TCE主名称"
     assert row["aliases"] == ["腾讯整体维保项目-预交付"]
+    assert row["peer_names"] == []
+
+
+def test_board_returns_proven_same_xsdd_names_as_peers(db):
+    project = _project(db, "xsdd-project-peer", "XSDD-PEER", "腾讯TCE主名称")
+    maintenance_project_identity.record_alias(
+        db,
+        project_id=project.project_id,
+        alias_name="腾讯整体维保项目-预交付",
+        source="xsdd_container_merge",
+    )
+    db.commit()
+
+    result = maintenance_boss_board.projects(
+        db,
+        user_ctx=_admin(),
+        page=1,
+        page_size=20,
+    )
+    row = next(item for item in result["rows"] if item["project_id"] == project.project_id)
+    assert row["aliases"] == ["腾讯整体维保项目-预交付"]
+    assert row["peer_names"] == ["腾讯整体维保项目-预交付"]
 
 
 def test_xsdd_normalization_matches_database_ascii_whitespace_contract():
@@ -655,6 +1031,60 @@ def test_reviewed_merge_preserves_contracts_and_archives_source_container(db):
         duplicate,
         xsdd,
     ) = _seed_mergeable_contract_conflict(db, suffix="9101")
+    discarded_source_order_id = "merge-discarded-wbdd-9101"
+    _seed_dirty_wbdd_assignment(
+        db,
+        raw_order_id=discarded_source_order_id,
+        sales_order=f"XSDD-{xsdd}",
+        project=source,
+        data_status="已作废",
+    )
+    tombstoned_source_order_id = "merge-tombstoned-wbdd-9101"
+    _seed_dirty_wbdd_assignment(
+        db,
+        raw_order_id=tombstoned_source_order_id,
+        sales_order=f"XSDD-{xsdd}",
+        project=source,
+        data_status="已生效",
+    )
+    tombstoned_at = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    delete_intent = MaintenanceDemandDeleteIntent(
+        intent_id="merge-tombstoned-intent-9101",
+        idempotency_key="merge-tombstoned-key-9101",
+        request_digest="d" * 64,
+        selection_digest="e" * 64,
+        status="executed",
+        reason="历史墓碑 fixture",
+        operated_by="xsdd-admin",
+        header_count=1,
+        line_count=1,
+        created_at=tombstoned_at,
+        expires_at=tombstoned_at,
+    )
+    db.add(delete_intent)
+    db.flush()
+    db.add(MaintenanceDemandTombstone(
+        source_order_id=tombstoned_source_order_id,
+        delete_intent_id=delete_intent.intent_id,
+        version_digest="f" * 64,
+        deleted_by="xsdd-admin",
+        delete_reason="历史墓碑 fixture",
+        deleted_at=tombstoned_at,
+        version=1,
+    ))
+    db.commit()
+    current_assignment_ids = dict(db.execute(
+        select(
+            MaintenanceSourceOrderAssignment.source_order_id,
+            MaintenanceSourceOrderAssignment.assignment_id,
+        ).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_({
+                discarded_source_order_id,
+                tombstoned_source_order_id,
+            }),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ).all())
     preview = maintenance_project_identity.preview_historical_conflicts(db)
     conflict = next(
         row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
@@ -688,6 +1118,60 @@ def test_reviewed_merge_preserves_contracts_and_archives_source_container(db):
     assert result["deleted_exact_collections"][0]["collection_id"] == duplicate.collection_id
     source_after = db.get(MaintenanceProject, source.project_id)
     assert source_after is not None and source_after.is_active is False
+    for source_order_id, assignment_id in current_assignment_ids.items():
+        archived_assignment = db.get(
+            MaintenanceSourceOrderAssignment,
+            assignment_id,
+        )
+        assert archived_assignment is not None
+        assert archived_assignment.is_active is False
+        assert archived_assignment.project_id == source.project_id
+        canonical_assignments = list(db.scalars(
+            select(MaintenanceSourceOrderAssignment).where(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == source_order_id,
+                MaintenanceSourceOrderAssignment.project_id
+                == canonical.project_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ))
+        assert len(canonical_assignments) == 1
+
+    # Merge only moves the current assignment generation.  It does not reveal
+    # or rewrite either hidden WBDD fact.
+    discarded_order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == discarded_source_order_id
+    ))
+    tombstone = db.get(
+        MaintenanceDemandTombstone,
+        tombstoned_source_order_id,
+    )
+    assert discarded_order.data_status == "已作废"
+    assert tombstone is not None and tombstone.restored_at is None
+
+    # Once every current generation belongs to the contract-backed canonical
+    # owner, both reveal guards accept the formerly hidden WBDD facts.
+    discarded_order.data_status = "已生效"
+    tombstone.restored_at = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    tombstone.restored_by = "xsdd-admin"
+    tombstone.restore_reason = "归并后恢复"
+    tombstone.version += 1
+    db.commit()
+    assert discarded_order.data_status == "已生效"
+    assert tombstone.restored_at is not None
+
+    project_rows = maintenance_boss_board.projects(
+        db,
+        user_ctx=_admin(),
+        page=1,
+        page_size=100,
+    )["rows"]
+    assert source.project_id not in {
+        row["project_id"] for row in project_rows
+    }
+    assert canonical.project_id in {
+        row["project_id"] for row in project_rows
+    }
     contracts = list(db.scalars(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_id == canonical.project_id)

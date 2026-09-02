@@ -12,6 +12,7 @@ from app.db import engine
 _ROOT = Path(__file__).resolve().parents[1]
 _REVISION = "b4c8d2e6f1a3"
 _PREVIOUS = "f1b3d5e7a9c2"
+_HEAD = "b8d4f6a2c9e1"
 
 
 def _load_migration():
@@ -28,8 +29,8 @@ def test_new_revision_is_additive_child_and_single_head():
     script = ScriptDirectory.from_config(cfg)
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
-    # 全链单 head；XSDD guard 后线性追加销售人工覆盖状态，仍不得产生迁移分叉。
-    assert list(script.get_heads()) == ["f6b1d3e8a2c4"]
+    # 全链单 head；后续迁移只能线性追加，不得产生分叉。
+    assert list(script.get_heads()) == [_HEAD]
 
 
 def test_migration_declares_exact_34_plus_28_columns():

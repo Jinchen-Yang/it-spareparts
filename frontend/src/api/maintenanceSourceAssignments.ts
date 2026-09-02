@@ -88,12 +88,13 @@ export const unassignMaintenanceSourceOrders = (body: {
   body,
 );
 
-/** 自动补挂靠：未归属维保订单按 project_std 精确匹配已有项目主档并挂靠。 */
+/** 自动补挂靠：未归属维保订单只按销售合同 XSDD owner 挂靠；无/非法 XSDD 保持待处理。 */
 export const autoAssignMaintenanceSourceOrders = () =>
   api.post<{
     result: {
       assigned_orders: number;
       matched_projects: number;
+      /** 兼容字段：自动补挂永不建项目，恒为 0。 */
       created_projects: number;
       skipped_groups: number;
       skipped_ambiguous: number;

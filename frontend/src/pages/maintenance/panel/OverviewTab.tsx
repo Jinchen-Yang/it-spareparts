@@ -113,9 +113,8 @@ export function OverviewTab({
       const { data } = await autoAssignMaintenanceSourceOrders();
       const r = data.result;
       const summary = `自动挂靠完成：${r.assigned_orders} 张单` +
-          (r.matched_projects ? `，挂到 ${r.matched_projects} 个已有项目` : "") +
-          (r.created_projects ? `，自动新建 ${r.created_projects} 个项目` : "") +
-          (r.skipped_groups ? `；${r.skipped_groups} 个无项目名已跳过` : "");
+          (r.matched_projects ? `，挂到 ${r.matched_projects} 个合同 owner 项目` : "") +
+          (r.skipped_groups ? `；${r.skipped_groups} 组无有效 XSDD 归属已跳过，待人工处理` : "");
       if (await onAssigned()) {
         message.success(`${summary}，页面已刷新`);
       } else {
@@ -190,8 +189,9 @@ export function OverviewTab({
           )}
         >
           <Text type="secondary" style={{ fontSize: 11.5 }}>
-            同一销售订单＝同一项目。点「自动匹配挂靠」会按单据自带的项目名自动挂到已有项目，
-            对不上的才留在下面人工确认；标「同 XSDD」的是命中本项目销售单的候选，已排最前。
+            同一销售订单＝同一项目。点「自动匹配挂靠」只把带有效 XSDD 的单据挂到对应销售合同
+             owner 项目；无 XSDD 或 XSDD 非法的单据绝不按名称匹配或建项，留在下面人工确认；
+            标「同 XSDD」的是命中本项目销售单的候选，已排最前。
           </Text>
           <Table<MaintenanceSourceOrderRow>
             rowKey="raw_order_id"

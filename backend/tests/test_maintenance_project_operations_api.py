@@ -1387,6 +1387,84 @@ def test_contract_relationship_update_and_archive_use_optimistic_lock(db):
     assert archived.json()["version"] == 3
 
 
+def test_contract_update_prelocks_sorted_xsdd_before_contract_advisories(db):
+    project = _project(db, project_id="project-contract-lock-order")
+    created = operations_service.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="contract-lock-order",
+        contract_no="XSDD-20260902-0099",
+        contract_amount=Decimal("1000.00"),
+        contract_status="synthetic-active",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-map-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="synthetic-test",
+        reason="建立锁序测试合同",
+        operated_by="锁序测试管理员",
+    )
+    assert created is not None
+    db.commit()
+
+    lock_events: list[str] = []
+
+    def record_lock_order(
+        _conn,
+        _cursor,
+        statement,
+        parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if "pg_advisory_xact_lock" not in statement:
+            return
+        values = (
+            list(parameters.values())
+            if hasattr(parameters, "values")
+            else list(parameters)
+        )
+        for value in values:
+            if value == operations_service.DATA_CHANGE_ADVISORY_LOCK_KEY:
+                lock_events.append("data-change")
+            elif isinstance(value, str) and value.startswith(
+                "maintenance-project-xsdd:"
+            ):
+                lock_events.append(value.removeprefix("maintenance-project-"))
+            elif isinstance(value, str) and value.startswith(
+                "maintenance-ledger-contract:"
+            ):
+                lock_events.append(value.removeprefix("maintenance-ledger-"))
+
+    engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", record_lock_order)
+    try:
+        updated = operations_service.update_contract(
+            db,
+            project_contract_id=created["project_contract_id"],
+            version=created["version"],
+            updates={"contract_no": " xsdd-20260901-0001 "},
+            reason="验证合同身份锁序",
+            operated_by="锁序测试管理员",
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record_lock_order)
+
+    assert updated is not None
+    assert lock_events[:4] == [
+        "data-change",
+        "xsdd:20260901-0001",
+        "xsdd:20260902-0099",
+        "data-change",
+    ]
+    assert next(
+        index
+        for index, value in enumerate(lock_events)
+        if value.startswith("contract:")
+    ) > 3
+
+
 def test_contract_identity_window_changes_recompute_expense_ownership_atomically(db):
     project = _project(db, project_id="project-contract-expense-resync")
     batch = _batch(db, "contract-expense-resync")
