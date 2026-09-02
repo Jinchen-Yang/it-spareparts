@@ -370,6 +370,35 @@ def test_sales_amount_can_derive_missing_rate_from_ex_tax_and_tax():
     assert rate == Decimal("0.130000")
 
 
+def test_sales_amount_preserves_numeric_zero_values():
+    adapter = bulk.SalesContractAmountAdapter()
+    detected = _sheet(
+        {
+            "order_amount": 0,
+            "tax_flag": 1,
+            "tax_rate": 2,
+            "tax_amount": 3,
+            "amount_ex_tax": 4,
+        },
+        [(
+            3,
+            (
+                Decimal("0.00"),
+                "含税",
+                Decimal("0"),
+                Decimal("0.00"),
+                Decimal("0.00"),
+            ),
+        )],
+    )
+
+    inc, amount_ex, rate = adapter._amounts(detected, detected.rows[0][1])
+
+    assert inc == Decimal("0.00")
+    assert amount_ex == Decimal("0.00")
+    assert rate == Decimal("0")
+
+
 def test_sales_form_without_tax_rate_column_is_recognized_from_ex_and_tax():
     workbook = Workbook()
     sheet = workbook.active
