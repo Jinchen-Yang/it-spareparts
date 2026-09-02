@@ -716,10 +716,22 @@ def test_v24_overview_shared_contract_now_editable_with_cas(db):
     )
     amount_cell.value = Decimal("12000.00")
 
-    with pytest.raises(master.WorkbookError) as exc:
-        master.validate_project_master_v2(
-            db, project_id=project.project_id, data=_save(wb))
-    assert exc.value.code == "contract_total_ambiguous"
+    # 2026-09-02 新口径：共享合同可编辑——validate 通过并产出合同额变更，
+    # apply 侧 base_version CAS 兜底；写回的是本项目那份合同事实。
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert plan.contract_amount_change is not None
+    assert plan.contract_amount_change.amount_inc_tax == Decimal("12000.00")
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="shared-editor",
+        import_batch_id=str(uuid.uuid4()))
+    assert result["contract_updates"] == 1
+    db.refresh(project)
+    # 本项目合同事实被更新；共享的另一项目合同不受影响（各自独立事实行）。
+    own_contract = db.scalar(
+        select(MaintenanceProjectContract).where(
+            MaintenanceProjectContract.project_id == project.project_id))
+    assert own_contract.amount_inc_tax == Decimal("12000.00")
 
 
 def test_v24_change_pn_retires_old_manual_evidence_and_runs_authoritative_reprice(
