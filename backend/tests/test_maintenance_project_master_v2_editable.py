@@ -178,7 +178,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.6.0"
+    assert meta["template_version"] == "2.7.0"
     assert meta["metadata_hmac_algorithm"] == "HMAC-SHA256"
     assert len(meta["metadata_hmac"]) == 64
 
@@ -216,10 +216,11 @@ def test_v25_non_contract_apply_bumps_workbook_revision_once(db):
     assert state.revision == before + 1
 
 
-def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
+def test_v27_same_row_double_write_conflicts_then_takeover(
     db,
 ):
-    """First writer wins; its ACK replay wins before the stale revision gate."""
+    """2.7.0 行级三路合并：同 revision 同行双写——先写者赢、后写者得冲突
+    明细且零写入；force_takeover 后按后写者覆盖并留 overridden 痕。"""
 
     project, _part, _order, line = _make_project_with_line(db)
     content = master.build_project_master_v2(
@@ -258,6 +259,8 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
     assert operations.get_or_create_workbook_state(
         db, project_id=project.project_id).revision == state_after_first
 
+    # 后写者：同行的基线已过期 → 冲突计划（非 force），apply 零写入拒绝
+    assert second_plan.conflicts, "同行双写必须产生行级冲突"
     audits_before = int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0)
     with pytest.raises(master.WorkbookError) as raised:
@@ -267,12 +270,29 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
             operated_by="occ-writer",
             import_batch_id=str(uuid.uuid4()),
         )
-    assert raised.value.code == "stale_workbook"
+    assert raised.value.code == "row_conflicts"
     db.rollback()
     db.refresh(line)
     assert line.qty == Decimal("3.00")
     assert int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0) == audits_before
+
+    # force_takeover：按后写者值覆盖，回执带 overridden 明细
+    takeover_plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(second_wb),
+        force_takeover=True)
+    assert not takeover_plan.conflicts
+    assert takeover_plan.overridden
+    taken = master.apply_project_master_v2(
+        db,
+        takeover_plan,
+        operated_by="occ-writer",
+        import_batch_id=str(uuid.uuid4()),
+    )
+    db.refresh(line)
+    assert line.qty == Decimal("4.00")
+    assert taken["overridden"], taken
+    assert taken["overridden"][0]["field"] == "需求数量"
 
 
 def test_v1_apply_rejects_foreign_part_and_site_hidden_ids(db):
@@ -1783,7 +1803,7 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
     assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
     # 合同总额可编辑协议升级后的模板版本
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.6.0"
+    assert meta["template_version"] == "2.7.0"
 
 
 def test_latest_missing_allows_full_sync_at_any_ratio(db):

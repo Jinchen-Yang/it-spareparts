@@ -27,6 +27,7 @@ from app.api.maintenance_expense_collection_workbook import (
     _XLSX_MEDIA,
     _operator,
     _read_upload,
+    _read_upload_with_takeover,
     _require_profit_visibility,
 )
 from app.api.maintenance_project_scope import (
@@ -135,6 +136,7 @@ def _fail(exc: ec.WorkbookError):
         "stale_cost_override",
         "stale_cost_fact",
         "stale_workbook",
+        "row_conflicts",
     }
     raise HTTPException(
         status.HTTP_409_CONFLICT if (busy or stale) else status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -665,7 +667,7 @@ async def validate_project_master(
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    data = await _read_upload(request)
+    data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             plan = master.validate_project_master_v2(
@@ -679,6 +681,10 @@ async def validate_project_master(
                 "project_id": project_id,
                 "sheets": list(plan.sheets),
                 **plan.summary,
+                # 2.7.0：字段级改动预览 + 行级冲突预览（前端据此提供接管入口）
+                "changes": [dict(item) for item in plan.field_changes],
+                "conflicts": [dict(item) for item in plan.conflicts],
+                "overridden": [dict(item) for item in plan.overridden],
                 # #265 契约：作废预览（03 显式 VOID + 04 显式 VOID/缺行），
                 # apply 前对用户可见（前端 WorkbookRoundTrip 两阶段确认）。
                 "will_void_rows": [dict(r) for r in plan.will_void_rows],
@@ -711,15 +717,30 @@ async def apply_project_master(
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
-    """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。"""
+    """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。
+
+    2.7.0：行级冲突默认 409（带三值明细）；multipart 额外字段
+    force_takeover=true 时按用户值强制接管并逐项留痕。
+    """
     response.headers["Cache-Control"] = "no-store"
-    data = await _read_upload(request)
+    data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             plan = master.validate_project_master_v2(
-                db, project_id=project_id, data=data, user_ctx=ctx)
+                db, project_id=project_id, data=data, user_ctx=ctx,
+                force_takeover=force_takeover)
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(ctx, ident)
+            if plan.conflicts and not force_takeover:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {
+                        "code": "row_conflicts",
+                        "message": "部分行已被他人更新，本次上传未写入任何数据；"
+                                   "请对照下方明细处理后重试，或确认后强制接管。",
+                        "conflicts": [dict(item) for item in plan.conflicts],
+                    },
+                )
             result = master.apply_project_master_v2(
                 db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4()),
                 user_ctx=ctx,
