@@ -1449,12 +1449,6 @@ def _validate_source_xsdd_scope(
         )
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_project_ids),
-            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
-            ~exists(select(1).where(
-                MaintenanceDemandTombstone.source_order_id
-                == FMaintenanceOrder.raw_order_id,
-                MaintenanceDemandTombstone.restored_at.is_(None),
-            )),
         )
     )
     identities = {
@@ -1860,6 +1854,10 @@ def _apply_locked_project_merge(
             "version": 1,
         })
 
+    # ``is_active`` is the assignment generation boundary.  Visibility of the
+    # WBDD fact (data_status/tombstone) is independent: a hidden current
+    # generation must move with the container or a later reveal would still
+    # claim the archived source project and fail the contract-backed guard.
     active_source_assignments = list(db.scalars(
         select(MaintenanceSourceOrderAssignment)
         .join(
@@ -1870,12 +1868,6 @@ def _apply_locked_project_merge(
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
-            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
-            ~exists(select(1).where(
-                MaintenanceDemandTombstone.source_order_id
-                == FMaintenanceOrder.raw_order_id,
-                MaintenanceDemandTombstone.restored_at.is_(None),
-            )),
         )
         .order_by(MaintenanceSourceOrderAssignment.assignment_id)
         .with_for_update()
@@ -2130,12 +2122,6 @@ def _apply_locked_project_merge(
         .where(
             MaintenanceSourceOrderAssignment.project_id.in_(source_ids),
             MaintenanceSourceOrderAssignment.is_active.is_(True),
-            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
-            ~exists(select(1).where(
-                MaintenanceDemandTombstone.source_order_id
-                == FMaintenanceOrder.raw_order_id,
-                MaintenanceDemandTombstone.restored_at.is_(None),
-            )),
         )
     ) or 0)
     active_source_user_count = int(db.scalar(

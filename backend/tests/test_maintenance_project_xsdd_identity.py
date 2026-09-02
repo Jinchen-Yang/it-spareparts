@@ -1032,37 +1032,59 @@ def test_reviewed_merge_preserves_contracts_and_archives_source_container(db):
         xsdd,
     ) = _seed_mergeable_contract_conflict(db, suffix="9101")
     discarded_source_order_id = "merge-discarded-wbdd-9101"
-    _upsert_wbdd_xsdd(
+    _seed_dirty_wbdd_assignment(
         db,
         raw_order_id=discarded_source_order_id,
         sales_order=f"XSDD-{xsdd}",
-        batch_key="merge-discarded-wbdd-9101",
+        project=source,
+        data_status="已作废",
     )
-    discarded_order = db.scalar(select(FMaintenanceOrder).where(
-        FMaintenanceOrder.raw_order_id == discarded_source_order_id
-    ))
-    discarded_order.data_status = "已作废"
+    tombstoned_source_order_id = "merge-tombstoned-wbdd-9101"
+    _seed_dirty_wbdd_assignment(
+        db,
+        raw_order_id=tombstoned_source_order_id,
+        sales_order=f"XSDD-{xsdd}",
+        project=source,
+        data_status="已生效",
+    )
+    tombstoned_at = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    delete_intent = MaintenanceDemandDeleteIntent(
+        intent_id="merge-tombstoned-intent-9101",
+        idempotency_key="merge-tombstoned-key-9101",
+        request_digest="d" * 64,
+        selection_digest="e" * 64,
+        status="executed",
+        reason="历史墓碑 fixture",
+        operated_by="xsdd-admin",
+        header_count=1,
+        line_count=1,
+        created_at=tombstoned_at,
+        expires_at=tombstoned_at,
+    )
+    db.add(delete_intent)
     db.flush()
-    db.execute(text(
-        "ALTER TABLE maintenance_source_order_assignment DISABLE TRIGGER "
-        "trg_maintenance_assignment_claim_xsdd"
+    db.add(MaintenanceDemandTombstone(
+        source_order_id=tombstoned_source_order_id,
+        delete_intent_id=delete_intent.intent_id,
+        version_digest="f" * 64,
+        deleted_by="xsdd-admin",
+        delete_reason="历史墓碑 fixture",
+        deleted_at=tombstoned_at,
+        version=1,
     ))
-    try:
-        db.add(MaintenanceSourceOrderAssignment(
-            assignment_id="merge-discarded-assignment-9101",
-            source_order_id=discarded_source_order_id,
-            project_id=source.project_id,
-            is_active=True,
-            version=1,
-            created_by="historical-fixture",
-        ))
-        db.flush()
-    finally:
-        db.execute(text(
-            "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
-            "trg_maintenance_assignment_claim_xsdd"
-        ))
     db.commit()
+    current_assignment_ids = dict(db.execute(
+        select(
+            MaintenanceSourceOrderAssignment.source_order_id,
+            MaintenanceSourceOrderAssignment.assignment_id,
+        ).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_({
+                discarded_source_order_id,
+                tombstoned_source_order_id,
+            }),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    ).all())
     preview = maintenance_project_identity.preview_historical_conflicts(db)
     conflict = next(
         row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
@@ -1096,21 +1118,60 @@ def test_reviewed_merge_preserves_contracts_and_archives_source_container(db):
     assert result["deleted_exact_collections"][0]["collection_id"] == duplicate.collection_id
     source_after = db.get(MaintenanceProject, source.project_id)
     assert source_after is not None and source_after.is_active is False
-    discarded_assignment = db.get(
-        MaintenanceSourceOrderAssignment,
-        "merge-discarded-assignment-9101",
+    for source_order_id, assignment_id in current_assignment_ids.items():
+        archived_assignment = db.get(
+            MaintenanceSourceOrderAssignment,
+            assignment_id,
+        )
+        assert archived_assignment is not None
+        assert archived_assignment.is_active is False
+        assert archived_assignment.project_id == source.project_id
+        canonical_assignments = list(db.scalars(
+            select(MaintenanceSourceOrderAssignment).where(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == source_order_id,
+                MaintenanceSourceOrderAssignment.project_id
+                == canonical.project_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ))
+        assert len(canonical_assignments) == 1
+
+    # Merge only moves the current assignment generation.  It does not reveal
+    # or rewrite either hidden WBDD fact.
+    discarded_order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == discarded_source_order_id
+    ))
+    tombstone = db.get(
+        MaintenanceDemandTombstone,
+        tombstoned_source_order_id,
     )
-    assert discarded_assignment is not None
-    assert discarded_assignment.is_active is True
-    assert discarded_assignment.project_id == source.project_id
-    assert db.scalar(select(func.count()).select_from(
-        MaintenanceSourceOrderAssignment
-    ).where(
-        MaintenanceSourceOrderAssignment.source_order_id
-        == discarded_source_order_id,
-        MaintenanceSourceOrderAssignment.project_id == canonical.project_id,
-        MaintenanceSourceOrderAssignment.is_active.is_(True),
-    )) == 0
+    assert discarded_order.data_status == "已作废"
+    assert tombstone is not None and tombstone.restored_at is None
+
+    # Once every current generation belongs to the contract-backed canonical
+    # owner, both reveal guards accept the formerly hidden WBDD facts.
+    discarded_order.data_status = "已生效"
+    tombstone.restored_at = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    tombstone.restored_by = "xsdd-admin"
+    tombstone.restore_reason = "归并后恢复"
+    tombstone.version += 1
+    db.commit()
+    assert discarded_order.data_status == "已生效"
+    assert tombstone.restored_at is not None
+
+    project_rows = maintenance_boss_board.projects(
+        db,
+        user_ctx=_admin(),
+        page=1,
+        page_size=100,
+    )["rows"]
+    assert source.project_id not in {
+        row["project_id"] for row in project_rows
+    }
+    assert canonical.project_id in {
+        row["project_id"] for row in project_rows
+    }
     contracts = list(db.scalars(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_id == canonical.project_id)
