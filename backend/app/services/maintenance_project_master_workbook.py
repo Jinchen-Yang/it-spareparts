@@ -3555,6 +3555,7 @@ def _v2_parse_site(
                             "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     out: list[SiteReturnFlag] = []
     present_ids: set[str] = set()
+    manual_ids: dict[str, int] = {}
     new_counts: dict[str, int] = {}
     # One issue header is repeated on every line in Excel.  Track changes
     # relative to the stored header so changing a single row propagates once;
@@ -3603,6 +3604,15 @@ def _v2_parse_site(
                 issue_date = datetime.strptime(raw_document_date, "%Y%m%d").date()
             identity = "|".join([project_id, issue_no, pn, serial_number or ""])
             raw_id = f"manual-site:{hashlib.sha1(identity.encode('utf-8')).hexdigest()}"
+            # 同文件内重复的手工行（同单号/PN/SN）会推导出相同确定性主键，
+            # apply 期双 INSERT 撞主键变 500（本地 E2E 实测）。解析期拒绝。
+            prior_row = manual_ids.get(raw_id)
+            if prior_row is not None:
+                raise WorkbookError(
+                    "duplicate_site_row",
+                    f"06_领用返还第 {row_no} 行与第 {prior_row} 行重复"
+                    "（同领用单号/PN/SN），请删除重复行后重传")
+            manual_ids[raw_id] = row_no
             existing_line = db.get(MaintenanceSiteIssueLine, raw_id)
             if existing_line is not None:
                 is_create = False
@@ -3855,6 +3865,7 @@ def _v2_parse_expenses(
     out: list[ec.ExpenseUpdate] = []
     voids: list[str] = []
     present_ids: set[str] = set()
+    manual_expense_ids: dict[str, int] = {}
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
@@ -3937,6 +3948,15 @@ def _v2_parse_expenses(
                 raise WorkbookError("missing_amount", f"第 {row_no} 行手工新增报销必须填写未税金额")
             scope = hashlib.sha1(contract_no.encode("utf-8")).hexdigest()[:8]
             raw_id = f"{bxd_no[:40]}#{line_no}@{scope}"
+            # 同文件内重复的费用单号+序号推导相同 raw_id，apply 期双 INSERT
+            # 撞唯一键（与 06 同类，解析期拒绝）。
+            prior_row = manual_expense_ids.get(raw_id)
+            if prior_row is not None:
+                raise WorkbookError(
+                    "duplicate_expense_row",
+                    f"04_费用报销第 {row_no} 行与第 {prior_row} 行重复"
+                    "（同费用单号+明细序号），请删除重复行后重传")
+            manual_expense_ids[raw_id] = row_no
             expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_id))
             is_create = expense is None
 

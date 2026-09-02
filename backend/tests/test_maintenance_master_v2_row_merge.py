@@ -309,3 +309,54 @@ def test_unmatched_pns_reported_in_batch(db):
     msg = raised.value.message
     assert "TOTALLY-UNKNOWN-LY-A" in msg and "TOTALLY-UNKNOWN-LY-B" in msg, msg
     assert "共 2 个" in msg
+
+
+def test_duplicate_manual_rows_rejected_not_500(db):
+    """同文件重复手工行（06 同单号/PN/SN；04 同单号+序号）解析期 422，
+    不得走到 apply 期撞主键变 500（本地 E2E 实测 UniqueViolation）。"""
+    from openpyxl import load_workbook as _lw
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_line as _mk,
+    )
+    from app.models.dimensions import DimPart
+
+    project, part, order, _line = _mk(db)
+    # 06 重复行
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = _lw(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    headers = {c.value: c.column for c in ws[1]}
+    base = ws.max_row + 1
+    for r in (base, base + 1):
+        ws.cell(r, headers["领用单号"], "CKD-DUP-001")
+        ws.cell(r, headers["领用日期"], "2026-09-01")
+        ws.cell(r, headers["PN"], part.pn_std)
+        ws.cell(r, headers["SN"], "SN-SAME")
+        ws.cell(r, headers["领用数量"], 1)
+    with pytest.raises(master.WorkbookError) as raised:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=_save(wb))
+    assert raised.value.code == "duplicate_site_row"
+
+    # 04 重复行（同费用单号+序号）
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = _lw(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_EXPENSE]
+    headers = {c.value: c.column for c in ws[1]}
+    base = ws.max_row + 1
+    from app.models.maintenance_project import MaintenanceProjectContract
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id))
+    for r in (base, base + 1):
+        ws.cell(r, headers["操作"], "CREATE")
+        ws.cell(r, headers["费用单号"], "BXD-DUP-001")
+        ws.cell(r, headers["明细序号"], 1)
+        ws.cell(r, headers["报销日期"], "2026-09-01")
+        ws.cell(r, headers["维保销售订单（归集键）"], contract.contract_no)
+        ws.cell(r, headers["未税金额"], 100)
+    with pytest.raises(master.WorkbookError) as raised:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=_save(wb))
+    assert raised.value.code == "duplicate_expense_row"
