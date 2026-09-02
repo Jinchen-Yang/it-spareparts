@@ -1,5 +1,7 @@
 """M1-6：WBDD 专用上传端点契约（plan v1.3 §4.1）——矩阵/错类型零写入/幂等/flag。"""
 import uuid
+from datetime import date
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,6 +24,7 @@ from app.models.maintenance_source_assignment import (
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_source_assignments as source_assignments
+from app.services import maintenance_project_operations as operations
 from app.services import maintenance_wbdd_import as wbdd
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
@@ -117,7 +120,7 @@ def test_upload_allowed_with_page_and_action(db, tmp_path):
 
 
 def test_upload_auto_assigns_only_current_batch_by_xsdd(db, tmp_path):
-    """只投影本批：已有 XSDD 挂靠；新 XSDD 合建；历史未归属单保持不动。"""
+    """只投影本批：已有合同 owner 挂靠；无 owner 留待销售事实建项。"""
     existing = MaintenanceProject(
         project_id="wbdd-existing-project",
         project_code="WBDD-EXISTING",
@@ -136,11 +139,23 @@ def test_upload_auto_assigns_only_current_batch_by_xsdd(db, tmp_path):
         version=1,
     )
     db.add_all([existing, name_collision])
-    db.add(MaintenanceProjectXsdd(
-        xsdd_norm="20990101-0001",
+    db.commit()
+    operations.create_contract(
+        db,
         project_id=existing.project_id,
+        contract_id="wbdd-existing-contract",
+        contract_no="XSDD-20990101-0001",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="test",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
         source="test",
-    ))
+        reason="建立销售合同 owner",
+        operated_by="test",
+    )
     db.commit()
 
     # 先留一张不属于本次上传的历史未归属单；新导入不得顺手扫描全库。
@@ -198,14 +213,16 @@ def test_upload_auto_assigns_only_current_batch_by_xsdd(db, tmp_path):
     response = _upload(client, current_path)
     assert response.status_code == 200, response.text
     assert response.json()["auto_assignment"] == {
-        "assigned_orders": 4,
-        "matched_projects": 2,
-        "created_projects": 1,
-        "skipped_groups": 0,
+        "assigned_orders": 2,
+        "matched_projects": 1,
+        "created_projects": 0,
+        "skipped_groups": 1,
         "skipped_ambiguous": 0,
         "sales_filled_projects": 0,
         "manager_filled_projects": 0,
         "assignments_created": 0,
+        "pending_owner_order_ids": ["CUR-O-003", "CUR-O-004"],
+        "pending_owner_order_ids_truncated": False,
     }
 
     db.expire_all()
@@ -221,16 +238,15 @@ def test_upload_auto_assigns_only_current_batch_by_xsdd(db, tmp_path):
     assert "HIST-O-001" not in assignments
     assert assignments["CUR-O-001"] == existing.project_id
     assert assignments["CUR-O-002"] == existing.project_id
-    new_project_id = assignments["CUR-O-003"]
-    assert assignments["CUR-O-004"] == new_project_id
-    assert new_project_id != existing.project_id
+    assert "CUR-O-003" not in assignments
+    assert "CUR-O-004" not in assignments
     assert (
         db.get(MaintenanceProjectXsdd, "20990101-0001").project_id
         == existing.project_id
     )
-    assert db.get(MaintenanceProjectXsdd, "20990101-0002").project_id == new_project_id
+    assert db.get(MaintenanceProjectXsdd, "20990101-0002") is None
     assert db.get(MaintenanceProjectXsdd, "20990101-0099") is None
-    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 3
+    assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 2
     db.refresh(existing)
     assert existing.salesperson is None
     assert existing.project_manager_id is None

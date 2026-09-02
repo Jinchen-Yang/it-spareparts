@@ -59,7 +59,13 @@ SALES_HEAD = {
     "客户类型": "customer_type",
     "客户来源": "customer_source",
     "客户城市": "customer_city",
+    # 维保自动建项所需销售源事实；随 TransformResult 传给受控投影，
+    # loader 不把这些临时字段写进 f_sales_order。
+    "维保业务": "maintenance_business",
     "业务类型#": "business_type",
+    "项目名称(必填)": "maintenance_project_name",
+    "维保起始日期(必填)": "maintenance_period_from",
+    "维保终止日期(必填)": "maintenance_period_to",
     "仓库": "warehouse",
     # 氚云销售订单金额区必须按文档类型解释，不能复用采购表的全局规范键。
     # 订单金额在“是否含税=含税”时是权威含税额；不含税金额仍保留为销售事实，

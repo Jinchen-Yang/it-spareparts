@@ -232,6 +232,29 @@ def _seed_mergeable_contract_conflict(db, *, suffix: str):
 
 
 def test_auto_assign_groups_same_xsdd_and_retains_names_as_aliases(db):
+    project = _project(
+        db,
+        "xsdd-auto-contract-owner",
+        "XSDD-AUTO-CONTRACT",
+        "腾讯销售合同项目",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-auto-contract-owner-contract",
+        contract_no="XSDD-20251017-0036",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2025, 10, 16),
+        effective_to=None,
+        source="test",
+        reason="销售合同先建立 XSDD owner",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
     orders = _load_same_xsdd_different_names(db)
 
     result = assignments.auto_assign_unassigned(
@@ -249,7 +272,8 @@ def test_auto_assign_groups_same_xsdd_and_retains_names_as_aliases(db):
     )))
     assert len(owner_ids) == 1
     project_id = next(iter(owner_ids))
-    assert result["created_projects"] == 1
+    assert project_id == project.project_id
+    assert result["created_projects"] == 0
     assert result["assigned_orders"] == 2
     mapping = db.get(MaintenanceProjectXsdd, "20251017-0036")
     assert mapping is not None and mapping.project_id == project_id
@@ -324,6 +348,13 @@ def test_wbdd_upsert_rejects_xsdd_owned_by_another_project(db):
         operated_by="xsdd-admin",
         user_ctx=_admin(),
     )
+    # Simulate a pre-migration map-only owner.  Upgrade must retain it, while
+    # any future active-assignment/order mutation remains contract-gated.
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20991231-0002",
+        project_id=project_a.project_id,
+        source="historical-map-only",
+    ))
     db.commit()
     operations.create_contract(
         db,
@@ -365,7 +396,7 @@ def test_wbdd_upsert_rejects_xsdd_owned_by_another_project(db):
     assert mapping is not None and mapping.project_id == project_b.project_id
 
 
-def test_wbdd_upsert_claims_unowned_xsdd_for_assigned_project(db):
+def test_wbdd_upsert_cannot_claim_unowned_xsdd_for_assigned_project(db):
     project_a = _project(
         db,
         "xsdd-wbdd-project-unowned-a",
@@ -391,20 +422,98 @@ def test_wbdd_upsert_claims_unowned_xsdd_for_assigned_project(db):
     )
     db.commit()
 
-    _upsert_wbdd_xsdd(
-        db,
-        raw_order_id=raw_order_id,
-        sales_order=new_xsdd,
-        batch_key="xsdd-wbdd-guard-unowned-update",
-    )
-    db.commit()
+    with pytest.raises(IntegrityError):
+        _upsert_wbdd_xsdd(
+            db,
+            raw_order_id=raw_order_id,
+            sales_order=new_xsdd,
+            batch_key="xsdd-wbdd-guard-unowned-update",
+        )
+    db.rollback()
 
     order = db.scalar(select(FMaintenanceOrder).where(
         FMaintenanceOrder.raw_order_id == raw_order_id
     ))
-    assert order is not None and order.linked_sales_order_no == new_xsdd
+    assert order is not None and order.linked_sales_order_no is None
     mapping = db.get(MaintenanceProjectXsdd, "20991231-0002")
     assert mapping is not None and mapping.project_id == project_a.project_id
+
+
+def test_assignment_requires_matching_contract_owner_even_if_map_exists(db):
+    project = _project(db, "xsdd-map-only-project", "XSDD-MAP-ONLY", "仅映射项目")
+    raw_order_id = "WBDD-XSDD-MAP-ONLY"
+    xsdd = "XSDD-20991231-0003"
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=xsdd,
+        batch_key="xsdd-map-only-order",
+    )
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20991231-0003",
+        project_id=project.project_id,
+        source="test-map-only",
+    ))
+    db.commit()
+
+    db.add(MaintenanceSourceOrderAssignment(
+        assignment_id="xsdd-map-only-assignment",
+        source_order_id=raw_order_id,
+        project_id=project.project_id,
+        is_active=True,
+        version=1,
+        created_by="xsdd-admin",
+    ))
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    assert db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == raw_order_id
+    )) is None
+
+
+def test_assignment_allows_matching_contract_owner(db):
+    project = _project(db, "xsdd-contract-owner", "XSDD-CONTRACT", "合同 owner 项目")
+    raw_order_id = "WBDD-XSDD-CONTRACT-OWNER"
+    xsdd = "XSDD-20991231-0004"
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id=raw_order_id,
+        sales_order=xsdd,
+        batch_key="xsdd-contract-owner-order",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-contract-owner-contract",
+        contract_no=xsdd,
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="建立合同 owner",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+
+    assignments.assign_source_orders(
+        db,
+        project_id=project.project_id,
+        items=[{"source_order_id": raw_order_id}],
+        reason="匹配合同 owner 后挂靠",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == raw_order_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert assignment is not None and assignment.project_id == project.project_id
 
 
 def test_one_project_may_own_multiple_xsdds(db):

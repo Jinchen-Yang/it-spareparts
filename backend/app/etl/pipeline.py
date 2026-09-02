@@ -362,6 +362,8 @@ def run_import(session: Session, file_path: str, original_name: str,
         maintenance_lock_envelope = None
         assignment_service = None
         warehouse_service = None
+        sales_projection_sheet = None
+        sales_xsdd_order_ids: dict[str, list[str]] = {}
         if auto_assign_maintenance_projects and result.file_type == mapping.MAINTENANCE:
             # 身份锁与所有可能既有目标必须早于 WBDD 事实行锁；load 后只能
             # 在此信封内 apply，禁止 order/line → workbook_state 反序。
@@ -375,6 +377,26 @@ def run_import(session: Session, file_path: str, original_name: str,
             maintenance_lock_envelope = loader.MaintenanceImportLockEnvelope(
                 target_project_ids=set(target_project_ids)
             )
+        elif auto_assign_maintenance_projects and result.file_type == mapping.SALES:
+            from app.services import maintenance_bulk_import
+
+            try:
+                sales_projection_sheet = maintenance_bulk_import.transformed_sales_sheet(
+                    result,
+                    source_columns=src_cols,
+                )
+                sales_xsdd_order_ids = (
+                    maintenance_bulk_import.prelock_uploaded_sales_sheet(
+                        session, sales_projection_sheet, mode=mode
+                    )
+                )
+            except (
+                maintenance_bulk_import.BulkImportInvalid,
+                maintenance_bulk_import.BulkImportConflict,
+            ) as exc:
+                raise loader.ImportIntegrityError(
+                    f"维保销售订单 XSDD 预锁失败：{exc}"
+                ) from exc
 
         counts = loader.load(
             session,
@@ -390,15 +412,17 @@ def run_import(session: Session, file_path: str, original_name: str,
         if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
             from app.services import maintenance_bulk_import
 
-            with open(file_path, "rb") as sales_workbook:
-                sales_workbook_data = sales_workbook.read()
+            if sales_projection_sheet is None:
+                raise loader.ImportIntegrityError("维保销售订单预锁上下文缺失")
             try:
                 sales_project_sync = maintenance_bulk_import.sync_uploaded_sales_workbook(
                     session,
-                    sales_workbook_data,
+                    None,
                     original_name,
                     operated_by=uploaded_by or "system",
                     import_batch_id=batch.id,
+                    prelocked_xsdd_order_ids=sales_xsdd_order_ids,
+                    detected_sheet=sales_projection_sheet,
                 )
             except (
                 maintenance_bulk_import.BulkImportInvalid,

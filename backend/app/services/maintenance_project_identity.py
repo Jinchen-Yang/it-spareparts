@@ -56,7 +56,26 @@ class XsddProjectMergeConflict(Exception):
 
 _XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{4}$")
 _ASCII_WHITESPACE_RE = re.compile(r"[ \t\n\r\f\v]+")
-_PEER_ALIAS_SOURCES = frozenset({"xsdd_container_merge", "sales_order_import"})
+_PEER_ALIAS_SOURCES = frozenset({"xsdd_container_merge"})
+_SALES_ALIAS_SOURCE_PREFIX = "sales_order_import:"
+
+
+def sales_alias_source(value: str | None) -> str:
+    """Embed the reviewed XSDD reference in an alias provenance value."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        raise XsddProjectConflict("销售项目名称缺少有效 XSDD 来源")
+    return f"{_SALES_ALIAS_SOURCE_PREFIX}{xsdd_norm}"
+
+
+def _peer_source_candidate(source: str) -> str | None:
+    if source in _PEER_ALIAS_SOURCES:
+        return ""
+    if source.startswith(_SALES_ALIAS_SOURCE_PREFIX):
+        xsdd_norm = normalize_xsdd(source.removeprefix(_SALES_ALIAS_SOURCE_PREFIX))
+        return xsdd_norm or None
+    return None
 
 # This is deliberately explicit.  A schema migration which adds another
 # direct maintenance_project FK must update this reviewed list; merge apply
@@ -279,6 +298,84 @@ def resolve_xsdd_project(db: Session, value: str | None) -> str | None:
     return next(iter(evidence), None)
 
 
+def _xsdd_owner_evidence(
+    db: Session,
+    xsdd_norm: str,
+) -> tuple[MaintenanceProjectXsdd | None, set[str], set[str]]:
+    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+    contract_ids = set(db.scalars(
+        select(MaintenanceProjectContract.project_id).where(
+            normalized_xsdd_sql(MaintenanceProjectContract.contract_no) == xsdd_norm
+        )
+    ))
+    assignment_ids = set(db.scalars(
+        select(MaintenanceSourceOrderAssignment.project_id)
+        .select_from(FMaintenanceOrder)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .where(normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm)
+    ))
+    return mapped, contract_ids, assignment_ids
+
+
+def resolve_sales_xsdd_project(db: Session, value: str | None) -> str | None:
+    """Resolve a sales-side project without treating WBDD as owner evidence."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        return None
+    mapped, contract_ids, assignment_ids = _xsdd_owner_evidence(db, xsdd_norm)
+    owner_ids = set(contract_ids)
+    if mapped is not None:
+        owner_ids.add(mapped.project_id)
+    if len(owner_ids) > 1 or (owner_ids and assignment_ids - owner_ids):
+        raise XsddProjectConflict(
+            f"XSDD {value} 已关联多个项目，需先完成历史归并预检"
+        )
+    if not owner_ids and assignment_ids:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 WBDD 归属、没有销售合同 owner，需先修复"
+        )
+    return next(iter(owner_ids), None)
+
+
+def resolve_contract_xsdd_owner(db: Session, value: str | None) -> str | None:
+    """Return the unique contract-backed owner; WBDD/mapping alone is insufficient."""
+
+    xsdd_norm = normalize_xsdd(value)
+    if not xsdd_norm:
+        return None
+    mapped, contract_ids, assignment_ids = _xsdd_owner_evidence(db, xsdd_norm)
+    if len(contract_ids) > 1:
+        raise XsddProjectConflict(
+            f"XSDD {value} 存在多个销售合同 owner，需先完成历史归并预检"
+        )
+    owner = next(iter(contract_ids), None)
+    if owner is not None and mapped is None:
+        raise XsddProjectConflict(
+            f"XSDD {value} 有销售合同但缺少 canonical owner 映射，需先修复"
+        )
+    if mapped is not None and owner is not None and mapped.project_id != owner:
+        raise XsddProjectConflict(
+            f"XSDD {value} 的映射与销售合同 owner 冲突"
+        )
+    if owner is None and assignment_ids:
+        raise XsddProjectConflict(
+            f"XSDD {value} 只有 WBDD 归属、没有销售合同 owner，需先修复"
+        )
+    if owner is not None and assignment_ids - {owner}:
+        raise XsddProjectConflict(
+            f"XSDD {value} 的 WBDD 归属与销售合同 owner 冲突"
+        )
+    return owner
+
+
 def claim_xsdd_project(
     db: Session,
     *,
@@ -328,7 +425,10 @@ def record_alias(
     if exists is not None:
         # Later sales/XSDD evidence may upgrade an old generic alias into a
         # proven peer name.  Never downgrade a proven source.
-        if source in _PEER_ALIAS_SOURCES and exists.source not in _PEER_ALIAS_SOURCES:
+        if (
+            _peer_source_candidate(source) is not None
+            and _peer_source_candidate(exists.source) is None
+        ):
             exists.source = source
             db.flush()
             return True
@@ -378,13 +478,52 @@ def peer_names_by_project(db: Session, project_ids: list[str]) -> dict[str, list
         .where(MaintenanceProjectAlias.project_id.in_(project_ids))
         .order_by(MaintenanceProjectAlias.project_id, MaintenanceProjectAlias.alias_name)
     ))
+    referenced_xsdds = {
+        xsdd_norm
+        for _project_id, _alias_name, _alias_key, source in aliases
+        if (xsdd_norm := _peer_source_candidate(source))
+    }
+    mapped_pairs: set[tuple[str, str]] = set()
+    contract_pairs: set[tuple[str, str]] = set()
+    if referenced_xsdds:
+        mapped_pairs = {
+            (project_id, xsdd_norm)
+            for project_id, xsdd_norm in db.execute(
+                select(
+                    MaintenanceProjectXsdd.project_id,
+                    MaintenanceProjectXsdd.xsdd_norm,
+                ).where(
+                    MaintenanceProjectXsdd.xsdd_norm.in_(sorted(referenced_xsdds))
+                )
+            )
+        }
+        contract_norm = normalized_xsdd_sql(
+            MaintenanceProjectContract.contract_no
+        ).label("xsdd_norm")
+        contract_pairs = {
+            (project_id, xsdd_norm)
+            for project_id, xsdd_norm in db.execute(
+                select(MaintenanceProjectContract.project_id, contract_norm).where(
+                    contract_norm.in_(sorted(referenced_xsdds))
+                )
+            )
+        }
     out: dict[str, list[str]] = {}
     for project_id, alias_name, _alias_key, source in aliases:
         # ``source_order`` has no source_ref column, so it cannot prove which
         # WBDD row supplied an old alias.  Keep it secondary instead of
         # guessing from equal text.  Sales import and XSDD container merge are
         # the two provenance paths that do establish the same XSDD identity.
-        if source not in _PEER_ALIAS_SOURCES:
+        xsdd_norm = _peer_source_candidate(source)
+        if xsdd_norm is None:
+            continue
+        if xsdd_norm and (
+            (project_id, xsdd_norm) not in mapped_pairs
+            or (project_id, xsdd_norm) not in contract_pairs
+        ):
+            # A source string is only a claim.  The current canonical map and
+            # sales contract must both prove the same project before UI may
+            # promote this alias to a peer name.
             continue
         bucket = out.setdefault(project_id, [])
         if alias_name not in bucket:

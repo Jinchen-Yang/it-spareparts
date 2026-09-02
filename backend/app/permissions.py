@@ -709,7 +709,7 @@ PERMISSION_META: dict[str, dict] = {
     "page_import": {
         "label": "数据导入",
         "summary": "可打开数据导入页，上传氚云 Excel 写入数据库。",
-        "can": "上传采购/销售/库存/询价/WBDD 文件，查看导入报告与历史批次；WBDD 会按 XSDD 自动挂靠已有项目或建档。",
+        "can": "上传采购/销售/库存/询价/WBDD 文件，查看导入报告与历史批次；WBDD 只按销售合同建立的 XSDD owner 自动挂靠，无 owner 时留待补挂。",
         "cannot": "不能删除已导入数据（无删除入口）；WBDD 导入不会覆盖已有项目负责人或账号可见范围。",
         "typical": ["管理员", "数据专员"],
         "sensitivity": "critical",
@@ -754,7 +754,7 @@ PERMISSION_META: dict[str, dict] = {
     "action_maintenance_wbdd_import": {
         "label": "维保需求单（WBDD）专用上传",
         "summary": "允许通过维保专用端点上传氚云维保备件需求单（90/91 列导出），快照式更新需求单事实、按 XSDD 挂靠或建档，并触发成本回填。",
-        "can": "上传 WBDD .xlsx（自动识别 90/91 列布局）；本批单据按唯一 XSDD 挂靠已有项目，无项目时同一 XSDD 只建一个项目；返回计数/快照差异/自动挂靠/成本重算统计。",
+        "can": "上传 WBDD .xlsx（自动识别 90/91 列布局）；本批单据只按销售合同建立的唯一 XSDD owner 挂靠，无 owner 时保留未归属且不建项目；返回计数/快照差异/自动挂靠/成本重算统计。",
         "cannot": "不能上传采购/销售/库存/报销文件（非 WBDD 一律 422 零写入）；不含通用导入页 page_import 的任何能力；不会借上传覆盖已有项目负责人或账号可见范围。",
         "typical": ["管理员", "维保数据维护人员（需单独授权）"],
         "sensitivity": "critical",
