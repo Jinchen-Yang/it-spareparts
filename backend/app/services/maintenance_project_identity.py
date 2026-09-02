@@ -2504,6 +2504,15 @@ def auto_merge_sales_xsdd_conflicts(
     if not incoming:
         return {"merged_group_count": 0, "groups": []}
 
+    # Every downstream write path uses DATA_CHANGE -> sorted XSDD locks.
+    # Acquire that envelope even when no merge plan exists and this call only
+    # repairs a missing map, avoiding an XSDD -> DATA_CHANGE lock inversion
+    # with WBDD prelock/assignment work later in the same transaction.
+    db.execute(select(func.pg_advisory_xact_lock(
+        config.DATA_CHANGE_ADVISORY_LOCK_KEY
+    )))
+    lock_xsdd_identities(db, sorted(incoming))
+
     preview = preview_historical_conflicts(db)
     relevant = [
         conflict
