@@ -29,8 +29,25 @@ export const SHEETS = {
   site: "06_现场领用与返还",
 } as const;
 
+/** 2.7.0 行级三路合并：字段级变更/冲突/接管明细。 */
+export interface WorkbookFieldChange {
+  sheet: string;
+  row: string;
+  entity_id: string;
+  field: string;
+  old: string;
+  new: string;
+  base?: string;
+  overridden?: boolean;
+}
+
 export interface WorkbookApplyResult {
   project_id?: string;
+  changes?: WorkbookFieldChange[];
+  conflicts?: WorkbookFieldChange[];
+  overridden?: WorkbookFieldChange[];
+  force_takeover?: boolean;
+  revision_drift?: boolean;
   applied_by?: string;
   import_batch_id?: string;
   sheets?: string[];
@@ -87,9 +104,14 @@ async function download(path: string, params?: Record<string, unknown>): Promise
   return resp.data;
 }
 
-async function upload(path: string, file: File): Promise<WorkbookApplyResult> {
+async function upload(
+  path: string,
+  file: File,
+  opts?: { forceTakeover?: boolean },
+): Promise<WorkbookApplyResult> {
   const body = new FormData();
   body.append("file", file);
+  if (opts?.forceTakeover) body.append("force_takeover", "true");
   const resp = await api.post<WorkbookApplyResult>(path, body);
   return resp.data;
 }
@@ -129,9 +151,13 @@ export const validateProjectMaster = async (projectId: string, file: File) => {
   return resp.data;
 };
 
-export const applyProjectMaster = (projectId: string, file: File) =>
+export const applyProjectMaster = (
+  projectId: string,
+  file: File,
+  opts?: { forceTakeover?: boolean },
+) =>
   upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/apply`,
-    file);
+    file, opts);
 
 /** 项目面板「报销」tab 的只读行（含备注，#47）。改动仍只走下载→改→上传覆盖。 */
 export interface ProjectExpenseRow {

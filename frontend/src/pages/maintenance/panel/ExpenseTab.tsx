@@ -67,7 +67,7 @@ export function ExpenseTab({
         hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file) => applyProjectMaster(projectId, file)}
+        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
         onAfterApply={onChanged}
       />
       <Table<ProjectExpenseRow>

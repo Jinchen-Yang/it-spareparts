@@ -197,7 +197,7 @@ export function PartsOrdersTab({
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file) => applyProjectMaster(projectId, file)}
+        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
         onAfterApply={onChanged}
       />
       <Card

@@ -174,3 +174,59 @@ describe("WorkbookRoundTrip", () => {
     await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
   });
 });
+
+describe("WorkbookRoundTrip · 2.7.0 行级冲突与强制接管", () => {
+  it("409 冲突展示三值对照，确认后带 force_takeover 重传", async () => {
+    const conflicts = [
+      {
+        sheet: "03_备件明细", row: "WBDD-1", entity_id: "7",
+        field: "需求数量", old: "4", new: "6", base: "2",
+        reason: "server_changed_since_export",
+      },
+    ];
+    const onApply = vi.fn()
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: {
+            detail: {
+              code: "row_conflicts",
+              message: "部分行已被他人更新",
+              conflicts,
+            },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        cost_refills: 0, site_return_flags: 0, expense_updates: 0,
+        collection_creates: 0, collection_voids: 0,
+        changes: conflicts.map((c) => ({ ...c, overridden: true })),
+        overridden: conflicts,
+        force_takeover: true,
+      });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="测试表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+    // 冲突弹窗：三值都渲染
+    expect(
+      (await screen.findAllByText(/有 1 处改动与他人冲突/)).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/你下载时的值：2/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/当前最新值：4/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/你上传的值：6/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /强制接管并上传/ }));
+    await waitFor(() => {
+      expect(onApply).toHaveBeenCalledTimes(2);
+      expect(onApply).toHaveBeenLastCalledWith(expect.any(File), {
+        forceTakeover: true,
+      });
+    });
+    await screen.findByText(/已覆盖/);
+  });
+});

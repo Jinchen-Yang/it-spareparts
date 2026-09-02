@@ -1916,16 +1916,19 @@ class _V2MergeContext:
 
     def record(
         self, *, sheet: str, row_label: str, entity_id, field: str,
-        old: str, new: str, conflict: bool,
+        old: str, new: str, conflict: bool, base: str = "",
     ) -> None:
         entry = {
             "sheet": sheet, "row": row_label, "entity_id": str(entity_id),
             "field": field, "old": old or "", "new": new or "",
         }
         if conflict:
-            self.conflicts.append({**entry, "reason": "server_changed_since_export"})
+            # 三值对照：base=导出基线 / old=服务端现值 / new=本次上传值
+            self.conflicts.append({
+                **entry, "base": base or "",
+                "reason": "server_changed_since_export"})
             if self.force_takeover:
-                self.overridden.append(entry)
+                self.overridden.append({**entry, "base": base or ""})
                 self.changes.append({**entry, "overridden": True})
         else:
             self.changes.append({**entry, "overridden": False})
@@ -1976,6 +1979,7 @@ def _v2_merge_row(
             sheet=sheet, row_label=row_label, entity_id=entity_id, field=name,
             old=server_value, new=user_value,
             conflict=server_value != baseline.get(name, ""),
+            base=baseline.get(name, ""),
         )
     return True
 
