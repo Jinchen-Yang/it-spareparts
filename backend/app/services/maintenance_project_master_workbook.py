@@ -2205,15 +2205,19 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
         and (contract.effective_to is None or contract.effective_to > today)
     ]
     if len(editable_contracts) == 1:
-        contract_edit_state = "可编辑：写回唯一当前含税合同事实"
+        contract_edit_state = (
+            "可编辑：写回唯一当前含税合同事实"
+            + ("（注意：该合同跨项目共享，修改将影响所有计入项目）"
+               if contract_shared else "")
+        )
     elif contract_shared:
-        contract_edit_state = "只读：合同跨项目共享，须先确认唯一归属"
+        contract_edit_state = "只读：多份当前计入合同且存在共享，须先收敛合同关系"
     elif len(current_included) > 1:
         contract_edit_state = "只读：当前有多份合同，须逐合同维护，不能把项目总额写入其中一份"
     elif not current_included:
         contract_edit_state = "只读：仅有 XSDD 参考或尚无合同台账，请先建立唯一合同关系"
     else:
-        contract_edit_state = "只读：当前合同未映射或事实不完整，请先完成合同治理"
+        contract_edit_state = "只读：当前合同事实不完整，请先完成合同治理"
     # 2026-08-19：备件成本合并人工覆盖——主表无成本但有 override 的行按
     # override 含税金额×数量计入（与看板/面板口径一致）
     line_ids = [line.id for line, _order, _pid in lines]
@@ -2300,30 +2304,14 @@ def _v2_editable_contracts(
         and contract.effective_from <= today
         and (contract.effective_to is None or contract.effective_to > today)
     ]
-    # “项目合同总额”只在它能一一对应到唯一权威事实时可写。即便仅有一条
-    # mapped 合同，只要还存在另一条当前计入但未映射的合同，也不能把项目总额
-    # 偷偷写进 mapped 那一条。
+    # 2026-09-02 拍板：合同额对项目负责人/销售与管理员全量放开。
+    # 仍要求「当前计入的合同恰好一份」，保证项目总额能一一对应回写到唯一
+    # 合同事实；mapped/共享不再硬拒——共享合同可编辑，apply 侧以
+    # contract base_version CAS + 审计兜底，共享状态在导出侧提示。
     if len(included_current) != 1:
         return []
     only = included_current[0]
-    if only.status_mapping_state != "mapped":
-        return []
-    # 同一稳定合同若同时计入多个项目，项目级总额没有唯一归属；工作簿不得
-    # 把共享合同的全额写回其中一个项目并制造双计。
-    related_projects = db.scalar(
-        select(func.count(func.distinct(MaintenanceProjectContract.project_id)))
-        .where(
-            (
-                (MaintenanceProjectContract.contract_id == only.contract_id)
-                | (MaintenanceProjectContract.contract_no == only.contract_no)
-            ),
-            MaintenanceProjectContract.included_in_total.is_(True),
-            MaintenanceProjectContract.effective_from <= today,
-            (MaintenanceProjectContract.effective_to.is_(None)
-             | (MaintenanceProjectContract.effective_to > today)),
-        )
-    ) or 0
-    if int(related_projects) != 1 or only.project_id != project_id:
+    if only.project_id != project_id:
         return []
     return [only]
 
