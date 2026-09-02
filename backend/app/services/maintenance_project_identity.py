@@ -15,12 +15,17 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import MetaData, Table, and_, case, func, select, text, union_all, update
+from sqlalchemy import MetaData, Table, and_, case, exists, func, select, text, union_all, update
 from sqlalchemy.orm import Session
 
+from app import config
 from app.business_time import business_today
 from app.db import Base
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
@@ -264,6 +269,12 @@ def evidence_project_ids(db: Session, xsdd_norm: str) -> set[str]:
         .where(
             FMaintenanceOrder.linked_sales_order_no.is_not(None),
             normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm,
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
         )
     ))
     # ``contract_id`` is an internal relation id and may retain a synthetic
@@ -319,7 +330,15 @@ def _xsdd_owner_evidence(
                 MaintenanceSourceOrderAssignment.is_active.is_(True),
             ),
         )
-        .where(normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm)
+        .where(
+            normalized_xsdd_sql(FMaintenanceOrder.linked_sales_order_no) == xsdd_norm,
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~exists(select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )),
+        )
     ))
     return mapped, contract_ids, assignment_ids
 
@@ -352,6 +371,12 @@ def resolve_contract_xsdd_owner(db: Session, value: str | None) -> str | None:
     if not xsdd_norm:
         return None
     mapped, contract_ids, assignment_ids = _xsdd_owner_evidence(db, xsdd_norm)
+    if mapped is not None:
+        mapped_project = db.get(MaintenanceProject, mapped.project_id)
+        if mapped_project is None or not mapped_project.is_active:
+            raise XsddProjectConflict(
+                f"XSDD {value} 的 canonical owner 项目已停用或不存在"
+            )
     if len(contract_ids) > 1:
         raise XsddProjectConflict(
             f"XSDD {value} 存在多个销售合同 owner，需先完成历史归并预检"

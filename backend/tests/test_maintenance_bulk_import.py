@@ -8,10 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.etl import loader, pipeline
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceOrder,
+    MaintenanceDemandDeleteIntent,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
@@ -248,10 +252,11 @@ def test_sales_conflicting_duplicate_blocks_entire_order(monkeypatch):
             "tax_rate": 3,
             "tax_amount": 4,
             "amount_ex_tax": 5,
+            "data_status": 6,
         },
         [
-            (3, ("XSDD-20240101-0001", "113", "含税", "13%", "13", "100")),
-            (4, ("XSDD-20240101-0001", "226", "含税", "13%", "26", "200")),
+            (3, ("XSDD-20240101-0001", "113", "含税", "13%", "13", "100", "已生效")),
+            (4, ("XSDD-20240101-0001", "226", "含税", "13%", "26", "200", "已生效")),
         ],
     )
 
@@ -262,6 +267,28 @@ def test_sales_conflicting_duplicate_blocks_entire_order(monkeypatch):
     assert any(
         issue["code"] == "order_level_fail_closed" for issue in plan["issues"]
     )
+
+
+def test_sales_apply_prelocks_data_change_before_xsdd(monkeypatch):
+    events: list[str] = []
+
+    class _LockOnlyDb:
+        def execute(self, _statement):
+            events.append("data_change")
+
+    monkeypatch.setattr(
+        maintenance_project_identity,
+        "lock_xsdd_identities",
+        lambda _db, _values: events.append("xsdd") or [],
+    )
+    result = bulk.SalesContractAmountAdapter().apply_plan(
+        _LockOnlyDb(),
+        {"operations": []},
+        operated_by="test",
+        audit_reason="lock-order-test",
+    )
+    assert events == ["data_change", "xsdd"]
+    assert result["written"] == 0
 
 
 def test_receipt_risk_row_blocks_all_months_without_partial_cumulative(monkeypatch):
@@ -696,6 +723,111 @@ def test_wbdd_first_defers_then_sales_links_and_sales_first_links_directly(
     assert second_assignment.project_id == second_owner.project_id
 
 
+@pytest.mark.parametrize("discard_mode", ["tombstone", "inactive"])
+def test_discarded_wbdd_assignment_does_not_claim_sales_owner_or_relink(
+    db, tmp_path, discard_mode
+):
+    xsdd = "XSDD-20260902-0020"
+    wbdd_id = f"discarded-wbdd-{discard_mode}"
+    wbdd_path = _ordinary_wbdd_workbook(
+        tmp_path,
+        xsdd=xsdd,
+        raw_order_id=wbdd_id,
+        project_name="已废弃历史 WBDD 项目",
+    )
+    pipeline.run_import(
+        db,
+        wbdd_path,
+        f"{discard_mode}-wbdd.xlsx",
+        uploaded_by="fixture",
+        mode="upsert",
+    )
+    legacy = MaintenanceProject(
+        project_id=f"discarded-legacy-{discard_mode}",
+        project_code=f"DISCARDED-{discard_mode.upper()}",
+        display_name="已废弃历史容器",
+        lifecycle_status="ended",
+        is_active=True,
+        version=1,
+    )
+    db.add(legacy)
+    db.flush()
+    db.execute(text(
+        "ALTER TABLE maintenance_source_order_assignment DISABLE TRIGGER "
+        "trg_maintenance_assignment_claim_xsdd"
+    ))
+    try:
+        db.add(MaintenanceSourceOrderAssignment(
+            assignment_id=f"discarded-assignment-{discard_mode}",
+            source_order_id=wbdd_id,
+            project_id=legacy.project_id,
+            is_active=True,
+            version=1,
+            created_by="historical-fixture",
+        ))
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
+            "trg_maintenance_assignment_claim_xsdd"
+        ))
+    order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id == wbdd_id
+    ))
+    if discard_mode == "inactive":
+        order.data_status = "已作废"
+    else:
+        now = datetime.now(timezone.utc)
+        intent = MaintenanceDemandDeleteIntent(
+            intent_id="discarded-intent-tombstone",
+            idempotency_key="discarded-intent-key",
+            request_digest="a" * 64,
+            selection_digest="b" * 64,
+            status="executed",
+            reason="测试销售 owner 忽略墓碑",
+            operated_by="test",
+            header_count=1,
+            line_count=1,
+            created_at=now,
+            expires_at=now,
+        )
+        db.add(intent)
+        db.flush()
+        db.add(MaintenanceDemandTombstone(
+            source_order_id=wbdd_id,
+            delete_intent_id=intent.intent_id,
+            version_digest="c" * 64,
+            deleted_by="test",
+            delete_reason="测试墓碑",
+            deleted_at=now,
+            version=1,
+        ))
+    db.commit()
+
+    sales_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=xsdd,
+        raw_order_id=f"sales-after-discard-{discard_mode}",
+        project_name="销售权威新项目",
+    )
+    pipeline.run_import(
+        db,
+        sales_path,
+        f"sales-after-{discard_mode}.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    owner = db.get(MaintenanceProjectXsdd, "20260902-0020")
+    assert owner is not None and owner.project_id != legacy.project_id
+    active_assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == wbdd_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert active_assignment is not None
+    assert active_assignment.project_id == legacy.project_id
+
+
 @pytest.mark.parametrize(
     ("maintenance_business", "business_type"),
     [("否", "单次维修"), ("是", "备件销售")],
@@ -786,6 +918,35 @@ def test_ordinary_sales_requires_active_status_and_strict_xsdd(db, tmp_path):
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
 
 
+@pytest.mark.parametrize(
+    ("order_no", "include_status"),
+    [("SALE-INVALID-001", True), ("XSDD-20260902-0019", False)],
+)
+def test_dedicated_sales_preview_requires_strict_xsdd_and_status(
+    db, tmp_path, order_no, include_status
+):
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=f"dedicated-strict-{include_status}",
+        project_name="专用导入严格门禁项目",
+        include_status=include_status,
+    )
+    with open(path, "rb") as workbook_file:
+        artifact = bulk.build_preview(
+            db, workbook_file.read(), "dedicated-strict.xlsx"
+        )
+    assert artifact.adapter_key == "sales_contract_amount"
+    assert artifact.plan["summary"]["blocking_errors"] >= 1
+    assert not [
+        row for row in artifact.plan["operations"]
+        if row.get("action") not in {"blocked", "error"}
+    ]
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
+
+
 def test_inactive_maintenance_sales_does_not_create_project(db, tmp_path):
     path = _ordinary_sales_workbook(
         tmp_path,
@@ -832,7 +993,7 @@ def test_ordinary_sales_reuses_generic_transform_without_bulk_redetect(
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 1
 
 
-def test_ordinary_sales_auto_project_failure_rolls_back_all_facts(db, tmp_path):
+def test_ordinary_sales_auto_project_allows_missing_period(db, tmp_path):
     path = _ordinary_sales_workbook(
         tmp_path,
         order_no="XSDD-20260902-0002",
@@ -842,17 +1003,71 @@ def test_ordinary_sales_auto_project_failure_rolls_back_all_facts(db, tmp_path):
         period_to=None,
     )
 
+    pipeline.run_import(
+        db,
+        path,
+        "sales-missing-period.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    project = db.scalar(select(MaintenanceProject))
+    assert project is not None
+    assert project.period_from is None and project.period_to is None
+    assert project.version == 1
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 1
+    assert db.get(MaintenanceProjectXsdd, "20260902-0002") is not None
+
+
+@pytest.mark.parametrize(
+    ("period_from", "period_to"),
+    [(date(2026, 1, 1), None), (None, date(2026, 12, 31))],
+)
+def test_ordinary_sales_auto_project_preserves_one_sided_period(
+    db, tmp_path, period_from, period_to
+):
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0017",
+        raw_order_id="sales-one-sided-period",
+        project_name="单侧期限维保项目",
+        period_from=period_from,
+        period_to=period_to,
+    )
+    pipeline.run_import(
+        db,
+        path,
+        "sales-one-sided-period.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    project = db.scalar(select(MaintenanceProject))
+    assert project is not None
+    assert project.period_from == period_from
+    assert project.period_to == period_to
+
+
+def test_ordinary_sales_inverted_period_rolls_back_all_facts(db, tmp_path):
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0018",
+        raw_order_id="sales-inverted-period",
+        project_name="倒置期限维保项目",
+        period_from=date(2027, 1, 1),
+        period_to=date(2026, 1, 1),
+    )
     with pytest.raises(loader.ImportIntegrityError, match="自动建项失败"):
         pipeline.run_import(
             db,
             path,
-            "sales-invalid.xlsx",
+            "sales-inverted-period.xlsx",
             uploaded_by="sales-importer",
             mode="upsert",
             auto_assign_maintenance_projects=True,
         )
     db.rollback()
-
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0

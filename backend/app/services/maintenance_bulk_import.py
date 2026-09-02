@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.etl import mapping
 from app.business_time import business_today
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import FMaintenanceOrder, MaintenanceDemandTombstone
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
@@ -558,6 +558,14 @@ def _assignment_evidence(
             == MaintenanceSourceOrderAssignment.project_id,
         )
         .where(FMaintenanceOrder.linked_sales_order_no.in_(sorted(order_variants)))
+        .where(
+            FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+            ~select(MaintenanceDemandTombstone.source_order_id).where(
+                MaintenanceDemandTombstone.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            ).exists(),
+        )
         .order_by(
             FMaintenanceOrder.linked_sales_order_no,
             MaintenanceSourceOrderAssignment.assignment_id,
@@ -724,17 +732,15 @@ def _maintenance_project_metadata(
     direct_from, direct_to = _explicit_maintenance_period(sheet, values)
     period_from = direct_from
     period_to = direct_to
-    if period_from is None or period_to is None:
-        raise BulkImportInvalid("维保销售订单自动建项必须能确定完整维保起止日期")
-    if period_to < period_from:
+    if period_from is not None and period_to is not None and period_to < period_from:
         raise BulkImportInvalid("维保终止日期不能早于起始日期")
     business_type = _text(_value(sheet, values, "business_type"))
     return {
         "row_no": row_no,
         "project_code": f"XSDD-{norm}"[:64],
         "display_name": display_name[:256],
-        "period_from": period_from.isoformat(),
-        "period_to": period_to.isoformat(),
+        "period_from": period_from.isoformat() if period_from else None,
+        "period_to": period_to.isoformat() if period_to else None,
         "business_type": business_type or None,
     }
 
@@ -945,7 +951,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         for row_no, values in sheet.rows:
             raw_order_id = _text(_value(sheet, values, "raw_order_id"))
             order_no_raw = _text(_value(sheet, values, "order_no"))
-            norm = normalize_order_no(order_no_raw)
+            norm = maintenance_project_identity.normalize_xsdd(order_no_raw)
             if raw_order_id:
                 raw_ids.add(raw_order_id)
             if norm:
@@ -963,7 +969,9 @@ class SalesContractAmountAdapter(HeaderAdapter):
         sales_by_raw = {row.raw_order_id: row for row in sales_rows}
         sales_by_order: dict[str, list[FSalesOrder]] = defaultdict(list)
         for row in sales_rows:
-            sales_by_order[normalize_order_no(row.order_no)].append(row)
+            sales_by_order[
+                maintenance_project_identity.normalize_xsdd(row.order_no)
+            ].append(row)
 
         all_projects = list(
             db.scalars(
@@ -977,7 +985,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
 
         for row_no, values in sheet.rows:
             order_no_raw = _text(_value(sheet, values, "order_no"))
-            norm = normalize_order_no(order_no_raw)
+            norm = maintenance_project_identity.normalize_xsdd(order_no_raw)
             raw_order_id = _text(_value(sheet, values, "raw_order_id"))
             base = {
                 "row_no": row_no,
@@ -986,15 +994,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 "issues": [],
             }
             if not norm:
-                issue = _row_issue(row_no, "missing_order_no", "销售订单号为空")
+                issue = _row_issue(
+                    row_no,
+                    "invalid_xsdd_order_no",
+                    "维保合同事实要求有效 XSDD-YYYYMMDD-NNNN 销售订单号",
+                )
                 base.update(action="error", issues=[issue])
                 source_rows.append(base)
                 hard_issues.append(issue)
                 continue
 
             source_status = _text(_value(sheet, values, "data_status"))
-            if "data_status" in sheet.field_indexes and not source_status:
-                issue = _row_issue(row_no, "missing_source_status", "销售订单数据状态为空")
+            if "data_status" not in sheet.field_indexes or not source_status:
+                issue = _row_issue(
+                    row_no,
+                    "missing_source_status",
+                    "维保合同事实要求源表包含明确的销售订单数据状态",
+                )
                 base.update(action="error", issues=[issue])
                 source_rows.append(base)
                 hard_issues.append(issue)
@@ -1442,6 +1458,19 @@ class SalesContractAmountAdapter(HeaderAdapter):
         operated_by: str,
         audit_reason: str,
     ) -> dict:
+        # Dedicated bulk apply and ordinary upload share the same global lock
+        # order: DATA_CHANGE -> XSDD identities -> per-order bulk locks.
+        db.execute(select(func.pg_advisory_xact_lock(
+            config.DATA_CHANGE_ADVISORY_LOCK_KEY
+        )))
+        maintenance_project_identity.lock_xsdd_identities(
+            db,
+            sorted({
+                row["normalized_order_no"]
+                for row in plan["operations"]
+                if row.get("normalized_order_no")
+            }),
+        )
         writes = 0
         noops = 0
         project_ids: set[str] = set()
@@ -1465,7 +1494,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     raise BulkImportConflict("预览后的销售订单已不存在")
                 if (
                     sales.raw_order_id != item["sales_raw_order_id"]
-                    or normalize_order_no(sales.order_no) != norm
+                    or maintenance_project_identity.normalize_xsdd(sales.order_no) != norm
                     or _jsonable(sales.amount_ex_tax)
                     != item["expected_sales_amount_ex_tax"]
                     or _jsonable(sales.tax_rate) != item["expected_sales_tax_rate"]
@@ -1623,19 +1652,22 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     operated_by=operated_by,
                 )
                 project_id = created["project_id"]
-                updated = catalog.update_project(
-                    db,
-                    project_id=project_id,
-                    version=created["version"],
-                    updates={
-                        "period_from": date.fromisoformat(metadata["period_from"]),
-                        "period_to": date.fromisoformat(metadata["period_to"]),
-                    },
-                    reason=audit_reason,
-                    operated_by=operated_by,
-                )
-                if updated is None:
-                    raise BulkImportConflict("维保项目在创建期间消失")
+                period_updates = {
+                    key: date.fromisoformat(metadata[key])
+                    for key in ("period_from", "period_to")
+                    if metadata.get(key)
+                }
+                if period_updates:
+                    updated = catalog.update_project(
+                        db,
+                        project_id=project_id,
+                        version=created["version"],
+                        updates=period_updates,
+                        reason=audit_reason,
+                        operated_by=operated_by,
+                    )
+                    if updated is None:
+                        raise BulkImportConflict("维保项目在创建期间消失")
                 payload = operations.create_contract(
                     db,
                     project_id=project_id,

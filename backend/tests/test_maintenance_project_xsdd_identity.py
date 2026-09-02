@@ -348,13 +348,6 @@ def test_wbdd_upsert_rejects_xsdd_owned_by_another_project(db):
         operated_by="xsdd-admin",
         user_ctx=_admin(),
     )
-    # Simulate a pre-migration map-only owner.  Upgrade must retain it, while
-    # any future active-assignment/order mutation remains contract-gated.
-    db.add(MaintenanceProjectXsdd(
-        xsdd_norm="20991231-0002",
-        project_id=project_a.project_id,
-        source="historical-map-only",
-    ))
     db.commit()
     operations.create_contract(
         db,
@@ -436,7 +429,7 @@ def test_wbdd_upsert_cannot_claim_unowned_xsdd_for_assigned_project(db):
     ))
     assert order is not None and order.linked_sales_order_no is None
     mapping = db.get(MaintenanceProjectXsdd, "20991231-0002")
-    assert mapping is not None and mapping.project_id == project_a.project_id
+    assert mapping is None
 
 
 def test_assignment_requires_matching_contract_owner_even_if_map_exists(db):
@@ -470,6 +463,8 @@ def test_assignment_requires_matching_contract_owner_even_if_map_exists(db):
     assert db.scalar(select(MaintenanceSourceOrderAssignment).where(
         MaintenanceSourceOrderAssignment.source_order_id == raw_order_id
     )) is None
+    mapping = db.get(MaintenanceProjectXsdd, "20991231-0003")
+    assert mapping is not None and mapping.project_id == project.project_id
 
 
 def test_assignment_allows_matching_contract_owner(db):
@@ -514,6 +509,111 @@ def test_assignment_allows_matching_contract_owner(db):
         MaintenanceSourceOrderAssignment.is_active.is_(True),
     ))
     assert assignment is not None and assignment.project_id == project.project_id
+
+
+def test_last_matching_contract_cannot_orphan_active_wbdd(db):
+    project = _project(db, "xsdd-contract-guard", "XSDD-CONTRACT-GUARD", "合同删除守卫")
+    xsdd = "XSDD-20991231-0005"
+    contracts = []
+    for suffix in ("a", "b"):
+        payload = operations.create_contract(
+            db,
+            project_id=project.project_id,
+            contract_id=f"xsdd-contract-guard-{suffix}",
+            contract_no=xsdd,
+            contract_amount=Decimal("100.00"),
+            contract_status="正常",
+            status_mapping_state="mapped",
+            status_mapping_version="xsdd-test-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            effective_to=None,
+            source="test",
+            reason="建立可替代合同 owner",
+            operated_by="xsdd-admin",
+        )
+        contracts.append(payload["project_contract_id"])
+    _upsert_wbdd_xsdd(
+        db,
+        raw_order_id="WBDD-XSDD-CONTRACT-GUARD",
+        sales_order=xsdd,
+        batch_key="xsdd-contract-guard-order",
+    )
+    assignments.assign_source_orders(
+        db,
+        project_id=project.project_id,
+        items=[{"source_order_id": "WBDD-XSDD-CONTRACT-GUARD"}],
+        reason="建立 active WBDD evidence",
+        operated_by="xsdd-admin",
+        user_ctx=_admin(),
+    )
+    db.commit()
+
+    first = db.get(MaintenanceProjectContract, contracts[0])
+    db.delete(first)
+    db.commit()
+    assert db.get(MaintenanceProjectContract, contracts[0]) is None
+
+    last = db.get(MaintenanceProjectContract, contracts[1])
+    last.contract_no = "XSDD-20991231-0999"
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    last = db.get(MaintenanceProjectContract, contracts[1])
+    db.delete(last)
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+    assert db.get(MaintenanceProjectContract, contracts[1]) is not None
+
+
+def test_xsdd_map_delete_requires_no_contract_or_active_wbdd_evidence(db):
+    project = _project(db, "xsdd-map-guard", "XSDD-MAP-GUARD", "映射删除守卫")
+    other_project = _project(
+        db,
+        "xsdd-map-guard-other",
+        "XSDD-MAP-GUARD-OTHER",
+        "映射移动守卫",
+    )
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="xsdd-map-guard-contract",
+        contract_no="XSDD-20991231-0006",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="xsdd-test-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="建立映射证据",
+        operated_by="xsdd-admin",
+    )
+    db.commit()
+    mapped = db.get(MaintenanceProjectXsdd, "20991231-0006")
+    mapped.project_id = other_project.project_id
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+    mapped = db.get(MaintenanceProjectXsdd, "20991231-0006")
+    db.delete(mapped)
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+    empty = MaintenanceProjectXsdd(
+        xsdd_norm="20991231-0007",
+        project_id=project.project_id,
+        source="test-no-evidence",
+    )
+    db.add(empty)
+    db.commit()
+    db.delete(empty)
+    db.commit()
+    assert db.get(MaintenanceProjectXsdd, "20991231-0007") is None
 
 
 def test_one_project_may_own_multiple_xsdds(db):

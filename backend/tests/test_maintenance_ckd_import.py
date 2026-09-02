@@ -19,7 +19,7 @@ from app.models.maintenance_front_stock import (
     MaintenanceFrontStock,
     MaintenanceFrontStockLedger,
 )
-from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysImportBatch
 from app.services import maintenance_ckd_import as ckd
@@ -73,6 +73,20 @@ def wbdd_project(db):
         is_active=True,
     )
     db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="ckd-contract-owner",
+        project_id=project.project_id,
+        contract_id="ckd-sales-contract",
+        contract_no="XSDD-20250731-0035",
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-v1",
+        included_in_total=False,
+        effective_from=date(2025, 7, 31),
+        source="synthetic-test",
+        version=1,
+    ))
     db.flush()
     import_batch = SysImportBatch(
         filename="w.xlsx", file_type="maintenance", file_hash="h1", status="success"

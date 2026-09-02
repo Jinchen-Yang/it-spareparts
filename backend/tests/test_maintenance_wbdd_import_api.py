@@ -269,6 +269,23 @@ def test_skip_mode_assigns_from_current_head_identity(db, tmp_path):
         source="test",
     ))
     db.commit()
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="wbdd-skip-current-contract",
+        contract_no="XSDD-20990104-0001",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="test",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="skip 模式 owner fixture",
+        operated_by="test",
+    )
+    db.commit()
 
     original = make_rows(orders=1, lines_per_order=1, project="旧头项目")
     original[0]["销售订单"] = "XSDD-20990104-0001"
@@ -498,12 +515,13 @@ def test_recompute_busy_rolls_back_whole_import_fail_closed(db, tmp_path):
         receipt = db.execute(select(MaintenanceWbddImportReceipt)).scalars().one()
         assert receipt.report_json["recompute"] is not None
         assert db.scalar(select(func.count(SysImportBatch.id))) == 1
-        assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 1
-        assert db.scalar(select(func.count(MaintenanceProjectXsdd.xsdd_norm))) == 1
-        assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 1
+        assert db.scalar(select(func.count(MaintenanceProject.project_id))) == 0
+        assert db.scalar(select(func.count(MaintenanceProjectXsdd.xsdd_norm))) == 0
+        assert db.scalar(select(func.count(MaintenanceProjectAlias.alias_id))) == 0
         assert db.scalar(select(func.count(
             MaintenanceSourceOrderAssignment.assignment_id
-        ))) == 1
+        ))) == 0
+        assert body["auto_assignment"]["pending_owner_order_ids"] == ["SYN-O001"]
     finally:
         wbdd.maintenance_cost.recompute = real
 
@@ -585,6 +603,23 @@ def test_auto_assign_target_escape_uses_real_envelope_guard(
         project_id=project.project_id,
         source="test",
     ))
+    db.commit()
+    operations.create_contract(
+        db,
+        project_id=project.project_id,
+        contract_id="wbdd-envelope-contract",
+        contract_no="XSDD-20990103-0001",
+        contract_amount=Decimal("100.00"),
+        contract_status="正常",
+        status_mapping_state="mapped",
+        status_mapping_version="test",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        source="test",
+        reason="信封逃逸 owner fixture",
+        operated_by="test",
+    )
     db.commit()
 
     rows = make_rows(orders=1, lines_per_order=1)
