@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import MetaData, Table, and_, case, exists, func, select, text, union_all, update
+from sqlalchemy import MetaData, Table, and_, case, exists, func, or_, select, text, union_all, update
 from sqlalchemy.orm import Session
 
 from app import config
@@ -2482,20 +2482,23 @@ def apply_historical_project_merge(
 def auto_merge_sales_xsdd_conflicts(
     db: Session,
     *,
-    xsdd_values,
+    incoming_amount_inc_tax_by_xsdd: dict[str, Decimal],
     operated_by: str,
 ) -> dict:
     """Merge only incoming, contract-backed XSDD splits during sales prelock.
 
     This deliberately delegates every write and OCC check to the reviewed
-    batch primitive.  Automation supplies no business resolution: one unique
-    contract owner must already be provable, and contract/user/unique-key or
-    manifest ambiguity remains a hard failure for the entire import.
+    batch primitive.  When historical current contracts disagree, the active
+    incoming sales row may select one existing contract only by an exact,
+    unique gross-amount match on the already chosen canonical project.  Every
+    other current contract is archived, never deleted.  Source user relations
+    are copied one-for-one; the reviewed parser still rejects any primary or
+    viewer uniqueness collision before the first write.
     """
 
     incoming = {
-        normalized
-        for value in xsdd_values
+        normalized: Decimal(amount)
+        for value, amount in incoming_amount_inc_tax_by_xsdd.items()
         if (normalized := normalize_xsdd(value))
     }
     if not incoming:
@@ -2522,25 +2525,187 @@ def auto_merge_sales_xsdd_conflicts(
             ),
             None,
         )
-        if (
-            conflict.get("requires_human_decision")
-            or conflict.get("canonical_rule") != "unique_contract_owner_v1"
-            or contract_owners != [canonical_id]
-            or canonical is None
-            or not canonical["is_active"]
-        ):
+        if conflict.get("requires_human_decision") or canonical is None or not canonical[
+            "is_active"
+        ]:
             raise XsddProjectMergeConflict(
                 f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并"
             )
+
+        member_ids = sorted(
+            project["project_id"] for project in conflict["projects"]
+        )
+        today = business_today()
+        current_contracts = list(db.scalars(
+            select(MaintenanceProjectContract)
+            .where(
+                MaintenanceProjectContract.project_id.in_(member_ids),
+                normalized_xsdd_sql(MaintenanceProjectContract.contract_no)
+                == conflict["xsdd_norm"],
+                MaintenanceProjectContract.effective_from <= today,
+                or_(
+                    MaintenanceProjectContract.effective_to.is_(None),
+                    MaintenanceProjectContract.effective_to > today,
+                ),
+            )
+            .order_by(MaintenanceProjectContract.project_contract_id)
+        ))
+        matching_contracts = [
+            contract
+            for contract in current_contracts
+            if contract.status_mapping_state == "mapped"
+            and contract.included_in_total
+            and contract.amount_inc_tax == incoming[conflict["xsdd_norm"]]
+        ]
+
+        contract_resolution = None
+        if len(contract_owners) == 1 and contract_owners == [canonical_id]:
+            # Preserve the original safe path when the contract-backed owner
+            # is already unique.  Only a genuinely ambiguous current set needs
+            # the sales amount to choose a survivor.
+            if len(current_contracts) > 1:
+                if len(matching_contracts) != 1:
+                    raise XsddProjectMergeConflict(
+                        f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并："
+                        "incoming 含税额未唯一匹配 current 合同"
+                    )
+        else:
+            if (
+                len(matching_contracts) != 1
+                or matching_contracts[0].project_id != canonical_id
+            ):
+                raise XsddProjectMergeConflict(
+                    f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并："
+                    "incoming 含税额未唯一匹配 locked canonical 合同"
+                )
+
+        if len(current_contracts) > 1:
+            current_contract = matching_contracts[0]
+            non_authoritative_contracts = [
+                contract
+                for contract in current_contracts
+                if contract.project_contract_id
+                != current_contract.project_contract_id
+            ]
+            if any(
+                contract.effective_from >= today
+                for contract in non_authoritative_contracts
+            ):
+                raise XsddProjectMergeConflict(
+                    f"XSDD {conflict['xsdd_norm']} 的非权威 current 合同起始日"
+                    "不早于业务日，不能无损归档"
+                )
+            archived_contract_ids = {
+                contract.project_contract_id
+                for contract in non_authoritative_contracts
+            }
+            survivor_ids = {
+                cluster["survivor_id"]
+                for cluster in conflict["exact_duplicate_candidates"]["collections"]
+            }
+            survivor_rows = list(db.scalars(
+                select(MaintenanceCollectionSnapshot).where(
+                    MaintenanceCollectionSnapshot.collection_id.in_(
+                        sorted(survivor_ids or {""})
+                    )
+                )
+            ))
+            contract_resolution = {
+                "current_project_contract_id": (
+                    current_contract.project_contract_id
+                ),
+                "archive_contracts": [
+                    {
+                        "project_contract_id": contract.project_contract_id,
+                        "effective_to": today.isoformat(),
+                    }
+                    for contract in non_authoritative_contracts
+                ],
+                "collection_contract_repoints": [
+                    {
+                        "collection_id": collection.collection_id,
+                        "target_project_contract_id": (
+                            current_contract.project_contract_id
+                        ),
+                    }
+                    for collection in survivor_rows
+                    if collection.project_contract_id in archived_contract_ids
+                ],
+            }
+
+        active_users = list(db.scalars(
+            select(MaintenanceProjectUserAssignment)
+            .where(
+                MaintenanceProjectUserAssignment.project_id.in_(member_ids),
+                MaintenanceProjectUserAssignment.archived_at.is_(None),
+            )
+            .order_by(MaintenanceProjectUserAssignment.assignment_id)
+        ))
+        canonical_users = [
+            assignment
+            for assignment in active_users
+            if assignment.project_id == canonical_id
+        ]
+        source_users = [
+            assignment
+            for assignment in active_users
+            if assignment.project_id != canonical_id
+        ]
+        user_assignment_resolution = None
+        if source_users:
+            users_by_id = {
+                user.id: user
+                for user in db.scalars(select(SysUser).where(
+                    SysUser.id.in_({assignment.user_id for assignment in active_users})
+                ))
+            }
+            invalid_user_ids = sorted({
+                assignment.user_id
+                for assignment in active_users
+                if users_by_id.get(assignment.user_id) is None
+                or not users_by_id[assignment.user_id].is_active
+            })
+            if invalid_user_ids:
+                raise XsddProjectMergeConflict(
+                    "active 项目用户关系指向停用或不存在账号，不能自动归并: "
+                    f"{invalid_user_ids}"
+                )
+            canonical_identities = {
+                (assignment.responsibility_type, assignment.user_id)
+                for assignment in canonical_users
+            }
+            source_by_identity: dict[
+                tuple[str, int], MaintenanceProjectUserAssignment
+            ] = {}
+            for assignment in source_users:
+                source_by_identity.setdefault(
+                    (assignment.responsibility_type, assignment.user_id),
+                    assignment,
+                )
+            user_assignment_resolution = {
+                "keep_assignment_ids": [
+                    assignment.assignment_id for assignment in canonical_users
+                ],
+                "archive_assignment_ids": [
+                    assignment.assignment_id for assignment in source_users
+                ],
+                "create_on_canonical": [
+                    {
+                        "source_assignment_id": assignment.assignment_id,
+                        "responsibility_type": assignment.responsibility_type,
+                        "user_id": assignment.user_id,
+                    }
+                    for identity, assignment in source_by_identity.items()
+                    if identity not in canonical_identities
+                ],
+            }
         plans.append({
             "xsdd": conflict["xsdd_norm"],
             "expected_manifest_hash": conflict["manifest_hash"],
             "expected_canonical_project_id": canonical_id,
-            "expected_member_project_ids": [
-                project["project_id"] for project in conflict["projects"]
-            ],
-            "contract_resolution": None,
-            "user_assignment_resolution": None,
+            "expected_member_project_ids": member_ids,
+            "contract_resolution": contract_resolution,
+            "user_assignment_resolution": user_assignment_resolution,
         })
 
     return apply_historical_project_merge_batch(

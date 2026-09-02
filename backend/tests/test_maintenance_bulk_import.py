@@ -10,6 +10,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import func, select, text
 
+from app.business_time import business_today
 from app.etl import loader, pipeline
 from app.models.maintenance import (
     FMaintenanceOrder,
@@ -20,10 +21,13 @@ from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAlias,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
     MaintenanceProjectXsdd,
 )
+from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
 from app.models.sales import FSalesOrder
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.models.system import SysUser
 from app.services import maintenance_bulk_import as bulk
 from app.services import maintenance_project_identity
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
@@ -71,6 +75,10 @@ def _ordinary_sales_workbook(
     business_type: str = "备件维保",
     data_status: str = "已生效",
     include_status: bool = True,
+    order_amount: str = "113",
+    tax_rate: str = "13%",
+    tax_amount: str = "13",
+    amount_ex_tax: str = "100",
 ) -> str:
     workbook = Workbook()
     sheet = workbook.active
@@ -88,8 +96,8 @@ def _ordinary_sales_workbook(
     ]
     values = [
         order_no, raw_order_id, data_status, maintenance_business, business_type, project_name,
-        period_from, period_to, "113", "含税", "13%", "13", "100",
-        f"{raw_order_id}-line", "PN-AUTO-1", "1", "113",
+        period_from, period_to, order_amount, "含税", tax_rate, tax_amount,
+        amount_ex_tax, f"{raw_order_id}-line", "PN-AUTO-1", "1", order_amount,
     ]
     if not include_status:
         del system_headers[2]
@@ -120,6 +128,176 @@ def _ordinary_wbdd_workbook(
     return write_workbook(
         str(tmp_path / f"{raw_order_id}.xlsx"), COLUMNS_91, rows
     )
+
+
+def _seed_sales_authoritative_split(
+    db,
+    tmp_path,
+    *,
+    xsdd: str,
+    canonical_primary_conflict: bool = False,
+) -> dict:
+    wbdd_by_project = {
+        "canonical": [f"{xsdd}-canonical-1", f"{xsdd}-canonical-2"],
+        "permissions": [f"{xsdd}-permissions-1"],
+    }
+    for owner, raw_order_ids in wbdd_by_project.items():
+        for raw_order_id in raw_order_ids:
+            path = _ordinary_wbdd_workbook(
+                tmp_path,
+                xsdd=f"XSDD-{xsdd}",
+                raw_order_id=raw_order_id,
+                project_name=f"历史 {owner} 容器",
+            )
+            pipeline.run_import(db, path, f"{raw_order_id}.xlsx", mode="upsert")
+
+    projects = {
+        owner: MaintenanceProject(
+            project_id=f"sales-authority-{owner}",
+            project_code=f"SALES-AUTHORITY-{owner.upper()}",
+            display_name=f"销售权威归并 {owner}",
+            lifecycle_status="ongoing",
+            is_active=True,
+            version=1,
+        )
+        for owner in ("canonical", "contract", "permissions")
+    }
+    db.add_all(projects.values())
+    users = [
+        SysUser(
+            id=user_id,
+            username=f"sales-authority-user-{user_id}",
+            password_hash="not-a-login-secret",
+            role="maintenance_manager" if user_id == 44 else "readonly",
+            is_active=True,
+        )
+        for user_id in (44, 55, 98, 99)
+    ]
+    db.add_all(users)
+    db.flush()
+
+    selected_contract = MaintenanceProjectContract(
+        project_contract_id="sales-authority-selected",
+        project_id=projects["canonical"].project_id,
+        contract_id=f"xsdd-XSDD-{xsdd}",
+        contract_no=f"XSDD-{xsdd}",
+        amount_inc_tax=Decimal("1670000.00"),
+        contract_status="已生效",
+        status_mapping_state="mapped",
+        status_mapping_version="test-v1",
+        included_in_total=True,
+        effective_from=date(2025, 10, 16),
+        source="sales_fallback",
+        version=1,
+    )
+    superseded_contract = MaintenanceProjectContract(
+        project_contract_id="sales-authority-superseded",
+        project_id=projects["contract"].project_id,
+        contract_id=f"xsdd-XSDD-{xsdd}",
+        contract_no=f"XSDD-{xsdd}",
+        amount_inc_tax=Decimal("1780283.02"),
+        contract_status="已生效",
+        status_mapping_state="mapped",
+        status_mapping_version="test-v1",
+        included_in_total=True,
+        effective_from=date(2025, 10, 16),
+        source="sales_fallback",
+        version=1,
+    )
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    db.execute(text(
+        "ALTER TABLE maintenance_source_order_assignment DISABLE TRIGGER "
+        "trg_maintenance_assignment_claim_xsdd"
+    ))
+    try:
+        db.add_all([selected_contract, superseded_contract])
+        assignments = []
+        for owner, raw_order_ids in wbdd_by_project.items():
+            for index, raw_order_id in enumerate(raw_order_ids):
+                assignments.append(MaintenanceSourceOrderAssignment(
+                    assignment_id=f"sales-authority-wbdd-{owner}-{index}",
+                    source_order_id=raw_order_id,
+                    project_id=projects[owner].project_id,
+                    is_active=True,
+                    version=1,
+                    created_by="historical-fixture",
+                ))
+        db.add_all(assignments)
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
+            "trg_maintenance_assignment_claim_xsdd"
+        ))
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+
+    collections = [
+        MaintenanceCollectionSnapshot(
+            collection_id=f"sales-authority-collection-{owner}",
+            project_id=contract.project_id,
+            project_contract_id=contract.project_contract_id,
+            report_month=date(2026, 8, 1),
+            cumulative_amount=Decimal("82325.40"),
+            status="confirmed",
+            receipt_reference="生产重复回款",
+            remark="相同业务事实",
+            source="legacy",
+            version=1,
+        )
+        for owner, contract in (
+            ("canonical", selected_contract),
+            ("contract", superseded_contract),
+        )
+    ]
+    db.add_all(collections)
+    source_user_assignments = [
+        MaintenanceProjectUserAssignment(
+            assignment_id=f"sales-auth-user-{role}-{user_id}",
+            project_id=projects["permissions"].project_id,
+            responsibility_type=role,
+            user_id=user_id,
+            source_manager_text=f"历史账号 {user_id}",
+            version=1,
+            assigned_by="historical-fixture",
+            assignment_reason="生产权限拓扑 fixture",
+        )
+        for role, user_id in (
+            ("primary_manager", 44),
+            ("viewer", 44),
+            ("viewer", 55),
+            ("viewer", 98),
+        )
+    ]
+    db.add_all(source_user_assignments)
+    canonical_user_assignment = None
+    if canonical_primary_conflict:
+        canonical_user_assignment = MaintenanceProjectUserAssignment(
+            assignment_id="sales-authority-canonical-primary",
+            project_id=projects["canonical"].project_id,
+            responsibility_type="primary_manager",
+            user_id=99,
+            source_manager_text="canonical 原负责人",
+            version=1,
+            assigned_by="historical-fixture",
+            assignment_reason="权限冲突 fixture",
+        )
+        db.add(canonical_user_assignment)
+    db.commit()
+    return {
+        "projects": projects,
+        "selected_contract": selected_contract,
+        "superseded_contract": superseded_contract,
+        "collections": collections,
+        "source_user_assignments": source_user_assignments,
+        "canonical_user_assignment": canonical_user_assignment,
+        "wbdd_by_project": wbdd_by_project,
+    }
 
 
 def test_sales_exact_machine_header_wins_duplicate_caption_at_row_20():
@@ -729,6 +907,103 @@ def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
     assert batch.report_json["maintenance_sales_project_sync"]["noop"] == 1
 
 
+def test_sales_upload_uses_unique_gross_to_merge_production_split(db, tmp_path):
+    xsdd = "20251017-0036"
+    fixture = _seed_sales_authoritative_split(db, tmp_path, xsdd=xsdd)
+    projects = fixture["projects"]
+    selected = fixture["selected_contract"]
+    superseded = fixture["superseded_contract"]
+
+    preview = maintenance_project_identity.preview_historical_conflicts(db)
+    conflict = next(
+        row for row in preview["conflicts"] if row["xsdd_norm"] == xsdd
+    )
+    assert conflict["canonical_project_id"] == projects["canonical"].project_id
+    assert conflict["contract_owner_project_ids"] == sorted([
+        projects["canonical"].project_id,
+        projects["contract"].project_id,
+    ])
+    assert len(conflict["exact_duplicate_candidates"]["collections"]) == 1
+
+    sales_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=f"XSDD-{xsdd}",
+        raw_order_id="sales-authority-incoming",
+        project_name="腾讯 TCE 2025 维保项目",
+        period_from=date(2025, 10, 16),
+        period_to=date(2026, 10, 15),
+        order_amount="1670000.00",
+        tax_rate="6%",
+        tax_amount="94528.30",
+        amount_ex_tax="1575471.70",
+    )
+    batch = pipeline.run_import(
+        db,
+        sales_path,
+        "sales-authority-production-shape.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    db.commit()
+
+    canonical_id = projects["canonical"].project_id
+    assert db.get(MaintenanceProjectXsdd, xsdd).project_id == canonical_id
+    assert db.get(MaintenanceProject, projects["contract"].project_id).is_active is False
+    assert db.get(
+        MaintenanceProject, projects["permissions"].project_id
+    ).is_active is False
+    assert db.get(
+        MaintenanceProjectContract, selected.project_contract_id
+    ).effective_to is None
+    archived_contract = db.get(
+        MaintenanceProjectContract, superseded.project_contract_id
+    )
+    assert archived_contract.project_id == canonical_id
+    assert archived_contract.included_in_total is False
+    assert archived_contract.effective_to == business_today()
+
+    collections = list(db.scalars(
+        select(MaintenanceCollectionSnapshot).order_by(
+            MaintenanceCollectionSnapshot.collection_id
+        )
+    ))
+    assert len(collections) == 1
+    assert collections[0].project_id == canonical_id
+    assert collections[0].cumulative_amount == Decimal("82325.40")
+
+    current_users = list(db.scalars(
+        select(MaintenanceProjectUserAssignment).where(
+            MaintenanceProjectUserAssignment.project_id == canonical_id,
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+    ))
+    assert {
+        (assignment.responsibility_type, assignment.user_id)
+        for assignment in current_users
+    } == {
+        ("primary_manager", 44),
+        ("viewer", 44),
+        ("viewer", 55),
+        ("viewer", 98),
+    }
+    assert all(
+        assignment.archived_at is not None
+        for assignment in fixture["source_user_assignments"]
+    )
+    for raw_order_ids in fixture["wbdd_by_project"].values():
+        for raw_order_id in raw_order_ids:
+            current_assignment = db.scalar(
+                select(MaintenanceSourceOrderAssignment).where(
+                    MaintenanceSourceOrderAssignment.source_order_id
+                    == raw_order_id,
+                    MaintenanceSourceOrderAssignment.is_active.is_(True),
+                )
+            )
+            assert current_assignment.project_id == canonical_id
+    assert batch.report_json["maintenance_sales_project_sync"]["noop"] == 1
+
+
 def test_sales_upload_keeps_multiple_contract_owners_fail_closed(db, tmp_path):
     xsdd = "20260902-0031"
     projects = [
@@ -794,6 +1069,51 @@ def test_sales_upload_keeps_multiple_contract_owners_fail_closed(db, tmp_path):
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
     assert db.get(MaintenanceProjectXsdd, xsdd) is None
     assert all(db.get(MaintenanceProject, row.project_id).is_active for row in projects)
+
+
+def test_sales_upload_keeps_permission_collision_fail_closed(db, tmp_path):
+    xsdd = "20251017-0037"
+    fixture = _seed_sales_authoritative_split(
+        db,
+        tmp_path,
+        xsdd=xsdd,
+        canonical_primary_conflict=True,
+    )
+    sales_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=f"XSDD-{xsdd}",
+        raw_order_id="sales-authority-permission-conflict",
+        project_name="权限冲突不得覆盖",
+        order_amount="1670000.00",
+        tax_rate="6%",
+        tax_amount="94528.30",
+        amount_ex_tax="1575471.70",
+    )
+
+    with pytest.raises(loader.ImportIntegrityError, match="用户关系方案.*唯一键冲突"):
+        pipeline.run_import(
+            db,
+            sales_path,
+            "sales-authority-permission-conflict.xlsx",
+            uploaded_by="sales-importer",
+            mode="upsert",
+            auto_assign_maintenance_projects=True,
+        )
+    db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert db.get(MaintenanceProjectXsdd, xsdd) is None
+    assert all(
+        db.get(MaintenanceProject, project.project_id).is_active
+        for project in fixture["projects"].values()
+    )
+    assert all(
+        assignment.archived_at is None
+        for assignment in fixture["source_user_assignments"]
+    )
+    assert fixture["canonical_user_assignment"].archived_at is None
+    assert fixture["superseded_contract"].effective_to is None
+    assert fixture["superseded_contract"].included_in_total is True
 
 
 def test_wbdd_first_defers_then_sales_links_and_sales_first_links_directly(

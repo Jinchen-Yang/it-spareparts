@@ -2323,22 +2323,40 @@ def prelock_uploaded_sales_sheet(
             ),
         )
     eligible_rows = _ordinary_maintenance_rows(sheet)
-    xsdds = {
-        maintenance_project_identity.normalize_xsdd(
+    incoming_amounts: dict[str, set[Decimal]] = defaultdict(set)
+    for _row_no, values in eligible_rows:
+        xsdd = maintenance_project_identity.normalize_xsdd(
             _text(_value(sheet, values, "order_no"))
         )
-        for _row_no, values in eligible_rows
-    }
-    if "" in xsdds:
-        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN")
+        if not xsdd:
+            raise BulkImportInvalid(
+                "维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN"
+            )
+        amount_inc_tax, _amount_ex_tax, _tax_rate = (
+            SalesContractAmountAdapter._amounts(sheet, values)
+        )
+        incoming_amounts[xsdd].add(amount_inc_tax)
+    xsdds = set(incoming_amounts)
     if not xsdds:
         return {}
+    ambiguous_amounts = {
+        xsdd: sorted(str(amount) for amount in amounts)
+        for xsdd, amounts in incoming_amounts.items()
+        if len(amounts) != 1
+    }
+    if ambiguous_amounts:
+        raise BulkImportInvalid(
+            f"同一 XSDD 的销售源行含税金额不唯一：{ambiguous_amounts}"
+        )
     from app.services import maintenance_source_assignments as assignments
 
     try:
         maintenance_project_identity.auto_merge_sales_xsdd_conflicts(
             db,
-            xsdd_values=xsdds,
+            incoming_amount_inc_tax_by_xsdd={
+                xsdd: next(iter(amounts))
+                for xsdd, amounts in incoming_amounts.items()
+            },
             operated_by=operated_by,
         )
         return assignments.prelock_sales_xsdd_backlog(
