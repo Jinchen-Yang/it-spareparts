@@ -3,7 +3,7 @@
 - 日期：2026-09-03 凌晨
 - 仓库：`Jinchen-Yang/it-spareparts`
 - 交接对象：zcode（以及任何接手「明早要上」的人）
-- 代码基线：**GitHub `codex/master-workbook-full-edit` 分支最新 HEAD（`a876644`），不是 main，不是本地**。
+- 代码基线：**GitHub `codex/master-workbook-full-edit` 分支最新 HEAD（`4356ade`），不是 main，不是本地**。
 
 ---
 
@@ -23,14 +23,14 @@
 
 | 项 | 状态 |
 |---|---|
-| 功能分支 | `codex/master-workbook-full-edit`，HEAD `a876644`，**已推 GitHub**（本地=远端，无未推提交） |
+| 功能分支 | `codex/master-workbook-full-edit`，HEAD `4356ade`，**已推 GitHub**（本地=远端，无未推提交） |
 | PR | **#304**「总表全量编辑恢复」，base=main，MERGEABLE，review=REQUIRED |
-| 最新 CI | run 33659463322：前端类型+构建 **pass**；后端 pytest+迁移链 **pending**（~35 分钟一轮） |
+| 最新 CI | run 33659463322（a876644）**全绿**：前端 pass + 后端 pytest+迁移链 pass。`4356ade`（只删文件）触发 run 33665951659 在跑，预期同样绿 |
 | 上一轮 CI | 3 个测试失败，正是 `a876644` 修的那 3 个：`test_maintenance_salesperson_override_migration`、`test_maintenance_wbdd_display_columns_migration`、`test_maintenance_project_master_v2_editable`（迁移头断言旧值 f6b1，现应为 a8e4 单头） |
 | 生产在跑 | `9b30126`（fix/contract-total-inc-tax 分支），**其 3 个提交 a29a4eb/80b54c4/9b30126 已全部是功能分支的祖先**——合入 #304 即覆盖生产代码，不会丢生产改动 |
 | main 现状 | `c9d67fe`（PR #300 已合） |
 
-### 8 个提交 = PR-1/2/3（对应 zcode 计划 4 个 PR 的前 3 个）
+### 9 个提交 = PR-1/2/3 + 清理（对应 zcode 计划 4 个 PR 的前 3 个）
 
 | commit | 内容 |
 |---|---|
@@ -40,6 +40,7 @@
 | `f35b104` | PR-3 前端：冲突三值对照 + 强制接管 UI + 字段级回执（1.27.0） |
 | `6029c21` | CI 修复：force 冲突语义 / 删行空单元格 / 权限谓词 / 测试时序 |
 | `a876644` | 修迁移头断言（f6b1→a8e4）+ v24 共享合同新口径 |
+| `4356ade` | 摘除 `.codex-pr-291-body.md` 与 `outputs/` 3 个排查产物目录（纯删除） |
 
 ---
 
@@ -74,7 +75,7 @@
 ## 五、已知风险与坑
 
 1. **模板 2.6.0→2.7.0 强制重下载**：旧文件因缺基线令牌列会被令牌校验拒绝，提示重新下载。会打到客户，属一次性迁移成本，提前在客户群里说一句。
-2. **分支里混进无关文件**：`.deploy/Caddyfile.it-data.example`、`docs/releases/https-ingress-runbook.md`、`backend/tests/test_https_deployment.py`、`outputs/contract-amount-import-20260827/`（含 ndjson 3937 行 + 2 张 png）。合入前**先确认这些要不要跟着进 main**——它们跟"全量编辑"无关，建议从 #304 里摘出来或单独 PR，别让功能 PR 夹带 HTTPS 部署变更。
+2. **分支里的 HTTPS 域名迁移文件不是无关文件，不要摘**：`.deploy/Caddyfile.it-data.example`、`docs/releases/https-ingress-runbook.md`（706→1062 行）、`backend/tests/test_https_deployment.py`、`docs/DEPLOY.md` 那 5 行，是 `hbzgc.icu`→`yabowei.xyz` 域名迁移（2026-08-31 拍板），**已在生产运行，main 上还没有**，必须随本 PR 进 main。真正无关的（`.codex-pr-291-body.md` + `outputs/` 3 个排查产物目录）已在 `4356ade` 摘除。
 3. **`01_项目概览`的主档字段（名称/期限/负责人）在工作簿内编辑本次不做**（PR 304 描述里明确「后续迭代」）。期限缺失的治理走「销售订单导入建项」那条线（PR #302），不是这条。别把两条混了。
 4. **本机 macOS 跑不了后端测试**（`tests/run_isolation.py` 要求 Linux）：以 CI 为门，前端 vitest 本机可跑。
 5. **PR #302**（sales XSDD 建项，`codex/sales-xsdd-auto-project`，233 文件）和 #304 有 2 个测试文件重叠，**不要同时合**；#302 应该切小 PR 分批合，别整体合 5.8 万行。
