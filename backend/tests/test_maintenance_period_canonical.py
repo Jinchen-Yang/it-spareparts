@@ -285,11 +285,15 @@ def test_completeness_state_and_lifecycle_status_pure_functions():
     # 只有起点且未结束 → ongoing；只有终点且已过期 → ended
     assert maintenance_periods.lifecycle_status(date(2026, 1, 1), None, as_of) == "ongoing"
     assert maintenance_periods.lifecycle_status(None, date(2026, 1, 1), as_of) == "ended"
-    # 尚未开始：按既有口径仍是 missing
+    # 尚未开始的未来项目：期限数据完整，计入 ongoing 而非 missing
+    # （2026-09-02 修正：旧口径兜底 missing，导致卡片墙给未来项目挂"期限缺失"假标签）
     assert (
         maintenance_periods.lifecycle_status(date(2027, 1, 1), date(2027, 12, 31), as_of)
-        == "missing"
+        == "ongoing"
     )
+    # 未来起点且无终点 → 同样 ongoing；missing 只留给起止皆空
+    assert maintenance_periods.lifecycle_status(date(2027, 1, 1), None, as_of) == "ongoing"
+    assert maintenance_periods.lifecycle_status(None, date(2027, 12, 31), as_of) == "ongoing"
 
 
 def test_helper_rejects_inverted_range_without_writes(db):

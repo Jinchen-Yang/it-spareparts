@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, select
 from sqlalchemy.orm import Session
 
 from app.models.maintenance_manager import MaintenanceServicePeriod
@@ -47,16 +47,17 @@ def lifecycle_status(
     period_to: date | None,
     as_of: date,
 ) -> str:
-    """期限生命周期快照（与台账导入同口径）：missing / ended / ongoing。"""
+    """期限生命周期快照：missing / ended / ongoing。
+
+    missing 只指"期限数据缺失"（起止皆空）；尚未开始的未来项目（period_from >
+    as_of）期限数据是完整的，计入 ongoing（2026-09-02 口径修正：此前兜底成
+    missing，导致回填期限后卡片墙仍挂"期限缺失"假标签）。
+    """
     if period_from is None and period_to is None:
         return "missing"
     if period_to is not None and period_to < as_of:
         return "ended"
-    if period_from is not None and period_from <= as_of and (
-        period_to is None or as_of <= period_to
-    ):
-        return "ongoing"
-    return "missing"
+    return "ongoing"
 
 
 def lifecycle_case(period_from_column, period_to_column, *, as_of: date):
@@ -75,15 +76,7 @@ def lifecycle_case(period_from_column, period_to_column, *, as_of: date):
             "missing",
         ),
         (period_to_column < as_of, "ended"),
-        (
-            and_(
-                period_from_column.is_not(None),
-                period_from_column <= as_of,
-                or_(period_to_column.is_(None), period_to_column >= as_of),
-            ),
-            "ongoing",
-        ),
-        else_="missing",
+        else_="ongoing",
     )
 
 

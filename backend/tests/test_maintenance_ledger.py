@@ -1218,10 +1218,10 @@ def test_resolve_lifecycle_falls_back_to_name_when_period_missing():
     assert ledger._resolve_lifecycle(
         None, None, "某客户20240101-20241231某服务商整体维保", today
     ) == "ended"
-    # 未来周期：起始未到 → 仍按 missing（与 _lifecycle_status 口径一致）
+    # 未来周期：起始未到但有完整期限 → ongoing（2026-09-02 口径修正，不再是 missing）
     assert ledger._resolve_lifecycle(
         None, None, "某客户20270101-20271231某服务商整体维保", today
-    ) == "missing"
+    ) == "ongoing"
     # 名称也解析不出 → missing
     assert ledger._resolve_lifecycle(None, None, "无期限项目", today) == "missing"
 
