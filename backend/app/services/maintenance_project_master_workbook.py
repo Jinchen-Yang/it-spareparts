@@ -2054,7 +2054,13 @@ def _v2_sign_meta_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
         ("metadata_hmac_algorithm", V2_META_SIGNATURE_ALGORITHM),
         ("metadata_hmac_key_id", key_id),
     ]
-    metadata = dict(rows)  # 签名覆盖逻辑值（未分块），与读取端合并后一致
+    # 签名覆盖「逻辑值（未分块）+ 算法/键ID」，与读取端合并后的全键一致。
+    # 教训：3cf4f53 曾误签 dict(rows)（缺 algorithm/key_id 两键）导致全量必炸，
+    # 由 test_v271 回归测试守住。
+    metadata = dict(rows) | {
+        "metadata_hmac_algorithm": V2_META_SIGNATURE_ALGORITHM,
+        "metadata_hmac_key_id": key_id,
+    }
     signed_rows.append(("metadata_hmac", _v2_metadata_signature(metadata, signing_key)))
     return signed_rows
 
