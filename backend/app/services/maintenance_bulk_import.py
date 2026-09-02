@@ -184,7 +184,9 @@ def _system_header(value: Any) -> str:
 
 
 def _text(value: Any) -> str:
-    return unicodedata.normalize("NFKC", str(value or "")).strip()
+    return unicodedata.normalize(
+        "NFKC", "" if value is None else str(value)
+    ).strip()
 
 
 def normalize_order_no(value: Any) -> str:
