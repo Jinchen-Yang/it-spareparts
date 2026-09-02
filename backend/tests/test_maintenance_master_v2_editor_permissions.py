@@ -40,8 +40,9 @@ def _user(db, username, *, salesperson_name=None, display_name=None):
         salesperson_name=salesperson_name,
         password_hash=hash_password(_PASSWORD), is_active=True,
         template_code="readonly", template_version=1, template_perms=base,
-        perm_overrides={"page_maintenance": True},
-        permissions=permissions_mod.effective_from_snapshot(base, {"page_maintenance": True}),
+        perm_overrides={"page_maintenance": True, "data_profit": False},
+        permissions=permissions_mod.effective_from_snapshot(
+            base, {"page_maintenance": True, "data_profit": False}),
     )
     db.add(user)
     db.flush()
@@ -121,6 +122,7 @@ def test_is_project_workbook_editor_matrix(db):
         db, project_id=project.project_id, user_ctx=yes)
 
     project.salesperson = "销售甲"
+    db.commit()
     sales = UserContext(user_id="whatever", role="readonly",
                         salesperson_name="销售甲", is_authenticated=True)
     assert assignments.is_project_workbook_editor(

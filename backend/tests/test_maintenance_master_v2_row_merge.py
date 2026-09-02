@@ -195,8 +195,9 @@ def test_deleted_row_conflicts_when_server_changed(db):
     second.qty = Decimal("9")
     operations.bump_workbook_revision(db, project_id=project.project_id)
     db.commit()
+    blank_row = _row_of(ws, second.id)
     for col in range(1, len(master.V2_PART_HEADERS) + 1):
-        ws.cell(_row_of(ws, second.id), col, None)
+        ws.cell(blank_row, col).value = None
 
     plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(wb))
@@ -216,7 +217,7 @@ def test_deleted_row_conflicts_when_server_changed(db):
 
 
 def test_baseline_token_tamper_rejected(db):
-    project, _part, _order, _line = _make_project_with_line(db)
+    project, _part, _order, line = _make_project_with_line(db)
     content = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
     wb = load_workbook(io.BytesIO(content))

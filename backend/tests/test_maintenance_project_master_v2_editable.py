@@ -237,8 +237,6 @@ def test_v27_same_row_double_write_conflicts_then_takeover(
     second_ws.cell(2, headers["需求数量"], 4)
     first_plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(first_wb))
-    second_plan = master.validate_project_master_v2(
-        db, project_id=project.project_id, data=_save(second_wb))
 
     first = master.apply_project_master_v2(
         db,
@@ -246,6 +244,10 @@ def test_v27_same_row_double_write_conflicts_then_takeover(
         operated_by="occ-writer",
         import_batch_id=str(uuid.uuid4()),
     )
+    # 2.7.0 语义：每次上传都是"重新校验+应用"一体；冲突判定基于
+    # 应用时刻的服务端状态，因此 second 的计划必须在 first 落库后重建。
+    second_plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(second_wb))
     state_after_first = operations.get_or_create_workbook_state(
         db, project_id=project.project_id).revision
     replay = master.apply_project_master_v2(
@@ -663,7 +665,7 @@ def test_v24_overview_rejects_project_total_when_multiple_contracts_are_current(
     assert exc.value.code == "contract_total_ambiguous"
 
 
-def test_v24_overview_rejects_cross_project_shared_contract(db):
+def test_v24_overview_shared_contract_now_editable_with_cas(db):
     import pytest
 
     project, _part, _order, _line = _make_project_with_line(db)
@@ -704,7 +706,9 @@ def test_v24_overview_rejects_cross_project_shared_contract(db):
     assert values["合同总额（含税）"] == "—"
     assert values["成本率"] == "—"
     assert meta["contract_total_exported"] is None
-    assert meta["contract_editable"] == "false"
+    # 2026-09-02 拍板：共享不再硬拒——唯一当前计入合同可编辑，
+    # 导出侧给出跨项目共享提示，apply 侧 base_version CAS + 审计兜底。
+    assert meta["contract_editable"] == "true"
     amount_cell = next(
         row[1] for row in wb[master.V2_SHEET_OVERVIEW].iter_rows(
             min_col=1, max_col=2)

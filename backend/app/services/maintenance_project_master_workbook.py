@@ -1923,13 +1923,17 @@ class _V2MergeContext:
             "field": field, "old": old or "", "new": new or "",
         }
         if conflict:
-            # 三值对照：base=导出基线 / old=服务端现值 / new=本次上传值
-            self.conflicts.append({
-                **entry, "base": base or "",
-                "reason": "server_changed_since_export"})
+            # 三值对照：base=导出基线 / old=服务端现值 / new=本次上传值。
+            # force_takeover 时冲突当场解决：不进 conflicts（放行 apply），
+            # 落 overridden 留痕并计入 changes。
             if self.force_takeover:
-                self.overridden.append({**entry, "base": base or ""})
-                self.changes.append({**entry, "overridden": True})
+                enriched = {**entry, "base": base or ""}
+                self.overridden.append(enriched)
+                self.changes.append({**enriched, "overridden": True})
+            else:
+                self.conflicts.append({
+                    **entry, "base": base or "",
+                    "reason": "server_changed_since_export"})
         else:
             self.changes.append({**entry, "overridden": False})
 
@@ -1940,12 +1944,12 @@ class _V2MergeContext:
         entry = {
             "sheet": sheet, "row": row_label, "entity_id": str(entity_id),
             "field": "（整行）", "old": "", "new": action,
-            "reason": "server_changed_since_export",
         }
-        self.conflicts.append(entry)
         if self.force_takeover:
-            self.overridden.append({k: v for k, v in entry.items() if k != "reason"})
+            self.overridden.append(dict(entry))
             return True
+        self.conflicts.append({
+            **entry, "reason": "server_changed_since_export"})
         return False
 
 
@@ -3726,6 +3730,7 @@ def _v2_parse_expenses(
     # Expense mutation requires a current, unshared contract identity.  Stable
     # row ownership itself is checked against expense attribution below.
     contract_nos = _writable_contract_nos(db, project_id)
+    expected_expense_ids = set(_expected_expense_ids(db, project_id))
     out: list[ec.ExpenseUpdate] = []
     voids: list[str] = []
     present_ids: set[str] = set()
@@ -3770,6 +3775,11 @@ def _v2_parse_expenses(
         is_create = False
         expense = None
         if raw_id:
+            if raw_id not in expected_expense_ids:
+                # 跨项目/伪造实体先于基线解码拒绝（与 03/06 同序）。
+                raise WorkbookError(
+                    "expense_not_in_project",
+                    f"第 {row_no} 行报销事实不属于本项目，请重新下载")
             expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_id))
             if expense is None:
                 raise WorkbookError("expense_not_found", f"第 {row_no} 行报销事实已不存在，请重新下载")
