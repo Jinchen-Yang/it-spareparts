@@ -76,7 +76,7 @@ V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
 # 2026-08-19（#264/#267）：03 全字段可编辑 + 04 作废/缺行=作废——新增「操作」列、
 # 放开行级数据列、只读哈希收窄。旧 2.0.0 工作簿因哈希列集合变更一律拒绝并
 # 提示重新下载。
-V2_TEMPLATE_VERSION = "2.7.0"
+V2_TEMPLATE_VERSION = "2.7.1"
 V2_META_SIGNATURE_ALGORITHM = "HMAC-SHA256"
 _V2_META_SIGNATURE_DOMAIN = b"ITDATA_MAINT_PROJECT_MASTER_META_V1\x00"
 
@@ -2025,14 +2025,36 @@ def _v2_metadata_signature(metadata: dict[str, str], hmac_key: bytes) -> str:
     ).hexdigest()
 
 
+_META_CELL_SAFE_LENGTH = 30000
+_META_CHUNK_SEP = "@"
+
+
+def _chunk_meta_value(key: str, value: str) -> list[tuple[str, str]]:
+    """Excel 单元格硬上限 32767：超长值（大项目 parts_base_hashes 实测 40KB+）
+    会被静默截断，签名必炸（2.7.0 生产回归）。按 30000 分块为 key@2/@3...，
+    读取端 _v2_meta 合并后再参与验签/使用。首块保留原名，兼容短值零分块。"""
+    text = str(value)
+    if len(text) <= _META_CELL_SAFE_LENGTH:
+        return [(key, text)]
+    chunks = [text[i:i + _META_CELL_SAFE_LENGTH]
+              for i in range(0, len(text), _META_CELL_SAFE_LENGTH)]
+    return [(key, chunks[0])] + [
+        (f"{key}{_META_CHUNK_SEP}{n + 2}", chunk)
+        for n, chunk in enumerate(chunks[1:])
+    ]
+
+
 def _v2_sign_meta_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
     key_id, signing_key = get_settings().maintenance_manifest_signing_material()
+    flat_rows: list[tuple[str, str]] = []
+    for key, value in rows:
+        flat_rows.extend(_chunk_meta_value(str(key), str(value)))
     signed_rows = [
-        *[(str(key), str(value)) for key, value in rows],
+        *flat_rows,
         ("metadata_hmac_algorithm", V2_META_SIGNATURE_ALGORITHM),
         ("metadata_hmac_key_id", key_id),
     ]
-    metadata = dict(signed_rows)
+    metadata = dict(rows)  # 签名覆盖逻辑值（未分块），与读取端合并后一致
     signed_rows.append(("metadata_hmac", _v2_metadata_signature(metadata, signing_key)))
     return signed_rows
 
@@ -2988,11 +3010,28 @@ def _cascade_void_site_lines(
 def _v2_meta(wb) -> dict[str, str]:
     if V2_SHEET_META not in wb.sheetnames:
         raise WorkbookError("template_version_mismatch", "工作簿缺少 V2 元数据，请重新下载当前项目总表")
-    return {
-        str(row[0].value).strip(): str(row[1].value or "").strip()
-        for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2)
-        if row[0].value
-    }
+    raw: dict[str, str] = {}
+    for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2):
+        if not row[0].value:
+            continue
+        key = str(row[0].value).strip()
+        raw[key] = str(row[1].value or "").strip()
+    # 合并 2.7.1 分块（key@2/key@3... 按数字序拼接——字典序会让 @10 排在 @2 前）；
+    # 签名在发射端按逻辑值计算，因此必须在任何使用/验签之前完成合并。
+    merged: dict[str, str] = {}
+    chunks: dict[str, list[tuple[int, str]]] = {}
+    for key, value in raw.items():
+        if (_META_CHUNK_SEP in key
+                and key.rsplit(_META_CHUNK_SEP, 1)[-1].isdigit()):
+            base, suffix = key.rsplit(_META_CHUNK_SEP, 1)
+            chunks.setdefault(base, []).append((int(suffix), value))
+        else:
+            merged[key] = value
+    for base, items in chunks.items():
+        if base not in merged:
+            merged[base] = ""
+        merged[base] += "".join(value for _n, value in sorted(items))
+    return merged
 
 
 def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:

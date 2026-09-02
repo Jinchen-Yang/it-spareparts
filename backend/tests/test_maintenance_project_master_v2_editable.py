@@ -178,7 +178,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.7.0"
+    assert meta["template_version"] == "2.7.1"
     assert meta["metadata_hmac_algorithm"] == "HMAC-SHA256"
     assert len(meta["metadata_hmac"]) == 64
 
@@ -1819,7 +1819,7 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
     assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
     # 合同总额可编辑协议升级后的模板版本
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.7.0"
+    assert meta["template_version"] == "2.7.1"
 
 
 def test_latest_missing_allows_full_sync_at_any_ratio(db):
@@ -2991,3 +2991,39 @@ def test_v25_validate_does_not_create_xsdd_contract_and_null_date_is_422(db):
         MaintenanceProjectContract.project_contract_id
     )).where(MaintenanceProjectContract.project_id == project.project_id)) or 0)
     assert after_apply == 0
+
+
+def test_v271_oversized_meta_chunks_roundtrip_and_verify():
+    """2.7.0 生产回归：parts_base_hashes 超 Excel 单元格 32767 上限被静默
+    截断，签名必炸（大项目零改动往返也 409/422）。分块写入 + 读取端合并
+    后，签名必须按逻辑值通过。"""
+    import io as _io
+    from openpyxl import Workbook as _WB
+    from app.config import get_settings as _gs
+    big_map = ",".join(
+        f"{i}:0dd4d8017bb17e6ccd50f5a07b41eb0ea{i:06d}" for i in range(900)
+    )
+    assert len(big_map) > 32767
+    rows = master._v2_sign_meta_rows([
+        ("protocol_id", master.V2_PROTOCOL_ID),
+        ("template_version", master.V2_TEMPLATE_VERSION),
+        ("parts_base_hashes", big_map),
+    ])
+    wb = _WB()
+    wb.remove(wb.active)
+    meta_ws = wb.create_sheet(master.V2_SHEET_META)
+    for key, value in rows:
+        meta_ws.append([key, value])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    from openpyxl import load_workbook as _lw
+    loaded = _lw(buf, data_only=True)
+    meta = master._v2_meta(loaded)
+    assert meta["parts_base_hashes"] == big_map
+    key_id = meta["metadata_hmac_key_id"]
+    verification_key = _gs().maintenance_manifest_verification_keys().get(key_id)
+    import hmac as _hmac
+    assert _hmac.compare_digest(
+        meta["metadata_hmac"],
+        master._v2_metadata_signature(meta, verification_key),
+    )
