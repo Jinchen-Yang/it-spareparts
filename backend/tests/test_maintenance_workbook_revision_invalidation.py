@@ -23,7 +23,11 @@ from sqlalchemy import select
 
 from app.etl import loader
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
-from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+    MaintenanceProjectXsdd,
+)
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine
@@ -61,6 +65,40 @@ def _make_project(db, *, tag: str, source_order_id: str) -> MaintenanceProject:
     return project
 
 
+def _seed_sales_backed_wbdd_owner(db) -> MaintenanceProject:
+    """Seed the contract-backed XSDD owner that permits automatic WBDD attach."""
+
+    project = MaintenanceProject(
+        project_id="k3-wbdd-sales-owner-project",
+        project_code="K3-WBDD-SALES-OWNER",
+        display_name="K3 销售事实项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20260101-0001",
+        project_id=project.project_id,
+        source="sales_order_import",
+    ))
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id="k3-wbdd-sales-owner-contract",
+        project_id=project.project_id,
+        contract_id="k3-wbdd-sales-owner-contract-id",
+        contract_no="XSDD-20260101-0001",
+        contract_status="已生效",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-v1",
+        included_in_total=False,
+        effective_from=date(2026, 1, 1),
+        source="sales_order_import",
+        version=1,
+    ))
+    db.commit()
+    return project
+
+
 def _state(db, project_id: str) -> MaintenanceProjectWorkbookState:
     db.expire_all()
     return db.execute(
@@ -72,6 +110,7 @@ def _state(db, project_id: str) -> MaintenanceProjectWorkbookState:
 
 def _wbdd_workbook(tmp_path, name: str, qty: str) -> str:
     rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["销售订单"] = "XSDD-20260101-0001"
     rows[0]["需求明细.需求数量"] = qty
     return write_workbook(str(tmp_path / name), COLUMNS_91, rows)
 
@@ -88,7 +127,8 @@ def _import_wbdd(db, path: str, key: str) -> dict:
 # ---------- WBDD：qty 2→3 必须 +1；no-op 必须 +0；旧总表 stale；新 qty 保留 ----------
 
 def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
-    # 首导 qty=2 会自动创建唯一项目并挂靠，取挂靠完成后的 revision 基线
+    # 销售事实先建立合同 owner；WBDD 首导只挂靠既有 owner，不自行建项。
+    project = _seed_sales_backed_wbdd_owner(db)
     path_v1 = _wbdd_workbook(tmp_path, "v1.xlsx", "2")
     _import_wbdd(db, path_v1, key=f"k3-{uuid.uuid4()}")
     order = db.execute(
@@ -100,8 +140,7 @@ def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
             MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
     ).scalar_one()
-    project = db.get(MaintenanceProject, assignment.project_id)
-    assert project is not None
+    assert assignment.project_id == project.project_id
     base = _state(db, project.project_id)
     base_revision = base.revision
     base_version = base.data_version
@@ -125,34 +164,25 @@ def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
     assert line.qty == Decimal("3"), "新 qty 必须保留"
 
 
-def test_wbdd_import_auto_creates_assignment_without_bump(tmp_path, db):
-    """无现有项目的单：自动建项目并唯一挂靠，初始 state 不计 bump。"""
+def test_wbdd_first_import_stays_deferred_without_owner(tmp_path, db):
+    """WBDD-first 无销售合同 owner：事实入库，项目/合同/映射/归属均不创建。"""
     path = _wbdd_workbook(tmp_path, "lonely.xlsx", "2")
     report = _import_wbdd(db, path, key=f"k3-{uuid.uuid4()}")
     assert report["workbook_projects_bumped"] == 0
     order = db.execute(
         select(FMaintenanceOrder).where(FMaintenanceOrder.order_no == "WBDD-20260001")
     ).scalar_one()
-    assignment = db.execute(
-        select(MaintenanceSourceOrderAssignment).where(
-            MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
-            MaintenanceSourceOrderAssignment.is_active.is_(True),
-        )
+    line = db.execute(
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id)
     ).scalar_one()
-    project = db.get(MaintenanceProject, assignment.project_id)
-    assert project is not None
-    state = db.execute(
-        select(MaintenanceProjectWorkbookState).where(
-            MaintenanceProjectWorkbookState.project_id == project.project_id
-        )
-    ).scalar_one()
-    assert db.scalars(select(MaintenanceProject)).all() == [project]
-    assert db.scalars(
-        select(MaintenanceSourceOrderAssignment).where(
-            MaintenanceSourceOrderAssignment.is_active.is_(True)
-        )
-    ).all() == [assignment]
-    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == [state]
+    assert order.linked_sales_order_no == "XSDD-20260101-0001"
+    assert line.qty == Decimal("2")
+    assert report["auto_assignment"]["pending_owner_order_ids"] == ["SYN-O001"]
+    assert db.scalars(select(MaintenanceProject)).all() == []
+    assert db.scalars(select(MaintenanceProjectContract)).all() == []
+    assert db.scalars(select(MaintenanceProjectXsdd)).all() == []
+    assert db.scalars(select(MaintenanceSourceOrderAssignment)).all() == []
+    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == []
 
 
 # ---------- 通用 maintenance import 路径（loader.load 直调，skip/upsert 双模式） ----------

@@ -1,4 +1,5 @@
 """列名容差归一：氚云非标导出视图让列丢 (必填) 注解（实测 #25 采购订单整文件 empty_pn）。"""
+from datetime import date
 from decimal import Decimal
 
 import openpyxl
@@ -192,6 +193,33 @@ def _sales_xlsx(tmp_path, business_type_header, double_header, raw_order_id, bus
     return str(path)
 
 
+def _sales_xlsx_with_maintenance_period_headers(
+    tmp_path,
+    *,
+    period_from_header: str,
+    period_to_header: str,
+    raw_order_id: str,
+) -> str:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [
+        "订单编号", "数据ID(不可修改)", "业务类型#",
+        period_from_header, period_to_header,
+        "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+        "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+    ]
+    ws.append([f"F000000{i}" for i in range(1, len(headers) + 1)])
+    ws.append(headers)
+    ws.append([
+        f"XSDD-{raw_order_id}", raw_order_id, "备件维保",
+        "2026-01-01", "2026-12-31",
+        f"{raw_order_id}-LINE", "ST8000NM000A", "1", "100", "100",
+    ])
+    path = tmp_path / f"{raw_order_id}-period.xlsx"
+    wb.save(path)
+    return str(path)
+
+
 def _sales_xlsx_with_business_type_aliases(tmp_path):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -321,7 +349,7 @@ def _maintenance_xlsx_with_continuation(tmp_path):
     ws = wb.active
     headers = [
         "需求单号", "数据ID(不可修改)", "需求类型", "业务类型",
-        "销售人员", "出库仓库(必填)",
+        "销售人员", "出库仓库(必填)", "维保起始日期", "维保终止日期",
         "需求明细.数据ID(不可修改)", "需求明细.需供货产品",
         "需求明细.需求数量", "需求明细.退货数量",
     ]
@@ -329,11 +357,11 @@ def _maintenance_xlsx_with_continuation(tmp_path):
     ws.append(headers)
     ws.append([
         "WBDD-STATE", "MAINTENANCE-STATE", "报修供货", "备件维保",
-        "销售A", "总仓",
+        "销售A", "总仓", "2026-01-01", "2026-12-31",
         "MAINTENANCE-STATE-LINE-1", "ST8000NM000A", "1", "0",
     ])
     ws.append([
-        None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
         "MAINTENANCE-STATE-LINE-2", "ST8000NM000B", "2", "1",
     ])
     path = tmp_path / "maintenance-state-machine.xlsx"
@@ -369,6 +397,41 @@ def test_sales_business_type_survives_transform_and_load(
     )
     assert loaded is not None
     assert loaded.business_type == business_type
+
+
+@pytest.mark.parametrize(
+    ("period_from_header", "period_to_header", "raw_order_id"),
+    [
+        ("维保起始日期", "维保终止日期", "SALES-PERIOD-BARE"),
+        (
+            "维保起始日期(必填)",
+            "维保终止日期(必填)",
+            "SALES-PERIOD-REQUIRED",
+        ),
+    ],
+)
+def test_sales_maintenance_period_header_variants_survive_transform(
+    tmp_path,
+    period_from_header,
+    period_to_header,
+    raw_order_id,
+):
+    path = _sales_xlsx_with_maintenance_period_headers(
+        tmp_path,
+        period_from_header=period_from_header,
+        period_to_header=period_to_header,
+        raw_order_id=raw_order_id,
+    )
+    df, file_type = reader.read_excel(path)
+    result = transform.transform(df, file_type)
+
+    assert file_type == mapping.SALES
+    assert "维保起始日期(必填)" in df.columns
+    assert "维保终止日期(必填)" in df.columns
+    assert "维保起始日期" not in df.columns
+    assert "维保终止日期" not in df.columns
+    assert result.orders[raw_order_id]["maintenance_period_from"] == "2026-01-01"
+    assert result.orders[raw_order_id]["maintenance_period_to"] == "2026-12-31"
 
 
 def test_sales_business_type_aliases_coalesce_before_ffill(db, tmp_path):
@@ -495,6 +558,8 @@ def test_maintenance_continuation_preserves_head_and_detail_count(db, tmp_path):
     assert result.orders["MAINTENANCE-STATE"]["business_type"] == "备件维保"
     assert result.orders["MAINTENANCE-STATE"]["salesperson"] == "销售A"
     assert result.orders["MAINTENANCE-STATE"]["warehouse"] == "总仓"
+    assert result.orders["MAINTENANCE-STATE"]["maint_start"] == date(2026, 1, 1)
+    assert result.orders["MAINTENANCE-STATE"]["maint_end"] == date(2026, 12, 31)
 
     pipeline.run_import(db, path, "maintenance-state-machine.xlsx")
     loaded = db.scalar(
@@ -507,6 +572,8 @@ def test_maintenance_continuation_preserves_head_and_detail_count(db, tmp_path):
     assert loaded.business_type == "备件维保"
     assert loaded.salesperson == "销售A"
     assert loaded.warehouse == "总仓"
+    assert loaded.maint_start == date(2026, 1, 1)
+    assert loaded.maint_end == date(2026, 12, 31)
     assert len(db.scalars(
         select(FMaintenanceLine).where(FMaintenanceLine.order_id == loaded.id)
     ).all()) == 2

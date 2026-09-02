@@ -18,7 +18,7 @@ status: implementing-sales-authority-and-write-guard
 - 普通销售订单是维保项目与合同的唯一自动事实入口。只有源表明确为已生效、明确是维保业务、XSDD 合法且项目名称存在的行，才能在一个事务内幂等新建或补齐项目、canonical XSDD owner 与合同；期限允许全空或单侧，已知值照实保存、缺侧保持 NULL，双侧倒置仍整批拒绝。
 - WBDD 是需求事实，不是项目身份或合同金额权威。系统导入只能按既有、合同支撑的 XSDD owner 挂靠；销售尚未建立 owner 时，WBDD 正常入库但留在未归属桶，不按名称建项目，也不反向认领 XSDD。
 - WBDD 先到时，后到的销售订单在同一事务建 owner/合同，并只补挂已预锁且 XSDD 完全相同的未归属 WBDD；销售先到时，后到 WBDD 直接挂该 owner。历史多 owner、归档 owner 或合同/映射冲突一律整批失败关闭。
-- 人工挂靠同样只能服从已有合同 owner。历史全局修复入口只保留无/非法 XSDD 的 name-only 兼容，不得产生 XSDD owner；有效 XSDD 缺合同 owner 时受控拒绝。
+- 人工挂靠与历史全局修复入口同样只能服从已有合同 owner。无/非法 XSDD 一律留未归属，不能按名称匹配、不能自动建项目；显式人工新建项目与显式指定挂靠仍走各自受控入口。
 - 不同 XSDD 不按名称自动合并，也不因重名阻断建档；一个项目拥有多个 XSDD 的既有明确关系继续保留。
 - 页面只把可由 `xsdd_container_merge`，或由当前 canonical 映射＋销售合同共同验证的销售来源名称提升为 `peer_names`。无法证明同一 XSDD 的人工/迁移 alias 继续灰显，禁止按“预交付”字样猜来源。
 
@@ -58,7 +58,7 @@ status: implementing-sales-authority-and-write-guard
 - 新增 `maintenance_project_xsdd`：每个规范化 XSDD 唯一指向一个项目；迁移只回填证据唯一的 XSDD。
 - 新增 `maintenance_project_alias`：保存主名、旧名和来源名。
 - 合同和活跃来源单归属通过数据库 trigger 认领 XSDD；跨项目或历史多项目证据统一 fail closed。
-- 自动挂靠改为 XSDD 优先分组；无 XSDD 才按名称兜底。
+- 自动挂靠只按合法 XSDD 的既有合同 owner；无/非法 XSDD 或缺 owner 时留未归属，不按名称兜底，也不创建 `AUTO-*` 项目。
 - 看板 API 返回 aliases，项目卡灰字展示，搜索命中 aliases。
 - 历史 6 组只生成 preview，不在本变更中移动、归档或删除任何项目和事实。
 - 项目总表 `05_实收回款` 新增签名 `receipt_row_ids` envelope；删除已导出行等价于 VOID，导出后新增行不受旧文件影响。
