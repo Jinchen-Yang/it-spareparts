@@ -66,7 +66,7 @@ def _mask_sample_value(value: str) -> str:
     text = value or ""
     if not text:
         return "<空>"
-    if re.fullmatch(r"[A-Z]+-\d{8}-\d{4}", text):
+    if re.fullmatch(r"[A-Z]+-\d{8}-\d{3,4}", text):
         return "<单号>"
     if re.fullmatch(r"[\d,，.¥￥ ]+", text):
         return "<数字>"

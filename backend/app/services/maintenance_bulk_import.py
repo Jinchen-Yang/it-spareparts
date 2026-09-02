@@ -1007,7 +1007,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 issue = _row_issue(
                     row_no,
                     "invalid_xsdd_order_no",
-                    "维保合同事实要求有效 XSDD-YYYYMMDD-NNNN 销售订单号",
+                    "维保合同事实要求有效 XSDD-YYYYMMDD-NNN/NNNN 销售订单号",
                 )
                 base.update(action="error", issues=[issue])
                 source_rows.append(base)
@@ -2329,7 +2329,7 @@ def prelock_uploaded_sales_sheet(
         for _row_no, values in eligible_rows
     }
     if "" in xsdds:
-        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNNN")
+        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN")
     if not xsdds:
         return {}
     from app.services import maintenance_source_assignments as assignments
@@ -2404,7 +2404,7 @@ def sync_uploaded_sales_workbook(
         )
         for _row_no, values in ordinary_eligible_rows
     ):
-        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNNN")
+        raise BulkImportInvalid("维保销售订单号不是有效 XSDD-YYYYMMDD-NNN/NNNN")
     eligible_rows = ordinary_eligible_rows
     if not eligible_rows:
         return {"status": "no_maintenance_rows", "eligible_rows": 0}

@@ -44,7 +44,7 @@ MAX_PREVIEW_BYTES = 256 * 1024 * 1024
 _RKD_RE = re.compile(r"(RKD-\d{8}-\d{4})")
 _BXD_RE = re.compile(r"(BXD-\d{8}-\d{4})")
 _WBDD_RE = re.compile(r"(WBDD-\d{8}-\d{4})")
-_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{4})")
+_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{3,4})(?!\d)")
 
 # doc_type → (sheet 名候选, 主表锚列, 主表列, 明细列, 归一化规则)
 _SPECS: dict[str, dict] = {

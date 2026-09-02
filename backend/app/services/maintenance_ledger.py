@@ -69,7 +69,7 @@ _EXPENSE_HEADERS = [
 ]
 _PLAN_HEADERS = ["订单编号", "计划期次", "计划回款时间", "计划回款金额"]
 
-_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{4})")
+_XSDD_RE = re.compile(r"(XSDD-\d{8}-\d{3,4})(?!\d)")
 _BXD_RE = re.compile(r"(BXD-\d{8}-\d{4})")
 
 

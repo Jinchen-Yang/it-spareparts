@@ -59,7 +59,7 @@ class XsddProjectMergeConflict(Exception):
     """A reviewed project-container merge plan is stale or unsafe to apply."""
 
 
-_XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{4}$")
+_XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{3,4}$")
 _ASCII_WHITESPACE_RE = re.compile(r"[ \t\n\r\f\v]+")
 _PEER_ALIAS_SOURCES = frozenset({"xsdd_container_merge"})
 _SALES_ALIAS_SOURCE_PREFIX = "sales_order_import:"
@@ -234,7 +234,7 @@ def normalized_xsdd_sql(column):
         "",
     )
     return case(
-        (normalized.op("~")(r"^[0-9]{8}-[0-9]{4}$"), normalized),
+        (normalized.op("~")(r"^[0-9]{8}-[0-9]{3,4}$"), normalized),
         else_="",
     )
 

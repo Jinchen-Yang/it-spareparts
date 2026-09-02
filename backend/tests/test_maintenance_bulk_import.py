@@ -922,7 +922,12 @@ def test_ordinary_sales_requires_active_status_and_strict_xsdd(db, tmp_path):
 
 @pytest.mark.parametrize(
     ("order_no", "include_status"),
-    [("SALE-INVALID-001", True), ("XSDD-20260902-0019", False)],
+    [
+        ("SALE-INVALID-001", True),
+        ("XSDD-20260902-19", True),
+        ("XSDD-20260902-00019", True),
+        ("XSDD-20260902-0019", False),
+    ],
 )
 def test_dedicated_sales_preview_requires_strict_xsdd_and_status(
     db, tmp_path, order_no, include_status
@@ -947,6 +952,31 @@ def test_dedicated_sales_preview_requires_strict_xsdd_and_status(
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
+
+
+def test_ordinary_sales_keeps_three_and_four_digit_xsdds_distinct(db, tmp_path):
+    for suffix in ("044", "0044"):
+        path = _ordinary_sales_workbook(
+            tmp_path,
+            order_no=f"XSDD-20260902-{suffix}",
+            raw_order_id=f"sales-suffix-{suffix}",
+            project_name="相同名称但不同销售订单",
+        )
+        pipeline.run_import(
+            db,
+            path,
+            f"sales-suffix-{suffix}.xlsx",
+            uploaded_by="sales-importer",
+            mode="upsert",
+            auto_assign_maintenance_projects=True,
+        )
+
+    assert set(db.scalars(select(MaintenanceProjectXsdd.xsdd_norm))) == {
+        "20260902-044",
+        "20260902-0044",
+    }
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 2
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 2
 
 
 def test_inactive_maintenance_sales_does_not_create_project(db, tmp_path):
