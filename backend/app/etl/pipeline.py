@@ -386,6 +386,31 @@ def run_import(session: Session, file_path: str, original_name: str,
             audit_overwrites=True,
             maintenance_lock_envelope=maintenance_lock_envelope,
         )
+        sales_project_sync = None
+        if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
+            from app.services import maintenance_bulk_import
+
+            with open(file_path, "rb") as sales_workbook:
+                sales_workbook_data = sales_workbook.read()
+            try:
+                sales_project_sync = maintenance_bulk_import.sync_uploaded_sales_workbook(
+                    session,
+                    sales_workbook_data,
+                    original_name,
+                    operated_by=uploaded_by or "system",
+                    import_batch_id=batch.id,
+                )
+            except (
+                maintenance_bulk_import.BulkImportInvalid,
+                maintenance_bulk_import.BulkImportConflict,
+            ) as exc:
+                # ReaderError is intentionally forbidden here: API callers
+                # commit parse-failure batches, which would also commit the
+                # already-loaded sales facts.  Integrity failure guarantees a
+                # whole-transaction rollback in both single and batch upload.
+                raise loader.ImportIntegrityError(
+                    f"维保销售订单自动建项失败：{exc}"
+                ) from exc
         auto_assignment = None
         if maintenance_lock_envelope is not None and assignment_service is not None:
             try:
@@ -423,6 +448,8 @@ def run_import(session: Session, file_path: str, original_name: str,
                   ]}
         if auto_assignment is not None:
             report["auto_assignment"] = auto_assignment
+        if sales_project_sync is not None:
+            report["maintenance_sales_project_sync"] = sales_project_sync
         batch.rows_total = counts["source_rows_total"]
         batch.rows_inserted = counts["fact_rows_inserted"]
         batch.rows_skipped = counts["fact_rows_skipped"]

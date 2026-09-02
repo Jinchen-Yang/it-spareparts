@@ -43,11 +43,17 @@ export function BossProjectTable({
       width: 260,
       render: (_: unknown, row) => {
         const isBucket = row.project_id === UNASSIGNED_BUCKET;
+        const displayNames = Array.from(new Set([row.display_name, ...(row.peer_names ?? [])]));
         return (
           <Space direction="vertical" size={0}>
-            <Link to={`/maintenance/boss/projects/${encodeURIComponent(row.project_id)}`}>
-              {row.display_name}
-            </Link>
+            {displayNames.map((name) => (
+              <Link
+                key={name}
+                to={`/maintenance/boss/projects/${encodeURIComponent(row.project_id)}`}
+              >
+                {name}
+              </Link>
+            ))}
             <Space size={4}>
               {isBucket ? (
                 <Tag color="purple">待人工确认</Tag>
@@ -57,9 +63,6 @@ export function BossProjectTable({
                 </Tag>
               )}
               {row.is_archived ? <Tag color="default">已归档</Tag> : null}
-              {row.pre_delivery_order_count > 0 ? (
-                <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>
-              ) : null}
             </Space>
           </Space>
         );
