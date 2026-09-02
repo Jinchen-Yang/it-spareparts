@@ -2510,9 +2510,6 @@ def auto_merge_sales_xsdd_conflicts(
         for conflict in preview["conflicts"]
         if conflict["xsdd_norm"] in incoming
     ]
-    if not relevant:
-        return {"merged_group_count": 0, "groups": []}
-
     plans: list[dict] = []
     for conflict in relevant:
         contract_owners = conflict.get("contract_owner_project_ids") or []
@@ -2708,8 +2705,39 @@ def auto_merge_sales_xsdd_conflicts(
             "user_assignment_resolution": user_assignment_resolution,
         })
 
-    return apply_historical_project_merge_batch(
-        db,
-        plans=plans,
-        operated_by=operated_by,
+    result = (
+        apply_historical_project_merge_batch(
+            db,
+            plans=plans,
+            operated_by=operated_by,
+        )
+        if plans
+        else {"merged_group_count": 0, "groups": []}
     )
+
+    # Some pre-identity production rows already have one unambiguous sales
+    # contract owner but no mapping.  Claim that proven owner under the XSDD
+    # lock before WBDD auto-assignment; contract/WBDD disagreement still
+    # raises through the normal resolver instead of being guessed here.
+    for xsdd_norm in sorted(incoming):
+        try:
+            owner_id = resolve_sales_xsdd_project(db, xsdd_norm)
+        except XsddProjectConflict as exc:
+            raise XsddProjectMergeConflict(str(exc)) from exc
+        if owner_id is None:
+            continue
+        owner = db.get(MaintenanceProject, owner_id)
+        if owner is None or not owner.is_active:
+            raise XsddProjectMergeConflict(
+                f"XSDD {xsdd_norm} 的销售合同 owner 项目已停用或不存在"
+            )
+        try:
+            claim_xsdd_project(
+                db,
+                value=xsdd_norm,
+                project_id=owner_id,
+                source="sales_import_prelock",
+            )
+        except XsddProjectConflict as exc:
+            raise XsddProjectMergeConflict(str(exc)) from exc
+    return result

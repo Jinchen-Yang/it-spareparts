@@ -1033,6 +1033,57 @@ def test_sales_upload_uses_unique_gross_to_merge_production_split(db, tmp_path):
     assert batch.report_json["maintenance_sales_project_sync"]["noop"] == 1
 
 
+def test_sales_prelock_claims_missing_map_for_unique_contract_owner(db):
+    xsdd = "20251230-0027"
+    project = MaintenanceProject(
+        project_id="sales-missing-map-owner",
+        project_code="SALES-MISSING-MAP-OWNER",
+        display_name="已有唯一销售合同项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    try:
+        db.add(MaintenanceProjectContract(
+            project_contract_id="sales-missing-map-contract",
+            project_id=project.project_id,
+            contract_id="sales-missing-map-contract-id",
+            contract_no=f"XSDD-{xsdd}",
+            amount_inc_tax=Decimal("113.00"),
+            contract_status="已生效",
+            status_mapping_state="mapped",
+            status_mapping_version="test-v1",
+            included_in_total=True,
+            effective_from=date(2025, 12, 30),
+            source="historical-fixture",
+            version=1,
+        ))
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    db.commit()
+    assert db.get(MaintenanceProjectXsdd, xsdd) is None
+
+    result = maintenance_project_identity.auto_merge_sales_xsdd_conflicts(
+        db,
+        incoming_amount_inc_tax_by_xsdd={xsdd: Decimal("113.00")},
+        operated_by="sales-importer",
+    )
+    db.commit()
+
+    assert result["merged_group_count"] == 0
+    assert db.get(MaintenanceProjectXsdd, xsdd).project_id == project.project_id
+
+
 def test_sales_upload_keeps_multiple_contract_owners_fail_closed(db, tmp_path):
     xsdd = "20260902-0031"
     projects = [
