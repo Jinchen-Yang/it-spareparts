@@ -177,6 +177,11 @@ export interface ProjectCardProps {
 export function ProjectCard({ row }: ProjectCardProps) {
   const isBucket = row.project_id === UNASSIGNED_BUCKET;
   const status = row.card_status ? STATUS_META[row.card_status] : null;
+  const displayNames = Array.from(new Set([row.display_name, ...(row.peer_names ?? [])]));
+  const displayNameKeys = new Set(displayNames);
+  const secondaryNames = Array.from(new Set(
+    (row.aliases ?? []).filter((name) => !displayNameKeys.has(name)),
+  ));
   const ratioRaw = row.cost_ratio_pct;
   const ratio =
     ratioRaw?.state === "ready" && ratioRaw.value !== null
@@ -193,16 +198,20 @@ export function ProjectCard({ row }: ProjectCardProps) {
       style={{ height: "100%", borderTop: `3px solid ${status?.color ?? "#d9d9d9"}` }}
     >
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
-        <Title level={5} style={{ margin: 0 }} ellipsis={{ tooltip: row.display_name }}>
-          {row.display_name}
-        </Title>
-        {row.aliases?.length ? (
+        <div data-testid="maintenance-project-names">
+          {displayNames.map((name) => (
+            <Title key={name} level={5} style={{ margin: 0 }} ellipsis={{ tooltip: name }}>
+              {name}
+            </Title>
+          ))}
+        </div>
+        {secondaryNames.length ? (
           <Text
             type="secondary"
-            style={{ fontSize: 11.5 }}
+            style={{ fontSize: 12 }}
             data-testid="maintenance-project-aliases"
           >
-            其他名称：{row.aliases.join("、")}
+            其他名称：{secondaryNames.join("、")}
           </Text>
         ) : null}
         <Space size={4} wrap>
@@ -210,9 +219,6 @@ export function ProjectCard({ row }: ProjectCardProps) {
           {/* R5：台账没给项目周期时以明确状态示人，不让卡片看起来「什么都没说」 */}
           {!isBucket && row.lifecycle === "missing" ? <Tag>期限缺失</Tag> : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
-          {row.pre_delivery_order_count > 0 ? (
-            <Tag>预交付 {row.pre_delivery_order_count} 单</Tag>
-          ) : null}
         </Space>
 
         <Text type="secondary" style={{ fontSize: 12 }}>

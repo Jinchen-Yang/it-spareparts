@@ -8,8 +8,18 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
+from sqlalchemy import func, select
 
+from app.etl import loader, pipeline
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAlias,
+    MaintenanceProjectContract,
+    MaintenanceProjectXsdd,
+)
+from app.models.sales import FSalesOrder
 from app.services import maintenance_bulk_import as bulk
+from app.services import maintenance_project_identity
 
 
 class _ScalarsOnlyDb:
@@ -40,6 +50,43 @@ def _sheet(field_indexes: dict[str, int], rows: list[tuple]) -> bulk.DetectedShe
         field_matches={},
         rows=tuple((row_no, tuple(values)) for row_no, values in rows),
     )
+
+
+def _ordinary_sales_workbook(
+    tmp_path,
+    *,
+    order_no: str,
+    raw_order_id: str,
+    project_name: str,
+    period_from: date | None = date(2026, 1, 1),
+    period_to: date | None = date(2026, 12, 31),
+    maintenance_business: str = "是",
+    business_type: str = "备件维保",
+) -> str:
+    workbook = Workbook()
+    sheet = workbook.active
+    system_headers = [
+        "SeqNo", "ObjectId", "Status", "F0000118", "F0000059",
+        "F0000119", "F0000131", "F0000132", "F0000021", "F0000053",
+        "F0000054", "F0000055", "F0000056", "D0001F0000001",
+        "D0001F0000002", "D0001F0000003", "D0001F0000004",
+    ]
+    captions = [
+        "订单编号(必填)", "数据ID(不可修改)", "数据状态", "维保业务", "业务类型#",
+        "项目名称(必填)", "维保起始日期(必填)", "维保终止日期(必填)", "订单金额", "是否含税(必填)",
+        "税率(必填)", "税金", "不含税金额", "订单明细.数据ID(不可修改)",
+        "订单明细.产品名称", "订单明细.订单数量", "订单明细.单价",
+    ]
+    sheet.append(system_headers)
+    sheet.append(captions)
+    sheet.append([
+        order_no, raw_order_id, "已生效", maintenance_business, business_type, project_name,
+        period_from, period_to, "113", "含税", "13%", "13", "100",
+        f"{raw_order_id}-line", "PN-AUTO-1", "1", "113",
+    ])
+    path = tmp_path / f"{raw_order_id}-{abs(hash(project_name))}.xlsx"
+    workbook.save(path)
+    return str(path)
 
 
 def test_sales_exact_machine_header_wins_duplicate_caption_at_row_20():
@@ -416,3 +463,201 @@ def test_preview_rejects_out_of_scope_operation_before_persist(monkeypatch):
             operated_by="operator",
             allowed_project_ids={"project-1"},
         )
+
+
+def test_ordinary_sales_upload_creates_one_xsdd_project_and_retains_peer_names(
+    db, tmp_path
+):
+    order_no = "XSDD-20260902-0001"
+    raw_order_id = "sales-auto-project-1"
+    pre_delivery_name = "预交付-联通云服务器维保"
+    formal_name = "联通云平台服务器维保集中项目"
+    first_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name=pre_delivery_name,
+    )
+
+    first = pipeline.run_import(
+        db,
+        first_path,
+        "sales-first.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    owner = db.get(MaintenanceProjectXsdd, "20260902-0001")
+    assert owner is not None
+    project = db.get(MaintenanceProject, owner.project_id)
+    assert project is not None
+    assert project.display_name == pre_delivery_name
+    assert project.period_from == date(2026, 1, 1)
+    assert project.period_to == date(2026, 12, 31)
+    assert first.report_json["maintenance_sales_project_sync"]["status"] == "applied"
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.project_id == project.project_id
+    ))
+    assert contract is not None
+    assert contract.contract_no == order_no
+    assert contract.amount_inc_tax == Decimal("113.00")
+
+    second_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name=formal_name,
+        period_to=date(2027, 12, 31),
+    )
+    second = pipeline.run_import(
+        db,
+        second_path,
+        "sales-formal.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    assert second.report_json["maintenance_sales_project_sync"]["noop"] == 1
+    assert project.period_to == date(2027, 12, 31)
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 1
+    aliases = set(db.scalars(select(MaintenanceProjectAlias.alias_name).where(
+        MaintenanceProjectAlias.project_id == project.project_id
+    )))
+    assert {pre_delivery_name, formal_name} <= aliases
+    peers = maintenance_project_identity.peer_names_by_project(
+        db, [project.project_id]
+    )
+    assert {pre_delivery_name, formal_name} <= set(peers[project.project_id])
+
+    project_version = project.version
+    contract_version = contract.version
+    alias_count = db.scalar(select(func.count()).select_from(MaintenanceProjectAlias))
+    with open(second_path, "rb") as workbook_file:
+        replay = bulk.sync_uploaded_sales_workbook(
+            db,
+            workbook_file.read(),
+            "sales-formal-replay.xlsx",
+            operated_by="sales-importer",
+            import_batch_id=second.id,
+        )
+    assert replay["noop"] == 1
+    assert project.version == project_version
+    assert contract.version == contract_version
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectAlias)) == alias_count
+
+    # Name equality alone never merges or blocks different XSDDs.  Only the
+    # XSDD owner relation decides identity.
+    other_xsdd_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0003",
+        raw_order_id="sales-auto-project-3",
+        project_name=formal_name,
+    )
+    pipeline.run_import(
+        db,
+        other_xsdd_path,
+        "sales-same-name-other-xsdd.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    other_owner = db.get(MaintenanceProjectXsdd, "20260902-0003")
+    assert other_owner is not None and other_owner.project_id != project.project_id
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 2
+
+
+def test_ordinary_sales_auto_project_failure_rolls_back_all_facts(db, tmp_path):
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0002",
+        raw_order_id="sales-auto-project-invalid",
+        project_name="缺期限的维保项目",
+        period_from=None,
+        period_to=None,
+    )
+
+    with pytest.raises(loader.ImportIntegrityError, match="自动建项失败"):
+        pipeline.run_import(
+            db,
+            path,
+            "sales-invalid.xlsx",
+            uploaded_by="sales-importer",
+            mode="upsert",
+            auto_assign_maintenance_projects=True,
+        )
+    db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
+
+
+def test_ordinary_non_maintenance_sales_upload_never_creates_project(db, tmp_path):
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0004",
+        raw_order_id="ordinary-hardware-sale",
+        project_name="普通备件销售",
+        maintenance_business="否",
+        business_type="备件销售",
+    )
+
+    batch = pipeline.run_import(
+        db,
+        path,
+        "ordinary-hardware-sale.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    assert batch.report_json["maintenance_sales_project_sync"]["status"] == "no_maintenance_rows"
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectXsdd)) == 0
+
+
+def test_skip_mode_existing_sales_fact_does_not_trigger_project_overwrite(db, tmp_path):
+    order_no = "XSDD-20260902-0005"
+    raw_order_id = "sales-skip-existing"
+    original = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name="普通销售原始事实",
+        maintenance_business="否",
+        business_type="备件销售",
+    )
+    pipeline.run_import(
+        db,
+        original,
+        "sales-skip-original.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    maintenance_revision = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name="不应在 skip 模式生效的维保项目",
+    )
+    skipped = pipeline.run_import(
+        db,
+        maintenance_revision,
+        "sales-skip-maintenance.xlsx",
+        uploaded_by="sales-importer",
+        mode="skip",
+        auto_assign_maintenance_projects=True,
+    )
+
+    assert skipped.report_json["maintenance_sales_project_sync"]["status"] == "no_maintenance_rows"
+    sales = db.scalar(select(FSalesOrder).where(FSalesOrder.raw_order_id == raw_order_id))
+    assert sales is not None and sales.business_type == "备件销售"
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0

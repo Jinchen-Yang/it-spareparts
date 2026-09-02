@@ -56,6 +56,7 @@ class XsddProjectMergeConflict(Exception):
 
 _XSDD_IDENTITY_RE = re.compile(r"^[0-9]{8}-[0-9]{4}$")
 _ASCII_WHITESPACE_RE = re.compile(r"[ \t\n\r\f\v]+")
+_PEER_ALIAS_SOURCES = frozenset({"xsdd_container_merge", "sales_order_import"})
 
 # This is deliberately explicit.  A schema migration which adds another
 # direct maintenance_project FK must update this reviewed list; merge apply
@@ -313,19 +314,25 @@ def record_alias(
     project_id: str,
     alias_name: str | None,
     source: str,
-) -> None:
+) -> bool:
     """Idempotently retain a human-facing name without changing identity."""
 
     clean = " ".join(str(alias_name or "").split())
     if not clean:
-        return
+        return False
     alias_key = project_names.display_name_identity(clean)
-    exists = db.scalar(select(MaintenanceProjectAlias.alias_id).where(
+    exists = db.scalar(select(MaintenanceProjectAlias).where(
         MaintenanceProjectAlias.project_id == project_id,
         MaintenanceProjectAlias.alias_key == alias_key,
     ))
     if exists is not None:
-        return
+        # Later sales/XSDD evidence may upgrade an old generic alias into a
+        # proven peer name.  Never downgrade a proven source.
+        if source in _PEER_ALIAS_SOURCES and exists.source not in _PEER_ALIAS_SOURCES:
+            exists.source = source
+            db.flush()
+            return True
+        return False
     db.add(MaintenanceProjectAlias(
         alias_id=str(uuid4()),
         project_id=project_id,
@@ -334,6 +341,7 @@ def record_alias(
         source=source,
     ))
     db.flush()
+    return True
 
 
 def aliases_by_project(db: Session, project_ids: list[str]) -> dict[str, list[str]]:
@@ -349,6 +357,35 @@ def aliases_by_project(db: Session, project_ids: list[str]) -> dict[str, list[st
     ).all()
     out: dict[str, list[str]] = {}
     for project_id, alias_name in rows:
+        bucket = out.setdefault(project_id, [])
+        if alias_name not in bucket:
+            bucket.append(alias_name)
+    return out
+
+
+def peer_names_by_project(db: Session, project_ids: list[str]) -> dict[str, list[str]]:
+    """Names whose provenance proves they describe the same XSDD owner."""
+
+    if not project_ids:
+        return {}
+    aliases = list(db.execute(
+        select(
+            MaintenanceProjectAlias.project_id,
+            MaintenanceProjectAlias.alias_name,
+            MaintenanceProjectAlias.alias_key,
+            MaintenanceProjectAlias.source,
+        )
+        .where(MaintenanceProjectAlias.project_id.in_(project_ids))
+        .order_by(MaintenanceProjectAlias.project_id, MaintenanceProjectAlias.alias_name)
+    ))
+    out: dict[str, list[str]] = {}
+    for project_id, alias_name, _alias_key, source in aliases:
+        # ``source_order`` has no source_ref column, so it cannot prove which
+        # WBDD row supplied an old alias.  Keep it secondary instead of
+        # guessing from equal text.  Sales import and XSDD container merge are
+        # the two provenance paths that do establish the same XSDD identity.
+        if source not in _PEER_ALIAS_SOURCES:
+            continue
         bucket = out.setdefault(project_id, [])
         if alias_name not in bucket:
             bucket.append(alias_name)

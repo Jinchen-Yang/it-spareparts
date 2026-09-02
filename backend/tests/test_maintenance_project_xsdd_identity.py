@@ -452,6 +452,28 @@ def test_board_returns_aliases_and_searches_by_old_name(db):
     row = next(item for item in result["rows"] if item["project_id"] == project.project_id)
     assert row["display_name"] == "腾讯TCE主名称"
     assert row["aliases"] == ["腾讯整体维保项目-预交付"]
+    assert row["peer_names"] == []
+
+
+def test_board_returns_proven_same_xsdd_names_as_peers(db):
+    project = _project(db, "xsdd-project-peer", "XSDD-PEER", "腾讯TCE主名称")
+    maintenance_project_identity.record_alias(
+        db,
+        project_id=project.project_id,
+        alias_name="腾讯整体维保项目-预交付",
+        source="xsdd_container_merge",
+    )
+    db.commit()
+
+    result = maintenance_boss_board.projects(
+        db,
+        user_ctx=_admin(),
+        page=1,
+        page_size=20,
+    )
+    row = next(item for item in result["rows"] if item["project_id"] == project.project_id)
+    assert row["aliases"] == ["腾讯整体维保项目-预交付"]
+    assert row["peer_names"] == ["腾讯整体维保项目-预交付"]
 
 
 def test_xsdd_normalization_matches_database_ascii_whitespace_contract():
