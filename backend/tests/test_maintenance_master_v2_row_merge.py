@@ -250,3 +250,58 @@ def test_apply_result_carries_field_changes(db):
     assert ("03_备件明细", str(line.id), "备注") in fields
     db.refresh(line)
     assert line.qty == Decimal("3.00")
+
+
+def test_site_pn_flexible_resolution_and_warnings(db):
+    """2026-09-03：PN 柔性解析——粘连取首段/补前导零自动命中并告警；
+    未匹配批量一次性报全量（不再首错即断）。"""
+    from app.models.dimensions import DimPart
+
+    project, part, order, _line = _make_project_with_line(db)
+    glue = DimPart(pn_std="AL15SEB120N", description="粘连PN测试")
+    zero = DimPart(pn_std="06200288", description="前导零货号测试")
+    db.add_all([glue, zero])
+    db.commit()
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    headers = {c.value: c.column for c in ws[1]}
+    ws.cell(2, headers["领用单号"], "LY-001")
+    ws.cell(2, headers["领用日期"], "2026-09-01")
+    ws.cell(2, headers["PN"], "AL15SEB120N V0231E4000000000")
+    ws.cell(2, headers["领用数量"], 1)
+    ws.cell(3, headers["领用单号"], "LY-002")
+    ws.cell(3, headers["领用日期"], "2026-09-01")
+    ws.cell(3, headers["PN"], "6200288")
+    ws.cell(3, headers["领用数量"], 1)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any("粘连" in w for w in plan.warnings), plan.warnings
+    assert any("前导零" in w for w in plan.warnings), plan.warnings
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="pn-flex", import_batch_id=str(uuid.uuid4()))
+    assert result["site_creates"] == 2
+    assert any("粘连" in w for w in result["warnings"])
+
+
+def test_unmatched_pns_reported_in_batch(db):
+    project, _part, _order, _line = _make_project_with_line(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    headers = {c.value: c.column for c in ws[1]}
+    for r, no in ((2, "LY-A"), (3, "LY-B")):
+        ws.cell(r, headers["领用单号"], no)
+        ws.cell(r, headers["领用日期"], "2026-09-01")
+        ws.cell(r, headers["PN"], f"TOTALLY-UNKNOWN-{no}")
+        ws.cell(r, headers["领用数量"], 1)
+    with pytest.raises(master.WorkbookError) as raised:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=_save(wb))
+    assert raised.value.code == "part_not_found"
+    msg = raised.value.message
+    assert "TOTALLY-UNKNOWN-LY-A" in msg and "TOTALLY-UNKNOWN-LY-B" in msg, msg
+    assert "共 2 个" in msg

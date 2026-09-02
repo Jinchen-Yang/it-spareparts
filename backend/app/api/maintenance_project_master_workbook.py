@@ -762,7 +762,7 @@ async def validate_project_master(
                     "from_project_name": change.previous_project_name,
                     "to_project_id": project_id,
                 } for change in plan.assignment_changes],
-                "warnings": [],
+                "warnings": list(plan.warnings),
             }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:

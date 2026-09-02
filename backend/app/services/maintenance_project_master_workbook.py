@@ -1779,6 +1779,7 @@ class MasterV2Plan:
     field_changes: tuple[dict, ...] = ()
     conflicts: tuple[dict, ...] = ()
     overridden: tuple[dict, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     @property
     def summary(self) -> dict:
@@ -1906,13 +1907,20 @@ def _v2_row_base_hash(values: dict[str, object], fields: tuple[str, ...]) -> str
 
 
 class _V2MergeContext:
-    """validate 期间收集三路合并结果（冲突/变更/接管明细）。"""
+    """validate 期间收集三路合并结果（冲突/变更/接管/PN 解析明细）。"""
 
     def __init__(self, *, force_takeover: bool) -> None:
         self.force_takeover = force_takeover
         self.changes: list[dict] = []
         self.conflicts: list[dict] = []
         self.overridden: list[dict] = []
+        # 2026-09-03：手工新增行的 PN 柔性解析——成功规范化记入 warnings，
+        # 失败批量收集（不再首错即断），validate 汇总一次性报全量。
+        self.warnings: list[str] = []
+        self.unresolved_pns: dict[str, list[int]] = {}
+
+    def note_unresolved_pn(self, pn: str, row_no: int) -> None:
+        self.unresolved_pns.setdefault(pn, []).append(row_no)
 
     def record(
         self, *, sheet: str, row_label: str, entity_id, field: str,
@@ -1951,6 +1959,76 @@ class _V2MergeContext:
         self.conflicts.append({
             **entry, "reason": "server_changed_since_export"})
         return False
+
+
+def _resolve_part_flexible(
+    db: Session, pn_raw: str, *, row_no: int, sheet: str,
+    merge: "_V2MergeContext",
+) -> DimPart:
+    """手工新增行的 PN 柔性解析（2026-09-03，中国电信云 1028 行实录教训）。
+
+    依次尝试：精确（含别名）→ 空格归一 → 纯数字补前导零（华为/中兴货号
+    6200288→06200288 实测）→ PN+WWN/固件号粘连取首段（首段须 ≥6 位且含
+    数字，防描述性文本误中）。命中规范化路径记 warning；全部失败则记入
+    批量收集器，validate 结束一次性报全量（不再首错即断——客户源数据
+    一次几十个杂 PN，逐个报错要循环上传几十次）。
+    """
+    pn = str(pn_raw or "").strip()
+    part = _exact_part_for_pn(db, pn)
+    if part is not None:
+        return part
+
+    collapsed = " ".join(pn.split())
+    if collapsed != pn:
+        part = _exact_part_for_pn(db, collapsed)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行 PN 空格已归一：{pn!r} → {part.pn_std}")
+            return part
+
+    if pn.isdigit():
+        part = _exact_part_for_pn(db, "0" + pn)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行货号已补前导零：{pn} → {part.pn_std}")
+            return part
+
+    first_token = collapsed.split(" ")[0] if " " in collapsed else ""
+    if (len(first_token) >= 6 and any(ch.isdigit() for ch in first_token)
+            and first_token.upper() == first_token):
+        part = _exact_part_for_pn(db, first_token)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行 PN 含粘连后缀已取标准段：{pn!r} → {part.pn_std}")
+            return part
+
+    merge.note_unresolved_pn(pn, row_no)
+    return _exact_part_for_pn(db, pn)  # None；真正报错在 validate 汇总
+
+
+def _unmatched_pn_error(
+    db: Session, merge: "_V2MergeContext",
+) -> "WorkbookError | None":
+    if not merge.unresolved_pns:
+        return None
+    lines = []
+    for pn, rows in sorted(merge.unresolved_pns.items()):
+        suggestions = ", ".join(
+            value for value in db.scalars(
+                select(DimPart.pn_std).where(
+                    DimPart.pn_std.ilike(f"%{pn[:18]}%"),
+                    DimPart.status != "merged",
+                ).limit(3)
+            ).all()
+        ) if len(pn) >= 4 else ""
+        suffix = f"（相近：{suggestions}）" if suggestions else ""
+        lines.append(f"{pn}（第 {'、'.join(str(r) for r in rows[:6])} 行等 {len(rows)} 行）{suffix}")
+    return WorkbookError(
+        "part_not_found",
+        f"共 {len(merge.unresolved_pns)} 个 PN 未匹配备件主数据，请修正后重传："
+        + "；".join(lines[:20])
+        + ("……" if len(lines) > 20 else ""),
+    )
 
 
 def _v2_merge_row(
@@ -3269,10 +3347,10 @@ def _v2_parse_parts(
             order = orders[0]
             if not pn_raw:
                 raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写 PN")
-            part = _exact_part_for_pn(db, pn_raw)
+            part = _resolve_part_flexible(
+                db, pn_raw, row_no=row_no, sheet="03_备件明细", merge=merge)
             if part is None:
-                raise WorkbookError("part_not_found",
-                                    f"第 {row_no} 行 PN {pn_raw!r} 未匹配备件主数据")
+                continue
             qty = _v2_decimal(qty_raw, row_no=row_no, label="需求数量", required=True)
             if qty is None or qty <= 0:
                 raise WorkbookError("invalid_amount",
@@ -3513,12 +3591,10 @@ def _v2_parse_site(
                 )
             if quantity <= 0:
                 raise WorkbookError("invalid_amount", f"第 {row_no} 行领用数量必须大于 0")
-            part = _exact_part_for_pn(db, pn)
+            part = _resolve_part_flexible(
+                db, pn, row_no=row_no, sheet="06_领用返还", merge=merge)
             if part is None:
-                raise WorkbookError(
-                    "part_not_found",
-                    f"06_领用返还第 {row_no} 行 PN {pn!r} 未匹配备件主数据",
-                )
+                continue
             part_id = part.id
             pn = part.pn_std
             document_date = re.search(r"(?:^|-)20\d{6}(?:-|$)", issue_no)
@@ -4780,6 +4856,10 @@ def validate_project_master_v2(
     if V2_SHEET_PARTS in included:
         export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
 
+    unmatched_error = _unmatched_pn_error(db, merge)
+    if unmatched_error is not None:
+        raise unmatched_error
+
     # Metadata HMAC proves the exported identity envelope was not forged, while
     # this live check proves every explicit/implicit target still belongs to
     # the URL project.  Do not treat signed metadata as an authorization cache.
@@ -4824,6 +4904,7 @@ def validate_project_master_v2(
         field_changes=tuple(merge.changes),
         conflicts=tuple(merge.conflicts),
         overridden=tuple(merge.overridden),
+        warnings=tuple(merge.warnings),
     )
 
 
@@ -4858,7 +4939,7 @@ def _v2_apply_result(
         "overridden": [dict(item) for item in plan.overridden],
         "force_takeover": plan.force_takeover,
         "revision_drift": revision_drift,
-        "warnings": [],
+        "warnings": list(plan.warnings),
         "replayed": replayed,
     }
 
