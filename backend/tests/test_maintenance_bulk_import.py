@@ -564,6 +564,7 @@ def test_ordinary_sales_upload_creates_one_xsdd_project_and_retains_peer_names(
         order_no=order_no,
         raw_order_id=raw_order_id,
         project_name=formal_name,
+        period_from=None,
         period_to=date(2027, 12, 31),
     )
     second = pipeline.run_import(
@@ -576,6 +577,7 @@ def test_ordinary_sales_upload_creates_one_xsdd_project_and_retains_peer_names(
     )
 
     assert second.report_json["maintenance_sales_project_sync"]["noop"] == 1
+    assert project.period_from is None
     assert project.period_to == date(2027, 12, 31)
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 1
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 1
@@ -1018,6 +1020,48 @@ def test_ordinary_sales_auto_project_allows_missing_period(db, tmp_path):
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 1
     assert db.get(MaintenanceProjectXsdd, "20260902-0002") is not None
+
+
+def test_owner_backed_maintenance_sales_still_requires_project_name(db, tmp_path):
+    project = MaintenanceProject(
+        project_id="sales-owner-blank-name-project",
+        project_code="XSDD-20260902-0021",
+        display_name="既有 XSDD owner 项目",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectXsdd(
+        xsdd_norm="20260902-0021",
+        project_id=project.project_id,
+        source="test-map-only-owner",
+    ))
+    db.commit()
+
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0021",
+        raw_order_id="sales-owner-blank-name",
+        project_name="",
+    )
+    with pytest.raises(
+        loader.ImportIntegrityError,
+        match="维保销售订单自动建项失败",
+    ):
+        pipeline.run_import(
+            db,
+            path,
+            "sales-owner-blank-name.xlsx",
+            uploaded_by="sales-importer",
+            mode="upsert",
+            auto_assign_maintenance_projects=True,
+        )
+    db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
 
 
 @pytest.mark.parametrize(

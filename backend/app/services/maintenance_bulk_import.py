@@ -755,13 +755,23 @@ def _apply_sales_project_period(
 ) -> None:
     raw_from = item.get("source_period_from")
     raw_to = item.get("source_period_to")
-    if raw_from is None and raw_to is None:
+    from_present = bool(item.get("source_period_from_present"))
+    to_present = bool(item.get("source_period_to_present"))
+    if not from_present and not to_present:
         return
     project = db.get(MaintenanceProject, project_id)
     if project is None:
         raise BulkImportConflict("项目在同步维保期限时消失")
-    desired_from = date.fromisoformat(raw_from) if raw_from is not None else project.period_from
-    desired_to = date.fromisoformat(raw_to) if raw_to is not None else project.period_to
+    desired_from = (
+        date.fromisoformat(raw_from)
+        if raw_from is not None
+        else (None if from_present else project.period_from)
+    )
+    desired_to = (
+        date.fromisoformat(raw_to)
+        if raw_to is not None
+        else (None if to_present else project.period_to)
+    )
     if project.period_from == desired_from and project.period_to == desired_to:
         return
     if project.version != item.get("expected_project_version"):
@@ -1054,6 +1064,16 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 hard_issues.append(issue)
                 continue
             if explicit_maintenance:
+                if not project_name_raw:
+                    issue = _row_issue(
+                        row_no,
+                        "invalid_maintenance_project",
+                        "维保销售订单自动建项必须提供项目名称",
+                    )
+                    base.update(action="error", issues=[issue])
+                    source_rows.append(base)
+                    hard_issues.append(issue)
+                    continue
                 try:
                     source_period_from, source_period_to = _explicit_maintenance_period(
                         sheet, values
@@ -1157,6 +1177,12 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 ),
                 "source_period_to": (
                     source_period_to.isoformat() if source_period_to else None
+                ),
+                "source_period_from_present": bool(
+                    explicit_maintenance and "period_from" in sheet.field_indexes
+                ),
+                "source_period_to_present": bool(
+                    explicit_maintenance and "period_to" in sheet.field_indexes
                 ),
                 "sales_order_id": sales.id if sync_sales else None,
                 "sales_raw_order_id": sales.raw_order_id if sync_sales else None,
