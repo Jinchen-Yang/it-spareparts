@@ -12,6 +12,7 @@ from app.db import engine
 _ROOT = Path(__file__).resolve().parents[1]
 _REVISION = "f6b1d3e8a2c4"
 _PREVIOUS = "e4a8c2f6b1d9"
+_HEAD = "a7c2e9f4b1d6"
 
 
 def test_salesperson_override_revision_is_linear_single_head():
@@ -21,7 +22,7 @@ def test_salesperson_override_revision_is_linear_single_head():
 
     revision = script.get_revision(_REVISION)
     assert revision.down_revision == _PREVIOUS
-    assert list(script.get_heads()) == [_REVISION]
+    assert list(script.get_heads()) == [_HEAD]
 
 
 def test_salesperson_override_column_is_nonnull_false_by_default(db):
