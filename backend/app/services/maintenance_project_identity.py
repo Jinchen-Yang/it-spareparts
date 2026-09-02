@@ -992,8 +992,27 @@ def preview_historical_conflicts(db: Session) -> dict:
     rows: list[dict] = []
     for xsdd_norm, member_ids in grouped.items():
         mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
-        if mapped is not None and mapped.project_id in member_ids:
+        contract_owner_project_ids = sorted({
+            row.project_id
+            for row in contract_rows
+            if normalize_xsdd(row.contract_no) == xsdd_norm
+        })
+        unique_contract_owner = (
+            contract_owner_project_ids[0]
+            if len(contract_owner_project_ids) == 1
+            else None
+        )
+        mapping_contract_conflict = bool(
+            unique_contract_owner is not None
+            and mapped is not None
+            and mapped.project_id != unique_contract_owner
+        )
+        if unique_contract_owner is not None:
+            canonical_project_id = unique_contract_owner
+            canonical_rule = "unique_contract_owner_v1"
+        elif mapped is not None and mapped.project_id in member_ids:
             canonical_project_id = mapped.project_id
+            canonical_rule = "mapped_owner_else_active_orders_facts_created_at_id_v1"
         else:
             canonical_project_id = sorted(
                 member_ids,
@@ -1010,6 +1029,7 @@ def preview_historical_conflicts(db: Session) -> dict:
                     project_id,
                 ),
             )[0]
+            canonical_rule = "mapped_owner_else_active_orders_facts_created_at_id_v1"
         members = []
         for project_id in member_ids:
             project = projects[project_id]
@@ -1033,8 +1053,13 @@ def preview_historical_conflicts(db: Session) -> dict:
         conflict = {
             "xsdd_norm": xsdd_norm,
             "canonical_project_id": canonical_project_id,
-            "canonical_rule": "mapped_owner_else_active_orders_facts_created_at_id_v1",
-            "requires_human_decision": False,
+            "canonical_rule": canonical_rule,
+            "mapped_project_id": mapped.project_id if mapped is not None else None,
+            "contract_owner_project_ids": contract_owner_project_ids,
+            # No automatic or reviewed merge may silently overturn an
+            # existing map which disagrees with the unique sales-contract
+            # owner.  That inconsistency needs an explicit repair path.
+            "requires_human_decision": mapping_contract_conflict,
             "exact_duplicate_candidates": {
                 "contracts": _exact_duplicate_clusters(
                     [row for row in contract_rows if row.project_id in member_ids],
@@ -2019,6 +2044,26 @@ def _apply_locked_project_merge(
             )
             .values(contract_no=contract_no)
         )
+    # The current source generations are already archived and every contract
+    # now belongs to the reviewed canonical container.  Establish the missing
+    # identity map before inserting replacement generations; the database
+    # assignment guard can therefore verify, rather than guess, their owner.
+    mapped = db.get(MaintenanceProjectXsdd, xsdd_norm)
+    if mapped is None:
+        mapped = MaintenanceProjectXsdd(
+            xsdd_norm=xsdd_norm,
+            project_id=canonical_id,
+            source="xsdd_container_merge",
+        )
+        db.add(mapped)
+    elif mapped.project_id != canonical_id:
+        raise XsddProjectMergeConflict(
+            "归并中的 XSDD mapping 与已验证 canonical owner 冲突"
+        )
+    else:
+        mapped.source = "xsdd_container_merge"
+    db.flush()
+
     created_source_assignments: list[dict] = []
     for archived in active_source_assignments:
         assignment = MaintenanceSourceOrderAssignment(
@@ -2432,3 +2477,74 @@ def apply_historical_project_merge(
         operated_by=operated_by,
     )
     return result["groups"][0]
+
+
+def auto_merge_sales_xsdd_conflicts(
+    db: Session,
+    *,
+    xsdd_values,
+    operated_by: str,
+) -> dict:
+    """Merge only incoming, contract-backed XSDD splits during sales prelock.
+
+    This deliberately delegates every write and OCC check to the reviewed
+    batch primitive.  Automation supplies no business resolution: one unique
+    contract owner must already be provable, and contract/user/unique-key or
+    manifest ambiguity remains a hard failure for the entire import.
+    """
+
+    incoming = {
+        normalized
+        for value in xsdd_values
+        if (normalized := normalize_xsdd(value))
+    }
+    if not incoming:
+        return {"merged_group_count": 0, "groups": []}
+
+    preview = preview_historical_conflicts(db)
+    relevant = [
+        conflict
+        for conflict in preview["conflicts"]
+        if conflict["xsdd_norm"] in incoming
+    ]
+    if not relevant:
+        return {"merged_group_count": 0, "groups": []}
+
+    plans: list[dict] = []
+    for conflict in relevant:
+        contract_owners = conflict.get("contract_owner_project_ids") or []
+        canonical_id = conflict["canonical_project_id"]
+        canonical = next(
+            (
+                project
+                for project in conflict["projects"]
+                if project["project_id"] == canonical_id
+            ),
+            None,
+        )
+        if (
+            conflict.get("requires_human_decision")
+            or conflict.get("canonical_rule") != "unique_contract_owner_v1"
+            or contract_owners != [canonical_id]
+            or canonical is None
+            or not canonical["is_active"]
+        ):
+            raise XsddProjectMergeConflict(
+                f"XSDD {conflict['xsdd_norm']} 不能按唯一销售合同 owner 自动归并"
+            )
+        plans.append({
+            "xsdd": conflict["xsdd_norm"],
+            "expected_manifest_hash": conflict["manifest_hash"],
+            "expected_canonical_project_id": canonical_id,
+            "expected_member_project_ids": [
+                project["project_id"] for project in conflict["projects"]
+            ],
+            "contract_resolution": None,
+            "user_assignment_resolution": None,
+        })
+
+    return apply_historical_project_merge_batch(
+        db,
+        plans=plans,
+        operated_by=operated_by,
+    )

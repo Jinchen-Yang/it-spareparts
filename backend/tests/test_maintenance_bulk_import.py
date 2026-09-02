@@ -627,6 +627,175 @@ def test_ordinary_sales_upload_creates_one_xsdd_project_and_retains_peer_names(
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 2
 
 
+def test_sales_upload_auto_merges_contract_wbdd_split_without_map(db, tmp_path):
+    xsdd = "20260902-0030"
+    wbdd_id = "sales-auto-merge-wbdd"
+    wbdd_path = _ordinary_wbdd_workbook(
+        tmp_path,
+        xsdd=f"XSDD-{xsdd}",
+        raw_order_id=wbdd_id,
+        project_name="历史 WBDD 容器",
+    )
+    pipeline.run_import(db, wbdd_path, "split-wbdd.xlsx", mode="upsert")
+
+    contract_owner = MaintenanceProject(
+        project_id="sales-auto-merge-contract-owner",
+        project_code="SALES-AUTO-MERGE-CONTRACT",
+        display_name="销售合同容器",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    wbdd_owner = MaintenanceProject(
+        project_id="sales-auto-merge-wbdd-owner",
+        project_code="SALES-AUTO-MERGE-WBDD",
+        display_name="历史 WBDD 容器",
+        lifecycle_status="ongoing",
+        is_active=True,
+        version=1,
+    )
+    db.add_all([contract_owner, wbdd_owner])
+    db.flush()
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    db.execute(text(
+        "ALTER TABLE maintenance_source_order_assignment DISABLE TRIGGER "
+        "trg_maintenance_assignment_claim_xsdd"
+    ))
+    try:
+        db.add(MaintenanceProjectContract(
+            project_contract_id="sales-auto-merge-contract",
+            project_id=contract_owner.project_id,
+            contract_id="sales-auto-merge-contract-id",
+            contract_no=f"XSDD-{xsdd}",
+            amount_inc_tax=Decimal("113.00"),
+            contract_status="已生效",
+            status_mapping_state="mapped",
+            status_mapping_version="test-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            source="historical-fixture",
+            version=1,
+        ))
+        db.add(MaintenanceSourceOrderAssignment(
+            assignment_id="sales-auto-merge-assignment",
+            source_order_id=wbdd_id,
+            project_id=wbdd_owner.project_id,
+            is_active=True,
+            version=1,
+            created_by="historical-fixture",
+        ))
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_source_order_assignment ENABLE TRIGGER "
+            "trg_maintenance_assignment_claim_xsdd"
+        ))
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    db.commit()
+    assert db.get(MaintenanceProjectXsdd, xsdd) is None
+
+    sales_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=f"XSDD-{xsdd}",
+        raw_order_id="sales-auto-merge-upload",
+        project_name="销售合同正式名称",
+    )
+    batch = pipeline.run_import(
+        db,
+        sales_path,
+        "sales-auto-merge.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+    db.commit()
+
+    mapping = db.get(MaintenanceProjectXsdd, xsdd)
+    assert mapping is not None
+    assert mapping.project_id == contract_owner.project_id
+    assert db.get(MaintenanceProject, wbdd_owner.project_id).is_active is False
+    current_assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == wbdd_id,
+        MaintenanceSourceOrderAssignment.is_active.is_(True),
+    ))
+    assert current_assignment is not None
+    assert current_assignment.project_id == contract_owner.project_id
+    assert batch.report_json["maintenance_sales_project_sync"]["noop"] == 1
+
+
+def test_sales_upload_keeps_multiple_contract_owners_fail_closed(db, tmp_path):
+    xsdd = "20260902-0031"
+    projects = [
+        MaintenanceProject(
+            project_id=f"sales-multi-owner-{suffix}",
+            project_code=f"SALES-MULTI-OWNER-{suffix.upper()}",
+            display_name=f"多合同容器 {suffix}",
+            lifecycle_status="ongoing",
+            is_active=True,
+            version=1,
+        )
+        for suffix in ("a", "b")
+    ]
+    db.add_all(projects)
+    db.flush()
+    db.execute(text(
+        "ALTER TABLE maintenance_project_contract DISABLE TRIGGER "
+        "trg_maintenance_contract_claim_xsdd"
+    ))
+    try:
+        db.add_all([
+            MaintenanceProjectContract(
+                project_contract_id=f"sales-multi-contract-{index}",
+                project_id=project.project_id,
+                contract_id=f"sales-multi-contract-id-{index}",
+                contract_no=f"XSDD-{xsdd}",
+                amount_inc_tax=Decimal("113.00"),
+                contract_status="已生效",
+                status_mapping_state="mapped",
+                status_mapping_version="test-v1",
+                included_in_total=True,
+                effective_from=date(2026, 1, 1),
+                source="historical-fixture",
+                version=1,
+            )
+            for index, project in enumerate(projects)
+        ])
+        db.flush()
+    finally:
+        db.execute(text(
+            "ALTER TABLE maintenance_project_contract ENABLE TRIGGER "
+            "trg_maintenance_contract_claim_xsdd"
+        ))
+    db.commit()
+
+    sales_path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=f"XSDD-{xsdd}",
+        raw_order_id="sales-multi-owner-upload",
+        project_name="多合同销售上传",
+    )
+    with pytest.raises(loader.ImportIntegrityError, match="唯一销售合同 owner"):
+        pipeline.run_import(
+            db,
+            sales_path,
+            "sales-multi-owner.xlsx",
+            uploaded_by="sales-importer",
+            mode="upsert",
+            auto_assign_maintenance_projects=True,
+        )
+    db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert db.get(MaintenanceProjectXsdd, xsdd) is None
+    assert all(db.get(MaintenanceProject, row.project_id).is_active for row in projects)
+
+
 def test_wbdd_first_defers_then_sales_links_and_sales_first_links_directly(
     db, tmp_path
 ):

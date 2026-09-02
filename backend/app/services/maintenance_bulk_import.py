@@ -2292,6 +2292,7 @@ def prelock_uploaded_sales_sheet(
     sheet: DetectedSheet,
     *,
     mode: str = "upsert",
+    operated_by: str = "system",
 ) -> dict[str, list[str]]:
     """Prelock the exact WBDD backlog a maintenance sales upload may link."""
 
@@ -2335,10 +2336,18 @@ def prelock_uploaded_sales_sheet(
     from app.services import maintenance_source_assignments as assignments
 
     try:
+        maintenance_project_identity.auto_merge_sales_xsdd_conflicts(
+            db,
+            xsdd_values=xsdds,
+            operated_by=operated_by,
+        )
         return assignments.prelock_sales_xsdd_backlog(
             db, xsdd_values=xsdds
         )
-    except assignments.SourceAssignmentConflict as exc:
+    except (
+        assignments.SourceAssignmentConflict,
+        maintenance_project_identity.XsddProjectMergeConflict,
+    ) as exc:
         raise BulkImportConflict(str(exc)) from exc
 
 

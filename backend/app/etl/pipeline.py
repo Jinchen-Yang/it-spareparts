@@ -387,7 +387,10 @@ def run_import(session: Session, file_path: str, original_name: str,
                 )
                 sales_xsdd_order_ids = (
                     maintenance_bulk_import.prelock_uploaded_sales_sheet(
-                        session, sales_projection_sheet, mode=mode
+                        session,
+                        sales_projection_sheet,
+                        mode=mode,
+                        operated_by=uploaded_by or "system",
                     )
                 )
             except (
