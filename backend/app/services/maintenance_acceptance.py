@@ -28,12 +28,12 @@ from app.services import maintenance_project_assignments as assignments
 from app.services.maintenance_attachment_validation import (
     AttachmentTooLarge,
     AttachmentValidationError,
-    MAX_MAINTENANCE_ATTACHMENT_BYTES,
+    MAX_ACCEPTANCE_ATTACHMENT_BYTES,
     validate_acceptance_attachment,
 )
 
 
-MAX_ACCEPTANCE_FILE_BYTES = MAX_MAINTENANCE_ATTACHMENT_BYTES
+MAX_ACCEPTANCE_FILE_BYTES = MAX_ACCEPTANCE_ATTACHMENT_BYTES
 
 
 class MaintenanceAcceptanceError(Exception):
@@ -79,7 +79,8 @@ def validate_attachment(
 ) -> tuple[str, str, str]:
     """2026-08-26 客户口径：附件不做类型/内容限制——任何格式都可上传
     （含带外部链接/宏的 Office 文件、扫描件等）。保留的防线只有：
-    文件名安全净化（路径穿越/控制字符）、非空、20MB 上限。
+    文件名安全净化（路径穿越/控制字符）、非空、体积上限
+    （2026-09-04 客户拍板 20MB → 50MB）。
     存储 MIME 取客户端申报值，缺失时回退 application/octet-stream。"""
     try:
         return validate_acceptance_attachment(
@@ -89,7 +90,8 @@ def validate_attachment(
         )
     except AttachmentTooLarge as exc:
         raise MaintenanceAcceptanceTooLarge(
-            "单个验收附件不得超过 20MB"
+            f"单个验收附件不得超过 "
+            f"{MAX_ACCEPTANCE_FILE_BYTES // (1024 * 1024)}MB"
         ) from exc
     except AttachmentValidationError as exc:
         raise MaintenanceAcceptanceUnsupported(str(exc)) from exc

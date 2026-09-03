@@ -12,6 +12,10 @@ from PIL import Image, UnidentifiedImageError
 
 
 MAX_MAINTENANCE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+# 验收附件是现场照片/扫描件，单份体积天然比回款凭证大一个量级；2026-09-04
+# 客户拍板放到 50MB。回款凭证仍是 20MB（银行回单/PDF，没有放大的理由），
+# 两者从此各用各的上限，别再共用一个常量后被顺手一起改掉。
+MAX_ACCEPTANCE_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 _COLLECTION_EVIDENCE_TYPES = {
     ".pdf": "application/pdf",
@@ -39,7 +43,7 @@ class AttachmentValidationError(Exception):
 
 
 class AttachmentTooLarge(AttachmentValidationError):
-    """An attachment exceeds the shared 20 MB size limit."""
+    """An attachment exceeds the size limit of its domain policy."""
 
 
 def _safe_filename(filename: str | None) -> tuple[str, str]:
@@ -56,12 +60,17 @@ def _safe_filename(filename: str | None) -> tuple[str, str]:
     return normalized, Path(normalized).suffix.lower()
 
 
-def _validated_basics(*, filename: str | None, content: bytes) -> tuple[str, str]:
+def _validated_basics(
+    *, filename: str | None, content: bytes, max_bytes: int,
+) -> tuple[str, str]:
     safe_name, extension = _safe_filename(filename)
     if not content:
         raise AttachmentValidationError("附件内容为空")
-    if len(content) > MAX_MAINTENANCE_ATTACHMENT_BYTES:
-        raise AttachmentTooLarge("单个附件不得超过 20MB")
+    if len(content) > max_bytes:
+        # 文案由上限算出来，不写死——写死过一次「20MB」，改上限时漏改就会
+        # 让用户看到一个和实际不符的数字。
+        raise AttachmentTooLarge(
+            f"单个附件不得超过 {max_bytes // (1024 * 1024)}MB")
     return safe_name, extension
 
 
@@ -73,7 +82,9 @@ def validate_acceptance_attachment(
     *, filename: str | None, mime_type: str | None, content: bytes
 ) -> tuple[str, str, str]:
     """Acceptance attachments intentionally allow every file type."""
-    safe_name, extension = _validated_basics(filename=filename, content=content)
+    safe_name, extension = _validated_basics(
+        filename=filename, content=content,
+        max_bytes=MAX_ACCEPTANCE_ATTACHMENT_BYTES)
     stored_mime = _normalized_mime(mime_type) or "application/octet-stream"
     return safe_name, extension, stored_mime
 
@@ -208,7 +219,9 @@ def validate_collection_evidence_attachment(
     *, filename: str | None, mime_type: str | None, content: bytes
 ) -> tuple[str, str, str]:
     """Collection evidence accepts only the documented document/image types."""
-    safe_name, extension = _validated_basics(filename=filename, content=content)
+    safe_name, extension = _validated_basics(
+        filename=filename, content=content,
+        max_bytes=MAX_MAINTENANCE_ATTACHMENT_BYTES)
     expected_mime = _COLLECTION_EVIDENCE_TYPES.get(extension)
     if expected_mime is None:
         raise AttachmentValidationError(
