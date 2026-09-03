@@ -52,6 +52,7 @@ app/api/maintenance_manager_directory.py
 app/api/maintenance_manager_workbooks.py
 app/api/maintenance_migration.py
 app/api/maintenance_project_assignments.py
+app/api/maintenance_project_batch_transfer.py
 app/api/maintenance_project_master_workbook.py
 app/api/maintenance_project_operations.py
 app/api/maintenance_project_scope.py
@@ -132,12 +133,15 @@ app/services/maintenance_acceptance.py
 app/services/maintenance_acceptance_checklist.py
 app/services/maintenance_ai_fallback.py
 app/services/maintenance_analytics.py
+app/services/maintenance_attachment_validation.py
 app/services/maintenance_bad_returns.py
 app/services/maintenance_bad_salvage.py
 app/services/maintenance_boss_board.py
 app/services/maintenance_boss_facts.py
+app/services/maintenance_bulk_import.py
 app/services/maintenance_ckd_import.py
 app/services/maintenance_collection_evidence.py
+app/services/maintenance_collection_milestone_restore.py
 app/services/maintenance_collection_milestones.py
 app/services/maintenance_collection_plan_imports.py
 app/services/maintenance_collection_plan_xls.py
@@ -170,6 +174,8 @@ app/services/maintenance_periods.py
 app/services/maintenance_project.py
 app/services/maintenance_project_assignments.py
 app/services/maintenance_project_catalog.py
+app/services/maintenance_project_export.py
+app/services/maintenance_project_identity.py
 app/services/maintenance_project_master_workbook.py
 app/services/maintenance_project_operations.py
 app/services/maintenance_project_procurement.py
@@ -298,8 +304,10 @@ tests/test_maintenance_boss_board_reconciliation.py
 tests/test_maintenance_boss_facts.py
 tests/test_maintenance_boss_permissions_migration.py
 tests/test_maintenance_boss_release_gate.py
+tests/test_maintenance_bulk_import.py
 tests/test_maintenance_ckd_import.py
 tests/test_maintenance_collection_evidence.py
+tests/test_maintenance_collection_milestone_restore.py
 tests/test_maintenance_collection_milestones.py
 tests/test_maintenance_collection_plan_imports.py
 tests/test_maintenance_collection_plan_upload_security.py
@@ -341,6 +349,8 @@ tests/test_maintenance_manager_workbooks_api.py
 tests/test_maintenance_margin.py
 tests/test_maintenance_margin_evidence.py
 tests/test_maintenance_margin_integration.py
+tests/test_maintenance_master_v2_editor_permissions.py
+tests/test_maintenance_master_v2_row_merge.py
 tests/test_maintenance_match_audit.py
 tests/test_maintenance_migration_api.py
 tests/test_maintenance_migration_controls_migration.py
@@ -352,10 +362,11 @@ tests/test_maintenance_migration_warehouse.py
 tests/test_maintenance_no_return_chain.py
 tests/test_maintenance_no_return_rules.py
 tests/test_maintenance_order_export.py
-tests/test_maintenance_period_canonical.py
 tests/test_maintenance_owner_backfill.py
+tests/test_maintenance_period_canonical.py
 tests/test_maintenance_permission_structure.py
 tests/test_maintenance_profit_export.py
+tests/test_maintenance_project_export.py
 tests/test_maintenance_project_foundation.py
 tests/test_maintenance_project_management_api.py
 tests/test_maintenance_project_management_migration.py
@@ -370,6 +381,7 @@ tests/test_maintenance_project_procurement.py
 tests/test_maintenance_project_workbook_v2.py
 tests/test_maintenance_project_workbook_v3.py
 tests/test_maintenance_project_workbooks_api.py
+tests/test_maintenance_project_xsdd_identity.py
 tests/test_maintenance_pure_rules.py
 tests/test_maintenance_recovery.py
 tests/test_maintenance_replenishment_evidence.py
@@ -379,6 +391,7 @@ tests/test_maintenance_roundtrip_bundle.py
 tests/test_maintenance_roundtrip_migration.py
 tests/test_maintenance_roundtrip_performance.py
 tests/test_maintenance_roundtrip_security.py
+tests/test_maintenance_salesperson_override_migration.py
 tests/test_maintenance_source_assignment_candidates.py
 tests/test_maintenance_source_health.py
 tests/test_maintenance_source_order_assignments_api.py

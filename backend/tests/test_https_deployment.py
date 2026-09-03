@@ -197,6 +197,74 @@ def test_caddy_template_and_runbook_preserve_https_safety_boundary() -> None:
     subprocess.run(["bash", "-n", str(ROLLBACK_SCRIPT)], check=True)
 
 
+def test_caddy_template_primary_and_bridge_domain_contract() -> None:
+    """yabowei.xyz 主站块与 hbzgc.icu 桥接块的部署契约（Runbook 第 12/13 节）。"""
+    template = CADDY_TEMPLATE.read_text(encoding="utf-8")
+    runbook = HTTPS_RUNBOOK.read_text(encoding="utf-8")
+
+    # 主站块：与通用站点块同上游同安全头，HSTS 首发固定 300。
+    assert "https://yabowei.xyz {" in template
+    primary_block = template.split("https://yabowei.xyz {", 1)[1]
+    assert "reverse_proxy {$IT_DATA_UPSTREAM}" in primary_block
+    assert "flush_interval -1" in primary_block
+    assert 'Strict-Transport-Security "max-age=300"' in primary_block
+    assert 'X-Content-Type-Options "nosniff"' in primary_block
+    assert 'X-Frame-Options "DENY"' in primary_block
+    assert 'Referrer-Policy "strict-origin-when-cross-origin"' in primary_block
+    assert (
+        'Permissions-Policy "camera=(), microphone=(), geolocation=()"'
+        in primary_block
+    )
+    # 主站/桥接都不得依赖新环境变量：任一未设值会让整份 Caddyfile 解析失败。
+    assert "{$IT_DATA_ALIAS" not in template
+    assert "{$IT_DATA_ALT" not in template
+    assert "{$IT_DATA_PRIMARY" not in template
+    # 主站块必须是模板最后一个站点块且自包含：Runbook 第 12 节靠
+    # "从主站标记截取到文件尾" 提取，后面再混入任何站点块都会被一起追加。
+    assert "\nhttps://" not in primary_block[1:]
+    assert primary_block.rstrip().endswith("}")
+
+    # 桥接块：只允许单条 308 到主站，不得挂业务上游或再下发 HSTS。
+    assert "https://hbzgc.icu {" in template
+    assert template.index("https://hbzgc.icu {") < template.index(
+        "https://yabowei.xyz {"
+    )
+    bridge_lines: list[str] = []
+    started = False
+    for line in template.splitlines(keepends=True):
+        if not started and line.rstrip("\n") == "https://hbzgc.icu {":
+            started = True
+            continue
+        if started:
+            bridge_lines.append(line)
+            if line.rstrip("\n") == "}":
+                break
+    assert started
+    bridge = "".join(bridge_lines)
+    assert "redir https://yabowei.xyz{uri} 308" in bridge
+    assert "reverse_proxy" not in bridge
+    assert "Strict-Transport-Security" not in bridge
+
+    # Runbook 第 13 节固化翻转流程：幂等守卫、单跳验收、巡检切换与专属回滚。
+    assert "## 13. 域名退位翻转" in runbook
+    assert "拒绝重复执行" in runbook
+    assert "308 https://yabowei.xyz/release-check?q=1" in runbook
+    assert "翻转专属回滚" in runbook
+    assert "printf 'https://%s/\\n' \"$IT_DATA_PRIMARY\"" in runbook
+    # 翻转后不得顺手删容器环境键：冻结的 edge 控制件仍校验它们。
+    assert "必须原样保留" in runbook
+
+    deploy_doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    assert "yabowei.xyz" in deploy_doc
+    assert "第 12、13 节" in deploy_doc
+
+    # 第 12 节（接入主站块）的守卫与回滚仍需在场：它是第 13 节的前置。
+    assert "## 12. 追加别名域名（yabowei.xyz）" in runbook
+    assert "拒绝重复追加" in runbook
+    assert "别名专属回滚" in runbook
+    assert "EXPECTED_HTTPS_HOST" in runbook
+
+
 def test_runbook_header_normalization_accepts_curl_crlf(tmp_path: Path) -> None:
     """curl -D 保留 CRLF；验收必须先去掉 CR 再做精确匹配。"""
     headers = tmp_path / "headers"

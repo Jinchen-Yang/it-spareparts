@@ -223,7 +223,7 @@ export function SiteReturnTab({
         hint="可回填领用事实和是否应返还；上传后页面立即刷新"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file) => applyProjectMaster(projectId, file)}
+        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
         onAfterApply={onChanged}
       />
       <Table<SiteReturnRow>

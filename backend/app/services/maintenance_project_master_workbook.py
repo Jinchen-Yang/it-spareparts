@@ -76,7 +76,7 @@ V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
 # 2026-08-19（#264/#267）：03 全字段可编辑 + 04 作废/缺行=作废——新增「操作」列、
 # 放开行级数据列、只读哈希收窄。旧 2.0.0 工作簿因哈希列集合变更一律拒绝并
 # 提示重新下载。
-V2_TEMPLATE_VERSION = "2.6.0"
+V2_TEMPLATE_VERSION = "2.7.1"
 V2_META_SIGNATURE_ALGORITHM = "HMAC-SHA256"
 _V2_META_SIGNATURE_DOMAIN = b"ITDATA_MAINT_PROJECT_MASTER_META_V1\x00"
 
@@ -131,7 +131,7 @@ V2_PART_HEADERS = [
     "PN", "描述", "需求数量", "SN", "退货数量", "成本来源", "置信度",
     "系统未税单位成本", "系统含税单位成本", "人工未税单位成本", "人工成本原因",
     "成本缺失类型", "可补价", "实体ID", "备件主键", "只读哈希",
-    "备注", "来源",
+    "备注", "来源", "基线令牌",
 ]
 # 2026-08-19 全字段可编辑（1-based 列号）：操作列 + 行级数据列（PN/描述/数量/SN/
 # 退货数量）+ 人工成本两列 + 备注。维保单号/制单日期/XSDD/头级字段/系统成本/来源仍锁。
@@ -146,10 +146,22 @@ V2_PLAN_HEADERS = ["操作", "合同编号", "期次", "计划回款日期", "�
                    "累计计划金额", "最新累计实收", "到款状态", "提醒状态", "负责人", "备注", "实体ID", "基础版本"]
 V2_EXPENSE_HEADERS = ["操作", "费用单号", "明细序号", "报销日期", "报销人员", "报销类别", "费用分类",
                       "支出事由", "维保销售订单（归集键）", "项目名称", "销售人员", "流程状态",
-                      "原始报销金额", "金额口径", "未税金额", "含税金额（系统）", "备注", "实体ID"]
-V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID"]
+                      "原始报销金额", "金额口径", "未税金额", "含税金额（系统）", "备注", "实体ID",
+                      "基线令牌"]
+V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID",
+                      "基线令牌"]
 V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注",
-                   "应返数量", "返还状态", "返还单号", "实体ID"]
+                   "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌"]
+# 行级基线令牌域（2.7.0）：把每行可编辑字段的导出值签进隐藏列，上传侧据此做
+# 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
+_V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
+V2_BASE_COLUMN = "基线令牌"
+V2_PART_BASE_FIELDS = ("PN", "描述", "需求数量", "SN", "退货数量",
+                       "人工未税单位成本", "人工成本原因", "备注")
+V2_EXPENSE_BASE_FIELDS = ("报销日期", "报销人员", "报销类别", "费用分类", "支出事由",
+                          "维保销售订单（归集键）", "原始报销金额", "未税金额", "流程状态", "备注")
+V2_RECEIPT_BASE_FIELDS = ("累计实收金额（含税）", "状态", "回款凭证号", "备注")
+V2_SITE_BASE_FIELDS = ("领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注")
 
 
 # ------------------------------------------------------------------ 计划
@@ -1762,6 +1774,12 @@ class MasterV2Plan:
     # 04 报销作废（#264/#267 契约）：显式 VOID 操作列 + 缺行=作废。
     expense_voids: tuple[str, ...] = ()
     will_void_rows: tuple[dict, ...] = ()
+    # 2.7.0 行级三路合并产物：字段级变更/冲突/接管明细。
+    force_takeover: bool = False
+    field_changes: tuple[dict, ...] = ()
+    conflicts: tuple[dict, ...] = ()
+    overridden: tuple[dict, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     @property
     def summary(self) -> dict:
@@ -1817,6 +1835,266 @@ def _v2_hash(values: list[object]) -> str:
         ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def _v2_row_base_token(
+    *, sheet: str, entity_id, values: dict[str, object]
+) -> str:
+    """行级签名基线（2.7.0）：该行可编辑字段的导出值快照 + HMAC。
+
+    与全局表 ``_global_cost_base_token`` 同一模式（域分隔 + 规范 JSON），
+    供上传侧三路合并区分「用户改的」与「文件里带出来的导出旧值」。
+    """
+    payload = {
+        "sheet": sheet,
+        "entity": str(entity_id),
+        "base": {
+            str(name): _v2_hash_value(values.get(name)) for name in sorted(values)
+        },
+    }
+    payload_bytes = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    key_id, signing_key = get_settings().maintenance_manifest_signing_material()
+    signature = hmac.new(
+        signing_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
+    ).hexdigest()
+    return json.dumps(
+        {"key_id": key_id, "payload": payload, "signature": signature},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _parse_v2_row_base_token(
+    value, *, sheet: str, entity_id, row_no: int
+) -> dict[str, str]:
+    try:
+        envelope = json.loads(str(value))
+        key_id = str(envelope["key_id"])
+        payload = envelope["payload"]
+        signature = str(envelope["signature"])
+        if (
+            not isinstance(payload, dict)
+            or payload.get("sheet") != sheet
+            or str(payload.get("entity")) != str(entity_id)
+        ):
+            raise ValueError("row mismatch")
+        payload_bytes = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        verification_key = (
+            get_settings().maintenance_manifest_verification_keys().get(key_id)
+        )
+        if verification_key is None:
+            raise ValueError("unknown key")
+        expected = hmac.new(
+            verification_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError("bad signature")
+        base = payload.get("base")
+        if not isinstance(base, dict):
+            raise ValueError("bad base")
+        return {str(k): ("" if v is None else str(v)) for k, v in base.items()}
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkbookError(
+            "invalid_concurrency_token",
+            f"第 {row_no} 行基线令牌无效或与实体不匹配，请重新下载当前项目总表（2.7.0）",
+        ) from exc
+
+
+def _v2_row_base_hash(values: dict[str, object], fields: tuple[str, ...]) -> str:
+    """行级基线哈希（进 99_元数据）：缺行=作废时判定「服务端该行是否已变」。"""
+    return _v2_hash([_v2_hash_value(values.get(name)) for name in fields])
+
+
+class _V2MergeContext:
+    """validate 期间收集三路合并结果（冲突/变更/接管/PN 解析明细）。"""
+
+    def __init__(self, *, force_takeover: bool) -> None:
+        self.force_takeover = force_takeover
+        self.changes: list[dict] = []
+        self.conflicts: list[dict] = []
+        self.overridden: list[dict] = []
+        # 2026-09-03：手工新增行的 PN 柔性解析——成功规范化记入 warnings，
+        # 失败批量收集（不再首错即断），validate 汇总一次性报全量。
+        self.warnings: list[str] = []
+        self.unresolved_pns: dict[str, list[int]] = {}
+
+    def note_unresolved_pn(self, pn: str, row_no: int) -> None:
+        self.unresolved_pns.setdefault(pn, []).append(row_no)
+
+    def record(
+        self, *, sheet: str, row_label: str, entity_id, field: str,
+        old: str, new: str, conflict: bool, base: str = "",
+    ) -> None:
+        entry = {
+            "sheet": sheet, "row": row_label, "entity_id": str(entity_id),
+            "field": field, "old": old or "", "new": new or "",
+        }
+        if conflict:
+            # 三值对照：base=导出基线 / old=服务端现值 / new=本次上传值。
+            # force_takeover 时冲突当场解决：不进 conflicts（放行 apply），
+            # 落 overridden 留痕并计入 changes。
+            if self.force_takeover:
+                enriched = {**entry, "base": base or ""}
+                self.overridden.append(enriched)
+                self.changes.append({**enriched, "overridden": True})
+            else:
+                self.conflicts.append({
+                    **entry, "base": base or "",
+                    "reason": "server_changed_since_export"})
+        else:
+            self.changes.append({**entry, "overridden": False})
+
+    def record_row_conflict(
+        self, *, sheet: str, row_label: str, entity_id, action: str,
+    ) -> bool:
+        """整行级冲突（删除行/作废行但服务端该行已变）。返回是否放行。"""
+        entry = {
+            "sheet": sheet, "row": row_label, "entity_id": str(entity_id),
+            "field": "（整行）", "old": "", "new": action,
+        }
+        if self.force_takeover:
+            self.overridden.append(dict(entry))
+            return True
+        self.conflicts.append({
+            **entry, "reason": "server_changed_since_export"})
+        return False
+
+
+def _resolve_part_flexible(
+    db: Session, pn_raw: str, *, row_no: int, sheet: str,
+    merge: "_V2MergeContext",
+) -> DimPart:
+    """手工新增行的 PN 柔性解析（2026-09-03，中国电信云 1028 行实录教训）。
+
+    依次尝试：精确（含别名）→ 空格归一 → 纯数字补前导零（华为/中兴货号
+    6200288→06200288 实测）→ PN+WWN/固件号粘连取首段（首段须 ≥6 位且含
+    数字，防描述性文本误中）。命中规范化路径记 warning；全部失败则记入
+    批量收集器，validate 结束一次性报全量（不再首错即断——客户源数据
+    一次几十个杂 PN，逐个报错要循环上传几十次）。
+    """
+    pn = str(pn_raw or "").strip()
+    part = _exact_part_for_pn(db, pn)
+    if part is not None:
+        return part
+
+    collapsed = " ".join(pn.split())
+    if collapsed != pn:
+        part = _exact_part_for_pn(db, collapsed)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行 PN 空格已归一：{pn!r} → {part.pn_std}")
+            return part
+
+    if pn.isdigit():
+        part = _exact_part_for_pn(db, "0" + pn)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行货号已补前导零：{pn} → {part.pn_std}")
+            return part
+
+    first_token = collapsed.split(" ")[0] if " " in collapsed else ""
+    if (len(first_token) >= 6 and any(ch.isdigit() for ch in first_token)
+            and first_token.upper() == first_token):
+        part = _exact_part_for_pn(db, first_token)
+        if part is not None:
+            merge.warnings.append(
+                f"{sheet}第 {row_no} 行 PN 含粘连后缀已取标准段：{pn!r} → {part.pn_std}")
+            return part
+
+    merge.note_unresolved_pn(pn, row_no)
+    return _exact_part_for_pn(db, pn)  # None；真正报错在 validate 汇总
+
+
+def _unmatched_pn_error(
+    db: Session, merge: "_V2MergeContext",
+) -> "WorkbookError | None":
+    if not merge.unresolved_pns:
+        return None
+    lines = []
+    for pn, rows in sorted(merge.unresolved_pns.items()):
+        suggestions = ", ".join(
+            value for value in db.scalars(
+                select(DimPart.pn_std).where(
+                    DimPart.pn_std.ilike(f"%{pn[:18]}%"),
+                    DimPart.status != "merged",
+                ).limit(3)
+            ).all()
+        ) if len(pn) >= 4 else ""
+        suffix = f"（相近：{suggestions}）" if suggestions else ""
+        lines.append(f"{pn}（第 {'、'.join(str(r) for r in rows[:6])} 行等 {len(rows)} 行）{suffix}")
+    return WorkbookError(
+        "part_not_found",
+        f"共 {len(merge.unresolved_pns)} 个 PN 未匹配备件主数据，请修正后重传："
+        + "；".join(lines[:20])
+        + ("……" if len(lines) > 20 else ""),
+    )
+
+
+def _v2_merge_row(
+    *,
+    sheet: str, row_label: str, entity_id, row, index: dict[str, int],
+    base_fields: tuple[str, ...], server_values: dict[str, object],
+    baseline: dict[str, str], ctx: _V2MergeContext,
+) -> tuple | None:
+    """三路合并一行：未触碰返回 ``None``，否则返回**已 rebase 的行**。
+
+    - 未触碰（用户值==导出基线）：返回 None，调用方跳过该行（服务端已变
+      也不回写——自动 rebase，取代整本 stale 作废）。
+    - 触碰且服务端未变：登记变更，走既有应用路径。
+    - 触碰且服务端已变且与用户值不同：冲突；force_takeover 时登记接管放行。
+
+    2026-09-03：返回 rebase 后的行，而不是布尔。本函数只做**分类**，不限制
+    下游写什么；而下游（``_v2_refill_for_existing_line``、05 的 CollectionOp）
+    是拿整行单元格与服务端现值逐一比对来生成 update 的。于是「用户没碰、但
+    导出之后被别人改过」的字段，会带着导出时的旧值把别人的改动**静默盖掉且
+    不报冲突**——正是 D-02 明令禁止、也是 09-02 事故的那一类。这里把未触碰
+    的基线字段换成服务端现值，下游比对自然不再产生 diff。
+
+    注意：只对**在合并之后才读行**的调用方生效（03 的 refill、05）。04/06
+    在合并之前就把单元格解析成局部变量了，那两条路径的同类问题需要各自调整
+    解析顺序，不在本次修复范围。
+    """
+    user_values = {
+        name: _v2_hash_value(_cell(row, index, name)) for name in base_fields
+    }
+    touched = {
+        name: value for name, value in user_values.items()
+        if value != baseline.get(name, "")
+    }
+    if not touched:
+        return None
+    for name, user_value in touched.items():
+        server_value = _v2_hash_value(server_values.get(name))
+        if user_value == server_value:
+            continue
+        ctx.record(
+            sheet=sheet, row_label=row_label, entity_id=entity_id, field=name,
+            old=server_value, new=user_value,
+            conflict=server_value != baseline.get(name, ""),
+            base=baseline.get(name, ""),
+        )
+    rebased = list(row)
+    for name in base_fields:
+        if name in touched:
+            continue
+        column = index.get(name)
+        if column is None or column >= len(rebased):
+            continue
+        rebased[column] = server_values.get(name)
+    return tuple(rebased)
+
+
+def _v2_server_row_changed(
+    *, server_values: dict[str, object], baseline: dict[str, str],
+    fields: tuple[str, ...],
+) -> bool:
+    return any(
+        _v2_hash_value(server_values.get(name)) != baseline.get(name, "")
+        for name in fields
+    )
+
+
 def _v2_metadata_signature(metadata: dict[str, str], hmac_key: bytes) -> str:
     """Bind the complete export identity set to a server-only key.
 
@@ -1844,14 +2122,42 @@ def _v2_metadata_signature(metadata: dict[str, str], hmac_key: bytes) -> str:
     ).hexdigest()
 
 
+_META_CELL_SAFE_LENGTH = 30000
+_META_CHUNK_SEP = "@"
+
+
+def _chunk_meta_value(key: str, value: str) -> list[tuple[str, str]]:
+    """Excel 单元格硬上限 32767：超长值（大项目 parts_base_hashes 实测 40KB+）
+    会被静默截断，签名必炸（2.7.0 生产回归）。按 30000 分块为 key@2/@3...，
+    读取端 _v2_meta 合并后再参与验签/使用。首块保留原名，兼容短值零分块。"""
+    text = str(value)
+    if len(text) <= _META_CELL_SAFE_LENGTH:
+        return [(key, text)]
+    chunks = [text[i:i + _META_CELL_SAFE_LENGTH]
+              for i in range(0, len(text), _META_CELL_SAFE_LENGTH)]
+    return [(key, chunks[0])] + [
+        (f"{key}{_META_CHUNK_SEP}{n + 2}", chunk)
+        for n, chunk in enumerate(chunks[1:])
+    ]
+
+
 def _v2_sign_meta_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
     key_id, signing_key = get_settings().maintenance_manifest_signing_material()
+    flat_rows: list[tuple[str, str]] = []
+    for key, value in rows:
+        flat_rows.extend(_chunk_meta_value(str(key), str(value)))
     signed_rows = [
-        *[(str(key), str(value)) for key, value in rows],
+        *flat_rows,
         ("metadata_hmac_algorithm", V2_META_SIGNATURE_ALGORITHM),
         ("metadata_hmac_key_id", key_id),
     ]
-    metadata = dict(signed_rows)
+    # 签名覆盖「逻辑值（未分块）+ 算法/键ID」，与读取端合并后的全键一致。
+    # 教训：3cf4f53 曾误签 dict(rows)（缺 algorithm/key_id 两键）导致全量必炸，
+    # 由 test_v271 回归测试守住。
+    metadata = dict(rows) | {
+        "metadata_hmac_algorithm": V2_META_SIGNATURE_ALGORITHM,
+        "metadata_hmac_key_id": key_id,
+    }
     signed_rows.append(("metadata_hmac", _v2_metadata_signature(metadata, signing_key)))
     return signed_rows
 
@@ -2032,15 +2338,19 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
         and (contract.effective_to is None or contract.effective_to > today)
     ]
     if len(editable_contracts) == 1:
-        contract_edit_state = "可编辑：写回唯一当前含税合同事实"
+        contract_edit_state = (
+            "可编辑：写回唯一当前含税合同事实"
+            + ("（注意：该合同跨项目共享，修改将影响所有计入项目）"
+               if contract_shared else "")
+        )
     elif contract_shared:
-        contract_edit_state = "只读：合同跨项目共享，须先确认唯一归属"
+        contract_edit_state = "只读：多份当前计入合同且存在共享，须先收敛合同关系"
     elif len(current_included) > 1:
         contract_edit_state = "只读：当前有多份合同，须逐合同维护，不能把项目总额写入其中一份"
     elif not current_included:
         contract_edit_state = "只读：仅有 XSDD 参考或尚无合同台账，请先建立唯一合同关系"
     else:
-        contract_edit_state = "只读：当前合同未映射或事实不完整，请先完成合同治理"
+        contract_edit_state = "只读：当前合同事实不完整，请先完成合同治理"
     # 2026-08-19：备件成本合并人工覆盖——主表无成本但有 override 的行按
     # override 含税金额×数量计入（与看板/面板口径一致）
     line_ids = [line.id for line, _order, _pid in lines]
@@ -2127,30 +2437,14 @@ def _v2_editable_contracts(
         and contract.effective_from <= today
         and (contract.effective_to is None or contract.effective_to > today)
     ]
-    # “项目合同总额”只在它能一一对应到唯一权威事实时可写。即便仅有一条
-    # mapped 合同，只要还存在另一条当前计入但未映射的合同，也不能把项目总额
-    # 偷偷写进 mapped 那一条。
+    # 2026-09-02 拍板：合同额对项目负责人/销售与管理员全量放开。
+    # 仍要求「当前计入的合同恰好一份」，保证项目总额能一一对应回写到唯一
+    # 合同事实；mapped/共享不再硬拒——共享合同可编辑，apply 侧以
+    # contract base_version CAS + 审计兜底，共享状态在导出侧提示。
     if len(included_current) != 1:
         return []
     only = included_current[0]
-    if only.status_mapping_state != "mapped":
-        return []
-    # 同一稳定合同若同时计入多个项目，项目级总额没有唯一归属；工作簿不得
-    # 把共享合同的全额写回其中一个项目并制造双计。
-    related_projects = db.scalar(
-        select(func.count(func.distinct(MaintenanceProjectContract.project_id)))
-        .where(
-            (
-                (MaintenanceProjectContract.contract_id == only.contract_id)
-                | (MaintenanceProjectContract.contract_no == only.contract_no)
-            ),
-            MaintenanceProjectContract.included_in_total.is_(True),
-            MaintenanceProjectContract.effective_from <= today,
-            (MaintenanceProjectContract.effective_to.is_(None)
-             | (MaintenanceProjectContract.effective_to > today)),
-        )
-    ) or 0
-    if int(related_projects) != 1 or only.project_id != project_id:
+    if only.project_id != project_id:
         return []
     return [only]
 
@@ -2237,10 +2531,15 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
             MaintenanceManualCostOverride.active.is_(True),
         ))
     } if line_ids else {}
+    base_hashes: dict[str, str] = {}
     for line, order, _pid in lines:
         values = _v2_part_row_values(line, order, overrides.get(line.id))
         digest = _v2_hash([values[name] for name in V2_PART_HASH_COLUMNS])
         values["只读哈希"] = digest
+        values[V2_BASE_COLUMN] = _v2_row_base_token(
+            sheet="03_备件明细", entity_id=line.id,
+            values={name: values.get(name) for name in V2_PART_BASE_FIELDS})
+        base_hashes[str(line.id)] = _v2_row_base_hash(values, V2_PART_BASE_FIELDS)
         ws.append([values[name] for name in V2_PART_HEADERS])
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
     for _ in range(5):
@@ -2260,25 +2559,55 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     })
     _v2_finalize(ws, V2_PART_HEADERS,
                  editable=V2_PART_EDITABLE, operation_col=1)
-    # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)。备注(25)/来源(26) 可见。
-    for col in (22, 23, 24):
+    # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)/基线令牌(27)。
+    # 备注(25)/来源(26) 可见。
+    for col in (22, 23, 24, len(V2_PART_HEADERS)):
         ws.column_dimensions[ws.cell(1, col).column_letter].hidden = True
+    return base_hashes
 
 
-def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> None:
+def _v2_expense_row_values(expense, project_display: str) -> dict[str, object]:
+    """04 一行的展示值（按表头名）。build/parse 共用，保证基线口径一致。"""
+    return {
+        "操作": "",
+        "费用单号": expense.bxd_no or "",
+        "明细序号": expense.line_no,
+        "报销日期": expense.expense_date,
+        "报销人员": expense.person or "",
+        "报销类别": expense.expense_type or "",
+        "费用分类": expense.fee_category or "",
+        "支出事由": expense.reason or "",
+        "维保销售订单（归集键）": expense.linked_sales_order_no or "",
+        "项目名称": project_display,
+        "销售人员": "—",
+        "流程状态": expense.data_status or "",
+        "原始报销金额": expense.amount,
+        "金额口径": expense.tax_basis or "ex",
+        "未税金额": expense.amount_ex_tax,
+        "含税金额（系统）": expense.amount_inc_tax,
+        "备注": expense.remark or "",
+        "实体ID": expense.raw_line_id,
+    }
+
+
+def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_EXPENSE)
     # 金额口径 is source provenance and cannot be edited independently.  The
     # user edits the explicit ex-tax column; apply preserves the source basis.
     _v2_header(ws, V2_EXPENSE_HEADERS, editable={1, 4, 5, 6, 7, 8, 9, 12, 15, 17})
     expenses = _project_expenses(db, project_id)
+    base_hashes: dict[str, str] = {}
+    project_display = (
+        project.display_name if getattr(project, "display_name", None) else project_id
+    )
     for expense in expenses:
-        ws.append(["", expense.bxd_no or "", expense.line_no, expense.expense_date, expense.person or "",
-                   expense.expense_type or "", expense.fee_category or "", expense.reason or "",
-                   expense.linked_sales_order_no or "",
-                   project.display_name if getattr(project, "display_name", None) else project_id,
-                   "—", expense.data_status or "",
-                   expense.amount, expense.tax_basis or "ex", expense.amount_ex_tax,
-                   expense.amount_inc_tax, expense.remark or "", expense.raw_line_id])
+        values = _v2_expense_row_values(expense, project_display)
+        values[V2_BASE_COLUMN] = _v2_row_base_token(
+            sheet="04_费用报销", entity_id=expense.raw_line_id,
+            values={name: values.get(name) for name in V2_EXPENSE_BASE_FIELDS})
+        base_hashes[str(expense.raw_line_id)] = _v2_row_base_hash(
+            values, V2_EXPENSE_BASE_FIELDS)
+        ws.append([values[name] for name in V2_EXPENSE_HEADERS])
     _v2_append_example_row(ws, V2_EXPENSE_HEADERS, {
         "操作": "示例",
         "费用单号": "BXD-20260901-0001",
@@ -2295,9 +2624,27 @@ def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> None:
     })
     _v2_finalize(ws, V2_EXPENSE_HEADERS, hidden_from=18,
                  editable={1, 4, 5, 6, 7, 8, 9, 12, 15, 17}, operation_col=1)
+    return base_hashes
 
 
-def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
+def _v2_receipt_row_values(snapshot, contract_no: str) -> dict[str, object]:
+    """05 一行的展示值（按表头名）。build/parse 共用。"""
+    month = snapshot.report_month
+    month_text = (
+        month.isoformat()[:7] if hasattr(month, "isoformat") else str(month or "")
+    )
+    return {
+        "合同编号": contract_no,
+        "报告月份": month_text,
+        "累计实收金额（含税）": snapshot.cumulative_amount,
+        "状态": snapshot.status,
+        "回款凭证号": snapshot.receipt_reference or "",
+        "备注": snapshot.remark or "",
+        "实体ID": snapshot.collection_id,
+    }
+
+
+def _v2_build_receipts(wb, db, project_id: str, contracts) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_RECEIPTS)
     _v2_header(ws, V2_RECEIPT_HEADERS)
     contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
@@ -2305,13 +2652,16 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
         MaintenanceCollectionSnapshot.project_id == project_id,
         MaintenanceCollectionSnapshot.status == "confirmed",
     ).order_by(MaintenanceCollectionSnapshot.report_month)))
+    base_hashes: dict[str, str] = {}
     for row in rows:
-        # 报告月份导出为 YYYY-MM（用户看到 2026-09-01 00:00:00 很怪；解析侧
-        # 对 YYYY-MM 回 parse 为当月一号，往返一致）
-        month_text = (row.report_month.isoformat()[:7]
-                      if hasattr(row.report_month, "isoformat") else str(row.report_month or ""))
-        ws.append([contract_by_id.get(row.project_contract_id, ""), month_text,
-                   row.cumulative_amount, row.status, row.receipt_reference or "", row.remark or "", row.collection_id])
+        contract_no = contract_by_id.get(row.project_contract_id, "")
+        values = _v2_receipt_row_values(row, contract_no)
+        values[V2_BASE_COLUMN] = _v2_row_base_token(
+            sheet="05_实收回款", entity_id=row.collection_id,
+            values={name: values.get(name) for name in V2_RECEIPT_BASE_FIELDS})
+        base_hashes[str(row.collection_id)] = _v2_row_base_hash(
+            values, V2_RECEIPT_BASE_FIELDS)
+        ws.append([values[name] for name in V2_RECEIPT_HEADERS])
     _v2_append_example_row(ws, V2_RECEIPT_HEADERS, {
         "合同编号": next(iter(contract_by_id.values()), "") or "（本项目合同号）",
         "报告月份": "2026-09",
@@ -2321,9 +2671,29 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> None:
         "备注": "【示例】实收=每月累计快照：同一合同同月重复上传即覆盖更新，凭证号选填",
     })
     _v2_finalize(ws, V2_RECEIPT_HEADERS, hidden_from=7)
+    return base_hashes
 
 
-def _v2_build_site(wb, db, project_id: str) -> None:
+def _v2_site_row_values(line, issue) -> dict[str, object]:
+    """06 一行的展示值（按表头名）。build/parse 共用。"""
+    return {
+        "领用单号": issue.issue_no,
+        "领用日期": issue.issue_date,
+        "PN": line.pn,
+        "SN": line.serial_number or "",
+        "领用数量": line.quantity,
+        "是否应返还": (
+            "" if line.no_return is None else ("否" if line.no_return else "是")
+        ),
+        "备注": line.remark or "",
+        "应返数量": "—",
+        "返还状态": "待确认品类",
+        "返还单号": "—",
+        "实体ID": line.issue_line_id,
+    }
+
+
+def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_SITE)
     _v2_header(ws, V2_SITE_HEADERS, editable={1, 2, 3, 4, 5, 6, 7})
     rows = db.execute(select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).join(
@@ -2331,10 +2701,15 @@ def _v2_build_site(wb, db, project_id: str) -> None:
     ).where(MaintenanceSiteIssue.project_id == project_id,
             MaintenanceSiteIssueLine.is_active.is_(True)
     ).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
+    base_hashes: dict[str, str] = {}
     for line, issue in rows:
-        ws.append([issue.issue_no, issue.issue_date, line.pn, line.serial_number or "", line.quantity,
-                   "" if line.no_return is None else ("否" if line.no_return else "是"), line.remark or "",
-                   "—", "待确认品类", "—", line.issue_line_id])
+        values = _v2_site_row_values(line, issue)
+        values[V2_BASE_COLUMN] = _v2_row_base_token(
+            sheet="06_领用返还", entity_id=line.issue_line_id,
+            values={name: values.get(name) for name in V2_SITE_BASE_FIELDS})
+        base_hashes[str(line.issue_line_id)] = _v2_row_base_hash(
+            values, V2_SITE_BASE_FIELDS)
+        ws.append([values[name] for name in V2_SITE_HEADERS])
     _v2_append_example_row(ws, V2_SITE_HEADERS, {
         "领用单号": "CKD-20260901-0001",
         "领用日期": "2026-09-01",
@@ -2346,6 +2721,7 @@ def _v2_build_site(wb, db, project_id: str) -> None:
     })
     _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
                  editable={1, 2, 3, 4, 5, 6, 7})
+    return base_hashes
 
 
 def _v2_build_usage(wb) -> None:
@@ -2449,18 +2825,21 @@ def build_project_master_v2(
              if V2_SHEET_OVERVIEW in wanted or V2_SHEET_PARTS in wanted else [])
     wb = Workbook()
     wb.remove(wb.active)
+    base_hash_maps: dict[str, dict[str, str]] = {}
     if V2_SHEET_OVERVIEW in wanted:
         _v2_build_overview(wb, project, contracts, db, lines)
     if V2_SHEET_PLAN in wanted:
         _v2_build_plan(wb, db, project_id, current_contracts)
     if V2_SHEET_PARTS in wanted:
-        _v2_build_parts(wb, db, project_id, lines)
+        base_hash_maps["parts"] = _v2_build_parts(wb, db, project_id, lines)
     if V2_SHEET_EXPENSE in wanted:
-        _v2_build_expense(wb, db, project_id, contracts, project=project)
+        base_hash_maps["expense"] = _v2_build_expense(
+            wb, db, project_id, contracts, project=project)
     if V2_SHEET_RECEIPTS in wanted:
-        _v2_build_receipts(wb, db, project_id, current_contracts)
+        base_hash_maps["receipt"] = _v2_build_receipts(
+            wb, db, project_id, current_contracts)
     if V2_SHEET_SITE in wanted:
-        _v2_build_site(wb, db, project_id)
+        base_hash_maps["site"] = _v2_build_site(wb, db, project_id)
     _v2_build_dictionary(wb)
     _v2_build_usage(wb)
     meta_rows = [
@@ -2501,9 +2880,13 @@ def build_project_master_v2(
     if V2_SHEET_PARTS in wanted:
         meta_rows.append(("parts_row_ids",
                           _encode_row_ids([ln.id for ln, _o, _p in lines])))
+        meta_rows.append(("parts_base_hashes",
+                          _encode_base_hashes(base_hash_maps.get("parts", {}))))
     if V2_SHEET_EXPENSE in wanted:
         meta_rows.append(("expense_row_ids",
                           _encode_row_ids(_expected_expense_ids(db, project_id))))
+        meta_rows.append(("expense_base_hashes",
+                          _encode_base_hashes(base_hash_maps.get("expense", {}))))
     if V2_SHEET_RECEIPTS in wanted:
         receipt_ids = db.scalars(
             select(MaintenanceCollectionSnapshot.collection_id).where(
@@ -2512,6 +2895,8 @@ def build_project_master_v2(
             )
         ).all()
         meta_rows.append(("receipt_row_ids", _encode_row_ids(receipt_ids)))
+        meta_rows.append(("receipt_base_hashes",
+                          _encode_base_hashes(base_hash_maps.get("receipt", {}))))
     if V2_SHEET_SITE in wanted:
         site_line_ids = db.scalars(
             select(MaintenanceSiteIssueLine.issue_line_id)
@@ -2522,6 +2907,8 @@ def build_project_master_v2(
             .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)
         ).all()
         meta_rows.append(("site_row_ids", _encode_row_ids(site_line_ids)))
+        meta_rows.append(("site_base_hashes",
+                          _encode_base_hashes(base_hash_maps.get("site", {}))))
     meta = wb.create_sheet(V2_SHEET_META)
     for key, value in _v2_sign_meta_rows(meta_rows):
         meta.append([key, value])
@@ -2726,11 +3113,28 @@ def _cascade_void_site_lines(
 def _v2_meta(wb) -> dict[str, str]:
     if V2_SHEET_META not in wb.sheetnames:
         raise WorkbookError("template_version_mismatch", "工作簿缺少 V2 元数据，请重新下载当前项目总表")
-    return {
-        str(row[0].value).strip(): str(row[1].value or "").strip()
-        for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2)
-        if row[0].value
-    }
+    raw: dict[str, str] = {}
+    for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2):
+        if not row[0].value:
+            continue
+        key = str(row[0].value).strip()
+        raw[key] = str(row[1].value or "").strip()
+    # 合并 2.7.1 分块（key@2/key@3... 按数字序拼接——字典序会让 @10 排在 @2 前）；
+    # 签名在发射端按逻辑值计算，因此必须在任何使用/验签之前完成合并。
+    merged: dict[str, str] = {}
+    chunks: dict[str, list[tuple[int, str]]] = {}
+    for key, value in raw.items():
+        if (_META_CHUNK_SEP in key
+                and key.rsplit(_META_CHUNK_SEP, 1)[-1].isdigit()):
+            base, suffix = key.rsplit(_META_CHUNK_SEP, 1)
+            chunks.setdefault(base, []).append((int(suffix), value))
+        else:
+            merged[key] = value
+    for base, items in chunks.items():
+        if base not in merged:
+            merged[base] = ""
+        merged[base] += "".join(value for _n, value in sorted(items))
+    return merged
 
 
 def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
@@ -2802,18 +3206,27 @@ def _v2_refill_for_existing_line(
     index: dict[str, int],
     row_no: int,
     line: FMaintenanceLine,
+    resolved_part: DimPart | None = None,
 ) -> CostRefill | None:
     """把一行人工回传与既有事实做 diff；原样行返回 ``None``。
 
     带实体 ID 的正常回传和「人工认证后、尚未出现在本项目导出中的全局 WBDD
     行」共用这一套字段语义，避免认领归属时顺手制造一份重复明细。
+
+    ``resolved_part``：认领分支的 PN 已由 :func:`_resolve_part_flexible` 解析过
+    （可能做了空格归一/补前导零/粘连取首段），调用方把结果传进来复用。否则这里
+    会拿**原始单元格**再做一次严格匹配，柔性解析刚命中的行必定 part_not_found
+    且当场中断整本上传——正好废掉柔性解析要解决的场景（2026-09-03 契约）。
     """
 
     pn = None
     part_id = None
     pn_cell = str(_cell(row, index, "PN") or "").strip()
     if pn_cell and pn_cell != (line.pn_std or line.pn_raw or ""):
-        part = _exact_part_for_pn(db, pn_cell)
+        part = (
+            resolved_part if resolved_part is not None
+            else _exact_part_for_pn(db, pn_cell)
+        )
         if part is None:
             raise WorkbookError("part_not_found",
                                 f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
@@ -2891,6 +3304,7 @@ def _v2_parse_parts(
     db: Session,
     project_id: str,
     ws,
+    merge: _V2MergeContext,
 ) -> tuple[
     list[CostRefill],
     int,
@@ -2900,10 +3314,10 @@ def _v2_parse_parts(
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
     required = {"操作", "维保单号", "PN", "需求数量", "人工未税单位成本",
-                "人工成本原因", "实体ID", "只读哈希", "备注"}
+                "人工成本原因", "实体ID", "只读哈希", "备注", V2_BASE_COLUMN}
     if not required.issubset(index):
         raise WorkbookError("template_version_mismatch",
-                            "03_备件明细列定义不是当前 V2.1 版本，请重新下载当前项目总表")
+                            "03_备件明细列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     out: list[CostRefill] = []
     uploaded_entity_rows = 0
     uploaded_entity_ids: set[int] = set()
@@ -2961,10 +3375,10 @@ def _v2_parse_parts(
             order = orders[0]
             if not pn_raw:
                 raise WorkbookError("missing_field", f"第 {row_no} 行新增明细必须填写 PN")
-            part = _exact_part_for_pn(db, pn_raw)
+            part = _resolve_part_flexible(
+                db, pn_raw, row_no=row_no, sheet="03_备件明细", merge=merge)
             if part is None:
-                raise WorkbookError("part_not_found",
-                                    f"第 {row_no} 行 PN {pn_raw!r} 未匹配备件主数据")
+                continue
             qty = _v2_decimal(qty_raw, row_no=row_no, label="需求数量", required=True)
             if qty is None or qty <= 0:
                 raise WorkbookError("invalid_amount",
@@ -3058,7 +3472,8 @@ def _v2_parse_parts(
                 uploaded_entity_rows += 1
                 uploaded_entity_ids.add(existing_line.id)
                 refill = _v2_refill_for_existing_line(
-                    db, row=row, index=index, row_no=row_no, line=existing_line)
+                    db, row=row, index=index, row_no=row_no, line=existing_line,
+                    resolved_part=part)
                 if refill is not None:
                     out.append(refill)
                 continue
@@ -3109,7 +3524,31 @@ def _v2_parse_parts(
                 "readonly_cell_modified",
                 f"第 {row_no} 行只读事实（单号/日期/XSDD/系统成本等）已修改或已过期，"
                 "请重新下载；如需改数量/PN/备注请改黄底列")
+        # 行级基线三路合并（2.7.0）：未触碰行直接跳过（服务端已变也不回写），
+        # 触碰行按字段判定冲突；VOID 行在服务端已变时登记整行冲突。
+        baseline = _parse_v2_row_base_token(
+            _cell(row, index, V2_BASE_COLUMN), sheet="03_备件明细",
+            entity_id=line.id, row_no=row_no)
+        baseline_order = db.get(FMaintenanceOrder, line.order_id)
+        baseline_override = db.scalar(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id == line.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ))
+        server_values = _v2_part_row_values(
+            line, baseline_order, baseline_override)
+        row_label = str(server_values.get("维保单号") or line.id)
         if operation == "VOID":
+            if _v2_server_row_changed(
+                    server_values=server_values, baseline=baseline,
+                    fields=V2_PART_BASE_FIELDS):
+                if merge.record_row_conflict(
+                        sheet="03_备件明细", row_label=row_label,
+                        entity_id=line.id, action="VOID（整行作废）"):
+                    out.append(CostRefill(line_id=line.id, operation="VOID",
+                                          unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                                          reason=None))
+                continue
             out.append(CostRefill(line_id=line.id, operation="VOID",
                                   unit_cost_ex_tax=None, unit_cost_inc_tax=None,
                                   reason=None))
@@ -3117,9 +3556,17 @@ def _v2_parse_parts(
         if operation and operation != "UPDATE":
             raise WorkbookError("invalid_operation",
                                 f"第 {row_no} 行操作只能是 UPDATE、VOID 或留空")
+        merged_row = _v2_merge_row(
+            sheet="03_备件明细", row_label=row_label, entity_id=line.id,
+            row=row, index=index, base_fields=V2_PART_BASE_FIELDS,
+            server_values=server_values, baseline=baseline, ctx=merge)
+        if merged_row is None:
+            continue
 
+        # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
+        # 导出时的旧值静默盖掉他人改动（D-02）。
         refill = _v2_refill_for_existing_line(
-            db, row=row, index=index, row_no=row_no, line=line)
+            db, row=merged_row, index=index, row_no=row_no, line=line)
         if refill is not None:
             out.append(refill)
     return (
@@ -3130,10 +3577,17 @@ def _v2_parse_parts(
     )
 
 
-def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
+def _v2_parse_site(
+    db: Session, project_id: str, ws, merge: _V2MergeContext,
+) -> tuple[list[SiteReturnFlag], set[str]]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
+    if V2_BASE_COLUMN not in index:
+        raise WorkbookError("template_version_mismatch",
+                            "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     out: list[SiteReturnFlag] = []
+    present_ids: set[str] = set()
+    manual_ids: dict[str, int] = {}
     new_counts: dict[str, int] = {}
     # One issue header is repeated on every line in Excel.  Track changes
     # relative to the stored header so changing a single row propagates once;
@@ -3146,6 +3600,8 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
         if _is_example_row(row):
             continue
         raw_id = _cell(row, index, "实体ID")
+        if raw_id not in (None, ""):
+            present_ids.add(str(raw_id))
         issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
         issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no, label="领用")
                       if _cell(row, index, "领用日期") not in (None, "") else None)
@@ -3168,12 +3624,10 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
                 )
             if quantity <= 0:
                 raise WorkbookError("invalid_amount", f"第 {row_no} 行领用数量必须大于 0")
-            part = _exact_part_for_pn(db, pn)
+            part = _resolve_part_flexible(
+                db, pn, row_no=row_no, sheet="06_领用返还", merge=merge)
             if part is None:
-                raise WorkbookError(
-                    "part_not_found",
-                    f"06_领用返还第 {row_no} 行 PN {pn!r} 未匹配备件主数据",
-                )
+                continue
             part_id = part.id
             pn = part.pn_std
             document_date = re.search(r"(?:^|-)20\d{6}(?:-|$)", issue_no)
@@ -3182,6 +3636,15 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
                 issue_date = datetime.strptime(raw_document_date, "%Y%m%d").date()
             identity = "|".join([project_id, issue_no, pn, serial_number or ""])
             raw_id = f"manual-site:{hashlib.sha1(identity.encode('utf-8')).hexdigest()}"
+            # 同文件内重复的手工行（同单号/PN/SN）会推导出相同确定性主键，
+            # apply 期双 INSERT 撞主键变 500（本地 E2E 实测）。解析期拒绝。
+            prior_row = manual_ids.get(raw_id)
+            if prior_row is not None:
+                raise WorkbookError(
+                    "duplicate_site_row",
+                    f"06_领用返还第 {row_no} 行与第 {prior_row} 行重复"
+                    "（同领用单号/PN/SN），请删除重复行后重传")
+            manual_ids[raw_id] = row_no
             existing_line = db.get(MaintenanceSiteIssueLine, raw_id)
             if existing_line is not None:
                 is_create = False
@@ -3216,6 +3679,17 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
                 raise WorkbookError("project_mismatch", f"第 {row_no} 行领用事实不属于本项目")
             issue_id = existing_line.issue_id
             line_no = existing_line.line_no
+            baseline = _parse_v2_row_base_token(
+                _cell(row, index, V2_BASE_COLUMN), sheet="06_领用返还",
+                entity_id=raw_id, row_no=row_no)
+            server_values = _v2_site_row_values(existing_line, issue)
+            if not _v2_merge_row(
+                    sheet="06_领用返还", row_label=(
+                        str(server_values.get("领用单号") or raw_id)),
+                    entity_id=raw_id,
+                    row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
+                    server_values=server_values, baseline=baseline, ctx=merge):
+                continue
             if pn is not None and pn != existing_line.pn:
                 part = _exact_part_for_pn(db, pn)
                 if part is None:
@@ -3260,6 +3734,7 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
             quantity=quantity,
             remark=str(_cell(row, index, "备注") or "").strip() or None,
         ))
+    present_ids |= {f.issue_line_id for f in out if not f.is_create}
     chosen_headers: dict[str, tuple[str, date]] = {}
     for issue_id, header in header_changes.items():
         new_nos = header["new_nos"]
@@ -3284,7 +3759,7 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
                 f"领用单号 {chosen_no!r} 已被本项目另一张领用单使用",
             )
         chosen_headers[issue_id] = (chosen_no, chosen_date)
-    return [
+    merged_out = [
         replace(
             flag,
             issue_no=chosen_headers[flag.issue_id][0],
@@ -3294,6 +3769,7 @@ def _v2_parse_site(db: Session, project_id: str, ws) -> list[SiteReturnFlag]:
         else flag
         for flag in out
     ]
+    return merged_out, present_ids
 
 
 def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
@@ -3399,22 +3875,29 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
     return out
 
 
-def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.ExpenseUpdate], list[str]]:
-    """04 解析（V2.1）：操作列（空/CREATE/UPDATE/VOID）+ 空白实体ID 手工新增
+def _v2_parse_expenses(
+    db: Session, project_id: str, ws, merge: _V2MergeContext,
+) -> tuple[list[ec.ExpenseUpdate], list[str], set[str]]:
+    """04 解析（V2.7）：操作列（空/CREATE/UPDATE/VOID）+ 空白实体ID 手工新增
     （27c95fa 既有语义，实体ID 空 + 费用单号/明细序号必填 → CREATE）。
 
-    返回 (updates, void_raw_line_ids)；缺行=作废的对账在 validate 里做。
+    返回 (updates, void_raw_line_ids, present_ids)；present_ids 是文件中出现
+    实体ID 的全部行（含未触碰行），供缺行=作废的对账使用。
     """
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
-    if "操作" not in index:
+    required = {"操作", "实体ID", V2_BASE_COLUMN}
+    if not required.issubset(index):
         raise WorkbookError("template_version_mismatch",
-                            "04_费用报销列定义不是当前 V2.1 版本，请重新下载当前项目总表")
+                            "04_费用报销列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     # Expense mutation requires a current, unshared contract identity.  Stable
     # row ownership itself is checked against expense attribution below.
     contract_nos = _writable_contract_nos(db, project_id)
+    expected_expense_ids = set(_expected_expense_ids(db, project_id))
     out: list[ec.ExpenseUpdate] = []
     voids: list[str] = []
+    present_ids: set[str] = set()
+    manual_expense_ids: dict[str, int] = {}
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
@@ -3425,6 +3908,8 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
             raise WorkbookError("invalid_operation",
                                 f"第 {row_no} 行操作只能是 VOID、UPDATE、CREATE 或留空")
         raw_id = str(_cell(row, index, "实体ID") or "").strip()
+        if raw_id:
+            present_ids.add(raw_id)
         bxd_no = str(_cell(row, index, "费用单号") or "").strip() or None
         raw_line_no = _cell(row, index, "明细序号")
         line_no = None
@@ -3454,11 +3939,34 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
         is_create = False
         expense = None
         if raw_id:
+            if raw_id not in expected_expense_ids:
+                # 跨项目/伪造实体先于基线解码拒绝（与 03/06 同序）。
+                raise WorkbookError(
+                    "expense_not_in_project",
+                    f"第 {row_no} 行报销事实不属于本项目，请重新下载")
             expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_id))
             if expense is None:
                 raise WorkbookError("expense_not_found", f"第 {row_no} 行报销事实已不存在，请重新下载")
+            baseline = _parse_v2_row_base_token(
+                _cell(row, index, V2_BASE_COLUMN), sheet="04_费用报销",
+                entity_id=raw_id, row_no=row_no)
+            server_values = _v2_expense_row_values(expense, "")
+            row_label = str(server_values.get("费用单号") or raw_id)
             if operation == "VOID":
+                if _v2_server_row_changed(
+                        server_values=server_values, baseline=baseline,
+                        fields=V2_EXPENSE_BASE_FIELDS):
+                    if merge.record_row_conflict(
+                            sheet="04_费用报销", row_label=row_label,
+                            entity_id=raw_id, action="VOID（整行作废）"):
+                        voids.append(raw_id)
+                    continue
                 voids.append(raw_id)
+                continue
+            if not _v2_merge_row(
+                    sheet="04_费用报销", row_label=row_label, entity_id=raw_id,
+                    row=row, index=index, base_fields=V2_EXPENSE_BASE_FIELDS,
+                    server_values=server_values, baseline=baseline, ctx=merge):
                 continue
         else:
             if not bxd_no or line_no is None:
@@ -3472,6 +3980,15 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
                 raise WorkbookError("missing_amount", f"第 {row_no} 行手工新增报销必须填写未税金额")
             scope = hashlib.sha1(contract_no.encode("utf-8")).hexdigest()[:8]
             raw_id = f"{bxd_no[:40]}#{line_no}@{scope}"
+            # 同文件内重复的费用单号+序号推导相同 raw_id，apply 期双 INSERT
+            # 撞唯一键（与 06 同类，解析期拒绝）。
+            prior_row = manual_expense_ids.get(raw_id)
+            if prior_row is not None:
+                raise WorkbookError(
+                    "duplicate_expense_row",
+                    f"04_费用报销第 {row_no} 行与第 {prior_row} 行重复"
+                    "（同费用单号+明细序号），请删除重复行后重传")
+            manual_expense_ids[raw_id] = row_no
             expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_id))
             is_create = expense is None
 
@@ -3506,7 +4023,7 @@ def _v2_parse_expenses(db: Session, project_id: str, ws) -> tuple[list[ec.Expens
             data_status=str(_cell(row, index, "流程状态") or "").strip() or None,
             remark=str(_cell(row, index, "备注") or "").strip() or None,
         ))
-    return out, voids
+    return out, voids, present_ids
 
 
 def _ensure_contract_for_xsdd_apply(
@@ -3699,9 +4216,14 @@ def _resolve_plan_contract(db: Session, project_id: str, contract_no: str, row_n
         + (f"（可用：{'、'.join(available[:8])}）" if available else "（本项目还没有合同，请先填挂靠单据上的 XSDD 号）"))
 
 
-def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp]:
+def _v2_parse_receipts(
+    db: Session, project_id: str, ws, merge: _V2MergeContext,
+) -> list[ec.CollectionOp]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
+    if V2_BASE_COLUMN not in index:
+        raise WorkbookError("template_version_mismatch",
+                            "05_实收回款列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     out: list[ec.CollectionOp] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
@@ -3738,6 +4260,26 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
             ))
             if contract is not None else None
         )
+        # 行级基线三路合并：带实体ID的既有行未触碰则跳过（05 的缺行=作废
+        # 对账以文件实体ID列为准，与本 ops 列表无关）。
+        raw_receipt_id = str(_cell(row, index, "实体ID") or "").strip()
+        if existing is not None and raw_receipt_id:
+            baseline = _parse_v2_row_base_token(
+                _cell(row, index, V2_BASE_COLUMN), sheet="05_实收回款",
+                entity_id=raw_receipt_id, row_no=row_no)
+            server_values = _v2_receipt_row_values(
+                existing, contract_no or "")
+            merged_row = _v2_merge_row(
+                sheet="05_实收回款", row_label=(
+                    f"{server_values.get('合同编号') or ''}"
+                    f"/{server_values.get('报告月份') or ''}"),
+                entity_id=raw_receipt_id,
+                row=row, index=index, base_fields=V2_RECEIPT_BASE_FIELDS,
+                server_values=server_values, baseline=baseline, ctx=merge)
+            if merged_row is None:
+                continue
+            # 同 03：下游 CollectionOp 直接读整行，必须读 rebase 后的值。
+            row = merged_row
         out.append(ec.CollectionOp(
             operation="UPDATE" if existing is not None else "CREATE",
             project_contract_id=(contract.project_contract_id if contract else ""),
@@ -3747,6 +4289,22 @@ def _v2_parse_receipts(db: Session, project_id: str, ws) -> list[ec.CollectionOp
             remark=str(row[index["备注"]] or "").strip() or None,
             collection_status=str(row[index["状态"]] or "confirmed").strip() or "confirmed",
         ))
+    return out
+
+
+def _encode_base_hashes(hashes: dict[str, str]) -> str:
+    """行基线哈希图（entity_id -> sha256），用于缺行=作废的行级冲突判定。"""
+    return ",".join(f"{eid}:{digest}" for eid, digest in sorted(hashes.items()))
+
+
+def _decode_base_hashes(value: str | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for chunk in str(value or "").split(","):
+        chunk = chunk.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        eid, digest = chunk.rsplit(":", 1)
+        out[eid] = digest
     return out
 
 
@@ -4067,12 +4625,14 @@ def validate_project_master_v2(
     project_id: str,
     data: bytes,
     user_ctx: UserContext | None = None,
+    force_takeover: bool = False,
 ) -> MasterV2Plan:
     try:
         wb = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:
         raise WorkbookError("invalid_file", f"无法读取 .xlsx：{type(exc).__name__}") from exc
     meta = _v2_verify_meta(db, wb, project_id)
+    merge = _V2MergeContext(force_takeover=force_takeover)
     included_meta = tuple(
         name.strip() for name in meta["included_sheets"].split(",") if name.strip()
     )
@@ -4099,7 +4659,7 @@ def validate_project_master_v2(
     if V2_SHEET_PARTS in included:
         (parsed_refills, uploaded_line_rows, uploaded_line_ids,
          assignment_changes) = _v2_parse_parts(
-            db, project_id, wb[V2_SHEET_PARTS])
+            db, project_id, wb[V2_SHEET_PARTS], merge)
         cost_refills = tuple(parsed_refills)
         if (assignment_changes and user_ctx is not None
                 and user_ctx.role not in FULL_SCOPE_ROLES):
@@ -4107,24 +4667,41 @@ def validate_project_master_v2(
                 "assignment_permission_denied",
                 "这份项目总表会更正统一 WBDD 的项目归属，仅管理员或全量项目账号可确认")
     if V2_SHEET_SITE in included:
-        site_flags = list(_v2_parse_site(db, project_id, wb[V2_SHEET_SITE]))
+        site_flags, uploaded_site_ids = _v2_parse_site(
+            db, project_id, wb[V2_SHEET_SITE], merge)
+        site_flags = list(site_flags)
         # 2026-08-23：06 缺行=作废（用户口径：Excel 删行覆盖上传，没有的默认作废）
         export_site_ids = _decode_row_ids(meta.get("site_row_ids"))
-        uploaded_site_ids = {f.issue_line_id for f in site_flags if not f.is_create}
+        export_site_hashes = _decode_base_hashes(meta.get("site_base_hashes"))
         missing_site_ids = [sid for sid in export_site_ids
                             if sid not in uploaded_site_ids]
         for sid in missing_site_ids:
             line_row = db.get(MaintenanceSiteIssueLine, sid)
             if line_row is not None and line_row.is_active:
+                issue_row = db.get(MaintenanceSiteIssue, line_row.issue_id)
+                values = _v2_site_row_values(line_row, issue_row) if issue_row else {}
+                exported_hash = export_site_hashes.get(sid)
+                if (exported_hash is not None
+                        and _v2_row_base_hash(values, V2_SITE_BASE_FIELDS)
+                        != exported_hash):
+                    if merge.record_row_conflict(
+                            sheet="06_领用返还",
+                            row_label=str(values.get("领用单号") or sid),
+                            entity_id=sid, action="删行=作废（服务端该行已变）"):
+                        site_flags.append(SiteReturnFlag(
+                            issue_line_id=sid, no_return=None, is_void=True))
+                    continue
                 site_flags.append(SiteReturnFlag(
                     issue_line_id=sid, no_return=None, is_void=True))
         site_flags = tuple(site_flags)
     if V2_SHEET_EXPENSE in included:
-        expense_updates, expense_voids = _v2_parse_expenses(
-            db, project_id, wb[V2_SHEET_EXPENSE])
+        (expense_updates, expense_voids,
+         uploaded_expense_present) = _v2_parse_expenses(
+            db, project_id, wb[V2_SHEET_EXPENSE], merge)
     if V2_SHEET_RECEIPTS in included:
         receipt_ws = wb[V2_SHEET_RECEIPTS]
-        receipt_ops = tuple(_v2_parse_receipts(db, project_id, receipt_ws))
+        receipt_ops = tuple(_v2_parse_receipts(
+            db, project_id, receipt_ws, merge))
         # 05 缺行=作废：只允许命中导出时由 HMAC 签名的稳定 collection_id。
         # 导出之后新产生的回款不在 envelope 中，不能被旧文件误删。
         export_receipt_ids = _decode_row_ids(meta.get("receipt_row_ids"))
@@ -4179,6 +4756,20 @@ def validate_project_master_v2(
                         "05_实收回款中仍有相同合同和月份的行，但隐藏实体ID已丢失；"
                         "为避免把保留的回款误作废，请重新下载项目总表后修改",
                     )
+                # 2.7.0 行级冲突：删行=作废时若服务端该快照已变，未接管则跳过
+                exported_hash = _decode_base_hashes(
+                    meta.get("receipt_base_hashes")).get(collection_id)
+                if exported_hash is not None and _v2_row_base_hash(
+                        _v2_receipt_row_values(snapshot, contract.contract_no),
+                        V2_RECEIPT_BASE_FIELDS) != exported_hash:
+                    if not merge.record_row_conflict(
+                            sheet=V2_SHEET_RECEIPTS,
+                            row_label=(
+                                f"{contract.contract_no} "
+                                f"{snapshot.report_month:%Y-%m}"),
+                            entity_id=collection_id,
+                            action="删行=作废（服务端该行已变）"):
+                        continue
                 implicit_voids.append(ec.CollectionOp(
                     operation="VOID",
                     project_contract_id=contract.project_contract_id,
@@ -4250,11 +4841,38 @@ def validate_project_master_v2(
     # 上传时消失」的行；导出后新导入的行不在导出全集里，天然豁免。
     if V2_SHEET_PARTS in included:
         export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
+        export_parts_hashes = _decode_base_hashes(meta.get("parts_base_hashes"))
         voided_line_ids = {r.line_id for r in cost_refills if r.operation == "VOID"}
         for line_id_str in export_parts_ids - {str(i) for i in uploaded_line_ids}:
             line_id = int(line_id_str)
             if line_id in voided_line_ids:
                 continue
+            missing_line = db.get(FMaintenanceLine, line_id)
+            exported_hash = export_parts_hashes.get(line_id_str)
+            if (missing_line is not None and missing_line.is_active
+                    and exported_hash is not None):
+                missing_order = db.get(FMaintenanceOrder, missing_line.order_id)
+                missing_override = db.scalar(
+                    select(MaintenanceManualCostOverride).where(
+                        MaintenanceManualCostOverride.line_id == line_id,
+                        MaintenanceManualCostOverride.active.is_(True),
+                    ))
+                values = _v2_part_row_values(
+                    missing_line, missing_order, missing_override)
+                if _v2_row_base_hash(values, V2_PART_BASE_FIELDS) != exported_hash:
+                    if merge.record_row_conflict(
+                            sheet="03_备件明细",
+                            row_label=str(values.get("维保单号") or line_id_str),
+                            entity_id=line_id_str,
+                            action="删行=作废（服务端该行已变）"):
+                        cost_refills = cost_refills + (CostRefill(
+                            line_id=line_id, operation="VOID",
+                            unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                            reason=None),)
+                        will_void_rows.append(
+                            {"sheet": "03_备件明细", "entity_id": line_id_str,
+                             "label": "", "reason": "上传文件缺行（接管覆盖）"})
+                    continue
             cost_refills = cost_refills + (CostRefill(
                 line_id=line_id, operation="VOID",
                 unit_cost_ex_tax=None, unit_cost_inc_tax=None, reason=None),)
@@ -4262,14 +4880,28 @@ def validate_project_master_v2(
                                    "label": "", "reason": "上传文件缺行"})
 
     if V2_SHEET_EXPENSE in included:
-        uploaded_expense_ids = ({u.raw_line_id for u in expense_updates}
-                                | set(expense_voids))
         # 缺行=作废只针对导出时存在的行（P1，Codex review #272）：
         # 导出后新导入的行不在导出全集里，天然豁免误杀。
         export_expense_ids = _decode_row_ids(meta.get("expense_row_ids"))
+        export_expense_hashes = _decode_base_hashes(meta.get("expense_base_hashes"))
         missing_expense_ids = [rid for rid in export_expense_ids
-                               if rid not in uploaded_expense_ids]
+                               if rid not in uploaded_expense_present]
         for rid in missing_expense_ids:
+            expense_row = db.scalar(select(FProjectExpense).where(
+                FProjectExpense.raw_line_id == rid))
+            exported_hash = export_expense_hashes.get(rid)
+            if (expense_row is not None and exported_hash is not None
+                    and _v2_row_base_hash(
+                        _v2_expense_row_values(expense_row, ""),
+                        V2_EXPENSE_BASE_FIELDS) != exported_hash):
+                if merge.record_row_conflict(
+                        sheet="04_费用报销",
+                        row_label=str(expense_row.bxd_no or rid),
+                        entity_id=rid, action="删行=作废（服务端该行已变）"):
+                    expense_voids.append(rid)
+                    will_void_rows.append(
+                        {"sheet": "04_费用报销", "entity_id": rid, "label": ""})
+                continue
             expense_voids.append(rid)
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
         # 2026-08-22 用户拍板：撤销行损失防呆（原 50% 批量损失拦截）——
@@ -4278,6 +4910,10 @@ def validate_project_master_v2(
 
     if V2_SHEET_PARTS in included:
         export_parts_ids = _decode_row_ids(meta.get("parts_row_ids"))
+
+    unmatched_error = _unmatched_pn_error(db, merge)
+    if unmatched_error is not None:
+        raise unmatched_error
 
     # Metadata HMAC proves the exported identity envelope was not forged, while
     # this live check proves every explicit/implicit target still belongs to
@@ -4319,6 +4955,11 @@ def validate_project_master_v2(
         contract_amount_change=contract_amount_change,
         expense_voids=tuple(expense_voids),
         will_void_rows=tuple(will_void_rows),
+        force_takeover=merge.force_takeover,
+        field_changes=tuple(merge.changes),
+        conflicts=tuple(merge.conflicts),
+        overridden=tuple(merge.overridden),
+        warnings=tuple(merge.warnings),
     )
 
 
@@ -4337,6 +4978,7 @@ def _v2_apply_result(
     operated_by: str,
     import_batch_id: str,
     replayed: bool,
+    revision_drift: bool = False,
 ) -> dict:
     return {
         "applied_by": operated_by,
@@ -4347,7 +4989,12 @@ def _v2_apply_result(
         "sheets": list(plan.sheets),
         **plan.summary,
         "will_void_rows": [dict(row) for row in plan.will_void_rows],
-        "warnings": [],
+        "changes": [dict(item) for item in plan.field_changes],
+        "conflicts": [dict(item) for item in plan.conflicts],
+        "overridden": [dict(item) for item in plan.overridden],
+        "force_takeover": plan.force_takeover,
+        "revision_drift": revision_drift,
+        "warnings": list(plan.warnings),
         "replayed": replayed,
     }
 
@@ -4525,7 +5172,7 @@ def apply_project_master_v2(
                 operated_by=operated_by,
                 import_batch_id=import_batch_id,
                 replayed=True,
-            )
+            )  # replay：以原回执语义返回，冲突字段为空
     carries_export_identity = bool(plan.export_id or plan.file_sha256)
     if carries_export_identity and (
         plan.expected_workbook_revision is None
@@ -4535,17 +5182,20 @@ def apply_project_master_v2(
             "invalid_concurrency_token",
             "工作簿缺少项目并发版本，请重新下载当前项目总表。",
         )
-    if (
+    # 2.7.0：整本 revision 不再硬拒（行级基线三路合并已区分用户改动与
+    # 导出旧值）；漂移仅记录，供回执与审计观测。
+    revision_drift = bool(
         plan.expected_workbook_revision is not None
         and (
             workbook_state.revision != plan.expected_workbook_revision
-            or workbook_state.data_version
-            != plan.expected_workbook_data_version
+            or workbook_state.data_version != plan.expected_workbook_data_version
         )
-    ):
+    )
+    if plan.conflicts and not plan.force_takeover:
         raise WorkbookError(
-            "stale_workbook",
-            "项目数据已被其他操作更新；本次上传未写入任何数据，请重新下载后再改。",
+            "row_conflicts",
+            "部分行已被他人更新，本次上传未写入任何数据；请处理后重试或选择强制接管。",
+            issues=[dict(item) for item in plan.conflicts],
         )
     plan_contract_nos = prestate_contract_nos
     prelock_contract_nos = plan_contract_nos | prelock_void_contract_nos
@@ -5266,4 +5916,5 @@ def apply_project_master_v2(
         operated_by=operated_by,
         import_batch_id=import_batch_id,
         replayed=False,
+        revision_drift=revision_drift,
     )

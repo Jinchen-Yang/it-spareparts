@@ -1,28 +1,38 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.26.0 release notes", () => {
-  it("publishes the attachment and maintenance salesperson updates", () => {
-    expect(APP_VERSION).toBe("1.26.0");
+describe("v1.27.0 release notes", () => {
+  it("publishes full workbook editing with row-level merge", () => {
+    expect(APP_VERSION).toBe("1.27.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-08-31");
+    expect(LATEST.date).toBe("2026-09-02");
 
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/任意常见文件均可上传/);
-    expect(notes).toMatch(/显示上传人姓名.*显示账号名/);
-    expect(notes).toMatch(/销售人员.*手工.*清空/);
-    expect(notes).toMatch(/负责人.*改派.*同步销售人员/);
+    expect(notes).toMatch(/全量修改/);
+    expect(notes).toMatch(/行级判定/);
+    expect(notes).toMatch(/强制接管/);
+    expect(notes).toMatch(/负责人与销售/);
+    expect(notes).toMatch(/逐字段/);
   });
 
   it("keeps prior releases archived in the changelog", () => {
     const versions = CHANGELOG.map((entry) => entry.version);
+    expect(versions).toContain("1.26.0");
     expect(versions).toContain("1.25.0");
-    expect(versions).toContain("1.24.0");
-    expect(versions).toContain("1.23.0");
     expect(versions).toContain("1.21.0");
-    // 数组按新→旧排列
-    expect(versions[0]).toBe("1.26.0");
+    expect(versions[0]).toBe("1.27.0");
+  });
+});
+
+describe("v1.26.0 release notes (archived)", () => {
+  const v126 = CHANGELOG.find((entry) => entry.version === "1.26.0")!;
+
+  it("keeps acceptance attachment openness and uploader names (2026-08-31)", () => {
+    expect(v126.date).toBe("2026-08-31");
+    const notes = v126.items.join("\n");
+    expect(notes).toMatch(/验收附件放开类型限制/);
+    expect(notes).toMatch(/显示上传人姓名/);
   });
 });
 

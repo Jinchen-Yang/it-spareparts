@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.26.0";
+export const APP_VERSION = "1.27.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.27.0",
+    date: "2026-09-02",
+    items: [
+      "项目总表恢复全量修改：下载的 Excel 中除系统隐藏列外所有字段可改（含成本与合同总额），改值、删行（作废）、加行适用于每张表",
+      "并发冲突从整本作废改为行级判定：他人导入或修改不再让你手里的表整体过期，未改动的行自动以最新数据为准",
+      "同行冲突时展示三值对照（你下载时的值/当前最新值/你上传的值），确认后可强制接管覆盖，全部操作留有审计",
+      "项目负责人与销售人员获得本人项目的总表编辑权（含成本与合同额字段）",
+      "上传回执逐字段列出本次改动明细；每次下载/上传/被拒均有记录可查",
+    ],
+  },
   {
     version: "1.26.0",
     date: "2026-08-31",
