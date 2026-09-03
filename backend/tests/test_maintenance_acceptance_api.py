@@ -787,3 +787,42 @@ def test_download_deleted_attachment_returns_404(db):
 
     gone = manager.get(f"/api/maintenance/acceptance-files/{upload.json()['file_id']}")
     assert gone.status_code == 404
+
+
+# ---------- 附件体积上限（2026-09-04：验收 50MB，回款凭证仍 20MB）----------
+
+def test_acceptance_attachment_limit_is_50mb_and_evidence_stays_20mb():
+    """两个域各用各的上限：改一个不得把另一个顺手带走。"""
+    from app.services import maintenance_attachment_validation as av
+
+    assert av.MAX_ACCEPTANCE_ATTACHMENT_BYTES == 50 * 1024 * 1024
+    assert av.MAX_MAINTENANCE_ATTACHMENT_BYTES == 20 * 1024 * 1024
+    assert acceptance_service.MAX_ACCEPTANCE_FILE_BYTES == 50 * 1024 * 1024
+
+
+def test_acceptance_accepts_a_file_over_the_old_20mb_limit():
+    """旧上限之上、新上限之内的附件必须收下——这条就是本次改动的验收点。"""
+    payload = b"%PDF-1.7\n" + b"x" * (30 * 1024 * 1024)
+    name, ext, mime = acceptance_service.validate_attachment(
+        filename="现场验收.pdf", mime_type="application/pdf", content=payload)
+    assert (name, ext) == ("现场验收.pdf", ".pdf")
+    assert mime == "application/pdf"
+
+
+def test_acceptance_still_refuses_over_50mb_with_a_message_matching_the_limit():
+    with pytest.raises(acceptance_service.MaintenanceAcceptanceTooLarge) as raised:
+        acceptance_service.validate_attachment(
+            filename="超大.pdf", mime_type="application/pdf",
+            content=b"x" * (acceptance_service.MAX_ACCEPTANCE_FILE_BYTES + 1))
+    # 文案必须跟着上限走，不能再写死 20MB
+    assert "50MB" in str(raised.value)
+
+
+def test_collection_evidence_limit_unchanged_at_20mb():
+    from app.services import maintenance_attachment_validation as av
+
+    with pytest.raises(av.AttachmentTooLarge) as raised:
+        av.validate_collection_evidence_attachment(
+            filename="回单.pdf", mime_type="application/pdf",
+            content=b"x" * (av.MAX_MAINTENANCE_ATTACHMENT_BYTES + 1))
+    assert "20MB" in str(raised.value)
