@@ -390,15 +390,19 @@ def run_import(session: Session, file_path: str, original_name: str,
         if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
             from app.services import maintenance_bulk_import
 
-            with open(file_path, "rb") as sales_workbook:
-                sales_workbook_data = sales_workbook.read()
+            # 复用 loader 已解析的 TransformResult，不重开 XLSX：_detect 走
+            # read_only=False 会实体化每个 worksheet，抵消 load_selected_workbook
+            # 的内存边界（真实销售导出有 19 个 sheet），也可能选到与已入库事实
+            # 不同的那一张表（Codex P1，2026-09-03）。
             try:
                 sales_project_sync = maintenance_bulk_import.sync_uploaded_sales_workbook(
                     session,
-                    sales_workbook_data,
+                    None,
                     original_name,
                     operated_by=uploaded_by or "system",
                     import_batch_id=batch.id,
+                    detected_sheet=maintenance_bulk_import.transformed_sales_sheet(
+                        result, source_columns=src_cols),
                 )
             except (
                 maintenance_bulk_import.BulkImportInvalid,

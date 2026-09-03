@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.business_time import business_today
+from app.etl import mapping
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
@@ -2210,13 +2211,90 @@ register_adapter(SalesContractAmountAdapter())
 register_adapter(ReceiptCollectionAdapter())
 
 
+def _synthetic_cell(value: Any) -> Any:
+    """把 pandas 空值还原成原始表格的空单元格。
+
+    合成 DetectedSheet 必须与 openpyxl 直读同形：空单元格是 None 而不是
+    NaN/NaT，否则下游会把 'nan' 当成非法日期，把整张销售订单判成阻断错误。
+    """
+
+    if value is None:
+        return None
+    try:
+        if value != value:  # NaN / NaT 自身不相等
+            return None
+    except (TypeError, ValueError):
+        return value
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def transformed_sales_sheet(
+    result,
+    *,
+    source_columns: list[str],
+) -> DetectedSheet:
+    """Adapt the already-bounded generic sales transform without reopening XLSX."""
+
+    internal_by_detected = {
+        "order_no": "order_no",
+        "raw_order_id": "raw_order_id",
+        "data_status": "data_status",
+        "maintenance_business": "maintenance_business",
+        "business_type": "business_type",
+        "project_name": "maintenance_project_name",
+        "project_manager": "maintenance_project_manager",
+        "period_from": "maintenance_period_from",
+        "period_to": "maintenance_period_to",
+        "order_amount": "amount_inc_tax",
+        "tax_flag": "is_tax_inclusive",
+        "tax_rate": "tax_rate",
+        "tax_amount": "tax_amount",
+        "amount_ex_tax": "amount_ex_tax",
+    }
+    present_internal = {
+        mapping.SALES_HEAD[column]
+        for column in source_columns
+        if column in mapping.SALES_HEAD
+    }
+    fields = [
+        field
+        for field, internal in internal_by_detected.items()
+        if internal in present_internal
+    ]
+    field_indexes = {field: index for index, field in enumerate(fields)}
+    rows: list[tuple[int, tuple[Any, ...]]] = []
+    for row_no, order in enumerate(result.orders.values(), start=3):
+        values: list[Any] = []
+        for field in fields:
+            value = order.get(internal_by_detected[field])
+            if field == "tax_flag":
+                value = "含税" if value is True else (
+                    "不含税" if value is False else None
+                )
+            values.append(_synthetic_cell(value))
+        rows.append((row_no, tuple(values)))
+    return DetectedSheet(
+        name="generic-sales-transform",
+        header_row=2,
+        header_rows=(1, 2),
+        headers=tuple(fields),
+        system_headers=(),
+        field_indexes=field_indexes,
+        field_matches={},
+        rows=tuple(rows),
+    )
+
+
 def sync_uploaded_sales_workbook(
     db: Session,
-    data: bytes,
+    data: bytes | None,
     filename: str,
     *,
     operated_by: str,
     import_batch_id: int,
+    detected_sheet: DetectedSheet | None = None,
 ) -> dict:
     """Project explicit maintenance sales rows during the ordinary import.
 
@@ -2226,20 +2304,21 @@ def sync_uploaded_sales_workbook(
     are therefore incapable of creating/updating maintenance contracts.
     """
 
-    try:
+    # 优先复用 loader 已经解析好的 TransformResult（transformed_sales_sheet），
+    # 不再重开 XLSX：_detect 走 read_only=False 会把每个 worksheet 都实体化，
+    # 抵消 load_selected_workbook 的内存边界（真实销售导出有 19 个 sheet），
+    # 而且可能选到与已入库事实不同的那一张表。同时也消除了「文件已被判定为
+    # SALES、但适配器识别失败就静默 not_applicable」这条无声跳过路径
+    # （Codex P1 ×2，2026-09-03）。
+    adapter = _ADAPTERS["sales_contract_amount"]
+    if detected_sheet is not None:
+        sheet = detected_sheet
+    else:
+        # 文件已被判定为 SALES 后，识别失败是硬错误：静默 not_applicable 会让
+        # 一份真实销售订单看起来「导入成功但一个项目都没建」。
         adapter, sheet = _detect(data)
-    except BulkImportInvalid as exc:
-        return {
-            "status": "not_applicable",
-            "eligible_rows": 0,
-            "reason": str(exc),
-        }
-    if adapter.key != "sales_contract_amount":
-        return {
-            "status": "not_applicable",
-            "eligible_rows": 0,
-            "reason": "未识别为销售订单合同事实表",
-        }
+        if adapter.key != "sales_contract_amount":
+            raise BulkImportInvalid("未识别为销售订单合同事实表")
     written_raw_ids = set(db.scalars(select(FSalesOrder.raw_order_id).where(
         FSalesOrder.import_batch_id == import_batch_id
     )))

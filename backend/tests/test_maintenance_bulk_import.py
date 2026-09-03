@@ -708,6 +708,43 @@ def test_ordinary_sales_auto_project_preserves_one_sided_period(
     assert project.period_to == period_to
 
 
+def test_ordinary_sales_auto_project_never_reopens_the_xlsx(db, tmp_path, monkeypatch):
+    """契约：自动建项只吃 loader 已解析的 TransformResult，绝不重开 XLSX。
+
+    重开等于 openpyxl 以 read_only=False 实体化每个 worksheet（真实销售导出
+    有 19 个 sheet），抵消 loader 的 load_selected_workbook 内存边界，还可能
+    选到与已入库事实不同的那一张表。把服务侧的 load_workbook 换成炸弹即可
+    把这条边界钉死。
+    """
+
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0033",
+        raw_order_id="sales-no-reopen",
+        project_name="不重开工作簿维保项目",
+        period_from=date(2026, 1, 1),
+        period_to=date(2026, 12, 31),
+    )
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("自动建项重开了 XLSX，内存边界被抵消")
+
+    monkeypatch.setattr(bulk, "load_workbook", _explode)
+
+    pipeline.run_import(
+        db,
+        path,
+        "sales-no-reopen.xlsx",
+        uploaded_by="sales-importer",
+        mode="upsert",
+        auto_assign_maintenance_projects=True,
+    )
+
+    project = db.scalar(select(MaintenanceProject))
+    assert project is not None
+    assert project.project_code == "XSDD-20260902-0033"
+
+
 def test_ordinary_sales_inverted_period_rolls_back_all_facts(db, tmp_path):
     path = _ordinary_sales_workbook(
         tmp_path,

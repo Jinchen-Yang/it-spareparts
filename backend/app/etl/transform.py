@@ -194,7 +194,16 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "customer_type": cleaner.clean_str(g("customer_type")),
             "customer_source": cleaner.clean_str(g("customer_source")),
             "customer_city": cleaner.clean_str(g("customer_city")),
+            "maintenance_business": cleaner.clean_str(g("maintenance_business")),
             "business_type": cleaner.clean_str(g("business_type")),
+            "maintenance_project_name": cleaner.clean_str(
+                g("maintenance_project_name")
+            ),
+            "maintenance_project_manager": cleaner.clean_str(
+                g("maintenance_project_manager")
+            ),
+            "maintenance_period_from": g("maintenance_period_from"),
+            "maintenance_period_to": g("maintenance_period_to"),
             "warehouse": cleaner.clean_str(g("warehouse")),
             "is_tax_inclusive": is_tax_inclusive,
             "tax_amount": tax_amount,
