@@ -21,6 +21,17 @@ from app.services import maintenance_source_health as health
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
 
+def _fresh_day() -> date:
+    """一个「肯定还没过期」的来源日期。
+
+    readiness 的 stale 判定是 business_today() - as_of > STALE_DAYS(45)，
+    夹具若写死绝对日期，就会在真实时间走过那 45 天之后集体变红——
+    2026-09-04 就是这么炸的（原来写死 2026-07-20）。日期一律相对今天取。
+    """
+
+    return business_today() - timedelta(days=10)
+
+
 def _link_wbdd(db, order_no="WBDD-20260001", *, project_code="合成项目A"):
     """建立 wbdd_no → 项目 的完整链路（CKD 就绪的前提；无归属即未关联）。"""
     import uuid as _uuid
@@ -66,7 +77,7 @@ def _ckd_batch(db, *, status="applied", issue_rows=0, order_date=None,
     db.flush()
     db.add(MaintenanceCkdHeadRow(
         row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=1,
-        order_no="CKD-1", order_date=order_date or date(2026, 7, 20),
+        order_no="CKD-1", order_date=order_date or _fresh_day(),
         category=category, wbdd_no=wbdd_no, data_status_raw="已生效",
     ))
     db.commit()
@@ -126,10 +137,11 @@ def test_pending_batch_does_not_count_as_imported(db):
 
 def test_ckd_ready_and_as_of_from_head_rows(db):
     _link_wbdd(db)                       # 有归属才谈得上 ready
-    _ckd_batch(db, order_date=date(2026, 7, 20))
+    order_date = _fresh_day()
+    _ckd_batch(db, order_date=order_date)
     source = health.source_health(db)["sources"]["ckd"]
     assert source["readiness"] == "ready"
-    assert source["as_of"] == "2026-07-20"
+    assert source["as_of"] == order_date.isoformat()
     assert source["unlinked_rows"] == 0
 
 

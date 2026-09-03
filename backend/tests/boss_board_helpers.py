@@ -1,6 +1,6 @@
 """维保展示板测试共享装置（合成数据）。"""
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app import permissions
 from app.auth import hash_password
+from app.business_time import business_today
 from app.etl import pipeline
 from app.main import app
 from app.models.maintenance import FMaintenanceOrder
@@ -125,7 +126,8 @@ def add_ckd(db, *, wbdd_no, pn="PN-SYN-0011", qty="4"):
     db.flush()
     head = MaintenanceCkdHeadRow(
         row_id=str(uuid.uuid4()), batch_id=batch.batch_id, row_no=1,
-        order_no="CKD-1", order_date=date(2026, 7, 20), category="维保供货",
+        order_no="CKD-1", order_date=business_today() - timedelta(days=10),
+        category="维保供货",
         wbdd_no=wbdd_no, data_status_raw="已生效")
     db.add(head)
     db.flush()
