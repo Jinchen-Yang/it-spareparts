@@ -47,16 +47,24 @@ def lifecycle_status(
     period_to: date | None,
     as_of: date,
 ) -> str:
-    """期限生命周期快照（与台账导入同口径）：missing / ended / ongoing。"""
-    if period_from is None and period_to is None:
+    """期限生命周期：missing / ended / ongoing。
+
+    口径（2026-09-03 负责人拍板）：
+
+    * ``missing`` = **期限数据不完整**——起止任一为空。单边期限仍要被筛出来
+      提醒补齐，因此不算 ongoing。
+    * ``ended``   = 期限完整且终止日已过。
+    * ``ongoing`` = 其余（**含尚未开始的未来项目**）。
+
+    修的是这个假标签：此前 ``period_from > as_of`` 的未开始项目三个分支都不
+    命中、掉进兜底判 missing——期限数据明明是完整的，却被当成"期限缺失"，
+    回填期限后卡片墙照旧挂假标签（广州农商银行 2026-09-05～2028-09-04 等）。
+    """
+    if period_from is None or period_to is None:
         return "missing"
-    if period_to is not None and period_to < as_of:
+    if period_to < as_of:
         return "ended"
-    if period_from is not None and period_from <= as_of and (
-        period_to is None or as_of <= period_to
-    ):
-        return "ongoing"
-    return "missing"
+    return "ongoing"
 
 
 def lifecycle_case(period_from_column, period_to_column, *, as_of: date):
@@ -68,22 +76,14 @@ def lifecycle_case(period_from_column, period_to_column, *, as_of: date):
     """
     return case(
         (
-            and_(
+            or_(
                 period_from_column.is_(None),
                 period_to_column.is_(None),
             ),
             "missing",
         ),
         (period_to_column < as_of, "ended"),
-        (
-            and_(
-                period_from_column.is_not(None),
-                period_from_column <= as_of,
-                or_(period_to_column.is_(None), period_to_column >= as_of),
-            ),
-            "ongoing",
-        ),
-        else_="missing",
+        else_="ongoing",
     )
 
 

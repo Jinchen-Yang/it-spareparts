@@ -272,24 +272,23 @@ def test_completeness_state_and_lifecycle_status_pure_functions():
         == "complete"
     )
 
+    # 2026-09-03 负责人拍板的完整真值表：
+    #   missing = 期限数据不完整（起止任一为空，仍要筛出来提醒补齐）
+    #   ended   = 期限完整且终止日已过
+    #   ongoing = 其余，含尚未开始的未来项目
     as_of = date(2026, 8, 15)
-    assert maintenance_periods.lifecycle_status(None, None, as_of) == "missing"
-    assert (
-        maintenance_periods.lifecycle_status(date(2026, 1, 1), date(2026, 12, 31), as_of)
-        == "ongoing"
-    )
-    assert (
-        maintenance_periods.lifecycle_status(date(2025, 1, 1), date(2025, 12, 31), as_of)
-        == "ended"
-    )
-    # 只有起点且未结束 → ongoing；只有终点且已过期 → ended
-    assert maintenance_periods.lifecycle_status(date(2026, 1, 1), None, as_of) == "ongoing"
-    assert maintenance_periods.lifecycle_status(None, date(2026, 1, 1), as_of) == "ended"
-    # 尚未开始：按既有口径仍是 missing
-    assert (
-        maintenance_periods.lifecycle_status(date(2027, 1, 1), date(2027, 12, 31), as_of)
-        == "missing"
-    )
+    lifecycle = maintenance_periods.lifecycle_status
+    assert lifecycle(None, None, as_of) == "missing"                    # empty
+    assert lifecycle(date(2026, 1, 1), None, as_of) == "missing"        # start_only
+    assert lifecycle(date(2027, 1, 1), None, as_of) == "missing"        # start_only(未来)
+    assert lifecycle(None, date(2026, 1, 1), as_of) == "missing"        # end_only(已过)
+    assert lifecycle(None, date(2027, 1, 1), as_of) == "missing"        # end_only(未来)
+    assert lifecycle(date(2025, 1, 1), date(2025, 12, 31), as_of) == "ended"
+    assert lifecycle(date(2026, 1, 1), date(2026, 12, 31), as_of) == "ongoing"
+    # 回归：期限完整但尚未开始 —— 曾被兜底成 missing，卡片墙挂假「期限缺失」
+    assert lifecycle(date(2027, 1, 1), date(2027, 12, 31), as_of) == "ongoing"
+    # 终止日当天仍算进行中（既有口径不变）
+    assert lifecycle(date(2026, 1, 1), as_of, as_of) == "ongoing"
 
 
 def test_helper_rejects_inverted_range_without_writes(db):
@@ -911,3 +910,49 @@ def test_classify_period_divergence_is_readonly(db):
     period = db.get(MaintenanceServicePeriod, diverged.project_id)
     assert period.version == 1
     assert period.service_start == date(2020, 1, 1)
+
+
+def test_readers_ignore_stale_stored_lifecycle_snapshot(db):
+    """展示侧一律动态算生命周期，不读 MaintenanceProject.lifecycle_status 存量列。
+
+    2026-09-03 用户报障的第三处：存库列只在某次写入时刷新（模块 docstring 明写
+    它「只保留为写入时兼容快照」），期限回填后会一直停在旧值。生产上跑过的
+    f3b5d7c9e2a4 迁移用的还是「未来起始→missing」的旧兜底，于是工作簿里
+    「项目状态/生命周期=期限缺失」紧挨着一个完好的「服务期」自相矛盾。
+    """
+    import io as _io
+    import uuid
+
+    from openpyxl import load_workbook as _load
+
+    from app.models.maintenance_project import MaintenanceProject
+    from app.services import maintenance_project_catalog as catalog
+    from app.services import maintenance_project_master_workbook as master
+
+    project = MaintenanceProject(
+        project_id=str(uuid.uuid4()), project_code=f"STALE-{uuid.uuid4().hex[:6]}",
+        display_name="存量快照过期项目",
+        period_from=date(2027, 1, 1), period_to=date(2027, 12, 31),
+        lifecycle_status="missing",   # 故意留一个过期的脏快照
+    )
+    db.add(project)
+    db.commit()
+
+    # 1) 面板/变更响应
+    assert catalog.project_dict(project)["lifecycle_status"] == "ongoing"
+
+    # 2) 项目总表 01_项目概览：生命周期必须与同一行的服务期自洽
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id,
+        sheets=(master.V2_SHEET_OVERVIEW,))
+    ws = _load(_io.BytesIO(content))[master.V2_SHEET_OVERVIEW]
+    cells = {
+        str(row[0].value).strip(): row[1].value
+        for row in ws.iter_rows(min_col=1, max_col=2) if row[0].value
+    }
+    assert cells.get("生命周期") == "ongoing", cells.get("生命周期")
+    assert "2027-01-01" in str(cells.get("服务期"))
+
+    # 存库列本身保持不动（写入侧兼容快照，不在本次修复范围）
+    db.refresh(project)
+    assert project.lifecycle_status == "missing"

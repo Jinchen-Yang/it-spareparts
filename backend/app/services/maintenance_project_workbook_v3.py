@@ -37,6 +37,7 @@ from app.models.maintenance_project_operations import (
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_front_stock as front_stock
 from app.services import maintenance_cost_quality
+from app.services import maintenance_periods
 from app.services import maintenance_project_operations as operations
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_workbook_export import safe_xlsx_text
@@ -363,7 +364,9 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         (project.project_manager_name if getattr(project, "project_manager_name", None) else ""),
         project.salesperson or "",
         "是" if project.no_return_default else "否",
-        project.lifecycle_status or "",
+        # 动态计算，不读存库快照（期限回填后该列会停在旧值）
+        maintenance_periods.lifecycle_status(
+            project.period_from, project.period_to, business_today()),
         len({row["warehouse_name"] for row in balance}),
         round(sum(row["qty"] for row in balance), 3),
         round(sum(v for v in values_inc if v is not None), 2) if complete_inc else "",
