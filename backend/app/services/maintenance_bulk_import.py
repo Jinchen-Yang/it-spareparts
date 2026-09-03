@@ -646,11 +646,15 @@ def _is_explicit_maintenance_row(
     sheet: DetectedSheet,
     values: tuple[Any, ...],
 ) -> bool:
-    """Only explicit source facts may trigger automatic project writes."""
+    """只认源表显式的「维保业务=是」（2026-09-03 负责人拍板）。
 
-    return _is_yes(_value(sheet, values, "maintenance_business")) or (
-        _is_maintenance_business_type(_value(sheet, values, "business_type"))
-    )
+    此前是「维保业务=是 或 业务类型含 维保/运维/维修」的或逻辑，会让明确标了
+    「维保业务=否」的单次维修（业务类型里正好带「维修」）也被自动建项——与源头
+    上人给出的否定标记直接矛盾。业务类型是分类，维保业务才是「这一行是不是维保
+    业务」的权威事实；只信后者，列缺失或留空一律不建项（fail-closed）。
+    """
+
+    return _is_yes(_value(sheet, values, "maintenance_business"))
 
 
 def _explicit_maintenance_period(
@@ -664,6 +668,24 @@ def _explicit_maintenance_period(
     if period_from is not None and period_to is not None and period_to < period_from:
         raise BulkImportInvalid("维保终止日期不能早于起始日期")
     return period_from, period_to
+
+
+_MANAGER_SEPARATORS = re.compile(r"[;；,，、/／|｜\s]+")
+
+
+def _split_project_managers(raw: Any) -> tuple[str | None, str | None]:
+    """销售订单「项目经理(必填)」是多值（实测「廖晓娟;司珂梓」，且不同行顺序相反）。
+
+    2026-09-03 拍板：建项时负责人取第一个，完整原值保留（写进建项审计），
+    不丢信息也不猜主责。返回 (首位, 原值归一)。
+    """
+    text = _text(raw)
+    if not text:
+        return None, None
+    parts = [part for part in _MANAGER_SEPARATORS.split(text) if part]
+    if not parts:
+        return None, None
+    return parts[0][:64], "、".join(parts)[:256]
 
 
 def _maintenance_project_metadata(
@@ -685,18 +707,23 @@ def _maintenance_project_metadata(
     direct_from, direct_to = _explicit_maintenance_period(sheet, values)
     period_from = direct_from
     period_to = direct_to
-    if period_from is None or period_to is None:
-        raise BulkImportInvalid("维保销售订单自动建项必须能确定完整维保起止日期")
-    if period_to < period_from:
+    # 期限允许缺失或单侧：D-05「销售订单上没有期限的，留给人工在项目信息编辑里填」。
+    # 已知值照实保存、缺侧保持 NULL；双侧倒置仍整批拒绝。单侧期限会按 2026-09-03
+    # 拍板口径显示为「期限缺失」，正好把待补项目筛出来提醒人工补齐。
+    if period_from is not None and period_to is not None and period_to < period_from:
         raise BulkImportInvalid("维保终止日期不能早于起始日期")
     business_type = _text(_value(sheet, values, "business_type"))
+    manager_primary, manager_raw = _split_project_managers(
+        _value(sheet, values, "project_manager"))
     return {
         "row_no": row_no,
         "project_code": f"XSDD-{norm}"[:64],
         "display_name": display_name[:256],
-        "period_from": period_from.isoformat(),
-        "period_to": period_to.isoformat(),
+        "period_from": period_from.isoformat() if period_from else None,
+        "period_to": period_to.isoformat() if period_to else None,
         "business_type": business_type or None,
+        "project_manager": manager_primary,
+        "project_manager_raw": manager_raw,
     }
 
 
@@ -764,6 +791,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         "maintenance_business": ("维保业务", "是否维保业务"),
         "business_type": ("业务类型#", "业务类型"),
         "project_name": ("项目名称(必填)", "项目名称"),
+        "project_manager": ("项目经理(必填)", "项目经理"),
         "period_from": ("维保起始日期(必填)", "维保起始日期", "维保起始时间"),
         "period_to": ("维保终止日期(必填)", "维保终止日期", "维保终止时间"),
     }
@@ -783,6 +811,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         # F0000059/业务类型#; the latter is the project-facing field.
         "business_type": ("F0000059",),
         "project_name": ("F0000119",),
+        "project_manager": ("F0000134",),
         "period_from": ("F0000131",),
         "period_to": ("F0000132",),
     }
@@ -1199,6 +1228,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         )
                     )
                 ) else "update_contract"
+                contract_project = projects_by_id.get(contract.project_id)
                 operation.update(
                     action=action,
                     project_id=contract.project_id,
@@ -1207,7 +1237,12 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     expected_contract_amount_inc_tax=_jsonable(
                         contract.amount_inc_tax
                     ),
-                    expected_project_version=projects_by_id[contract.project_id].version,
+                    # 生产 FK 保证项目存在；这里用 get 取不到时留 None，既让
+                    # 「只有合同、项目未预载」的计划期假数据可用，也不影响正确性
+                    # ——apply 阶段仍会重新解析并锁定真实项目后才写入。
+                    expected_project_version=(
+                        contract_project.version if contract_project else None
+                    ),
                 )
             elif current_relations:
                 issue = _row_issue(
@@ -1603,28 +1638,41 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 for existing in db.scalars(select(MaintenanceProject)):
                     if existing.project_code.casefold() == metadata["project_code"].casefold():
                         raise BulkImportConflict("预览后 XSDD 稳定项目编号已被占用")
+                # 负责人取销售订单「项目经理(必填)」首位；该列是多值且不同行
+                # 顺序不一致，完整原值写进建项审计 reason（项目表无备注列，
+                # 不为此加迁移），信息不丢也不猜主责。
+                manager_primary = metadata.get("project_manager")
+                manager_raw = metadata.get("project_manager_raw")
+                create_reason = audit_reason
+                if manager_raw and manager_raw != manager_primary:
+                    create_reason = f"{audit_reason}；销售订单项目经理原值：{manager_raw}"
                 created = catalog.create_project(
                     db,
                     project_code=metadata["project_code"],
                     display_name=metadata["display_name"],
-                    project_manager_id=None,
-                    reason=audit_reason,
+                    project_manager_id=manager_primary,
+                    reason=create_reason,
                     operated_by=operated_by,
                 )
                 project_id = created["project_id"]
-                updated = catalog.update_project(
-                    db,
-                    project_id=project_id,
-                    version=created["version"],
-                    updates={
-                        "period_from": date.fromisoformat(metadata["period_from"]),
-                        "period_to": date.fromisoformat(metadata["period_to"]),
-                    },
-                    reason=audit_reason,
-                    operated_by=operated_by,
-                )
-                if updated is None:
-                    raise BulkImportConflict("维保项目在创建期间消失")
+                # 期限可缺可单侧（D-05）：只写销售订单上确实给了的那一侧，
+                # 两侧都没有就完全不发 update，项目保持 NULL 待人工补。
+                period_updates = {
+                    key: date.fromisoformat(metadata[key])
+                    for key in ("period_from", "period_to")
+                    if metadata.get(key)
+                }
+                if period_updates:
+                    updated = catalog.update_project(
+                        db,
+                        project_id=project_id,
+                        version=created["version"],
+                        updates=period_updates,
+                        reason=audit_reason,
+                        operated_by=operated_by,
+                    )
+                    if updated is None:
+                        raise BulkImportConflict("维保项目在创建期间消失")
                 payload = operations.create_contract(
                     db,
                     project_id=project_id,

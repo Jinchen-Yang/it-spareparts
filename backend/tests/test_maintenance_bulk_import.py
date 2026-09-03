@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 
 from app.etl import loader, pipeline
 from app.models.maintenance_project import (
+    MaintenanceProjectAuditLog,
     MaintenanceProject,
     MaintenanceProjectAlias,
     MaintenanceProjectContract,
@@ -62,27 +63,36 @@ def _ordinary_sales_workbook(
     period_to: date | None = date(2026, 12, 31),
     maintenance_business: str = "是",
     business_type: str = "备件维保",
+    data_status: str = "已生效",
+    project_manager: str = "",
+    order_amount: str = "113",
+    tax_rate: str = "13%",
+    tax_amount: str = "13",
+    amount_ex_tax: str = "100",
 ) -> str:
     workbook = Workbook()
     sheet = workbook.active
     system_headers = [
         "SeqNo", "ObjectId", "Status", "F0000118", "F0000059",
-        "F0000119", "F0000131", "F0000132", "F0000021", "F0000053",
+        "F0000119", "F0000134", "F0000131", "F0000132", "F0000021", "F0000053",
         "F0000054", "F0000055", "F0000056", "D0001F0000001",
         "D0001F0000002", "D0001F0000003", "D0001F0000004",
     ]
     captions = [
         "订单编号(必填)", "数据ID(不可修改)", "数据状态", "维保业务", "业务类型#",
-        "项目名称(必填)", "维保起始日期(必填)", "维保终止日期(必填)", "订单金额", "是否含税(必填)",
+        "项目名称(必填)", "项目经理(必填)", "维保起始日期(必填)", "维保终止日期(必填)",
+        "订单金额", "是否含税(必填)",
         "税率(必填)", "税金", "不含税金额", "订单明细.数据ID(不可修改)",
         "订单明细.产品名称", "订单明细.订单数量", "订单明细.单价",
     ]
     sheet.append(system_headers)
     sheet.append(captions)
     sheet.append([
-        order_no, raw_order_id, "已生效", maintenance_business, business_type, project_name,
-        period_from, period_to, "113", "含税", "13%", "13", "100",
-        f"{raw_order_id}-line", "PN-AUTO-1", "1", "113",
+        order_no, raw_order_id, data_status, maintenance_business, business_type,
+        project_name, project_manager, period_from, period_to,
+        order_amount, "含税", tax_rate,
+        tax_amount, amount_ex_tax,
+        f"{raw_order_id}-line", "PN-AUTO-1", "1", order_amount,
     ])
     path = tmp_path / f"{raw_order_id}-{abs(hash(project_name))}.xlsx"
     workbook.save(path)
@@ -841,3 +851,75 @@ def test_skip_mode_existing_sales_fact_does_not_trigger_project_overwrite(db, tm
     assert sales is not None and sales.business_type == "备件销售"
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectContract)) == 0
+
+
+def test_ordinary_sales_auto_project_takes_first_of_multiple_managers(db, tmp_path):
+    """销售订单「项目经理(必填)」是多值，建项负责人取首位、原值留审计。
+
+    2026-09-03 负责人拍板。真实导出实测形如「廖晓娟;司珂梓」，且不同订单行
+    人名顺序不一致——所以必须逐行取各自的首位，不能全批写同一个人。
+    项目表没有备注列，完整原值写进建项审计 reason，不为此加迁移。
+    """
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0031",
+        raw_order_id="sales-multi-manager",
+        project_name="多负责人维保项目",
+        project_manager="廖晓娟;司珂梓",
+    )
+    pipeline.run_import(
+        db, path, "sales-multi-manager.xlsx", uploaded_by="sales-importer",
+        mode="upsert", auto_assign_maintenance_projects=True,
+    )
+    project = db.scalar(select(MaintenanceProject))
+    assert project is not None
+    assert project.project_code == "XSDD-20260902-0031"
+    assert project.project_manager_id == "廖晓娟"
+    audit = db.scalars(
+        select(MaintenanceProjectAuditLog).where(
+            MaintenanceProjectAuditLog.project_id == project.project_id)
+    ).all()
+    assert any("廖晓娟、司珂梓" in (entry.reason or "") for entry in audit), [
+        entry.reason for entry in audit
+    ]
+
+
+def test_ordinary_sales_auto_project_ignores_non_maintenance_rows(db, tmp_path):
+    """只有明确「维保业务=是」且已生效的行才建项（2026-09-03 拍板口径）。"""
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0032",
+        raw_order_id="sales-not-maintenance",
+        project_name="非维保销售订单",
+        maintenance_business="否",
+        business_type="设备销售",
+    )
+    pipeline.run_import(
+        db, path, "sales-not-maintenance.xlsx", uploaded_by="sales-importer",
+        mode="upsert", auto_assign_maintenance_projects=True,
+    )
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+
+
+def test_explicit_no_maintenance_flag_wins_over_business_type(db, tmp_path):
+    """「维保业务=否」但业务类型里带「维修」的单次维修，不得被自动建项。
+
+    这是收窄门槛前的或逻辑（维保业务=是 或 业务类型含维保/运维/维修）判错的
+    那一类：业务类型是分类，维保业务才是这一行是不是维保业务的权威事实，
+    源头上人已经明确说「否」就不能反过来靠分类词把项目建出来。
+    """
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no="XSDD-20260902-0033",
+        raw_order_id="sales-single-repair",
+        project_name="单次维修不建项",
+        maintenance_business="否",
+        business_type="单次维修",
+    )
+    pipeline.run_import(
+        db, path, "sales-single-repair.xlsx", uploaded_by="sales-importer",
+        mode="upsert", auto_assign_maintenance_projects=True,
+    )
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
