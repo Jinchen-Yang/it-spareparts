@@ -366,3 +366,58 @@ def test_site_concurrent_commit_between_validate_and_apply_is_refused(db):
 
     assert db.scalar(select(MaintenanceSiteIssueLine.quantity).where(
         MaintenanceSiteIssueLine.issue_line_id == site_line_id)) == Decimal("42")
+
+
+def test_receipt_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """05 实收回款：窗口内并发改同一快照 → 整本零写入报 row_conflicts。
+
+    05 的快照不由 _v2_assert_entity_scope 加锁，但复核位置依然权威：
+    apply 顶部的 expire_all 给新鲜性（本族还用列级标量读绕开 identity map），
+    全局 advisory + workbook state 行锁 + 项目行锁给稳定性——app/ 下能写快照的
+    五个点各自至少被其中一把挡住。详见 _v2_recheck_row_guards 的 docstring。
+    """
+    from app.models.maintenance_project_operations import (
+        MaintenanceCollectionSnapshot,
+    )
+    from tests.test_maintenance_project_master_v2_editable import (
+        _project_with_receipt,
+    )
+
+    project, _contract, snapshot = _project_with_receipt(db)
+    collection_id = snapshot.collection_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == collection_id
+    )
+    ws.cell(row_no, headers["累计实收金额（含税）"], 90000)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_RECEIPTS for g in plan.row_guards), (
+        "05 触碰行必须发指纹")
+
+    def _peer(other):
+        peer = other.get(MaintenanceCollectionSnapshot, collection_id)
+        peer.cumulative_amount = Decimal("123456.78")
+        peer.version = peer.version + 1
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(MaintenanceCollectionSnapshot.cumulative_amount).where(
+        MaintenanceCollectionSnapshot.collection_id == collection_id
+    )) == Decimal("123456.78")

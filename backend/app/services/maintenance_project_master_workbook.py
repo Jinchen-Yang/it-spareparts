@@ -4363,6 +4363,11 @@ def _v2_parse_receipts(
                 server_values=server_values, baseline=baseline, ctx=merge)
             if merged_row is None:
                 continue
+            merge.guard(
+                sheet=V2_SHEET_RECEIPTS, entity_id=existing.collection_id,
+                row_label=(f"{server_values.get('合同编号') or ''}"
+                           f"/{server_values.get('报告月份') or ''}"),
+                values=server_values, fields=V2_RECEIPT_BASE_FIELDS)
             # 同 03：下游 CollectionOp 直接读整行，必须读 rebase 后的值。
             row = merged_row
         out.append(ec.CollectionOp(
@@ -4648,9 +4653,22 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
     不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」跟基线
     比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
 
-    05_实收回款不在此列：它的快照不由 _v2_assert_entity_scope 加锁（真正的锁在
-    maintenance_expense_collection_workbook 里），在这里复核会是又一次无锁读，
-    不权威。留待单独处理。
+    05_实收回款的快照**不由** _v2_assert_entity_scope 加锁（真正的行锁在
+    maintenance_expense_collection_workbook 里，要到 ec.apply 才发生），但在这个
+    位置复核它依然权威，靠的是另外三把锁的合力：
+      - 新鲜性：apply 顶部的 db.expire_all()；05 分支还用列级标量读，直接绕开
+        identity map，不依赖「expire 之后没人加载过快照」这个无机制保证的前提。
+      - 稳定性：本事务此刻已持 DATA_CHANGE_ADVISORY_LOCK_KEY 全局锁、本项目的
+        workbook state 行锁、以及 maintenance_project 行锁。app/ 下能写快照的
+        五个点各自至少被其中一把挡住：
+          operations.create_collection / operations.update_collection（取 state 锁）、
+          maintenance_expense_collection_workbook.apply（取 state 锁）、
+          maintenance_project_identity 的归并（取同一把全局 advisory + states）、
+          maintenance_project_identity.apply_exact_collection_dedupe
+            （**不取 state 锁**，靠同一把全局 advisory + 项目行锁才被挡住）。
+    最后那条是这个不变量最脆的一环：日后若新增一个既不取 state 锁、也不取项目行
+    锁、也不取全局 advisory 的快照写者，本复核会静默失去权威性而不报任何错。
+    改这五个点的锁之前请先回来看这段。
     """
 
     if not plan.row_guards:
@@ -4722,6 +4740,33 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
             fresh_by_key[(guard.sheet, guard.entity_id)] = (
                 None if line is None or issue is None
                 else (_v2_site_row_values(line, issue), V2_SITE_BASE_FIELDS)
+            )
+
+    receipt_guards = by_sheet.get(V2_SHEET_RECEIPTS, [])
+    if receipt_guards:
+        collection_ids = [g.entity_id for g in receipt_guards]
+        # 列级标量读：不进 identity map，因此新鲜性不依赖调用顺序。
+        snapshot_rows = {
+            row.collection_id: row for row in db.execute(
+                select(
+                    MaintenanceCollectionSnapshot.collection_id,
+                    # report_month 不在基线字段里，但 _v2_receipt_row_values
+                    # 会读它；不选就 AttributeError。
+                    MaintenanceCollectionSnapshot.report_month,
+                    MaintenanceCollectionSnapshot.cumulative_amount,
+                    MaintenanceCollectionSnapshot.status,
+                    MaintenanceCollectionSnapshot.receipt_reference,
+                    MaintenanceCollectionSnapshot.remark,
+                ).where(
+                    MaintenanceCollectionSnapshot.collection_id.in_(collection_ids)
+                )
+            ).all()
+        }
+        for guard in receipt_guards:
+            row = snapshot_rows.get(guard.entity_id)
+            # 合同编号不在 V2_RECEIPT_BASE_FIELDS 里，传 "" 与采集侧一致。
+            fresh_by_key[(guard.sheet, guard.entity_id)] = None if row is None else (
+                _v2_receipt_row_values(row, ""), V2_RECEIPT_BASE_FIELDS,
             )
 
     drifted: list[dict] = []
@@ -4974,6 +5019,12 @@ def validate_project_master_v2(
                             entity_id=collection_id,
                             action="删行=作废（服务端该行已变）"):
                         continue
+                merge.guard(
+                    sheet=V2_SHEET_RECEIPTS, entity_id=collection_id,
+                    row_label=(f"{contract.contract_no} "
+                               f"{snapshot.report_month:%Y-%m}"),
+                    values=_v2_receipt_row_values(snapshot, contract.contract_no),
+                    fields=V2_RECEIPT_BASE_FIELDS)
                 implicit_voids.append(ec.CollectionOp(
                     operation="VOID",
                     project_contract_id=contract.project_contract_id,
