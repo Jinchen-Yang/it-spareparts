@@ -401,3 +401,37 @@ def test_manual_row_claiming_existing_line_accepts_normalized_pn(db):
         FMaintenanceLine.part_id == glued_part.id,
         FMaintenanceLine.is_active.is_(True),
     )) == 1
+
+
+def test_untouched_field_not_reverted_when_server_changed_it(db):
+    """D-02 契约：用户只碰字段 A，他人在导出后改了同行字段 B —— 上传不得把 B
+    静默回滚成导出时的旧值。
+
+    根因（2026-09-03 评审 P1）：_v2_merge_row 只做分类，不限制下游写什么；
+    _v2_refill_for_existing_line 是拿整行单元格与服务端现值逐一比对生成 update，
+    于是用户表里「没碰但已过期」的 B 会盖掉他人改动，且因 B 未触碰而不报冲突。
+    修法是合并时把未触碰字段 rebase 成服务端现值再进 refill。
+    """
+    project, _part, _order, line = _make_project_with_line(db, qty=Decimal("5"))
+    line.description = "原始描述"
+    db.commit()
+
+    _content, wb = _download_parts(db, project.project_id)
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {c.value: c.column for c in ws[1]}
+    target = _row_of(ws, line.id)
+
+    # 导出之后，另一个写入方改了「描述」——用户全程没碰这个字段
+    line.description = "他人改的描述"
+    db.commit()
+
+    # 用户只改「需求数量」
+    ws.cell(target, headers["需求数量"], 9)
+
+    plan, _result = _apply(db, project.project_id, wb)
+    db.refresh(line)
+    assert line.qty == Decimal("9.000"), line.qty
+    assert line.description == "他人改的描述", (
+        f"静默回滚了他人的改动：{line.description!r}")
+    # 未触碰字段自动 rebase，不应制造冲突
+    assert not plan.conflicts, plan.conflicts

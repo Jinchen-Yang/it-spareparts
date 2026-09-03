@@ -2036,13 +2036,24 @@ def _v2_merge_row(
     sheet: str, row_label: str, entity_id, row, index: dict[str, int],
     base_fields: tuple[str, ...], server_values: dict[str, object],
     baseline: dict[str, str], ctx: _V2MergeContext,
-) -> bool:
-    """三路合并一行：返回该行是否被用户触碰。
+) -> tuple | None:
+    """三路合并一行：未触碰返回 ``None``，否则返回**已 rebase 的行**。
 
-    - 未触碰（用户值==导出基线）：返回 False，调用方跳过该行（服务端已变
+    - 未触碰（用户值==导出基线）：返回 None，调用方跳过该行（服务端已变
       也不回写——自动 rebase，取代整本 stale 作废）。
     - 触碰且服务端未变：登记变更，走既有应用路径。
     - 触碰且服务端已变且与用户值不同：冲突；force_takeover 时登记接管放行。
+
+    2026-09-03：返回 rebase 后的行，而不是布尔。本函数只做**分类**，不限制
+    下游写什么；而下游（``_v2_refill_for_existing_line``、05 的 CollectionOp）
+    是拿整行单元格与服务端现值逐一比对来生成 update 的。于是「用户没碰、但
+    导出之后被别人改过」的字段，会带着导出时的旧值把别人的改动**静默盖掉且
+    不报冲突**——正是 D-02 明令禁止、也是 09-02 事故的那一类。这里把未触碰
+    的基线字段换成服务端现值，下游比对自然不再产生 diff。
+
+    注意：只对**在合并之后才读行**的调用方生效（03 的 refill、05）。04/06
+    在合并之前就把单元格解析成局部变量了，那两条路径的同类问题需要各自调整
+    解析顺序，不在本次修复范围。
     """
     user_values = {
         name: _v2_hash_value(_cell(row, index, name)) for name in base_fields
@@ -2052,7 +2063,7 @@ def _v2_merge_row(
         if value != baseline.get(name, "")
     }
     if not touched:
-        return False
+        return None
     for name, user_value in touched.items():
         server_value = _v2_hash_value(server_values.get(name))
         if user_value == server_value:
@@ -2063,7 +2074,15 @@ def _v2_merge_row(
             conflict=server_value != baseline.get(name, ""),
             base=baseline.get(name, ""),
         )
-    return True
+    rebased = list(row)
+    for name in base_fields:
+        if name in touched:
+            continue
+        column = index.get(name)
+        if column is None or column >= len(rebased):
+            continue
+        rebased[column] = server_values.get(name)
+    return tuple(rebased)
 
 
 def _v2_server_row_changed(
@@ -3537,14 +3556,17 @@ def _v2_parse_parts(
         if operation and operation != "UPDATE":
             raise WorkbookError("invalid_operation",
                                 f"第 {row_no} 行操作只能是 UPDATE、VOID 或留空")
-        if not _v2_merge_row(
-                sheet="03_备件明细", row_label=row_label, entity_id=line.id,
-                row=row, index=index, base_fields=V2_PART_BASE_FIELDS,
-                server_values=server_values, baseline=baseline, ctx=merge):
+        merged_row = _v2_merge_row(
+            sheet="03_备件明细", row_label=row_label, entity_id=line.id,
+            row=row, index=index, base_fields=V2_PART_BASE_FIELDS,
+            server_values=server_values, baseline=baseline, ctx=merge)
+        if merged_row is None:
             continue
 
+        # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
+        # 导出时的旧值静默盖掉他人改动（D-02）。
         refill = _v2_refill_for_existing_line(
-            db, row=row, index=index, row_no=row_no, line=line)
+            db, row=merged_row, index=index, row_no=row_no, line=line)
         if refill is not None:
             out.append(refill)
     return (
@@ -4247,14 +4269,17 @@ def _v2_parse_receipts(
                 entity_id=raw_receipt_id, row_no=row_no)
             server_values = _v2_receipt_row_values(
                 existing, contract_no or "")
-            if not _v2_merge_row(
-                    sheet="05_实收回款", row_label=(
-                        f"{server_values.get('合同编号') or ''}"
-                        f"/{server_values.get('报告月份') or ''}"),
-                    entity_id=raw_receipt_id,
-                    row=row, index=index, base_fields=V2_RECEIPT_BASE_FIELDS,
-                    server_values=server_values, baseline=baseline, ctx=merge):
+            merged_row = _v2_merge_row(
+                sheet="05_实收回款", row_label=(
+                    f"{server_values.get('合同编号') or ''}"
+                    f"/{server_values.get('报告月份') or ''}"),
+                entity_id=raw_receipt_id,
+                row=row, index=index, base_fields=V2_RECEIPT_BASE_FIELDS,
+                server_values=server_values, baseline=baseline, ctx=merge)
+            if merged_row is None:
                 continue
+            # 同 03：下游 CollectionOp 直接读整行，必须读 rebase 后的值。
+            row = merged_row
         out.append(ec.CollectionOp(
             operation="UPDATE" if existing is not None else "CREATE",
             project_contract_id=(contract.project_contract_id if contract else ""),
