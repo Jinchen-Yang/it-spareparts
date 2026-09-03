@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.business_time import business_today
+from app.etl import mapping
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
@@ -44,8 +45,8 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.models.sales import FSalesOrder
 from app.models.system import SysAuditLog, SysImportBatch, SysImportError
 from app.services import maintenance_project_catalog as catalog
+from app.services import maintenance_project_identity
 from app.services import maintenance_project_operations as operations
-from app.services import date_loose, maintenance_periods, project_names
 
 PROTOCOL_VERSION = "maintenance-bulk-import-v1"
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
@@ -184,7 +185,9 @@ def _system_header(value: Any) -> str:
 
 
 def _text(value: Any) -> str:
-    return unicodedata.normalize("NFKC", str(value or "")).strip()
+    return unicodedata.normalize(
+        "NFKC", "" if value is None else str(value)
+    ).strip()
 
 
 def normalize_order_no(value: Any) -> str:
@@ -635,7 +638,58 @@ def _is_yes(value: Any) -> bool:
     return _text(value).casefold() in {"是", "含税", "true", "yes", "1", "y"}
 
 
-def _pre_delivery_metadata(
+def _is_maintenance_business_type(value: Any) -> bool:
+    business_type = _text(value)
+    return any(word in business_type for word in ("维保", "运维", "维修"))
+
+
+def _is_explicit_maintenance_row(
+    sheet: DetectedSheet,
+    values: tuple[Any, ...],
+) -> bool:
+    """只认源表显式的「维保业务=是」（2026-09-03 负责人拍板）。
+
+    此前是「维保业务=是 或 业务类型含 维保/运维/维修」的或逻辑，会让明确标了
+    「维保业务=否」的单次维修（业务类型里正好带「维修」）也被自动建项——与源头
+    上人给出的否定标记直接矛盾。业务类型是分类，维保业务才是「这一行是不是维保
+    业务」的权威事实；只信后者，列缺失或留空一律不建项（fail-closed）。
+    """
+
+    return _is_yes(_value(sheet, values, "maintenance_business"))
+
+
+def _explicit_maintenance_period(
+    sheet: DetectedSheet,
+    values: tuple[Any, ...],
+) -> tuple[date | None, date | None]:
+    raw_from = _value(sheet, values, "period_from")
+    raw_to = _value(sheet, values, "period_to")
+    period_from = _date(raw_from, label="维保起始日期") if _text(raw_from) else None
+    period_to = _date(raw_to, label="维保终止日期") if _text(raw_to) else None
+    if period_from is not None and period_to is not None and period_to < period_from:
+        raise BulkImportInvalid("维保终止日期不能早于起始日期")
+    return period_from, period_to
+
+
+_MANAGER_SEPARATORS = re.compile(r"[;；,，、/／|｜\s]+")
+
+
+def _split_project_managers(raw: Any) -> tuple[str | None, str | None]:
+    """销售订单「项目经理(必填)」是多值（实测「廖晓娟;司珂梓」，且不同行顺序相反）。
+
+    2026-09-03 拍板：建项时负责人取第一个，完整原值保留（写进建项审计），
+    不丢信息也不猜主责。返回 (首位, 原值归一)。
+    """
+    text = _text(raw)
+    if not text:
+        return None, None
+    parts = [part for part in _MANAGER_SEPARATORS.split(text) if part]
+    if not parts:
+        return None, None
+    return parts[0][:64], "、".join(parts)[:256]
+
+
+def _maintenance_project_metadata(
     sheet: DetectedSheet,
     values: tuple[Any, ...],
     *,
@@ -643,42 +697,82 @@ def _pre_delivery_metadata(
     norm: str,
 ) -> dict:
     raw_name = _text(_value(sheet, values, "project_name"))
-    if not project_names.is_pre_delivery(raw_name):
-        raise BulkImportInvalid("未关联已有项目，且项目名不是明确的“预交付-”格式")
-    if not _is_yes(_value(sheet, values, "maintenance_business")):
-        raise BulkImportInvalid("预交付自动建项只接受明确标记为“是”的维保业务")
-    parsed_name = date_loose.parse_project_name(raw_name)
-    display_name = project_names.strip_pre_delivery(raw_name).strip()
-    if not display_name or display_name == raw_name:
-        raise BulkImportInvalid("预交付项目名称无法安全归一")
+    if not raw_name:
+        raise BulkImportInvalid("维保销售订单自动建项必须提供项目名称")
+    if not _is_explicit_maintenance_row(sheet, values):
+        raise BulkImportInvalid("自动建项只接受销售订单中明确的维保业务事实")
+    # Preserve the exact sales-order name.  A pre-delivery name and a later
+    # formal name for the same XSDD are peer display facts, not a hierarchy.
+    display_name = raw_name.strip()
 
-    raw_from = _value(sheet, values, "period_from")
-    raw_to = _value(sheet, values, "period_to")
-    direct_from = _date(raw_from, label="维保起始日期") if _text(raw_from) else None
-    direct_to = _date(raw_to, label="维保终止日期") if _text(raw_to) else None
-    name_from = parsed_name.get("period_from")
-    name_to = parsed_name.get("period_to")
-    if direct_from and name_from and direct_from != name_from:
-        raise BulkImportInvalid("维保起始日期与项目名称内嵌日期冲突")
-    if direct_to and name_to and direct_to != name_to:
-        raise BulkImportInvalid("维保终止日期与项目名称内嵌日期冲突")
-    period_from = direct_from or name_from
-    period_to = direct_to or name_to
-    if period_from is None or period_to is None:
-        raise BulkImportInvalid("预交付自动建项必须能确定完整维保起止日期")
-    if period_to < period_from:
+    direct_from, direct_to = _explicit_maintenance_period(sheet, values)
+    period_from = direct_from
+    period_to = direct_to
+    # 期限允许缺失或单侧：D-05「销售订单上没有期限的，留给人工在项目信息编辑里填」。
+    # 已知值照实保存、缺侧保持 NULL；双侧倒置仍整批拒绝。单侧期限会按 2026-09-03
+    # 拍板口径显示为「期限缺失」，正好把待补项目筛出来提醒人工补齐。
+    if period_from is not None and period_to is not None and period_to < period_from:
         raise BulkImportInvalid("维保终止日期不能早于起始日期")
     business_type = _text(_value(sheet, values, "business_type"))
-    if business_type and not any(word in business_type for word in ("维保", "运维", "维修")):
-        raise BulkImportInvalid("预交付业务类型与维保业务标记冲突")
+    manager_primary, manager_raw = _split_project_managers(
+        _value(sheet, values, "project_manager"))
     return {
         "row_no": row_no,
-        "project_code": f"PD-{norm}"[:64],
+        "project_code": f"XSDD-{norm}"[:64],
         "display_name": display_name[:256],
-        "period_from": period_from.isoformat(),
-        "period_to": period_to.isoformat(),
+        "period_from": period_from.isoformat() if period_from else None,
+        "period_to": period_to.isoformat() if period_to else None,
         "business_type": business_type or None,
+        "project_manager": manager_primary,
+        "project_manager_raw": manager_raw,
     }
+
+
+def _apply_sales_project_period(
+    db: Session,
+    *,
+    item: dict,
+    project_id: str,
+    audit_reason: str,
+    operated_by: str,
+) -> None:
+    raw_from = item.get("source_period_from")
+    raw_to = item.get("source_period_to")
+    from_present = bool(item.get("source_period_from_present"))
+    to_present = bool(item.get("source_period_to_present"))
+    if not from_present and not to_present:
+        return
+    project = db.get(MaintenanceProject, project_id)
+    if project is None:
+        raise BulkImportConflict("项目在同步维保期限时消失")
+    desired_from = (
+        date.fromisoformat(raw_from)
+        if raw_from is not None
+        else (None if from_present else project.period_from)
+    )
+    desired_to = (
+        date.fromisoformat(raw_to)
+        if raw_to is not None
+        else (None if to_present else project.period_to)
+    )
+    if project.period_from == desired_from and project.period_to == desired_to:
+        return
+    if project.version != item.get("expected_project_version"):
+        raise BulkImportConflict("预览后的项目维保期限已变化")
+    updates = {"period_from": desired_from, "period_to": desired_to}
+    try:
+        updated = catalog.update_project(
+            db,
+            project_id=project_id,
+            version=project.version,
+            updates=updates,
+            reason=f"销售订单权威维保期限同步：{audit_reason}",
+            operated_by=operated_by,
+        )
+    except (catalog.MaintenanceProjectCatalogError, catalog.MaintenanceProjectCatalogConflict) as exc:
+        raise BulkImportConflict(str(exc)) from exc
+    if updated is None:
+        raise BulkImportConflict("项目在同步维保期限时消失")
 
 
 class SalesContractAmountAdapter(HeaderAdapter):
@@ -698,6 +792,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         "maintenance_business": ("维保业务", "是否维保业务"),
         "business_type": ("业务类型#", "业务类型"),
         "project_name": ("项目名称(必填)", "项目名称"),
+        "project_manager": ("项目经理(必填)", "项目经理"),
         "period_from": ("维保起始日期(必填)", "维保起始日期", "维保起始时间"),
         "period_to": ("维保终止日期(必填)", "维保终止日期", "维保终止时间"),
     }
@@ -717,6 +812,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         # F0000059/业务类型#; the latter is the project-facing field.
         "business_type": ("F0000059",),
         "project_name": ("F0000119",),
+        "project_manager": ("F0000134",),
         "period_from": ("F0000131",),
         "period_to": ("F0000132",),
     }
@@ -875,14 +971,10 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 select(MaintenanceProject).order_by(MaintenanceProject.project_id)
             )
         )
-        projects_by_name: dict[str, list[MaintenanceProject]] = defaultdict(list)
+        projects_by_id = {project.project_id: project for project in all_projects}
         projects_by_code: dict[str, list[MaintenanceProject]] = defaultdict(list)
         for project in all_projects:
-            projects_by_name[
-                project_names.display_name_identity(project.display_name)
-            ].append(project)
             projects_by_code[project.project_code.casefold()].append(project)
-        planned_new_names: dict[str, tuple[str, int]] = {}
 
         for row_no, values in sheet.rows:
             order_no_raw = _text(_value(sheet, values, "order_no"))
@@ -934,6 +1026,51 @@ class SalesContractAmountAdapter(HeaderAdapter):
             project_name_raw = _text(_value(sheet, values, "project_name"))
             period_from_raw = _text(_value(sheet, values, "period_from"))
             period_to_raw = _text(_value(sheet, values, "period_to"))
+            source_period_from: date | None = None
+            source_period_to: date | None = None
+            inverted_period_warning: dict | None = None
+            try:
+                explicit_maintenance = _is_explicit_maintenance_row(sheet, values)
+            except BulkImportInvalid as exc:
+                issue = _row_issue(
+                    row_no, "maintenance_source_conflict", str(exc)
+                )
+                base.update(action="error", issues=[issue])
+                source_rows.append(base)
+                hard_issues.append(issue)
+                continue
+            if explicit_maintenance:
+                if not project_name_raw:
+                    issue = _row_issue(
+                        row_no,
+                        "invalid_maintenance_project",
+                        "维保销售订单自动建项必须提供项目名称",
+                    )
+                    base.update(action="error", issues=[issue])
+                    source_rows.append(base)
+                    hard_issues.append(issue)
+                    continue
+                try:
+                    source_period_from, source_period_to = _explicit_maintenance_period(
+                        sheet, values
+                    )
+                except BulkImportInvalid as exc:
+                    if str(exc) == "维保终止日期不能早于起始日期":
+                        inverted_period_warning = _row_issue(
+                            row_no,
+                            "inverted_maintenance_period_preserved",
+                            "销售源维保期限倒置；已有项目将保留原期限，"
+                            "本次仍同步 XSDD 身份与合同金额",
+                            severity="warning",
+                        )
+                    else:
+                        issue = _row_issue(
+                            row_no, "invalid_maintenance_period", str(exc)
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
             duplicate = seen.get(norm)
             signature = (
                 inc,
@@ -1019,6 +1156,23 @@ class SalesContractAmountAdapter(HeaderAdapter):
             operation = {
                 "row_no": row_no,
                 "normalized_order_no": norm,
+                "source_project_name": project_name_raw[:256] or None,
+                "source_period_from": (
+                    source_period_from.isoformat() if source_period_from else None
+                ),
+                "source_period_to": (
+                    source_period_to.isoformat() if source_period_to else None
+                ),
+                "source_period_from_present": bool(
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_from" in sheet.field_indexes
+                ),
+                "source_period_to_present": bool(
+                    explicit_maintenance
+                    and inverted_period_warning is None
+                    and "period_to" in sheet.field_indexes
+                ),
                 "sales_order_id": sales.id if sync_sales else None,
                 "sales_raw_order_id": sales.raw_order_id if sync_sales else None,
                 "sales_match_state": (
@@ -1075,6 +1229,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         )
                     )
                 ) else "update_contract"
+                contract_project = projects_by_id.get(contract.project_id)
                 operation.update(
                     action=action,
                     project_id=contract.project_id,
@@ -1082,6 +1237,12 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     expected_contract_version=contract.version,
                     expected_contract_amount_inc_tax=_jsonable(
                         contract.amount_inc_tax
+                    ),
+                    # 生产 FK 保证项目存在；这里用 get 取不到时留 None，既让
+                    # 「只有合同、项目未预载」的计划期假数据可用，也不影响正确性
+                    # ——apply 阶段仍会重新解析并锁定真实项目后才写入。
+                    expected_project_version=(
+                        contract_project.version if contract_project else None
                     ),
                 )
             elif current_relations:
@@ -1152,19 +1313,16 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     }
                     action = "create_contract"
                 else:
-                    # Ordinary unmatched sales rows are skipped; only an
-                    # explicitly marked maintenance pre-delivery row may create
-                    # a new project, per the user's current business rule.
-                    if not project_names.is_pre_delivery(project_name_raw) or not _is_yes(
-                        _value(sheet, values, "maintenance_business")
-                    ):
+                    # Never infer a project from customer/name text.  Only an
+                    # explicit maintenance source fact may create one.
+                    if not _is_explicit_maintenance_row(sheet, values):
                         base.update(
                             action="unmatched",
                             issues=[
                                 _row_issue(
                                     row_no,
                                     "project_not_found",
-                                    "未命中已有维保项目；非安全预交付行，本批跳过",
+                                    "未命中已有维保项目，且源行未明确标记维保业务，本批跳过",
                                     severity="warning",
                                 )
                             ],
@@ -1175,48 +1333,47 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         issue = _row_issue(
                             row_no,
                             "historical_assignment_conflict",
-                            "预交付销售订单存在历史项目归属，拒绝另建项目",
+                            "销售订单存在历史项目归属，拒绝另建项目",
+                        )
+                        base.update(action="error", issues=[issue])
+                        source_rows.append(base)
+                        hard_issues.append(issue)
+                        continue
+                    if inverted_period_warning is not None:
+                        issue = _row_issue(
+                            row_no,
+                            "invalid_maintenance_period",
+                            "维保终止日期不能早于起始日期；新项目无法建立可信期限",
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
                     try:
-                        metadata = _pre_delivery_metadata(
+                        metadata = _maintenance_project_metadata(
                             sheet, values, row_no=row_no, norm=norm
                         )
                     except BulkImportInvalid as exc:
                         issue = _row_issue(
-                            row_no, "invalid_pre_delivery_project", str(exc)
+                            row_no, "invalid_maintenance_project", str(exc)
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
-                    name_key = project_names.display_name_identity(
-                        metadata["display_name"]
-                    )
-                    existing_names = projects_by_name.get(name_key, [])
                     existing_codes = projects_by_code.get(
                         metadata["project_code"].casefold(), []
                     )
-                    prior_plan = planned_new_names.get(name_key)
-                    if existing_names or existing_codes or prior_plan is not None:
-                        detail = (
-                            "项目名称/编号已存在（含历史归档项目）"
-                            if existing_names or existing_codes
-                            else f"与第 {prior_plan[1]} 行计划创建同名项目"
-                        )
+                    if existing_codes:
                         issue = _row_issue(
                             row_no,
-                            "pre_delivery_project_identity_conflict",
-                            f"{detail}，拒绝自动创建",
+                            "maintenance_project_identity_conflict",
+                            "XSDD 稳定项目编号已存在，拒绝自动创建",
                         )
                         base.update(action="error", issues=[issue])
                         source_rows.append(base)
                         hard_issues.append(issue)
                         continue
-                    planned_new_names[name_key] = (norm, row_no)
                     operation.update(
                         action="create_project",
                         project_id=None,
@@ -1237,6 +1394,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     }
                     action = "create_project"
 
+            if inverted_period_warning is not None:
+                base["issues"].append(inverted_period_warning)
             base.update(
                 action=action,
                 project_id=operation.get("project_id"),
@@ -1309,7 +1468,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 "source_sync": "f_sales_order+maintenance_project_contract",
                 "missing_project_policy": (
                     "unique_active_wbdd=create_contract;"
-                    "safe_pre_delivery=create_project;otherwise_skip"
+                    "explicit_maintenance=create_project;otherwise_skip"
                 ),
             },
         )
@@ -1387,6 +1546,24 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     != item["expected_contract_amount_inc_tax"]
                 ):
                     raise BulkImportConflict("预览后的合同金额已变化，请重新预览")
+                _apply_sales_project_period(
+                    db,
+                    item=item,
+                    project_id=contract.project_id,
+                    audit_reason=audit_reason,
+                    operated_by=operated_by,
+                )
+                alias_created = maintenance_project_identity.record_alias(
+                    db,
+                    project_id=contract.project_id,
+                    alias_name=item.get("source_project_name"),
+                    source="sales_order_import",
+                )
+                if alias_created:
+                    operations.bump_workbook_revision(
+                        db, project_id=contract.project_id
+                    )
+                project_ids.add(contract.project_id)
                 noops += 1
                 continue
 
@@ -1457,41 +1634,46 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     raise BulkImportConflict("预览后该销售订单已出现合同关系")
                 current, history = _assignment_evidence(db, variants)
                 if current.get(norm) or history.get(norm):
-                    raise BulkImportConflict("预览后预交付销售订单已出现项目归属")
+                    raise BulkImportConflict("预览后销售订单已出现项目归属")
                 metadata = item["new_project"]
-                name_key = project_names.display_name_identity(
-                    metadata["display_name"]
-                )
                 for existing in db.scalars(select(MaintenanceProject)):
-                    if (
-                        project_names.display_name_identity(existing.display_name)
-                        == name_key
-                        or existing.project_code.casefold()
-                        == metadata["project_code"].casefold()
-                    ):
-                        raise BulkImportConflict("预览后预交付项目名称或编号已被占用")
+                    if existing.project_code.casefold() == metadata["project_code"].casefold():
+                        raise BulkImportConflict("预览后 XSDD 稳定项目编号已被占用")
+                # 负责人取销售订单「项目经理(必填)」首位；该列是多值且不同行
+                # 顺序不一致，完整原值写进建项审计 reason（项目表无备注列，
+                # 不为此加迁移），信息不丢也不猜主责。
+                manager_primary = metadata.get("project_manager")
+                manager_raw = metadata.get("project_manager_raw")
+                create_reason = audit_reason
+                if manager_raw and manager_raw != manager_primary:
+                    create_reason = f"{audit_reason}；销售订单项目经理原值：{manager_raw}"
                 created = catalog.create_project(
                     db,
                     project_code=metadata["project_code"],
                     display_name=metadata["display_name"],
-                    project_manager_id=None,
-                    reason=audit_reason,
+                    project_manager_id=manager_primary,
+                    reason=create_reason,
                     operated_by=operated_by,
                 )
                 project_id = created["project_id"]
-                updated = catalog.update_project(
-                    db,
-                    project_id=project_id,
-                    version=created["version"],
-                    updates={
-                        "period_from": date.fromisoformat(metadata["period_from"]),
-                        "period_to": date.fromisoformat(metadata["period_to"]),
-                    },
-                    reason=audit_reason,
-                    operated_by=operated_by,
-                )
-                if updated is None:
-                    raise BulkImportConflict("预交付项目在创建期间消失")
+                # 期限可缺可单侧（D-05）：只写销售订单上确实给了的那一侧，
+                # 两侧都没有就完全不发 update，项目保持 NULL 待人工补。
+                period_updates = {
+                    key: date.fromisoformat(metadata[key])
+                    for key in ("period_from", "period_to")
+                    if metadata.get(key)
+                }
+                if period_updates:
+                    updated = catalog.update_project(
+                        db,
+                        project_id=project_id,
+                        version=created["version"],
+                        updates=period_updates,
+                        reason=audit_reason,
+                        operated_by=operated_by,
+                    )
+                    if updated is None:
+                        raise BulkImportConflict("维保项目在创建期间消失")
                 payload = operations.create_contract(
                     db,
                     project_id=project_id,
@@ -1511,9 +1693,29 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     operated_by=operated_by,
                 )
                 if payload is None:
-                    raise BulkImportConflict("预交付项目在创建合同期间消失")
+                    raise BulkImportConflict("维保项目在创建合同期间消失")
             else:
                 raise BulkImportConflict("预览计划包含未知销售订单动作")
+
+            if item["action"] != "create_project":
+                _apply_sales_project_period(
+                    db,
+                    item=item,
+                    project_id=project_id,
+                    audit_reason=audit_reason,
+                    operated_by=operated_by,
+                )
+            alias_created = maintenance_project_identity.record_alias(
+                db,
+                project_id=project_id,
+                alias_name=item.get("source_project_name"),
+                source="sales_order_import",
+            )
+            if alias_created:
+                # create/update contract already bumps in this transaction;
+                # the dedupe registry makes this exactly-once.  It is the sole
+                # bump for an amount-noop row that contributes a new peer name.
+                operations.bump_workbook_revision(db, project_id=project_id)
 
             if sales is not None:
                 before = {
@@ -2007,6 +2209,159 @@ def _finish_plan(
 
 register_adapter(SalesContractAmountAdapter())
 register_adapter(ReceiptCollectionAdapter())
+
+
+def _synthetic_cell(value: Any) -> Any:
+    """把 pandas 空值还原成原始表格的空单元格。
+
+    合成 DetectedSheet 必须与 openpyxl 直读同形：空单元格是 None 而不是
+    NaN/NaT，否则下游会把 'nan' 当成非法日期，把整张销售订单判成阻断错误。
+    """
+
+    if value is None:
+        return None
+    try:
+        if value != value:  # NaN / NaT 自身不相等
+            return None
+    except (TypeError, ValueError):
+        return value
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def transformed_sales_sheet(
+    result,
+    *,
+    source_columns: list[str],
+) -> DetectedSheet:
+    """Adapt the already-bounded generic sales transform without reopening XLSX."""
+
+    internal_by_detected = {
+        "order_no": "order_no",
+        "raw_order_id": "raw_order_id",
+        "data_status": "data_status",
+        "maintenance_business": "maintenance_business",
+        "business_type": "business_type",
+        "project_name": "maintenance_project_name",
+        "project_manager": "maintenance_project_manager",
+        "period_from": "maintenance_period_from",
+        "period_to": "maintenance_period_to",
+        "order_amount": "amount_inc_tax",
+        "tax_flag": "is_tax_inclusive",
+        "tax_rate": "tax_rate",
+        "tax_amount": "tax_amount",
+        "amount_ex_tax": "amount_ex_tax",
+    }
+    present_internal = {
+        mapping.SALES_HEAD[column]
+        for column in source_columns
+        if column in mapping.SALES_HEAD
+    }
+    fields = [
+        field
+        for field, internal in internal_by_detected.items()
+        if internal in present_internal
+    ]
+    field_indexes = {field: index for index, field in enumerate(fields)}
+    rows: list[tuple[int, tuple[Any, ...]]] = []
+    for row_no, order in enumerate(result.orders.values(), start=3):
+        values: list[Any] = []
+        for field in fields:
+            value = order.get(internal_by_detected[field])
+            if field == "tax_flag":
+                value = "含税" if value is True else (
+                    "不含税" if value is False else None
+                )
+            values.append(_synthetic_cell(value))
+        rows.append((row_no, tuple(values)))
+    return DetectedSheet(
+        name="generic-sales-transform",
+        header_row=2,
+        header_rows=(1, 2),
+        headers=tuple(fields),
+        system_headers=(),
+        field_indexes=field_indexes,
+        field_matches={},
+        rows=tuple(rows),
+    )
+
+
+def sync_uploaded_sales_workbook(
+    db: Session,
+    data: bytes | None,
+    filename: str,
+    *,
+    operated_by: str,
+    import_batch_id: int,
+    detected_sheet: DetectedSheet | None = None,
+) -> dict:
+    """Project explicit maintenance sales rows during the ordinary import.
+
+    The ordinary ETL remains the sales fact writer.  This hook reuses the
+    reviewed XSDD planner/apply path, but feeds it only rows whose source
+    columns explicitly declare maintenance business.  Non-maintenance rows
+    are therefore incapable of creating/updating maintenance contracts.
+    """
+
+    # 优先复用 loader 已经解析好的 TransformResult（transformed_sales_sheet），
+    # 不再重开 XLSX：_detect 走 read_only=False 会把每个 worksheet 都实体化，
+    # 抵消 load_selected_workbook 的内存边界（真实销售导出有 19 个 sheet），
+    # 而且可能选到与已入库事实不同的那一张表。同时也消除了「文件已被判定为
+    # SALES、但适配器识别失败就静默 not_applicable」这条无声跳过路径
+    # （Codex P1 ×2，2026-09-03）。
+    adapter = _ADAPTERS["sales_contract_amount"]
+    if detected_sheet is not None:
+        sheet = detected_sheet
+    else:
+        # 文件已被判定为 SALES 后，识别失败是硬错误：静默 not_applicable 会让
+        # 一份真实销售订单看起来「导入成功但一个项目都没建」。
+        adapter, sheet = _detect(data)
+        if adapter.key != "sales_contract_amount":
+            raise BulkImportInvalid("未识别为销售订单合同事实表")
+    written_raw_ids = set(db.scalars(select(FSalesOrder.raw_order_id).where(
+        FSalesOrder.import_batch_id == import_batch_id
+    )))
+    eligible_rows = tuple(
+        (row_no, values)
+        for row_no, values in sheet.rows
+        if _is_explicit_maintenance_row(sheet, values)
+        and _text(_value(sheet, values, "raw_order_id")) in written_raw_ids
+    )
+    if not eligible_rows:
+        return {"status": "no_maintenance_rows", "eligible_rows": 0}
+    maintenance_sheet = DetectedSheet(
+        name=sheet.name,
+        header_row=sheet.header_row,
+        header_rows=sheet.header_rows,
+        headers=sheet.headers,
+        system_headers=sheet.system_headers,
+        field_indexes=sheet.field_indexes,
+        field_matches=sheet.field_matches,
+        rows=eligible_rows,
+    )
+    plan = adapter.build_plan(db, maintenance_sheet)
+    blocking = int((plan.get("summary") or {}).get("blocking_errors") or 0)
+    if blocking:
+        raise BulkImportInvalid(
+            f"维保销售订单自动建项有 {blocking} 个阻断错误",
+            issues=plan.get("issues") or [],
+        )
+    result = adapter.apply_plan(
+        db,
+        plan,
+        operated_by=operated_by,
+        audit_reason=(
+            f"普通销售订单导入自动建维保项目 "
+            f"batch={import_batch_id} filename={filename[:128]}"
+        ),
+    )
+    return {
+        "status": "applied",
+        "eligible_rows": len(eligible_rows),
+        "source_actions": (plan.get("summary") or {}).get("source_actions") or {},
+        **result,
+    }
 
 
 def build_preview(db: Session, data: bytes, filename: str) -> PreviewArtifact:

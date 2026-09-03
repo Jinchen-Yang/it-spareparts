@@ -1076,6 +1076,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     # 卡片「销售」：canonical salesperson 优先；未人工覆盖的遗留空值才用 WBDD 众数兜底。
     sales_modes = _card_salesperson_modes(db, project_ids)
     aliases = maintenance_project_identity.aliases_by_project(db, project_ids)
+    peer_names = maintenance_project_identity.peer_names_by_project(db, project_ids)
 
     out_rows = []
     for proj in rows:
@@ -1086,6 +1087,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "display_name": proj.display_name,
             "aliases": [
                 name for name in aliases.get(proj.project_id, [])
+                if project_names.display_name_identity(name)
+                != project_names.display_name_identity(proj.display_name)
+            ],
+            "peer_names": [
+                name for name in peer_names.get(proj.project_id, [])
                 if project_names.display_name_identity(name)
                 != project_names.display_name_identity(proj.display_name)
             ],
@@ -1137,6 +1143,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
             "aliases": [],
+            "peer_names": [],
             "lifecycle": "missing",
             "period_from": None,       # 桶不是项目，没有期限可言
             "period_to": None,

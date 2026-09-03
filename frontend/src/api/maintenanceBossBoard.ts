@@ -98,6 +98,8 @@ export interface BoardProjectRow {
   display_name: string;
   /** 同一 canonical 项目的历史/来源名称，仅用于展示和搜索。 */
   aliases?: string[];
+  /** 由同一 XSDD 销售事实或 XSDD 容器归并证明的平等项目名称。 */
+  peer_names?: string[];
   lifecycle: "ongoing" | "ended" | "missing";
   /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
   period_from: string | null;
