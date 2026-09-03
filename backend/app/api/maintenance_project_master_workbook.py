@@ -732,8 +732,12 @@ async def validate_project_master(
     data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
+            # force_takeover 必须透传：接管预检要让用户在按下「强制接管」之前
+            # 看到自己将要覆盖的具体值（plan.overridden）。不传则预检永远返回
+            # 普通冲突计划，客户端无从预览（2026-09-03 评审 P2）。
             plan = master.validate_project_master_v2(
-                db, project_id=project_id, data=data, user_ctx=ctx)
+                db, project_id=project_id, data=data, user_ctx=ctx,
+                force_takeover=force_takeover)
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(
                     ctx, ident, db=db, project_id=project_id)
