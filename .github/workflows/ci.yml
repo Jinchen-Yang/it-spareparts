@@ -42,19 +42,22 @@ jobs:
         run: |
           uv run --extra dev alembic upgrade head
           uv run --extra dev alembic check
-      # PRs #251 and #252 only change the v1.22 release controllers/their
-      # focused tests, CI plumbing, and frontend test stability. Their base main
-      # SHAs already passed the complete backend suite; rerun the affected
-      # backend contract so the slower self-hosted runner does not time out.
-      - name: 跑受影响的 v1.22 发布控制测试
-        if: github.event_name == 'pull_request' && (github.event.pull_request.number == 251 || github.event.pull_request.number == 252)
-        timeout-minutes: 10
+      # 2026-09-03（阶段 0 护栏）：历史上迁移链反复分叉（6 个 merge 迁移为证），
+      # 多头会让 `alembic upgrade head` 在部署时报错或漏跑一条链。卡死单头。
+      - name: 迁移链单头卡口（alembic heads == 1）
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
-        run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
+        run: |
+          heads="$(uv run --extra dev alembic heads | grep -c . || true)"
+          if [ "$heads" != "1" ]; then
+            echo "::error::迁移链有 $heads 个头，必须收敛为 1 个再合并"
+            uv run --extra dev alembic heads
+            exit 1
+          fi
+      # 2026-09-03（阶段 0 护栏）：删除对 PR #251/#252 的硬编码豁免——那两个 PR
+      # 早已合并，留着等于给「按 PR 号跳过全量后端测试」留了一条可复用的口子。
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
-        if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
         timeout-minutes: 140
         working-directory: backend
         env:
