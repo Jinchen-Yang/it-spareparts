@@ -299,8 +299,7 @@ def _current_contracts(
         )
     )
     if lock:
-        statement = statement.with_for_update().execution_options(
-            populate_existing=True)
+        statement = statement.with_for_update()
     return list(db.scalars(statement).all())
 
 
@@ -917,9 +916,7 @@ def _global_line_in_scope(
         # Keep the active project edge stable between scope validation and the
         # override write. Reassignment uses the same row lock and therefore
         # either completes first (this query sees the new scope) or waits.
-        stmt = stmt.with_for_update(
-            of=MaintenanceSourceOrderAssignment
-        ).execution_options(populate_existing=True)
+        stmt = stmt.with_for_update(of=MaintenanceSourceOrderAssignment)
     return db.scalar(stmt)
 
 
@@ -1636,6 +1633,12 @@ def apply_global_lines(
     # ORM 读到 (1, 10000)，且返回的就是 validate 期那个对象。
     # 安全前提：validate_* 只读（无 db.add/flush/commit/属性赋值），
     # SessionLocal 是 autoflush=False（app/db.py），此处无待写改动可丢。
+    #
+    # 有了这一句，锁内**第一次**读到的就是真实行，因此除「取锁阶段」的加锁
+    # 读之外，一律不要再加 populate_existing：autoflush=False 下，写阶段的
+    # 重读若 repopulate，会把尚未 flush 的改动直接冲掉（同一行既改数量又填
+    # 人工成本时，数量会被静默丢弃而成本照常提交 —— Codex P1，2026-09-04，
+    # 已有回归用例守着）。持锁之后没人能在我们脚下改数据，一次新鲜读就够。
     db.expire_all()
     probed_rows = list(db.execute(
         select(
@@ -1681,7 +1684,6 @@ def apply_global_lines(
             )
             .order_by(MaintenanceProject.project_id)
             .with_for_update()
-            .execution_options(populate_existing=True)
         ).all())
         if locked_projects != probed_project_ids:
             raise WorkbookError(
@@ -2858,7 +2860,6 @@ def build_project_master_v2(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if project is None:
         return None
@@ -3053,7 +3054,6 @@ def _merge_manual_cost_to_line(
         select(FMaintenanceLine)
         .where(FMaintenanceLine.id == refill.line_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if line is None:
         raise WorkbookError("line_not_found", "备件行已不存在，请重新下载")
@@ -3061,7 +3061,6 @@ def _merge_manual_cost_to_line(
         select(MaintenanceManualCostOverride)
         .where(MaintenanceManualCostOverride.line_id == refill.line_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     changed = False
     if refill.unit_cost_ex_tax is not None:
@@ -4128,7 +4127,6 @@ def _ensure_contract_for_xsdd_apply(
         )
         .limit(1)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if shared is not None:
         raise WorkbookError(
@@ -4171,7 +4169,6 @@ def _ensure_contract_for_xsdd_apply(
             FSalesOrder.id.desc(),
         )
         .with_for_update(of=FSalesOrder)
-        .execution_options(populate_existing=True)
     ).all())
     economic_candidates = {
         (
@@ -5166,6 +5163,12 @@ def apply_project_master_v2(
     # ORM 读到 (1, 10000)，且返回的就是 validate 期那个对象。
     # 安全前提：validate_* 只读（无 db.add/flush/commit/属性赋值），
     # SessionLocal 是 autoflush=False（app/db.py），此处无待写改动可丢。
+    #
+    # 有了这一句，锁内**第一次**读到的就是真实行，因此除「取锁阶段」的加锁
+    # 读之外，一律不要再加 populate_existing：autoflush=False 下，写阶段的
+    # 重读若 repopulate，会把尚未 flush 的改动直接冲掉（同一行既改数量又填
+    # 人工成本时，数量会被静默丢弃而成本照常提交 —— Codex P1，2026-09-04，
+    # 已有回归用例守着）。持锁之后没人能在我们脚下改数据，一次新鲜读就够。
     db.expire_all()
     project_exists = db.scalar(
         select(MaintenanceProject.project_id).where(
@@ -5269,7 +5272,6 @@ def apply_project_master_v2(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == plan.project_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if project is None or not project.is_active:
         raise WorkbookError("project_not_editable", "项目已不存在或归档，请重新下载")
@@ -5289,7 +5291,6 @@ def apply_project_master_v2(
                 == apply_operation_key
             )
             .with_for_update()
-            .execution_options(populate_existing=True)
         )
         if receipt is not None:
             if (
@@ -5417,7 +5418,6 @@ def apply_project_master_v2(
             .where(MaintenanceProjectContract.project_id == plan.project_id)
             .order_by(MaintenanceProjectContract.project_contract_id)
             .with_for_update()
-            .execution_options(populate_existing=True)
         ))
         editable_contracts = _v2_editable_contracts(db, plan.project_id, contracts)
         if (len(editable_contracts) != 1
@@ -5938,7 +5938,6 @@ def apply_project_master_v2(
         )
         .order_by(MaintenanceCollectionMilestone.milestone_id)
         .with_for_update()
-        .execution_options(populate_existing=True)
     ).all()) if milestone_entity_ids else []
     if (
         {milestone.milestone_id for milestone in locked_milestones}
@@ -6020,7 +6019,6 @@ def apply_project_master_v2(
                     MaintenanceCollectionMilestone.sequence == change.sequence,
                 )
                 .with_for_update()
-                .execution_options(populate_existing=True)
             )
             if coordinate_owner is not None:
                 raise WorkbookError(

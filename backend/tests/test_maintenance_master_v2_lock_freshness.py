@@ -215,3 +215,45 @@ def test_concurrent_change_to_an_untouched_row_does_not_block_the_upload(db):
         FMaintenanceLine.id == touched_id)) == Decimal("3.000")
     assert db.scalar(select(FMaintenanceLine.qty).where(
         FMaintenanceLine.id == untouched_id)) == Decimal("42.000")
+
+
+# ---------- 写阶段重读不得冲掉未 flush 的改动 ----------
+
+def test_same_row_quantity_and_manual_cost_both_land(db):
+    """同一行既改数量、又填人工成本 → 两者都必须落库。
+
+    SessionLocal 是 autoflush=False。写阶段若对同一行做带 populate_existing
+    的重读，会把已经赋值但尚未 flush 的 qty/PN/备注/重算金额直接冲回库里的旧
+    值，而人工成本照常提交——半截应用，审计还记的是被冲回去的值
+    （Codex P1，2026-09-04）。规则：populate_existing 只出现在取锁阶段。
+    """
+    from app.models.maintenance import FMaintenanceLine
+
+    project, _part, _order, line = _make_project_with_line(
+        db, unit_cost=None, cost_source="none")
+    line_id = line.id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    ws.cell(2, headers["需求数量"], 7)
+    ws.cell(2, headers["人工未税单位成本"], Decimal("88.00"))
+    ws.cell(2, headers["人工成本原因"], "本次人工定价")
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.commit()
+
+    row = db.execute(
+        select(FMaintenanceLine.qty, FMaintenanceLine.unit_cost_ex_tax,
+               FMaintenanceLine.cost_source)
+        .where(FMaintenanceLine.id == line_id)
+    ).first()
+    assert row[0] == Decimal("7.000"), f"数量改动被写阶段重读冲掉了：{row[0]}"
+    assert row[1] == Decimal("88.00")
+    assert row[2] == "manual"
