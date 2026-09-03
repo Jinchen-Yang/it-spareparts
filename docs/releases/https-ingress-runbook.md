@@ -704,3 +704,359 @@ ssh -L 18080:127.0.0.1:8080 it-spareparts-prod
 首次 HTTPS 接入的阶段回滚不恢复公网 8080。Issue #178 经风险负责人单独批准的
 最终入口不是业务明文回退，而是固定 308/405 的 Caddy redirect-only 兼容层；任何
 超出该契约的变化必须另立变更单。
+
+## 12. 追加别名域名（yabowei.xyz）
+
+> 2026-08-31 后续拍板：hbzgc.icu 将到期退位，本节接入的 yabowei.xyz 随后
+> 升为主站正式域名，翻转流程见第 13 节；本节“正式域名不动”的描述仅指
+> 执行本节时的状态。
+
+适用范围：已按第 1–11 节完成首次 HTTPS 接入的生产环境。2026-08-31 起域名
+所有者已把 `yabowei.xyz` 的 `A` 记录解析到同一台生产服务器；别名与正式域名
+`hbzgc.icu` 同上游、同安全响应头，证书独立签发，HTTP→HTTPS 由 Caddy 自动
+308。正式域名仍是唯一跳转目标与巡检真值：`.https_monitor_url`、
+`10.0.0.11:8080` redirect-only 边缘、`observe_v120.sh`/`monitor.sh` 与
+`EXPECTED_HTTPS_HOST` 全部不动。
+
+别名站点块以 `.deploy/Caddyfile.it-data.example` 文件末尾的
+`https://yabowei.xyz` 段为唯一来源，禁止手写副本或引入新的 Caddy 环境变量
+（少一个必填键就少一种“未设值导致整份 Caddyfile 解析失败”的路径，也无需改
+Compose 或 edge 控制件的 env 契约）。本仓库构建的新环境在第 7 节整文件追加
+时会同时带上别名块，无需执行本节；只有既有生产需要按下述流程单独补加。
+
+别名 HSTS 首发固定 `max-age=300` 字面量，刻意不复用
+`{$IT_DATA_HSTS_MAX_AGE}`：正式域名已按 scoped runbook 提升，别名必须独立走
+小步观察。别名纳入持续巡检属于后续可选变更（当前 `monitor.sh` 是单 URL
+契约），不阻塞本节验收。
+
+前置检查：
+
+```bash
+test "$(id -un)" = ubuntu
+export IT_DATA_ALIAS=yabowei.xyz
+export ASSISTANT_SMOKE_URL='https://<原personal-assistant域名>/health'
+export IT_DATA_IPV4='<生产公网IPv4>'
+[[ "$ASSISTANT_SMOKE_URL" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?/health$ ]]
+test "$(dig +short A "$IT_DATA_ALIAS" | sort -u)" = "$IT_DATA_IPV4"
+test -z "$(dig +short AAAA "$IT_DATA_ALIAS")"
+
+# 既有生产必须已带正式域名站点块与三个 Caddy 环境键。
+sudo grep -Fq 'https://{$IT_DATA_HOST}' /opt/personal-ai-assistant/Caddyfile
+sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  personal-ai-assistant-caddy |
+  grep -cE '^(IT_DATA_HOST|IT_DATA_UPSTREAM|IT_DATA_HSTS_MAX_AGE)=' |
+  grep -qx 3
+```
+
+备份边缘配置并原子追加别名块（幂等：重复执行必须失败而不是重复追加）：
+
+```bash
+RELEASE_ID="alias-$(date +%Y%m%d-%H%M%S)"
+EVIDENCE_DIR="/home/ubuntu/apps/it-spareparts/backups/$RELEASE_ID"
+sudo install -d -m 700 "$EVIDENCE_DIR"
+sudo install -m 600 /opt/personal-ai-assistant/Caddyfile \
+  "$EVIDENCE_DIR/Caddyfile.before"
+sudo sha256sum "$EVIDENCE_DIR/Caddyfile.before" |
+  sudo tee "$EVIDENCE_DIR/SHA256SUMS" >/dev/null
+sudo chmod 600 "$EVIDENCE_DIR/SHA256SUMS"
+sudo sha256sum -c "$EVIDENCE_DIR/SHA256SUMS"
+
+sudo IT_DATA_ALIAS="$IT_DATA_ALIAS" /bin/bash -c '
+set -Eeuo pipefail
+target=/opt/personal-ai-assistant/Caddyfile
+source=/home/ubuntu/apps/it-spareparts/.deploy/Caddyfile.it-data.example
+if grep -Fq "https://$IT_DATA_ALIAS {" "$target"; then
+  echo "别名站点块已经存在，拒绝重复追加" >&2
+  exit 1
+fi
+if ! grep -Fq "https://{\$IT_DATA_HOST}" "$target"; then
+  echo "正式域名站点块缺失：先按第 7 节完成首次接入" >&2
+  exit 1
+fi
+alias_block=$(sed -n "/^https:\/\/${IT_DATA_ALIAS} {\$/,\$p" "$source")
+printf "%s\n" "$alias_block" |
+  grep -Fq "reverse_proxy {\$IT_DATA_UPSTREAM}"
+printf "%s\n" "$alias_block" | grep -Fq "max-age=300"
+printf "%s\n" "$alias_block" | grep -Fq "X-Content-Type-Options"
+printf "\n%s\n" "$alias_block" >> "$target"
+'
+```
+
+重建前先在容器内验证候选配置；别名块只依赖既有 `IT_DATA_UPSTREAM`，
+容器环境已含全部三个键，不需要注入临时值：
+
+```bash
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo docker exec personal-ai-assistant-caddy \
+  wget -qO- https://acme-v02.api.letsencrypt.org/directory >/dev/null
+sudo docker exec personal-ai-assistant-caddy \
+  wget -qO- http://it-spareparts-frontend/ >/dev/null
+
+cd /opt/personal-ai-assistant
+sudo docker compose --env-file .env -f compose.production.yml \
+  up -d --no-deps --force-recreate caddy
+test "$(sudo docker inspect -f '{{.State.Running}}' \
+  personal-ai-assistant-caddy)" = true
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+机器可判定的别名验收（Caddy 会为新域名自动签发证书，首次请求前需等
+ACME 完成；失败先看 Caddy 日志，不得改成明文入口）：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsS "https://$IT_DATA_ALIAS/" >/dev/null
+curl -fsS "https://$IT_DATA_ALIAS/health" >/dev/null
+curl -fsS "https://$IT_DATA_ALIAS/health/db" >/dev/null
+
+# HTTP→HTTPS 单跳 308，保留路径与查询参数。
+test "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+  "http://$IT_DATA_ALIAS/release-check?q=1")" \
+  = "308 https://$IT_DATA_ALIAS/release-check?q=1"
+
+# 安全响应头：CRLF 归一后精确匹配；-Server 必须仍然移除。
+headers=$(curl -fsSI "https://$IT_DATA_ALIAS/" | tr -d '\r')
+grep -Eqi '^strict-transport-security: max-age=300$' <<<"$headers"
+grep -Eqi '^x-content-type-options: nosniff$' <<<"$headers"
+grep -Eqi '^x-frame-options: DENY$' <<<"$headers"
+! grep -Eqi '^server:' <<<"$headers"
+```
+
+正式域名与同机其他站点不回归：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsS 'https://hbzgc.icu/' >/dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+  'http://hbzgc.icu/release-check?q=1')" \
+  = '308 https://hbzgc.icu/release-check?q=1'
+curl --proto '=https' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL" >/dev/null
+```
+
+别名专属回滚（只移除别名站点块；不动 DNS、不动正式域名、不动 Compose，
+也不复用第 11 节的整套 ingress 回滚）：
+
+```bash
+sudo install -o root -g root -m 644 \
+  "$EVIDENCE_DIR/Caddyfile.before" /opt/personal-ai-assistant/Caddyfile
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+cd /opt/personal-ai-assistant
+sudo docker compose --env-file .env -f compose.production.yml \
+  up -d --no-deps --force-recreate caddy
+test "$(sudo docker inspect -f '{{.State.Running}}' \
+  personal-ai-assistant-caddy)" = true
+curl --proto '=https' --tlsv1.2 -fsS 'https://hbzgc.icu/' >/dev/null
+curl --proto '=https' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL" >/dev/null
+```
+
+DNS 记录去留由域名所有者另行决定，回滚不擅自改 DNS。别名 HSTS 后续如需
+对齐正式域名，另立变更单；`hsts-v120-scoped-runbook.md` 绑定的是
+`hbzgc.icu`，不得复用于别名。
+
+## 13. 域名退位翻转：yabowei.xyz 升主站，hbzgc.icu 退为桥接
+
+适用范围：已按第 12 节接入 `yabowei.xyz` 的生产。2026-08-31 拍板：旧正式域名
+`hbzgc.icu` 后续将到期，`yabowei.xyz` 升为主站正式域名；`hbzgc.icu` 续费一年
+只做 308 桥接——域名一旦落入他人之手，可在同一 hostname 挂高仿登录页钓鱼
+（老访客浏览器还带着 HSTS 钉子和书签），桥接期结束、用户全部迁移后再另立
+变更摘除。第 12 节“正式域名仍是唯一跳转目标与巡检真值”的描述到本节为止：
+翻转后主站承担全部业务与巡检，hbzgc.icu 只保留单跳 308。
+
+执行门槛：
+
+1. 第 12 节已执行：线上 Caddyfile 已有 `https://yabowei.xyz` 主站块。
+2. hbzgc.icu 已完成续费（至少覆盖一年桥接期）；未续费不得执行本节。
+3. 已通知用户新地址 `https://yabowei.xyz/`：token 按 origin 隔离不迁移，
+   所有人需要在新域名重新登录一次；旧地址的路径与查询会被 308 原样带过去。
+4. Compose/caddy 容器环境键 `IT_DATA_HOST`、`IT_DATA_HSTS_MAX_AGE`、
+   `IT_DATA_UPSTREAM` 必须原样保留：翻转后 Caddyfile 不再引用前两个，但
+   `edge_v120_root.sh` 的候选 env 校验仍要求这三个键存在，删掉会阻断后续
+   边缘控制件流程；`IT_DATA_UPSTREAM` 仍被主站块使用。
+
+前置检查：
+
+```bash
+test "$(id -un)" = ubuntu
+export IT_DATA_PRIMARY=yabowei.xyz
+export ASSISTANT_SMOKE_URL='https://<原personal-assistant域名>/health'
+export IT_DATA_IPV4='<生产公网IPv4>'
+[[ "$ASSISTANT_SMOKE_URL" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?/health$ ]]
+test "$(dig +short A "$IT_DATA_PRIMARY" | sort -u)" = "$IT_DATA_IPV4"
+test -z "$(dig +short AAAA "$IT_DATA_PRIMARY")"
+test "$(dig +short A hbzgc.icu | sort -u)" = "$IT_DATA_IPV4"
+sudo grep -Fq "https://yabowei.xyz {" /opt/personal-ai-assistant/Caddyfile
+sudo grep -Fq 'https://{$IT_DATA_HOST}' /opt/personal-ai-assistant/Caddyfile
+```
+
+备份边缘配置（同第 12 节纪律）：
+
+```bash
+RELEASE_ID="flip-$(date +%Y%m%d-%H%M%S)"
+EVIDENCE_DIR="/home/ubuntu/apps/it-spareparts/backups/$RELEASE_ID"
+sudo install -d -m 700 "$EVIDENCE_DIR"
+sudo install -m 600 /opt/personal-ai-assistant/Caddyfile \
+  "$EVIDENCE_DIR/Caddyfile.before"
+sudo sha256sum "$EVIDENCE_DIR/Caddyfile.before" |
+  sudo tee "$EVIDENCE_DIR/SHA256SUMS" >/dev/null
+sudo chmod 600 "$EVIDENCE_DIR/SHA256SUMS"
+sudo sha256sum -c "$EVIDENCE_DIR/SHA256SUMS"
+```
+
+翻转（一次原子写入完成“摘除通用站点块 + 追加桥接块”，中间态不落盘；
+重复执行必须拒绝而不是叠加）：
+
+```bash
+sudo IT_DATA_PRIMARY="$IT_DATA_PRIMARY" /bin/bash -c '
+set -Eeuo pipefail
+target=/opt/personal-ai-assistant/Caddyfile
+source=/home/ubuntu/apps/it-spareparts/.deploy/Caddyfile.it-data.example
+if ! grep -Fq "https://$IT_DATA_PRIMARY {" "$target"; then
+  echo "主站站点块缺失：先按第 12 节接入 yabowei.xyz" >&2
+  exit 1
+fi
+if grep -Fq "https://hbzgc.icu {" "$target"; then
+  echo "桥接站点块已经存在，拒绝重复执行" >&2
+  exit 1
+fi
+bridge=$(sed -n "/^https:\/\/hbzgc\.icu {$/,/^}$/p" "$source")
+printf "%s\n" "$bridge" | grep -Fq "redir https://$IT_DATA_PRIMARY{uri} 308"
+bridge_tmp=$(mktemp)
+printf "%s" "$bridge" > "$bridge_tmp"
+python3 - "$target" "$bridge_tmp" <<PY
+import os
+import sys
+
+path, bridge_path = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.readlines()
+label = "https://{\$IT_DATA_HOST} {"
+starts = [i for i, line in enumerate(lines) if line.rstrip("\n") == label]
+if len(starts) != 1:
+    raise SystemExit("通用站点块必须恰好出现一次")
+start = starts[0]
+depth = 0
+end = None
+for i in range(start, len(lines)):
+    depth += lines[i].count("{") - lines[i].count("}")
+    if depth == 0:
+        end = i
+        break
+if end is None:
+    raise SystemExit("通用站点块缺少闭合大括号")
+removed = "".join(lines[start : end + 1])
+if "reverse_proxy" not in removed or "Strict-Transport-Security" not in removed:
+    raise SystemExit("摘除段不含业务代理/安全头，疑似选错块")
+remainder = lines[:start] + lines[end + 1 :]
+if any("{\$IT_DATA_HOST}" in line for line in remainder):
+    raise SystemExit("站点块之外仍有 {\$IT_DATA_HOST} 引用，需人工处理")
+with open(bridge_path, encoding="utf-8") as handle:
+    bridge = handle.read()
+if not bridge.endswith("\n"):
+    bridge += "\n"
+if remainder and not remainder[-1].endswith("\n"):
+    remainder[-1] += "\n"
+candidate = remainder + ["\n", bridge]
+tmp = path + ".flip.tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.writelines(candidate)
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+os.unlink(bridge_path)
+PY
+rm -f "$bridge_tmp"
+test "$(grep -c "^https://hbzgc.icu {$" "$target")" = 1
+'
+```
+
+重建与验证（同第 12 节节奏：先在容器内验证候选，通过后才重建）：
+
+```bash
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+cd /opt/personal-ai-assistant
+sudo docker compose --env-file .env -f compose.production.yml \
+  up -d --no-deps --force-recreate caddy
+test "$(sudo docker inspect -f '{{.State.Running}}' \
+  personal-ai-assistant-caddy)" = true
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+机器可判定的验收（主站全量、桥接单跳、同机其他站点不回归）：
+
+```bash
+# 主站：业务、健康检查、同域 HTTP→HTTPS、安全响应头。
+curl --proto '=https' --tlsv1.2 -fsS "https://$IT_DATA_PRIMARY/" >/dev/null
+curl -fsS "https://$IT_DATA_PRIMARY/health" >/dev/null
+curl -fsS "https://$IT_DATA_PRIMARY/health/db" >/dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+  "http://$IT_DATA_PRIMARY/release-check?q=1")" \
+  = "308 https://$IT_DATA_PRIMARY/release-check?q=1"
+headers=$(curl -fsSI "https://$IT_DATA_PRIMARY/" | tr -d '\r')
+grep -Eqi '^strict-transport-security: max-age=300$' <<<"$headers"
+grep -Eqi '^x-content-type-options: nosniff$' <<<"$headers"
+grep -Eqi '^x-frame-options: DENY$' <<<"$headers"
+! grep -Eqi '^server:' <<<"$headers"
+
+# 桥接：https 起点必须单跳 308 到主站，保留路径与查询；
+# http 起点先由 Caddy 自动跳同域 https（两跳），最终落地主站 200。
+test "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+  "https://hbzgc.icu/release-check?q=1")" \
+  = "308 https://yabowei.xyz/release-check?q=1"
+curl -fsSL "http://hbzgc.icu/health" >/dev/null
+
+# 原 personal assistant 路由不受影响。
+curl --proto '=https' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL" >/dev/null
+```
+
+巡检真值切换（翻转后 hbzgc.icu 只回 308，旧探针会持续误报，必须在同一
+窗口内完成切换并确认两个 cron 周期 ok=Y）：
+
+```bash
+cd /home/ubuntu/apps/it-spareparts
+test "$(id -un)" = ubuntu
+umask 077
+printf 'https://%s/\n' "$IT_DATA_PRIMARY" > .https_monitor_url
+chmod 600 .https_monitor_url
+test "$(stat -c '%U:%G:%a' .https_monitor_url)" = "ubuntu:ubuntu:600"
+.deploy/monitor.sh
+grep -q 'ok=Y' monitor.status
+```
+
+翻转专属回滚（只恢复 Caddyfile 与巡检真值；不动 DNS、不动 Compose 环境
+键、不复用第 11 节的整套 ingress 回滚）：
+
+```bash
+sudo install -o root -g root -m 644 \
+  "$EVIDENCE_DIR/Caddyfile.before" /opt/personal-ai-assistant/Caddyfile
+sudo docker exec personal-ai-assistant-caddy \
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+cd /opt/personal-ai-assistant
+sudo docker compose --env-file .env -f compose.production.yml \
+  up -d --no-deps --force-recreate caddy
+test "$(sudo docker inspect -f '{{.State.Running}}' \
+  personal-ai-assistant-caddy)" = true
+curl --proto '=https' --tlsv1.2 -fsS 'https://hbzgc.icu/' >/dev/null
+curl --proto '=https' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL" >/dev/null
+
+cd /home/ubuntu/apps/it-spareparts
+umask 077
+printf 'https://hbzgc.icu/\n' > .https_monitor_url
+chmod 600 .https_monitor_url
+.deploy/monitor.sh
+grep -q 'ok=Y' monitor.status
+```
+
+已知后续（都不在本节内完成，各自另立变更）：
+
+1. `10.0.0.11:8080` redirect-only 边缘的 308 目标钉死 hbzgc.icu（冻结的
+   v1.20 控制件），翻转后从该入口要两跳才到主站。旧公网 8080 已基本无
+   流量，建议桥接期内直接关闭安全组 TCP 8080 并退役该边缘。
+2. yabowei.xyz 的 HSTS 提升不得复用 `hsts-v120-scoped-runbook.md`（其
+   绑定 hbzgc.icu）；主站观察期通过后另立变更。
+3. 后续发布/观察控制件的 `EXPECTED_HTTPS_HOST` 以后继版本切到
+   yabowei.xyz；不改写历史 v1.20 控制件。
+4. 桥接期结束、hbzgc.icu 流量归零后：释放或停放域名前，先摘除全部
+   hbzgc.icu 站点块与配置引用。

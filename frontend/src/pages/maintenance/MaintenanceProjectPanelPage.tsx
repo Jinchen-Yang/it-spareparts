@@ -419,7 +419,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           hint="六 sheet 一次下载，回填后整份上传覆盖"
           onDownload={() => downloadProjectMaster(projectId)}
           onValidate={(file) => validateProjectMaster(projectId, file)}
-          onApply={(file) => applyProjectMaster(projectId, file)}
+          onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
           onAfterApply={refreshProject}
         />
       </Flex>

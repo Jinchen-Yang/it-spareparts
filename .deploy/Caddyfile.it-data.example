@@ -6,6 +6,14 @@
 #                      it-spareparts-frontend:80
 # 可选：
 #   IT_DATA_HSTS_MAX_AGE  首次发布建议 300；观察通过后再提升到 31536000
+#
+# 当前生产（2026-08-31 起）的目标形态是三段：
+#   1) 环境变量通用站点块 —— 新环境首次接入的通用形态；
+#   2) hbzgc.icu 桥接块 —— 旧正式域名续费兜底，只允许 308 到主站；
+#   3) yabowei.xyz 主站块 —— 现正式域名，必须是文件最后一个站点块
+#      （Runbook 第 12 节的截取逻辑依赖这一点）。
+# 两个字面量块只属于当前生产；其他环境复用本文件前必须先删除它们。
+# 既有生产逐块截取追加：第 12 节接主站块，第 13 节做退位翻转。
 https://{$IT_DATA_HOST} {
 	reverse_proxy {$IT_DATA_UPSTREAM} {
 		# 下载与 SSE 立即向客户端转发，避免外层代理攒到响应结束。
@@ -14,6 +22,34 @@ https://{$IT_DATA_HOST} {
 
 	header {
 		Strict-Transport-Security "max-age={$IT_DATA_HSTS_MAX_AGE:300}"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+}
+
+# 桥接域名（旧正式域名 hbzgc.icu，2026-08-31 拍板：续费一年防抢注钓鱼）。
+# 退位后只允许 308 到主站并保留路径与查询；不带业务上游，也不再下发
+# HSTS——旧访客的 HSTS 钉子已无法撤销，桥接期结束域名释放前不得再叠加
+# 新的长期钉子。翻转流程见 Runbook 第 13 节。
+https://hbzgc.icu {
+	redir https://yabowei.xyz{uri} 308
+}
+
+# 主站域名（yabowei.xyz，原第 12 节以别名接入，第 13 节起升为正式域名）。
+# 与通用站点块同上游、同安全响应头，证书独立签发；HTTP→HTTPS 由 Caddy
+# 自动 308。HSTS 刻意固定 max-age=300 而不复用 {$IT_DATA_HSTS_MAX_AGE}：
+# 该环境键当前承载旧域名已提升到的大值，新主站必须独立走小步观察，
+# 通过后另立变更再提升。
+https://yabowei.xyz {
+	reverse_proxy {$IT_DATA_UPSTREAM} {
+		flush_interval -1
+	}
+
+	header {
+		Strict-Transport-Security "max-age=300"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"

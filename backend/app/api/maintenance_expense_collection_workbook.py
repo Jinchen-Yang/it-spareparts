@@ -38,6 +38,16 @@ def _operator(ident: dict) -> str:
     return str(ident.get("username") or ident.get("sub") or "unknown")
 
 
+async def _read_upload_with_takeover(request: Request) -> tuple[bytes, bool]:
+    """读取上传文件 + force_takeover 标志（2.7.0 行级冲突强制接管）。"""
+    data = await _read_upload(request)
+    # starlette 会缓存已解析的 form，二次 await 不会重复读体。
+    form = await request.form()
+    value = form.get("force_takeover")
+    raw = str(value).strip().lower() if value is not None else ""
+    return data, raw in {"1", "true", "yes", "on"}
+
+
 async def _read_upload(request: Request) -> bytes:
     content_type = request.headers.get("content-type", "")
     if not content_type.lower().startswith("multipart/form-data"):

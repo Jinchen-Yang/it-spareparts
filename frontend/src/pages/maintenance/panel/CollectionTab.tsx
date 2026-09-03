@@ -119,7 +119,7 @@ export function CollectionTab({
         hint="下载后可回填累计实收、状态、凭证号和备注"
         onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
         onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file) => applyProjectMaster(projectId, file)}
+        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
         onAfterApply={onRefresh}
       />
       <Card
