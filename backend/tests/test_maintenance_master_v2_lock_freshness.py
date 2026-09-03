@@ -20,6 +20,7 @@ apply 在拿到行锁之后、任何写之前重算比对，不等就整本 fail
 """
 import io
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -257,3 +258,111 @@ def test_same_row_quantity_and_manual_cost_both_land(db):
     assert row[0] == Decimal("7.000"), f"数量改动被写阶段重读冲掉了：{row[0]}"
     assert row[1] == Decimal("88.00")
     assert row[2] == "manual"
+
+
+# ---------- 04 报销 / 06 领用返还：同一套哨兵 ----------
+
+def test_expense_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """04 报销：窗口内并发改同一行 → 整本零写入报 row_conflicts。"""
+    from app.models.maintenance import FProjectExpense
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_expense,
+    )
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    raw_line_id = expense.raw_line_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_EXPENSE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == raw_line_id
+    )
+    ws.cell(row_no, headers["操作"], "UPDATE")
+    ws.cell(row_no, headers["未税金额"], 600)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_EXPENSE for g in plan.row_guards)
+
+    def _peer(other):
+        peer = other.scalar(select(FProjectExpense).where(
+            FProjectExpense.raw_line_id == raw_line_id))
+        peer.person = "别人改的"
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(FProjectExpense.person).where(
+        FProjectExpense.raw_line_id == raw_line_id)) == "别人改的"
+    assert db.scalar(select(FProjectExpense.amount_ex_tax).where(
+        FProjectExpense.raw_line_id == raw_line_id)) == Decimal("500.00")
+
+
+def test_site_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """06 领用返还：窗口内并发改同一行 → 整本零写入报 row_conflicts。"""
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    project, part, order, line = _make_project_with_line(db)
+    issue = MaintenanceSiteIssue(
+        issue_id=str(uuid.uuid4()), project_id=project.project_id,
+        issue_no="CKD-GUARD-1", issue_date=date(2026, 8, 2),
+        raw_status="已确认", status_mapping_state="mapped",
+        normalized_status="confirmed", status_mapping_version="v1",
+        source="legacy",
+    )
+    db.add(issue)
+    db.flush()
+    site_line = MaintenanceSiteIssueLine(
+        issue_line_id=str(uuid.uuid4()), issue_id=issue.issue_id, line_no=1,
+        part_id=part.id, pn=part.pn_std, quantity=Decimal("1"),
+        source_order_id=order.raw_order_id, source_line_id=line.raw_line_id,
+        algorithm_version="v1",
+    )
+    db.add(site_line)
+    db.commit()
+    site_line_id = site_line.issue_line_id
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == site_line_id
+    )
+    ws.cell(row_no, headers["备注"], "我改的备注")
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_SITE for g in plan.row_guards)
+
+    def _peer(other):
+        peer = other.get(MaintenanceSiteIssueLine, site_line_id)
+        peer.quantity = Decimal("42")
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(MaintenanceSiteIssueLine.quantity).where(
+        MaintenanceSiteIssueLine.issue_line_id == site_line_id)) == Decimal("42")
