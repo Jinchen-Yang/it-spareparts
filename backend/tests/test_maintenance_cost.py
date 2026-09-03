@@ -670,3 +670,46 @@ def test_loader_report_counts(db, batch):
     assert (r2["fact_rows_inserted"], r2["fact_rows_skipped"]) == (0, 1)
     n = db.execute(select(FMaintenanceOrder)).scalars().all()
     assert len(n) == 1
+
+
+def test_projects_aggregate_uses_project_period_over_wbdd_maint_end(db, batch):
+    """项目上有完整维保期限时，不得因某张 WBDD 单缺 maint_end 就判「期限缺失」。
+
+    用户报障（2026-09-03）：期限回填后项目列表/看板仍大面积显示「期限缺失」。
+    根因是本模块自带一套独立 lifecycle——只看挂靠 WBDD 单的 maint_end，
+    任一单缺日期即整项目 missing，完全不看 MaintenanceProject.period_from/to。
+    而 maintenance_periods 的 docstring 明写项目期限才是唯一业务事实。
+    """
+    import uuid as _uuid
+
+    from app.models.maintenance_project import MaintenanceProject
+    from app.models.maintenance_source_assignment import (
+        MaintenanceSourceOrderAssignment,
+    )
+
+    _load_maintenance(db, batch, {
+        # 这张单没有 maint_end —— 旧口径据此把整个项目判成「期限缺失」
+        "MP1": f.maintenance_head("MP1", on=date(2026, 3, 9), project="期限项目",
+                                  maint_end=None),
+    }, [f.maintenance_line("MP1", "MPL1", "PN-J", qty="1")])
+    project = MaintenanceProject(
+        project_id=str(_uuid.uuid4()), project_code="PERIOD-1",
+        display_name="期限项目", lifecycle_status="ongoing",
+        # 期限完整，只是还没开始
+        period_from=date(2027, 1, 1), period_to=date(2027, 12, 31),
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceSourceOrderAssignment(
+        assignment_id=str(_uuid.uuid4()), project_id=project.project_id,
+        source_order_id="MP1", is_active=True, created_by="test",
+    ))
+    db.commit()
+    maintenance_cost.recompute(db)
+
+    data = maintenance_cost.projects_aggregate(
+        db, lifecycle="all", as_of=date(2026, 9, 3))
+    row = {r["project"]: r for r in data["rows"]}["期限项目"]
+    assert row["lifecycle_status"] == "ongoing", row["lifecycle_status"]
+    # 桶计数与行标签必须同源，否则筛「期限缺失」还能把它翻出来
+    assert data["lifecycle_counts"]["missing"] == 0, data["lifecycle_counts"]

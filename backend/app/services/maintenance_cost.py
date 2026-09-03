@@ -46,6 +46,7 @@ from app.services import (
     maintenance_demands,
     maintenance_margin,
     maintenance_margin_evidence,
+    maintenance_periods,
     maintenance_project_operations,
 )
 from app.services.maintenance_match_keys import exact_match_key
@@ -862,10 +863,67 @@ def _normalize_lifecycle(lifecycle: str) -> str:
 
 
 def _lifecycle_status(missing_count: int, latest_end: date | None, as_of: date) -> str:
-    """聚合期限：任一底层单缺日期优先判 missing，否则以最晚终止日判断。"""
+    """WBDD 兜底期限：任一底层单缺日期优先判 missing，否则以最晚终止日判断。
+
+    仅在项目侧拿不到完整期限时使用。项目期限才是唯一业务事实
+    （见 ``maintenance_periods`` 模块 docstring），见 :func:`_project_periods`。
+    """
     if missing_count or latest_end is None:
         return "missing"
     return "ended" if latest_end < as_of else "ongoing"
+
+
+def _project_period_subquery():
+    """project_std -> (挂靠项目数, period_from, period_to)，每名恰好一行。
+
+    2026-09-03 用户报障：期限回填后项目列表/导出仍大面积「期限缺失」。根因是
+    本模块只按挂靠 WBDD 单的 ``maint_end`` 判定——任一单缺日期即整项目 missing，
+    完全不看 ``MaintenanceProject.period_from/period_to``；而项目期限才是唯一
+    业务事实（见 ``maintenance_periods`` 模块 docstring），WBDD 单上的维保日期
+    只是来源之一。
+    """
+    from app.models.maintenance_project import MaintenanceProject
+
+    order = aliased(FMaintenanceOrder)
+    name = func.coalesce(order.project_std, "(未填项目)")
+    return (
+        select(
+            name.label("project"),
+            func.count(func.distinct(
+                MaintenanceSourceOrderAssignment.project_id)).label("project_count"),
+            func.min(MaintenanceProject.period_from).label("period_from"),
+            func.max(MaintenanceProject.period_to).label("period_to"),
+        )
+        .select_from(order)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .join(
+            MaintenanceProject,
+            MaintenanceProject.project_id
+            == MaintenanceSourceOrderAssignment.project_id,
+        )
+        .group_by(name)
+        .subquery()
+    )
+
+
+def _row_lifecycle(row, as_of: date) -> str:
+    """项目期限优先，拿不到才回退 WBDD 单据兜底。
+
+    只在「该项目名唯一对应一个项目、且起止齐全」时接管；一名对多项目或期限不全
+    一律走 :func:`_lifecycle_status`，避免跨项目张冠李戴。
+    """
+    if (row.period_project_count == 1
+            and row.project_period_from is not None
+            and row.project_period_to is not None):
+        return maintenance_periods.lifecycle_status(
+            row.project_period_from, row.project_period_to, as_of)
+    return _lifecycle_status(row.maint_end_missing, row.latest_maint_end, as_of)
 
 
 def _parts_tax_basis_summary(
@@ -1045,6 +1103,11 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         ).label(f"src_{source}")
         for source in COSTED_SOURCES
     ]
+    # 项目名 -> 挂靠项目数 + 期限（2026-09-03 报障修复）。项目上填了完整起止就
+    # 按它判生命周期，别再因某张 WBDD 单缺 maint_end 把整个项目打成「期限缺失」；
+    # 一名对多项目或期限不全时回退 WBDD 兜底，避免张冠李戴。并进主查询而不是
+    # 另发一条，保住 test_lifecycle_filters_keep_query_count_constant 的查询数契约。
+    _period_sub = _project_period_subquery()
     stmt = (
         select(
             proj.label("project"),
@@ -1074,6 +1137,9 @@ def projects_aggregate(db: Session, date_from: date | None = None,
                 ).label("sales_orders"),
             *_dual_cost_aggregate_columns(ml),
             *src_cols,
+            func.max(_period_sub.c.project_count).label("period_project_count"),
+            func.min(_period_sub.c.period_from).label("project_period_from"),
+            func.max(_period_sub.c.period_to).label("project_period_to"),
         )
         .select_from(mo)
         .outerjoin(ml, ml.order_id == mo.id)
@@ -1084,6 +1150,8 @@ def projects_aggregate(db: Session, date_from: date | None = None,
                 MaintenanceManualCostOverride.active.is_(True),
             ),
         )
+        # 子查询每个 project_std 恰好一行，LEFT JOIN 不会放大聚合行数
+        .outerjoin(_period_sub, _period_sub.c.project == proj)
         .group_by(proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
@@ -1102,9 +1170,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     lifecycle_counts = {"ongoing": 0, "ended": 0, "missing": 0}
     classified = []
     for row in raw_all:
-        lifecycle_status = _lifecycle_status(
-            row.maint_end_missing, row.latest_maint_end, as_of,
-        )
+        lifecycle_status = _row_lifecycle(row, as_of)
         lifecycle_counts[lifecycle_status] += 1
         classified.append((row, lifecycle_status))
     raw = [
