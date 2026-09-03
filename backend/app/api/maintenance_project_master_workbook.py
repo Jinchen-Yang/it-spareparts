@@ -185,9 +185,15 @@ def _fail(exc: ec.WorkbookError):
         "stale_workbook",
         "row_conflicts",
     }
+    detail = {"code": exc.code, "message": exc.message, "issues": exc.issues}
+    if exc.code == "row_conflicts":
+        # 前端 WorkbookRoundTrip.extractConflicts 只认 detail.conflicts；端点自己
+        # 拼的前置 409 用的就是这个键。服务层抛的 row_conflicts 必须给同一个键，
+        # 否则冲突表渲染成空白（2026-09-03 评审）。
+        detail["conflicts"] = [dict(item) for item in exc.issues]
     raise HTTPException(
         status.HTTP_409_CONFLICT if (busy or stale) else status.HTTP_422_UNPROCESSABLE_CONTENT,
-        {"code": exc.code, "message": exc.message, "issues": exc.issues},
+        detail,
         headers={"Retry-After": "5"} if busy else None,
     ) from exc
 

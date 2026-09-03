@@ -299,7 +299,8 @@ def _current_contracts(
         )
     )
     if lock:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(
+            populate_existing=True)
     return list(db.scalars(statement).all())
 
 
@@ -916,7 +917,9 @@ def _global_line_in_scope(
         # Keep the active project edge stable between scope validation and the
         # override write. Reassignment uses the same row lock and therefore
         # either completes first (this query sees the new scope) or waits.
-        stmt = stmt.with_for_update(of=MaintenanceSourceOrderAssignment)
+        stmt = stmt.with_for_update(
+            of=MaintenanceSourceOrderAssignment
+        ).execution_options(populate_existing=True)
     return db.scalar(stmt)
 
 
@@ -1387,6 +1390,7 @@ def _lock_global_refill_rows(
         .where(FMaintenanceOrder.id.in_(expected_source_by_order))
         .order_by(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     if (
         {order.id for order in locked_orders} != set(expected_source_by_order)
@@ -1409,6 +1413,7 @@ def _lock_global_refill_rows(
         )
         .order_by(MaintenanceSourceOrderAssignment.source_order_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     assignment_by_source = {
         assignment.source_order_id: assignment for assignment in assignments
@@ -1443,6 +1448,7 @@ def _lock_global_refill_rows(
         )
         .order_by(FMaintenanceLine.id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     lines_by_id = {line.id: line for line in lines}
     expected_order_by_line = {
@@ -1465,6 +1471,7 @@ def _lock_global_refill_rows(
         .where(MaintenanceManualCostOverride.line_id.in_(requested))
         .order_by(MaintenanceManualCostOverride.line_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     overrides_by_line = {override.line_id: override for override in overrides}
 
@@ -1539,6 +1546,7 @@ def _lock_v1_site_rows(
         .where(MaintenanceSiteIssue.issue_id.in_(issue_ids))
         .order_by(MaintenanceSiteIssue.issue_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     if (
         {issue.issue_id for issue in issues} != set(issue_ids)
@@ -1557,6 +1565,7 @@ def _lock_v1_site_rows(
         )
         .order_by(MaintenanceSiteIssueLine.issue_line_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all())
     lines_by_id = {line.issue_line_id: line for line in lines}
     if (
@@ -1619,6 +1628,15 @@ def apply_global_lines(
     db.execute(
         select(func.pg_advisory_xact_lock(config.DATA_CHANGE_ADVISORY_LOCK_KEY))
     )
+    # 取锁之后必须清掉 identity map：validate_* 全程在这把锁之外读服务端值，
+    # 并把读到的每一行留在了本 Session 里。不 expire，apply 侧的 db.get() 会
+    # 命中旧对象一条 SQL 都不发，SELECT ... FOR UPDATE 也不会覆盖已加载属性
+    # ——于是「加锁后复检版本号」变成拿陈旧值跟陈旧值比，永远判「没变」。
+    # 实测：同一事务里原生 SQL FOR UPDATE 读到 (version=2, amount=99999)，
+    # ORM 读到 (1, 10000)，且返回的就是 validate 期那个对象。
+    # 安全前提：validate_* 只读（无 db.add/flush/commit/属性赋值），
+    # SessionLocal 是 autoflush=False（app/db.py），此处无待写改动可丢。
+    db.expire_all()
     probed_rows = list(db.execute(
         select(
             FMaintenanceLine.id,
@@ -1663,6 +1681,7 @@ def apply_global_lines(
             )
             .order_by(MaintenanceProject.project_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all())
         if locked_projects != probed_project_ids:
             raise WorkbookError(
@@ -1779,6 +1798,7 @@ class MasterV2Plan:
     expense_voids: tuple[str, ...] = ()
     will_void_rows: tuple[dict, ...] = ()
     # 2.7.0 行级三路合并产物：字段级变更/冲突/接管明细。
+    row_guards: tuple[V2RowGuard, ...] = ()
     force_takeover: bool = False
     field_changes: tuple[dict, ...] = ()
     conflicts: tuple[dict, ...] = ()
@@ -1910,6 +1930,26 @@ def _v2_row_base_hash(values: dict[str, object], fields: tuple[str, ...]) -> str
     return _v2_hash([_v2_hash_value(values.get(name)) for name in fields])
 
 
+@dataclass(frozen=True)
+class V2RowGuard:
+    """validate 时刻的服务端行指纹（只覆盖该 sheet 的基线字段）。
+
+    2.7.0 的冲突判定是 `server_value != baseline`，而它在 validate 里、
+    在 apply 的任何一把锁之外算完。指纹把「我算这个判定时读到的服务端行」
+    钉下来，apply 拿到行锁之后重算一次；不等就说明判定所依据的服务端行在
+    validate→apply 窗口内被人改过 —— 整本 fail-closed，一个字节都不写。
+
+    只为**用户真正触碰过的行**采集：未触碰行本来就不写、也不在
+    _v2_assert_entity_scope 的加锁集合里，给它们发指纹会让「项目里任何一行
+    被人改过就整本 409」，那正是 2.7.0 明确废掉的整本硬拒。
+    """
+
+    sheet: str
+    entity_id: str
+    row_label: str
+    digest: str
+
+
 class _V2MergeContext:
     """validate 期间收集三路合并结果（冲突/变更/接管/PN 解析明细）。"""
 
@@ -1922,6 +1962,7 @@ class _V2MergeContext:
         # 失败批量收集（不再首错即断），validate 汇总一次性报全量。
         self.warnings: list[str] = []
         self.unresolved_pns: dict[str, list[int]] = {}
+        self.guards: list[V2RowGuard] = []
 
     def note_unresolved_pn(self, pn: str, row_no: int) -> None:
         self.unresolved_pns.setdefault(pn, []).append(row_no)
@@ -2817,6 +2858,7 @@ def build_project_master_v2(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if project is None:
         return None
@@ -3011,6 +3053,7 @@ def _merge_manual_cost_to_line(
         select(FMaintenanceLine)
         .where(FMaintenanceLine.id == refill.line_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if line is None:
         raise WorkbookError("line_not_found", "备件行已不存在，请重新下载")
@@ -3018,6 +3061,7 @@ def _merge_manual_cost_to_line(
         select(MaintenanceManualCostOverride)
         .where(MaintenanceManualCostOverride.line_id == refill.line_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     changed = False
     if refill.unit_cost_ex_tax is not None:
@@ -3569,6 +3613,10 @@ def _v2_parse_parts(
             server_values=server_values, baseline=baseline, ctx=merge)
         if merged_row is None:
             continue
+        # 触碰行才发指纹：apply 会在行锁之后重算并比对（见 _v2_recheck_row_guards）。
+        merge.guards.append(V2RowGuard(
+            sheet="03_备件明细", entity_id=str(line.id), row_label=row_label,
+            digest=_v2_row_base_hash(server_values, V2_PART_BASE_FIELDS)))
 
         # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
         # 导出时的旧值静默盖掉他人改动（D-02）。
@@ -4080,6 +4128,7 @@ def _ensure_contract_for_xsdd_apply(
         )
         .limit(1)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if shared is not None:
         raise WorkbookError(
@@ -4122,6 +4171,7 @@ def _ensure_contract_for_xsdd_apply(
             FSalesOrder.id.desc(),
         )
         .with_for_update(of=FSalesOrder)
+        .execution_options(populate_existing=True)
     ).all())
     economic_candidates = {
         (
@@ -4420,6 +4470,7 @@ def _v2_assert_entity_scope(
             .where(FMaintenanceOrder.id.in_(sorted(order_ids)))
             .order_by(FMaintenanceOrder.raw_order_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all()) if order_ids else []
         source_ids = [order.raw_order_id for order in locked_orders]
         locked_assignments: list[MaintenanceSourceOrderAssignment] = []
@@ -4432,6 +4483,7 @@ def _v2_assert_entity_scope(
                 )
                 .order_by(MaintenanceSourceOrderAssignment.source_order_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             ).all())
         project_sources = {
             assignment.source_order_id
@@ -4452,6 +4504,7 @@ def _v2_assert_entity_scope(
                 .where(FMaintenanceLine.id.in_(requested_parts))
                 .order_by(FMaintenanceLine.id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             ).all())
             if {line.id for line in locked_lines} != requested_parts:
                 raise WorkbookError(
@@ -4488,12 +4541,14 @@ def _v2_assert_entity_scope(
             .where(MaintenanceSiteIssue.issue_id.in_(parent_issue_ids))
             .order_by(MaintenanceSiteIssue.issue_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all())
         locked_site_lines = list(db.scalars(
             select(MaintenanceSiteIssueLine)
             .where(MaintenanceSiteIssueLine.issue_line_id.in_(requested_sites))
             .order_by(MaintenanceSiteIssueLine.issue_line_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all())
         if (
             {line.issue_line_id for line in locked_site_lines} != requested_sites
@@ -4519,6 +4574,7 @@ def _v2_assert_entity_scope(
             )
             .order_by(MaintenanceProjectExpenseAttribution.expense_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all())
         if (
             {attribution.expense_id for attribution in locked_attributions}
@@ -4537,6 +4593,7 @@ def _v2_assert_entity_scope(
             .where(FProjectExpense.raw_line_id.in_(requested_expenses))
             .order_by(FProjectExpense.raw_line_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).all())
         if {expense.raw_line_id for expense in locked_expenses} != requested_expenses:
             raise WorkbookError(
@@ -4551,6 +4608,68 @@ def _v2_assert_entity_scope(
             "工作簿包含已不存在、已作废或不属于本项目的报销事实，请重新下载",
         )
     return locked_project_xsdd_nos
+
+
+def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
+    """锁后复核：每个受保护实体的服务端指纹必须仍等于 validate 时刻的值。
+
+    调用位置必须在 _v2_assert_entity_scope(lock_rows=True) 之后、任何写之前。
+    那次调用已经把这些行 FOR UPDATE 锁住并（populate_existing）读成新鲜的，
+    因此本函数不取任何新锁、也不引入新的锁序边；03 只额外发一条按 line_id
+    批量取人工成本覆盖的查询，语句数与行数无关。
+
+    不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」
+    跟基线比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
+    """
+
+    part_guards = [g for g in plan.row_guards if g.sheet == "03_备件明细"]
+    if not part_guards:
+        return
+    line_ids = [int(g.entity_id) for g in part_guards]
+    lines = {
+        line.id: line for line in db.scalars(
+            select(FMaintenanceLine).where(FMaintenanceLine.id.in_(line_ids)))
+    }
+    orders = {
+        order.id: order for order in db.scalars(
+            select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(
+                {line.order_id for line in lines.values()})))
+    } if lines else {}
+    overrides = {
+        override.line_id: override for override in db.scalars(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.line_id.in_(line_ids),
+                MaintenanceManualCostOverride.active.is_(True),
+            ))
+    }
+    drifted: list[dict] = []
+    for guard in part_guards:
+        line = lines.get(int(guard.entity_id))
+        if line is None:
+            # 行已消失：_v2_assert_entity_scope 已经拦过，这里只兜底。
+            drifted.append({
+                "sheet": guard.sheet, "row": guard.row_label,
+                "entity_id": guard.entity_id, "field": "（整行）",
+                "old": "", "new": "", "base": "",
+                "reason": "server_changed_since_validate",
+            })
+            continue
+        fresh = _v2_part_row_values(
+            line, orders.get(line.order_id), overrides.get(line.id))
+        if _v2_row_base_hash(fresh, V2_PART_BASE_FIELDS) != guard.digest:
+            drifted.append({
+                "sheet": guard.sheet, "row": guard.row_label,
+                "entity_id": guard.entity_id, "field": "（整行）",
+                "old": "", "new": "", "base": "",
+                "reason": "server_changed_since_validate",
+            })
+    if drifted:
+        raise WorkbookError(
+            "row_conflicts",
+            "部分行在校验与写入之间被他人更新，本次上传未写入任何数据；"
+            "请重新下载项目总表后再试。",
+            issues=drifted,
+        )
 
 def _v2_parse_contract_amount(
     db: Session,
@@ -4953,6 +5072,7 @@ def validate_project_master_v2(
         file_sha256=hashlib.sha256(data).hexdigest(),
         expected_workbook_revision=int(meta["workbook_revision"]),
         expected_workbook_data_version=meta["workbook_data_version"],
+        row_guards=tuple(merge.guards),
         cost_refills=cost_refills,
         site_flags=site_flags,
         expense_updates=tuple(expense_updates),
@@ -5038,6 +5158,15 @@ def apply_project_master_v2(
     db.execute(
         select(func.pg_advisory_xact_lock(config.DATA_CHANGE_ADVISORY_LOCK_KEY))
     )
+    # 取锁之后必须清掉 identity map：validate_* 全程在这把锁之外读服务端值，
+    # 并把读到的每一行留在了本 Session 里。不 expire，apply 侧的 db.get() 会
+    # 命中旧对象一条 SQL 都不发，SELECT ... FOR UPDATE 也不会覆盖已加载属性
+    # ——于是「加锁后复检版本号」变成拿陈旧值跟陈旧值比，永远判「没变」。
+    # 实测：同一事务里原生 SQL FOR UPDATE 读到 (version=2, amount=99999)，
+    # ORM 读到 (1, 10000)，且返回的就是 validate 期那个对象。
+    # 安全前提：validate_* 只读（无 db.add/flush/commit/属性赋值），
+    # SessionLocal 是 autoflush=False（app/db.py），此处无待写改动可丢。
+    db.expire_all()
     project_exists = db.scalar(
         select(MaintenanceProject.project_id).where(
             MaintenanceProject.project_id == plan.project_id)
@@ -5140,6 +5269,7 @@ def apply_project_master_v2(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == plan.project_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if project is None or not project.is_active:
         raise WorkbookError("project_not_editable", "项目已不存在或归档，请重新下载")
@@ -5159,6 +5289,7 @@ def apply_project_master_v2(
                 == apply_operation_key
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if receipt is not None:
             if (
@@ -5232,6 +5363,9 @@ def apply_project_master_v2(
         linked_sales_order_nos=prelock_contract_nos,
         lock_rows=True,
     )
+    # 行锁已在手且读的是新鲜值：此刻复核 validate 时刻的行指纹。必须在任何写
+    # 之前 —— 冲突时整本零写入，由调用方 rollback。
+    _v2_recheck_row_guards(db, plan)
     locked_void_contract_nos = {
         str(value)
         for value in db.scalars(
@@ -5283,6 +5417,7 @@ def apply_project_master_v2(
             .where(MaintenanceProjectContract.project_id == plan.project_id)
             .order_by(MaintenanceProjectContract.project_contract_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ))
         editable_contracts = _v2_editable_contracts(db, plan.project_id, contracts)
         if (len(editable_contracts) != 1
@@ -5803,6 +5938,7 @@ def apply_project_master_v2(
         )
         .order_by(MaintenanceCollectionMilestone.milestone_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).all()) if milestone_entity_ids else []
     if (
         {milestone.milestone_id for milestone in locked_milestones}
@@ -5884,6 +6020,7 @@ def apply_project_master_v2(
                     MaintenanceCollectionMilestone.sequence == change.sequence,
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
             if coordinate_owner is not None:
                 raise WorkbookError(
