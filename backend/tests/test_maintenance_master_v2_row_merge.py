@@ -435,3 +435,48 @@ def test_untouched_field_not_reverted_when_server_changed_it(db):
         f"静默回滚了他人的改动：{line.description!r}")
     # 未触碰字段自动 rebase，不应制造冲突
     assert not plan.conflicts, plan.conflicts
+
+
+def test_modified_example_row_not_silently_skipped(db):
+    """2026-09-03 阿里云重庆实测：空项目 03 表只剩示例行，成本填进示例行
+    （未删【示例】备注）→ 整行被静默跳过 → 全零写入"传了没反应"。
+    修复：示例行只有与导出内容完全一致才跳过；被改过按普通行走校验。"""
+    from openpyxl import load_workbook as _lw
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_line as _mk,
+    )
+
+    project, _part, _order, _line = _mk(db)
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = _lw(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = [str(c.value or "") for c in ws[1]]
+    h = {name: i + 1 for i, name in enumerate(headers)}
+    example_row = None
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, len(headers) + 1):
+            text = str(ws.cell(r, c).value or "")
+            if text.startswith("【示例】") or text == "示例":
+                example_row = r
+                break
+        if example_row:
+            break
+    assert example_row is not None
+    meta = {row[0]: row[1] for row in wb[master.V2_SHEET_META]
+            .iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    assert meta.get("03_example_digest"), "构建期必须写入示例行摘要"
+
+    # 旧行为复现对照：未修改的示例行仍被正常跳过（零改动往返 200）
+    unmodified = _lw(io.BytesIO(content))
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(unmodified))
+    assert plan.cost_refills == ()
+
+    # 修改示例行（人工成本）→ 不再静默跳过：按普通行走校验给明确错误
+    ws.cell(example_row, h["人工未税单位成本"], 55.5)
+    with pytest.raises(master.WorkbookError) as raised:
+        master.validate_project_master_v2(
+            db, project_id=project.project_id, data=_save(wb))
+    assert raised.value.code in ("invalid_operation", "missing_field"), \
+        raised.value.code

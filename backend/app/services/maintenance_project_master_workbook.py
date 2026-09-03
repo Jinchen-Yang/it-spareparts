@@ -1897,7 +1897,8 @@ def _parse_v2_row_base_token(
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise WorkbookError(
             "invalid_concurrency_token",
-            f"第 {row_no} 行基线令牌无效或与实体不匹配，请重新下载当前项目总表（2.7.0）",
+            f"第 {row_no} 行基线令牌无效或与实体不匹配，"
+            f"请重新下载当前项目总表（{V2_TEMPLATE_VERSION}）",
         ) from exc
 
 
@@ -2162,6 +2163,19 @@ def _v2_sign_meta_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return signed_rows
 
 
+def _v2_example_row_digest(ws, headers: list[str]) -> str | None:
+    """示例行的规范摘要（构建期）：解析期逐格比对，只有与导出示例完全
+    一致的行才跳过。用户在示例行里填了真数据（哪怕没删【示例】备注）
+    不再被静默丢弃——会按普通行走校验并给出明确错误。"""
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if _is_example_row(row):
+            values = ["" if v is None else str(v) for v in row[:len(headers)]]
+            while len(values) < len(headers):
+                values.append("")
+            return _v2_hash(values)
+    return None
+
+
 def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None,
                  editable: set[int] | None = None,
                  operation_col: int | None = None,
@@ -2274,13 +2288,29 @@ def _v2_append_example_row(ws, headers: list[str], values: dict[str, object]) ->
         cell.fill = _EXAMPLE_FILL
 
 
-def _is_example_row(row) -> bool:
-    """上传侧识别示例行：任一单元格为「示例」或以「【示例】」开头。"""
+def _is_example_row(row, *, headers: list[str] | None = None,
+                     example_digest: str | None = None) -> bool:
+    """上传侧识别示例行。
+
+    精确口径（2.7.1+）：传入导出期的示例行摘要时，**只有整行内容与导出
+    示例完全一致**才跳过——用户在示例行填了任何真数据（哪怕【示例】备注
+    没删）都会当普通行走校验，不再静默丢行（阿里云重庆 09-02 实测：空项目
+    03 表只剩示例行，成本填进示例行 → 全零写入 → "传了没反应"）。
+    未传摘要时退回标记识别（兼容旧调用）。"""
+    marker = False
     for value in row or ():
         text = str(value or "").strip()
         if text == "示例" or text.startswith("【示例】"):
-            return True
-    return False
+            marker = True
+            break
+    if not marker:
+        return False
+    if example_digest is None or headers is None:
+        return True
+    values = ["" if v is None else str(v) for v in row[:len(headers)]]
+    while len(values) < len(headers):
+        values.append("")
+    return _v2_hash(values) == example_digest
 
 
 def _line_cost_evidence(line, override, *, basis: str) -> dict:
@@ -2910,6 +2940,15 @@ def build_project_master_v2(
         meta_rows.append(("site_base_hashes",
                           _encode_base_hashes(base_hash_maps.get("site", {}))))
     meta = wb.create_sheet(V2_SHEET_META)
+    # 各数据 sheet 的示例行摘要（2.7.1+：解析期精确判定，防用户改过的
+    # 示例行被静默跳过——阿里云重庆 09-02 实测踩中）
+    for sheet_name in wanted:
+        sheet_ws = wb[sheet_name]
+        sheet_headers = [str(c.value or "") for c in sheet_ws[1]]
+        digest = _v2_example_row_digest(sheet_ws, sheet_headers)
+        if digest is not None:
+            meta_rows.append(
+                (f"{sheet_name.split('_', 1)[0]}_example_digest", digest))
     for key, value in _v2_sign_meta_rows(meta_rows):
         meta.append([key, value])
     meta.sheet_state = "hidden"
@@ -3305,6 +3344,7 @@ def _v2_parse_parts(
     project_id: str,
     ws,
     merge: _V2MergeContext,
+    example_digest: str | None = None,
 ) -> tuple[
     list[CostRefill],
     int,
@@ -3315,6 +3355,8 @@ def _v2_parse_parts(
     index = {name: i for i, name in enumerate(headers)}
     required = {"操作", "维保单号", "PN", "需求数量", "人工未税单位成本",
                 "人工成本原因", "实体ID", "只读哈希", "备注", V2_BASE_COLUMN}
+    _skip_example = lambda row: _is_example_row(
+        row, headers=headers, example_digest=example_digest)  # noqa: E731
     if not required.issubset(index):
         raise WorkbookError("template_version_mismatch",
                             "03_备件明细列定义不是当前 V2.7 版本，请重新下载当前项目总表")
@@ -3326,7 +3368,7 @@ def _v2_parse_parts(
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        if _is_example_row(row):
+        if _skip_example(row):
             continue
         raw_id = _cell(row, index, "实体ID")
         operation = str(_cell(row, index, "操作") or "").strip().upper()
@@ -3579,9 +3621,12 @@ def _v2_parse_parts(
 
 def _v2_parse_site(
     db: Session, project_id: str, ws, merge: _V2MergeContext,
+    example_digest: str | None = None,
 ) -> tuple[list[SiteReturnFlag], set[str]]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
+    _skip_example = lambda row: _is_example_row(  # noqa: E731
+        row, headers=headers, example_digest=example_digest)
     if V2_BASE_COLUMN not in index:
         raise WorkbookError("template_version_mismatch",
                             "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
@@ -3597,7 +3642,7 @@ def _v2_parse_site(
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        if _is_example_row(row):
+        if _skip_example(row):
             continue
         raw_id = _cell(row, index, "实体ID")
         if raw_id not in (None, ""):
@@ -3772,14 +3817,17 @@ def _v2_parse_site(
     return merged_out, present_ids
 
 
-def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
+def _v2_parse_plan(db: Session, project_id: str, ws,
+                   example_digest: str | None = None) -> list[V2MilestoneChange]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
+    _skip_example = lambda row: _is_example_row(  # noqa: E731
+        row, headers=headers, example_digest=example_digest)
     out: list[V2MilestoneChange] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        if _is_example_row(row):
+        if _skip_example(row):
             continue
         operation = str(row[index["操作"]] or "").strip().upper()
         raw_entity = str(row[index["实体ID"]] or "").strip() or None
@@ -3877,6 +3925,7 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
 
 def _v2_parse_expenses(
     db: Session, project_id: str, ws, merge: _V2MergeContext,
+    example_digest: str | None = None,
 ) -> tuple[list[ec.ExpenseUpdate], list[str], set[str]]:
     """04 解析（V2.7）：操作列（空/CREATE/UPDATE/VOID）+ 空白实体ID 手工新增
     （27c95fa 既有语义，实体ID 空 + 费用单号/明细序号必填 → CREATE）。
@@ -3898,10 +3947,12 @@ def _v2_parse_expenses(
     voids: list[str] = []
     present_ids: set[str] = set()
     manual_expense_ids: dict[str, int] = {}
+    _skip_example = lambda row: _is_example_row(  # noqa: E731
+        row, headers=headers, example_digest=example_digest)
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        if _is_example_row(row):
+        if _skip_example(row):
             continue
         operation = str(_cell(row, index, "操作") or "").strip().upper()
         if operation and operation not in {"VOID", "UPDATE", "CREATE"}:
@@ -4218,17 +4269,20 @@ def _resolve_plan_contract(db: Session, project_id: str, contract_no: str, row_n
 
 def _v2_parse_receipts(
     db: Session, project_id: str, ws, merge: _V2MergeContext,
+    example_digest: str | None = None,
 ) -> list[ec.CollectionOp]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
     if V2_BASE_COLUMN not in index:
         raise WorkbookError("template_version_mismatch",
                             "05_实收回款列定义不是当前 V2.7 版本，请重新下载当前项目总表")
+    _skip_example = lambda row: _is_example_row(  # noqa: E731
+        row, headers=headers, example_digest=example_digest)
     out: list[ec.CollectionOp] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
-        if _is_example_row(row):
+        if _skip_example(row):
             continue
         contract_no = str(row[index["合同编号"]] or "").strip()
         contract = (
@@ -4633,6 +4687,13 @@ def validate_project_master_v2(
         raise WorkbookError("invalid_file", f"无法读取 .xlsx：{type(exc).__name__}") from exc
     meta = _v2_verify_meta(db, wb, project_id)
     merge = _V2MergeContext(force_takeover=force_takeover)
+    example_digests = {
+        key.removesuffix("_example_digest"): value
+        for key, value in meta.items()
+        if key.endswith("_example_digest")
+    }
+    def _dig(sheet_name: str) -> str | None:
+        return example_digests.get(sheet_name.split("_", 1)[0])
     included_meta = tuple(
         name.strip() for name in meta["included_sheets"].split(",") if name.strip()
     )
@@ -4659,7 +4720,8 @@ def validate_project_master_v2(
     if V2_SHEET_PARTS in included:
         (parsed_refills, uploaded_line_rows, uploaded_line_ids,
          assignment_changes) = _v2_parse_parts(
-            db, project_id, wb[V2_SHEET_PARTS], merge)
+            db, project_id, wb[V2_SHEET_PARTS], merge,
+            example_digest=_dig(V2_SHEET_PARTS))
         cost_refills = tuple(parsed_refills)
         if (assignment_changes and user_ctx is not None
                 and user_ctx.role not in FULL_SCOPE_ROLES):
@@ -4668,7 +4730,8 @@ def validate_project_master_v2(
                 "这份项目总表会更正统一 WBDD 的项目归属，仅管理员或全量项目账号可确认")
     if V2_SHEET_SITE in included:
         site_flags, uploaded_site_ids = _v2_parse_site(
-            db, project_id, wb[V2_SHEET_SITE], merge)
+            db, project_id, wb[V2_SHEET_SITE], merge,
+            example_digest=_dig(V2_SHEET_SITE))
         site_flags = list(site_flags)
         # 2026-08-23：06 缺行=作废（用户口径：Excel 删行覆盖上传，没有的默认作废）
         export_site_ids = _decode_row_ids(meta.get("site_row_ids"))
@@ -4697,11 +4760,13 @@ def validate_project_master_v2(
     if V2_SHEET_EXPENSE in included:
         (expense_updates, expense_voids,
          uploaded_expense_present) = _v2_parse_expenses(
-            db, project_id, wb[V2_SHEET_EXPENSE], merge)
+            db, project_id, wb[V2_SHEET_EXPENSE], merge,
+            example_digest=_dig(V2_SHEET_EXPENSE))
     if V2_SHEET_RECEIPTS in included:
         receipt_ws = wb[V2_SHEET_RECEIPTS]
         receipt_ops = tuple(_v2_parse_receipts(
-            db, project_id, receipt_ws, merge))
+            db, project_id, receipt_ws, merge,
+            example_digest=_dig(V2_SHEET_RECEIPTS)))
         # 05 缺行=作废：只允许命中导出时由 HMAC 签名的稳定 collection_id。
         # 导出之后新产生的回款不在 envelope 中，不能被旧文件误删。
         export_receipt_ids = _decode_row_ids(meta.get("receipt_row_ids"))
@@ -4792,7 +4857,8 @@ def validate_project_master_v2(
             receipt_ops = receipt_ops + tuple(implicit_voids)
     if V2_SHEET_PLAN in included:
         plan_ws = wb[V2_SHEET_PLAN]
-        milestone_changes = tuple(_v2_parse_plan(db, project_id, plan_ws))
+        milestone_changes = tuple(_v2_parse_plan(
+            db, project_id, plan_ws, example_digest=_dig(V2_SHEET_PLAN)))
         # 02 缺行=作废（2026-08-20 用户三连问）：只命中导出时存在的里程碑
         export_plan_ids = _decode_row_ids(meta.get("plan_row_ids"))
         plan_headers = [str(cell.value or "") for cell in plan_ws[1]]
