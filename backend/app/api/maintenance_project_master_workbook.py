@@ -27,6 +27,7 @@ from app.api.maintenance_expense_collection_workbook import (
     _XLSX_MEDIA,
     _operator,
     _read_upload,
+    _read_upload_with_takeover,
     _require_profit_visibility,
 )
 from app.api.maintenance_project_scope import (
@@ -72,11 +73,50 @@ class MilestoneRestoreRequest(BaseModel):
     items: list[MilestoneRestoreItem] = Field(min_length=1, max_length=24)
 
 
-def _require_contract_amount_manage(ctx: UserContext, ident: dict) -> None:
-    """合同额改单元格比普通报销/回款回传更高权，按变更内容条件检查。"""
+def _require_master_edit(
+    project_id: str,
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> None:
+    """项目总表上传/校验门（2026-09-02 拍板）。
 
-    # 合同额会直接改变回款率、成本率和经营提醒。共享 ADMIN_PASSWORD 虽然
-    # 角色名也是 admin，但没有可追责的 SysUser 身份，不能借 admin 短路改金额。
+    管理员/全量账号走既有 action 键（含 data_profit）；
+    项目负责人（primary_manager 挂靠）与项目销售（canonical salesperson）
+    对本人项目拥有全量编辑权（含成本/合同额列——当日拍板放开）。
+    """
+    if not config.ENABLE_RBAC or ctx.role == "admin":
+        return
+    from app import permissions as _perm
+    from app.services import maintenance_project_assignments as _assignments
+
+    perms = (
+        ctx.permissions
+        if ctx.permissions is not None
+        else _perm.effective(ctx.role, None)
+    )
+    if perms.get(_ACTION_KEY, False) and perms.get("data_profit", False):
+        return
+    if _assignments.is_project_workbook_editor(
+            db, project_id=project_id, user_ctx=ctx):
+        return
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        "项目总表编辑需要上传权限，或为本项目的负责人/销售",
+    )
+
+
+def _require_contract_amount_manage(
+    ctx: UserContext,
+    ident: dict,
+    db: Session | None = None,
+    project_id: str | None = None,
+) -> None:
+    """合同额改单元格门槛（2026-09-02 拍板放开到项目负责人/销售）。
+
+    仍要求可追责的实名系统账号；权限二选一：
+    管理口径（action_maintenance_project_manage + data_profit）或
+    本项目负责人/销售（此时 project_id/db 必填）。
+    """
     if (ident.get("authn") != "sys_user" or ident.get("fb")
             or not ident.get("sub")):
         raise HTTPException(
@@ -88,12 +128,20 @@ def _require_contract_amount_manage(ctx: UserContext, ident: dict) -> None:
     from app import permissions as _perm
 
     perms = ctx.permissions if ctx.permissions is not None else _perm.effective(ctx.role, None)
-    if not (perms.get("action_maintenance_project_manage", False)
-            and perms.get("data_profit", False)):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "修改项目合同总额需要维保项目主档管理权限和经营数据权限",
-        )
+    if perms.get("action_maintenance_project_manage", False) and perms.get(
+            "data_profit", False):
+        return
+    if db is not None and project_id:
+        from app.services import maintenance_project_assignments as _assignments
+
+        if _assignments.is_project_workbook_editor(
+                db, project_id=project_id, user_ctx=ctx):
+            return
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        "修改项目合同总额需要维保项目主档管理权限和经营数据权限，"
+        "或为本项目的负责人/销售",
+    )
 
 
 def _require_real_admin_restore(ctx: UserContext, ident: dict) -> None:
@@ -135,6 +183,7 @@ def _fail(exc: ec.WorkbookError):
         "stale_cost_override",
         "stale_cost_fact",
         "stale_workbook",
+        "row_conflicts",
     }
     raise HTTPException(
         status.HTTP_409_CONFLICT if (busy or stale) else status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -323,12 +372,27 @@ def download_project_master(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ):
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
+    # 2026-09-02 拍板：项目负责人/销售对本人项目全量可见（含成本列）。
+    if not config.ENABLE_RBAC or ctx.role == "admin":
+        pass
+    else:
+        from app import permissions as _perm
+        from app.services import maintenance_project_assignments as _assignments
+
+        _perms = (ctx.permissions if ctx.permissions is not None
+                  else _perm.effective(ctx.role, None))
+        _allowed = (_perms.get("data_profit", False)
+                    or _assignments.is_project_workbook_editor(
+                        db, project_id=project_id, user_ctx=ctx))
+        if not _allowed:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "下载项目总表需要经营数据权限，或为本项目的负责人/销售")
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             v2_names = {
@@ -660,18 +724,27 @@ async def validate_project_master(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _edit: None = Depends(_require_master_edit),
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    data = await _read_upload(request)
+    data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
+            # force_takeover 必须透传：接管预检要让用户在按下「强制接管」之前
+            # 看到自己将要覆盖的具体值（plan.overridden）。不传则预检永远返回
+            # 普通冲突计划，客户端无从预览（2026-09-03 评审 P2）。
             plan = master.validate_project_master_v2(
-                db, project_id=project_id, data=data, user_ctx=ctx)
+                db, project_id=project_id, data=data, user_ctx=ctx,
+                force_takeover=force_takeover)
             if plan.contract_amount_change is not None:
-                _require_contract_amount_manage(ctx, ident)
+                _require_contract_amount_manage(
+                    ctx, ident, db=db, project_id=project_id)
+            record_access_log(
+                ctx, "workbook_validate", "maintenance_project_master_workbook",
+                {"project_id": project_id, "conflicts": len(plan.conflicts),
+                 "changes": len(plan.field_changes)})
             return {
                 "valid": True,
                 "protocol_id": master.V2_PROTOCOL_ID,
@@ -679,6 +752,10 @@ async def validate_project_master(
                 "project_id": project_id,
                 "sheets": list(plan.sheets),
                 **plan.summary,
+                # 2.7.0：字段级改动预览 + 行级冲突预览（前端据此提供接管入口）
+                "changes": [dict(item) for item in plan.field_changes],
+                "conflicts": [dict(item) for item in plan.conflicts],
+                "overridden": [dict(item) for item in plan.overridden],
                 # #265 契约：作废预览（03 显式 VOID + 04 显式 VOID/缺行），
                 # apply 前对用户可见（前端 WorkbookRoundTrip 两阶段确认）。
                 "will_void_rows": [dict(r) for r in plan.will_void_rows],
@@ -689,7 +766,7 @@ async def validate_project_master(
                     "from_project_name": change.previous_project_name,
                     "to_project_id": project_id,
                 } for change in plan.assignment_changes],
-                "warnings": [],
+                "warnings": list(plan.warnings),
             }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:
@@ -707,19 +784,40 @@ async def apply_project_master(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _edit: None = Depends(_require_master_edit),
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
-    """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。"""
+    """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。
+
+    2.7.0：行级冲突默认 409（带三值明细）；multipart 额外字段
+    force_takeover=true 时按用户值强制接管并逐项留痕。
+    """
     response.headers["Cache-Control"] = "no-store"
-    data = await _read_upload(request)
+    data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             plan = master.validate_project_master_v2(
-                db, project_id=project_id, data=data, user_ctx=ctx)
+                db, project_id=project_id, data=data, user_ctx=ctx,
+                force_takeover=force_takeover)
             if plan.contract_amount_change is not None:
-                _require_contract_amount_manage(ctx, ident)
+                _require_contract_amount_manage(
+                    ctx, ident, db=db, project_id=project_id)
+            if plan.conflicts and not force_takeover:
+                record_access_log(
+                    ctx, "workbook_apply_conflict",
+                    "maintenance_project_master_workbook",
+                    {"project_id": project_id,
+                     "conflicts": len(plan.conflicts)})
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {
+                        "code": "row_conflicts",
+                        "message": "部分行已被他人更新，本次上传未写入任何数据；"
+                                   "请对照下方明细处理后重试，或确认后强制接管。",
+                        "conflicts": [dict(item) for item in plan.conflicts],
+                    },
+                )
             result = master.apply_project_master_v2(
                 db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4()),
                 user_ctx=ctx,
@@ -730,7 +828,15 @@ async def apply_project_master(
                                   import_batch_id=str(uuid.uuid4()))
     except ec.WorkbookError as exc:
         db.rollback()
+        record_access_log(
+            ctx, "workbook_apply_failed",
+            "maintenance_project_master_workbook",
+            {"project_id": project_id, "code": exc.code,
+             "message": exc.message[:200]})
         _fail(exc)
-    record_access_log(ctx, "apply", "maintenance_project_master_workbook",
-                      {"project_id": project_id, **plan.summary})
+    record_access_log(
+        ctx, "workbook_apply" if not force_takeover else "workbook_apply_takeover",
+        "maintenance_project_master_workbook",
+        {"project_id": project_id, "overridden": len(result.get("overridden", [])),
+         **plan.summary})
     return {"project_id": project_id, **result}

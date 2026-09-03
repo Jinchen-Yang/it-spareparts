@@ -178,7 +178,7 @@ def test_v21_parts_sheet_has_operation_column_and_new_template(db):
     assert headers[0] == "操作"
     assert headers.count("实体ID") == 1
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.6.0"
+    assert meta["template_version"] == "2.7.1"
     assert meta["metadata_hmac_algorithm"] == "HMAC-SHA256"
     assert len(meta["metadata_hmac"]) == 64
 
@@ -216,10 +216,11 @@ def test_v25_non_contract_apply_bumps_workbook_revision_once(db):
     assert state.revision == before + 1
 
 
-def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
+def test_v27_same_row_double_write_conflicts_then_takeover(
     db,
 ):
-    """First writer wins; its ACK replay wins before the stale revision gate."""
+    """2.7.0 行级三路合并：同 revision 同行双写——先写者赢、后写者得冲突
+    明细且零写入；force_takeover 后按后写者覆盖并留 overridden 痕。"""
 
     project, _part, _order, line = _make_project_with_line(db)
     content = master.build_project_master_v2(
@@ -236,8 +237,6 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
     second_ws.cell(2, headers["需求数量"], 4)
     first_plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(first_wb))
-    second_plan = master.validate_project_master_v2(
-        db, project_id=project.project_id, data=_save(second_wb))
 
     first = master.apply_project_master_v2(
         db,
@@ -245,6 +244,10 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
         operated_by="occ-writer",
         import_batch_id=str(uuid.uuid4()),
     )
+    # 2.7.0 语义：每次上传都是"重新校验+应用"一体；冲突判定基于
+    # 应用时刻的服务端状态，因此 second 的计划必须在 first 落库后重建。
+    second_plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(second_wb))
     state_after_first = operations.get_or_create_workbook_state(
         db, project_id=project.project_id).revision
     replay = master.apply_project_master_v2(
@@ -258,6 +261,8 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
     assert operations.get_or_create_workbook_state(
         db, project_id=project.project_id).revision == state_after_first
 
+    # 后写者：同行的基线已过期 → 冲突计划（非 force），apply 零写入拒绝
+    assert second_plan.conflicts, "同行双写必须产生行级冲突"
     audits_before = int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0)
     with pytest.raises(master.WorkbookError) as raised:
@@ -267,12 +272,29 @@ def test_v26_different_workbook_from_same_revision_is_zero_write_stale(
             operated_by="occ-writer",
             import_batch_id=str(uuid.uuid4()),
         )
-    assert raised.value.code == "stale_workbook"
+    assert raised.value.code == "row_conflicts"
     db.rollback()
     db.refresh(line)
     assert line.qty == Decimal("3.00")
     assert int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0) == audits_before
+
+    # force_takeover：按后写者值覆盖，回执带 overridden 明细
+    takeover_plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(second_wb),
+        force_takeover=True)
+    assert not takeover_plan.conflicts
+    assert takeover_plan.overridden
+    taken = master.apply_project_master_v2(
+        db,
+        takeover_plan,
+        operated_by="occ-writer",
+        import_batch_id=str(uuid.uuid4()),
+    )
+    db.refresh(line)
+    assert line.qty == Decimal("4.00")
+    assert taken["overridden"], taken
+    assert taken["overridden"][0]["field"] == "需求数量"
 
 
 def test_v1_apply_rejects_foreign_part_and_site_hidden_ids(db):
@@ -643,7 +665,7 @@ def test_v24_overview_rejects_project_total_when_multiple_contracts_are_current(
     assert exc.value.code == "contract_total_ambiguous"
 
 
-def test_v24_overview_rejects_cross_project_shared_contract(db):
+def test_v24_overview_shared_contract_now_editable_with_cas(db):
     import pytest
 
     project, _part, _order, _line = _make_project_with_line(db)
@@ -684,7 +706,9 @@ def test_v24_overview_rejects_cross_project_shared_contract(db):
     assert values["合同总额（含税）"] == "—"
     assert values["成本率"] == "—"
     assert meta["contract_total_exported"] is None
-    assert meta["contract_editable"] == "false"
+    # 2026-09-02 拍板：共享不再硬拒——唯一当前计入合同可编辑，
+    # 导出侧给出跨项目共享提示，apply 侧 base_version CAS + 审计兜底。
+    assert meta["contract_editable"] == "true"
     amount_cell = next(
         row[1] for row in wb[master.V2_SHEET_OVERVIEW].iter_rows(
             min_col=1, max_col=2)
@@ -692,10 +716,22 @@ def test_v24_overview_rejects_cross_project_shared_contract(db):
     )
     amount_cell.value = Decimal("12000.00")
 
-    with pytest.raises(master.WorkbookError) as exc:
-        master.validate_project_master_v2(
-            db, project_id=project.project_id, data=_save(wb))
-    assert exc.value.code == "contract_total_ambiguous"
+    # 2026-09-02 新口径：共享合同可编辑——validate 通过并产出合同额变更，
+    # apply 侧 base_version CAS 兜底；写回的是本项目那份合同事实。
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert plan.contract_amount_change is not None
+    assert plan.contract_amount_change.amount_inc_tax == Decimal("12000.00")
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="shared-editor",
+        import_batch_id=str(uuid.uuid4()))
+    assert result["contract_updates"] == 1
+    db.refresh(project)
+    # 本项目合同事实被更新；共享的另一项目合同不受影响（各自独立事实行）。
+    own_contract = db.scalar(
+        select(MaintenanceProjectContract).where(
+            MaintenanceProjectContract.project_id == project.project_id))
+    assert own_contract.amount_inc_tax == Decimal("12000.00")
 
 
 def test_v24_change_pn_retires_old_manual_evidence_and_runs_authoritative_reprice(
@@ -1783,7 +1819,7 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
     assert fill.start_color.rgb in ("00FFE699", "FFFFE699") or fill.fgColor.rgb == "00FFE699"
     # 合同总额可编辑协议升级后的模板版本
     meta = {r[0].value: r[1].value for r in wb[master.V2_SHEET_META].iter_rows(min_col=1, max_col=2)}
-    assert meta["template_version"] == "2.6.0"
+    assert meta["template_version"] == "2.7.1"
 
 
 def test_latest_missing_allows_full_sync_at_any_ratio(db):
@@ -2955,3 +2991,120 @@ def test_v25_validate_does_not_create_xsdd_contract_and_null_date_is_422(db):
         MaintenanceProjectContract.project_contract_id
     )).where(MaintenanceProjectContract.project_id == project.project_id)) or 0)
     assert after_apply == 0
+
+
+def test_v271_oversized_meta_chunks_roundtrip_and_verify():
+    """2.7.0 生产回归：parts_base_hashes 超 Excel 单元格 32767 上限被静默
+    截断，签名必炸（大项目零改动往返也 409/422）。分块写入 + 读取端合并
+    后，签名必须按逻辑值通过。"""
+    import io as _io
+    from openpyxl import Workbook as _WB
+    from app.config import get_settings as _gs
+    big_map = ",".join(
+        f"{i}:0dd4d8017bb17e6ccd50f5a07b41eb0ea{i:06d}" for i in range(900)
+    )
+    assert len(big_map) > 32767
+    rows = master._v2_sign_meta_rows([
+        ("protocol_id", master.V2_PROTOCOL_ID),
+        ("template_version", master.V2_TEMPLATE_VERSION),
+        ("parts_base_hashes", big_map),
+    ])
+    wb = _WB()
+    wb.remove(wb.active)
+    meta_ws = wb.create_sheet(master.V2_SHEET_META)
+    for key, value in rows:
+        meta_ws.append([key, value])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    from openpyxl import load_workbook as _lw
+    loaded = _lw(buf, data_only=True)
+    meta = master._v2_meta(loaded)
+    assert meta["parts_base_hashes"] == big_map
+    key_id = meta["metadata_hmac_key_id"]
+    verification_key = _gs().maintenance_manifest_verification_keys().get(key_id)
+    import hmac as _hmac
+    assert _hmac.compare_digest(
+        meta["metadata_hmac"],
+        master._v2_metadata_signature(meta, verification_key),
+    )
+
+
+def test_v271_large_project_real_roundtrip_passes_signature(db):
+    """2.7.1 端到端：700+ 行大项目「下载→原样上传」必须通过验签。
+
+    这是 2.7.0 生产事故的真实形态（中国电信云 730 行备件）：
+    parts_base_hashes 实际 40KB+，超 Excel 单元格 32767 硬上限被静默截断，
+    签名按完整值算、校验读到截断值 —— 零改动往返也 template_signature_invalid。
+
+    既有的 test_v271_oversized_meta_chunks_roundtrip_and_verify 是**合成**用例：
+    手搓 3 键元数据表，只调 _v2_sign_meta_rows/_v2_meta，不经过 build、不经过
+    _v2_verify_meta、更不经过 validate。它证明分块函数本身可用，但证明不了
+    客户那条路。本用例走真实全链路，并断言分块确实被触发（小项目不触发）。
+    """
+    project, part, order, first_line = _make_project_with_line(db)
+    batch = _batch(db)
+    # 造到 700+ 行：单价/SN 各不相同，逼近真实项目的哈希图体量
+    extra_parts = [
+        DimPart(pn_std=f"BULK-PN-{i:05d}", description=f"批量备件{i}")
+        for i in range(750)
+    ]
+    db.add_all(extra_parts)
+    db.flush()
+    db.add_all([
+        FMaintenanceLine(
+            raw_line_id=f"raw-bulk-{i}-{uuid.uuid4()}", order_id=order.id,
+            line_no=100 + i, part_id=bulk.id,
+            pn_std=bulk.pn_std, pn_raw=bulk.pn_std, description=bulk.description,
+            qty=Decimal("2"), return_qty=Decimal("0"),
+            serial_numbers=f"SN{i:08d}",
+            cost_source="direct", cost_tax_basis="ex", confidence="high",
+            import_batch_id=batch,
+        )
+        for i, bulk in enumerate(extra_parts)
+    ])
+    db.commit()
+
+    # 客户下载的是整本，不是单表：全表构建才能把所有 *_base_hashes /
+    # *_row_ids 都放到 32767 这把尺子下量一遍。
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content), data_only=True)
+    meta_ws = wb[master.V2_SHEET_META]
+    raw_meta = {
+        str(r[0].value).strip(): str(r[1].value or "")
+        for r in meta_ws.iter_rows(min_col=1, max_col=2) if r[0].value
+    }
+
+    # 1) 真实数据确实撑爆了单元格上限 —— 分块必须被触发
+    chunk_keys = [k for k in raw_meta if k.startswith("parts_base_hashes@")]
+    assert chunk_keys, (
+        "750 行项目没有触发分块，本用例失去意义："
+        f"parts_base_hashes 长度={len(raw_meta.get('parts_base_hashes', ''))}")
+
+    # 2) 落盘的每个单元格都必须在 Excel 硬上限之内（否则又会被静默截断）
+    oversized = {k: len(v) for k, v in raw_meta.items() if len(v) > 32767}
+    assert not oversized, f"仍有单元格超过 32767：{oversized}"
+
+    # 3) 合并后的逻辑值长度确实 > 32767（证明这是"大项目"路径）
+    merged = master._v2_meta(wb)
+    assert len(merged["parts_base_hashes"]) > 32767, len(merged["parts_base_hashes"])
+
+    # 4) 客户实际动作：零改动原样上传 —— 必须通过验签，不得 template_signature_invalid
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts, plan.conflicts
+
+    # 5) 大文件上真改一行也要能落库（不是只有零改动能过）
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {c.value: c.column for c in ws[1]}
+    id_col = headers["实体ID"]
+    target = next(
+        r for r in range(2, ws.max_row + 1)
+        if str(ws.cell(r, id_col).value or "").strip() == str(first_line.id))
+    ws.cell(target, headers["需求数量"], 13)
+    plan2 = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    master.apply_project_master_v2(
+        db, plan2, operated_by="v271-large",
+        import_batch_id=str(uuid.uuid4()))
+    db.refresh(first_line)
+    assert first_line.qty == Decimal("13.000"), first_line.qty

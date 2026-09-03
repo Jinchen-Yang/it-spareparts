@@ -6,6 +6,7 @@ import type {
   WillReassignOrder,
   WillVoidRow,
   WorkbookApplyResult,
+  WorkbookFieldChange,
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
@@ -27,7 +28,8 @@ export interface WorkbookRoundTripProps {
   hint?: string;
   filename: string;
   onDownload: () => Promise<Blob>;
-  onApply: (file: File) => Promise<WorkbookApplyResult>;
+  /** opts.forceTakeover：2.7.0 行级冲突强制接管（覆盖他人改动并留审计）。 */
+  onApply: (file: File, opts?: { forceTakeover?: boolean }) => Promise<WorkbookApplyResult>;
   /**
    * 落库成功后的读回校验。返回 false/抛错都只表示“刷新失败”，不能把已经
    * commit 的上传误报成上传失败；调用方应同时失效页面里的旧快照。
@@ -42,6 +44,10 @@ export interface WorkbookRoundTripProps {
 
 function describe(result: Partial<WorkbookApplyResult>): string {
   const parts: string[] = [];
+  if (result.changes?.length) parts.push(`字段改动 ${result.changes.length} 处`);
+  if (result.overridden?.length) {
+    parts.push(`强制覆盖他人改动 ${result.overridden.length} 处（已记审计）`);
+  }
   if (result.cost_refills || result.cost_overrides) {
     parts.push(`补价 ${result.cost_refills || result.cost_overrides} 行`);
   }
@@ -112,8 +118,11 @@ export function WorkbookRoundTrip({
     }
   };
 
-  const applyDirectly = async (file: File) => {
-    const result = await onApply(file);
+  const applyDirectly = async (
+    file: File,
+    opts?: { forceTakeover?: boolean },
+  ) => {
+    const result = await onApply(file, opts);
     if (onAfterApply) {
       try {
         const refreshed = await onAfterApply();
@@ -207,9 +216,58 @@ export function WorkbookRoundTrip({
         await applyDirectly(file as unknown as File);
       }
     } catch (error) {
-      // 后端整份拒绝时把原文 message 显示出来：告诉用户**哪一行**不合法，
-      // 而不是一句「上传失败」——这份表是人工编辑的，定位靠这句话。
-      message.error(readError(error, "上传失败"));
+      // 2.7.0 行级冲突：展示三值对照，用户确认后可强制接管重传。
+      const conflicts = extractConflicts(error);
+      if (conflicts?.length) {
+        await new Promise<void>((resolve) => {
+          Modal.confirm({
+            title: `有 ${conflicts.length} 处改动与他人冲突`,
+            width: 640,
+            content: (
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Text type="danger" style={{ fontSize: 12 }}>
+                  以下字段在你下载后被他人更新；本次上传未写入任何数据。
+                  可选择「强制接管」用你的值覆盖（每次覆盖均记入审计），
+                  或取消后重新下载把改动搬进最新表。
+                </Text>
+                <List
+                  size="small"
+                  dataSource={conflicts.slice(0, 30)}
+                  renderItem={(row, index) => (
+                    <List.Item style={{ padding: "4px 0" }}>
+                      <Text style={{ fontSize: 12 }}>
+                        {describeConflict(row, index)}
+                      </Text>
+                    </List.Item>
+                  )}
+                />
+                {conflicts.length > 30 ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    ……另有 {conflicts.length - 30} 处，明细见审计日志
+                  </Text>
+                ) : null}
+              </Space>
+            ),
+            okText: "强制接管并上传",
+            okButtonProps: { danger: true },
+            cancelText: "取消（重新下载处理）",
+            onOk: async () => {
+              try {
+                await applyDirectly(file as unknown as File, {
+                  forceTakeover: true,
+                });
+              } finally {
+                resolve();
+              }
+            },
+            onCancel: () => resolve(),
+          });
+        });
+      } else {
+        // 后端整份拒绝时把原文 message 显示出来：告诉用户**哪一行**不合法，
+        // 而不是一句「上传失败」——这份表是人工编辑的，定位靠这句话。
+        message.error(readError(error, "上传失败"));
+      }
     } finally {
       setApplying(false);
       // 浏览器不会为同一个原生 file input 的同文件重选再次触发 change。
@@ -251,6 +309,28 @@ export function WorkbookRoundTrip({
       ) : null}
     </Space>
   );
+}
+
+/** 从 409 响应里提取行级冲突三值明细（2.7.0）。 */
+function extractConflicts(error: unknown): WorkbookFieldChange[] | null {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response
+    ?.data?.detail;
+  if (detail && typeof detail === "object" && Array.isArray(
+    (detail as { conflicts?: unknown }).conflicts)) {
+    return (detail as { conflicts: WorkbookFieldChange[] }).conflicts;
+  }
+  return null;
+}
+
+function describeConflict(row: WorkbookFieldChange, index: number): string {
+  return [
+    row.sheet ? String(row.sheet) : null,
+    row.row ? String(row.row) : null,
+    row.field ? String(row.field) : null,
+    `你下载时的值：${row.base || "（空）"}`,
+    `当前最新值：${row.old || "（空）"}`,
+    `你上传的值：${row.new || "（空）"}`,
+  ].filter(Boolean).join(" · ") || `第 ${index + 1} 处`;
 }
 
 function readError(error: unknown, fallback: string): string {

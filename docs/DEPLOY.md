@@ -224,6 +224,11 @@ sudo docker compose exec app alembic upgrade head
 4. 按
    [`HTTPS 入口 Runbook`](releases/https-ingress-runbook.md)
    完成证书、HTTP→HTTPS、响应头、回滚和外网验收。
+5. 域名口径（2026-08-31 拍板）：`yabowei.xyz` 为主站正式域名；旧域名
+   `hbzgc.icu` 计划到期，续费一年降级为纯 308 桥接（防止域名被抢注后对老
+   访客钓鱼），桥接期结束、用户迁移完成后再摘除。接入与翻转步骤见
+   [`HTTPS 入口 Runbook`](releases/https-ingress-runbook.md) 第 12、13 节；
+   翻转后 `.https_monitor_url` 巡检真值随主站切换。
 
 容器启动后应看到：
 

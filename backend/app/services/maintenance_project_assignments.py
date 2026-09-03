@@ -144,6 +144,76 @@ def accessible_project_condition(user_ctx: UserContext):
     return condition
 
 
+def is_project_workbook_editor(
+    db: Session,
+    *,
+    project_id: str,
+    user_ctx: UserContext,
+) -> bool:
+    """项目负责人/销售对本人项目拥有工作簿编辑权（2026-09-02 拍板）。
+
+    FULL_SCOPE 账号不在此判定（由 API 层按既有 action 键放行）；这里只回答
+    「该账号是不是这个项目的 primary_manager 或 canonical 销售」。
+    primary_manager 以活跃挂靠为准；销售以
+    ``project.salesperson == user_ctx.salesperson_name`` 为准（含 override
+    语义：override 后 canonical 值即权威值）。
+    """
+    if not user_ctx.is_authenticated or not user_ctx.user_id:
+        return False
+    managed = db.scalar(
+        select(MaintenanceProjectUserAssignment.assignment_id).where(
+            MaintenanceProjectUserAssignment.project_id == project_id,
+            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProjectUserAssignment.user_id.in_(
+                select(SysUser.id).where(
+                    SysUser.username == user_ctx.user_id,
+                    SysUser.is_active.is_(True),
+                )
+            ),
+        ).limit(1)
+    )
+    if managed is not None:
+        return True
+    if user_ctx.salesperson_name:
+        return db.scalar(
+            select(MaintenanceProject.project_id).where(
+                MaintenanceProject.project_id == project_id,
+                MaintenanceProject.salesperson == user_ctx.salesperson_name,
+            ).limit(1)
+        ) is not None
+    return False
+
+
+def is_project_workbook_editor_locked(
+    db: Session,
+    *,
+    project: MaintenanceProject,
+    user_ctx: UserContext,
+) -> bool:
+    """apply 事务内（项目行已 FOR UPDATE）复检，防挂靠/销售被并发吊销。"""
+    if not user_ctx.is_authenticated or not user_ctx.user_id:
+        return False
+    managed = db.scalar(
+        select(MaintenanceProjectUserAssignment.assignment_id).where(
+            MaintenanceProjectUserAssignment.project_id == project.project_id,
+            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProjectUserAssignment.user_id.in_(
+                select(SysUser.id).where(
+                    SysUser.username == user_ctx.user_id,
+                    SysUser.is_active.is_(True),
+                )
+            ),
+        ).limit(1)
+    )
+    if managed is not None:
+        return True
+    if user_ctx.salesperson_name:
+        return project.salesperson == user_ctx.salesperson_name
+    return False
+
+
 def can_access_project(
     db: Session,
     *,
@@ -157,20 +227,30 @@ def can_access_project(
 
     if is_scoped_maintenance(user_ctx):
         return project_id in (maintenance_scope_project_ids(db, user_ctx) or set())
-    return bool(
-        db.scalar(
-            select(MaintenanceProjectUserAssignment.assignment_id)
-            .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
-            .where(
-                MaintenanceProjectUserAssignment.project_id == project_id,
-                MaintenanceProjectUserAssignment.responsibility_type.in_(
-                    ("primary_manager", "viewer")),
-                MaintenanceProjectUserAssignment.archived_at.is_(None),
-                SysUser.username == user_ctx.user_id,
-                SysUser.is_active.is_(True),
-            )
+    owns = db.scalar(
+        select(MaintenanceProjectUserAssignment.assignment_id)
+        .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
+        .where(
+            MaintenanceProjectUserAssignment.project_id == project_id,
+            MaintenanceProjectUserAssignment.responsibility_type.in_(
+                ("primary_manager", "viewer")),
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            SysUser.username == user_ctx.user_id,
+            SysUser.is_active.is_(True),
         )
     )
+    if owns is not None:
+        return True
+    # 2026-09-02 拍板：canonical 销售与负责人同级可见/可编——非行键角色也按
+    # 同一谓词放行（与 accessible_project_condition 保持一致）。
+    if user_ctx.salesperson_name:
+        return db.scalar(
+            select(MaintenanceProject.project_id).where(
+                MaintenanceProject.project_id == project_id,
+                MaintenanceProject.salesperson == user_ctx.salesperson_name,
+            )
+        ) is not None
+    return False
 
 
 def maintenance_scope_project_ids(

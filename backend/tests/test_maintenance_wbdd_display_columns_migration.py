@@ -28,8 +28,9 @@ def test_new_revision_is_additive_child_and_single_head():
     script = ScriptDirectory.from_config(cfg)
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
-    # 全链单 head；XSDD guard 后线性追加销售人工覆盖状态，仍不得产生迁移分叉。
-    assert list(script.get_heads()) == ["f6b1d3e8a2c4"]
+    # 全链单 head；XSDD guard 后线性追加销售人工覆盖状态，再线性追加
+    # a8e4 期限回填（2026-09-02 基座），仍不得产生迁移分叉。
+    assert list(script.get_heads()) == ["a8e4f1c7d3b9"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():
