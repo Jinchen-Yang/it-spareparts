@@ -272,24 +272,23 @@ def test_completeness_state_and_lifecycle_status_pure_functions():
         == "complete"
     )
 
+    # 2026-09-03 负责人拍板的完整真值表：
+    #   missing = 期限数据不完整（起止任一为空，仍要筛出来提醒补齐）
+    #   ended   = 期限完整且终止日已过
+    #   ongoing = 其余，含尚未开始的未来项目
     as_of = date(2026, 8, 15)
-    assert maintenance_periods.lifecycle_status(None, None, as_of) == "missing"
-    assert (
-        maintenance_periods.lifecycle_status(date(2026, 1, 1), date(2026, 12, 31), as_of)
-        == "ongoing"
-    )
-    assert (
-        maintenance_periods.lifecycle_status(date(2025, 1, 1), date(2025, 12, 31), as_of)
-        == "ended"
-    )
-    # 只有起点且未结束 → ongoing；只有终点且已过期 → ended
-    assert maintenance_periods.lifecycle_status(date(2026, 1, 1), None, as_of) == "ongoing"
-    assert maintenance_periods.lifecycle_status(None, date(2026, 1, 1), as_of) == "ended"
-    # 尚未开始：按既有口径仍是 missing
-    assert (
-        maintenance_periods.lifecycle_status(date(2027, 1, 1), date(2027, 12, 31), as_of)
-        == "missing"
-    )
+    lifecycle = maintenance_periods.lifecycle_status
+    assert lifecycle(None, None, as_of) == "missing"                    # empty
+    assert lifecycle(date(2026, 1, 1), None, as_of) == "missing"        # start_only
+    assert lifecycle(date(2027, 1, 1), None, as_of) == "missing"        # start_only(未来)
+    assert lifecycle(None, date(2026, 1, 1), as_of) == "missing"        # end_only(已过)
+    assert lifecycle(None, date(2027, 1, 1), as_of) == "missing"        # end_only(未来)
+    assert lifecycle(date(2025, 1, 1), date(2025, 12, 31), as_of) == "ended"
+    assert lifecycle(date(2026, 1, 1), date(2026, 12, 31), as_of) == "ongoing"
+    # 回归：期限完整但尚未开始 —— 曾被兜底成 missing，卡片墙挂假「期限缺失」
+    assert lifecycle(date(2027, 1, 1), date(2027, 12, 31), as_of) == "ongoing"
+    # 终止日当天仍算进行中（既有口径不变）
+    assert lifecycle(date(2026, 1, 1), as_of, as_of) == "ongoing"
 
 
 def test_helper_rejects_inverted_range_without_writes(db):
