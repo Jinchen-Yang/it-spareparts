@@ -3027,3 +3027,84 @@ def test_v271_oversized_meta_chunks_roundtrip_and_verify():
         meta["metadata_hmac"],
         master._v2_metadata_signature(meta, verification_key),
     )
+
+
+def test_v271_large_project_real_roundtrip_passes_signature(db):
+    """2.7.1 端到端：700+ 行大项目「下载→原样上传」必须通过验签。
+
+    这是 2.7.0 生产事故的真实形态（中国电信云 730 行备件）：
+    parts_base_hashes 实际 40KB+，超 Excel 单元格 32767 硬上限被静默截断，
+    签名按完整值算、校验读到截断值 —— 零改动往返也 template_signature_invalid。
+
+    既有的 test_v271_oversized_meta_chunks_roundtrip_and_verify 是**合成**用例：
+    手搓 3 键元数据表，只调 _v2_sign_meta_rows/_v2_meta，不经过 build、不经过
+    _v2_verify_meta、更不经过 validate。它证明分块函数本身可用，但证明不了
+    客户那条路。本用例走真实全链路，并断言分块确实被触发（小项目不触发）。
+    """
+    project, part, order, first_line = _make_project_with_line(db)
+    batch = _batch(db)
+    # 造到 700+ 行：单价/SN 各不相同，逼近真实项目的哈希图体量
+    extra_parts = [
+        DimPart(pn_std=f"BULK-PN-{i:05d}", description=f"批量备件{i}")
+        for i in range(750)
+    ]
+    db.add_all(extra_parts)
+    db.flush()
+    db.add_all([
+        FMaintenanceLine(
+            raw_line_id=f"raw-bulk-{i}-{uuid.uuid4()}", order_id=order.id,
+            line_no=100 + i, part_id=bulk.id,
+            pn_std=bulk.pn_std, pn_raw=bulk.pn_std, description=bulk.description,
+            qty=Decimal("2"), return_qty=Decimal("0"),
+            serial_numbers=f"SN{i:08d}",
+            cost_source="direct", cost_tax_basis="ex", confidence="high",
+            import_batch_id=batch,
+        )
+        for i, bulk in enumerate(extra_parts)
+    ])
+    db.commit()
+
+    # 客户下载的是整本，不是单表：全表构建才能把所有 *_base_hashes /
+    # *_row_ids 都放到 32767 这把尺子下量一遍。
+    content = master.build_project_master_v2(db, project_id=project.project_id)
+    wb = load_workbook(io.BytesIO(content), data_only=True)
+    meta_ws = wb[master.V2_SHEET_META]
+    raw_meta = {
+        str(r[0].value).strip(): str(r[1].value or "")
+        for r in meta_ws.iter_rows(min_col=1, max_col=2) if r[0].value
+    }
+
+    # 1) 真实数据确实撑爆了单元格上限 —— 分块必须被触发
+    chunk_keys = [k for k in raw_meta if k.startswith("parts_base_hashes@")]
+    assert chunk_keys, (
+        "750 行项目没有触发分块，本用例失去意义："
+        f"parts_base_hashes 长度={len(raw_meta.get('parts_base_hashes', ''))}")
+
+    # 2) 落盘的每个单元格都必须在 Excel 硬上限之内（否则又会被静默截断）
+    oversized = {k: len(v) for k, v in raw_meta.items() if len(v) > 32767}
+    assert not oversized, f"仍有单元格超过 32767：{oversized}"
+
+    # 3) 合并后的逻辑值长度确实 > 32767（证明这是"大项目"路径）
+    merged = master._v2_meta(wb)
+    assert len(merged["parts_base_hashes"]) > 32767, len(merged["parts_base_hashes"])
+
+    # 4) 客户实际动作：零改动原样上传 —— 必须通过验签，不得 template_signature_invalid
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts, plan.conflicts
+
+    # 5) 大文件上真改一行也要能落库（不是只有零改动能过）
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {c.value: c.column for c in ws[1]}
+    id_col = headers["实体ID"]
+    target = next(
+        r for r in range(2, ws.max_row + 1)
+        if str(ws.cell(r, id_col).value or "").strip() == str(first_line.id))
+    ws.cell(target, headers["需求数量"], 13)
+    plan2 = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    master.apply_project_master_v2(
+        db, plan2, operated_by="v271-large",
+        import_batch_id=str(uuid.uuid4()))
+    db.refresh(first_line)
+    assert first_line.qty == Decimal("13.000"), first_line.qty
