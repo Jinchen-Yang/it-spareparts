@@ -164,25 +164,38 @@ def test_wbdd_qty_change_bumps_once_noop_does_not(tmp_path, db):
     assert line.qty == Decimal("3"), "新 qty 必须保留"
 
 
-def test_wbdd_first_import_stays_deferred_without_owner(tmp_path, db):
-    """WBDD-first 无销售合同 owner：事实入库，项目/合同/映射/归属均不创建。"""
+def test_wbdd_import_auto_creates_assignment_without_bump(tmp_path, db):
+    """无现有项目的单：自动建项目并唯一挂靠，初始 state 不计 bump。
+
+    D-05 的另一半（WBDD 不再建项）不在本 PR 范围内，因此这里保留 main 的
+    现行行为断言；等那半边落地时再一并改成「无 owner 就停在未归属桶」。
+    """
     path = _wbdd_workbook(tmp_path, "lonely.xlsx", "2")
     report = _import_wbdd(db, path, key=f"k3-{uuid.uuid4()}")
     assert report["workbook_projects_bumped"] == 0
     order = db.execute(
         select(FMaintenanceOrder).where(FMaintenanceOrder.order_no == "WBDD-20260001")
     ).scalar_one()
-    line = db.execute(
-        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id)
+    assignment = db.execute(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id == order.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
     ).scalar_one()
-    assert order.linked_sales_order_no == "XSDD-20260101-0001"
-    assert line.qty == Decimal("2")
-    assert report["auto_assignment"]["pending_owner_order_ids"] == ["SYN-O001"]
-    assert db.scalars(select(MaintenanceProject)).all() == []
-    assert db.scalars(select(MaintenanceProjectContract)).all() == []
-    assert db.scalars(select(MaintenanceProjectXsdd)).all() == []
-    assert db.scalars(select(MaintenanceSourceOrderAssignment)).all() == []
-    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == []
+    project = db.get(MaintenanceProject, assignment.project_id)
+    assert project is not None
+    state = db.execute(
+        select(MaintenanceProjectWorkbookState).where(
+            MaintenanceProjectWorkbookState.project_id == project.project_id
+        )
+    ).scalar_one()
+    assert db.scalars(select(MaintenanceProject)).all() == [project]
+    assert db.scalars(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.is_active.is_(True)
+        )
+    ).all() == [assignment]
+    assert db.scalars(select(MaintenanceProjectWorkbookState)).all() == [state]
 
 
 # ---------- 通用 maintenance import 路径（loader.load 直调，skip/upsert 双模式） ----------
