@@ -20,6 +20,7 @@ apply 在拿到行锁之后、任何写之前重算比对，不等就整本 fail
 """
 import io
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -257,3 +258,214 @@ def test_same_row_quantity_and_manual_cost_both_land(db):
     assert row[0] == Decimal("7.000"), f"数量改动被写阶段重读冲掉了：{row[0]}"
     assert row[1] == Decimal("88.00")
     assert row[2] == "manual"
+
+
+# ---------- 04 报销 / 06 领用返还：同一套哨兵 ----------
+
+def test_expense_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """04 报销：窗口内并发改同一行 → 整本零写入报 row_conflicts。"""
+    from app.models.maintenance import FProjectExpense
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_expense,
+    )
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    raw_line_id = expense.raw_line_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_EXPENSE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == raw_line_id
+    )
+    ws.cell(row_no, headers["操作"], "UPDATE")
+    ws.cell(row_no, headers["未税金额"], 600)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_EXPENSE for g in plan.row_guards)
+
+    def _peer(other):
+        peer = other.scalar(select(FProjectExpense).where(
+            FProjectExpense.raw_line_id == raw_line_id))
+        peer.person = "别人改的"
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(FProjectExpense.person).where(
+        FProjectExpense.raw_line_id == raw_line_id)) == "别人改的"
+    assert db.scalar(select(FProjectExpense.amount_ex_tax).where(
+        FProjectExpense.raw_line_id == raw_line_id)) == Decimal("500.00")
+
+
+def test_site_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """06 领用返还：窗口内并发改同一行 → 整本零写入报 row_conflicts。"""
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    project, part, order, line = _make_project_with_line(db)
+    issue = MaintenanceSiteIssue(
+        issue_id=str(uuid.uuid4()), project_id=project.project_id,
+        issue_no="CKD-GUARD-1", issue_date=date(2026, 8, 2),
+        raw_status="已确认", status_mapping_state="mapped",
+        normalized_status="confirmed", status_mapping_version="v1",
+        source="legacy",
+    )
+    db.add(issue)
+    db.flush()
+    site_line = MaintenanceSiteIssueLine(
+        issue_line_id=str(uuid.uuid4()), issue_id=issue.issue_id, line_no=1,
+        part_id=part.id, pn=part.pn_std, quantity=Decimal("1"),
+        source_order_id=order.raw_order_id, source_line_id=line.raw_line_id,
+        algorithm_version="v1",
+    )
+    db.add(site_line)
+    db.commit()
+    site_line_id = site_line.issue_line_id
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == site_line_id
+    )
+    ws.cell(row_no, headers["备注"], "我改的备注")
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_SITE for g in plan.row_guards)
+
+    def _peer(other):
+        peer = other.get(MaintenanceSiteIssueLine, site_line_id)
+        peer.quantity = Decimal("42")
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(MaintenanceSiteIssueLine.quantity).where(
+        MaintenanceSiteIssueLine.issue_line_id == site_line_id)) == Decimal("42")
+
+
+def test_receipt_concurrent_commit_between_validate_and_apply_is_refused(db):
+    """05 实收回款：窗口内并发改同一快照 → 整本零写入报 row_conflicts。
+
+    05 的快照不由 _v2_assert_entity_scope 加锁，但复核位置依然权威：
+    apply 顶部的 expire_all 给新鲜性（本族还用列级标量读绕开 identity map），
+    全局 advisory + workbook state 行锁 + 项目行锁给稳定性——app/ 下能写快照的
+    五个点各自至少被其中一把挡住。详见 _v2_recheck_row_guards 的 docstring。
+    """
+    from app.models.maintenance_project_operations import (
+        MaintenanceCollectionSnapshot,
+    )
+    from tests.test_maintenance_project_master_v2_editable import (
+        _project_with_receipt,
+    )
+
+    project, _contract, snapshot = _project_with_receipt(db)
+    collection_id = snapshot.collection_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id,
+        sheets=(master.V2_SHEET_RECEIPTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == collection_id
+    )
+    ws.cell(row_no, headers["累计实收金额（含税）"], 90000)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert not plan.conflicts
+    assert any(g.sheet == master.V2_SHEET_RECEIPTS for g in plan.row_guards), (
+        "05 触碰行必须发指纹")
+
+    def _peer(other):
+        peer = other.get(MaintenanceCollectionSnapshot, collection_id)
+        peer.cumulative_amount = Decimal("123456.78")
+        peer.version = peer.version + 1
+
+    _peer_commit(_peer)
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(MaintenanceCollectionSnapshot.cumulative_amount).where(
+        MaintenanceCollectionSnapshot.collection_id == collection_id
+    )) == Decimal("123456.78")
+
+
+def test_implicit_void_of_an_unchanged_row_is_still_guarded(db):
+    """删行=作废的**常态路径**（导出后没人动过、哈希吻合）也必须发指纹。
+
+    修复前指纹只发在「哈希不符 + 强制接管」那条罕见分支里，于是最常见的
+    「用户删一行、期间别人改了这行」会被静默作废掉对方刚写的状态
+    （Codex P1，2026-09-04）。
+    """
+    from app.models.maintenance import FProjectExpense
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_expense,
+    )
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    raw_line_id = expense.raw_line_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_EXPENSE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == raw_line_id
+    )
+    ws.delete_rows(row_no, 1)   # 用户删行 = 作废，且这一行导出后没人动过
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert raw_line_id in plan.expense_voids
+    assert any(g.entity_id == raw_line_id for g in plan.row_guards), (
+        "常态删行路径也必须发指纹")
+
+    _peer_commit(lambda o: setattr(
+        o.scalar(select(FProjectExpense).where(
+            FProjectExpense.raw_line_id == raw_line_id)),
+        "person", "别人刚改的"))
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(FProjectExpense.data_status).where(
+        FProjectExpense.raw_line_id == raw_line_id)) != "已作废"

@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -1992,6 +1993,20 @@ class _V2MergeContext:
         else:
             self.changes.append({**entry, "overridden": False})
 
+    def guard(self, *, sheet: str, entity_id, row_label: str,
+              values: dict, fields: tuple[str, ...]) -> None:
+        """记下这一行在 validate 时刻的服务端指纹。
+
+        只给**结局已定且会进入写集合**的行发指纹（合并判定为触碰、显式作废、
+        缺行=作废）。未触碰行不写、也不在 _v2_assert_entity_scope 的加锁集合里，
+        给它们发指纹会让「项目里任何一行被人改过就整本 409」——那是 2.7.0
+        明确废掉的整本硬拒。
+        """
+
+        self.guards.append(V2RowGuard(
+            sheet=sheet, entity_id=str(entity_id), row_label=row_label,
+            digest=_v2_row_base_hash(values, fields)))
+
     def record_row_conflict(
         self, *, sheet: str, row_label: str, entity_id, action: str,
     ) -> bool:
@@ -3595,10 +3610,16 @@ def _v2_parse_parts(
                 if merge.record_row_conflict(
                         sheet="03_备件明细", row_label=row_label,
                         entity_id=line.id, action="VOID（整行作废）"):
+                    merge.guard(sheet=V2_SHEET_PARTS, entity_id=line.id,
+                                row_label=row_label, values=server_values,
+                                fields=V2_PART_BASE_FIELDS)
                     out.append(CostRefill(line_id=line.id, operation="VOID",
                                           unit_cost_ex_tax=None, unit_cost_inc_tax=None,
                                           reason=None))
                 continue
+            merge.guard(sheet=V2_SHEET_PARTS, entity_id=line.id,
+                        row_label=row_label, values=server_values,
+                        fields=V2_PART_BASE_FIELDS)
             out.append(CostRefill(line_id=line.id, operation="VOID",
                                   unit_cost_ex_tax=None, unit_cost_inc_tax=None,
                                   reason=None))
@@ -3612,10 +3633,8 @@ def _v2_parse_parts(
             server_values=server_values, baseline=baseline, ctx=merge)
         if merged_row is None:
             continue
-        # 触碰行才发指纹：apply 会在行锁之后重算并比对（见 _v2_recheck_row_guards）。
-        merge.guards.append(V2RowGuard(
-            sheet="03_备件明细", entity_id=str(line.id), row_label=row_label,
-            digest=_v2_row_base_hash(server_values, V2_PART_BASE_FIELDS)))
+        merge.guard(sheet=V2_SHEET_PARTS, entity_id=line.id, row_label=row_label,
+                    values=server_values, fields=V2_PART_BASE_FIELDS)
 
         # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
         # 导出时的旧值静默盖掉他人改动（D-02）。
@@ -3744,6 +3763,9 @@ def _v2_parse_site(
                     row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
                     server_values=server_values, baseline=baseline, ctx=merge):
                 continue
+            merge.guard(sheet=V2_SHEET_SITE, entity_id=raw_id,
+                        row_label=str(server_values.get("领用单号") or raw_id),
+                        values=server_values, fields=V2_SITE_BASE_FIELDS)
             if pn is not None and pn != existing_line.pn:
                 part = _exact_part_for_pn(db, pn)
                 if part is None:
@@ -4013,8 +4035,14 @@ def _v2_parse_expenses(
                     if merge.record_row_conflict(
                             sheet="04_费用报销", row_label=row_label,
                             entity_id=raw_id, action="VOID（整行作废）"):
+                        merge.guard(sheet=V2_SHEET_EXPENSE, entity_id=raw_id,
+                                    row_label=row_label, values=server_values,
+                                    fields=V2_EXPENSE_BASE_FIELDS)
                         voids.append(raw_id)
                     continue
+                merge.guard(sheet=V2_SHEET_EXPENSE, entity_id=raw_id,
+                            row_label=row_label, values=server_values,
+                            fields=V2_EXPENSE_BASE_FIELDS)
                 voids.append(raw_id)
                 continue
             if not _v2_merge_row(
@@ -4022,6 +4050,9 @@ def _v2_parse_expenses(
                     row=row, index=index, base_fields=V2_EXPENSE_BASE_FIELDS,
                     server_values=server_values, baseline=baseline, ctx=merge):
                 continue
+            merge.guard(sheet=V2_SHEET_EXPENSE, entity_id=raw_id,
+                        row_label=row_label, values=server_values,
+                        fields=V2_EXPENSE_BASE_FIELDS)
         else:
             if not bxd_no or line_no is None:
                 raise WorkbookError(
@@ -4332,6 +4363,11 @@ def _v2_parse_receipts(
                 server_values=server_values, baseline=baseline, ctx=merge)
             if merged_row is None:
                 continue
+            merge.guard(
+                sheet=V2_SHEET_RECEIPTS, entity_id=existing.collection_id,
+                row_label=(f"{server_values.get('合同编号') or ''}"
+                           f"/{server_values.get('报告月份') or ''}"),
+                values=server_values, fields=V2_RECEIPT_BASE_FIELDS)
             # 同 03：下游 CollectionOp 直接读整行，必须读 rebase 后的值。
             row = merged_row
         out.append(ec.CollectionOp(
@@ -4611,49 +4647,134 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
     """锁后复核：每个受保护实体的服务端指纹必须仍等于 validate 时刻的值。
 
     调用位置必须在 _v2_assert_entity_scope(lock_rows=True) 之后、任何写之前。
-    那次调用已经把这些行 FOR UPDATE 锁住并（populate_existing）读成新鲜的，
-    因此本函数不取任何新锁、也不引入新的锁序边；03 只额外发一条按 line_id
-    批量取人工成本覆盖的查询，语句数与行数无关。
+    那次调用已经把 03/04/06 三族的行 FOR UPDATE 锁住并读成新鲜的，因此本函数
+    不取任何新锁、也不引入新的锁序边；每族只发常数条批量查询，语句数与行数无关。
 
-    不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」
-    跟基线比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
+    不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」跟基线
+    比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
+
+    05_实收回款的快照**不由** _v2_assert_entity_scope 加锁（真正的行锁在
+    maintenance_expense_collection_workbook 里，要到 ec.apply 才发生），但在这个
+    位置复核它依然权威，靠的是另外三把锁的合力：
+      - 新鲜性：apply 顶部的 db.expire_all()；05 分支还用列级标量读，直接绕开
+        identity map，不依赖「expire 之后没人加载过快照」这个无机制保证的前提。
+      - 稳定性：本事务此刻已持 DATA_CHANGE_ADVISORY_LOCK_KEY 全局锁、本项目的
+        workbook state 行锁、以及 maintenance_project 行锁。app/ 下能写快照的
+        五个点各自至少被其中一把挡住：
+          operations.create_collection / operations.update_collection（取 state 锁）、
+          maintenance_expense_collection_workbook.apply（取 state 锁）、
+          maintenance_project_identity 的归并（取同一把全局 advisory + states）、
+          maintenance_project_identity.apply_exact_collection_dedupe
+            （**不取 state 锁**，靠同一把全局 advisory + 项目行锁才被挡住）。
+    最后那条是这个不变量最脆的一环：日后若新增一个既不取 state 锁、也不取项目行
+    锁、也不取全局 advisory 的快照写者，本复核会静默失去权威性而不报任何错。
+    改这五个点的锁之前请先回来看这段。
     """
 
-    part_guards = [g for g in plan.row_guards if g.sheet == "03_备件明细"]
-    if not part_guards:
+    if not plan.row_guards:
         return
-    line_ids = [int(g.entity_id) for g in part_guards]
-    lines = {
-        line.id: line for line in db.scalars(
-            select(FMaintenanceLine).where(FMaintenanceLine.id.in_(line_ids)))
-    }
-    orders = {
-        order.id: order for order in db.scalars(
-            select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(
-                {line.order_id for line in lines.values()})))
-    } if lines else {}
-    overrides = {
-        override.line_id: override for override in db.scalars(
-            select(MaintenanceManualCostOverride).where(
-                MaintenanceManualCostOverride.line_id.in_(line_ids),
-                MaintenanceManualCostOverride.active.is_(True),
-            ))
-    }
+
+    by_sheet: dict[str, list[V2RowGuard]] = defaultdict(list)
+    for guard in plan.row_guards:
+        by_sheet[guard.sheet].append(guard)
+
+    fresh_by_key: dict[tuple[str, str], tuple[dict, tuple[str, ...]] | None] = {}
+
+    part_guards = by_sheet.get(V2_SHEET_PARTS, [])
+    if part_guards:
+        line_ids = [int(g.entity_id) for g in part_guards]
+        lines = {
+            line.id: line for line in db.scalars(
+                select(FMaintenanceLine).where(FMaintenanceLine.id.in_(line_ids)))
+        }
+        orders = {
+            order.id: order for order in db.scalars(
+                select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(
+                    {line.order_id for line in lines.values()})))
+        } if lines else {}
+        overrides = {
+            override.line_id: override for override in db.scalars(
+                select(MaintenanceManualCostOverride).where(
+                    MaintenanceManualCostOverride.line_id.in_(line_ids),
+                    MaintenanceManualCostOverride.active.is_(True),
+                ))
+        }
+        for guard in part_guards:
+            line = lines.get(int(guard.entity_id))
+            fresh_by_key[(guard.sheet, guard.entity_id)] = None if line is None else (
+                _v2_part_row_values(
+                    line, orders.get(line.order_id), overrides.get(line.id)),
+                V2_PART_BASE_FIELDS,
+            )
+
+    expense_guards = by_sheet.get(V2_SHEET_EXPENSE, [])
+    if expense_guards:
+        raw_ids = [g.entity_id for g in expense_guards]
+        expenses = {
+            expense.raw_line_id: expense for expense in db.scalars(
+                select(FProjectExpense).where(
+                    FProjectExpense.raw_line_id.in_(raw_ids)))
+        }
+        for guard in expense_guards:
+            expense = expenses.get(guard.entity_id)
+            fresh_by_key[(guard.sheet, guard.entity_id)] = None if expense is None else (
+                _v2_expense_row_values(expense, ""), V2_EXPENSE_BASE_FIELDS,
+            )
+
+    site_guards = by_sheet.get(V2_SHEET_SITE, [])
+    if site_guards:
+        site_ids = [g.entity_id for g in site_guards]
+        site_lines = {
+            line.issue_line_id: line for line in db.scalars(
+                select(MaintenanceSiteIssueLine).where(
+                    MaintenanceSiteIssueLine.issue_line_id.in_(site_ids)))
+        }
+        issues = {
+            issue.issue_id: issue for issue in db.scalars(
+                select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.issue_id.in_(
+                    {line.issue_id for line in site_lines.values()})))
+        } if site_lines else {}
+        for guard in site_guards:
+            line = site_lines.get(guard.entity_id)
+            issue = issues.get(line.issue_id) if line is not None else None
+            fresh_by_key[(guard.sheet, guard.entity_id)] = (
+                None if line is None or issue is None
+                else (_v2_site_row_values(line, issue), V2_SITE_BASE_FIELDS)
+            )
+
+    receipt_guards = by_sheet.get(V2_SHEET_RECEIPTS, [])
+    if receipt_guards:
+        collection_ids = [g.entity_id for g in receipt_guards]
+        # 列级标量读：不进 identity map，因此新鲜性不依赖调用顺序。
+        snapshot_rows = {
+            row.collection_id: row for row in db.execute(
+                select(
+                    MaintenanceCollectionSnapshot.collection_id,
+                    # report_month 不在基线字段里，但 _v2_receipt_row_values
+                    # 会读它；不选就 AttributeError。
+                    MaintenanceCollectionSnapshot.report_month,
+                    MaintenanceCollectionSnapshot.cumulative_amount,
+                    MaintenanceCollectionSnapshot.status,
+                    MaintenanceCollectionSnapshot.receipt_reference,
+                    MaintenanceCollectionSnapshot.remark,
+                ).where(
+                    MaintenanceCollectionSnapshot.collection_id.in_(collection_ids)
+                )
+            ).all()
+        }
+        for guard in receipt_guards:
+            row = snapshot_rows.get(guard.entity_id)
+            # 合同编号不在 V2_RECEIPT_BASE_FIELDS 里，传 "" 与采集侧一致。
+            fresh_by_key[(guard.sheet, guard.entity_id)] = None if row is None else (
+                _v2_receipt_row_values(row, ""), V2_RECEIPT_BASE_FIELDS,
+            )
+
     drifted: list[dict] = []
-    for guard in part_guards:
-        line = lines.get(int(guard.entity_id))
-        if line is None:
-            # 行已消失：_v2_assert_entity_scope 已经拦过，这里只兜底。
-            drifted.append({
-                "sheet": guard.sheet, "row": guard.row_label,
-                "entity_id": guard.entity_id, "field": "（整行）",
-                "old": "", "new": "", "base": "",
-                "reason": "server_changed_since_validate",
-            })
-            continue
-        fresh = _v2_part_row_values(
-            line, orders.get(line.order_id), overrides.get(line.id))
-        if _v2_row_base_hash(fresh, V2_PART_BASE_FIELDS) != guard.digest:
+    for guard in plan.row_guards:
+        fresh = fresh_by_key.get((guard.sheet, guard.entity_id))
+        # fresh is None：行已消失/父单不见了。_v2_assert_entity_scope 通常已经
+        # 拦过，这里只兜底，同样按漂移处理，绝不放行。
+        if fresh is None or _v2_row_base_hash(fresh[0], fresh[1]) != guard.digest:
             drifted.append({
                 "sheet": guard.sheet, "row": guard.row_label,
                 "entity_id": guard.entity_id, "field": "（整行）",
@@ -4667,6 +4788,7 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
             "请重新下载项目总表后再试。",
             issues=drifted,
         )
+
 
 def _v2_parse_contract_amount(
     db: Session,
@@ -4807,13 +4929,18 @@ def validate_project_master_v2(
                 if (exported_hash is not None
                         and _v2_row_base_hash(values, V2_SITE_BASE_FIELDS)
                         != exported_hash):
-                    if merge.record_row_conflict(
+                    if not merge.record_row_conflict(
                             sheet="06_领用返还",
                             row_label=str(values.get("领用单号") or sid),
                             entity_id=sid, action="删行=作废（服务端该行已变）"):
-                        site_flags.append(SiteReturnFlag(
-                            issue_line_id=sid, no_return=None, is_void=True))
-                    continue
+                        continue
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径
+                # （Codex P1，2026-09-04）。
+                if values:
+                    merge.guard(
+                        sheet=V2_SHEET_SITE, entity_id=sid,
+                        row_label=str(values.get("领用单号") or sid),
+                        values=values, fields=V2_SITE_BASE_FIELDS)
                 site_flags.append(SiteReturnFlag(
                     issue_line_id=sid, no_return=None, is_void=True))
         site_flags = tuple(site_flags)
@@ -4893,6 +5020,12 @@ def validate_project_master_v2(
                             entity_id=collection_id,
                             action="删行=作废（服务端该行已变）"):
                         continue
+                merge.guard(
+                    sheet=V2_SHEET_RECEIPTS, entity_id=collection_id,
+                    row_label=(f"{contract.contract_no} "
+                               f"{snapshot.report_month:%Y-%m}"),
+                    values=_v2_receipt_row_values(snapshot, contract.contract_no),
+                    fields=V2_RECEIPT_BASE_FIELDS)
                 implicit_voids.append(ec.CollectionOp(
                     operation="VOID",
                     project_contract_id=contract.project_contract_id,
@@ -4982,20 +5115,32 @@ def validate_project_master_v2(
                     ))
                 values = _v2_part_row_values(
                     missing_line, missing_order, missing_override)
+                row_label = str(values.get("维保单号") or line_id_str)
+                takeover = False
                 if _v2_row_base_hash(values, V2_PART_BASE_FIELDS) != exported_hash:
-                    if merge.record_row_conflict(
-                            sheet="03_备件明细",
-                            row_label=str(values.get("维保单号") or line_id_str),
+                    if not merge.record_row_conflict(
+                            sheet="03_备件明细", row_label=row_label,
                             entity_id=line_id_str,
                             action="删行=作废（服务端该行已变）"):
-                        cost_refills = cost_refills + (CostRefill(
-                            line_id=line_id, operation="VOID",
-                            unit_cost_ex_tax=None, unit_cost_inc_tax=None,
-                            reason=None),)
-                        will_void_rows.append(
-                            {"sheet": "03_备件明细", "entity_id": line_id_str,
-                             "label": "", "reason": "上传文件缺行（接管覆盖）"})
-                    continue
+                        continue
+                    takeover = True
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径，
+                # 不发就等于把 validate→apply 窗口对整条常态路径敞着
+                # （Codex P1，2026-09-04）。
+                merge.guard(
+                    sheet=V2_SHEET_PARTS, entity_id=line_id,
+                    row_label=row_label, values=values,
+                    fields=V2_PART_BASE_FIELDS)
+                cost_refills = cost_refills + (CostRefill(
+                    line_id=line_id, operation="VOID",
+                    unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                    reason=None),)
+                will_void_rows.append(
+                    {"sheet": "03_备件明细", "entity_id": line_id_str,
+                     "label": "",
+                     "reason": ("上传文件缺行（接管覆盖）" if takeover
+                                else "上传文件缺行")})
+                continue
             cost_refills = cost_refills + (CostRefill(
                 line_id=line_id, operation="VOID",
                 unit_cost_ex_tax=None, unit_cost_inc_tax=None, reason=None),)
@@ -5017,14 +5162,19 @@ def validate_project_master_v2(
                     and _v2_row_base_hash(
                         _v2_expense_row_values(expense_row, ""),
                         V2_EXPENSE_BASE_FIELDS) != exported_hash):
-                if merge.record_row_conflict(
+                if not merge.record_row_conflict(
                         sheet="04_费用报销",
                         row_label=str(expense_row.bxd_no or rid),
                         entity_id=rid, action="删行=作废（服务端该行已变）"):
-                    expense_voids.append(rid)
-                    will_void_rows.append(
-                        {"sheet": "04_费用报销", "entity_id": rid, "label": ""})
-                continue
+                    continue
+            if expense_row is not None:
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径
+                # （Codex P1，2026-09-04）。
+                merge.guard(
+                    sheet=V2_SHEET_EXPENSE, entity_id=rid,
+                    row_label=str(expense_row.bxd_no or rid),
+                    values=_v2_expense_row_values(expense_row, ""),
+                    fields=V2_EXPENSE_BASE_FIELDS)
             expense_voids.append(rid)
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
         # 2026-08-22 用户拍板：撤销行损失防呆（原 50% 批量损失拦截）——
