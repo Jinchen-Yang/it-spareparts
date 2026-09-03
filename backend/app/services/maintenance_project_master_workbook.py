@@ -63,6 +63,7 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.models.sales import FSalesOrder
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_cost_quality, maintenance_project_identity
+from app.services import maintenance_periods
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_collection_milestones import write_collection_milestone
@@ -512,7 +513,10 @@ def _sheet_basics(wb, db: Session, project: MaintenanceProject,
         ("业务类型", project.business_type or ""),
         ("项目经理(CMO)", project.cmo_name or ""),
         ("销售人员", project.salesperson or ""),
-        ("项目状态", project.lifecycle_status),
+        # 读侧动态计算，不读存库快照：该列只在某次写入时刷新，期限回填后
+        # 会一直停着旧值，导致「项目状态=期限缺失」紧挨着完好的服务期。
+        ("项目状态", maintenance_periods.lifecycle_status(
+            project.period_from, project.period_to, business_today())),
         ("硬盘不返还默认值(项目级)", "是" if project.no_return_default else "否"),
         ("合同编号(XSDD)", "、".join(c.contract_no for c in contracts)),
         ("前置库种类数 / 件数 / 金额(含税)", "尚未接入"),
@@ -2067,7 +2071,10 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     cost_complete = bool(cost_facts) and missing_cost_lines == 0
     values = [
         ("项目编号", project.project_code), ("项目名称", project.display_name),
-        ("生命周期", project.lifecycle_status), ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
+        # 生命周期与服务期必须同源，否则同一行自相矛盾（见上）。
+        ("生命周期", maintenance_periods.lifecycle_status(
+            project.period_from, project.period_to, business_today())),
+        ("服务期", f"{project.period_from or '—'} ~ {project.period_to or '—'}"),
         # 负责人＝项目经理（显示人名）；销售人员＝canonical 优先，未人工覆盖的
         # 遗留空值才回落到挂靠需求单众数；CMO＝台账来源（无台账则缺）。
         ("项目经理（负责人）",

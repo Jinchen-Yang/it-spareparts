@@ -13,6 +13,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
 )
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
+from app.business_time import business_today
 from app.services import (
     maintenance_periods,
     maintenance_project_identity,
@@ -40,7 +41,9 @@ def project_dict(project: MaintenanceProject) -> dict:
         # 维保期限主数据（#51）：面板可显示、可编辑（#39）
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
-        "lifecycle_status": project.lifecycle_status,
+        # 动态计算：存库列只是写入时兼容快照，期限改动后不会自动刷新
+        "lifecycle_status": maintenance_periods.lifecycle_status(
+            project.period_from, project.period_to, business_today()),
         "is_active": project.is_active,
         "version": project.version,
     }
