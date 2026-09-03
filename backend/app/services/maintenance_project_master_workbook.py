@@ -4929,17 +4929,18 @@ def validate_project_master_v2(
                 if (exported_hash is not None
                         and _v2_row_base_hash(values, V2_SITE_BASE_FIELDS)
                         != exported_hash):
-                    if merge.record_row_conflict(
+                    if not merge.record_row_conflict(
                             sheet="06_领用返还",
                             row_label=str(values.get("领用单号") or sid),
                             entity_id=sid, action="删行=作废（服务端该行已变）"):
-                        merge.guard(
-                            sheet=V2_SHEET_SITE, entity_id=sid,
-                            row_label=str(values.get("领用单号") or sid),
-                            values=values, fields=V2_SITE_BASE_FIELDS)
-                        site_flags.append(SiteReturnFlag(
-                            issue_line_id=sid, no_return=None, is_void=True))
-                    continue
+                        continue
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径
+                # （Codex P1，2026-09-04）。
+                if values:
+                    merge.guard(
+                        sheet=V2_SHEET_SITE, entity_id=sid,
+                        row_label=str(values.get("领用单号") or sid),
+                        values=values, fields=V2_SITE_BASE_FIELDS)
                 site_flags.append(SiteReturnFlag(
                     issue_line_id=sid, no_return=None, is_void=True))
         site_flags = tuple(site_flags)
@@ -5114,24 +5115,32 @@ def validate_project_master_v2(
                     ))
                 values = _v2_part_row_values(
                     missing_line, missing_order, missing_override)
+                row_label = str(values.get("维保单号") or line_id_str)
+                takeover = False
                 if _v2_row_base_hash(values, V2_PART_BASE_FIELDS) != exported_hash:
-                    if merge.record_row_conflict(
-                            sheet="03_备件明细",
-                            row_label=str(values.get("维保单号") or line_id_str),
+                    if not merge.record_row_conflict(
+                            sheet="03_备件明细", row_label=row_label,
                             entity_id=line_id_str,
                             action="删行=作废（服务端该行已变）"):
-                        merge.guard(
-                            sheet=V2_SHEET_PARTS, entity_id=line_id,
-                            row_label=str(values.get("维保单号") or line_id_str),
-                            values=values, fields=V2_PART_BASE_FIELDS)
-                        cost_refills = cost_refills + (CostRefill(
-                            line_id=line_id, operation="VOID",
-                            unit_cost_ex_tax=None, unit_cost_inc_tax=None,
-                            reason=None),)
-                        will_void_rows.append(
-                            {"sheet": "03_备件明细", "entity_id": line_id_str,
-                             "label": "", "reason": "上传文件缺行（接管覆盖）"})
-                    continue
+                        continue
+                    takeover = True
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径，
+                # 不发就等于把 validate→apply 窗口对整条常态路径敞着
+                # （Codex P1，2026-09-04）。
+                merge.guard(
+                    sheet=V2_SHEET_PARTS, entity_id=line_id,
+                    row_label=row_label, values=values,
+                    fields=V2_PART_BASE_FIELDS)
+                cost_refills = cost_refills + (CostRefill(
+                    line_id=line_id, operation="VOID",
+                    unit_cost_ex_tax=None, unit_cost_inc_tax=None,
+                    reason=None),)
+                will_void_rows.append(
+                    {"sheet": "03_备件明细", "entity_id": line_id_str,
+                     "label": "",
+                     "reason": ("上传文件缺行（接管覆盖）" if takeover
+                                else "上传文件缺行")})
+                continue
             cost_refills = cost_refills + (CostRefill(
                 line_id=line_id, operation="VOID",
                 unit_cost_ex_tax=None, unit_cost_inc_tax=None, reason=None),)
@@ -5153,19 +5162,19 @@ def validate_project_master_v2(
                     and _v2_row_base_hash(
                         _v2_expense_row_values(expense_row, ""),
                         V2_EXPENSE_BASE_FIELDS) != exported_hash):
-                if merge.record_row_conflict(
+                if not merge.record_row_conflict(
                         sheet="04_费用报销",
                         row_label=str(expense_row.bxd_no or rid),
                         entity_id=rid, action="删行=作废（服务端该行已变）"):
-                    merge.guard(
-                        sheet=V2_SHEET_EXPENSE, entity_id=rid,
-                        row_label=str(expense_row.bxd_no or rid),
-                        values=_v2_expense_row_values(expense_row, ""),
-                        fields=V2_EXPENSE_BASE_FIELDS)
-                    expense_voids.append(rid)
-                    will_void_rows.append(
-                        {"sheet": "04_费用报销", "entity_id": rid, "label": ""})
-                continue
+                    continue
+            if expense_row is not None:
+                # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径
+                # （Codex P1，2026-09-04）。
+                merge.guard(
+                    sheet=V2_SHEET_EXPENSE, entity_id=rid,
+                    row_label=str(expense_row.bxd_no or rid),
+                    values=_v2_expense_row_values(expense_row, ""),
+                    fields=V2_EXPENSE_BASE_FIELDS)
             expense_voids.append(rid)
             will_void_rows.append({"sheet": "04_费用报销", "entity_id": rid, "label": ""})
         # 2026-08-22 用户拍板：撤销行损失防呆（原 50% 批量损失拦截）——

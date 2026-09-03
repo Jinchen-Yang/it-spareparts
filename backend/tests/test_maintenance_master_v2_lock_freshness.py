@@ -421,3 +421,51 @@ def test_receipt_concurrent_commit_between_validate_and_apply_is_refused(db):
     assert db.scalar(select(MaintenanceCollectionSnapshot.cumulative_amount).where(
         MaintenanceCollectionSnapshot.collection_id == collection_id
     )) == Decimal("123456.78")
+
+
+def test_implicit_void_of_an_unchanged_row_is_still_guarded(db):
+    """删行=作废的**常态路径**（导出后没人动过、哈希吻合）也必须发指纹。
+
+    修复前指纹只发在「哈希不符 + 强制接管」那条罕见分支里，于是最常见的
+    「用户删一行、期间别人改了这行」会被静默作废掉对方刚写的状态
+    （Codex P1，2026-09-04）。
+    """
+    from app.models.maintenance import FProjectExpense
+    from tests.test_maintenance_project_master_v2_editable import (
+        _make_project_with_expense,
+    )
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    raw_line_id = expense.raw_line_id
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_EXPENSE]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    row_no = next(
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(r, headers["实体ID"]).value == raw_line_id
+    )
+    ws.delete_rows(row_no, 1)   # 用户删行 = 作废，且这一行导出后没人动过
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert raw_line_id in plan.expense_voids
+    assert any(g.entity_id == raw_line_id for g in plan.row_guards), (
+        "常态删行路径也必须发指纹")
+
+    _peer_commit(lambda o: setattr(
+        o.scalar(select(FProjectExpense).where(
+            FProjectExpense.raw_line_id == raw_line_id)),
+        "person", "别人刚改的"))
+
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="racer", import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "row_conflicts"
+    db.rollback()
+
+    assert db.scalar(select(FProjectExpense.data_status).where(
+        FProjectExpense.raw_line_id == raw_line_id)) != "已作废"
