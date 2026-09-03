@@ -912,18 +912,39 @@ def _project_period_subquery():
     )
 
 
-def _row_lifecycle(row, as_of: date) -> str:
-    """项目期限优先，拿不到才回退 WBDD 单据兜底。
+def _row_canonical_period(row) -> tuple | None:
+    """该行能否用项目期限作事实源：唯一挂靠项目 + 起止齐全，否则 ``None``。
 
-    只在「该项目名唯一对应一个项目、且起止齐全」时接管；一名对多项目或期限不全
-    一律走 :func:`_lifecycle_status`，避免跨项目张冠李戴。
+    一名对多项目或期限不全一律回退 WBDD 兜底，避免跨项目张冠李戴。
     """
     if (row.period_project_count == 1
             and row.project_period_from is not None
             and row.project_period_to is not None):
-        return maintenance_periods.lifecycle_status(
-            row.project_period_from, row.project_period_to, as_of)
+        return row.project_period_from, row.project_period_to
+    return None
+
+
+def _row_lifecycle(row, as_of: date) -> str:
+    """项目期限优先，拿不到才回退 WBDD 单据兜底。"""
+    period = _row_canonical_period(row)
+    if period is not None:
+        return maintenance_periods.lifecycle_status(period[0], period[1], as_of)
     return _lifecycle_status(row.maint_end_missing, row.latest_maint_end, as_of)
+
+
+def _row_maint_end(row, lifecycle_status: str) -> str | None:
+    """展示用维保终止日**必须与判定 lifecycle 的事实源同源**。
+
+    否则 canonical 期限接管判定时，终止日仍从 WBDD 取：所有单 maint_end 为空
+    就成了「进行中但终止日空白」，WBDD 上有过期日期则状态与日期自相矛盾
+    （Codex P2，2026-09-03）。
+    """
+    period = _row_canonical_period(row)
+    if period is not None:
+        return period[1].isoformat()
+    if lifecycle_status != "missing" and row.latest_maint_end:
+        return row.latest_maint_end.isoformat()
+    return None
 
 
 def _parts_tax_basis_summary(
@@ -1344,10 +1365,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "contract_incomplete": (
                 contract_incomplete
             ),
-            "maint_end": (
-                r.latest_maint_end.isoformat()
-                if lifecycle_status != "missing" and r.latest_maint_end else None
-            ),
+            "maint_end": _row_maint_end(r, lifecycle_status),
             "lifecycle_status": lifecycle_status,
         })
     cost_restricted = security.is_field_hidden(user_ctx, "cost_total")

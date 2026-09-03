@@ -713,3 +713,6 @@ def test_projects_aggregate_uses_project_period_over_wbdd_maint_end(db, batch):
     assert row["lifecycle_status"] == "ongoing", row["lifecycle_status"]
     # 桶计数与行标签必须同源，否则筛「期限缺失」还能把它翻出来
     assert data["lifecycle_counts"]["missing"] == 0, data["lifecycle_counts"]
+    # 展示用终止日必须与判定同源：canonical 期限接管时不能还吐 WBDD 的空值，
+    # 否则就是「进行中但终止日空白」（Codex P2）
+    assert row["maint_end"] == "2027-12-31", row["maint_end"]
