@@ -89,7 +89,12 @@ export interface BoardAttention {
 /** 卡片三态（#35/#43）：<80% 正常 / 80–100% 提醒 / >100% 报警。 */
 export type CardStatus = "normal" | "warning" | "alert";
 
-export type BoardProjectLifecycle = "ongoing" | "ended" | "missing" | "all";
+export type BoardProjectLifecycle =
+  | "ongoing"
+  | "ended"
+  | "missing"
+  | "payment_complete"
+  | "all";
 export type BoardProjectSort = "attention" | "orders" | "name" | "known_cost" | "cost_ratio";
 
 export interface BoardProjectRow {
@@ -100,7 +105,8 @@ export interface BoardProjectRow {
   aliases?: string[];
   /** 由同一 XSDD 销售事实或 XSDD 容器归并证明的平等项目名称。 */
   peer_names?: string[];
-  lifecycle: "ongoing" | "ended" | "missing";
+  /** 回款已完成＝实收回款 ≥ 合同总额（含税）；仅持有合同财务权限的请求会返回该值。 */
+  lifecycle: "ongoing" | "ended" | "missing" | "payment_complete";
   /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
   period_from: string | null;
   period_to: string | null;

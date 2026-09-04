@@ -39,7 +39,9 @@ const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
 // missing＝台账未提供项目周期（plan v1.3 R5：期限缺失要以明确状态可见，而非空白）。
 // 台账导入生产之前 415 个项目全部 missing——若筛选器没有这一档，整面卡墙会
 // 无声全空，用户无从区分「没项目」和「周期未维护」。默认仍是进行中（#37）。
-type LifecycleFilter = "ongoing" | "ended" | "missing";
+// payment_complete＝回款已完成（2026-09-04 客户反馈：收满回款的项目不用再盯），
+// 由合同额+回款推得且优先于三个期限桶；只对持有合同财务权限的账号展示与放行。
+type LifecycleFilter = "ongoing" | "ended" | "missing" | "payment_complete";
 type ProjectSort = "name" | "attention" | "orders" | "known_cost" | "cost_ratio";
 
 /**
@@ -59,6 +61,10 @@ export function MaintenanceHomePage() {
   const canUpload = !!permissions.action_maintenance_expense_collection_upload;
   const canViewCost = localStorage.getItem("role") === "admin"
     || permissions.data_purchase_cost === true;
+  // 回款已完成桶由合同额+回款推得，属于合同财务数据：无 data_profit 的账号
+  // 不展示该页签（后端同样 422 拒绝），也不做期限桶排除。
+  const canViewContract = localStorage.getItem("role") === "admin"
+    || permissions.data_profit === true;
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [status, setStatus] = useState<CardStatus | undefined>();
   const [sort, setSort] = useState<ProjectSort>(() => canViewCost ? "cost_ratio" : "name");
@@ -213,6 +219,9 @@ export function MaintenanceHomePage() {
               { label: "进行中", value: "ongoing" },
               { label: "已结束", value: "ended" },
               { label: "期限缺失", value: "missing" },
+              ...(canViewContract
+                ? [{ label: "回款已完成", value: "payment_complete" as const }]
+                : []),
             ]}
           />
           <Select

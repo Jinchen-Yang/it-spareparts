@@ -79,7 +79,7 @@ class ProjectSearch(BaseModel):
     q: str = Field(min_length=1, max_length=128)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
-    lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
+    lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|payment_complete|all)$")
     sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$")
     card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
 
@@ -89,7 +89,7 @@ class ProjectExportRequest(BaseModel):
 
     fields: list[str] = Field(min_length=1, max_length=len(project_export.EXPORT_FIELDS))
     q: str | None = Field(default=None, max_length=128)
-    lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|all)$")
+    lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|payment_complete|all)$")
     card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
     sort: str = Field(
         default="name",
@@ -141,7 +141,7 @@ def board_projects(
     q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
-    lifecycle: str = Query("all", pattern=r"^(ongoing|ended|missing|all)$"),
+    lifecycle: str = Query("all", pattern=r"^(ongoing|ended|missing|payment_complete|all)$"),
     sort: str = Query("name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$"),
     has_activity: bool | None = Query(None),
     card_status: str | None = Query(None, pattern=r"^(normal|warning|alert)$"),
