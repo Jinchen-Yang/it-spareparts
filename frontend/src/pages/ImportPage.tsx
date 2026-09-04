@@ -543,7 +543,7 @@ export default function ImportPage() {
               <Alert
                 type="warning" showIcon style={{ marginBottom: 12 }}
                 message={`删除侧未生效：${detail.report.expense_rows_void_protected} 条旧报销行被保留`}
-                description="本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。补齐销售订单后重导即可让删除生效。"
+                description="本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。请勿为了「让删除生效」而把无销售订单的行删掉或补一个合同号后重导：报销单一单多行时，明细行的销售订单靠单头继承，按单元格是否为空来过滤会连带删掉这些继承行，重导后它们对应的旧行会被真的作废。要按本表删除旧行，请用对应项目的工作簿报销页（单合同、带页级锚）逐个合同做。"
               />
             )}
             {Number(detail.report?.expense_rows_dropped_no_contract) > 0 && (
