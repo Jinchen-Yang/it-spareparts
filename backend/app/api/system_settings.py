@@ -3,11 +3,13 @@
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.auth import current_identity, require_admin
+from app.auth import current_identity, require_admin, verify_token_db
+from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysBusinessSetting
 from app.services import system_settings
@@ -107,3 +109,45 @@ def update_system_settings(
     except Exception:
         db.rollback()
         raise
+
+
+# ---------- DSH 企业助手：唯一模型配置下发（itdata-config 插件轮询） ----------
+_bearer_optional = HTTPBearer(auto_error=False)
+
+
+def _dsh_config_gate(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+    db: Session = Depends(get_db),
+) -> str:
+    """机器密钥（x-dsh-config-token == DSH_CONFIG_TOKEN，非空时）或 admin token 二者其一。"""
+    settings = get_settings()
+    header = request.headers.get("x-dsh-config-token", "")
+    if settings.dsh_config_token and header and header == settings.dsh_config_token:
+        return "machine"
+    if creds is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
+    data = verify_token_db(creds.credentials, db)
+    if data.get("role") != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限或机器密钥")
+    return "admin"
+
+
+@router.get("/dsh-llm-config")
+def dsh_llm_config(response: Response, _: str = Depends(_dsh_config_gate)) -> dict:
+    """企业唯一模型配置（来源：后端 .env 的 LLM_* 配置）。密钥随响应下发给 DSH 宿主写入其 credentials，
+    仅机器密钥/管理员可读；DSH 侧不落 settings 明文。"""
+    settings = get_settings()
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "enabled": bool(settings.llm_api_key),
+        "provider_id": "enterprise-llm",
+        "display_name": settings.dsh_llm_display_name,
+        "api": "openai-completions",
+        "base_url": settings.llm_base_url,
+        "default_model": settings.llm_model,
+        "api_key": settings.llm_api_key,
+        "api_key_env": "DSH_ENTERPRISE_LLM_KEY",
+        "reasoning": "off",
+        "models": [{"id": settings.llm_model, "name": settings.llm_model}],
+    }

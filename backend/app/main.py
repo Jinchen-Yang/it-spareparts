@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app import auth
 from app.api import (
+    agent_data,
     accounts,
     agent,
     chat_sessions,
@@ -103,6 +104,7 @@ app.include_router(governance.router, prefix=settings.api_prefix)
 app.include_router(data_quality.router, prefix=settings.api_prefix)
 app.include_router(data_quality_calibration.router, prefix=settings.api_prefix)
 app.include_router(agent.router, prefix=settings.api_prefix)
+app.include_router(agent_data.router, prefix=settings.api_prefix)
 app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
 app.include_router(replenishment.router, prefix=settings.api_prefix)

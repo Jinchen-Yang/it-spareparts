@@ -91,6 +91,16 @@ class Settings(BaseSettings):
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
+    # ── DSH 企业助手（itdata-dsh）集成 ──
+    # 只读角色连接串：留空则 /api/agent/dsn 返回 501（本地脚本模式关闭）。生产建议建只读角色：
+    #   CREATE ROLE dsh_ro LOGIN PASSWORD '...'; GRANT SELECT ON ALL TABLES IN SCHEMA public TO dsh_ro;
+    dsh_ro_dsn: str = ""
+    # LLM 配置下发端点的机器密钥（x-dsh-config-token）；留空则该端点仅 admin 可读
+    dsh_config_token: str = ""
+    dsh_llm_display_name: str = "企业统一模型"
+    agent_sql_timeout_seconds: int = 15
+    agent_sql_max_rows: int = 500
+    agent_script_python: str = "python3"
     vision_api_key: str = ""
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vision_model: str = "qwen-vl-max"

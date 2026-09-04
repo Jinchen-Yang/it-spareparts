@@ -100,6 +100,10 @@ ACTION_KEYS: list[str] = [
     # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
     "action_replenishment_create",
     "action_replenishment_review",
+    # DSH 企业助手（itdata-dsh）数据通道：text2sql 只读直查（字段级脱敏、行级收紧账号整体禁用）；
+    # 本地脚本只读 DSN（不做字段脱敏，仅给完全信任的数据岗，高风险组）。
+    "action_agent_sql",
+    "action_agent_dsn_ro",
 ]
 ROW_KEYS: list[str] = [
     "own_customers_only",
@@ -157,6 +161,8 @@ LABELS: dict[str, str] = {
     "page_replenishment_beta": "补库申请",
     "action_replenishment_create": "补库申请创建与复提（按维保项目范围）",
     "action_replenishment_review": "补库审核结果回写",
+    "action_agent_sql": "AI 助手直查数据库（只读 SQL，字段脱敏）",
+    "action_agent_dsn_ro": "AI 助手本地脚本只读连接（不脱敏，高风险）",
 }
 
 
@@ -228,7 +234,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_expense_collection_upload": False,
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
-             "action_replenishment_review": False},
+             "action_replenishment_review": False, "action_agent_sql": False, "action_agent_dsn_ro": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -257,7 +263,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_expense_collection_upload": False,
                  "page_replenishment_beta": False,
                  "action_replenishment_create": False,
-                 "action_replenishment_review": False,
+                 "action_replenishment_review": False, "action_agent_sql": False, "action_agent_dsn_ro": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -302,7 +308,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
-        "action_replenishment_review": False,
+        "action_replenishment_review": False, "action_agent_sql": False, "action_agent_dsn_ro": False,
         "own_customers_only": True,
         # 行键保持历史冻结口径 False（防漂移契约）；销售的项目收敛同样由
         # 迁移 a9e2f7c4d1b8 在 DB 侧开启（账号快照），代码兜底不动。
@@ -348,7 +354,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
-        "action_replenishment_review": False,
+        "action_replenishment_review": False, "action_agent_sql": False, "action_agent_dsn_ro": False,
         "own_maintenance_projects_only": False,
         "own_customers_only": False,
     },
@@ -594,6 +600,7 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_collection_plan_import",
          "action_replenishment_create",
          "action_replenishment_review",
+         "action_agent_sql",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -607,7 +614,8 @@ UI_GROUPS: list[dict] = [
                "action_maintenance_wbdd_import",
                # 2026-08-25 摘除 action_maintenance_acceptance_checklist_import
                # 死键（同上：无端点消费的假权限，不再展示）。
-               "action_maintenance_expense_collection_upload"]},
+               "action_maintenance_expense_collection_upload",
+               "action_agent_dsn_ro"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
@@ -1004,6 +1012,24 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "受控审核集成账号"],
         "sensitivity": "critical",
         "risk": "审核结论决定哪些行可进入最终 WBDD 子集导出，仅管理员可授予本权限。",
+    },
+    "action_agent_sql": {
+        "label": "AI 助手直查数据库（只读 SQL）",
+        "summary": "允许在 DSH 企业助手里用自然语言生成 SQL 直接查询业务库（只读）。",
+        "can": "对业务表执行 SELECT 查询；结果按本账号「数据可见范围」逐字段脱敏；系统表与写操作一律拒绝。",
+        "cannot": "不能改数据；勾了「只看自己成交的客户」的账号整体不能用（行级过滤无法在自由 SQL 上保证），只能用带行级过滤的业务查询工具。",
+        "typical": ["老板", "数据岗", "采购"],
+        "sensitivity": "high",
+        "risk": "自由查询面比页面大，字段脱敏靠键名匹配；只给能看全表数据的岗位。",
+    },
+    "action_agent_dsn_ro": {
+        "label": "AI 助手本地脚本只读连接",
+        "summary": "允许 DSH 企业助手领取只读数据库连接串，在本机跑分析脚本。",
+        "can": "以数据库只读角色直连业务库跑 Python 分析（不经过后端字段脱敏）。",
+        "cannot": "只读角色无法写库；不代表可以拿到写库凭据。",
+        "typical": ["数据管理员"],
+        "sensitivity": "critical",
+        "risk": "不做字段脱敏——等同于看到全部业务字段，只给完全信任的数据岗。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

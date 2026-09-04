@@ -247,3 +247,25 @@ class SysAccessLog(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (Index("ix_access_user_time", "username", "created_at"),)
+
+
+class SysDshScript(Base):
+    """DSH 企业助手白名单脚本（itdata-dsh run_script 的服务端写库通道）。
+
+    管理员在 DSH 设置页/接口维护；助手只能按名执行。服务端以后端自身的 DB 连接跑脚本
+    （凭据不出服务器），required_action 绑定既有 action_* 键作为执行门槛（空=仅需登录）。
+    """
+
+    __tablename__ = "sys_dsh_script"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    required_action: Mapped[str | None] = mapped_column(String(64))
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
