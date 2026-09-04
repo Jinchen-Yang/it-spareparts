@@ -185,9 +185,41 @@ def test_genuinely_deleted_row_is_still_voided(db, tmp_path):
     assert voided.data_status == "已作废"
 
 
-def test_void_exemption_matches_by_content_when_bxd_absent(db, tmp_path):
-    """无单号/序号时降级到内容签名（日期+金额+人员+事由）——正是内容派生键
-    basis 去掉 xsdd 后的全部成分，故与旧行必然同签名。"""
+def test_void_suppressed_even_when_dropped_row_matches_nothing(db, tmp_path):
+    """Codex P1（2026-09-04）：曾用三族身份比对逐行豁免，弱签名不匹配时假阴性。
+
+    源系统里改一次金额，签名就对不上 → 不豁免、也不计「身份不可得」→ 旧行照样
+    被作废。这不止于弱签名：旧行可能是在源表还没有「数据ID」列的年代按内容键入
+    库的，连最强一族也匹配不上。**任何一次不匹配都不构成「旧行真的消失了」的
+    证明**，故改为「本表有行被排除 ⇒ 整批不作废」。本例的被排除行与库里任何旧行
+    都对不上（金额被改过），旧行仍必须活着。
+    """
+    t1 = _anchored_sheet(tmp_path, "p1.xlsx", [
+        _row(d="2026-06-01", amount=700, reason="项目差旅"),
+        _row(d="2026-06-02", person="赵六", amount=420, reason="仓库租金",
+             fee="仓储费用"),
+    ], anchor="XSDD-P1")
+    pipeline.run_import(db, t1, "p1.xlsx")
+    db.commit()
+
+    t2 = _rowwise_sheet(tmp_path, "p2.xlsx", [
+        _row(d="2026-06-01", amount=700, reason="项目差旅", xsdd="XSDD-P1"),
+        # 同一笔仓库租金，金额在源系统里被更正过 → 与旧行签名对不上
+        _row(d="2026-06-02", person="赵六", amount=999, reason="仓库租金",
+             fee="仓储费用"),
+    ])
+    batch = pipeline.run_import(db, t2, "p2.xlsx", mode="upsert")
+    db.commit()
+
+    assert batch.report_json["expense_rows_voided"] == 0
+    assert batch.report_json["expense_rows_void_protected"] == 1
+    assert all(r.data_status == "已结束"
+               for r in db.scalars(select(FProjectExpense)))
+    assert sum(r.amount for r in db.scalars(select(FProjectExpense))) == Decimal("1120")
+
+
+def test_void_suppressed_when_dropped_row_has_no_bxd(db, tmp_path):
+    """无单号/序号的形态同样抑制作废（此前靠内容签名比对，现在不依赖比对）。"""
     t1 = _anchored_sheet(tmp_path, "c1.xlsx", [
         _row(d="2026-06-01", amount=700, reason="项目差旅"),
         _row(d="2026-06-02", person="赵六", amount=420, reason="仓库租金",
@@ -262,10 +294,11 @@ def test_identity_is_persisted_into_import_error_rows(db, tmp_path):
     assert err.raw_row["_identity"]["reason"] == "办公用品"
 
 
-def test_unidentifiable_dropped_row_suppresses_the_whole_void_loop(db, tmp_path,
-                                                                   monkeypatch):
-    """兜底：被丢弃行身份不可得（未随 ErrorRec.identity 升级的新代码路径）时，
-    整批退化为「覆盖同键、只增不删」——留旧账 ≫ 丢账。"""
+def test_real_deletion_is_held_back_when_the_sheet_also_drops_rows(db, tmp_path):
+    """代价说明：本表既有真删除、又有被排除行时，删除侧整批不生效并计数上报。
+
+    这是刻意的——本表不完整就不能代表「以本表为准」的删除侧。补齐销售订单后
+    重导即可让删除生效；同键覆盖（改金额）不受影响。"""
     t1 = _rowwise_sheet(tmp_path, "u1.xlsx", [
         _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-U"),
         _row(amount=3000, reason="真的删掉了", bxd="BXD-2", seq=1, xsdd="XSDD-U"),
@@ -273,24 +306,17 @@ def test_unidentifiable_dropped_row_suppresses_the_whole_void_loop(db, tmp_path,
     pipeline.run_import(db, t1, "u1.xlsx")
     db.commit()
 
-    real_transform = pipeline.transform
-
-    def _blind(*args, **kwargs):
-        res = real_transform(*args, **kwargs)
-        for e in res.errors:
-            e.identity = None
-        return res
-
-    monkeypatch.setattr(pipeline, "transform", _blind)
     t2 = _rowwise_sheet(tmp_path, "u2.xlsx", [
-        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-U"),
+        _row(amount=5500, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-U"),
         _row(amount=99, reason="办公用品"),                       # missing_link
     ])
     batch = pipeline.run_import(db, t2, "u2.xlsx", mode="upsert")
     db.commit()
 
-    # 「真的删掉了」这行本该作废，但本批无法证明安全 → 一律不作废并计数
     assert batch.report_json["expense_rows_voided"] == 0
     assert batch.report_json["expense_rows_void_protected"] == 1
-    assert all(r.data_status == "已结束"
-               for r in db.scalars(select(FProjectExpense)))
+    assert batch.report_json["expense_rows_dropped_no_contract"] == 1
+    rows = {r.reason: (r.data_status, r.amount)
+            for r in db.scalars(select(FProjectExpense))}
+    assert rows["真的删掉了"][0] == "已结束"        # 删除侧未生效
+    assert rows["保留"] == ("已结束", Decimal("5500"))   # 同键覆盖照常生效

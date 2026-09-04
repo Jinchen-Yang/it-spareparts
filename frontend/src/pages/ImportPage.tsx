@@ -31,7 +31,7 @@ const REPORT_LABEL: Record<string, string> = {
   import_mode: "导入模式",
   expense_rows_replaced: "修复模式覆盖范围（行）",
   expense_rows_voided: "作废旧行",
-  expense_rows_void_protected: "免于作废（本表里其实还在）",
+  expense_rows_void_protected: "免于作废（本表不完整，删除侧未生效）",
   expense_rows_dropped_no_contract: "无销售订单被排除",
 };
 const JOB_STATUS: Record<string, { label: string; color: string }> = {
@@ -542,8 +542,8 @@ export default function ImportPage() {
             {Number(detail.report?.expense_rows_void_protected) > 0 && (
               <Alert
                 type="warning" showIcon style={{ marginBottom: 12 }}
-                message={`${detail.report.expense_rows_void_protected} 条旧报销行免于作废`}
-                description="这些行在本表里其实还在，只是所在行缺少销售订单被排除了，因此系统保留了旧记录（未按「以本表为准」删除）。补上销售订单后重导即可让本表完全生效。"
+                message={`删除侧未生效：${detail.report.expense_rows_void_protected} 条旧报销行被保留`}
+                description="本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。补齐销售订单后重导即可让删除生效。"
               />
             )}
             {Number(detail.report?.expense_rows_dropped_no_contract) > 0 && (
