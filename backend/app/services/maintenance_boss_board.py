@@ -882,8 +882,6 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         .exists()
     )
     filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
-    if lifecycle in ("ongoing", "ended", "missing"):
-        filters.append(lifecycle_expr == lifecycle)
     if allowed_project_ids is not None:
         filters.append(MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
     if q_text:
@@ -936,6 +934,35 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                 MaintenanceProject.project_id.in_(by_order_salesperson),
             ),
         ))
+
+    # —— 回款已完成桶（2026-09-04 客户反馈：回款已完成的项目不用再盯）——
+    # 判定复用卡片同一取数（_payment_complete_ids），桶成员与卡片上显示回款
+    # 100% 的项目永远是同一批，不另立 SQL 口径。该桶由合同额+回款推得，属于
+    # 合同财务数据：无 data_profit 权限的账号请求该桶直接 422，也不做「移出
+    # 期限桶」的排除——否则仅凭各桶计数差就能反推哪些项目回款收满。
+    payment_complete_ids: set[str] | None = None
+    if lifecycle == "payment_complete" and not can_contract:
+        raise BoardCostContractNotPermitted()
+    if lifecycle == "payment_complete" or (
+            lifecycle in ("ongoing", "ended", "missing") and can_contract):
+        scoped = list(filters)
+        if lifecycle != "payment_complete":
+            scoped.append(lifecycle_expr == lifecycle)
+        candidate_ids = list(db.execute(
+            select(MaintenanceProject.project_id).where(*scoped)
+        ).scalars())
+        payment_complete_ids = _payment_complete_ids(db, candidate_ids)
+        if lifecycle == "payment_complete":
+            filters.append(MaintenanceProject.project_id.in_(
+                payment_complete_ids or {"__payment_complete_none__"}))
+        else:
+            filters.append(lifecycle_expr == lifecycle)
+            if payment_complete_ids:
+                # 回款已完成的项目整体移出三个期限桶（含期限缺失）：不再需要盯。
+                filters.append(
+                    MaintenanceProject.project_id.not_in(payment_complete_ids))
+    elif lifecycle in ("ongoing", "ended", "missing"):
+        filters.append(lifecycle_expr == lifecycle)
 
     # 窗口内的每项目计数/成本子查询：既用于 has_activity 过滤，也用于真实排序。
     # 不这么做的话 sort/has_activity 会变成「接收但静默忽略」的假参数——调用方
@@ -1095,10 +1122,18 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
                 if project_names.display_name_identity(name)
                 != project_names.display_name_identity(proj.display_name)
             ],
-            "lifecycle": maintenance_periods.lifecycle_status(
-                proj.period_from,
-                proj.period_to,
-                today,
+            "lifecycle": (
+                # 回款已完成仅在 compute 过该集合的请求⾥出现（payment_complete
+                # 桶或持有合同权限的三桶请求）；lifecycle=all/无权限请求保持
+                # 纯期限口径，避免经⾮门控字段泄露回款状态。
+                "payment_complete"
+                if payment_complete_ids is not None
+                and proj.project_id in payment_complete_ids
+                else maintenance_periods.lifecycle_status(
+                    proj.period_from,
+                    proj.period_to,
+                    today,
+                )
             ),
             # 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值
             "period_from": proj.period_from.isoformat() if proj.period_from else None,
@@ -1689,6 +1724,32 @@ def _card_collections(db: Session, project_ids: list[str]) -> dict[str, Decimal]
     for (pid, _), snapshot in latest.items():
         out[pid] = (out.get(pid) or Decimal(0)) + snapshot.cumulative_amount
     return out
+
+
+def _payment_complete_ids(db: Session, project_ids: list[str]) -> set[str]:
+    """回款已完成项目集合（2026-09-04 客户反馈：收满回款的项目不用再盯）。
+
+    判定与卡片「回款 / 合同总额（含税）」完全同源——直接复用 _card_contracts /
+    _card_collections，绝不另写一份 SQL（两处口径漂移会让桶和卡片各说各话）：
+    合同事实完整（⾮不完整/共用/重复/缺额）且总额 > 0，且已回款 ≥ 合同总额
+    （超额回款也算完成）。合同事实不完整或⽆回款快照的项目不判定，留在原期限桶。
+    """
+    if not project_ids:
+        return set()
+    contracts = _card_contracts(db, project_ids)
+    collections = _card_collections(db, project_ids)
+    complete: set[str] = set()
+    for pid in project_ids:
+        bucket = contracts.get(pid)
+        if not bucket or bucket.get("contract_incomplete"):
+            continue
+        amount = bucket.get("amount_inc_tax")
+        if amount is None or amount <= 0:
+            continue
+        collected = collections.get(pid)
+        if collected is not None and collected >= amount:
+            complete.add(pid)
+    return complete
 
 
 def _card_cost_ex_tax(db: Session, window: tuple[date, date],

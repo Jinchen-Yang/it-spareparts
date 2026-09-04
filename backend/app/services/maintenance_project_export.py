@@ -185,6 +185,7 @@ def _lifecycle(row: dict) -> str:
         "ongoing": "进行中",
         "ended": "已结束",
         "missing": "期限缺失",
+        "payment_complete": "回款已完成",
     }.get(row.get("lifecycle"), str(row.get("lifecycle") or ""))
 
 

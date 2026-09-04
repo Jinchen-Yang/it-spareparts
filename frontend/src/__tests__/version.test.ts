@@ -1,27 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.27.0 release notes", () => {
-  it("publishes full workbook editing with row-level merge", () => {
-    expect(APP_VERSION).toBe("1.27.0");
+describe("v1.28.0 release notes", () => {
+  it("publishes the payment-complete card wall bucket", () => {
+    expect(APP_VERSION).toBe("1.28.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-02");
+    expect(LATEST.date).toBe("2026-09-04");
 
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/回款已完成/);
+    expect(notes).toMatch(/不再出现在进行中\/已结束\/期限缺失/);
+    expect(notes).toMatch(/同一口径/);
+    expect(notes).toMatch(/合同财务权限/);
+  });
+});
+
+describe("v1.27.0 release notes (archived)", () => {
+  const v127 = CHANGELOG.find((entry) => entry.version === "1.27.0")!;
+
+  it("keeps the full workbook editing release (2026-09-02)", () => {
+    expect(v127.date).toBe("2026-09-02");
+    const notes = v127.items.join("\n");
     expect(notes).toMatch(/全量修改/);
     expect(notes).toMatch(/行级判定/);
     expect(notes).toMatch(/强制接管/);
     expect(notes).toMatch(/负责人与销售/);
     expect(notes).toMatch(/逐字段/);
-  });
-
-  it("keeps prior releases archived in the changelog", () => {
-    const versions = CHANGELOG.map((entry) => entry.version);
-    expect(versions).toContain("1.26.0");
-    expect(versions).toContain("1.25.0");
-    expect(versions).toContain("1.21.0");
-    expect(versions[0]).toBe("1.27.0");
   });
 });
 

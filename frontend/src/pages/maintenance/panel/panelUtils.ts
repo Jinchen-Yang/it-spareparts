@@ -98,6 +98,7 @@ export const LIFECYCLE_LABEL: Record<string, string> = {
   ongoing: "进行中",
   ended: "已结束",
   missing: "期限缺失",
+  payment_complete: "回款已完成",
 };
 
 /** 三态色与卡墙一致（#35/#43）：<80% 绿、80–100% 黄、>100% 红。 */

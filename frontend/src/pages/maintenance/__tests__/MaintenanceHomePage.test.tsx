@@ -147,6 +147,24 @@ describe("维保主页（项目卡墙）", () => {
       }));
   });
 
+  it("有合同财务权限时「回款已完成」可筛出（2026-09-04 客户反馈）", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_profit: true }));
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText("回款已完成"));
+    await waitFor(() =>
+      expect(lastArg(getBoardProjects)).toMatchObject({
+        lifecycle: "payment_complete",
+      }));
+  });
+
+  it("无合同财务权限时不显示「回款已完成」页签", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: true }));
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("回款已完成")).toBeNull();
+  });
+
   it("有关键字时改走搜索端点（GET 不接自由文本）", async () => {
     renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());

@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.27.0";
+export const APP_VERSION = "1.28.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.28.0",
+    date: "2026-09-04",
+    items: [
+      "维保主页新增「回款已完成」页签：已回款 ≥ 合同总额（含税）的项目自动归入该页签，不再出现在进行中/已结束/期限缺失列表里——收满回款的项目不用再盯",
+      "项目卡对回款已完成的项目显示绿色「回款已完成」标记；判定与卡片上的回款/合同总额完全同一口径，合同事实不完整或没有回款快照的项目不会误入",
+      "该页签及对应的项目清单导出、批量移交筛选仅对持有合同财务权限的账号开放，其余账号维持原有三个页签不变",
+    ],
+  },
   {
     version: "1.27.0",
     date: "2026-09-02",

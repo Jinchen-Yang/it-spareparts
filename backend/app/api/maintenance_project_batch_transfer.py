@@ -111,7 +111,7 @@ class BatchDownloadRequest(BaseModel):
     q: str | None = Field(default=None, max_length=128)
     lifecycle: str = Field(
         default="all",
-        pattern=r"^(ongoing|ended|missing|all)$",
+        pattern=r"^(ongoing|ended|missing|payment_complete|all)$",
     )
     card_status: str | None = Field(
         default=None,
@@ -512,6 +512,15 @@ def download_transfer(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "sort_requires_cost_permission", "message": str(exc)},
+        ) from exc
+    except board.BoardCostContractNotPermitted as exc:
+        # lifecycle=payment_complete 等由合同财务数据推得的筛选需要 data_profit。
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "code": "cost_contract_permission_required",
+                "message": "成本及合同财务数据权限",
+            },
         ) from exc
     stamp = business_today().strftime("%Y%m%d")
     ascii_name = f"maintenance-projects-{stamp}.xlsx"
