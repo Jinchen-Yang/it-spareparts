@@ -5,16 +5,19 @@ import os
 import tempfile
 import threading
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+import time
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
-from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB
+from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB, get_settings
 from app.db import SessionLocal, get_db
 from app.security import (
+    apply_field_visibility,
     UserContext,
     apply_profit_recompute_visibility,
     get_current_user_context,
@@ -22,7 +25,8 @@ from app.security import (
     require_page,
 )
 from app.services import inventory, maintenance_cost, master_data, profit
-from app.etl import loader, pipeline, precheck as import_precheck
+from app.etl import expense_void, loader, pipeline, precheck as import_precheck
+from app.services import import_void_preview
 from app.etl.reader import ReaderError
 from app.etl.transform import SOFT_ERROR_TYPES
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
@@ -144,19 +148,60 @@ def _prefer_maintenance_recompute_stats(
     return result
 
 
+
+def _hmac_key() -> bytes:
+    key = get_settings().secret_key.encode("utf-8")
+    if len(key) < 16:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "服务端预演签名密钥配置无效")
+    return key
+
+
+def _verify_preview_tokens(tokens: list[str], mode: str) -> list[dict]:
+    """令牌存在但不合法 ⇒ 409，绝不静默按无令牌路径走。"""
+    payloads = []
+    for token in tokens:
+        if not token:
+            continue
+        try:
+            payloads.append(import_void_preview.verify(
+                token, hmac_key=_hmac_key(), now=int(time.time()), mode=mode))
+        except import_void_preview.VoidPreviewTokenError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc),
+                                headers={"X-Error-Code": exc.code}) from exc
+    return payloads
+
+
+def _fingerprints_by_file(payloads: list[dict], saved: list[tuple[str, str]]) -> dict[str, str]:
+    """按实际收到文件的 sha256 命中令牌：预演过的文件在提交前被改过 ⇒ 令牌对不上任何文件 ⇒ 409。"""
+    if not payloads:
+        return {}          # 没有令牌就不算 hash：跳过模式/无报销页的批次零额外成本
+    by_hash = {p["file_hash"]: p["fingerprint"] for p in payloads}
+    hashes = {tmp: pipeline.sha256_file(tmp) for tmp, _ in saved}
+    unmatched = set(by_hash) - set(hashes.values())
+    if unmatched:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "预演的文件与本次提交的文件不一致（预演后文件被修改或换了文件），请重新预演",
+            headers={"X-Error-Code": "void_preview_mismatch"})
+    return {tmp: by_hash[h] for tmp, h in hashes.items() if h in by_hash}
+
+
 @router.post("/upload")
 def upload(
     file: UploadFile = File(...),
     mode: str = Query("skip"),    # skip(默认,跳过已存在) | upsert(更新已存在,修复数据)
+    preview_token: str | None = Form(None),   # 作废预演令牌（修复模式单合同报销页必需）
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     mode = mode if mode in ("skip", "upsert") else "skip"
     name = file.filename or "upload.xlsx"
     record_access_log(ctx, "upload", "import", {"filename": name, "mode": mode})
+    payloads = _verify_preview_tokens([preview_token] if preview_token else [], mode)
     tmp = _save_upload_to_temp(file, name)
     try:
         maintenance_recompute_stats = None
+        expected_fp = _fingerprints_by_file(payloads, [(tmp, name)]).get(tmp)
         try:
             # 审计：登录身份(token sub，RBAC 开启时即用户名)落 batch.uploaded_by → 每条数据可追溯到人。
             batch = pipeline.run_import(
@@ -166,6 +211,8 @@ def upload(
                 uploaded_by=ctx.user_id,
                 mode=mode,
                 auto_assign_maintenance_projects=True,
+                expected_void_fingerprint=expected_fp,
+                require_void_preview=True,
             )
             try:
                 maintenance_recompute_stats = _maintenance_recompute_in_import_transaction(
@@ -228,9 +275,14 @@ def upload(
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR, _INTERNAL_IMPORT_ERROR
             ) from exc
+        except expense_void.VoidPlanDrift as exc:
+            db.commit()  # failed batch 已记录（任何写入之前中止，只有留痕）
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc),
+                                headers={"X-Error-Code": exc.code}) from exc
         except ReaderError as exc:
             db.commit()  # failed batch 已记录
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc),
+                                headers={"X-Error-Code": exc.code}) from exc
         except DataError as exc:
             # 字段超长/超限等 DB 数据错误：回滚整批，回干净 422 而非裸 500（审计 2026-06-28 I-4）。
             db.rollback()
@@ -340,7 +392,8 @@ def _public_job_note(note: str | None) -> str | None:
 
 
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
-                        created_by: str | None) -> None:
+                        created_by: str | None,
+                        fingerprints: dict[str, str] | None = None) -> None:
     """后台 worker：逐文件 run_import（各自事务，复用全局导入锁串行），更新作业进度。
 
     与对话流式 worker 同模式（独立 SessionLocal、daemon 线程），客户端只需轮询 /import/jobs/{id}。
@@ -363,6 +416,8 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                     mode=mode,
                     import_job_id=job_id,
                     auto_assign_maintenance_projects=True,
+                    expected_void_fingerprint=(fingerprints or {}).get(tmp),
+                    require_void_preview=True,
                 )
                 _maintenance_recompute_in_import_transaction(db, batch.file_type)
                 db.commit()
@@ -373,6 +428,10 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 notes.append(f"重复跳过：{name}（已导入 batch {exc.batch_id}）")
+            except expense_void.VoidPlanDrift as exc:
+                db.commit()  # 失败批次已建并带 job_id；任何写入之前中止
+                errored += 1
+                notes.append(f"预演失效：{name}（{str(exc)[:300]}）")
             except ReaderError as exc:
                 db.commit()  # 失败批次已建并带 job_id，提交留痕
                 errored += 1
@@ -428,10 +487,47 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
         db.close()
 
 
+
+@router.post("/expense-void-preview")
+def expense_void_preview(
+    file: UploadFile = File(...),
+    mode: str = Query("upsert"),
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """导入前作废预演（单文件、纯读、不建批次）：修复模式下这一批会作废哪些旧报销行、
+    多少钱；status=ready 时附带把 文件 sha256 + 作废指纹 + 合同 绑在一起的令牌，提交
+    时必须带上，loader 装载期复核（见 app/etl/expense_void.py）。"""
+    mode = mode if mode in ("skip", "upsert") else "skip"
+    name = file.filename or "upload.xlsx"
+    record_access_log(ctx, "expense_void_preview", "import", {"filename": name, "mode": mode})
+    tmp = _save_upload_to_temp(file, name)
+    try:
+        file_hash = pipeline.sha256_file(tmp)
+        try:
+            payload = pipeline.preview_expense_void(db, tmp, mode=mode)
+        except ReaderError as exc:
+            payload = {"status": "unreadable", "code": exc.code, "error": str(exc)}
+        finally:
+            db.rollback()   # 纯读；不留任何事务状态
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    payload = {"filename": name, "file_hash": file_hash, "mode": mode, **payload}
+    if payload["status"] == "ready":
+        payload["preview_token"] = import_void_preview.issue(
+            file_hash=file_hash, mode=mode, fingerprint=payload["fingerprint"],
+            contract=payload.get("contract"), issued_at=int(time.time()),
+            hmac_key=_hmac_key())
+        payload["expires_in_seconds"] = import_void_preview.TOKEN_TTL_SECONDS
+    return apply_field_visibility(payload, ctx)
+
+
 @router.post("/upload-batch")
 def upload_batch(
     files: list[UploadFile] = File(...),
     mode: str = Query("skip"),
+    preview_tokens: list[str] = Form([]),   # 作废预演令牌（每个会作废的报销页一枚）
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
@@ -441,12 +537,23 @@ def upload_batch(
     if not files:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "未选择文件")
     record_access_log(ctx, "upload_batch", "import", {"count": len(files), "mode": mode})
+    payloads = _verify_preview_tokens(preview_tokens, mode)
+    if mode == "upsert" and len(payloads) >= 2:
+        # 同批两个会作废的报销页：文件 #1 提交后文件 #2 的作废集合已变，而两份预演都是
+        # 在同一库态下算的——逐文件独立事务顺序 commit 之下这不可能同时兑现。后端硬拒，
+        # 不交给前端判合同交集（对抗核验证明前端在合同列表截断时会 fail open）。
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "修复模式一次只能导入一个会作废旧行的单合同报销页，请分批提交",
+            headers={"X-Error-Code": "void_preview_multiple"})
     # 落临时文件 + 建作业行：任一步失败都清掉已落临时文件（线程一旦启动则由线程负责清理）
     saved: list[tuple[str, str]] = []
+    fingerprints: dict[str, str] = {}
     try:
         for f in files:
             name = f.filename or "upload.xlsx"
             saved.append((_save_upload_to_temp(f, name), name))
+        fingerprints = _fingerprints_by_file(payloads, saved)
         job = SysImportJob(created_by=ctx.user_id, mode=mode, total_files=len(saved),
                            status="processing")
         db.add(job)
@@ -457,7 +564,8 @@ def upload_batch(
                 os.remove(tmp)
         raise
     job_id = job.id
-    threading.Thread(target=_process_import_job, args=(job_id, saved, mode, ctx.user_id),
+    threading.Thread(target=_process_import_job,
+                     args=(job_id, saved, mode, ctx.user_id, fingerprints),
                      daemon=True, name=f"import-job-{job_id}").start()
     return {"job_id": job_id, "total_files": len(saved), "status": "processing"}
 

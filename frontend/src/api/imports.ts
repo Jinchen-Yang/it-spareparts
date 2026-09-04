@@ -298,10 +298,14 @@ export interface UploadImportBatchResult {
   total_files: number;
 }
 
-export async function uploadImportBatch(files: readonly File[], mode: ImportMode) {
+export async function uploadImportBatch(
+  files: readonly File[], mode: ImportMode, previewTokens: readonly string[] = [],
+) {
+  const form = filesFormData(files);
+  previewTokens.forEach((token) => form.append("preview_tokens", token));
   const { data } = await api.post<UploadImportBatchResult>(
     "/import/upload-batch",
-    filesFormData(files),
+    form,
     { params: { mode } },
   );
   if (!isRecord(data) || !isPositiveInteger(data.job_id)
@@ -333,3 +337,120 @@ export async function downloadImportErrors(batchId: number) {
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 }
+
+// ---- 导入前作废预演（修复模式 · 单合同项目工作簿报销页）----
+//
+// 预演是无锁读、导入是加锁读，两者之间可能有别人的导入落地；文件也是分两次上传的。
+// 所以 status=ready 的预演会附带一枚令牌（file sha256 + 作废指纹 + 合同，服务端 HMAC），
+// 提交时必须原样带回：服务端按实际收到文件的 sha256 认令牌，装载期再复核指纹——
+// 不一致就整批不导入并提示重新预演。前端不做任何「预演数字」的推算，只展示服务端给的。
+
+export type ExpenseVoidPreviewStatus =
+  "ready" | "suppressed" | "will_be_rejected" | "not_applicable" | "unreadable";
+
+export interface ExpenseVoidRow {
+  raw_line_id: string;
+  linked_sales_order_no: string | null;
+  bxd_no: string | null;
+  line_no: number | null;
+  expense_date: string | null;
+  person: string | null;
+  reason: string | null;
+  data_status: string | null;
+  amount: string;             // 可能被字段级脱敏成掩码串，只展示、不参与计算
+}
+
+export interface ExpenseVoidPreview {
+  filename: string;
+  status: ExpenseVoidPreviewStatus;
+  reason: string | null;
+  contract: string | null;
+  contracts: string[];
+  rows_incoming: number | null;
+  dropped_no_contract: number | null;
+  blocking_error_types: string[];
+  void: { rows: number; amount: string; already_void_rows: number } | null;
+  void_rows: ExpenseVoidRow[];
+  void_rows_truncated: boolean;
+  preview_token: string | null;
+  error: string | null;
+}
+
+const VOID_STATUSES = new Set<ExpenseVoidPreviewStatus>([
+  "ready", "suppressed", "will_be_rejected", "not_applicable", "unreadable",
+]);
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function normalizeVoidRow(value: unknown): ExpenseVoidRow | null {
+  if (!isRecord(value) || typeof value.raw_line_id !== "string" || typeof value.amount !== "string") {
+    return null;
+  }
+  const opt = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    raw_line_id: value.raw_line_id,
+    linked_sales_order_no: opt(value.linked_sales_order_no),
+    bxd_no: opt(value.bxd_no),
+    line_no: typeof value.line_no === "number" ? value.line_no : null,
+    expense_date: opt(value.expense_date),
+    person: opt(value.person),
+    reason: opt(value.reason),
+    data_status: opt(value.data_status),
+    amount: value.amount,
+  };
+}
+
+/** 服务端响应 → 严格校验后的预演；任何形状不对都返回 null（调用方按「预演不可用」处理，绝不猜）。 */
+export function normalizeExpenseVoidPreview(value: unknown): ExpenseVoidPreview | null {
+  if (!isRecord(value) || typeof value.filename !== "string"
+    || typeof value.status !== "string"
+    || !VOID_STATUSES.has(value.status as ExpenseVoidPreviewStatus)) return null;
+  const status = value.status as ExpenseVoidPreviewStatus;
+  let voidSummary: ExpenseVoidPreview["void"] = null;
+  let voidRows: ExpenseVoidRow[] = [];
+  let token: string | null = null;
+  if (status === "ready") {
+    const v = value.void;
+    if (!isRecord(v) || !isNonNegativeInteger(v.rows) || typeof v.amount !== "string"
+      || !isNonNegativeInteger(v.already_void_rows)) return null;
+    voidSummary = { rows: v.rows, amount: v.amount, already_void_rows: v.already_void_rows };
+    if (!Array.isArray(value.void_rows)) return null;
+    const rows = value.void_rows.map(normalizeVoidRow);
+    if (rows.some((row) => row === null)) return null;
+    voidRows = rows as ExpenseVoidRow[];
+    if (!isNonEmptyString(value.preview_token)) return null;   // ready 必带令牌
+    token = value.preview_token;
+    if (!isNonEmptyString(value.contract)) return null;
+  }
+  return {
+    filename: value.filename,
+    status,
+    reason: typeof value.reason === "string" ? value.reason : null,
+    contract: typeof value.contract === "string" ? value.contract : null,
+    contracts: isStringArray(value.contracts) ? value.contracts : [],
+    rows_incoming: isNonNegativeInteger(value.rows_incoming) ? value.rows_incoming : null,
+    dropped_no_contract: isNonNegativeInteger(value.dropped_no_contract) ? value.dropped_no_contract : null,
+    blocking_error_types: isStringArray(value.blocking_error_types) ? value.blocking_error_types : [],
+    void: voidSummary,
+    void_rows: voidRows,
+    void_rows_truncated: value.void_rows_truncated === true,
+    preview_token: token,
+    error: typeof value.error === "string" ? value.error : null,
+  };
+}
+
+export async function previewExpenseVoid(file: File, mode: ImportMode, signal?: AbortSignal) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/import/expense-void-preview", form, {
+    params: { mode }, signal, timeout: 120_000,
+  });
+  const preview = normalizeExpenseVoidPreview(data);
+  if (!preview || preview.filename !== file.name) {
+    throw new Error(`「${file.name}」作废预演响应无效，无法安全确认`);
+  }
+  return preview;
+}
+

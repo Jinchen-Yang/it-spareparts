@@ -8,6 +8,7 @@ const get = vi.fn();
 const downloadImportErrors = vi.fn();
 const precheckImportFiles = vi.fn();
 const uploadImportBatch = vi.fn();
+const previewExpenseVoid = vi.fn();
 
 vi.mock("../../api", () => ({
   default: { get: (...args: unknown[]) => get(...args) },
@@ -17,6 +18,7 @@ vi.mock("../../api/imports", () => ({
   downloadImportErrors: (...args: unknown[]) => downloadImportErrors(...args),
   precheckImportFiles: (...args: unknown[]) => precheckImportFiles(...args),
   uploadImportBatch: (...args: unknown[]) => uploadImportBatch(...args),
+  previewExpenseVoid: (...args: unknown[]) => previewExpenseVoid(...args),
 }));
 
 import ImportPage from "../ImportPage";
@@ -1059,3 +1061,91 @@ describe("导入预检状态机", () => {
     expect(batchRequests).toBe(2);
   });
 });
+
+// ---- 作废预演（修复模式 · D-10 预演即承诺）----
+
+const armedResult: ImportPrecheckResult = {
+  ...cleanResult,
+  decision: "warning",
+  mode: "upsert",
+  files: [{
+    ...cleanResult.files[0],
+    filename: "报销.xlsx",
+    file_type: "expense",
+    severity: "warning",
+    issues: [{ severity: "warning", code: "upsert_void_armed",
+      message: "本表为单合同（XSDD-P）项目工作簿报销页且无错误行：修复模式将把该合同名下未出现在本表的旧报销行作废。" }],
+  }],
+};
+
+const readyPreview = {
+  filename: "报销.xlsx", status: "ready", reason: null, contract: "XSDD-P", contracts: ["XSDD-P"],
+  rows_incoming: 2, dropped_no_contract: 0, blocking_error_types: [],
+  void: { rows: 1, amount: "1200.00", already_void_rows: 0 },
+  void_rows: [{ raw_line_id: "BXD-3#1@abc", linked_sales_order_no: "XSDD-P", bxd_no: "BXD-3",
+    line_no: 1, expense_date: "2026-05-03", person: "丙", reason: "租金",
+    data_status: "已结束", amount: "1200.00" }],
+  void_rows_truncated: false, preview_token: "tok.1", error: null,
+};
+
+describe("作废预演（修复模式）", () => {
+  it("预检说会作废的文件：向服务端要预演、展示逐行清单，令牌随正式提交带回", async () => {
+    precheckImportFiles.mockResolvedValueOnce(armedResult);
+    previewExpenseVoid.mockResolvedValueOnce(readyPreview);
+    uploadImportBatch.mockResolvedValueOnce({ job_id: 7, total_files: 1 });
+    get.mockImplementation((url: string) => url === "/import/jobs/7"
+      ? Promise.resolve({ data: { id: 7, status: "done", mode: "upsert", total_files: 1,
+        done_files: 1, error_files: 0, note: null, batches: [] } })
+      : Promise.resolve({ data: [] }));
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    const file = stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText(/将作废 1 条旧报销行，合计 1200\.00/)).toBeInTheDocument();
+    expect(screen.getByText("租金")).toBeInTheDocument();
+    expect(previewExpenseVoid).toHaveBeenCalledWith(file, "upsert", expect.anything());
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已逐行核对作废预演清单（共 1 行）/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认警告并导入" }));
+
+    expect(await screen.findByText("导入作业 #7")).toBeInTheDocument();
+    expect(uploadImportBatch).toHaveBeenCalledWith([file], "upsert", ["tok.1"]);
+  });
+
+  it("预演拿不到 ready（会被整批拒绝）就不允许提交，不让用户对着没有清单的「将作废」按确认", async () => {
+    precheckImportFiles.mockResolvedValueOnce(armedResult);
+    previewExpenseVoid.mockResolvedValueOnce({
+      ...readyPreview, status: "will_be_rejected", void: null, void_rows: [],
+      preview_token: null, blocking_error_types: ["duplicate_key"],
+    });
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText("导入将被整批拒绝")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认警告并导入" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "开始导入" })).toBeNull();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("提交时预演已失效（void_plan_drift）：提示重新预检，不伪造作业", async () => {
+    precheckImportFiles.mockResolvedValueOnce(armedResult);
+    previewExpenseVoid.mockResolvedValueOnce(readyPreview);
+    uploadImportBatch.mockRejectedValueOnce({ response: {
+      status: 409, headers: { "x-error-code": "void_plan_drift" },
+      data: { detail: "作废预演已失效：预演之后相关报销行发生变化，本批未导入，请重新预演" },
+    } });
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    await screen.findByText(/将作废 1 条旧报销行/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已逐行核对作废预演清单/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认警告并导入" }));
+
+    expect(await screen.findByText(/作废预演已失效.*重新预检/)).toBeInTheDocument();
+    expect(screen.queryByText(/导入作业 #/)).toBeNull();
+  });
+});
+

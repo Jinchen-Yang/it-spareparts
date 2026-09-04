@@ -483,7 +483,7 @@ _MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
          mode: str = "skip", operated_by: str | None = None,
          audit_overwrites: bool = False,
-         maintenance_lock_envelope: MaintenanceImportLockEnvelope | None = None) -> dict:
+         maintenance_lock_envelope: MaintenanceImportLockEnvelope | None = None, expected_void_fingerprint: str | None = None) -> dict:
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date,
                                operated_by, audit_overwrites)
@@ -498,7 +498,7 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
             maintenance_lock_envelope,
         )
     if result.file_type == mapping.EXPENSE:
-        return _load_expense(session, result, batch_id, mode, operated_by, audit_overwrites)
+        return _load_expense(session, result, batch_id, mode, operated_by, audit_overwrites, expected_void_fingerprint=expected_void_fingerprint)
     return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
 
 
@@ -912,7 +912,7 @@ def _invalidate_expense_snapshot_state(
 
 def _load_expense(session: Session, result: TransformResult, batch_id: int,
                   mode: str = "skip", operated_by: str | None = None,
-                  audit_overwrites: bool = False) -> dict:
+                  audit_overwrites: bool = False, expected_void_fingerprint: str | None = None) -> dict:
     """报销明细入库：单表平铺，按 raw_line_id 幂等（§16.3/§17.4）。
 
     不建商品/客户维度（费用行无 PN）。项目归集以“发生日命中的唯一历史合同”为
@@ -972,6 +972,13 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
             )
         })
     affected_ids = sorted(set(incoming_ids) | set(existing_scope))
+    # 预演承诺·第一次复核（无锁探针，便宜地中止）：作废候选集在这里就由 affected_ids
+    # 定死，之后还有逐行锁与归属探测（客户形态实测约 45s、全程持全局导入锁），不该
+    # 等到那之后才发现预演已失效。expected 为 None（直接调用 run_import）则不检查。
+    if expected_void_fingerprint is not None:
+        expense_void.assert_fingerprint(
+            expense_void.classify(existing_scope, void_inputs), void_inputs,
+            existing_scope, expected_void_fingerprint)
     affected_expense_ids = [expense_id_for(raw_id) for raw_id in affected_ids]
     existing_attributions = list(session.scalars(
         select(MaintenanceProjectExpenseAttribution).where(
@@ -1096,6 +1103,10 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
     # 加锁重读之后、任何写入之前做判定；两道抑制（有行被排除 / 触及多合同）
     # 都在 expense_void.classify 里，这里只执行它给出的 void_ids。
     decision = expense_void.classify(locked_existing, void_inputs)
+    # 预演承诺·第二次复核（加锁重读后，权威）：与令牌指纹不符 ⇒ 任何写入之前整批中止。
+    expense_void.assert_fingerprint(decision, void_inputs, locked_existing,
+                                    expected_void_fingerprint)
+    void_fingerprint = expense_void.fingerprint(decision, void_inputs, locked_existing)
     replaced = len(locked_existing) if upsert else 0
     voided = 0
     void_protected = len(decision.protected_ids)
@@ -1285,6 +1296,8 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         # 但不能不说）。原因见 expense_void_suppressed_reason。
         "expense_rows_void_protected": void_protected,
         "expense_void_suppressed_reason": decision.suppressed_reason,
+        # 本批实际执行的作废集合摘要（与预演令牌里的指纹同一算法），回执可对账。
+        "expense_void_fingerprint": void_fingerprint,
         # 被排除的无合同行（客户的公司日常开销即此类）：本次未入库，也未牵连旧行。
         "expense_rows_dropped_no_contract": void_inputs.dropped_no_contract,
         # Count canonical rows, not project-side invalidations.  One attribution
