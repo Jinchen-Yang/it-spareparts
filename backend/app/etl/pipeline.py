@@ -348,16 +348,39 @@ def run_import(session: Session, file_path: str, original_name: str,
 
         # 错误行入 sys_import_error（失败批次也保留，便于按行修正）
         for e in result.errors:
+            raw_row = e.raw_row
+            if e.identity:
+                # raw_row 只读本行原始单元格：延续行几乎全空、§17.3 宽松列
+                # （单号/序号/报销金额）不在 full_map 里。identity 是 gvh 归一后
+                # 的那份，留痕以它为准。
+                raw_row = {**(raw_row or {}),
+                           "_identity": {k: (v if v is None or isinstance(v, (int, str))
+                                             else str(v))
+                                         for k, v in e.identity.items()}}
             session.add(SysImportError(batch_id=batch.id, row_no=e.row_no,
                                        error_type=e.error_type, error_detail=e.error_detail,
-                                       raw_row=e.raw_row))
+                                       raw_row=raw_row))
 
-        # §17.4 修复模式=以本表为准（合同级删除重建）：要求报销页零错误行——
-        # 半截行/撞键行意味着"本表"不完整，此时整表替换会静默丢账，必须先修再导
-        if expense_sheets and mode == "upsert" and result.errors:
-            raise ReaderError(
-                f"修复模式（以本表为准）要求报销页无错误行：发现 {len(result.errors)} 行错误"
-                "（详见批次错误明细），本次未导入。请修正后重试，或改用「跳过」模式仅补新行。")
+        # §17.4 修复模式=以本表为准（合同级删除重建）：半截行/撞键行意味着"本表"
+        # 不完整，此时整表替换会静默丢账，必须先修再导。
+        #
+        # missing_link 是唯一例外，也是唯一能按类型放行的错误：xsdd 直到
+        # transform.py 的归集键那一步才求值，其余错误全部在此之前 continue——
+        # 那些行**可能带着完整 XSDD**，error_type 对「这行属不属于某个被重建的
+        # 合同」零信息量，故一律仍拦（duplicate_key 更要拦：第一行已进 lines 并
+        # 会 UPDATE 掉库里的记录）。missing_link 则按定义即可证明无合同，对重建
+        # 范围零贡献。放行的安全性不靠这条门禁，靠 loader 的作废豁免
+        # （_expense_void_exemptions）——门禁判断错了钱也丢不了，反之不成立。
+        #
+        # 刻意不把门禁对齐到 SOFT_ERROR_TYPES：在途单常带 XSDD，其幂等键与日期
+        # 无关，一张已入库单据被退回改「进行中」后重导会静默作废旧行。只对齐计
+        # 数与展示（loader/imports 已如此），不对齐作废门禁。
+        if expense_sheets and mode == "upsert":
+            blocking = [e for e in result.errors if e.error_type != "missing_link"]
+            if blocking:
+                raise ReaderError(
+                    f"修复模式（以本表为准）要求报销页无错误行：发现 {len(blocking)} 行错误"
+                    "（详见批次错误明细），本次未导入。请修正后重试，或改用「跳过」模式仅补新行。")
 
         maintenance_lock_envelope = None
         assignment_service = None
