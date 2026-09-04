@@ -35,6 +35,12 @@ const REPORT_LABEL: Record<string, string> = {
   expense_rows_void_protected: "免于作废（删除侧未生效）",
   expense_void_suppressed_reason: "删除侧未生效的原因",
   expense_rows_dropped_no_contract: "无销售订单被排除",
+  expense_attribution_legacy_takeovers: "旧键形态归因被原生数据ID接管",
+  expense_attribution_legacy_skipped: "旧键形态重复行已入库并作废（原生键为准）",
+  expense_rows_voided_by_identity: "因键形态接管而作废的旧行",
+  expense_attribution_legacy_unresolved: "无序号旧键与原生行内容对不上（未接管，需治理）",
+  expense_attribution_legacy_takeovers_amount_changed: "接管时金额与旧行不同",
+  expense_attribution_legacy_siblings_active: "接管所在报销单仍有未覆盖的旧键行",
 };
 const VOID_SUPPRESSED_REASON: Record<string, string> = {
   dropped_no_contract: "本表有行缺销售订单被排除",
@@ -587,6 +593,20 @@ export default function ImportPage() {
                 description="「以本表为准」会把本表触及的每个销售订单名下、未出现在本表里的报销行作废，成本随之从项目卡片上扣除。若本表只覆盖了部分月份/部分来源，请核对这些行是否确实该删。"
               />
             )}
+            {Number(detail.report?.expense_rows_voided_by_identity) > 0 && (
+              <Alert
+                type="warning" showIcon style={{ marginBottom: 12 }}
+                message={`${detail.report.expense_rows_voided_by_identity} 条旧键形态报销行因原生数据ID接管而作废`}
+                description="同一笔报销明细在旧导出视图（无数据ID）与新视图（带数据ID）下会落成两把键。本次以带数据ID的行为准，旧键行已作废（审计可查），看板只计一次。这不是「以本表为准」的缺行作废。"
+              />
+            )}
+            {Number(detail.report?.expense_attribution_legacy_unresolved) > 0 && (
+              <Alert
+                type="error" showIcon style={{ marginBottom: 12 }}
+                message={`${detail.report.expense_attribution_legacy_unresolved} 条无序号旧键归因与本次原生行内容对不上，未接管`}
+                description="这些报销单在库里存在按内容生成的旧键归因（无序号），与本次带数据ID的行同单号但日期/金额/事由/人员不完全一致，系统不猜。请人工核对后治理，否则该单可能被重复计入。"
+              />
+            )}
             {Number(detail.report?.expense_rows_void_protected) > 0 && (
               <Alert
                 type="warning" showIcon style={{ marginBottom: 12 }}
@@ -595,7 +615,7 @@ export default function ImportPage() {
                   ? "本表没有页级「销售订单」锚，不是系统导出的项目工作簿报销页。「以本表为准」的删除只在那种页上执行——逐行手填的单合同表无法证明它完整覆盖了该合同。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。要按本表删除旧行，请从对应项目下载工作簿、在报销页上修改后回传。"
                   : detail.report.expense_void_suppressed_reason === "multi_contract"
                   ? "本表触及多个销售订单。「以本表为准」的删除只在单合同的项目工作簿报销页上执行——多合同的全公司导出无法证明它完整覆盖了每个合同，按它删除会把这些合同名下本表未覆盖时段的历史报销一并作废。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。要按本表删除旧行，请用对应项目的工作簿报销页逐个合同做。"
-                  : "本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。请勿为了「让删除生效」而把无销售订单的行删掉或补一个合同号后重导：报销单一单多行时，明细行的销售订单靠单头继承，按单元格是否为空来过滤会连带删掉这些继承行。要按本表删除旧行，请用对应项目的工作簿报销页（单合同、带页级锚）逐个合同做。"}
+                  : "本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未按缺行作废任何旧行（键形态接管产生的作废另行列出）。请勿为了「让删除生效」而把无销售订单的行删掉或补一个合同号后重导：报销单一单多行时，明细行的销售订单靠单头继承，按单元格是否为空来过滤会连带删掉这些继承行。要按本表删除旧行，请用对应项目的工作簿报销页（单合同、带页级锚）逐个合同做。"}
               />
             )}
             {Number(detail.report?.expense_rows_dropped_no_contract) > 0 && (

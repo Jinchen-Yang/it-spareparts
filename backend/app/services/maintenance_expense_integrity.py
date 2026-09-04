@@ -31,6 +31,8 @@ resolution never reads approval state.
 
 from __future__ import annotations
 
+import hashlib
+
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -81,6 +83,53 @@ def expense_id_for(raw_line_id: str) -> str:
             f"expense_id longer than {EXPENSE_ID_MAX_LENGTH}: {len(expense_id)}"
         )
     return expense_id
+
+
+KEY_FAMILY_NATIVE = "native"        # 氚云原生「报销明细.数据ID」（UUID），§17.4 形态①
+KEY_FAMILY_COMPOSITE = "composite"  # 单号#序号@合同域hash，形态②（旧导出视图无数据ID列）
+KEY_FAMILY_CONTENT = "content"      # EXP:sha1(...)#n，形态③（既无数据ID也无单号/序号）
+
+
+def raw_key_family(raw_line_id: str) -> str:
+    """幂等键形态。同一笔报销单明细行在不同导出视图下会落成不同形态的键——
+    2026-09-05 事故：批次 168 用无数据ID的旧视图落成复合键，客户新导出带数据ID，
+    同一 (项目, 单号#序号) 出现两把键，守卫把它当真重复整批拒绝，且客户侧无解。"""
+    if raw_line_id.startswith("EXP:"):
+        return KEY_FAMILY_CONTENT
+    if "#" in raw_line_id and "@" in raw_line_id:
+        return KEY_FAMILY_COMPOSITE
+    return KEY_FAMILY_NATIVE
+
+
+def content_key_digest(*, xsdd: str | None, expense_date, amount, reason, person) -> str:
+    """§17.4 形态③ 内容派生键的摘要。transform 与 loader 共用，保证按内容匹配旧键时
+    与历史落库的键逐字节同源（amount 为 round_money 后的 Decimal，str() 即 '501.00'）。"""
+    basis = "|".join([xsdd or "", expense_date.isoformat(), str(amount), reason or "", person or ""])
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:36]
+
+
+def raw_backed_key(attr) -> str | None:
+    """归因对应的事实行键；手工 create_expense 的独立归因（无 raw）返回 None——它们
+    不是任何幂等键形态，不能参与接管/跳过判定（否则一条手填归因就能作废导入事实）。"""
+    key = attr.raw_expense_line_id or raw_line_id_from_expense_id(attr.expense_id)
+    return key or None
+
+
+def duplicate_identity_verdict(existing_key: str, incoming_key: str) -> str:
+    """同项目同 单号#序号 下两把不同的键该怎么办。
+
+    takeover     既有是遗留形态、来行是原生 UUID：同一业务行换了导出视图，原生键接管
+    keep_native  既有是原生、来行是遗留：原生键权威，来行是旧视图的重复导出，跳过不降级
+                 ——否则月度大导出与手工薄来回传会让键形态反复横跳
+    conflict     同形态不同键：真重复（如报销单退回重提换了数据ID），守卫本来就要防
+    """
+    ex, inc = raw_key_family(existing_key), raw_key_family(incoming_key)
+    legacy = {KEY_FAMILY_COMPOSITE, KEY_FAMILY_CONTENT}
+    if inc == KEY_FAMILY_NATIVE and ex in legacy:
+        return "takeover"
+    if ex == KEY_FAMILY_NATIVE and inc in legacy:
+        return "keep_native"
+    return "conflict"
 
 
 def raw_line_id_from_expense_id(expense_id: str) -> str | None:

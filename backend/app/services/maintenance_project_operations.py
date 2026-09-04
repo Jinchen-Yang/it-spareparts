@@ -64,6 +64,9 @@ from app.services import maintenance_warehouse_site_issue_bridge
 from app.services.query_filters import active_beta_maintenance_orders
 
 
+_EXPENSE_VOID_STATUSES = frozenset({"已作废", "作废"})
+
+
 class MaintenanceOperationError(Exception):
     """Invalid stable-project operating-fact request."""
 
@@ -3541,6 +3544,11 @@ def _resync_contract_expenses_locked(
         raw = raws[raw_id]
         expense_id = expense_id_for(raw_id)
         existing = db.get(MaintenanceProjectExpenseAttribution, expense_id)
+        if existing is None and raw.data_status in _EXPENSE_VOID_STATUSES:
+            # 已作废且无归因的事实行（键形态接管让位后的旧键行）不可能产生计数归因，
+            # 也没有归因可刷新；不跳过的话下面的重复守卫会把它当真重复，此后该项目
+            # 任何合同修改/新建/归档都被拒绝，而 UI 里根本看不到这些行。
+            continue
         if raw.expense_date is None:
             if existing is not None:
                 raise MaintenanceOperationError(
