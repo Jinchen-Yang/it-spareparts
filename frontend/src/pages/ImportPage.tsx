@@ -22,6 +22,18 @@ const FILE_TYPE: Record<string, string> = {
   expense: "报销明细", workbook: "项目工作簿",
 };
 const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", processing: "blue" };
+// 批次报告键的中文名。作废是**减钱**动作，其可见度必须高于插入统计，故除了在这里
+// 有名字，还单独渲染成 warning（见详情弹窗）。未列出的键按原样显示。
+const REPORT_LABEL: Record<string, string> = {
+  source_rows_total: "源文件行数", fact_rows_inserted: "新增入库",
+  fact_rows_updated: "更新", fact_rows_skipped: "跳过", fact_rows_error: "错误行",
+  rows_inactive: "非生效行", rows_skipped_no_data: "空行跳过",
+  import_mode: "导入模式",
+  expense_rows_replaced: "修复模式覆盖范围（行）",
+  expense_rows_voided: "作废旧行",
+  expense_rows_void_protected: "免于作废（本表里其实还在）",
+  expense_rows_dropped_no_contract: "无销售订单被排除",
+};
 const JOB_STATUS: Record<string, { label: string; color: string }> = {
   processing: { label: "进行中", color: "blue" },
   done: { label: "全部完成", color: "green" },
@@ -520,11 +532,32 @@ export default function ImportPage() {
                 description="通常是导出视图选错。请用含 单价 / 金额 / 税 的视图重新导出，再用「修复模式」重导补上金额。"
               />
             )}
+            {Number(detail.report?.expense_rows_voided) > 0 && (
+              <Alert
+                type="warning" showIcon style={{ marginBottom: 12 }}
+                message={`修复模式作废了 ${detail.report.expense_rows_voided} 条旧报销行`}
+                description="「以本表为准」会把本表触及的每个销售订单名下、未出现在本表里的报销行作废，成本随之从项目卡片上扣除。若本表只覆盖了部分月份/部分来源，请核对这些行是否确实该删。"
+              />
+            )}
+            {Number(detail.report?.expense_rows_void_protected) > 0 && (
+              <Alert
+                type="warning" showIcon style={{ marginBottom: 12 }}
+                message={`${detail.report.expense_rows_void_protected} 条旧报销行免于作废`}
+                description="这些行在本表里其实还在，只是所在行缺少销售订单被排除了，因此系统保留了旧记录（未按「以本表为准」删除）。补上销售订单后重导即可让本表完全生效。"
+              />
+            )}
+            {Number(detail.report?.expense_rows_dropped_no_contract) > 0 && (
+              <Alert
+                type="info" showIcon style={{ marginBottom: 12 }}
+                message={`${detail.report.expense_rows_dropped_no_contract} 行因无销售订单未入库`}
+                description="这些行不挂任何销售订单（公司日常开销等），本次未入库，也未牵连其它行。明细见下方问题清单，含日期/金额/人员/事由。"
+              />
+            )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
               {Object.entries(detail.report || {})
                 .filter(([k]) => k !== "errors_preview" && k !== "missing_price_columns")
                 .map(([k, v]) => (
-                  <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
+                  <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{String(v)}</Descriptions.Item>
                 ))}
             </Descriptions>
             {detail.issue_count > 0 && (

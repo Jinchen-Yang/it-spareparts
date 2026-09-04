@@ -865,6 +865,76 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     }
 
 
+def _expense_void_exemptions(
+    result: TransformResult,
+    locked_existing: dict,
+    missing_ids: set,
+) -> tuple[set[str], int]:
+    """修复模式作废豁免：把「本次被丢弃、但库里还活着」的行挡在作废循环之外。
+
+    背景（2026-09-04 客户报销单事故的真正危险面）：重建范围是**合同粒度**的
+    ——`contracts` 只由存活行贡献，但 existing_scope 会按合同把该合同名下**全部**
+    旧行拉进来。于是一条本次被判 missing_link 而丢弃的行，会落进别人贡献的合同
+    范围里，走 `missing_ids` 被软作废：文件里它还在，系统当它消失了。批次报
+    success，唯一留痕是一条不含金额的错误行——这就是静默丢账。
+
+    豁免判据不是 error_type，是**业务身份是否与将被作废的旧行相交**。三族身份
+    并集比对（任一命中即豁免，宁可少作废也不能丢账）：
+      1. 氚云原生 数据ID —— 与 xsdd 无关，最强；
+      2. (bxd_no, line_no) —— 复合幂等键 `单号#序号@sha1(xsdd)` 的非合同部分；
+      3. (日期, 金额, 人员, 事由) —— 正是内容派生键 basis 去掉 xsdd 的全部成分。
+    三族都用并集而非「取最强一族」：幂等键族会随源表形态变化（旧行按复合键入库、
+    新文件带上了数据ID），只认最强族会漏配，而漏配的代价是丢账、过度豁免的代价
+    只是留下一条待人工确认的旧行。多义同理一律判命中。
+
+    返回 (豁免的 raw_line_id 集合, 身份不可得的被丢弃行数)。后者非 0 时调用方
+    必须整批跳过作废循环——身份不可得就无法证明安全，只能退化为「覆盖同键、只增
+    不删」。正常路径下它恒为 0：transform 保证 missing_link 行必带 identity 且
+    日期/金额非空（无金额行走 rows_skipped_no_data、无日期行走 missing_date）。
+    """
+    dropped = [e for e in result.errors if e.error_type == "missing_link"]
+    if not dropped or not missing_ids:
+        return set(), 0
+
+    by_bxd_line: dict[tuple, set[str]] = {}
+    by_content: dict[tuple, set[str]] = {}
+    for raw_id in missing_ids:
+        row = locked_existing[raw_id]
+        if row.bxd_no and row.line_no is not None:
+            by_bxd_line.setdefault((row.bxd_no, int(row.line_no)), set()).add(raw_id)
+        if row.expense_date is not None and row.amount is not None:
+            by_content.setdefault(
+                (row.expense_date, Decimal(row.amount), row.person or "", row.reason or ""),
+                set(),
+            ).add(raw_id)
+
+    exempt: set[str] = set()
+    unidentified = 0
+    for err in dropped:
+        ident = err.identity
+        # 身份缺失只可能来自「未随 ErrorRec.identity 一起升级」的新代码路径；
+        # 与其猜，不如整批停掉作废（见 docstring）。
+        if not ident:
+            unidentified += 1
+            continue
+        native = ident.get("raw_line_id")
+        if native and native in missing_ids:
+            exempt.add(native)
+        bxd_no, line_no = ident.get("bxd_no"), ident.get("line_no")
+        if bxd_no and line_no is not None:
+            exempt |= by_bxd_line.get((bxd_no, int(line_no)), set())
+        expense_date, amount = ident.get("expense_date"), ident.get("amount")
+        if expense_date is not None and amount is not None:
+            exempt |= by_content.get((
+                expense_date, Decimal(amount),
+                ident.get("person") or "", ident.get("reason") or "",
+            ), set())
+        elif not native and not (bxd_no and line_no is not None):
+            # 三族键一族都构造不出来 → 无法证明这行不对应任何将被作废的旧行
+            unidentified += 1
+    return exempt, unidentified
+
+
 # 可更新字段（upsert 修复模式）：排除幂等主键 raw_line_id
 _EXPENSE_UPD = ["bxd_no", "line_no", "data_status", "expense_date", "person",
                 "expense_type", "fee_category", "reason", "linked_sales_order_no",
@@ -1099,12 +1169,26 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         if upsert else set()
     )
     replaced = len(locked_existing) if upsert else 0
+    # 作废豁免必须算在作废循环之前：此时重建范围内的旧行已由上面两次查询取回内存，
+    # 0 条额外 SQL、0 个新索引。放到 pipeline 门禁处则要多查一次库。
+    void_exempt, void_unidentified = _expense_void_exemptions(
+        result, locked_existing, missing_ids)
     voided = 0
+    void_protected = 0
     changed_raw_ids: set[str] = set()
     void_audits: list[tuple] = []
     for raw_id in sorted(missing_ids):
         row = locked_existing[raw_id]
         if row.data_status in {"已作废", "作废"}:
+            continue
+        if void_unidentified:
+            # 整批退化为「覆盖同键、只增不删」：有身份不可得的被丢弃行，就无法
+            # 证明这些旧行真的从文件里消失了。留旧账 ≫ 丢账。
+            void_protected += 1
+            continue
+        if raw_id in void_exempt:
+            # 这条旧行在本次文件里其实还在，只是那一行缺 XSDD 被丢弃了。
+            void_protected += 1
             continue
         before = {c: _jsonable(getattr(row, c)) for c in _EXPENSE_UPD}
         row.data_status = "已作废"
@@ -1270,6 +1354,13 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         "rows_inactive": result.rows_inactive,
         "expense_rows_replaced": replaced,
         "expense_rows_voided": voided,
+        # 修复模式下「本该作废、但因本次文件里其实还有这笔账而豁免」的旧行数。
+        # >0 说明本表有行缺 XSDD 被丢弃，其对应旧行被保留而非静默作废——回执必须
+        # 显示，否则用户会以为「以本表为准」已完全生效。
+        "expense_rows_void_protected": void_protected,
+        # 被丢弃的无合同行（客户的公司日常开销即此类）：本次未入库，也未牵连旧行。
+        "expense_rows_dropped_no_contract": sum(
+            1 for e in result.errors if e.error_type == "missing_link"),
         # Count canonical rows, not project-side invalidations.  One attribution
         # moved P→Q touches two revisions/audits but is still one synced row.
         "expense_attributions_synced": attributions_synced,

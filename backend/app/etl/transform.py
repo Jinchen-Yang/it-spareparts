@@ -23,6 +23,11 @@ class ErrorRec:
     error_type: str
     error_detail: str
     raw_row: dict
+    # 被丢弃行的**业务身份**（已过 gvh 头行继承、已归一为 date/Decimal/int）。
+    # raw_row 走 _row_dict 只读本行原始单元格：延续行几乎全空，§17.3 宽松列
+    # （单号/序号/报销金额）也不在 full_map 里，两者都读不出可比对的身份。
+    # 修复模式的作废豁免（loader._void_exempt_index）只认这个字段，不认 raw_row。
+    identity: dict | None = None
 
 
 @dataclass
@@ -732,12 +737,10 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
 
         # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv
         xsdd = _clip(cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor)
-        if not xsdd:
-            res.errors.append(ErrorRec(row_no, "missing_link",
-                                       "缺少销售订单(XSDD)：行内无该列且工作表无「销售订单」锚",
-                                       _row_dict(row, full_map)))
-            continue
 
+        # 身份提取必须早于 missing_link 判定：修复模式放行这类行后，loader 要靠
+        # 这套身份证明「被丢的行不对应任何将被作废的旧行」。此处仍在 raw_line_id/
+        # duplicate_key 之前——复合键 ck/scope 依赖 xsdd，那部分不能上移。
         title = cleaner.clean_str(gvh("数据标题"))
         m = _BXD_RX.search(title or "")
         bxd_no = _clip(m.group(0) if m
@@ -745,8 +748,36 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
         line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
         person = _clip(cleaner.clean_str(gvh("报销人员", "申请人")))
         reason = cleaner.clean_str(gvh("支出事由", "报销主题"))
+        native_line_id = cleaner.clean_str(gv("报销明细.数据ID(不可修改)",
+                                              "报销明细.数据ID"))
 
-        raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
+        if not xsdd:
+            # expense_date/amount 在此必非空：无金额行已在 rows_skipped_no_data
+            # 出口 continue，无日期行已在 missing_date 出口 continue。故内容签名
+            # （日期+金额+人员+事由）恒可构造，作废豁免不会退化为「永远零命中」。
+            # 身份写进 error_detail：raw_row 在宽松列/延续行形态下金额为 null，
+            # 而 batch_detail 与 errors.csv 都只回 detail 不回 raw_row——不写在
+            # 这里，1,873 行错误明细对人工对账等于没有。
+            tail = " ".join(str(v) for v in (
+                expense_date.isoformat(), f"¥{amount}", person or "", reason or "",
+            ) if v)
+            res.errors.append(ErrorRec(
+                row_no, "missing_link",
+                f"缺少销售订单(XSDD)：行内无该列且工作表无「销售订单」锚｜{tail}",
+                _row_dict(row, full_map),
+                identity={
+                    "raw_line_id": native_line_id,
+                    "bxd_no": bxd_no,
+                    "line_no": line_no,
+                    "expense_date": expense_date,
+                    "amount": amount,
+                    "person": person,
+                    "reason": reason,
+                },
+            ))
+            continue
+
+        raw_line = native_line_id
         if not raw_line:
             if bxd_no and line_no is not None:
                 ck = (xsdd, bxd_no, line_no)
