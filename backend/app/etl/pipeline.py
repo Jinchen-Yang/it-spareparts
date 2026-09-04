@@ -5,15 +5,16 @@ import os
 import re
 import stat
 import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
-from app.etl import loader, mapping, reader, sheet_selection
+from app.etl import expense_void, loader, mapping, reader, sheet_selection
 from app.etl.reader import ReaderError
-from app.etl.transform import transform
+from app.etl.transform import TransformResult, transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
 from app.services import data_quality_amount_mismatch
 
@@ -219,6 +220,116 @@ def _archive(src_path: str, file_hash: str) -> str:
         raise ArchiveError() from exc
 
 
+@dataclass
+class LoadedWorkbook:
+    """inspect → 选表 → 只物化选中页 → 列检查。run_import 与导入前预演共用。"""
+
+    inspected: list
+    selection: object
+    selected_sheets: list
+    expense_sheets: list
+    primary: object | None
+
+    @property
+    def file_type(self) -> str | None:
+        return self.selection.file_type
+
+
+@dataclass
+class TransformedWorkbook:
+    result: TransformResult
+    extra_report: dict = field(default_factory=dict)
+    src_cols: list = field(default_factory=list)
+
+
+def load_workbook(file_path: str, *, inspected: list | None = None) -> LoadedWorkbook:
+    """读法只写一处：预演若自己再写一遍选表/物化，读出的 lines 集合就可能与真实
+    导入不同——而 lines 集合正是作废集合的补集。
+
+    inspected：调用方（precheck）已扫过表头时传入，省掉一次整包扫描（客户 3802 行
+    文件实测 ≈3.5s）。run_import 不传。
+    """
+    # 先只扫描全部 sheet 的边界和表头；真正的值只加载选中的业务页，
+    # 这是 inline-string 大工作簿避免 OOM 的关键边界。
+    inspected_sheets = (inspected if inspected is not None
+                        else reader.inspect_workbook(file_path, load_data=False))
+    selection = sheet_selection.select_workbook_sheets(inspected_sheets)
+    if not selection.selected:
+        raise ReaderError(
+            "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
+            code="no_recognized_sheet",
+        )
+    selected_sheets = reader.load_selected_workbook(
+        file_path,
+        [sheet.sheet_name for sheet in selection.selected],
+        inspections=inspected_sheets,
+    )
+
+    # §17.5 调度：**有报销页才是项目追踪工作簿**——只吃报销页，其余可识别页
+    # （系统导出的备件回填副本/手工粘贴件，非权威源）跳过并报告，防回环污染。
+    # 没有报销页 → 老语义：导第一个可识别页（隐藏副本页/杂页不再拖垮整个文件），
+    # 其余页在报告中列为 ignored_sheets 提示。
+    expense_sheets = [
+        sheet for sheet in selected_sheets if sheet.file_type == mapping.EXPENSE
+    ]
+    primary = None if expense_sheets else selected_sheets[0]
+    return LoadedWorkbook(inspected_sheets, selection, selected_sheets,
+                          expense_sheets, primary)
+
+
+def require_clean_workbook(loaded: LoadedWorkbook) -> None:
+    """将被取用的页若有重复列名 → 整批拒绝。独立于 load_workbook，好让 run_import
+    在它之前把 batch.file_type 落库（失败批次仍记录识别出的类型，与旧行为一致）。"""
+    if loaded.expense_sheets:
+        for s in loaded.expense_sheets:
+            reader.require_clean_columns(s)
+    else:
+        reader.require_clean_columns(loaded.primary)
+
+
+def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
+    """transform + 多报销页合并 + 跨页去重，同样只写一处（同上理由）。"""
+    selection, expense_sheets, primary = (
+        loaded.selection, loaded.expense_sheets, loaded.primary)
+    if expense_sheets:
+        # 多报销页合并成一次装载：单次合同级替换（修复模式不互删）、计数不虚高
+        result = transform(expense_sheets[0].df, mapping.EXPENSE,
+                           anchor=expense_sheets[0].anchor)
+        if len(expense_sheets) > 1:
+            for e in result.errors:
+                e.error_detail = f"[{expense_sheets[0].sheet_name}] {e.error_detail}"
+            for s in expense_sheets[1:]:
+                r = transform(s.df, mapping.EXPENSE, anchor=s.anchor)
+                for e in r.errors:
+                    e.error_detail = f"[{s.sheet_name}] {e.error_detail}"
+                result.errors.extend(r.errors)
+                result.rows_total += r.rows_total
+                result.rows_inactive += r.rows_inactive
+                result.rows_skipped_no_data += r.rows_skipped_no_data
+                result.lines.extend(r.lines)
+                result.expense_anchors.extend(r.expense_anchors)
+            # 跨页同键（完全相同的行/同单号行）＝同一笔费用，保留首次，防 upsert 撞键
+            seen_keys: set[str] = set()
+            result.lines = [ln for ln in result.lines
+                            if not (ln["raw_line_id"] in seen_keys
+                                    or seen_keys.add(ln["raw_line_id"]))]
+        extra_report = {
+            "expense_sheets": [s.sheet_name for s in expense_sheets],
+            "skipped_sheets": [f"{s.sheet_name}（{s.file_type}，此类数据请用氚云原生导出单独上传）"
+                               for s in selection.ignored_recognized],
+        }
+        return TransformedWorkbook(result, extra_report,
+                                   list(expense_sheets[0].df.columns))
+    result = transform(primary.df, primary.file_type)
+    extra_report = {}
+    if selection.ignored_recognized:
+        extra_report["ignored_sheets"] = [
+            f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
+            for s in selection.ignored_recognized
+        ]
+    return TransformedWorkbook(result, extra_report, list(primary.df.columns))
+
+
 def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
                import_job_id: int | None = None,
@@ -272,79 +383,19 @@ def run_import(session: Session, file_path: str, original_name: str,
     session.flush()  # 取 batch.id
 
     try:
-        # 先只扫描全部 sheet 的边界和表头；真正的值只加载选中的业务页，
-        # 这是 inline-string 大工作簿避免 OOM 的关键边界。
-        inspected_sheets = reader.inspect_workbook(file_path, load_data=False)
-        selection = sheet_selection.select_workbook_sheets(inspected_sheets)
-        if not selection.selected:
-            raise ReaderError(
-                "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
-                code="no_recognized_sheet",
-            )
-        selected_sheets = reader.load_selected_workbook(
-            file_path,
-            [sheet.sheet_name for sheet in selection.selected],
-            inspections=inspected_sheets,
-        )
-
-        # §17.5 调度：**有报销页才是项目追踪工作簿**——只吃报销页，其余可识别页
-        # （系统导出的备件回填副本/手工粘贴件，非权威源）跳过并报告，防回环污染。
-        # 没有报销页 → 老语义：导第一个可识别页（隐藏副本页/杂页不再拖垮整个文件），
-        # 其余页在报告中列为 ignored_sheets 提示。
-        expense_sheets = [
-            sheet for sheet in selected_sheets if sheet.file_type == mapping.EXPENSE
-        ]
-        if expense_sheets:
-            primary = None
-            batch.file_type = selection.file_type
-            for s in expense_sheets:
-                reader.require_clean_columns(s)
-        else:
-            primary = selected_sheets[0]
-            reader.require_clean_columns(primary)
-            batch.file_type = selection.file_type
+        loaded = load_workbook(file_path)
+        batch.file_type = loaded.file_type
+        require_clean_workbook(loaded)
+        selection, expense_sheets = loaded.selection, loaded.expense_sheets
 
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
                                file_hash=file_hash, storage_path=storage_path))
         snapshot = datetime.now(timezone.utc).date()
 
-        if expense_sheets:
-            # 多报销页合并成一次装载：单次合同级替换（修复模式不互删）、计数不虚高
-            result = transform(expense_sheets[0].df, mapping.EXPENSE,
-                               anchor=expense_sheets[0].anchor)
-            if len(expense_sheets) > 1:
-                for e in result.errors:
-                    e.error_detail = f"[{expense_sheets[0].sheet_name}] {e.error_detail}"
-                for s in expense_sheets[1:]:
-                    r = transform(s.df, mapping.EXPENSE, anchor=s.anchor)
-                    for e in r.errors:
-                        e.error_detail = f"[{s.sheet_name}] {e.error_detail}"
-                    result.errors.extend(r.errors)
-                    result.rows_total += r.rows_total
-                    result.rows_inactive += r.rows_inactive
-                    result.rows_skipped_no_data += r.rows_skipped_no_data
-                    result.lines.extend(r.lines)
-                # 跨页同键（完全相同的行/同单号行）＝同一笔费用，保留首次，防 upsert 撞键
-                seen_keys: set[str] = set()
-                result.lines = [ln for ln in result.lines
-                                if not (ln["raw_line_id"] in seen_keys
-                                        or seen_keys.add(ln["raw_line_id"]))]
-            extra_report = {
-                "expense_sheets": [s.sheet_name for s in expense_sheets],
-                "skipped_sheets": [f"{s.sheet_name}（{s.file_type}，此类数据请用氚云原生导出单独上传）"
-                                   for s in selection.ignored_recognized],
-            }
-            src_cols = list(expense_sheets[0].df.columns)
-        else:
-            result = transform(primary.df, primary.file_type)
-            extra_report = {}
-            if selection.ignored_recognized:
-                extra_report["ignored_sheets"] = [
-                    f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
-                    for s in selection.ignored_recognized
-                ]
-            src_cols = list(primary.df.columns)
+        transformed = transform_workbook(loaded)
+        result, extra_report, src_cols = (
+            transformed.result, transformed.extra_report, transformed.src_cols)
 
         # 错误行入 sys_import_error（失败批次也保留，便于按行修正）
         for e in result.errors:
@@ -369,14 +420,14 @@ def run_import(session: Session, file_path: str, original_name: str,
         # 那些行**可能带着完整 XSDD**，error_type 对「这行属不属于某个被重建的
         # 合同」零信息量，故一律仍拦（duplicate_key 更要拦：第一行已进 lines 并
         # 会 UPDATE 掉库里的记录）。missing_link 则按定义即可证明无合同，对重建
-        # 范围零贡献。放行的安全性不靠这条门禁，靠 loader 的作废豁免
-        # （_expense_void_exemptions）——门禁判断错了钱也丢不了，反之不成立。
+        # 范围零贡献。放行的安全性不靠这条门禁，靠 loader 消费的
+        # expense_void.classify 两道抑制——门禁判断错了钱也丢不了，反之不成立。
         #
         # 刻意不把门禁对齐到 SOFT_ERROR_TYPES：在途单常带 XSDD，其幂等键与日期
         # 无关，一张已入库单据被退回改「进行中」后重导会静默作废旧行。只对齐计
         # 数与展示（loader/imports 已如此），不对齐作废门禁。
         if expense_sheets and mode == "upsert":
-            blocking = [e for e in result.errors if e.error_type != "missing_link"]
+            blocking = expense_void.blocking_errors(result)
             if blocking:
                 raise ReaderError(
                     f"修复模式（以本表为准）要求报销页无错误行：发现 {len(blocking)} 行错误"

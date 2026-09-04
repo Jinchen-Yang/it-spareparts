@@ -272,6 +272,7 @@ def precheck(
     """导入前预检（不导入、不建批次）：返回选表结果、风险等级与 v1 兼容字段。"""
     _enforce_import_file_limit(files)
     mode = mode if mode in ("skip", "upsert") else "skip"
+    upsert_budget = import_precheck.new_upsert_budget()   # 每请求预算，跨文件累计
     results_with_hashes: list[tuple[dict, str | None]] = []
     for f in files:
         name = f.filename or "upload.xlsx"
@@ -289,7 +290,8 @@ def precheck(
         try:
             file_hash = pipeline.sha256_file(tmp)
             try:
-                result = import_precheck.inspect_file(tmp, name)
+                result = import_precheck.inspect_file(tmp, name, mode=mode,
+                                                      budget=upsert_budget)
             except ReaderError as exc:
                 result = import_precheck.failed_file_result(name, exc.code, str(exc))
         finally:

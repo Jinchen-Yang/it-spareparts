@@ -138,7 +138,7 @@ def parse_int(x) -> int | None:
         return None
     try:
         return int(float(str(x).strip()))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):   # "inf"/"1e999" → int() 抛 OverflowError
         return None
 
 

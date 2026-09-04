@@ -164,17 +164,18 @@ def test_anchored_overhead_row_is_not_silently_voided_by_rowwise_reimport(db, tm
 
 
 def test_genuinely_deleted_row_is_still_voided(db, tmp_path):
-    """负面对照：真的从文件里消失的行照常作废——豁免没有把修复模式废掉。"""
-    t1 = _rowwise_sheet(tmp_path, "d1.xlsx", [
-        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-D"),
-        _row(amount=3000, reason="要删掉的", bxd="BXD-2", seq=1, xsdd="XSDD-D"),
-    ])
+    """负面对照：单合同、带页级锚的项目工作簿报销页（修复模式主用法）里真的消失的行
+    照常作废——抑制没有把修复模式废掉。"""
+    t1 = _anchored_sheet(tmp_path, "d1.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1),
+        _row(amount=3000, reason="要删掉的", bxd="BXD-2", seq=1),
+    ], anchor="XSDD-D")
     pipeline.run_import(db, t1, "d1.xlsx")
     db.commit()
 
-    t2 = _rowwise_sheet(tmp_path, "d2.xlsx", [
-        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-D"),
-    ])
+    t2 = _anchored_sheet(tmp_path, "d2.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1),
+    ], anchor="XSDD-D")
     batch = pipeline.run_import(db, t2, "d2.xlsx", mode="upsert")
     db.commit()
 
@@ -320,3 +321,124 @@ def test_real_deletion_is_held_back_when_the_sheet_also_drops_rows(db, tmp_path)
             for r in db.scalars(select(FProjectExpense))}
     assert rows["真的删掉了"][0] == "已结束"        # 删除侧未生效
     assert rows["保留"] == ("已结束", Decimal("5500"))   # 同键覆盖照常生效
+
+
+# ---------- 第二道抑制：触及多个合同 ----------
+
+def test_multi_contract_rowwise_upsert_never_voids(db, tmp_path):
+    """2026-09-04 实测时序的最小版：全公司导出（多合同）零错误 + 修复模式。
+
+    按「销售订单」列过滤后的客户文件正是这个形态——第一道抑制已解除，此前会对
+    789 个合同全域作废（实测 431 行、¥497,806.94）。「以本表为准」的删除承诺只有
+    在本表完整覆盖它触及的合同时才成立，而文件自己证明不了；修复模式的设计形态是
+    单合同工作簿报销页，多合同触发作废是实现副作用。
+    """
+    t1 = _rowwise_sheet(tmp_path, "m1.xlsx", [
+        _row(amount=5000, reason="A-保留", bxd="BXD-1", seq=1, xsdd="XSDD-M1"),
+        _row(amount=3000, reason="A-不在本表", bxd="BXD-2", seq=1, xsdd="XSDD-M1"),
+        _row(amount=700, reason="B-保留", bxd="BXD-3", seq=1, xsdd="XSDD-M2"),
+    ])
+    pipeline.run_import(db, t1, "m1.xlsx")
+    db.commit()
+
+    t2 = _rowwise_sheet(tmp_path, "m2.xlsx", [
+        _row(amount=5000, reason="A-保留", bxd="BXD-1", seq=1, xsdd="XSDD-M1"),
+        _row(amount=700, reason="B-保留", bxd="BXD-3", seq=1, xsdd="XSDD-M2"),
+    ])
+    batch = pipeline.run_import(db, t2, "m2.xlsx", mode="upsert")
+    db.commit()
+
+    r = batch.report_json
+    assert r["expense_rows_voided"] == 0
+    assert r["expense_rows_void_protected"] == 1
+    assert r["expense_void_suppressed_reason"] == "multi_contract"
+    assert r["expense_rows_dropped_no_contract"] == 0
+    assert all(x.data_status == "已结束" for x in db.scalars(select(FProjectExpense)))
+
+
+def test_single_contract_report_says_not_suppressed(db, tmp_path):
+    """负面对照：单合同、无排除行 ⇒ 不抑制，reason 为空，作废照常（与
+    test_genuinely_deleted_row_is_still_voided 同形态，钉住新回执键的口径）。"""
+    t1 = _anchored_sheet(tmp_path, "s1.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1),
+        _row(amount=3000, reason="删掉", bxd="BXD-2", seq=1),
+    ], anchor="XSDD-S")
+    pipeline.run_import(db, t1, "s1.xlsx")
+    db.commit()
+    t2 = _anchored_sheet(tmp_path, "s2.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1),
+    ], anchor="XSDD-S")
+    batch = pipeline.run_import(db, t2, "s2.xlsx", mode="upsert")
+    db.commit()
+    r = batch.report_json
+    assert r["expense_rows_voided"] == 1
+    assert r["expense_void_suppressed_reason"] is None
+
+
+# ---------- 第三道抑制：无页级锚 ----------
+
+def test_unanchored_single_contract_rowwise_upsert_never_voids(db, tmp_path):
+    """绕过路径的最小复现：把多合同导出按合同拆成单合同逐行表分次上传。没有这条，
+    每份单合同表各自 voided=1，最终库态与直接上传多合同表一模一样——¥497,806.94
+    的路径原样重开。"""
+    t1 = _rowwise_sheet(tmp_path, "u1.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-U"),
+        _row(amount=3000, reason="不在本表", bxd="BXD-2", seq=1, xsdd="XSDD-U"),
+    ])
+    pipeline.run_import(db, t1, "u1.xlsx")
+    db.commit()
+    t2 = _rowwise_sheet(tmp_path, "u2.xlsx", [
+        _row(amount=5500, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-U"),
+    ])
+    batch = pipeline.run_import(db, t2, "u2.xlsx", mode="upsert")
+    db.commit()
+    r = batch.report_json
+    assert r["expense_rows_voided"] == 0
+    assert r["expense_rows_void_protected"] == 1
+    assert r["expense_void_suppressed_reason"] == "unanchored"
+    rows = {x.reason: (x.data_status, x.amount) for x in db.scalars(select(FProjectExpense))}
+    assert rows["不在本表"][0] == "已结束"
+    assert rows["保留"] == ("已结束", Decimal("5500"))       # 同键覆盖仍生效
+
+
+def test_anchored_page_with_row_level_override_is_multi_contract(db, tmp_path):
+    """锚定项目页里有一行行级「销售订单」指向另一合同 ⇒ 整页判多合同、不作废。
+    方向安全（此前会作废），回执 reason 说明原因。"""
+    cols = _ANCHORED + ["销售订单"]
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "报销明细"
+    ws.append(["销售订单", "XSDD-P"]); ws.append(cols)
+    ws.append(["2026-05-01", "张三", "维保费用", "外援劳务", "a", 100, "已结束", "BXD-1", 1, None])
+    ws.append(["2026-05-01", "张三", "维保费用", "外援劳务", "b", 100, "已结束", "BXD-2", 1, None])
+    p1 = tmp_path / "o1.xlsx"; wb.save(str(p1))
+    pipeline.run_import(db, str(p1), "o1.xlsx"); db.commit()
+
+    wb = Workbook(); ws = wb.active; ws.title = "报销明细"
+    ws.append(["销售订单", "XSDD-P"]); ws.append(cols)
+    # a 被行级改到别的合同，b 仍在锚上 ⇒ 本次触及 {XSDD-P, XSDD-OTHER} 两个合同
+    ws.append(["2026-05-01", "张三", "维保费用", "外援劳务", "a", 100, "已结束", "BXD-1", 1, "XSDD-OTHER"])
+    ws.append(["2026-05-01", "张三", "维保费用", "外援劳务", "b", 100, "已结束", "BXD-2", 1, None])
+    p2 = tmp_path / "o2.xlsx"; wb.save(str(p2))
+    batch = pipeline.run_import(db, str(p2), "o2.xlsx", mode="upsert"); db.commit()
+    r = batch.report_json
+    assert r["expense_rows_voided"] == 0
+    assert r["expense_void_suppressed_reason"] == "multi_contract"
+    # 旧 BXD-1（合同域 XSDD-P 的键）不在本次 incoming 里，本该作废，被保留并计数
+    assert r["expense_rows_void_protected"] == 1
+    assert all(x.data_status == "已结束" for x in db.scalars(select(FProjectExpense)))
+
+
+def test_failed_batch_still_records_detected_file_type(db, tmp_path):
+    """抽出 load_workbook 后 batch.file_type 的赋值时机必须与旧行为一致：表头重复导致
+    的失败批次仍落库 file_type='expense'，不是 'unknown'（导入历史里可见）。"""
+    from openpyxl import Workbook
+    from app.etl.reader import ReaderError
+    wb = Workbook(); ws = wb.active; ws.title = "Sheet1"
+    ws.append(["报销日期", "报销金额", "销售订单", "销售订单"])
+    ws.append(["2026-05-01", 100, "XSDD-A", "XSDD-A"])
+    p = tmp_path / "dup_hdr.xlsx"; wb.save(str(p))
+    with pytest.raises(ReaderError):
+        pipeline.run_import(db, str(p), "dup_hdr.xlsx")
+    from app.models.system import SysImportBatch
+    b = db.scalars(select(SysImportBatch).order_by(SysImportBatch.id.desc())).first()
+    assert b.status == "failed" and b.file_type == "expense"

@@ -25,6 +25,26 @@ function recommendation(code: string) {
   if (code === "sheet_ignored_recognized") {
     return "当前规则只导入选中页；如需该页请单独导出并上传。";
   }
+  // 修复模式删除侧（D-09）。这些提示描述的是系统**将怎样执行**，不是文件有错；
+  // 千万不要建议用户「修正后重新预检」——把无销售订单的行删掉再传正是 2026-09-04 丢账的路径。
+  if (code === "upsert_blocking_errors") {
+    return "修正这些错误行后重新预检；或改用「跳过」模式，只补新行、不作废旧行。";
+  }
+  if (code === "upsert_void_suppressed_dropped") {
+    return "无需修改文件。请勿为了「让删除生效」而删掉无销售订单的行：一单多行的明细行靠单头继承合同号，按单元格是否为空过滤会连带删掉它们。要删旧行请用对应项目的工作簿报销页。";
+  }
+  if (code === "upsert_void_suppressed_multi_contract" || code === "upsert_void_suppressed_unanchored") {
+    return "无需修改文件。只有单合同、带页级锚的项目工作簿报销页才会执行删除；如需删除旧行，从对应项目下载工作簿、在报销页上修改后回传。";
+  }
+  if (code === "upsert_void_armed") {
+    return "确认本表完整覆盖了该合同的全部报销后再继续；不在本表里的旧行会被作废。若只想补新行/改金额，改用「跳过」模式。";
+  }
+  if (code === "upsert_precheck_skipped") {
+    return "本次未预演；导入时仍按同一规则执行。文件较多或较大时请分批预检。";
+  }
+  if (code === "upsert_precheck_failed") {
+    return "该文件预演解析失败；导入时也会失败，请先按提示修正。";
+  }
   return "请根据问题说明检查文件，修正后重新预检。";
 }
 
