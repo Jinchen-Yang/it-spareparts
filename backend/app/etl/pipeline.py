@@ -619,19 +619,26 @@ def preview_expense_void(session: Session, file_path: str, *, mode: str) -> dict
     decision = expense_void.classify(existing, inputs)
     rows = expense_void.void_rows(decision, existing)
     (contract,) = inputs.contracts
+    summary = {
+        "rows": len(rows),
+        "amount": format(expense_void.void_amount(decision, existing), "f"),
+        "already_void_rows": len(decision.already_void_ids),
+    }
+    if len(rows) > VOID_PREVIEW_ROW_CAP:
+        # 用户要对着「已逐行核对（共 N 行）」勾确认：清单不完整就不能签发令牌。
+        # 不截断展示、不签令牌，让这一批在确认前就停下（Codex P1）。单合同报销页
+        # 一次作废超过这个数本身就不是正常往返，应拆分或改用跳过模式。
+        return {"status": "too_large", "contract": contract, "void": summary,
+                "row_cap": VOID_PREVIEW_ROW_CAP, **base}
     return {
         "status": "ready",
         "contract": contract,
         "fingerprint": expense_void.fingerprint(decision, inputs, existing),
-        "void": {
-            "rows": len(rows),
-            "amount": format(expense_void.void_amount(decision, existing), "f"),
-            "already_void_rows": len(decision.already_void_ids),
-        },
-        "void_rows": rows[:_VOID_PREVIEW_ROW_LIMIT],
-        "void_rows_truncated": len(rows) > _VOID_PREVIEW_ROW_LIMIT,
+        "void": summary,
+        "void_rows": rows,                 # 完整清单：确认框承诺的是每一行
         **base,
     }
 
 
-_VOID_PREVIEW_ROW_LIMIT = 200
+# 超过此数不签令牌（见 preview_expense_void）。行是小字典，几千行的 JSON 仍在可接受范围。
+VOID_PREVIEW_ROW_CAP = 5000

@@ -346,7 +346,7 @@ export async function downloadImportErrors(batchId: number) {
 // 不一致就整批不导入并提示重新预演。前端不做任何「预演数字」的推算，只展示服务端给的。
 
 export type ExpenseVoidPreviewStatus =
-  "ready" | "suppressed" | "will_be_rejected" | "not_applicable" | "unreadable";
+  "ready" | "suppressed" | "will_be_rejected" | "not_applicable" | "unreadable" | "too_large";
 
 export interface ExpenseVoidRow {
   raw_line_id: string;
@@ -357,7 +357,7 @@ export interface ExpenseVoidRow {
   person: string | null;
   reason: string | null;
   data_status: string | null;
-  amount: string;             // 可能被字段级脱敏成掩码串，只展示、不参与计算
+  amount: string | null;      // 无 data_purchase_cost 的账号会被字段级脱敏成 null；只展示、不计算
 }
 
 export interface ExpenseVoidPreview {
@@ -369,23 +369,27 @@ export interface ExpenseVoidPreview {
   rows_incoming: number | null;
   dropped_no_contract: number | null;
   blocking_error_types: string[];
-  void: { rows: number; amount: string; already_void_rows: number } | null;
+  void: { rows: number; amount: string | null; already_void_rows: number } | null;
   void_rows: ExpenseVoidRow[];
-  void_rows_truncated: boolean;
+  row_cap: number | null;     // too_large：超过此数不签令牌
   preview_token: string | null;
   error: string | null;
 }
 
 const VOID_STATUSES = new Set<ExpenseVoidPreviewStatus>([
-  "ready", "suppressed", "will_be_rejected", "not_applicable", "unreadable",
+  "ready", "suppressed", "will_be_rejected", "not_applicable", "unreadable", "too_large",
 ]);
+
+function isMaskableString(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;   // null = 服务端字段级脱敏
+}
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function normalizeVoidRow(value: unknown): ExpenseVoidRow | null {
-  if (!isRecord(value) || typeof value.raw_line_id !== "string" || typeof value.amount !== "string") {
+  if (!isRecord(value) || typeof value.raw_line_id !== "string" || !isMaskableString(value.amount)) {
     return null;
   }
   const opt = (v: unknown) => (typeof v === "string" ? v : null);
@@ -411,11 +415,13 @@ export function normalizeExpenseVoidPreview(value: unknown): ExpenseVoidPreview 
   let voidSummary: ExpenseVoidPreview["void"] = null;
   let voidRows: ExpenseVoidRow[] = [];
   let token: string | null = null;
-  if (status === "ready") {
+  if (status === "ready" || status === "too_large") {
     const v = value.void;
-    if (!isRecord(v) || !isNonNegativeInteger(v.rows) || typeof v.amount !== "string"
+    if (!isRecord(v) || !isNonNegativeInteger(v.rows) || !isMaskableString(v.amount)
       || !isNonNegativeInteger(v.already_void_rows)) return null;
     voidSummary = { rows: v.rows, amount: v.amount, already_void_rows: v.already_void_rows };
+  }
+  if (status === "ready") {
     if (!Array.isArray(value.void_rows)) return null;
     const rows = value.void_rows.map(normalizeVoidRow);
     if (rows.some((row) => row === null)) return null;
@@ -435,7 +441,7 @@ export function normalizeExpenseVoidPreview(value: unknown): ExpenseVoidPreview 
     blocking_error_types: isStringArray(value.blocking_error_types) ? value.blocking_error_types : [],
     void: voidSummary,
     void_rows: voidRows,
-    void_rows_truncated: value.void_rows_truncated === true,
+    row_cap: isNonNegativeInteger(value.row_cap) ? value.row_cap : null,
     preview_token: token,
     error: typeof value.error === "string" ? value.error : null,
   };

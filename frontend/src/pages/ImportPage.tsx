@@ -226,21 +226,29 @@ export default function ImportPage() {
     try {
       const result = await precheckImportFiles(files, mode, controller.signal);
       if (!mountedRef.current || revision !== inputRevisionRef.current) return;
-      // 预检说「会作废」的文件，逐个向服务端要作废预演（逐行清单 + 金额 + 令牌）。
-      // 预演拿不到就不允许提交：宁可让用户重来，也不让他对着没有清单的「将作废」按确认。
-      const armed = result.contract === "v2"
-        ? result.files.filter((file) => file.issues.some((issue) => issue.code === "upsert_void_armed"))
+      // 预检说「会作废」的文件，以及预检因解析预算被跳过、删除侧结论未知的报销文件，
+      // 逐个向服务端要作废预演（单文件端点有自己的预算；结论 ready/suppressed/… 都精确）。
+      // 预演给不出可确认的结论就不允许提交：宁可让用户重来，也不让他对着没有清单的
+      // 「将作废」按确认，更不能等作业跑到一半才被 void_preview_required 拒绝。
+      // 文件按**位置**配对，不按文件名：precheckImportFiles 已校验响应顺序与文件一一对应，
+      // 而不同目录的同名文件按名字查会拿错字节。
+      const NEEDS_PREVIEW = new Set(["upsert_void_armed", "upsert_precheck_skipped"]);
+      const armedIndexes = result.contract === "v2"
+        ? result.files.flatMap((file, index) =>
+          file.issues.some((issue) => NEEDS_PREVIEW.has(issue.code)) ? [index] : [])
         : [];
       const previews: ExpenseVoidPreview[] = [];
-      for (const armedFile of armed) {
-        const source = files.find((file) => file.name === armedFile.filename);
-        if (!source) throw new Error(`「${armedFile.filename}」无法定位到已选文件，请重新预检`);
+      for (const index of armedIndexes) {
+        const source = files[index];
+        if (!source) throw new Error(`「${result.files[index].filename}」无法定位到已选文件，请重新预检`);
         previews.push(await previewExpenseVoid(source, mode, controller.signal));
         if (!mountedRef.current || revision !== inputRevisionRef.current) return;
       }
-      const notReady = previews.filter((preview) => preview.status !== "ready");
+      // suppressed / not_applicable 是正常结论（不会作废、不需要令牌）；其余非 ready 一律阻断
+      const blocking = previews.some((preview) =>
+        preview.status !== "ready" && preview.status !== "suppressed" && preview.status !== "not_applicable");
       setSnapshot({ files, mode, revision, result, previews });
-      setPhase(notReady.length ? "blocked"
+      setPhase(blocking ? "blocked"
         : result.decision === "clean" ? "clean_ready"
         : result.decision === "warning" ? "warning_ready" : "blocked");
     } catch (e: any) {

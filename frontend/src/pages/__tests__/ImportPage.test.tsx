@@ -1085,7 +1085,7 @@ const readyPreview = {
   void_rows: [{ raw_line_id: "BXD-3#1@abc", linked_sales_order_no: "XSDD-P", bxd_no: "BXD-3",
     line_no: 1, expense_date: "2026-05-03", person: "丙", reason: "租金",
     data_status: "已结束", amount: "1200.00" }],
-  void_rows_truncated: false, preview_token: "tok.1", error: null,
+  row_cap: null, preview_token: "tok.1", error: null,
 };
 
 describe("作废预演（修复模式）", () => {
@@ -1149,3 +1149,97 @@ describe("作废预演（修复模式）", () => {
   });
 });
 
+
+
+describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上限）", () => {
+  const skippedResult: ImportPrecheckResult = {
+    ...armedResult,
+    files: [{
+      ...armedResult.files[0],
+      issues: [{ severity: "warning", code: "upsert_precheck_skipped",
+        message: "报销页共 9000 行，超出本次预检剩余解析预算，未预演修复模式的门禁与删除侧结论" }],
+    }],
+  };
+
+  it("预检因预算跳过的报销文件同样要预演：拿到令牌才提交，不让作业跑到一半被拒", async () => {
+    precheckImportFiles.mockResolvedValueOnce(skippedResult);
+    previewExpenseVoid.mockResolvedValueOnce(readyPreview);
+    uploadImportBatch.mockResolvedValueOnce({ job_id: 8, total_files: 1 });
+    get.mockImplementation((url: string) => url === "/import/jobs/8"
+      ? Promise.resolve({ data: { id: 8, status: "done", mode: "upsert", total_files: 1,
+        done_files: 1, error_files: 0, note: null, batches: [] } })
+      : Promise.resolve({ data: [] }));
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    const file = stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    await screen.findByText(/将作废 1 条旧报销行/);
+    expect(previewExpenseVoid).toHaveBeenCalledWith(file, "upsert", expect.anything());
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已逐行核对作废预演清单/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认警告并导入" }));
+    expect(await screen.findByText("导入作业 #8")).toBeInTheDocument();
+    expect(uploadImportBatch).toHaveBeenCalledWith([file], "upsert", ["tok.1"]);
+  });
+
+  it("预算跳过的文件预演结论是「不会作废」时不阻断、也不需要令牌", async () => {
+    precheckImportFiles.mockResolvedValueOnce(skippedResult);
+    previewExpenseVoid.mockResolvedValueOnce({
+      ...readyPreview, status: "suppressed", reason: "dropped_no_contract",
+      void: null, void_rows: [], preview_token: null,
+    });
+    uploadImportBatch.mockResolvedValueOnce({ job_id: 9, total_files: 1 });
+    get.mockImplementation((url: string) => url === "/import/jobs/9"
+      ? Promise.resolve({ data: { id: 9, status: "done", mode: "upsert", total_files: 1,
+        done_files: 1, error_files: 0, note: null, batches: [] } })
+      : Promise.resolve({ data: [] }));
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    const file = stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText("本次不会作废任何旧报销行")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "我已阅读并确认以上警告" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认警告并导入" }));
+    expect(await screen.findByText("导入作业 #9")).toBeInTheDocument();
+    expect(uploadImportBatch).toHaveBeenCalledWith([file], "upsert");
+  });
+
+  it("同名文件按位置配对：第二个才会作废时，预演的是第二个文件的字节", async () => {
+    const twoFiles: ImportPrecheckResult = {
+      ...armedResult,
+      files: [
+        { ...cleanResult.files[0], filename: "报销.xlsx", file_type: "expense", issues: [] },
+        armedResult.files[0],
+      ],
+    };
+    precheckImportFiles.mockResolvedValueOnce(twoFiles);
+    previewExpenseVoid.mockResolvedValueOnce(readyPreview);
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    const first = stage(new File([Uint8Array.of(1)], "报销.xlsx"));
+    const second = stage(new File([Uint8Array.of(2)], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    await screen.findByText(/将作废 1 条旧报销行/);
+    expect(previewExpenseVoid).toHaveBeenCalledTimes(1);
+    expect(previewExpenseVoid.mock.calls[0][0]).toBe(second);
+    expect(previewExpenseVoid.mock.calls[0][0]).not.toBe(first);
+  });
+
+  it("清单超过上限（too_large）：展示行数与上限并阻断提交", async () => {
+    precheckImportFiles.mockResolvedValueOnce(armedResult);
+    previewExpenseVoid.mockResolvedValueOnce({
+      ...readyPreview, status: "too_large", row_cap: 5000,
+      void: { rows: 6000, amount: "1.00", already_void_rows: 0 }, void_rows: [], preview_token: null,
+    });
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    stage(new File(["xlsx"], "报销.xlsx"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText(/将作废 6000 条旧报销行，超过可逐行核对的上限（5000 行）/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认警告并导入" })).toBeNull();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+});

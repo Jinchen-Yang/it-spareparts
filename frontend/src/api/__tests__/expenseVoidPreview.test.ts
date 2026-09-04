@@ -27,12 +27,24 @@ describe("normalizeExpenseVoidPreview", () => {
     expect(normalizeExpenseVoidPreview({ ...ready, void_rows: [{ amount: 1 }] })).toBeNull();
     expect(normalizeExpenseVoidPreview({ ...ready, status: "whatever" })).toBeNull();
   });
-  it("keeps a masked amount as an opaque string", () => {
+  it("accepts server-masked (null) amounts — 无成本可见权限的账号也能走完预演", () => {
     const p = normalizeExpenseVoidPreview({
-      ...ready, void: { ...ready.void, amount: "***" },
-      void_rows: [{ ...ready.void_rows[0], amount: "***" }],
+      ...ready, void: { ...ready.void, amount: null },
+      void_rows: [{ ...ready.void_rows[0], amount: null }],
     });
-    expect(p?.void?.amount).toBe("***");
+    expect(p?.status).toBe("ready");
+    expect(p?.void?.amount).toBeNull();
+    expect(p?.void_rows[0].amount).toBeNull();
+  });
+  it("too_large carries the summary but no token and no rows", () => {
+    const p = normalizeExpenseVoidPreview({
+      filename: "page.xlsx", status: "too_large", contract: "XSDD-P",
+      void: { rows: 6000, amount: "1.00", already_void_rows: 0 }, row_cap: 5000,
+    });
+    expect(p?.status).toBe("too_large");
+    expect(p?.void?.rows).toBe(6000);
+    expect(p?.row_cap).toBe(5000);
+    expect(p?.preview_token).toBeNull();
   });
   it("suppressed previews need no token", () => {
     const p = normalizeExpenseVoidPreview({ filename: "x.xlsx", status: "suppressed", reason: "multi_contract" });

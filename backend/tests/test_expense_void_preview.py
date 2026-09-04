@@ -275,3 +275,18 @@ def test_contract_change_inside_probe_to_lock_window_is_caught(db, tmp_path, mon
     assert len(calls) == 2                                   # 第二次（加锁重读后）才抓到
     db.expire_all()
     assert _rows(db)["租金"].data_status == "已结束"
+
+
+def test_preview_over_row_cap_withholds_token(db, tmp_path, monkeypatch):
+    """清单超过上限就不签令牌（Codex P1）：确认框承诺的是每一行，不完整的清单不能被确认。"""
+    _seed(db, tmp_path)                                          # R1 R2 R3 在库
+    page = _anchored(tmp_path, "page.xlsx", [R1])                # R2 R3 将作废
+    monkeypatch.setattr(pipeline, "VOID_PREVIEW_ROW_CAP", 1)
+    pv = pipeline.preview_expense_void(db, page, mode="upsert")
+    assert pv["status"] == "too_large" and pv["void"]["rows"] == 2
+    assert "preview_token" not in pv and "fingerprint" not in pv and "void_rows" not in pv
+
+    monkeypatch.setattr(pipeline, "VOID_PREVIEW_ROW_CAP", 2)
+    pv = pipeline.preview_expense_void(db, page, mode="upsert")
+    assert pv["status"] == "ready" and len(pv["void_rows"]) == 2   # 完整清单，不截断
+
