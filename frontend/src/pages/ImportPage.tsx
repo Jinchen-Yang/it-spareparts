@@ -31,9 +31,19 @@ const REPORT_LABEL: Record<string, string> = {
   import_mode: "导入模式",
   expense_rows_replaced: "修复模式覆盖范围（行）",
   expense_rows_voided: "作废旧行",
-  expense_rows_void_protected: "免于作废（本表不完整，删除侧未生效）",
+  expense_rows_void_protected: "免于作废（删除侧未生效）",
+  expense_void_suppressed_reason: "删除侧未生效的原因",
   expense_rows_dropped_no_contract: "无销售订单被排除",
 };
+const VOID_SUPPRESSED_REASON: Record<string, string> = {
+  dropped_no_contract: "本表有行缺销售订单被排除",
+  multi_contract: "本表触及多个销售订单",
+  unanchored: "本表不是带页级锚的项目工作簿报销页",
+};
+function reportValue(k: string, v: unknown): string {
+  if (k === "expense_void_suppressed_reason") return VOID_SUPPRESSED_REASON[String(v)] ?? String(v);
+  return String(v);
+}
 const JOB_STATUS: Record<string, { label: string; color: string }> = {
   processing: { label: "进行中", color: "blue" },
   done: { label: "全部完成", color: "green" },
@@ -543,7 +553,11 @@ export default function ImportPage() {
               <Alert
                 type="warning" showIcon style={{ marginBottom: 12 }}
                 message={`删除侧未生效：${detail.report.expense_rows_void_protected} 条旧报销行被保留`}
-                description="本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。请勿为了「让删除生效」而把无销售订单的行删掉或补一个合同号后重导：报销单一单多行时，明细行的销售订单靠单头继承，按单元格是否为空来过滤会连带删掉这些继承行，重导后它们对应的旧行会被真的作废。要按本表删除旧行，请用对应项目的工作簿报销页（单合同、带页级锚）逐个合同做。"
+                description={detail.report.expense_void_suppressed_reason === "unanchored"
+                  ? "本表没有页级「销售订单」锚，不是系统导出的项目工作簿报销页。「以本表为准」的删除只在那种页上执行——逐行手填的单合同表无法证明它完整覆盖了该合同。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。要按本表删除旧行，请从对应项目下载工作簿、在报销页上修改后回传。"
+                  : detail.report.expense_void_suppressed_reason === "multi_contract"
+                  ? "本表触及多个销售订单。「以本表为准」的删除只在单合同的项目工作簿报销页上执行——多合同的全公司导出无法证明它完整覆盖了每个合同，按它删除会把这些合同名下本表未覆盖时段的历史报销一并作废。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。要按本表删除旧行，请用对应项目的工作簿报销页逐个合同做。"
+                  : "本表有行因缺少销售订单被排除，因此本表不能代表「以本表为准」的删除侧——这些旧行可能正对应被排除的那些行。本次只做了同键覆盖（改金额照常生效），未作废任何旧行。请勿为了「让删除生效」而把无销售订单的行删掉或补一个合同号后重导：报销单一单多行时，明细行的销售订单靠单头继承，按单元格是否为空来过滤会连带删掉这些继承行。要按本表删除旧行，请用对应项目的工作簿报销页（单合同、带页级锚）逐个合同做。"}
               />
             )}
             {Number(detail.report?.expense_rows_dropped_no_contract) > 0 && (
@@ -555,9 +569,9 @@ export default function ImportPage() {
             )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
               {Object.entries(detail.report || {})
-                .filter(([k]) => k !== "errors_preview" && k !== "missing_price_columns")
+                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns" && v != null)
                 .map(([k, v]) => (
-                  <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{String(v)}</Descriptions.Item>
+                  <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{reportValue(k, v)}</Descriptions.Item>
                 ))}
             </Descriptions>
             {detail.issue_count > 0 && (

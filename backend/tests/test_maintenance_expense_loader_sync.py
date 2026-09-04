@@ -55,10 +55,13 @@ def _expense(raw_id: str, *, bxd_no: str, amount: str) -> dict:
 
 
 def _result(*lines: dict) -> TransformResult:
+    # 模拟的是「权威合同页」＝带页级锚的单合同项目工作簿报销页（D-09：修复模式的
+    # 删除侧只在这种形态下武装；无锚逐行表不作废）。
     return TransformResult(
         file_type=mapping.EXPENSE,
         lines=list(lines),
         rows_total=len(lines),
+        expense_anchors=["XSDD-EXP-SYNC"],
     )
 
 

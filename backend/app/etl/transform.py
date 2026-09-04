@@ -41,6 +41,9 @@ class TransformResult:
     rows_inactive: int = 0
     rows_excluded_warehouse: int = 0   # 排除仓（坏品仓等）跳过的库存行，进导入报告
     rows_skipped_no_data: int = 0      # 报销页缺 日期/金额 跳过的行（合计行/空行，非错误，§17.3）
+    # 报销页逐页的页级锚（无锚为 None）。修复模式删除侧只在「每页都有锚」时武装
+    # （expense_void.VoidInputs.anchored）；多页合并时由 pipeline 逐页追加。
+    expense_anchors: list = field(default_factory=list)
     # WBDD 专用（plan v1.3 M1-2/M1-3）：
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
@@ -457,6 +460,7 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
     """
     res = TransformResult(file_type=mapping.EXPENSE)
     res.rows_total = len(df)
+    res.expense_anchors = [anchor]
     full_map = {**mapping.EXPENSE_HEAD, **mapping.EXPENSE_LINE}
     content_seen: dict[str, int] = {}
     composite_seen: set[tuple] = set()

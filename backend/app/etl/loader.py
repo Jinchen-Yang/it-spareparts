@@ -16,11 +16,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import case, delete, func, or_, select
+from sqlalchemy import case, delete, func, or_, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.etl import mapping
+from app.etl import expense_void, mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
@@ -865,31 +865,6 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     }
 
 
-def _expense_dropped_no_contract(result: TransformResult) -> int:
-    """本批因缺销售订单（missing_link）被排除的行数。>0 ⇒ 整批不执行作废。
-
-    背景（2026-09-04 客户报销单事故的真正危险面）：重建范围是**合同粒度**的
-    ——`contracts` 只由存活行贡献，但 existing_scope 会按合同把该合同名下**全部**
-    旧行拉进来。于是一条本次被判 missing_link 而丢弃的行，会落进别人贡献的合同
-    范围里，走 `missing_ids` 被软作废：文件里它还在，系统当它消失了。批次报
-    success，唯一留痕是一条不含金额的错误行——这就是静默丢账。
-
-    为什么是「有一条就整批不作废」，而不是按身份逐行豁免：**任何一次不匹配都不
-    构成「这条旧行真的消失了」的证据**。曾经实现过三族身份比对（数据ID /
-    单号+序号 / 日期+金额+人员+事由），Codex P1 指出弱签名不匹配时会假阴性——
-    源系统里改一次金额，签名就对不上，旧行照样被作废。而这不止于弱签名：旧行
-    可能是在源表还没有「数据ID」列的年代按内容键入库的，此时连最强的一族也匹配
-    不上。既然没有一族能给出否定证明，逐行豁免就是建立在错误前提上的。
-
-    代价可控，因为它不碰修复模式的主用法：项目追踪工作簿报销页有页级锚，
-    `xsdd = 行内值 or anchor` 恒非空，missing_link 恒为 0，作废照常执行。
-    只有「非锚定的全公司导出」才会触发抑制——而那恰恰是最不该由它决定删谁的场景
-    （合同级全量替换，范围不按批次/来源/日期区间收敛）。抑制的只是删除侧；
-    同键覆盖（_upsert_facts + _EXPENSE_UPD）不受影响，改金额照样以本表为准。
-    """
-    return sum(1 for e in result.errors if e.error_type == "missing_link")
-
-
 # 可更新字段（upsert 修复模式）：排除幂等主键 raw_line_id
 _EXPENSE_UPD = ["bxd_no", "line_no", "data_status", "expense_date", "person",
                 "expense_type", "fee_category", "reason", "linked_sales_order_no",
@@ -972,11 +947,9 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         for line in result.lines
         if line.get("raw_line_id")
     }
-    contracts = {
-        ln["linked_sales_order_no"]
-        for ln in result.lines
-        if ln.get("linked_sales_order_no")
-    }
+    # 删除侧的输入与判定只认 expense_void：预演与执行共用同一份规则，不存在第二份实现
+    void_inputs = expense_void.plan_inputs(result, mode=mode)
+    contracts = set(void_inputs.contracts)
     incoming_ids = sorted(incoming_by_id)
     existing_scope: dict[str, FProjectExpense] = {}
     if incoming_ids:
@@ -988,12 +961,13 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                 )
             )
         })
-    if upsert and contracts:
+    scope_contracts = expense_void.scope_contracts(void_inputs)
+    if scope_contracts:
         existing_scope.update({
             row.raw_line_id: row
             for row in session.scalars(
                 select(FProjectExpense).where(
-                    FProjectExpense.linked_sales_order_no.in_(sorted(contracts))
+                    FProjectExpense.linked_sales_order_no.in_(scope_contracts)
                 )
             )
         })
@@ -1119,25 +1093,29 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
             .execution_options(populate_existing=True)
         )
     } if affected_ids else {}
-    missing_ids = (
-        set(locked_existing) - set(incoming_ids)
-        if upsert else set()
-    )
+    # 加锁重读之后、任何写入之前做判定；两道抑制（有行被排除 / 触及多合同）
+    # 都在 expense_void.classify 里，这里只执行它给出的 void_ids。
+    decision = expense_void.classify(locked_existing, void_inputs)
     replaced = len(locked_existing) if upsert else 0
-    dropped_no_contract = _expense_dropped_no_contract(result)
     voided = 0
-    void_protected = 0
+    void_protected = len(decision.protected_ids)
+    if decision.suppressed_reason and contracts:
+        # 抑制时不按合同扩宽 scope（不锁、不同步那些旧行），被保留的行数单独 COUNT：
+        # 回执必须说清「本该作废多少行没作废」。
+        # 与 expense_void.classify 同口径：NULL 状态也是作废候选（三值逻辑下裸
+        # NOT IN 会把 NULL 排除，回执少算，Codex P2）。
+        void_protected = session.scalar(
+            select(func.count()).select_from(FProjectExpense).where(
+                FProjectExpense.linked_sales_order_no.in_(sorted(contracts)),
+                or_(FProjectExpense.data_status.is_(None),
+                    FProjectExpense.data_status.not_in(sorted(expense_void.VOID_STATUSES))),
+                FProjectExpense.raw_line_id.not_in(incoming_ids) if incoming_ids else true(),
+            )
+        ) or 0
     changed_raw_ids: set[str] = set()
     void_audits: list[tuple] = []
-    for raw_id in sorted(missing_ids):
+    for raw_id in decision.void_ids:
         row = locked_existing[raw_id]
-        if row.data_status in {"已作废", "作废"}:
-            continue
-        if dropped_no_contract:
-            # 本表有行被排除 ⇒ 它不能代表「以本表为准」的删除侧：这条旧行的对应
-            # 行可能正躺在被排除的那堆里。整批退化为「覆盖同键、只增不删」。
-            void_protected += 1
-            continue
         before = {c: _jsonable(getattr(row, c)) for c in _EXPENSE_UPD}
         row.data_status = "已作废"
         row.import_batch_id = batch_id
@@ -1302,12 +1280,13 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         "rows_inactive": result.rows_inactive,
         "expense_rows_replaced": replaced,
         "expense_rows_voided": voided,
-        # 「本该作废、但因本表不完整而保留」的旧行数。>0 说明本表有行缺销售订单
-        # 被排除，删除侧未生效——回执必须显示，否则用户会以为「以本表为准」已完全
-        # 生效（作废是减钱动作，留旧账比丢账安全，但不能不说）。
+        # 「本该作废、但因抑制而保留」的旧行数。>0 ⇒ 删除侧未生效——回执必须显示，
+        # 否则用户会以为「以本表为准」已完全生效（作废是减钱动作，留旧账比丢账安全，
+        # 但不能不说）。原因见 expense_void_suppressed_reason。
         "expense_rows_void_protected": void_protected,
+        "expense_void_suppressed_reason": decision.suppressed_reason,
         # 被排除的无合同行（客户的公司日常开销即此类）：本次未入库，也未牵连旧行。
-        "expense_rows_dropped_no_contract": dropped_no_contract,
+        "expense_rows_dropped_no_contract": void_inputs.dropped_no_contract,
         # Count canonical rows, not project-side invalidations.  One attribution
         # moved P→Q touches two revisions/audits but is still one synced row.
         "expense_attributions_synced": attributions_synced,
