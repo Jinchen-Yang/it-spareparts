@@ -80,7 +80,7 @@ for r in app.routes:
                             "fields": model_fields(ann)})
             multipart = any(b["file"] or b["form"] for b in bps)
             body = {"content_type": "multipart" if multipart else "json", "params": bps}
-        qp = [{"name": p.name, "type": type_name(getattr(p, "type_", None) or p.field_info.annotation), "required": bool(getattr(p, "required", p.field_info.is_required())), "default": (None if p.field_info.default is ... or getattr(p, "required", p.field_info.is_required()) else repr(p.field_info.default)[:60]), "desc": p.field_info.description or ""} for p in dep.query_params]
+        qp = [{"name": (getattr(p, "alias", None) or getattr(p.field_info, "alias", None) or p.name), "py_name": p.name, "type": type_name(getattr(p, "type_", None) or p.field_info.annotation), "required": bool(getattr(p, "required", p.field_info.is_required())), "default": (None if p.field_info.default is ... or getattr(p, "required", p.field_info.is_required()) else repr(p.field_info.default)[:60]), "desc": p.field_info.description or ""} for p in dep.query_params]
         pp = [{"name": p.name, "type": type_name(getattr(p, "type_", None) or p.field_info.annotation)} for p in dep.path_params]
         doc = inspect.getdoc(r.endpoint) or ""
         rc = r.response_class
