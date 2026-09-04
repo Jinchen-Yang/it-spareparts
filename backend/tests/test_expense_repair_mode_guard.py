@@ -442,3 +442,32 @@ def test_failed_batch_still_records_detected_file_type(db, tmp_path):
     from app.models.system import SysImportBatch
     b = db.scalars(select(SysImportBatch).order_by(SysImportBatch.id.desc())).first()
     assert b.status == "failed" and b.file_type == "expense"
+
+
+def test_protected_count_includes_null_status_rows(db, tmp_path):
+    """Codex P2（#315）：抑制时被保留行数用 COUNT 上报，裸 NOT IN 在三值逻辑下会把
+    data_status 为 NULL 的旧行（历史/手工行）排除，与 classify 的口径（NULL 也是作废
+    候选）不一致，回执少算、>0 才弹的告警可能消失。"""
+    t1 = _rowwise_sheet(tmp_path, "n1.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-N"),
+    ])
+    pipeline.run_import(db, t1, "n1.xlsx")
+    db.commit()
+    legacy = db.scalars(select(FProjectExpense)).one()
+    db.add(FProjectExpense(
+        raw_line_id="LEGACY-NULL-STATUS", bxd_no="BXD-L", line_no=1, data_status=None,
+        expense_date=legacy.expense_date, person="老账", reason="状态为空的历史行",
+        linked_sales_order_no="XSDD-N", amount=Decimal("1"), amount_ex_tax=Decimal("1"),
+        amount_inc_tax=Decimal("1.13"), tax_basis="default_ex",
+        tax_rate_used=legacy.tax_rate_used, import_batch_id=legacy.import_batch_id,
+    ))
+    db.commit()
+
+    t2 = _rowwise_sheet(tmp_path, "n2.xlsx", [
+        _row(amount=5000, reason="保留", bxd="BXD-1", seq=1, xsdd="XSDD-N"),
+    ])
+    batch = pipeline.run_import(db, t2, "n2.xlsx", mode="upsert")   # 无锚 ⇒ 抑制
+    db.commit()
+    r = batch.report_json
+    assert r["expense_void_suppressed_reason"] == "unanchored"
+    assert r["expense_rows_void_protected"] == 1                     # NULL 状态行被计入

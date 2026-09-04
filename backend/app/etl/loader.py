@@ -1102,10 +1102,13 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
     if decision.suppressed_reason and contracts:
         # 抑制时不按合同扩宽 scope（不锁、不同步那些旧行），被保留的行数单独 COUNT：
         # 回执必须说清「本该作废多少行没作废」。
+        # 与 expense_void.classify 同口径：NULL 状态也是作废候选（三值逻辑下裸
+        # NOT IN 会把 NULL 排除，回执少算，Codex P2）。
         void_protected = session.scalar(
             select(func.count()).select_from(FProjectExpense).where(
                 FProjectExpense.linked_sales_order_no.in_(sorted(contracts)),
-                FProjectExpense.data_status.not_in(sorted(expense_void.VOID_STATUSES)),
+                or_(FProjectExpense.data_status.is_(None),
+                    FProjectExpense.data_status.not_in(sorted(expense_void.VOID_STATUSES))),
                 FProjectExpense.raw_line_id.not_in(incoming_ids) if incoming_ids else true(),
             )
         ) or 0
