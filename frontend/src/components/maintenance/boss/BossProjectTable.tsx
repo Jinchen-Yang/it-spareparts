@@ -13,6 +13,7 @@ const LIFECYCLE_TEXT: Record<string, { text: string; color?: string }> = {
   ongoing: { text: "进行中", color: "blue" },
   ended: { text: "已结束" },
   missing: { text: "期限缺失", color: "default" },
+  payment_complete: { text: "回款已完成", color: "green" },
 };
 
 /**
