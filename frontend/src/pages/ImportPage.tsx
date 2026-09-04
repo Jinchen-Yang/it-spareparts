@@ -9,10 +9,11 @@ import PageHeader from "../components/PageHeader";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 import {
-  downloadImportErrors, precheckImportFiles, uploadImportBatch,
-  type ImportMode, type ImportPrecheckResult,
+  downloadImportErrors, precheckImportFiles, previewExpenseVoid, uploadImportBatch,
+  type ExpenseVoidPreview, type ImportMode, type ImportPrecheckResult,
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
+import ExpenseVoidPreviewPanel from "./import/ExpenseVoidPreviewPanel";
 
 const MAX_IMPORT_FILES = 20;
 
@@ -74,6 +75,9 @@ interface PrecheckSnapshot {
   mode: ImportMode;
   revision: number;
   result: ImportPrecheckResult;
+  // 修复模式下会真的作废的报销页（预检 upsert_void_armed）各一份服务端预演；
+  // status=ready 的令牌随正式提交带回，服务端装载期复核。
+  previews: ExpenseVoidPreview[];
 }
 
 export default function ImportPage() {
@@ -222,8 +226,30 @@ export default function ImportPage() {
     try {
       const result = await precheckImportFiles(files, mode, controller.signal);
       if (!mountedRef.current || revision !== inputRevisionRef.current) return;
-      setSnapshot({ files, mode, revision, result });
-      setPhase(result.decision === "clean" ? "clean_ready"
+      // 预检说「会作废」的文件，以及预检因解析预算被跳过、删除侧结论未知的报销文件，
+      // 逐个向服务端要作废预演（单文件端点有自己的预算；结论 ready/suppressed/… 都精确）。
+      // 预演给不出可确认的结论就不允许提交：宁可让用户重来，也不让他对着没有清单的
+      // 「将作废」按确认，更不能等作业跑到一半才被 void_preview_required 拒绝。
+      // 文件按**位置**配对，不按文件名：precheckImportFiles 已校验响应顺序与文件一一对应，
+      // 而不同目录的同名文件按名字查会拿错字节。
+      const NEEDS_PREVIEW = new Set(["upsert_void_armed", "upsert_precheck_skipped"]);
+      const armedIndexes = result.contract === "v2"
+        ? result.files.flatMap((file, index) =>
+          file.issues.some((issue) => NEEDS_PREVIEW.has(issue.code)) ? [index] : [])
+        : [];
+      const previews: ExpenseVoidPreview[] = [];
+      for (const index of armedIndexes) {
+        const source = files[index];
+        if (!source) throw new Error(`「${result.files[index].filename}」无法定位到已选文件，请重新预检`);
+        previews.push(await previewExpenseVoid(source, mode, controller.signal));
+        if (!mountedRef.current || revision !== inputRevisionRef.current) return;
+      }
+      // suppressed / not_applicable 是正常结论（不会作废、不需要令牌）；其余非 ready 一律阻断
+      const blocking = previews.some((preview) =>
+        preview.status !== "ready" && preview.status !== "suppressed" && preview.status !== "not_applicable");
+      setSnapshot({ files, mode, revision, result, previews });
+      setPhase(blocking ? "blocked"
+        : result.decision === "clean" ? "clean_ready"
         : result.decision === "warning" ? "warning_ready" : "blocked");
     } catch (e: any) {
       if (!mountedRef.current || revision !== inputRevisionRef.current) return;
@@ -256,7 +282,13 @@ export default function ImportPage() {
     setImportError(null);
     setPhase("uploading");
     try {
-      const data = await uploadImportBatch(current.files, current.mode);
+      const tokens = current.previews
+        .filter((preview) => preview.status === "ready" && preview.preview_token)
+        .map((preview) => preview.preview_token as string);
+      // 没有令牌时保持既有调用形状（files, mode）；令牌只在会作废的形态下出现
+      const data = tokens.length
+        ? await uploadImportBatch(current.files, current.mode, tokens)
+        : await uploadImportBatch(current.files, current.mode);
       if (!mountedRef.current) return;
       setJob({ id: data.job_id, status: "processing", mode: current.mode,
                total_files: data.total_files, done_files: 0, error_files: 0, note: null, batches: [] });
@@ -274,7 +306,10 @@ export default function ImportPage() {
     } catch (e: any) {
       if (!mountedRef.current || current.revision !== inputRevisionRef.current) return;
       const detail = e?.response?.data?.detail || e?.message || "正式提交失败";
-      setImportError(`${detail}。请先查看导入历史，确认未创建作业后再重试。`);
+      const code = String(e?.response?.headers?.["x-error-code"] ?? "");
+      setImportError(code.startsWith("void_")
+        ? `${detail}。请点「返回修改」后重新预检，系统会重新生成作废预演。`
+        : `${detail}。请先查看导入历史，确认未创建作业后再重试。`);
       setPhase(current.result.decision === "warning" ? "warning_ready" : "clean_ready");
     } finally {
       if (mountedRef.current) setSubmitting(false);
@@ -474,7 +509,9 @@ export default function ImportPage() {
               {phase === "warning_ready" && (
                 <>
                   <Checkbox checked={warningConfirmed} onChange={(event) => setWarningConfirmed(event.target.checked)}>
-                    我已阅读并确认以上警告
+                    {snapshot?.previews.some((preview) => preview.status === "ready" && (preview.void?.rows ?? 0) > 0)
+                      ? `我已逐行核对作废预演清单（共 ${snapshot.previews.reduce((n, preview) => n + (preview.void?.rows ?? 0), 0)} 行）并确认导入`
+                      : "我已阅读并确认以上警告"}
                   </Checkbox>
                   <Button type="primary" loading={submitting} disabled={busy || activeJob || !warningConfirmed} onClick={submitBatch}>
                     确认警告并导入
@@ -494,6 +531,7 @@ export default function ImportPage() {
               result={snapshot.result}
               onOpenBatch={(batchId) => { void openDetail(batchId, true); }}
             />}
+            {snapshot && <ExpenseVoidPreviewPanel previews={snapshot.previews} />}
           </div>
         )}
       </Card>

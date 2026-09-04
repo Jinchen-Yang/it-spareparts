@@ -27,9 +27,14 @@
 作废 431 行、¥497,806.94 从存活金额里消失，批次报 success。那 431 行是报销单一单多行
 时靠单头继承 XSDD 的明细行——用户按单元格是否为空来过滤，看不出它们与公司开销行的区别。
 """
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Iterable, Mapping
 
+from app.etl.reader import ReaderError
 from app.etl.transform import TransformResult
 
 # 已经不生效的状态：再作废一次没有意义，也不该计入回执
@@ -146,3 +151,109 @@ def scope_contracts(inputs: VoidInputs) -> list:
 
 def iter_error_types(errors: Iterable) -> set:
     return {e.error_type for e in errors}
+
+
+# ---------------------------------------------------------------------------
+# 导入前作废预演：预演与执行之间的「承诺」
+# ---------------------------------------------------------------------------
+#
+# 预演是无锁读、导入是事务内加锁读，两者之间可能有别人的导入落地；文件在预演与
+# 提交之间也是分两次上传的。所以预演给出的数字不是描述，而是一份承诺：要么真实
+# 导入的作废集合与预演逐行一致，要么这次导入根本不发生。承诺由三样东西兑现：
+#   1. 作废判定只有 classify 一份实现（预演与 loader 同源，见模块 docstring）；
+#   2. 字节同一性：HTTP 层用 HMAC 令牌把 file_hash + 指纹绑在一起（services/
+#      import_void_preview.py），提交时重算实际收到文件的 sha256 才认令牌；
+#   3. 装载期指纹复核：loader 在无锁探针后与加锁重读后各算一次指纹，与令牌里的
+#      不一致就在任何写入之前抛 VoidPlanDrift，整批不导入、提示重新预演。
+#
+# 指纹逐行元组必须含 linked_sales_order_no：loader 的作废候选集在无锁探针处就由
+# affected_ids 定死，费用归集工作簿 apply 不取全局导入锁，能在探针→逐行锁的窗口
+# 里把某行的合同号从 C 改到 C2 并提交；该行仍会被作废，若指纹只看状态与金额则
+# 一声不响——预演说「从合同 C 扣这笔」，实际从 C2 扣。
+
+
+class VoidPlanDrift(ReaderError):
+    """预演之后相关报销行已变化：整批不导入（作为 ReaderError 走失败批次留痕路径）。"""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message or "作废预演已失效：预演之后相关报销行发生变化，本批未导入，请重新预演",
+            code="void_plan_drift",
+        )
+
+
+def is_armed(inputs: VoidInputs) -> bool:
+    """本批会**真的**执行作废（修复模式、单合同、锚定、无排除行、且有合同）。
+
+    只有这种形态需要预演令牌；抑制形态与非报销文件的删除侧结论与库状态无关，
+    预检时刻就是精确的。
+    """
+    return inputs.upsert and bool(inputs.contracts) and inputs.suppressed_reason is None
+
+
+def _money(value) -> str:
+    return format(Decimal(value), "f") if value is not None else ""
+
+
+def fingerprint(decision: VoidDecision, inputs: VoidInputs, existing: Mapping) -> str:
+    """预演承诺的规范化摘要。
+
+    刻意只覆盖作废集合、已作废集合与抑制原因，**不**覆盖本表会同键覆盖的行（∈
+    incoming）：它们永远不在作废集合里，对它们的并发编辑与「预演承诺的那件事」无关，
+    纳入只会制造无意义的拒绝。反过来，作废行的金额与合同号必须纳入——用户是对着
+    一个金额和一个合同号勾的确认框，任一变了就不算同一个承诺。
+    """
+    def tup(raw_id):
+        row = existing[raw_id]
+        return [raw_id, getattr(row, "data_status", None), _money(getattr(row, "amount", None)),
+                getattr(row, "linked_sales_order_no", None)]
+
+    payload = {
+        "v": 1,
+        "upsert": inputs.upsert,
+        "reason": decision.suppressed_reason,
+        "dropped": inputs.dropped_no_contract,
+        "anchored": inputs.anchored,
+        "contracts": sorted(inputs.contracts),
+        "void": [tup(raw_id) for raw_id in sorted(decision.void_ids)],
+        "already_void": sorted(decision.already_void_ids),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def assert_fingerprint(decision: VoidDecision, inputs: VoidInputs, existing: Mapping,
+                       expected: str | None) -> None:
+    """expected 为 None ⇒ 无承诺可核（直接调用 run_import 的既有路径），不检查。"""
+    if expected is None:
+        return
+    actual = fingerprint(decision, inputs, existing)
+    if not hmac.compare_digest(actual, expected):
+        raise VoidPlanDrift()
+
+
+def void_rows(decision: VoidDecision, existing: Mapping) -> list[dict]:
+    """预演/回执用的作废行清单（按 raw_line_id 排序，字段名与 FProjectExpense 一致）。"""
+    rows = []
+    for raw_id in sorted(decision.void_ids):
+        row = existing[raw_id]
+        rows.append({
+            "raw_line_id": raw_id,
+            "linked_sales_order_no": getattr(row, "linked_sales_order_no", None),
+            "bxd_no": getattr(row, "bxd_no", None),
+            "line_no": getattr(row, "line_no", None),
+            "expense_date": (getattr(row, "expense_date", None).isoformat()
+                             if getattr(row, "expense_date", None) else None),
+            "person": getattr(row, "person", None),
+            "reason": getattr(row, "reason", None),
+            "data_status": getattr(row, "data_status", None),
+            "amount": _money(getattr(row, "amount", None)),
+        })
+    return rows
+
+
+def void_amount(decision: VoidDecision, existing: Mapping) -> Decimal:
+    return sum((Decimal(getattr(existing[r], "amount", 0) or 0) for r in decision.void_ids),
+               Decimal("0"))
+

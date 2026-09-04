@@ -8,11 +8,12 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, update, or_
 from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.etl import expense_void, loader, mapping, reader, sheet_selection
+from app.models.maintenance import FProjectExpense
 from app.etl.reader import ReaderError
 from app.etl.transform import TransformResult, transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
@@ -333,7 +334,8 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
 def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
                import_job_id: int | None = None,
-               auto_assign_maintenance_projects: bool = False) -> SysImportBatch:
+               auto_assign_maintenance_projects: bool = False, expected_void_fingerprint: str | None = None,
+               require_void_preview: bool = False) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
@@ -432,6 +434,16 @@ def run_import(session: Session, file_path: str, original_name: str,
                 raise ReaderError(
                     f"修复模式（以本表为准）要求报销页无错误行：发现 {len(blocking)} 行错误"
                     "（详见批次错误明细），本次未导入。请修正后重试，或改用「跳过」模式仅补新行。")
+            # 会真的作废的形态（单合同 + 锚定 + 无排除行）必须带着预演承诺进来。
+            # 强制放在 HTTP 入口（require_void_preview 由 /upload 与 /upload-batch 传
+            # True），不写死在 run_import 内部：既有直接调用 run_import 的路径与用例
+            # 不受影响，而两个公开入口都没有绕过预演的后门。
+            if (require_void_preview and expected_void_fingerprint is None
+                    and expense_void.is_armed(expense_void.plan_inputs(result, mode=mode))):
+                raise ReaderError(
+                    "修复模式导入单合同项目工作簿报销页必须先完成作废预演（导入页会在预检后"
+                    "自动预演并展示将作废的行），本次未导入。",
+                    code="void_preview_required")
 
         maintenance_lock_envelope = None
         assignment_service = None
@@ -458,8 +470,7 @@ def run_import(session: Session, file_path: str, original_name: str,
             mode=mode,
             operated_by=uploaded_by,
             audit_overwrites=True,
-            maintenance_lock_envelope=maintenance_lock_envelope,
-        )
+            maintenance_lock_envelope=maintenance_lock_envelope, expected_void_fingerprint=expected_void_fingerprint)
         sales_project_sync = None
         if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
             from app.services import maintenance_bulk_import
@@ -547,3 +558,87 @@ def run_import(session: Session, file_path: str, original_name: str,
         batch.report_json = {"error": str(exc)}
         session.flush()
         raise
+
+
+def preview_expense_void(session: Session, file_path: str, *, mode: str) -> dict:
+    """导入前作废预演（纯读：不加锁、不建批次、不写任何东西）。
+
+    读法与判定与 run_import 逐字节同源（load_workbook / transform_workbook /
+    expense_void.classify），本函数没有任何一行自己的作废逻辑；与 loader 的差别只有
+    候选行来自无锁投影而非加锁实体、以及不执行写入。返回的 fingerprint 由 HTTP 层
+    签进令牌，loader 装载期复核（见 expense_void 模块 docstring）。
+
+    status:
+      not_applicable   非修复模式 / 无报销页 / 报销页为空（无合同）——不需要令牌
+      will_be_rejected 门禁会整批拒绝（与 pipeline 门禁同一个 blocking_errors）
+      suppressed       删除侧被 D-09 抑制（reason 说明原因）——不需要令牌，精确
+      ready            会真的作废：给出逐行清单、金额与指纹（令牌由 API 层签发）
+    """
+    loaded = load_workbook(file_path)
+    require_clean_workbook(loaded)
+    if mode != "upsert" or not loaded.expense_sheets:
+        return {"status": "not_applicable", "file_type": loaded.file_type}
+    result = transform_workbook(loaded).result
+    inputs = expense_void.plan_inputs(result, mode="upsert")
+    base = {
+        "file_type": loaded.file_type,
+        "rows_incoming": len(inputs.incoming_ids),
+        "dropped_no_contract": inputs.dropped_no_contract,
+        "contracts": sorted(inputs.contracts),
+        "anchored": inputs.anchored,
+    }
+    blocking = expense_void.blocking_errors(result)
+    if blocking:
+        return {"status": "will_be_rejected", "blocking_errors": len(blocking),
+                "blocking_error_types": sorted(expense_void.iter_error_types(blocking)),
+                **base}
+    if inputs.suppressed_reason:
+        return {"status": "suppressed", "reason": inputs.suppressed_reason, **base}
+    if not expense_void.is_armed(inputs):
+        return {"status": "not_applicable", **base}
+
+    incoming_ids = sorted(inputs.incoming_ids)
+    scope_contracts = expense_void.scope_contracts(inputs)
+    predicates = []
+    if incoming_ids:
+        predicates.append(FProjectExpense.raw_line_id.in_(incoming_ids))
+    if scope_contracts:
+        predicates.append(FProjectExpense.linked_sales_order_no.in_(scope_contracts))
+    existing = {
+        row.raw_line_id: row
+        for row in session.execute(
+            select(
+                FProjectExpense.raw_line_id, FProjectExpense.data_status,
+                FProjectExpense.amount, FProjectExpense.linked_sales_order_no,
+                FProjectExpense.bxd_no, FProjectExpense.line_no,
+                FProjectExpense.expense_date, FProjectExpense.person,
+                FProjectExpense.reason,
+            ).where(or_(*predicates))
+        )
+    } if predicates else {}
+    decision = expense_void.classify(existing, inputs)
+    rows = expense_void.void_rows(decision, existing)
+    (contract,) = inputs.contracts
+    summary = {
+        "rows": len(rows),
+        "amount": format(expense_void.void_amount(decision, existing), "f"),
+        "already_void_rows": len(decision.already_void_ids),
+    }
+    if len(rows) > VOID_PREVIEW_ROW_CAP:
+        # 用户要对着「已逐行核对（共 N 行）」勾确认：清单不完整就不能签发令牌。
+        # 不截断展示、不签令牌，让这一批在确认前就停下（Codex P1）。单合同报销页
+        # 一次作废超过这个数本身就不是正常往返，应拆分或改用跳过模式。
+        return {"status": "too_large", "contract": contract, "void": summary,
+                "row_cap": VOID_PREVIEW_ROW_CAP, **base}
+    return {
+        "status": "ready",
+        "contract": contract,
+        "fingerprint": expense_void.fingerprint(decision, inputs, existing),
+        "void": summary,
+        "void_rows": rows,                 # 完整清单：确认框承诺的是每一行
+        **base,
+    }
+
+
+# 超过此数不签令牌（见 preview_expense_void）。行是小字典，几千行的 JSON 仍在可接受范围。
+VOID_PREVIEW_ROW_CAP = 5000
