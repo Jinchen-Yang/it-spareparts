@@ -942,7 +942,7 @@ _TAKEOVER_DIFF_FIELDS = ("amount_ex_tax", "amount_inc_tax", "expense_date", "fee
 
 def _retire_legacy_expense_identity(session: Session, *, duplicate_attr, legacy_raw,
                                     successor, batch_id: int, operated_by: str | None,
-                                    changed_raw_ids: set) -> tuple[str | None, bool]:
+                                    changed_raw_ids: set) -> tuple[str | None, bool, bool]:
     """键形态升级接管：旧归因让位（删除 + 项目事实审计），旧键事实行作废（导入覆盖审计）。
 
     调用方已按协议顺序持有归因行锁与旧键事实行锁。之后调用方照常 sync_attribution_from_raw
@@ -950,7 +950,8 @@ def _retire_legacy_expense_identity(session: Session, *, duplicate_attr, legacy_
     expense_ref) 要求业务身份唯一，一条 void 的旧归因留着仍与新归因同 ref 撞在一起。
 
     审计记录接管前后的金额/日期/类别/合同/人员/事由差异：不设金额门槛（源端更正金额是
-    合法场景，等额重排又能绕过门槛），但差异必须可事后复核。返回（旧键行合同串, 金额是否变化）。
+    合法场景，等额重排又能绕过门槛），但差异必须可事后复核。
+    返回（旧键行合同串, 金额是否变化, 本次是否真的把旧键行置为作废）。
     """
     from app.services.maintenance_expense_integrity import expense_id_for
 
@@ -970,14 +971,15 @@ def _retire_legacy_expense_identity(session: Session, *, duplicate_attr, legacy_
     )
     session.delete(duplicate_attr)
     session.flush()               # 归因 DELETE 先落库，再动事实行（锁序协议）
-    _void_raw_expense_row(
+    voided_here = _void_raw_expense_row(
         session, legacy_raw, batch_id=batch_id, operated_by=operated_by,
         table="f_project_expense(键形态升级接管·旧键行作废)", changed_raw_ids=changed_raw_ids,
         extra_after={"superseded_by": expense_id_for(successor.raw_line_id)},
     )
     session.flush()
     amount_changed = "amount_ex_tax" in diff or "amount_inc_tax" in diff
-    return (legacy_raw.linked_sales_order_no if legacy_raw is not None else None), amount_changed
+    return ((legacy_raw.linked_sales_order_no if legacy_raw is not None else None),
+            amount_changed, voided_here)
 
 
 def _load_expense(session: Session, result: TransformResult, batch_id: int,
@@ -1290,27 +1292,38 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                 != expense_id_for(raw_id),
             ).with_for_update()
         )
-        if (duplicate_attr is None and raw.bxd_no and raw.line_no is not None
-                and raw_key_family(raw_id) == KEY_FAMILY_NATIVE):
-            # 旧视图既无数据ID也无序号时落成 EXP: 内容键，其 expense_ref 只有单号，
-            # 与带序号的原生行 ref 永不相等——不处理就是静默双计。只在内容摘要逐字节
-            # 相同时接管；对不上就上报 unresolved，绝不猜。
-            seqless = session.scalar(
+        if duplicate_attr is None and raw_key_family(raw_id) == KEY_FAMILY_NATIVE \
+                and raw.expense_date is not None:
+            # 旧视图既无数据ID也无序号时落成 EXP: 内容键：有单号则 expense_ref 只有单号，
+            # 连单号都没有则 expense_ref 就是 EXP 键本身——两种都与带序号原生行的 ref 永不
+            # 相等，不处理就是静默双计。按**内容摘要**直接找旧归因（不依赖任一侧有无单号，
+            # Codex P1）：找到即逐字节同内容，接管；同单号却对不上摘要的，上报 unresolved，
+            # 绝不猜。
+            digest = content_key_digest(
+                xsdd=raw.linked_sales_order_no, expense_date=raw.expense_date,
+                amount=raw.amount, reason=raw.reason, person=raw.person)
+            by_content = session.scalar(
                 select(MaintenanceProjectExpenseAttribution).where(
                     MaintenanceProjectExpenseAttribution.project_id == target_project_id,
-                    MaintenanceProjectExpenseAttribution.expense_ref == raw.bxd_no,
                     MaintenanceProjectExpenseAttribution.expense_id != expense_id_for(raw_id),
+                    or_(
+                        MaintenanceProjectExpenseAttribution.raw_expense_line_id.like(f"EXP:{digest}#%"),
+                        MaintenanceProjectExpenseAttribution.expense_id.like(f"bxd:EXP:{digest}#%"),
+                    ),
                 ).with_for_update()
             )
-            if seqless is not None:
-                key = raw_backed_key(seqless)
-                digest = content_key_digest(
-                    xsdd=raw.linked_sales_order_no, expense_date=raw.expense_date,
-                    amount=raw.amount, reason=raw.reason, person=raw.person)
-                if key and raw_key_family(key) == KEY_FAMILY_CONTENT \
-                        and key.startswith(f"EXP:{digest}#"):
-                    duplicate_attr = seqless
-                else:
+            if by_content is not None:
+                duplicate_attr = by_content
+            elif raw.bxd_no and raw.line_no is not None:
+                seqless = session.scalar(
+                    select(MaintenanceProjectExpenseAttribution).where(
+                        MaintenanceProjectExpenseAttribution.project_id == target_project_id,
+                        MaintenanceProjectExpenseAttribution.expense_ref == raw.bxd_no,
+                        MaintenanceProjectExpenseAttribution.expense_id != expense_id_for(raw_id),
+                    )
+                )
+                key = raw_backed_key(seqless) if seqless is not None else None
+                if key and raw_key_family(key) == KEY_FAMILY_CONTENT:
                     attribution_legacy_unresolved += 1
                     _log.warning(
                         "expense identity unresolved: batch=%s project=%s bxd=%s "
@@ -1345,7 +1358,7 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                 # 业务行从所有读模型消失且回执不报错。退回整批拒绝（与改动前一致）。
                 reject_reason = "原生键行已作废或正被本批作废，来行为遗留形态"
             if reject_reason is None and verdict == "takeover":
-                legacy_contract, amount_changed = _retire_legacy_expense_identity(
+                legacy_contract, amount_changed, voided_here = _retire_legacy_expense_identity(
                     session, duplicate_attr=duplicate_attr, legacy_raw=counterpart,
                     successor=raw, batch_id=batch_id, operated_by=operated_by,
                     changed_raw_ids=changed_raw_ids,
@@ -1353,7 +1366,10 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                 attribution_legacy_takeovers += 1
                 takeovers_amount_changed += int(amount_changed)
                 retired_raw_ids.add(existing_key)
-                identity_voided_raw_ids.add(existing_key)
+                if voided_here:
+                    # 锚定修复模式下旧键行不在 incoming，缺行作废循环已先把它作废并计入
+                    # expense_rows_voided——同一物理行不能再进 voided_by_identity（Codex P2）
+                    identity_voided_raw_ids.add(existing_key)
                 if legacy_contract:
                     identity_contracts.add(legacy_contract)
                 if raw_key_family(existing_key) == KEY_FAMILY_COMPOSITE:

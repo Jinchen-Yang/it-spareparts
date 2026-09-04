@@ -194,6 +194,9 @@ def test_takeover_in_upsert_mode_counts_once(db):
     _load(db, _expense(LEGACY_COMPOSITE, amount="100"))
     r = _load(db, _expense(NATIVE, amount="120"), mode="upsert")
     assert r["expense_attribution_legacy_takeovers"] == 1
+    # 锚定修复模式：旧键行不在本表，缺行作废循环先作废并计入 expense_rows_voided；
+    # 同一物理行不能再进 voided_by_identity（Codex P2）
+    assert r["expense_rows_voided"] == 1 and r["expense_rows_voided_by_identity"] == 0
     assert _attr(db, LEGACY_COMPOSITE) is None and _attr(db, NATIVE).amount_ex_tax == Decimal("120")
     assert _raw(db, LEGACY_COMPOSITE).data_status == "已作废"
     assert _expense_by_contract(db)[CONTRACT] == Decimal("120")
@@ -315,7 +318,7 @@ def test_receipt_does_not_depend_on_key_order(db, native):
     r = _load(db, _expense(native, amount="120"), mode="upsert")
     assert r["expense_attribution_legacy_takeovers"] == 1
     assert r["expense_attribution_legacy_skipped"] == 0
-    assert r["expense_rows_voided_by_identity"] == 1
+    assert r["expense_rows_voided"] == 1 and r["expense_rows_voided_by_identity"] == 0
     assert _expense_by_contract(db)[CONTRACT] == Decimal("120")
 
 
@@ -344,4 +347,21 @@ def test_partial_export_takeover_warns_about_uncovered_siblings(db):
     r = _load(db, _expense(NATIVE, line_no=1, amount="100"))         # 只带回第 1 行
     assert r["expense_attribution_legacy_takeovers"] == 1
     assert r["expense_attribution_legacy_siblings_active"] == 1
+
+
+def test_content_key_without_any_number_is_found_by_digest(db):
+    """Codex P1（#317）：旧视图既无数据ID也无单号 ⇒ EXP 键本身就是 expense_ref，按单号
+    永远找不到；必须按内容摘要直接找旧归因，否则原生行另建归因、旧事实行仍生效 ⇒ 静默双计。"""
+    _seed_project(db)
+    digest = content_key_digest(xsdd=CONTRACT, expense_date=date(2026, 3, 28),
+                                amount=Decimal("100.00"), reason="现场备件", person="尤玉玲")
+    legacy = f"EXP:{digest}#0"
+    _load(db, _expense(legacy, bxd_no=None, line_no=None, amount="100"))
+    assert _attr(db, legacy).expense_ref == legacy                    # ref 就是键本身
+
+    r = _load(db, _expense(NATIVE, amount="100"))                     # 同内容，带单号+序号
+    assert r["expense_attribution_legacy_takeovers"] == 1
+    assert _attr(db, legacy) is None and _raw(db, legacy).data_status == "已作废"
+    assert _attr(db, NATIVE) is not None
+    assert _expense_by_contract(db)[CONTRACT] == Decimal("100")       # 单计
 
