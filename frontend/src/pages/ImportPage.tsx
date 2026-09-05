@@ -39,6 +39,7 @@ const REPORT_LABEL: Record<string, string> = {
   expense_attribution_legacy_skipped: "旧键形态重复行已入库并作废（原生键为准）",
   expense_rows_voided_by_identity: "因键形态接管而作废的旧行",
   expense_attribution_legacy_unresolved: "无序号旧键与原生行内容对不上（未接管，需治理）",
+  expense_attribution_legacy_orphans_voided: "从未建归因的旧键孤儿行已作废（原生键为准）",
   expense_attribution_legacy_takeovers_amount_changed: "接管时金额与旧行不同",
   expense_attribution_legacy_siblings_active: "接管所在报销单仍有未覆盖的旧键行",
 };

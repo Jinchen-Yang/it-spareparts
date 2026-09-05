@@ -115,6 +115,53 @@ def raw_backed_key(attr) -> str | None:
     return key or None
 
 
+def legacy_orphan_disposition(*, orphan_raw, native_attr, native_raw) -> str:
+    """无归因的旧键事实行，其 (项目, 单号#序号) 已被原生键归因持有时该怎么办。
+
+    retire    原生侧仍在计数（归因 approved、原生事实行生效）且同一合同域 ⇒ 孤儿带审计作废：
+              它和原生行是同一笔账，留着就在预算看板双计，还让合同重算守卫把它当真重复
+              （2026-09-05 验收③：3 条批次 168 时代未建成归因的旧键行，让项目 5eee74ea 的
+              合同金额改不了）。跳过而不作废等于永远留雷。
+    conflict  其余（原生侧已作废/未 approved、跨合同域、既有不是原生键或不是 raw 支撑）
+              ⇒ 维持原有整批拒绝：无法证明是同一笔账。
+    """
+    native_key = raw_backed_key(native_attr)
+    if not native_key or raw_key_family(native_key) != KEY_FAMILY_NATIVE:
+        return "conflict"
+    if raw_key_family(orphan_raw.raw_line_id) == KEY_FAMILY_NATIVE:
+        return "conflict"
+    if native_raw is None or native_attr.normalized_status != "approved":
+        return "conflict"
+    if native_raw.data_status in ("已作废", "作废"):
+        return "conflict"
+    if normalize_contract_no(orphan_raw.linked_sales_order_no) != normalize_contract_no(
+            native_raw.linked_sales_order_no):
+        return "conflict"
+    return "retire"
+
+
+def retire_orphan_raw(db, orphan_raw, *, superseded_by: str, reason: str,
+                      operated_by: str | None, entity_type: str = "expense_identity") -> bool:
+    """把一条无归因的旧键事实行软作废并写 SysAuditLog（身份层面的改动，无条件留痕）。
+    已作废的不重复处理。loader 的批次内作废有自己的批次审计通道；此函数供合同重算等
+    非导入路径使用。返回是否真的改了。"""
+    from app.models.system import SysAuditLog
+
+    if orphan_raw is None or orphan_raw.data_status in ("已作废", "作废"):
+        return False
+    before = {"raw_line_id": orphan_raw.raw_line_id, "data_status": orphan_raw.data_status,
+              "linked_sales_order_no": orphan_raw.linked_sales_order_no,
+              "bxd_no": orphan_raw.bxd_no, "line_no": orphan_raw.line_no,
+              "amount": str(orphan_raw.amount) if orphan_raw.amount is not None else None}
+    orphan_raw.data_status = "已作废"
+    after = {**before, "data_status": "已作废", "superseded_by": superseded_by}
+    db.add(SysAuditLog(entity_type=entity_type, entity_id=orphan_raw.id, action="void",
+                       before_json=before, after_json=after, reason=reason,
+                       operated_by=operated_by or "system"))
+    db.flush()
+    return True
+
+
 def duplicate_identity_verdict(existing_key: str, incoming_key: str) -> str:
     """同项目同 单号#序号 下两把不同的键该怎么办。
 

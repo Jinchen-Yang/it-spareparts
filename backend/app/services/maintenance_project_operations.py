@@ -64,6 +64,8 @@ from app.services import maintenance_warehouse_site_issue_bridge
 from app.services.query_filters import active_beta_maintenance_orders
 
 
+import logging
+_log = logging.getLogger("maintenance_project_operations")
 _EXPENSE_VOID_STATUSES = frozenset({"已作废", "作废"})
 
 
@@ -3489,6 +3491,9 @@ def _resync_contract_expenses_locked(
         expense_id_for,
         expense_ref_for,
         find_ownership_candidates,
+        legacy_orphan_disposition,
+        raw_backed_key,
+        retire_orphan_raw,
         sync_attribution_from_raw,
     )
 
@@ -3574,17 +3579,42 @@ def _resync_contract_expenses_locked(
                 "合同变更产生了预锁范围外的报销归属，请重试"
             )
         duplicate = db.scalar(
-            select(MaintenanceProjectExpenseAttribution.expense_id).where(
+            select(MaintenanceProjectExpenseAttribution).where(
                 MaintenanceProjectExpenseAttribution.project_id
                 == target_project_id,
                 MaintenanceProjectExpenseAttribution.expense_ref
                 == expense_ref_for(raw),
                 MaintenanceProjectExpenseAttribution.expense_id != expense_id,
-            )
+            ).with_for_update()
         )
         if duplicate is not None:
+            disposition = "conflict"
+            native_raw = None
+            if existing is None:
+                native_key = raw_backed_key(duplicate)
+                native_raw = db.scalar(
+                    select(FProjectExpense)
+                    .where(FProjectExpense.raw_line_id == native_key)
+                    .with_for_update()
+                ) if native_key else None
+                disposition = legacy_orphan_disposition(
+                    orphan_raw=raw, native_attr=duplicate, native_raw=native_raw)
+            if disposition == "retire":
+                # 无归因的旧键事实行，其业务身份已被仍在计数的原生键归因持有（D-11）：
+                # 同一笔账，带审计作废；跳过等于永远留雷（2026-09-05 验收③）。
+                retire_orphan_raw(
+                    db, raw, superseded_by=duplicate.expense_id,
+                    reason=f"键形态孤儿作废·原生键为准（合同重算：{reason}）",
+                    operated_by=operated_by,
+                )
+                _log.info(
+                    "contract resync retired orphan legacy expense: project=%s ref=%s orphan=%s native=%s",
+                    target_project_id, expense_ref_for(raw), raw_id, duplicate.expense_id,
+                )
+                continue
             raise MaintenanceOperationError(
                 "合同变更命中同项目重复报销单号与明细序号，请先治理重复费用"
+                f"（{expense_ref_for(raw)}：既有 {duplicate.expense_id} / 本行 {raw_id}）"
             )
         try:
             result = sync_attribution_from_raw(
