@@ -12,6 +12,7 @@ import pandas as pd
 
 from app import config, tax_policy
 from app.etl import anomaly, cleaner, mapping
+from app.services.maintenance_expense_integrity import content_key_digest
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
 SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress"})
@@ -796,9 +797,8 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
                 scope = hashlib.sha1(xsdd.encode("utf-8")).hexdigest()[:8]
                 raw_line = f"{bxd_no[:40]}#{line_no}@{scope}"
             else:
-                basis = "|".join([xsdd, expense_date.isoformat(), str(amount),
-                                  reason or "", person or ""])
-                digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:36]
+                digest = content_key_digest(xsdd=xsdd, expense_date=expense_date,
+                                            amount=amount, reason=reason, person=person)
                 dup = content_seen.get(digest, 0)
                 content_seen[digest] = dup + 1
                 raw_line = f"EXP:{digest}#{dup}"    # 内容派生键（§17.4）

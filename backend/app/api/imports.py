@@ -264,6 +264,9 @@ def upload(
             ) from exc
         except loader.ImportIntegrityError as exc:
             db.rollback()
+            # 对外保持固定业务文案（稳定失败契约，test_import_precheck_v2 钉住）；冲突对
+            # （单号#序号 / 项目 / 两把键 / 原因）走结构化日志与批量作业 notes，不再无痕。
+            _log.warning("single upload integrity failure: file=%s: %s", name, exc)
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 _IMPORT_INTEGRITY_ERROR,
@@ -443,7 +446,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
             except loader.ImportIntegrityError:
                 db.rollback()
                 errored += 1
-                notes.append(f"完整性失败：{name}（{_IMPORT_INTEGRITY_ERROR}）")
+                notes.append(f"完整性失败：{name}（{str(exc)[:300]}）")
             except maintenance_cost.WorkbookInvalidationConflictError:
                 db.rollback()
                 errored += 1
