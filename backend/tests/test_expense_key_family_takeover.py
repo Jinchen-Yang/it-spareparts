@@ -365,3 +365,85 @@ def test_content_key_without_any_number_is_found_by_digest(db):
     assert _attr(db, NATIVE) is not None
     assert _expense_by_contract(db)[CONTRACT] == Decimal("100")       # 单计
 
+
+# ======== 验收③（2026-09-05）：从未建成归因的旧键孤儿行 ========
+
+def _orphan(db, raw_id, **kw):
+    """直接种一条无归因、仍生效的旧键事实行（批次 168 时代未建成归因的形态）。"""
+    line = _expense(raw_id, **kw)
+    line["import_batch_id"] = _batch(db)
+    db.add(FProjectExpense(**line)); db.commit(); db.expire_all()
+    assert _attr(db, raw_id) is None and _raw(db, raw_id).data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+
+
+def test_import_voids_orphan_legacy_row_with_same_identity(db):
+    """导入侧：原生行归因时，同合同域 + 同 单号#序号、无归因且仍生效的旧键行一并作废，
+    看板不双计。"""
+    _seed_project(db)
+    _orphan(db, LEGACY_COMPOSITE, amount="100")
+    r = _load(db, _expense(NATIVE, amount="120"))
+    assert r["expense_attribution_legacy_orphans_voided"] == 1
+    assert r["expense_rows_voided_by_identity"] == 1
+    assert _raw(db, LEGACY_COMPOSITE).data_status == "已作废"
+    assert _attr(db, NATIVE) is not None
+    assert _expense_by_contract(db)[CONTRACT] == Decimal("120")
+    (v,) = _audits(db, "键形态孤儿作废")
+    assert v.after_json["superseded_by"] == f"bxd:{NATIVE}"
+
+
+def test_import_voids_orphan_content_key_by_digest(db):
+    _seed_project(db)
+    digest = content_key_digest(xsdd=CONTRACT, expense_date=date(2026, 3, 28),
+                                amount=Decimal("100.00"), reason="现场备件", person="尤玉玲")
+    _orphan(db, f"EXP:{digest}#0", bxd_no=None, line_no=None, amount="100")
+    r = _load(db, _expense(NATIVE, amount="100"))
+    assert r["expense_attribution_legacy_orphans_voided"] == 1
+    assert _raw(db, f"EXP:{digest}#0").data_status == "已作废"
+    assert _expense_by_contract(db)[CONTRACT] == Decimal("100")
+
+
+def test_import_leaves_cross_contract_orphan_alone(db):
+    project = _seed_project(db)
+    _add_contract(db, project, "XSDD-KEYFAM-2")
+    _orphan(db, LEGACY_COMPOSITE, amount="100", contract="XSDD-KEYFAM-2")   # 另一合同域
+    r = _load(db, _expense(NATIVE, amount="120"))
+    assert r["expense_attribution_legacy_orphans_voided"] == 0
+    assert _raw(db, LEGACY_COMPOSITE).data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+
+
+def test_contract_edit_retires_orphan_instead_of_400(db):
+    """合同重算侧（生产验收③的原样时序）：原生键归因已在，孤儿旧键行无归因且生效 ⇒
+    改合同金额必须成功，孤儿带审计作废，看板单计。"""
+    _seed_project(db)
+    _load(db, _expense(NATIVE, amount="120"))                       # 原生键归因已在
+    _orphan(db, LEGACY_COMPOSITE, amount="100")                     # 事后种孤儿（绕过导入）
+    assert _expense_by_contract(db)[CONTRACT] == Decimal("220")     # 修复前：双计
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.contract_no == CONTRACT))
+    ops.update_contract(db, project_contract_id=contract.project_contract_id,
+                        version=contract.version, updates={"contract_amount": Decimal("12345.00")},
+                        reason="验收③", operated_by="zcode")
+    db.commit(); db.expire_all()
+    assert _raw(db, LEGACY_COMPOSITE).data_status == "已作废"
+    assert _attr(db, NATIVE).normalized_status == "approved"
+    assert _expense_by_contract(db)[CONTRACT] == Decimal("120")
+    (v,) = _audits(db, "键形态孤儿作废")
+    assert v.after_json["superseded_by"] == f"bxd:{NATIVE}" and v.operated_by == "zcode"
+
+
+def test_contract_edit_still_refuses_when_native_side_is_void(db):
+    """原生侧已作废（不再计数）时孤儿不能被当成同一笔账作废——维持整批拒绝。"""
+    _seed_project(db)
+    _load(db, _expense(NATIVE, amount="120"))
+    n = _raw(db, NATIVE); n.data_status = "已作废"; db.commit()
+    a = _attr(db, NATIVE); a.normalized_status = "void"; db.commit(); db.expire_all()
+    _orphan(db, LEGACY_COMPOSITE, amount="100")
+    contract = db.scalar(select(MaintenanceProjectContract).where(
+        MaintenanceProjectContract.contract_no == CONTRACT))
+    with pytest.raises(ops.MaintenanceOperationError, match="重复报销单号"):
+        ops.update_contract(db, project_contract_id=contract.project_contract_id,
+                            version=contract.version, updates={"contract_amount": Decimal("1.00")},
+                            reason="t", operated_by="t")
+    db.rollback(); db.expire_all()
+    assert _raw(db, LEGACY_COMPOSITE).data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import case, delete, func, or_, select, true
+from sqlalchemy import case, delete, func, or_, select, true, and_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -1238,6 +1238,7 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
     attribution_legacy_takeovers = 0
     attribution_legacy_skipped = 0
     attribution_legacy_unresolved = 0
+    attribution_legacy_orphans_voided = 0
     takeovers_amount_changed = 0
     legacy_siblings_active = 0
     identity_voided_raw_ids: set[str] = set()   # 本批因键形态接管/跳过而作废的事实行
@@ -1330,6 +1331,51 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
                         "seqless_legacy=%s native=%s (content digest mismatch)",
                         batch_id, target_project_id, raw.bxd_no, key, raw_id,
                     )
+        if duplicate_attr is None and raw_key_family(raw_id) == KEY_FAMILY_NATIVE \
+                and raw.data_status not in expense_void.VOID_STATUSES:
+            # 孤儿旧键行：与本原生行同一业务身份（同合同域 + 同 单号#序号，或同内容摘要），
+            # 但从未建成归因——接管碰不到它（没有旧归因可让位），它却仍生效：预算看板按事
+            # 实行汇总会双计，合同重算守卫会把它当真重复（2026-09-05 验收③）。一并带审计作废。
+            orphan_filters = [
+                FProjectExpense.raw_line_id != raw_id,
+                or_(FProjectExpense.data_status.is_(None),
+                    FProjectExpense.data_status.not_in(sorted(expense_void.VOID_STATUSES))),
+            ]
+            identity_filter = None
+            if raw.bxd_no and raw.line_no is not None:
+                identity_filter = and_(FProjectExpense.bxd_no == raw.bxd_no,
+                                       FProjectExpense.line_no == raw.line_no)
+            if raw.expense_date is not None:
+                digest_like = FProjectExpense.raw_line_id.like(
+                    f"EXP:{content_key_digest(xsdd=raw.linked_sales_order_no, expense_date=raw.expense_date, amount=raw.amount, reason=raw.reason, person=raw.person)}#%")
+                identity_filter = digest_like if identity_filter is None else or_(identity_filter, digest_like)
+            if identity_filter is not None:
+                for orphan in session.scalars(
+                    select(FProjectExpense).where(*orphan_filters, identity_filter).with_for_update()
+                ).all():
+                    if raw_key_family(orphan.raw_line_id) == KEY_FAMILY_NATIVE:
+                        continue                                   # 同形态不同键＝真重复，留给归因守卫
+                    if normalize_contract_no(orphan.linked_sales_order_no) != normalize_contract_no(
+                            raw.linked_sales_order_no):
+                        continue                                   # 跨合同域不是同一笔账
+                    if session.get(MaintenanceProjectExpenseAttribution,
+                                   expense_id_for(orphan.raw_line_id)) is not None:
+                        continue                                   # 有归因的走下面的接管路径
+                    if _void_raw_expense_row(
+                        session, orphan, batch_id=batch_id, operated_by=operated_by,
+                        table="f_project_expense(键形态孤儿作废·原生键为准)",
+                        changed_raw_ids=changed_raw_ids,
+                        extra_after={"superseded_by": expense_id_for(raw_id)},
+                    ):
+                        attribution_legacy_orphans_voided += 1
+                        identity_voided_raw_ids.add(orphan.raw_line_id)
+                        retired_raw_ids.add(orphan.raw_line_id)
+                        if orphan.linked_sales_order_no:
+                            identity_contracts.add(orphan.linked_sales_order_no)
+                        _log.info(
+                            "expense identity orphan voided: batch=%s project=%s ref=%s orphan=%s native=%s",
+                            batch_id, target_project_id, expense_ref_for(raw), orphan.raw_line_id, raw_id,
+                        )
         if duplicate_attr is not None:
             existing_key = raw_backed_key(duplicate_attr)
             counterpart = session.scalar(
@@ -1533,6 +1579,8 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         "expense_rows_voided_by_identity": len(identity_voided_raw_ids),
         # 无序号的 EXP 内容键归因与带序号原生行同单号但内容摘要对不上：未接管，需人工治理
         "expense_attribution_legacy_unresolved": attribution_legacy_unresolved,
+        # 从未建成归因、却与本批原生行同一业务身份的旧键事实行：一并作废（看板不双计）
+        "expense_attribution_legacy_orphans_voided": attribution_legacy_orphans_voided,
         # 接管时金额与旧行不同的次数（源端更正金额属合法，但必须可复核）
         "expense_attribution_legacy_takeovers_amount_changed": takeovers_amount_changed,
         # 接管所在报销单在旧键域下仍生效且不在本表的其它明细行数：>0 提示本表未完整覆盖该单
