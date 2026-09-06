@@ -59,8 +59,11 @@ class MaintenanceCollectionSnapshot(Base):
             "status IN ('confirmed', 'unconfirmed', 'void')",
             name="ck_maintenance_collection_status",
         ),
-        # bulk_import = 收款单（SKD）批量导入网关（D-16）；与 workbook 一样必须
-        # 带 import_batch_id（sys_import_batch.id），追溯不靠审计 reason 文本。
+        # workbook = 05 表工作簿回传（独立两表 / 项目总表 V1、V2），import_batch_id
+        # 是该次上传请求的标识（API 生成的 uuid / V2 幂等键 v2-<sha>），**不是**
+        # sys_import_batch.id——工作簿上传不建 sys_import_batch 行；
+        # bulk_import = 收款单（SKD）批量导入网关（D-16），import_batch_id 才是
+        # sys_import_batch.id。两者都必须带批次号，追溯不靠审计 reason 文本。
         CheckConstraint(
             "source IN ('legacy', 'direct_api', 'workbook', 'bulk_import')",
             name="ck_maintenance_collection_source",

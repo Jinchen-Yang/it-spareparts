@@ -688,13 +688,18 @@ def _seed_confirmed_snapshots(db, project, *months_amounts):
     db.commit()
 
 
-def _update_month(client, project, month_text: str, amount):
+_KEEP = object()
+
+
+def _update_month(client, project, month_text: str, amount, *, remark=_KEEP):
     wb = load_workbook(io.BytesIO(_download(client, project)))
     ws = wb[wbk.SHEET_COLLECTION]
     for row in range(2, ws.max_row + 1):
         if ws.cell(row=row, column=3).value == month_text:
             ws.cell(row=row, column=1, value="UPDATE")
             ws.cell(row=row, column=4, value=amount)
+            if remark is not _KEEP:
+                ws.cell(row=row, column=7, value=remark)
             break
     else:
         raise AssertionError(f"下载的 05 表里没有 {month_text}")
@@ -744,6 +749,219 @@ def test_excel_update_leaves_fact_audit_naming_the_workbook_batch(db, project):
     assert audit.before_json["cumulative_amount"] == "20000.00"
     assert audit.after_json["cumulative_amount"] == "25000.00"
     assert audit.after_json["import_batch_id"] == batch_id
-    assert f"import_batch_id={batch_id}" in audit.reason
+    # 批次号是上传请求标识而非 sys_import_batch.id，reason 不再冒充 import_batch_id
+    assert f"上传请求 {batch_id}" in audit.reason
     assert "20000.00→25000.00" in audit.reason
     assert audit.operated_by == "wbk-uploader"
+
+
+# ---------- 05 表终态单调守卫 + 新增/作废审计 + 无变化不计版本（契约测试） ----------
+
+def _send_rows(client, project, rows, *, contract_no="HT-001"):
+    """从下载模板出发，从第 2 行起整行写 (操作, 报告月份, 累计金额)。
+
+    下载只带每份合同**最新**一条确认快照，多月份操作必须自己把行写全；
+    状态列留空 = UPDATE 沿用原状态、CREATE 默认 confirmed。
+    """
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_COLLECTION]
+    for offset, (operation, month_text, amount) in enumerate(rows):
+        row = 2 + offset
+        ws.cell(row=row, column=1, value=operation)
+        ws.cell(row=row, column=2, value=contract_no)
+        ws.cell(row=row, column=3, value=month_text)
+        ws.cell(row=row, column=4, value=amount)
+        ws.cell(row=row, column=5, value=None)
+        ws.cell(row=row, column=6, value=None)
+        ws.cell(row=row, column=7, value=None)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return _upload(client, project, buf.getvalue())
+
+
+def _month_row(db, month: date) -> MaintenanceCollectionSnapshot:
+    return db.execute(select(MaintenanceCollectionSnapshot).where(
+        MaintenanceCollectionSnapshot.report_month == month)).scalar_one()
+
+
+def _collection_audits(db, action: str | None = None):
+    statement = select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.entity_type == "collection")
+    if action is not None:
+        statement = statement.where(MaintenanceProjectOperationAudit.action == action)
+    return db.execute(statement.order_by(MaintenanceProjectOperationAudit.id)).scalars().all()
+
+
+def test_excel_create_on_existing_month_below_earlier_confirmed_month_is_rejected(db, project):
+    """「上传即覆盖」的 CREATE 命中既有月份 = 更新，同样过守卫，整本零写入。"""
+    _seed_confirmed_snapshots(
+        db, project, (date(2026, 6, 1), "10000.00"), (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _send_rows(client, project, [("CREATE", "2026-07", 5000)])
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "collection_not_monotonic"
+    assert "HT-001 2026-07" in detail["message"]
+    assert "已确认累计回款不得低于更早月份的已确认累计回款" in detail["message"]
+    db.expire_all()
+    july = _month_row(db, date(2026, 7, 1))
+    assert july.cumulative_amount == Decimal("20000.00") and july.version == 1
+    assert db.execute(select(MaintenanceProjectOperationAudit)).scalars().all() == []
+
+
+def test_excel_multi_month_raise_is_judged_on_the_end_state(db, project):
+    """红线：逐行守卫拿写了一半的序列比对，1 月 100→400 撞上还没改的 2 月=200 就整本拒。
+
+    合法的整体抬高（1 月 100→400、2 月 200→500、3 月 300→600）终态单调，
+    必须放行，且三行各落一条 update 审计。
+    """
+    _seed_confirmed_snapshots(
+        db, project,
+        (date(2026, 1, 1), "100.00"), (date(2026, 2, 1), "200.00"), (date(2026, 3, 1), "300.00"))
+    client = uploader(db)
+
+    resp = _send_rows(client, project, [
+        ("UPDATE", "2026-01", 400), ("UPDATE", "2026-02", 500), ("UPDATE", "2026-03", 600)])
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["collection_updates"] == 3
+    batch_id = resp.json()["import_batch_id"]
+    db.expire_all()
+    for month, amount in ((1, "400.00"), (2, "500.00"), (3, "600.00")):
+        row = _month_row(db, date(2026, month, 1))
+        assert row.cumulative_amount == Decimal(amount) and row.version == 2
+        assert row.import_batch_id == batch_id
+    audits = _collection_audits(db, "update")
+    assert len(audits) == 3
+    assert {a.entity_id for a in audits} == {
+        _month_row(db, date(2026, m, 1)).collection_id for m in (1, 2, 3)}
+    assert all(f"上传请求 {batch_id}" in a.reason for a in audits)
+
+
+def test_excel_fresh_create_below_earlier_confirmed_month_is_rejected(db, project):
+    """红线：新月份的 CREATE 以前完全绕过守卫（6 月 1 万、7 月 2 万，追加 8 月 5 千也收）。"""
+    _seed_confirmed_snapshots(
+        db, project, (date(2026, 6, 1), "10000.00"), (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _send_rows(client, project, [("CREATE", "2026-08", 5000)])
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "collection_not_monotonic"
+    assert "HT-001 2026-08" in detail["message"]
+    assert "已确认累计回款不得低于更早月份的已确认累计回款" in detail["message"]
+    assert detail["issues"] == [{
+        "contract_no": "HT-001", "report_month": "2026-08",
+        "code": "collection_not_monotonic", "message": detail["message"]}]
+    db.expire_all()
+    months = sorted(db.scalars(select(MaintenanceCollectionSnapshot.report_month)).all())
+    assert months == [date(2026, 6, 1), date(2026, 7, 1)]        # 8 月没有落行
+    assert db.execute(select(MaintenanceProjectOperationAudit)).scalars().all() == []
+
+
+def test_excel_fresh_create_leaves_create_fact_audit(db, project):
+    """红线：新月份 CREATE 以前不落事实审计——与直连 create_collection 同口径留痕。"""
+    _seed_confirmed_snapshots(db, project, (date(2026, 6, 1), "10000.00"))
+    client = uploader(db)
+
+    resp = _send_rows(client, project, [("CREATE", "2026-07", 25000)])
+
+    assert resp.status_code == 200, resp.text
+    batch_id = resp.json()["import_batch_id"]
+    db.expire_all()
+    july = _month_row(db, date(2026, 7, 1))
+    (audit,) = _collection_audits(db, "create")
+    assert audit.entity_id == july.collection_id
+    assert audit.before_json is None
+    assert audit.after_json["cumulative_amount"] == "25000.00"
+    assert audit.after_json["import_batch_id"] == batch_id
+    assert "回传新增" in audit.reason and f"上传请求 {batch_id}" in audit.reason
+    assert "HT-001 2026-07" in audit.reason
+    assert audit.operated_by == "wbk-uploader"
+
+
+def test_excel_void_leaves_fact_audit_naming_the_upload(db, project):
+    """红线：D-01 删行=作废也是经营事实变更，以前只改状态不留痕。"""
+    _seed_confirmed_snapshots(db, project, (date(2026, 6, 1), "10000.00"))
+    client = uploader(db)
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_COLLECTION]
+    assert ws.cell(row=2, column=3).value == "2026-06"
+    ws.cell(row=2, column=1, value="VOID")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    resp = _upload(client, project, buf.getvalue())
+
+    assert resp.status_code == 200, resp.text
+    batch_id = resp.json()["import_batch_id"]
+    db.expire_all()
+    june = _month_row(db, date(2026, 6, 1))
+    assert june.status == "void" and june.version == 2
+    (audit,) = _collection_audits(db)
+    assert audit.action == "void" and audit.entity_id == june.collection_id
+    assert audit.before_json["status"] == "confirmed"
+    assert audit.after_json["status"] == "void" and audit.after_json["version"] == 2
+    assert "回传作废" in audit.reason and f"上传请求 {batch_id}" in audit.reason
+    assert "HT-001 2026-06" in audit.reason
+
+
+def test_excel_unchanged_update_is_not_a_new_version(db, project):
+    """红线：原样回传一行以前也 version+1 并落一条「累计 X→X」的假审计。"""
+    _seed_confirmed_snapshots(db, project, (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _update_month(client, project, "2026-07", 20000)
+
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    july = _month_row(db, date(2026, 7, 1))
+    assert july.version == 1 and july.cumulative_amount == Decimal("20000.00")
+    # 没改就不算本次上传写的：来源/批次保持原写入者
+    assert july.source == "legacy" and july.import_batch_id is None
+    assert _collection_audits(db) == []
+
+
+def test_excel_remark_only_update_names_the_remark_in_the_reason(db, project):
+    """红线：只改备注时 reason 以前仍写「累计 20000.00→20000.00」，把没变的说成变了。"""
+    _seed_confirmed_snapshots(db, project, (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _update_month(client, project, "2026-07", 20000, remark="补充说明")
+
+    assert resp.status_code == 200, resp.text
+    batch_id = resp.json()["import_batch_id"]
+    db.expire_all()
+    july = _month_row(db, date(2026, 7, 1))
+    assert july.remark == "补充说明" and july.version == 2
+    (audit,) = _collection_audits(db, "update")
+    assert audit.before_json["remark"] is None
+    assert audit.after_json["remark"] == "补充说明"
+    assert "备注 空→补充说明" in audit.reason
+    assert "累计" not in audit.reason and f"上传请求 {batch_id}" in audit.reason
+
+
+def test_excel_every_regressing_month_is_listed_in_issues(db, project):
+    """红线：多行倒退以前只报第一行（且 apply 的 422 不带 issues）——D-02 行级回执。"""
+    _seed_confirmed_snapshots(
+        db, project,
+        (date(2026, 6, 1), "10000.00"), (date(2026, 7, 1), "20000.00"), (date(2026, 8, 1), "30000.00"))
+    client = uploader(db)
+
+    resp = _send_rows(client, project, [("UPDATE", "2026-07", 5000), ("UPDATE", "2026-08", 6000)])
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "collection_not_monotonic"
+    assert "另有 1 行" in detail["message"]
+    assert [issue["report_month"] for issue in detail["issues"]] == ["2026-07", "2026-08"]
+    assert all(issue["code"] == "collection_not_monotonic" for issue in detail["issues"])
+    assert all("不得低于更早月份" in issue["message"] for issue in detail["issues"])
+    db.expire_all()
+    assert _month_row(db, date(2026, 7, 1)).cumulative_amount == Decimal("20000.00")
+    assert _month_row(db, date(2026, 8, 1)).cumulative_amount == Decimal("30000.00")
+    assert {row.version for row in db.scalars(select(MaintenanceCollectionSnapshot))} == {1}
+    assert db.execute(select(MaintenanceProjectOperationAudit)).scalars().all() == []

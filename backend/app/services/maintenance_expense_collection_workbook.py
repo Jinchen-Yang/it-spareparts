@@ -885,6 +885,24 @@ def _lock_and_recheck_apply_scope(
         )
     return contracts_by_no, workbook_state
 
+
+# 快照事实列 → 审计 reason 里的中文标签；来源/批次/版本不是事实，不入 diff
+_COLLECTION_FACT_LABELS = (
+    ("cumulative_amount", "累计"),
+    ("status", "状态"),
+    ("receipt_reference", "凭证号"),
+    ("remark", "备注"),
+)
+
+
+def _shown(value) -> str:
+    """审计 reason 里的取值展示：空值写「空」，长备注截断。"""
+    text = "" if value is None else str(value)
+    if text == "":
+        return "空"
+    return text if len(text) <= 40 else text[:37] + "…"
+
+
 def _overwrite_collection_snapshot(
     db: Session,
     existing: MaintenanceCollectionSnapshot,
@@ -894,31 +912,36 @@ def _overwrite_collection_snapshot(
     project_id: str,
     import_batch_id: str,
     operated_by: str,
-) -> None:
-    """05 表覆盖既有月度快照：与直连接口同一条单调性守卫 + 同一条事实审计。
+) -> bool:
+    """05 表覆盖既有月度快照：事实列真有变化才计版本、落审计；返回是否改了。
 
-    2026-09（D-16）之前这里直接改写累计额，既没有"已确认累计不得低于更早月份"
-    的校验，也不落 ``maintenance_project_operation_audit``——Excel 一格填错就能
-    让确认过的累计回款倒退且无迹可循。守卫抛出的标准文案原样透传给上传者。
+    2026-09（D-16）之前这里直接改写累计额、不落
+    ``maintenance_project_operation_audit``——Excel 一格填错就能让确认过的累计
+    回款倒退且无迹可循。单调性不在这里逐行判（逐行判拿的是写了一半的序列，
+    见 ``_validate_collection_end_state``），这里只管写值与留痕：
+
+    - 原样回传（累计/状态/凭证号/备注都没变）不算改动：不加版本、不落审计，
+      来源与批次也保持原写入者，免得把「没改」记成「改了」；
+    - reason 按实际变化的列写旧值→新值（只改备注就只说备注）；括号里的批次号
+      是本次上传请求的标识（API 生成的 uuid / V2 幂等键），不是 sys_import_batch.id。
     """
 
     from app.services import maintenance_project_operations as operations
 
     before = operations.collection_dict(existing)
-    if status == "confirmed":
-        try:
-            operations._validate_confirmed_collection_monotonicity(
-                db,
-                project_contract_id=existing.project_contract_id,
-                report_month=op.report_month,
-                cumulative_amount=op.cumulative_amount,
-                exclude_collection_id=existing.collection_id,
-            )
-        except operations.MaintenanceOperationError as exc:
-            raise WorkbookError(
-                "collection_not_monotonic",
-                f"{op.contract_no} {op.report_month:%Y-%m}：{exc}",
-            ) from exc
+    proposed = {
+        "cumulative_amount": operations._money(op.cumulative_amount),
+        "status": status,
+        "receipt_reference": op.receipt_reference,
+        "remark": op.remark,
+    }
+    changes = [
+        f"{label} {_shown(before[key])}→{_shown(proposed[key])}"
+        for key, label in _COLLECTION_FACT_LABELS
+        if before[key] != proposed[key]
+    ]
+    if not changes:
+        return False
     existing.cumulative_amount = op.cumulative_amount
     existing.receipt_reference = op.receipt_reference
     existing.remark = op.remark
@@ -935,12 +958,60 @@ def _overwrite_collection_snapshot(
         before=before,
         after=operations.collection_dict(existing),
         reason=(
-            f"05 表回款工作簿回传覆盖 import_batch_id={import_batch_id}："
-            f"{op.contract_no} {op.report_month:%Y-%m} 累计 "
-            f"{before['cumulative_amount']}→{operations._money(op.cumulative_amount)}"
+            f"05 表回款工作簿回传覆盖（上传请求 {import_batch_id}）："
+            f"{op.contract_no} {op.report_month:%Y-%m} {'；'.join(changes)}"
         ),
         operated_by=operated_by,
     )
+    return True
+
+
+def _validate_collection_end_state(
+    db: Session,
+    touched: list[tuple[CollectionOp, MaintenanceCollectionSnapshot]],
+) -> None:
+    """合同终态单调性守卫：整份计划写完（未提交）后一次校验，违规行全部列出。
+
+    D-16 首版在每行写入前按月升序逐行调守卫，比对的是「写了一半」的序列：
+    1 月 100→400、2 月 200→500、3 月 300→600 这种合法的整体抬高，写完 1 月
+    就撞上还没改的 2 月而整本被拒（往下调反而能过——不对称）；新月份的 CREATE
+    又完全绕过守卫。改为先把 CREATE/UPDATE/VOID 全部落到本事务并 flush，再对
+    计划里每一条终态仍为 confirmed 的行复用直连接口同一条守卫
+    （``_validate_confirmed_collection_monotonicity``，同一句文案）校验终态；
+    任一行违规整本不落（调用方回滚），所有违规行进 ``WorkbookError.issues``
+    供回执逐行列出（D-02 行级回执）。
+    """
+
+    from app.services import maintenance_project_operations as operations
+
+    db.flush()
+    issues: list[dict] = []
+    for op, row in sorted(
+        touched, key=lambda item: (item[0].contract_no, item[0].report_month)
+    ):
+        if row.status != "confirmed":
+            continue
+        try:
+            operations._validate_confirmed_collection_monotonicity(
+                db,
+                project_contract_id=row.project_contract_id,
+                report_month=row.report_month,
+                cumulative_amount=row.cumulative_amount,
+                exclude_collection_id=row.collection_id,
+            )
+        except operations.MaintenanceOperationError as exc:
+            issues.append({
+                "contract_no": op.contract_no,
+                "report_month": f"{op.report_month:%Y-%m}",
+                "code": "collection_not_monotonic",
+                "message": f"{op.contract_no} {op.report_month:%Y-%m}：{exc}",
+            })
+    if not issues:
+        return
+    message = issues[0]["message"]
+    if len(issues) > 1:
+        message += f"（另有 {len(issues) - 1} 行同类问题，见明细）"
+    raise WorkbookError("collection_not_monotonic", message, issues=issues)
 
 
 def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
@@ -1074,6 +1145,7 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
         contracts_by_no=contracts_by_no,
     ) or operating_fact_changed
 
+    touched: list[tuple[CollectionOp, MaintenanceCollectionSnapshot]] = []
     for op in sorted(plan.collection_ops,
                      key=lambda item: (item.project_contract_id, item.report_month)):
         existing = db.execute(
@@ -1088,8 +1160,27 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
                 raise WorkbookError(
                     "void_target_missing",
                     f"{op.contract_no} {op.report_month:%Y-%m} 没有可作废的快照")
+            if existing.status == "void":
+                continue    # 作废已作废：不重复计版本、不重复留痕
+            before = operations.collection_dict(existing)
             existing.status = "void"
             existing.version += 1
+            # D-01 删行=作废也是经营事实变更，与直连接口一样落事实审计
+            operations._fact_audit(
+                db,
+                project_id=plan.project_id,
+                entity_type="collection",
+                entity_id=existing.collection_id,
+                action="void",
+                before=before,
+                after=operations.collection_dict(existing),
+                reason=(
+                    f"05 表回款工作簿回传作废（上传请求 {import_batch_id}）："
+                    f"{op.contract_no} {op.report_month:%Y-%m} 状态 "
+                    f"{before['status']}→void，累计 {before['cumulative_amount']}"
+                ),
+                operated_by=operated_by,
+            )
             operating_fact_changed = True
             continue
         if op.operation == "UPDATE":
@@ -1097,18 +1188,18 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
                 raise WorkbookError(
                     "update_target_missing",
                     f"{op.contract_no} {op.report_month:%Y-%m} 没有可更新的快照")
-            _overwrite_collection_snapshot(
+            operating_fact_changed = _overwrite_collection_snapshot(
                 db, existing, op,
                 status=(op.collection_status
                         if op.collection_status is not None else existing.status),
                 project_id=plan.project_id,
                 import_batch_id=import_batch_id,
                 operated_by=operated_by,
-            )
-            operating_fact_changed = True
+            ) or operating_fact_changed
+            touched.append((op, existing))
             continue
         if existing is None:
-            db.add(MaintenanceCollectionSnapshot(
+            created = MaintenanceCollectionSnapshot(
                 collection_id=str(uuid4()),
                 project_id=plan.project_id,
                 project_contract_id=op.project_contract_id,
@@ -1120,18 +1211,39 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
                 source="workbook",
                 import_batch_id=import_batch_id,
                 version=1,
-            ))
+            )
+            db.add(created)
+            # 新月份也是经营事实写入：与直连 create_collection 一样留 create 审计
+            operations._fact_audit(
+                db,
+                project_id=plan.project_id,
+                entity_type="collection",
+                entity_id=created.collection_id,
+                action="create",
+                before=None,
+                after=operations.collection_dict(created),
+                reason=(
+                    f"05 表回款工作簿回传新增（上传请求 {import_batch_id}）："
+                    f"{op.contract_no} {op.report_month:%Y-%m} 累计 "
+                    f"{operations._money(created.cumulative_amount)}（{created.status}）"
+                ),
+                operated_by=operated_by,
+            )
             operating_fact_changed = True
+            touched.append((op, created))
         else:
             # 「上传即覆盖」的 CREATE 命中既有快照 = 更新，与显式 UPDATE 同一条路。
-            _overwrite_collection_snapshot(
+            operating_fact_changed = _overwrite_collection_snapshot(
                 db, existing, op,
                 status=op.collection_status or "confirmed",
                 project_id=plan.project_id,
                 import_batch_id=import_batch_id,
                 operated_by=operated_by,
-            )
-            operating_fact_changed = True
+            ) or operating_fact_changed
+            touched.append((op, existing))
+    # 单调性只看整份计划写完后的终态（新增月份一并纳入）；逐行守卫会误拒合法的
+    # 整体抬高、又放过新增月份的倒退。违规即整本不落。
+    _validate_collection_end_state(db, touched)
     if bump_revision and operating_fact_changed:
         operations.bump_locked_workbook_revision(db, state=workbook_state)
     if commit:

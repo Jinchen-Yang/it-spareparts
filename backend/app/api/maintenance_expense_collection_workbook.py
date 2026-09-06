@@ -176,9 +176,10 @@ async def apply_workbook(
                            import_batch_id=batch_id)
     except wbk.WorkbookError as exc:
         db.rollback()
+        # issues 逐行列出违规（如多月累计倒退），回执不只报第一行（D-02）
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            {"code": exc.code, "message": exc.message},
+            {"code": exc.code, "message": exc.message, "issues": exc.issues},
         ) from exc
     record_access_log(ctx, "apply", "maintenance_expense_collection_workbook",
                       {"project_id": project_id, **plan.summary})
