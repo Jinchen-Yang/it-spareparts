@@ -1244,19 +1244,32 @@ def stable_project_tasks(
 @router.get("/{project_id}/purchases")
 def stable_project_purchases(
     project_id: str = Path(..., min_length=1, max_length=36),
+    source_order_id: str | None = Query(
+        None, min_length=1, max_length=64,
+        description="只看挂在这张需求单（WBDD raw id）上的采购单（#259）"),
+    page: int | None = Query(None, ge=1, description="省略＝全量返回（旧协议）"),
+    page_size: int | None = Query(None, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    rows = procurement.get_project_procurement_chain(db, project_id)
+    payload = procurement.list_project_procurement(
+        db, project_id, source_order_id=source_order_id,
+        page=page, page_size=page_size,
+    )
+    rows = payload["rows"]
     # 采购成本字段脱敏：无 data_purchase_cost 权限时单价结构性置空，
     # 与同文件 unit_cost 遮罩（is_field_hidden "unit_cost"）同一口径。
-    if is_field_hidden(ctx, "unit_price"):
-        for order in rows:
-            for line in order.get("lines", []):
+    # unit_price_masked 显式区分「无权查看」与「采购行本来没价」——两者都是 null，
+    # 前端不能靠 null 猜（#259）。
+    masked = is_field_hidden(ctx, "unit_price")
+    for order in rows:
+        for line in order.get("lines", []):
+            if masked:
                 line["unit_price"] = None
+            line["unit_price_masked"] = masked
     record_access_log(
         ctx,
         "stable_project_purchases",
@@ -1264,10 +1277,17 @@ def stable_project_purchases(
         {
             "project_id": project_id,
             "result_count": len(rows),
-            "cost_masked": is_field_hidden(ctx, "unit_price"),
+            "total": payload["total"],
+            "cost_masked": masked,
         },
     )
-    return {"project_id": project_id, "purchases": rows}
+    return {
+        "project_id": project_id,
+        "purchases": rows,
+        "total": payload["total"],
+        "page": payload["page"],
+        "page_size": payload["page_size"],
+    }
 
 
 def _stable_project_operations_response(

@@ -21,6 +21,7 @@ const searchMaintenanceManagerAccounts = vi.fn();
 const searchSiteIssues = vi.fn();
 const searchMaintenanceReturnObligations = vi.fn();
 const searchMaintenanceBadReturns = vi.fn();
+const getProjectProcurement = vi.fn();
 
 vi.mock("../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -69,6 +70,15 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     searchMaintenanceReturnObligations: (...a: unknown[]) =>
       searchMaintenanceReturnObligations(...a),
     searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
+  };
+});
+vi.mock("../../../api/maintenanceProjectProcurement", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../../../api/maintenanceProjectProcurement",
+  );
+  return {
+    ...actual,
+    getProjectProcurement: (...a: unknown[]) => getProjectProcurement(...a),
   };
 });
 
@@ -128,6 +138,9 @@ beforeEach(() => {
   updateMaintenanceProject.mockResolvedValue({ data: {} });
   listProjectExpenseRows.mockResolvedValue({ rows: [], total: 0 });
   listProjectPartsRows.mockResolvedValue({ rows: [], total: 0, sheet: "03_备件订单" });
+  getProjectProcurement.mockResolvedValue({
+    data: { project_id: "p1", purchases: [], total: 0, page: 1, page_size: 10 },
+  });
   getCollectionPlan.mockResolvedValue({ rows: [], total: 0 });
   getMaintenanceProjectWorkspace.mockResolvedValue({
     data: {

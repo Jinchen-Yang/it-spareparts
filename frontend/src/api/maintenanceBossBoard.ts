@@ -190,6 +190,8 @@ export interface BoardOrderRow {
   order_no: string;
   order_date: string | null;
   data_status: string | null;
+  /** 挂靠的销售订单号（XSDD）：合同筛选的唯一依据（#259）；WBDD 单号本身不含合同号。 */
+  linked_sales_order_no: string | null;
   project_raw: string | null;
   is_pre_delivery: boolean;
   line_count: number;
@@ -319,9 +321,10 @@ export const downloadBoardProjectsExport = async (
 export const getBoardProject = (projectId: string) =>
   api.get<BoardProjectRow>(`${BASE}/projects/${encodeURIComponent(projectId)}`);
 
+/** contract_no：服务端按 linked_sales_order_no 归一化相等过滤（去空白/大写/去 XSDD-）。 */
 export const getBoardProjectOrders = (
   projectId: string,
-  params?: { page?: number; page_size?: number },
+  params?: { page?: number; page_size?: number; contract_no?: string },
 ) => api.get<BoardOrders>(`${BASE}/projects/${encodeURIComponent(projectId)}/orders`, { params });
 
 export const getBoardOrderLines = (

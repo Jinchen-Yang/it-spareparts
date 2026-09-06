@@ -39,7 +39,7 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app import config, tax_policy
 from app.models.maintenance_project import MaintenanceProjectContract
@@ -200,6 +200,20 @@ def normalize_contract_no(value: str | None) -> str:
     if normalized.startswith(_CONTRACT_PREFIX):
         normalized = normalized[len(_CONTRACT_PREFIX):]
     return normalized
+
+
+def normalized_contract_no_sql(column):
+    """PostgreSQL twin of :func:`normalize_contract_no` for WHERE-side equality.
+
+    Same three steps in the same order (strip all whitespace, uppercase, drop
+    a leading ``XSDD-``) so ``normalized_contract_no_sql(col) ==
+    normalize_contract_no(value)`` is a true normalized equality.
+    """
+    return func.regexp_replace(
+        func.upper(func.regexp_replace(func.btrim(column), r"\s+", "", "g")),
+        f"^{_CONTRACT_PREFIX}",
+        "",
+    )
 
 
 def dual_amounts(amount: Decimal | str | int, tax_basis: str) -> tuple[Decimal, Decimal]:

@@ -51,6 +51,7 @@ from app.services import maintenance_expense_collection_workbook as ec
 from app.services import maintenance_collection_milestone_restore as milestone_restore
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_workbook_renderer
+from app.services.maintenance_expense_integrity import normalize_contract_no
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
@@ -557,10 +558,49 @@ def restore_collection_milestones(
     return payload
 
 
+_ROWS_DEFAULT_PAGE_SIZE = 20
+
+
+def _filter_and_page_lines(
+    rows: list,
+    *,
+    order_no: str | None,
+    contract_no: str | None,
+    page: int | None,
+    page_size: int | None,
+) -> tuple[list, int]:
+    """03 行级的服务端过滤 + 分页（#259）：返回 ``(本页行, 过滤后真实总数)``。
+
+    过滤在 ``_assigned_lines`` 之后按 Python 做（高风险服务不动）：需求单号精确
+    相等；合同号走报销归属同一把 ``normalize_contract_no`` 尺子（去空白、大写、
+    去 ``XSDD-``）。``page`` 省略 = 全量返回，旧调用方与 Excel 往返不受影响。
+    """
+    if order_no is not None:
+        rows = [item for item in rows if item[1].order_no == order_no]
+    if contract_no is not None:
+        want = normalize_contract_no(contract_no)
+        rows = [
+            item for item in rows
+            if normalize_contract_no(item[1].linked_sales_order_no) == want
+        ]
+    total = len(rows)
+    if page is not None:
+        size = page_size or _ROWS_DEFAULT_PAGE_SIZE
+        rows = rows[(page - 1) * size:page * size]
+    return rows, total
+
+
 @router.get(_MASTER + "/rows")
 def list_master_rows(
     project_id: str = Path(..., min_length=1, max_length=36),
     sheet: str = Query(..., description="sheet 名，当前支持 03_备件订单"),
+    order_no: str | None = Query(
+        None, min_length=1, max_length=64, description="只看这张需求单（WBDD 单号精确相等）"),
+    contract_no: str | None = Query(
+        None, min_length=1, max_length=64,
+        description="按挂靠销售订单号（XSDD）归一化相等过滤（#259）"),
+    page: int | None = Query(None, ge=1, description="省略＝全量返回（旧协议）"),
+    page_size: int | None = Query(None, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -571,7 +611,10 @@ def list_master_rows(
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
     if (get_settings().maintenance_project_master_v2_enabled
             and sheet in {master.V2_SHEET_PARTS, master.SHEET_PARTS}):
-        rows = master._assigned_lines(db, project_id=project_id, window=None)
+        rows, total = _filter_and_page_lines(
+            master._assigned_lines(db, project_id=project_id, window=None),
+            order_no=order_no, contract_no=contract_no,
+            page=page, page_size=page_size)
         line_ids = [line.id for line, _order, _pid in rows]
         overrides = {
             item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
@@ -605,6 +648,7 @@ def list_master_rows(
                 "part_id": line.part_id,
                 "order_no": order.order_no,
                 "order_date": order.order_date.isoformat() if order.order_date else None,
+                "sales_order_no": order.linked_sales_order_no or "",
                 "pn_std": line.pn_std or line.pn_raw or "",
                 "description": line.description or "",
                 "qty": str(line.qty) if line.qty is not None else None,
@@ -645,7 +689,9 @@ def list_master_rows(
 
         return {
             "sheet": sheet,
-            "total": len(rows),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "rows": [_v2_row(line, order) for line, order, _pid in rows],
         }
     if sheet not in {master.SHEET_PARTS}:
@@ -654,7 +700,10 @@ def list_master_rows(
             {"code": "unsupported_sheet",
              "message": "当前仅支持 03_备件订单 行级查询"},
         )
-    rows = master._assigned_lines(db, project_id=project_id, window=None)
+    rows, total = _filter_and_page_lines(
+        master._assigned_lines(db, project_id=project_id, window=None),
+        order_no=order_no, contract_no=contract_no,
+        page=page, page_size=page_size)
     line_ids = [line.id for line, _order, _pid in rows]
     overrides: dict[int, MaintenanceManualCostOverride] = {}
     if line_ids:
@@ -708,7 +757,9 @@ def list_master_rows(
 
     return {
         "sheet": sheet,
-        "total": len(rows),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
         "rows": [_legacy_row(line, order) for line, order, _pid in rows],
     }
 

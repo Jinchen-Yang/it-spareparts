@@ -233,10 +233,31 @@ export interface ProjectPartsRow {
   can_refill?: boolean;
 }
 
-export const listProjectPartsRows = async (projectId: string) => {
-  const resp = await api.get<{ sheet: string; total: number; rows: ProjectPartsRow[] }>(
+export interface ProjectPartsRowsQuery {
+  /** 省略＝全量返回（旧协议）；给定则服务端分页，total 仍是过滤后真实总数。 */
+  page?: number;
+  page_size?: number;
+  /** 只看这张需求单（WBDD 单号精确相等）。 */
+  order_no?: string;
+  /** 按挂靠销售订单号归一化相等过滤（与需求单列表同一把尺子，#259）。 */
+  contract_no?: string;
+}
+
+export interface ProjectPartsRows {
+  sheet: string;
+  total: number;
+  page?: number | null;
+  page_size?: number | null;
+  rows: ProjectPartsRow[];
+}
+
+export const listProjectPartsRows = async (
+  projectId: string,
+  query?: ProjectPartsRowsQuery,
+) => {
+  const resp = await api.get<ProjectPartsRows>(
     `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/rows`,
-    { params: { sheet: SHEETS.parts } },
+    { params: { sheet: SHEETS.parts, ...(query ?? {}) } },
   );
   return resp.data;
 };

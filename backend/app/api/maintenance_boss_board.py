@@ -353,6 +353,9 @@ def board_project_orders(
     project_id: str = Path(..., min_length=1, max_length=36),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
+    contract_no: str | None = Query(
+        None, min_length=1, max_length=64,
+        description="按挂靠销售订单号（XSDD）归一化相等过滤（#259）"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     ctx: UserContext = Depends(require_board_view),
@@ -370,7 +373,8 @@ def board_project_orders(
         # 冒充「这个项目没有单」（M0-B 改判后范围不再收敛，存在性校验必须自己做）
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在")
     return board.project_orders(db, user_ctx=ctx, project_id=project_id,
-                                page=page, page_size=page_size)
+                                page=page, page_size=page_size,
+                                contract_no=contract_no)
 
 
 @router.get("/orders/{source_order_id}/lines")

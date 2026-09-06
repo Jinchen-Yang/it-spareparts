@@ -1108,3 +1108,86 @@ def test_download_needs_profit_upload_needs_action_key(db, project_with_lines):
     assert reader(db, "m-perm-read3").post(
         f"{_GLOBAL}/apply",
         files={"file": ("g.xlsx", io.BytesIO(content), _XLSX)}).status_code == 403
+
+
+def _two_contract_project(db, tmp_path):
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2, lines_per_order=3)
+    for order in orders:
+        assign(db, order, proj)
+    orders[0].linked_sales_order_no = "XSDD-20260828-0120"
+    orders[1].linked_sales_order_no = "20260901-0007"   # 裸形态入库
+    db.commit()
+    return proj, orders
+
+
+def test_master_rows_unpaged_stays_full_and_paged_total_is_real(db, tmp_path):
+    """#259：03 行级 page 省略＝全量（旧协议、Excel 往返不受影响）；
+    分页只是同一行序的切片，total 是过滤后真实总数而非本页行数。"""
+    proj, _orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-paging")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    full = client.get(url, params={"sheet": master.SHEET_PARTS}).json()
+    assert full["total"] == 6 and len(full["rows"]) == 6
+    assert full["page"] is None and full["page_size"] is None
+
+    page1 = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 1, "page_size": 4}).json()
+    assert len(page1["rows"]) == 4
+    assert (page1["total"], page1["page"], page1["page_size"]) == (6, 1, 4)
+    page2 = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 2, "page_size": 4}).json()
+    assert len(page2["rows"]) == 2 and page2["total"] == 6
+    assert ([row["line_id"] for row in page1["rows"]]
+            + [row["line_id"] for row in page2["rows"]]
+            == [row["line_id"] for row in full["rows"]])
+    assert client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 1, "page_size": 201}).status_code == 422
+
+
+def test_master_rows_filter_by_order_no_and_normalized_contract_no(db, tmp_path):
+    """#259：order_no 精确相等；contract_no 与报销归属同一把归一化尺子。"""
+    proj, orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-filter")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    by_order = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "order_no": orders[0].order_no}).json()
+    assert by_order["total"] == 3
+    assert {row["order_no"] for row in by_order["rows"]} == {orders[0].order_no}
+
+    for variant in ("XSDD-20260828-0120", "xsdd-20260828-0120", "20260828-0120"):
+        body = client.get(url, params={
+            "sheet": master.SHEET_PARTS, "contract_no": variant}).json()
+        assert body["total"] == 3, variant
+        assert {row["sales_order_no"] for row in body["rows"]} == {"XSDD-20260828-0120"}
+    bare = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260901-0007"}).json()
+    assert {row["order_no"] for row in bare["rows"]} == {orders[1].order_no}
+    miss = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260101-9999"}).json()
+    assert miss["total"] == 0 and miss["rows"] == []
+
+    combo = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260828-0120",
+        "order_no": orders[0].order_no, "page": 2, "page_size": 2}).json()
+    assert len(combo["rows"]) == 1 and combo["total"] == 3
+
+
+def test_master_rows_v2_carries_sales_order_no_and_honours_filters(
+    db, tmp_path, monkeypatch,
+):
+    """V2 行级同样带 sales_order_no 并接受同一组过滤/分页参数（#259）。"""
+    monkeypatch.setattr(
+        master_api.get_settings(), "maintenance_project_master_v2_enabled", True)
+    proj, orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-v2")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    body = client.get(url, params={
+        "sheet": master.V2_SHEET_PARTS, "contract_no": "20260901-0007",
+        "page": 1, "page_size": 2}).json()
+    assert len(body["rows"]) == 2 and body["total"] == 3
+    assert {row["sales_order_no"] for row in body["rows"]} == {"20260901-0007"}
+    assert {row["order_no"] for row in body["rows"]} == {orders[1].order_no}
