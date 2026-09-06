@@ -336,6 +336,13 @@ def board_project(
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在或无权查看")
+    from app.services import maintenance_project_assignments as _assignments
+
+    # D-03：项目负责人/销售对本人项目可传总表。前端上传入口按这个服务端判定显示，
+    # 与 master-workbook 上传门是同一函数，不在客户端复算挂靠关系。
+    row["can_edit_master_workbook"] = _assignments.can_edit_master_workbook(
+        db, project_id=project_id, user_ctx=ctx,
+    )
     record_access_log(ctx, "boss_board_project", project_id, {})
     return row
 

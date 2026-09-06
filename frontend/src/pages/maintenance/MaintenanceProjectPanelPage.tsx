@@ -209,7 +209,10 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   });
 
   const perms = readPermissionMap();
-  const canUpload = !!perms.action_maintenance_expense_collection_upload;
+  // D-03（2026-09-02 拍板）：项目负责人/销售对本人项目可传总表。后端上传门早已按此
+  // 放行，入口显示跟服务端下发的 can_edit_master_workbook 走，不在前端复算挂靠关系。
+  const canUpload = !!perms.action_maintenance_expense_collection_upload
+    || !!row?.can_edit_master_workbook;
   const canManageProject = !!perms.action_maintenance_project_manage;
   // 验收清单导入 2026-08-22 起跟随维保页面权限（与 maintenancePermissions 同口径），
   // 不再看已停用的 action_maintenance_acceptance_checklist_import 旧键。

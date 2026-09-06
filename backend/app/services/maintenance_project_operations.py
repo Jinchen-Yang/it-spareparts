@@ -2111,8 +2111,11 @@ def void_site_issue(
         return None
     if issue.project_id != project_id:
         raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
-    if issue.source != "site_issue_v2":
-        raise MaintenanceOperationError("旧版现场领用单不支持此作废流程")
+    # 2026-09-06：不再按 source 拒绝。生产里 06 表建的领用单全是 source=workbook，
+    # 面板「作废」一律 400。整条流程里只有「返还义务事件」一步依赖 v2 形态
+    # （发货来源 delivery_line_id），下面按「该单是否发过事件」判定；状态机、版本
+    # OCC、明细软作废、审计、幂等回执、revision 对任何来源都成立，legacy /
+    # direct_api 同样无需拒绝——未映射（unknown）的旧单仍由下面的状态检查挡住。
     if issue.version != version:
         raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
     if issue.normalized_status == "void":
@@ -2164,8 +2167,17 @@ def void_site_issue(
     issue.status_mapping_version = "site-issue-v2-workflow-v1"
     issue.voided_at = datetime.now(UTC)
     issue.version += 1
+    # D-01：作废行不进入任何统计与导出。06 表导出、上传实体范围与面板行只看
+    # line.is_active（与工作簿删行同一软作废语义），整单作废把全部明细一并软作废，
+    # 否则单头已 void 的行仍会被导进 06 表、还能被再次上传改动。
+    for line in lines:
+        if line.is_active:
+            line.is_active = False
     event = None
-    if was_confirmed:
+    # 只有曾进入返还义务接口的单（confirm / correct 时发过 outbox 事件）才需要
+    # 再发一条 voided 事件把义务撤回。工作簿 / 旧版来源的单没有发货来源、从未
+    # 投影义务，对它们发事件会被消费方契约（发货明细稳定编号必填）拒绝。
+    if was_confirmed and return_events:
         event = MaintenanceSiteIssueReturnEvent(
             event_id=str(uuid4()),
             project_id=project_id,

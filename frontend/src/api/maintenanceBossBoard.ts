@@ -140,6 +140,11 @@ export interface BoardProjectRow {
   shipped_qty: Stat<string | number>;
   returned_good_qty: Stat<string | number>;
   returned_bad_qty: Stat<string | number>;
+  /**
+   * D-03：本人项目的负责人/销售可传总表。只有按稳定 ID 取单卡时下发，由服务端
+   * 与 master-workbook 上传门同一判定算出；前端只消费，不复算挂靠关系。
+   */
+  can_edit_master_workbook?: boolean;
 }
 
 export interface BoardProjects {

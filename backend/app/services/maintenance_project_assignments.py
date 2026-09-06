@@ -185,6 +185,37 @@ def is_project_workbook_editor(
     return False
 
 
+WORKBOOK_UPLOAD_ACTION = "action_maintenance_expense_collection_upload"
+
+
+def can_edit_master_workbook(
+    db: Session,
+    *,
+    project_id: str,
+    user_ctx: UserContext,
+) -> bool:
+    """项目总表编辑权的唯一判定（D-03，2026-09-02 拍板全量下放）。
+
+    上传/校验的 API 门 ``_require_master_edit`` 与展示板项目卡的
+    ``can_edit_master_workbook`` 字段（前端据此显示上传入口）都只消费这一处，
+    不允许各写一份而漂移。管理员 / RBAC 关闭恒可编；全量账号走既有 action 键
+    （含 data_profit）；否则看是否本项目负责人/销售（``is_project_workbook_editor``）。
+    """
+    from app import config
+    from app import permissions as _perm
+
+    if not config.ENABLE_RBAC or user_ctx.role == "admin":
+        return True
+    perms = (
+        user_ctx.permissions
+        if user_ctx.permissions is not None
+        else _perm.effective(user_ctx.role, None)
+    )
+    if perms.get(WORKBOOK_UPLOAD_ACTION, False) and perms.get("data_profit", False):
+        return True
+    return is_project_workbook_editor(db, project_id=project_id, user_ctx=user_ctx)
+
+
 def is_project_workbook_editor_locked(
     db: Session,
     *,

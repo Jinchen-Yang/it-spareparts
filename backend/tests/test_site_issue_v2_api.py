@@ -1,17 +1,22 @@
 """Public workflow tests for server-owned site-consumption documents."""
 
+import io
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from app import auth
 from app.api import maintenance_project_operations
 from app.auth import hash_password
+from app.business_time import business_today
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.maintenance_bad_return import MaintenanceReturnObligation
@@ -29,6 +34,10 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysAccessLog, SysImportBatch, SysUser
+from app.security import UserContext
+from app.services import maintenance_boss_board as board
+from app.services import maintenance_project_master_workbook as master
+from app.services import maintenance_project_operations as operations
 
 
 def _client(
@@ -179,6 +188,101 @@ def _create_draft(
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def _workbook_issue(
+    db,
+    *,
+    project: MaintenanceProject,
+    issue_no: str,
+) -> tuple[MaintenanceSiteIssue, MaintenanceSiteIssueLine]:
+    """06 表建的领用单形态：source=workbook、无发货来源、无幂等字段、无返还事件。"""
+    part = DimPart(pn_std=f"PN-WB-{issue_no[-4:]}")
+    db.add(part)
+    db.flush()
+    issue = MaintenanceSiteIssue(
+        issue_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_no=issue_no,
+        issue_date=date(2026, 8, 20),
+        raw_status="已确认",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="workbook-manual-v1",
+        source="workbook",
+        import_batch_id="synthetic-master-workbook-batch",
+        created_by="synthetic-uploader",
+        version=1,
+    )
+    db.add(issue)
+    db.flush()
+    line = MaintenanceSiteIssueLine(
+        issue_line_id=f"{issue.issue_id}:1",
+        issue_id=issue.issue_id,
+        line_no=1,
+        part_id=part.id,
+        pn=part.pn_std,
+        quantity=Decimal("2"),
+        no_return=False,
+        is_active=True,
+        # 成本结果七列同生同灭，且 unit_cost/cost_amount 是 ex_tax 的旧别名
+        unit_cost=Decimal("50.00"),
+        cost_amount=Decimal("100.00"),
+        unit_cost_ex_tax=Decimal("50.00"),
+        unit_cost_inc_tax=Decimal("56.50"),
+        cost_amount_ex_tax=Decimal("100.00"),
+        cost_amount_inc_tax=Decimal("113.00"),
+        cost_source="manual",
+        algorithm_version="workbook-manual-v1",
+    )
+    db.add(line)
+    db.commit()
+    return issue, line
+
+
+_FULL_VIEW = UserContext(
+    user_id="synthetic-full-view",
+    role="admin",
+    permissions={"page_maintenance": True, "data_purchase_cost": True, "data_profit": True},
+    is_authenticated=True,
+)
+
+
+def _site_sheet_entity_ids(db, project_id: str) -> set[str]:
+    """06 表导出里出现的领用行实体 ID（D-01 的「导出」读模型）。"""
+    content = master.build_project_master_v2(
+        db, project_id=project_id, sheets=(master.V2_SHEET_SITE,)
+    )
+    # 导出会锁项目工作簿状态行；释放它，随后走 API 的作废才能拿到同一把锁
+    db.commit()
+    worksheet = load_workbook(io.BytesIO(content))[master.V2_SHEET_SITE]
+    headers = {cell.value: cell.column for cell in worksheet[1]}
+    return {
+        str(worksheet.cell(row, headers["实体ID"]).value or "")
+        for row in range(2, worksheet.max_row + 1)
+    }
+
+
+def _workspace_requisition_cost(db, project_id: str) -> str:
+    """项目工作台 metrics.site_requisition_known_cost（面板健康带「已领用」取数）。"""
+    workspace = operations.project_workspace(
+        db, project_id=project_id, as_of=business_today(), user_ctx=_FULL_VIEW
+    )
+    db.commit()
+    return workspace["project"]["metrics"]["site_requisition_known_cost"]
+
+
+def _board_requisition_cost(db, project_id: str) -> Decimal:
+    """展示板项目卡 requisition_cost_inc_tax（maintenance_boss_board 已领用成本口径）。"""
+    rows = board.projects(
+        db, user_ctx=_FULL_VIEW, allowed_project_ids={project_id}
+    )["rows"]
+    db.commit()
+    stat = next(row for row in rows if row["project_id"] == project_id)[
+        "requisition_cost_inc_tax"
+    ]
+    assert stat["state"] == "ready", stat
+    return Decimal(str(stat["value"]))
 
 
 def test_create_site_issue_generates_identity_and_only_saves_a_draft(db):
@@ -933,6 +1037,13 @@ def test_confirmed_issue_can_be_corrected_then_fully_voided_without_registration
     )
     assert voided_response.status_code == 200, voided_response.text
     assert voided_response.json()["workflow_status"] == "void"
+    # D-01：v2 整单作废同样把明细软作废，06 表导出随之排除（此前单头 void 行仍会被导出）
+    db.expire_all()
+    voided_lines = db.query(MaintenanceSiteIssueLine).filter_by(issue_id=draft["issue_id"]).all()
+    assert voided_lines and all(item.is_active is False for item in voided_lines)
+    assert not {item.issue_line_id for item in voided_lines} & _site_sheet_entity_ids(
+        db, project.project_id
+    )
 
     candidates = client.post(
         f"/api/maintenance/site-issues/projects/{project.project_id}/candidates/search",
@@ -1306,5 +1417,103 @@ def test_command_receipts_are_append_only_and_return_events_only_allow_one_downs
         db.query(MaintenanceSiteIssueCommand)
         .filter_by(idempotency_key="synthetic-site-issue-confirm-immutable")
         .count()
+        == 1
+    )
+
+
+def test_workbook_sourced_issue_can_be_voided_through_the_panel_route(db):
+    """生产缺陷：06 表建的领用单（source=workbook）在面板点「作废」一律 400。
+
+    作废后按 D-01 退出全部读模型：单头 void、明细软作废、06 表导出不含该行、
+    工作台与展示板的已领用成本归零；审计与幂等回执照写，重放 / 再作废与 v2 同口径。
+    """
+    project = _project(db, project_id="project-site-issue-workbook-void")
+    issue, line = _workbook_issue(db, project=project, issue_no="CKD-WB-0001")
+    assert line.issue_line_id in _site_sheet_entity_ids(db, project.project_id)
+    assert _workspace_requisition_cost(db, project.project_id) == "113.00"
+    assert _board_requisition_cost(db, project.project_id) == Decimal("113.00")
+
+    client = _client(
+        db,
+        username="site_issue_workbook_void_manager",
+        role="boss",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    path = f"/api/maintenance/site-issues/{issue.issue_id}/void"
+    body = {
+        "project_id": project.project_id,
+        "version": issue.version,
+        "idempotency_key": "synthetic-workbook-void-command",
+        "reason": "06 表录错的领用单整单作废",
+    }
+    voided = client.post(path, json=body)
+    assert voided.status_code == 200, voided.text
+    payload = voided.json()
+    assert payload["workflow_status"] == "void"
+    assert payload["source"] == "workbook"
+    assert payload["return_obligation_event"] is None
+    assert payload["inventory_effect"] == "none"
+    assert payload["idempotent_replay"] is False
+
+    db.expire_all()
+    stored = db.get(MaintenanceSiteIssue, issue.issue_id)
+    assert stored.normalized_status == "void"
+    assert stored.voided_at is not None
+    assert stored.version == 2
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).is_active is False
+    audit = (
+        db.query(MaintenanceProjectOperationAudit)
+        .filter_by(entity_type="site_issue", entity_id=issue.issue_id, action="void")
+        .one()
+    )
+    assert audit.reason == body["reason"]
+    assert audit.before_json["workflow_status"] == "confirmed"
+    assert audit.after_json["workflow_status"] == "void"
+    # 从未进入返还义务接口的单：不发事件、不投影义务，也不能因此报错
+    assert (
+        db.query(MaintenanceSiteIssueReturnEvent).filter_by(issue_id=issue.issue_id).count()
+        == 0
+    )
+    assert (
+        db.query(MaintenanceReturnObligation).filter_by(issue_id=issue.issue_id).count()
+        == 0
+    )
+
+    # D-01：作废行不再进入任何统计与导出
+    assert line.issue_line_id not in _site_sheet_entity_ids(db, project.project_id)
+    assert _workspace_requisition_cost(db, project.project_id) == "0.00"
+    assert _board_requisition_cost(db, project.project_id) == Decimal("0")
+    listed = client.post(
+        "/api/maintenance/site-issues/search",
+        json={"project_id": project.project_id},
+    )
+    assert listed.status_code == 200, listed.text
+    listed_issue = next(
+        row for row in listed.json()["rows"] if row["issue_id"] == issue.issue_id
+    )
+    assert listed_issue["workflow_status"] == "void"
+    # 面板按明细铺行，明细软作废后作废单不再出现在「领用与返还」列表
+    assert listed_issue["lines"] == []
+
+    # 幂等：同键重放返回同一回执；换键再作废按既有口径 409，不写第二张回执
+    replayed = client.post(path, json=body)
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["idempotent_replay"] is True
+    again = client.post(
+        path,
+        json={
+            **body,
+            "version": 2,
+            "idempotency_key": "synthetic-workbook-void-command-again",
+        },
+    )
+    assert again.status_code == 409, again.text
+    assert "已经作废" in again.json()["detail"]
+    assert (
+        db.query(MaintenanceSiteIssueCommand).filter_by(issue_id=issue.issue_id).count()
         == 1
     )

@@ -205,3 +205,30 @@ def test_contract_amount_editable_by_manager(db, monkeypatch):
         pytest.fail("概览缺少合同总额行")
     applied = _upload(client, project.project_id, wb)
     assert applied.status_code == 200, applied.text
+
+
+def test_board_project_card_exposes_master_edit_flag_from_the_same_gate(
+    db, monkeypatch,
+):
+    """D-03：前端上传入口跟服务端 can_edit_master_workbook 走，它与上传门同一判定。
+
+    负责人账号没有上传动作键、也没有 data_profit：卡片 flag 为 True 且下载放行；
+    无关账号 flag 为 False 且下载 403——两者必须同时成立，否则前端就会与后端漂移。
+    """
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "maintenance_project_master_v2_enabled",
+                        True)
+    project, _part, _order, _line = _make_project_with_line(db)
+    card_path = f"/api/maintenance/boss-board/projects/{project.project_id}"
+
+    manager = _manager_client(db, project)
+    card = manager.get(card_path)
+    assert card.status_code == 200, card.text
+    assert card.json()["can_edit_master_workbook"] is True
+    assert _download(manager, project.project_id).status_code == 200
+
+    outsider = _sales_client(db, project, match=False)
+    card = outsider.get(card_path)
+    assert card.status_code == 200, card.text
+    assert card.json()["can_edit_master_workbook"] is False
+    assert _download(outsider, project.project_id).status_code == 403

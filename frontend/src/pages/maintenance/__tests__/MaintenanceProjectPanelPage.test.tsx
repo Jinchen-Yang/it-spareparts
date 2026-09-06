@@ -987,4 +987,28 @@ describe("报销 tab 展示备注（#47）", () => {
     await waitFor(() => expect(screen.queryByText("BXD-OLD")).toBeNull());
     expect(screen.queryByText(/已覆盖并刷新/)).toBeNull();
   });
+
+  it("项目负责人无上传动作键时按服务端 can_edit_master_workbook 给上传入口（D-03）", async () => {
+    // 后端上传门早已放行本人项目的负责人/销售；入口显示只信服务端下发的判定，
+    // 不看本地权限图（负责人账号通常没有 action_maintenance_expense_collection_upload）
+    getBoardProject.mockResolvedValue({
+      data: { ...projectRow, can_edit_master_workbook: true },
+    });
+    renderPanel();
+    expect(await screen.findByRole("button", { name: /上传覆盖/ })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    await screen.findByRole("button", { name: /下载报销/ });
+    expect(screen.getAllByRole("button", { name: /上传覆盖/ })).toHaveLength(2);
+  });
+
+  it("服务端 can_edit_master_workbook 为 false 且无动作键时仍无上传入口", async () => {
+    getBoardProject.mockResolvedValue({
+      data: { ...projectRow, can_edit_master_workbook: false },
+    });
+    renderPanel();
+    await screen.findByRole("button", { name: /下载本项目总表/ });
+    fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
+    await screen.findByRole("button", { name: /下载报销/ });
+    expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
+  });
 });

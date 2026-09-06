@@ -83,20 +83,12 @@ def _require_master_edit(
     管理员/全量账号走既有 action 键（含 data_profit）；
     项目负责人（primary_manager 挂靠）与项目销售（canonical salesperson）
     对本人项目拥有全量编辑权（含成本/合同额列——当日拍板放开）。
+    判定本体在 ``maintenance_project_assignments.can_edit_master_workbook``，
+    展示板项目卡向前端下发的同名字段用的是同一函数（D-03）。
     """
-    if not config.ENABLE_RBAC or ctx.role == "admin":
-        return
-    from app import permissions as _perm
     from app.services import maintenance_project_assignments as _assignments
 
-    perms = (
-        ctx.permissions
-        if ctx.permissions is not None
-        else _perm.effective(ctx.role, None)
-    )
-    if perms.get(_ACTION_KEY, False) and perms.get("data_profit", False):
-        return
-    if _assignments.is_project_workbook_editor(
+    if _assignments.can_edit_master_workbook(
             db, project_id=project_id, user_ctx=ctx):
         return
     raise HTTPException(
