@@ -2,7 +2,7 @@
 
 覆盖：
 - 迁移单 head、台账表/快照来源约束/批次索引谓词，downgrade→upgrade 无损；
-- 预览即归档原件（sys_raw_file + 磁盘文件 + 批次 file_hash = 原件 sha256）；
+- 预览即归档原件（磁盘文件 + 批次 file_hash = 原件 sha256；sys_raw_file 行到应用成功才落）；
 - 应用写出台账行（带批次），快照 source=bulk_import 且指向批次；
 - 同文件再导：全部已入账，无可提交行；
 - 增量文件：只新建新月份；既有月份变化 = update 行，未勾选不写，勾选后走
@@ -98,7 +98,9 @@ def _preview(db, data: bytes, *, name: str = "receipts.xlsx") -> dict:
     return bulk.preview_transfer(db, [(name, data)], operated_by="skd-operator")
 
 
-def _apply(db, preview: dict, row_keys: list[str]) -> dict:
+def _apply(db, preview: dict, row_keys: list[str], *, real_operator: bool = True) -> dict:
+    # 2026-09-06 复核：覆盖行（update_collection_snapshot）必须实名账号；服务层
+    # 由 HTTP 入口传入实名判定，这里模拟实名（HTTP 门禁见 hardening 测试）。
     return bulk.apply_transfer(
         db,
         preview_token=preview["preview_token"],
@@ -106,6 +108,7 @@ def _apply(db, preview: dict, row_keys: list[str]) -> dict:
         data_version=preview["data_version"],
         row_keys=row_keys,
         operated_by="skd-operator",
+        real_operator=real_operator,
     )
 
 
@@ -139,14 +142,26 @@ def test_migration_is_single_head_and_roundtrips(db):
 
     inspector = inspect(db.get_bind())
     assert "maintenance_collection_receipt" in inspector.get_table_names()
-    uniques = {
-        item["name"]: item["column_names"]
-        for item in inspector.get_unique_constraints("maintenance_collection_receipt")
+    # 2026-09-06 复核：唯一键改为只约束生效行的偏唯一索引——裁决把旧行留档
+    # （is_active=false）并另插同 (销售订单, 收款单号) 的更正行。
+    assert inspector.get_unique_constraints("maintenance_collection_receipt") == []
+    columns = {
+        item["name"]: item for item in inspector.get_columns("maintenance_collection_receipt")
     }
-    assert uniques["uq_maintenance_collection_receipt_contract_receipt"] == [
-        "contract_no", "receipt_no",
-    ]
+    assert columns["source_sha256"]["nullable"] is True
+    assert {"superseded_by", "ruling_id", "ruling_reason", "ruled_by", "ruled_at"} <= set(columns)
     with engine.connect() as connection:
+        active_index = connection.execute(text(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'ux_maintenance_collection_receipt_active'"
+        )).scalar_one()
+        assert "UNIQUE" in active_index and "WHERE is_active" in active_index
+        selection_index = connection.execute(text(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'ix_batch_success_selection_hash'"
+        )).scalar_one()
+        assert "report_json ->> 'selection_hash'" in selection_index
+        assert "WHERE" in selection_index and "'success'" in selection_index
         source_check = connection.execute(text(
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
             "WHERE conname = 'ck_maintenance_collection_source'"
@@ -191,6 +206,8 @@ def test_migration_is_single_head_and_roundtrips(db):
 # ---------- 归档 ----------
 
 def test_preview_archives_original_and_keeps_file_sha256_on_batch(db):
+    """预览即归档原件；sys_raw_file 行到应用成功才落（2026-09-06 复核：只预览不
+    应用的批次不该把原件钉死在磁盘上，过了宽限期由 GC 当孤儿回收）。"""
     _project_with_contract(db)
     data = _receipt_xlsx([(ORDER_NO, "SK-1", date(2026, 1, 10), 100)])
     sha256 = hashlib.sha256(data).hexdigest()
@@ -201,14 +218,22 @@ def test_preview_archives_original_and_keeps_file_sha256_on_batch(db):
     assert batch.file_type == "maint_bulk"
     assert batch.file_hash == sha256
     assert batch.report_json["payload_hash"] == preview["payload_hash"]
+    (archive,) = batch.report_json["archives"]
+    assert archive["file_hash"] == sha256 and archive["filename"] == "收款单.xlsx"
+    assert "archives" not in batch.report_json["public"]
+    assert os.path.dirname(os.path.abspath(archive["storage_path"])) == os.path.abspath(
+        get_settings().raw_file_dir
+    )
+    with open(archive["storage_path"], "rb") as handle:
+        assert hashlib.sha256(handle.read()).hexdigest() == sha256
+    assert db.scalars(select(SysRawFile).where(SysRawFile.batch_id == batch.id)).all() == []
+
+    _apply(db, preview, [row["row_key"] for row in _rows(preview, row_status="ready")])
+
     raw = db.scalars(select(SysRawFile).where(SysRawFile.batch_id == batch.id)).one()
     assert raw.file_hash == sha256
     assert raw.filename == "收款单.xlsx"
-    assert os.path.dirname(os.path.abspath(raw.storage_path)) == os.path.abspath(
-        get_settings().raw_file_dir
-    )
-    with open(raw.storage_path, "rb") as handle:
-        assert hashlib.sha256(handle.read()).hexdigest() == sha256
+    assert raw.storage_path == archive["storage_path"]
 
 
 def test_general_import_duplicate_lookup_ignores_bulk_gateway_batches(db):

@@ -359,6 +359,8 @@ def _receipt_plan(monkeypatch, rows, *, ledger=(), snapshots=()):
     )
     monkeypatch.setattr(bulk, "_ledger_receipts", lambda _db, _norms: list(ledger))
     monkeypatch.setattr(bulk, "_existing_snapshots", lambda _db, _ids: list(snapshots))
+    # 覆盖回执要点名原操作人（D-16 复核 2026-09-06）：单元层无 DB，原操作人查询打桩。
+    monkeypatch.setattr(bulk, "_snapshot_operators", lambda _db, _rows: {})
     detected = _sheet(
         {"order_no": 0, "receipt_no": 1, "receipt_date": 2, "actual_amount": 3},
         [(row_no, ("XSDD-20240101-0001", *values)) for row_no, values in rows],

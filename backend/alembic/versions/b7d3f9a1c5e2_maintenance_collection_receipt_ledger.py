@@ -1,15 +1,21 @@
 """收款单（SKD）导入台账与快照来源扩展（D-16，issue #288）
 
-1. 新表 ``maintenance_collection_receipt``：逐笔实收台账，
-   ``UNIQUE (contract_no, receipt_no)`` 让同一收款单跨批次幂等；
+1. 新表 ``maintenance_collection_receipt``：逐笔实收台账。唯一键只约束**生效行**
+   （偏唯一索引 ``ux_maintenance_collection_receipt_active``），让同一收款单跨批次
+   幂等，同时允许人工裁决把旧行留档（``is_active=false`` + ``superseded_by``）、
+   另插一条更正行（``ruling_id`` 非空、无批次、无原件 sha256）；
 2. ``maintenance_collection_snapshot`` 来源新增 ``bulk_import``，与 ``workbook``
    一样必须带 ``import_batch_id``，批量导入写出/覆盖的快照直接指向批次；
 3. ``ux_batch_success_hash`` 偏唯一索引排除 ``maint_bulk``：该网关的
    ``file_hash`` 现在保存原件 sha256（原件同时归档到 ``sys_raw_file``），
-   同一原件分次勾选提交是合法流程，不能被"同 hash 只许成功一次"挡住。
+   同一原件分次勾选提交是合法流程，不能被"同 hash 只许成功一次"挡住；
+4. ``ix_batch_success_selection_hash``：应用幂等按 ``report_json->>'selection_hash'``
+   找已成功批次，表达式索引避免随批次表增长退化成全表扫。
 
 downgrade 有损：``bulk_import`` 来源的快照退回 ``direct_api``/无批次
-（旧 CHECK 不认识新来源），台账表整体删除。
+（旧 CHECK 不认识新来源），台账表整体删除。**受保护**：已经存在同一原件分次
+提交的多条 success ``maint_bulk`` 批次时，旧唯一索引根本建不回来，此时拒绝降级
+（``downgrade refused``），而不是在半途以 UniqueViolation 崩掉。
 
 Revision ID: b7d3f9a1c5e2
 Revises: a8e4f1c7d3b9
@@ -38,7 +44,8 @@ def upgrade() -> None:
         sa.Column("actual_amount", sa.Numeric(14, 2), nullable=False),
         sa.Column("remark", sa.Text(), nullable=True),
         sa.Column("import_batch_id", sa.Integer(), nullable=True),
-        sa.Column("source_sha256", sa.String(length=64), nullable=False),
+        # 导入行必带原件 sha256；裁决更正行没有原件。
+        sa.Column("source_sha256", sa.String(length=64), nullable=True),
         sa.Column(
             "is_active",
             sa.Boolean(),
@@ -52,6 +59,12 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("created_by", sa.String(length=64), nullable=False),
+        # 人工裁决链：被取代行指向更正行；更正行带裁决号。
+        sa.Column("superseded_by", sa.Integer(), nullable=True),
+        sa.Column("ruling_id", sa.String(length=36), nullable=True),
+        sa.Column("ruling_reason", sa.Text(), nullable=True),
+        sa.Column("ruled_by", sa.String(length=64), nullable=True),
+        sa.Column("ruled_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "actual_amount >= 0 AND actual_amount < 1000000000000",
             name="ck_maintenance_collection_receipt_amount",
@@ -64,12 +77,18 @@ def upgrade() -> None:
             ["project_contract_id"],
             ["maintenance_project_contract.project_contract_id"],
         ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "contract_no",
-            "receipt_no",
-            name="uq_maintenance_collection_receipt_contract_receipt",
+        sa.ForeignKeyConstraint(
+            ["superseded_by"],
+            ["maintenance_collection_receipt.id"],
         ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ux_maintenance_collection_receipt_active",
+        "maintenance_collection_receipt",
+        ["contract_no", "receipt_no"],
+        unique=True,
+        postgresql_where=sa.text("is_active"),
     )
     op.create_index(
         "ix_maintenance_collection_receipt_contract",
@@ -112,9 +131,41 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("status = 'success' AND file_type <> 'maint_bulk'"),
     )
+    op.create_index(
+        "ix_batch_success_selection_hash",
+        "sys_import_batch",
+        ["file_type", sa.text("(report_json ->> 'selection_hash')")],
+        postgresql_where=sa.text("status = 'success'"),
+    )
 
 
 def downgrade() -> None:
+    # 旧 ux_batch_success_hash 对 maint_bulk 也要求 (file_type, file_hash) 唯一。
+    # 同一原件分次勾选提交会留下多条 success 批次；那样的库建不回旧索引，
+    # 与其在 CREATE INDEX 时以 UniqueViolation 半途崩掉，不如在任何改动之前
+    # 明确拒绝，让运维先归档/清理再降级（同 a9c4e7b2d6f1 的受保护降级形态）。
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("LOCK TABLE sys_import_batch IN ACCESS EXCLUSIVE MODE")
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM sys_import_batch
+                WHERE status = 'success'
+                GROUP BY file_type, file_hash
+                HAVING count(*) > 1
+            ) THEN
+                RAISE EXCEPTION
+                    'success import batches share a (file_type, file_hash); '
+                    'downgrade refused';
+            END IF;
+        END;
+        $$
+        """
+    )
+
+    op.drop_index("ix_batch_success_selection_hash", table_name="sys_import_batch")
     op.drop_index("ux_batch_success_hash", table_name="sys_import_batch")
     op.create_index(
         "ux_batch_success_hash",
@@ -157,6 +208,10 @@ def downgrade() -> None:
     )
     op.drop_index(
         "ix_maintenance_collection_receipt_contract",
+        table_name="maintenance_collection_receipt",
+    )
+    op.drop_index(
+        "ux_maintenance_collection_receipt_active",
         table_name="maintenance_collection_receipt",
     )
     op.drop_table("maintenance_collection_receipt")

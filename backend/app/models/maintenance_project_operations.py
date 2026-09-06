@@ -98,6 +98,11 @@ class MaintenanceCollectionReceipt(Base):
     月度累计快照由「台账生效行 ∪ 本文件新收款」推导，因此增量导出（只含最近
     几个月）也能算出正确累计；同一 (销售订单, 收款单号) 只落一行，再次出现时
     金额/日期一致即跳过，不一致即人工裁决，绝不自动覆盖或累加。
+
+    人工裁决（``receipt-rulings``）不改行：旧行 ``is_active=False`` 并记
+    ``superseded_by`` / 裁决人 / 时间 / 理由，另插一条生效的更正行（``ruling_id``
+    非空、无批次、无原件 sha256）。唯一键只约束**生效行**，被取代的历史行保留。
+    幂等 / 冲突判定与累计推导都只看生效行。
     """
 
     __tablename__ = "maintenance_collection_receipt"
@@ -115,7 +120,8 @@ class MaintenanceCollectionReceipt(Base):
     import_batch_id: Mapped[int | None] = mapped_column(
         ForeignKey("sys_import_batch.id")
     )
-    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 导入行必带原件 sha256；裁决更正行没有原件，为空。
+    source_sha256: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
@@ -123,12 +129,23 @@ class MaintenanceCollectionReceipt(Base):
         TZDateTime, nullable=False, server_default=func.now()
     )
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 裁决链：被取代行指向更正行；更正行带裁决号。
+    superseded_by: Mapped[int | None] = mapped_column(
+        ForeignKey("maintenance_collection_receipt.id")
+    )
+    ruling_id: Mapped[str | None] = mapped_column(String(36))
+    ruling_reason: Mapped[str | None] = mapped_column(Text)
+    ruled_by: Mapped[str | None] = mapped_column(String(64))
+    ruled_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
     __table_args__ = (
-        UniqueConstraint(
+        # 只有生效行唯一：裁决后旧行留档、更正行接管同一 (销售订单, 收款单号)。
+        Index(
+            "ux_maintenance_collection_receipt_active",
             "contract_no",
             "receipt_no",
-            name="uq_maintenance_collection_receipt_contract_receipt",
+            unique=True,
+            postgresql_where=text("is_active"),
         ),
         CheckConstraint(
             "actual_amount >= 0 AND actual_amount < 1000000000000",
