@@ -30,6 +30,10 @@ export type MaintenanceBatchAction =
   | "create_contract"
   | "update_contract"
   | "upsert_collection_snapshot"
+  /** D-16：覆盖既有已确认累计——可勾选但默认不勾，用户须逐行确认。 */
+  | "update_collection_snapshot"
+  /** D-16：累计不变，只把新收款登记入台账。 */
+  | "record_receipts"
   | "skip"
   | "block";
 
@@ -99,6 +103,8 @@ export interface MaintenanceBatchPreviewRow {
   match_state: MaintenanceBatchMatchState;
   action: MaintenanceBatchAction;
   row_status: MaintenanceBatchRowStatus;
+  /** 为 true 的行默认不勾选（覆盖既有累计），必须由用户显式勾选。 */
+  requires_confirmation?: boolean;
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
   delta?: Record<string, unknown> | null;
@@ -113,6 +119,12 @@ export interface MaintenanceBatchCounts {
   unmatched: number;
   invalid: number;
   ready: number;
+  /** 收款单已在台账、本次跳过的行数（D-16）。 */
+  known?: number;
+  /** 收款单号与台账金额/日期不一致、需人工裁决的行数（D-16）。 */
+  receipt_conflicts?: number;
+  /** 覆盖既有累计、需显式勾选的行数（D-16）。 */
+  updates?: number;
 }
 
 export interface MaintenanceBatchPreviewResponse {
@@ -153,6 +165,13 @@ export interface MaintenanceBatchApplyRowResult {
   aggregate_key?: string | null;
   project_contract_id?: string | null;
   report_month?: string | null;
+  /** 覆盖回执：原值→新值、原来源/时间（D-16）。 */
+  before_amount?: string | null;
+  after_amount?: string | null;
+  previous_source?: string | null;
+  previous_import_batch_id?: string | null;
+  previous_updated_at?: string | null;
+  receipts_recorded?: number | null;
 }
 
 export interface MaintenanceBatchApplyResponse {

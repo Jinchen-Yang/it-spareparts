@@ -36,6 +36,7 @@ from app.models.maintenance_bad_return import (
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.maintenance_project_operations import (
+    MaintenanceCollectionReceipt,
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
@@ -177,6 +178,7 @@ __all__ = [
     "MaintenanceBadReturnLine",
     "MaintenanceBadReturnCommand",
     "MaintenanceSourceOrderAssignment",
+    "MaintenanceCollectionReceipt",
     "MaintenanceCollectionSnapshot",
     "MaintenanceProjectExpenseAttribution",
     "MaintenanceProjectOperationAudit",

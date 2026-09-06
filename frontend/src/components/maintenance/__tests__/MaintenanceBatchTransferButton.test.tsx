@@ -191,6 +191,100 @@ const preview = {
   },
 };
 
+/** D-16 收款单预览：新建 / 覆盖（默认不勾）/ 已在台账 / 台账冲突 四种行。 */
+const receiptRow = (overrides: Record<string, unknown>) => ({
+  file_id: "f-receipt",
+  filename: "收款单.xlsx",
+  detected_sheet: "Sheet1",
+  normalized_key: "20240101-0001",
+  matched_project_id: "p1",
+  matched_project_name: "项目一",
+  matched_contract_id: "c1",
+  match_strategy: "exact_contract_no",
+  candidate_count: 1,
+  candidates: [],
+  match_state: "matched",
+  before: null,
+  delta: null,
+  warnings: [],
+  errors: [],
+  ...overrides,
+});
+
+const receiptPreview = {
+  ...preview,
+  files: [
+    {
+      file_id: "f-receipt",
+      filename: "收款单.xlsx",
+      import_kind: "receipt",
+      source_sha256: "c".repeat(64),
+      detected_sheet: "Sheet1",
+      header_rows: [1],
+      detected_fields: [],
+      mapping_conflicts: [],
+    },
+  ],
+  rows: [
+    receiptRow({
+      row_key: "row-create",
+      source_row: 4,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-08-01", cumulative_received_inc_tax: "180.00" },
+      idempotency_key: "k-create",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "180.00", new_receipts: 1 },
+    }),
+    receiptRow({
+      row_key: "row-update",
+      source_row: 3,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-07-01", cumulative_received_inc_tax: "130.00" },
+      idempotency_key: "k-update",
+      action: "update_collection_snapshot",
+      row_status: "ready",
+      requires_confirmation: true,
+      before: { cumulative_amount: "100.00", source: "workbook", import_batch_id: "wb-1", updated_at: "2026-08-02T09:30:00" },
+      after: { cumulative_amount: "130.00", new_receipts: 1 },
+      warnings: [
+        {
+          code: "snapshot_overwrite",
+          message: "将覆盖 2026-07 已确认累计 100.00 → 130.00（原来源 workbook / 批次 wb-1 / 2026-08-02 09:30）",
+          field: "cumulative_received_inc_tax",
+        },
+      ],
+    }),
+    receiptRow({
+      row_key: "row-known",
+      source_row: 2,
+      canonical: { receipt_key: "SK-1|XSDD-20240101-0001", sales_order_no: "20240101-0001", receipt_no: "SK-1" },
+      idempotency_key: "k-known",
+      match_strategy: "none",
+      candidate_count: 0,
+      action: "skip",
+      row_status: "unchanged",
+      after: null,
+      warnings: [{ code: "receipt_known", message: "收款单 SK-1 已在台账（批次 12，2026-08-01 12:00），本次跳过", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-conflict",
+      source_row: 5,
+      canonical: { receipt_key: "SK-9|XSDD-20240101-0001", sales_order_no: "20240101-0001" },
+      idempotency_key: "k-conflict",
+      match_strategy: "none",
+      candidate_count: 0,
+      match_state: "invalid",
+      action: "block",
+      row_status: "blocked",
+      after: null,
+      errors: [
+        { code: "receipt_conflict", message: "收款单 SK-9 与台账不一致（台账 100.00 / 2026-01-10，本文件 120.00 / 2026-01-10），需人工裁决，不自动覆盖也不累加", field: null },
+        { code: "order_level_fail_closed", message: "销售订单 20240101-0001 存在无效/风险/冲突收款行，禁止从其余行计算部分累计", field: null },
+      ],
+    }),
+  ],
+  summary: { total: 4, matched: 3, ambiguous: 0, unmatched: 0, invalid: 1, ready: 2, known: 1, receipt_conflicts: 1, updates: 1 },
+};
+
 const applyResult = {
   batch_id: "batch-1",
   status: "done",
@@ -291,6 +385,62 @@ describe("MaintenanceBatchTransferButton", () => {
     await waitFor(() => expect(onApplied).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("逐行提交结果")).toBeInTheDocument();
     expect(screen.getByText("合同金额已更新")).toBeInTheDocument();
+  });
+
+  it("收款单预览：覆盖行可勾选但默认不勾，已在台账与台账冲突有标签", async () => {
+    mocks.preview.mockResolvedValue({ data: receiptPreview });
+    mocks.apply.mockResolvedValue({
+      data: {
+        ...applyResult,
+        applied: 2,
+        rows: [
+          {
+            row_key: "row-update",
+            source_file: "收款单.xlsx",
+            source_sheet: "Sheet1",
+            source_row: 3,
+            status: "applied",
+            action: "update_collection_snapshot",
+            project_id: "p1",
+            message: "XSDD-20240101-0001 2026-07 已覆盖：原值 100.00 → 新值 130.00（原来源 workbook/批次 wb-1/2026-08-02 09:30），登记 1 笔收款入台账",
+            before_amount: "100.00",
+            after_amount: "130.00",
+            previous_source: "workbook",
+          },
+        ],
+      },
+    });
+    renderButton();
+    await screen.findByText("先预览，再提交");
+    const input = document.querySelector('input[type="file"]');
+    const file = new File(["receipt"], "收款单.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    fireEvent.change(input!, { target: { files: [file] } });
+    fireEvent.click(await screen.findByRole("button", { name: "自动识别并预览" }));
+
+    // create 行默认勾选；update 行可勾选但默认不勾
+    expect(await screen.findByText("可提交 2 行，已选 1 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).toBeChecked();
+    const overwrite = screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行");
+    expect(overwrite).not.toBeChecked();
+    expect(overwrite).not.toBeDisabled();
+    expect(screen.getByText("其中 1 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 0 行。")).toBeInTheDocument();
+    // 覆盖提示列：原值→新值 + 原来源
+    expect(screen.getByText("将覆盖 2026-07 已确认累计 100.00 → 130.00（原来源 workbook / 批次 wb-1 / 2026-08-02 09:30）")).toBeInTheDocument();
+    expect(screen.getByText("需确认覆盖")).toBeInTheDocument();
+    expect(screen.getByText("覆盖已确认累计")).toBeInTheDocument();
+    // 已在台账 / 台账冲突标签，且都不可提交
+    expect(screen.getByText("已在台账")).toBeInTheDocument();
+    expect(screen.getByText("台账冲突")).toBeInTheDocument();
+    expect(screen.getByLabelText("无效行不可提交")).toBeDisabled();
+    expect(screen.getAllByLabelText("已匹配行不可提交")).toHaveLength(1);
+
+    // 显式勾选覆盖行后才随 apply 提交
+    fireEvent.click(overwrite);
+    expect(await screen.findByText("其中 1 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 1 行。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "提交 2 行" }));
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledTimes(1));
+    expect([...mocks.apply.mock.calls[0][0].row_keys].sort()).toEqual(["row-create", "row-update"]);
+    expect(await screen.findByText(/原值 100.00 → 新值 130.00/)).toBeInTheDocument();
   });
 
   it("批量下载按服务端表单/字段白名单并携带主页当前筛选", async () => {

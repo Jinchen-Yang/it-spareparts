@@ -24,6 +24,7 @@ from app.models.maintenance_project import (
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectOperationAudit,
 )
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_expense_collection_workbook as wbk
@@ -672,3 +673,77 @@ def test_unchanged_remark_is_not_a_write(db, project):
     client = uploader(db, "rmk-6")
     content = _download(client, project)
     assert _upload(client, project, content).json()["expense_updates"] == 0
+
+
+# ---------- D-16：05 表 UPDATE 走单调性守卫 + 事实审计（契约测试） ----------
+
+def _seed_confirmed_snapshots(db, project, *months_amounts):
+    contract = db.execute(select(MaintenanceProjectContract)).scalars().one()
+    for month, amount in months_amounts:
+        db.add(MaintenanceCollectionSnapshot(
+            collection_id=str(uuid.uuid4()), project_id=project.project_id,
+            project_contract_id=contract.project_contract_id,
+            report_month=month, cumulative_amount=Decimal(amount),
+            status="confirmed", source="legacy", version=1))
+    db.commit()
+
+
+def _update_month(client, project, month_text: str, amount):
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_COLLECTION]
+    for row in range(2, ws.max_row + 1):
+        if ws.cell(row=row, column=3).value == month_text:
+            ws.cell(row=row, column=1, value="UPDATE")
+            ws.cell(row=row, column=4, value=amount)
+            break
+    else:
+        raise AssertionError(f"下载的 05 表里没有 {month_text}")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return _upload(client, project, buf.getvalue())
+
+
+def test_excel_update_regressing_below_earlier_confirmed_month_is_rejected(db, project):
+    """Excel 一格填错不能让已确认累计回款倒退：与直连接口同一条守卫、同一句文案。"""
+    _seed_confirmed_snapshots(
+        db, project, (date(2026, 6, 1), "10000.00"), (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _update_month(client, project, "2026-07", 5000)
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "collection_not_monotonic"
+    assert "已确认累计回款不得低于更早月份的已确认累计回款" in detail["message"]
+    db.expire_all()
+    july = db.execute(select(MaintenanceCollectionSnapshot).where(
+        MaintenanceCollectionSnapshot.report_month == date(2026, 7, 1))).scalar_one()
+    assert july.cumulative_amount == Decimal("20000.00") and july.version == 1
+    assert db.execute(select(MaintenanceProjectOperationAudit)).scalars().all() == []
+
+
+def test_excel_update_leaves_fact_audit_naming_the_workbook_batch(db, project):
+    _seed_confirmed_snapshots(
+        db, project, (date(2026, 6, 1), "10000.00"), (date(2026, 7, 1), "20000.00"))
+    client = uploader(db)
+
+    resp = _update_month(client, project, "2026-07", 25000)
+
+    assert resp.status_code == 200, resp.text
+    batch_id = resp.json()["import_batch_id"]
+    db.expire_all()
+    july = db.execute(select(MaintenanceCollectionSnapshot).where(
+        MaintenanceCollectionSnapshot.report_month == date(2026, 7, 1))).scalar_one()
+    assert july.cumulative_amount == Decimal("25000.00")
+    assert july.version == 2 and july.import_batch_id == batch_id
+    audit = db.execute(select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.entity_type == "collection",
+        MaintenanceProjectOperationAudit.action == "update",
+    )).scalars().one()
+    assert audit.entity_id == july.collection_id
+    assert audit.before_json["cumulative_amount"] == "20000.00"
+    assert audit.after_json["cumulative_amount"] == "25000.00"
+    assert audit.after_json["import_batch_id"] == batch_id
+    assert f"import_batch_id={batch_id}" in audit.reason
+    assert "20000.00→25000.00" in audit.reason
+    assert audit.operated_by == "wbk-uploader"

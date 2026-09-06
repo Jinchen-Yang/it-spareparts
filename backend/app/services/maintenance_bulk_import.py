@@ -37,13 +37,16 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.business_time import business_today
-from app.etl import mapping
+from app.etl import mapping, pipeline
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
-from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionReceipt,
+    MaintenanceCollectionSnapshot,
+)
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.sales import FSalesOrder
-from app.models.system import SysAuditLog, SysImportBatch, SysImportError
+from app.models.system import SysAuditLog, SysImportBatch, SysImportError, SysRawFile
 from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_identity
 from app.services import maintenance_project_operations as operations
@@ -129,7 +132,10 @@ class FormAdapter(Protocol):
         *,
         operated_by: str,
         audit_reason: str,
+        provenance: dict | None = None,
     ) -> dict:
+        """``provenance``：``{"batch_id": sys_import_batch.id, "source_sha256": 原件 sha256}``，
+        让写出的事实行直接指向批次与原件，而不只靠审计 reason 文本。"""
         ...
 
 
@@ -1480,6 +1486,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
         *,
         operated_by: str,
         audit_reason: str,
+        provenance: dict | None = None,
     ) -> dict:
         writes = 0
         noops = 0
@@ -1795,6 +1802,7 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 "row_no": row_no,
                 "business_key": f"{receipt_no}|{order_raw}",
                 "normalized_order_no": norm,
+                "receipt_no": receipt_no,
                 "issues": [],
             }
             try:
@@ -1846,6 +1854,7 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                     )
                 )
 
+            # 文件内去重：同一 (销售订单, 收款单号) 只计一次；金额/日期不一致即冲突。
             duplicate = seen_keys.get((norm, receipt_no))
             if duplicate is not None:
                 if duplicate[:2] != (receipt_date, actual):
@@ -1910,13 +1919,61 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 "actual": actual,
                 "remark": remark,
                 "contract": contract,
+                "source": base,
+                "state": "new",
             })
 
+        # 跨批次幂等（D-16）：按 (销售订单, 收款单号) 对照台账。同单号同金额同日期
+        # = 已入账，跳过；同单号不同金额/日期 = 硬冲突，人工裁决，绝不覆盖或累加。
+        ledger_rows = _ledger_receipts(db, sorted(by_order))
+        ledger_by_key = {(row.contract_no, row.receipt_no): row for row in ledger_rows}
+        ledger_known = 0
+        ledger_conflicts = 0
+        for norm, receipts in by_order.items():
+            for receipt in receipts:
+                known = ledger_by_key.get((norm, receipt["receipt_no"]))
+                if known is None:
+                    continue
+                source = receipt["source"]
+                if (
+                    known.receipt_date == receipt["receipt_date"]
+                    and known.actual_amount == receipt["actual"]
+                ):
+                    receipt["state"] = "known"
+                    ledger_known += 1
+                    source["action"] = "known"
+                    source["issues"].append(_row_issue(
+                        receipt["row_no"],
+                        "receipt_known",
+                        (
+                            f"收款单 {receipt['receipt_no']} 已在台账"
+                            f"（批次 {known.import_batch_id or '-'}"
+                            f"，{_ledger_stamp(known)}），本次跳过"
+                        ),
+                        severity="warning",
+                    ))
+                    continue
+                receipt["state"] = "conflict"
+                ledger_conflicts += 1
+                issue = _row_issue(
+                    receipt["row_no"],
+                    "receipt_conflict",
+                    (
+                        f"收款单 {receipt['receipt_no']} 与台账不一致"
+                        f"（台账 {_jsonable(known.actual_amount)} / {known.receipt_date:%Y-%m-%d}"
+                        f"，本文件 {_jsonable(receipt['actual'])} / {receipt['receipt_date']:%Y-%m-%d}）"
+                        "，需人工裁决，不自动覆盖也不累加"
+                    ),
+                )
+                source["action"] = "error"
+                source["issues"].append(issue)
+                hard_issues.append(issue)
+
         # A receipt export represents cumulative history.  If any physical row
-        # for an order is invalid (risk remark, status, amount/date, or a
-        # conflicting duplicate), calculating from only the remaining rows
-        # would silently create a partial cumulative snapshot.  Freeze every
-        # known month for that order as blocked instead.
+        # for an order is invalid (risk remark, status, amount/date, a
+        # conflicting duplicate, or a ledger conflict), calculating from only
+        # the remaining rows would silently create a partial cumulative
+        # snapshot.  Freeze every known month for that order as blocked instead.
         blocked_norms = {
             str(row.get("normalized_order_no") or "")
             for row in source_rows
@@ -1969,14 +2026,7 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         contract_ids = sorted({
             rows[0]["contract"].project_contract_id for rows in by_order.values() if rows
         })
-        existing_rows = list(db.scalars(
-            select(MaintenanceCollectionSnapshot)
-            .where(MaintenanceCollectionSnapshot.project_contract_id.in_(contract_ids or [""]))
-            .order_by(
-                MaintenanceCollectionSnapshot.project_contract_id,
-                MaintenanceCollectionSnapshot.report_month,
-            )
-        ))
+        existing_rows = _existing_snapshots(db, contract_ids)
         existing = {
             (row.project_contract_id, row.report_month): row for row in existing_rows
         }
@@ -1984,76 +2034,25 @@ class ReceiptCollectionAdapter(HeaderAdapter):
 
         for norm, receipts in sorted(by_order.items()):
             contract = receipts[0]["contract"]
-            operation_start = len(operations_plan)
-            monthly: dict[date, list[dict]] = defaultdict(list)
-            for receipt in receipts:
-                day = receipt["receipt_date"]
-                monthly[date(day.year, day.month, 1)].append(receipt)
-            cumulative = Decimal("0.00")
-            expected_months: set[date] = set()
-            for month, month_rows in sorted(monthly.items()):
-                cumulative += sum((row["actual"] for row in month_rows), Decimal("0.00"))
-                cumulative = cumulative.quantize(Decimal("0.01"))
-                expected_months.add(month)
-                refs = self._refs([
-                    (row["receipt_date"], row["receipt_no"]) for row in month_rows
-                ])
-                current = existing.get((contract.project_contract_id, month))
-                item = {
-                    "row_no": min(row["row_no"] for row in month_rows),
-                    "normalized_order_no": norm,
-                    "project_id": contract.project_id,
-                    "project_contract_id": contract.project_contract_id,
-                    "expected_contract_version": contract.version,
-                    "report_month": month.isoformat(),
-                    "new_cumulative_amount": _jsonable(cumulative),
-                    "receipt_reference": refs,
-                }
-                if current is None:
-                    item.update(action="create", expected_collection_id=None)
-                elif current.status != "confirmed" or current.cumulative_amount != cumulative:
-                    issue = _row_issue(
-                        item["row_no"],
-                        "snapshot_conflict",
-                        f"{contract.contract_no} {month:%Y-%m} 已有快照与源实收累计不一致",
-                    )
-                    item.update(
-                        action="conflict",
-                        expected_collection_id=current.collection_id,
-                        expected_collection_version=current.version,
-                        expected_current_amount=_jsonable(current.cumulative_amount),
-                        issues=[issue],
-                    )
-                    hard_issues.append(issue)
-                else:
-                    item.update(
-                        action="noop",
-                        expected_collection_id=current.collection_id,
-                        expected_collection_version=current.version,
-                        expected_current_amount=_jsonable(current.cumulative_amount),
-                        preserve_receipt_reference=current.receipt_reference,
-                    )
-                operations_plan.append(item)
-
-            extras = [
-                row for row in existing_rows
-                if row.project_contract_id == contract.project_contract_id
-                and row.report_month not in expected_months
-                and row.status == "confirmed"
+            new_receipts = [row for row in receipts if row["state"] == "new"]
+            if not new_receipts:
+                # 全部已入账：无新收款，快照不可能因本文件而变化。
+                continue
+            ledger_active = [
+                row for row in ledger_rows
+                if row.contract_no == norm and row.is_active
             ]
-            if extras:
-                issue = _row_issue(
-                    min(row["row_no"] for row in receipts),
-                    "incomplete_receipt_history",
-                    f"{contract.contract_no} 的源文件缺少 {len(extras)} 个生产已有月份，不能证明是完整累计导出",
-                )
-                hard_issues.append(issue)
-                for item in operations_plan[operation_start:]:
-                    item["action"] = "conflict"
-                    item.setdefault("issues", []).append(issue)
-                for row in source_rows:
-                    if row.get("normalized_order_no") == norm:
-                        row.setdefault("issues", []).append(issue)
+            operations_plan.extend(self._contract_operations(
+                norm=norm,
+                contract=contract,
+                new_receipts=new_receipts,
+                ledger_active=ledger_active,
+                snapshots=[
+                    row for row in existing_rows
+                    if row.project_contract_id == contract.project_contract_id
+                ],
+                hard_issues=hard_issues,
+            ))
 
         return _finish_plan(
             sheet,
@@ -2064,7 +2063,14 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 "amount_basis": "actual_received_inc_tax",
                 "source_amount_field": "收款明细.实收金额",
                 "missing_project_policy": "skip_without_create",
-                "existing_snapshot_policy": "exact_noop_else_conflict",
+                # D-16：月度累计 = 台账生效收款 ∪ 本文件新收款（见 _contract_operations）；
+                # 既有快照相等即 noop，不等即显式勾选的 update，不再整合同阻断。
+                "cumulative_basis": "ledger_union_file",
+                "existing_snapshot_policy": "noop_or_explicit_update",
+                "ledger": {
+                    "known": ledger_known,
+                    "conflicts": ledger_conflicts,
+                },
                 "source_warnings": (
                     [
                         {
@@ -2079,6 +2085,274 @@ class ReceiptCollectionAdapter(HeaderAdapter):
             },
         )
 
+    def _contract_operations(
+        self,
+        *,
+        norm: str,
+        contract: Any,
+        new_receipts: list[dict],
+        ledger_active: list[Any],
+        snapshots: list[Any],
+        hard_issues: list[dict],
+    ) -> list[dict]:
+        """一个合同的月度目标操作：台账 ∪ 本文件新收款推导累计，逐月对照快照。
+
+        累计(月) = 基线 + Σ台账生效收款(日期 ≤ 月末) + Σ本文件新收款(日期 ≤ 月末)。
+        基线 = 台账与本文件都未覆盖的更早月份里最晚一条已确认快照（台账建立
+        之前的历史累计只存在于快照里；没有基线，第一次增量导入要么被单调性
+        守卫拦下，要么算出偏低却仍单调的累计静默写库）。台账覆盖完整时基线为 0，
+        公式退化为纯收款求和。
+
+        受影响月份 = 台账 ∪ 本文件覆盖起点及之后的所有候选月（台账月、文件月、
+        既有快照月）——覆盖范围内每个月都按台账对账，快照与推导值不等即 update
+        行（默认不勾选）；覆盖起点之前的月份只作基线，不动。
+        """
+
+        coverage_start = min(
+            [_month_start(row["receipt_date"]) for row in new_receipts]
+            + [_month_start(row.receipt_date) for row in ledger_active]
+        )
+        baseline_row = max(
+            (
+                row for row in snapshots
+                if row.status == "confirmed" and row.report_month < coverage_start
+            ),
+            key=lambda row: row.report_month,
+            default=None,
+        )
+        baseline_amount = (
+            Decimal(baseline_row.cumulative_amount) if baseline_row is not None
+            else Decimal("0.00")
+        )
+        baseline = (
+            {
+                "report_month": baseline_row.report_month.isoformat(),
+                "cumulative_amount": _jsonable(baseline_row.cumulative_amount),
+                "source": baseline_row.source,
+            }
+            if baseline_row is not None
+            else None
+        )
+        by_month: dict[date, Any] = {row.report_month: row for row in snapshots}
+        candidate_months = (
+            {_month_start(row["receipt_date"]) for row in new_receipts}
+            | {_month_start(row.receipt_date) for row in ledger_active}
+            | {row.report_month for row in snapshots if row.report_month >= coverage_start}
+        )
+        affected = sorted(candidate_months)
+        anchor_row_no = min(row["row_no"] for row in new_receipts)
+
+        items: list[dict] = []
+        for month in affected:
+            month_end = _month_end(month)
+            month_new = [
+                row for row in new_receipts
+                if _month_start(row["receipt_date"]) == month
+            ]
+            month_ledger = [
+                row for row in ledger_active
+                if _month_start(row.receipt_date) == month
+            ]
+            cumulative = (
+                baseline_amount
+                + sum(
+                    (row.actual_amount for row in ledger_active
+                     if row.receipt_date <= month_end),
+                    Decimal("0.00"),
+                )
+                + sum(
+                    (row["actual"] for row in new_receipts
+                     if row["receipt_date"] <= month_end),
+                    Decimal("0.00"),
+                )
+            ).quantize(Decimal("0.01"))
+            refs = self._refs(
+                [(row.receipt_date, row.receipt_no) for row in month_ledger]
+                + [(row["receipt_date"], row["receipt_no"]) for row in month_new]
+            )
+            current = by_month.get(month)
+            item = {
+                "row_no": min(row["row_no"] for row in month_new) if month_new else anchor_row_no,
+                "normalized_order_no": norm,
+                "project_id": contract.project_id,
+                "project_contract_id": contract.project_contract_id,
+                "expected_contract_version": contract.version,
+                "report_month": month.isoformat(),
+                "new_cumulative_amount": _jsonable(cumulative),
+                "receipt_reference": refs,
+                "new_receipts": [
+                    {
+                        "row_no": row["row_no"],
+                        "receipt_no": row["receipt_no"],
+                        "receipt_date": row["receipt_date"].isoformat(),
+                        "actual_amount": _jsonable(row["actual"]),
+                        "remark": row["remark"] or None,
+                    }
+                    for row in sorted(month_new, key=lambda row: row["row_no"])
+                ],
+                "ledger_receipt_count": len(month_ledger),
+                "baseline": baseline,
+                "issues": [],
+            }
+            if not month_new:
+                earlier_new = any(
+                    _month_start(row["receipt_date"]) < month for row in new_receipts
+                )
+                item["issues"].append(_row_issue(
+                    item["row_no"],
+                    "cascade_from_earlier_month" if earlier_new else "ledger_drift",
+                    (
+                        f"{month:%Y-%m} 本文件无新收款；累计因更早月份新增收款而变化"
+                        if earlier_new
+                        else f"{month:%Y-%m} 本文件无新收款；按台账推导的累计与现有快照不一致"
+                    ),
+                    severity="warning",
+                ))
+            if current is None:
+                item.update(action="create", expected_collection_id=None)
+            elif current.status == "void":
+                issue = _row_issue(
+                    item["row_no"],
+                    "snapshot_voided",
+                    f"{contract.contract_no} {month:%Y-%m} 快照已作废，导入不自动复活，请人工处理",
+                )
+                item.update(
+                    action="conflict",
+                    expected_collection_id=current.collection_id,
+                    expected_collection_version=current.version,
+                    expected_current_amount=_jsonable(current.cumulative_amount),
+                    issues=[*item["issues"], issue],
+                )
+                hard_issues.append(issue)
+            elif current.status == "confirmed" and current.cumulative_amount == cumulative:
+                item.update(
+                    action="record_receipts" if month_new else "noop",
+                    expected_collection_id=current.collection_id,
+                    expected_collection_version=current.version,
+                    expected_current_amount=_jsonable(current.cumulative_amount),
+                    preserve_receipt_reference=current.receipt_reference,
+                )
+            else:
+                item.update(
+                    action="update",
+                    expected_collection_id=current.collection_id,
+                    expected_collection_version=current.version,
+                    expected_current_amount=_jsonable(current.cumulative_amount),
+                    expected_current_status=current.status,
+                    previous_source=current.source,
+                    previous_import_batch_id=current.import_batch_id,
+                    previous_updated_at=_jsonable(getattr(current, "updated_at", None)),
+                )
+            items.append(item)
+
+        # 一个月的累计包含更早月份的新收款：单独勾选它会把台账没有的收款算进
+        # 快照。带新收款的更早行必须同批勾选，预览提示、应用硬拒。
+        constituents: list[str] = []
+        for item in items:
+            item["requires_months"] = list(constituents)
+            if constituents and item["action"] in {"create", "update"}:
+                item["issues"].append(_row_issue(
+                    item["row_no"],
+                    "requires_earlier_months",
+                    "累计包含更早月份 "
+                    + "、".join(
+                        f"{date.fromisoformat(value):%Y-%m}" for value in constituents
+                    )
+                    + " 的新收款，需同时勾选这些行",
+                    severity="warning",
+                ))
+            if item["new_receipts"] and item["action"] in {
+                "create", "update", "record_receipts"
+            }:
+                constituents.append(item["report_month"])
+
+        self._precheck_monotonic(
+            contract=contract,
+            items=items,
+            snapshots=snapshots,
+            hard_issues=hard_issues,
+        )
+        return items
+
+    @staticmethod
+    def _precheck_monotonic(
+        *,
+        contract: Any,
+        items: list[dict],
+        snapshots: list[Any],
+        hard_issues: list[dict],
+    ) -> None:
+        """预览期复算 create_collection/update_collection 的单调性守卫。
+
+        以「本文件全部行都应用后」的状态对照：受影响月份取拟写入值，其余月份取
+        既有已确认值。倒退在预览里就是 blocked 行，而不是应用时整批 422。
+        另对依赖同批 update 行的行给出警告：只勾它不勾那条覆盖行，应用会被守卫拒绝。
+        """
+
+        affected = {date.fromisoformat(item["report_month"]) for item in items}
+        proposed: dict[date, Decimal] = {
+            row.report_month: Decimal(row.cumulative_amount)
+            for row in snapshots
+            if row.status == "confirmed" and row.report_month not in affected
+        }
+        current_updates: dict[date, Decimal] = {}
+        for item in items:
+            month = date.fromisoformat(item["report_month"])
+            if item["action"] in {"create", "update", "record_receipts", "noop"}:
+                proposed[month] = Decimal(item["new_cumulative_amount"])
+            elif (
+                item.get("expected_current_amount") is not None
+                and item.get("expected_current_status", "confirmed") == "confirmed"
+            ):
+                proposed[month] = Decimal(item["expected_current_amount"])
+            if (
+                item["action"] == "update"
+                and item.get("expected_current_status") == "confirmed"
+            ):
+                current_updates[month] = Decimal(item["expected_current_amount"])
+
+        for item in items:
+            if item["action"] not in {"create", "update"}:
+                continue
+            month = date.fromisoformat(item["report_month"])
+            value = Decimal(item["new_cumulative_amount"])
+            message = None
+            for other_month, other_value in proposed.items():
+                if other_month < month and value < other_value:
+                    message = "已确认累计回款不得低于更早月份的已确认累计回款"
+                    break
+                if other_month > month and value > other_value:
+                    message = "已确认累计回款不得高于更晚月份的已确认累计回款"
+                    break
+            if message is not None:
+                issue = _row_issue(
+                    item["row_no"],
+                    "collection_not_monotonic",
+                    f"{contract.contract_no} {month:%Y-%m}：{message}",
+                )
+                item["action"] = "conflict"
+                item.setdefault("issues", []).append(issue)
+                hard_issues.append(issue)
+                continue
+            depends = sorted(
+                other_month
+                for other_month, other_value in current_updates.items()
+                if other_month != month
+                and (
+                    (other_month < month and value < other_value)
+                    or (other_month > month and value > other_value)
+                )
+            )
+            if depends:
+                item.setdefault("issues", []).append(_row_issue(
+                    item["row_no"],
+                    "depends_on_update",
+                    "需同时勾选 "
+                    + "、".join(f"{other:%Y-%m}" for other in depends)
+                    + " 的覆盖行，否则提交会被单调性校验拒绝",
+                    severity="warning",
+                ))
+
     def apply_plan(
         self,
         db: Session,
@@ -2086,11 +2360,32 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         *,
         operated_by: str,
         audit_reason: str,
+        provenance: dict | None = None,
     ) -> dict:
-        target_contracts = sorted({
-            item["project_contract_id"] for item in plan["operations"]
-            if item["action"] in {"create", "noop"}
-        })
+        actionable = {"create", "update", "record_receipts", "noop"}
+        selected = [item for item in plan["operations"] if item["action"] in actionable]
+        target_contracts = sorted({item["project_contract_id"] for item in selected})
+        selected_months: dict[str, set[str]] = defaultdict(set)
+        for item in selected:
+            if item["action"] in {"create", "update", "record_receipts"}:
+                selected_months[item["project_contract_id"]].add(item["report_month"])
+        for item in selected:
+            if item["action"] not in {"create", "update"}:
+                continue
+            missing = [
+                value for value in item.get("requires_months") or []
+                if value not in selected_months[item["project_contract_id"]]
+            ]
+            if missing:
+                raise BulkImportInvalid(
+                    f"{item['normalized_order_no']} "
+                    f"{date.fromisoformat(item['report_month']):%Y-%m} 的累计包含更早月份 "
+                    + "、".join(f"{date.fromisoformat(v):%Y-%m}" for v in missing)
+                    + " 的新收款，必须同时勾选这些行"
+                )
+        # 台账唯一键是 DB 兜底；先按合同串行化，避免并发同单入账撞唯一约束变 500。
+        for project_contract_id in target_contracts:
+            _advisory_lock(db, f"maintenance-receipt-ledger:{project_contract_id}")
         contracts = {
             row.project_contract_id: row for row in db.scalars(
                 select(MaintenanceProjectContract).where(
@@ -2105,9 +2400,12 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 )
             )
         }
-        for item in plan["operations"]:
-            if item["action"] not in {"create", "noop"}:
-                continue
+        norms = sorted({item["normalized_order_no"] for item in selected})
+        ledger_keys = {
+            (row.contract_no, row.receipt_no)
+            for row in _ledger_receipts(db, norms)
+        }
+        for item in selected:
             contract = contracts.get(item["project_contract_id"])
             if contract is None or contract.version != item["expected_contract_version"]:
                 raise BulkImportConflict("预览后的项目合同关系已变化")
@@ -2121,54 +2419,233 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                     current is None
                     or current.collection_id != item["expected_collection_id"]
                     or current.version != item["expected_collection_version"]
-                    or current.status != "confirmed"
                     or _jsonable(current.cumulative_amount)
                     != item["expected_current_amount"]
+                    or (
+                        item["action"] != "update"
+                        and current.status != "confirmed"
+                    )
                 ):
                     raise BulkImportConflict("预览后的既有回款快照已变化")
+            for receipt in item.get("new_receipts") or []:
+                if (item["normalized_order_no"], receipt["receipt_no"]) in ledger_keys:
+                    raise BulkImportConflict(
+                        f"预览后收款单台账已变化：{receipt['receipt_no']} 已入账，请重新预览"
+                    )
+
+        batch_id = (provenance or {}).get("batch_id")
+        source_sha256 = str(
+            (provenance or {}).get("source_sha256") or plan.get("file_hash") or ""
+        )
+        snapshot_source = "bulk_import" if batch_id is not None else "direct_api"
+        snapshot_batch = str(batch_id) if batch_id is not None else None
+
+        def _record_receipts(item: dict, contract: MaintenanceProjectContract) -> int:
+            count = 0
+            for receipt in item.get("new_receipts") or []:
+                db.add(MaintenanceCollectionReceipt(
+                    project_contract_id=contract.project_contract_id,
+                    contract_no=item["normalized_order_no"],
+                    receipt_no=receipt["receipt_no"],
+                    receipt_date=date.fromisoformat(receipt["receipt_date"]),
+                    actual_amount=Decimal(receipt["actual_amount"]),
+                    remark=receipt.get("remark"),
+                    import_batch_id=batch_id,
+                    source_sha256=source_sha256,
+                    is_active=True,
+                    created_by=operated_by,
+                ))
+                count += 1
+            return count
+
+        # 写入顺序服从单调性守卫（逐行对照库内现值）：先把要"降"的月份按月升序
+        # 更新，再把新增/要"升"的月份按月降序写入。最终状态单调时这个顺序保证
+        # 每一步都通过守卫（升序写"升"会撞上尚未抬高的更晚月份）。
+        def _month(item: dict) -> date:
+            return date.fromisoformat(item["report_month"])
+
+        decreases = sorted(
+            (
+                item for item in selected
+                if item["action"] == "update"
+                and Decimal(item["new_cumulative_amount"])
+                < Decimal(item["expected_current_amount"])
+            ),
+            key=_month,
+        )
+        increases = sorted(
+            (
+                item for item in selected
+                if item["action"] == "create"
+                or (
+                    item["action"] == "update"
+                    and Decimal(item["new_cumulative_amount"])
+                    >= Decimal(item["expected_current_amount"])
+                )
+            ),
+            key=_month,
+            reverse=True,
+        )
+        ledger_only = [item for item in selected if item["action"] == "record_receipts"]
 
         writes = 0
-        noops = 0
-        for item in sorted(
-            plan["operations"],
-            key=lambda row: (
-                row["project_id"], row["project_contract_id"], row["report_month"]
-            ),
-        ):
-            if item["action"] == "noop":
-                noops += 1
+        updates = 0
+        noops = sum(1 for item in selected if item["action"] == "noop")
+        receipts_recorded = 0
+        details: dict[str, dict] = {}
+        for item in [*decreases, *increases, *ledger_only]:
+            contract = contracts[item["project_contract_id"]]
+            month = _month(item)
+            key = f"{item['project_contract_id']}:{item['report_month']}"
+            recorded = _record_receipts(item, contract)
+            receipts_recorded += recorded
+            db.flush()
+            if item["action"] == "record_receipts":
+                current = snapshots[(contract.project_contract_id, month)]
+                details[key] = {
+                    "status": "applied",
+                    "message": (
+                        f"{contract.contract_no} {month:%Y-%m} 累计不变"
+                        f"（{item['expected_current_amount']}），登记 {recorded} 笔收款入台账"
+                    ),
+                    "entity_id": current.collection_id,
+                    "before_version": current.version,
+                    "after_version": current.version,
+                    "receipts_recorded": recorded,
+                }
                 continue
-            if item["action"] != "create":
+            if item["action"] == "create":
+                payload = operations.create_collection(
+                    db,
+                    project_id=item["project_id"],
+                    project_contract_id=item["project_contract_id"],
+                    report_month=month,
+                    cumulative_amount=Decimal(item["new_cumulative_amount"]),
+                    status="confirmed",
+                    receipt_reference=item["receipt_reference"],
+                    remark=None,
+                    reason=audit_reason,
+                    operated_by=operated_by,
+                    source=snapshot_source,
+                    import_batch_id=snapshot_batch,
+                )
+                if payload is None:
+                    raise BulkImportConflict("项目在应用期间消失")
+                writes += 1
+                details[key] = {
+                    "status": "applied",
+                    "message": (
+                        f"{contract.contract_no} {month:%Y-%m} 新建已确认累计 "
+                        f"{item['new_cumulative_amount']}，登记 {recorded} 笔收款入台账"
+                    ),
+                    "entity_id": payload["collection_id"],
+                    "before_version": None,
+                    "after_version": payload["version"],
+                    "receipts_recorded": recorded,
+                }
                 continue
-            payload = operations.create_collection(
+            previous_stamp = (
+                f"{item.get('previous_source') or '-'}"
+                f"/批次 {item.get('previous_import_batch_id') or '-'}"
+                f"/{_stamp_text(item.get('previous_updated_at'))}"
+            )
+            reason = (
+                f"{audit_reason}：覆盖 {contract.contract_no} {month:%Y-%m} "
+                f"已确认累计 {item['expected_current_amount']}→{item['new_cumulative_amount']}"
+                f"（原来源 {previous_stamp}，操作人 {operated_by}）"
+            )
+            payload = operations.update_collection(
                 db,
-                project_id=item["project_id"],
-                project_contract_id=item["project_contract_id"],
-                report_month=date.fromisoformat(item["report_month"]),
-                cumulative_amount=Decimal(item["new_cumulative_amount"]),
-                status="confirmed",
-                receipt_reference=item["receipt_reference"],
-                remark=None,
-                reason=audit_reason,
+                collection_id=item["expected_collection_id"],
+                version=int(item["expected_collection_version"]),
+                updates={
+                    "cumulative_amount": Decimal(item["new_cumulative_amount"]),
+                    "receipt_reference": item["receipt_reference"],
+                    "status": "confirmed",
+                },
+                reason=reason,
                 operated_by=operated_by,
-                source="direct_api",
-                import_batch_id=None,
+                source=snapshot_source,
+                import_batch_id=snapshot_batch,
             )
             if payload is None:
-                raise BulkImportConflict("项目在应用期间消失")
-            writes += 1
+                raise BulkImportConflict("回款快照在应用期间消失")
+            updates += 1
+            details[key] = {
+                "status": "applied",
+                "message": (
+                    f"{contract.contract_no} {month:%Y-%m} 已覆盖：原值 "
+                    f"{item['expected_current_amount']} → 新值 {item['new_cumulative_amount']}"
+                    f"（原来源 {previous_stamp}），登记 {recorded} 笔收款入台账"
+                ),
+                "entity_id": payload["collection_id"],
+                "before_version": item["expected_collection_version"],
+                "after_version": payload["version"],
+                "before_amount": item["expected_current_amount"],
+                "after_amount": item["new_cumulative_amount"],
+                "previous_source": item.get("previous_source"),
+                "previous_import_batch_id": item.get("previous_import_batch_id"),
+                "previous_updated_at": item.get("previous_updated_at"),
+                "receipts_recorded": recorded,
+            }
         return {
             "written": writes,
+            "updated": updates,
             "noop": noops,
-            "operation": "collection_snapshot_create",
-            "project_ids": sorted(
-                {
-                    item["project_id"]
-                    for item in plan["operations"]
-                    if item["action"] in {"create", "noop"}
-                }
-            ),
+            "receipts_recorded": receipts_recorded,
+            "operation": "collection_snapshot_upsert",
+            "project_ids": sorted({item["project_id"] for item in selected}),
+            "details": details,
         }
+
+
+def _month_start(day: date) -> date:
+    return date(day.year, day.month, 1)
+
+
+def _month_end(month: date) -> date:
+    return (month.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+
+def _stamp_text(value: Any) -> str:
+    if not value:
+        return "-"
+    text = str(value)
+    return text[:16].replace("T", " ")
+
+
+def _ledger_stamp(row: Any) -> str:
+    created = getattr(row, "created_at", None)
+    return _stamp_text(created.isoformat() if isinstance(created, datetime) else created)
+
+
+def _ledger_receipts(db: Session, contract_nos: list[str]) -> list[MaintenanceCollectionReceipt]:
+    """收款单台账按（归一化）销售订单号取行——含已作废行，幂等判定看全部，累计只看生效。"""
+
+    if not contract_nos:
+        return []
+    return list(db.scalars(
+        select(MaintenanceCollectionReceipt)
+        .where(MaintenanceCollectionReceipt.contract_no.in_(contract_nos))
+        .order_by(
+            MaintenanceCollectionReceipt.contract_no,
+            MaintenanceCollectionReceipt.receipt_date,
+            MaintenanceCollectionReceipt.id,
+        )
+    ))
+
+
+def _existing_snapshots(db: Session, contract_ids: list[str]) -> list[MaintenanceCollectionSnapshot]:
+    if not contract_ids:
+        return []
+    return list(db.scalars(
+        select(MaintenanceCollectionSnapshot)
+        .where(MaintenanceCollectionSnapshot.project_contract_id.in_(contract_ids))
+        .order_by(
+            MaintenanceCollectionSnapshot.project_contract_id,
+            MaintenanceCollectionSnapshot.report_month,
+        )
+    ))
 
 
 def _finish_plan(
@@ -2567,6 +3044,7 @@ def apply_preview(
         plan,
         operated_by=operated_by,
         audit_reason=audit_reason,
+        provenance={"batch_id": batch.id, "source_sha256": batch.file_hash},
     )
     result = _jsonable({
         **result,
@@ -2822,17 +3300,42 @@ def _public_receipt_rows(
         warnings, errors = _split_issues(operation.get("issues"))
         warnings = [*status_warnings, *warnings]
         internal_action = operation["action"]
-        action = (
-            "upsert_collection_snapshot"
-            if internal_action in {"create", "noop"}
-            else "block"
-        )
+        # create → 新建快照；update → 覆盖既有已确认累计（前端默认不勾选，需显式
+        # 勾选）；record_receipts → 累计不变、只把新收款登记入台账；noop → 无事可做。
+        action = {
+            "create": "upsert_collection_snapshot",
+            "update": "update_collection_snapshot",
+            "record_receipts": "record_receipts",
+            "noop": "skip",
+        }.get(internal_action, "block")
         row_status = (
             "ready"
-            if internal_action == "create"
+            if internal_action in {"create", "update", "record_receipts"}
             else ("unchanged" if internal_action == "noop" else "blocked")
         )
-        match_state = "matched" if internal_action in {"create", "noop"} else "ambiguous"
+        match_state = (
+            "matched"
+            if internal_action in {"create", "update", "record_receipts", "noop"}
+            else "ambiguous"
+        )
+        if internal_action == "update":
+            previous_stamp = (
+                f"{operation.get('previous_source') or '-'}"
+                f" / 批次 {operation.get('previous_import_batch_id') or '-'}"
+                f" / {_stamp_text(operation.get('previous_updated_at'))}"
+            )
+            month = date.fromisoformat(operation["report_month"])
+            warnings.append(
+                {
+                    "code": "snapshot_overwrite",
+                    "message": (
+                        f"将覆盖 {month:%Y-%m} 已确认累计 "
+                        f"{operation.get('expected_current_amount')} → "
+                        f"{operation['new_cumulative_amount']}（原来源 {previous_stamp}）"
+                    ),
+                    "field": "cumulative_received_inc_tax",
+                }
+            )
         target_key = (
             f"receipt:{operation['project_contract_id']}:"
             f"{operation['report_month']}"
@@ -2867,13 +3370,24 @@ def _public_receipt_rows(
             "match_state": match_state,
             "action": action,
             "row_status": row_status,
+            # update 行：默认不勾选，用户必须显式确认覆盖。
+            "requires_confirmation": internal_action == "update",
             "before": (
-                {"cumulative_amount": operation.get("expected_current_amount")}
+                {
+                    "cumulative_amount": operation.get("expected_current_amount"),
+                    "status": operation.get("expected_current_status", "confirmed"),
+                    "source": operation.get("previous_source"),
+                    "import_batch_id": operation.get("previous_import_batch_id"),
+                    "updated_at": operation.get("previous_updated_at"),
+                    "version": operation.get("expected_collection_version"),
+                }
                 if operation.get("expected_collection_id")
                 else None
             ),
             "after": {
-                "cumulative_amount": operation["new_cumulative_amount"]
+                "cumulative_amount": operation["new_cumulative_amount"],
+                "new_receipts": len(operation.get("new_receipts") or []),
+                "baseline": operation.get("baseline"),
             },
             "delta": None,
             "warnings": warnings,
@@ -2905,6 +3419,16 @@ def _public_receipt_rows(
         row_key = _canonical_hash(
             [file_id, plan_index, row_no, source.get("business_key")]
         )[:32]
+        canonical: dict[str, Any] = {
+            "receipt_key": source.get("business_key"),
+            "sales_order_no": source.get("normalized_order_no"),
+        }
+        if source_action == "known":
+            canonical.update(
+                receipt_no=source.get("receipt_no"),
+                receipt_date=source.get("receipt_date"),
+                actual_amount=source.get("actual_amount"),
+            )
         rows.append(
             {
                 "row_key": row_key,
@@ -2912,10 +3436,7 @@ def _public_receipt_rows(
                 "filename": filename,
                 "detected_sheet": plan.get("sheet"),
                 "source_row": row_no,
-                "canonical": {
-                    "receipt_key": source.get("business_key"),
-                    "sales_order_no": source.get("normalized_order_no"),
-                },
+                "canonical": canonical,
                 "normalized_key": source.get("normalized_order_no"),
                 "idempotency_key": row_key,
                 "matched_project_id": source.get("project_id"),
@@ -2948,6 +3469,16 @@ def _transfer_summary(rows: list[dict]) -> dict:
         "unmatched": sum(row["match_state"] == "unmatched" for row in rows),
         "invalid": sum(row["match_state"] == "invalid" for row in rows),
         "ready": sum(row["row_status"] == "ready" for row in rows),
+        # D-16 收款单台账：已入账跳过 / 台账冲突 / 需显式勾选的覆盖行
+        "known": sum(
+            any(issue["code"] == "receipt_known" for issue in row["warnings"])
+            for row in rows
+        ),
+        "receipt_conflicts": sum(
+            any(issue["code"] == "receipt_conflict" for issue in row["errors"])
+            for row in rows
+        ),
+        "updates": sum(row["action"] == "update_collection_snapshot" for row in rows),
     }
 
 
@@ -3117,10 +3648,13 @@ def preview_transfer(
             "data_version": data_version,
         }
     )
+    # file_hash = 原件 sha256（单文件）/ 各原件 sha256 排序后再 sha256（多文件）；
+    # 逐文件 sha256 见 sys_raw_file 与 report_json.files[].source_sha256。
+    # 预览 payload 与 apply 选择的指纹都留在 report_json，不再挤占 file_hash。
     batch = SysImportBatch(
         filename=(";".join(name for name, _data in files))[:256],
         file_type=TRANSFER_BATCH_TYPE,
-        file_hash=payload_hash,
+        file_hash=_batch_file_hash(hashes),
         uploaded_by=operated_by,
         rows_total=summary["total"],
         rows_inserted=0,
@@ -3130,6 +3664,17 @@ def preview_transfer(
     )
     db.add(batch)
     db.flush()
+    # 原件在预览时即按内容寻址归档（与通用导入同一 _archive），随批次可追溯。
+    for (filename, data), artifact in zip(files, artifacts, strict=True):
+        storage_path = pipeline.archive_bytes(data, artifact.file_hash)
+        db.add(
+            SysRawFile(
+                batch_id=batch.id,
+                filename=filename[:256],
+                file_hash=artifact.file_hash,
+                storage_path=storage_path,
+            )
+        )
     secret = secrets.token_urlsafe(32)
     preview_token = f"{batch.id}.{secret}"
     batch.report_json = {
@@ -3168,6 +3713,12 @@ def preview_transfer(
         "data_version": data_version,
         "expires_at": expires_at.isoformat(),
     }
+
+
+def _batch_file_hash(file_hashes: list[str]) -> str:
+    if len(file_hashes) == 1:
+        return file_hashes[0]
+    return hashlib.sha256("\n".join(sorted(file_hashes)).encode("ascii")).hexdigest()
 
 
 def _batch_id_from_transfer_token(preview_token: str) -> int:
@@ -3328,7 +3879,7 @@ def apply_transfer(
         .where(
             SysImportBatch.id != batch.id,
             SysImportBatch.file_type == TRANSFER_BATCH_TYPE,
-            SysImportBatch.file_hash == selection_hash,
+            SysImportBatch.report_json["selection_hash"].as_string() == selection_hash,
             SysImportBatch.status == "success",
         )
         .order_by(SysImportBatch.id)
@@ -3350,6 +3901,7 @@ def apply_transfer(
         return dict(already_report.get("result") or {})
 
     project_ids: set[str] = set()
+    details_by_key: dict[str, dict] = {}
     audit_reason = f"全项目批量传输 batch={batch.id} payload={payload_hash}"
     for plan_index in sorted(selected_by_plan):
         plan_wrapper = plans[plan_index]
@@ -3367,8 +3919,13 @@ def apply_transfer(
             subplan,
             operated_by=operated_by,
             audit_reason=f"{audit_reason} file={plan_wrapper['file_id']}",
+            provenance={
+                "batch_id": batch.id,
+                "source_sha256": source_plan.get("file_hash"),
+            },
         )
         project_ids.update(result.get("project_ids") or [])
+        details_by_key.update(result.get("details") or {})
 
     result_rows: list[dict] = []
     for row_key in selected:
@@ -3410,6 +3967,7 @@ def apply_transfer(
             entity_id = snapshot.collection_id if snapshot is not None else None
         if project_id:
             project_ids.add(project_id)
+        detail = details_by_key.get(aggregate_key or "", {}) if aggregate_key else {}
         result_rows.append(
             {
                 "row_key": row_key,
@@ -3420,14 +3978,23 @@ def apply_transfer(
                 "action": public["action"],
                 "project_id": project_id,
                 "contract_id": operation.get("contract_id"),
-                "entity_id": entity_id,
-                "message": "已按冻结预览在同一事务中应用",
+                "entity_id": detail.get("entity_id", entity_id),
+                "message": detail.get("message") or "已按冻结预览在同一事务中应用",
                 "error_code": None,
-                "before_version": operation.get("expected_contract_version"),
-                "after_version": None,
+                "before_version": detail.get(
+                    "before_version", operation.get("expected_contract_version")
+                ),
+                "after_version": detail.get("after_version"),
                 "aggregate_key": aggregate_key,
                 "project_contract_id": project_contract_id,
                 "report_month": report_month,
+                # 覆盖回执：原值→新值、原来源/时间（D-16）
+                "before_amount": detail.get("before_amount"),
+                "after_amount": detail.get("after_amount"),
+                "previous_source": detail.get("previous_source"),
+                "previous_import_batch_id": detail.get("previous_import_batch_id"),
+                "previous_updated_at": detail.get("previous_updated_at"),
+                "receipts_recorded": detail.get("receipts_recorded"),
             }
         )
 
@@ -3447,7 +4014,7 @@ def apply_transfer(
     report["selection_hash"] = selection_hash
     report["applied_at"] = datetime.now(timezone.utc).isoformat()
     report["applied_by"] = operated_by
-    batch.file_hash = selection_hash
+    # file_hash 保持原件 sha256；选择指纹只在 report_json.selection_hash。
     batch.report_json = report
     batch.status = "success"
     batch.rows_inserted = len(result_rows)

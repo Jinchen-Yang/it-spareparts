@@ -312,48 +312,265 @@ def test_receipt_risk_row_blocks_all_months_without_partial_cumulative(monkeypat
     )
 
 
-def test_incomplete_receipt_history_blocks_every_month_for_contract(monkeypatch):
-    contract = SimpleNamespace(
-        project_id="project-1",
-        project_contract_id="relation-1",
-        contract_no="XSDD-20240101-0001",
-        version=1,
+_RECEIPT_CONTRACT = SimpleNamespace(
+    project_id="project-1",
+    project_contract_id="relation-1",
+    contract_no="XSDD-20240101-0001",
+    version=1,
+)
+
+
+def _ledger_row(receipt_no, receipt_date, amount, *, is_active=True, batch=7):
+    return SimpleNamespace(
+        contract_no="20240101-0001",
+        receipt_no=receipt_no,
+        receipt_date=receipt_date,
+        actual_amount=Decimal(amount),
+        is_active=is_active,
+        import_batch_id=batch,
+        created_at=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
     )
-    existing = SimpleNamespace(
+
+
+def _snapshot(month, amount, *, status="confirmed", collection_id="collection-1",
+              version=1, source="workbook", batch="wb-1"):
+    return SimpleNamespace(
         project_contract_id="relation-1",
-        report_month=date(2025, 12, 1),
-        status="confirmed",
-        cumulative_amount=Decimal("10.00"),
-        collection_id="collection-1",
-        version=1,
+        report_month=month,
+        status=status,
+        cumulative_amount=Decimal(amount),
+        collection_id=collection_id,
+        version=version,
         receipt_reference="SK-OLD",
+        source=source,
+        import_batch_id=batch,
+        updated_at=datetime(2026, 8, 2, 9, 30, tzinfo=timezone.utc),
     )
+
+
+def _receipt_plan(monkeypatch, rows, *, ledger=(), snapshots=()):
     monkeypatch.setattr(
         bulk,
         "_contract_maps",
-        lambda _db: ({"20240101-0001": [contract]}, {"20240101-0001": contract}),
+        lambda _db: (
+            {"20240101-0001": [_RECEIPT_CONTRACT]},
+            {"20240101-0001": _RECEIPT_CONTRACT},
+        ),
     )
+    monkeypatch.setattr(bulk, "_ledger_receipts", lambda _db, _norms: list(ledger))
+    monkeypatch.setattr(bulk, "_existing_snapshots", lambda _db, _ids: list(snapshots))
     detected = _sheet(
         {"order_no": 0, "receipt_no": 1, "receipt_date": 2, "actual_amount": 3},
+        [(row_no, ("XSDD-20240101-0001", *values)) for row_no, values in rows],
+    )
+    return bulk.ReceiptCollectionAdapter().build_plan(object(), detected)
+
+
+def test_incremental_receipt_export_uses_ledger_instead_of_requiring_full_history(
+    monkeypatch,
+):
+    """D-16：台账 ∪ 本文件推导累计，增量导出（只含最近月份）不再整合同阻断。
+
+    台账已有 2025-12 的 10 元、快照 2025-12=10 已确认；文件只带 2026-01/02 两笔。
+    旧口径（incomplete_receipt_history）会把两个月全部 conflict；新口径按
+    10+100=110、110+50=160 建两条 create。
+    """
+
+    plan = _receipt_plan(
+        monkeypatch,
         [
-            (3, ("XSDD-20240101-0001", "SK-1", date(2026, 1, 10), "100")),
-            (4, ("XSDD-20240101-0001", "SK-2", date(2026, 2, 10), "50")),
+            (3, ("SK-1", date(2026, 1, 10), "100")),
+            (4, ("SK-2", date(2026, 2, 10), "50")),
+        ],
+        ledger=[_ledger_row("SK-OLD", date(2025, 12, 5), "10.00")],
+        snapshots=[_snapshot(date(2025, 12, 1), "10.00")],
+    )
+
+    # 覆盖范围（台账起点 2025-12 起）逐月对账：12 月与快照一致 → noop，1/2 月新建
+    assert [(op["report_month"], op["action"], op["new_cumulative_amount"])
+            for op in plan["operations"]] == [
+        ("2025-12-01", "noop", "10.00"),
+        ("2026-01-01", "create", "110.00"),
+        ("2026-02-01", "create", "160.00"),
+    ]
+    assert plan["issues"] == []
+    assert plan["existing_snapshot_policy"] == "noop_or_explicit_update"
+    assert [r["receipt_no"] for r in plan["operations"][1]["new_receipts"]] == ["SK-1"]
+    assert plan["operations"][2]["requires_months"] == ["2026-01-01"]
+
+
+def test_receipt_already_in_ledger_is_known_and_skipped(monkeypatch):
+    plan = _receipt_plan(
+        monkeypatch,
+        [
+            (3, ("SK-1", date(2026, 1, 10), "100")),
+            (4, ("SK-2", date(2026, 2, 10), "50")),
+        ],
+        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+        snapshots=[_snapshot(date(2026, 1, 1), "100.00")],
+    )
+
+    known = next(row for row in plan["rows"] if row["row_no"] == 3)
+    assert known["action"] == "known"
+    assert any(issue["code"] == "receipt_known" for issue in known["issues"])
+    assert plan["ledger"] == {"known": 1, "conflicts": 0}
+    # 只有 SK-2 是新收款：2026-01 台账与快照一致 → noop，2026-02 = 100 + 50
+    assert [(op["report_month"], op["action"], op["new_cumulative_amount"])
+            for op in plan["operations"]] == [
+        ("2026-01-01", "noop", "100.00"),
+        ("2026-02-01", "create", "150.00"),
+    ]
+
+
+def test_receipt_conflicting_with_ledger_is_hard_conflict_and_never_summed(monkeypatch):
+    plan = _receipt_plan(
+        monkeypatch,
+        [
+            (3, ("SK-1", date(2026, 1, 10), "120")),
+            (4, ("SK-2", date(2026, 2, 10), "50")),
+        ],
+        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+    )
+
+    conflict = next(row for row in plan["rows"] if row["row_no"] == 3)
+    assert conflict["action"] == "error"
+    assert any(issue["code"] == "receipt_conflict" for issue in conflict["issues"])
+    assert plan["ledger"]["conflicts"] == 1
+    # 合同级 fail-closed：不会从剩余行算出部分累计
+    assert {op["action"] for op in plan["operations"]} == {"conflict"}
+    assert all(op["new_cumulative_amount"] is None for op in plan["operations"])
+
+
+def test_changed_month_becomes_explicit_update_not_block(monkeypatch):
+    """既有快照与台账 ∪ 文件不等 → update（前端默认不勾选），带原值/原来源。"""
+
+    plan = _receipt_plan(
+        monkeypatch,
+        [(3, ("SK-LATE", date(2026, 1, 25), "30"))],
+        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+        snapshots=[
+            _snapshot(date(2026, 1, 1), "100.00", collection_id="c-jan", version=2),
+            _snapshot(date(2026, 2, 1), "120.00", collection_id="c-feb", version=1),
         ],
     )
 
-    plan = bulk.ReceiptCollectionAdapter().build_plan(
-        _ScalarsOnlyDb([existing]), detected
+    by_month = {op["report_month"]: op for op in plan["operations"]}
+    jan = by_month["2026-01-01"]
+    assert jan["action"] == "update"
+    assert jan["expected_collection_id"] == "c-jan"
+    assert jan["expected_collection_version"] == 2
+    assert jan["expected_current_amount"] == "100.00"
+    assert jan["new_cumulative_amount"] == "130.00"
+    assert jan["previous_source"] == "workbook"
+    assert jan["requires_months"] == []
+    # 2026-02 只有台账/快照、没有新收款，但累计因 1 月新增而级联变化
+    feb = by_month["2026-02-01"]
+    assert feb["action"] == "update"
+    assert feb["new_cumulative_amount"] == "130.00"
+    assert feb["expected_current_amount"] == "120.00"
+    assert any(issue["code"] == "cascade_from_earlier_month" for issue in feb["issues"])
+    # 2 月的累计包含 1 月的新收款：单独勾 2 月不行
+    assert feb["requires_months"] == ["2026-01-01"]
+    assert any(issue["code"] == "requires_earlier_months" for issue in feb["issues"])
+    # 1 月抬到 130 高于 2 月现值 120：只勾 1 月会被单调性守卫拒绝 → 提示同勾 2 月
+    depends = next(i for i in jan["issues"] if i["code"] == "depends_on_update")
+    assert "2026-02" in depends["message"]
+
+
+def test_manual_drift_in_covered_month_surfaces_as_update_not_block(monkeypatch):
+    """1 月被人工抬高到 300（台账只有 100）：1 月是 update 行（漂移），2 月 create 且提示依赖。"""
+
+    plan = _receipt_plan(
+        monkeypatch,
+        [(3, ("SK-2", date(2026, 2, 10), "50"))],
+        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+        snapshots=[_snapshot(date(2026, 1, 1), "300.00")],
     )
 
-    assert len(plan["operations"]) == 2
-    assert all(operation["action"] == "conflict" for operation in plan["operations"])
-    assert all(
-        any(
-            issue["code"] == "incomplete_receipt_history"
-            for issue in operation["issues"]
-        )
-        for operation in plan["operations"]
+    by_month = {op["report_month"]: op for op in plan["operations"]}
+    jan = by_month["2026-01-01"]
+    assert jan["action"] == "update"
+    assert (jan["expected_current_amount"], jan["new_cumulative_amount"]) == ("300.00", "100.00")
+    assert any(issue["code"] == "ledger_drift" for issue in jan["issues"])
+    feb = by_month["2026-02-01"]
+    assert feb["action"] == "create" and feb["new_cumulative_amount"] == "150.00"
+    assert any(issue["code"] == "depends_on_update" for issue in feb["issues"])
+    assert plan["issues"] == []
+
+
+def test_preview_runs_monotonic_guard_and_blocks_regression(monkeypatch):
+    """历史快照本身不单调（旧 05 表无守卫）：基线取 2025-12=300，但 2025-11=500 更高，
+    本文件推导的 2026-01=400 低于它 → 预览即 blocked，不留到应用时整批 422。"""
+
+    plan = _receipt_plan(
+        monkeypatch,
+        [(3, ("SK-1", date(2026, 1, 10), "100"))],
+        snapshots=[
+            _snapshot(date(2025, 11, 1), "500.00", collection_id="c-nov"),
+            _snapshot(date(2025, 12, 1), "300.00", collection_id="c-dec"),
+        ],
     )
+
+    (jan,) = plan["operations"]
+    assert jan["new_cumulative_amount"] == "400.00"
+    assert jan["action"] == "conflict"
+    issue = next(i for i in jan["issues"] if i["code"] == "collection_not_monotonic")
+    assert "已确认累计回款不得低于更早月份的已确认累计回款" in issue["message"]
+    assert any(i["code"] == "collection_not_monotonic" for i in plan["issues"])
+
+
+def test_legacy_confirmed_snapshot_before_ledger_coverage_is_the_baseline(monkeypatch):
+    """台账建立前的历史只存在于快照里：2026-07 已确认 100（无台账），文件只带 8 月 30。
+
+    没有基线，8 月累计会算成 30——比 7 月低则被守卫拦下，比 7 月高则静默写错。
+    """
+
+    plan = _receipt_plan(
+        monkeypatch,
+        [(3, ("SK-AUG", date(2026, 8, 3), "30"))],
+        snapshots=[_snapshot(date(2026, 7, 1), "100.00")],
+    )
+
+    (aug,) = plan["operations"]
+    assert aug["action"] == "create"
+    assert aug["new_cumulative_amount"] == "130.00"
+    assert aug["baseline"] == {
+        "report_month": "2026-07-01",
+        "cumulative_amount": "100.00",
+        "source": "workbook",
+    }
+
+
+def test_public_receipt_rows_expose_update_known_and_conflict_semantics(monkeypatch):
+    plan = _receipt_plan(
+        monkeypatch,
+        [
+            (3, ("SK-1", date(2026, 1, 10), "100")),
+            (4, ("SK-LATE", date(2026, 1, 25), "30")),
+        ],
+        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+        snapshots=[_snapshot(date(2026, 1, 1), "100.00")],
+    )
+
+    rows, row_map = bulk._public_receipt_rows(
+        file_id="file-1",
+        filename="receipts.xlsx",
+        plan_index=0,
+        plan=plan,
+        project_names_by_id={"project-1": "项目一"},
+    )
+    update = next(row for row in rows if row["action"] == "update_collection_snapshot")
+    assert update["row_status"] == "ready"
+    assert update["requires_confirmation"] is True
+    assert update["row_key"] in row_map
+    overwrite = next(w for w in update["warnings"] if w["code"] == "snapshot_overwrite")
+    assert overwrite["message"].startswith("将覆盖 2026-01 已确认累计 100.00 → 130.00（原来源 workbook")
+    assert update["before"]["source"] == "workbook"
+    known = next(row for row in rows if row["source_row"] == 3)
+    assert known["action"] == "skip" and known["row_status"] == "unchanged"
+    assert any(w["code"] == "receipt_known" for w in known["warnings"])
+    summary = bulk._transfer_summary(rows)
+    assert summary["known"] == 1 and summary["updates"] == 1 and summary["ready"] == 1
 
 
 def _transfer_batch(*, status: str, selected: list[str]) -> tuple[str, str, str, object]:

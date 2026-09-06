@@ -885,6 +885,64 @@ def _lock_and_recheck_apply_scope(
         )
     return contracts_by_no, workbook_state
 
+def _overwrite_collection_snapshot(
+    db: Session,
+    existing: MaintenanceCollectionSnapshot,
+    op: CollectionOp,
+    *,
+    status: str,
+    project_id: str,
+    import_batch_id: str,
+    operated_by: str,
+) -> None:
+    """05 表覆盖既有月度快照：与直连接口同一条单调性守卫 + 同一条事实审计。
+
+    2026-09（D-16）之前这里直接改写累计额，既没有"已确认累计不得低于更早月份"
+    的校验，也不落 ``maintenance_project_operation_audit``——Excel 一格填错就能
+    让确认过的累计回款倒退且无迹可循。守卫抛出的标准文案原样透传给上传者。
+    """
+
+    from app.services import maintenance_project_operations as operations
+
+    before = operations.collection_dict(existing)
+    if status == "confirmed":
+        try:
+            operations._validate_confirmed_collection_monotonicity(
+                db,
+                project_contract_id=existing.project_contract_id,
+                report_month=op.report_month,
+                cumulative_amount=op.cumulative_amount,
+                exclude_collection_id=existing.collection_id,
+            )
+        except operations.MaintenanceOperationError as exc:
+            raise WorkbookError(
+                "collection_not_monotonic",
+                f"{op.contract_no} {op.report_month:%Y-%m}：{exc}",
+            ) from exc
+    existing.cumulative_amount = op.cumulative_amount
+    existing.receipt_reference = op.receipt_reference
+    existing.remark = op.remark
+    existing.status = status
+    existing.source = "workbook"
+    existing.import_batch_id = import_batch_id
+    existing.version += 1
+    operations._fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="collection",
+        entity_id=existing.collection_id,
+        action="update",
+        before=before,
+        after=operations.collection_dict(existing),
+        reason=(
+            f"05 表回款工作簿回传覆盖 import_batch_id={import_batch_id}："
+            f"{op.contract_no} {op.report_month:%Y-%m} 累计 "
+            f"{before['cumulative_amount']}→{operations._money(op.cumulative_amount)}"
+        ),
+        operated_by=operated_by,
+    )
+
+
 def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
           import_batch_id: str, commit: bool = True,
           workbook_state: MaintenanceProjectWorkbookState | None = None,
@@ -1039,14 +1097,14 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
                 raise WorkbookError(
                     "update_target_missing",
                     f"{op.contract_no} {op.report_month:%Y-%m} 没有可更新的快照")
-            existing.cumulative_amount = op.cumulative_amount
-            existing.receipt_reference = op.receipt_reference
-            existing.remark = op.remark
-            if op.collection_status is not None:
-                existing.status = op.collection_status
-            existing.source = "workbook"
-            existing.import_batch_id = import_batch_id
-            existing.version += 1
+            _overwrite_collection_snapshot(
+                db, existing, op,
+                status=(op.collection_status
+                        if op.collection_status is not None else existing.status),
+                project_id=plan.project_id,
+                import_batch_id=import_batch_id,
+                operated_by=operated_by,
+            )
             operating_fact_changed = True
             continue
         if existing is None:
@@ -1065,13 +1123,14 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
             ))
             operating_fact_changed = True
         else:
-            existing.cumulative_amount = op.cumulative_amount
-            existing.status = op.collection_status or "confirmed"
-            existing.receipt_reference = op.receipt_reference
-            existing.remark = op.remark
-            existing.source = "workbook"
-            existing.import_batch_id = import_batch_id
-            existing.version += 1
+            # 「上传即覆盖」的 CREATE 命中既有快照 = 更新，与显式 UPDATE 同一条路。
+            _overwrite_collection_snapshot(
+                db, existing, op,
+                status=op.collection_status or "confirmed",
+                project_id=plan.project_id,
+                import_batch_id=import_batch_id,
+                operated_by=operated_by,
+            )
             operating_fact_changed = True
     if bump_revision and operating_fact_changed:
         operations.bump_locked_workbook_revision(db, state=workbook_state)

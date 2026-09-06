@@ -51,6 +51,12 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+# 全项目批量传输网关（maintenance_bulk_import）自 D-16 起把原件 sha256 记进
+# file_hash（同时归档到 sys_raw_file）。它与通用导入是不同协议命名空间：同一份
+# 销售订单导出先走批量网关、再走通用导入是合法的，不能被判成"该文件已成功导入"。
+_ISOLATED_BATCH_TYPES = ("maint_bulk", "maint_contract", "maint_receipt")
+
+
 def successful_batch_ids_by_hash(
     session: Session,
     file_hashes: set[str],
@@ -65,6 +71,8 @@ def successful_batch_ids_by_hash(
     )
     if file_type is not None:
         query = query.where(SysImportBatch.file_type == file_type)
+    else:
+        query = query.where(SysImportBatch.file_type.not_in(_ISOLATED_BATCH_TYPES))
     rows = session.execute(query).all()
     return {file_hash: batch_id for file_hash, batch_id in rows}
 
@@ -219,6 +227,30 @@ def _archive(src_path: str, file_hash: str) -> str:
         if isinstance(exc, ArchiveError):
             raise
         raise ArchiveError() from exc
+
+
+def archive_bytes(data: bytes, file_hash: str) -> str:
+    """内存中的上传原件按内容寻址归档，返回存储路径。
+
+    与 ``run_import`` 走同一个 ``_archive``（临时文件 → 校验 sha256 → fsync →
+    原子替换 → 已存在同 hash 文件即复用），供只读字节、不落临时上传文件的
+    网关（全项目批量传输预览）复用，不另抄一份归档逻辑。
+    """
+
+    settings = get_settings()
+    os.makedirs(settings.raw_file_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=settings.raw_file_dir, suffix=".upload")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return _archive(temp_path, file_hash)
+    finally:
+        try:
+            os.remove(temp_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            _log.warning("archive upload temporary cleanup failed", exc_info=True)
 
 
 @dataclass

@@ -24,6 +24,7 @@ from app.auth import current_identity, current_role
 from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.business_time import business_today
 from app.db import get_db
+from app.etl import pipeline
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
     UserContext,
@@ -333,6 +334,13 @@ async def preview_transfer(
                 "message": str(exc),
                 "issues": exc.issues,
             },
+        ) from exc
+    except pipeline.ArchiveError as exc:
+        # 原件归档失败即预览失败：没有可追溯原件的批次不允许存在。
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"code": "archive_failed", "message": str(exc)},
         ) from exc
 
 

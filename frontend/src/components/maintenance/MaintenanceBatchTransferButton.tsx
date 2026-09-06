@@ -68,8 +68,19 @@ const ACTION_LABELS: Record<string, string> = {
   create_contract: "新建合同",
   update_contract: "更新合同",
   upsert_collection_snapshot: "更新回款快照",
+  update_collection_snapshot: "覆盖已确认累计",
+  record_receipts: "登记收款台账",
   skip: "跳过",
   block: "阻断",
+};
+
+/** D-16 收款单台账：行级提示标签（已入账 / 台账冲突 / 需确认覆盖）。 */
+const RECEIPT_HINTS: Record<string, { label: string; color: string }> = {
+  receipt_known: { label: "已在台账", color: "default" },
+  receipt_conflict: { label: "台账冲突", color: "red" },
+  snapshot_overwrite: { label: "需确认覆盖", color: "orange" },
+  requires_earlier_months: { label: "需同勾更早月份", color: "gold" },
+  depends_on_update: { label: "依赖覆盖行", color: "gold" },
 };
 
 type MatchFilter = "all" | MaintenanceBatchMatchState;
@@ -117,6 +128,34 @@ function rowCanApply(row: MaintenanceBatchPreviewRow): boolean {
     && row.errors.length === 0;
 }
 
+/** 覆盖既有已确认累计的行：可勾选，但绝不默认勾选（D-16）。 */
+function rowNeedsConfirmation(row: MaintenanceBatchPreviewRow): boolean {
+  return row.requires_confirmation === true || row.action === "update_collection_snapshot";
+}
+
+function defaultSelectedKeys(rows: MaintenanceBatchPreviewRow[]): string[] {
+  return rows
+    .filter((row) => rowCanApply(row) && !rowNeedsConfirmation(row))
+    .map((row) => row.row_key);
+}
+
+function receiptHints(row: MaintenanceBatchPreviewRow) {
+  const issues = [...row.errors, ...row.warnings];
+  return issues
+    .filter((issue) => issue.code in RECEIPT_HINTS)
+    .map((issue) => ({ ...RECEIPT_HINTS[issue.code], code: issue.code, message: issue.message }));
+}
+
+function overwriteText(row: MaintenanceBatchPreviewRow): string | null {
+  const overwrite = row.warnings.find((issue) => issue.code === "snapshot_overwrite");
+  if (overwrite) return overwrite.message;
+  if (!rowNeedsConfirmation(row)) return null;
+  const before = row.before?.cumulative_amount;
+  const after = row.after?.cumulative_amount;
+  const month = String(row.canonical.report_month ?? "").slice(0, 7);
+  return `将覆盖 ${month} 已确认累计 ${String(before ?? "—")} → ${String(after ?? "—")}`;
+}
+
 function countsFromRows(rows: MaintenanceBatchPreviewRow[]) {
   return rows.reduce(
     (counts, row) => ({ ...counts, [row.match_state]: counts[row.match_state] + 1 }),
@@ -125,7 +164,8 @@ function countsFromRows(rows: MaintenanceBatchPreviewRow[]) {
 }
 
 function issueText(row: MaintenanceBatchPreviewRow): string {
-  const issues = [...row.errors, ...row.warnings];
+  // 台账/覆盖类提示单独成列渲染，这里不重复
+  const issues = [...row.errors, ...row.warnings].filter((issue) => !(issue.code in RECEIPT_HINTS));
   if (issues.length) return issues.map((issue) => issue.message).join("；");
   if (row.match_state === "ambiguous" && row.candidates?.length) {
     return `候选：${row.candidates.map((item) => item.project_name).join("、")}`;
@@ -274,7 +314,8 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       const { data } = await previewMaintenanceBatchTransfer(sourceFiles);
       if (generation !== requestGeneration.current) return;
       setPreview(data);
-      setSelectedRowKeys(data.rows.filter(rowCanApply).map((row) => row.row_key));
+      // 覆盖既有累计的行默认不勾选，必须由用户逐行确认（D-16）
+      setSelectedRowKeys(defaultSelectedKeys(data.rows));
       setFilter("all");
     } catch (reason) {
       if (generation !== requestGeneration.current) return;
@@ -296,7 +337,16 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     () => new Set(preview?.rows.filter(rowCanApply).map((row) => row.row_key) ?? []),
     [preview],
   );
+  const confirmationKeys = useMemo(
+    () => new Set(
+      preview?.rows
+        .filter((row) => rowCanApply(row) && rowNeedsConfirmation(row))
+        .map((row) => row.row_key) ?? [],
+    ),
+    [preview],
+  );
   const safeSelectedKeys = selectedRowKeys.filter((key) => selectableKeys.has(String(key)));
+  const selectedOverwrites = safeSelectedKeys.filter((key) => confirmationKeys.has(String(key)));
 
   const apply = async () => {
     if (!preview || !safeSelectedKeys.length || applying) return;
@@ -371,6 +421,26 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       render: (_, row) => <Text title={canonicalText(row)}>{canonicalText(row)}</Text>,
     },
     {
+      title: "台账/覆盖提示",
+      key: "receipt_hints",
+      width: 260,
+      render: (_, row) => {
+        const hints = receiptHints(row);
+        const overwrite = overwriteText(row);
+        if (!hints.length && !overwrite) return "—";
+        return (
+          <Space direction="vertical" size={2}>
+            <Space size={4} wrap>
+              {hints.map((hint) => (
+                <Tag key={hint.code} color={hint.color} title={hint.message}>{hint.label}</Tag>
+              ))}
+            </Space>
+            {overwrite ? <Text type="warning" title={overwrite}>{overwrite}</Text> : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: "问题/候选",
       key: "issues",
       width: 260,
@@ -406,7 +476,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         type="info"
         showIcon
         message="先预览，再提交"
-        description="系统自动识别表单、字段和项目归属。字段映射只读展示；正式提交只消费冻结的预览凭证。歧义、未匹配或无效行不能勾选。"
+        description="系统自动识别表单、字段和项目归属。字段映射只读展示；正式提交只消费冻结的预览凭证。歧义、未匹配或无效行不能勾选；收款单已在台账的行自动跳过，覆盖既有已确认累计的行默认不勾选，需逐行确认。"
       />
 
       <Upload.Dragger {...uploadProps}>
@@ -472,9 +542,11 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                   onChange: setSelectedRowKeys,
                   getCheckboxProps: (row) => ({
                     disabled: !rowCanApply(row),
-                    "aria-label": rowCanApply(row)
-                      ? `选择 ${row.filename} 第 ${row.source_row} 行`
-                      : `${MATCH_LABELS[row.match_state]}行不可提交`,
+                    "aria-label": !rowCanApply(row)
+                      ? `${MATCH_LABELS[row.match_state]}行不可提交`
+                      : rowNeedsConfirmation(row)
+                        ? `确认覆盖 ${row.filename} 第 ${row.source_row} 行`
+                        : `选择 ${row.filename} 第 ${row.source_row} 行`,
                   }),
                 }}
               />
@@ -483,6 +555,11 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                   <Text type="secondary">
                     可提交 {selectableKeys.size} 行，已选 {safeSelectedKeys.length} 行；其余行需修正源文件或后端归属后重新预览。
                   </Text>
+                  {confirmationKeys.size ? (
+                    <Text type="warning" style={{ display: "block" }}>
+                      其中 {confirmationKeys.size} 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 {selectedOverwrites.length} 行。
+                    </Text>
+                  ) : null}
                 </Col>
                 <Col>
                   <Button

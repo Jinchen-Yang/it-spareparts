@@ -59,12 +59,14 @@ class MaintenanceCollectionSnapshot(Base):
             "status IN ('confirmed', 'unconfirmed', 'void')",
             name="ck_maintenance_collection_status",
         ),
+        # bulk_import = 收款单（SKD）批量导入网关（D-16）；与 workbook 一样必须
+        # 带 import_batch_id（sys_import_batch.id），追溯不靠审计 reason 文本。
         CheckConstraint(
-            "source IN ('legacy', 'direct_api', 'workbook')",
+            "source IN ('legacy', 'direct_api', 'workbook', 'bulk_import')",
             name="ck_maintenance_collection_source",
         ),
         CheckConstraint(
-            "(source = 'workbook' AND import_batch_id IS NOT NULL) OR "
+            "(source IN ('workbook', 'bulk_import') AND import_batch_id IS NOT NULL) OR "
             "(source IN ('legacy', 'direct_api') AND import_batch_id IS NULL)",
             name="ck_maintenance_collection_import_batch",
         ),
@@ -86,6 +88,60 @@ class MaintenanceCollectionSnapshot(Base):
             "ix_maintenance_collection_project_month",
             "project_id",
             "report_month",
+        ),
+    )
+
+
+class MaintenanceCollectionReceipt(Base):
+    """收款单（SKD）台账：逐笔实收事实，跨批次按收款单号幂等（D-16）。
+
+    月度累计快照由「台账生效行 ∪ 本文件新收款」推导，因此增量导出（只含最近
+    几个月）也能算出正确累计；同一 (销售订单, 收款单号) 只落一行，再次出现时
+    金额/日期一致即跳过，不一致即人工裁决，绝不自动覆盖或累加。
+    """
+
+    __tablename__ = "maintenance_collection_receipt"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_contract_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project_contract.project_contract_id"), nullable=False
+    )
+    # normalize_order_no 后的销售订单号（去掉 XSDD- 前缀、去空白、大写）
+    contract_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt_date: Mapped[date] = mapped_column(Date, nullable=False)
+    actual_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    import_batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_import_batch.id")
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_no",
+            "receipt_no",
+            name="uq_maintenance_collection_receipt_contract_receipt",
+        ),
+        CheckConstraint(
+            "actual_amount >= 0 AND actual_amount < 1000000000000",
+            name="ck_maintenance_collection_receipt_amount",
+        ),
+        Index(
+            "ix_maintenance_collection_receipt_contract",
+            "project_contract_id",
+            "receipt_date",
+        ),
+        Index(
+            "ix_maintenance_collection_receipt_batch",
+            "import_batch_id",
         ),
     )
 
