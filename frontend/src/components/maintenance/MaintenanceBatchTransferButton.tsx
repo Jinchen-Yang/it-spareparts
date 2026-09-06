@@ -535,14 +535,21 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     const next = new Set(nextKeys.map(String).filter((key) => selectableKeys.has(key)));
     const added = [...next].filter((key) => !current.has(key));
     const removed = [...current].filter((key) => !next.has(key));
-    const autoAdded = [...closure(added, edges.dependencies)]
+    const wanted = [...closure(added, edges.dependencies)]
       .filter((key) => !next.has(key) && selectableKeys.has(key));
+    // D-16 第 3 点：覆盖既有已确认累计的行必须由用户逐行手动勾选确认，不随依赖自动带上；
+    // 缺了它勾选就不一致，提交按钮禁用并写明原因，直到用户自己勾上。
+    const autoAdded = wanted.filter((key) => !confirmationKeys.has(key));
+    const explicitNeeded = wanted.filter((key) => confirmationKeys.has(key));
     autoAdded.forEach((key) => next.add(key));
     const autoRemoved = [...closure(removed, edges.dependents)].filter((key) => next.has(key));
     autoRemoved.forEach((key) => next.delete(key));
     const describe = (keys: string[]) => keys.map((key) => rowLabel(rowsByKey.get(key), key)).join("、");
     if (autoAdded.length) {
       message.info(`已同时勾选其依赖的 ${autoAdded.length} 行：${describe(autoAdded)}`);
+    }
+    if (explicitNeeded.length) {
+      message.warning(`覆盖既有已确认累计的行须手动逐行勾选确认：${describe(explicitNeeded)}`);
     }
     if (autoRemoved.length) {
       message.info(`已同时取消依赖它的 ${autoRemoved.length} 行：${describe(autoRemoved)}`);

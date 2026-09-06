@@ -630,7 +630,7 @@ describe("MaintenanceBatchTransferButton", () => {
     expect(await screen.findByText(/原值 100.00 → 新值 130.00/)).toBeInTheDocument();
   });
 
-  it("依赖行默认不勾；勾选依赖行自动带上依赖并提示，取消被依赖行时一并取消", async () => {
+  it("依赖行默认不勾；勾选依赖行自动带上非覆盖依赖并提示，覆盖行须手动确认；取消被依赖行时一并取消", async () => {
     mocks.preview.mockResolvedValue({ data: dependencyPreview });
     await previewReceiptFile();
 
@@ -647,13 +647,20 @@ describe("MaintenanceBatchTransferButton", () => {
     expect(screen.getByText("依赖覆盖行")).toBeInTheDocument();
     expect(screen.getByText("需同勾更早月份")).toBeInTheDocument();
 
-    // 勾 09 月 → 自动带上 08 月与 07 月覆盖行（06 月已勾）
+    // 勾 09 月 → 自动带上 08 月；07 月是覆盖行，D-16 要求手动逐行确认，不自动带上，提交先禁用
     fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 5 行"));
-    expect(await screen.findByText(/已同时勾选其依赖的 2 行：收款单\.xlsx 第 4 行、收款单\.xlsx 第 3 行/)).toBeInTheDocument();
-    expect(screen.getByText("可提交 5 行，已选 4 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
-    expect(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行")).toBeChecked();
+    expect(await screen.findByText(/已同时勾选其依赖的 1 行：收款单\.xlsx 第 4 行/)).toBeInTheDocument();
+    expect(await screen.findByText(/覆盖既有已确认累计的行须手动逐行勾选确认：收款单\.xlsx 第 3 行/)).toBeInTheDocument();
+    expect(screen.getByText("可提交 5 行，已选 3 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行")).not.toBeChecked();
     expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).toBeChecked();
-    expect(screen.getByText("其中 1 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 1 行。")).toBeInTheDocument();
+    expect(screen.getByText(/勾选不一致，无法提交：/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交 3 行" })).toBeDisabled();
+    // 手动勾上 07 月覆盖行 → 勾选一致，可提交
+    fireEvent.click(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行"));
+    expect(await screen.findByText("其中 1 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 1 行。")).toBeInTheDocument();
+    expect(screen.getByText("可提交 5 行，已选 4 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.queryByText(/勾选不一致/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交 4 行" })).not.toBeDisabled();
 
     // 取消 07 月覆盖行 → 依赖它的 08/09 月一并取消
@@ -663,8 +670,10 @@ describe("MaintenanceBatchTransferButton", () => {
     expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).not.toBeChecked();
     expect(screen.getByLabelText("选择 收款单.xlsx 第 5 行")).not.toBeChecked();
 
-    // 再勾 09 月并提交：四行一起进 apply
+    // 再勾 09 月（自动带上 08 月）并手动确认 07 月覆盖行后提交：四行一起进 apply
     fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 5 行"));
+    await screen.findAllByText(/已同时勾选其依赖的 1 行/);
+    fireEvent.click(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行"));
     fireEvent.click(await screen.findByRole("button", { name: "提交 4 行" }));
     await waitFor(() => expect(mocks.apply).toHaveBeenCalledTimes(1));
     expect([...mocks.apply.mock.calls[0][0].row_keys].sort()).toEqual(["row-aug", "row-jul", "row-jun", "row-sep"]);
