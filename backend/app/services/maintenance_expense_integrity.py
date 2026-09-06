@@ -202,15 +202,26 @@ def normalize_contract_no(value: str | None) -> str:
     return normalized
 
 
+# Python 的 ``\s``（= ``str.isspace()``）比 PostgreSQL ARE 的 ``\s``（[[:space:]]）宽：
+# NBSP U+00A0 / U+202F / 全角空格 U+3000 这类从 Excel 粘来的空白 Python 剥、PG 不剥，
+# 同一个合同号在 SQL 路由（看板需求单）与 Python 路由（03 行级）上就会答案不同。
+# SQL 侧字符类直接由 Python 的空白集生成——两侧同一套字符，按构造成双。
+_WHITESPACE_SQL_CLASS = "[" + "".join(
+    chr(cp) for cp in range(0x10000) if chr(cp).isspace()) + "]+"
+
+
 def normalized_contract_no_sql(column):
     """PostgreSQL twin of :func:`normalize_contract_no` for WHERE-side equality.
 
     Same three steps in the same order (strip all whitespace, uppercase, drop
     a leading ``XSDD-``) so ``normalized_contract_no_sql(col) ==
-    normalize_contract_no(value)`` is a true normalized equality.
+    normalize_contract_no(value)`` is a true normalized equality.  The
+    whitespace class is generated from Python's own ``str.isspace`` set, so
+    NBSP-family characters are stripped on both sides (see the note above).
     """
     return func.regexp_replace(
-        func.upper(func.regexp_replace(func.btrim(column), r"\s+", "", "g")),
+        func.upper(func.regexp_replace(
+            func.btrim(column), _WHITESPACE_SQL_CLASS, "", "g")),
         f"^{_CONTRACT_PREFIX}",
         "",
     )

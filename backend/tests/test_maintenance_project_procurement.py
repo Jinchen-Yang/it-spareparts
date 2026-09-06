@@ -350,3 +350,26 @@ def test_masked_unit_price_is_distinguishable_from_missing_price(db):
         for masked_line in po["lines"]:
             assert masked_line["unit_price"] is None
             assert masked_line["unit_price_masked"] is True
+
+
+def test_purchases_page_size_echo_is_effective_size_or_null(db):
+    """#259 修正 (c)：给了 page 就回显真正切片用的页长（省略＝默认 20，不是 null）；
+    省略 page 时 page_size 被忽略、回显 null——不能回显一个没生效的值。"""
+    p = _project(db, "proc-echo", "回显项目")
+    _seed_demand(db, "RAW-EC-001", "回显项目")
+    for i in (1, 2, 3):
+        _seed_purchase(db, f"PO-EC-00{i}", "RAW-EC-001")
+    _assign_source_order(db, source_order_id="RAW-EC-001", project_id=p.project_id)
+    admin, _ = _client(db, "proc_admin_echo", role="admin")
+
+    defaulted = _fetch_params(admin, p.project_id, page=1).json()
+    assert (defaulted["page"], defaulted["page_size"]) == (1, 20)
+    assert len(defaulted["purchases"]) == 3 and defaulted["total"] == 3
+
+    ignored = _fetch_params(admin, p.project_id, page_size=2).json()
+    assert ignored["page"] is None and ignored["page_size"] is None
+    assert len(ignored["purchases"]) == 3   # 没有 page 就是全量，page_size 不生效
+
+    # 归属为空的短路同样回显生效页长
+    empty = _fetch_params(admin, p.project_id, source_order_id="RAW-NOT-MINE", page=1).json()
+    assert (empty["total"], empty["page"], empty["page_size"]) == (0, 1, 20)

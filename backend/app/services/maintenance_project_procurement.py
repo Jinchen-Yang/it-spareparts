@@ -63,11 +63,14 @@ def list_project_procurement(
     - ``source_order_id``：只看挂在这张需求单（WBDD raw id）上的采购单；仍然
       只认稳定归属——不在本项目归属内的需求单即使传了也是空。
     - ``page`` 省略 = 全量返回（与 :func:`get_project_procurement_chain` 相同），
-      ``total`` 永远是过滤后的真实总数，不是本页行数。
+      此时 ``page_size`` 被忽略、回显 None；给了 ``page`` 才回显真正切片用的页长
+      （省略页长时是 :data:`DEFAULT_PAGE_SIZE`，不是 None）。``total`` 永远是
+      过滤后的真实总数，不是本页行数。
     - 行序固定（采购日期倒序 → 采购单号 → id），否则分页跨页会重复/漏行。
     """
     from app import config
 
+    page_size = (page_size or DEFAULT_PAGE_SIZE) if page is not None else None
     demand_ids = _demand_ids_by_assignment(db, project_id)
     if source_order_id is not None:
         demand_ids &= {source_order_id}
@@ -97,8 +100,7 @@ def list_project_procurement(
                   FPurchaseOrder.order_no, FPurchaseOrder.id)
     )
     if page is not None:
-        size = page_size or DEFAULT_PAGE_SIZE
-        stmt = stmt.offset((page - 1) * size).limit(size)
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     purchase_rows = db.execute(stmt).mappings().all()
     if not purchase_rows:
         return {"rows": [], "total": total, "page": page, "page_size": page_size}

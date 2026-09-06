@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, useCallback, useEffect, useRef } from "react";
 import { Tag } from "antd";
 
 /**
@@ -137,4 +137,30 @@ export function readError(error: unknown, fallback: string): string {
     return String((detail as { message: unknown }).message);
   }
   return fallback;
+}
+
+/**
+ * 一段读回的「只认最后一发」守卫（#259 屏障修正）：范围一换（选中单被清、合同一换），
+ * 效应会再发一次请求把在途的旧请求盖掉。被盖掉的旧请求不报 false，而是把结果交给
+ * 最新那一发——落库后的读回屏障要等的是这一段最终展示的那次读回，不是被丢弃的那次；
+ * 否则「读回把选中单清掉 → 两段按新范围重读」这条正常路径会被误报成刷新失败。
+ * 卸载后所有在途都作废（返回 false，且 isCurrent() 为 false 时读回函数不该再碰状态）。
+ */
+export function useLatestRead(): (
+  read: (isCurrent: () => boolean) => Promise<boolean>,
+) => Promise<boolean> {
+  const seq = useRef(0);
+  const latest = useRef<{ seq: number; promise: Promise<boolean> } | null>(null);
+  useEffect(() => () => { seq.current += 1; }, []);
+  return useCallback((read) => {
+    const mine = ++seq.current;
+    const isCurrent = () => mine === seq.current;
+    const promise = read(isCurrent).then((ok) => {
+      if (isCurrent()) return ok;
+      const newer = latest.current;
+      return newer && newer.seq !== mine ? newer.promise : false;
+    });
+    latest.current = { seq: mine, promise };
+    return promise;
+  }, []);
 }

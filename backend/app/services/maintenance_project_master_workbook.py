@@ -467,6 +467,8 @@ def _assigned_lines(
     项目总表 03、02 概览、主页全局行级表三处共用本入口。
     2026-08-21（客户反馈）：order_date 倒序——最新日期排前面；行键/行级哈希
     与行序解耦，Excel 回传不受行序影响。
+    #259 修正：line_no 可空，同单同日的行在前三键上会打平；行 id 作尾键，
+    否则 03 行级分页切片跨页会重复/漏行（打平行的顺序由堆序决定，不稳定）。
     """
     from app.services import maintenance_demands
 
@@ -481,7 +483,7 @@ def _assigned_lines(
         .where(FMaintenanceLine.is_active.is_(True),
                maintenance_demands.active_demand_condition())
         .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
-                  FMaintenanceLine.line_no)
+                  FMaintenanceLine.line_no, FMaintenanceLine.id)
     )
     if project_id is not None:
         stmt = stmt.where(MaintenanceSourceOrderAssignment.project_id == project_id)

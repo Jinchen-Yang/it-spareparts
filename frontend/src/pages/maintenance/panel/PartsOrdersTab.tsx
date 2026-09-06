@@ -16,16 +16,27 @@ import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip
 import {
   COST_CATEGORY_LEGEND,
   CostSourceTag,
+  type PanelRefresh,
   type RegisterPanelRefresh,
   raw,
   readError,
   statText,
+  useLatestRead,
 } from "./panelUtils";
 
 const { Text } = Typography;
 
 /** PN 明细服务端分页页长（后端上限 200）。 */
 const LINES_PAGE_SIZE = 20;
+/** 需求单表本地分页页长（需求单一次拉全、前端翻页）。 */
+const ORDERS_PAGE_SIZE = 10;
+
+/**
+ * 点选的需求单：单号给 PN 明细（order_no 精确相等），raw id 给采购段（source_order_id）。
+ * 点击时拍快照，而不是每次从列表里 find——需求单重载失败或该单已不在列表时，
+ * 两段的范围不能悄悄漂移成「全部」。
+ */
+type SelectedOrder = Pick<BoardOrderRow, "order_no" | "source_order_id">;
 
 /**
  * 备件与需求单 tab（2026-08-19 重设计）：原顶部「出库明细」卡与原「备件成本」tab
@@ -54,18 +65,31 @@ export function PartsOrdersTab({
 }) {
   const [orders, setOrders] = useState<BoardOrderRow[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersPage, setOrdersPage] = useState(1);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
-  /** 点选的需求单号＝行过滤（再点一次取消）；默认展示项目全部备件行。 */
-  const [selectedOrderNo, setSelectedOrderNo] = useState<string | null>(null);
+  /** 点选的需求单＝行过滤（再点一次取消）；默认展示项目全部备件行。 */
+  const [selectedOrder, setSelectedOrder] = useState<SelectedOrder | null>(null);
+  const selectedRef = useRef<SelectedOrder | null>(null);
   const [lines, setLines] = useState<ProjectPartsRow[]>([]);
   const [linesTotal, setLinesTotal] = useState(0);
   const [linesPage, setLinesPage] = useState(1);
   const [linesLoading, setLinesLoading] = useState(false);
-  const ordersSeq = useRef(0);
-  const linesSeq = useRef(0);
+  const readOrders = useLatestRead();
+  const readLines = useLatestRead();
+  /** 采购段自己的读回函数（由 ProjectProcurementPanel 登记），一起进落库后的读回屏障。 */
+  const procurementRefresh = useRef<PanelRefresh | null>(null);
+  const registerProcurementRefresh = useCallback((refresh: PanelRefresh | null) => {
+    procurementRefresh.current = refresh;
+  }, []);
 
-  const loadOrders = useCallback(async () => {
-    const seq = ++ordersSeq.current;
+  /** 选中/取消一张需求单：范围一换，PN 明细回第一页。 */
+  const selectOrder = useCallback((next: SelectedOrder | null) => {
+    selectedRef.current = next;
+    setSelectedOrder(next);
+    setLinesPage(1);
+  }, []);
+
+  const loadOrders = useCallback(() => readOrders(async (isCurrent) => {
     setOrdersLoading(true);
     try {
       const pageSize = 200;
@@ -78,58 +102,70 @@ export function PartsOrdersTab({
           page_size: pageSize,
           contract_no: contractFilter,
         });
-        if (seq !== ordersSeq.current) return false;
+        if (!isCurrent()) return false;
         total = response.data.total;
         all.push(...response.data.rows);
         if (!response.data.rows.length) break;
         page += 1;
       } while (all.length < total);
       setOrders(all);
+      // 成功读回后选中的单已不在列表（被改派/作废）：清范围并告知，不让 PN 明细与
+      // 采购段还按一张看不见的单过滤。读回失败时选中不动——范围不因失败漂移。
+      const stale = selectedRef.current;
+      if (stale && !all.some((order) => order.source_order_id === stale.source_order_id)) {
+        selectOrder(null);
+        message.info(`需求单 ${stale.order_no} 已不在当前列表，已取消按单过滤`);
+      }
       return true;
     } catch (err) {
-      if (seq === ordersSeq.current) {
+      if (isCurrent()) {
         setOrders([]);
         message.error(readError(err, "需求单加载失败"));
       }
       return false;
     } finally {
-      if (seq === ordersSeq.current) setOrdersLoading(false);
+      if (isCurrent()) setOrdersLoading(false);
     }
-  }, [projectId, contractFilter]);
+  }), [projectId, contractFilter, readOrders, selectOrder]);
 
-  const loadLines = useCallback(async () => {
-    const seq = ++linesSeq.current;
+  const loadLines = useCallback(() => readLines(async (isCurrent) => {
     setLinesLoading(true);
     try {
       const resp = await listProjectPartsRows(projectId, {
         page: linesPage,
         page_size: LINES_PAGE_SIZE,
-        order_no: selectedOrderNo ?? undefined,
+        order_no: selectedOrder?.order_no,
         contract_no: contractFilter,
       });
-      if (seq !== linesSeq.current) return false;
+      if (!isCurrent()) return false;
       setLines(resp.rows);
       setLinesTotal(resp.total);
       return true;
     } catch (err) {
-      if (seq === linesSeq.current) {
+      if (isCurrent()) {
         setLines([]);
         setLinesTotal(0);
         message.error(readError(err, "备件明细加载失败"));
       }
       return false;
     } finally {
-      if (seq === linesSeq.current) setLinesLoading(false);
+      if (isCurrent()) setLinesLoading(false);
     }
-  }, [projectId, contractFilter, selectedOrderNo, linesPage]);
+  }), [projectId, contractFilter, selectedOrder, linesPage, readLines]);
 
   useEffect(() => { void loadOrders(); }, [loadOrders]);
   useEffect(() => { void loadLines(); }, [loadLines]);
 
-  // 落库后的读回屏障：两段各自读回，任一没完成都算没完成（采购段与 03 表无关，不进屏障）。
+  // 落库后的读回屏障：三段各自读回，任一没完成都算没完成。采购段也在屏障里——
+  // 03 回传（will_reassign_orders → 改派需求单）与概览挂靠都会改需求单归属，
+  // 而归属正是采购链唯一的输入。
   const refreshAll = useCallback(async () => {
-    const [ordersOk, linesOk] = await Promise.all([loadOrders(), loadLines()]);
-    return ordersOk && linesOk;
+    const [ordersOk, linesOk, procurementOk] = await Promise.all([
+      loadOrders(),
+      loadLines(),
+      procurementRefresh.current?.() ?? Promise.resolve(true),
+    ]);
+    return ordersOk && linesOk && procurementOk;
   }, [loadOrders, loadLines]);
 
   useEffect(() => {
@@ -137,33 +173,25 @@ export function PartsOrdersTab({
     return () => { registerRefresh("parts-orders", null); };
   }, [refreshAll, registerRefresh]);
 
-  useEffect(() => () => {
-    ordersSeq.current += 1;
-    linesSeq.current += 1;
-  }, []);
-
-  /** 合同一换，原选中的需求单多半已不在列表里：清选中、回第一页，三段一起换范围。 */
+  /** 合同一换，原选中的需求单多半已不在列表里：清选中、两张表都回第一页，三段一起换范围。 */
   const onContractChange = (value: string | undefined) => {
     setContractFilter(value);
-    setSelectedOrderNo(null);
-    setLinesPage(1);
+    selectOrder(null);
+    setOrdersPage(1);
   };
 
-  const toggleOrder = (orderNo: string) => {
-    setSelectedOrderNo((prev) => (prev === orderNo ? null : orderNo));
-    setLinesPage(1);
+  const toggleOrder = (order: BoardOrderRow) => {
+    selectOrder(selectedRef.current?.source_order_id === order.source_order_id
+      ? null
+      : { order_no: order.order_no, source_order_id: order.source_order_id });
   };
-
-  const selectedOrder = selectedOrderNo
-    ? orders.find((order) => order.order_no === selectedOrderNo) ?? null
-    : null;
 
   const orderColumns: ColumnsType<BoardOrderRow> = [
     {
       title: "需求单号",
       dataIndex: "order_no",
-      render: (value: string) => (
-        <a onClick={() => toggleOrder(value)}>
+      render: (value: string, order) => (
+        <a onClick={() => toggleOrder(order)}>
           {value}
         </a>
       ),
@@ -268,7 +296,12 @@ export function PartsOrdersTab({
           loading={ordersLoading}
           dataSource={orders}
           columns={orderColumns}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
+          pagination={{
+            current: ordersPage,
+            pageSize: ORDERS_PAGE_SIZE,
+            showSizeChanger: false,
+            onChange: (page) => setOrdersPage(page),
+          }}
         />
         <Space size={12} wrap>
           {COST_CATEGORY_LEGEND.map((item) => (
@@ -276,7 +309,7 @@ export function PartsOrdersTab({
           ))}
           <Text type="secondary" style={{ fontSize: 11.5 }}>
             成本来源：绿=系统关联（采购单挂接）｜橙=估算（窗口/历史/池/月均/销售参考）｜紫=人工回填｜红=缺失
-            {selectedOrderNo ? `｜当前过滤：${selectedOrderNo}（再点单号取消）` : ""}
+            {selectedOrder ? `｜当前过滤：${selectedOrder.order_no}（再点单号取消）` : ""}
           </Text>
         </Space>
         <Text type="secondary" style={{ display: "block", fontSize: 11.5 }}>
@@ -302,6 +335,7 @@ export function PartsOrdersTab({
         projectId={projectId}
         sourceOrderId={selectedOrder?.source_order_id ?? null}
         sourceOrderNo={selectedOrder?.order_no ?? null}
+        registerRefresh={registerProcurementRefresh}
       />
     </Space>
   );

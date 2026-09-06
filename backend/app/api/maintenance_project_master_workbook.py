@@ -30,6 +30,7 @@ from app.api.maintenance_expense_collection_workbook import (
     _read_upload_with_takeover,
     _require_profit_visibility,
 )
+from app.api.maintenance_boss_board import contract_no_filter
 from app.api.maintenance_project_scope import (
     require_maintenance_project_access,
     resolve_visible_project_ids,
@@ -571,12 +572,14 @@ def _filter_and_page_lines(
     contract_no: str | None,
     page: int | None,
     page_size: int | None,
-) -> tuple[list, int]:
-    """03 行级的服务端过滤 + 分页（#259）：返回 ``(本页行, 过滤后真实总数)``。
+) -> tuple[list, int, int | None]:
+    """03 行级的服务端过滤 + 分页（#259）：返回 ``(本页行, 过滤后真实总数, 生效页长)``。
 
     过滤在 ``_assigned_lines`` 之后按 Python 做（高风险服务不动）：需求单号精确
     相等；合同号走报销归属同一把 ``normalize_contract_no`` 尺子（去空白、大写、
-    去 ``XSDD-``）。``page`` 省略 = 全量返回，旧调用方与 Excel 往返不受影响。
+    去 ``XSDD-``）。``page`` 省略 = 全量返回，旧调用方与 Excel 往返不受影响，
+    此时 ``page_size`` 被忽略、回显 None；给了 ``page`` 才回显真正切片用的页长
+    （省略页长时是默认值，不是 None）。
     """
     if order_no is not None:
         rows = [item for item in rows if item[1].order_no == order_no]
@@ -587,10 +590,10 @@ def _filter_and_page_lines(
             if normalize_contract_no(item[1].linked_sales_order_no) == want
         ]
     total = len(rows)
-    if page is not None:
-        size = page_size or _ROWS_DEFAULT_PAGE_SIZE
-        rows = rows[(page - 1) * size:page * size]
-    return rows, total
+    if page is None:
+        return rows, total, None
+    size = page_size or _ROWS_DEFAULT_PAGE_SIZE
+    return rows[(page - 1) * size:page * size], total, size
 
 
 @router.get(_MASTER + "/rows")
@@ -599,11 +602,10 @@ def list_master_rows(
     sheet: str = Query(..., description="sheet 名，当前支持 03_备件订单"),
     order_no: str | None = Query(
         None, min_length=1, max_length=64, description="只看这张需求单（WBDD 单号精确相等）"),
-    contract_no: str | None = Query(
-        None, min_length=1, max_length=64,
-        description="按挂靠销售订单号（XSDD）归一化相等过滤（#259）"),
+    contract_no: str | None = Depends(contract_no_filter),
     page: int | None = Query(None, ge=1, description="省略＝全量返回（旧协议）"),
-    page_size: int | None = Query(None, ge=1, le=200),
+    page_size: int | None = Query(
+        None, ge=1, le=200, description="只在给了 page 时生效，省略＝20"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -614,7 +616,7 @@ def list_master_rows(
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
     if (get_settings().maintenance_project_master_v2_enabled
             and sheet in {master.V2_SHEET_PARTS, master.SHEET_PARTS}):
-        rows, total = _filter_and_page_lines(
+        rows, total, page_size = _filter_and_page_lines(
             master._assigned_lines(db, project_id=project_id, window=None),
             order_no=order_no, contract_no=contract_no,
             page=page, page_size=page_size)
@@ -703,7 +705,7 @@ def list_master_rows(
             {"code": "unsupported_sheet",
              "message": "当前仅支持 03_备件订单 行级查询"},
         )
-    rows, total = _filter_and_page_lines(
+    rows, total, page_size = _filter_and_page_lines(
         master._assigned_lines(db, project_id=project_id, window=None),
         order_no=order_no, contract_no=contract_no,
         page=page, page_size=page_size)

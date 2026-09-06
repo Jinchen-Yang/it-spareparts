@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -58,7 +58,9 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     expect(api.getProjectProcurement).toHaveBeenCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-1",
     });
-    expect(screen.getByText(/当前范围：需求单 WBDD-1/)).toBeInTheDocument();
+    // 范围提示在卡体里而不是 extra：375px 下长 extra 会把标题挤成省略号
+    expect(screen.getByText(/当前范围：需求单 WBDD-1/).closest(".ant-card-body")).not.toBeNull();
+    expect(container.querySelector(".ant-card-extra")).toBeNull();
 
     fireEvent.click(container.querySelector(".ant-table-row-expand-icon")!);
     expect(await screen.findByText("¥88.00")).toBeInTheDocument();
@@ -100,5 +102,33 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     await waitFor(() => expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-2",
     }));
+  });
+
+  it("向所在 tab 登记读回函数：调用即按当前范围重读，失败 resolve false；卸载登记 null", async () => {
+    api.getProjectProcurement.mockResolvedValue(payload([order("PO-1", [])]));
+    const registerRefresh = vi.fn();
+    const { unmount } = render(
+      <ProjectProcurementPanel projectId="p1" sourceOrderId="RAW-1" registerRefresh={registerRefresh} />,
+    );
+    await screen.findByText("PO-1");
+    const registered = registerRefresh.mock.calls.filter(([fn]) => fn);
+    const refresh = registered[registered.length - 1][0] as () => Promise<boolean>;
+
+    await act(async () => {
+      expect(await refresh()).toBe(true);
+    });
+    expect(api.getProjectProcurement).toHaveBeenCalledTimes(2);
+    expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
+      page: 1, page_size: 10, source_order_id: "RAW-1",
+    });
+
+    api.getProjectProcurement.mockRejectedValueOnce(new Error("boom"));
+    await act(async () => {
+      expect(await refresh()).toBe(false);
+    });
+    expect(await screen.findByText("采购订单关联数据加载失败")).toBeInTheDocument();
+
+    unmount();
+    expect(registerRefresh).toHaveBeenLastCalledWith(null);
   });
 });
