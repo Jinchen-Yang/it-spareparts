@@ -1025,3 +1025,116 @@ describe("报销 tab 展示备注（#47）", () => {
     expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
   });
 });
+
+describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => {
+  it("展示板单卡 404 时按稳定详情 project 上的 can_edit_master_workbook 给上传入口", async () => {
+    // 无挂靠的停用项目 / 展示板开关关闭 → 单卡 404，row 为 null；面板总是先取
+    // 稳定详情，flag 挂在 project 上兜底，负责人不丢上传入口（同一服务端判定）。
+    getBoardProject.mockRejectedValue(new Error("404 项目不存在或无权查看"));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+          project_manager_id: null, lifecycle_status: "ongoing",
+          is_active: true, version: 1, can_edit_master_workbook: true,
+        },
+      },
+    });
+    renderPanel();
+    expect(await screen.findByRole("button", { name: /上传覆盖/ })).toBeInTheDocument();
+  });
+
+  it("展示板单卡 404 且稳定详情 flag 为 false、无动作键时仍无上传入口", async () => {
+    getBoardProject.mockRejectedValue(new Error("404 项目不存在或无权查看"));
+    getMaintenanceProject.mockResolvedValue({
+      data: {
+        project: {
+          project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+          project_manager_id: null, lifecycle_status: "ongoing",
+          is_active: true, version: 1, can_edit_master_workbook: false,
+        },
+      },
+    });
+    renderPanel();
+    await screen.findByRole("button", { name: /下载本项目总表/ });
+    expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
+  });
+
+  it("面板作废后明细为空的领用单以「已作废」摘要行显示，可核对且没有作废按钮", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      action_maintenance_site_issue_manage: true,
+      data_purchase_cost: true,
+    }));
+    searchSiteIssues.mockResolvedValue({
+      data: {
+        project_id: "p1",
+        rows: [
+          {
+            issue_id: "ISSUE-VOID",
+            project_id: "p1",
+            issue_no: "CKD-VOID-1",
+            issue_date: "2026-09-01",
+            workflow_status: "void",
+            voided_at: "2026-09-06T02:03:04+00:00",
+            version: 2,
+            lines: [],
+          },
+          {
+            issue_id: "ISSUE-LIVE",
+            project_id: "p1",
+            issue_no: "CKD-LIVE-1",
+            issue_date: "2026-09-02",
+            workflow_status: "confirmed",
+            version: 1,
+            lines: [{
+              issue_line_id: "LINE-LIVE", part_id: 9, pn: "PN-LIVE",
+              serial_number: "SN-LIVE", quantity: "1", no_return: false,
+            }],
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 100,
+      },
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
+    expect(await screen.findByText("CKD-VOID-1")).toBeInTheDocument();
+    expect(screen.getByText("CKD-LIVE-1")).toBeInTheDocument();
+    expect(screen.getByText(/作废于/)).toBeInTheDocument();
+    // 领用状态列 + 返还状态列都是「领用已作废」
+    expect(screen.getAllByText("领用已作废")).toHaveLength(2);
+    // 操作列：作废单是「已作废」标签，只有活单有作废按钮（AntD 两字按钮渲染为「作 废」）
+    expect(screen.getByText("已作废")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^作\s?废$/ })).toHaveLength(1);
+    // 作废摘要行不是明细：作废活单时弹窗按活行数计
+    fireEvent.click(screen.getByRole("button", { name: /^作\s?废$/ }));
+    expect(await screen.findByText(/作废领用单 CKD-LIVE-1（共 1 行）/)).toBeInTheDocument();
+  });
+
+  it("预检回执列出落在已作废行上的改动未生效（D-02 作废优先），其余照常回传", async () => {
+    localStorage.setItem("permissions",
+      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+    validateProjectMaster.mockResolvedValue({
+      site_creates: 1,
+      will_void_rows: [],
+      will_reassign_orders: [],
+      voided_rows: [{
+        sheet: "06_领用返还", row: "CKD-20260901-0001", row_no: 5,
+        entity_id: "manual-site:abc", field: "（整行）", old: "", new: "",
+        reason: "row_voided", voided_by: "张三", voided_at: "2026-09-06T02:03:04+00:00",
+        message: "06_领用返还第 5 行：领用单 CKD-20260901-0001 已被 张三 于 2026-09-06 10:03 作废，修改未生效；作废行不复活，如需重新领用请换单号重录",
+      }],
+    });
+    const { container } = renderPanel();
+    await screen.findByRole("button", { name: /上传覆盖/ });
+    const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(inputs[0], {
+      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    });
+    expect(await screen.findByText(/已作废行改动未生效 1 行/)).toBeInTheDocument();
+    expect(screen.getByText(/已被 张三 于 2026-09-06 10:03 作废，修改未生效/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /确认回传/ }));
+    await waitFor(() => expect(applyProjectMaster).toHaveBeenCalledTimes(1));
+  });
+});

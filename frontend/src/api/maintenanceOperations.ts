@@ -321,6 +321,9 @@ export interface SiteIssueDocument {
   issued_by: string;
   site_location: string;
   version: number;
+  /** 整单作废时间（ISO）；面板作废后的单靠它给出「已作废」摘要行。 */
+  voided_at?: string | null;
+  /** 只含活行：整单作废后为空数组（明细已软作废）。 */
   lines: SiteIssueLine[];
   inventory_effect?: "none";
   idempotent_replay?: boolean;

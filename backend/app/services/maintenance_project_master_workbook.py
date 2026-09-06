@@ -37,7 +37,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app import config
-from app.business_time import business_today
+from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app.models.dimensions import DimPart, PartAlias
 from app.models.maintenance import (
@@ -1807,6 +1807,8 @@ class MasterV2Plan:
     conflicts: tuple[dict, ...] = ()
     overridden: tuple[dict, ...] = ()
     warnings: tuple[str, ...] = ()
+    # D-02 作废优先：落在已作废行/单上的改动，行级列明「已被谁何时作废，修改未生效」。
+    voided_rows: tuple[dict, ...] = ()
 
     @property
     def summary(self) -> dict:
@@ -1966,9 +1968,26 @@ class _V2MergeContext:
         self.warnings: list[str] = []
         self.unresolved_pns: dict[str, list[int]] = {}
         self.guards: list[V2RowGuard] = []
+        # D-02 唯一保留的拒绝：作废优先。用户改到的行/身份在服务端已作废，
+        # 该行不进写集合、也不整本拒绝——记一条行级回执，其余行照常应用。
+        self.voided_rows: list[dict] = []
 
     def note_unresolved_pn(self, pn: str, row_no: int) -> None:
         self.unresolved_pns.setdefault(pn, []).append(row_no)
+
+    def record_voided_row(
+        self, *, sheet: str, row_no: int, row_label: str, entity_id,
+        voided_by: str, voided_at: datetime | None, message: str,
+    ) -> None:
+        """登记「该行已被 xxx 作废，修改未生效」（D-02），不阻断其余行。"""
+        self.voided_rows.append({
+            "sheet": sheet, "row": row_label, "row_no": row_no,
+            "entity_id": str(entity_id), "field": "（整行）",
+            "reason": "row_voided", "voided_by": voided_by,
+            "voided_at": voided_at.isoformat() if voided_at else None,
+            "message": message,
+        })
+        self.warnings.append(message)
 
     def record(
         self, *, sheet: str, row_label: str, entity_id, field: str,
@@ -2117,13 +2136,8 @@ def _v2_merge_row(
     在合并之前就把单元格解析成局部变量了，那两条路径的同类问题需要各自调整
     解析顺序，不在本次修复范围。
     """
-    user_values = {
-        name: _v2_hash_value(_cell(row, index, name)) for name in base_fields
-    }
-    touched = {
-        name: value for name, value in user_values.items()
-        if value != baseline.get(name, "")
-    }
+    touched = _v2_touched_fields(
+        row=row, index=index, base_fields=base_fields, baseline=baseline)
     if not touched:
         return None
     for name, user_value in touched.items():
@@ -2145,6 +2159,20 @@ def _v2_merge_row(
             continue
         rebased[column] = server_values.get(name)
     return tuple(rebased)
+
+
+def _v2_touched_fields(
+    *, row, index: dict[str, int], base_fields: tuple[str, ...],
+    baseline: dict[str, str],
+) -> dict[str, str]:
+    """用户改过的基线字段（用户值≠导出基线）。空 = 未触碰行。"""
+    user_values = {
+        name: _v2_hash_value(_cell(row, index, name)) for name in base_fields
+    }
+    return {
+        name: value for name, value in user_values.items()
+        if value != baseline.get(name, "")
+    }
 
 
 def _v2_server_row_changed(
@@ -2758,12 +2786,65 @@ def _v2_site_row_values(line, issue) -> dict[str, object]:
     }
 
 
+def _v2_site_void_audit(
+    db: Session, *, project_id: str, issue, line=None,
+) -> tuple[str, datetime | None]:
+    """06 行/单的作废人与作废时间。
+
+    优先取行级作废审计（工作簿删行、03 级联），再取整单作废审计（面板作废），
+    都没有时退回单头 ``voided_at``（旧数据）。只为回执文案服务，不做判定。
+    """
+    candidates: list[tuple[str, str]] = []
+    if line is not None:
+        candidates.append(("site_issue_line", str(line.issue_line_id)))
+    candidates.append(("site_issue", str(issue.issue_id)))
+    for entity_type, entity_id in candidates:
+        audit = db.scalar(
+            select(MaintenanceProjectOperationAudit)
+            .where(
+                MaintenanceProjectOperationAudit.project_id == project_id,
+                MaintenanceProjectOperationAudit.entity_type == entity_type,
+                MaintenanceProjectOperationAudit.entity_id == entity_id,
+                MaintenanceProjectOperationAudit.action.in_(("void", "VOID")),
+            )
+            .order_by(MaintenanceProjectOperationAudit.operated_at.desc())
+            .limit(1)
+        )
+        if audit is not None:
+            return audit.operated_by, audit.operated_at
+    return "系统", issue.voided_at
+
+
+def _v2_note_voided_site_row(
+    db: Session, merge: "_V2MergeContext", *, project_id: str, row_no: int,
+    issue, line=None, issue_no: str | None = None, entity_id,
+) -> None:
+    """D-02 作废优先：06 某行落在已作废的行/单上 → 行级回执，不进写集合。"""
+    voided_by, voided_at = _v2_site_void_audit(
+        db, project_id=project_id, issue=issue, line=line)
+    when = (
+        voided_at.astimezone(BUSINESS_TZ).strftime("%Y-%m-%d %H:%M")
+        if voided_at else "此前"
+    )
+    label = issue_no or issue.issue_no
+    merge.record_voided_row(
+        sheet="06_领用返还", row_no=row_no, row_label=label,
+        entity_id=entity_id, voided_by=voided_by, voided_at=voided_at,
+        message=(
+            f"06_领用返还第 {row_no} 行：领用单 {label} 已被 {voided_by} 于 {when} "
+            "作废，修改未生效；作废行不复活，如需重新领用请换单号重录"),
+    )
+
+
 def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_SITE)
     _v2_header(ws, V2_SITE_HEADERS, editable={1, 2, 3, 4, 5, 6, 7})
+    # D-01：作废不进导出。行看 is_active，单看单头状态——面板整单作废之前
+    # （d2d819b 以前）只置单头 void 不动明细，那些行也不能漏进 06 表。
     rows = db.execute(select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).join(
         MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id
     ).where(MaintenanceSiteIssue.project_id == project_id,
+            MaintenanceSiteIssue.normalized_status != "void",
             MaintenanceSiteIssueLine.is_active.is_(True)
     ).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
     base_hashes: dict[str, str] = {}
@@ -3720,11 +3801,41 @@ def _v2_parse_site(
             manual_ids[raw_id] = row_no
             existing_line = db.get(MaintenanceSiteIssueLine, raw_id)
             if existing_line is not None:
+                existing_issue = db.get(MaintenanceSiteIssue, existing_line.issue_id)
+                if existing_issue is None or existing_issue.project_id != project_id:
+                    raise WorkbookError(
+                        "project_mismatch", f"第 {row_no} 行领用事实不属于本项目")
+                if (not existing_line.is_active
+                        or existing_issue.normalized_status == "void"):
+                    # 同单号/PN/SN 的确定性主键落在已作废的行/单上：D-02 作废
+                    # 优先，不复活也不整本拒绝（此前会走到实体范围校验，整本
+                    # site_line_not_in_project，同一身份从此永远录不回来）。
+                    _v2_note_voided_site_row(
+                        db, merge, project_id=project_id, row_no=row_no,
+                        issue=existing_issue, line=existing_line,
+                        issue_no=issue_no, entity_id=raw_id,
+                    )
+                    continue
                 is_create = False
                 issue_id = existing_line.issue_id
                 line_no = existing_line.line_no
                 part_id = existing_line.part_id
             else:
+                void_header = db.scalar(
+                    select(MaintenanceSiteIssue).where(
+                        MaintenanceSiteIssue.project_id == project_id,
+                        MaintenanceSiteIssue.issue_no == issue_no,
+                        MaintenanceSiteIssue.normalized_status == "void",
+                    ).limit(1)
+                )
+                if void_header is not None:
+                    # 单头已作废的单号下新增 SN：apply 会把活行挂到 void 单头
+                    # （导出/面板可见、成本不计、不能再作废）。作废优先，换单号重录。
+                    _v2_note_voided_site_row(
+                        db, merge, project_id=project_id, row_no=row_no,
+                        issue=void_header, issue_no=issue_no, entity_id=raw_id,
+                    )
+                    continue
                 base = db.scalar(
                     select(func.max(MaintenanceSiteIssueLine.line_no))
                     .join(MaintenanceSiteIssue,
@@ -3755,6 +3866,18 @@ def _v2_parse_site(
             baseline = _parse_v2_row_base_token(
                 _cell(row, index, V2_BASE_COLUMN), sheet="06_领用返还",
                 entity_id=raw_id, row_no=row_no)
+            if not existing_line.is_active or issue.normalized_status == "void":
+                # 旧文件里的行在下载之后被作废（面板整单作废 / 别人删行）。
+                # 未触碰 = 无事发生；触碰了 = D-02 作废优先，行级回执，
+                # 不再让 _expected_site_ids 把整本打成 site_line_not_in_project。
+                if _v2_touched_fields(
+                        row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
+                        baseline=baseline):
+                    _v2_note_voided_site_row(
+                        db, merge, project_id=project_id, row_no=row_no,
+                        issue=issue, line=existing_line, entity_id=raw_id,
+                    )
+                continue
             server_values = _v2_site_row_values(existing_line, issue)
             if not _v2_merge_row(
                     sheet="06_领用返还", row_label=(
@@ -4439,7 +4562,11 @@ def _expected_part_ids(db: Session, project_id: str) -> set[int]:
 
 
 def _expected_site_ids(db: Session, project_id: str) -> set[str]:
-    """Active 06 entities whose owning issue belongs to this project."""
+    """Active 06 entities whose owning issue belongs to this project.
+
+    与 ``_v2_build_site`` 同一口径：行活跃且单头未作废。单头 void 的行不在
+    实体范围内——它们既不导出，也不允许被上传改动（D-01）。
+    """
 
     return set(db.scalars(
         select(MaintenanceSiteIssueLine.issue_line_id)
@@ -4449,6 +4576,7 @@ def _expected_site_ids(db: Session, project_id: str) -> set[str]:
         )
         .where(
             MaintenanceSiteIssue.project_id == project_id,
+            MaintenanceSiteIssue.normalized_status != "void",
             MaintenanceSiteIssueLine.is_active.is_(True),
         )
     ).all())
@@ -4922,8 +5050,13 @@ def validate_project_master_v2(
                             if sid not in uploaded_site_ids]
         for sid in missing_site_ids:
             line_row = db.get(MaintenanceSiteIssueLine, sid)
-            if line_row is not None and line_row.is_active:
-                issue_row = db.get(MaintenanceSiteIssue, line_row.issue_id)
+            issue_row = (db.get(MaintenanceSiteIssue, line_row.issue_id)
+                         if line_row is not None else None)
+            # 单头已作废（面板整单作废）的行与已软作废的行一样：删行 = 无事发生。
+            # 否则旧文件删到这种行会进写集合，再被实体范围校验整本打回。
+            if (line_row is not None and line_row.is_active
+                    and (issue_row is None
+                         or issue_row.normalized_status != "void")):
                 values = _v2_site_row_values(line_row, issue_row) if issue_row else {}
                 exported_hash = export_site_hashes.get(sid)
                 if (exported_hash is not None
@@ -5234,6 +5367,7 @@ def validate_project_master_v2(
         conflicts=tuple(merge.conflicts),
         overridden=tuple(merge.overridden),
         warnings=tuple(merge.warnings),
+        voided_rows=tuple(merge.voided_rows),
     )
 
 
@@ -5269,6 +5403,7 @@ def _v2_apply_result(
         "force_takeover": plan.force_takeover,
         "revision_drift": revision_drift,
         "warnings": list(plan.warnings),
+        "voided_rows": [dict(item) for item in plan.voided_rows],
         "replayed": replayed,
     }
 
@@ -5926,11 +6061,27 @@ def apply_project_master_v2(
                                                  if db.get(MaintenanceSiteIssue, line.issue_id) else None)})
                 operating_fact_changed = True
             continue
+        if flag.is_create and line is not None:
+            # validate→apply 窗口内同身份行被建出/作废：手工新增行的单头没有行锁，
+            # 不能拿 validate 时的判断当真。作废优先，整本零写入让用户重传。
+            raise WorkbookError(
+                "row_voided",
+                f"领用单 {flag.issue_no} 的同单号/PN/SN 行在校验后已存在或已作废，"
+                "本次上传未写入任何数据；请重新下载后再传",
+            )
         if line is None and flag.is_create:
             issue = db.scalar(select(MaintenanceSiteIssue).where(
                 MaintenanceSiteIssue.project_id == plan.project_id,
                 MaintenanceSiteIssue.issue_no == flag.issue_no,
             ))
+            if issue is not None and issue.normalized_status == "void":
+                # 解析期已按 D-02 把落在 void 单头下的新增行挡下；这里只剩
+                # validate→apply 窗口内被面板作废的单头。活行不得挂到 void 单头。
+                raise WorkbookError(
+                    "row_voided",
+                    f"领用单 {flag.issue_no} 在校验后已被作废，本次上传未写入任何"
+                    "数据；作废行不复活，如需重新领用请换单号重录",
+                )
             if issue is None:
                 issue = MaintenanceSiteIssue(
                     issue_id=str(uuid4()),

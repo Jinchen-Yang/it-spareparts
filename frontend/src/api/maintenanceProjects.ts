@@ -15,6 +15,11 @@ export interface MaintenanceProject {
   version: number;
   /** 项目级可见账号（2026-08-25）：overview 载荷回显用。 */
   visible_usernames?: string[];
+  /**
+   * D-03：本人项目的负责人 / 持利润键的销售可传总表。稳定项目详情下发，与
+   * master-workbook 上传门同一判定；展示板单卡 404 时面板靠它给上传入口。
+   */
+  can_edit_master_workbook?: boolean;
 }
 
 export interface MaintenanceProjectDirectory {

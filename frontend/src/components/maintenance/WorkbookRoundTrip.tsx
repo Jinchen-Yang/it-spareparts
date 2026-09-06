@@ -48,6 +48,9 @@ function describe(result: Partial<WorkbookApplyResult>): string {
   if (result.overridden?.length) {
     parts.push(`强制覆盖他人改动 ${result.overridden.length} 处（已记审计）`);
   }
+  if (result.voided_rows?.length) {
+    parts.push(`已作废行改动未生效 ${result.voided_rows.length} 行（作废优先）`);
+  }
   if (result.cost_refills || result.cost_overrides) {
     parts.push(`补价 ${result.cost_refills || result.cost_overrides} 行`);
   }
@@ -145,6 +148,7 @@ export function WorkbookRoundTrip({
     const preview = await onValidate!(file);
     const voidRows = preview.will_void_rows ?? [];
     const reassignRows = preview.will_reassign_orders ?? [];
+    const voidedRows = preview.voided_rows ?? [];
     await new Promise<void>((resolve, reject) => {
       Modal.confirm({
         title: `确认回传${title}？`,
@@ -152,6 +156,25 @@ export function WorkbookRoundTrip({
         content: (
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Text>{describe(preview)}</Text>
+          {voidedRows.length ? (
+            // D-02 作废优先：这些行的改动不会写入，其余行照常回传
+            <Alert
+              type="info"
+              showIcon
+              message={`以下 ${voidedRows.length} 行落在已作废的领用行/单上，改动不会生效（作废优先）`}
+              description={
+                <List
+                  size="small"
+                  dataSource={voidedRows}
+                  renderItem={(row) => (
+                    <List.Item style={{ padding: "4px 0" }}>
+                      <Text style={{ fontSize: 12 }}>{row.message}</Text>
+                    </List.Item>
+                  )}
+                />
+              }
+            />
+          ) : null}
           {voidRows.length ? (
             <Alert
               type="warning"

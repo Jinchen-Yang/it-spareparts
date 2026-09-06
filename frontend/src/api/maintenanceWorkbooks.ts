@@ -41,11 +41,21 @@ export interface WorkbookFieldChange {
   overridden?: boolean;
 }
 
+/** D-02 作废优先：落在已作废行/单上的改动——不生效、不整本拒绝，行级回执。 */
+export interface WorkbookVoidedRow extends WorkbookFieldChange {
+  row_no?: number;
+  reason: "row_voided";
+  voided_by?: string;
+  voided_at?: string | null;
+  message: string;
+}
+
 export interface WorkbookApplyResult {
   project_id?: string;
   changes?: WorkbookFieldChange[];
   conflicts?: WorkbookFieldChange[];
   overridden?: WorkbookFieldChange[];
+  voided_rows?: WorkbookVoidedRow[];
   force_takeover?: boolean;
   revision_drift?: boolean;
   applied_by?: string;

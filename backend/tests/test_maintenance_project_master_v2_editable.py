@@ -3108,3 +3108,208 @@ def test_v271_large_project_real_roundtrip_passes_signature(db):
         import_batch_id=str(uuid.uuid4()))
     db.refresh(first_line)
     assert first_line.qty == Decimal("13.000"), first_line.qty
+
+
+# ----------------------------------------------------------------------
+# D-02 作废优先（06 领用返还）：面板整单作废之后，落在已作废行/单上的上传改动
+# 只做行级回执、其余行照常应用；作废单下的行不导出、不进实体范围。
+# ----------------------------------------------------------------------
+
+def _panel_void(db, issue, *, operated_by="张三"):
+    """走真实的面板整单作废（写 site_issue/void 审计、明细软作废）。"""
+    db.refresh(issue)
+    result = operations.void_site_issue(
+        db, issue_id=issue.issue_id, project_id=issue.project_id,
+        version=issue.version, idempotency_key=f"void-d02-{uuid.uuid4().hex}",
+        reason="录错项目，整单作废", operated_by=operated_by)
+    assert result is not None and result["workflow_status"] == "void"
+    db.commit()
+    db.expire_all()
+
+
+def _site_wb(db, project_id):
+    content = master.build_project_master_v2(
+        db, project_id=project_id, sheets=(master.V2_SHEET_SITE,))
+    wb = load_workbook(io.BytesIO(content))
+    return wb, wb[master.V2_SHEET_SITE]
+
+
+def _append_manual_site_row(ws, *, issue_no, pn, sn, qty=1):
+    ws.append([issue_no, "2026-09-01", pn, sn, qty, "是", "手工新增", "", "", "", ""])
+    return ws.max_row
+
+
+def _active_lines_of(db, issue_id):
+    return db.scalars(select(MaintenanceSiteIssueLine).where(
+        MaintenanceSiteIssueLine.issue_id == issue_id,
+        MaintenanceSiteIssueLine.is_active.is_(True))).all()
+
+
+def _manual_issue(db, project, part, *, issue_no="CKD-20260901-0001", sn="SN-001"):
+    """用 06 表手工新增建一张 source=workbook 的领用单，返回 (issue, line)。"""
+    wb, ws = _site_wb(db, project.project_id)
+    _append_manual_site_row(ws, issue_no=issue_no, pn=part.pn_std, sn=sn)
+    _reupload(db, project.project_id, wb)
+    db.commit()
+    issue = db.scalar(select(MaintenanceSiteIssue).where(
+        MaintenanceSiteIssue.project_id == project.project_id,
+        MaintenanceSiteIssue.issue_no == issue_no))
+    assert issue is not None and issue.source == "workbook"
+    lines = _active_lines_of(db, issue.issue_id)
+    assert len(lines) == 1
+    return issue, lines[0]
+
+
+def test_v2_site_reenter_same_identity_after_panel_void_is_row_level_not_whole_book(db):
+    """同单号/PN/SN 在面板作废之后再录一次：行级「已被谁作废」回执，其余新增行照常入库。
+
+    修复前：确定性主键命中软作废行 → is_create=False 进写集合 → _expected_site_ids
+    只含活行 → 整本 site_line_not_in_project，同一身份从此永远录不回来。
+    """
+    project, part, _order, _line = _make_project_with_line(db)
+    issue, voided_line = _manual_issue(db, project, part)
+    _panel_void(db, issue, operated_by="张三")
+
+    wb, ws = _site_wb(db, project.project_id)
+    _append_manual_site_row(ws, issue_no="CKD-20260901-0001", pn=part.pn_std, sn="SN-001")
+    _append_manual_site_row(ws, issue_no="CKD-20260901-0002", pn=part.pn_std, sn="SN-002")
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert [row["reason"] for row in plan.voided_rows] == ["row_voided"]
+    notice = plan.voided_rows[0]
+    assert notice["sheet"] == "06_领用返还"
+    assert notice["entity_id"] == voided_line.issue_line_id
+    assert notice["voided_by"] == "张三"
+    assert notice["voided_at"] is not None
+    assert "已被 张三" in notice["message"] and "换单号重录" in notice["message"]
+    assert notice["message"] in plan.warnings
+    assert plan.summary["site_creates"] == 1
+    assert plan.summary["site_updates"] == 0
+
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.commit()
+    db.expire_all()
+    assert _active_lines_of(db, issue.issue_id) == []
+    assert db.get(MaintenanceSiteIssueLine, voided_line.issue_line_id).is_active is False
+    assert db.get(MaintenanceSiteIssue, issue.issue_id).normalized_status == "void"
+    created = db.scalar(select(MaintenanceSiteIssue).where(
+        MaintenanceSiteIssue.project_id == project.project_id,
+        MaintenanceSiteIssue.issue_no == "CKD-20260901-0002"))
+    assert created is not None and created.normalized_status == "confirmed"
+    assert len(_active_lines_of(db, created.issue_id)) == 1
+
+
+def test_v2_site_new_sn_under_void_header_is_row_level_and_never_attaches_active_line(db):
+    """已作废单号下新增另一个 SN：行级回执，不给 void 单头挂活行。
+
+    修复前：解析期通过、apply 按单号找到 void 单头直接挂一条活行——06 导出可见、
+    面板显示「领用已作废」、成本不计、还不能再作废（409）。
+    """
+    project, part, _order, _line = _make_project_with_line(db)
+    issue, _voided_line = _manual_issue(db, project, part)
+    _panel_void(db, issue, operated_by="李四")
+
+    wb, ws = _site_wb(db, project.project_id)
+    _append_manual_site_row(ws, issue_no="CKD-20260901-0001", pn=part.pn_std, sn="SN-NEW")
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert len(plan.voided_rows) == 1
+    assert plan.voided_rows[0]["voided_by"] == "李四"
+    assert plan.voided_rows[0]["row"] == "CKD-20260901-0001"
+    assert plan.summary["site_creates"] == 0
+
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.commit()
+    db.expire_all()
+    assert _active_lines_of(db, issue.issue_id) == []
+    assert db.get(MaintenanceSiteIssue, issue.issue_id).normalized_status == "void"
+    # 单头未被复活，也没有第二张同单号的单
+    assert db.scalar(select(func.count()).select_from(MaintenanceSiteIssue).where(
+        MaintenanceSiteIssue.project_id == project.project_id,
+        MaintenanceSiteIssue.issue_no == "CKD-20260901-0001")) == 1
+
+
+def test_v2_site_touched_row_of_issue_voided_after_export_is_row_level_other_edits_apply(db):
+    """旧文件里改到一行，而该单在下载之后被面板作废：该行行级「已作废」，其他行的改动照常生效。
+
+    修复前：整本 site_line_not_in_project，提示重新下载，别的改动全部丢失。
+    """
+    project, part, _order, _line = _make_project_with_line(db)
+    issue_a, line_a = _site_issue(db, project, part, issue_no="ISS-D02-A")
+    issue_b, line_b = _site_issue(db, project, part, issue_no="ISS-D02-B")
+    wb, ws = _site_wb(db, project.project_id)
+    _panel_void(db, issue_a, operated_by="王五")
+
+    ws.cell(_site_row_for_entity(ws, line_a.issue_line_id), 6, "否")
+    ws.cell(_site_row_for_entity(ws, line_b.issue_line_id), 6, "否")
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert [row["entity_id"] for row in plan.voided_rows] == [line_a.issue_line_id]
+    assert plan.voided_rows[0]["voided_by"] == "王五"
+    assert plan.voided_rows[0]["row"] == "ISS-D02-A"
+    assert {flag.issue_line_id for flag in plan.site_flags} == {line_b.issue_line_id}
+    assert not plan.conflicts
+
+    master.apply_project_master_v2(
+        db, plan, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+    db.commit()
+    db.expire_all()
+    line_a = db.get(MaintenanceSiteIssueLine, line_a.issue_line_id)
+    line_b = db.get(MaintenanceSiteIssueLine, line_b.issue_line_id)
+    assert line_b.no_return is True
+    assert line_a.is_active is False and line_a.no_return is None
+    assert db.get(MaintenanceSiteIssue, issue_a.issue_id).normalized_status == "void"
+
+
+def test_v2_site_untouched_or_deleted_row_of_voided_issue_is_noop(db):
+    """未触碰 / 直接删掉 已作废单的行：无事发生——无回执、无作废标记、不整本拒绝。"""
+    project, part, _order, _line = _make_project_with_line(db)
+    issue_a, line_a = _site_issue(db, project, part, issue_no="ISS-D02-A")
+    _issue_b, line_b = _site_issue(db, project, part, issue_no="ISS-D02-B")
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,))
+    _panel_void(db, issue_a)
+
+    # 未触碰：只改 B
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_SITE]
+    ws.cell(_site_row_for_entity(ws, line_b.issue_line_id), 6, "否")
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb))
+    assert plan.voided_rows == ()
+    assert {flag.issue_line_id for flag in plan.site_flags} == {line_b.issue_line_id}
+    assert plan.summary["site_voids"] == 0
+
+    # 直接删掉 A 那一行：删行=作废，但它已经作废 → 不再进写集合
+    wb2 = load_workbook(io.BytesIO(content))
+    ws2 = wb2[master.V2_SHEET_SITE]
+    ws2.delete_rows(_site_row_for_entity(ws2, line_a.issue_line_id), 1)
+    plan2 = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(wb2))
+    assert plan2.voided_rows == ()
+    assert plan2.summary["site_voids"] == 0
+    assert line_a.issue_line_id not in {flag.issue_line_id for flag in plan2.site_flags}
+    master.apply_project_master_v2(
+        db, plan2, operated_by="tester", import_batch_id=str(uuid.uuid4()))
+
+
+def test_v2_site_export_and_entity_scope_exclude_lines_under_void_header(db):
+    """单头 void 但明细仍 is_active（d2d819b 之前面板作废留下的旧数据）：
+    不导出、不在实体范围（D-01 作废不进任何导出与统计）。"""
+    project, part, _order, _line = _make_project_with_line(db)
+    issue, line = _site_issue(db, project, part, issue_no="ISS-D02-OLD-VOID")
+    _keep, live = _site_issue(db, project, part, issue_no="ISS-D02-LIVE")
+    issue.normalized_status = "void"
+    db.commit()
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).is_active is True
+
+    _wb, ws = _site_wb(db, project.project_id)
+    exported = {ws.cell(r, 11).value for r in range(2, ws.max_row + 1)}
+    assert live.issue_line_id in exported
+    assert line.issue_line_id not in exported
+    expected = master._expected_site_ids(db, project.project_id)
+    assert live.issue_line_id in expected
+    assert line.issue_line_id not in expected

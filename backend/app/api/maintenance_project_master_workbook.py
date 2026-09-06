@@ -79,13 +79,14 @@ def _require_master_edit(
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> None:
-    """项目总表上传/校验门（2026-09-02 拍板）。
+    """项目总表上传/校验门（D-03，2026-09-02 拍板）。
 
-    管理员/全量账号走既有 action 键（含 data_profit）；
-    项目负责人（primary_manager 挂靠）与项目销售（canonical salesperson）
-    对本人项目拥有全量编辑权（含成本/合同额列——当日拍板放开）。
-    判定本体在 ``maintenance_project_assignments.can_edit_master_workbook``，
-    展示板项目卡向前端下发的同名字段用的是同一函数（D-03）。
+    管理员/全量账号走既有 action 键（含 data_profit）；其余按 D-03 原句：
+    「项目负责人对本人项目工作簿全部字段可见可改（含成本与合同额）；销售限
+    本人项目，成本与合同额仍受 data_profit 利润键控制」——V2 总表整本带成本列，
+    所以没有利润键的销售不放行。判定本体在
+    ``maintenance_project_assignments.can_edit_master_workbook``，展示板项目卡
+    与稳定项目详情向前端下发的同名字段用的是同一函数。
     """
     from app.services import maintenance_project_assignments as _assignments
 
@@ -104,11 +105,12 @@ def _require_contract_amount_manage(
     db: Session | None = None,
     project_id: str | None = None,
 ) -> None:
-    """合同额改单元格门槛（2026-09-02 拍板放开到项目负责人/销售）。
+    """合同额改单元格门槛（D-03，2026-09-02 拍板放开到项目负责人）。
 
     仍要求可追责的实名系统账号；权限二选一：
     管理口径（action_maintenance_project_manage + data_profit）或
-    本项目负责人/销售（此时 project_id/db 必填）。
+    本项目负责人 / 持利润键的本项目销售（``is_project_workbook_editor``，
+    此时 project_id/db 必填）——D-03：销售的合同额仍受 data_profit 控制。
     """
     if (ident.get("authn") != "sys_user" or ident.get("fb")
             or not ident.get("sub")):
@@ -376,7 +378,8 @@ def download_project_master(
 ):
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
-    # 2026-09-02 拍板：项目负责人/销售对本人项目全量可见（含成本列）。
+    # D-03：负责人对本人项目全量可见（含成本列）；销售的成本仍受 data_profit
+    # 控制——无利润键的销售在 is_project_workbook_editor 里就不算编辑者。
     if not config.ENABLE_RBAC or ctx.role == "admin":
         pass
     else:
@@ -816,6 +819,9 @@ async def validate_project_master(
                     "to_project_id": project_id,
                 } for change in plan.assignment_changes],
                 "warnings": list(plan.warnings),
+                # D-02 作废优先：落在已作废行/单上的改动不生效、也不整本拒绝，
+                # 行级列明作废人/时间（apply 回执同字段）。
+                "voided_rows": [dict(item) for item in plan.voided_rows],
             }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:

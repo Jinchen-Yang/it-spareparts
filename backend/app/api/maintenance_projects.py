@@ -424,4 +424,13 @@ def stable_project_overview(
     )
     if payload is None:
         raise HTTPException(status_code=404, detail="维保项目不存在")
+    from app.services import maintenance_project_assignments as _assignments
+
+    # D-03：面板总是先取这份详情；展示板单卡可能 404（无挂靠的停用项目 /
+    # 展示板开关关闭），flag 只挂在卡上会让负责人丢掉上传入口。同一判定函数。
+    payload["project"]["can_edit_master_workbook"] = (
+        _assignments.can_edit_master_workbook(
+            db, project_id=project_id, user_ctx=ctx,
+        )
+    )
     return payload
