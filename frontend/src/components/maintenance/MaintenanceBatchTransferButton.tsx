@@ -13,6 +13,7 @@ import {
   Collapse,
   Descriptions,
   Divider,
+  Input,
   Modal,
   Row,
   Segmented,
@@ -35,6 +36,7 @@ import {
   downloadMaintenanceBatchTransfer,
   getMaintenanceBatchTransferOptions,
   previewMaintenanceBatchTransfer,
+  ruleMaintenanceReceiptConflict,
   type MaintenanceBatchApplyResponse,
   type MaintenanceBatchDownloadField,
   type MaintenanceBatchDownloadInput,
@@ -74,14 +76,37 @@ const ACTION_LABELS: Record<string, string> = {
   block: "阻断",
 };
 
-/** D-16 收款单台账：行级提示标签（已入账 / 台账冲突 / 需确认覆盖）。 */
+/** D-16 收款单台账：行级提示标签（已入账 / 台账冲突 / 需确认覆盖 / 建账与依赖类阻断）。 */
 const RECEIPT_HINTS: Record<string, { label: string; color: string }> = {
   receipt_known: { label: "已在台账", color: "default" },
+  known: { label: "已在台账", color: "default" },
   receipt_conflict: { label: "台账冲突", color: "red" },
   snapshot_overwrite: { label: "需确认覆盖", color: "orange" },
   requires_earlier_months: { label: "需同勾更早月份", color: "gold" },
   depends_on_update: { label: "依赖覆盖行", color: "gold" },
+  record_receipts: { label: "仅登记台账", color: "cyan" },
+  seed_required: { label: "需先建账", color: "red" },
+  snapshot_voided: { label: "快照已作废", color: "red" },
+  cross_file_same_contract: { label: "跨文件同合同", color: "red" },
+  cumulative_unverifiable: { label: "累计无法核验", color: "red" },
+  ledger_backfill: { label: "按台账新建", color: "blue" },
+  stale_preview: { label: "预览已失效", color: "red" },
 };
+
+/** 这些码的说明必须可见（不能只放悬停）：后端 hint_messages 之外，也把 issue.message 直接展示。 */
+const VISIBLE_HINT_CODES = new Set([
+  "requires_earlier_months",
+  "depends_on_update",
+  "seed_required",
+  "cumulative_unverifiable",
+  "cross_file_same_contract",
+  "snapshot_voided",
+  "ledger_backfill",
+  "stale_preview",
+]);
+
+/** 台账冲突人工裁决只开放给 admin / boss（后端再校验实名账号与利润权限）。 */
+const RULING_ROLES = new Set(["admin", "boss"]);
 
 type MatchFilter = "all" | MaintenanceBatchMatchState;
 
@@ -112,8 +137,29 @@ async function errorMessage(error: unknown, fallback: string): Promise<string> {
   return readDetail(data) ?? fallback;
 }
 
+function readDetailCode(data: unknown): string | null {
+  if (!data || typeof data !== "object" || !("detail" in data)) return null;
+  const detail = (data as { detail: unknown }).detail;
+  if (detail && typeof detail === "object" && "code" in detail) {
+    return String((detail as { code: unknown }).code);
+  }
+  return null;
+}
+
 function errorStatus(error: unknown): number | null {
   return (error as { response?: { status?: number } })?.response?.status ?? null;
+}
+
+/** apply 时预览凭证已失效（预览后台账/快照已变化）：按码或后端固定文案识别，409/422 都可能。 */
+function isStalePreviewError(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status !== 409 && status !== 422) return false;
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  return readDetailCode(data) === "stale_preview" || (readDetail(data) ?? "").includes("请重新预览");
+}
+
+function canRuleReceiptConflict(): boolean {
+  return RULING_ROLES.has(localStorage.getItem("role") ?? "");
 }
 
 function rawFile(file: UploadFile): File | null {
@@ -133,10 +179,63 @@ function rowNeedsConfirmation(row: MaintenanceBatchPreviewRow): boolean {
   return row.requires_confirmation === true || row.action === "update_collection_snapshot";
 }
 
+/** 本行必须与之同勾的行键：更早月份累计行、本行新建所依赖的覆盖行（D-16）。 */
+function rowDependencies(row: MaintenanceBatchPreviewRow): string[] {
+  return row.depends_on_row_keys ?? [];
+}
+
+function rowLabel(row: MaintenanceBatchPreviewRow | undefined, key?: string): string {
+  return row ? `${row.filename} 第 ${row.source_row} 行` : `行 ${key ?? "?"}（不在本次预览中）`;
+}
+
+/** 行键 → 直接依赖 / 直接被谁依赖，两个方向都建，勾选联动时各走一边。 */
+function dependencyEdges(rows: MaintenanceBatchPreviewRow[]) {
+  const dependencies = new Map<string, string[]>();
+  const dependents = new Map<string, string[]>();
+  rows.forEach((row) => {
+    dependencies.set(row.row_key, rowDependencies(row));
+    rowDependencies(row).forEach((dep) => {
+      dependents.set(dep, [...(dependents.get(dep) ?? []), row.row_key]);
+    });
+  });
+  return { dependencies, dependents };
+}
+
+/** 沿 edges 求传递闭包（不含起点本身）。 */
+function closure(start: Iterable<string>, edges: Map<string, string[]>): Set<string> {
+  const seen = new Set<string>();
+  const stack = [...start];
+  while (stack.length) {
+    const key = stack.pop() as string;
+    (edges.get(key) ?? []).forEach((next) => {
+      if (!seen.has(next)) {
+        seen.add(next);
+        stack.push(next);
+      }
+    });
+  }
+  return seen;
+}
+
+/**
+ * 默认勾选：可提交且不需确认覆盖的行，再迭代剔除依赖未全部默认勾选的行——
+ * 新建行依赖默认不勾的覆盖行 / 更早月份行时，默认提交必被后端整批拒绝（D-16）。
+ */
 function defaultSelectedKeys(rows: MaintenanceBatchPreviewRow[]): string[] {
-  return rows
-    .filter((row) => rowCanApply(row) && !rowNeedsConfirmation(row))
-    .map((row) => row.row_key);
+  const selected = new Set(
+    rows.filter((row) => rowCanApply(row) && !rowNeedsConfirmation(row)).map((row) => row.row_key),
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    rows.forEach((row) => {
+      if (selected.has(row.row_key) && rowDependencies(row).some((dep) => !selected.has(dep))) {
+        selected.delete(row.row_key);
+        changed = true;
+      }
+    });
+  }
+  return rows.filter((row) => selected.has(row.row_key)).map((row) => row.row_key);
 }
 
 function receiptHints(row: MaintenanceBatchPreviewRow) {
@@ -144,6 +243,62 @@ function receiptHints(row: MaintenanceBatchPreviewRow) {
   return issues
     .filter((issue) => issue.code in RECEIPT_HINTS)
     .map((issue) => ({ ...RECEIPT_HINTS[issue.code], code: issue.code, message: issue.message }));
+}
+
+/** 可见提示文本：后端 hint_messages 优先，再补上必须可见的码的 message（去重）。 */
+function hintTexts(row: MaintenanceBatchPreviewRow): string[] {
+  const texts = [...(row.hint_messages ?? [])];
+  [...row.errors, ...row.warnings].forEach((issue) => {
+    if (VISIBLE_HINT_CODES.has(issue.code) && !texts.includes(issue.message)) texts.push(issue.message);
+  });
+  return texts;
+}
+
+interface RulingSubject {
+  contract_no: string;
+  receipt_no: string;
+  receipt_date: string | null;
+  actual_amount: string | null;
+  ledger_amount: string | null;
+  ledger_date: string | null;
+  message: string;
+}
+
+function valueText(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  return String(value);
+}
+
+function dateText(value: unknown): string | null {
+  const raw = valueText(value);
+  return raw && /^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(0, 10) : null;
+}
+
+/**
+ * 台账冲突行 → 裁决所需的合同 / 收款单号 / 文件值 / 台账值。canonical、before 有值时
+ * 优先，否则从后端固定文案「台账 金额 / 日期，本文件 金额 / 日期」里取；取不到就留空，
+ * 由界面拒绝提交——绝不猜值（REQ #56 / #57）。
+ */
+function rulingSubject(row: MaintenanceBatchPreviewRow): RulingSubject | null {
+  const conflict = [...row.errors, ...row.warnings].find((issue) => issue.code === "receipt_conflict");
+  if (!conflict) return null;
+  const receiptKey = valueText(row.canonical.receipt_key);
+  const contractNo = valueText(row.canonical.contract_no)
+    ?? valueText(row.canonical.sales_order_no)
+    ?? row.normalized_key;
+  const receiptNo = valueText(row.canonical.receipt_no) ?? receiptKey?.split("|")[0] ?? null;
+  if (!contractNo || !receiptNo) return null;
+  const fileMatch = /本文件\s*(-?[\d.]+)\s*\/\s*(\d{4}-\d{2}-\d{2})/.exec(conflict.message);
+  const ledgerMatch = /台账\s*(-?[\d.]+)\s*\/\s*(\d{4}-\d{2}-\d{2})/.exec(conflict.message);
+  return {
+    contract_no: contractNo,
+    receipt_no: receiptNo,
+    receipt_date: dateText(row.canonical.receipt_date) ?? fileMatch?.[2] ?? null,
+    actual_amount: valueText(row.canonical.actual_amount) ?? fileMatch?.[1] ?? null,
+    ledger_amount: valueText(row.before?.actual_amount) ?? ledgerMatch?.[1] ?? null,
+    ledger_date: dateText(row.before?.receipt_date) ?? ledgerMatch?.[2] ?? null,
+    message: conflict.message,
+  };
 }
 
 function overwriteText(row: MaintenanceBatchPreviewRow): string | null {
@@ -253,7 +408,13 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
   const [filter, setFilter] = useState<MatchFilter>("all");
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [result, setResult] = useState<MaintenanceBatchApplyResponse | null>(null);
+  // 台账冲突人工裁决弹窗（D-16 / REQ #56 #57）
+  const [rulingRow, setRulingRow] = useState<MaintenanceBatchPreviewRow | null>(null);
+  const [rulingReason, setRulingReason] = useState("");
+  const [ruling, setRuling] = useState(false);
+  const [rulingError, setRulingError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
+  const canRule = canRuleReceiptConflict();
 
   const maxFiles = options.max_files || DEFAULT_MAX_FILES;
   const accepted = options.accepted_extensions.length
@@ -345,8 +506,103 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     ),
     [preview],
   );
+  const edges = useMemo(() => dependencyEdges(preview?.rows ?? []), [preview]);
+  const rowsByKey = useMemo(
+    () => new Map((preview?.rows ?? []).map((row) => [row.row_key, row] as const)),
+    [preview],
+  );
+  const dependentCount = useMemo(
+    () => (preview?.rows ?? []).filter((row) => rowCanApply(row) && rowDependencies(row).length > 0).length,
+    [preview],
+  );
   const safeSelectedKeys = selectedRowKeys.filter((key) => selectableKeys.has(String(key)));
   const selectedOverwrites = safeSelectedKeys.filter((key) => confirmationKeys.has(String(key)));
+  // 已勾选行的依赖是否都在勾选集合里；不一致时后端会整批拒绝，前端直接禁用提交并说明原因
+  const selectedSet = new Set(safeSelectedKeys.map(String));
+  const missingDependencies = (preview?.rows ?? [])
+    .filter((row) => selectedSet.has(row.row_key))
+    .flatMap((row) => {
+      const missing = rowDependencies(row).filter((dep) => !selectedSet.has(dep));
+      return missing.length
+        ? [`${rowLabel(row)} 依赖 ${missing.map((dep) => rowLabel(rowsByKey.get(dep), dep)).join("、")}`]
+        : [];
+    });
+  const selectionInconsistent = missingDependencies.length > 0;
+
+  /** 勾选依赖行 → 自动带上其（传递）依赖；取消被依赖行 → 一并取消依赖它的行（D-16）。 */
+  const changeSelection = (nextKeys: Key[]) => {
+    const current = new Set(safeSelectedKeys.map(String));
+    const next = new Set(nextKeys.map(String).filter((key) => selectableKeys.has(key)));
+    const added = [...next].filter((key) => !current.has(key));
+    const removed = [...current].filter((key) => !next.has(key));
+    const autoAdded = [...closure(added, edges.dependencies)]
+      .filter((key) => !next.has(key) && selectableKeys.has(key));
+    autoAdded.forEach((key) => next.add(key));
+    const autoRemoved = [...closure(removed, edges.dependents)].filter((key) => next.has(key));
+    autoRemoved.forEach((key) => next.delete(key));
+    const describe = (keys: string[]) => keys.map((key) => rowLabel(rowsByKey.get(key), key)).join("、");
+    if (autoAdded.length) {
+      message.info(`已同时勾选其依赖的 ${autoAdded.length} 行：${describe(autoAdded)}`);
+    }
+    if (autoRemoved.length) {
+      message.info(`已同时取消依赖它的 ${autoRemoved.length} 行：${describe(autoRemoved)}`);
+    }
+    setSelectedRowKeys((preview?.rows ?? []).filter((row) => next.has(row.row_key)).map((row) => row.row_key));
+  };
+
+  const rulingTarget = rulingRow ? rulingSubject(rulingRow) : null;
+  const rulingReady = Boolean(rulingTarget?.receipt_date && rulingTarget?.actual_amount);
+  const rulingReasonText = rulingReason.trim();
+  const rulingReasonValid = rulingReasonText.length > 0 && rulingReasonText.length <= 1000;
+
+  const openRuling = (row: MaintenanceBatchPreviewRow) => {
+    setRulingRow(row);
+    setRulingReason("");
+    setRulingError(null);
+  };
+
+  const closeRuling = () => {
+    if (ruling) return;
+    setRulingRow(null);
+    setRulingReason("");
+    setRulingError(null);
+  };
+
+  const submitRuling = async () => {
+    const subject = rulingTarget;
+    if (!subject || !subject.receipt_date || !subject.actual_amount || !rulingReasonValid || ruling) return;
+    setRuling(true);
+    setRulingError(null);
+    try {
+      const outcome = await ruleMaintenanceReceiptConflict({
+        contract_no: subject.contract_no,
+        receipt_no: subject.receipt_no,
+        receipt_date: subject.receipt_date,
+        actual_amount: subject.actual_amount,
+        reason: rulingReasonText,
+      });
+      message.success(
+        `已裁决收款单 ${subject.receipt_no}：台账原行作废、以本文件值重建，涉及 ${outcome.affected_months.length} 个月份累计；正在重新预览`,
+      );
+      setRulingRow(null);
+      setRulingReason("");
+      // 裁决只改台账不改快照：必须重新预览，受影响月份才会以覆盖行呈现
+      await runPreview();
+    } catch (reason) {
+      const status = errorStatus(reason);
+      const detail = await errorMessage(reason, "");
+      setRulingError(
+        detail
+        || (status === 403
+          ? "经营事实写入必须使用实名系统账号（admin / boss）"
+          : status === null && reason instanceof Error && reason.message
+            ? reason.message
+            : "裁决失败，请稍后重试"),
+      );
+    } finally {
+      setRuling(false);
+    }
+  };
 
   const apply = async () => {
     if (!preview || !safeSelectedKeys.length || applying) return;
@@ -370,6 +626,17 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       message.success(`批量提交完成：成功 ${data.applied} 行`);
     } catch (reason) {
       if (generation !== requestGeneration.current) return;
+      if (isStalePreviewError(reason)) {
+        // 预览后台账/快照已变化：预览凭证作废，清掉预览与勾选（保留文件）让用户重新预览
+        setPreview(null);
+        setResult(null);
+        setSelectedRowKeys([]);
+        setFilter("all");
+        setError(
+          `${await errorMessage(reason, "预览后台账/快照已变化，请重新预览")}——预览已清除，请重新点击「自动识别并预览」`,
+        );
+        return;
+      }
       const status = errorStatus(reason);
       setError(
         status === 409
@@ -423,11 +690,13 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     {
       title: "台账/覆盖提示",
       key: "receipt_hints",
-      width: 260,
+      width: 300,
       render: (_, row) => {
         const hints = receiptHints(row);
         const overwrite = overwriteText(row);
-        if (!hints.length && !overwrite) return "—";
+        const texts = hintTexts(row);
+        const subject = canRule ? rulingSubject(row) : null;
+        if (!hints.length && !overwrite && !texts.length) return "—";
         return (
           <Space direction="vertical" size={2}>
             <Space size={4} wrap>
@@ -436,6 +705,15 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
               ))}
             </Space>
             {overwrite ? <Text type="warning" title={overwrite}>{overwrite}</Text> : null}
+            {/* 依赖月份 / 建账 / 核验类说明必须可见，不能只靠悬停 */}
+            {texts.map((hint) => (
+              <Text key={hint} type="secondary" style={{ display: "block" }}>{hint}</Text>
+            ))}
+            {subject ? (
+              <Button size="small" danger onClick={() => openRuling(row)}>
+                以本文件为准（人工裁决）
+              </Button>
+            ) : null}
           </Space>
         );
       },
@@ -455,12 +733,18 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     {
       title: "结果",
       dataIndex: "status",
-      width: 110,
-      render: (value: string) => (
-        <Tag color={value === "applied" ? "green" : value === "skipped" ? "default" : "red"}>
-          {value}
-        </Tag>
-      ),
+      width: 150,
+      render: (value: string, row) => {
+        const code = row.error_code && RECEIPT_HINTS[row.error_code];
+        return (
+          <Space size={4} wrap>
+            <Tag color={value === "applied" ? "green" : value === "skipped" ? "default" : "red"}>
+              {value}
+            </Tag>
+            {code ? <Tag color={code.color}>{code.label}</Tag> : null}
+          </Space>
+        );
+      },
     },
     { title: "动作", dataIndex: "action", width: 130, render: (value) => ACTION_LABELS[value] || value || "—" },
     { title: "说明", dataIndex: "message", render: (value) => value || "—" },
@@ -539,7 +823,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                 rowSelection={{
                   selectedRowKeys: safeSelectedKeys,
                   preserveSelectedRowKeys: true,
-                  onChange: setSelectedRowKeys,
+                  onChange: changeSelection,
                   getCheckboxProps: (row) => ({
                     disabled: !rowCanApply(row),
                     "aria-label": !rowCanApply(row)
@@ -560,12 +844,23 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                       其中 {confirmationKeys.size} 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 {selectedOverwrites.length} 行。
                     </Text>
                   ) : null}
+                  {dependentCount ? (
+                    <Text type="secondary" style={{ display: "block" }}>
+                      其中 {dependentCount} 行依赖更早月份 / 覆盖行：依赖未勾时默认不勾，勾选时自动带上依赖行，取消被依赖行时一并取消。
+                    </Text>
+                  ) : null}
+                  {selectionInconsistent ? (
+                    <Text type="danger" style={{ display: "block" }}>
+                      勾选不一致，无法提交：{missingDependencies.join("；")}
+                    </Text>
+                  ) : null}
                 </Col>
                 <Col>
                   <Button
                     type="primary"
                     loading={applying}
-                    disabled={!preview.can_apply || !safeSelectedKeys.length || previewing}
+                    disabled={!preview.can_apply || !safeSelectedKeys.length || previewing || selectionInconsistent}
+                    title={selectionInconsistent ? `勾选不一致：${missingDependencies.join("；")}` : undefined}
                     onClick={() => void apply()}
                   >
                     提交 {safeSelectedKeys.length} 行
@@ -574,6 +869,52 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
               </Row>
             </Space>
           </Card>
+
+          <Modal
+            open={rulingRow !== null}
+            title="人工裁决：以本文件为准"
+            okText="确认裁决"
+            cancelText="取消"
+            confirmLoading={ruling}
+            okButtonProps={{ danger: true, disabled: !rulingReady || !rulingReasonValid }}
+            onOk={() => void submitRuling()}
+            onCancel={closeRuling}
+            destroyOnHidden
+          >
+            {rulingTarget ? (
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="台账原行将作废并以本文件值重建；快照不自动改写"
+                  description="裁决只改台账，不求和、不猜重。受影响月份的累计会在重新预览时以「覆盖已确认累计」行呈现，仍需逐行确认。"
+                />
+                <Descriptions size="small" column={1} bordered>
+                  <Descriptions.Item label="合同 / 销售订单">{rulingTarget.contract_no}</Descriptions.Item>
+                  <Descriptions.Item label="收款单号">{rulingTarget.receipt_no}</Descriptions.Item>
+                  <Descriptions.Item label="台账值（金额 / 日期）">
+                    {`${rulingTarget.ledger_amount ?? "—"} / ${rulingTarget.ledger_date ?? "—"}`}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="本文件值（裁决后生效）">
+                    {`${rulingTarget.actual_amount ?? "—"} / ${rulingTarget.receipt_date ?? "—"}`}
+                  </Descriptions.Item>
+                </Descriptions>
+                {!rulingReady ? (
+                  <Alert type="error" showIcon message="本行缺少文件值（金额 / 日期），无法裁决；请重新预览后再试" />
+                ) : null}
+                <Input.TextArea
+                  aria-label="裁决原因"
+                  rows={3}
+                  maxLength={1000}
+                  showCount
+                  value={rulingReason}
+                  onChange={(event) => setRulingReason(event.target.value)}
+                  placeholder="必填，1~1000 字：说明为何以本文件为准（如已核对银行回单）"
+                />
+                {rulingError ? <Alert type="error" showIcon message={rulingError} /> : null}
+              </Space>
+            ) : null}
+          </Modal>
         </>
       ) : null}
 

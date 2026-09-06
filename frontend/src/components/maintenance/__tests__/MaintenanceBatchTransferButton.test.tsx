@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { message } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -7,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   apply: vi.fn(),
   download: vi.fn(),
   saveBlob: vi.fn(),
+  ruling: vi.fn(),
 }));
 
 vi.mock("../../../api/maintenanceBatchTransfer", async () => {
@@ -19,6 +21,7 @@ vi.mock("../../../api/maintenanceBatchTransfer", async () => {
     previewMaintenanceBatchTransfer: (...args: unknown[]) => mocks.preview(...args),
     applyMaintenanceBatchTransfer: (...args: unknown[]) => mocks.apply(...args),
     downloadMaintenanceBatchTransfer: (...args: unknown[]) => mocks.download(...args),
+    ruleMaintenanceReceiptConflict: (...args: unknown[]) => mocks.ruling(...args),
   };
 });
 
@@ -285,6 +288,172 @@ const receiptPreview = {
   summary: { total: 4, matched: 3, ambiguous: 0, unmatched: 0, invalid: 1, ready: 2, known: 1, receipt_conflicts: 1, updates: 1 },
 };
 
+/**
+ * D-16 依赖联动：06 月新建（无依赖）/ 07 月覆盖（默认不勾）/ 08 月新建依赖 07 覆盖行与 06 月 /
+ * 09 月新建依赖 08 月；另一合同 10 月新建依赖一条被「需先建账」阻断的行。
+ */
+const dependencyPreview = {
+  ...preview,
+  files: receiptPreview.files,
+  rows: [
+    receiptRow({
+      row_key: "row-jun",
+      source_row: 2,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-06-01", cumulative_received_inc_tax: "80.00" },
+      idempotency_key: "k-jun",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "80.00", new_receipts: 1 },
+      depends_on_row_keys: [],
+      hint_messages: [],
+    }),
+    receiptRow({
+      row_key: "row-jul",
+      source_row: 3,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-07-01", cumulative_received_inc_tax: "130.00" },
+      idempotency_key: "k-jul",
+      action: "update_collection_snapshot",
+      row_status: "ready",
+      requires_confirmation: true,
+      before: { cumulative_amount: "100.00", source: "workbook" },
+      after: { cumulative_amount: "130.00", new_receipts: 1 },
+      depends_on_row_keys: ["row-jun"],
+      hint_messages: [],
+      warnings: [{ code: "snapshot_overwrite", message: "将覆盖 2026-07 已确认累计 100.00 → 130.00（原来源 workbook）", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-aug",
+      source_row: 4,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-08-01", cumulative_received_inc_tax: "180.00" },
+      idempotency_key: "k-aug",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "180.00", new_receipts: 1 },
+      depends_on_row_keys: ["row-jul", "row-jun"],
+      hint_messages: ["2026-08 累计依赖 2026-07 的覆盖行，需一起勾选"],
+      warnings: [{ code: "depends_on_update", message: "2026-08 累计依赖 2026-07 的覆盖行，需一起勾选", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-sep",
+      source_row: 5,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-09-01", cumulative_received_inc_tax: "200.00" },
+      idempotency_key: "k-sep",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "200.00", new_receipts: 1 },
+      depends_on_row_keys: ["row-aug"],
+      hint_messages: ["需同勾更早月份：2026-06、2026-07、2026-08"],
+      warnings: [{ code: "requires_earlier_months", message: "需同勾更早月份：2026-06、2026-07、2026-08", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-orphan",
+      source_row: 6,
+      normalized_key: "20240101-0002",
+      matched_project_id: "p2",
+      matched_project_name: "项目二",
+      matched_contract_id: "c2",
+      canonical: { sales_order_no: "20240101-0002", report_month: "2026-10-01", cumulative_received_inc_tax: "50.00" },
+      idempotency_key: "k-orphan",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "50.00", new_receipts: 1 },
+      depends_on_row_keys: ["row-blocked"],
+      hint_messages: ["需同勾更早月份：2026-05"],
+    }),
+    receiptRow({
+      row_key: "row-blocked",
+      source_row: 7,
+      normalized_key: "20240101-0002",
+      matched_project_id: "p2",
+      matched_project_name: "项目二",
+      matched_contract_id: "c2",
+      canonical: { sales_order_no: "20240101-0002", report_month: "2026-05-01", cumulative_received_inc_tax: "20.00" },
+      idempotency_key: "k-blocked",
+      match_state: "invalid",
+      action: "block",
+      row_status: "blocked",
+      after: null,
+      depends_on_row_keys: [],
+      hint_messages: ["该合同已有确认快照但尚无收款单台账，请先上传该合同的全量历史收款单导出建账"],
+      errors: [{ code: "seed_required", message: "该合同已有确认快照但尚无收款单台账，请先上传该合同的全量历史收款单导出建账", field: null }],
+    }),
+  ],
+  summary: { total: 6, matched: 5, ambiguous: 0, unmatched: 0, invalid: 1, ready: 5, updates: 1 },
+};
+
+/** D-16 新增码：快照作废（合同级）/ 跨文件同合同 / 累计无法核验 / 按台账新建 / 仅登记台账。 */
+const codesPreview = {
+  ...preview,
+  files: receiptPreview.files,
+  rows: [
+    receiptRow({
+      row_key: "row-voided",
+      source_row: 2,
+      canonical: { sales_order_no: "20240101-0001", report_month: "2026-03-01" },
+      idempotency_key: "k-voided",
+      match_state: "invalid",
+      action: "block",
+      row_status: "blocked",
+      after: null,
+      hint_messages: ["该合同存在已作废快照，整个合同各月份均需人工处理后再导入"],
+      errors: [{ code: "snapshot_voided", message: "该合同存在已作废快照，整个合同各月份均需人工处理后再导入", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-cross",
+      source_row: 3,
+      canonical: { sales_order_no: "20240101-0003", report_month: "2026-03-01" },
+      idempotency_key: "k-cross",
+      match_state: "invalid",
+      action: "block",
+      row_status: "blocked",
+      after: null,
+      hint_messages: ["同一批次两个文件触及同一合同 20240101-0003，请只保留一个文件"],
+      errors: [{ code: "cross_file_same_contract", message: "同一批次两个文件触及同一合同 20240101-0003，请只保留一个文件", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-unverifiable",
+      source_row: 4,
+      canonical: { sales_order_no: "20240101-0004", report_month: "2026-03-01" },
+      idempotency_key: "k-unverifiable",
+      match_state: "invalid",
+      action: "block",
+      row_status: "blocked",
+      after: null,
+      hint_messages: ["台账无法推导出 2026-03 已确认累计，请核对历史收款单"],
+      errors: [{ code: "cumulative_unverifiable", message: "台账无法推导出 2026-03 已确认累计，请核对历史收款单", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-backfill",
+      source_row: 5,
+      canonical: { sales_order_no: "20240101-0005", report_month: "2026-03-01", cumulative_received_inc_tax: "60.00" },
+      idempotency_key: "k-backfill",
+      action: "upsert_collection_snapshot",
+      row_status: "ready",
+      after: { cumulative_amount: "60.00", new_receipts: 0 },
+      hint_messages: ["该月只有台账收款、尚无快照，将按台账新建"],
+      warnings: [{ code: "ledger_backfill", message: "该月只有台账收款、尚无快照，将按台账新建", field: null }],
+    }),
+    receiptRow({
+      row_key: "row-record",
+      source_row: 6,
+      canonical: { sales_order_no: "20240101-0006", report_month: "2026-03-01", cumulative_received_inc_tax: "70.00" },
+      idempotency_key: "k-record",
+      action: "record_receipts",
+      row_status: "ready",
+      after: { cumulative_amount: "70.00", new_receipts: 2 },
+      warnings: [{ code: "record_receipts", message: "累计不变，只把 2 笔新收款登记入台账", field: null }],
+    }),
+  ],
+  summary: { total: 5, matched: 2, ambiguous: 0, unmatched: 0, invalid: 3, ready: 2 },
+};
+
+const rulingResult = {
+  ruling_id: "r-1",
+  superseded_receipt_id: "9",
+  new_receipt_id: "10",
+  affected_months: [{ report_month: "2026-01-01", current_cumulative: "100.00", derived_cumulative: "120.00" }],
+};
+
 const applyResult = {
   batch_id: "batch-1",
   status: "done",
@@ -311,16 +480,34 @@ const applyResult = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem("role");
   mocks.getOptions.mockResolvedValue({ data: options });
   mocks.preview.mockResolvedValue({ data: preview });
   mocks.apply.mockResolvedValue({ data: applyResult });
+  mocks.ruling.mockResolvedValue(rulingResult);
   mocks.download.mockResolvedValue({
     blob: new Blob(["xlsx"]),
     filename: "维保批量导出.xlsx",
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  message.destroy();
+  localStorage.removeItem("role");
+});
+
+/** 打开弹窗、拖入一个收款单文件并触发预览。 */
+async function previewReceiptFile(onApplied = vi.fn()) {
+  renderButton(onApplied);
+  await screen.findByText("先预览，再提交");
+  const input = document.querySelector('input[type="file"]');
+  const file = new File(["receipt"], "收款单.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  fireEvent.change(input!, { target: { files: [file] } });
+  fireEvent.click(await screen.findByRole("button", { name: "自动识别并预览" }));
+  await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(1));
+  return onApplied;
+}
 
 function renderButton(onApplied = vi.fn()) {
   render(
@@ -441,6 +628,154 @@ describe("MaintenanceBatchTransferButton", () => {
     await waitFor(() => expect(mocks.apply).toHaveBeenCalledTimes(1));
     expect([...mocks.apply.mock.calls[0][0].row_keys].sort()).toEqual(["row-create", "row-update"]);
     expect(await screen.findByText(/原值 100.00 → 新值 130.00/)).toBeInTheDocument();
+  });
+
+  it("依赖行默认不勾；勾选依赖行自动带上依赖并提示，取消被依赖行时一并取消", async () => {
+    mocks.preview.mockResolvedValue({ data: dependencyPreview });
+    await previewReceiptFile();
+
+    // 默认只勾 06 月：07 月是覆盖行，08/09 月依赖它，10 月依赖被阻断的行
+    expect(await screen.findByText("可提交 5 行，已选 1 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 2 行")).toBeChecked();
+    expect(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行")).not.toBeChecked();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).not.toBeChecked();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 5 行")).not.toBeChecked();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 6 行")).not.toBeChecked();
+    // 依赖说明必须可见，不能只放悬停
+    expect(screen.getByText("2026-08 累计依赖 2026-07 的覆盖行，需一起勾选")).toBeInTheDocument();
+    expect(screen.getByText("需同勾更早月份：2026-06、2026-07、2026-08")).toBeInTheDocument();
+    expect(screen.getByText("依赖覆盖行")).toBeInTheDocument();
+    expect(screen.getByText("需同勾更早月份")).toBeInTheDocument();
+
+    // 勾 09 月 → 自动带上 08 月与 07 月覆盖行（06 月已勾）
+    fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 5 行"));
+    expect(await screen.findByText(/已同时勾选其依赖的 2 行：收款单\.xlsx 第 4 行、收款单\.xlsx 第 3 行/)).toBeInTheDocument();
+    expect(screen.getByText("可提交 5 行，已选 4 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行")).toBeChecked();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).toBeChecked();
+    expect(screen.getByText("其中 1 行会覆盖既有已确认累计，默认未勾选，已确认覆盖 1 行。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交 4 行" })).not.toBeDisabled();
+
+    // 取消 07 月覆盖行 → 依赖它的 08/09 月一并取消
+    fireEvent.click(screen.getByLabelText("确认覆盖 收款单.xlsx 第 3 行"));
+    expect(await screen.findByText(/已同时取消依赖它的 2 行/)).toBeInTheDocument();
+    expect(screen.getByText("可提交 5 行，已选 1 行；其余行需修正源文件或后端归属后重新预览。")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 4 行")).not.toBeChecked();
+    expect(screen.getByLabelText("选择 收款单.xlsx 第 5 行")).not.toBeChecked();
+
+    // 再勾 09 月并提交：四行一起进 apply
+    fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 5 行"));
+    fireEvent.click(await screen.findByRole("button", { name: "提交 4 行" }));
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledTimes(1));
+    expect([...mocks.apply.mock.calls[0][0].row_keys].sort()).toEqual(["row-aug", "row-jul", "row-jun", "row-sep"]);
+  });
+
+  it("依赖行不可勾选时提交按钮禁用并写明原因；需先建账标签与说明可见", async () => {
+    mocks.preview.mockResolvedValue({ data: dependencyPreview });
+    await previewReceiptFile();
+    await screen.findByText("可提交 5 行，已选 1 行；其余行需修正源文件或后端归属后重新预览。");
+    expect(screen.getByText("需先建账")).toBeInTheDocument();
+    expect(screen.getByText("该合同已有确认快照但尚无收款单台账，请先上传该合同的全量历史收款单导出建账")).toBeInTheDocument();
+    expect(screen.getByText("需同勾更早月份：2026-05")).toBeInTheDocument();
+
+    // 10 月依赖被阻断的 05 月行：勾上后无法自动补齐依赖 → 提交禁用并说明
+    fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 6 行"));
+    expect(await screen.findByText("勾选不一致，无法提交：收款单.xlsx 第 6 行 依赖 收款单.xlsx 第 7 行")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交 2 行" })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("选择 收款单.xlsx 第 6 行"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "提交 1 行" })).not.toBeDisabled());
+    expect(screen.queryByText(/勾选不一致/)).not.toBeInTheDocument();
+  });
+
+  it("D-16 新增码有标签，说明文字可见", async () => {
+    mocks.preview.mockResolvedValue({ data: codesPreview });
+    await previewReceiptFile();
+    await screen.findByText("可提交 2 行，已选 2 行；其余行需修正源文件或后端归属后重新预览。");
+    expect(screen.getByText("快照已作废")).toBeInTheDocument();
+    expect(screen.getByText("该合同存在已作废快照，整个合同各月份均需人工处理后再导入")).toBeInTheDocument();
+    expect(screen.getByText("跨文件同合同")).toBeInTheDocument();
+    expect(screen.getByText("同一批次两个文件触及同一合同 20240101-0003，请只保留一个文件")).toBeInTheDocument();
+    expect(screen.getByText("累计无法核验")).toBeInTheDocument();
+    expect(screen.getByText("台账无法推导出 2026-03 已确认累计，请核对历史收款单")).toBeInTheDocument();
+    expect(screen.getByText("按台账新建")).toBeInTheDocument();
+    expect(screen.getByText("该月只有台账收款、尚无快照，将按台账新建")).toBeInTheDocument();
+    expect(screen.getByText("仅登记台账")).toBeInTheDocument();
+    expect(screen.getByText("登记收款台账")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("无效行不可提交")).toHaveLength(3);
+  });
+
+  it("台账冲突：非管理员只见标签，不能裁决", async () => {
+    localStorage.setItem("role", "sales");
+    mocks.preview.mockResolvedValue({ data: receiptPreview });
+    await previewReceiptFile();
+    expect(await screen.findByText("台账冲突")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "以本文件为准（人工裁决）" })).not.toBeInTheDocument();
+  });
+
+  it("台账冲突：老板可人工裁决，须填原因，成功后自动重新预览", async () => {
+    localStorage.setItem("role", "boss");
+    mocks.preview.mockResolvedValue({ data: receiptPreview });
+    await previewReceiptFile();
+    fireEvent.click(await screen.findByRole("button", { name: "以本文件为准（人工裁决）" }));
+
+    expect(await screen.findByText("人工裁决：以本文件为准")).toBeInTheDocument();
+    expect(screen.getByText("100.00 / 2026-01-10")).toBeInTheDocument();
+    expect(screen.getByText("120.00 / 2026-01-10")).toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "确认裁决" });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("裁决原因"), { target: { value: "  已核对银行回单，以本文件为准 " } });
+    await waitFor(() => expect(confirm).not.toBeDisabled());
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(mocks.ruling).toHaveBeenCalledWith({
+      contract_no: "20240101-0001",
+      receipt_no: "SK-9",
+      receipt_date: "2026-01-10",
+      actual_amount: "120.00",
+      reason: "已核对银行回单，以本文件为准",
+    }));
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/已裁决收款单 SK-9/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("人工裁决：以本文件为准")).not.toBeInTheDocument());
+  });
+
+  it("台账冲突：共享口令管理员裁决被 403 时在弹窗内提示实名要求，不重新预览", async () => {
+    localStorage.setItem("role", "admin");
+    mocks.preview.mockResolvedValue({ data: receiptPreview });
+    mocks.ruling.mockRejectedValue({
+      response: { status: 403, data: { detail: { code: "permission_denied", message: "经营事实写入必须使用实名系统账号" } } },
+    });
+    await previewReceiptFile();
+    fireEvent.click(await screen.findByRole("button", { name: "以本文件为准（人工裁决）" }));
+    fireEvent.change(await screen.findByLabelText("裁决原因"), { target: { value: "核对回单" } });
+    const confirm = screen.getByRole("button", { name: "确认裁决" });
+    await waitFor(() => expect(confirm).not.toBeDisabled());
+    fireEvent.click(confirm);
+
+    expect(await screen.findByText("经营事实写入必须使用实名系统账号")).toBeInTheDocument();
+    expect(mocks.preview).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("人工裁决：以本文件为准")).toBeInTheDocument();
+  });
+
+  it("apply 返回 stale_preview 时提示重新预览并清空预览状态", async () => {
+    mocks.apply.mockRejectedValue({
+      response: { status: 409, data: { detail: { code: "stale_preview", message: "预览后台账/快照已变化，请重新预览" } } },
+    });
+    const onApplied = await previewReceiptFile();
+    fireEvent.click(await screen.findByRole("button", { name: "提交 1 行" }));
+
+    expect(await screen.findByText("预览后台账/快照已变化，请重新预览——预览已清除，请重新点击「自动识别并预览」")).toBeInTheDocument();
+    expect(screen.queryByText("行匹配预览")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^提交 \d+ 行$/ })).not.toBeInTheDocument();
+    expect(onApplied).not.toHaveBeenCalled();
+    // 文件仍在，可直接重新预览
+    const previewButton = screen.getByRole("button", { name: "自动识别并预览" });
+    expect(previewButton).not.toBeDisabled();
+    fireEvent.click(previewButton);
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("行匹配预览")).toBeInTheDocument();
   });
 
   it("批量下载按服务端表单/字段白名单并携带主页当前筛选", async () => {
