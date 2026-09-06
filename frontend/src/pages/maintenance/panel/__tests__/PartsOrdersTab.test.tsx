@@ -251,6 +251,39 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     }));
   });
 
+  it("落库后 PN 明细总数收缩、当前页越界时夹到最后一页重读，不停在空白页", async () => {
+    const registerRefresh = vi.fn();
+    mocks.listProjectPartsRows.mockResolvedValue({
+      sheet: "03_备件订单", total: 45, page: 1, page_size: 20,
+      rows: [lineRow(1, "PN-1", "WBDD-1")],
+    });
+    renderTab(["XSDD-1", "XSDD-2"], registerRefresh);
+    const linesTable = (await screen.findByText("PN-1")).closest<HTMLElement>(".ant-table-wrapper")!;
+    fireEvent.click(within(linesTable).getByTitle("3"));
+    await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
+      page: 3, page_size: 20, order_no: undefined, contract_no: undefined,
+    }));
+
+    // 回传把明细收缩到 3 行：第 3 页为空但 total>0，必须夹到第 1 页重读
+    mocks.listProjectPartsRows.mockImplementation(
+      (_id: string, params?: { page?: number }) => Promise.resolve(
+        params?.page === 1
+          ? { sheet: "03_备件订单", total: 3, page: 1, page_size: 20, rows: [lineRow(9, "PN-9", "WBDD-1")] }
+          : { sheet: "03_备件订单", total: 3, page: params?.page ?? 1, page_size: 20, rows: [] },
+      ),
+    );
+    await act(async () => {
+      expect(await lastRegistered(registerRefresh)()).toBe(true);
+    });
+    expect(await screen.findByText("PN-9")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
+      page: 1, page_size: 20, order_no: undefined, contract_no: undefined,
+    }));
+    await waitFor(() => expect(
+      within(linesTable).getByTitle("1").closest("li"),
+    ).toHaveClass("ant-pagination-item-active"));
+  });
+
   it("需求单表分页受控：合同筛选收窄列表时回到第 1 页，而不是被 antd 夹到最后一页", async () => {
     const many = Array.from({ length: 25 }, (_, i) =>
       orderRow(`WBDD-${String(i + 1).padStart(2, "0")}`, "XSDD-1"));

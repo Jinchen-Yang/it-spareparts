@@ -131,13 +131,23 @@ export function PartsOrdersTab({
   const loadLines = useCallback(() => readLines(async (isCurrent) => {
     setLinesLoading(true);
     try {
-      const resp = await listProjectPartsRows(projectId, {
-        page: linesPage,
+      const params = {
         page_size: LINES_PAGE_SIZE,
         order_no: selectedOrder?.order_no,
         contract_no: contractFilter,
-      });
+      };
+      let page = linesPage;
+      let resp = await listProjectPartsRows(projectId, { page, ...params });
       if (!isCurrent()) return false;
+      // 落库后总数收缩（改派 / 作废）时停留的页码可能已越界：服务端回空页但 total>0。
+      // 夹到最后一页重读并同步页码，否则受控表格停在一张空白页（Codex P2，#319）。
+      const lastPage = Math.max(1, Math.ceil(resp.total / LINES_PAGE_SIZE));
+      if (!resp.rows.length && resp.total > 0 && page > lastPage) {
+        page = lastPage;
+        resp = await listProjectPartsRows(projectId, { page, ...params });
+        if (!isCurrent()) return false;
+        setLinesPage(page);
+      }
       setLines(resp.rows);
       setLinesTotal(resp.total);
       return true;

@@ -2124,11 +2124,21 @@ def void_site_issue(
         raise MaintenanceOperationConflict("当前现场领用状态不能作废")
 
     was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
-    if was_confirmed:
+    return_events = list(
+        db.scalars(
+            select(MaintenanceSiteIssueReturnEvent)
+            .where(MaintenanceSiteIssueReturnEvent.issue_id == issue_id)
+            .order_by(MaintenanceSiteIssueReturnEvent.created_at)
+            .with_for_update()
+        )
+    )
+    if was_confirmed and return_events:
         # A confirmed issue may have an outbox event that has not yet been
         # projected. Drain every earlier event for the stable project before
         # creating the void event so a delayed projector can never resurrect
-        # the withdrawn obligation.
+        # the withdrawn obligation. 只对「发过返还事件」的单做：工作簿 / 旧版
+        # 来源的单从未投影义务，替它们清空整个项目的待投影事件，只会让别的单
+        # 一条被锁 / 畸形 / 与已登记返还冲突的事件把本单的作废挡住。
         try:
             maintenance_bad_returns.consume_pending_return_events(
                 db,
@@ -2139,15 +2149,6 @@ def void_site_issue(
             maintenance_bad_returns.BadReturnError,
         ) as exc:
             raise MaintenanceOperationConflict(str(exc)) from exc
-
-    return_events = list(
-        db.scalars(
-            select(MaintenanceSiteIssueReturnEvent)
-            .where(MaintenanceSiteIssueReturnEvent.issue_id == issue_id)
-            .order_by(MaintenanceSiteIssueReturnEvent.created_at)
-            .with_for_update()
-        )
-    )
     if any(
         event.downstream_reference
         and not event.downstream_reference.startswith(

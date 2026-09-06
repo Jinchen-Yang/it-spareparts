@@ -1421,6 +1421,55 @@ def test_command_receipts_are_append_only_and_return_events_only_allow_one_downs
     )
 
 
+def test_workbook_issue_void_is_not_blocked_by_unrelated_pending_return_event(db):
+    """Codex P2（#319）：作废从未发过返还事件的单，不应替它清空整个项目的待投影事件。
+
+    同项目另一张单留下一条畸形的待投影事件（消费方会抛契约错误）时，工作簿来源的单
+    仍能作废；那条无关事件原样保留（不被本单的作废顺手消费或撞成 409）。
+    """
+    project = _project(db, project_id="project-si-wb-void-unrelated")
+    issue, line = _workbook_issue(db, project=project, issue_no="CKD-WB-0101")
+    other, _ = _workbook_issue(db, project=project, issue_no="CKD-WB-0102")
+    stray = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_id=other.issue_id,
+        event_type="return_obligation_created",
+        issue_version=1,
+        payload={"schema_version": 1, "project_id": project.project_id, "issue_id": other.issue_id},
+    )
+    db.add(stray)
+    db.commit()
+
+    client = _client(
+        db,
+        username="site_issue_workbook_void_unrelated_manager",
+        role="boss",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    voided = client.post(
+        f"/api/maintenance/site-issues/{issue.issue_id}/void",
+        json={
+            "project_id": project.project_id,
+            "version": issue.version,
+            "idempotency_key": "synthetic-workbook-void-unrelated-command",
+            "reason": "同项目另一张单的畸形待投影事件不该挡住本单作废",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["return_obligation_event"] is None
+
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, issue.issue_id).normalized_status == "void"
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).is_active is False
+    kept = db.get(MaintenanceSiteIssueReturnEvent, stray.event_id)
+    assert kept.downstream_reference is None and kept.consumed_at is None
+
+
 def test_workbook_sourced_issue_can_be_voided_through_the_panel_route(db):
     """生产缺陷：06 表建的领用单（source=workbook）在面板点「作废」一律 400。
 
