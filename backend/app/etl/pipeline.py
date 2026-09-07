@@ -21,6 +21,10 @@ from app.services import data_quality_amount_mismatch
 
 _ARCHIVE_HASH_RE = re.compile(r"[0-9a-f]{64}")
 _ARCHIVE_ERROR_MESSAGE = "原始文件归档失败"
+# 归档暂存文件统一用可辨认的名字：进程在暂存→原子替换之间死掉留下的残片，
+# 由 raw_archive_gc 按 mtime 超过一天回收（正式归档是 {sha256}.xlsx，永不冲突）。
+ARCHIVE_STAGING_PREFIX = "staging-"
+ARCHIVE_STAGING_SUFFIX = ".part"
 _log = logging.getLogger(__name__)
 
 
@@ -179,6 +183,9 @@ def _archive(src_path: str, file_hash: str) -> str:
             except _ArchiveDestinationChanged:
                 continue
             if destination_hash == file_hash:
+                # 复用即重新引用：刷新 mtime 让这个 blob 重新进入 GC 宽限期，否则
+                # 只预览未应用留下的旧孤儿会在预览→应用窗口里被当孤儿回收。
+                os.utime(dest, follow_symlinks=False)
                 return dest
             _log.warning("corrupt raw archive will be repaired")
             break
@@ -192,7 +199,11 @@ def _archive(src_path: str, file_hash: str) -> str:
     temp_path: str | None = None
     temp_file = None
     try:
-        fd, temp_path = tempfile.mkstemp(dir=settings.raw_file_dir)
+        fd, temp_path = tempfile.mkstemp(
+            dir=settings.raw_file_dir,
+            prefix=ARCHIVE_STAGING_PREFIX,
+            suffix=ARCHIVE_STAGING_SUFFIX,
+        )
         try:
             temp_file = _open_archive_temp(fd)
         except Exception:
@@ -239,7 +250,11 @@ def archive_bytes(data: bytes, file_hash: str) -> str:
 
     settings = get_settings()
     os.makedirs(settings.raw_file_dir, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=settings.raw_file_dir, suffix=".upload")
+    fd, temp_path = tempfile.mkstemp(
+        dir=settings.raw_file_dir,
+        prefix=ARCHIVE_STAGING_PREFIX,
+        suffix=ARCHIVE_STAGING_SUFFIX,
+    )
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -251,6 +266,28 @@ def archive_bytes(data: bytes, file_hash: str) -> str:
             pass
         except Exception:
             _log.warning("archive upload temporary cleanup failed", exc_info=True)
+
+
+def verify_archive(storage_path: str, file_hash: str) -> None:
+    """核验已归档原件仍是 sha256 与 ``file_hash`` 相符的普通文件，否则 ``ArchiveError``。
+
+    供把 ``storage_path`` 钉进 ``sys_raw_file`` 的写入方在同一事务里调用：预览到
+    应用之间原件若被回收 / 换成软链 / 改写，登记行宁可不落。
+    """
+
+    if _ARCHIVE_HASH_RE.fullmatch(file_hash) is None or not storage_path:
+        raise ArchiveError()
+    try:
+        current_stat = _archive_lstat(storage_path)
+        if not stat.S_ISREG(current_stat.st_mode):
+            raise ArchiveError()
+        digest = _archive_digest_regular(storage_path, current_stat)
+    except ArchiveError:
+        raise
+    except Exception as exc:
+        raise ArchiveError() from exc
+    if digest != file_hash:
+        raise ArchiveError()
 
 
 @dataclass

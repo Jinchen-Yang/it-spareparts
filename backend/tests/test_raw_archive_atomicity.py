@@ -110,7 +110,11 @@ def test_archive_reuses_valid_destination_without_rewrite(tmp_path, raw_dir):
 
     after = destination.stat()
     assert result == str(destination)
-    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    # 2026-09-07：复用即重新引用——同一 inode 不重写，但 mtime 刷新让 blob 重新进入
+    # raw_archive_gc 的宽限期（只预览未应用留下的旧孤儿不再在预览→应用窗口里被回收）。
+    assert after.st_ino == before.st_ino
+    assert after.st_mtime_ns >= before.st_mtime_ns
+    assert destination.read_bytes() == source.read_bytes()
     assert _temp_files(raw_dir) == []
 
 
@@ -162,10 +166,9 @@ def test_archive_atomically_repairs_corrupt_regular_file_once(
 
     pipeline._archive(str(source), file_hash)
     reused = destination.stat()
-    assert (reused.st_ino, reused.st_mtime_ns) == (
-        repaired.st_ino,
-        repaired.st_mtime_ns,
-    )
+    # 2026-09-07：复用不重写（同 inode），只刷新 mtime 重新进入 GC 宽限期。
+    assert reused.st_ino == repaired.st_ino
+    assert reused.st_mtime_ns >= repaired.st_mtime_ns
 
 
 @pytest.mark.parametrize("failure", ["copy", "flush", "fsync", "replace"])

@@ -444,11 +444,15 @@ def test_conflicting_receipt_is_blocked_for_manual_ruling(db):
 
     assert preview["summary"]["ready"] == 0
     assert preview["summary"]["receipt_conflicts"] == 1
-    (conflict,) = _rows(preview, match_state="invalid")
+    # 2026-09-07 再复核：fail-closed 的月度行也是 invalid（不再是 ambiguous）。
+    invalid = _rows(preview, match_state="invalid")
+    (conflict,) = [row for row in invalid if row["canonical"].get("receipt_key")]
     assert conflict["source_row"] == 2 and conflict["row_status"] == "blocked"
     assert any(issue["code"] == "receipt_conflict" for issue in conflict["errors"])
-    snapshot_rows = _rows(preview, action="block", match_state="ambiguous")
-    assert snapshot_rows and all(row["after"]["cumulative_amount"] is None for row in snapshot_rows)
+    snapshot_rows = [row for row in invalid if row["canonical"].get("report_month")]
+    assert snapshot_rows and all(row["action"] == "block" for row in snapshot_rows)
+    assert all(row["after"]["cumulative_amount"] is None for row in snapshot_rows)
+    assert not _rows(preview, match_state="ambiguous")
     db.expire_all()
     assert db.scalar(select(MaintenanceCollectionSnapshot.cumulative_amount)) == Decimal("100.00")
 

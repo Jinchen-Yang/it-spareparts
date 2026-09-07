@@ -444,12 +444,19 @@ def test_receipt_conflicting_with_ledger_is_hard_conflict_and_never_summed(monke
 
 
 def test_changed_month_becomes_explicit_update_not_block(monkeypatch):
-    """既有快照与台账 ∪ 文件不等 → update（前端默认不勾选），带原值/原来源。"""
+    """既有快照与台账 ∪ 文件不等 → update（前端默认不勾选），带原值/原来源。
+
+    2026-09-07 再复核：无台账支撑的月份推导值高于 / 低于已确认值同论阻断，
+    本例给 2 月一笔台账收款（SK-2 20）作支撑，级联覆盖才成立。
+    """
 
     plan = _receipt_plan(
         monkeypatch,
         [(3, ("SK-LATE", date(2026, 1, 25), "30"))],
-        ledger=[_ledger_row("SK-1", date(2026, 1, 10), "100.00")],
+        ledger=[
+            _ledger_row("SK-1", date(2026, 1, 10), "100.00"),
+            _ledger_row("SK-2", date(2026, 2, 10), "20.00"),
+        ],
         snapshots=[
             _snapshot(date(2026, 1, 1), "100.00", collection_id="c-jan", version=2),
             _snapshot(date(2026, 2, 1), "120.00", collection_id="c-feb", version=1),
@@ -468,7 +475,7 @@ def test_changed_month_becomes_explicit_update_not_block(monkeypatch):
     # 2026-02 只有台账/快照、没有新收款，但累计因 1 月新增而级联变化
     feb = by_month["2026-02-01"]
     assert feb["action"] == "update"
-    assert feb["new_cumulative_amount"] == "130.00"
+    assert feb["new_cumulative_amount"] == "150.00"
     assert feb["expected_current_amount"] == "120.00"
     assert any(issue["code"] == "cascade_from_earlier_month" for issue in feb["issues"])
     # 2 月的累计包含 1 月的新收款：单独勾 2 月不行

@@ -10,12 +10,17 @@
    ``file_hash`` 现在保存原件 sha256（原件同时归档到 ``sys_raw_file``），
    同一原件分次勾选提交是合法流程，不能被"同 hash 只许成功一次"挡住；
 4. ``ix_batch_success_selection_hash``：应用幂等按 ``report_json->>'selection_hash'``
-   找已成功批次，表达式索引避免随批次表增长退化成全表扫。
+   找已成功批次，偏唯一表达式索引（``status='success' AND file_type='maint_bulk'``）
+   避免随批次表增长退化成全表扫，同时把"同一选择只成功一次"落成约束。
 
 downgrade 有损：``bulk_import`` 来源的快照退回 ``direct_api``/无批次
-（旧 CHECK 不认识新来源），台账表整体删除。**受保护**：已经存在同一原件分次
-提交的多条 success ``maint_bulk`` 批次时，旧唯一索引根本建不回来，此时拒绝降级
-（``downgrade refused``），而不是在半途以 UniqueViolation 崩掉。
+（旧 CHECK 不认识新来源），台账表整体删除。**受保护**，任一情况都拒绝降级
+（``downgrade refused``）而不是半途崩掉或静默丢事实：
+* 已经存在同一原件分次提交的多条 success ``maint_bulk`` 批次——旧唯一索引根本
+  建不回来；
+* 台账表有任何行（含裁决留档行）——逐笔实收事实与裁决链会随表一起消失；
+* 存在 ``source='bulk_import'`` 的快照——来源 / 批次溯源会被抹平。
+运维须先导出台账与快照溯源（或确认可弃）再降级。
 
 Revision ID: b7d3f9a1c5e2
 Revises: a8e4f1c7d3b9
@@ -34,6 +39,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
         "maintenance_collection_receipt",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -135,7 +141,8 @@ def upgrade() -> None:
         "ix_batch_success_selection_hash",
         "sys_import_batch",
         ["file_type", sa.text("(report_json ->> 'selection_hash')")],
-        postgresql_where=sa.text("status = 'success'"),
+        unique=True,
+        postgresql_where=sa.text("status = 'success' AND file_type = 'maint_bulk'"),
     )
 
 
@@ -144,8 +151,13 @@ def downgrade() -> None:
     # 同一原件分次勾选提交会留下多条 success 批次；那样的库建不回旧索引，
     # 与其在 CREATE INDEX 时以 UniqueViolation 半途崩掉，不如在任何改动之前
     # 明确拒绝，让运维先归档/清理再降级（同 a9c4e7b2d6f1 的受保护降级形态）。
+    # 台账行（含裁决留档）与 bulk_import 来源快照同理：降级会把它们连同溯源一起
+    # 抹掉，运维必须先导出再降级。
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.execute("LOCK TABLE sys_import_batch IN ACCESS EXCLUSIVE MODE")
+    op.execute(
+        "LOCK TABLE sys_import_batch, maintenance_collection_receipt, "
+        "maintenance_collection_snapshot IN ACCESS EXCLUSIVE MODE"
+    )
     op.execute(
         """
         DO $$
@@ -159,6 +171,19 @@ def downgrade() -> None:
                 RAISE EXCEPTION
                     'success import batches share a (file_type, file_hash); '
                     'downgrade refused';
+            END IF;
+            IF EXISTS (SELECT 1 FROM maintenance_collection_receipt) THEN
+                RAISE EXCEPTION
+                    'maintenance_collection_receipt has rows (rulings included); '
+                    'export the receipt ledger before downgrading; downgrade refused';
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM maintenance_collection_snapshot
+                WHERE source = 'bulk_import'
+            ) THEN
+                RAISE EXCEPTION
+                    'maintenance_collection_snapshot has bulk_import rows; '
+                    'export snapshot provenance before downgrading; downgrade refused';
             END IF;
         END;
         $$

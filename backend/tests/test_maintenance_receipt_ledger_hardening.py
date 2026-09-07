@@ -512,9 +512,11 @@ def test_constituent_months_are_explicit_row_key_dependencies(db):
     ]))
     by_month = _by_month(preview)
     jan_key = by_month["2026-01-01"]["row_key"]
+    feb_key = by_month["2026-02-01"]["row_key"]
     assert by_month["2026-01-01"]["depends_on_row_keys"] == []
     assert by_month["2026-02-01"]["depends_on_row_keys"] == [jan_key]
-    assert by_month["2026-03-01"]["depends_on_row_keys"] == [jan_key]
+    # 2026-09-07 再复核：累计经过的每个覆盖月（含 2 月级联覆盖）都是依赖，方向无关。
+    assert by_month["2026-03-01"]["depends_on_row_keys"] == [jan_key, feb_key]
     assert any("2026-01" in hint for hint in by_month["2026-03-01"]["hint_messages"])
     with pytest.raises(bulk.BulkImportInvalid, match="2026-01"):
         _apply(db, preview, [by_month["2026-03-01"]["row_key"]])
@@ -731,11 +733,21 @@ def test_http_apply_with_update_rows_requires_real_name_operator(db):
     assert db.get(SysImportBatch, int(preview["preview_id"])).status == "success"
 
 
-def test_http_apply_without_update_rows_does_not_require_real_name(db):
+def test_http_apply_with_create_rows_also_requires_real_name_operator(db):
+    """2026-09-07 再复核：新建已确认快照同样是经营事实写入，共享口令 admin 一律 403
+    （与 POST /projects/stable/{id}/collections 同一门禁）；此前只有覆盖行受门禁。"""
     _project_with_contract(db)
     preview = _preview(db, _receipt_xlsx([(ORDER_NO, "SK-1", date(2026, 1, 10), 100)]))
     shared = _shared_admin_client()
-    ok = shared.post(f"{_API}/apply", json=_apply_body(preview, _ready_keys(preview)))
+    denied = shared.post(f"{_API}/apply", json=_apply_body(preview, _ready_keys(preview)))
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == {
+        "code": "permission_denied", "message": "经营事实写入必须使用实名系统账号",
+    }
+    db.expire_all()
+    assert db.get(SysImportBatch, int(preview["preview_id"])).status == "processing"
+    real = client_for(db, username="skd-real-admin", role="admin")
+    ok = real.post(f"{_API}/apply", json=_apply_body(preview, _ready_keys(preview)))
     assert ok.status_code == 200, ok.text
 
 

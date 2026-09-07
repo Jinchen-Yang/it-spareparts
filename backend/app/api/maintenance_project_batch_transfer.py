@@ -7,7 +7,8 @@ Public contract (``/maintenance/project-batch-transfer``):
   server-owned mapping/match plan.
 * ``POST /apply`` accepts only the preview token, payload/data CAS hashes and
   selected row keys.  Client-supplied canonical values are never accepted.
-  勾选含覆盖既有已确认累计的行时必须实名账号（与 stable 项目 API 同一门禁）。
+  勾选含任何写已确认快照 / 台账行的收款行（新建、覆盖、登记入台账）时必须实名
+  账号（与 stable 项目 API ``POST /projects/stable/{id}/collections`` 同一门禁）。
 * ``POST /receipt-rulings`` 人工裁决收款单台账冲突（D-16 / #56）：admin 或 boss、
   实名账号、data_profit；旧行留档、更正行生效，不动快照。
 * ``POST /download`` exports all projects matching the current board filters,
@@ -383,8 +384,8 @@ def apply_transfer(
     operator = _operator(ident)
     allow_admin = ctx.role in {"admin", "boss"}
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
-    # 实名判定交给服务层：只有勾选里含覆盖既有已确认累计的行才要求实名，
-    # 共享口令 admin 仍可应用纯新建/登记行。
+    # 实名判定交给服务层：勾选里含任何写已确认快照 / 台账行的收款行（新建、覆盖、
+    # 登记入台账）都要求实名；共享口令 admin 只能应用不写经营事实的行。
     real_operator = real_operator_or_none(db, ident) is not None
     record_access_log(
         ctx,
@@ -458,6 +459,14 @@ def apply_transfer(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "business_rule_violation", "message": str(exc)},
+        ) from exc
+    except pipeline.ArchiveError as exc:
+        # 原件在预览→应用之间不再是 sha256 相符的普通文件：事实写入整体回滚，
+        # 批次保持 processing（不是预览失效，重试 / 重新预览都可），与预览期同码。
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"code": "archive_failed", "message": str(exc)},
         ) from exc
     except Exception as exc:
         db.rollback()

@@ -190,13 +190,14 @@ class SysImportBatch(Base):
             unique=True,
             postgresql_where=text("status = 'success' AND file_type <> 'maint_bulk'"),
         ),
-        # maint_bulk 应用幂等按 report_json.selection_hash 找已成功批次；表达式索引
-        # 让这条查询不随批次表增长退化成全表扫。
+        # maint_bulk 应用幂等按 report_json.selection_hash 找已成功批次；偏唯一表达式
+        # 索引让这条查询不随批次表增长退化成全表扫，也把"同一选择只成功一次"落成约束。
         Index(
             "ix_batch_success_selection_hash",
             "file_type",
             text("(report_json ->> 'selection_hash')"),
-            postgresql_where=text("status = 'success'"),
+            unique=True,
+            postgresql_where=text("status = 'success' AND file_type = 'maint_bulk'"),
         ),
     )
 
