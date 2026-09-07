@@ -76,11 +76,16 @@ const ACTION_LABELS: Record<string, string> = {
   block: "阻断",
 };
 
-/** D-16 收款单台账：行级提示标签（已入账 / 台账冲突 / 需确认覆盖 / 建账与依赖类阻断）。 */
+/**
+ * D-16 收款单台账：行级提示标签（已入账 / 台账冲突 / 上游已作废 / 需确认覆盖 / 建账与依赖类阻断）。
+ * 键必须是后端真实发出的 issue code（`maintenance_bulk_import` 的 `_row_issue` / `_public_receipt_rows`），
+ * 不要放后端从不发的码——那只是死 UI。
+ */
 const RECEIPT_HINTS: Record<string, { label: string; color: string }> = {
   receipt_known: { label: "已在台账", color: "default" },
-  known: { label: "已在台账", color: "default" },
   receipt_conflict: { label: "台账冲突", color: "red" },
+  /** 上游导出已把该收款单标成作废，台账却仍有生效行：走裁决把台账行按 0 元更正。 */
+  receipt_voided_upstream: { label: "上游已作废", color: "red" },
   snapshot_overwrite: { label: "需确认覆盖", color: "orange" },
   requires_earlier_months: { label: "需同勾更早月份", color: "gold" },
   depends_on_update: { label: "依赖覆盖行", color: "gold" },
@@ -89,27 +94,33 @@ const RECEIPT_HINTS: Record<string, { label: string; color: string }> = {
   snapshot_voided: { label: "快照已作废", color: "red" },
   cross_file_same_contract: { label: "跨文件同合同", color: "red" },
   cumulative_unverifiable: { label: "累计无法核验", color: "red" },
+  /** 本行累计包含被阻断月份（不可核实 / 不单调 / 需建账 …）的新收款，随之阻断，不展示累计值。 */
+  constituent_blocked: { label: "构成月被阻断", color: "red" },
   ledger_backfill: { label: "按台账新建", color: "blue" },
   stale_preview: { label: "预览已失效", color: "red" },
 };
 
 /**
  * 这些码的说明必须可见（不能只放悬停）：后端 hint_messages 之外，也把 issue.message 直接展示。
- * 台账冲突 / 已在台账的「台账 vs 本文件」句子对不能裁决的角色同样要可见，否则冲突只剩一个标签。
+ * 台账冲突 / 上游已作废 / 已在台账的「台账 vs 本文件」句子对不能裁决的角色同样要可见，否则冲突只剩一个标签。
  */
 const VISIBLE_HINT_CODES = new Set([
   "requires_earlier_months",
   "depends_on_update",
   "seed_required",
   "cumulative_unverifiable",
+  "constituent_blocked",
   "cross_file_same_contract",
   "snapshot_voided",
   "ledger_backfill",
   "stale_preview",
   "receipt_conflict",
+  "receipt_voided_upstream",
   "receipt_known",
-  "known",
 ]);
+
+/** 可走人工裁决的台账冲突码：金额 / 日期不一致，或上游已作废而台账仍生效。 */
+const RULING_CODES = new Set(["receipt_conflict", "receipt_voided_upstream"]);
 
 /** 台账冲突人工裁决只开放给 admin / boss（后端再校验实名账号与利润权限）。 */
 const RULING_ROLES = new Set(["admin", "boss"]);
@@ -156,23 +167,35 @@ function errorStatus(error: unknown): number | null {
   return (error as { response?: { status?: number } })?.response?.status ?? null;
 }
 
+function errorData(error: unknown): unknown {
+  return (error as { response?: { data?: unknown } })?.response?.data;
+}
+
 /** apply 时预览凭证已失效（预览后台账/快照已变化）：按码或后端固定文案识别，409/422 都可能。 */
 function isStalePreviewError(error: unknown): boolean {
   const status = errorStatus(error);
   if (status !== 409 && status !== 422) return false;
-  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  const data = errorData(error);
   return readDetailCode(data) === "stale_preview" || (readDetail(data) ?? "").includes("请重新预览");
 }
 
 /**
- * apply 的终态失败：后端已把批次记为 failed（409 apply_conflict / stale_preview、
- * 422 business_rule_violation / invalid_selection、未预期异常 5xx），预览凭证随之作废，
- * 再点提交只会得到「该预览已失败或失效」。403（实名门禁 / 范围）不是终态：批次仍 processing，
- * 去掉覆盖行重提或换实名账号都行，预览必须保留。
+ * apply 的终态失败（D-16 09-07 第 4 点）：后端已把批次记为 failed、预览凭证作废，再点提交只会得到
+ * 「该预览已失败或失效」——409 stale_preview / apply_conflict、422 business_rule_violation、
+ * 未预期异常 5xx（apply_failed）。前端清掉预览与勾选，让用户重新预览。
+ *
+ * 不是终态（批次仍 processing，预览与勾选必须保留，按后端原话提示）：
+ * 403 permission_denied（实名门禁 / 项目范围：去掉覆盖行重提或换实名账号）、
+ * 422 invalid_selection（勾选缺依赖行：后端在任何写入之前硬拒，补勾点名的行即可重提）、
+ * 500 archive_failed（原件归档校验失败：事实写入整体回滚，重试 / 重新预览都可）。
  */
 function isTerminalApplyFailure(error: unknown): boolean {
   const status = errorStatus(error);
-  return status === 409 || status === 422 || (status !== null && status >= 500);
+  if (status === null) return false;
+  const code = readDetailCode(errorData(error));
+  if (status === 409) return true;
+  if (status === 422) return code === "business_rule_violation";
+  return status >= 500 && code !== "archive_failed";
 }
 
 function terminalApplyFallback(error: unknown): string {
@@ -181,6 +204,24 @@ function terminalApplyFallback(error: unknown): string {
   if (status === 409) return "预览已过期或数据版本已变化，请重新预览";
   if (status === 422) return "批量提交被拒绝，本次预览已作废，请重新预览";
   return "批量提交失败，本次预览已作废，请重新预览";
+}
+
+/**
+ * 非终态失败的提示：后端原话优先。invalid_selection 要点明「勾选须包含后端点名的行」——
+ * 用户看到的是同一份预览，缺的只是勾选；archive_failed 要说明预览仍有效、可直接重试。
+ */
+async function retryableApplyMessage(error: unknown): Promise<string> {
+  const status = errorStatus(error);
+  const code = readDetailCode(errorData(error));
+  const detail = await errorMessage(error, "");
+  if (status === 422 && code === "invalid_selection") {
+    return `勾选不完整，本次提交被拒绝（预览与勾选保留）：${detail || "勾选缺少依赖行"}。请把提示中点名的行一并勾上后重新提交`;
+  }
+  if (code === "archive_failed") {
+    return `${detail || "原件归档校验失败"}——本次未写入任何数据，预览仍有效，可直接重试或重新预览`;
+  }
+  if (status === 403) return detail || "当前账号没有批量导入权限";
+  return detail || "批量提交失败，请稍后重试";
 }
 
 function canRuleReceiptConflict(): boolean {
@@ -263,7 +304,16 @@ function defaultSelectedKeys(rows: MaintenanceBatchPreviewRow[]): string[] {
   return rows.filter((row) => selected.has(row.row_key)).map((row) => row.row_key);
 }
 
-/** 行级提示标签：同一码在合同级 fail-closed 时可能重复出现（各月各一条），只渲染一个标签。 */
+/** 仅登记台账行的说明（后端 record_receipts 提示码缺席时按行动作兜底）。 */
+function recordReceiptsText(row: MaintenanceBatchPreviewRow): string {
+  const count = row.after?.new_receipts;
+  return typeof count === "number" ? `累计不变，只把 ${count} 笔新收款登记入台账` : "累计不变，只把新收款登记入台账";
+}
+
+/**
+ * 行级提示标签：同一码在合同级 fail-closed 时可能重复出现（各月各一条），只渲染一个标签。
+ * 「仅登记台账」由后端 record_receipts 提示码驱动；老预览没有该码时按行动作兜底，标签不能是死 UI。
+ */
 function receiptHints(row: MaintenanceBatchPreviewRow) {
   const seen = new Set<string>();
   const hints: { label: string; color: string; code: string; message: string }[] = [];
@@ -272,6 +322,9 @@ function receiptHints(row: MaintenanceBatchPreviewRow) {
     seen.add(issue.code);
     hints.push({ ...RECEIPT_HINTS[issue.code], code: issue.code, message: issue.message });
   });
+  if (row.action === "record_receipts" && !seen.has("record_receipts")) {
+    hints.push({ ...RECEIPT_HINTS.record_receipts, code: "record_receipts", message: recordReceiptsText(row) });
+  }
   return hints;
 }
 
@@ -285,6 +338,8 @@ function hintTexts(row: MaintenanceBatchPreviewRow): string[] {
 }
 
 interface RulingSubject {
+  /** conflict：金额 / 日期不一致，以本文件值重建；voided_upstream：上游已作废，台账行按 0 元更正。 */
+  kind: "conflict" | "voided_upstream";
   contract_no: string;
   receipt_no: string;
   receipt_date: string | null;
@@ -305,14 +360,17 @@ function dateText(value: unknown): string | null {
 }
 
 /**
- * 台账冲突行 → 裁决所需的合同 / 收款单号 / 文件值 / 台账值。契约字段优先：
+ * 台账冲突 / 上游已作废行 → 裁决所需的合同 / 收款单号 / 文件值 / 台账值。契约字段优先：
  * canonical.{receipt_no, receipt_date, actual_amount} 是本文件值，before.{…} 是台账值；
  * 老预览没有这些字段时才退回解析固定文案「台账 金额 / 日期，本文件 金额 / 日期」和
  * receipt_key 前缀；取不到就留空，由界面拒绝提交——绝不猜值（REQ #56 / #57）。
+ * 上游已作废（receipt_voided_upstream）：本文件说该收款单已作废，裁决值就是 0 元
+ * （台账行按 0 元更正即从累计中扣除，下次预览该行即「已在台账」）；日期取文件值，缺失时取台账值。
  */
 function rulingSubject(row: MaintenanceBatchPreviewRow): RulingSubject | null {
-  const conflict = [...row.errors, ...row.warnings].find((issue) => issue.code === "receipt_conflict");
+  const conflict = [...row.errors, ...row.warnings].find((issue) => RULING_CODES.has(issue.code));
   if (!conflict) return null;
+  const kind = conflict.code === "receipt_voided_upstream" ? "voided_upstream" : "conflict";
   const receiptKey = valueText(row.canonical.receipt_key);
   const contractNo = valueText(row.canonical.contract_no)
     ?? valueText(row.canonical.sales_order_no)
@@ -322,15 +380,28 @@ function rulingSubject(row: MaintenanceBatchPreviewRow): RulingSubject | null {
   if (!contractNo || !receiptNo) return null;
   const fileMatch = /本文件\s*(-?[\d.]+)\s*\/\s*(\d{4}-\d{2}-\d{2})/.exec(conflict.message);
   const ledgerMatch = /台账\s*(-?[\d.]+)\s*\/\s*(\d{4}-\d{2}-\d{2})/.exec(conflict.message);
+  const ledgerDate = dateText(row.before?.receipt_date) ?? ledgerMatch?.[2] ?? null;
+  const fileDate = dateText(row.canonical.receipt_date) ?? fileMatch?.[2] ?? null;
   return {
+    kind,
     contract_no: contractNo,
     receipt_no: receiptNo,
-    receipt_date: dateText(row.canonical.receipt_date) ?? fileMatch?.[2] ?? null,
-    actual_amount: valueText(row.canonical.actual_amount) ?? fileMatch?.[1] ?? null,
+    receipt_date: kind === "voided_upstream" ? fileDate ?? ledgerDate : fileDate,
+    actual_amount: kind === "voided_upstream" ? "0" : valueText(row.canonical.actual_amount) ?? fileMatch?.[1] ?? null,
     ledger_amount: valueText(row.before?.actual_amount) ?? ledgerMatch?.[1] ?? null,
-    ledger_date: dateText(row.before?.receipt_date) ?? ledgerMatch?.[2] ?? null,
+    ledger_date: ledgerDate,
     message: conflict.message,
   };
+}
+
+/** 覆盖行既有快照的状态：后端 before.status 给 confirmed / unconfirmed，老预览缺失时按已确认。 */
+function overwriteStatusText(row: MaintenanceBatchPreviewRow): string {
+  return row.before?.status === "unconfirmed" ? "未确认" : "已确认";
+}
+
+function actionLabel(row: MaintenanceBatchPreviewRow): string {
+  if (row.action === "update_collection_snapshot") return `覆盖${overwriteStatusText(row)}累计`;
+  return ACTION_LABELS[row.action] || row.action;
 }
 
 function overwriteText(row: MaintenanceBatchPreviewRow): string | null {
@@ -340,7 +411,7 @@ function overwriteText(row: MaintenanceBatchPreviewRow): string | null {
   const before = row.before?.cumulative_amount;
   const after = row.after?.cumulative_amount;
   const month = String(row.canonical.report_month ?? "").slice(0, 7);
-  return `将覆盖 ${month} 已确认累计 ${String(before ?? "—")} → ${String(after ?? "—")}`;
+  return `将覆盖 ${month} ${overwriteStatusText(row)}累计 ${String(before ?? "—")} → ${String(after ?? "—")}`;
 }
 
 function countsFromRows(rows: MaintenanceBatchPreviewRow[]) {
@@ -626,7 +697,9 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         reason: rulingReasonText,
       });
       message.success(
-        `已裁决收款单 ${subject.receipt_no}：台账原行作废、以本文件值重建，涉及 ${outcome.affected_months.length} 个月份累计；正在重新预览`,
+        subject.kind === "voided_upstream"
+          ? `已裁决收款单 ${subject.receipt_no}：上游已作废，台账原行按 0 元更正，涉及 ${outcome.affected_months.length} 个月份累计；正在重新预览`
+          : `已裁决收款单 ${subject.receipt_no}：台账原行作废、以本文件值重建，涉及 ${outcome.affected_months.length} 个月份累计；正在重新预览`,
       );
       setRulingRow(null);
       setRulingReason("");
@@ -671,22 +744,19 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     } catch (reason) {
       if (generation !== requestGeneration.current) return;
       if (isTerminalApplyFailure(reason)) {
-        // 后端已把批次记为 failed（stale_preview / apply_conflict / 422 业务拒绝 / 5xx）：预览凭证作废，
-        // 清掉预览与勾选（保留文件）让用户重新预览，而不是留着一个再点也只会 409 的死预览
+        // 后端已把批次记为 failed（409 stale_preview / apply_conflict、422 business_rule_violation、
+        // 未预期异常 5xx）：预览凭证作废，清掉预览与勾选（保留文件）让用户重新预览，
+        // 而不是留着一个再点也只会 409 的死预览
         resetPreviewState();
         setError(
           `${await errorMessage(reason, terminalApplyFallback(reason))}——预览已清除，请重新点击「自动识别并预览」`,
         );
         return;
       }
-      // 403 不是终态（实名门禁 / 项目范围）：批次仍在，预览与勾选保留，按后端原话提示
-      // （如「经营事实写入必须使用实名系统账号」），用户可去掉覆盖行重提或换实名账号；与裁决弹窗同一处理。
-      setError(
-        await errorMessage(
-          reason,
-          errorStatus(reason) === 403 ? "当前账号没有批量导入权限" : "批量提交失败，请稍后重试",
-        ),
-      );
+      // 非终态（403 实名门禁 / 项目范围、422 invalid_selection 勾选缺依赖行、500 archive_failed 原件归档）：
+      // 批次仍 processing，预览与勾选保留，按后端原话提示（如「经营事实写入必须使用实名系统账号」），
+      // 用户补勾点名的行 / 去掉覆盖行重提 / 换实名账号 / 直接重试都行；与裁决弹窗同一处理。
+      setError(await retryableApplyMessage(reason));
     } finally {
       if (generation === requestGeneration.current) setApplying(false);
     }
@@ -719,9 +789,10 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     },
     {
       title: "动作",
-      dataIndex: "action",
+      key: "action",
       width: 130,
-      render: (value: string) => ACTION_LABELS[value] || value,
+      // 覆盖行按既有快照的真实状态标「覆盖已确认 / 未确认累计」（D-16 09-07：未确认快照也算历史）
+      render: (_, row) => actionLabel(row),
     },
     {
       title: "识别内容",
@@ -925,12 +996,21 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
           >
             {rulingTarget ? (
               <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="台账原行将作废并以本文件值重建；快照不自动改写"
-                  description="裁决只改台账，不求和、不猜重。受影响月份的累计会在重新预览时以「覆盖已确认累计」行呈现，仍需逐行确认。"
-                />
+                {rulingTarget.kind === "voided_upstream" ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="上游已作废：台账原行将作废并按 0 元更正；快照不自动改写"
+                    description="本文件（上游导出）已把该收款单标成作废，台账却仍有生效行。裁决只改台账，把该笔收款从累计中扣除；受影响月份的累计会在重新预览时以覆盖行呈现，仍需逐行确认。"
+                  />
+                ) : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="台账原行将作废并以本文件值重建；快照不自动改写"
+                    description="裁决只改台账，不求和、不猜重。受影响月份的累计会在重新预览时以「覆盖已确认累计」行呈现，仍需逐行确认。"
+                  />
+                )}
                 <Descriptions size="small" column={1} bordered>
                   <Descriptions.Item label="合同 / 销售订单">{rulingTarget.contract_no}</Descriptions.Item>
                   <Descriptions.Item label="收款单号">{rulingTarget.receipt_no}</Descriptions.Item>
@@ -938,7 +1018,9 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                     {`${rulingTarget.ledger_amount ?? "—"} / ${rulingTarget.ledger_date ?? "—"}`}
                   </Descriptions.Item>
                   <Descriptions.Item label="本文件值（裁决后生效）">
-                    {`${rulingTarget.actual_amount ?? "—"} / ${rulingTarget.receipt_date ?? "—"}`}
+                    {rulingTarget.kind === "voided_upstream"
+                      ? `已作废 → 0 / ${rulingTarget.receipt_date ?? "—"}`
+                      : `${rulingTarget.actual_amount ?? "—"} / ${rulingTarget.receipt_date ?? "—"}`}
                   </Descriptions.Item>
                 </Descriptions>
                 {!rulingReady ? (

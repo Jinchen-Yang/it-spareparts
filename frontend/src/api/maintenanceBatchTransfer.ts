@@ -16,7 +16,7 @@ export const MAINTENANCE_BATCH_TRANSFER_BASE = "/maintenance/project-batch-trans
 /**
  * ambiguous 只表示项目归属有多个候选；D-16 的 fail-closed / 冲突行（seed_required、snapshot_voided、
  * cross_file_same_contract、cumulative_unverifiable、constituent_blocked、collection_not_monotonic、
- * order_level_fail_closed、receipt_conflict）一律是 invalid，计入「无效」筛选与计数。
+ * order_level_fail_closed、receipt_conflict、receipt_voided_upstream）一律是 invalid，计入「无效」筛选与计数。
  */
 export type MaintenanceBatchMatchState =
   | "matched"
@@ -125,12 +125,14 @@ export interface MaintenanceBatchPreviewRow {
    */
   hint_messages?: string[];
   /**
-   * 既有值：覆盖行是 cumulative_amount / source / import_batch_id / updated_at；
-   * receipt_conflict 行是台账值 receipt_no / receipt_date / actual_amount。
+   * 既有值：覆盖行是 cumulative_amount / status（confirmed / unconfirmed，决定「覆盖已确认 / 未确认累计」）
+   * / source / import_batch_id / updated_at；receipt_conflict / receipt_voided_upstream 行是台账值
+   * receipt_no / receipt_date / actual_amount。
    */
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
   delta?: Record<string, unknown> | null;
+  /** record_receipts 行带 info 码 record_receipts（『累计不变，只把 N 笔新收款登记入台账』），标签由它驱动。 */
   warnings: MaintenanceBatchIssue[];
   errors: MaintenanceBatchIssue[];
 }
