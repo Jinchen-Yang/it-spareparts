@@ -6191,6 +6191,7 @@ def apply_project_master_v2(
     if pricing_entries:
         from app.services import maintenance_consumption_cost as _consumption_cost
         _consumption_cost.resolve_lines(db, lines=list(pricing_entries.values()))
+    receipt_voided_rows: list[dict] = []
     if plan.expense_updates or receipt_ops:
         inner_result = ec.apply(
             db,
@@ -6206,6 +6207,13 @@ def apply_project_master_v2(
             bool(inner_result.pop("_operating_fact_changed", False))
             or operating_fact_changed
         )
+        # D-02 作废优先（05）：共享写路径跳过的已作废月份并入本表的行级回执，
+        # 与 06 表 voided_rows 同一形状；05 导出只带 confirmed 行，V2 解析器把
+        # 落在作废月上的新行当 UPDATE 送来，不带回执用户以为改成了。
+        receipt_voided_rows = [
+            {**item, "sheet": V2_SHEET_RECEIPTS}
+            for item in inner_result.get("voided_rows", ())
+        ]
     # 04 作废（显式 VOID + 缺行=作废）：软删标记，读侧从此不导出（#264 契约）。
     for raw_line_id in plan.expense_voids:
         expense = db.scalar(select(FProjectExpense).where(FProjectExpense.raw_line_id == raw_line_id))
@@ -6356,10 +6364,13 @@ def apply_project_master_v2(
             operated_by=operated_by,
         ))
     db.commit()
-    return _v2_apply_result(
+    result = _v2_apply_result(
         plan,
         operated_by=operated_by,
         import_batch_id=import_batch_id,
         replayed=False,
         revision_drift=revision_drift,
     )
+    result["voided_rows"].extend(receipt_voided_rows)
+    result["warnings"].extend(item["message"] for item in receipt_voided_rows)
+    return result
