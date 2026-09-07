@@ -3313,3 +3313,110 @@ def test_v2_site_export_and_entity_scope_exclude_lines_under_void_header(db):
     expected = master._expected_site_ids(db, project.project_id)
     assert live.issue_line_id in expected
     assert line.issue_line_id not in expected
+
+
+# ----------------------------------------------------------------------
+# D-16 第 5 点：项目总表 V2 的 05 表走 ec.apply 同一条终态单调守卫 + 事实审计。
+# 本组不改高风险的 maintenance_project_master_workbook.py，只通过它验证契约。
+# ----------------------------------------------------------------------
+
+def _seed_receipt(db, project, contract, month, amount):
+    row = MaintenanceCollectionSnapshot(
+        collection_id=str(uuid.uuid4()),
+        project_id=project.project_id,
+        project_contract_id=contract.project_contract_id,
+        report_month=month,
+        cumulative_amount=Decimal(amount),
+        status="confirmed",
+        source="direct_api",
+        import_batch_id=None,
+        version=1,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _receipt_row_no(sheet, headers, collection_id) -> int:
+    return next(
+        row for row in range(2, sheet.max_row + 1)
+        if sheet.cell(row, headers["实体ID"]).value == collection_id
+    )
+
+
+def test_v2_receipt_multi_month_raise_is_judged_on_the_end_state(db):
+    """红线：6 月新值(11 万)高于 7 月旧值(10 万)，逐行守卫写完 6 月就拒；终态单调应放行。"""
+    project, contract, june = _project_with_receipt(db)           # 6 月 82325.40
+    july = _seed_receipt(db, project, contract, date(2026, 7, 1), "100000.00")
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_RECEIPTS,))
+    workbook = load_workbook(io.BytesIO(content))
+    sheet = workbook[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in sheet[1]}
+    sheet.cell(_receipt_row_no(sheet, headers, june.collection_id),
+               headers["累计实收金额（含税）"], 110000)
+    sheet.cell(_receipt_row_no(sheet, headers, july.collection_id),
+               headers["累计实收金额（含税）"], 120000)
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(workbook))
+    assert plan.summary["collection_updates"] == 2
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="receipt-raise-test", import_batch_id=str(uuid.uuid4()))
+
+    db.refresh(june)
+    db.refresh(july)
+    assert (june.cumulative_amount, june.version) == (Decimal("110000.00"), 2)
+    assert (july.cumulative_amount, july.version) == (Decimal("120000.00"), 2)
+    assert june.source == "workbook" and june.import_batch_id == result["import_batch_id"]
+    audits = db.scalars(select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.entity_type == "collection",
+        MaintenanceProjectOperationAudit.action == "update",
+    )).all()
+    assert {audit.entity_id for audit in audits} == {june.collection_id, july.collection_id}
+    assert all(f"上传请求 {result['import_batch_id']}" in audit.reason for audit in audits)
+    assert any("82325.40→110000.00" in audit.reason for audit in audits)
+
+
+def test_v2_fresh_receipt_month_regress_rolls_back_the_whole_master_transaction(db):
+    """红线：05 新增月份（无实体ID）低于更早已确认月份，以前直接落库、无审计。
+
+    现在 collection_not_monotonic 整本不落：同一份总表里 03 的数量改动一并回滚。
+    """
+    project, contract, june = _project_with_receipt(db)           # 6 月 82325.40
+    line = db.scalar(select(FMaintenanceLine))
+    assert line.qty == Decimal("2")
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id,
+        sheets=(master.V2_SHEET_PARTS, master.V2_SHEET_RECEIPTS))
+    workbook = load_workbook(io.BytesIO(content))
+    workbook[master.V2_SHEET_PARTS].cell(row=2, column=11, value=5)   # 需求数量 2→5
+    sheet = workbook[master.V2_SHEET_RECEIPTS]
+    headers = {cell.value: cell.column for cell in sheet[1]}
+    row = sheet.max_row + 1
+    sheet.cell(row, headers["合同编号"], contract.contract_no)
+    sheet.cell(row, headers["报告月份"], "2026-08")
+    sheet.cell(row, headers["累计实收金额（含税）"], 50000)
+    sheet.cell(row, headers["状态"], "confirmed")
+
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=_save(workbook))
+    assert plan.summary["qty_updates"] == 1
+    assert plan.summary["collection_updates"] == 1
+    with pytest.raises(master.WorkbookError) as raised:
+        master.apply_project_master_v2(
+            db, plan, operated_by="receipt-regress-test",
+            import_batch_id=str(uuid.uuid4()))
+    assert raised.value.code == "collection_not_monotonic"
+    assert "不得低于更早月份" in raised.value.message
+    assert raised.value.issues == [{
+        "contract_no": contract.contract_no, "report_month": "2026-08",
+        "code": "collection_not_monotonic", "message": raised.value.message}]
+    db.rollback()
+
+    db.refresh(line)
+    db.refresh(june)
+    assert line.qty == Decimal("2")                                # 03 改动一并回滚
+    assert june.cumulative_amount == Decimal("82325.40") and june.version == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceCollectionSnapshot)) == 1
+    assert db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit)) == 0

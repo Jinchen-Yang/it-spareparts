@@ -59,12 +59,17 @@ class MaintenanceCollectionSnapshot(Base):
             "status IN ('confirmed', 'unconfirmed', 'void')",
             name="ck_maintenance_collection_status",
         ),
+        # workbook = 05 表工作簿回传（独立两表 / 项目总表 V1、V2），import_batch_id
+        # 是该次上传请求的标识（API 生成的 uuid / V2 幂等键 v2-<sha>），**不是**
+        # sys_import_batch.id——工作簿上传不建 sys_import_batch 行；
+        # bulk_import = 收款单（SKD）批量导入网关（D-16），import_batch_id 才是
+        # sys_import_batch.id。两者都必须带批次号，追溯不靠审计 reason 文本。
         CheckConstraint(
-            "source IN ('legacy', 'direct_api', 'workbook')",
+            "source IN ('legacy', 'direct_api', 'workbook', 'bulk_import')",
             name="ck_maintenance_collection_source",
         ),
         CheckConstraint(
-            "(source = 'workbook' AND import_batch_id IS NOT NULL) OR "
+            "(source IN ('workbook', 'bulk_import') AND import_batch_id IS NOT NULL) OR "
             "(source IN ('legacy', 'direct_api') AND import_batch_id IS NULL)",
             name="ck_maintenance_collection_import_batch",
         ),
@@ -86,6 +91,77 @@ class MaintenanceCollectionSnapshot(Base):
             "ix_maintenance_collection_project_month",
             "project_id",
             "report_month",
+        ),
+    )
+
+
+class MaintenanceCollectionReceipt(Base):
+    """收款单（SKD）台账：逐笔实收事实，跨批次按收款单号幂等（D-16）。
+
+    月度累计快照由「台账生效行 ∪ 本文件新收款」推导，因此增量导出（只含最近
+    几个月）也能算出正确累计；同一 (销售订单, 收款单号) 只落一行，再次出现时
+    金额/日期一致即跳过，不一致即人工裁决，绝不自动覆盖或累加。
+
+    人工裁决（``receipt-rulings``）不改行：旧行 ``is_active=False`` 并记
+    ``superseded_by`` / 裁决人 / 时间 / 理由，另插一条生效的更正行（``ruling_id``
+    非空、无批次、无原件 sha256）。唯一键只约束**生效行**，被取代的历史行保留。
+    幂等 / 冲突判定与累计推导都只看生效行。
+    """
+
+    __tablename__ = "maintenance_collection_receipt"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_contract_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project_contract.project_contract_id"), nullable=False
+    )
+    # normalize_order_no 后的销售订单号（去掉 XSDD- 前缀、去空白、大写）
+    contract_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt_date: Mapped[date] = mapped_column(Date, nullable=False)
+    actual_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    import_batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_import_batch.id")
+    )
+    # 导入行必带原件 sha256；裁决更正行没有原件，为空。
+    source_sha256: Mapped[str | None] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 裁决链：被取代行指向更正行；更正行带裁决号。
+    superseded_by: Mapped[int | None] = mapped_column(
+        ForeignKey("maintenance_collection_receipt.id")
+    )
+    ruling_id: Mapped[str | None] = mapped_column(String(36))
+    ruling_reason: Mapped[str | None] = mapped_column(Text)
+    ruled_by: Mapped[str | None] = mapped_column(String(64))
+    ruled_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+    __table_args__ = (
+        # 只有生效行唯一：裁决后旧行留档、更正行接管同一 (销售订单, 收款单号)。
+        Index(
+            "ux_maintenance_collection_receipt_active",
+            "contract_no",
+            "receipt_no",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+        CheckConstraint(
+            "actual_amount >= 0 AND actual_amount < 1000000000000",
+            name="ck_maintenance_collection_receipt_amount",
+        ),
+        Index(
+            "ix_maintenance_collection_receipt_contract",
+            "project_contract_id",
+            "receipt_date",
+        ),
+        Index(
+            "ix_maintenance_collection_receipt_batch",
+            "import_batch_id",
         ),
     )
 

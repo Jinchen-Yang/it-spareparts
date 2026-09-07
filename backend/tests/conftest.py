@@ -178,6 +178,7 @@ _TABLES = [
     "maintenance_rkd_return_line",
     "maintenance_bad_salvage",
     "maintenance_collection_evidence",
+    "maintenance_collection_receipt",
     "maintenance_ai_mapping_proposal",
     "maintenance_service_period",
     "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",

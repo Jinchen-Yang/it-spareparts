@@ -7,12 +7,18 @@ Public contract (``/maintenance/project-batch-transfer``):
   server-owned mapping/match plan.
 * ``POST /apply`` accepts only the preview token, payload/data CAS hashes and
   selected row keys.  Client-supplied canonical values are never accepted.
+  勾选含任何写已确认快照 / 台账行的收款行（新建、覆盖、登记入台账）时必须实名
+  账号（与 stable 项目 API ``POST /projects/stable/{id}/collections`` 同一门禁）。
+* ``POST /receipt-rulings`` 人工裁决收款单台账冲突（D-16 / #56）：admin 或 boss、
+  实名账号、data_profit；旧行留档、更正行生效，不动快照。
 * ``POST /download`` exports all projects matching the current board filters,
   constrained to the server field/form whitelist.
 """
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
@@ -21,9 +27,11 @@ from sqlalchemy.orm import Session
 
 from app import config, permissions
 from app.auth import current_identity, current_role
+from app.api.maintenance_project_operations import _real_operator, real_operator_or_none
 from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.business_time import business_today
 from app.db import get_db
+from app.etl import pipeline
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
     UserContext,
@@ -100,6 +108,17 @@ class BatchApplyRequest(BaseModel):
     row_keys: list[str] = Field(min_length=1, max_length=bulk.MAX_PREVIEW_ROWS)
 
 
+class ReceiptRulingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_no: str = Field(min_length=1, max_length=64)
+    receipt_no: str = Field(min_length=1, max_length=64)
+    receipt_date: date
+    # 字符串十进制，避免浮点；范围由服务层 _decimal 校验。
+    actual_amount: Decimal = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class BatchDownloadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +167,13 @@ def _can_import(ctx: UserContext) -> bool:
 
 def _operator(ident: dict) -> str:
     return str(ident.get("username") or ident.get("sub") or "unknown")
+
+
+def _has_profit_data(ctx: UserContext) -> bool:
+    if not config.ENABLE_RBAC or ctx.role == "admin":
+        return True
+    graph = ctx.permissions or permissions.effective(ctx.role, None)
+    return bool(permissions.runtime_safe(graph).get("data_profit"))
 
 
 def _field_form_keys(field: project_export.ExportField) -> list[str]:
@@ -334,6 +360,13 @@ async def preview_transfer(
                 "issues": exc.issues,
             },
         ) from exc
+    except pipeline.ArchiveError as exc:
+        # 原件归档失败即预览失败：没有可追溯原件的批次不允许存在。
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"code": "archive_failed", "message": str(exc)},
+        ) from exc
 
 
 @router.post("/apply")
@@ -351,6 +384,9 @@ def apply_transfer(
     operator = _operator(ident)
     allow_admin = ctx.role in {"admin", "boss"}
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
+    # 实名判定交给服务层：勾选里含任何写已确认快照 / 台账行的收款行（新建、覆盖、
+    # 登记入台账）都要求实名；共享口令 admin 只能应用不写经营事实的行。
+    real_operator = real_operator_or_none(db, ident) is not None
     record_access_log(
         ctx,
         "maintenance_project_batch_apply",
@@ -367,6 +403,7 @@ def apply_transfer(
             operated_by=operator,
             allow_admin=allow_admin,
             allowed_project_ids=allowed_project_ids,
+            real_operator=real_operator,
         )
     except bulk.BulkImportScopeDenied as exc:
         db.rollback()
@@ -386,12 +423,14 @@ def apply_transfer(
         operations.MaintenanceOperationConflict,
     ) as exc:
         db.rollback()
+        # stale_preview（预览后台账/快照已变化）等可重试形态按服务层 code 透传。
+        code = getattr(exc, "code", None) or "apply_conflict"
         try:
             bulk.record_transfer_failure(
                 db,
                 preview_token=body.preview_token,
                 operated_by=operator,
-                error_code="apply_conflict",
+                error_code=code,
                 message=str(exc),
                 allow_admin=allow_admin,
             )
@@ -399,7 +438,7 @@ def apply_transfer(
             db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            {"code": "apply_conflict", "message": str(exc)},
+            {"code": code, "message": str(exc)},
         ) from exc
     except (
         catalog.MaintenanceProjectCatalogError,
@@ -421,6 +460,14 @@ def apply_transfer(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "business_rule_violation", "message": str(exc)},
         ) from exc
+    except pipeline.ArchiveError as exc:
+        # 原件在预览→应用之间不再是 sha256 相符的普通文件：事实写入整体回滚，
+        # 批次保持 processing（不是预览失效，重试 / 重新预览都可），与预览期同码。
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"code": "archive_failed", "message": str(exc)},
+        ) from exc
     except Exception as exc:
         db.rollback()
         try:
@@ -434,6 +481,64 @@ def apply_transfer(
             )
         except Exception:  # noqa: BLE001
             db.rollback()
+        raise
+
+
+@router.post("/receipt-rulings")
+def rule_receipt(
+    body: ReceiptRulingRequest,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """人工裁决收款单台账冲突：旧行留档、更正行生效，不动快照（下次预览出 update 行）。"""
+
+    if ctx.role not in {"admin", "boss"} or not _has_profit_data(ctx):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": "收款单裁决仅限管理员或老板，且需利润数据权限"},
+        )
+    operator = _real_operator(db, ident)
+    record_access_log(
+        ctx,
+        "maintenance_receipt_ruling",
+        "maintenance",
+        {"contract_no": body.contract_no, "receipt_no": body.receipt_no},
+    )
+    try:
+        result = bulk.rule_receipt(
+            db,
+            contract_no=body.contract_no,
+            receipt_no=body.receipt_no,
+            receipt_date=body.receipt_date,
+            actual_amount=body.actual_amount,
+            reason=body.reason,
+            operated_by=operator,
+        )
+        db.commit()
+        return result
+    except bulk.BulkImportNotFound as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {"code": "receipt_not_found", "message": str(exc)},
+        ) from exc
+    except bulk.BulkImportInvalid as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "invalid_ruling", "message": str(exc)},
+        ) from exc
+    except bulk.BulkImportConflict as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": getattr(exc, "code", None) or "apply_conflict", "message": str(exc)},
+        ) from exc
+    except Exception:
+        db.rollback()
         raise
 
 

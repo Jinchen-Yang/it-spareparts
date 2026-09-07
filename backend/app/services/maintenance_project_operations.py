@@ -4026,7 +4026,14 @@ def update_collection(
     reason: str,
     operated_by: str,
     bump_revision: bool = True,
+    source: str | None = None,
+    import_batch_id: str | None = None,
 ) -> dict | None:
+    """CAS + 单调性守卫 + 事实审计的唯一回款快照更新路径。
+
+    ``source``/``import_batch_id`` 成对给出时，覆盖后的快照来源改指本次写入者
+    （批量导入网关传 ``bulk_import`` + 批次号）；旧来源保留在审计 before_json。
+    """
     project_id = db.scalar(
         select(MaintenanceCollectionSnapshot.project_id).where(
             MaintenanceCollectionSnapshot.collection_id == collection_id
@@ -4090,6 +4097,9 @@ def update_collection(
             if key in {"receipt_reference", "remark"}:
                 value = value.strip() if value and value.strip() else None
             setattr(row, key, value)
+    if source is not None:
+        row.source = source
+        row.import_batch_id = import_batch_id
     after = collection_dict(row)
     if after == before:
         return before

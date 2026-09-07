@@ -345,7 +345,9 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
       const [input] = screen.getAllByRole("spinbutton");
       expect((input as HTMLInputElement).value).toBe("777.00");
     });
-    expect(screen.getAllByText(/已重新加载最新数据/).length).toBeGreaterThanOrEqual(1);
+    // antd message 在表单回填之后的下一拍才挂到 portal，负载高的 CI runner 上同步断言会抢跑
+    // （#320 两次复现），改为等待出现。
+    expect((await screen.findAllByText(/已重新加载最新数据/)).length).toBeGreaterThanOrEqual(1);
   });
 
   it("保存成功且版本正是本次保存产生的 → 保留基线刷新，不打扰用户", async () => {

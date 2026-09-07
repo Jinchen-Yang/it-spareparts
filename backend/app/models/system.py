@@ -180,13 +180,24 @@ class SysImportBatch(Base):
 
     # 仅对同一 file_type 的 success file_hash 唯一。固定维保回填与通用导入是
     # 不同协议命名空间，错入口的历史记录不能污染正确入口的幂等判断。
+    # maint_bulk（全项目批量传输）file_hash 保存原件 sha256，同一原件允许分次
+    # 勾选提交多次（幂等由收款单台账 + report_json.selection_hash 保证），不入偏唯一索引。
     __table_args__ = (
         Index(
             "ux_batch_success_hash",
             "file_type",
             "file_hash",
             unique=True,
-            postgresql_where=text("status = 'success'"),
+            postgresql_where=text("status = 'success' AND file_type <> 'maint_bulk'"),
+        ),
+        # maint_bulk 应用幂等按 report_json.selection_hash 找已成功批次；偏唯一表达式
+        # 索引让这条查询不随批次表增长退化成全表扫，也把"同一选择只成功一次"落成约束。
+        Index(
+            "ix_batch_success_selection_hash",
+            "file_type",
+            text("(report_json ->> 'selection_hash')"),
+            unique=True,
+            postgresql_where=text("status = 'success' AND file_type = 'maint_bulk'"),
         ),
     )
 

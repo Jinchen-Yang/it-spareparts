@@ -294,19 +294,28 @@ class ExpenseStatusPatch(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
-def _real_operator(db: Session, ident: dict) -> str:
+def real_operator_or_none(db: Session, ident: dict) -> str | None:
+    """实名操作者判定的唯一实现：实名登录（authn == sys_user）、非共享口令回退、
+    账号仍有效才返回用户名，否则 None。经营事实写入门禁（本模块与批量传输网关）共用。"""
     if ident.get("authn") != "sys_user" or ident.get("fb"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "经营事实写入必须使用实名系统账号")
+        return None
     username = str(ident.get("sub") or "").strip()
+    if not username:
+        return None
     user = db.scalar(
         select(SysUser).where(
             SysUser.username == username,
             SysUser.is_active.is_(True),
         )
     )
-    if not username or user is None:
+    return username if user is not None else None
+
+
+def _real_operator(db: Session, ident: dict) -> str:
+    operator = real_operator_or_none(db, ident)
+    if operator is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "经营事实写入必须使用实名系统账号")
-    return username
+    return operator
 
 
 def _enforce_site_issue_access(

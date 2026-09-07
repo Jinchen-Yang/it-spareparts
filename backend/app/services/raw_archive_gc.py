@@ -29,6 +29,10 @@ MIN_GRACE_DAYS = 7
 MAX_GRACE_DAYS = 3650
 DEFAULT_GRACE_DAYS = MIN_GRACE_DAYS
 _ARCHIVE_NAME_RE = re.compile(r"(?P<file_hash>[0-9a-f]{64})\.xlsx\Z")
+# 归档暂存残片（pipeline.ARCHIVE_STAGING_PREFIX/SUFFIX，进程在暂存→原子替换之间
+# 死掉留下的）：没有数据库引用可查，按 mtime 超过一天即回收。正常归档在秒级完成。
+_STAGING_NAME_RE = re.compile(r"staging-[A-Za-z0-9_]+\.part\Z")
+STAGING_GRACE = timedelta(days=1)
 _CHUNK_SIZE = 1024 * 1024
 _METRIC_KEYS = (
     "scanned",
@@ -153,20 +157,66 @@ def _digest_if_stable(
         os.close(file_fd)
 
 
+def _reap_staging(
+    dir_fd: int,
+    *,
+    entry: os.DirEntry,
+    execute: bool,
+    cutoff_ns: int,
+    result: dict[str, int | bool],
+) -> None:
+    """暂存残片：普通文件且 mtime 早于一天前才算候选；不确定即保留。"""
+
+    try:
+        before = entry.stat(follow_symlinks=False)
+    except OSError:
+        result["errors"] += 1
+        return
+    if not stat.S_ISREG(before.st_mode) or before.st_mtime_ns >= cutoff_ns:
+        result["skipped"] += 1
+        return
+    result["candidates"] += 1
+    if not execute:
+        return
+    try:
+        current = os.stat(entry.name, dir_fd=dir_fd, follow_symlinks=False)
+        if not _same_file_state(before, current):
+            raise RuntimeError("staging file changed before deletion")
+        os.unlink(entry.name, dir_fd=dir_fd)
+    except (OSError, RuntimeError):
+        result["errors"] += 1
+        return
+    result["deleted"] += 1
+    result["deleted_bytes"] += before.st_size
+
+
 def _scan_locked(
     db: Session,
     *,
     raw_dir: str,
     execute: bool,
     cutoff_ns: int,
+    grace_ns: int,
     result: dict[str, int | bool],
 ) -> None:
     referenced_hashes, referenced_paths = _load_references(db)
+    staging_cutoff_ns = cutoff_ns + grace_ns - int(
+        STAGING_GRACE.total_seconds() * 1_000_000_000
+    )
     dir_fd, directory_opened = _directory_fd(raw_dir)
     try:
         with os.scandir(dir_fd) as entries:
             for entry in entries:
                 result["scanned"] += 1
+                if _STAGING_NAME_RE.fullmatch(entry.name) is not None:
+                    _reap_staging(
+                        dir_fd,
+                        entry=entry,
+                        execute=execute,
+                        cutoff_ns=staging_cutoff_ns,
+                        result=result,
+                    )
+                    continue
                 matched = _ARCHIVE_NAME_RE.fullmatch(entry.name)
                 if matched is None:
                     result["skipped"] += 1
@@ -295,6 +345,7 @@ def reap_orphan_archives(
                     raw_dir=selected_raw_dir,
                     execute=execute,
                     cutoff_ns=cutoff_ns,
+                    grace_ns=grace_ns,
                     result=result,
                 )
             finally:
