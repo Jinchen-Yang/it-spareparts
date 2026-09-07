@@ -263,3 +263,113 @@ def test_admin_sees_chain_for_any_project(db):
     r = _fetch(admin, p.project_id)
     assert r.status_code == 200, r.text
     assert len(r.json()["purchases"]) == 1
+
+
+def _fetch_params(client, project_id: str, **params):
+    return client.get(
+        f"/api/maintenance/projects/stable/{project_id}/purchases", params=params,
+    )
+
+
+def test_purchases_paging_total_and_source_order_scope(db):
+    """#259：page 省略＝全量（旧协议）；分页 total 是收敛后的真实总数；
+    source_order_id 只看挂在该需求单上的采购单，且仍只认稳定归属。"""
+    p = _project(db, "proc-paging", "分页项目")
+    _seed_demand(db, "RAW-PG-001", "分页项目")
+    _seed_demand(db, "RAW-PG-002", "分页项目")
+    for i in (1, 2, 3):
+        _seed_purchase(db, f"PO-PG-00{i}", "RAW-PG-001")
+    _seed_purchase(db, "PO-PG-OTHER", "RAW-PG-002")
+    _assign_source_order(db, source_order_id="RAW-PG-001", project_id=p.project_id)
+    _assign_source_order(db, source_order_id="RAW-PG-002", project_id=p.project_id)
+    admin, _ = _client(db, "proc_admin_paging", role="admin")
+
+    full = _fetch(admin, p.project_id).json()
+    assert len(full["purchases"]) == 4
+    assert full["total"] == 4
+    assert full["page"] is None and full["page_size"] is None
+    assert {po["demand_source_order_id"] for po in full["purchases"]} == {
+        "RAW-PG-001", "RAW-PG-002",
+    }
+
+    page1 = _fetch_params(admin, p.project_id, page=1, page_size=3).json()
+    assert len(page1["purchases"]) == 3
+    assert (page1["total"], page1["page"], page1["page_size"]) == (4, 1, 3)
+    page2 = _fetch_params(admin, p.project_id, page=2, page_size=3).json()
+    assert len(page2["purchases"]) == 1 and page2["total"] == 4
+    # 跨页不重不漏
+    assert {po["purchase_order_no"] for po in page1["purchases"] + page2["purchases"]} == {
+        "PO-PG-001", "PO-PG-002", "PO-PG-003", "PO-PG-OTHER",
+    }
+    assert _fetch_params(admin, p.project_id, page=1, page_size=201).status_code == 422
+
+    scoped = _fetch_params(admin, p.project_id, source_order_id="RAW-PG-001").json()
+    assert {po["purchase_order_no"] for po in scoped["purchases"]} == {
+        "PO-PG-001", "PO-PG-002", "PO-PG-003",
+    }
+    assert scoped["total"] == 3
+    scoped_page = _fetch_params(
+        admin, p.project_id, source_order_id="RAW-PG-001", page=2, page_size=2,
+    ).json()
+    assert len(scoped_page["purchases"]) == 1 and scoped_page["total"] == 3
+    # 不在本项目归属内的需求单：即使传了也是空（稳定归属优先，不按名猜）
+    foreign = _fetch_params(admin, p.project_id, source_order_id="RAW-NOT-MINE").json()
+    assert foreign["purchases"] == [] and foreign["total"] == 0
+
+
+def test_masked_unit_price_is_distinguishable_from_missing_price(db):
+    """#259：脱敏置空与源表本来没价都是 null——unit_price_masked 显式标注区分。"""
+    from app.models.purchase import FPurchaseLine, FPurchaseOrder
+
+    p = _project(db, "proc-mask-flag", "脱敏标注项目")
+    _seed_demand(db, "RAW-MF-001", "脱敏标注项目")
+    _seed_purchase(db, "PO-MF-PRICED", "RAW-MF-001", price="66")
+    _seed_purchase(db, "PO-MF-NOPRICE", "RAW-MF-001", price="1")
+    line = db.scalar(
+        select(FPurchaseLine).join(FPurchaseOrder, FPurchaseOrder.id == FPurchaseLine.order_id)
+        .where(FPurchaseOrder.raw_order_id == "PO-MF-NOPRICE")
+    )
+    line.unit_price = None   # 源表就没价
+    db.commit()
+    _assign_source_order(db, source_order_id="RAW-MF-001", project_id=p.project_id)
+
+    # 有成本权限的读者用管理员（同一项目只能有一位在任主负责人）
+    with_cost, _ = _client(db, "proc_flag_admin", role="admin")
+    body = _fetch(with_cost, p.project_id).json()
+    by_no = {po["purchase_order_no"]: po for po in body["purchases"]}
+    priced = by_no["PO-MF-PRICED"]["lines"][0]
+    assert priced["unit_price"] == "66.00" and priced["unit_price_masked"] is False
+    missing = by_no["PO-MF-NOPRICE"]["lines"][0]
+    assert missing["unit_price"] is None and missing["unit_price_masked"] is False
+
+    no_cost, no_cost_user = _client(db, "proc_flag_no_cost", data_purchase_cost=False)
+    _assign_user(db, user=no_cost_user, project_id=p.project_id)
+    body = _fetch(no_cost, p.project_id).json()
+    assert len(body["purchases"]) == 2
+    for po in body["purchases"]:
+        for masked_line in po["lines"]:
+            assert masked_line["unit_price"] is None
+            assert masked_line["unit_price_masked"] is True
+
+
+def test_purchases_page_size_echo_is_effective_size_or_null(db):
+    """#259 修正 (c)：给了 page 就回显真正切片用的页长（省略＝默认 20，不是 null）；
+    省略 page 时 page_size 被忽略、回显 null——不能回显一个没生效的值。"""
+    p = _project(db, "proc-echo", "回显项目")
+    _seed_demand(db, "RAW-EC-001", "回显项目")
+    for i in (1, 2, 3):
+        _seed_purchase(db, f"PO-EC-00{i}", "RAW-EC-001")
+    _assign_source_order(db, source_order_id="RAW-EC-001", project_id=p.project_id)
+    admin, _ = _client(db, "proc_admin_echo", role="admin")
+
+    defaulted = _fetch_params(admin, p.project_id, page=1).json()
+    assert (defaulted["page"], defaulted["page_size"]) == (1, 20)
+    assert len(defaulted["purchases"]) == 3 and defaulted["total"] == 3
+
+    ignored = _fetch_params(admin, p.project_id, page_size=2).json()
+    assert ignored["page"] is None and ignored["page_size"] is None
+    assert len(ignored["purchases"]) == 3   # 没有 page 就是全量，page_size 不生效
+
+    # 归属为空的短路同样回显生效页长
+    empty = _fetch_params(admin, p.project_id, source_order_id="RAW-NOT-MINE", page=1).json()
+    assert (empty["total"], empty["page"], empty["page_size"]) == (0, 1, 20)

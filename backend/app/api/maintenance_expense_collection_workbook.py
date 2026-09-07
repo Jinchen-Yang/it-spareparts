@@ -23,10 +23,12 @@ from app.security import (
 )
 from app.services import import_safety
 from app.services import maintenance_expense_collection_workbook as wbk
+from app.services.maintenance_project_assignments import WORKBOOK_UPLOAD_ACTION
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
-_ACTION_KEY = "action_maintenance_expense_collection_upload"
+# 与 can_edit_master_workbook（D-03 判定）共用同一常量，避免键名两处漂移
+_ACTION_KEY = WORKBOOK_UPLOAD_ACTION
 _MAX_BYTES = 20 * 1024 * 1024
 _XLSX_MEDIA = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

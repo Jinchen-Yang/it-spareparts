@@ -1156,3 +1156,43 @@ def test_bucket_row_has_the_same_card_keys(db, tmp_path):
     real = next(r for r in rows if r["project_id"] == proj.project_id)
     assert set(bucket) == set(real)
     assert bucket["contract_nos"] == [] and bucket["project_manager"] is None
+
+
+def test_project_orders_contract_filter_is_normalized_equality_on_linked_xsdd(
+    db, tmp_path,
+):
+    """#259：合同筛选按需求单挂靠的 linked_sales_order_no 归一化相等。
+
+    WBDD 单号本身不含 XSDD 号，旧前端按「单号包含合同号」过滤永远为空；
+    服务端用报销归属同一把 normalize_contract_no 尺子（去空白、大写、去 XSDD-）。
+    """
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2, lines_per_order=1)
+    assign(db, orders[0], proj)
+    assign(db, orders[1], proj)
+    orders[0].linked_sales_order_no = "XSDD-20260828-0120"
+    orders[1].linked_sales_order_no = "20260901-0007"   # 裸形态入库也是同一合同
+    db.commit()
+    client = boss_client(db, username="contract-filter")
+    url = f"/api/maintenance/boss-board/projects/{proj.project_id}/orders"
+
+    unfiltered = client.get(url).json()
+    assert unfiltered["total"] == 2
+    assert {row["linked_sales_order_no"] for row in unfiltered["rows"]} == {
+        "XSDD-20260828-0120", "20260901-0007",
+    }
+
+    hit = client.get(url, params={"contract_no": "XSDD-20260828-0120"}).json()
+    assert hit["total"] == 1
+    assert [row["order_no"] for row in hit["rows"]] == [orders[0].order_no]
+    # 归一化：小写 / 首尾空白 / 去 XSDD- 前缀都命中同一张单
+    for variant in ("xsdd-20260828-0120", " XSDD-20260828-0120 ", "20260828-0120"):
+        body = client.get(url, params={"contract_no": variant}).json()
+        assert body["total"] == 1, variant
+        assert body["rows"][0]["order_no"] == orders[0].order_no, variant
+    # 裸形态入库的 XSDD 也能用带前缀的合同号筛到
+    bare = client.get(url, params={"contract_no": "XSDD-20260901-0007"}).json()
+    assert [row["order_no"] for row in bare["rows"]] == [orders[1].order_no]
+    # 别的合同一单都不返回，而不是退回全量
+    miss = client.get(url, params={"contract_no": "XSDD-20260101-9999"}).json()
+    assert miss == {"rows": [], "total": 0, "page": 1, "page_size": 20}

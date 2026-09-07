@@ -36,6 +36,10 @@ from app.services import (
     maintenance_source_health,
     project_names,
 )
+from app.services.maintenance_expense_integrity import (
+    normalize_contract_no,
+    normalized_contract_no_sql,
+)
 from app.services.query_filters import active_orders
 
 # 未归属桶的伪项目 ID（§4.5）：与真实 project_id 不可能冲突
@@ -1897,13 +1901,23 @@ def _pre_delivery_counts(db: Session, project_ids: list[str]) -> dict:
 # ---------------------------------------------------------------- 下钻
 
 def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
-                   page: int = 1, page_size: int = 20) -> dict:
-    """单据下钻（project_id 可为 unassigned 伪桶）。"""
+                   page: int = 1, page_size: int = 20,
+                   contract_no: str | None = None) -> dict:
+    """单据下钻（project_id 可为 unassigned 伪桶）。
+
+    contract_no（#259）：按需求单挂靠的销售订单 ``linked_sales_order_no`` 归一化
+    相等过滤（与报销归属同一把 normalize_contract_no 尺子：去空白、大写、去
+    ``XSDD-`` 前缀）；WBDD 单号本身不含 XSDD 号，字符串包含匹配永远为空。
+    """
     can_cost = can_view_cost(user_ctx)
     unassigned = project_id == UNASSIGNED_BUCKET
     base = select(FMaintenanceOrder)
     base = _scope_stmt(base, project_id=None if unassigned else project_id,
                        unassigned_only=unassigned)
+    if contract_no is not None:
+        base = base.where(
+            normalized_contract_no_sql(FMaintenanceOrder.linked_sales_order_no)
+            == normalize_contract_no(contract_no))
     total = int(db.execute(
         select(func.count()).select_from(base.subquery())).scalar_one())
     rows = db.execute(
@@ -1925,6 +1939,7 @@ def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
             "order_no": order.order_no,
             "order_date": order.order_date.isoformat() if order.order_date else None,
             "data_status": order.data_status,          # 原样展示（铁律 3）
+            "linked_sales_order_no": order.linked_sales_order_no,  # XSDD，合同筛选依据
             "project_raw": order.project_raw,
             "is_pre_delivery": project_names.is_pre_delivery(order.project_raw),
             "line_count": line_count,

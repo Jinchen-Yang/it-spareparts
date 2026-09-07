@@ -29,7 +29,7 @@ from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_source_assignments
 from app.api import maintenance_project_master_workbook as master_api
-from tests.boss_board_helpers import assign, import_wbdd, make_project
+from tests.boss_board_helpers import assign, boss_client, import_wbdd, make_project
 from tests.test_maintenance_expense_collection_workbook import (  # noqa: F401
     _XLSX, _client, uploader, reader,
 )
@@ -1108,3 +1108,196 @@ def test_download_needs_profit_upload_needs_action_key(db, project_with_lines):
     assert reader(db, "m-perm-read3").post(
         f"{_GLOBAL}/apply",
         files={"file": ("g.xlsx", io.BytesIO(content), _XLSX)}).status_code == 403
+
+
+def _two_contract_project(db, tmp_path):
+    proj = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=2, lines_per_order=3)
+    for order in orders:
+        assign(db, order, proj)
+    orders[0].linked_sales_order_no = "XSDD-20260828-0120"
+    orders[1].linked_sales_order_no = "20260901-0007"   # 裸形态入库
+    db.commit()
+    return proj, orders
+
+
+def test_master_rows_unpaged_stays_full_and_paged_total_is_real(db, tmp_path):
+    """#259：03 行级 page 省略＝全量（旧协议、Excel 往返不受影响）；
+    分页只是同一行序的切片，total 是过滤后真实总数而非本页行数。"""
+    proj, _orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-paging")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    full = client.get(url, params={"sheet": master.SHEET_PARTS}).json()
+    assert full["total"] == 6 and len(full["rows"]) == 6
+    assert full["page"] is None and full["page_size"] is None
+
+    page1 = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 1, "page_size": 4}).json()
+    assert len(page1["rows"]) == 4
+    assert (page1["total"], page1["page"], page1["page_size"]) == (6, 1, 4)
+    page2 = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 2, "page_size": 4}).json()
+    assert len(page2["rows"]) == 2 and page2["total"] == 6
+    assert ([row["line_id"] for row in page1["rows"]]
+            + [row["line_id"] for row in page2["rows"]]
+            == [row["line_id"] for row in full["rows"]])
+    assert client.get(url, params={
+        "sheet": master.SHEET_PARTS, "page": 1, "page_size": 201}).status_code == 422
+
+
+def test_master_rows_filter_by_order_no_and_normalized_contract_no(db, tmp_path):
+    """#259：order_no 精确相等；contract_no 与报销归属同一把归一化尺子。"""
+    proj, orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-filter")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    by_order = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "order_no": orders[0].order_no}).json()
+    assert by_order["total"] == 3
+    assert {row["order_no"] for row in by_order["rows"]} == {orders[0].order_no}
+
+    for variant in ("XSDD-20260828-0120", "xsdd-20260828-0120", "20260828-0120"):
+        body = client.get(url, params={
+            "sheet": master.SHEET_PARTS, "contract_no": variant}).json()
+        assert body["total"] == 3, variant
+        assert {row["sales_order_no"] for row in body["rows"]} == {"XSDD-20260828-0120"}
+    bare = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260901-0007"}).json()
+    assert {row["order_no"] for row in bare["rows"]} == {orders[1].order_no}
+    miss = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260101-9999"}).json()
+    assert miss["total"] == 0 and miss["rows"] == []
+
+    combo = client.get(url, params={
+        "sheet": master.SHEET_PARTS, "contract_no": "XSDD-20260828-0120",
+        "order_no": orders[0].order_no, "page": 2, "page_size": 2}).json()
+    assert len(combo["rows"]) == 1 and combo["total"] == 3
+
+
+def test_master_rows_v2_carries_sales_order_no_and_honours_filters(
+    db, tmp_path, monkeypatch,
+):
+    """V2 行级同样带 sales_order_no 并接受同一组过滤/分页参数（#259）。"""
+    monkeypatch.setattr(
+        master_api.get_settings(), "maintenance_project_master_v2_enabled", True)
+    proj, orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-v2")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    body = client.get(url, params={
+        "sheet": master.V2_SHEET_PARTS, "contract_no": "20260901-0007",
+        "page": 1, "page_size": 2}).json()
+    assert len(body["rows"]) == 2 and body["total"] == 3
+    assert {row["sales_order_no"] for row in body["rows"]} == {"20260901-0007"}
+    assert {row["order_no"] for row in body["rows"]} == {orders[1].order_no}
+
+
+_BOARD = "/api/maintenance/boss-board/projects"
+
+
+@pytest.mark.parametrize(
+    "blank", ["\u00a0", "\u202f", "\u3000"], ids=["nbsp", "nnbsp", "ideographic"])
+def test_contract_filter_agrees_across_orders_and_rows_routes_on_nbsp(
+    db, tmp_path, blank,
+):
+    """#259 修正 (a)：挂靠号里夹着 NBSP 族空白时，看板需求单（SQL 归一化）与
+    03 行级（Python 归一化）对同一个干净合同号必须给同一个答案——修正前 PG 的
+    ``\\s`` 不剥 NBSP，需求单路由查不到、行级路由查得到。"""
+    proj, orders = _two_contract_project(db, tmp_path)
+    orders[0].linked_sales_order_no = f"XSDD-2026{blank}0828-0120"
+    db.commit()
+    want = "XSDD-20260828-0120"
+
+    board = boss_client(db, username=f"m-nbsp-board-{ord(blank):x}").get(
+        f"{_BOARD}/{proj.project_id}/orders", params={"contract_no": want}).json()
+    rows = uploader(db, f"m-nbsp-rows-{ord(blank):x}").get(
+        f"{_BASE}/{proj.project_id}/master-workbook/rows",
+        params={"sheet": master.SHEET_PARTS, "contract_no": want}).json()
+
+    assert board["total"] == 1 and rows["total"] == 3
+    assert ({row["order_no"] for row in board["rows"]}
+            == {row["order_no"] for row in rows["rows"]}
+            == {orders[0].order_no})
+
+
+def test_contract_filter_rejects_whitespace_only_on_both_routes(db, tmp_path):
+    """#259 修正 (b)：去空白后为空的 contract_no 在两条路由上含义不同（SQL 侧只配
+    挂靠号本身为空白的单、Python 侧连 NULL 也配），一律 422，不各自猜。"""
+    proj, _orders = _two_contract_project(db, tmp_path)
+    board = boss_client(db, username="m-blank-board")
+    rows = uploader(db, "m-blank-rows")
+    for blank in (" ", "\u00a0", " \t ", "XSDD-"):
+        resp = board.get(f"{_BOARD}/{proj.project_id}/orders",
+                         params={"contract_no": blank})
+        assert resp.status_code == 422, (repr(blank), resp.text)
+        assert resp.json()["detail"]["code"] == "invalid_contract_no"
+        resp = rows.get(f"{_BASE}/{proj.project_id}/master-workbook/rows",
+                        params={"sheet": master.SHEET_PARTS, "contract_no": blank})
+        assert resp.status_code == 422, (repr(blank), resp.text)
+        assert resp.json()["detail"]["code"] == "invalid_contract_no"
+    # 不传才是「全部」
+    assert board.get(f"{_BOARD}/{proj.project_id}/orders").json()["total"] == 2
+    assert rows.get(f"{_BASE}/{proj.project_id}/master-workbook/rows",
+                    params={"sheet": master.SHEET_PARTS}).json()["total"] == 6
+
+
+def test_master_rows_page_size_echo_is_effective_size_or_null(db, tmp_path):
+    """#259 修正 (c)：给了 page 就回显真正切片用的页长（省略＝默认 20，不是 null）；
+    省略 page 时 page_size 被忽略、回显 null——不能回显一个没生效的值。"""
+    proj, _orders = _two_contract_project(db, tmp_path)
+    client = uploader(db, "m-rows-echo")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+
+    defaulted = client.get(url, params={"sheet": master.SHEET_PARTS, "page": 1}).json()
+    assert (defaulted["page"], defaulted["page_size"]) == (1, 20)
+    assert len(defaulted["rows"]) == 6 and defaulted["total"] == 6
+
+    ignored = client.get(url, params={"sheet": master.SHEET_PARTS, "page_size": 2}).json()
+    assert ignored["page"] is None and ignored["page_size"] is None
+    assert len(ignored["rows"]) == 6   # 没有 page 就是全量，page_size 不生效
+
+
+def test_assigned_lines_breaks_ties_on_line_id_so_paging_is_stable(db, tmp_path):
+    """#259 修正 (d)（高风险模块契约）：line_no 可空，同单同日的行在
+    (order_date, order_no, line_no) 上打平；行 id 必须是尾键，否则 03 行级分页
+    切片的顺序由堆序决定——跨页可能重复/漏行。"""
+    proj = make_project(db)
+    (order,) = import_wbdd(db, tmp_path, orders=1, lines_per_order=4)
+    assign(db, order, proj)
+    lines = db.scalars(
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id)
+        .order_by(FMaintenanceLine.id)).all()
+    ids = [line.id for line in lines]
+    # 全部 line_no 置空，四行在前三键上完全打平；倒序逐行改写让堆序偏离 id 序。
+    # 打平行的输出顺序取决于执行计划，行为断言不一定能在没有尾键时抓到错序——
+    # 真正的红线是下面对 ORDER BY 的契约断言：尾键必须是行 id。
+    for line in reversed(lines):
+        line.line_no = None
+        db.flush()
+    db.commit()
+
+    captured: list[str] = []
+
+    def capture(_conn, _cursor, statement, *_rest):
+        if "f_maintenance_line" in statement and "ORDER BY" in statement:
+            captured.append(statement)
+
+    event.listen(db.get_bind(), "before_cursor_execute", capture)
+    try:
+        rows = master._assigned_lines(db, project_id=proj.project_id, window=None)
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", capture)
+    assert [line.id for line, _order, _pid in rows] == ids
+    order_by = captured[-1].split("ORDER BY", 1)[1]
+    assert order_by.strip().endswith("f_maintenance_line.id"), order_by
+
+    client = uploader(db, "m-rows-tiebreak")
+    url = f"{_BASE}/{proj.project_id}/master-workbook/rows"
+    paged = [
+        row["line_id"]
+        for page in (1, 2)
+        for row in client.get(url, params={
+            "sheet": master.SHEET_PARTS, "page": page, "page_size": 2}).json()["rows"]
+    ]
+    assert paged == ids   # 跨页不重不漏，且就是 id 序

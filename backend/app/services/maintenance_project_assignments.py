@@ -144,19 +144,41 @@ def accessible_project_condition(user_ctx: UserContext):
     return condition
 
 
+def _salesperson_has_profit_key(user_ctx: UserContext) -> bool:
+    """D-03 第二句：「销售限本人项目，成本与合同额仍受 data_profit 利润键控制」。
+
+    V2 项目总表整本带成本/合同额列，服务端没有列级脱敏——没有利润键的销售
+    拿到编辑权就等于拿到成本，所以销售分支必须同时持有 ``data_profit``。
+    """
+    from app import config
+    from app import permissions as _perm
+
+    if not config.ENABLE_RBAC:
+        return True
+    perms = (
+        user_ctx.permissions
+        if user_ctx.permissions is not None
+        else _perm.effective(user_ctx.role, None)
+    )
+    return bool(perms.get("data_profit", False))
+
+
 def is_project_workbook_editor(
     db: Session,
     *,
     project_id: str,
     user_ctx: UserContext,
 ) -> bool:
-    """项目负责人/销售对本人项目拥有工作簿编辑权（2026-09-02 拍板）。
+    """项目负责人/销售对本人项目的工作簿编辑权（D-03，2026-09-02 拍板）。
 
-    FULL_SCOPE 账号不在此判定（由 API 层按既有 action 键放行）；这里只回答
-    「该账号是不是这个项目的 primary_manager 或 canonical 销售」。
-    primary_manager 以活跃挂靠为准；销售以
+    D-03 原句：「项目负责人对本人项目工作簿全部字段可见可改（含成本与合同额）；
+    销售限本人项目，成本与合同额仍受 data_profit 利润键控制」。
+    FULL_SCOPE 账号不在此判定（由 ``can_edit_master_workbook`` 按既有 action 键
+    放行）；这里只回答「该账号是不是这个项目的 primary_manager，或是持有
+    利润键的 canonical 销售」。primary_manager 以活跃挂靠为准；销售以
     ``project.salesperson == user_ctx.salesperson_name`` 为准（含 override
-    语义：override 后 canonical 值即权威值）。
+    语义：override 后 canonical 值即权威值）且必须持有 ``data_profit``——
+    所有消费方（上传门、合同额门、下载门、展示板/详情 flag）都从这里拿同一答案。
     """
     if not user_ctx.is_authenticated or not user_ctx.user_id:
         return False
@@ -175,7 +197,7 @@ def is_project_workbook_editor(
     )
     if managed is not None:
         return True
-    if user_ctx.salesperson_name:
+    if user_ctx.salesperson_name and _salesperson_has_profit_key(user_ctx):
         return db.scalar(
             select(MaintenanceProject.project_id).where(
                 MaintenanceProject.project_id == project_id,
@@ -183,6 +205,38 @@ def is_project_workbook_editor(
             ).limit(1)
         ) is not None
     return False
+
+
+WORKBOOK_UPLOAD_ACTION = "action_maintenance_expense_collection_upload"
+
+
+def can_edit_master_workbook(
+    db: Session,
+    *,
+    project_id: str,
+    user_ctx: UserContext,
+) -> bool:
+    """项目总表编辑权的唯一判定（D-03，2026-09-02 拍板）。
+
+    上传/校验的 API 门 ``_require_master_edit``、展示板项目卡与稳定项目详情的
+    ``can_edit_master_workbook`` 字段（前端据此显示上传入口）都只消费这一处，
+    不允许各写一份而漂移。管理员 / RBAC 关闭恒可编；全量账号走既有 action 键
+    （含 data_profit）；否则按 D-03「负责人对本人项目全部字段可见可改；销售限
+    本人项目、成本与合同额仍受 data_profit 控制」看 ``is_project_workbook_editor``。
+    """
+    from app import config
+    from app import permissions as _perm
+
+    if not config.ENABLE_RBAC or user_ctx.role == "admin":
+        return True
+    perms = (
+        user_ctx.permissions
+        if user_ctx.permissions is not None
+        else _perm.effective(user_ctx.role, None)
+    )
+    if perms.get(WORKBOOK_UPLOAD_ACTION, False) and perms.get("data_profit", False):
+        return True
+    return is_project_workbook_editor(db, project_id=project_id, user_ctx=user_ctx)
 
 
 def is_project_workbook_editor_locked(
@@ -209,7 +263,7 @@ def is_project_workbook_editor_locked(
     )
     if managed is not None:
         return True
-    if user_ctx.salesperson_name:
+    if user_ctx.salesperson_name and _salesperson_has_profit_key(user_ctx):
         return project.salesperson == user_ctx.salesperson_name
     return False
 

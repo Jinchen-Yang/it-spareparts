@@ -30,6 +30,7 @@ from app.api.maintenance_expense_collection_workbook import (
     _read_upload_with_takeover,
     _require_profit_visibility,
 )
+from app.api.maintenance_boss_board import contract_no_filter
 from app.api.maintenance_project_scope import (
     require_maintenance_project_access,
     resolve_visible_project_ids,
@@ -51,6 +52,7 @@ from app.services import maintenance_expense_collection_workbook as ec
 from app.services import maintenance_collection_milestone_restore as milestone_restore
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_workbook_renderer
+from app.services.maintenance_expense_integrity import normalize_contract_no
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
@@ -78,25 +80,18 @@ def _require_master_edit(
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> None:
-    """项目总表上传/校验门（2026-09-02 拍板）。
+    """项目总表上传/校验门（D-03，2026-09-02 拍板）。
 
-    管理员/全量账号走既有 action 键（含 data_profit）；
-    项目负责人（primary_manager 挂靠）与项目销售（canonical salesperson）
-    对本人项目拥有全量编辑权（含成本/合同额列——当日拍板放开）。
+    管理员/全量账号走既有 action 键（含 data_profit）；其余按 D-03 原句：
+    「项目负责人对本人项目工作簿全部字段可见可改（含成本与合同额）；销售限
+    本人项目，成本与合同额仍受 data_profit 利润键控制」——V2 总表整本带成本列，
+    所以没有利润键的销售不放行。判定本体在
+    ``maintenance_project_assignments.can_edit_master_workbook``，展示板项目卡
+    与稳定项目详情向前端下发的同名字段用的是同一函数。
     """
-    if not config.ENABLE_RBAC or ctx.role == "admin":
-        return
-    from app import permissions as _perm
     from app.services import maintenance_project_assignments as _assignments
 
-    perms = (
-        ctx.permissions
-        if ctx.permissions is not None
-        else _perm.effective(ctx.role, None)
-    )
-    if perms.get(_ACTION_KEY, False) and perms.get("data_profit", False):
-        return
-    if _assignments.is_project_workbook_editor(
+    if _assignments.can_edit_master_workbook(
             db, project_id=project_id, user_ctx=ctx):
         return
     raise HTTPException(
@@ -111,11 +106,12 @@ def _require_contract_amount_manage(
     db: Session | None = None,
     project_id: str | None = None,
 ) -> None:
-    """合同额改单元格门槛（2026-09-02 拍板放开到项目负责人/销售）。
+    """合同额改单元格门槛（D-03，2026-09-02 拍板放开到项目负责人）。
 
     仍要求可追责的实名系统账号；权限二选一：
     管理口径（action_maintenance_project_manage + data_profit）或
-    本项目负责人/销售（此时 project_id/db 必填）。
+    本项目负责人 / 持利润键的本项目销售（``is_project_workbook_editor``，
+    此时 project_id/db 必填）——D-03：销售的合同额仍受 data_profit 控制。
     """
     if (ident.get("authn") != "sys_user" or ident.get("fb")
             or not ident.get("sub")):
@@ -383,7 +379,8 @@ def download_project_master(
 ):
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
-    # 2026-09-02 拍板：项目负责人/销售对本人项目全量可见（含成本列）。
+    # D-03：负责人对本人项目全量可见（含成本列）；销售的成本仍受 data_profit
+    # 控制——无利润键的销售在 is_project_workbook_editor 里就不算编辑者。
     if not config.ENABLE_RBAC or ctx.role == "admin":
         pass
     else:
@@ -565,10 +562,50 @@ def restore_collection_milestones(
     return payload
 
 
+_ROWS_DEFAULT_PAGE_SIZE = 20
+
+
+def _filter_and_page_lines(
+    rows: list,
+    *,
+    order_no: str | None,
+    contract_no: str | None,
+    page: int | None,
+    page_size: int | None,
+) -> tuple[list, int, int | None]:
+    """03 行级的服务端过滤 + 分页（#259）：返回 ``(本页行, 过滤后真实总数, 生效页长)``。
+
+    过滤在 ``_assigned_lines`` 之后按 Python 做（高风险服务不动）：需求单号精确
+    相等；合同号走报销归属同一把 ``normalize_contract_no`` 尺子（去空白、大写、
+    去 ``XSDD-``）。``page`` 省略 = 全量返回，旧调用方与 Excel 往返不受影响，
+    此时 ``page_size`` 被忽略、回显 None；给了 ``page`` 才回显真正切片用的页长
+    （省略页长时是默认值，不是 None）。
+    """
+    if order_no is not None:
+        rows = [item for item in rows if item[1].order_no == order_no]
+    if contract_no is not None:
+        want = normalize_contract_no(contract_no)
+        rows = [
+            item for item in rows
+            if normalize_contract_no(item[1].linked_sales_order_no) == want
+        ]
+    total = len(rows)
+    if page is None:
+        return rows, total, None
+    size = page_size or _ROWS_DEFAULT_PAGE_SIZE
+    return rows[(page - 1) * size:page * size], total, size
+
+
 @router.get(_MASTER + "/rows")
 def list_master_rows(
     project_id: str = Path(..., min_length=1, max_length=36),
     sheet: str = Query(..., description="sheet 名，当前支持 03_备件订单"),
+    order_no: str | None = Query(
+        None, min_length=1, max_length=64, description="只看这张需求单（WBDD 单号精确相等）"),
+    contract_no: str | None = Depends(contract_no_filter),
+    page: int | None = Query(None, ge=1, description="省略＝全量返回（旧协议）"),
+    page_size: int | None = Query(
+        None, ge=1, le=200, description="只在给了 page 时生效，省略＝20"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -579,7 +616,10 @@ def list_master_rows(
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
     if (get_settings().maintenance_project_master_v2_enabled
             and sheet in {master.V2_SHEET_PARTS, master.SHEET_PARTS}):
-        rows = master._assigned_lines(db, project_id=project_id, window=None)
+        rows, total, page_size = _filter_and_page_lines(
+            master._assigned_lines(db, project_id=project_id, window=None),
+            order_no=order_no, contract_no=contract_no,
+            page=page, page_size=page_size)
         line_ids = [line.id for line, _order, _pid in rows]
         overrides = {
             item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
@@ -613,6 +653,7 @@ def list_master_rows(
                 "part_id": line.part_id,
                 "order_no": order.order_no,
                 "order_date": order.order_date.isoformat() if order.order_date else None,
+                "sales_order_no": order.linked_sales_order_no or "",
                 "pn_std": line.pn_std or line.pn_raw or "",
                 "description": line.description or "",
                 "qty": str(line.qty) if line.qty is not None else None,
@@ -653,7 +694,9 @@ def list_master_rows(
 
         return {
             "sheet": sheet,
-            "total": len(rows),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "rows": [_v2_row(line, order) for line, order, _pid in rows],
         }
     if sheet not in {master.SHEET_PARTS}:
@@ -662,7 +705,10 @@ def list_master_rows(
             {"code": "unsupported_sheet",
              "message": "当前仅支持 03_备件订单 行级查询"},
         )
-    rows = master._assigned_lines(db, project_id=project_id, window=None)
+    rows, total, page_size = _filter_and_page_lines(
+        master._assigned_lines(db, project_id=project_id, window=None),
+        order_no=order_no, contract_no=contract_no,
+        page=page, page_size=page_size)
     line_ids = [line.id for line, _order, _pid in rows]
     overrides: dict[int, MaintenanceManualCostOverride] = {}
     if line_ids:
@@ -716,7 +762,9 @@ def list_master_rows(
 
     return {
         "sheet": sheet,
-        "total": len(rows),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
         "rows": [_legacy_row(line, order) for line, order, _pid in rows],
     }
 
@@ -773,6 +821,9 @@ async def validate_project_master(
                     "to_project_id": project_id,
                 } for change in plan.assignment_changes],
                 "warnings": list(plan.warnings),
+                # D-02 作废优先：落在已作废行/单上的改动不生效、也不整本拒绝，
+                # 行级列明作废人/时间（apply 回执同字段）。
+                "voided_rows": [dict(item) for item in plan.voided_rows],
             }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:

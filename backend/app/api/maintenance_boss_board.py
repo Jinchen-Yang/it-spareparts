@@ -24,6 +24,7 @@ from app.security import (
 )
 from app.services import maintenance_boss_board as board
 from app.services import maintenance_project_export as project_export
+from app.services.maintenance_expense_integrity import normalize_contract_no
 
 router = APIRouter(
     prefix="/maintenance/boss-board",
@@ -336,8 +337,33 @@ def board_project(
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在或无权查看")
+    from app.services import maintenance_project_assignments as _assignments
+
+    # D-03：项目负责人/销售对本人项目可传总表。前端上传入口按这个服务端判定显示，
+    # 与 master-workbook 上传门是同一函数，不在客户端复算挂靠关系。
+    row["can_edit_master_workbook"] = _assignments.can_edit_master_workbook(
+        db, project_id=project_id, user_ctx=ctx,
+    )
     record_access_log(ctx, "boss_board_project", project_id, {})
     return row
+
+
+def contract_no_filter(
+    contract_no: str | None = Query(
+        None, min_length=1, max_length=64,
+        description="按挂靠销售订单号（XSDD）归一化相等过滤（#259）"),
+) -> str | None:
+    """合同筛选参数（#259）：去空白后为空的值一律 422。
+
+    空串在两条路由上含义不同——SQL 侧只配「挂靠号本身是空白」的单，Python 侧连
+    NULL 也配——与其各自猜，不如把它当成无效参数拒掉；想看全部就别传。
+    """
+    if contract_no is not None and not normalize_contract_no(contract_no):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "invalid_contract_no", "message": "合同号去空白后为空"},
+        )
+    return contract_no
 
 
 @router.get("/projects/{project_id}/orders")
@@ -346,6 +372,7 @@ def board_project_orders(
     project_id: str = Path(..., min_length=1, max_length=36),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
+    contract_no: str | None = Depends(contract_no_filter),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     ctx: UserContext = Depends(require_board_view),
@@ -363,7 +390,8 @@ def board_project_orders(
         # 冒充「这个项目没有单」（M0-B 改判后范围不再收敛，存在性校验必须自己做）
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在")
     return board.project_orders(db, user_ctx=ctx, project_id=project_id,
-                                page=page, page_size=page_size)
+                                page=page, page_size=page_size,
+                                contract_no=contract_no)
 
 
 @router.get("/orders/{source_order_id}/lines")

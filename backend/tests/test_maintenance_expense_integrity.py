@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import select, text
+from sqlalchemy import literal, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.db import engine
@@ -559,6 +559,9 @@ def test_normalize_contract_no_and_dual_amounts():
     assert ei.normalize_contract_no("XSDD-20221008 0165") == "202210080165"
     assert ei.normalize_contract_no(None) == ""
     assert ei.normalize_contract_no("") == ""
+    # NBSP 族（Excel 粘来的不断行空格）同样算空白
+    assert ei.normalize_contract_no("xsdd-2026\u00a00828-0120") == "20260828-0120"
+    assert ei.normalize_contract_no("\u00a0") == ""
 
     assert ei.dual_amounts(Decimal("100"), "default_ex") == (
         Decimal("100.00"), Decimal("113.00"))
@@ -716,3 +719,24 @@ def test_sync_attribution_create_noop_change_and_move(db):
         ei.sync_attribution_from_raw(
             db, raw=raw, project_id="ei-sync-p2",
             status_mapping_version="ei-sync-v1")
+
+
+def test_normalized_contract_no_sql_strips_every_python_whitespace(db):
+    """#259 修正 (a)：SQL 孪生与 normalize_contract_no 剥同一套空白。
+
+    PG ARE 的 ``\\s`` 是 [[:space:]]，不含 NBSP U+00A0 / U+202F 这类 Excel 粘来
+    的空白；Python 的 ``\\s`` 含。两侧不一致时，看板需求单（SQL 过滤）与 03 行级
+    （Python 过滤）对同一个合同号会给出不同答案。逐字符对照 Python 的空白集，
+    红线：修正前 U+001C-001F / U+0085 / U+00A0 / U+2007 / U+202F 在 PG 侧不剥。
+    """
+    mismatches = []
+    for cp in range(0x10000):
+        blank = chr(cp)
+        if not blank.isspace():
+            continue
+        value = f"{blank}xsdd-2026{blank}0828-0120{blank}"
+        got = db.execute(
+            select(ei.normalized_contract_no_sql(literal(value)))).scalar_one()
+        if got != ei.normalize_contract_no(value):
+            mismatches.append(f"U+{cp:04X}")
+    assert mismatches == []

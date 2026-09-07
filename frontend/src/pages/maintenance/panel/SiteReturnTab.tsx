@@ -38,9 +38,20 @@ function idempotencyKey(): string {
 interface SiteReturnRow {
   issueLineId: string;
   issue: SiteIssueDocument;
-  line: SiteIssueLine;
+  /**
+   * null = 整单作废后的摘要行：面板作废把明细一并软作废、search 只回活行，
+   * 没有这一行用户就无从核对「作废成功了没有」。
+   */
+  line: SiteIssueLine | null;
   obligation: MaintenanceReturnObligation | null;
   returns: MaintenanceBadReturn[];
+}
+
+function formatVoidedAt(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return value;
+  return at.toLocaleString("zh-CN", { hour12: false });
 }
 
 async function fetchAllRows<T>(
@@ -61,7 +72,9 @@ async function fetchAllRows<T>(
 }
 
 function returnStatus(row: SiteReturnRow): { label: string; color: string } {
-  if (row.issue.workflow_status === "void") return { label: "领用已作废", color: "default" };
+  if (row.issue.workflow_status === "void" || !row.line) {
+    return { label: "领用已作废", color: "default" };
+  }
   if (row.line.no_return === true || row.obligation?.classification === "exempt") {
     return { label: "免返", color: "blue" };
   }
@@ -137,8 +150,18 @@ export function SiteReturnTab({
           returns.set(line.obligation_id, current);
         }
       }
-      setRows(issues.flatMap((issue) =>
-        issue.lines.map((line) => {
+      setRows(issues.flatMap((issue): SiteReturnRow[] => {
+        if (issue.workflow_status === "void" && !issue.lines.length) {
+          // 整单作废后没有活行：给一行摘要（单号/日期/作废时间），不参与任何合计
+          return [{
+            issueLineId: `void:${issue.issue_id}`,
+            issue,
+            line: null,
+            obligation: null,
+            returns: [],
+          }];
+        }
+        return issue.lines.map((line) => {
           const obligation = obligations.get(line.issue_line_id) ?? null;
           return {
             issueLineId: line.issue_line_id,
@@ -147,8 +170,8 @@ export function SiteReturnTab({
             obligation,
             returns: obligation ? returns.get(obligation.obligation_id) ?? [] : [],
           };
-        }),
-      ));
+        });
+      }));
       return true;
     } catch (err) {
       if (seq === requestSeq.current) {
@@ -183,6 +206,7 @@ export function SiteReturnTab({
   const linesPerIssue = useMemo(() => {
     const counts = new Map<string, number>();
     for (const row of rows) {
+      if (!row.line) continue; // 已作废摘要行不是明细，不计入
       counts.set(row.issue.issue_id, (counts.get(row.issue.issue_id) ?? 0) + 1);
     }
     return counts;
@@ -241,12 +265,22 @@ export function SiteReturnTab({
             title: "领用状态",
             render: (_value, item) => {
               const status = ISSUE_STATUS[item.issue.workflow_status];
-              return <Tag color={status?.color}>{status?.label ?? item.issue.workflow_status}</Tag>;
+              const voidedAt = item.line ? null : formatVoidedAt(item.issue.voided_at);
+              return (
+                <Space direction="vertical" size={0}>
+                  <Tag color={status?.color}>{status?.label ?? item.issue.workflow_status}</Tag>
+                  {voidedAt ? (
+                    <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>
+                      作废于 {voidedAt}
+                    </span>
+                  ) : null}
+                </Space>
+              );
             },
           },
-          { title: "PN", render: (_value, item) => raw(item.line.pn) },
-          { title: "SN", render: (_value, item) => raw(item.line.serial_number) },
-          { title: "领用数量", render: (_value, item) => raw(item.line.quantity) },
+          { title: "PN", render: (_value, item) => raw(item.line?.pn) },
+          { title: "SN", render: (_value, item) => raw(item.line?.serial_number) },
+          { title: "领用数量", render: (_value, item) => raw(item.line?.quantity) },
           {
             title: "应返数量",
             render: (_value, item) => raw(item.obligation?.required_quantity),

@@ -4,6 +4,10 @@
 - 日期：2026-08-09
 - 范围：来源维保单检索、成本与库存推导、项目视图、导出、往返工作簿
 
+> **状态补记（2026-09-06）：UI 层被 D-12 取代（2026-08-19 拍板），API 保留。**
+> 前端一键作废统一走 `POST /maintenance/demands/void-fast`（单事务、跳过 7 秒 arm 窗口，保留行数上限、版本 digest 冲突检测、整批零删除、实名操作者与审计）；本文第 3、4 节描述的两阶段 `delete-intents` API（复核快照 → 7 秒等待 → HTTP 425）保留不动，但无页面调用。第 1、2、5 节（删除单位、唯一有效读边界、权限 / 审计 / 恢复）仍是现行口径。详见 `docs/decisions/0001-维保整改八条口径.md` D-12；正文按原样保留，不改写。
+> 补记事实（2026-09-06）：第 2 节「唯一有效读边界」对稳定读者（成本 / 导出 / 展示板 / 项目总表，经 `active_demand_condition`）的生效，以及第 5 节恢复时的成本失效，都受 `maintenance_cutover_enabled` 开关控制——开关关闭时 `active_demand_condition` 返回 `true()`、`restore_demand` 返回 `cost_state="stable_unchanged"`（`backend/app/services/maintenance_demands.py`）；该开关默认 `false`（`backend/app/config.py`、`docker-compose.yml`、`.env.example`）。挂靠停用不受开关控制。本注只记录代码事实，不断言生产环境取值。
+
 ## 背景
 
 历史导入中存在重复或不应继续参与经营计算的 WBDD。直接物理删除会同时破坏原始追溯、项目归属和审计；只在当前页面隐藏则会让成本、库存、导出等口径继续使用该单。跨页批量操作还存在误勾、页面倒计时被绕过和复核后源数据变化等风险。
