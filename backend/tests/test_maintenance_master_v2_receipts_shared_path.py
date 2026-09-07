@@ -1,7 +1,8 @@
 """05_实收回款经项目总表（V2）走共享写路径的契约：作废优先、重复月份、状态列。
 
-复现自评审探针（V2P1 / V2P2 / V2P3）。V2 解析器（高风险模块）不判同合同同月重复、
-不校验状态列、把落在已作废月份上的新行当 UPDATE 送来；守卫全部落在共享写路径
+复现自评审探针（V2P1 / V2P2 / V2P3，以及 09-07 再复核的状态留空）。V2 解析器
+（高风险模块）不判同合同同月重复、不校验状态列、把落在已作废月份上的新行当 UPDATE
+送来、状态留空传 None（与独立 05 同口径）；守卫全部落在共享写路径
 ``maintenance_expense_collection_workbook.apply``，总表只把 05 的行级回执并进
 ``voided_rows``。这里只从总表 HTTP 入口证明，不测解析器内部。
 """
@@ -90,6 +91,13 @@ def _rows(db):
 
 def _audits(db):
     return [(a.action, a.entity_id) for a in db.scalars(
+        select(MaintenanceProjectOperationAudit)
+        .where(MaintenanceProjectOperationAudit.entity_type == "collection")
+        .order_by(MaintenanceProjectOperationAudit.id))]
+
+
+def _audit_reasons(db):
+    return [(a.action, a.entity_id, a.reason) for a in db.scalars(
         select(MaintenanceProjectOperationAudit)
         .where(MaintenanceProjectOperationAudit.entity_type == "collection")
         .order_by(MaintenanceProjectOperationAudit.id))]
@@ -192,3 +200,82 @@ def test_v2_free_text_status_is_a_422_receipt_not_a_500(db, monkeypatch):
     db.expire_all()
     assert _rows(db) == [(date(2026, 6, 1), "confirmed", Decimal("82325.40"), 1)]
     assert _audits(db) == []
+
+
+def _exported_months(ws, headers):
+    return {str(ws.cell(r, headers["报告月份"]).value or "")
+            for r in range(2, ws.max_row + 1)}
+
+
+def test_v2_blank_status_on_a_hidden_unconfirmed_month_keeps_it_unconfirmed(db, monkeypatch):
+    """红线：05 导出只带 confirmed 行，7 月 unconfirmed 对上传者不可见；补一行 7 月、
+    状态留空，以前 V2 解析器把空格子折成 confirmed，绕开共享写路径的「留空 = 沿用原
+    状态」，7 月被静默确认（版本 3→4、审计「状态 unconfirmed→confirmed」）。
+
+    共享路径口径（与独立 05 上传一致）：留空 = 只改填了的列、不改状态。所以累计
+    90000→95000 照写（版本 3→4、一条 update 审计只提累计），7 月仍是 unconfirmed。"""
+    project, contract, _june = _project_with_receipt(db)     # 6 月 82325.40 confirmed
+    july = _seed_month(db, project, contract, date(2026, 7, 1), "90000.00",
+                       status="unconfirmed")
+    client = _v2_client(db, monkeypatch)
+    wb, ws, headers = _receipt_sheet(client, project)
+    assert "2026-07" not in _exported_months(ws, headers)     # 未确认月不导出
+    _add_row(ws, headers, contract.contract_no, "2026-07", 95000)   # 状态留空
+
+    resp = _apply(client, project, wb)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["voided_rows"] == []
+    db.expire_all()
+    assert _rows(db) == [
+        (date(2026, 6, 1), "confirmed", Decimal("82325.40"), 1),
+        (date(2026, 7, 1), "unconfirmed", Decimal("95000.00"), 4),
+    ]
+    ((action, entity_id, reason),) = _audit_reasons(db)
+    assert (action, entity_id) == ("update", july.collection_id)
+    assert "累计 90000.00→95000.00" in reason
+    assert "状态" not in reason
+
+
+def test_v2_blank_status_with_unchanged_amount_on_a_hidden_unconfirmed_month_writes_nothing(db, monkeypatch):
+    """评审探针原样：7 月 unconfirmed 90000，补一行 7 月 90000、状态留空。原样回传不算
+    改动——以前这份文件把 7 月翻成 confirmed（版本 3→4）；现在版本不动、不落审计。"""
+    project, contract, _june = _project_with_receipt(db)
+    _seed_month(db, project, contract, date(2026, 7, 1), "90000.00", status="unconfirmed")
+    client = _v2_client(db, monkeypatch)
+    wb, ws, headers = _receipt_sheet(client, project)
+    _add_row(ws, headers, contract.contract_no, "2026-07", 90000)   # 状态留空
+
+    resp = _apply(client, project, wb)
+
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    assert _rows(db) == [
+        (date(2026, 6, 1), "confirmed", Decimal("82325.40"), 1),
+        (date(2026, 7, 1), "unconfirmed", Decimal("90000.00"), 3),
+    ]
+    assert _audits(db) == []
+
+
+def test_v2_explicit_confirmed_status_confirms_a_hidden_unconfirmed_month_with_audit(db, monkeypatch):
+    """确认是显式写出来的经营事实：状态格写 confirmed 才把 7 月 unconfirmed→confirmed，
+    版本 3→4，update 审计点名「状态 unconfirmed→confirmed」（累计没变就不提累计）。"""
+    project, contract, _june = _project_with_receipt(db)
+    july = _seed_month(db, project, contract, date(2026, 7, 1), "90000.00",
+                       status="unconfirmed")
+    client = _v2_client(db, monkeypatch)
+    wb, ws, headers = _receipt_sheet(client, project)
+    _add_row(ws, headers, contract.contract_no, "2026-07", 90000, status="confirmed")
+
+    resp = _apply(client, project, wb)
+
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    assert _rows(db) == [
+        (date(2026, 6, 1), "confirmed", Decimal("82325.40"), 1),
+        (date(2026, 7, 1), "confirmed", Decimal("90000.00"), 4),
+    ]
+    ((action, entity_id, reason),) = _audit_reasons(db)
+    assert (action, entity_id) == ("update", july.collection_id)
+    assert "状态 unconfirmed→confirmed" in reason
+    assert "累计" not in reason

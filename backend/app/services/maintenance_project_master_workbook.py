@@ -4502,7 +4502,11 @@ def _v2_parse_receipts(
             report_month=month, cumulative_amount=amount,
             receipt_reference=str(row[index["回款凭证号"]] or "").strip() or None,
             remark=str(row[index["备注"]] or "").strip() or None,
-            collection_status=str(row[index["状态"]] or "confirmed").strip() or "confirmed",
+            # 状态留空 = 不动（与独立 05 上传 ``_parse_collections`` 同口径）：传 None
+            # 让共享写路径沿用原状态。此前折成 confirmed，导出不带的 unconfirmed 月
+            # 补一行就被静默确认（D-16 09-07 再复核）。自由文本不在此拦，由共享写
+            # 路径按行拒成 422 invalid_status。
+            collection_status=str(row[index["状态"]] or "").strip() or None,
         ))
     return out
 
