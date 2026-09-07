@@ -13,6 +13,11 @@ import type {
  */
 export const MAINTENANCE_BATCH_TRANSFER_BASE = "/maintenance/project-batch-transfer";
 
+/**
+ * ambiguous 只表示项目归属有多个候选；D-16 的 fail-closed / 冲突行（seed_required、snapshot_voided、
+ * cross_file_same_contract、cumulative_unverifiable、constituent_blocked、collection_not_monotonic、
+ * order_level_fail_closed、receipt_conflict）一律是 invalid，计入「无效」筛选与计数。
+ */
 export type MaintenanceBatchMatchState =
   | "matched"
   | "ambiguous"
@@ -90,7 +95,10 @@ export interface MaintenanceBatchPreviewRow {
   filename: string;
   detected_sheet?: string | null;
   source_row: number;
-  /** 仅用于人工预览；apply 请求绝不回传。 */
+  /**
+   * 仅用于人工预览；apply 请求绝不回传。收款单 receipt_conflict 行额外带本文件值
+   * receipt_no / receipt_date / actual_amount（裁决体取这里，不解析文案）。
+   */
   canonical: Record<string, string | number | boolean | null>;
   normalized_key: string | null;
   idempotency_key: string;
@@ -107,11 +115,19 @@ export interface MaintenanceBatchPreviewRow {
   requires_confirmation?: boolean;
   /**
    * 必须与本行一起勾选的行键：更早月份的累计行、本行新建所依赖的覆盖行（D-16）。
-   * 只勾本行不勾依赖行，后端会整批拒绝；前端默认勾选时排除依赖未满足的行。
+   * 只在后端应用时会硬拒的行上出现（create / update / record_receipts），只勾本行不勾依赖行
+   * 后端整批拒绝；前端默认勾选时排除依赖未满足的行，覆盖行永不随依赖自动勾上。
    */
   depends_on_row_keys?: string[];
-  /** 人类可读提示（需同勾更早月份 / 依赖覆盖行 / 需先建账 / 累计无法核验），须可见渲染而非悬停。 */
+  /**
+   * 人类可读提示（需同勾更早月份 / 依赖覆盖行 / 需先建账 / 累计无法核验 / 台账冲突 / 已在台账），
+   * 须可见渲染而非悬停。
+   */
   hint_messages?: string[];
+  /**
+   * 既有值：覆盖行是 cumulative_amount / source / import_batch_id / updated_at；
+   * receipt_conflict 行是台账值 receipt_no / receipt_date / actual_amount。
+   */
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
   delta?: Record<string, unknown> | null;

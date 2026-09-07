@@ -93,7 +93,10 @@ const RECEIPT_HINTS: Record<string, { label: string; color: string }> = {
   stale_preview: { label: "预览已失效", color: "red" },
 };
 
-/** 这些码的说明必须可见（不能只放悬停）：后端 hint_messages 之外，也把 issue.message 直接展示。 */
+/**
+ * 这些码的说明必须可见（不能只放悬停）：后端 hint_messages 之外，也把 issue.message 直接展示。
+ * 台账冲突 / 已在台账的「台账 vs 本文件」句子对不能裁决的角色同样要可见，否则冲突只剩一个标签。
+ */
 const VISIBLE_HINT_CODES = new Set([
   "requires_earlier_months",
   "depends_on_update",
@@ -103,6 +106,9 @@ const VISIBLE_HINT_CODES = new Set([
   "snapshot_voided",
   "ledger_backfill",
   "stale_preview",
+  "receipt_conflict",
+  "receipt_known",
+  "known",
 ]);
 
 /** 台账冲突人工裁决只开放给 admin / boss（后端再校验实名账号与利润权限）。 */
@@ -156,6 +162,25 @@ function isStalePreviewError(error: unknown): boolean {
   if (status !== 409 && status !== 422) return false;
   const data = (error as { response?: { data?: unknown } })?.response?.data;
   return readDetailCode(data) === "stale_preview" || (readDetail(data) ?? "").includes("请重新预览");
+}
+
+/**
+ * apply 的终态失败：后端已把批次记为 failed（409 apply_conflict / stale_preview、
+ * 422 business_rule_violation / invalid_selection、未预期异常 5xx），预览凭证随之作废，
+ * 再点提交只会得到「该预览已失败或失效」。403（实名门禁 / 范围）不是终态：批次仍 processing，
+ * 去掉覆盖行重提或换实名账号都行，预览必须保留。
+ */
+function isTerminalApplyFailure(error: unknown): boolean {
+  const status = errorStatus(error);
+  return status === 409 || status === 422 || (status !== null && status >= 500);
+}
+
+function terminalApplyFallback(error: unknown): string {
+  if (isStalePreviewError(error)) return "预览后台账/快照已变化，请重新预览";
+  const status = errorStatus(error);
+  if (status === 409) return "预览已过期或数据版本已变化，请重新预览";
+  if (status === 422) return "批量提交被拒绝，本次预览已作废，请重新预览";
+  return "批量提交失败，本次预览已作废，请重新预览";
 }
 
 function canRuleReceiptConflict(): boolean {
@@ -238,20 +263,25 @@ function defaultSelectedKeys(rows: MaintenanceBatchPreviewRow[]): string[] {
   return rows.filter((row) => selected.has(row.row_key)).map((row) => row.row_key);
 }
 
+/** 行级提示标签：同一码在合同级 fail-closed 时可能重复出现（各月各一条），只渲染一个标签。 */
 function receiptHints(row: MaintenanceBatchPreviewRow) {
-  const issues = [...row.errors, ...row.warnings];
-  return issues
-    .filter((issue) => issue.code in RECEIPT_HINTS)
-    .map((issue) => ({ ...RECEIPT_HINTS[issue.code], code: issue.code, message: issue.message }));
+  const seen = new Set<string>();
+  const hints: { label: string; color: string; code: string; message: string }[] = [];
+  [...row.errors, ...row.warnings].forEach((issue) => {
+    if (!(issue.code in RECEIPT_HINTS) || seen.has(issue.code)) return;
+    seen.add(issue.code);
+    hints.push({ ...RECEIPT_HINTS[issue.code], code: issue.code, message: issue.message });
+  });
+  return hints;
 }
 
-/** 可见提示文本：后端 hint_messages 优先，再补上必须可见的码的 message（去重）。 */
+/** 可见提示文本：后端 hint_messages 优先，再补上必须可见的码的 message（按文本去重）。 */
 function hintTexts(row: MaintenanceBatchPreviewRow): string[] {
-  const texts = [...(row.hint_messages ?? [])];
+  const texts = new Set(row.hint_messages ?? []);
   [...row.errors, ...row.warnings].forEach((issue) => {
-    if (VISIBLE_HINT_CODES.has(issue.code) && !texts.includes(issue.message)) texts.push(issue.message);
+    if (VISIBLE_HINT_CODES.has(issue.code)) texts.add(issue.message);
   });
-  return texts;
+  return [...texts];
 }
 
 interface RulingSubject {
@@ -275,9 +305,10 @@ function dateText(value: unknown): string | null {
 }
 
 /**
- * 台账冲突行 → 裁决所需的合同 / 收款单号 / 文件值 / 台账值。canonical、before 有值时
- * 优先，否则从后端固定文案「台账 金额 / 日期，本文件 金额 / 日期」里取；取不到就留空，
- * 由界面拒绝提交——绝不猜值（REQ #56 / #57）。
+ * 台账冲突行 → 裁决所需的合同 / 收款单号 / 文件值 / 台账值。契约字段优先：
+ * canonical.{receipt_no, receipt_date, actual_amount} 是本文件值，before.{…} 是台账值；
+ * 老预览没有这些字段时才退回解析固定文案「台账 金额 / 日期，本文件 金额 / 日期」和
+ * receipt_key 前缀；取不到就留空，由界面拒绝提交——绝不猜值（REQ #56 / #57）。
  */
 function rulingSubject(row: MaintenanceBatchPreviewRow): RulingSubject | null {
   const conflict = [...row.errors, ...row.warnings].find((issue) => issue.code === "receipt_conflict");
@@ -286,6 +317,7 @@ function rulingSubject(row: MaintenanceBatchPreviewRow): RulingSubject | null {
   const contractNo = valueText(row.canonical.contract_no)
     ?? valueText(row.canonical.sales_order_no)
     ?? row.normalized_key;
+  // 旧形态退路：receipt_key 是「收款单号|订单号」，收款单号本身含 | 时会截断，故契约字段优先
   const receiptNo = valueText(row.canonical.receipt_no) ?? receiptKey?.split("|")[0] ?? null;
   if (!contractNo || !receiptNo) return null;
   const fileMatch = /本文件\s*(-?[\d.]+)\s*\/\s*(\d{4}-\d{2}-\d{2})/.exec(conflict.message);
@@ -425,12 +457,17 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     requestGeneration.current += 1;
   }, []);
 
-  const invalidatePreview = () => {
-    requestGeneration.current += 1;
+  /** 清掉预览、勾选与回执（文件保留），用户须重新预览。 */
+  const resetPreviewState = () => {
     setPreview(null);
     setResult(null);
     setSelectedRowKeys([]);
     setFilter("all");
+  };
+
+  const invalidatePreview = () => {
+    requestGeneration.current += 1;
+    resetPreviewState();
     setError(null);
   };
 
@@ -633,24 +670,22 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       message.success(`批量提交完成：成功 ${data.applied} 行`);
     } catch (reason) {
       if (generation !== requestGeneration.current) return;
-      if (isStalePreviewError(reason)) {
-        // 预览后台账/快照已变化：预览凭证作废，清掉预览与勾选（保留文件）让用户重新预览
-        setPreview(null);
-        setResult(null);
-        setSelectedRowKeys([]);
-        setFilter("all");
+      if (isTerminalApplyFailure(reason)) {
+        // 后端已把批次记为 failed（stale_preview / apply_conflict / 422 业务拒绝 / 5xx）：预览凭证作废，
+        // 清掉预览与勾选（保留文件）让用户重新预览，而不是留着一个再点也只会 409 的死预览
+        resetPreviewState();
         setError(
-          `${await errorMessage(reason, "预览后台账/快照已变化，请重新预览")}——预览已清除，请重新点击「自动识别并预览」`,
+          `${await errorMessage(reason, terminalApplyFallback(reason))}——预览已清除，请重新点击「自动识别并预览」`,
         );
         return;
       }
-      const status = errorStatus(reason);
+      // 403 不是终态（实名门禁 / 项目范围）：批次仍在，预览与勾选保留，按后端原话提示
+      // （如「经营事实写入必须使用实名系统账号」），用户可去掉覆盖行重提或换实名账号；与裁决弹窗同一处理。
       setError(
-        status === 409
-          ? "预览已过期或数据版本已变化，请重新预览后再提交"
-          : status === 403
-            ? "当前账号没有批量导入权限"
-            : await errorMessage(reason, "批量提交失败，请稍后重试"),
+        await errorMessage(
+          reason,
+          errorStatus(reason) === 403 ? "当前账号没有批量导入权限" : "批量提交失败，请稍后重试",
+        ),
       );
     } finally {
       if (generation === requestGeneration.current) setApplying(false);
@@ -707,14 +742,14 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         return (
           <Space direction="vertical" size={2}>
             <Space size={4} wrap>
-              {hints.map((hint) => (
-                <Tag key={hint.code} color={hint.color} title={hint.message}>{hint.label}</Tag>
+              {hints.map((hint, index) => (
+                <Tag key={`${hint.code}-${index}`} color={hint.color} title={hint.message}>{hint.label}</Tag>
               ))}
             </Space>
             {overwrite ? <Text type="warning" title={overwrite}>{overwrite}</Text> : null}
-            {/* 依赖月份 / 建账 / 核验类说明必须可见，不能只靠悬停 */}
-            {texts.map((hint) => (
-              <Text key={hint} type="secondary" style={{ display: "block" }}>{hint}</Text>
+            {/* 依赖月份 / 建账 / 核验 / 台账冲突类说明必须可见，不能只靠悬停 */}
+            {texts.map((hint, index) => (
+              <Text key={`${index}-${hint}`} type="secondary" style={{ display: "block" }}>{hint}</Text>
             ))}
             {subject ? (
               <Button size="small" danger onClick={() => openRuling(row)}>
