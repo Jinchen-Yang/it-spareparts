@@ -1892,6 +1892,41 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 "receipt_no": receipt_no,
                 "issues": [],
             }
+            # 归属先于校验（2026-09-08）：收款单导出是全公司的，实拍 298 行里 297 行是
+            # 备件销售 / 销售换货 / 租赁 / 整机销售。这些订单没有维保合同，本来就一分钱
+            # 都不会写进维保，却要先撞金额（退货负数）、状态、备注三道校验，报出一堆与
+            # 维保无关的硬错误，把真正该看的错误淹掉；「其他收款」那种有单号无订单的行
+            # 报的还是「销售订单号和收款单号不能为空」，与事实不符。
+            #
+            # 判定权威仍是**维保合同**而不是业务类型——业务类型只作分类、维保业务=是 才是
+            # 建项依据（2026-09-03 拍板，见 _is_explicit_maintenance_row）。这里只是把
+            # 已有的合同匹配提前，不新增任何按业务类型挡钱的规则。
+            if norm and norm not in safe_contracts and not all_contracts.get(norm):
+                base.update(
+                    action="unmatched",
+                    issues=[_row_issue(
+                        row_no,
+                        "project_not_found",
+                        "销售订单未关联当前维保项目，本批跳过且不创建项目",
+                        severity="warning",
+                    )],
+                )
+                source_rows.append(base)
+                continue
+            if not norm and receipt_no:
+                base.update(
+                    action="unmatched",
+                    issues=[_row_issue(
+                        row_no,
+                        "receipt_without_order",
+                        f"收款单 {receipt_no} 没有销售订单（其他收款 / 预付款等），"
+                        "无法归属到维保合同，本批跳过",
+                        severity="warning",
+                    )],
+                )
+                source_rows.append(base)
+                continue
+
             try:
                 if not norm or not receipt_no:
                     raise BulkImportInvalid("销售订单号和收款单号不能为空")
@@ -2126,11 +2161,33 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         # conflicting duplicate, or a ledger conflict), calculating from only
         # the remaining rows would silently create a partial cumulative
         # snapshot.  Freeze every known month for that order as blocked instead.
-        blocked_norms = {
-            str(row.get("normalized_order_no") or "")
-            for row in source_rows
-            if row.get("action") == "error" and row.get("normalized_order_no")
-        }
+        # 连坐粒度是**收款单**，不是销售订单（2026-09-08）。一张收款单是一张资金凭证：
+        # 「退换货核销 / 平账」单的正腿和负腿天生落在不同销售订单上（实拍 10 张单，7 张
+        # 整单净额为 0、银行一分钱没动），按订单连坐永远够不着正腿——负腿被判无效丢掉，
+        # 正腿绿色、无警告、默认勾选，一点就写进台账和 confirmed 累计快照。任何一行不可
+        # 信，整张单涉及的订单都不该按剩下的行算累计。
+        orders_by_receipt: dict[str, set[str]] = defaultdict(set)
+        for row in source_rows:
+            receipt_no = str(row.get("receipt_no") or "")
+            norm = str(row.get("normalized_order_no") or "")
+            if receipt_no and norm:
+                orders_by_receipt[receipt_no].add(norm)
+        blocked_norms: set[str] = set()
+        # 自己有坏行的订单 → order_level_fail_closed；被同一张单的坏行牵连的 → receipt_level。
+        own_blocked: set[str] = set()
+        blocking_receipts: dict[str, set[str]] = defaultdict(set)
+        for row in source_rows:
+            if row.get("action") != "error":
+                continue
+            norm = str(row.get("normalized_order_no") or "")
+            if norm:
+                own_blocked.add(norm)
+                blocked_norms.add(norm)
+            receipt_no = str(row.get("receipt_no") or "")
+            for peer in orders_by_receipt.get(receipt_no, ()):
+                blocked_norms.add(peer)
+                if peer != norm:
+                    blocking_receipts[peer].add(receipt_no)
         blocked_operations: list[dict] = []
         for norm in sorted(blocked_norms):
             order_sources = [
@@ -2138,15 +2195,26 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 for row in source_rows
                 if row.get("normalized_order_no") == norm
             ]
+            if norm in own_blocked:
+                code = "order_level_fail_closed"
+                message = (
+                    f"销售订单 {norm} 存在无效/风险/冲突收款行，禁止从其余行计算部分累计"
+                )
+            else:
+                receipts_text = "、".join(sorted(blocking_receipts.get(norm, ())))
+                code = "receipt_level_fail_closed"
+                message = (
+                    f"收款单 {receipts_text} 存在无效/风险/冲突明细行，"
+                    f"整张单涉及的销售订单（含 {norm}）本批一律不入账——"
+                    "一张收款单整体成立或整体不成立，不按剩下的行算累计"
+                )
             issue = _row_issue(
-                min(int(row["row_no"]) for row in order_sources),
-                "order_level_fail_closed",
-                f"销售订单 {norm} 存在无效/风险/冲突收款行，禁止从其余行计算部分累计",
+                min(int(row["row_no"]) for row in order_sources), code, message
             )
             hard_issues.append(issue)
             for row in order_sources:
                 if not any(
-                    item.get("code") == "order_level_fail_closed"
+                    item.get("code") in {"order_level_fail_closed", "receipt_level_fail_closed"}
                     for item in row.get("issues") or []
                 ):
                     row.setdefault("issues", []).append(issue)
