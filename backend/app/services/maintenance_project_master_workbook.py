@@ -2134,9 +2134,16 @@ def _v2_merge_row(
     不报冲突**——正是 D-02 明令禁止、也是 09-02 事故的那一类。这里把未触碰
     的基线字段换成服务端现值，下游比对自然不再产生 diff。
 
-    注意：只对**在合并之后才读行**的调用方生效（03 的 refill、05）。04/06
-    在合并之前就把单元格解析成局部变量了，那两条路径的同类问题需要各自调整
-    解析顺序，不在本次修复范围。
+    调用方两条规则（2026-09-08 起 03/04/05/06 全部遵守）：
+
+    - 规则 A：凡属 ``base_fields`` 的列，**解析必须发生在本函数返回之后**，且调用方
+      必须把返回值绑定到名字并回写 ``row``。此前 04/06 把返回值只当布尔用、05 的
+      金额在合并前就解析好了，于是「只改一个备注」的上传会把他人改过的金额 / 数量 /
+      报销人 / 日期静默改回导出时的旧值，且因未触碰而不报冲突——``merge.guard`` 拿
+      server_values 登记，应用期 CAS 照样放行，救不了。
+    - 规则 B：用来**定位服务端实体的身份键**（如 05 的报告月份、实体ID）必须在合并
+      之前解析，且**绝不能**出现在 ``base_fields`` 里——rebase 会改写身份键，把行悄悄
+      漂到另一个月/另一条实体上，那比本 bug 更糟。
     """
     touched = _v2_touched_fields(
         row=row, index=index, base_fields=base_fields, baseline=baseline)
@@ -3881,13 +3888,33 @@ def _v2_parse_site(
                     )
                 continue
             server_values = _v2_site_row_values(existing_line, issue)
-            if not _v2_merge_row(
+            merged_row = _v2_merge_row(
                     sheet="06_领用返还", row_label=(
                         str(server_values.get("领用单号") or raw_id)),
                     entity_id=raw_id,
                     row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
-                    server_values=server_values, baseline=baseline, ctx=merge):
+                    server_values=server_values, baseline=baseline, ctx=merge)
+            if merged_row is None:
                 continue
+            # 未触碰的基线字段已换成服务端现值。下游 SiteReturnFlag 用的是**合并之前**
+            # 解析出来的局部量（:3761-3768），不重解析就会拿导出时的旧值静默盖掉他人
+            # 改动（D-02，2026-09-08 审查 P1）。remark 本来就从 row 读，换掉 row 即可。
+            #
+            # 注意重解析必须落在这里：上面的「作废优先」分支（D-02 / #319）要拿**用户
+            # 原始行**判「碰没碰」，喂 rebase 行会让「未触碰」永远成立、行级作废回执失效；
+            # 那段先 continue，走不到这里。手工新增分支（raw_id 空）没有基线可 rebase，
+            # 同样不受影响。
+            row = merged_row
+            issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
+            issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no,
+                                   label="领用")
+                          if _cell(row, index, "领用日期") not in (None, "") else None)
+            pn = str(_cell(row, index, "PN") or "").strip() or None
+            serial_number = str(_cell(row, index, "SN") or "").strip() or None
+            quantity = (_v2_decimal(_cell(row, index, "领用数量"), row_no=row_no,
+                                    label="领用数量")
+                        if _cell(row, index, "领用数量") not in (None, "") else None)
+            flag = str(_cell(row, index, "是否应返还") or "").strip()
             merge.guard(sheet=V2_SHEET_SITE, entity_id=raw_id,
                         row_label=str(server_values.get("领用单号") or raw_id),
                         values=server_values, fields=V2_SITE_BASE_FIELDS)
@@ -4170,11 +4197,32 @@ def _v2_parse_expenses(
                             fields=V2_EXPENSE_BASE_FIELDS)
                 voids.append(raw_id)
                 continue
-            if not _v2_merge_row(
+            merged_row = _v2_merge_row(
                     sheet="04_费用报销", row_label=row_label, entity_id=raw_id,
                     row=row, index=index, base_fields=V2_EXPENSE_BASE_FIELDS,
-                    server_values=server_values, baseline=baseline, ctx=merge):
+                    server_values=server_values, baseline=baseline, ctx=merge)
+            if merged_row is None:
                 continue
+            # 下游 ExpenseUpdate 两侧都得吃 rebase 值：既内联读 row（报销人 / 报销类别 /
+            # 费用分类 / 事由 / 流程状态 / 备注），又用**合并之前**解析出来的局部量
+            # （amount / inc / expense_date）。不重解析就会拿导出时的旧值静默盖掉他人
+            # 改动（D-02，2026-09-08 审查 P1）。
+            #
+            # 故意**不**重跑 contract_no 的 contract_not_found 校验：rebase 出的归集键
+            # 就是库里现存的值，写回去是 no-op；重跑它反而会新增一种 422——导出之后这条
+            # 报销被挪到了当前不可写的 XSDD，用户只改备注也会被顶回来。
+            # VOID 分支在上面 continue，CREATE 分支在 else 里（没有基线可 rebase），
+            # 两者都走不到这里。
+            row = merged_row
+            amount = _v2_decimal(
+                _cell(row, index, "未税金额"), row_no=row_no,
+                label="未税金额", allow_negative=True)
+            inc = (amount * (Decimal("1") + TAX_RATE)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ) if amount is not None else None
+            expense_date = (_v2_date(_cell(row, index, "报销日期"), row_no=row_no,
+                                     label="报销")
+                            if _cell(row, index, "报销日期") not in (None, "") else None)
             merge.guard(sheet=V2_SHEET_EXPENSE, entity_id=raw_id,
                         row_label=row_label, values=server_values,
                         fields=V2_EXPENSE_BASE_FIELDS)
@@ -4495,6 +4543,14 @@ def _v2_parse_receipts(
                 values=server_values, fields=V2_RECEIPT_BASE_FIELDS)
             # 同 03：下游 CollectionOp 直接读整行，必须读 rebase 后的值。
             row = merged_row
+            # 金额在合并**之前**解析过一次（与「先拿 month 查 existing」同一段），
+            # 那份是导出时的旧值；未触碰时必须改读 rebase 后的服务端现值，否则
+            # 「只改备注」的上传会把他人改过的累计实收静默改回去（2026-09-08 审查 P1）。
+            # month 不必重解析：它不在 V2_RECEIPT_BASE_FIELDS 里，rebase 不碰它；
+            # 而且它是查 existing 的身份键，必须先于合并解析——身份键永远不进基线字段。
+            amount = _v2_decimal(
+                row[index["累计实收金额（含税）"]], row_no=row_no,
+                label="累计实收金额", required=True)
         out.append(ec.CollectionOp(
             operation="UPDATE" if existing is not None else "CREATE",
             project_contract_id=(contract.project_contract_id if contract else ""),
