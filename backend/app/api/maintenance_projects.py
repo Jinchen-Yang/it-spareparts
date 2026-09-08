@@ -20,6 +20,7 @@ from app.security import (
     require_page,
 )
 from app.models.maintenance_project import MaintenanceProject
+from app.services import maintenance_business_type_backfill as business_type_backfill
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_catalog as catalog
@@ -441,3 +442,53 @@ def stable_project_overview(
         )
     )
     return payload
+
+
+class BusinessTypeBackfillApply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@router.get("/business-type-backfill/preview")
+def preview_business_type_backfill(
+    response: Response,
+    db: Session = Depends(get_db),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action("action_maintenance_project_manage", require_data="data_profit")
+    ),
+) -> dict:
+    """这一轮回填会填哪些、哪些冲突、哪些推不出来。只读，不写库。
+
+    生产 648 个项目里 647 个业务类型为空，卡墙的业务类型筛选因此一个也筛不出来。
+    回填从活跃挂靠的销售订单推，唯一才填、冲突交人工——先看清楚再决定要不要跑。
+    """
+
+    response.headers["Cache-Control"] = "no-store"
+    return business_type_backfill.preview(db)
+
+
+@router.post("/business-type-backfill/apply")
+def apply_business_type_backfill(
+    body: BusinessTypeBackfillApply,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action("action_maintenance_project_manage", require_data="data_profit")
+    ),
+) -> dict:
+    """按预览结果回填；冲突与推不出来的一个字都不动。
+
+    实名门禁与手工建档 / 补录同一条：这是批量改经营口径，必须落到具体的人。
+    应用内部会重新预览一次，不吃客户端传来的计划——避免「预览时能填、应用时已被
+    人工补过」这种把人工改动盖掉的窗口。
+    """
+
+    operated_by = _real_operator(db, ident)
+    result = business_type_backfill.apply(
+        db, operated_by=operated_by, reason=body.reason,
+    )
+    db.commit()
+    return result
