@@ -15,7 +15,7 @@ from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.etl import expense_void, loader, mapping, reader, sheet_selection
 from app.models.maintenance import FProjectExpense
 from app.etl.reader import ReaderError
-from app.etl.transform import TransformResult, transform
+from app.etl.transform import ErrorRec, TransformResult, transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
 from app.services import data_quality_amount_mismatch
 
@@ -357,6 +357,63 @@ def require_clean_workbook(loaded: LoadedWorkbook) -> None:
         reader.require_clean_columns(loaded.primary)
 
 
+def _dedupe_expense_lines_across_sheets(
+    result: TransformResult, line_sheets: list[str],
+) -> list[dict]:
+    """跨报销页同键：同值＝同一笔费用保留首次；**不同值＝事实冲突，两条都不要**。
+
+    2026-09-08 审查（P1）：此前只按 ``raw_line_id`` 去重、不比对行内容，注释里说的
+    「完全相同的行」并没有真的校验。于是同一笔报销在两页金额不同（100 / 900）时
+    静默保留第一页的 100、错误清单为空——最终入库金额由 Sheet 在工作簿里的先后
+    顺序决定，而不是任何业务事实。
+
+    同一张页内的同键重复本来就有守卫（``transform`` 的 ``composite_seen`` 报
+    ``duplicate_key``），跨页缺的正是这一道。冲突时两边都不进写入计划：替用户挑
+    一个就是替他改账，人必须自己去改表。
+    """
+
+    # 归属证明用的技术字段不参与比对：它们随页而变，不是业务事实。
+    ignored = {"_order_raw_id", "_sheet_name", "anomaly_flags"}
+    first: dict[str, tuple[str, int, dict]] = {}
+    conflicts: dict[str, list[tuple[str, dict]]] = {}
+    kept: list[tuple[str, dict]] = []
+    for position, (sheet_name, line) in enumerate(zip(line_sheets, result.lines)):
+        key = line["raw_line_id"]
+        prior = first.get(key)
+        if prior is None:
+            first[key] = (sheet_name, position, line)
+            kept.append((sheet_name, line))
+            continue
+        prior_sheet, _prior_position, prior_line = prior
+        diff = {
+            name: (prior_line.get(name), line.get(name))
+            for name in set(prior_line) | set(line)
+            if name not in ignored and prior_line.get(name) != line.get(name)
+        }
+        if not diff:
+            continue
+        conflicts.setdefault(key, []).append((sheet_name, line))
+        detail = "；".join(
+            f"{name}：{prior_sheet}={old!s} / {sheet_name}={new!s}"
+            for name, (old, new) in sorted(diff.items())
+        )
+        result.errors.append(ErrorRec(
+            0, "cross_sheet_conflict",
+            f"报销明细 {key} 在「{prior_sheet}」与「{sheet_name}」两页取值不同，"
+            f"两页都不入账，请改表后重传｜{detail}",
+            dict(line),
+            identity={
+                "raw_line_id": key,
+                "bxd_no": line.get("bxd_no"),
+                "line_no": line.get("line_no"),
+                "amount": line.get("amount"),
+            },
+        ))
+    if not conflicts:
+        return [line for _sheet_name, line in kept]
+    return [line for _sheet_name, line in kept if line["raw_line_id"] not in conflicts]
+
+
 def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
     """transform + 多报销页合并 + 跨页去重，同样只写一处（同上理由）。"""
     selection, expense_sheets, primary = (
@@ -368,6 +425,7 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
         if len(expense_sheets) > 1:
             for e in result.errors:
                 e.error_detail = f"[{expense_sheets[0].sheet_name}] {e.error_detail}"
+            line_sheets = [expense_sheets[0].sheet_name] * len(result.lines)
             for s in expense_sheets[1:]:
                 r = transform(s.df, mapping.EXPENSE, anchor=s.anchor)
                 for e in r.errors:
@@ -376,13 +434,11 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
                 result.rows_total += r.rows_total
                 result.rows_inactive += r.rows_inactive
                 result.rows_skipped_no_data += r.rows_skipped_no_data
+                line_sheets.extend([s.sheet_name] * len(r.lines))
                 result.lines.extend(r.lines)
                 result.expense_anchors.extend(r.expense_anchors)
-            # 跨页同键（完全相同的行/同单号行）＝同一笔费用，保留首次，防 upsert 撞键
-            seen_keys: set[str] = set()
-            result.lines = [ln for ln in result.lines
-                            if not (ln["raw_line_id"] in seen_keys
-                                    or seen_keys.add(ln["raw_line_id"]))]
+            result.lines = _dedupe_expense_lines_across_sheets(
+                result, line_sheets)
         extra_report = {
             "expense_sheets": [s.sheet_name for s in expense_sheets],
             "skipped_sheets": [f"{s.sheet_name}（{s.file_type}，此类数据请用氚云原生导出单独上传）"
