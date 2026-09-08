@@ -45,6 +45,76 @@ from app.services.query_filters import active_orders
 # 未归属桶的伪项目 ID（§4.5）：与真实 project_id 不可能冲突
 UNASSIGNED_BUCKET = "unassigned"
 
+# 业务类型筛选（2026-09-08 客户需求）。客户口径：维保只有三种业务类型——整体维保 /
+# 备件维保 / 算力运维；卡墙要能按业务类型筛，且与期限状态**叠加**而不是互斥。
+#
+# 参数值用 ASCII 码不用中文原文：库里 business_type 是自由文本、无枚举约束，
+# 中文直传会把脏值变体带进 URL；其余筛选参数（lifecycle / sort / card_status）
+# 也都是 ASCII 正则，保持一致。
+#
+# **默认不排除任何一档**（后端默认 all、前端默认全选）。2026-09-08 生产只读取证：
+# 648 个项目里 647 个 business_type 是 NULL，只有 1 个有值。「默认排除非维保」在
+# 今天的生产数据上会筛掉 0 个项目；而为了挡住把「未标注」也排除，会把卡墙筛空
+# ——那是 R5「项目不得静默消失」事故。
+BUSINESS_TYPE_LABELS: dict[str, str] = {
+    "overall": "整体维保",
+    "spare": "备件维保",
+    "computing": "算力运维",
+}
+# 显式别名表，**不做包含/模糊匹配**：「业务类型含 维保/运维/维修 即维保」正是
+# 2026-09-03 被明确否掉的逻辑（「单次维修」正好带「维修」）。别名是可测、可审计的。
+_BUSINESS_TYPE_ALIASES: dict[str, frozenset[str]] = {
+    code: frozenset({label}) for code, label in BUSINESS_TYPE_LABELS.items()
+}
+_KNOWN_BUSINESS_LITERALS: frozenset[str] = frozenset(
+    literal for names in _BUSINESS_TYPE_ALIASES.values() for literal in names
+)
+BUSINESS_TYPE_CODES: tuple[str, ...] = (
+    "overall", "spare", "computing", "other", "unlabeled",
+)
+_BT = "|".join(BUSINESS_TYPE_CODES)
+BUSINESS_TYPE_FILTER_PATTERN = rf"^(all|({_BT})(,({_BT}))*)$"
+
+
+def business_type_code(value: str | None) -> str:
+    """把库里的自由文本归到一个档位；空 / 只有空白 ⇒ unlabeled，有值未命中 ⇒ other。"""
+    text = (value or "").strip()
+    if not text:
+        return "unlabeled"
+    for code, literals in _BUSINESS_TYPE_ALIASES.items():
+        if text in literals:
+            return code
+    return "other"
+
+
+def _business_type_clause(spec: str):
+    """把 CSV 码串编译成 where 子句；不过滤时返回 None（默认路径 SQL 一条不多）。"""
+    if not spec or spec == "all":
+        return None
+    codes = {code for code in spec.split(",") if code}
+    if not codes or codes >= set(BUSINESS_TYPE_CODES):
+        return None
+    trimmed = func.btrim(MaintenanceProject.business_type)
+    blank = or_(
+        MaintenanceProject.business_type.is_(None),
+        trimmed == "",
+    )
+    clauses = []
+    for code in sorted(codes):
+        if code == "unlabeled":
+            clauses.append(blank)
+        elif code == "other":
+            # NULL 在 SQL 三值逻辑下两边都进不去，必须显式排除空值再取补集，
+            # 否则 647 个未标注项目会从所有档里一起消失。
+            clauses.append(and_(
+                MaintenanceProject.business_type.is_not(None),
+                trimmed != "",
+                trimmed.not_in(sorted(_KNOWN_BUSINESS_LITERALS)),
+            ))
+        else:
+            clauses.append(trimmed.in_(sorted(_BUSINESS_TYPE_ALIASES[code])))
+    return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
 # 铁律 3 白名单：聚合表达式只允许引用这些事实列。
 # 需求侧只认 qty/return_qty 与成本回填列；三源事实来自 boss_facts（各自源表）。
 AGGREGATE_SOURCE_COLUMNS: frozenset[str] = frozenset({
@@ -841,6 +911,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
              card_status_filter: str | None = None,
              date_from: date | None = None,
              date_to: date | None = None,
+             business_type: str = "all",
              allowed_project_ids: set[str] | None = None) -> dict:
     """全项目分页列表 + 未归属桶（§4.5）。
 
@@ -888,6 +959,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
     if allowed_project_ids is not None:
         filters.append(MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
+    # 必须在 payment_complete 候选预跑之前进入 filters：那一档要拿收敛后的候选集算，
+    # 两个筛选才是真叠加而不是先算完再交集。
+    business_type_clause = _business_type_clause(business_type)
+    if business_type_clause is not None:
+        filters.append(business_type_clause)
     if q_text:
         needle = q_text.strip()
         # 除项目名/编号外还命中 XSDD 合同号（#37：搜项目名、项目单号）
@@ -1041,6 +1117,29 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     total = int(db.execute(
         select(func.count()).select_from(base.subquery())).scalar_one())
 
+    # R5：隐藏必须可计数、可撤销。hidden = 同条件下去掉业务类型子句的候选数 − total，
+    # 不能拿全库总数硬减（那样切了期限档之后数字就不对了）。不过滤时不发这条 SQL，
+    # 默认路径的 SELECT 条数与改动前一致（perf 基线不动）。
+    business_type_hidden = 0
+    if business_type_clause is not None:
+        wide = (select(MaintenanceProject)
+                .outerjoin(window_stats,
+                           window_stats.c.project_id == MaintenanceProject.project_id)
+                .outerjoin(return_stats,
+                           return_stats.c.project_id == MaintenanceProject.project_id))
+        if budget_stats is not None:
+            wide = wide.outerjoin(
+                budget_stats,
+                budget_stats.c.project_id == MaintenanceProject.project_id,
+            )
+        wide = wide.where(*[f for f in filters if f is not business_type_clause])
+        if has_activity is True:
+            wide = wide.where(func.coalesce(window_stats.c.orders_n, 0) > 0)
+        elif has_activity is False:
+            wide = wide.where(func.coalesce(window_stats.c.orders_n, 0) == 0)
+        business_type_hidden = max(0, int(db.execute(
+            select(func.count()).select_from(wide.subquery())).scalar_one()) - total)
+
     if sort == "orders":
         order_by = (func.coalesce(window_stats.c.orders_n, 0).desc(),
                     MaintenanceProject.project_code)
@@ -1116,6 +1215,9 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             "project_id": proj.project_id,
             "project_code": proj.project_code,
             "display_name": proj.display_name,
+            # 原值 + 档位一起给：用户要能自证「这张卡为什么在 / 为什么不在」。
+            "business_type": proj.business_type,
+            "business_type_code": business_type_code(proj.business_type),
             "aliases": [
                 name for name in aliases.get(proj.project_id, [])
                 if project_names.display_name_identity(name)
@@ -1174,13 +1276,17 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
 
     # 未归属桶恒为一行（不静默丢单）：仅全范围账号可见（未归属单无「本人」范围）。
     # 搜索/生命周期筛选下不注入——桶不是搜索命中项，混入会污染结果集。
+    # 业务类型筛选下同样不注入：桶不是项目、没有业务类型，混进来会污染语义。
     if (allowed_project_ids is None and page == 1
-            and not q_text and lifecycle == "all"):
+            and not q_text and lifecycle == "all"
+            and business_type_clause is None):
         u_orders, u_lines = _window_counts(db, window, unassigned_only=True)
         out_rows.insert(0, {
             "project_id": UNASSIGNED_BUCKET,
             "project_code": UNASSIGNED_BUCKET,
             "display_name": "未归属（待人工确认）",
+            "business_type": None,      # 键集与项目行保持一致
+            "business_type_code": "unlabeled",
             "aliases": [],
             "peer_names": [],
             "lifecycle": "missing",
@@ -1213,6 +1319,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     return {"rows": out_rows, "total": total, "page": page,
             "page_size": page_size, "sort": sort,
             "sort_applied": sort,
+            "business_type": business_type,
+            "business_type_hidden": business_type_hidden,
             "window": {"from": window[0].isoformat(), "to": window[1].isoformat()}}
 
 
