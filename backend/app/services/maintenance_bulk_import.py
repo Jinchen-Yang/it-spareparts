@@ -1743,6 +1743,11 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     project_code=metadata["project_code"],
                     display_name=metadata["display_name"],
                     project_manager_id=manager_primary,
+                    # 业务类型早就从源表解析进 metadata 了，此前没往下传、就地丢弃：
+                    # 生产 648 个项目 647 个 business_type 为 NULL，卡墙的业务类型
+                    # 筛选一个也筛不出来。这是 D-05 认定的唯一正规建项来源，补上之后
+                    # 此后新建的 XSDD 项目自带业务类型（源表没填仍是 None，不猜）。
+                    business_type=metadata.get("business_type"),
                     reason=create_reason,
                     operated_by=operated_by,
                 )

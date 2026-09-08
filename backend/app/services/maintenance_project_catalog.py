@@ -38,6 +38,9 @@ def project_dict(project: MaintenanceProject) -> dict:
         "salesperson": project.salesperson,
         "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
+        # 业务类型（2026-09-08）：卡墙筛选的唯一判定列。生产 647/648 为空，
+        # 既靠建项写入补新项目，也靠这里的可编辑面把存量补回来。
+        "business_type": project.business_type,
         # 维保期限主数据（#51）：面板可显示、可编辑（#39）
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
@@ -133,6 +136,7 @@ def create_project(
     project_manager_id: str | None,
     reason: str,
     operated_by: str,
+    business_type: str | None = None,
 ) -> dict:
     clean_code = _clean_required(project_code, label="稳定项目编号", max_length=64)
     clean_name = _clean_required(display_name, label="项目名称", max_length=256)
@@ -140,6 +144,11 @@ def create_project(
         project_manager_id,
         label="项目经理标识",
         max_length=64,
+    )
+    # 不猜：源表没填就是空，落进「未标注」那一档，绝不按项目名或关键字倒推
+    # （业务类型只作分类、维保业务=是 才是建项依据，2026-09-03 拍板 / D-05）。
+    clean_business_type = _clean_optional(
+        business_type, label="业务类型", max_length=16,
     )
     clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
     project_names.lock_display_name_identities(db, [clean_name])
@@ -149,6 +158,7 @@ def create_project(
         project_code=clean_code,
         display_name=clean_name,
         project_manager_id=clean_manager,
+        business_type=clean_business_type,
         # 业务期限的权威来源尚未锁定；新主档必须显式暴露为待确认，不能猜。
         lifecycle_status="missing",
         is_active=True,
@@ -191,7 +201,8 @@ def update_project(
     operated_by: str,
 ) -> dict | None:
     allowed = {key: value for key, value in updates.items() if key in {
-        "display_name", "salesperson", "project_manager_id", "period_from", "period_to"
+        "display_name", "salesperson", "project_manager_id", "period_from",
+        "period_to", "business_type",
     }}
     if not allowed:
         raise MaintenanceProjectCatalogError("没有可修改的项目字段")
@@ -230,6 +241,11 @@ def update_project(
             allowed["project_manager_id"],
             label="项目经理标识",
             max_length=64,
+        )
+    if "business_type" in allowed:
+        # 传空串 = 改回未标注（填错了要能退回来，不能只进不出）。
+        project.business_type = _clean_optional(
+            allowed["business_type"], label="业务类型", max_length=16,
         )
     # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交）。期限双源 P1 修复后
     # project.period_* 是唯一事实源：统一走 canonical helper 同步 projection 投影，

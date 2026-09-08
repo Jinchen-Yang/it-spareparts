@@ -34,6 +34,8 @@ class StableProjectCreate(BaseModel):
     project_code: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=256)
     project_manager_id: str | None = Field(default=None, max_length=64)
+    # 业务类型（2026-09-08）：手工建档也能一次填对，不留新的「未标注」。
+    business_type: str | None = Field(default=None, max_length=16)
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -44,6 +46,10 @@ class StableProjectPatch(BaseModel):
     display_name: str | None = Field(default=None, max_length=256)
     salesperson: str | None = Field(default=None, max_length=64)
     project_manager_id: str | None = Field(default=None, max_length=64)
+    # 业务类型补录（2026-09-08）：生产 647/648 个项目未标注，没有这个入口它们
+    # 在界面上无法自救——卡墙的业务类型筛选也就永远只有「未标注」一档可用。
+    # 传空串 = 改回未标注。
+    business_type: str | None = Field(default=None, max_length=16)
     # 维保期限（#39/#51）：面板「编辑基本信息」可改起止日期
     period_from: date | None = None
     period_to: date | None = None
@@ -110,6 +116,7 @@ def create_stable_project(
             project_code=body.project_code,
             display_name=body.display_name,
             project_manager_id=body.project_manager_id,
+            business_type=body.business_type,
             reason=body.reason,
             operated_by=operated_by,
         )
