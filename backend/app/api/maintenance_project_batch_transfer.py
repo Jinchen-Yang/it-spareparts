@@ -140,6 +140,11 @@ class BatchDownloadRequest(BaseModel):
         default="name",
         pattern=r"^(attention|orders|name|known_cost|cost_ratio)$",
     )
+    # 所见即所得（2026-09-08）：批量移交下载与卡墙、项目清单导出共用一个筛选口径。
+    # 这是 lifecycle/card_status/sort 三条正则在仓库里的第四份拷贝，最容易漏——
+    # 漏了它，屏幕上筛出 3 个项目、下载下来是全量。
+    business_type: str = Field(
+        default="all", pattern=board.BUSINESS_TYPE_FILTER_PATTERN)
 
 
 def _require_board_view(
@@ -594,6 +599,7 @@ def download_transfer(
             lifecycle=body.lifecycle,
             card_status=body.card_status,
             sort=body.sort,
+            business_type=body.business_type,
             allowed_project_ids=(
                 maintenance_project_assignments.maintenance_scope_project_ids(
                     db, ctx

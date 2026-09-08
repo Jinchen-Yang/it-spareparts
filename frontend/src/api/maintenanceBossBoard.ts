@@ -96,6 +96,34 @@ export type BoardProjectLifecycle =
   | "payment_complete"
   | "all";
 export type BoardProjectSort = "attention" | "orders" | "name" | "known_cost" | "cost_ratio";
+/**
+ * 业务类型档位（2026-09-08）。维保只有三种业务类型（整体维保 / 备件维保 / 算力运维），
+ * 另加「非维保」与「未标注」两档。
+ *
+ * `unlabeled` 是**显式一档且默认选中**：生产 648 个项目里 647 个 business_type 为空，
+ * 把它排除掉等于把卡墙筛空（R5：项目不得静默消失）。
+ */
+export type BoardBusinessTypeCode =
+  | "overall"
+  | "spare"
+  | "computing"
+  | "other"
+  | "unlabeled";
+export const BOARD_BUSINESS_TYPE_CODES: BoardBusinessTypeCode[] = [
+  "overall", "spare", "computing", "other", "unlabeled",
+];
+export const BOARD_BUSINESS_TYPE_LABELS: Record<BoardBusinessTypeCode, string> = {
+  overall: "整体维保",
+  spare: "备件维保",
+  computing: "算力运维",
+  other: "非维保",
+  unlabeled: "未标注",
+};
+/** 全选 / 全不选都等于不过滤：与后端 `all` 同义，别把空选当成「筛掉一切」。 */
+export const boardBusinessTypeParam = (codes: BoardBusinessTypeCode[]): string =>
+  codes.length === 0 || codes.length === BOARD_BUSINESS_TYPE_CODES.length
+    ? "all"
+    : [...codes].sort().join(",");
 
 export interface BoardProjectRow {
   project_id: string;
@@ -107,6 +135,9 @@ export interface BoardProjectRow {
   peer_names?: string[];
   /** 回款已完成＝实收回款 ≥ 合同总额（含税）；仅持有合同财务权限的请求会返回该值。 */
   lifecycle: "ongoing" | "ended" | "missing" | "payment_complete";
+  /** 业务类型原值（库里是自由文本，可能为空）与归一后的档位。 */
+  business_type: string | null;
+  business_type_code: BoardBusinessTypeCode;
   /** 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值。 */
   period_from: string | null;
   period_to: string | null;
@@ -153,6 +184,13 @@ export interface BoardProjects {
   page: number;
   page_size: number;
   sort: string;
+  /** 本次请求实际生效的业务类型筛选（CSV 码串或 "all"）。 */
+  business_type?: string;
+  /**
+   * 被业务类型筛选挡掉的项目数（同条件下去掉该子句的候选数 − total）。
+   * R5：隐藏必须可计数、可撤销——前端据此常驻「已隐藏 N 个 · 查看全部」。
+   */
+  business_type_hidden?: number;
   window: BoardWindow;
 }
 
@@ -178,6 +216,8 @@ export interface BoardProjectExportInput {
   lifecycle?: BoardProjectLifecycle;
   card_status?: CardStatus;
   sort?: BoardProjectSort;
+  /** 所见即所得：导出必须带上与卡墙同一个业务类型筛选。 */
+  business_type?: string;
 }
 
 export interface BoardProjectExportDownload {
@@ -282,6 +322,7 @@ export const getBoardProjects = (params?: {
   card_status?: CardStatus;
   from?: string;
   to?: string;
+  business_type?: string;
 }) => api.get<BoardProjects>(`${BASE}/projects`, { params });
 
 export const searchBoardProjects = (body: {
@@ -291,6 +332,7 @@ export const searchBoardProjects = (body: {
   lifecycle?: string;
   sort?: string;
   card_status?: CardStatus;
+  business_type?: string;
 }) => api.post<BoardProjects>(`${BASE}/projects/search`, body);
 
 export const getBoardProjectExportOptions = () =>
