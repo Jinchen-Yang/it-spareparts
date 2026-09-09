@@ -96,12 +96,13 @@ def test_invalid_date_serials_fail_closed(value):
         master._v2_date(value, row_no=3, label="领用")
 
 
-def test_preflight_reports_dates_quantities_and_unknown_pns_together(db):
+@pytest.mark.parametrize("month_only", ["2025-04", "2025-4"])
+def test_preflight_reports_dates_quantities_and_unknown_pns_together(db, month_only):
     project, part, *_ = _make_project_with_line(db)
     wb = _book(db, project.project_id)
     first = _append(wb, "UNKNOWN-PN-A", when="4月21", qty=-1)
     second = _append(wb, "UNKNOWN-PN-B", when=None)
-    third = _append(wb, part.pn_std, when="2025-04")
+    third = _append(wb, part.pn_std, when=month_only)
     with pytest.raises(master.WorkbookError) as exc:
         master.validate_project_master_v2(db, project_id=project.project_id, data=_save(wb))
     assert exc.value.code == "invalid_site_rows"

@@ -30,7 +30,7 @@ def annotate(source: Path, destination: Path) -> list[int]:
         cell = cells[index["领用日期"] - 1]
         try:
             parsed = _v2_date(cell.value, row_no=cell.row, label="领用", epoch=wb.epoch)
-            incomplete = parsed is None or bool(re.fullmatch(r"\d{4}-\d{2}", str(cell.value).strip()))
+            incomplete = parsed is None or bool(re.fullmatch(r"\d{4}-\d{1,2}", str(cell.value).strip()))
         except WorkbookError:
             incomplete = True
         if not incomplete:
