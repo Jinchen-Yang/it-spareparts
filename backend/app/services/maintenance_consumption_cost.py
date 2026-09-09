@@ -514,11 +514,12 @@ def _pick_demand_unit(
             "维保需求单精确行（领用行关联的需求行）",
             list(exact[1].samples),
         )
-    same_order = by_order.get((project_id, issue_no or "", line.part_id))
+    demand_no = getattr(line, "demand_order_no", None) or issue_no
+    same_order = by_order.get((project_id, demand_no or "", line.part_id))
     if same_order is not None:
         return (
             same_order.unit_cost_ex_tax,
-            f"维保需求单同单同 PN（{issue_no}）",
+            f"维保需求单同单同 PN（{demand_no}）",
             list(same_order.samples),
         )
     fallback = by_part.get((project_id, line.part_id))
