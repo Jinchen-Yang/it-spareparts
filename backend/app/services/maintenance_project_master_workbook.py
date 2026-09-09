@@ -3763,7 +3763,7 @@ def _v2_site_preflight(db: Session, ws, index, merge: _V2MergeContext) -> None:
         try:
             parsed_date = _v2_date(raw_date, row_no=row_no, label="领用", epoch=ws.parent.epoch)
             if (is_new and parsed_date is None) or (
-                raw_date not in (None, "") and re.fullmatch(r"\d{4}-\d{2}", str(raw_date).strip())
+                raw_date not in (None, "") and re.fullmatch(r"\d{4}-\d{1,2}", str(raw_date).strip())
             ):
                 raise WorkbookError("invalid_date", f"第 {row_no} 行领用日期须填写完整年月日 YYYY-MM-DD（原值：{raw_date!r}）")
         except WorkbookError as exc:
