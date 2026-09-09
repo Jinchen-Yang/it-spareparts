@@ -1,14 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.28.0 release notes", () => {
-  it("publishes the payment-complete card wall bucket", () => {
-    expect(APP_VERSION).toBe("1.28.0");
+describe("v1.28.1 release notes", () => {
+  it("publishes site date parsing and automatic numbering", () => {
+    expect(APP_VERSION).toBe("1.28.1");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-04");
+    expect(LATEST.date).toBe("2026-09-09");
 
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/Excel 数值日期/);
+    expect(notes).toMatch(/自动编号/);
+    expect(notes).toMatch(/重复回传不重复入账/);
+    expect(notes).toMatch(/重新下载总表/);
+  });
+});
+
+describe("v1.28.0 release notes (archived)", () => {
+  it("keeps the payment-complete card wall bucket", () => {
+    const entry = CHANGELOG.find((item) => item.version === "1.28.0")!;
+    expect(entry.date).toBe("2026-09-04");
+    const notes = entry.items.join("\n");
     expect(notes).toMatch(/回款已完成/);
     expect(notes).toMatch(/不再出现在进行中\/已结束\/期限缺失/);
     expect(notes).toMatch(/同一口径/);
