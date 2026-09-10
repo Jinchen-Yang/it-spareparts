@@ -96,7 +96,7 @@ describe("import precheck adapter", () => {
     expect(post).toHaveBeenCalledWith("/import/precheck", expect.any(FormData), {
       params: { mode: "upsert" },
       signal: controller.signal,
-      timeout: 30_000,
+      timeout: 120_000,
     });
   });
 
@@ -233,7 +233,7 @@ describe("import precheck adapter", () => {
     expect(post).toHaveBeenNthCalledWith(1, "/import/precheck", precheckForm, {
       params: { mode: "skip" },
       signal: controller.signal,
-      timeout: 30_000,
+      timeout: 120_000,
     });
     expect(precheckForm.getAll("files")).toEqual([file]);
 
