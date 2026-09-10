@@ -281,7 +281,9 @@ export async function precheckImportFiles(
   const { data } = await api.post("/import/precheck", filesFormData(files), {
     params: { mode },
     signal,
-    timeout: 30_000,
+    // 氚云累积导出越滚越大，后端逐 cell 安全扫描可达数十秒（18.8MB 实测 94s）；
+    // 30s 会让正常的销售单预检直接报「超时」，给到 120s。
+    timeout: 120_000,
   });
   const result = normalizeImportPrecheck(data);
   if (result.contract === "v2"
