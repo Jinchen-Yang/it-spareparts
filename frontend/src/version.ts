@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.28.0";
+export const APP_VERSION = "1.28.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.28.1",
+    date: "2026-09-09",
+    items: [
+      "修复项目总表现地领用日期识别：支持 Excel 数值日期，缺少年月日时逐行提示，不再用需求单号中的日期覆盖实际领用日期",
+      "现场领用单号可留空，由系统自动编号；WBDD 需求单号单独关联，重复回传不重复入账，相同 PN 的多次实际消耗分别保留",
+      "回传预检集中提示日期、PN、数量等问题；首次上传后请重新下载总表，再修改已入账的领用记录",
+    ],
+  },
   {
     version: "1.28.0",
     date: "2026-09-04",
