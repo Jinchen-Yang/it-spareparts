@@ -13,8 +13,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 _REVISION = "f6b1d3e8a2c4"
 _PREVIOUS = "e4a8c2f6b1d9"
 # 2026-09-02 基座（fix/contract-total-inc-tax）：a8e4 期限回填迁移线性追加；
-# 2026-09-07 #288 收款单台账 b7d3 线性追加（D-16）。全链仍单 head。
-_HEAD = "b7d3f9a1c5e2"
+# 2026-09-07 #288 收款单台账 b7d3 线性追加（D-16）；
+# 2026-09-11 返还收货台账 d2f8b4e6c9a1 线性追加。全链仍单 head。
+_HEAD = "d2f8b4e6c9a1"
 
 
 def test_salesperson_override_revision_is_linear_single_head():
