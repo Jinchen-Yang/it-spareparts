@@ -3,11 +3,19 @@
 Single deployable app: **FastAPI backend** (`backend/`, Python · `uv` · Alembic · SQLAlchemy ·
 PostgreSQL) + **React/Vite/AntD frontend** (`frontend/`), shipped via Docker Compose. Backend
 tests run with `pytest` against a Postgres on `:5433`; CI runs backend pytest + frontend
-`tsc && vite build`. Work on a branch → PR → squash-merge → deploy (no auto-migration; run
-`alembic upgrade head` on deploy).
+`tsc && vite build`. Branch → PR → squash-merge → deploy describes the repo's lifecycle
+**stages**, not authorization: commit/push on feature branches is fine; **merging, deploying
+and any production access require explicit user approval.** Shared workflow for all agents:
+`.ai/AI_WORKFLOW.md` (read it before non-trivial work).
 
 To **run / drive the app locally** (launch the stack, smoke the API, screenshot the UI), use the
 `run-it-spareparts` skill (`.claude/skills/run-it-spareparts/`).
+
+Other repo skills (`.claude/skills/`, shared with OpenCode; sources in `PROVENANCE.md`):
+`db-change-safety` (DB/migration changes), `vertical-slice-contract` (cross-layer features),
+`regression-gate` (done-means-verified), plus vendored `supabase-postgres-best-practices`
+(generic PG only), `vercel-react-best-practices` (React 18 + Vite only),
+`web-design-guidelines` (pinned rules, AntD conventions win).
 
 ## Agent skills
 

@@ -12,12 +12,11 @@
 ### Step 1 — 读取项目上下文
 
 ```
-Read: .ai/PROJECT_CONTEXT.md   → 了解产品目标、当前阶段、约束
-Read: .ai/ARCHITECTURE.md       → 了解系统架构、模块职责、分层规则
-Read: .ai/TECH_STACK.md         → 了解技术栈、版本、选型原因
-Read: .ai/DEVELOPMENT_RULES.md  → 了解编码规范、禁止事项
-Read: .ai/BUSINESS_RULES.md     → 了解业务规则（库存计算、价格逻辑等）
-Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
+Read: .ai/AI_WORKFLOW.md          → 本协议
+Read: CONTEXT.md                  → 领域语言与数据可信边界
+Read: docs/decisions/0001-维保整改八条口径.md → 业务拍板 D-01…D-16（后拍板覆盖先拍板）
+按需: docs/maintenance/ARCHITECTURE.md / REQUIREMENTS.md、docs/adr/
+本机若有(不入 Git): HANDOFF.md、memory/MEMORY.md（生产拓扑、部署陷阱、历史修复链）
 ```
 
 ### Step 2 — 分析当前状态
@@ -26,7 +25,7 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 - 检查当前 git 分支和状态
 - 读取要修改的文件（Read，不要假设内容）
 - 理解上下游依赖（谁调这个模块，这个模块调谁）
-- 检查是否有相关的 ADR（.ai/DECISIONS.md）
+- 检查是否有相关的架构/业务决策（`docs/adr/`、`docs/decisions/`）
 ```
 
 ### Step 3 — 确认任务边界
@@ -40,7 +39,6 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 
 ### Step 4 — 输出实施计划（Plan-First 协议）
 
-> **完整协议见 `.claude/skills/plan-first/SKILL.md`。**
 > **触发条件**：涉及 >1 文件、新增功能/API/页面、Bug 修复、重构、数据模型变更。
 > **例外**：单行 typo、格式化、用户明确说"直接做"。
 
@@ -68,7 +66,9 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 - 改动文件数 / 是否架构变动 / 是否破坏接口 / 是否需要迁移 / 已知风险
 ```
 
-**禁止直接修改代码直到用户确认计划。**
+**计划确认规则（按风险分级）**：输出计划后，常规实现直接继续执行，不必等待用户逐字批准。
+只有当计划涉及以下内容时，先停下等用户决策：业务口径变化、架构变更、破坏性接口改动、
+破坏性/批量数据操作、生产访问。实现细节的最小安全选择由 Agent 自行决定。
 
 ---
 
@@ -110,19 +110,20 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 3. **检查 lint**（如配置了的话）
 
 4. **更新文档（留痕协议，硬性要求）**
-   - 修改了 API → 更新 `.ai/API_DESIGN.md`
-   - 修改了架构 → 更新 `.ai/ARCHITECTURE.md` + 写 ADR（`.ai/DECISIONS.md`，含"原有→新→原因→影响"）
-   - 修改了业务规则 → 更新 `.ai/BUSINESS_RULES.md`
-   - 完成了任务 → 更新 `.ai/CURRENT_TASK.md`
+   - 修改了业务口径 → 确认与 `docs/decisions/0001` 的 D-xx 一致；拍板变更需用户确认后记录
+   - 修改了架构 → 写 ADR（`docs/adr/`，含"原有→新→原因→影响"）
    - **任何变更** → 追加 `.ai/CHANGELOG.md`，**必须含**：before（改动前状态）/after（改动内容）/原因（Issue 编号）/验证结果/**commit SHA**
    - 收尾自答 0.3 检查清单（原有状态？变成什么？为什么？是否架构变动？影响面？）
 
-5. **Git 提交**
+5. **Git 提交与推送（已授权自动执行）**
    ```bash
    git add <changed files>
    git commit -m "type(scope): 中文描述 (#issue)"
+   git push -u origin <branch>
    ```
-   commit message 必须独立说明"改了什么、为什么"；提交后把 **commit SHA 回填到 CHANGELOG 记录**（同一次会话内完成，不留空）
+   验证通过后在功能分支上直接提交并推送，commit message 必须独立说明"改了什么、为什么"；
+   提交后把 **commit SHA 回填到 CHANGELOG 记录**（同一次会话内完成，不留空）。
+   **边界**：合并分支/PR、部署、生产操作不属于本授权——必须用户单独批准。
 
 ---
 
@@ -130,7 +131,7 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 
 代码提交前，AI 必须自审：
 
-### AI_REVIEW_CHECKLIST（见 `.ai/AI_REVIEW_CHECKLIST.md`）
+### AI_REVIEW_CHECKLIST（自审清单）
 
 ```
 □ 是否破坏架构分层
@@ -171,9 +172,9 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 
 当一个 AI Agent 接手另一个 Agent 的工作时：
 
-1. 读取 `.ai/CURRENT_TASK.md` 了解进度
-2. 读取 `.ai/CHANGELOG.md` 了解最近的变更
-3. 读取 `.ai/DECISIONS.md` 了解最近的架构决策
+1. 读取 `.ai/CHANGELOG.md` 了解最近的变更
+2. 读取 `docs/decisions/0001-维保整改八条口径.md` 与 `docs/adr/` 了解最近的决策
+3. 读取 `CONTEXT.md` 了解领域语言
 4. 运行 `git log --oneline -20` 查看最近提交
 5. **不要基于"我认为"做假设**——代码和文档是唯一真相
 6. 如果某个变更**找不到** CHANGELOG 记录或 ADR，视为留痕缺失，先补齐再继续，不得跳过

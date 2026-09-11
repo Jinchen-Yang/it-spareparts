@@ -43,7 +43,9 @@ node .claude/skills/run-it-spareparts/shot.mjs /tmp/sp.png 采购记录
 default to `localhost:8000` / `localhost:5176`; override with `BASE=` / `FRONTEND=`.
 `shot.mjs <out.png> <menu-label>` picks the page — e.g. `利润分析`, `库存查询`, `数据治理`.
 
-Point either driver at **production** instead: `BASE=http://<host>:8080 node .../driver.mjs`.
+Pointing either driver at **production** (`BASE=http://<host>:8080`) touches live systems
+(login writes audit rows) and requires **explicit user approval first** — never do it as
+part of routine regression.
 
 ## Direct invocation (backend internals — many PRs need only this)
 

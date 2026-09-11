@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-09-11
+
+**Agent:** OpenCode (cloudlay-3080，本地会话)
+**Session:** Agent 规则共享化 + OpenCode 权限边界 + 七 Skills 配置
+
+**Changed:**
+- `AGENTS.md` — 从本机专属改为**可入库共享**的 agent 入口：授权边界（提交/推送自动；合并/部署/生产访问须用户批准）、真实命令、文档导航、红线；`.git/info/exclude` 移除 `/AGENTS.md` 与 `/opencode.json`
+- `opencode.json` — 入库共享：`instructions` 挂载 `.ai/AI_WORKFLOW.md`；bash 权限默认 allow，`git merge`/`gh pr merge`/`git push -f`/`.deploy/*`/ssh/scp/rsync/sudo 设为 ask；webfetch/websearch/skill 放行（替换原无效的 `web` 键）
+- `.ai/AI_WORKFLOW.md` — 修复失效引用（`.ai/PROJECT_CONTEXT.md` 等 6 个不存在文件 → `CONTEXT.md`+`docs/decisions/`+`docs/adr/`；`plan-first` skill → 内联规则）；计划确认改为按风险分级（常规实现直接做，业务口径/架构/破坏性改动才停下等决策）；Phase 2 Git 步骤改为**已授权自动提交+推送功能分支**，合并/部署明确不在授权内；交接协议指向真实文件
+- `CLAUDE.md` / `docs/agents/domain.md` — 同步授权边界表述；修复"CONTEXT.md/docs/adr 不存在"的过时说明，补 `docs/decisions/0001` 导航
+- `.claude/skills/` — 新增 3 个项目 Skill：`db-change-safety`（Alembic/回填/锁/金额口径安全流程）、`vertical-slice-contract`（DB→API→手维护 TS 客户端→AntD 跨层一致性）、`regression-gate`（真实命令回归验收，未跑不报成功）；引入 3 个外部 Skill（副本固化+来源记录 `PROVENANCE.md`）：`supabase-postgres-best-practices`（仅取通用 PG 15 建议）、`vercel-react-best-practices`（限 React 18+Vite，内部 AGENTS.md 改名 FULL_GUIDE.md 防指令污染）、`web-design-guidelines`（规则本地钉版，AntD 惯例优先）；`run-it-spareparts` 生产指向改为须显式批准
+
+**验证:**
+- `opencode debug config` 解析正常（权限/instructions 合并生效）；`opencode debug skill` 七个 Skill 全部被发现；目录名与 frontmatter name 全部一致
+- 纯配置/文档变更，未运行后端/前端测试套件（无代码路径改动）
+
+**Notes:**
+- 配置需重启 OpenCode 生效；Skill 更新前先审上游 diff（PROVENANCE.md 记录钉版 commit）
+- bash 模式权限不是沙箱：脚本内部/环境变量隐藏的生产操作靠共享文档边界约束，`ssh`/`.deploy/*` 已设 ask
+
+---
+
 ## 2026-08-17
 
 **Agent:** Claude Code (macOS，本地会话)

@@ -13,10 +13,11 @@ deployable app — FastAPI backend + React/Vite frontend + Postgres).
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`/grill-with-docs`) creates them lazily when terms or decisions actually get resolved.
 
-> Note: this repo doesn't have `CONTEXT.md` or `docs/adr/` yet. There is, however, real
-> domain/architecture prose under `docs/` (`PN标准化Agent设计方案.md`, `智能体平台架构与演进路线.md`,
-> `DEPLOY.md`, etc.) and a deeper domain summary in the maintainer's auto-memory — useful
-> background until `/grill-with-docs` produces a proper `CONTEXT.md`.
+> Note: this repo already has `CONTEXT.md` and `docs/adr/` at the root, plus numbered
+> business decisions in `docs/decisions/0001-维保整改八条口径.md` (D-01…D-16; later
+> decisions supersede earlier ones) and maintenance docs under `docs/maintenance/`.
+> Start with `CONTEXT.md` + the decision log for the area you're touching. A deeper
+> maintainer memory exists locally under `memory/` (not tracked in git).
 
 ## File structure
 
