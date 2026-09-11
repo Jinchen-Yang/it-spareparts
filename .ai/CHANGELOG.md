@@ -8,6 +8,7 @@
 
 **Agent:** OpenCode (cloudlay-3080)
 **Session:** 返还收货台账 step-2（数据与服务层）——计划 `docs/superpowers/plans/2026-09-11-site-issue-display-and-return-ledger.md` §4.3 第 2 步
+**Commit:** `4767e88`（分支 `feat/return-receipt-ledger`，自 origin/main `e0c80b0` 切出）
 
 **Changed:**
 - `backend/alembic/versions/d2f8b4e6c9a1_return_receipt_ledger.py` — **迁移（单头，parent b7d3f9a1c5e2）**：`maintenance_rkd_return_line` 放开 batch/head NOT NULL（容纳手工行）；新增 `source_order_id`(FK f_maintenance_order.raw_order_id)、`source`、`line_status`、`version`、`description/note/evidence_ref`、`created_by/updated_by/updated_at/voided_by/voided_at/void_reason`；6 个 CHECK（source 枚举/状态枚举/版本/source 形状互斥/void 形状互斥）+ 活跃行 (project, demand) 部分索引。可逆（downgrade 先删手工行再恢复 NOT NULL）
