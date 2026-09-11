@@ -6,7 +6,7 @@
 
 ## 2026-09-11
 
-**Agent:** OpenCode (cloudlay-3080，本地会话)
+**Agent:** OpenCode (cloudlay-3080，本地会话) — commit `6da37c0`（分支 `chore/agent-skills-and-permissions`）
 **Session:** Agent 规则共享化 + OpenCode 权限边界 + 七 Skills 配置
 
 **Changed:**
