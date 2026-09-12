@@ -1667,3 +1667,147 @@ export const getMaintenanceExpenseReconcile = (
   "/maintenance/reconcile/expenses",
   { params },
 );
+
+// ---------------------------------------------------------------------------
+// 返还收货台账（2026-09-11 口径：项目必选 / 需求单可选 / PN 不限原领用 /
+// 按数量统计 / 可修改作废 + 审计；登记即视为已收到返件）
+// ---------------------------------------------------------------------------
+
+export interface ReturnReceipt {
+  receipt_id: string;
+  project_id: string;
+  source: "rkd_import" | "manual" | string;
+  source_order_id: string | null;
+  order_no: string | null;
+  batch_id: string | null;
+  head_no: string;
+  part_id: number | null;
+  pn: string;
+  description: string | null;
+  /**三位小数字符串（后端 _qty 约定）；手工登记恒为整数。 */
+  qty: string;
+  condition: "成品" | "坏品" | "废品" | string | null;
+  note: string | null;
+  evidence_ref: string | null;
+  occurred_at: string | null;
+  line_status: "active" | "voided" | string;
+  version: number;
+  created_by: string;
+  created_at: string | null;
+  updated_by: string | null;
+  updated_at: string | null;
+  voided_by: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+}
+
+export interface ReturnReceiptDemandTotal {
+  source_order_id: string;
+  order_no: string | null;
+  qty: string;
+}
+
+export interface ReturnReceiptSummary {
+  project_id: string;
+  project_total_qty: string;
+  unassigned_qty: string;
+  by_demand: ReturnReceiptDemandTotal[];
+}
+
+export interface ReturnReceiptSearchResult {
+  total: number;
+  page: number;
+  page_size: number;
+  items: ReturnReceipt[];
+}
+
+export interface ReturnReceiptCreateInput {
+  pn: string;
+  qty: number;
+  wbdd_no?: string | null;
+  part_id?: number | null;
+  description?: string | null;
+  condition?: "成品" | "坏品" | "废品" | null;
+  note?: string | null;
+  evidence_ref?: string | null;
+  idempotency_key?: string | null;
+}
+
+export interface ReturnReceiptUpdateInput {
+  version: number;
+  reason: string;
+  wbdd_no?: string | null;
+  pn?: string;
+  part_id?: number | null;
+  qty?: number;
+  condition?: "成品" | "坏品" | "废品" | null;
+  note?: string | null;
+  evidence_ref?: string | null;
+}
+
+export interface ReturnReceiptAuditEntry {
+  id: number;
+  project_id: string;
+  entity_id: string;
+  action: string;
+  before_json: Record<string, unknown> | null;
+  after_json: Record<string, unknown> | null;
+  reason: string;
+  operated_by: string;
+  operated_at: string | null;
+}
+
+const returnReceiptBase = (projectId: string) =>
+  `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipts`;
+
+export const getReturnReceiptSummary = (projectId: string) =>
+  api.get<ReturnReceiptSummary>(`${returnReceiptBase(projectId)}/return-receipt-summary`);
+
+export const searchReturnReceipts = (
+  projectId: string,
+  input: {
+    page?: number;
+    page_size?: number;
+    line_status?: "active" | "voided" | "all";
+    q?: string;
+    source_order_id?: string;
+    source?: "rkd_import" | "manual";
+  } = {},
+) => api.get<ReturnReceiptSearchResult>(returnReceiptBase(projectId), {
+  params: {
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 50,
+    ...(input.line_status && input.line_status !== "all"
+      ? { line_status: input.line_status }
+      : {}),
+    ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    ...(input.source_order_id ? { source_order_id: input.source_order_id } : {}),
+    ...(input.source ? { source: input.source } : {}),
+  },
+});
+
+export const createReturnReceipt = (
+  projectId: string,
+  input: ReturnReceiptCreateInput,
+) => api.post<ReturnReceipt & { replayed: boolean }>(returnReceiptBase(projectId), input);
+
+export const updateReturnReceipt = (
+  receiptId: string,
+  input: ReturnReceiptUpdateInput,
+) => api.patch<ReturnReceipt>(
+  `/maintenance/return-receipts/${encodeURIComponent(receiptId)}`,
+  input,
+);
+
+export const voidReturnReceipt = (
+  receiptId: string,
+  input: { version: number; reason: string },
+) => api.post<ReturnReceipt>(
+  `/maintenance/return-receipts/${encodeURIComponent(receiptId)}/void`,
+  input,
+);
+
+export const getReturnReceiptAudit = (receiptId: string) =>
+  api.get<{ receipt_id: string; items: ReturnReceiptAuditEntry[] }>(
+    `/maintenance/return-receipts/${encodeURIComponent(receiptId)}/audit`,
+  );

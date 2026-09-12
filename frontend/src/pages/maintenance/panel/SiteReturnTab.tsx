@@ -19,6 +19,7 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import ReturnReceiptsSection from "./ReturnReceiptsSection";
 import { readPermissionMap } from "../../../nav";
 import {
   ISSUE_STATUS,
@@ -250,6 +251,7 @@ export function SiteReturnTab({
         onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
         onAfterApply={onChanged}
       />
+      <ReturnReceiptsSection projectId={projectId} />
       <Table<SiteReturnRow>
         rowKey="issueLineId"
         size="small"

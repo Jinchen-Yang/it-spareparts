@@ -70,6 +70,14 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     searchMaintenanceReturnObligations: (...a: unknown[]) =>
       searchMaintenanceReturnObligations(...a),
     searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
+    // 返还收货台账（2026-09-11）：面板挂载即拉汇总与列表，测试给空态即可
+    getReturnReceiptSummary: vi.fn().mockResolvedValue({
+      data: { project_id: "p", project_total_qty: "0.000", unassigned_qty: "0.000", by_demand: [] },
+    }),
+    searchReturnReceipts: vi.fn().mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 50, items: [] },
+    }),
+    getReturnReceiptAudit: vi.fn().mockResolvedValue({ data: { receipt_id: "r", items: [] } }),
   };
 });
 vi.mock("../../../api/maintenanceProjectProcurement", async () => {
