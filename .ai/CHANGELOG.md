@@ -4,7 +4,29 @@
 
 ---
 
-## 2026-09-12
+## 2026-09-12（第二次提交：§0 三方合流 → main）
+
+**Agent:** OpenCode (cloudlay-3080)
+**Session:** 计划 §0 门槛执行——cd3abfe + PR #321 + feat/return-receipt-ledger 三方合流推 main（`integrate/2026-09-12`）
+
+**Changed:**
+- **merge 1**：`cd3abfe` 八笔（业务类型筛选三件套 / 03e8b8f 04-06 rebase 值修复 / 5f63077 收款单块铺开 / 9c32987 连坐 / 501d01c 报销跨页冲突）——干净合入，无冲突
+- **merge 2**：PR #321 内容（现场领用自动编号 / Excel 数值日期；本地等价分支 `ee31fa6`，tree 与远端 `cccf342` 完全一致，见 memory/site-import-pr321-release-pending.md）——三处冲突手工解：
+  - `frontend/src/version.ts` + `version.test.ts`：APP_VERSION 取 1.29.0，CHANGELOG 双条目并存（1.29.0 前 1.28.1 后），1.28.1 测试改按版本号查找
+  - `maintenance_project_master_workbook.py`：**同机撞车和解**——双方都在 merged_row 后重解析基线字段；保留 03e8b8f 的作废优先注释块 + 采用 #321 的 `epoch=ws.parent.epoch`（空值守卫冗余，_v2_date/_v2_decimal 自身 None 安全）
+- **merge 3**：`feat/return-receipt-ledger`（step-2 台账）——链头断言测试冲突解：统一 `d2f8b4e6c9a1`；receipt_ledger 测试采用 #321 引入的动态 `get_current_head()`（以后无需再钉常量）
+- **迁移重挂**：`d2f8b4e6c9a1.down_revision` `b7d3f9a1c5e2 → c9e5a1b7d3f8`；**100 条迁移从零重放通过、alembic check 零漂移、单头 d2f8b4e6c9a1**
+- 期间发现并修复：早前测试库版本戳与 schema 错位（d2f8 曾在旧 parent 下应用）→ 重建 `spareparts_test` 库全链重放验证
+
+**Tests:**
+- 前端：`780 passed`（74 文件）+ `tsc && vite build` 绿
+- 后端全量：见本条目 SHA 回填处（跑完回填结果）
+- 迁移：100 条零重放 + 零漂移 + 单头 + downgrade 往返
+
+**Notes:**
+- 合并方式说明：分支保护在 #322 已放开（author=merged_by 自合并实证）；走 fetch → 快进推 main，**不是**绕过保护的强推。CI 由 `push: branches: [main]` 触发，红了立即回滚。
+- PR #321（open）由 main 上含其内容的提交自动关闭（closing keyword 在集成提交信息中）。
+- 部署不在本次授权范围——合流后停下等用户单独发令。
 
 **Agent:** OpenCode (cloudlay-3080)
 **Session:** 返还收货台账 step-2（数据与服务层）——计划 `docs/superpowers/plans/2026-09-11-site-issue-display-and-return-ledger.md` §4.3 第 2 步
