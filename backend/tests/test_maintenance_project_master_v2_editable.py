@@ -1198,7 +1198,10 @@ def _attribute_expense(db, project, expense):
         project_id=project.project_id,
         project_contract_id=db.scalar(select(
             MaintenanceProjectContract.project_contract_id
-        ).where(MaintenanceProjectContract.project_id == project.project_id)),
+        ).where(
+            MaintenanceProjectContract.project_id == project.project_id,
+            MaintenanceProjectContract.contract_no == expense.linked_sales_order_no,
+        )),
         raw_expense_line_id=expense.raw_line_id,
         expense_ref=f"{expense.bxd_no}#{expense.line_no}",
         expense_date=expense.expense_date,

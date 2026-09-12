@@ -34,10 +34,14 @@ def _rollback_fixture(
     (assistant_dir / "compose.production.yml").write_text(
         "new compose config\n", encoding="utf-8"
     )
+    # Match the production ownership contract regardless of the runner umask.
+    (assistant_dir / "Caddyfile").chmod(0o644)
+    (assistant_dir / "compose.production.yml").chmod(0o644)
 
     app_dir = tmp_path / "it-spareparts"
     app_dir.mkdir()
     shutil.copy2(REPO_ROOT / "docker-compose.yml", app_dir / "docker-compose.yml")
+    (app_dir / "docker-compose.yml").chmod(0o644)
     (assistant_dir / ".env").write_text(
         "ASSISTANT_HOST=assistant.example.test\n", encoding="utf-8"
     )

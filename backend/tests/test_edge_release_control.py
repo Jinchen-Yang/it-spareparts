@@ -2148,7 +2148,7 @@ def test_issue153_runbooks_are_clean_shell_copyable_and_define_inputs(
         )
         assert parsed.returncode == 0, parsed.stderr
         checked = subprocess.run(
-            ["shellcheck", "-s", "bash", "-e", "SC2016", "-"],
+            [shutil.which("shellcheck") or "shellcheck", "-s", "bash", "-e", "SC2016", "-"],
             input=blocks,
             text=True,
             capture_output=True,
