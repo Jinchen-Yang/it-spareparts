@@ -31,7 +31,8 @@ def test_new_revision_is_additive_child_and_single_head():
     # 全链单 head；XSDD guard 后线性追加销售人工覆盖状态，再线性追加
     # a8e4 期限回填（2026-09-02 基座）、b7d3 收款单台账（2026-09-07，#288），
     # 仍不得产生迁移分叉。
-    assert list(script.get_heads()) == ["b7d3f9a1c5e2"]
+    # 2026-09-09 c9e5 现场领用需求单引用继续线性追加。
+    assert list(script.get_heads()) == ["c9e5a1b7d3f8"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():

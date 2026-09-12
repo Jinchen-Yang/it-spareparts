@@ -200,7 +200,7 @@ def test_migration_is_single_head_and_roundtrips(db):
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == REVISION
+        ).scalar_one() == script.get_current_head()
 
 
 # ---------- 归档 ----------

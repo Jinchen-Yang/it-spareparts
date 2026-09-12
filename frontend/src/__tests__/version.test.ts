@@ -21,6 +21,20 @@ describe("v1.29.0 release notes", () => {
   });
 });
 
+describe("v1.28.1 release notes (archived)", () => {
+  const v1281 = CHANGELOG.find((entry) => entry.version === "1.28.1")!;
+
+  it("keeps site date parsing and automatic numbering", () => {
+    expect(v1281).toBeDefined();
+    expect(v1281.date).toBe("2026-09-09");
+    const notes = v1281.items.join("\n");
+    expect(notes).toMatch(/Excel 数值日期/);
+    expect(notes).toMatch(/自动编号/);
+    expect(notes).toMatch(/重复回传不重复入账/);
+    expect(notes).toMatch(/重新下载总表/);
+  });
+});
+
 describe("v1.28.0 release notes (archived)", () => {
   const v128 = CHANGELOG.find((entry) => entry.version === "1.28.0")!;
 

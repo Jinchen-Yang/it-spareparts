@@ -32,6 +32,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -153,7 +154,7 @@ V2_EXPENSE_HEADERS = ["操作", "费用单号", "明细序号", "报销日期", 
 V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID",
                       "基线令牌"]
 V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注",
-                   "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌"]
+                   "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌", "关联需求单号"]
 # 行级基线令牌域（2.7.0）：把每行可编辑字段的导出值签进隐藏列，上传侧据此做
 # 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
 _V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
@@ -227,6 +228,7 @@ class SiteReturnFlag:
     # 2026-08-17 全面放开：可回传覆盖的领用事实
     issue_no: str | None = None
     issue_date: date | None = None
+    demand_order_no: str | None = None
     pn: str | None = None
     serial_number: str | None = None
     quantity: Decimal | None = None
@@ -2090,7 +2092,7 @@ def _resolve_part_flexible(
 
 
 def _unmatched_pn_error(
-    db: Session, merge: "_V2MergeContext",
+    db: Session, merge: "_V2MergeContext", *, full: bool = False,
 ) -> "WorkbookError | None":
     if not merge.unresolved_pns:
         return None
@@ -2105,12 +2107,13 @@ def _unmatched_pn_error(
             ).all()
         ) if len(pn) >= 4 else ""
         suffix = f"（相近：{suggestions}）" if suggestions else ""
-        lines.append(f"{pn}（第 {'、'.join(str(r) for r in rows[:6])} 行等 {len(rows)} 行）{suffix}")
+        shown_rows = rows if full else rows[:6]
+        lines.append(f"{pn}（第 {'、'.join(str(r) for r in shown_rows)} 行，共 {len(rows)} 行）{suffix}")
     return WorkbookError(
         "part_not_found",
         f"共 {len(merge.unresolved_pns)} 个 PN 未匹配备件主数据，请修正后重传："
-        + "；".join(lines[:20])
-        + ("……" if len(lines) > 20 else ""),
+        + "；".join(lines if full else lines[:20])
+        + ("……" if not full and len(lines) > 20 else ""),
     )
 
 
@@ -2792,6 +2795,7 @@ def _v2_site_row_values(line, issue) -> dict[str, object]:
         "返还状态": "待确认品类",
         "返还单号": "—",
         "实体ID": line.issue_line_id,
+        "关联需求单号": line.demand_order_no or "",
     }
 
 
@@ -2866,16 +2870,18 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
             values, V2_SITE_BASE_FIELDS)
         ws.append([values[name] for name in V2_SITE_HEADERS])
     _v2_append_example_row(ws, V2_SITE_HEADERS, {
-        "领用单号": "CKD-20260901-0001",
+        "领用单号": "",
         "领用日期": "2026-09-01",
         "PN": (rows[0][0].pn if rows else "（标准PN）"),
         "SN": "SN-001",
         "领用数量": 1,
         "是否应返还": "是",
-        "备注": "【示例】手工新增领用：实体ID留空，单号/日期/PN/数量必填",
+        "备注": "【示例】新增领用：实体ID留空，完整日期/PN/数量必填；单号留空自动编号，有关联 WBDD 可填入单号列",
     })
     _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
                  editable={1, 2, 3, 4, 5, 6, 7})
+    ws.column_dimensions["M"].hidden = False
+    ws.column_dimensions["M"].width = 26
     return base_hashes
 
 
@@ -2899,7 +2905,8 @@ def _v2_build_usage(wb) -> None:
         ("新增一行", "表尾填 费用单号+明细序号+报销日期+金额+归集键（XSDD），操作列留空或 CREATE。"),
         ("【02 回款计划】", "计划=打算什么时候收多少钱：一行一个合同期次。操作选 CREATE 新增，填合同号、期次（第几期）、计划回款日期、金额；改已有行选 UPDATE（带基础版本防冲突）；作废选 VOID。"),
         ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
-        ("【06 领用返还】", "按黄底提示编辑；手工新增领用行填单号/日期/PN/数量，实体ID留空。"),
+        ("【06 领用返还】", "新增领用填完整日期 YYYY-MM-DD、PN、正数量，实体ID留空；领用单号选填，留空时自动编号。WBDD 填在单号列时保留为关联需求单号，并另生成领用编号。"),
+        ("自动编号与重传", "同一本文件原样重传或排序不会重复新增；相同内容的多行仍分别保留。首次导入后请重新下载，后续修改保留实体ID；不要把已导入记录再次作为新行粘贴。关联需求单号只读。"),
         ("删除领用行", "2026-08-23 起：直接把该行整行删掉再上传 = 该领用行作废（退出成本与返还计算）；一张单的行全删 = 整单作废。"),
         ("【灰色示例行】", "每个数据页最后一行灰色斜体是填写示例，系统上传时自动忽略，不会入库——照着它的格式填，填完可保留或删除该行。"),
         ("", ""),
@@ -3073,13 +3080,25 @@ def build_project_master_v2(
     return buffer.getvalue()
 
 
-def _v2_date(value, *, row_no: int, label: str) -> date | None:
+def _v2_date(value, *, row_no: int, label: str, epoch: datetime = WINDOWS_EPOCH) -> date | None:
     if value in (None, ""):
         return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        # WPS/Excel copy-paste can discard the date style while retaining the
+        # serial. Use the workbook's epoch, never Unix time or the current year.
+        try:
+            if not Decimal(str(value)).is_finite() or value < 1:
+                raise ValueError
+            converted = from_excel(float(value), epoch=epoch)
+            if isinstance(converted, datetime):
+                return converted.date()
+        except (ValueError, OverflowError, InvalidOperation):
+            pass
+        raise WorkbookError("invalid_date", f"第 {row_no} 行{label}日期序列值无效：{value!r}")
     raw = str(value).strip()
     for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y-%m"):
         try:
@@ -3740,14 +3759,80 @@ def _v2_parse_parts(
     )
 
 
+def _v2_site_preflight(db: Session, ws, index, merge: _V2MergeContext) -> None:
+    """Collect independent input problems before parsing any writable site rows."""
+    errors: list[WorkbookError] = []
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        if all(v in (None, "") for v in row) or _is_example_row(row):
+            continue
+        is_new = _cell(row, index, "实体ID") in (None, "")
+        raw_date = _cell(row, index, "领用日期")
+        try:
+            parsed_date = _v2_date(raw_date, row_no=row_no, label="领用", epoch=ws.parent.epoch)
+            if (is_new and parsed_date is None) or (
+                raw_date not in (None, "") and re.fullmatch(r"\d{4}-\d{1,2}", str(raw_date).strip())
+            ):
+                raise WorkbookError("invalid_date", f"第 {row_no} 行领用日期须填写完整年月日 YYYY-MM-DD（原值：{raw_date!r}）")
+        except WorkbookError as exc:
+            errors.append(WorkbookError(exc.code, f"{exc.message}；原值 {raw_date!r}，请核实后填写 YYYY-MM-DD"))
+        try:
+            quantity = _v2_decimal(_cell(row, index, "领用数量"), row_no=row_no, label="领用数量", required=is_new)
+            if quantity is not None and quantity <= 0:
+                raise WorkbookError("invalid_amount", f"第 {row_no} 行领用数量必须大于 0")
+        except WorkbookError as exc:
+            errors.append(exc)
+        flag = str(_cell(row, index, "是否应返还") or "").strip()
+        if flag and flag not in {"是", "否"}:
+            errors.append(WorkbookError("invalid_flag", f"第 {row_no} 行是否应返还只能填 是 / 否"))
+        pn = str(_cell(row, index, "PN") or "").strip()
+        if is_new and not pn:
+            errors.append(WorkbookError("missing_site_identity", f"第 {row_no} 行必须填写 PN"))
+        elif is_new:
+            _resolve_part_flexible(db, pn, row_no=row_no, sheet=V2_SHEET_SITE, merge=merge)
+        no = str(_cell(row, index, "领用单号") or "").strip()
+        if len(no) > 64:
+            errors.append(WorkbookError("invalid_site_identity", f"第 {row_no} 行领用单号不能超过 64 字符"))
+        if is_new and _cell(row, index, "关联需求单号") not in (None, ""):
+            errors.append(WorkbookError("readonly_field_changed", f"第 {row_no} 行关联需求单号为系统展示列；新增时请将 WBDD 填在领用单号列，系统会单独保存"))
+    unmatched = _unmatched_pn_error(db, merge, full=True)
+    if unmatched:
+        errors.append(unmatched)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise WorkbookError("invalid_site_rows", f"06_领用返还有 {len(errors)} 项待补正，本次未写入：" + "；".join(e.message for e in errors))
+
+
+def _v2_auto_site_prefix(project_id, export_id):
+    scope = json.dumps([project_id, export_id], ensure_ascii=False)
+    return "LY-AUTO-" + hashlib.sha256(scope.encode()).hexdigest()[:20] + "-"
+
+
+def _v2_auto_site_no(project_id, export_id, raw_pn, issue_date, serial_number, demand_no,
+                     quantity, flag, remark, occurrences):
+    # Signed export scope separates independent workbooks; content+occurrence
+    # survives sorting and retains physically distinct identical rows.
+    identity = json.dumps([project_id, export_id, raw_pn, issue_date.isoformat(),
+                           serial_number or "", demand_no or "", str(quantity), flag, remark], ensure_ascii=False)
+    occurrences[identity] += 1
+    digest = hashlib.sha256(f"{identity}|{occurrences[identity]}".encode()).hexdigest()[:24]
+    return _v2_auto_site_prefix(project_id, export_id) + digest
+
+
 def _v2_parse_site(
-    db: Session, project_id: str, ws, merge: _V2MergeContext,
+    db: Session, project_id: str, ws, merge: _V2MergeContext, *, export_id: str = "",
 ) -> tuple[list[SiteReturnFlag], set[str]]:
     headers = [str(cell.value or "") for cell in ws[1]]
     index = {name: i for i, name in enumerate(headers)}
     if V2_BASE_COLUMN not in index:
         raise WorkbookError("template_version_mismatch",
                             "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
+    _v2_site_preflight(db, ws, index, merge)
+    auto_scope_used = bool(export_id and db.scalar(select(MaintenanceSiteIssue.issue_id).where(
+        MaintenanceSiteIssue.project_id == project_id,
+        MaintenanceSiteIssue.issue_no.startswith(_v2_auto_site_prefix(project_id, export_id)),
+    ).limit(1)))
+    occurrences: dict[str, int] = defaultdict(int)
     out: list[SiteReturnFlag] = []
     present_ids: set[str] = set()
     manual_ids: dict[str, int] = {}
@@ -3766,7 +3851,7 @@ def _v2_parse_site(
         if raw_id not in (None, ""):
             present_ids.add(str(raw_id))
         issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
-        issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no, label="领用")
+        issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no, label="领用", epoch=ws.parent.epoch)
                       if _cell(row, index, "领用日期") not in (None, "") else None)
         pn = str(_cell(row, index, "PN") or "").strip() or None
         serial_number = str(_cell(row, index, "SN") or "").strip() or None
@@ -3780,10 +3865,12 @@ def _v2_parse_site(
         line_no = None
         part_id = None
         if is_create:
-            if not issue_no or issue_date is None or not pn or quantity is None:
+            generated = False
+            legacy_replay = False
+            if issue_date is None or not pn or quantity is None:
                 raise WorkbookError(
                     "missing_site_identity",
-                    f"06_领用返还第 {row_no} 行手工新增必须填写领用单号、日期、PN 和数量",
+                    f"06_领用返还第 {row_no} 行手工新增必须填写日期、PN 和数量",
                 )
             if quantity <= 0:
                 raise WorkbookError("invalid_amount", f"第 {row_no} 行领用数量必须大于 0")
@@ -3792,11 +3879,26 @@ def _v2_parse_site(
             if part is None:
                 continue
             part_id = part.id
+            raw_pn = pn
             pn = part.pn_std
-            document_date = re.search(r"(?:^|-)20\d{6}(?:-|$)", issue_no)
-            if document_date:
-                raw_document_date = document_date.group(0).strip("-")
-                issue_date = datetime.strptime(raw_document_date, "%Y%m%d").date()
+            demand_no = None
+            if not issue_no or re.fullmatch(r"WBDD-\d{8}-\d+", issue_no):
+                # A previously imported legacy WBDD row must not be duplicated
+                # under a new generated identity when an old file is replayed.
+                legacy_identity = "|".join([project_id, issue_no or "", pn, serial_number or ""])
+                legacy_id = f"manual-site:{hashlib.sha1(legacy_identity.encode('utf-8')).hexdigest()}"
+                legacy = db.get(MaintenanceSiteIssueLine, legacy_id) if issue_no else None
+                legacy_replay = legacy is not None
+                if legacy is None:
+                    if not export_id:
+                        raise WorkbookError("missing_export_id", "自动编号需要原始项目总表的导出标识，请重新下载")
+                    demand_no = issue_no
+                    issue_no = _v2_auto_site_no(project_id, export_id, raw_pn, issue_date,
+                                              serial_number, demand_no, quantity, flag,
+                                              str(_cell(row, index, "备注") or "").strip(), occurrences)
+                    generated = True
+                    merge.warnings.append(f"06_领用返还第 {row_no} 行已生成领用编号 {issue_no}"
+                                          + (f"，关联需求单 {demand_no}" if demand_no else ""))
             identity = "|".join([project_id, issue_no, pn, serial_number or ""])
             raw_id = f"manual-site:{hashlib.sha1(identity.encode('utf-8')).hexdigest()}"
             # 同文件内重复的手工行（同单号/PN/SN）会推导出相同确定性主键，
@@ -3806,9 +3908,11 @@ def _v2_parse_site(
                 raise WorkbookError(
                     "duplicate_site_row",
                     f"06_领用返还第 {row_no} 行与第 {prior_row} 行重复"
-                    "（同领用单号/PN/SN），请删除重复行后重传")
+                    "（同领用单号/PN/SN）；请核实是否重复，不同次领用请分别编号或将单号留空自动编号")
             manual_ids[raw_id] = row_no
             existing_line = db.get(MaintenanceSiteIssueLine, raw_id)
+            if generated and existing_line is None and auto_scope_used:
+                raise WorkbookError("stale_site_replay", f"第 {row_no} 行所在原文件已导入过；请重新下载总表后新增或修改，避免重复登记")
             if existing_line is not None:
                 existing_issue = db.get(MaintenanceSiteIssue, existing_line.issue_id)
                 if existing_issue is None or existing_issue.project_id != project_id:
@@ -3824,6 +3928,18 @@ def _v2_parse_site(
                         issue=existing_issue, line=existing_line,
                         issue_no=issue_no, entity_id=raw_id,
                     )
+                    continue
+                if generated or legacy_replay:
+                    replay_values = {
+                        "领用单号": issue_no, "领用日期": issue_date, "PN": pn,
+                        "SN": serial_number or "", "领用数量": quantity,
+                        "是否应返还": flag, "备注": str(_cell(row, index, "备注") or "").strip(),
+                    }
+                    if (_v2_row_base_hash(replay_values, V2_SITE_BASE_FIELDS)
+                            != _v2_row_base_hash(_v2_site_row_values(existing_line, existing_issue), V2_SITE_BASE_FIELDS)
+                            or (generated and existing_line.demand_order_no != demand_no)):
+                        raise WorkbookError("stale_site_replay", f"第 {row_no} 行与已入库领用记录不同，请重新下载总表，保留实体ID后修改；新增领用请使用新行身份")
+                    present_ids.add(str(raw_id))
                     continue
                 is_create = False
                 issue_id = existing_line.issue_id
@@ -3863,6 +3979,7 @@ def _v2_parse_site(
                         f"06_领用返还中同一新增领用单 {issue_no!r} 填了不同日期",
                     )
         else:
+            demand_no = None
             raw_id = str(raw_id)
             existing_line = db.get(MaintenanceSiteIssueLine, raw_id)
             if existing_line is None:
@@ -3870,6 +3987,8 @@ def _v2_parse_site(
             issue = db.get(MaintenanceSiteIssue, existing_line.issue_id)
             if issue is None or issue.project_id != project_id:
                 raise WorkbookError("project_mismatch", f"第 {row_no} 行领用事实不属于本项目")
+            if "关联需求单号" in index and str(_cell(row, index, "关联需求单号") or "").strip() != (existing_line.demand_order_no or ""):
+                raise WorkbookError("readonly_field_changed", f"第 {row_no} 行关联需求单号为只读来源，请重新下载")
             issue_id = existing_line.issue_id
             line_no = existing_line.line_no
             baseline = _parse_v2_row_base_token(
@@ -3897,23 +4016,22 @@ def _v2_parse_site(
             if merged_row is None:
                 continue
             # 未触碰的基线字段已换成服务端现值。下游 SiteReturnFlag 用的是**合并之前**
-            # 解析出来的局部量（:3761-3768），不重解析就会拿导出时的旧值静默盖掉他人
-            # 改动（D-02，2026-09-08 审查 P1）。remark 本来就从 row 读，换掉 row 即可。
+            # 解析出来的局部量，不重解析就会拿导出时的旧值静默盖掉他人改动
+            # （D-02，2026-09-08 审查 P1；cd3abfe 03e8b8f 与 #321 同机修复，此处合并）。
             #
             # 注意重解析必须落在这里：上面的「作废优先」分支（D-02 / #319）要拿**用户
             # 原始行**判「碰没碰」，喂 rebase 行会让「未触碰」永远成立、行级作废回执失效；
             # 那段先 continue，走不到这里。手工新增分支（raw_id 空）没有基线可 rebase，
-            # 同样不受影响。
+            # 同样不受影响。_v2_date 带 workbook epoch：WPS/Excel 拷贝可能丢日期样式
+            # 只留序列值（#321）。
             row = merged_row
             issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
-            issue_date = (_v2_date(_cell(row, index, "领用日期"), row_no=row_no,
-                                   label="领用")
-                          if _cell(row, index, "领用日期") not in (None, "") else None)
+            issue_date = _v2_date(_cell(row, index, "领用日期"), row_no=row_no,
+                                  label="领用", epoch=ws.parent.epoch)
             pn = str(_cell(row, index, "PN") or "").strip() or None
             serial_number = str(_cell(row, index, "SN") or "").strip() or None
-            quantity = (_v2_decimal(_cell(row, index, "领用数量"), row_no=row_no,
-                                    label="领用数量")
-                        if _cell(row, index, "领用数量") not in (None, "") else None)
+            quantity = _v2_decimal(_cell(row, index, "领用数量"), row_no=row_no,
+                                   label="领用数量")
             flag = str(_cell(row, index, "是否应返还") or "").strip()
             merge.guard(sheet=V2_SHEET_SITE, entity_id=raw_id,
                         row_label=str(server_values.get("领用单号") or raw_id),
@@ -3957,6 +4075,7 @@ def _v2_parse_site(
             no_return=(flag == "否") if flag else None,
             issue_no=issue_no,
             issue_date=issue_date,
+            demand_order_no=demand_no,
             pn=pn,
             serial_number=serial_number,
             quantity=quantity,
@@ -4060,7 +4179,7 @@ def _v2_parse_plan(db: Session, project_id: str, ws) -> list[V2MilestoneChange]:
         if precision not in {"day", "month"}:
             raise WorkbookError("invalid_date_precision", f"第 {row_no} 行日期精度只能是 day/month")
         amount = _v2_decimal(row[index["计划回款金额（含税）"]], row_no=row_no, label="计划回款金额", required=operation == "CREATE")
-        planned_date = _v2_date(row[index["计划回款日期"]], row_no=row_no, label="计划回款")
+        planned_date = _v2_date(row[index["计划回款日期"]], row_no=row_no, label="计划回款", epoch=ws.parent.epoch)
         if operation not in ("VOID",) and not raw_entity and planned_date is None and amount is None:
             raise WorkbookError("incomplete_milestone", f"第 {row_no} 行计划日期和金额不能同时为空")
         note = str(row[index["备注"]] or "").strip() if "备注" in index else None
@@ -4162,7 +4281,7 @@ def _v2_parse_expenses(
         )
         inc = (amount * (Decimal("1") + TAX_RATE)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if amount is not None else None
         exported_basis = str(_cell(row, index, "金额口径") or "").strip()
-        expense_date = (_v2_date(_cell(row, index, "报销日期"), row_no=row_no, label="报销")
+        expense_date = (_v2_date(_cell(row, index, "报销日期"), row_no=row_no, label="报销", epoch=ws.parent.epoch)
                         if _cell(row, index, "报销日期") not in (None, "") else None)
         is_create = False
         expense = None
@@ -4502,7 +4621,7 @@ def _v2_parse_receipts(
             else:
                 contract_no, contract = _xsdd_contract_for_project(
                     db, project_id, row_no)
-        month = _v2_date(row[index["报告月份"]], row_no=row_no, label="报告月份")
+        month = _v2_date(row[index["报告月份"]], row_no=row_no, label="报告月份", epoch=ws.parent.epoch)
         if month is None:
             raise WorkbookError("invalid_month", f"第 {row_no} 行报告月份不能为空")
         # Excel 日期单元格通常保存为某月任意一天；数据库快照的身份键是
@@ -5103,7 +5222,7 @@ def validate_project_master_v2(
                 "这份项目总表会更正统一 WBDD 的项目归属，仅管理员或全量项目账号可确认")
     if V2_SHEET_SITE in included:
         site_flags, uploaded_site_ids = _v2_parse_site(
-            db, project_id, wb[V2_SHEET_SITE], merge)
+            db, project_id, wb[V2_SHEET_SITE], merge, export_id=meta["export_id"])
         site_flags = list(site_flags)
         # 2026-08-23：06 缺行=作废（用户口径：Excel 删行覆盖上传，没有的默认作废）
         export_site_ids = _decode_row_ids(meta.get("site_row_ids"))
@@ -6097,6 +6216,15 @@ def apply_project_master_v2(
             )
             operating_fact_changed = True
 
+    # Recheck generated scopes under the apply locks. A second validation of
+    # an edited original file must not add a second copy after the first wins.
+    auto_prefix = _v2_auto_site_prefix(plan.project_id, plan.export_id)
+    if any(f.is_create and (f.issue_no or "").startswith(auto_prefix) for f in plan.site_flags):
+        if db.scalar(select(MaintenanceSiteIssue.issue_id).where(
+            MaintenanceSiteIssue.project_id == plan.project_id,
+            MaintenanceSiteIssue.issue_no.startswith(auto_prefix),
+        ).limit(1)):
+            raise WorkbookError("stale_site_replay", "原文件已完成自动编号领用导入，请重新下载总表后编辑")
     pricing_entries: dict[str, tuple[date, MaintenanceSiteIssueLine]] = {}
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
@@ -6169,6 +6297,7 @@ def apply_project_master_v2(
                 pn=flag.pn,
                 quantity=flag.quantity,
                 serial_number=flag.serial_number,
+                demand_order_no=flag.demand_order_no,
                 remark=flag.remark,
                 no_return=flag.no_return,
                 is_active=True,
