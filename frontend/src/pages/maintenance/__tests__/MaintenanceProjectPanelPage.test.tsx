@@ -71,6 +71,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
       searchMaintenanceReturnObligations(...a),
     searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
     // 返还收货台账（2026-09-11）：面板挂载即拉汇总与列表，测试给空态即可
+    getReturnReceiptDemands: (...a: unknown[]) => getBoardProjectOrders(...a),
     getReturnReceiptSummary: vi.fn().mockResolvedValue({
       data: { project_id: "p", project_total_qty: "0.000", unassigned_qty: "0.000", by_demand: [] },
     }),
@@ -424,7 +425,7 @@ describe("项目面板", () => {
     expect(screen.getByText("REC-PAGE-2")).toBeInTheDocument();
   });
 
-  it("领用与返还 tab 合并领用、返还义务和返还单状态", async () => {
+  it("领用与返还 tab 展示领用信息与应返要求，返件汇总独立展示", async () => {
     searchSiteIssues.mockResolvedValue({
       data: {
         project_id: "p1",
@@ -441,6 +442,7 @@ describe("项目面板", () => {
             serial_number: "SN-001",
             quantity: "2",
             no_return: false,
+            description: "当前服务器描述", remark: "现场更换备注", brand: "合成品牌", unit: "块",
           }],
         }],
         total: 1,
@@ -483,11 +485,14 @@ describe("项目面板", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
     expect(await screen.findByText("CKD-1")).toBeInTheDocument();
     expect(screen.getByText("PN-001")).toBeInTheDocument();
-    expect(screen.getByText("仓库已确认返还")).toBeInTheDocument();
-    expect(screen.getByText("HJFH-1")).toBeInTheDocument();
+    expect(screen.getByText("应返")).toBeInTheDocument();
+    expect(screen.getByText("当前服务器描述")).toBeInTheDocument();
+    expect(screen.getByText("现场更换备注")).toBeInTheDocument();
+    expect(screen.queryByText("仓库已确认返还")).not.toBeInTheDocument();
+    expect(searchMaintenanceBadReturns).not.toHaveBeenCalled();
   });
 
-  it("领用、返还义务和返还单都按 total 拉取后续页", async () => {
+  it("领用按 total 拉取后续页，不依赖旧返还工作流", async () => {
     const issue = (index: number) => ({
       issue_id: `ISSUE-${index}`,
       project_id: "p1",
@@ -531,12 +536,11 @@ describe("项目面板", () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
     expect(await screen.findByText("CKD-PAGE-2")).toBeInTheDocument();
-    expect(screen.getByText("HJFH-PAGE-2")).toBeInTheDocument();
+    expect(screen.getByText("PN-2")).toBeInTheDocument();
     expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page_size: 100 }));
     expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
-    expect(searchMaintenanceReturnObligations)
-      .toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
-    expect(searchMaintenanceBadReturns).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    expect(searchMaintenanceReturnObligations).not.toHaveBeenCalled();
+    expect(searchMaintenanceBadReturns).not.toHaveBeenCalled();
   });
 
   it("多合同项目在「备件与需求单」tab 给出合同筛选（#39）", async () => {

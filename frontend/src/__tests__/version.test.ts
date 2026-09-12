@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.29.0 release notes", () => {
+describe("v1.29.0 release notes (archived)", () => {
+  const v129 = CHANGELOG.find((entry) => entry.version === "1.29.0")!;
   it("publishes the business-type filter and the workbook rebase fixes", () => {
-    expect(APP_VERSION).toBe("1.29.0");
+    expect(APP_VERSION).toBe("1.30.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-08");
+    expect(v129.date).toBe("2026-09-08");
 
-    const notes = LATEST.items.join("\n");
+    const notes = v129.items.join("\n");
     expect(notes).toMatch(/业务类型/);
     expect(notes).toMatch(/整体维保/);
     expect(notes).toMatch(/叠加/);

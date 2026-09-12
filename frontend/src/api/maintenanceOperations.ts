@@ -298,6 +298,21 @@ export interface SiteIssueLine {
   source_order_id: string | null;
   source_line_id: string | null;
   serial_number: string | null;
+  description?: string | null;
+  description_source?: "current_master_data";
+  brand?: string | null;
+  category_major?: string | null;
+  category_minor?: string | null;
+  unit?: string | null;
+  remark?: string | null;
+  demand_order_no?: string | null;
+  return_requirement?: {
+    requirement_status: "required" | "exempt" | "pending_category";
+    required_quantity: string;
+    exempt_quantity: string;
+    pending_quantity: string;
+    basis: Record<string, unknown>;
+  };
   /** 行级返还规则：true=免返，false=必须返还，null=继承项目默认。 */
   no_return: boolean | null;
   cost_source: string | null;
@@ -1681,9 +1696,14 @@ export interface ReturnReceipt {
   order_no: string | null;
   batch_id: string | null;
   head_no: string;
+  head_row_id?: string | null;
+  source_ref?: string | null;
   part_id: number | null;
   pn: string;
   description: string | null;
+  components?: { row_id: string; pn: string; description: string | null; qty: string | number; condition: string | null }[];
+  receipt_kind?: "part" | "machine" | "component";
+  review_required?: boolean;
   /**三位小数字符串（后端 _qty 约定）；手工登记恒为整数。 */
   qty: string;
   condition: "成品" | "坏品" | "废品" | string | null;
@@ -1734,6 +1754,8 @@ export interface ReturnReceiptCreateInput {
 }
 
 export interface ReturnReceiptUpdateInput {
+  project_id?: string;
+  description?: string | null;
   version: number;
   reason: string;
   wbdd_no?: string | null;
@@ -1760,8 +1782,14 @@ export interface ReturnReceiptAuditEntry {
 const returnReceiptBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipts`;
 
+export const getReturnReceiptDemands = (projectId: string, input: { page?: number; page_size?: number; q?: string } = {}) =>
+  api.get<{ rows: { source_order_id: string; order_no: string; order_date: string | null }[]; total: number; page: number; page_size: number }>(
+    `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-demands`,
+    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}) } },
+  );
+
 export const getReturnReceiptSummary = (projectId: string) =>
-  api.get<ReturnReceiptSummary>(`${returnReceiptBase(projectId)}/return-receipt-summary`);
+  api.get<ReturnReceiptSummary>(`/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-summary`);
 
 export const searchReturnReceipts = (
   projectId: string,
@@ -1772,17 +1800,17 @@ export const searchReturnReceipts = (
     q?: string;
     source_order_id?: string;
     source?: "rkd_import" | "manual";
+    unassigned?: boolean;
   } = {},
 ) => api.get<ReturnReceiptSearchResult>(returnReceiptBase(projectId), {
   params: {
     page: input.page ?? 1,
     page_size: input.page_size ?? 50,
-    ...(input.line_status && input.line_status !== "all"
-      ? { line_status: input.line_status }
-      : {}),
+    line_status: input.line_status ?? "active",
     ...(input.q?.trim() ? { q: input.q.trim() } : {}),
     ...(input.source_order_id ? { source_order_id: input.source_order_id } : {}),
     ...(input.source ? { source: input.source } : {}),
+    ...(input.unassigned ? { unassigned: true } : {}),
   },
 });
 

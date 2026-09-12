@@ -26,6 +26,10 @@ import {
   downloadMaintenanceWorkbookValidationErrors,
   getMaintenanceManagerWorkbookStatus,
   getMaintenanceProjectWorkspace,
+  getReturnReceiptSummary,
+  getReturnReceiptDemands,
+  searchReturnReceipts,
+  updateReturnReceipt,
   listMaintenanceReturnCategories,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
@@ -57,6 +61,27 @@ beforeEach(() => {
 });
 
 describe("maintenance operations API", () => {
+  it("返还汇总使用项目级路由，含作废筛选显式传 all", () => {
+    getReturnReceiptSummary("project/id");
+    expect(get).toHaveBeenLastCalledWith(
+      "/maintenance/projects/stable/project%2Fid/return-receipt-summary",
+    );
+    searchReturnReceipts("project/id", { line_status: "all" });
+    expect(get).toHaveBeenLastCalledWith(
+      "/maintenance/projects/stable/project%2Fid/return-receipts",
+      { params: { page: 1, page_size: 50, line_status: "all" } },
+    );
+  });
+  it("返还需求单候选使用正式项目端点且透传分页", () => {
+    getReturnReceiptDemands("p/id", { page: 12, page_size: 100, q: " WBDD-1 " });
+    expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/p%2Fid/return-receipt-demands", { params: { page: 12, page_size: 100, q: "WBDD-1" } });
+  });
+  it("台账清空与转移透传字段；未关联筛选独立编码", () => {
+    updateReturnReceipt("receipt/id", { version: 3, reason: "转移", project_id: "p2", wbdd_no: null, condition: null, note: null, evidence_ref: null });
+    expect(patch).toHaveBeenCalledWith("/maintenance/return-receipts/receipt%2Fid", { version: 3, reason: "转移", project_id: "p2", wbdd_no: null, condition: null, note: null, evidence_ref: null });
+    searchReturnReceipts("p1", { unassigned: true });
+    expect(get).toHaveBeenLastCalledWith("/maintenance/projects/stable/p1/return-receipts", { params: { page: 1, page_size: 50, line_status: "active", unassigned: true } });
+  });
   it("搜索词仅通过 POST body 发送，不进入请求 URL", () => {
     listMaintenanceProjectOperations({ page: 2, page_size: 24, q: "移动" });
 

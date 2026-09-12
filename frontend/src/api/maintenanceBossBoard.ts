@@ -126,6 +126,12 @@ export const boardBusinessTypeParam = (codes: BoardBusinessTypeCode[]): string =
     : [...codes].sort().join(",");
 
 export interface BoardProjectRow {
+  receipt_return_rate?: {
+    returned_qty: string;
+    demand_qty: string | null;
+    rate_pct: number | null;
+    state: "ready" | "basis_incomplete";
+  } | null;
   project_id: string;
   project_code: string;
   display_name: string;

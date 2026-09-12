@@ -1,7 +1,8 @@
 /** 维保数据分析页：URL 状态、金额千分位、表头排序联动（2026-08-21 视觉升级）。 */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { message } from "antd";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 const fetchPnRanking = vi.fn();
 vi.mock("../../../api/maintenanceAnalytics", async () => ({
@@ -40,6 +41,8 @@ function FakePage() {
   return <MaintenanceAnalyticsPage />;
 }
 
+afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
+
 describe("维保数据分析页", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -65,6 +68,17 @@ describe("维保数据分析页", () => {
     expect(await screen.findByText("¥11,335,390,694.72")).toBeInTheDocument();
     // 表格金额同样千分位
     expect(await screen.findByText("¥2,586,637.81")).toBeInTheDocument();
+  });
+
+  it("卸载后迟到的请求失败不更新页面或弹全局错误", async () => {
+    let rejectRequest!: (reason: unknown) => void;
+    fetchPnRanking.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectRequest = reject; }));
+    const errorMessage = vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+    const view = renderPage();
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
+    view.unmount();
+    await act(async () => { rejectRequest(new Error("late network failure")); });
+    expect(errorMessage).not.toHaveBeenCalled();
   });
 
   it("默认参数：ytd + cost_inc + 20/页", async () => {

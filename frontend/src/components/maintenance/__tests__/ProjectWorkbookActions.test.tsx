@@ -66,8 +66,13 @@ beforeEach(() => {
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  // saveBlob deliberately releases URLs after WebKit has consumed the download.
+  // Keep the URL mock alive until those callbacks finish.
+  await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledTimes(
+    vi.mocked(URL.createObjectURL).mock.calls.length,
+  ), { timeout: 2000 });
   localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
