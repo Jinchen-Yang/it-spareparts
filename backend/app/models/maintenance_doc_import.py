@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from sqlalchemy import (UniqueConstraint,
     ARRAY,
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -159,8 +160,8 @@ class MaintenanceRkdReturnLine(Base):
 
     - ``source='rkd_import'``：apply 时从 raw 明细行投影，batch/head 必填；
       旧坏件口径（D-14 分子）消费方以
-      ``source='rkd_import' AND test_result IN RKD_RETURN_TEST_RESULTS AND
-      line_status='active'`` 冻结，不随后续「件况全收」导入或手工登记变化。
+      ``legacy_bad_return_filter`` 保持既有来源、类别及坏品件况边界，
+      不纳入手工登记或其他件况；来源事实被明确更正、作废后数量随之更新。
     - ``source='manual'``：页面登记即视为已收到返件，batch/head 为空；
       归属 project 必填，``source_order_id`` 可空（未关联需求单），
       关联校验走 active assignment（同 _resolve_project_id 链）。
@@ -185,7 +186,7 @@ class MaintenanceRkdReturnLine(Base):
         ForeignKey("f_maintenance_order.raw_order_id")
     )
     source: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="rkd_import", server_default="'rkd_import'"
+        String(16), nullable=False, default="rkd_import", server_default=text("'rkd_import'")
     )
     head_no: Mapped[str] = mapped_column(String(64), nullable=False)
     source_ref: Mapped[str] = mapped_column(String(96), nullable=False)
@@ -198,13 +199,13 @@ class MaintenanceRkdReturnLine(Base):
     evidence_ref: Mapped[str | None] = mapped_column(String(128))
     occurred_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     line_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="'active'"
+        String(16), nullable=False, default="active", server_default=text("'active'")
     )
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
     created_by: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="rkd_import", server_default="'rkd_import'"
+        String(64), nullable=False, default="rkd_import", server_default=text("'rkd_import'")
     )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -214,6 +215,15 @@ class MaintenanceRkdReturnLine(Base):
     voided_by: Mapped[str | None] = mapped_column(String(64))
     voided_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     void_reason: Mapped[str | None] = mapped_column(String(256))
+    # Source snapshot is only advanced by an explicitly confirmed import correction.
+    # Manual edits leave it intact so an old workbook cannot silently overwrite them.
+    source_payload: Mapped[dict | None] = mapped_column(JSONB)
+    receipt_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="part", server_default=text("'part'")
+    )
+    review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     __table_args__ = (
         CheckConstraint("qty > 0", name="ck_maintenance_rkd_return_qty"),

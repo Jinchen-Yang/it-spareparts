@@ -435,14 +435,14 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_replenishment_create": "page_replenishment_beta",
 }
 
-# 新维保动作同时依赖稳定版基础权限和 Beta 白名单。本表是叠加约束，保留
+# 尚未发布的维保动作同时依赖基础权限和 Beta 白名单。本表是叠加约束，保留
 # ACTION_PAGE_DEPENDENCIES 中既有的 page_maintenance 映射，避免历史权限契约漂移。
 ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
     "action_maintenance_project_manage": "page_maintenance_beta",
     "action_maintenance_demand_delete": "page_maintenance_beta",
-    "action_maintenance_site_issue_manage": "page_maintenance_beta",
-    "action_maintenance_bad_return_manage": "page_maintenance_beta",
+    # 已发布的领用作废/返还收货操作仅依赖 page_maintenance；旧草稿工作流
+    # 仍由独立 Beta 路由总闸与白名单保护，不因此授予任何账号新的动作。
     # 验收两键 2026-08-24 起移出 Beta 附加依赖：客户拍板验收开放给销售/项目经理/
     # 维保负责人（模板 sales 与 maintenance_manager 直接生效），保留稳定版
     # page_maintenance 依赖即可，不再强制 Beta 白名单。

@@ -475,6 +475,12 @@ def consume_return_event(
 ) -> list[MaintenanceReturnObligation]:
     """Project one #207 outbox event exactly once inside the caller transaction."""
 
+    from app.services import maintenance_site_return_requirements as requirements
+    if (event.payload or {}).get("schema_version") == requirements.SCHEMA:
+        requirements.acknowledge(event)
+        db.flush()
+        return []
+
     _set_write_lock_timeout(db)
 
     expected_prefix = "maintenance-return-obligations:"

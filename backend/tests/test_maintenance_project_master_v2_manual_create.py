@@ -54,7 +54,7 @@ def _manual_workbook(db, project_id: str) -> bytes:
     site = wb[master.V2_SHEET_SITE]
     site.append([
         "CKD-20260818-0001", "2026-08-18", "MANUAL-PN-001", "SN-001",
-        1, "是", "人工新增领用", 1, "", "", "",
+        1, "是", "人工新增领用", "", "", "", "",
     ])
     output = io.BytesIO()
     wb.save(output)

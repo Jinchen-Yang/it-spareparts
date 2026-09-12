@@ -1268,6 +1268,12 @@ def apply(
                 )
             changed_project_ids.add(project_id)
 
+    from app.services import maintenance_site_return_requirements as requirements
+    requirement_before = {
+        flag.issue_line_id: requirements.snapshot(line)
+        for flag in plan.site_flags
+        if (line := db.get(MaintenanceSiteIssueLine, flag.issue_line_id)) is not None
+    }
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         if line is None:
@@ -1302,6 +1308,8 @@ def apply(
                     issue.issue_date = flag.issue_date
                     operating_fact_changed = True
 
+    requirements.record_corrections(db, project_id=plan.project_id, before=requirement_before,
+                                   operated_by=operated_by, reason="项目总表返还要求更正")
     if plan.inner is not None:
         inner_result = ec.apply(
             db,
@@ -2779,8 +2787,11 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> dict[str, str]:
     return base_hashes
 
 
-def _v2_site_row_values(line, issue) -> dict[str, object]:
+def _v2_site_row_values(line, issue, details=None) -> dict[str, object]:
     """06 一行的展示值（按表头名）。build/parse 共用。"""
+    requirement = (details or {}).get("return_requirement")
+    state = requirement["requirement_status"] if requirement else (
+        "exempt" if line.no_return is True else "required" if line.no_return is False else "pending_category")
     return {
         "领用单号": issue.issue_no,
         "领用日期": issue.issue_date,
@@ -2791,9 +2802,11 @@ def _v2_site_row_values(line, issue) -> dict[str, object]:
             "" if line.no_return is None else ("否" if line.no_return else "是")
         ),
         "备注": line.remark or "",
-        "应返数量": "—",
-        "返还状态": "待确认品类",
-        "返还单号": "—",
+        "应返数量": (Decimal(requirement["required_quantity"]) if requirement and state != "pending_category"
+                      else line.quantity if state == "required" else 0 if state == "exempt" else "—"),
+        "返还状态": {"required": "应返；收货见项目返还台账", "exempt": "免返；收货记录保留",
+                     "pending_category": "按规则判断（品类待确认）"}[state],
+        "返还单号": "按项目/需求单汇总，不逐行分配",
         "实体ID": line.issue_line_id,
         "关联需求单号": line.demand_order_no or "",
     }
@@ -2860,12 +2873,14 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
             MaintenanceSiteIssue.normalized_status != "void",
             MaintenanceSiteIssueLine.is_active.is_(True)
     ).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
+    from app.services.maintenance_site_return_requirements import line_details
+    details = line_details(db, [line for line, _ in rows], project=db.get(MaintenanceProject, project_id))
     base_hashes: dict[str, str] = {}
     for line, issue in rows:
-        values = _v2_site_row_values(line, issue)
+        values = _v2_site_row_values(line, issue, details.get(line.issue_line_id))
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="06_领用返还", entity_id=line.issue_line_id,
-            values={name: values.get(name) for name in V2_SITE_BASE_FIELDS})
+            values={name: values.get(name) for name in (*V2_SITE_BASE_FIELDS, "应返数量", "返还状态", "返还单号")})
         base_hashes[str(line.issue_line_id)] = _v2_row_base_hash(
             values, V2_SITE_BASE_FIELDS)
         ws.append([values[name] for name in V2_SITE_HEADERS])
@@ -2946,6 +2961,64 @@ def _v2_build_dictionary(wb) -> None:
     _v2_finalize(ws, headers)
 
 
+V2_SHEET_RETURN_LEDGER = "返还收货台账（只读）"
+
+
+def _v2_readonly_sheet_hash(ws) -> str:
+    rows = []
+    for cells in ws.iter_rows(values_only=True):
+        values = [_v2_hash_value(value) for value in cells]
+        while values and values[-1] == "":
+            values.pop()
+        rows.append(values)
+    while rows and not rows[-1]:
+        rows.pop()
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _v2_build_return_ledger(wb, db, project_id) -> str:
+    from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
+
+    # One query supplies both details and totals from the same database snapshot.
+    records = db.execute(select(MaintenanceRkdReturnLine, FMaintenanceOrder.order_no)
+        .outerjoin(FMaintenanceOrder, FMaintenanceOrder.raw_order_id == MaintenanceRkdReturnLine.source_order_id)
+        .where(MaintenanceRkdReturnLine.project_id == project_id,
+               MaintenanceRkdReturnLine.line_status == "active")
+        .order_by(MaintenanceRkdReturnLine.created_at, MaintenanceRkdReturnLine.rkd_line_id)).all()
+    total = sum((Decimal(row.qty) for row, _ in records), Decimal(0))
+    unassigned = sum((Decimal(row.qty) for row, _ in records if row.source_order_id is None), Decimal(0))
+    ws = wb.create_sheet(V2_SHEET_RETURN_LEDGER)
+    ws.append(["收货事实只读快照；更正请到项目返还台账，免返不删除收货记录"])
+    ws.append(["项目已返还数量", str(total)])
+    ws.append(["未关联需求单数量", str(unassigned)])
+    by_demand = {}
+    for row, order_no in records:
+        if row.source_order_id:
+            key = (row.source_order_id, order_no)
+            by_demand[key] = by_demand.get(key, Decimal(0)) + Decimal(row.qty)
+    for (_, order_no), qty in by_demand.items():
+        ws.append(["需求单已返还", order_no or "来源需求单", str(qty)])
+    ws.append([])
+    ws.append(["记录ID", "需求单", "PN", "描述", "数量", "件况", "收货时间", "来源", "来源单号", "备注", "登记人", "版本", "层级", "数量待审"])
+    for row, order_no in records:
+        ws.append([row.rkd_line_id, order_no or "未关联需求单", row.pn,
+                   row.description, str(row.qty), row.test_result,
+                   row.occurred_at.isoformat() if row.occurred_at else None,
+                   "手工登记" if row.source == "manual" else "入库导入", row.head_no,
+                   row.note, row.created_by, row.version,
+                   "整机（计1台，附属明细不计数）" if row.receipt_kind == "machine" else "备件",
+                   "待审（保留源小数）" if row.review_required else "否"])
+    for cells in ws:
+        for cell in cells:
+            # Source PN/notes are plain text, never formulas in an exported file.
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+    for column in "ABCDEFGHIJKLMN":
+        ws.column_dimensions[column].width = 24
+    ws.protection.sheet = True
+    return _v2_readonly_sheet_hash(ws)
+
+
 def build_project_master_v2(
     db: Session,
     *,
@@ -3002,6 +3075,8 @@ def build_project_master_v2(
             wb, db, project_id, current_contracts)
     if V2_SHEET_SITE in wanted:
         base_hash_maps["site"] = _v2_build_site(wb, db, project_id)
+    receipt_ledger_hash = (_v2_build_return_ledger(wb, db, project_id)
+                           if V2_SHEET_SITE in wanted else None)
     _v2_build_dictionary(wb)
     _v2_build_usage(wb)
     meta_rows = [
@@ -3012,6 +3087,8 @@ def build_project_master_v2(
         ("workbook_revision", str(exported_revision)),
         ("workbook_data_version", exported_data_version),
     ]
+    if receipt_ledger_hash is not None:
+        meta_rows.append(("receipt_ledger_hash", receipt_ledger_hash))
     if V2_SHEET_OVERVIEW in wanted:
         editable_contracts = _v2_editable_contracts(db, project_id, contracts)
         card = _canonical_contract_read_model(db, project_id)
@@ -3342,6 +3419,10 @@ def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
             "project_mismatch",
             f"这份工作簿属于项目「{other_name}」，请到该项目的面板上传；"
             f"或重新从当前项目下载后再改。")
+    if meta.get("receipt_ledger_hash"):
+        if (V2_SHEET_RETURN_LEDGER not in wb.sheetnames
+                or _v2_readonly_sheet_hash(wb[V2_SHEET_RETURN_LEDGER]) != meta["receipt_ledger_hash"]):
+            raise WorkbookError("readonly_field_changed", "返还收货台账为只读快照，不能修改或删除；请到页面更正收货记录")
     included = tuple(
         name.strip() for name in meta.get("included_sheets", "").split(",")
         if name.strip()
@@ -3792,6 +3873,8 @@ def _v2_site_preflight(db: Session, ws, index, merge: _V2MergeContext) -> None:
         no = str(_cell(row, index, "领用单号") or "").strip()
         if len(no) > 64:
             errors.append(WorkbookError("invalid_site_identity", f"第 {row_no} 行领用单号不能超过 64 字符"))
+        if is_new and any(_cell(row, index, field) not in (None, "") for field in ("应返数量", "返还状态", "返还单号")):
+            errors.append(WorkbookError("readonly_field_changed", f"第 {row_no} 行应返数量、返还状态与返还单号为只读字段，新增时请留空"))
         if is_new and _cell(row, index, "关联需求单号") not in (None, ""):
             errors.append(WorkbookError("readonly_field_changed", f"第 {row_no} 行关联需求单号为系统展示列；新增时请将 WBDD 填在领用单号列，系统会单独保存"))
     unmatched = _unmatched_pn_error(db, merge, full=True)
@@ -3994,6 +4077,17 @@ def _v2_parse_site(
             baseline = _parse_v2_row_base_token(
                 _cell(row, index, V2_BASE_COLUMN), sheet="06_领用返还",
                 entity_id=raw_id, row_no=row_no)
+            # Compare to the signed export, so legitimate server changes do not
+            # invalidate an untouched read-only cell in an older workbook.
+            legacy_readonly = {"应返数量": "—", "返还状态": "待确认品类", "返还单号": "—"}
+            for field, legacy_value in legacy_readonly.items():
+                expected = baseline.get(field, _v2_hash_value(legacy_value))
+                if _v2_hash_value(_cell(row, index, field)) != expected:
+                    raise WorkbookError("readonly_field_changed", f"第 {row_no} 行{field}为只读统计字段，不能修改")
+            if flag == "否" and existing_line.no_return is not True:
+                from app.services.maintenance_return_receipts import receipt_summary
+                if Decimal(receipt_summary(db, project_id=project_id)["project_total_qty"]) > 0:
+                    merge.warnings.append(f"第 {row_no} 行改为免返；项目已有收货记录，实际返还数量和历史均保留")
             if not existing_line.is_active or issue.normalized_status == "void":
                 # 旧文件里的行在下载之后被作废（面板整单作废 / 别人删行）。
                 # 未触碰 = 无事发生；触碰了 = D-02 作废优先，行级回执，
@@ -6226,6 +6320,12 @@ def apply_project_master_v2(
         ).limit(1)):
             raise WorkbookError("stale_site_replay", "原文件已完成自动编号领用导入，请重新下载总表后编辑")
     pricing_entries: dict[str, tuple[date, MaintenanceSiteIssueLine]] = {}
+    from app.services import maintenance_site_return_requirements as requirements
+    requirement_before = {
+        flag.issue_line_id: requirements.snapshot(line)
+        for flag in plan.site_flags
+        if (line := db.get(MaintenanceSiteIssueLine, flag.issue_line_id)) is not None
+    }
     for flag in plan.site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         # 2026-08-23：缺行=作废——领用行软作废，退出成本与返还义务计算；
@@ -6358,6 +6458,8 @@ def apply_project_master_v2(
         if flag.remark is not None and flag.remark != line.remark:
             line.remark = flag.remark
             operating_fact_changed = True
+    requirements.record_corrections(db, project_id=plan.project_id, before=requirement_before,
+                                   operated_by=operated_by, reason=audit_reason)
     if header_changed_issue_ids:
         for issue, line in db.execute(
             select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)

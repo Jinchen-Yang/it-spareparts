@@ -24,6 +24,7 @@ _TABLE = "maintenance_rkd_return_line"
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.alter_column(_TABLE, "batch_id", existing_type=sa.String(36), nullable=True)
     op.alter_column(_TABLE, "head_row_id", existing_type=sa.String(36), nullable=True)
     op.add_column(
@@ -43,7 +44,7 @@ def upgrade() -> None:
             "source",
             sa.String(16),
             nullable=False,
-            server_default="'rkd_import'",
+            server_default=sa.text("'rkd_import'"),
         ),
     )
     op.add_column(_TABLE, sa.Column("description", sa.String(256), nullable=True))
@@ -55,7 +56,7 @@ def upgrade() -> None:
             "line_status",
             sa.String(16),
             nullable=False,
-            server_default="'active'",
+            server_default=sa.text("'active'"),
         ),
     )
     op.add_column(
@@ -68,7 +69,7 @@ def upgrade() -> None:
             "created_by",
             sa.String(64),
             nullable=False,
-            server_default="'rkd_import'",
+            server_default=sa.text("'rkd_import'"),
         ),
     )
     op.add_column(_TABLE, sa.Column("updated_by", sa.String(64), nullable=True))
@@ -104,8 +105,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Reversible: manual rows cannot survive NOT NULL batch/head, so they are
-    # removed explicitly (audit rows are string-keyed and keep the history).
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    # Lock before checking; no registration may slip between the guard and DDL.
+    # Original untouched RKD rows remain reversible. New facts/provenance and
+    # corrections must be exported and deliberately migrated by an operator.
+    op.execute(f"LOCK TABLE {_TABLE} IN ACCESS EXCLUSIVE MODE")
+    op.execute(f"""
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM {_TABLE}
+            WHERE source <> 'rkd_import' OR batch_id IS NULL OR head_row_id IS NULL
+              OR source_order_id IS NOT NULL OR line_status <> 'active'
+              OR version <> 1 OR description IS NOT NULL OR note IS NOT NULL
+              OR evidence_ref IS NOT NULL OR created_by <> 'rkd_import'
+              OR updated_by IS NOT NULL OR updated_at IS NOT NULL
+              OR voided_by IS NOT NULL OR voided_at IS NOT NULL OR void_reason IS NOT NULL)
+          THEN RAISE EXCEPTION 'export the return receipt ledger first; downgrade refused';
+          END IF;
+        END $$
+    """)
     op.drop_index("ix_maintenance_rkd_return_active_demand", table_name=_TABLE)
     op.drop_constraint("ck_maintenance_rkd_return_void_shape", _TABLE, type_="check")
     op.drop_constraint("ck_maintenance_rkd_return_source_shape", _TABLE, type_="check")
@@ -126,6 +143,5 @@ def downgrade() -> None:
     op.drop_column(_TABLE, "source")
     op.drop_constraint("fk_maintenance_rkd_return_source_order", _TABLE, type_="foreignkey")
     op.drop_column(_TABLE, "source_order_id")
-    op.execute(f"DELETE FROM {_TABLE} WHERE batch_id IS NULL OR head_row_id IS NULL")
     op.alter_column(_TABLE, "batch_id", existing_type=sa.String(36), nullable=False)
     op.alter_column(_TABLE, "head_row_id", existing_type=sa.String(36), nullable=False)

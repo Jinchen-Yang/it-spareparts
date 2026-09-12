@@ -39,6 +39,7 @@ from app.api import (
     maintenance_migration,
     maintenance_project_operations,
     maintenance_return_receipts,
+    maintenance_return_receipt_import,
     maintenance_source_assignments,
     maintenance_project_workbooks,
     maintenance_project_workbook_v3,
@@ -115,6 +116,7 @@ app.include_router(maintenance_expense_collection_workbook.router, prefix=settin
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
+app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_batch_transfer.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
@@ -166,14 +168,24 @@ app.include_router(
 # The stable operations router must precede the project-master ``/{project_id}``
 # route so literal paths such as ``/operations`` cannot be captured as an id.
 app.include_router(
-    maintenance_project_operations.router,
+    maintenance_project_operations.operations_beta_router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
 app.include_router(
-    maintenance_project_operations.site_issue_router,
+    maintenance_project_operations.site_issue_beta_router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_project_operations.stable_workspace_router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_boss_dependencies,
+)
+app.include_router(
+    maintenance_project_operations.stable_site_issue_router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_boss_dependencies,
 )
 app.include_router(
     maintenance_bad_returns.router,

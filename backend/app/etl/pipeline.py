@@ -58,7 +58,7 @@ def sha256_file(path: str) -> str:
 # 全项目批量传输网关（maintenance_bulk_import）自 D-16 起把原件 sha256 记进
 # file_hash（同时归档到 sys_raw_file）。它与通用导入是不同协议命名空间：同一份
 # 销售订单导出先走批量网关、再走通用导入是合法的，不能被判成"该文件已成功导入"。
-_ISOLATED_BATCH_TYPES = ("maint_bulk", "maint_contract", "maint_receipt")
+_ISOLATED_BATCH_TYPES = ("maint_bulk", "maint_contract", "maint_receipt", "return_receipts")
 
 
 def successful_batch_ids_by_hash(

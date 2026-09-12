@@ -36,8 +36,11 @@ from app.services import maintenance_project_operations as operations
 from app.services import maintenance_project_procurement as procurement
 
 
-router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
-site_issue_router = APIRouter(prefix="/maintenance/site-issues", tags=["maintenance"])
+operations_beta_router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
+stable_workspace_router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
+site_issue_beta_router = APIRouter(prefix="/maintenance/site-issues", tags=["maintenance"])
+# The published panel reads and voids site facts without enabling the Beta draft workflow.
+stable_site_issue_router = APIRouter(prefix="/maintenance/site-issues", tags=["maintenance"])
 
 
 class ProjectOperationsSearch(BaseModel):
@@ -335,7 +338,7 @@ def _enforce_site_issue_access(
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
 
 
-@router.post("/{project_id}/contracts", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post("/{project_id}/contracts", status_code=status.HTTP_201_CREATED)
 def create_project_contract(
     body: ContractCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -409,7 +412,7 @@ def _contract_write_result(
         raise
 
 
-@router.patch("/contracts/{project_contract_id}")
+@operations_beta_router.patch("/contracts/{project_contract_id}")
 def patch_project_contract(
     body: ContractPatch,
     project_contract_id: str = Path(..., min_length=1, max_length=36),
@@ -439,7 +442,7 @@ def patch_project_contract(
     )
 
 
-@router.post("/contracts/{project_contract_id}/archive")
+@operations_beta_router.post("/contracts/{project_contract_id}/archive")
 def archive_project_contract(
     body: ContractArchive,
     project_contract_id: str = Path(..., min_length=1, max_length=36),
@@ -469,7 +472,7 @@ def archive_project_contract(
     )
 
 
-@router.post("/{project_id}/collections", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post("/{project_id}/collections", status_code=status.HTTP_201_CREATED)
 def create_project_collection(
     body: CollectionCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -510,7 +513,7 @@ def create_project_collection(
         raise
 
 
-@router.patch("/collections/{collection_id}")
+@operations_beta_router.patch("/collections/{collection_id}")
 def patch_project_collection(
     body: CollectionPatch,
     collection_id: str = Path(..., min_length=1, max_length=36),
@@ -540,7 +543,7 @@ def patch_project_collection(
     )
 
 
-@site_issue_router.post("/projects/{project_id}/candidates/search")
+@site_issue_beta_router.post("/projects/{project_id}/candidates/search")
 def search_project_site_issue_candidates(
     body: SiteIssueCandidateSearch,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -580,7 +583,7 @@ def search_project_site_issue_candidates(
     return payload
 
 
-@router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue(
     body: SiteIssueCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -624,7 +627,7 @@ def create_project_site_issue(
         raise
 
 
-@site_issue_router.post("/projects/{project_id}", status_code=status.HTTP_201_CREATED)
+@site_issue_beta_router.post("/projects/{project_id}", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue_draft(
     body: SiteIssueDraftCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -672,7 +675,7 @@ def create_project_site_issue_draft(
         raise
 
 
-@site_issue_router.post("/{issue_id}/preview")
+@site_issue_beta_router.post("/{issue_id}/preview")
 def preview_project_site_issue(
     body: SiteIssuePreview,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -708,7 +711,7 @@ def preview_project_site_issue(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
-@site_issue_router.post("/{issue_id}/confirm")
+@site_issue_beta_router.post("/{issue_id}/confirm")
 def confirm_project_site_issue(
     body: SiteIssueCommand,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -759,7 +762,7 @@ def confirm_project_site_issue(
         raise
 
 
-@site_issue_router.patch("/{issue_id}")
+@site_issue_beta_router.patch("/{issue_id}")
 def patch_project_site_issue_v2(
     body: SiteIssuePatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -819,7 +822,7 @@ def patch_project_site_issue_v2(
         raise
 
 
-@site_issue_router.post("/{issue_id}/void")
+@stable_site_issue_router.post("/{issue_id}/void")
 def void_project_site_issue(
     body: SiteIssueCommand,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -870,7 +873,7 @@ def void_project_site_issue(
         raise
 
 
-@site_issue_router.post("/search")
+@stable_site_issue_router.post("/search")
 def search_project_site_issues(
     body: SiteIssueSearch,
     db: Session = Depends(get_db),
@@ -912,7 +915,7 @@ def search_project_site_issues(
     return payload
 
 
-@router.patch("/site-issues/{issue_id}/status")
+@operations_beta_router.patch("/site-issues/{issue_id}/status")
 def patch_project_site_issue_status(
     body: SiteIssueStatusPatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -964,7 +967,7 @@ def patch_project_site_issue_status(
         raise
 
 
-@router.get("/{project_id}/cost-gaps")
+@operations_beta_router.get("/{project_id}/cost-gaps")
 def project_cost_gaps(
     project_id: str = Path(..., min_length=1, max_length=36),
     page: int = Query(1, ge=1),
@@ -999,7 +1002,7 @@ def project_cost_gaps(
     return payload
 
 
-@router.post("/{project_id}/cost-gaps/recompute")
+@operations_beta_router.post("/{project_id}/cost-gaps/recompute")
 def recompute_project_cost_gaps(
     body: CostGapRecompute,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1024,7 +1027,7 @@ def recompute_project_cost_gaps(
     )
 
 
-@router.post("/{project_id}/expenses", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post("/{project_id}/expenses", status_code=status.HTTP_201_CREATED)
 def create_project_expense(
     body: ExpenseCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1063,7 +1066,7 @@ def create_project_expense(
         raise
 
 
-@router.put("/{project_id}/expenses/readiness")
+@operations_beta_router.put("/{project_id}/expenses/readiness")
 def mark_project_expense_readiness(
     body: ExpenseReadinessMark,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1091,7 +1094,7 @@ def mark_project_expense_readiness(
     )
 
 
-@router.patch("/expenses/{expense_id}/status")
+@operations_beta_router.patch("/expenses/{expense_id}/status")
 def patch_project_expense_status(
     body: ExpenseStatusPatch,
     expense_id: str = Path(..., min_length=1, max_length=64),
@@ -1143,7 +1146,7 @@ def patch_project_expense_status(
         raise
 
 
-@router.patch("/{project_id}/cost-gaps")
+@operations_beta_router.patch("/{project_id}/cost-gaps")
 def patch_project_cost_gap(
     body: ManualCostPatch,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1168,7 +1171,7 @@ def patch_project_cost_gap(
     )
 
 
-@router.get("/{project_id}/workspace")
+@stable_workspace_router.get("/{project_id}/workspace")
 def stable_project_workspace(
     response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1218,7 +1221,7 @@ def stable_project_workspace(
     return payload
 
 
-@router.get("/{project_id}/tasks")
+@operations_beta_router.get("/{project_id}/tasks")
 def stable_project_tasks(
     project_id: str = Path(..., min_length=1, max_length=36),
     as_of: date | None = None,
@@ -1250,7 +1253,7 @@ def stable_project_tasks(
     return payload
 
 
-@router.get("/{project_id}/purchases")
+@operations_beta_router.get("/{project_id}/purchases")
 def stable_project_purchases(
     project_id: str = Path(..., min_length=1, max_length=36),
     source_order_id: str | None = Query(
@@ -1385,7 +1388,7 @@ def _stable_project_operations_response(
     return payload
 
 
-@router.get("/operations")
+@operations_beta_router.get("/operations")
 def stable_project_operations(
     as_of: date | None = None,
     page: int = Query(1, ge=1),
@@ -1425,7 +1428,7 @@ def stable_project_operations(
     )
 
 
-@router.post("/site-issue-costs/backfill")
+@operations_beta_router.post("/site-issue-costs/backfill")
 def backfill_site_issue_costs_endpoint(
     force: bool = Query(False, description="算法升级后全量重算"),
     db: Session = Depends(get_db),
@@ -1452,7 +1455,7 @@ def backfill_site_issue_costs_endpoint(
     return stats
 
 
-@router.post("/expense-attribution/backfill")
+@operations_beta_router.post("/expense-attribution/backfill")
 def backfill_expense_attribution_endpoint(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
@@ -1477,7 +1480,7 @@ def backfill_expense_attribution_endpoint(
     return stats
 
 
-@router.post("/operations/search")
+@operations_beta_router.post("/operations/search")
 def search_stable_project_operations(
     body: ProjectOperationsSearch,
     db: Session = Depends(get_db),
@@ -1512,3 +1515,14 @@ def search_stable_project_operations(
         db=db,
         ctx=ctx,
     )
+
+
+# Compatibility composition for isolated API tests/embedders. Production mounts
+# the two child routers separately with their respective release gates.
+site_issue_router = APIRouter()
+site_issue_router.include_router(site_issue_beta_router)
+site_issue_router.include_router(stable_site_issue_router)
+
+router = APIRouter()
+router.include_router(operations_beta_router)
+router.include_router(stable_workspace_router)
