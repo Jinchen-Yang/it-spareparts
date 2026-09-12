@@ -7,7 +7,7 @@ Extends maintenance_rkd_return_line into the unified return-receipt ledger
 they keep source='rkd_import', line_status='active' via server defaults.
 
 Revision ID: d2f8b4e6c9a1
-Revises: b7d3f9a1c5e2
+Revises: c9e5a1b7d3f8
 """
 
 from collections.abc import Sequence
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d2f8b4e6c9a1"
-down_revision: str | None = "b7d3f9a1c5e2"
+down_revision: str | None = "c9e5a1b7d3f8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

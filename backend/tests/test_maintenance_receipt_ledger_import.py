@@ -39,9 +39,8 @@ from app.services import maintenance_bulk_import as bulk
 
 REVISION = "b7d3f9a1c5e2"
 PREVIOUS = "a8e4f1c7d3b9"
-# 2026-09-11 台账统一迁移 d2f8b4e6c9a1 线性追加（返还收货台账）；
-# upgrade head 后的链头断言随之指向新头。
-CHAIN_HEAD = "d2f8b4e6c9a1"
+# 链头断言用 script.get_current_head() 动态取值（#321 起不再钉常量，
+# 后续迁移线性追加无须再改本文件）。
 ORDER_NO = "XSDD-20240101-0001"
 
 
@@ -203,11 +202,7 @@ def test_migration_is_single_head_and_roundtrips(db):
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-<<<<<<< HEAD
         ).scalar_one() == script.get_current_head()
-=======
-        ).scalar_one() == CHAIN_HEAD
->>>>>>> feat/return-receipt-ledger
 
 
 # ---------- 归档 ----------
