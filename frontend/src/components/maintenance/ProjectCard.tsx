@@ -222,6 +222,20 @@ export function ProjectCard({ row }: ProjectCardProps) {
             <Tag color="green">回款已完成</Tag>
           ) : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
+          {/* 业务类型（2026-09-08）：用户要能自证「这张卡为什么在 / 为什么不在筛选里」。
+              未标注是灰色提示而不是留白——生产 647/648 都在这一档，留白等于什么都没说。 */}
+          {!isBucket && row.business_type_code === "unlabeled" ? (
+            <Tag>未标注业务类型</Tag>
+          ) : null}
+          {!isBucket && row.business_type_code === "other" ? (
+            <Tag color="orange">{row.business_type}</Tag>
+          ) : null}
+          {!isBucket
+            && row.business_type
+            && row.business_type_code !== "unlabeled"
+            && row.business_type_code !== "other" ? (
+              <Tag color="blue">{row.business_type}</Tag>
+            ) : null}
         </Space>
 
         <Text type="secondary" style={{ fontSize: 12 }}>

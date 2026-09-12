@@ -83,6 +83,8 @@ class ProjectSearch(BaseModel):
     lifecycle: str = Field(default="all", pattern=r"^(ongoing|ended|missing|payment_complete|all)$")
     sort: str = Field(default="name", pattern=r"^(attention|orders|name|known_cost|cost_ratio)$")
     card_status: str | None = Field(default=None, pattern=r"^(normal|warning|alert)$")
+    business_type: str = Field(
+        default="all", pattern=board.BUSINESS_TYPE_FILTER_PATTERN)
 
 
 class ProjectExportRequest(BaseModel):
@@ -96,6 +98,9 @@ class ProjectExportRequest(BaseModel):
         default="name",
         pattern=r"^(attention|orders|name|known_cost|cost_ratio)$",
     )
+    # 所见即所得：导出必须吃与卡墙同一个筛选，否则「屏幕上 3 个、导出下来全量」。
+    business_type: str = Field(
+        default="all", pattern=board.BUSINESS_TYPE_FILTER_PATTERN)
 
 
 @router.get("/health")
@@ -148,6 +153,7 @@ def board_projects(
     card_status: str | None = Query(None, pattern=r"^(normal|warning|alert)$"),
     date_from: date | None = Query(None, alias="from"),
     date_to: date | None = Query(None, alias="to"),
+    business_type: str = Query("all", pattern=board.BUSINESS_TYPE_FILTER_PATTERN),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     ctx: UserContext = Depends(require_board_view),
@@ -166,7 +172,7 @@ def board_projects(
         return board.projects(
             db, user_ctx=ctx, page=page, page_size=page_size, lifecycle=lifecycle,
             sort=sort, has_activity=has_activity, card_status_filter=card_status,
-            date_from=date_from, date_to=date_to,
+            date_from=date_from, date_to=date_to, business_type=business_type,
             allowed_project_ids=_project_card_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:
@@ -199,6 +205,7 @@ def board_projects_search(
             db, user_ctx=ctx, page=payload.page, page_size=payload.page_size,
             lifecycle=payload.lifecycle, sort=payload.sort, q_text=payload.q,
             card_status_filter=payload.card_status,
+            business_type=payload.business_type,
             allowed_project_ids=_project_card_scope(db, ctx),
         )
     except board.BoardSortNotPermitted as exc:
@@ -253,6 +260,7 @@ def board_project_export(
             lifecycle=payload.lifecycle,
             card_status=payload.card_status,
             sort=payload.sort,
+            business_type=payload.business_type,
             allowed_project_ids=_allowed_scope(db, ctx),
         )
     except project_export.UnknownProjectExportField as exc:

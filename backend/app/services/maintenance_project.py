@@ -115,6 +115,9 @@ def project_directory(
             "salesperson": project.salesperson,
             "salesperson_override_active": project.salesperson_override_active,
             "project_manager_id": project.project_manager_id,
+            # 业务类型（2026-09-08）：与 overview/catalog 键集一致，卡墙筛选与
+            # 面板补录读的是同一列，三处任缺一处就会出现「改了看不到」。
+            "business_type": project.business_type,
             # 维保期限主数据（#39/#51），与 overview/catalog 的键集一致
             "period_from": project.period_from.isoformat() if project.period_from else None,
             "period_to": project.period_to.isoformat() if project.period_to else None,
@@ -346,6 +349,8 @@ def project_overview_from_facts(
         "salesperson": project.salesperson,
         "salesperson_override_active": project.salesperson_override_active,
         "project_manager_id": project.project_manager_id,
+        # 业务类型（2026-09-08）：面板「编辑基本信息」补录后回读同一份 payload
+        "business_type": project.business_type,
         # 维保期限主数据（#39/#51）：面板显示与编辑回读都走这份 payload
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
