@@ -4,7 +4,34 @@
 
 ---
 
-## 2026-08-17
+## 2026-09-12
+
+**Agent:** OpenCode (cloudlay-3080)
+**Session:** 返还收货台账 step-2（数据与服务层）——计划 `docs/superpowers/plans/2026-09-11-site-issue-display-and-return-ledger.md` §4.3 第 2 步
+**Commit:** `4767e88`（分支 `feat/return-receipt-ledger`，自 origin/main `e0c80b0` 切出）
+
+**Changed:**
+- `backend/alembic/versions/d2f8b4e6c9a1_return_receipt_ledger.py` — **迁移（单头，parent b7d3f9a1c5e2）**：`maintenance_rkd_return_line` 放开 batch/head NOT NULL（容纳手工行）；新增 `source_order_id`(FK f_maintenance_order.raw_order_id)、`source`、`line_status`、`version`、`description/note/evidence_ref`、`created_by/updated_by/updated_at/voided_by/voided_at/void_reason`；6 个 CHECK（source 枚举/状态枚举/版本/source 形状互斥/void 形状互斥）+ 活跃行 (project, demand) 部分索引。可逆（downgrade 先删手工行再恢复 NOT NULL）
+- `backend/app/models/maintenance_doc_import.py` — `MaintenanceRkdReturnLine` 扩展为统一台账模型（与迁移同构），docstring 记录口径
+- `backend/app/services/maintenance_return_receipts.py` — **新服务**：登记（项目必选/wbdd 可选且校验 active assignment 归属一致/PN 必填/正整数/件况枚举 成品·坏品·废品 或留空）、修改（版本 CAS + 前后值审计 + 项目转移双写审计）、作废（必填原因、不物理删除、退出有效统计）、检索、汇总（Σ需求单+未关联=项目总量 **不变式断言**）、审计读取；`legacy_bad_return_filter()` 共享旧口径冻结过滤器
+- `backend/app/api/maintenance_return_receipts.py` — **新 API（非 Beta，生产可达）**：`GET/POST /maintenance/projects/stable/{id}/return-receipts`、`GET .../return-receipt-summary`、`PATCH /maintenance/return-receipts/{id}`、`POST .../void`、`GET .../audit`；写走 `action_maintenance_bad_return_manage`；**失败尝试（403/404/409/422）同样 record_access_log 留痕**
+- `backend/app/main.py` — 注册新 router（无 Beta 闸）
+- `backend/app/services/maintenance_bad_returns.py` / `maintenance_boss_facts.py` / `maintenance_analytics.py` / `maintenance_recovery.py` — **旧坏件口径冻结（先并存后切换）**：四个消费方统一加 `source='rkd_import' AND test_result∈RKD_RETURN_TEST_RESULTS AND line_status='active'` 过滤器，当前行为零变化，防后续「件况全收」导入与手工行漂移旧分子
+- `backend/tests/test_maintenance_return_receipts_api.py` — **12 个新测试**：未关联登记/补选不重复计数/跨项目 wbdd 拒绝/入参校验/CAS+审计前后值/作废+复作废/幂等重放/权限 403+读放行/件况不影响总量/旧口径冻结/审计端点/PN 解析 part_id
+- `backend/tests/test_maintenance_receipt_ledger_import.py` / `test_maintenance_salesperson_override_migration.py` / `test_maintenance_wbdd_display_columns_migration.py` — 链头断言更新 `b7d3f9a1c5e2 → d2f8b4e6c9a1`（线性追加惯例，同 #321 修法）
+- `.gitignore` — 加 `.opencode-inbox/`（真实样表永不入 Git）
+- `docs/superpowers/plans/2026-09-11-site-issue-display-and-return-ledger.md` — 完整计划（口径已全部拍板：项目必选/需求单可选/PN 不匹配原领用/按数量统计/可改可废/审计；§5.2 三细节已定）
+
+**Tests:**
+- 新增 12 + 迁移断言 15 = `27 passed`（含迁移升级/降级/单头/零漂移：upgrade ✅ check ✅ heads ✅ downgrade→upgrade 往返 ✅）
+- 后端全量：`4294 passed, 14 failed, 7 skipped`——14 个失败全部为**本机环境固有**（shellcheck 缺失 ×1；https_rollback/edge_release 9+1 需 systemd/网络命名空间），与本改动零关联（已验证三文件不 import 任何本次修改模块；CI 环境不受影响）
+- 前端未改动（本 PR 纯后端，页面在 step-3）
+
+**Notes:**
+- 口径依据：2026-09-11 拍板（计划 §2/§5.2）+ D-14 分子口径（RKD 返件类∈{维保拆旧返件,旧库退返}）背书
+- ⚠️ 迁移 parent 与 PR #321 的 `c9e5a1b7d3f8` 同为 `b7d3f9a1c5e2`：若 #321 先合并，本分支需重定基并重挂迁移 parent（已知修法，见 memory/site-import-pr321-release-pending.md）
+- §0 合流门槛（cd3abfe 八笔 + #321）由用户执行：本分支与其零文件冲突（cd3abfe 无迁移、不动 doc_import 域）
+
 
 **Agent:** Claude Code (macOS，本地会话)
 **Session:** v1.23 维保展示板生产发布（PR #254 → main `bd867a7`）＋ 发布阻断修复 ＋ 卡墙 R5 回归修复

@@ -29,10 +29,10 @@ def test_new_revision_is_additive_child_and_single_head():
     rev = script.get_revision(_REVISION)
     assert rev.down_revision == _PREVIOUS
     # 全链单 head；XSDD guard 后线性追加销售人工覆盖状态，再线性追加
-    # a8e4 期限回填（2026-09-02 基座）、b7d3 收款单台账（2026-09-07，#288），
-    # 仍不得产生迁移分叉。
-    # 2026-09-09 c9e5 现场领用需求单引用继续线性追加。
-    assert list(script.get_heads()) == ["c9e5a1b7d3f8"]
+    # a8e4 期限回填（2026-09-02 基座）、b7d3 收款单台账（2026-09-07，#288）、
+    # c9e5 现场领用需求单引用（2026-09-09，#321）、
+    # d2f8 返还收货台账（2026-09-11，rebase 至 c9e5 之上），仍不得产生迁移分叉。
+    assert list(script.get_heads()) == ["d2f8b4e6c9a1"]
 
 
 def test_migration_declares_exact_34_plus_28_columns():

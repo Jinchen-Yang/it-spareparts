@@ -34,6 +34,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceRkdReturnLine,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.services.maintenance_return_receipts import legacy_bad_return_filter
 
 # 未用件收回口径（铁律 5）：返库单只认成品；坏品/废品属坏件回收（走 RKD）
 GOOD_RETURN_RESULTS = ("成品",)
@@ -148,13 +149,18 @@ def _applied_return_lines() -> Select:
 
 
 def _applied_rkd_lines() -> Select:
-    """坏件回收规范事实（导入期已按返件类白名单 + 坏品/废品枚举 fail-closed）。"""
+    """坏件回收规范事实（导入期已按返件类白名单 + 坏品/废品枚举 fail-closed）。
+
+    口径冻结（2026-09-11 台账统一后）：只统计 rkd_import 来源 + 坏品类件况 +
+    有效行，手工登记与「件况全收」导入不进入本口径（先并存后切换）。
+    """
     return (
         select(
             MaintenanceRkdReturnLine.project_id.label("project_id"),
             MaintenanceRkdReturnLine.pn.label("pn"),
             func.sum(MaintenanceRkdReturnLine.qty).label("qty"),
         )
+        .where(*legacy_bad_return_filter())
         .group_by(MaintenanceRkdReturnLine.project_id, MaintenanceRkdReturnLine.pn)
     )
 

@@ -38,6 +38,7 @@ from app.api import (
     maintenance_project_assignments,
     maintenance_migration,
     maintenance_project_operations,
+    maintenance_return_receipts,
     maintenance_source_assignments,
     maintenance_project_workbooks,
     maintenance_project_workbook_v3,
@@ -113,6 +114,7 @@ app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
 app.include_router(maintenance_expense_collection_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
+app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_batch_transfer.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]

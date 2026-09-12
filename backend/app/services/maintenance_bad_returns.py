@@ -13,6 +13,9 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
+from app.services.maintenance_return_receipts import (
+    legacy_bad_return_filter as _legacy_bad_filter,
+)
 from app.models.maintenance_bad_return import (
     MaintenanceBadReturn,
     MaintenanceBadReturnCommand,
@@ -876,6 +879,8 @@ def return_rates_for_projects(
         return_facts[project_id] = (Decimal(registered), Decimal(confirmed))
 
     # 官方返还率分子（Q8）：氚云收货入库单 RKD 的坏品/坏件/故障/废品明细件数。
+    # 口径冻结（2026-09-11 台账统一后）：只统计 rkd_import 来源 + 坏品类件况 +
+    # 有效行；手工登记与成品/废品全收入账不进入旧分子（先并存后切换）。
     rkd_facts: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for project_id, official_qty in db.execute(
         select(
@@ -884,7 +889,10 @@ def return_rates_for_projects(
                 func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")
             ),
         )
-        .where(MaintenanceRkdReturnLine.project_id.in_(ids))
+        .where(
+            MaintenanceRkdReturnLine.project_id.in_(ids),
+            *_legacy_bad_filter(),
+        )
         .group_by(MaintenanceRkdReturnLine.project_id)
     ):
         rkd_facts[project_id] = Decimal(official_qty)
@@ -912,7 +920,10 @@ def return_rates_for_projects(
         select(
             MaintenanceRkdReturnLine.project_id,
             MaintenanceRkdReturnLine.pn,
-        ).where(MaintenanceRkdReturnLine.project_id.in_(ids))
+        ).where(
+            MaintenanceRkdReturnLine.project_id.in_(ids),
+            *_legacy_bad_filter(),
+        )
     ):
         rkd_pns[project_id].add(pn)
     obligation_pns: dict[str, set[str]] = defaultdict(set)

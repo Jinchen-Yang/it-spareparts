@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_front_stock import MaintenanceFrontStockLedger
 from app.services import maintenance_front_stock as front_stock
+from app.services.maintenance_return_receipts import legacy_bad_return_filter
 
 
 def recovery_summary(db: Session, project_id: str) -> dict:
@@ -30,7 +31,10 @@ def recovery_summary(db: Session, project_id: str) -> dict:
     ).scalars().all()
     bad = db.execute(
         select(MaintenanceRkdReturnLine)
-        .where(MaintenanceRkdReturnLine.project_id == project_id)
+        .where(
+            MaintenanceRkdReturnLine.project_id == project_id,
+            *legacy_bad_return_filter(),
+        )
         .order_by(
             MaintenanceRkdReturnLine.occurred_at.desc().nulls_last(),
             MaintenanceRkdReturnLine.head_no,
