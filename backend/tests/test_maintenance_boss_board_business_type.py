@@ -25,8 +25,11 @@ import pytest
 from app.config import get_settings
 from app.models.maintenance_project import MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.security import UserContext
 from app.services import maintenance_boss_board as board
 from tests.boss_board_helpers import boss_client, make_project
+from tests.test_maintenance_boss_board_payment_complete import _collected, _contract
+from tests.test_maintenance_boss_board_perf import count_sql
 
 
 @pytest.fixture(autouse=True)
@@ -255,6 +258,112 @@ def test_hidden_count_uses_the_same_other_filters(db):
     ongoing = _get(client, lifecycle="ongoing", business_type="overall")
     assert ongoing["total"] == 1
     assert ongoing["business_type_hidden"] == 1, "已结束那个不在 ongoing 条件内，不该计入"
+
+
+def _payment_pair(db, prefix, *, business_type, lifecycle):
+    pair = []
+    for paid in (False, True):
+        project = _project(db, f"{prefix}-{int(paid)}", business_type=business_type,
+                           lifecycle=lifecycle)
+        _collected(db, project, _contract(db, project), "1000" if paid else "500")
+        pair.append(project)
+    db.commit()
+    return pair  # unpaid, paid
+
+
+@pytest.mark.parametrize("lifecycle", ["payment_complete", "ongoing", "ended", "missing"])
+def test_hidden_count_recomputes_payment_membership_across_business_types(db, lifecycle):
+    period = "ongoing" if lifecycle == "payment_complete" else lifecycle
+    pairs = {
+        code: _payment_pair(db, code, business_type=kind, lifecycle=period)
+        for code, kind in (("overall", "整体维保"), ("spare", "备件维保"),
+                           ("other", "整机销售"), ("unlabeled", None))
+    }
+    client = boss_client(db)
+    # Clearing only the business-type selection defines the hidden count.
+    unfiltered = _get(client, lifecycle=lifecycle, business_type="all")
+    assert unfiltered["total"] == 4
+    index = int(lifecycle == "payment_complete")
+    selected = {pairs[code][index].project_id for code in ("overall", "spare")}
+    seen = set()
+    for page in (1, 2, 3):
+        filtered = _get(client, lifecycle=lifecycle, business_type="overall,spare",
+                        page=page, page_size=1)
+        assert filtered["total"] == 2
+        assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 2
+        assert len(filtered["rows"]) == (1 if page <= 2 else 0)
+        seen |= _ids(filtered)
+    assert seen == selected
+
+
+@pytest.mark.parametrize("lifecycle", ["payment_complete", "ongoing", "ended", "missing"])
+def test_hidden_payment_count_preserves_query_scope_and_activity_filters(db, lifecycle):
+    from tests.test_maintenance_return_receipts_api import _wbdd
+
+    period = "ongoing" if lifecycle == "payment_complete" else lifecycle
+    allowed = set()
+    expected = {}
+    for code, kind in (("overall", "整体维保"), ("spare", "备件维保"), ("other", "整机销售")):
+        pair = _payment_pair(db, f"MATCH-{code}", business_type=kind, lifecycle=period)
+        allowed.update(p.project_id for p in pair)
+        expected[code] = pair[int(lifecycle == "payment_complete")].project_id
+    _payment_pair(db, "MATCH-outside-scope", business_type="整机销售", lifecycle=period)
+    for prefix in ("OFF-query", "MATCH-activity", "MATCH-archived"):
+        pair = _payment_pair(db, prefix, business_type="整机销售", lifecycle=period)
+        allowed.update(p.project_id for p in pair)
+        for index, project in enumerate(pair):
+            if prefix == "MATCH-activity":
+                _wbdd(db, project=project, order_no=f"WBDD-ACTIVITY-{index}")
+            elif prefix == "MATCH-archived":
+                project.is_active = False
+        db.commit()
+    args = dict(user_ctx=UserContext(user_id="viewer", role="boss"), lifecycle=lifecycle,
+                q_text="MATCH", allowed_project_ids=allowed, has_activity=False, page_size=1)
+    unfiltered = board.projects(db, business_type="all", **args)
+    filtered = board.projects(db, business_type="overall,spare", **args)
+    assert unfiltered["total"] == 3
+    assert filtered["total"] == 2
+    assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 1
+    assert _ids(filtered) <= {expected["overall"], expected["spare"]}
+
+
+@pytest.mark.parametrize("lifecycle", ["ongoing", "ended", "missing"])
+def test_hidden_count_without_contract_permission_never_computes_payment_membership(db, monkeypatch, lifecycle):
+    for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
+        _payment_pair(db, code, business_type=kind, lifecycle=lifecycle)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("business-type hidden count must not derive payment identities without contract permission")
+
+    monkeypatch.setattr(board, "_payment_complete_ids", forbidden)
+    client = boss_client(db, with_profit=False)
+    unfiltered = _get(client, lifecycle=lifecycle, business_type="all")
+    filtered = _get(client, lifecycle=lifecycle, business_type="overall", page_size=1)
+    assert unfiltered["total"] == 4 and filtered["total"] == 2
+    assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 2
+    assert all(row["lifecycle"] == lifecycle for row in unfiltered["rows"])
+    assert all(row["collection_preview_inc_tax"]["state"] == "restricted" for row in unfiltered["rows"])
+
+
+def test_hidden_payment_membership_uses_batched_queries_across_pages_and_project_counts(db):
+    for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
+        _payment_pair(db, code, business_type=kind, lifecycle="ongoing")
+    client = boss_client(db)
+    args = dict(lifecycle="payment_complete", business_type="overall")
+    with count_sql() as small:
+        first = _get(client, **args, page_size=1)
+    assert first["total"] == 1 and first["business_type_hidden"] == 1
+    for number in range(10):
+        for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
+            _payment_pair(db, f"{code}-{number}", business_type=kind, lifecycle="ongoing")
+    with count_sql() as larger:
+        page = _get(client, **args, page_size=1)
+    with count_sql() as bigger_page:
+        full = _get(client, **args, page_size=50)
+    assert page["total"] == full["total"] == 11
+    assert page["business_type_hidden"] == full["business_type_hidden"] == 11
+    assert len(full["rows"]) == 11
+    assert small.selects == larger.selects == bigger_page.selects
 
 
 # ---------- 参数校验 ----------

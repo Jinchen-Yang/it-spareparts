@@ -1008,8 +1008,7 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
     if allowed_project_ids is not None:
         filters.append(MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
-    # 必须在 payment_complete 候选预跑之前进入 filters：那一档要拿收敛后的候选集算，
-    # 两个筛选才是真叠加而不是先算完再交集。
+    # 业务类型限制返回项目；回款成员计算还需覆盖隐藏计数的候选，见下方。
     business_type_clause = _business_type_clause(business_type)
     if business_type_clause is not None:
         filters.append(business_type_clause)
@@ -1074,7 +1073,10 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         raise BoardCostContractNotPermitted()
     if lifecycle == "payment_complete" or (
             lifecycle in ("ongoing", "ended", "missing") and can_contract):
-        scoped = list(filters)
+        # Both the selected rows and the hidden count need the same payment
+        # membership after clearing only business type. Keep scope/search and
+        # lifecycle constraints; one batched calculation serves both queries.
+        scoped = [f for f in filters if f is not business_type_clause]
         if lifecycle != "payment_complete":
             scoped.append(lifecycle_expr == lifecycle)
         candidate_ids = list(db.execute(
