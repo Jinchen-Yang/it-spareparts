@@ -1,6 +1,6 @@
 # 返还台账与领用改造：接续工作记录
 
-更新时间：2026-09-13。本文件替代前一会话未经验证的完成宣称；测试和远端状态以本文件最新记录与实际命令为准。
+更新时间：2026-09-14。本文件替代前一会话未经验证的完成宣称；测试和远端状态以本文件最新记录与实际命令为准。
 
 ## 接手入口和授权
 
@@ -87,3 +87,10 @@
 - shellcheck 安装在 `/tmp/return-ledger-tools/usr/bin`。完整后端用 `PATH=/tmp/return-ledger-tools/usr/bin:$PATH ~/.local/bin/uv run --extra dev pytest -q`。
 - Playwright 位于 `/tmp/return-ledger-browser/node_modules`，Chromium需 `LD_LIBRARY_PATH=/tmp/return-ledger-tools/usr/lib/x86_64-linux-gnu`。本地已装 CJK 字体修正截图缺字。
 - 真实样表只存 `.opencode-inbox/`；不提交原件、客户行、凭据、令牌或数据库备份。
+
+## 2026-09-14 本地演示域名修复
+
+- 用户通过 `http://home.cloudlay.cn:5176` 访问时实际遇到 Vite Host 403。此前使用本机地址的浏览器验收未覆盖这个入口，不能把本机200外推成用户域名已可用。
+- `8cc866b` 在 `frontend/vite.config.ts` 的 `server.allowedHosts` 中加入准确域名 `home.cloudlay.cn`；Vite已热重载。实际域名/本机均200，陌生Host仍403，构建通过。日志 `/tmp/return-ledger-browser/allowed-host-root-check.json`、`/tmp/return-ledger-allowed-host-build.log`。
+- 此前 `04635f5` 的 [CI #674](https://github.com/Jinchen-Yang/it-spareparts/actions/runs/34765106251) 已前后端全绿（后端4494通过/7跳过/0失败，前端817通过，迁移及生产依赖审计通过），但普通合并被GitHub以405拒绝：至少需要一位具备写权限的审查者批准。后续配置修复提交的最新CI和审批状态，以 [PR #323](https://github.com/Jinchen-Yang/it-spareparts/pull/323) 为准；未关闭分支保护，未合并main，未部署生产。
+- 真实DNS域名浏览器验收通过，未映射hosts：首页和入口模块200，登录后返还台账正常；页面/API/资源/请求错误为空，仅既有antd弃用警告。证据 `/tmp/return-ledger-browser/allowed-host-smoke.json`、`allowed-host-smoke.log`，没有导入或修改演示业务数据。

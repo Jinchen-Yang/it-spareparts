@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-14 — 本地演示域名白名单修复
+
+**Agent:** Codex。
+**Commit:** `8cc866b`。
+**Before:** 演示使用 `home.cloudlay.cn:5176` 访问时被 Vite Host 校验拒绝（403）；此前浏览器验收使用本机地址，未覆盖用户实际域名。
+**After:** `frontend/vite.config.ts` 的 `server.allowedHosts` 明确加入 `home.cloudlay.cn`，配置热重载后域名访问恢复；仍拒绝陌生主机名。
+**原因:** 修复用户访问已提供演示链接时遇到的阻断。
+**验证:** 修复前域名 Host 403、本机200；修复后实际域名和本机200、陌生Host仍403，`npm run build`通过。真实DNS下的浏览器登录及返还台账显示通过，页面/API/资源无错误。证据 `/tmp/return-ledger-browser/allowed-host-root-check.json`、`/tmp/return-ledger-browser/allowed-host-smoke.json`、`/tmp/return-ledger-allowed-host-build.log`。不修改业务逻辑、生产部署或数据库。
+**交付:** 已通过的全量CI #674对应此前 `04635f5`；本修复推送后的最新检查与仍需维护者批准的合并状态，以 [PR #323](https://github.com/Jinchen-Yang/it-spareparts/pull/323) 为准。
+
+---
+
 ## 2026-09-13 — PR #323 卡墙隐藏计数审查修复
 
 **Agent:** Codex（主任务复核，core 实现与回归）
