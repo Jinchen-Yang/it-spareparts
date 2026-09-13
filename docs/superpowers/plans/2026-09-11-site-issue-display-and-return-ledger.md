@@ -9,7 +9,7 @@
 - 本条覆盖下文“不在分母不完整时推算返还率”的范围限制：分母完整时可发布上述卡墙指标，不改其他旧指标的既有定义。
 - 验证：后端新增 2 项测试通过（不同 PN、所有件况、项目未关联记录、作废、超过 100%、缺少分母）；原卡片 17 项测试及 TypeScript 检查通过。演示接口核查为 7 / 42 = 16.7%。
 
-> 最新状态（2026-09-13）：业务口径已拍板，前置变更已在本地 integration 分支吸收，台账、导入、领用同步、页面及演示更新已完成。代码提交至 `b3de27c`；最终后端全量4482通过/7跳过/0失败，前端817项通过且构建通过；npm 在线审计按用户后续指令执行并通过，交付PR为 #323，远端检查与合并状态以该PR为准。交付方式按 §0 调整为完整 integration PR，详细证据见文末及最新交接记录。
+> 最新状态（2026-09-13）：业务口径已拍板，前置变更已在本地 integration 分支吸收，台账、导入、领用同步、页面及演示更新已完成。业务代码最新提交 `489fa67`；审查修复前后端全量4482通过/7跳过/0失败，审查隐藏计数修复后相关专项92项通过，最终全量以PR最新提交CI为准，前端817项通过且构建通过；npm 在线审计按用户后续指令执行并通过，交付PR为 #323，远端检查与合并状态以该PR为准。交付方式按 §0 调整为完整 integration PR，详细证据见文末及最新交接记录。
 > 日期：2026-09-11（同日结合远端/生产现状优化一版，优化记录见文末）
 > 依据：本地代码（main `e0c80b0`；cloudlay 工作区在 `chore/agent-skills-and-permissions`，领先 main 两笔纯 agents/docs 提交，无代码冲突）、生产只读核查、三份真实样表分析（`.opencode-inbox`，不入 Git）。
 
@@ -431,7 +431,9 @@
 - 独立 QA `beta=false / boss=true / V2=true`：`/tmp/return-ledger-browser/` 下 `flow.cjs`、`workbook-flow.cjs`、`import-flow.cjs`、`machine-flow.cjs` 四个脚本及同名日志全部成功、`errors=[]`，覆盖桌面/移动、登记修改作废、工作簿是/否上传再下载、小数备注修改与原件重传、整机组成和转移。原有收货总量7在登记作废及免返更正后保持7，小数导入后8.250、整机转移后9.250，附属件不计数。
 - 演示环境已安全更新：backend PID17688/8000，Vite5176，迁移 `d2 → e3`、V2启用，其余开关未改。原5条收货及8表旧字段逐表hash不变，证据 `/tmp/return-ledger-demo-backup/upgrade-result.log`、`facts-preserved.json`；只读浏览器 `/tmp/return-ledger-browser/demo-check.log` 通过，4条有效/5条全部，总量7、未关联4、两份已关联需求单分别2和1。实际下载工作簿包含 `06_领用返还`、`返还收货台账（只读）`、`98_字段说明`、`00_使用说明`、`99_元数据`。未清库、未在验收时导入或修改用户演示收货。
 - QA 验收结束后，精确核对 cmdline 并停止隔离进程4175383/3868295，uv session39119 exit0、自清私库；正式演示8000/5176仍正常。
-- **首轮后端全量真实结果**：`/tmp/return-ledger-backend-full-final.log`，**4 failed / 4457 passed / 8 skipped，2248.92秒**，保留该轮真实失败记录。修复后固定 `b3de27c` 代码完成第二轮完整验证：**4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**，`/tmp/return-ledger-backend-frozen-full.log`，session63974已结束，后续仅文档修改。
+- **首轮后端全量真实结果**：`/tmp/return-ledger-backend-full-final.log`，**4 failed / 4457 passed / 8 skipped，2248.92秒**，保留该轮真实失败记录。修复后固定 `b3de27c` 代码完成第二轮完整验证：**4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**，`/tmp/return-ledger-backend-frozen-full.log`，session63974已结束。随后 `489fa67` 修复卡墙业务类型与回款生命周期叠加时隐藏计数，相关专项92项通过；最终全量以PR最新提交CI为准，不沿用旧树全量结论。
 - 7个跳过节点已用最终4489节点收集结果逐位核对：型号夹具缺失的overview回读、发布主机二进制 opt-in、旧收款提醒样表、生产规模性能基准、FK阻止构造孤儿数据的防御路径、可选返还原件、真实Chrome发布主机管道。只有可选返还原件为本次新增，它已在54项零跳过专项中实际运行；其余6个跳过条件原已存在main，不能把未执行的性能/防御路径称为已验证。
 - Nginx故障日志检查按CI条件单独实际运行 **1 passed，76.65秒，exit0**，`/tmp/return-ledger-nginx-runtime-check.log`；测试按固定digest拉取镜像后，最终全量中的同项也实际执行通过，未再跳过。
 - **交付入口**：前端在线依赖审计已按后续授权通过，日志 `/tmp/return-ledger-frontend-audit-online.log`。完整交付PR为 [#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)，CI已启动；该PR是检查、审批与合并结果的实时依据。接续时已合并则核对远端main，不重做已完成交付；未合并则按既有授权处理剩余检查/审批后squash合并。生产发布另行授权。
+
+- PR审查修复 `489fa67`：回款身份集合覆盖取消业务类型筛选后的候选，保留权限/搜索/生命周期，一次批量计算供返回列表与隐藏数量共用。新增8项先失败，修复后业务类型、回款、权限、性能与返还率相关92项全部通过，日志 `/tmp/pr323-business-type-green.log`；生产代码没有改动返还率口径。

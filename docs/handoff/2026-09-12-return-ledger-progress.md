@@ -22,7 +22,7 @@
 
 ## Git 真实状态
 
-- 当前分支 `integrate/2026-09-12`，接手 HEAD 为 `52278b2`（当时领先 main 19 笔），当前代码 HEAD 为 `b3de27c`。本轮已提交：`c175bb8` 测试夹具与发布回归环境、`0bb182e` 后端台账/导入/并发审计、`e84fcaa` 前端台账/导入/领用同步、`b3de27c` 两项迁移祖先关系测试；接口与规则文档已提交 `e98ba71`，集成分支已推送到远端；最终验收结果随后以文档提交回填，最新提交号以 `git log -1` 为准。
+- 当前分支 `integrate/2026-09-12`，接手 HEAD 为 `52278b2`（当时领先 main 19 笔），最新业务代码提交为 `489fa67`。本轮已提交：`c175bb8` 测试夹具与发布回归环境、`0bb182e` 后端台账/导入/并发审计、`e84fcaa` 前端台账/导入/领用同步、`b3de27c` 两项迁移祖先关系测试；接口与规则文档已提交 `e98ba71`，集成分支已推送到远端；最终验收结果随后以文档提交回填，最新提交号以 `git log -1` 为准。
 - 完整交付PR：[#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)。此后接手续先读该PR的实时检查、审批和合并状态，并核对远端main；不要将本文件记录时的状态外推为当前结果。PR创建时main=`e0c80b02220e287530025086e9c26b7ad351b828`，返还历史分支=`80c1db52e20d15ff6a52b7ac77cfb2b0665d967b`。
 - 已 fetch 实时 PR321 head；它与本地 `ee31fa6` 的 tree 都为 `766277a91c5caf2080a08879847fb6b749ef5a52`。复核时 PR321 仍 open，不等于远端合并。
 - 历史“已推 main”“作者自合并证明保护已关闭”均已在 CHANGELOG 纠正。不得直接推 main、绕过 CI/审批或回滚不明远端变更。
@@ -43,6 +43,13 @@
 - 前端支持清空、完整分页候选、转移、稳定重试键、请求代次防串页、审计和中文导入差异、小数与其他源件况的备注单独修改、整机附属明细、原件下载。版本升为 1.30.0。
 - 导入取消与轮询竞争已修复并完成延迟响应专项；轮询不会夺走取消操作的请求代次，取消后 busy 能正常退出。
 
+## PR #323 审查修复（2026-09-13）
+
+- `489fa67` 修复 `business_type_hidden` 与回款生命周期叠加时计数错误：之前回款成员集合已被业务类型缩窄，导致“回款完成”隐藏数少算、其他期限桶多算。现在仅从回款候选中移除业务类型条件，保留项目范围、搜索与生命周期，共用一次批量回款计算；列表和隐藏查询仍保留其各自全部筛选。
+- 新增回归先复现8项失败（`/tmp/pr323-business-type-red.log`），修复后相关专项 **92 passed / 0 failed，53.90秒**（`/tmp/pr323-business-type-green.log`）。覆盖四生命周期桶、多选/分页/空页、范围/搜索/活动/归档条件，无财务权限不推导回款身份，以及项目数/页大小增长时 SELECT 次数恒定。
+- 该修复在本地4482项全量之后发现；最终发布判断以 [PR #323](https://github.com/Jinchen-Yang/it-spareparts/pull/323) 最新提交的检查及合并状态为准，旧提交 CI 不替代新提交 CI。
+- 全依赖审计的两个 moderate 条目对应开发依赖 Vitest 3.2.7 的同一公告 GHSA-82fw-gwwq-j7x9；当前仅 jsdom + vitest run，未启用 browser/API/UI 或受影响插件，生产 Nginx 镜像不含该开发服务器。生产依赖审计为0已知漏洞；全依赖不能记为0。升级至修复版本4.1.11或更新版本可另行兼容验证，详情与官方来源记录在PR说明。
+
 ## 验证证据（不要把多次重复专项相加）
 
 - 历史集成全量曾为 **4373 passed / 12 failed / 7 skipped**。已定位真实多合同测试夹具非确定性、umask 文件权限和 shellcheck PATH 问题；没有用跳过或放宽生产校验掩盖失败。
@@ -58,7 +65,7 @@
 - 后端生产依赖 pip-audit：无已知漏洞，`/tmp/return-ledger-backend-audit.log`。
 - **前端 npm 在线依赖审计已通过**：用户在明确获知发送目的地和依赖包名称/版本后指示“你解决一下”，已按授权执行 `npm run audit:prod`，exit0，输出 `PRODUCTION_AUDIT_OK: no known runtime vulnerabilities`；日志 `/tmp/return-ledger-frontend-audit-online.log`。此前自动审批拒绝已解决，离线跳过没有作为通过证据。
 - **接续首轮后端全量已结束**：session6649，`/tmp/return-ledger-backend-full-final.log`，真实结果为 **4 failed / 4457 passed / 8 skipped，2248.92秒**。4个失败均为该进程载入旧模块后已定位、修复并通过专项的问题，不能因此把这次运行改记为全绿。
-- **固定最终代码的第二轮全量已通过**：session63974已结束、exit0，`/tmp/return-ledger-backend-frozen-full.log`，结果为 **4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**。业务代码固定在 `b3de27c`，后续只有文档回填。最终4489节点与进度符号逐位核对，机器可读结果 `/tmp/return-ledger-final-validation.json`。前一会话挂起十小时的孤儿pytest已退出，未清公共库。
+- **审查修复前固定代码的第二轮全量已通过**：session63974已结束、exit0，`/tmp/return-ledger-backend-frozen-full.log`，结果为 **4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**。该轮业务代码固定在 `b3de27c`；随后 PR 审查修复 `489fa67` 改动了卡墙隐藏计数，须以最新 PR head 的远端 CI 完成最终全量验证，不能把本轮结果当作新代码全量结果。最终4489节点与进度符号逐位核对，机器可读结果 `/tmp/return-ledger-final-validation.json`。前一会话挂起十小时的孤儿pytest已退出，未清公共库。
 - 7个跳过节点已用最终4489节点收集结果逐位核对：型号夹具缺失的overview回读、发布主机二进制 opt-in、旧收款提醒样表、生产规模性能基准、FK阻止构造孤儿数据的防御路径、可选返还原件、真实Chrome发布主机管道。只有可选返还原件为本次新增，它已在54项零跳过专项中实际运行；其余6个跳过条件原已存在main，不能把未执行的性能/防御路径称为已验证。
 - Nginx故障日志检查按CI条件单独实际运行 **1 passed，76.65秒，exit0**，`/tmp/return-ledger-nginx-runtime-check.log`；测试按固定digest拉取镜像后，最终全量中的同项也实际执行通过，未再跳过。
 
