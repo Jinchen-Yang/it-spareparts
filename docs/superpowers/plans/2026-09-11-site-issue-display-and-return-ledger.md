@@ -343,7 +343,7 @@
 3. **页面登记与管理已完成**：新增、修改、作废、历史、项目/需求单汇总及整机附属明细。
 4. **第二份 Excel 接入已完成**：解析、预览、关联、幂等和更正；真实标准样表及最终导入54项专项通过。
 5. **领用展示与免返同步修复已完成**：接口、页面、导出及字段合并，工作簿浏览器上传/再下载闭环通过。
-6. **完整回归与验收进行中**：前端817项、构建、导入/核心/迁移专项及四个浏览器流程已通过；演示已保留原有数据更新并只读验收。仍待唯一后端全量最终汇总、npm 在线审计授权与结果、远端 PR/CI/审批。
+6. **完整回归与交付验收**：前端817项、构建、导入/核心/迁移专项及四个浏览器流程已通过；演示已保留原有数据更新并只读验收。npm 在线生产依赖审计已按授权通过。后端4482项全量属于审查修复前的代码，`489fa67` 隐藏计数修复后相关92项专项通过；最终后端全量、审批与合并结果统一读取 [PR #323](https://github.com/Jinchen-Yang/it-spareparts/pull/323) 最新提交的检查，不沿用旧树结果。
 7. **单独申请发布授权**：代码验收不自动等于允许部署或导入生产数据。
 
 ---
@@ -390,7 +390,7 @@
 - 生产库只读（`ssh ybwznt → docker exec -i db-1 psql`，SQL 走 stdin heredoc）；写数据一律走带审计的应用 API。
 - 本次样表分析结论：第一份（总部）维保拆旧返件 1,815 单/14,665 件全为成品且无项目/WBDD 关联；第二份（维保部门）315 单/491 件（成品 485、坏品 6），全部有 WBDD 关联、312 有项目；两份主单/明细 ID 零交集但 2,682 个单号重合。
 - 本轮用户已授权接续实现与合并，合并仍须满足远端 CI/审批；生产部署、生产数据写入和超出既有范围的生产访问仍需另行授权，不能由本地代码验收推定。
-- **部署通道现状备忘（新增，执行时照此）**：生产在 ybwznt `/opt/it-spareparts`（git checkout + 未跟踪部署配套文件，勿动）；**服务器侧 `git fetch` GitHub 不通，代码送达走 Mac 打 thin bundle → scp → 服务器 fetch bundle**；镜像按 `release-<sha8>` 打标签；本次含迁移，先跑 `backup.sh` 再 app+迁移、后前端；分支保护 enforce_admins + 1 批准 + 2 检查，合并需授权（合流 cd3abfe 时同样适用）。
+- **部署通道现状备忘（新增，执行时照此）**：生产在 ybwznt `/opt/it-spareparts`（git checkout + 未跟踪部署配套文件，勿动）；**服务器侧 `git fetch` GitHub 不通，代码送达走 Mac 打 thin bundle → scp → 服务器 fetch bundle**；镜像按 `release-<sha8>` 打标签；本次含迁移，先跑 `backup.sh` 再 app+迁移、后前端；历史记录中的分支保护为 enforce_admins + 1 批准 + 2 检查，执行时须核对实时要求；本轮用户已授权经 PR/CI/审批后合并，生产发布仍需另行授权。
 
 ---
 
@@ -429,7 +429,7 @@
 - 卡墙/导出最终11项通过，`/tmp/return-ledger-final-card-export-tests.log`；迁移祖先/单头7项通过，`/tmp/return-ledger-migration-head-regression.log`。全新独立库真正执行 `upgrade head → alembic check → heads` 通过，`/tmp/receipt-alembic-check.log`，无新增升级差异、唯一 head 为 `e3a7b9c2d4f6`；带旧数据往返和原生SQL插入另验证 d2/e3 默认值及无损降级保护。
 - 最终前端 **78文件817项通过、无未捕获异常**，`/tmp/return-ledger-frontend-full-final.log`；最终 `tsc && vite build` exit0，`/tmp/return-ledger-frontend-build-final.log`。
 - 独立 QA `beta=false / boss=true / V2=true`：`/tmp/return-ledger-browser/` 下 `flow.cjs`、`workbook-flow.cjs`、`import-flow.cjs`、`machine-flow.cjs` 四个脚本及同名日志全部成功、`errors=[]`，覆盖桌面/移动、登记修改作废、工作簿是/否上传再下载、小数备注修改与原件重传、整机组成和转移。原有收货总量7在登记作废及免返更正后保持7，小数导入后8.250、整机转移后9.250，附属件不计数。
-- 演示环境已安全更新：backend PID17688/8000，Vite5176，迁移 `d2 → e3`、V2启用，其余开关未改。原5条收货及8表旧字段逐表hash不变，证据 `/tmp/return-ledger-demo-backup/upgrade-result.log`、`facts-preserved.json`；只读浏览器 `/tmp/return-ledger-browser/demo-check.log` 通过，4条有效/5条全部，总量7、未关联4、两份已关联需求单分别2和1。实际下载工作簿包含 `06_领用返还`、`返还收货台账（只读）`、`98_字段说明`、`00_使用说明`、`99_元数据`。未清库、未在验收时导入或修改用户演示收货。
+- 演示环境已安全更新：backend 8000（首次升级PID17688，审查修复后刷新为3853749；操作前重查），Vite5176，迁移 `d2 → e3`、V2启用，其余开关未改。原5条收货及8表旧字段逐表hash不变，证据 `/tmp/return-ledger-demo-backup/upgrade-result.log`、`facts-preserved.json`；只读浏览器 `/tmp/return-ledger-browser/demo-check.log` 通过，4条有效/5条全部，总量7、未关联4、两份已关联需求单分别2和1。实际下载工作簿包含 `06_领用返还`、`返还收货台账（只读）`、`98_字段说明`、`00_使用说明`、`99_元数据`。未清库、未在验收时导入或修改用户演示收货。
 - QA 验收结束后，精确核对 cmdline 并停止隔离进程4175383/3868295，uv session39119 exit0、自清私库；正式演示8000/5176仍正常。
 - **首轮后端全量真实结果**：`/tmp/return-ledger-backend-full-final.log`，**4 failed / 4457 passed / 8 skipped，2248.92秒**，保留该轮真实失败记录。修复后固定 `b3de27c` 代码完成第二轮完整验证：**4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**，`/tmp/return-ledger-backend-frozen-full.log`，session63974已结束。随后 `489fa67` 修复卡墙业务类型与回款生命周期叠加时隐藏计数，相关专项92项通过；最终全量以PR最新提交CI为准，不沿用旧树全量结论。
 - 7个跳过节点已用最终4489节点收集结果逐位核对：型号夹具缺失的overview回读、发布主机二进制 opt-in、旧收款提醒样表、生产规模性能基准、FK阻止构造孤儿数据的防御路径、可选返还原件、真实Chrome发布主机管道。只有可选返还原件为本次新增，它已在54项零跳过专项中实际运行；其余6个跳过条件原已存在main，不能把未执行的性能/防御路径称为已验证。
@@ -437,3 +437,5 @@
 - **交付入口**：前端在线依赖审计已按后续授权通过，日志 `/tmp/return-ledger-frontend-audit-online.log`。完整交付PR为 [#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)，CI已启动；该PR是检查、审批与合并结果的实时依据。接续时已合并则核对远端main，不重做已完成交付；未合并则按既有授权处理剩余检查/审批后squash合并。生产发布另行授权。
 
 - PR审查修复 `489fa67`：回款身份集合覆盖取消业务类型筛选后的候选，保留权限/搜索/生命周期，一次批量计算供返回列表与隐藏数量共用。新增8项先失败，修复后业务类型、回款、权限、性能与返还率相关92项全部通过，日志 `/tmp/pr323-business-type-green.log`；生产代码没有改动返还率口径。
+
+- 演示已刷新加载审查修复 `489fa67`（刷新时HEAD为 `796dd8f`），最新PID3853749；8表全部字段hash与5条收货保持不变，四生命周期×六种业务类型选择共24组只读API满足隐藏数量恒等式，浏览器无脚本/API错误。证据 `/tmp/return-ledger-demo-backup/review-refresh-result.json`、`/tmp/return-ledger-browser/demo-review-filter-check.log`、`/tmp/return-ledger-browser/demo-review-refresh-check.log`。后续文档校正不改业务代码。

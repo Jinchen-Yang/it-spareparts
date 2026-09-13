@@ -22,7 +22,7 @@
 
 ## Git 真实状态
 
-- 当前分支 `integrate/2026-09-12`，接手 HEAD 为 `52278b2`（当时领先 main 19 笔），最新业务代码提交为 `489fa67`。本轮已提交：`c175bb8` 测试夹具与发布回归环境、`0bb182e` 后端台账/导入/并发审计、`e84fcaa` 前端台账/导入/领用同步、`b3de27c` 两项迁移祖先关系测试；接口与规则文档已提交 `e98ba71`，集成分支已推送到远端；最终验收结果随后以文档提交回填，最新提交号以 `git log -1` 为准。
+- 本轮交付分支 `integrate/2026-09-12`（接续时以 `git branch --show-current` 为准），接手 HEAD 为 `52278b2`（当时领先 main 19 笔），最新业务代码提交为 `489fa67`。本轮已提交：`c175bb8` 测试夹具与发布回归环境、`0bb182e` 后端台账/导入/并发审计、`e84fcaa` 前端台账/导入/领用同步、`b3de27c` 两项迁移祖先关系测试；接口与规则文档已提交 `e98ba71`，集成分支已推送到远端；最终验收结果随后以文档提交回填，最新提交号以 `git log -1` 为准。
 - 完整交付PR：[#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)。此后接手续先读该PR的实时检查、审批和合并状态，并核对远端main；不要将本文件记录时的状态外推为当前结果。PR创建时main=`e0c80b02220e287530025086e9c26b7ad351b828`，返还历史分支=`80c1db52e20d15ff6a52b7ac77cfb2b0665d967b`。
 - 已 fetch 实时 PR321 head；它与本地 `ee31fa6` 的 tree 都为 `766277a91c5caf2080a08879847fb6b749ef5a52`。复核时 PR321 仍 open，不等于远端合并。
 - 历史“已推 main”“作者自合并证明保护已关闭”均已在 CHANGELOG 纠正。不得直接推 main、绕过 CI/审批或回滚不明远端变更。
@@ -71,16 +71,17 @@
 
 ## 交付流程与接续检查
 
-1. 本地实现、最终前后端完整回归、构建、迁移、真实样表专项、浏览器验收与前后端生产依赖在线审计均已完成。npm元数据发送授权已取得且审计通过，不再是阻塞。
+1. 本地实现、前端完整回归、构建、迁移、真实样表专项、浏览器验收与前后端生产依赖在线审计均已完成。后端全量必须按上文各轮对应的代码版本理解；最新业务代码 `489fa67` 的最终完整验证读取PR最新head的CI。npm元数据发送授权已取得且审计通过，不再是阻塞。
 2. 完整PR说明已发布至 [#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)，按既有授权执行 PR → 远端CI → 审批 → squash合并。接续时先核查该PR：已合并则直接核对远端main与合并SHA，不重做交付；尚未合并则处理剩余检查/审批。不得绕过必需检查或批准要求。生产部署和生产数据导入仍需另行授权。
 
 ## 演示、隔离验证与本地工具
 
-- 用户演示：`http://home.cloudlay.cn:5176`；backend `127.0.0.1:8000` 已安全更新为进程17688（操作前仍需重新核实）；Vite5176。库为本机5433 `spareparts_dev`，容器 `it-spareparts-import-test-pg`。
+- 用户演示：`http://home.cloudlay.cn:5176`；backend `127.0.0.1:8000` 已刷新加载审查修复，记录时PID3853749（操作前必须重新核实，记录文件 `/tmp/return-ledger-demo-backup/new-backend.pid`）；Vite5176。库为本机5433 `spareparts_dev`，容器 `it-spareparts-import-test-pg`。
 - 演示项目 `9ddd613f-2ffb-4cd2-9b39-a3e3396636f4`；不清库、不重播种子。日志 `/tmp/opencode/backend-demo.log`、`/tmp/opencode/frontend-demo.log`。
 - 已只读备份演示库至 `/tmp/return-ledger-demo-backup/spareparts_dev.before-return-ledger.dump`（权限600，601615字节），pg_restore --list 通过；尚未声称完整恢复演练。
 - 演示已完成 `d2f8b4e6c9a1 → e3a7b9c2d4f6` 加法升级并启用 V2，其余功能开关未改。原有5条收货保留，8张相关表原有字段与行数逐表 hash 不变；证据 `/tmp/return-ledger-demo-backup/upgrade-result.log`、`facts-preserved.json`。没有清库或重新播种。
 - 演示只读浏览器验收通过，`/tmp/return-ledger-browser/demo-check.log`：4条有效/5条全部记录，总量7、未关联4，两份已关联需求单分别为2和1；UI 为1.30.0，`errors=[]`。该核查没有导入或修改用户演示收货。
+- 审查修复后再次刷新（当时HEAD=`796dd8f`）及只读验收通过：8表全部字段hash不变、5条收货保留、24组卡墙筛选隐藏数量恒等式通过、浏览器 `errors=[]`。证据 `/tmp/return-ledger-demo-backup/review-refresh-result.json`、`/tmp/return-ledger-browser/demo-review-filter-check.log`、`/tmp/return-ledger-browser/demo-review-refresh-check.log`；不执行新迁移或业务写入。
 - 演示实际下载工作簿已核对包含 `06_领用返还`、`返还收货台账（只读）`、`98_字段说明`、`00_使用说明`、`99_元数据`。
 - 本轮 QA 曾使用8001/5177和独立随机测试库；完成后已核对精确 cmdline 停止进程4175383/3868295，QA uv session39119 exit0并自清私库，正式演示8000/5176仍正常。需要再次验收时使用 `/tmp/return-ledger-browser/qa_server.py` 新建自己的隔离库；登录信息位于权限600的 qa.json，不输出或提交，截图目录同上。
 - shellcheck 安装在 `/tmp/return-ledger-tools/usr/bin`。完整后端用 `PATH=/tmp/return-ledger-tools/usr/bin:$PATH ~/.local/bin/uv run --extra dev pytest -q`。
