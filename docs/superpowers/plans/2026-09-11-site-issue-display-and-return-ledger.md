@@ -9,7 +9,7 @@
 - 本条覆盖下文“不在分母不完整时推算返还率”的范围限制：分母完整时可发布上述卡墙指标，不改其他旧指标的既有定义。
 - 验证：后端新增 2 项测试通过（不同 PN、所有件况、项目未关联记录、作废、超过 100%、缺少分母）；原卡片 17 项测试及 TypeScript 检查通过。演示接口核查为 7 / 42 = 16.7%。
 
-> 最新状态（2026-09-13）：业务口径已拍板，前置变更已在本地 integration 分支吸收，台账、导入、领用同步、页面及演示更新已完成。代码提交至 `b3de27c`；最终后端全量4482通过/7跳过/0失败，前端817项通过且构建通过；npm 在线审计按用户后续指令执行并通过，正在推进远端 PR/CI/合并。交付方式按 §0 调整为完整 integration PR，详细证据见文末及最新交接记录。
+> 最新状态（2026-09-13）：业务口径已拍板，前置变更已在本地 integration 分支吸收，台账、导入、领用同步、页面及演示更新已完成。代码提交至 `b3de27c`；最终后端全量4482通过/7跳过/0失败，前端817项通过且构建通过；npm 在线审计按用户后续指令执行并通过，交付PR为 #323，远端检查与合并状态以该PR为准。交付方式按 §0 调整为完整 integration PR，详细证据见文末及最新交接记录。
 > 日期：2026-09-11（同日结合远端/生产现状优化一版，优化记录见文末）
 > 依据：本地代码（main `e0c80b0`；cloudlay 工作区在 `chore/agent-skills-and-permissions`，领先 main 两笔纯 agents/docs 提交，无代码冲突）、生产只读核查、三份真实样表分析（`.opencode-inbox`，不入 Git）。
 
@@ -418,7 +418,7 @@
 
 本节以本次实际运行结果为准；旧条目的完成宣称不能替代当前验证。最新接手入口为 `docs/handoff/2026-09-12-return-ledger-progress.md`；不要将多次重复专项数量累加成全量结果。
 
-- 实时远端 main=`e0c80b02220e287530025086e9c26b7ad351b828`，#321仍open；接续代码已在本地提交 `c175bb8 → 0bb182e → e84fcaa → b3de27c`。交付文档已提交 `e98ba71` 且完整集成分支已推送；本轮尚未创建远端交付 PR、运行远端 CI 或合并，生产未部署。交付安排按 §0 的完整 integration PR 执行。
+- 实时远端 main=`e0c80b02220e287530025086e9c26b7ad351b828`，#321仍open；接续代码已在本地提交 `c175bb8 → 0bb182e → e84fcaa → b3de27c`。交付文档已提交 `e98ba71` 且完整集成分支已推送；完整交付PR已创建为 [#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)，远端CI已触发，后续状态以该PR为准；生产未部署。交付安排按 §0 的完整 integration PR 执行。
 - 全量历史业务失败已定位：`_attribute_expense` 测试夹具在双合同项目中任取一份合同，导致报销挂错合同而无法导出；改为按原报销 XSDD 精确选合同。没有削弱生产归属规则。
 - 回滚测试修正：夹具的配置文件权限不再依赖 runner 的 umask，显式 0644；生产权限校验不变。ShellCheck 安装到 `/tmp/return-ledger-tools`；静态 runbook 检查按 PATH 解析实际二进制后保留受控子进程环境。
 - 领用要求：新增 `maintenance_site_return_requirements.py`，以领用行 ID 记录前后值与版本化 `return_obligation_corrected` 事件。采用独立事件协议与幂等消费标记，不生成虚假发货 ID / 旧义务。项目面板查询批量读取当前主数据，现场备注独立透出。
@@ -434,4 +434,4 @@
 - **首轮后端全量真实结果**：`/tmp/return-ledger-backend-full-final.log`，**4 failed / 4457 passed / 8 skipped，2248.92秒**，保留该轮真实失败记录。修复后固定 `b3de27c` 代码完成第二轮完整验证：**4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**，`/tmp/return-ledger-backend-frozen-full.log`，session63974已结束，后续仅文档修改。
 - 7个跳过节点已用最终4489节点收集结果逐位核对：型号夹具缺失的overview回读、发布主机二进制 opt-in、旧收款提醒样表、生产规模性能基准、FK阻止构造孤儿数据的防御路径、可选返还原件、真实Chrome发布主机管道。只有可选返还原件为本次新增，它已在54项零跳过专项中实际运行；其余6个跳过条件原已存在main，不能把未执行的性能/防御路径称为已验证。
 - Nginx故障日志检查按CI条件单独实际运行 **1 passed，76.65秒，exit0**，`/tmp/return-ledger-nginx-runtime-check.log`；测试按固定digest拉取镜像后，最终全量中的同项也实际执行通过，未再跳过。
-- **当前真实待办**：npm 在线依赖审计已按用户后续“你解决一下”指令执行通过，exit0且无已知运行时漏洞，日志 `/tmp/return-ledger-frontend-audit-online.log`；此前元数据发送阻塞已解决。集成分支与文档已推送，正在推进已批准的远端 PR/CI/审批和合并流程，最终远端结果随后回填，生产发布另行授权。
+- **交付入口**：前端在线依赖审计已按后续授权通过，日志 `/tmp/return-ledger-frontend-audit-online.log`。完整交付PR为 [#323](https://github.com/Jinchen-Yang/it-spareparts/pull/323)，CI已启动；该PR是检查、审批与合并结果的实时依据。接续时已合并则核对远端main，不重做已完成交付；未合并则按既有授权处理剩余检查/审批后squash合并。生产发布另行授权。
