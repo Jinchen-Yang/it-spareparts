@@ -56,7 +56,7 @@
 - **最终前端全量：78 文件817项通过、exit0、无未捕获异常**，`/tmp/return-ledger-frontend-full-final.log`；最终 `tsc && vite build` exit0，`/tmp/return-ledger-frontend-build-final.log`。
 - 浏览器四个脚本 `flow.cjs`、`workbook-flow.cjs`、`import-flow.cjs`、`machine-flow.cjs` 全成功，分别记录于 `/tmp/return-ledger-browser/` 下同名 `.log`。独立 QA 为 `beta=false / boss=true / V2=true`，所有脚本 `errors=[]`。登记5→改3/清空备注→审计→作废后，原有收货总量仍为7；手机 viewport/document 均390宽，表格内部横滚。工作簿“是→否”上传后网页和再次下载一致，收货仍7；导入1.250并修改备注/重传原件后总量8.250；整机明细展开、原件一致和转移后总量9.250，整机仅计1台。
 - 后端生产依赖 pip-audit：无已知漏洞，`/tmp/return-ledger-backend-audit.log`。
-- **前端 npm 在线依赖审计尚未完成**：自动审批拒绝向 npm 官方仓库发送依赖元数据，root 已异步请求该载荷/目的地授权，尚未收到答复。离线运行会跳过审计，不能记作通过，也不能宣称前端依赖无漏洞。
+- **前端 npm 在线依赖审计已通过**：用户在明确获知发送目的地和依赖包名称/版本后指示“你解决一下”，已按授权执行 `npm run audit:prod`，exit0，输出 `PRODUCTION_AUDIT_OK: no known runtime vulnerabilities`；日志 `/tmp/return-ledger-frontend-audit-online.log`。此前自动审批拒绝已解决，离线跳过没有作为通过证据。
 - **接续首轮后端全量已结束**：session6649，`/tmp/return-ledger-backend-full-final.log`，真实结果为 **4 failed / 4457 passed / 8 skipped，2248.92秒**。4个失败均为该进程载入旧模块后已定位、修复并通过专项的问题，不能因此把这次运行改记为全绿。
 - **固定最终代码的第二轮全量已通过**：session63974已结束、exit0，`/tmp/return-ledger-backend-frozen-full.log`，结果为 **4482 passed / 7 skipped，0 failed，2427.75秒（40分27秒），exit0**。业务代码固定在 `b3de27c`，后续只有文档回填。最终4489节点与进度符号逐位核对，机器可读结果 `/tmp/return-ledger-final-validation.json`。前一会话挂起十小时的孤儿pytest已退出，未清公共库。
 - 7个跳过节点已用最终4489节点收集结果逐位核对：型号夹具缺失的overview回读、发布主机二进制 opt-in、旧收款提醒样表、生产规模性能基准、FK阻止构造孤儿数据的防御路径、可选返还原件、真实Chrome发布主机管道。只有可选返还原件为本次新增，它已在54项零跳过专项中实际运行；其余6个跳过条件原已存在main，不能把未执行的性能/防御路径称为已验证。
@@ -64,8 +64,8 @@
 
 ## 当前收尾事项
 
-1. 本地实现、最终前后端完整回归、构建、迁移、真实样表专项和浏览器验收均已完成。等待 npm 官方仓库依赖元数据授权，获准后执行在线审计并记录实际结果；离线跳过不满足此项。
-2. 集成分支已推送，完整PR说明准备于 `/tmp/return-ledger-pr-description.md`。授权在线审计后，继续已批准的完整 integration PR → 远端 CI → 审批 → squash合并流程；远端main仍为e0c80b0，尚未创建PR、合并或部署生产。不要绕过必需检查或批准要求。
+1. 本地实现、最终前后端完整回归、构建、迁移、真实样表专项、浏览器验收与前后端生产依赖在线审计均已完成。npm元数据发送授权已取得且审计通过，不再是阻塞。
+2. 集成分支已推送，完整PR说明准备于 `/tmp/return-ledger-pr-description.md`。正在推进已批准的完整 integration PR → 远端 CI → 审批 → squash合并流程；远端main仍为e0c80b0，尚未创建PR、合并或部署生产。不要绕过必需检查或批准要求。
 
 ## 演示、隔离验证与本地工具
 
