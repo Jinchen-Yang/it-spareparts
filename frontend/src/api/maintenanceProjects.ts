@@ -7,6 +7,8 @@ export interface MaintenanceProject {
   salesperson: string | null;
   salesperson_override_active: boolean;
   project_manager_id: string | null;
+  /** 项目主档原值；空值表示未标注。 */
+  business_type?: string | null;
   /** 维保期限主数据（#39/#51）：可显示、可在面板编辑。 */
   period_from: string | null;
   period_to: string | null;
@@ -46,6 +48,8 @@ export interface MaintenanceProjectUpdateInput {
   version: number;
   display_name?: string;
   salesperson?: string | null;
+  /** 中文标准类型；空串显式清除，不传则保留。 */
+  business_type?: string | null;
   project_manager_id?: string | null;
   /** 维保期限（#39/#51）：YYYY-MM-DD；起止整组提交。 */
   period_from?: string | null;

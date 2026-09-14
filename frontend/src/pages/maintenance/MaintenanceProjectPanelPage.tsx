@@ -538,6 +538,7 @@ function EditBasicsButton({
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
   const salespersonEditedRef = useRef(false);
+  const businessTypeEditedRef = useRef(false);
 
   const openModal = async () => {
     try {
@@ -548,9 +549,11 @@ function EditBasicsButton({
       // touched 元数据，避免旧会话的销售编辑污染本次 PATCH。
       form.resetFields();
       salespersonEditedRef.current = false;
+      businessTypeEditedRef.current = false;
       form.setFieldsValue({
         display_name: proj.display_name,
         salesperson: proj.salesperson,
+        business_type: proj.business_type?.trim() || "",
         version: proj.version,
         period:
           proj.period_from || proj.period_to
@@ -581,7 +584,7 @@ function EditBasicsButton({
 
   const submit = async () => {
     const values = await form.validateFields();
-    const { period, salesperson, ...rest } = values as {
+    const { period, salesperson, business_type, ...rest } = values as {
       period?: [Dayjs | null, Dayjs | null] | null;
     } & Record<string, unknown>;
     const payload = {
@@ -589,6 +592,8 @@ function EditBasicsButton({
       ...(salespersonEditedRef.current
         ? { salesperson: salesperson === "" || salesperson == null ? null : salesperson }
         : {}),
+      // 只提交用户明确修改的类型，保留未编辑的历史自由文本与旧接口缺字段。
+      ...(businessTypeEditedRef.current ? { business_type: business_type ?? "" } : {}),
       // 期限整组提交（#39/#51）；清空即回 missing
       period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
       period_to: period?.[1] ? period[1].format("YYYY-MM-DD") : null,
@@ -635,6 +640,9 @@ function EditBasicsButton({
             if (Object.prototype.hasOwnProperty.call(changedValues, "salesperson")) {
               salespersonEditedRef.current = true;
             }
+            if (Object.prototype.hasOwnProperty.call(changedValues, "business_type")) {
+              businessTypeEditedRef.current = true;
+            }
           }}
         >
           <Form.Item name="display_name" label="项目名称">
@@ -642,6 +650,17 @@ function EditBasicsButton({
           </Form.Item>
           <Form.Item name="salesperson" label="销售人员">
             <Input allowClear maxLength={64} placeholder="可手工填写或清空" />
+          </Form.Item>
+          <Form.Item name="business_type" label="业务类型">
+            <Select
+              options={[
+                { label: "整体维保", value: "整体维保" },
+                { label: "备件维保", value: "备件维保" },
+                { label: "算力运维", value: "算力运维" },
+                { label: "非维保", value: "非维保" },
+                { label: "未标注", value: "" },
+              ]}
+            />
           </Form.Item>
           {/* #39/#51：起止时间可编辑；台账导入会以台账为权威覆盖 */}
           <Form.Item name="period" label="维保期限（起止）">

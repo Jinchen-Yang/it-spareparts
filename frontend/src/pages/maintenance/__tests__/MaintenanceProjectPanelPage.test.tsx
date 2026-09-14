@@ -609,6 +609,50 @@ describe("项目面板", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
     await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("project_manager_id");
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("business_type");
+  });
+
+  it.each(["整体维保", "备件维保", "算力运维", "非维保", "未标注"])("基本信息可将业务类型改成 %s，携带版本和审计原因", async (label) => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({ data: { project: {
+      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+      business_type: label === "未标注" ? "整体维保" : null,
+      version: 7, is_active: true, period_from: null, period_to: null,
+    } } });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    await waitFor(() => expect(within(dialog).getByText(label === "未标注" ? "整体维保" : "未标注")).toBeVisible());
+    fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "业务类型" }));
+    const option = await screen.findByTitle(label);
+    fireEvent.click(option);
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({
+      business_type: label === "未标注" ? "" : label,
+      version: 7, reason: "面板编辑基本信息",
+    })));
+  });
+
+  it("未修改的历史自由文本类型保留，取消后再次打开不会提交上次未保存的选择", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    getMaintenanceProject.mockResolvedValue({ data: { project: {
+      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+      business_type: "历史特殊类型", version: 3, is_active: true,
+    } } });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    let dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    await waitFor(() => expect(within(dialog).getByText("历史特殊类型")).toBeVisible());
+    fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "业务类型" }));
+    fireEvent.click(await screen.findByTitle("算力运维"));
+    fireEvent.click(within(dialog).getByRole("button", { name: /取 消|Cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: /编辑基本信息/ }));
+    dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    await waitFor(() => expect(within(dialog).getByText("历史特殊类型")).toBeVisible());
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("business_type");
   });
 
   it("历史销售为空时仅修改项目名称不会提交 salesperson", async () => {
