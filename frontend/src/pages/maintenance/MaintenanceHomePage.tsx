@@ -282,7 +282,7 @@ export function MaintenanceHomePage() {
             </Badge>
           </Col>
         </Row>
-        <div id="maintenance-home-filters" role="region" aria-label="项目筛选条件" hidden={!filtersExpanded}>
+        {filtersExpanded ? <div id="maintenance-home-filters" role="region" aria-label="项目筛选条件">
         <Row gutter={[16, 12]} style={{ marginTop: 16 }}>
           <Col xs={24} sm={12} lg={6}>
           <Text type="secondary">业务类型</Text>
@@ -348,7 +348,7 @@ export function MaintenanceHomePage() {
           />
           </Col>
         </Row>
-        </div>
+        </div> : null}
         {activeFilterCount > 0 ? (
           <Space wrap size={[0, 8]} role="group" aria-label="已应用筛选条件" style={{ marginTop: 16 }}>
             {activeBusinessTypes.map((code) => (

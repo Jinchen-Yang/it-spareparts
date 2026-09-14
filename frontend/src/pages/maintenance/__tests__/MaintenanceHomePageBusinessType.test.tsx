@@ -140,6 +140,7 @@ describe("维保主页 · 业务类型筛选", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("region", { name: "项目筛选条件" })).toBeNull();
+    expect(screen.queryByTestId("business-type-filter")).toBeNull();
     expect(screen.getByText("进行中")).toBeVisible();
     expect(getBoardProjects).toHaveBeenCalledTimes(1);
     view.unmount();
