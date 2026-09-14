@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -132,6 +132,76 @@ function renderPage() {
 }
 
 describe("维保主页 · 业务类型筛选", () => {
+  it("首访展开；收起不重查、不改筛选且期限常驻，刷新后记住收起", async () => {
+    const view = renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    const toggle = screen.getByRole("button", { name: "筛选" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "项目筛选条件" })).toBeNull();
+    expect(screen.getByText("进行中")).toBeVisible();
+    expect(getBoardProjects).toHaveBeenCalledTimes(1);
+    view.unmount();
+    renderPage();
+    expect(screen.getByRole("button", { name: "筛选" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    expect(screen.getByRole("region", { name: "项目筛选条件" })).toBeVisible();
+  });
+
+  it("默认全选没有条件；收起后仍可逐粒移除类型，最后一粒移除恢复全部并同步导出", async () => {
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
+    expect(screen.queryByRole("group", { name: "已应用筛选条件" })).toBeNull();
+    await toggleBusinessType("非维保");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    const chips = screen.getByRole("group", { name: "已应用筛选条件" });
+    expect(within(chips).getAllByRole("button")).toHaveLength(4);
+    expect(screen.getByTestId("active-filter-count").querySelector("[title='4']")).not.toBeNull();
+    for (const label of ["整体维保", "备件维保", "算力运维", "未标注"]) {
+      fireEvent.click(within(chips).getByRole("button", { name: `移除业务类型：${label}` }));
+    }
+    await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({ business_type: "all" }));
+    expect(lastArg(exportFilters)).toMatchObject({ business_type: "all" });
+    expect(lastArg(transferFilters)).toMatchObject({ business_type: "all" });
+    expect(screen.queryByRole("group", { name: "已应用筛选条件" })).toBeNull();
+  });
+
+  it("只显示已提交关键词；删除状态或关键词保持其他条件、期限与导出一致", async () => {
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("已结束"));
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "项目状态筛选" }));
+    fireEvent.click(await screen.findByTitle("报警"));
+    const input = screen.getByPlaceholderText("搜项目名 / XSDD 单号 / 销售姓名");
+    fireEvent.change(input, { target: { value: "  XSDD-123  " } });
+    expect(searchBoardProjects).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
+    await waitFor(() => expect(lastArg(searchBoardProjects)).toMatchObject({
+      q: "XSDD-123", lifecycle: "ended", card_status: "alert",
+    }));
+    expect(screen.getByTestId("active-filter-count").querySelector("[title='2']")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
+    await waitFor(() => expect(lastArg(searchBoardProjects)).toMatchObject({ q: "XSDD-123", card_status: undefined }));
+    fireEvent.click(screen.getByRole("button", { name: "移除关键词筛选" }));
+    await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({ lifecycle: "ended", business_type: "all" }));
+    expect(lastArg(exportFilters)).not.toHaveProperty("q");
+    expect(lastArg(transferFilters)).not.toHaveProperty("card_status");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    expect(screen.getByPlaceholderText("搜项目名 / XSDD 单号 / 销售姓名")).toHaveValue("");
+  });
+
+  it("排序改变顺序，不增加条件数或胶囊", async () => {
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "项目排序" }));
+    fireEvent.click(await screen.findByTitle("订单数"));
+    await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({ sort: "orders" }));
+    expect(screen.queryByRole("group", { name: "已应用筛选条件" })).toBeNull();
+    expect(lastArg(exportFilters)).toMatchObject({ sort: "orders" });
+  });
+
   it("默认不排除任何一档（R5：647/648 个项目未标注，默认排除会把卡墙筛空）", async () => {
     renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());

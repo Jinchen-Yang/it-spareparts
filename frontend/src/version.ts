@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.30.0";
+export const APP_VERSION = "1.31.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.31.0",
+    date: "2026-09-15",
+    items: [
+      "项目面板「编辑基本信息」补齐业务类型下拉：整体维保、备件维保、算力运维、非维保及未标注；可补录、改正或清空，沿用版本校验与实名审计",
+      "维保主页筛选面板支持展开与收起，记住本机选择；期限页签始终可见，收起不改变当前筛选",
+      "已应用的业务类型、状态和关键词显示为可移除的蓝色标签；筛选按钮显示条件数，排序不计入条件，清空业务类型表示全部",
+      "项目清单导出与批量移交继续跟随当前筛选，并保留业务类型和备件成本含税、未税列",
+    ],
+  },
   {
     version: "1.30.0",
     date: "2026-09-13",

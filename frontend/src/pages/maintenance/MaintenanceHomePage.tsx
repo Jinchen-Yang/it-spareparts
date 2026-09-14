@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Col,
@@ -13,8 +14,10 @@ import {
   Select,
   Space,
   Spin,
+  Tag,
   Typography,
 } from "antd";
+import { DownOutlined, FilterOutlined, UpOutlined } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
 import type { BoardProjectRow, CardStatus } from "../../api/maintenanceBossBoard";
 import { getBoardProjects, searchBoardProjects } from "../../api/maintenanceBossBoard";
@@ -41,6 +44,8 @@ const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
 const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
+const FILTERS_EXPANDED_KEY = "maintenance.home.filters-expanded";
+const STATUS_LABELS: Record<CardStatus, string> = { normal: "正常", warning: "提醒", alert: "报警" };
 
 // missing＝台账未提供项目周期（plan v1.3 R5：期限缺失要以明确状态可见，而非空白）。
 // 台账导入生产之前 415 个项目全部 missing——若筛选器没有这一档，整面卡墙会
@@ -82,6 +87,26 @@ export function MaintenanceHomePage() {
   const [status, setStatus] = useState<CardStatus | undefined>();
   const [sort, setSort] = useState<ProjectSort>(() => canViewCost ? "cost_ratio" : "name");
   const [keyword, setKeyword] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [filtersExpanded, setFiltersExpanded] = useState(() => {
+    try {
+      return localStorage.getItem(FILTERS_EXPANDED_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  // 全选和空选都不收窄，因此没有业务类型条件胶囊；期限和排序不计入条件数。
+  const activeBusinessTypes = boardBusinessTypeParam(businessTypes) === "all" ? [] : businessTypes;
+  const activeFilterCount = activeBusinessTypes.length + Number(!!status) + Number(!!keyword.trim());
+  const toggleFilters = () => {
+    const expanded = !filtersExpanded;
+    setFiltersExpanded(expanded);
+    try {
+      localStorage.setItem(FILTERS_EXPANDED_KEY, String(expanded));
+    } catch {
+      // 浏览器禁用存储时仍允许折叠，只是不跨访问记忆。
+    }
+  };
   const [rows, setRows] = useState<BoardProjectRow[]>([]);
   const [page, setPage] = useState(1);
   const [done, setDone] = useState(false);
@@ -226,9 +251,10 @@ export function MaintenanceHomePage() {
         </Col>
       </Row>
 
-      {/* 筛选行：只放「筛哪面墙」的控件 */}
+      {/* 期限常驻；折叠只改变控件可见性，不改变筛选与导出参数。 */}
       <Card size="small">
-        <Space wrap size={12} align="center" style={{ width: "100%" }}>
+        <Row justify="space-between" align="middle" gutter={[12, 12]}>
+          <Col style={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
           <Segmented
             value={lifecycle}
             onChange={(value) => setLifecycle(value as LifecycleFilter)}
@@ -241,6 +267,25 @@ export function MaintenanceHomePage() {
                 : []),
             ]}
           />
+          </Col>
+          <Col>
+            <Badge count={activeFilterCount} size="small" color="#1677ff" data-testid="active-filter-count">
+              <Button
+                icon={<FilterOutlined />}
+                aria-label="筛选"
+                aria-expanded={filtersExpanded}
+                aria-controls="maintenance-home-filters"
+                onClick={toggleFilters}
+              >
+                筛选 {filtersExpanded ? <UpOutlined /> : <DownOutlined />}
+              </Button>
+            </Badge>
+          </Col>
+        </Row>
+        <div id="maintenance-home-filters" role="region" aria-label="项目筛选条件" hidden={!filtersExpanded}>
+        <Row gutter={[16, 12]} style={{ marginTop: 16 }}>
+          <Col xs={24} sm={12} lg={6}>
+          <Text type="secondary">业务类型</Text>
           {/* 业务类型（2026-09-08）：独立一维，与期限状态叠加。多选，默认全选＝不排除。 */}
           <Select
             mode="multiple"
@@ -248,7 +293,8 @@ export function MaintenanceHomePage() {
             data-testid="business-type-filter"
             maxTagCount="responsive"
             placeholder="全部业务类型"
-            style={{ minWidth: 220 }}
+            aria-label="业务类型筛选"
+            style={{ width: "100%", marginTop: 4 }}
             value={businessTypes}
             onChange={(value) => setBusinessTypes(value as BoardBusinessTypeCode[])}
             options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
@@ -256,10 +302,14 @@ export function MaintenanceHomePage() {
               value: code,
             }))}
           />
+          </Col>
+          <Col xs={24} sm={12} lg={5}>
+          <Text type="secondary">项目状态</Text>
           <Select
             allowClear
             placeholder="全部状态"
-            style={{ width: 140 }}
+            aria-label="项目状态筛选"
+            style={{ width: "100%", marginTop: 4 }}
             value={status}
             onChange={(value) => setStatus(value as CardStatus | undefined)}
             options={[
@@ -268,8 +318,12 @@ export function MaintenanceHomePage() {
               { label: "报警", value: "alert" },
             ]}
           />
+          </Col>
+          <Col xs={24} sm={12} lg={5}>
+          <Text type="secondary">排序方式</Text>
           <Select
-            style={{ width: 150 }}
+            aria-label="项目排序"
+            style={{ width: "100%", marginTop: 4 }}
             value={sort}
             onChange={(value) => setSort(value as ProjectSort)}
             options={[
@@ -280,13 +334,44 @@ export function MaintenanceHomePage() {
               ...(canViewCost ? [{ label: "需关注", value: "attention" as const }] : []),
             ]}
           />
+          </Col>
+          <Col xs={24} sm={12} lg={8}>
+          <Text type="secondary">关键词</Text>
           <Input.Search
             allowClear
             placeholder="搜项目名 / XSDD 单号 / 销售姓名"
-            style={{ width: 260 }}
-            onSearch={setKeyword}
+            aria-label="项目关键词"
+            style={{ width: "100%", marginTop: 4 }}
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            onSearch={(value) => setKeyword(value.trim())}
           />
-        </Space>
+          </Col>
+        </Row>
+        </div>
+        {activeFilterCount > 0 ? (
+          <Space wrap size={[0, 8]} role="group" aria-label="已应用筛选条件" style={{ marginTop: 16 }}>
+            {activeBusinessTypes.map((code) => (
+              <Tag
+                key={code}
+                color="blue"
+                closable
+                closeIcon={<button type="button" aria-label={`移除业务类型：${BOARD_BUSINESS_TYPE_LABELS[code]}`}
+                  style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
+                onClose={() => setBusinessTypes((current) => current.filter((value) => value !== code))}
+                style={{ borderRadius: 16 }}
+              >业务类型：{BOARD_BUSINESS_TYPE_LABELS[code]}</Tag>
+            ))}
+            {status ? <Tag color="blue" closable
+              closeIcon={<button type="button" aria-label="移除状态筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
+              onClose={() => setStatus(undefined)} style={{ borderRadius: 16 }}>状态：{STATUS_LABELS[status]}</Tag> : null}
+            {keyword.trim() ? <Tag color="blue" closable
+              closeIcon={<button type="button" aria-label="移除关键词筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
+              onClose={() => { setKeyword(""); setSearchInput(""); }}
+              style={{ borderRadius: 16, maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }}
+            >关键词：{keyword.trim()}</Tag> : null}
+          </Space>
+        ) : null}
       </Card>
 
       {hiddenByBusinessType > 0 ? (

@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
+describe("v1.31.0 release notes", () => {
+  it("describes business-type editing and persistent collapsible filters", () => {
+    expect(LATEST.version).toBe("1.31.0");
+    expect(LATEST.date).toBe("2026-09-15");
+    expect(LATEST.items.join("\n")).toMatch(/业务类型下拉/);
+    expect(LATEST.items.join("\n")).toMatch(/展开与收起/);
+    expect(LATEST.items.join("\n")).toMatch(/排序不计入条件/);
+  });
+});
+
 describe("v1.29.0 release notes (archived)", () => {
   const v129 = CHANGELOG.find((entry) => entry.version === "1.29.0")!;
   it("publishes the business-type filter and the workbook rebase fixes", () => {
-    expect(APP_VERSION).toBe("1.30.0");
+    expect(APP_VERSION).toBe("1.31.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
     expect(v129.date).toBe("2026-09-08");
