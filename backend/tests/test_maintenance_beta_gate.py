@@ -67,8 +67,6 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
         "action_maintenance_manager_workbook_apply",
         "action_maintenance_project_manage",
         "action_maintenance_demand_delete",
-        "action_maintenance_site_issue_manage",
-        "action_maintenance_bad_return_manage",
         "action_maintenance_warehouse_manage",
         "action_maintenance_migration_review",
         "action_maintenance_collection_follow_up",
@@ -83,6 +81,8 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
     for action in (
         "action_maintenance_acceptance_submit",
         "action_maintenance_acceptance_review",
+        "action_maintenance_site_issue_manage",
+        "action_maintenance_bad_return_manage",
     ):
         assert action not in permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES
 
@@ -287,6 +287,14 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
     boss_endpoint_modules = {
         "app.api.maintenance_projects",
         "app.api.maintenance_source_assignments",
+        "app.api.maintenance_return_receipts",
+        "app.api.maintenance_return_receipt_import",
+    }
+    from app.api import maintenance_project_operations
+    stable_operations = {
+        maintenance_project_operations.search_project_site_issues,
+        maintenance_project_operations.void_project_site_issue,
+        maintenance_project_operations.stable_project_workspace,
     }
 
     def _routes(modules: set[str]) -> list[APIRoute]:
@@ -306,11 +314,15 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
             )
         ]
 
-    beta_routes = _routes(beta_endpoint_modules)
+    beta_routes = [route for route in _routes(beta_endpoint_modules)
+                   if route.endpoint not in stable_operations]
     assert beta_routes
     assert _missing(beta_routes, require_maintenance_beta) == []
 
-    boss_routes = _routes(boss_endpoint_modules)
+    boss_routes = _routes(boss_endpoint_modules) + [
+        route for route in _routes({"app.api.maintenance_project_operations"})
+        if route.endpoint in stable_operations
+    ]
     assert boss_routes
     assert _missing(boss_routes, require_maintenance_boss) == []
 

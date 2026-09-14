@@ -1,14 +1,48 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.28.0 release notes", () => {
-  it("publishes the payment-complete card wall bucket", () => {
-    expect(APP_VERSION).toBe("1.28.0");
+describe("v1.29.0 release notes (archived)", () => {
+  const v129 = CHANGELOG.find((entry) => entry.version === "1.29.0")!;
+  it("publishes the business-type filter and the workbook rebase fixes", () => {
+    expect(APP_VERSION).toBe("1.30.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-04");
+    expect(v129.date).toBe("2026-09-08");
 
-    const notes = LATEST.items.join("\n");
+    const notes = v129.items.join("\n");
+    expect(notes).toMatch(/业务类型/);
+    expect(notes).toMatch(/整体维保/);
+    expect(notes).toMatch(/叠加/);
+    expect(notes).toMatch(/未标注/);
+    expect(notes).toMatch(/不会被悄悄挡掉|整面变空/);
+    expect(notes).toMatch(/所见即所得/);
+    // 两条 P1 数据正确性修复必须写进用户可见日志
+    expect(notes).toMatch(/悄悄改回旧值/);
+    expect(notes).toMatch(/两条都不入账/);
+  });
+});
+
+describe("v1.28.1 release notes (archived)", () => {
+  const v1281 = CHANGELOG.find((entry) => entry.version === "1.28.1")!;
+
+  it("keeps site date parsing and automatic numbering", () => {
+    expect(v1281).toBeDefined();
+    expect(v1281.date).toBe("2026-09-09");
+    const notes = v1281.items.join("\n");
+    expect(notes).toMatch(/Excel 数值日期/);
+    expect(notes).toMatch(/自动编号/);
+    expect(notes).toMatch(/重复回传不重复入账/);
+    expect(notes).toMatch(/重新下载总表/);
+  });
+});
+
+describe("v1.28.0 release notes (archived)", () => {
+  const v128 = CHANGELOG.find((entry) => entry.version === "1.28.0")!;
+
+  it("kept the payment-complete card wall bucket", () => {
+    expect(v128).toBeDefined();
+    expect(v128.date).toBe("2026-09-04");
+    const notes = v128.items.join("\n");
     expect(notes).toMatch(/回款已完成/);
     expect(notes).toMatch(/不再出现在进行中\/已结束\/期限缺失/);
     expect(notes).toMatch(/同一口径/);

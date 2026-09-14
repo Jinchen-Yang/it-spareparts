@@ -28,6 +28,12 @@ import {
 import ProjectCard from "../../components/maintenance/ProjectCard";
 import MaintenanceBatchTransferButton from "../../components/maintenance/MaintenanceBatchTransferButton";
 import MaintenanceProjectExportButton from "../../components/maintenance/MaintenanceProjectExportButton";
+import {
+  BOARD_BUSINESS_TYPE_CODES,
+  BOARD_BUSINESS_TYPE_LABELS,
+  boardBusinessTypeParam,
+  type BoardBusinessTypeCode,
+} from "../../api/maintenanceBossBoard";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
@@ -66,6 +72,13 @@ export function MaintenanceHomePage() {
   const canViewContract = localStorage.getItem("role") === "admin"
     || permissions.data_profit === true;
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
+  // 业务类型（2026-09-08 客户需求）：与期限状态**叠加**的独立一维。
+  // 默认五档全选＝不排除任何项目：生产 648 个项目 647 个未标注，默认排除等于把
+  // 卡墙筛空（R5）。用户主动取消勾选才开始收窄。
+  const [businessTypes, setBusinessTypes] = useState<BoardBusinessTypeCode[]>(
+    () => [...BOARD_BUSINESS_TYPE_CODES],
+  );
+  const [hiddenByBusinessType, setHiddenByBusinessType] = useState(0);
   const [status, setStatus] = useState<CardStatus | undefined>();
   const [sort, setSort] = useState<ProjectSort>(() => canViewCost ? "cost_ratio" : "name");
   const [keyword, setKeyword] = useState("");
@@ -92,6 +105,7 @@ export function MaintenanceHomePage() {
           lifecycle,
           card_status: status,
           sort,
+          business_type: boardBusinessTypeParam(businessTypes),
         };
         const resp = keyword.trim()
           ? await searchBoardProjects({ q: keyword.trim(), ...params })
@@ -99,6 +113,7 @@ export function MaintenanceHomePage() {
         const body = resp.data;
         if (seq !== requestSeq.current) return false;      // 已被更新的筛选取代
         setRows((prev) => (replace ? body.rows : [...prev, ...body.rows]));
+        setHiddenByBusinessType(body.business_type_hidden ?? 0);
         setPage(nextPage);
         // card_status 在后端按候选页计算后过滤：某页可以 0 命中、下一页仍有命中。
         // 因此必须按候选 total 继续拉，不能用过滤后的 rows.length 提前截断。
@@ -114,7 +129,7 @@ export function MaintenanceHomePage() {
         if (seq === requestSeq.current) setLoading(false);
       }
     },
-    [lifecycle, status, keyword, sort],
+    [lifecycle, status, keyword, sort, businessTypes],
   );
   // 上传流程跨越“预检 → 人工确认”，期间筛选可能已变化。旧 onApply 闭包只
   // 通过这个 ref 调用当前 render 的 load，避免旧筛选主动成为最新请求。
@@ -166,6 +181,7 @@ export function MaintenanceHomePage() {
               filters={{
                 lifecycle,
                 sort,
+                business_type: boardBusinessTypeParam(businessTypes),
                 ...(status ? { card_status: status } : {}),
                 ...(keyword.trim() ? { q: keyword.trim() } : {}),
               }}
@@ -175,6 +191,7 @@ export function MaintenanceHomePage() {
               filters={{
                 lifecycle,
                 sort,
+                business_type: boardBusinessTypeParam(businessTypes),
                 ...(status ? { card_status: status } : {}),
                 ...(keyword.trim() ? { q: keyword.trim() } : {}),
               }}
@@ -224,6 +241,21 @@ export function MaintenanceHomePage() {
                 : []),
             ]}
           />
+          {/* 业务类型（2026-09-08）：独立一维，与期限状态叠加。多选，默认全选＝不排除。 */}
+          <Select
+            mode="multiple"
+            allowClear
+            data-testid="business-type-filter"
+            maxTagCount="responsive"
+            placeholder="全部业务类型"
+            style={{ minWidth: 220 }}
+            value={businessTypes}
+            onChange={(value) => setBusinessTypes(value as BoardBusinessTypeCode[])}
+            options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
+              label: BOARD_BUSINESS_TYPE_LABELS[code],
+              value: code,
+            }))}
+          />
           <Select
             allowClear
             placeholder="全部状态"
@@ -257,6 +289,23 @@ export function MaintenanceHomePage() {
         </Space>
       </Card>
 
+      {hiddenByBusinessType > 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`已按业务类型隐藏 ${hiddenByBusinessType} 个项目`}
+          action={
+            <Button
+              size="small"
+              type="link"
+              onClick={() => setBusinessTypes([...BOARD_BUSINESS_TYPE_CODES])}
+            >
+              查看全部
+            </Button>
+          }
+        />
+      ) : null}
+
       {error ? <Alert type="error" showIcon message={error} /> : null}
 
       <Row gutter={[12, 12]}>
@@ -272,9 +321,12 @@ export function MaintenanceHomePage() {
       {!rows.length && !loading ? (
         <Empty
           description={
-            lifecycle === "missing"
-              ? "没有符合条件的项目"
-              : "没有符合条件的项目；若项目台账尚未导入，项目周期无从判定，请切换「期限缺失」查看"
+            businessTypes.length > 0
+            && businessTypes.length < BOARD_BUSINESS_TYPE_CODES.length
+              ? "没有符合条件的项目；多数存量项目尚未标注业务类型，请勾上「未标注」或清空业务类型筛选再看"
+              : lifecycle === "missing"
+                ? "没有符合条件的项目"
+                : "没有符合条件的项目；若项目台账尚未导入，项目周期无从判定，请切换「期限缺失」查看"
           }
         />
       ) : null}

@@ -388,6 +388,7 @@ def build_project_export(
     lifecycle: str,
     card_status: str | None,
     sort: str,
+    business_type: str = "all",
     allowed_project_ids: set[str] | None,
 ) -> tuple[bytes, int]:
     fields = resolve_fields(field_keys, user_ctx)
@@ -400,6 +401,7 @@ def build_project_export(
         sort=sort,
         q_text=q_text.strip() if q_text and q_text.strip() else None,
         card_status_filter=card_status,
+        business_type=business_type,
         allowed_project_ids=allowed_project_ids,
     )
     if result["total"] > MAX_EXPORT_ROWS:

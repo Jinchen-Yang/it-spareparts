@@ -361,6 +361,8 @@ class MaintenanceSiteIssueLine(Base):
     )
     source_order_id: Mapped[str | None] = mapped_column(String(64))
     source_line_id: Mapped[str | None] = mapped_column(String(128))
+    # 原始 WBDD 参考号独立保存，不充当现场领用单身份或领用日期。
+    demand_order_no: Mapped[str | None] = mapped_column(String(64))
     serial_number: Mapped[str | None] = mapped_column(Text)
     # 用户回填的现场说明；领用/返还事实仍来自源单。
     remark: Mapped[str | None] = mapped_column(Text)

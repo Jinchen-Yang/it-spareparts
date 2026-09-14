@@ -271,6 +271,22 @@ def test_source_line_id_exact_link_wins(db):
     assert line.unit_cost_ex_tax == Decimal("150.00")
 
 
+def test_generated_issue_uses_separate_demand_reference_for_price(db):
+    project = _project(db, "自动编号关联需求项目")
+    part = _part(db, "PN-AUTO-DEMAND")
+    _wbdd_price(db, project=project, pn=part.pn_std, unit_ex="150",
+                order_no="WBDD-20250506-0010", order_date=date(2026, 5, 1))
+    _wbdd_price(db, project=project, pn=part.pn_std, unit_ex="777",
+                order_no="WBDD-LATEST", order_date=date(2026, 8, 9))
+    issue, line = _issue_line(db, project=project, part=part)
+    issue.issue_no = "LY-AUTO-REFERENCE"
+    line.demand_order_no = "WBDD-20250506-0010"
+    db.commit()
+    mcc.resolve_lines(db, lines=[(issue.issue_date, line)])
+    db.commit()
+    assert line.unit_cost_ex_tax == Decimal("150.00")
+
+
 def test_resolve_line_single_path_also_uses_demand_layer(db):
     """单行路径（补价/重算入口）与批量路径同口径：需求单层必须生效。"""
     project = _project(db, "单行路径需求层项目")

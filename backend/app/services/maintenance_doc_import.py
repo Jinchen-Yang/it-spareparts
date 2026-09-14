@@ -478,9 +478,16 @@ def apply_batch(
     *,
     allowed_project_ids: set[str] | None = None,
 ) -> dict:
+    # Both document entry points serialize native/legacy identity checks.
+    from app.services.maintenance_return_receipts import lock_receipt_context
+    from app.services.maintenance_return_receipt_import import _lock
+    lock_receipt_context(db)
+    _lock(db, "return-receipt-import-apply")
     batch = db.get(MaintenanceDocImportBatch, batch_id)
     if batch is None:
         raise DocBatchError("单据批次不存在")
+    if (batch.report_json or {}).get("protocol") == "return_receipts_v1":
+        raise DocBatchError("标准返件任务必须使用其专用预览令牌应用接口")
     if batch.status == "applied":
         raise DocBatchError("单据批次已应用，不能重复应用")
     if batch.status == "failed":
@@ -618,6 +625,12 @@ def apply_batch(
                 continue
             if head.head_date is None:
                 failures.append(f"{head.head_no}: 返还入库单缺少入库日期")
+                continue
+            if db.scalar(select(MaintenanceRkdReturnLine.rkd_line_id).where(
+                MaintenanceRkdReturnLine.head_no == head.head_no,
+                MaintenanceRkdReturnLine.source_payload.is_not(None),
+            ).limit(1)):
+                failures.append(f"{head.head_no}: 标准返件台账已有此单据，请使用专用导入核对来源身份")
                 continue
             project_id = _resolve_project_id(db, head)
             if project_id is None:

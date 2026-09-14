@@ -106,6 +106,8 @@ class DetectedSheet:
     field_indexes: dict[str, int]
     field_matches: dict[str, dict]
     rows: tuple[tuple[int, tuple[Any, ...]], ...]
+    # 数据区被铺开的合并单元格数（0 = 文件本身没有合并区，读法与改动前完全一致）。
+    merged_cells_expanded: int = 0
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,9 @@ class HeaderAdapter:
     system_aliases: dict[str, tuple[str, ...]] = {}
     required_fields: frozenset[str]
     required_alternatives: tuple[frozenset[str], ...] = ()
+    # 合并单元格铺满整块时**绝不能**铺的字段：逐行金额一旦被铺，一笔钱会被复制成
+    # 多笔。现网导出从不合并这些列（见 _expand_merged_cells），真出现了就显式拒绝。
+    merge_guarded_fields: frozenset[str] = frozenset()
 
     def recognize(
         self,
@@ -445,13 +450,22 @@ def _detect(data: bytes) -> tuple[FormAdapter, DetectedSheet]:
         matches,
     ) = best[0]
     sheet = workbook[sheet_name]
+    merged_fill = _expand_merged_cells(
+        sheet, header_row=header_row, adapter=adapter, indexes=indexes
+    )
     rows: list[tuple[int, tuple[Any, ...]]] = []
     for row_no, values in enumerate(
         sheet.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1
     ):
         values = tuple(values)
+        # 空行判定看**原始**单元格：先铺再判会把合并区盖住的空行当成数据行，凭空造钱。
         if all(_text(value) == "" for value in values):
             continue
+        if merged_fill:
+            values = tuple(
+                merged_fill.get((row_no, index), value)
+                for index, value in enumerate(values)
+            )
         rows.append((row_no, values))
         if len(rows) > MAX_PREVIEW_ROWS:
             raise BulkImportInvalid(f"数据行超过安全上限 {MAX_PREVIEW_ROWS}")
@@ -466,7 +480,67 @@ def _detect(data: bytes) -> tuple[FormAdapter, DetectedSheet]:
         field_indexes=indexes,
         field_matches=matches,
         rows=tuple(rows),
+        merged_cells_expanded=len(merged_fill),
     )
+
+
+def _expand_merged_cells(
+    sheet: Any,
+    *,
+    header_row: int,
+    adapter: FormAdapter,
+    indexes: dict[str, int],
+) -> dict[tuple[int, int], Any]:
+    """把数据区的纵向合并区铺满整块，返回 {(行号, 0基列号): 值}。
+
+    氚云「收款单主表 + 明细展开」导出（2026-09-08 生产实拍）把 收款单号 / 收款日期 /
+    数据状态 等 38 个主表列做成跨整张单的合并区，只有块首那格有值。openpyxl 读非
+    左上角单元格一律 None，于是同一张单的第 2..n 条明细全被判成「收款单号为空」——
+    实拍 298 行文件 232 行落空，149.9 万只认了 37.8 万。合并区是 xlsx 自身对
+    「这几行共用这个值」的表达，铺开就是按它的语义读，不是猜。
+
+    三份生产导出实测：合并区全是单列纵向、不跨表头、从不涉及「收款明细.*」子表列
+    （4 行文件 39 个 / 298 行文件 1287 个 / 8-28 子表导出 0 个）。没有合并区的文件
+    这里返回空字典，读法与改动前逐字节一致。
+
+    金额列被合并则拒绝（``merge_guarded_fields``）：铺开会把一笔钱复制成多笔，
+    这是钱，不猜。
+    """
+
+    guarded = {
+        index: field
+        for field, index in indexes.items()
+        if field in getattr(adapter, "merge_guarded_fields", frozenset())
+    }
+    fill: dict[tuple[int, int], Any] = {}
+    for cell_range in sheet.merged_cells.ranges:
+        if cell_range.max_row <= header_row:
+            continue  # 表头区的合并不动，识别逻辑另有其事
+        if cell_range.max_row == cell_range.min_row and cell_range.max_col == cell_range.min_col:
+            continue
+        for column in range(cell_range.min_col, cell_range.max_col + 1):
+            field = guarded.get(column - 1)
+            if field is None:
+                continue
+            raise BulkImportInvalid(
+                f"第 {cell_range.min_row}-{cell_range.max_row} 行的"
+                f"「{_text(sheet.cell(header_row, column).value)}」是合并单元格；"
+                "逐行金额列不接受合并（铺开会把一笔钱算成多笔），请取消合并后重新导出",
+                issues=[{
+                    "code": "merged_amount_column",
+                    "cell_range": str(cell_range),
+                    "canonical_field": field,
+                }],
+            )
+        anchor = sheet.cell(cell_range.min_row, cell_range.min_col).value
+        if anchor is None:
+            continue
+        for row_no in range(cell_range.min_row, cell_range.max_row + 1):
+            for column in range(cell_range.min_col, cell_range.max_col + 1):
+                if row_no == cell_range.min_row and column == cell_range.min_col:
+                    continue
+                fill[(row_no, column - 1)] = anchor
+    return fill
 
 
 def _value(sheet: DetectedSheet, values: tuple[Any, ...], field: str) -> Any:
@@ -1669,6 +1743,11 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     project_code=metadata["project_code"],
                     display_name=metadata["display_name"],
                     project_manager_id=manager_primary,
+                    # 业务类型早就从源表解析进 metadata 了，此前没往下传、就地丢弃：
+                    # 生产 648 个项目 647 个 business_type 为 NULL，卡墙的业务类型
+                    # 筛选一个也筛不出来。这是 D-05 认定的唯一正规建项来源，补上之后
+                    # 此后新建的 XSDD 项目自带业务类型（源表没填仍是 None，不猜）。
+                    business_type=metadata.get("business_type"),
                     reason=create_reason,
                     operated_by=operated_by,
                 )
@@ -1790,6 +1869,8 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         "receipt_status": ("Status",),
     }
     required_fields = frozenset({"order_no", "receipt_no", "receipt_date", "actual_amount"})
+    # 逐行金额：合并即拒绝（一笔钱不能铺成多笔）。主表汇总列没被映射，不受影响。
+    merge_guarded_fields = frozenset({"actual_amount", "gross_amount", "discount_amount"})
 
     @staticmethod
     def _refs(values: list[tuple[date, str]]) -> str:
@@ -1816,6 +1897,41 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 "receipt_no": receipt_no,
                 "issues": [],
             }
+            # 归属先于校验（2026-09-08）：收款单导出是全公司的，实拍 298 行里 297 行是
+            # 备件销售 / 销售换货 / 租赁 / 整机销售。这些订单没有维保合同，本来就一分钱
+            # 都不会写进维保，却要先撞金额（退货负数）、状态、备注三道校验，报出一堆与
+            # 维保无关的硬错误，把真正该看的错误淹掉；「其他收款」那种有单号无订单的行
+            # 报的还是「销售订单号和收款单号不能为空」，与事实不符。
+            #
+            # 判定权威仍是**维保合同**而不是业务类型——业务类型只作分类、维保业务=是 才是
+            # 建项依据（2026-09-03 拍板，见 _is_explicit_maintenance_row）。这里只是把
+            # 已有的合同匹配提前，不新增任何按业务类型挡钱的规则。
+            if norm and norm not in safe_contracts and not all_contracts.get(norm):
+                base.update(
+                    action="unmatched",
+                    issues=[_row_issue(
+                        row_no,
+                        "project_not_found",
+                        "销售订单未关联当前维保项目，本批跳过且不创建项目",
+                        severity="warning",
+                    )],
+                )
+                source_rows.append(base)
+                continue
+            if not norm and receipt_no:
+                base.update(
+                    action="unmatched",
+                    issues=[_row_issue(
+                        row_no,
+                        "receipt_without_order",
+                        f"收款单 {receipt_no} 没有销售订单（其他收款 / 预付款等），"
+                        "无法归属到维保合同，本批跳过",
+                        severity="warning",
+                    )],
+                )
+                source_rows.append(base)
+                continue
+
             try:
                 if not norm or not receipt_no:
                     raise BulkImportInvalid("销售订单号和收款单号不能为空")
@@ -2050,11 +2166,33 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         # conflicting duplicate, or a ledger conflict), calculating from only
         # the remaining rows would silently create a partial cumulative
         # snapshot.  Freeze every known month for that order as blocked instead.
-        blocked_norms = {
-            str(row.get("normalized_order_no") or "")
-            for row in source_rows
-            if row.get("action") == "error" and row.get("normalized_order_no")
-        }
+        # 连坐粒度是**收款单**，不是销售订单（2026-09-08）。一张收款单是一张资金凭证：
+        # 「退换货核销 / 平账」单的正腿和负腿天生落在不同销售订单上（实拍 10 张单，7 张
+        # 整单净额为 0、银行一分钱没动），按订单连坐永远够不着正腿——负腿被判无效丢掉，
+        # 正腿绿色、无警告、默认勾选，一点就写进台账和 confirmed 累计快照。任何一行不可
+        # 信，整张单涉及的订单都不该按剩下的行算累计。
+        orders_by_receipt: dict[str, set[str]] = defaultdict(set)
+        for row in source_rows:
+            receipt_no = str(row.get("receipt_no") or "")
+            norm = str(row.get("normalized_order_no") or "")
+            if receipt_no and norm:
+                orders_by_receipt[receipt_no].add(norm)
+        blocked_norms: set[str] = set()
+        # 自己有坏行的订单 → order_level_fail_closed；被同一张单的坏行牵连的 → receipt_level。
+        own_blocked: set[str] = set()
+        blocking_receipts: dict[str, set[str]] = defaultdict(set)
+        for row in source_rows:
+            if row.get("action") != "error":
+                continue
+            norm = str(row.get("normalized_order_no") or "")
+            if norm:
+                own_blocked.add(norm)
+                blocked_norms.add(norm)
+            receipt_no = str(row.get("receipt_no") or "")
+            for peer in orders_by_receipt.get(receipt_no, ()):
+                blocked_norms.add(peer)
+                if peer != norm:
+                    blocking_receipts[peer].add(receipt_no)
         blocked_operations: list[dict] = []
         for norm in sorted(blocked_norms):
             order_sources = [
@@ -2062,15 +2200,26 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 for row in source_rows
                 if row.get("normalized_order_no") == norm
             ]
+            if norm in own_blocked:
+                code = "order_level_fail_closed"
+                message = (
+                    f"销售订单 {norm} 存在无效/风险/冲突收款行，禁止从其余行计算部分累计"
+                )
+            else:
+                receipts_text = "、".join(sorted(blocking_receipts.get(norm, ())))
+                code = "receipt_level_fail_closed"
+                message = (
+                    f"收款单 {receipts_text} 存在无效/风险/冲突明细行，"
+                    f"整张单涉及的销售订单（含 {norm}）本批一律不入账——"
+                    "一张收款单整体成立或整体不成立，不按剩下的行算累计"
+                )
             issue = _row_issue(
-                min(int(row["row_no"]) for row in order_sources),
-                "order_level_fail_closed",
-                f"销售订单 {norm} 存在无效/风险/冲突收款行，禁止从其余行计算部分累计",
+                min(int(row["row_no"]) for row in order_sources), code, message
             )
             hard_issues.append(issue)
             for row in order_sources:
                 if not any(
-                    item.get("code") == "order_level_fail_closed"
+                    item.get("code") in {"order_level_fail_closed", "receipt_level_fail_closed"}
                     for item in row.get("issues") or []
                 ):
                     row.setdefault("issues", []).append(issue)

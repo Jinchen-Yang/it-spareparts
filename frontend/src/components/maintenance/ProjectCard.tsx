@@ -222,6 +222,20 @@ export function ProjectCard({ row }: ProjectCardProps) {
             <Tag color="green">回款已完成</Tag>
           ) : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
+          {/* 业务类型（2026-09-08）：用户要能自证「这张卡为什么在 / 为什么不在筛选里」。
+              未标注是灰色提示而不是留白——生产 647/648 都在这一档，留白等于什么都没说。 */}
+          {!isBucket && row.business_type_code === "unlabeled" ? (
+            <Tag>未标注业务类型</Tag>
+          ) : null}
+          {!isBucket && row.business_type_code === "other" ? (
+            <Tag color="orange">{row.business_type}</Tag>
+          ) : null}
+          {!isBucket
+            && row.business_type
+            && row.business_type_code !== "unlabeled"
+            && row.business_type_code !== "other" ? (
+              <Tag color="blue">{row.business_type}</Tag>
+            ) : null}
         </Space>
 
         <Text type="secondary" style={{ fontSize: 12 }}>
@@ -272,6 +286,23 @@ export function ProjectCard({ row }: ProjectCardProps) {
             collected={row.collection_preview_inc_tax}
             contract={row.contract_amount_inc_tax}
           />
+          {!isBucket ? (
+            <div data-testid="receipt-return-rate">
+              <Text>坏件返还率：{row.receipt_return_rate?.rate_pct == null
+                ? "暂不可计算"
+                : `${row.receipt_return_rate.rate_pct}%`}</Text>
+              <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>
+                已返还 {row.receipt_return_rate ? qty(Number(row.receipt_return_rate.returned_qty)) : "—"}
+                {" / 需求备件 "}{row.receipt_return_rate?.demand_qty == null
+                  ? "—" : qty(Number(row.receipt_return_rate.demand_qty))}
+                {"（含好件、坏件及其他件况）"}
+              </div>
+              {row.receipt_return_rate?.rate_pct != null ? (
+                <Progress percent={Math.min(row.receipt_return_rate.rate_pct, 100)}
+                  showInfo={false} size="small" strokeColor="#13c2c2" status="normal" />
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {ratio === null ? (

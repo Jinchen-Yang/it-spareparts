@@ -17,3 +17,4 @@ dist/
 monitor.log
 monitor.status
 frontend/.vite/
+.opencode-inbox/

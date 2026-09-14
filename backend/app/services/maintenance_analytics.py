@@ -27,6 +27,7 @@ from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_quality, query_filters
+from app.services.maintenance_return_receipts import legacy_bad_return_filter
 from app.services.maintenance_boss_board import not_imported, ready, restricted, wbdd_imported
 
 RANGES = ("ytd", "12m", "all", "custom")
@@ -170,13 +171,14 @@ def pn_ranking(
         stmt = stmt.where(FMaintenanceOrder.order_date <= end)
     rows = db.execute(stmt).all()
 
-    # ---- 坏件佐证：RKD 坏件返还按 part_id 聚合 ----
+    # ---- 坏件佐证：RKD 坏件返还按 part_id 聚合（口径冻结：rkd_import + 坏品类 + 有效行）----
     rkd_stmt = select(
         MaintenanceRkdReturnLine.part_id,
         func.upper(MaintenanceRkdReturnLine.pn),
         func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")),
     ).group_by(MaintenanceRkdReturnLine.part_id,
                func.upper(MaintenanceRkdReturnLine.pn))
+    rkd_stmt = rkd_stmt.where(*legacy_bad_return_filter())
     if allowed_project_ids is not None:
         rkd_stmt = rkd_stmt.where(
             MaintenanceRkdReturnLine.project_id.in_(allowed_project_ids or {""}))

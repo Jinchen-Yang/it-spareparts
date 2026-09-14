@@ -284,3 +284,20 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(screen.getByText(/需在项目面板确认挂靠/)).toBeInTheDocument();
   });
 });
+
+describe("实际收货返还率", () => {
+  it("超过100%仍展示真实百分比及分子分母", () => {
+    renderCard(makeRow({ receipt_return_rate: {
+      returned_qty: "12.000", demand_qty: "10.000", rate_pct: 120, state: "ready",
+    } }));
+    expect(screen.getByText("坏件返还率：120%")).toBeInTheDocument();
+    expect(screen.getByText(/已返还 12/)).toHaveTextContent("需求备件 10");
+  });
+  it("分母不完整时不显示0%", () => {
+    renderCard(makeRow({ receipt_return_rate: {
+      returned_qty: "2.000", demand_qty: null, rate_pct: null, state: "basis_incomplete",
+    } }));
+    expect(screen.getByText("坏件返还率：暂不可计算")).toBeInTheDocument();
+    expect(screen.getByText(/已返还 2/)).toHaveTextContent("需求备件 —");
+  });
+});

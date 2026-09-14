@@ -280,6 +280,8 @@ export interface MaintenanceBatchDownloadInput {
   lifecycle?: BoardProjectLifecycle;
   card_status?: CardStatus;
   sort?: BoardProjectSort;
+  /** 所见即所得：与卡墙同一个业务类型筛选，否则下载下来是全量。 */
+  business_type?: string;
 }
 
 export interface MaintenanceBatchDownloadResult {

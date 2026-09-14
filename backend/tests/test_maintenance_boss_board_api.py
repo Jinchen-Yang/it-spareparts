@@ -1155,6 +1155,8 @@ def test_bucket_row_has_the_same_card_keys(db, tmp_path):
     bucket = next(r for r in rows if r["project_id"] == board.UNASSIGNED_BUCKET)
     real = next(r for r in rows if r["project_id"] == proj.project_id)
     assert set(bucket) == set(real)
+    assert bucket["receipt_return_rate"] is None
+    assert real["receipt_return_rate"]["state"] == "ready"
     assert bucket["contract_nos"] == [] and bucket["project_manager"] is None
 
 

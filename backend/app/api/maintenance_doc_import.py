@@ -193,6 +193,8 @@ def get_doc_import(
             status.HTTP_403_FORBIDDEN,
             {"code": "permission_denied", "message": "无权读取该单据批次"},
         )
+    if (batch.report_json or {}).get("protocol") == "return_receipts_v1":
+        raise HTTPException(409, {"code": "dedicated_protocol", "message": "返件任务请使用专用任务查询接口"})
     return {
         "batch_id": batch.batch_id,
         "doc_type": batch.doc_type,

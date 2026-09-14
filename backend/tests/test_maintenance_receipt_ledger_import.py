@@ -39,6 +39,8 @@ from app.services import maintenance_bulk_import as bulk
 
 REVISION = "b7d3f9a1c5e2"
 PREVIOUS = "a8e4f1c7d3b9"
+# 链头断言用 script.get_current_head() 动态取值（#321 起不再钉常量，
+# 后续迁移线性追加无须再改本文件）。
 ORDER_NO = "XSDD-20240101-0001"
 
 
@@ -200,7 +202,7 @@ def test_migration_is_single_head_and_roundtrips(db):
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == REVISION
+        ).scalar_one() == script.get_current_head()
 
 
 # ---------- 归档 ----------

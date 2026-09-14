@@ -164,6 +164,7 @@ export function MaintenanceAnalyticsPage() {
 
   useEffect(() => {
     void load();
+    return () => { seqRef.current += 1; };
   }, [load]);
 
   const onTableChange: TableProps<PnRankingRow>["onChange"] = (pg, _fl, sorter) => {

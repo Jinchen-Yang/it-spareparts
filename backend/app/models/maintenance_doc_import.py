@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from sqlalchemy import (UniqueConstraint,
     ARRAY,
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -19,6 +20,7 @@ from sqlalchemy import (UniqueConstraint,
     Integer,
     String,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -154,34 +156,73 @@ class MaintenanceDocLineRow(Base):
 
 
 class MaintenanceRkdReturnLine(Base):
-    """RKD 入库单坏件返还 canonical 事实（F3 返还率分子，Q8 口径）。
+    """返还收货台账（统一）：RKD 入库导入行 + 页面手工登记行（2026-09-11 口径）。
 
-    apply 时从 raw 明细行投影：test_result ∈ 坏品/坏件/故障 的行 = 已返还事实。
-    不扣前置库账本（坏件是消耗返还，不走 front_stock）；领用→不返还 义务在
-    maintenance_return_obligation，本表只记「入库单确认收到」的数量。
+    - ``source='rkd_import'``：apply 时从 raw 明细行投影，batch/head 必填；
+      旧坏件口径（D-14 分子）消费方以
+      ``legacy_bad_return_filter`` 保持既有来源、类别及坏品件况边界，
+      不纳入手工登记或其他件况；来源事实被明确更正、作废后数量随之更新。
+    - ``source='manual'``：页面登记即视为已收到返件，batch/head 为空；
+      归属 project 必填，``source_order_id`` 可空（未关联需求单），
+      关联校验走 active assignment（同 _resolve_project_id 链）。
+    - 作废不物理删除：``line_status='voided'`` 退出全部有效统计，
+      审计落 maintenance_project_operation_audit（entity_type='return_receipt'）。
+    - 不扣前置库账本（坏件是消耗返还，不走 front_stock）。
     """
 
     __tablename__ = "maintenance_rkd_return_line"
 
     rkd_line_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    batch_id: Mapped[str] = mapped_column(
-        ForeignKey("maintenance_doc_import_batch.batch_id"), nullable=False
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_doc_import_batch.batch_id")
     )
-    head_row_id: Mapped[str] = mapped_column(
-        ForeignKey("maintenance_doc_head_row.row_id"), nullable=False
+    head_row_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_doc_head_row.row_id")
     )
     project_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    source_order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("f_maintenance_order.raw_order_id")
+    )
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="rkd_import", server_default=text("'rkd_import'")
     )
     head_no: Mapped[str] = mapped_column(String(64), nullable=False)
     source_ref: Mapped[str] = mapped_column(String(96), nullable=False)
     part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     pn: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(256))
     qty: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     test_result: Mapped[str | None] = mapped_column(String(64))
+    note: Mapped[str | None] = mapped_column(String(512))
+    evidence_ref: Mapped[str | None] = mapped_column(String(128))
     occurred_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    line_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default=text("'active'")
+    )
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="rkd_import", server_default=text("'rkd_import'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    voided_by: Mapped[str | None] = mapped_column(String(64))
+    voided_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    void_reason: Mapped[str | None] = mapped_column(String(256))
+    # Source snapshot is only advanced by an explicitly confirmed import correction.
+    # Manual edits leave it intact so an old workbook cannot silently overwrite them.
+    source_payload: Mapped[dict | None] = mapped_column(JSONB)
+    receipt_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="part", server_default=text("'part'")
+    )
+    review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
     __table_args__ = (
@@ -189,6 +230,28 @@ class MaintenanceRkdReturnLine(Base):
         CheckConstraint(
             "char_length(btrim(pn)) > 0",
             name="ck_maintenance_rkd_return_pn",
+        ),
+        CheckConstraint(
+            "source IN ('rkd_import', 'manual')",
+            name="ck_maintenance_rkd_return_source",
+        ),
+        CheckConstraint(
+            "line_status IN ('active', 'voided')",
+            name="ck_maintenance_rkd_return_status",
+        ),
+        CheckConstraint(
+            "version >= 1", name="ck_maintenance_rkd_return_version"
+        ),
+        CheckConstraint(
+            "(source = 'manual' AND batch_id IS NULL AND head_row_id IS NULL) "
+            "OR (source = 'rkd_import' AND batch_id IS NOT NULL "
+            "AND head_row_id IS NOT NULL)",
+            name="ck_maintenance_rkd_return_source_shape",
+        ),
+        CheckConstraint(
+            "(line_status = 'voided') = (voided_at IS NOT NULL "
+            "AND voided_by IS NOT NULL)",
+            name="ck_maintenance_rkd_return_void_shape",
         ),
         UniqueConstraint(
             "source_ref", name="uq_maintenance_rkd_return_source_ref"
@@ -198,5 +261,11 @@ class MaintenanceRkdReturnLine(Base):
             "project_id",
             "part_id",
             "occurred_at",
+        ),
+        Index(
+            "ix_maintenance_rkd_return_active_demand",
+            "project_id",
+            "source_order_id",
+            postgresql_where=text("line_status = 'active'"),
         ),
     )

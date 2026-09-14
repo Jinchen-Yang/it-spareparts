@@ -888,6 +888,8 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "source_line_id": row.source_line_id,
         "serial_number": row.serial_number,
         "no_return": row.no_return,
+        "remark": row.remark,
+        "demand_order_no": row.demand_order_no,
         "linked_purchase_line_id": row.linked_purchase_line_id,
         "manual_unit_cost": _money(row.manual_unit_cost),
         "manual_unit_cost_inc_tax": _money(row.manual_unit_cost_inc_tax),
@@ -932,6 +934,7 @@ def site_issue_dict(
     lines: list[MaintenanceSiteIssueLine],
     *,
     idempotent_replay: bool = False,
+    line_details: dict | None = None,
 ) -> dict:
     return {
         "issue_id": row.issue_id,
@@ -953,7 +956,7 @@ def site_issue_dict(
         "corrected_at": row.corrected_at.isoformat() if row.corrected_at else None,
         "voided_at": row.voided_at.isoformat() if row.voided_at else None,
         "version": row.version,
-        "lines": [site_issue_line_dict(line) for line in lines],
+        "lines": [{**site_issue_line_dict(line), **(line_details or {}).get(line.issue_line_id, {})} for line in lines],
         "idempotent_replay": idempotent_replay,
     }
 
@@ -2132,7 +2135,10 @@ def void_site_issue(
             .with_for_update()
         )
     )
-    if was_confirmed and return_events:
+    legacy_return_events = [event for event in return_events
+                            if (event.payload or {}).get("schema_version")
+                            == "maintenance-return-obligation-interface-v1"]
+    if was_confirmed and legacy_return_events:
         # A confirmed issue may have an outbox event that has not yet been
         # projected. Drain every earlier event for the stable project before
         # creating the void event so a delayed projector can never resurrect
@@ -2151,9 +2157,9 @@ def void_site_issue(
             raise MaintenanceOperationConflict(str(exc)) from exc
     if any(
         event.downstream_reference
-        and not event.downstream_reference.startswith(
-            "maintenance-return-obligations:"
-        )
+        and not event.downstream_reference.startswith((
+            "maintenance-return-obligations:", "maintenance-site-line-requirements:"
+        ))
         for event in return_events
     ):
         raise MaintenanceOperationConflict(
@@ -2162,6 +2168,8 @@ def void_site_issue(
 
     lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
     before = site_issue_dict(issue, lines)
+    from app.services import maintenance_site_return_requirements as requirements
+    requirement_before = {line.issue_line_id: requirements.snapshot(line) for line in lines}
     issue.raw_status = "void"
     issue.status_mapping_state = "mapped"
     issue.normalized_status = "void"
@@ -2178,7 +2186,7 @@ def void_site_issue(
     # 只有曾进入返还义务接口的单（confirm / correct 时发过 outbox 事件）才需要
     # 再发一条 voided 事件把义务撤回。工作簿 / 旧版来源的单没有发货来源、从未
     # 投影义务，对它们发事件会被消费方契约（发货明细稳定编号必填）拒绝。
-    if was_confirmed and return_events:
+    if was_confirmed and legacy_return_events:
         event = MaintenanceSiteIssueReturnEvent(
             event_id=str(uuid4()),
             project_id=project_id,
@@ -2190,6 +2198,9 @@ def void_site_issue(
         db.add(event)
         db.flush()
         _consume_site_issue_return_event(db, event)
+    if return_events and not legacy_return_events:
+        requirements.record_corrections(db, project_id=project_id, before=requirement_before,
+                                       operated_by=operated_by, reason=clean_reason)
     db.flush()
     response = {
         **site_issue_dict(issue, lines),
@@ -2299,9 +2310,11 @@ def search_site_issues(
         db,
         project_id=project_id,
     )
+    from app.services.maintenance_site_return_requirements import line_details
+    details = line_details(db, line_rows, project=project)
     return {
         "project_id": project_id,
-        "rows": [site_issue_dict(issue, by_issue[issue.issue_id]) for issue in issues],
+        "rows": [site_issue_dict(issue, by_issue[issue.issue_id], line_details=details) for issue in issues],
         "total": total,
         "page": page,
         "page_size": page_size,
