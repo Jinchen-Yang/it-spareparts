@@ -1,0 +1,85 @@
+{
+  "status": "design_static_validation_passed",
+  "runtime_tested": false,
+  "source_commit": "ae847991e60e84d12c64b375fc07d30c99357efe",
+  "routes": 139,
+  "tool_count": 19,
+  "phases": {
+    "M1": 13,
+    "M1-optional": 3,
+    "M2": 3
+  },
+  "skills": [
+    {
+      "skill": "partflow-document-intake",
+      "validation": "Skill is valid!",
+      "tool_references": [
+        "pf_create_upload_session",
+        "pf_get_capabilities",
+        "pf_get_upload_session",
+        "pf_inspect_document",
+        "pf_search_projects"
+      ]
+    },
+    {
+      "skill": "partflow-export-roundtrip",
+      "validation": "Skill is valid!",
+      "tool_references": [
+        "pf_create_export",
+        "pf_get_capabilities",
+        "pf_get_download",
+        "pf_get_export_options",
+        "pf_get_job",
+        "pf_search_projects"
+      ]
+    },
+    {
+      "skill": "partflow-import-review",
+      "validation": "Skill is valid!",
+      "tool_references": [
+        "pf_apply_import",
+        "pf_get_capabilities",
+        "pf_get_import_preview",
+        "pf_get_job",
+        "pf_inspect_document",
+        "pf_open_review",
+        "pf_preview_import",
+        "pf_retry_job"
+      ]
+    },
+    {
+      "skill": "partflow-parts-lookup",
+      "validation": "Skill is valid!",
+      "tool_references": [
+        "pf_get_capabilities",
+        "pf_get_inventory",
+        "pf_get_price_reference",
+        "pf_search_parts"
+      ]
+    },
+    {
+      "skill": "partflow-project-check",
+      "validation": "Skill is valid!",
+      "tool_references": [
+        "pf_get_capabilities",
+        "pf_get_project_materials",
+        "pf_search_projects"
+      ]
+    }
+  ],
+  "checks": [
+    "skill frontmatter and structure",
+    "all skill tool references declared",
+    "tool inputs required fields and closed top-level schemas",
+    "source module paths exist",
+    "read-only hints match planned side effects",
+    "all local Markdown links resolve",
+    "source commit matches route inventory"
+  ],
+  "limits": [
+    "No WorkBuddy client connection tested",
+    "No production access or migrations",
+    "Per-tool outputSchema to be finalized during implementation",
+    "No behavioral execution of draft tools"
+  ]
+}

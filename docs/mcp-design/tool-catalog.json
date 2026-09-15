@@ -1,0 +1,1027 @@
+{
+  "status": "design_only_not_implemented",
+  "version": "0.1.0",
+  "source_commit": "ae847991e60e84d12c64b375fc07d30c99357efe",
+  "output_contract_note": "result_fields are design requirements, not final JSON Schemas; generate strict per-tool outputSchema during M1/M4 before publishing",
+  "tools": [
+    {
+      "name": "pf_get_capabilities",
+      "title": "查询身份与已开放能力",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.use",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "actor_display",
+        "capability_version",
+        "enabled_tools",
+        "families{protocols,preview,apply,export,gate_state}",
+        "limits",
+        "disabled_reasons"
+      ],
+      "source_modules": [
+        "security.py",
+        "permissions.py",
+        "main.py"
+      ],
+      "implementation_gap": "新增family与工具注册表；仅披露当前用户可见能力，不输出密钥/全局配置",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_create_upload_session",
+      "title": "创建文件暂存会话",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "staging",
+      "scope": "mcp.files.upload",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20971520
+                },
+                "mime": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              },
+              "required": [
+                "name",
+                "size_bytes",
+                "mime"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "document_import",
+              "attachment_organize",
+              "workbook_return"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "files",
+          "purpose",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "upload_session_id",
+        "upload_page_url",
+        "entries",
+        "expires_at",
+        "limits"
+      ],
+      "source_modules": [
+        "services/agent_files.py",
+        "services/import_safety.py"
+      ],
+      "implementation_gap": "新增真实二进制上传通道；工具不接受local_path或URL抓取；会话生成不等于上传",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_upload_session",
+      "title": "查询暂存文件状态",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.files.upload",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "upload_session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "upload_session_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "entries{file_id,name,status,server_sha256,size_bytes,error}",
+        "complete"
+      ],
+      "source_modules": [],
+      "implementation_gap": "新增会话/文件登记与逐项校验状态",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_inspect_document",
+      "title": "查看文件结构与单据分类",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.files.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "include_sample": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "file_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "file_id",
+        "sha256",
+        "sheets",
+        "detected_family",
+        "protocol",
+        "confidence",
+        "evidence",
+        "candidate_projects",
+        "warnings",
+        "optional_sample"
+      ],
+      "source_modules": [
+        "services/agent_files.py",
+        "etl/reader.py",
+        "etl/mapping.py"
+      ],
+      "implementation_gap": "复用确定性识别器+文件ACL；family识别不写业务；默认不返回客户全文，样本经字段权限校验，不确定不推断",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_search_projects",
+      "title": "定位员工可见项目",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.projects.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "items{project_id,xsdd,display_name,match_reason}",
+        "next_cursor"
+      ],
+      "source_modules": [
+        "api/maintenance_boss_board.py",
+        "api/maintenance_project_scope.py"
+      ],
+      "implementation_gap": "抽取现有范围过滤；不能仅凭名字自动归属；关闭发布闸时不绕过",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_preview_import",
+      "title": "创建持久导入预览",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "staging",
+      "scope": "mcp.import.preview",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "family": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "upsert"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "file_ids",
+          "family",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "job_id",
+        "preview_id",
+        "state",
+        "family",
+        "protocol",
+        "transaction_scope",
+        "file_results",
+        "changes{create,update,void,skip}",
+        "issues",
+        "can_apply",
+        "expires_at"
+      ],
+      "source_modules": [
+        "api/imports.py",
+        "api/maintenance_project_batch_transfer.py",
+        "api/maintenance_project_master_workbook.py",
+        "api/maintenance_expense_collection_workbook.py",
+        "api/maintenance_return_receipt_import.py",
+        "api/maintenance_acceptance_checklist.py"
+      ],
+      "implementation_gap": "适配各族原生预览；未实现dry-run的family返回unsupported；混合family先拆分，业务写入次数必须为0；upsert仅获明确修复意图时使用",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_import_preview",
+      "title": "读取预览详情和逐行问题",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.import.preview",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "preview_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "section": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "changes",
+              "issues"
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        "required": [
+          "preview_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "version",
+        "file_hashes",
+        "changes",
+        "items",
+        "next_cursor",
+        "warnings",
+        "can_apply",
+        "expires_at"
+      ],
+      "source_modules": [],
+      "implementation_gap": "新增持久预览统一读模型，不泄露其他人的预览；分页不隐去存在更多作废行的事实",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_open_review",
+      "title": "生成登录审阅入口",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.import.preview",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "preview_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "preview_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "review_url",
+        "preview_id",
+        "expires_at",
+        "requires_human_confirmation"
+      ],
+      "source_modules": [],
+      "implementation_gap": "新增网页绑定冻结预览，GET不创建批准；真实确认在浏览器业务登录后POST，待实现不能返回虚构链接",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_job",
+      "title": "查询任务与处理回执",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.jobs.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "status",
+        "items",
+        "operation_ids",
+        "native_receipts",
+        "counts",
+        "retryable_items",
+        "artifacts",
+        "next_poll_after_seconds"
+      ],
+      "source_modules": [
+        "api/imports.py",
+        "api/maintenance_return_receipt_import.py"
+      ],
+      "implementation_gap": "统一持久任务所有权/结果未知状态，不暴露原接口全局作业列表",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_export_options",
+      "title": "查询允许导出的模板与字段",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.export",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "export_kinds",
+        "protocols",
+        "forms",
+        "fields",
+        "required_parameters",
+        "roundtrip",
+        "mutation_semantics"
+      ],
+      "source_modules": [
+        "api/maintenance_project_batch_transfer.py",
+        "api/maintenance_boss_board.py",
+        "api/maintenance_project_master_workbook.py"
+      ],
+      "implementation_gap": "按账号与发布闸生成受限注册表；模板全额权限不足则不提供该模板",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_create_export",
+      "title": "生成业务导出任务",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "artifact",
+      "scope": "mcp.export",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "export_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "date_from": {
+            "type": "string",
+            "format": "date"
+          },
+          "date_to": {
+            "type": "string",
+            "format": "date"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "protocol": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "export_kind",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "job_id",
+        "normalized_scope",
+        "fields",
+        "protocol",
+        "roundtrip",
+        "warnings"
+      ],
+      "source_modules": [
+        "api/maintenance_project_batch_transfer.py",
+        "api/maintenance_project_master_workbook.py",
+        "api/maintenance_expense_collection_workbook.py",
+        "api/maintenance_acceptance_checklist.py"
+      ],
+      "implementation_gap": "字段/日期/项目范围在服务端验证；完整往返模板拒绝任意fields或日期裁剪，不降级成普通报表；产物有权限来源",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_download",
+      "title": "获取权限保护的下载入口",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.files.download",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "download_url",
+        "filename",
+        "mime",
+        "size_bytes",
+        "sha256",
+        "expires_at"
+      ],
+      "source_modules": [
+        "api/agent.py",
+        "services/agent_files.py"
+      ],
+      "implementation_gap": "返回登录链接，不返回服务器路径或原始PAT；真实下载端再验权/记录流状态",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_project_materials",
+      "title": "查看项目材料与已知缺项",
+      "implementation_status": "design_only",
+      "phase": "M1-optional",
+      "side_effect": "query",
+      "scope": "mcp.projects.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "items{kind,status,source_ids}",
+        "gaps{code,evidence}",
+        "unknowns",
+        "as_of"
+      ],
+      "source_modules": [
+        "api/maintenance_acceptance_checklist.py",
+        "api/maintenance_return_receipts.py",
+        "api/maintenance_boss_board.py"
+      ],
+      "implementation_gap": "新增受限聚合；未配置要求不能声称缺失；无费用行不能推断零费用或已完整",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_search_parts",
+      "title": "PN与描述查询",
+      "implementation_status": "design_only",
+      "phase": "M1-optional",
+      "side_effect": "query",
+      "scope": "mcp.parts.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "items{part_id,pn,category,description,source}",
+        "next_cursor"
+      ],
+      "source_modules": [
+        "api/parts.py"
+      ],
+      "implementation_gap": "允许列表投影，默认无价格/供应商/客户；适配性仅引用已维护记录",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_inventory",
+      "title": "批量查询配件库存",
+      "implementation_status": "design_only",
+      "phase": "M1-optional",
+      "side_effect": "query",
+      "scope": "mcp.inventory.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "part_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "warehouse_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "part_ids"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "items{part_id,warehouse,quantity,unit,quantity_basis}",
+        "as_of",
+        "warnings"
+      ],
+      "source_modules": [
+        "api/inventory.py",
+        "services/inventory.py"
+      ],
+      "implementation_gap": "实际API映射与库存字段口径适配；不把需求、发货候选、领用当库存，不宣称实时可承诺库存",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_get_price_reference",
+      "title": "查询授权内历史参考价格",
+      "implementation_status": "design_only",
+      "phase": "M2",
+      "side_effect": "query",
+      "scope": "mcp.prices.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "part_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "purchase",
+              "sales"
+            ]
+          },
+          "date_from": {
+            "type": "string",
+            "format": "date"
+          },
+          "date_to": {
+            "type": "string",
+            "format": "date"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        "required": [
+          "part_id",
+          "side"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "items{date,qty,unit,amount,tax_basis,currency,reference_kind,source_id}",
+        "next_cursor"
+      ],
+      "source_modules": [
+        "api/parts.py",
+        "services/part_overview.py"
+      ],
+      "implementation_gap": "数据权限与own_customers_only；不对缺失价格补0或暗中扩大查询窗口",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_search_audit",
+      "title": "检索本人或授权范围审计",
+      "implementation_status": "design_only",
+      "phase": "M1",
+      "side_effect": "query",
+      "scope": "mcp.audit.read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "date_from": {
+            "type": "string",
+            "format": "date"
+          },
+          "date_to": {
+            "type": "string",
+            "format": "date"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        "required": [
+          "date_from",
+          "date_to"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "events",
+        "next_cursor",
+        "effective_scope"
+      ],
+      "source_modules": [
+        "security.py",
+        "models/system.py"
+      ],
+      "implementation_gap": "新增可靠事件存储；actor参数只做过滤不能提升权限，self/all独立判定；最长31天/次，响应本身脱敏",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_apply_import",
+      "title": "提交服务器已确认的预览",
+      "implementation_status": "design_only",
+      "phase": "M2",
+      "side_effect": "business_write",
+      "scope": "mcp.import.apply",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "preview_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "approval_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "preview_id",
+          "approval_id",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "job_id",
+        "operation_id",
+        "status",
+        "receipt"
+      ],
+      "source_modules": [],
+      "implementation_gap": "首版不注册；网页确认记录绑定预览/行集，原生事务收据/outbox/幂等全部完成后开放",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "pf_retry_job",
+      "title": "重试明确未提交的失败项目",
+      "implementation_status": "design_only",
+      "phase": "M2",
+      "side_effect": "business_write",
+      "scope": "mcp.import.apply",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "job_id",
+          "item_ids",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "result_fields": [
+        "job_id",
+        "reused_receipts",
+        "rejected_items"
+      ],
+      "source_modules": [],
+      "implementation_gap": "首版不注册；先查receipt，未知提交不得重放；权限/版本改变须重预览确认",
+      "authorization": "current sys_user + MCP scope + native page/action/data/project gates; all object ownership checked",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    }
+  ]
+}
