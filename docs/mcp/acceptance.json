@@ -1,0 +1,30 @@
+{
+  "date": "2026-09-16",
+  "backend_scope": {
+    "total": 4523,
+    "passed": 4515,
+    "skipped": 8,
+    "method": "分段回归；发布依赖清单修复后续跑剩余节点，最后新增MCP用例另行全模块复测",
+    "initial_passed": 4142,
+    "initial_skipped": 7,
+    "remaining_passed": 369,
+    "remaining_skipped": 1,
+    "additional_mcp_cases": 4,
+    "final_mcp_module_passed": 21
+  },
+  "production_python_related_tests": {
+    "python": "3.11.16",
+    "passed": 100
+  },
+  "frontend": {
+    "tests_passed": 828,
+    "build": "passed",
+    "dependency_audit": "passed"
+  },
+  "backend_dependency_audit": "passed",
+  "migration": "single head; alembic check passed; guarded downgrade passed",
+  "browser": "desktop + mobile + expired review recovery passed",
+  "container": "build + package assets + nginx proxy checks passed",
+  "workbuddy_desktop": "not tested",
+  "production_deployment": "not performed"
+}

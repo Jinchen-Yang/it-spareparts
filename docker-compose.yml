@@ -45,6 +45,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://spareparts:${POSTGRES_PASSWORD:-spareparts}@db:5432/spareparts
       RAW_FILE_DIR: /app/data/raw
+      MCP_ENABLED: ${MCP_ENABLED:-false}
+      MCP_CONFIRM_ENABLED: ${MCP_CONFIRM_ENABLED:-false}
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      MCP_MAX_FILE_BYTES: ${MCP_MAX_FILE_BYTES:-20971520}
+      MCP_WORKER_LEASE_SECONDS: ${MCP_WORKER_LEASE_SECONDS:-600}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
       MAINTENANCE_MANIFEST_ACTIVE_KEY_ID: ${MAINTENANCE_MANIFEST_ACTIVE_KEY_ID:-dev-v1}
@@ -89,6 +94,13 @@ services:
     volumes:
       - uploaded_files:/app/data/raw
     restart: unless-stopped
+
+  # Opt-in durable MCP worker, sharing the application rules, DB and file volume.
+  mcp-worker:
+    extends:
+      service: app
+    profiles: [mcp]
+    command: [python, -m, app.mcp.worker]
 
   frontend:
     logging: *default-logging

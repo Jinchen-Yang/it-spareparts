@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
@@ -20,6 +20,13 @@ _DEFAULT_MANIFEST_KEY = "change-me-maintenance-manifest-key-dev-v1"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Employee MCP: disabled by default; native business feature gates still apply.
+    mcp_enabled: bool = False
+    mcp_confirm_enabled: bool = False
+    mcp_public_base_url: str = "http://127.0.0.1:8000"
+    mcp_max_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+    mcp_worker_lease_seconds: int = Field(default=600, ge=60, le=3600)
 
     app_name: str = "IT 备件智能管理系统"
     api_prefix: str = "/api"
