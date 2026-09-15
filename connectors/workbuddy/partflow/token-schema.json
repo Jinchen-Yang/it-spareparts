@@ -1,0 +1,20 @@
+{
+  "title": "连接公司 PARTFLOW",
+  "description": "填写公司提供的 HTTPS 地址，以及自己在文件与确认页生成的个人令牌。不要使用营销演示站地址。",
+  "fields": [
+    {
+      "key": "API_BASE_URL",
+      "label": "公司系统地址（末尾不加斜线）",
+      "type": "text",
+      "required": true,
+      "placeholder": "https://your-company.example.com"
+    },
+    {
+      "key": "PARTFLOW_TOKEN",
+      "label": "个人连接令牌",
+      "type": "password",
+      "required": true,
+      "placeholder": "在公司系统 /mcp-office 中生成"
+    }
+  ]
+}

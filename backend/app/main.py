@@ -78,7 +78,32 @@ if _sec_warns:
     for w in _sec_warns:
         _log.warning("[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w)
 
-app = FastAPI(title=settings.app_name)
+from contextlib import asynccontextmanager
+from app.mcp.server import create_manager, McpTransport
+from app.mcp.api import router as mcp_office_router
+from app.mcp.core import McpError
+from fastapi.responses import JSONResponse
+
+@asynccontextmanager
+async def app_lifespan(app):
+    app.state.mcp_manager = create_manager()
+    async with app.state.mcp_manager.run():
+        yield
+
+app = FastAPI(title=settings.app_name, lifespan=app_lifespan)
+
+@app.exception_handler(McpError)
+async def mcp_error_handler(request, exc):
+    return JSONResponse({"code": exc.code, "message": exc.message}, status_code=exc.status,
+                        headers={"Cache-Control": "no-store"})
+
+from app.mcp.http_controls import McpHttpControls
+app.add_middleware(McpHttpControls)
+
+app.include_router(mcp_office_router)
+# Mount at an exact path to avoid credential-bearing redirect requirements.
+from starlette.routing import Route
+app.router.routes.append(Route("/mcp", endpoint=McpTransport(), methods=["GET", "POST", "DELETE"]))
 
 app.add_middleware(
     CORSMiddleware,

@@ -235,6 +235,9 @@ def apply_batch(db: Session, batch_id: str, *, operated_by: str) -> dict:
             f"清单有 {len(issues)} 个问题行，整批未生效："
             + "；".join(f"第 {row} 行 {msg}" for row, msg in issues[:5]))
 
+    # Serialize whole-list replacement across HTTP and MCP confirmations.
+    db.execute(select(MaintenanceProject).where(
+        MaintenanceProject.project_id == batch.project_id).with_for_update())
     previous = _current_batch(db, batch.project_id)
     batch.status = "applied"
     batch.applied_by = operated_by

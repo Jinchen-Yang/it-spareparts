@@ -1,0 +1,21 @@
+{
+  "name": "序维 PARTFLOW",
+  "name_zh": "序维 PARTFLOW",
+  "name_en": "PARTFLOW",
+  "description": "整理业务文件、预览导入差异、导出项目工作簿与查询备件库存。",
+  "description_zh": "整理业务文件、预览导入差异、导出项目工作簿与查询备件库存。",
+  "description_en": "Review business documents, export project workbooks and find parts and stock.",
+  "source": "partflow-business",
+  "type": "mcp",
+  "version": "1.0.0",
+  "auth_mode": "token",
+  "minWorkbuddyVersion": "4.24.0",
+  "examples_zh": [
+    "检查这份项目验收清单，列出问题",
+    "导出这个项目的费用回款工作簿"
+  ],
+  "examples_en": [
+    "Check this project acceptance checklist.",
+    "Export the expense and collection workbook for this project."
+  ]
+}

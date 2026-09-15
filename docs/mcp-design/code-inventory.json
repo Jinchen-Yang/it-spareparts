@@ -1,0 +1,2546 @@
+{
+  "commit": "ae847991e60e84d12c64b375fc07d30c99357efe",
+  "scope": "Static source inspection only; API prefix comes from settings.api_prefix; live production flags not checked",
+  "routes": [
+    {
+      "module": "imports",
+      "method": "POST",
+      "path": "/import/upload",
+      "function": "upload",
+      "line": 190,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "POST",
+      "path": "/import/precheck",
+      "function": "precheck",
+      "line": 321,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "POST",
+      "path": "/import/expense-void-preview",
+      "function": "expense_void_preview",
+      "line": 495,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "POST",
+      "path": "/import/upload-batch",
+      "function": "upload_batch",
+      "line": 530,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "GET",
+      "path": "/import/jobs",
+      "function": "list_jobs",
+      "line": 586,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "GET",
+      "path": "/import/jobs/{job_id}",
+      "function": "job_detail",
+      "line": 594,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "GET",
+      "path": "/import/batches",
+      "function": "list_batches",
+      "line": 611,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "GET",
+      "path": "/import/batches/{batch_id}",
+      "function": "batch_detail",
+      "line": 624,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)"
+      ]
+    },
+    {
+      "module": "imports",
+      "method": "GET",
+      "path": "/import/batches/{batch_id}/errors.csv",
+      "function": "batch_errors_csv",
+      "line": 648,
+      "source": "backend/app/api/imports.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_import'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "agent",
+      "method": "POST",
+      "path": "/agent/chat",
+      "function": "chat",
+      "line": 46,
+      "source": "backend/app/api/agent.py",
+      "router_dependencies": "[Depends(require_page('page_chat'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "agent",
+      "method": "POST",
+      "path": "/agent/chat/stream",
+      "function": "chat_stream",
+      "line": 70,
+      "source": "backend/app/api/agent.py",
+      "router_dependencies": "[Depends(require_page('page_chat'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "agent",
+      "method": "POST",
+      "path": "/agent/upload",
+      "function": "upload",
+      "line": 103,
+      "source": "backend/app/api/agent.py",
+      "router_dependencies": "[Depends(require_page('page_chat'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "agent",
+      "method": "GET",
+      "path": "/agent/files/{file_id}",
+      "function": "download",
+      "line": 119,
+      "source": "backend/app/api/agent.py",
+      "router_dependencies": "[Depends(require_page('page_chat'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "agent",
+      "method": "GET",
+      "path": "/agent/files/{file_id}/preview",
+      "function": "preview_file",
+      "line": 146,
+      "source": "backend/app/api/agent.py",
+      "router_dependencies": "[Depends(require_page('page_chat'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/search",
+      "function": "search",
+      "line": 28,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/categories",
+      "function": "part_categories",
+      "line": 75,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/overview",
+      "function": "overview",
+      "line": 93,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/purchases",
+      "function": "purchases",
+      "line": 111,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/sales",
+      "function": "sales",
+      "line": 123,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/{part_id}/pool-reference",
+      "function": "pool_reference",
+      "line": 143,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_pool_analysis'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "POST",
+      "path": "/parts/pool-references",
+      "function": "pool_references",
+      "line": 170,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_pool_analysis'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/master/check",
+      "function": "master_check_duplicates",
+      "line": 213,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "POST",
+      "path": "/parts/master",
+      "function": "master_create",
+      "line": 225,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "PATCH",
+      "path": "/parts/master",
+      "function": "master_edit_part",
+      "line": 245,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(get_current_user_context)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/master/categories",
+      "function": "master_categories",
+      "line": 265,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/master/suggest",
+      "function": "master_suggest",
+      "line": 281,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "GET",
+      "path": "/parts/master/batch-preview",
+      "function": "master_batch_preview",
+      "line": 301,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "parts",
+      "method": "POST",
+      "path": "/parts/master/batch-apply",
+      "function": "master_batch_apply",
+      "line": 314,
+      "source": "backend/app/api/parts.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)",
+        "Depends(current_role)",
+        "Depends(require_page('page_master_data'))"
+      ]
+    },
+    {
+      "module": "inventory",
+      "method": "GET",
+      "path": "/inventory",
+      "function": "list_",
+      "line": 33,
+      "source": "backend/app/api/inventory.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_inventory'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "inventory",
+      "method": "GET",
+      "path": "/inventory/dynamic",
+      "function": "list_dynamic",
+      "line": 46,
+      "source": "backend/app/api/inventory.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_inventory'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "inventory",
+      "method": "GET",
+      "path": "/inventory/warehouses",
+      "function": "warehouse_options",
+      "line": 58,
+      "source": "backend/app/api/inventory.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_inventory'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)"
+      ]
+    },
+    {
+      "module": "inventory",
+      "method": "PUT",
+      "path": "/inventory/{inv_id}",
+      "function": "update",
+      "line": 63,
+      "source": "backend/app/api/inventory.py",
+      "router_dependencies": "[Depends(current_role), Depends(require_page('page_inventory'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(require_admin)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "POST",
+      "path": "/maintenance/recompute",
+      "function": "recompute",
+      "line": 148,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(require_admin)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/projects",
+      "function": "projects",
+      "line": 173,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/lines",
+      "function": "lines",
+      "line": 193,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/export",
+      "function": "export",
+      "line": 366,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/orders/export",
+      "function": "orders_export",
+      "line": 474,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/as-of",
+      "function": "maintenance_as_of",
+      "line": 525,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/export-workbooks",
+      "function": "export_workbooks",
+      "line": 537,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/lines/export",
+      "function": "lines_export",
+      "line": 585,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/board",
+      "function": "board",
+      "line": 669,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/board/export",
+      "function": "board_export",
+      "line": 717,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/export-workbook",
+      "function": "export_workbook",
+      "line": 854,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/roundtrip-template",
+      "function": "roundtrip_template",
+      "line": 902,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "GET",
+      "path": "/maintenance/roundtrip-templates",
+      "function": "roundtrip_templates",
+      "line": 956,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance",
+      "method": "POST",
+      "path": "/maintenance/roundtrip-import",
+      "function": "roundtrip_import",
+      "line": 1274,
+      "source": "backend/app/api/maintenance.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_roundtrip_apply', require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/health",
+      "function": "board_health",
+      "line": 107,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/summary",
+      "function": "board_summary",
+      "line": 118,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/attention",
+      "function": "board_attention",
+      "line": 132,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/projects",
+      "function": "board_projects",
+      "line": 145,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "POST",
+      "path": "/maintenance/boss-board/projects/search",
+      "function": "board_projects_search",
+      "line": 193,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/projects/export/options",
+      "function": "board_project_export_options",
+      "line": 226,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "POST",
+      "path": "/maintenance/boss-board/projects/export",
+      "function": "board_project_export",
+      "line": 236,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/projects/{project_id}",
+      "function": "board_project",
+      "line": 322,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/projects/{project_id}/orders",
+      "function": "board_project_orders",
+      "line": 378,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(contract_no_filter)",
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_boss_board",
+      "method": "GET",
+      "path": "/maintenance/boss-board/orders/{source_order_id}/lines",
+      "function": "board_order_lines",
+      "line": 406,
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_project_batch_transfer",
+      "method": "GET",
+      "path": "/maintenance/project-batch-transfer/options",
+      "function": "transfer_options",
+      "line": 240,
+      "source": "backend/app/api/maintenance_project_batch_transfer.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(_require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_project_batch_transfer",
+      "method": "POST",
+      "path": "/maintenance/project-batch-transfer/preview",
+      "function": "preview_transfer",
+      "line": 289,
+      "source": "backend/app/api/maintenance_project_batch_transfer.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_IMPORT_ACTION, require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_batch_transfer",
+      "method": "POST",
+      "path": "/maintenance/project-batch-transfer/apply",
+      "function": "apply_transfer",
+      "line": 378,
+      "source": "backend/app/api/maintenance_project_batch_transfer.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_IMPORT_ACTION, require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_batch_transfer",
+      "method": "POST",
+      "path": "/maintenance/project-batch-transfer/receipt-rulings",
+      "function": "rule_receipt",
+      "line": 493,
+      "source": "backend/app/api/maintenance_project_batch_transfer.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_batch_transfer",
+      "method": "POST",
+      "path": "/maintenance/project-batch-transfer/download",
+      "function": "download_transfer",
+      "line": 551,
+      "source": "backend/app/api/maintenance_project_batch_transfer.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(_require_board_view)"
+      ]
+    },
+    {
+      "module": "maintenance_wbdd_import",
+      "method": "POST",
+      "path": "/maintenance/wbdd-imports",
+      "function": "upload_wbdd",
+      "line": 56,
+      "source": "backend/app/api/maintenance_wbdd_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_idempotency_key)",
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_wbdd_import",
+      "method": "GET",
+      "path": "/maintenance/wbdd-imports/latest",
+      "function": "latest",
+      "line": 125,
+      "source": "backend/app/api/maintenance_wbdd_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))"
+      ]
+    },
+    {
+      "module": "maintenance_wbdd_import",
+      "method": "GET",
+      "path": "/maintenance/wbdd-imports/latest/missing",
+      "function": "latest_missing",
+      "line": 136,
+      "source": "backend/app/api/maintenance_wbdd_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY))"
+      ]
+    },
+    {
+      "module": "maintenance_expense_collection_workbook",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/expense-collection-workbook.xlsx",
+      "function": "download_workbook",
+      "line": 112,
+      "source": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_profit_visibility)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_expense_collection_workbook",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/expense-collection-workbook/validate",
+      "function": "validate_workbook",
+      "line": 138,
+      "source": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_profit'))",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_expense_collection_workbook",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/expense-collection-workbook/apply",
+      "function": "apply_workbook",
+      "line": 157,
+      "source": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_profit'))",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "GET",
+      "path": "/maintenance/spare-part-lines.xlsx",
+      "function": "download_global_lines",
+      "line": 227,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_profit_visibility)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "POST",
+      "path": "/maintenance/spare-part-lines/validate",
+      "function": "validate_global_lines",
+      "line": 259,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "POST",
+      "path": "/maintenance/spare-part-lines/apply",
+      "function": "apply_global_lines",
+      "line": 284,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/expense-rows",
+      "function": "list_project_expense_rows",
+      "line": 322,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_profit_visibility)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/master-workbook.xlsx",
+      "function": "download_project_master",
+      "line": 371,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/master-workbook/collection-plan",
+      "function": "get_collection_plan",
+      "line": 427,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_profit_visibility)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/collection-milestones/restore",
+      "function": "restore_collection_milestones",
+      "line": 493,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(require_admin)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_profit'))",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/master-workbook/rows",
+      "function": "list_master_rows",
+      "line": 600,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(contract_no_filter)",
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_profit_visibility)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/master-workbook/validate",
+      "function": "validate_project_master",
+      "line": 773,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_master_edit)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_project_master_workbook",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/master-workbook/apply",
+      "function": "apply_project_master",
+      "line": 836,
+      "source": "backend/app/api/maintenance_project_master_workbook.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_require_master_edit)",
+        "Depends(get_current_user_context)",
+        "Depends(require_maintenance_project_access)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/return-receipts/jobs",
+      "function": "upload",
+      "line": 97,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "GET",
+      "path": "/maintenance/doc-imports/return-receipts/jobs/{batch_id}",
+      "function": "get_job",
+      "line": 158,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/return-receipts/jobs/{batch_id}/cancel",
+      "function": "cancel",
+      "line": 182,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "GET",
+      "path": "/maintenance/doc-imports/return-receipts/jobs/{batch_id}/original",
+      "function": "original",
+      "line": 197,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/return-receipts/jobs/{batch_id}/retry",
+      "function": "retry",
+      "line": 220,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipt_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/return-receipts/jobs/{batch_id}/apply",
+      "function": "apply",
+      "line": 239,
+      "source": "backend/app/api/maintenance_return_receipt_import.py",
+      "router_dependencies": "[Depends(require_maintenance_boss), Depends(require_page('page_maintenance')), Depends(require_action('action_maintenance_bad_return_manage'))]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/return-receipt-demands",
+      "function": "receipt_demand_candidates",
+      "line": 173,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/return-receipt-summary",
+      "function": "receipt_summary",
+      "line": 195,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/return-receipts",
+      "function": "search_receipts",
+      "line": 219,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/return-receipts",
+      "function": "create_receipt",
+      "line": 263,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_bad_return_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "PATCH",
+      "path": "/maintenance/return-receipts/{receipt_id}",
+      "function": "update_receipt",
+      "line": 316,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_bad_return_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "POST",
+      "path": "/maintenance/return-receipts/{receipt_id}/void",
+      "function": "void_receipt",
+      "line": 362,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_bad_return_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_return_receipts",
+      "method": "GET",
+      "path": "/maintenance/return-receipts/{receipt_id}/audit",
+      "function": "receipt_audit",
+      "line": 400,
+      "source": "backend/app/api/maintenance_return_receipts.py",
+      "router_dependencies": "[Depends(require_maintenance_boss)]",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_doc_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/{doc_type}/preview",
+      "function": "preview_doc_import",
+      "line": 52,
+      "source": "backend/app/api/maintenance_doc_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(_preflight)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_doc_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/{batch_id}/apply",
+      "function": "apply_doc_import",
+      "line": 136,
+      "source": "backend/app/api/maintenance_doc_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_doc_import",
+      "method": "GET",
+      "path": "/maintenance/doc-imports/{batch_id}",
+      "function": "get_doc_import",
+      "line": 173,
+      "source": "backend/app/api/maintenance_doc_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_doc_import",
+      "method": "POST",
+      "path": "/maintenance/doc-imports/relink-projects",
+      "function": "relink_doc_import_projects",
+      "line": 216,
+      "source": "backend/app/api/maintenance_doc_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(require_maintenance_boss)",
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_ckd_import",
+      "method": "POST",
+      "path": "/maintenance/ckd-imports/preview",
+      "function": "preview_ckd_import",
+      "line": 45,
+      "source": "backend/app/api/maintenance_ckd_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(_preflight)"
+      ]
+    },
+    {
+      "module": "maintenance_ckd_import",
+      "method": "POST",
+      "path": "/maintenance/ckd-imports/{batch_id}/apply",
+      "function": "apply_ckd_import",
+      "line": 122,
+      "source": "backend/app/api/maintenance_ckd_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_ckd_import",
+      "method": "GET",
+      "path": "/maintenance/ckd-imports/{batch_id}",
+      "function": "get_ckd_import",
+      "line": 160,
+      "source": "backend/app/api/maintenance_ckd_import.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action(_ACTION_KEY, require_data='data_purchase_cost'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-imports/preview",
+      "function": "preview_warehouse_import",
+      "line": 188,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-imports/{import_id}/apply",
+      "function": "apply_warehouse_import",
+      "line": 248,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_warehouse_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-documents/search",
+      "function": "search_warehouse_documents",
+      "line": 294,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-ambiguities/search",
+      "function": "search_warehouse_ambiguities",
+      "line": 328,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-ambiguities/{ambiguity_id}/resolve",
+      "function": "resolve_warehouse_ambiguity",
+      "line": 370,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_warehouse_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_warehouse",
+      "method": "POST",
+      "path": "/maintenance/warehouse-integrations/reconcile",
+      "function": "reconcile_warehouse_integrations",
+      "line": 411,
+      "source": "backend/app/api/maintenance_warehouse.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_warehouse_manage'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_workbooks",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/workbook",
+      "function": "export_project_workbook",
+      "line": 210,
+      "source": "backend/app/api/maintenance_project_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_maintenance_project_access)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_workbooks",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/workbook/validate",
+      "function": "validate_project_workbook_upload",
+      "line": 255,
+      "source": "backend/app/api/maintenance_project_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_roundtrip_apply', require_data='data_profit'))",
+        "Depends(require_maintenance_project_access)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_workbooks",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/workbook/apply",
+      "function": "apply_project_workbook_plan",
+      "line": 305,
+      "source": "backend/app/api/maintenance_project_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_roundtrip_apply', require_data='data_profit'))",
+        "Depends(require_maintenance_project_access)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_workbooks",
+      "method": "GET",
+      "path": "/maintenance/workbook-validations/{validation_id}/errors.xlsx",
+      "function": "download_project_workbook_errors",
+      "line": 361,
+      "source": "backend/app/api/maintenance_project_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_roundtrip_apply', require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_project_workbook_v3",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/workbook-v3.xlsx",
+      "function": "export_project_workbook_v3",
+      "line": 54,
+      "source": "backend/app/api/maintenance_project_workbook_v3.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_manager_workbooks",
+      "method": "GET",
+      "path": "/maintenance/project-manager/workbooks/v3/status",
+      "function": "manager_workbook_status",
+      "line": 230,
+      "source": "backend/app/api/maintenance_manager_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_manager_workbooks",
+      "method": "GET",
+      "path": "/maintenance/project-manager/workbooks/v3",
+      "function": "export_manager_workbook",
+      "line": 254,
+      "source": "backend/app/api/maintenance_manager_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_manager_workbooks",
+      "method": "POST",
+      "path": "/maintenance/project-manager/workbooks/v3/validate",
+      "function": "validate_manager_workbook_upload",
+      "line": 291,
+      "source": "backend/app/api/maintenance_manager_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_manager_workbooks",
+      "method": "POST",
+      "path": "/maintenance/project-manager/workbooks/v3/apply",
+      "function": "apply_manager_workbook",
+      "line": 328,
+      "source": "backend/app/api/maintenance_manager_workbooks.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix",
+        "dependencies": "maintenance_beta_dependencies"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(require_action('action_maintenance_manager_workbook_apply', require_data='data_profit'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_acceptance_checklist",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/acceptance/checklist",
+      "function": "get_project_checklist",
+      "line": 58,
+      "source": "backend/app/api/maintenance_acceptance_checklist.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_acceptance_checklist",
+      "method": "GET",
+      "path": "/maintenance/projects/stable/{project_id}/acceptance/checklist/template",
+      "function": "download_checklist_template",
+      "line": 70,
+      "source": "backend/app/api/maintenance_acceptance_checklist.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_acceptance_checklist",
+      "method": "POST",
+      "path": "/maintenance/projects/stable/{project_id}/acceptance/checklist/preview",
+      "function": "preview_checklist",
+      "line": 88,
+      "source": "backend/app/api/maintenance_acceptance_checklist.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(_preflight)",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "maintenance_acceptance_checklist",
+      "method": "POST",
+      "path": "/maintenance/acceptance-checklist/{batch_id}/apply",
+      "function": "apply_checklist",
+      "line": 179,
+      "source": "backend/app/api/maintenance_acceptance_checklist.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(current_role)",
+        "Depends(require_page('page_maintenance'))",
+        "Depends(get_current_user_context)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/capabilities",
+      "function": "capabilities",
+      "line": 183,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/catalog",
+      "function": "catalog",
+      "line": 216,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/projects",
+      "function": "projects",
+      "line": 236,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/cart-drafts/{project_id}",
+      "function": "get_cart_draft",
+      "line": 256,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "PUT",
+      "path": "/replenishment-beta/cart-drafts/{project_id}",
+      "function": "put_cart_draft",
+      "line": 280,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "DELETE",
+      "path": "/replenishment-beta/cart-drafts/{project_id}",
+      "function": "remove_cart_draft",
+      "line": 307,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/cart-drafts/{project_id}/submit",
+      "function": "submit_cart_draft",
+      "line": 333,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications",
+      "function": "applications",
+      "line": 360,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications",
+      "function": "create_application",
+      "line": 377,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}",
+      "function": "application_detail",
+      "line": 404,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "PATCH",
+      "path": "/replenishment-beta/applications/{application_id}",
+      "function": "patch_application",
+      "line": 423,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications/{application_id}/lines",
+      "function": "add_line",
+      "line": 433,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "PATCH",
+      "path": "/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "function": "patch_line",
+      "line": 443,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "DELETE",
+      "path": "/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "function": "delete_line",
+      "line": 454,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications/{application_id}/submit",
+      "function": "submit_application",
+      "line": 465,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications/{application_id}/revision",
+      "function": "create_revision",
+      "line": 475,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications/{application_id}/revisions",
+      "function": "apply_application_revision",
+      "line": 485,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "POST",
+      "path": "/replenishment-beta/applications/{application_id}/review-results",
+      "function": "review_result",
+      "line": 521,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_review'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx",
+      "function": "export_manual_review",
+      "line": 545,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}/exports/system-screening.xlsx",
+      "function": "export_system_screening",
+      "line": 570,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx",
+      "function": "export_wbdd_subset",
+      "line": 597,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}/evidence",
+      "function": "application_evidence",
+      "line": 622,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    },
+    {
+      "module": "replenishment",
+      "method": "GET",
+      "path": "/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx",
+      "function": "export_purchase_list",
+      "line": 657,
+      "source": "backend/app/api/replenishment.py",
+      "router_dependencies": "",
+      "mount": {
+        "prefix": "settings.api_prefix"
+      },
+      "dependencies": [
+        "Depends(get_db)",
+        "Depends(current_identity)",
+        "Depends(get_current_user_context)",
+        "Depends(_beta_enabled)",
+        "Depends(_beta_page_whitelist)",
+        "Depends(require_action('action_replenishment_create', require_data='data_pool_price_governance'))"
+      ]
+    }
+  ]
+}

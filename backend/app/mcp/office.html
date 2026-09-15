@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>PARTFLOW · 文件与确认</title
+  ><style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font:
+        16px/1.6 system-ui,
+        sans-serif;
+      background: #f4f7fb;
+      color: #15263c;
+      margin: 0;
+    }
+    main {
+      max-width: 940px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+    header {
+      border-bottom: 1px solid #ccd8e6;
+      margin-bottom: 24px;
+    }
+    h1 {
+      font-size: 30px;
+    }
+    section {
+      background: white;
+      border: 1px solid #d9e2ee;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    input,
+    select,
+    button {
+      font: inherit;
+      padding: 9px 12px;
+      margin: 4px 6px 4px 0;
+      max-width: 100%;
+      border: 1px solid #aebed1;
+      border-radius: 0;
+    }
+    button {
+      background: #1260b2;
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #8494a5;
+      cursor: wait;
+    }
+    label {
+      display: block;
+      margin-top: 10px;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 13px/1.7 monospace;
+      max-height: 460px;
+      overflow: auto;
+      background: #f4f7fb;
+      padding: 15px;
+    }
+    small {
+      color: #566b83;
+    }
+    #error {
+      color: #a21616;
+      white-space: pre-wrap;
+    }
+    #token {
+      overflow-wrap: anywhere;
+    }
+    .hide {
+      display: none;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    td,
+    th {
+      border-bottom: 1px solid #ddd;
+      text-align: left;
+      padding: 8px;
+      overflow-wrap: anywhere;
+    }
+    a {
+      color: #1260b2;
+    }
+    .status {
+      font-weight: 600;
+      color: #1260b2;
+    }
+  </style>
+  <main>
+    <header>
+      <small>序维 PARTFLOW</small>
+      <h1>文件整理与业务确认</h1>
+      <p>请保留本地原件，先检查差异，再确认入账。</p>
+    </header>
+    <p id="error" role="alert"></p>
+    <section id="login">
+      <h2>登录业务账号</h2>
+      <form id="loginForm">
+        <label
+          >账号<input id="username" autocomplete="username" required /></label
+        ><label
+          >密码<input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required /></label
+        ><button>登录</button>
+      </form>
+      <small
+        >使用公司分配的独立账号。登录状态仅保存在当前页面内存，刷新需重新登录。</small
+      >
+    </section>
+    <div id="work" class="hide">
+      <p id="identity" class="status"></p>
+      <button id="logout">退出</button>
+      <section>
+        <h2>WorkBuddy 连接授权</h2>
+        <p>
+          每人独立令牌，有效期30天。只在 WorkBuddy
+          连接器的密码配置中填写，不发进对话。
+        </p>
+        <button id="issue">生成个人连接令牌</button
+        ><button id="listCredentials">查看/撤销授权</button>
+        <div id="token"></div>
+        <div id="credentials"></div>
+      </section>
+      <section>
+        <h2>上传与检查</h2>
+        <p>最多10个文件；整理附件不会自动生成业务事实。暂存及导出文件保留7天，请保留本地原件。</p>
+        <input
+          id="files"
+          type="file"
+          multiple
+          accept=".xlsx,.pdf,.docx,.png,.jpg,.jpeg,.txt,.csv"
+        /><button id="upload">上传原件</button>
+        <p id="uploadStatus"></p>
+        <label
+          >单据类型<select id="family">
+            <option value="legacy_trade">采购/销售等通用单据（仅预检）</option>
+            <option value="acceptance_checklist">
+              项目验收清单（整表替换）
+            </option>
+            <option value="expense_collection">项目费用/回款工作簿</option>
+          </select></label
+        ><label
+          >项目检索<input
+            id="projectQuery"
+            placeholder="项目名或项目编号"
+          /><button id="findProjects">查找</button></label
+        ><select id="projects">
+          <option value="">请选择项目</option></select
+        ><button id="preview">生成预览</button>
+        <div id="uploadResult"></div>
+      </section>
+      <section>
+        <h2>导出</h2>
+        <p>使用上面选择的项目。保留完整模板，不裁剪技术表。</p>
+        <select id="exportKind">
+          <option value="acceptance_checklist">
+            当前验收清单（无数据时提供模板）
+          </option>
+          <option value="expense_collection">
+            项目费用/回款完整工作簿
+          </option></select
+        ><button id="export">生成导出</button>
+        <div id="artifacts"></div>
+      </section>
+      <section>
+        <h2>任务与确认</h2>
+        <p>“已生成预览”不代表入账。逐文件查看后确认，多个文件分别提交。</p>
+        <div id="jobs"></div>
+        <div id="reviews"></div>
+      </section>
+      <section>
+        <h2>本人操作记录</h2>
+        <button id="audit">查看今天的记录</button>
+        <div id="auditResult"></div>
+      </section>
+    </div>
+  </main>
+  <script src="/mcp-office.js"></script>
+</html>
