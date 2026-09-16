@@ -5,19 +5,20 @@
   标准三过滤：行 is_active、active_orders()（生效/墓碑）、order_date ∈ 窗口。
 - 成本口径 = recompute 回填的 cost_amount_inc_tax/ex_tax（缺价行不按 0，
   missing_lines 单列——铁律 5）。
-- 损坏佐证 = RKD 坏件返还量（maintenance_rkd_return_line.qty，按 PN 对齐
-  occurred_at 窗口）；坏返率 = 坏件量 / 有效消耗量，分母为零不显示。
+- 损坏佐证 = RKD 坏件返还量（maintenance_rkd_return_line.qty，按 PN 对齐，
+  保持既有全时段口径）；坏返率 = 坏件量 / 有效消耗量，分母为零不显示。
 - 聚合只引用 AGGREGATE_SOURCE_COLUMNS 白名单列（铁律 3）：单头 order_no/
-  order_date + 行 qty/return_qty + 成本回填列；挂靠 join 只用于项目计数。
+  order_date + 行 qty/return_qty + 成本回填列；当前挂靠用于项目计数及业务类型筛选。
 - 权限：无 data_purchase_cost → 成本列整体 restricted()（键集与 ready 一致），
   成本排序拒绝（422），不静默降级（boss-board 同款）。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -25,18 +26,38 @@ from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
+from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_quality, query_filters
 from app.services.maintenance_return_receipts import legacy_bad_return_filter
-from app.services.maintenance_boss_board import not_imported, ready, restricted, wbdd_imported
+from app.services.maintenance_boss_board import (
+    _business_type_clause,
+    not_imported,
+    ready,
+    restricted,
+    wbdd_imported,
+)
 
 RANGES = ("ytd", "12m", "all", "custom")
 SORTS = (
-    "cost_inc", "cost_ex", "qty", "return_qty", "effective_qty",
-    "occurrences", "order_count", "project_count", "monthly_avg",
-    "bad_qty", "bad_rate", "missing_lines", "cost_share", "pn",
+    "cost_inc",
+    "cost_ex",
+    "qty",
+    "return_qty",
+    "effective_qty",
+    "occurrences",
+    "order_count",
+    "project_count",
+    "monthly_avg",
+    "bad_qty",
+    "bad_rate",
+    "missing_lines",
+    "cost_share",
+    "pn",
 )
 COST_SORTS = {"cost_inc", "cost_ex"}
+# 需求类型码 ↔ 库内字面量（API 只收 repair/stock 码，服务层收字面量）
+DEMAND_TYPE_LITERALS = {"repair": "报修供货", "stock": "补库供货"}
 
 
 class AnalyticsValidationError(ValueError):
@@ -47,8 +68,35 @@ class AnalyticsSortNotPermitted(ValueError):
     """无成本权限按成本排序（422 语义，不静默降级）。"""
 
 
-def resolve_window(range_: str, date_from: date | None,
-                   date_to: date | None) -> tuple[date | date | None, date | date | None]:
+def parse_csv_items(
+    spec: str | None, *, max_items: int, max_len: int, field: str, trim: bool = True
+) -> list[str] | None:
+    """CSV 入参 → 去空/去重后的列表；全空返回 None，超限 422 语义。
+
+    trim=False 用于仓库这类自由文本：筛选走库内原值精确 IN，
+    去空白会让「 广州仓 」这类历史带空格值选不中自己（filter_options 同口径）。
+    """
+    if spec is None:
+        return None
+    items: list[str] = []
+    for raw in spec.split(","):
+        item = raw.strip() if trim else raw
+        if not item:
+            continue
+        if len(item) > max_len:
+            raise AnalyticsValidationError(f"{field} 单项长度不能超过 {max_len}")
+        if item not in items:
+            items.append(item)
+    if not items:
+        return None
+    if len(items) > max_items:
+        raise AnalyticsValidationError(f"{field} 最多 {max_items} 项")
+    return items
+
+
+def resolve_window(
+    range_: str, date_from: date | None, date_to: date | None
+) -> tuple[date | date | None, date | date | None]:
     """ytd / 12m / all / custom → (start, end)。all 两端为 None（全量）。"""
     today = business_today()
     if range_ == "ytd":
@@ -74,6 +122,41 @@ def _window_months(start: date | None, end: date | None) -> Decimal | None:
     return Decimal(max(months, 1))
 
 
+def _cost_source_clause(cost_sources: list[str] | None):
+    """取价来源四分类 → 行级 where 子句（前端 costSourceCategory 同口径）。
+
+    linked=direct；manual=manual；missing=NULL/none/空串（前端 !source 判空同口径）；
+    estimated=其余非空来源（window/purchase_history/pool_*/月均/销售参考等）。
+    """
+    if not cost_sources:
+        return None
+    clauses = []
+    for code in cost_sources:
+        if code == "linked":
+            clauses.append(FMaintenanceLine.cost_source == "direct")
+        elif code == "manual":
+            clauses.append(FMaintenanceLine.cost_source == "manual")
+        elif code == "missing":
+            clauses.append(
+                or_(
+                    FMaintenanceLine.cost_source.is_(None),
+                    FMaintenanceLine.cost_source.in_(("none", "")),
+                )
+            )
+        elif code == "estimated":
+            clauses.append(
+                and_(
+                    FMaintenanceLine.cost_source.is_not(None),
+                    FMaintenanceLine.cost_source.not_in(
+                        ("direct", "manual", "none", "")
+                    ),
+                )
+            )
+    if not clauses:
+        return None
+    return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+
 def pn_ranking(
     db: Session,
     *,
@@ -81,6 +164,14 @@ def pn_ranking(
     date_from: date | None = None,
     date_to: date | None = None,
     q: str | None = None,
+    business_type: str = "all",
+    project_ids: list[str] | None = None,
+    customer: str | None = None,
+    salesperson: str | None = None,
+    order_no: str | None = None,
+    demand_types: list[str] | None = None,
+    warehouses: list[str] | None = None,
+    cost_sources: list[str] | None = None,
     sort: str = "cost_inc",
     page: int = 1,
     page_size: int = 20,
@@ -92,9 +183,16 @@ def pn_ranking(
     allowed_project_ids 非 None（行键 own_maintenance_projects_only 开）时，
     行集与坏件佐证都收敛到该范围：未归属行（assignment 为 NULL）一并排除，
     不得经排名/汇总泄露他人项目（含 total 口径）。
+    业务类型按当前项目分类，在 PN 聚合前取交集；具体分类必须有真实项目，
+    未归属只进入 all（含六档全选），不得混入 unlabeled。
+    历史五档 URL（无 refit）是显式子集：只筛那五档，不等于 all。
+    全字段筛选（项目/客户/销售/单号/需求类型/仓库/取价来源）同样在聚合前
+    落到 where：行集、total、summary、成本占比与分页随之收敛；project_ids
+    与 allowed_project_ids 取交集，绝不放大行键范围。
     """
     start, end = resolve_window(range_, date_from, date_to)
     months = _window_months(start, end)
+    business_type_clause = _business_type_clause(business_type)
 
     cost_inc, _actual_inc, _estimated_inc, missing_inc = (
         maintenance_cost_quality.sql_normalized_line_cost(
@@ -133,10 +231,13 @@ def pn_ranking(
             func.max(DimPart.description).label("description"),
             func.count(FMaintenanceLine.id).label("occurrences"),
             func.count(func.distinct(FMaintenanceOrder.order_no)).label("order_count"),
-            func.count(func.distinct(
-                MaintenanceSourceOrderAssignment.project_id)).label("project_count"),
+            func.count(
+                func.distinct(MaintenanceSourceOrderAssignment.project_id)
+            ).label("project_count"),
             func.coalesce(func.sum(FMaintenanceLine.qty), Decimal("0")).label("qty"),
-            func.coalesce(func.sum(FMaintenanceLine.return_qty), Decimal("0")).label("return_qty"),
+            func.coalesce(func.sum(FMaintenanceLine.return_qty), Decimal("0")).label(
+                "return_qty"
+            ),
             func.sum(cost_inc).label("cost_inc"),
             func.sum(cost_ex).label("cost_ex"),
             func.count().filter(missing_inc).label("missing_lines"),
@@ -153,18 +254,56 @@ def pn_ranking(
         )
         .outerjoin(
             MaintenanceSourceOrderAssignment,
-            (MaintenanceSourceOrderAssignment.source_order_id
-             == FMaintenanceOrder.raw_order_id)
-            & MaintenanceSourceOrderAssignment.is_active.is_(True))
+            (
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id
+            )
+            & MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
         .where(FMaintenanceLine.is_active.is_(True))
         .group_by(FMaintenanceLine.part_id)
     )
     stmt = query_filters.active_orders(stmt, FMaintenanceOrder)
+    if business_type_clause is not None:
+        # EXISTS 显式要求项目存在，避免 outer join 的 NULL 被归入「未标注」。
+        stmt = stmt.where(
+            select(1)
+            .where(
+                MaintenanceProject.project_id
+                == MaintenanceSourceOrderAssignment.project_id,
+                business_type_clause,
+            )
+            .exists()
+        )
     if allowed_project_ids is not None:
         # outerjoin 上的 where 让未归属行（NULL）自然落选——范围账号看不到无主行
         stmt = stmt.where(
-            MaintenanceSourceOrderAssignment.project_id.in_(
-                allowed_project_ids or {""}))
+            MaintenanceSourceOrderAssignment.project_id.in_(allowed_project_ids or {""})
+        )
+    if project_ids is not None:
+        # 与 allowed_project_ids 是 AND 关系：显式项目筛选绝不放大行键范围
+        stmt = stmt.where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids or {""})
+        )
+    if customer:
+        stmt = stmt.where(
+            FMaintenanceOrder.end_customer.icontains(customer, autoescape=True)
+        )
+    if salesperson:
+        stmt = stmt.where(
+            FMaintenanceOrder.salesperson.icontains(salesperson, autoescape=True)
+        )
+    if order_no:
+        stmt = stmt.where(
+            FMaintenanceOrder.order_no.icontains(order_no, autoescape=True)
+        )
+    if demand_types:
+        stmt = stmt.where(FMaintenanceOrder.demand_type.in_(demand_types))
+    if warehouses:
+        stmt = stmt.where(FMaintenanceOrder.warehouse.in_(warehouses))
+    cost_source_clause = _cost_source_clause(cost_sources)
+    if cost_source_clause is not None:
+        stmt = stmt.where(cost_source_clause)
     if start is not None:
         stmt = stmt.where(FMaintenanceOrder.order_date >= start)
     if end is not None:
@@ -172,16 +311,34 @@ def pn_ranking(
     rows = db.execute(stmt).all()
 
     # ---- 坏件佐证：RKD 坏件返还按 part_id 聚合（口径冻结：rkd_import + 坏品类 + 有效行）----
+    # RKD 行没有订单头维度：只吃项目级筛选（business_type + project_ids）；
+    # 订单级筛选（客户/销售/单号/需求类型/仓库/取价来源）有意不作用于坏件佐证。
     rkd_stmt = select(
         MaintenanceRkdReturnLine.part_id,
         func.upper(MaintenanceRkdReturnLine.pn),
         func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")),
-    ).group_by(MaintenanceRkdReturnLine.part_id,
-               func.upper(MaintenanceRkdReturnLine.pn))
+    ).group_by(
+        MaintenanceRkdReturnLine.part_id, func.upper(MaintenanceRkdReturnLine.pn)
+    )
     rkd_stmt = rkd_stmt.where(*legacy_bad_return_filter())
+    if business_type_clause is not None:
+        rkd_stmt = rkd_stmt.where(
+            select(1)
+            .where(
+                MaintenanceProject.project_id == MaintenanceRkdReturnLine.project_id,
+                business_type_clause,
+            )
+            .exists()
+        )
     if allowed_project_ids is not None:
         rkd_stmt = rkd_stmt.where(
-            MaintenanceRkdReturnLine.project_id.in_(allowed_project_ids or {""}))
+            MaintenanceRkdReturnLine.project_id.in_(allowed_project_ids or {""})
+        )
+    if project_ids is not None:
+        # 坏件佐证只能按项目收窄（订单级筛选不适用于 RKD 行，见上方注释）
+        rkd_stmt = rkd_stmt.where(
+            MaintenanceRkdReturnLine.project_id.in_(project_ids or {""})
+        )
     rkd = db.execute(rkd_stmt).all()
     bad_by_part = {p: q for p, _pn, q in rkd if p is not None}
     bad_by_pn = {pn.upper(): q for _p, pn, q in rkd}
@@ -191,36 +348,44 @@ def pn_ranking(
     items = []
     for r in rows:
         pn = (r.pn_std or "").strip()
-        if term and term not in pn.upper() and term not in (r.description or "").upper():
+        if (
+            term
+            and term not in pn.upper()
+            and term not in (r.description or "").upper()
+        ):
             continue
         effective = (r.qty or Decimal("0")) - (r.return_qty or Decimal("0"))
         # part_id 优先，缺 part_id 的 RKD 行按 PN 大写文本回退（boss_facts 同口径）
-        bad_qty = (bad_by_part.get(r.part_id)
-                   or bad_by_pn.get(pn.upper())
-                   or Decimal("0"))
-        items.append({
-            "part_id": r.part_id,
-            "pn": pn,
-            "description": r.description,
-            "occurrences": int(r.occurrences),
-            "order_count": int(r.order_count),
-            "project_count": int(r.project_count),
-            "qty": r.qty,
-            "return_qty": r.return_qty,
-            "effective_qty": effective,
-            "cost_inc": (
-                Decimal(r.cost_inc).quantize(Decimal("0.01"))
-                if r.cost_inc is not None else None
-            ),
-            "cost_ex": (
-                Decimal(r.cost_ex).quantize(Decimal("0.01"))
-                if r.cost_ex is not None else None
-            ),
-            "missing_lines": int(r.missing_lines),
-            "bad_return_qty": bad_qty,
-            "first_date": r.first_date.isoformat() if r.first_date else None,
-            "last_date": r.last_date.isoformat() if r.last_date else None,
-        })
+        bad_qty = (
+            bad_by_part.get(r.part_id) or bad_by_pn.get(pn.upper()) or Decimal("0")
+        )
+        items.append(
+            {
+                "part_id": r.part_id,
+                "pn": pn,
+                "description": r.description,
+                "occurrences": int(r.occurrences),
+                "order_count": int(r.order_count),
+                "project_count": int(r.project_count),
+                "qty": r.qty,
+                "return_qty": r.return_qty,
+                "effective_qty": effective,
+                "cost_inc": (
+                    Decimal(r.cost_inc).quantize(Decimal("0.01"))
+                    if r.cost_inc is not None
+                    else None
+                ),
+                "cost_ex": (
+                    Decimal(r.cost_ex).quantize(Decimal("0.01"))
+                    if r.cost_ex is not None
+                    else None
+                ),
+                "missing_lines": int(r.missing_lines),
+                "bad_return_qty": bad_qty,
+                "first_date": r.first_date.isoformat() if r.first_date else None,
+                "last_date": r.last_date.isoformat() if r.last_date else None,
+            }
+        )
 
     # ---- 汇总（过滤后全集上计算，占比分母用全集） ----
     total_cost_inc = sum((i["cost_inc"] or Decimal("0")) for i in items)
@@ -231,14 +396,28 @@ def pn_ranking(
     # 先加工派生指标（排序键依赖），再排序，最后赋名次
     for i in items:
         i["cost_share_pct"] = (
-            float(((i["cost_inc"] or Decimal("0")) / total_cost_inc * 100).quantize(Decimal("0.1")))
-            if total_cost_inc else None)
+            float(
+                ((i["cost_inc"] or Decimal("0")) / total_cost_inc * 100).quantize(
+                    Decimal("0.1")
+                )
+            )
+            if total_cost_inc
+            else None
+        )
         i["monthly_avg_qty"] = (
             float((i["effective_qty"] / months).quantize(Decimal("0.1")))
-            if months is not None else None)
+            if months is not None
+            else None
+        )
         i["bad_return_rate_pct"] = (
-            float(((i["bad_return_qty"] / i["effective_qty"]) * 100).quantize(Decimal("0.1")))
-            if i["effective_qty"] > 0 and i["bad_return_qty"] > 0 else None)
+            float(
+                ((i["bad_return_qty"] / i["effective_qty"]) * 100).quantize(
+                    Decimal("0.1")
+                )
+            )
+            if i["effective_qty"] > 0 and i["bad_return_qty"] > 0
+            else None
+        )
 
     def sort_key(i):
         return {
@@ -263,21 +442,28 @@ def pn_ranking(
         i["rank"] = rank
 
     total = len(items)
-    page_items = items[(page - 1) * page_size: page * page_size]
+    page_items = items[(page - 1) * page_size : page * page_size]
 
     # ---- 权限信封：成本列整体三态（键集一致，无侧信道） ----
     if can_cost:
         for i in page_items:
-            i["cost_inc"] = ready(str(i["cost_inc"]) if i["cost_inc"] is not None else None)
-            i["cost_ex"] = ready(str(i["cost_ex"]) if i["cost_ex"] is not None else None)
+            i["cost_inc"] = ready(
+                str(i["cost_inc"]) if i["cost_inc"] is not None else None
+            )
+            i["cost_ex"] = ready(
+                str(i["cost_ex"]) if i["cost_ex"] is not None else None
+            )
     else:
         for i in page_items:
             i["cost_inc"] = restricted()
             i["cost_ex"] = restricted()
 
     wbdd_ready = wbdd_imported(db)
-    cost_total = (ready(str(total_cost_inc)) if can_cost
-                  else (not_imported() if not wbdd_ready else restricted()))
+    cost_total = (
+        ready(str(total_cost_inc))
+        if can_cost
+        else (not_imported() if not wbdd_ready else restricted())
+    )
 
     return {
         "rows": page_items,
@@ -300,3 +486,37 @@ def pn_ranking(
         },
         "sort": sort,
     }
+
+
+def filter_options(db: Session, *, allowed_project_ids: set[str] | None = None) -> dict:
+    """筛选器候选项：有效订单的非空仓库去重排序（最多 200）。
+
+    allowed_project_ids 非 None（行键开）时用 EXISTS 收敛到可见项目，
+    范围账号不得看到范围外仓库。
+    """
+    # 返回值必须是库内原值：warehouses 筛选走精确 IN，去空白会让候选项选不中自己
+    stmt = (
+        select(FMaintenanceOrder.warehouse)
+        .where(
+            FMaintenanceOrder.warehouse.is_not(None),
+            func.btrim(FMaintenanceOrder.warehouse) != "",
+        )
+        .distinct()
+        .order_by(FMaintenanceOrder.warehouse)
+        .limit(200)
+    )
+    stmt = query_filters.active_orders(stmt, FMaintenanceOrder)
+    if allowed_project_ids is not None:
+        stmt = stmt.where(
+            select(1)
+            .where(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+                MaintenanceSourceOrderAssignment.project_id.in_(
+                    allowed_project_ids or {""}
+                ),
+            )
+            .exists()
+        )
+    return {"warehouses": [w for w in db.scalars(stmt).all() if w]}

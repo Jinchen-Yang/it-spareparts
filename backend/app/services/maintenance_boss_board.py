@@ -9,6 +9,7 @@
 2. **状态列白名单**（铁律 3）：聚合只允许引用 AGGREGATE_SOURCE_COLUMNS 中的列；
    28 个流转状态列禁止进入任何聚合表达式，由单测锁死交集为空。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -45,8 +46,9 @@ from app.services.query_filters import active_orders
 # 未归属桶的伪项目 ID（§4.5）：与真实 project_id 不可能冲突
 UNASSIGNED_BUCKET = "unassigned"
 
-# 业务类型筛选（2026-09-08 客户需求）。客户口径：维保只有三种业务类型——整体维保 /
-# 备件维保 / 算力运维；卡墙要能按业务类型筛，且与期限状态**叠加**而不是互斥。
+# 业务类型筛选（2026-09-08 客户需求；2026-09-16 新增「拆改配服务」）。客户口径：
+# 维保业务类型为整体维保 / 备件维保 / 算力运维 / 拆改配服务；卡墙要能按业务类型筛，
+# 且与期限状态**叠加**而不是互斥。
 #
 # 参数值用 ASCII 码不用中文原文：库里 business_type 是自由文本、无枚举约束，
 # 中文直传会把脏值变体带进 URL；其余筛选参数（lifecycle / sort / card_status）
@@ -60,6 +62,7 @@ BUSINESS_TYPE_LABELS: dict[str, str] = {
     "overall": "整体维保",
     "spare": "备件维保",
     "computing": "算力运维",
+    "refit": "拆改配服务",
 }
 # 显式别名表，**不做包含/模糊匹配**：「业务类型含 维保/运维/维修 即维保」正是
 # 2026-09-03 被明确否掉的逻辑（「单次维修」正好带「维修」）。别名是可测、可审计的。
@@ -70,7 +73,12 @@ _KNOWN_BUSINESS_LITERALS: frozenset[str] = frozenset(
     literal for names in _BUSINESS_TYPE_ALIASES.values() for literal in names
 )
 BUSINESS_TYPE_CODES: tuple[str, ...] = (
-    "overall", "spare", "computing", "other", "unlabeled",
+    "overall",
+    "spare",
+    "computing",
+    "refit",
+    "other",
+    "unlabeled",
 )
 _BT = "|".join(BUSINESS_TYPE_CODES)
 BUSINESS_TYPE_FILTER_PATTERN = rf"^(all|({_BT})(,({_BT}))*)$"
@@ -106,51 +114,79 @@ def _business_type_clause(spec: str):
         elif code == "other":
             # NULL 在 SQL 三值逻辑下两边都进不去，必须显式排除空值再取补集，
             # 否则 647 个未标注项目会从所有档里一起消失。
-            clauses.append(and_(
-                MaintenanceProject.business_type.is_not(None),
-                trimmed != "",
-                trimmed.not_in(sorted(_KNOWN_BUSINESS_LITERALS)),
-            ))
+            clauses.append(
+                and_(
+                    MaintenanceProject.business_type.is_not(None),
+                    trimmed != "",
+                    trimmed.not_in(sorted(_KNOWN_BUSINESS_LITERALS)),
+                )
+            )
         else:
             clauses.append(trimmed.in_(sorted(_BUSINESS_TYPE_ALIASES[code])))
     return or_(*clauses) if len(clauses) > 1 else clauses[0]
 
+
 # 铁律 3 白名单：聚合表达式只允许引用这些事实列。
 # 需求侧只认 qty/return_qty 与成本回填列；三源事实来自 boss_facts（各自源表）。
-AGGREGATE_SOURCE_COLUMNS: frozenset[str] = frozenset({
-    # f_maintenance_order
-    "raw_order_id", "order_no", "order_date", "project_std", "project_raw",
-    "data_status",
-    # salesperson（2026-08-21 客户反馈）：卡片「销售」与负责人回填的身份列，
-    # 仅用于分组取众数（非数值聚合，也非流转状态列），与 project_std 同类。
-    "salesperson",
-    # f_maintenance_line：数量事实
-    "qty", "return_qty",
-    # f_maintenance_line：成本回填列（recompute 独占写）
-    "cost_amount", "cost_amount_inc_tax", "cost_amount_ex_tax", "cost_source",
-    "cost_tax_basis", "confidence", "anomaly_flags",
-}) | frozenset({"warehouse_shipped_qty", "direct_ship_qty"})
+AGGREGATE_SOURCE_COLUMNS: frozenset[str] = frozenset(
+    {
+        # f_maintenance_order
+        "raw_order_id",
+        "order_no",
+        "order_date",
+        "project_std",
+        "project_raw",
+        "data_status",
+        # salesperson（2026-08-21 客户反馈）：卡片「销售」与负责人回填的身份列，
+        # 仅用于分组取众数（非数值聚合，也非流转状态列），与 project_std 同类。
+        "salesperson",
+        # f_maintenance_line：数量事实
+        "qty",
+        "return_qty",
+        # f_maintenance_line：成本回填列（recompute 独占写）
+        "cost_amount",
+        "cost_amount_inc_tax",
+        "cost_amount_ex_tax",
+        "cost_source",
+        "cost_tax_basis",
+        "confidence",
+        "anomaly_flags",
+    }
+) | frozenset({"warehouse_shipped_qty", "direct_ship_qty"})
 # 「维保备件采购数」的两列（REQUIREMENTS #41，业务 2026-08-16 明文指定公式
 # ＝库房发货＋直采直发）。铁律 3 禁止进聚合的状态列，原文枚举的是
 # 「已采/待供/待返/领用」——这两列不在其中，且 #41 显式授权按此聚合，
 # 故从 STATUS_ONLY_COLUMNS 里豁免这两列，其余 26 列照旧禁止。
-PROCURED_QTY_COLUMNS: frozenset[str] = frozenset({
-    "warehouse_shipped_qty", "direct_ship_qty",
-})
+PROCURED_QTY_COLUMNS: frozenset[str] = frozenset(
+    {
+        "warehouse_shipped_qty",
+        "direct_ship_qty",
+    }
+)
 # 流转状态列（只展示，永不进聚合）——由 mapping 的明细展示列取前 14 项定义域
-STATUS_ONLY_COLUMNS: frozenset[str] = (frozenset(
-    mapping.MAINTENANCE_LINE_DISPLAY_FIELDS
-) | frozenset({
-    # 头级自报四列同样只展示（M4-4 无判定并排）
-    "head_demand_qty", "head_purchase_qty", "head_shipped_qty", "head_returned_qty",
-})) - PROCURED_QTY_COLUMNS
+STATUS_ONLY_COLUMNS: frozenset[str] = (
+    frozenset(mapping.MAINTENANCE_LINE_DISPLAY_FIELDS)
+    | frozenset(
+        {
+            # 头级自报四列同样只展示（M4-4 无判定并排）
+            "head_demand_qty",
+            "head_purchase_qty",
+            "head_shipped_qty",
+            "head_returned_qty",
+        }
+    )
+) - PROCURED_QTY_COLUMNS
 
 
 # ---------------------------------------------------------------- 信封
 
+
 def ready(value, *, as_of: date | None = None) -> dict:
-    return {"state": "ready", "value": value,
-            "as_of": as_of.isoformat() if as_of else None}
+    return {
+        "state": "ready",
+        "value": value,
+        "as_of": as_of.isoformat() if as_of else None,
+    }
 
 
 def restricted() -> dict:
@@ -189,6 +225,7 @@ def can_view_contract(user_ctx: UserContext) -> bool:
 
 # ---------------------------------------------------------------- 时间窗
 
+
 def resolve_window(date_from: date | None, date_to: date | None) -> tuple[date, date]:
     """默认当年 1-1 至今；字段名 orders_ytd/lines_ytd **不写死年份**。"""
     today = business_today()
@@ -222,11 +259,16 @@ def _order_date_in_window(window: tuple[date, date]):
 
 # ---------------------------------------------------------------- 成本五件套
 
-def _cost_bundle(db: Session, *, window: tuple[date, date],
-                 project_id: str | None = None,
-                 unassigned_only: bool = False,
-                 can_cost: bool,
-                 allowed_project_ids: set[str] | None = None) -> dict:
+
+def _cost_bundle(
+    db: Session,
+    *,
+    window: tuple[date, date],
+    project_id: str | None = None,
+    unassigned_only: bool = False,
+    can_cost: bool,
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
     """「已知申请估算成本（含税）」actual/estimated/missing/coverage/quality（§4.3）。
 
     口径与 services/maintenance_cost_quality 完全一致；缺价不按 0——missing_lines
@@ -234,22 +276,25 @@ def _cost_bundle(db: Session, *, window: tuple[date, date],
     """
     if not can_cost:
         return restricted()
-    stmt = (select(*_cost_columns())
-            .select_from(FMaintenanceLine)
-            .join(FMaintenanceOrder,
-                  FMaintenanceOrder.id == FMaintenanceLine.order_id)
-            .outerjoin(
-                MaintenanceManualCostOverride,
-                and_(
-                    MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
-                    MaintenanceManualCostOverride.active.is_(True),
-                ),
-            )
-            .where(_order_date_in_window(window),
-                   FMaintenanceLine.is_active.is_(True)))
-    stmt = _scope_stmt(stmt, project_id=project_id,
-                       unassigned_only=unassigned_only,
-                       allowed_project_ids=allowed_project_ids)
+    stmt = (
+        select(*_cost_columns())
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            and_(
+                MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ),
+        )
+        .where(_order_date_in_window(window), FMaintenanceLine.is_active.is_(True))
+    )
+    stmt = _scope_stmt(
+        stmt,
+        project_id=project_id,
+        unassigned_only=unassigned_only,
+        allowed_project_ids=allowed_project_ids,
+    )
     stmt = active_orders(stmt, FMaintenanceOrder)
     return _bundle_from_row(*db.execute(stmt).one())
 
@@ -293,8 +338,7 @@ def _cost_columns_for_basis(basis: str):
     )
     return (
         func.coalesce(func.sum(case((actual_known, amount), else_=0)), 0),
-        func.coalesce(func.sum(case(
-            (estimated_known, amount), else_=0)), 0),
+        func.coalesce(func.sum(case((estimated_known, amount), else_=0)), 0),
         func.count(case((actual_known, 1))),
         func.count(case((estimated_known, 1))),
         func.count(FMaintenanceLine.id),
@@ -313,16 +357,16 @@ def _normalized_inc_cost_tier_predicates():
     )
 
 
-def _bundle_from_row(actual, estimated, actual_lines, estimated_lines,
-                     total_lines) -> dict:
+def _bundle_from_row(
+    actual, estimated, actual_lines, estimated_lines, total_lines
+) -> dict:
     line_count = int(total_lines)
     # 没有有效明细时，SUM 的 0 只是 SQL 单位元，不是“真实成本为 0”。这既可能
     # 是空项目，也可能是有 WBDD 单头但明细被作废/未导入；两者都必须不可判定。
     known = None if line_count == 0 else (actual or 0) + (estimated or 0)
     known_lines = int(actual_lines) + int(estimated_lines)
     missing_lines = max(0, line_count - known_lines)
-    coverage = (round(known_lines / line_count * 100, 1)
-                if line_count else None)
+    coverage = round(known_lines / line_count * 100, 1) if line_count else None
     if line_count == 0 or missing_lines:
         quality = "incomplete"
     elif estimated_lines:
@@ -334,16 +378,20 @@ def _bundle_from_row(actual, estimated, actual_lines, estimated_lines,
         # 展示已知金额与缺口，但完全缺价时不得再被解释成真实 0。
         "state": "partial" if quality == "incomplete" else "ready",
         "value": {
-            "actual_amount": actual, "estimated_amount": estimated,
-            "known_amount": known, "missing_lines": missing_lines,
-            "coverage_pct": coverage, "quality": quality,
+            "actual_amount": actual,
+            "estimated_amount": estimated,
+            "known_amount": known,
+            "missing_lines": missing_lines,
+            "coverage_pct": coverage,
+            "quality": quality,
         },
         "as_of": None,
     }
 
 
-def _cost_bundles_by_project(db: Session, *, window: tuple[date, date],
-                             project_ids: list[str], can_cost: bool) -> dict:
+def _cost_bundles_by_project(
+    db: Session, *, window: tuple[date, date], project_ids: list[str], can_cost: bool
+) -> dict:
     """本页全部项目的成本五件套：**一次分组查询**（M3-4 禁 N+1）。"""
     if not can_cost:
         return {pid: restricted() for pid in project_ids}
@@ -366,9 +414,11 @@ def _cost_bundles_by_project(db: Session, *, window: tuple[date, date],
             ),
         )
         .join(MaintenanceSourceOrderAssignment, active)
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               _order_date_in_window(window),
-               FMaintenanceLine.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            _order_date_in_window(window),
+            FMaintenanceLine.is_active.is_(True),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
@@ -378,16 +428,17 @@ def _cost_bundles_by_project(db: Session, *, window: tuple[date, date],
     return {pid: found.get(pid, empty) for pid in project_ids}
 
 
-def _order_cost_bundles(db: Session, order_ids: list[int], *,
-                        can_cost: bool) -> dict:
+def _order_cost_bundles(db: Session, order_ids: list[int], *, can_cost: bool) -> dict:
     """本页全部单据的成本五件套与行数：**一次分组查询**。"""
     if not order_ids:
         return {}
     if not can_cost:
         counts = db.execute(
             select(FMaintenanceLine.order_id, func.count(FMaintenanceLine.id))
-            .where(FMaintenanceLine.order_id.in_(order_ids),
-                   FMaintenanceLine.is_active.is_(True))
+            .where(
+                FMaintenanceLine.order_id.in_(order_ids),
+                FMaintenanceLine.is_active.is_(True),
+            )
             .group_by(FMaintenanceLine.order_id)
         ).all()
         line_counts = {oid: int(n) for oid, n in counts}
@@ -401,8 +452,10 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
                 MaintenanceManualCostOverride.active.is_(True),
             ),
         )
-        .where(FMaintenanceLine.order_id.in_(order_ids),
-               FMaintenanceLine.is_active.is_(True))
+        .where(
+            FMaintenanceLine.order_id.in_(order_ids),
+            FMaintenanceLine.is_active.is_(True),
+        )
         .group_by(FMaintenanceLine.order_id)
     ).all()
     found = {row[0]: (_bundle_from_row(*row[1:]), int(row[5])) for row in rows}
@@ -410,8 +463,13 @@ def _order_cost_bundles(db: Session, order_ids: list[int], *,
     return {oid: found.get(oid, empty) for oid in order_ids}
 
 
-def _scope_stmt(stmt, *, project_id: str | None, unassigned_only: bool,
-                allowed_project_ids: set[str] | None = None):
+def _scope_stmt(
+    stmt,
+    *,
+    project_id: str | None,
+    unassigned_only: bool,
+    allowed_project_ids: set[str] | None = None,
+):
     """按项目归属收敛语句：项目桶 / 未归属桶 / 全局。"""
     active = and_(
         MaintenanceSourceOrderAssignment.source_order_id
@@ -420,45 +478,60 @@ def _scope_stmt(stmt, *, project_id: str | None, unassigned_only: bool,
     )
     if unassigned_only:
         return stmt.outerjoin(MaintenanceSourceOrderAssignment, active).where(
-            MaintenanceSourceOrderAssignment.assignment_id.is_(None))
+            MaintenanceSourceOrderAssignment.assignment_id.is_(None)
+        )
     if project_id:
         return stmt.join(MaintenanceSourceOrderAssignment, active).where(
-            MaintenanceSourceOrderAssignment.project_id == project_id)
+            MaintenanceSourceOrderAssignment.project_id == project_id
+        )
     if allowed_project_ids is not None:
         return stmt.join(MaintenanceSourceOrderAssignment, active).where(
-            MaintenanceSourceOrderAssignment.project_id.in_(
-                allowed_project_ids or {""}))
+            MaintenanceSourceOrderAssignment.project_id.in_(allowed_project_ids or {""})
+        )
     return stmt
 
 
 # ---------------------------------------------------------------- 首屏
 
+
 def health(db: Session) -> dict:
     return maintenance_source_health.source_health(db)
 
 
-def _window_counts(db: Session, window: tuple[date, date], *,
-                   project_id: str | None = None,
-                   unassigned_only: bool = False,
-                   allowed_project_ids: set[str] | None = None) -> tuple[int, int]:
+def _window_counts(
+    db: Session,
+    window: tuple[date, date],
+    *,
+    project_id: str | None = None,
+    unassigned_only: bool = False,
+    allowed_project_ids: set[str] | None = None,
+) -> tuple[int, int]:
     orders_stmt = select(func.count(func.distinct(FMaintenanceOrder.id))).where(
-        _order_date_in_window(window))
-    orders_stmt = _scope_stmt(orders_stmt, project_id=project_id,
-                              unassigned_only=unassigned_only,
-                              allowed_project_ids=allowed_project_ids)
+        _order_date_in_window(window)
+    )
+    orders_stmt = _scope_stmt(
+        orders_stmt,
+        project_id=project_id,
+        unassigned_only=unassigned_only,
+        allowed_project_ids=allowed_project_ids,
+    )
     orders_stmt = active_orders(orders_stmt, FMaintenanceOrder)
-    lines_stmt = (select(func.count(FMaintenanceLine.id))
-                  .select_from(FMaintenanceLine)
-                  .join(FMaintenanceOrder,
-                        FMaintenanceOrder.id == FMaintenanceLine.order_id)
-                  .where(_order_date_in_window(window),
-                         FMaintenanceLine.is_active.is_(True)))
-    lines_stmt = _scope_stmt(lines_stmt, project_id=project_id,
-                             unassigned_only=unassigned_only,
-                             allowed_project_ids=allowed_project_ids)
+    lines_stmt = (
+        select(func.count(FMaintenanceLine.id))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .where(_order_date_in_window(window), FMaintenanceLine.is_active.is_(True))
+    )
+    lines_stmt = _scope_stmt(
+        lines_stmt,
+        project_id=project_id,
+        unassigned_only=unassigned_only,
+        allowed_project_ids=allowed_project_ids,
+    )
     lines_stmt = active_orders(lines_stmt, FMaintenanceOrder)
     return int(db.execute(orders_stmt).scalar_one()), int(
-        db.execute(lines_stmt).scalar_one())
+        db.execute(lines_stmt).scalar_one()
+    )
 
 
 def wbdd_imported(db: Session) -> bool:
@@ -467,13 +540,20 @@ def wbdd_imported(db: Session) -> bool:
     未导入时首屏三个指标槽必须显示「尚未导入」而不是 0——「本期需求单 0」会被
     老板读成「本期没人提申请」，与「数据没传」是两件完全不同的事（铁律 5）。
     """
-    return (maintenance_source_health.source_health(db)["sources"]["wbdd"]
-            ["readiness"] != "not_imported")
+    return (
+        maintenance_source_health.source_health(db)["sources"]["wbdd"]["readiness"]
+        != "not_imported"
+    )
 
 
-def summary(db: Session, *, user_ctx: UserContext,
-            date_from: date | None = None, date_to: date | None = None,
-            allowed_project_ids: set[str] | None = None) -> dict:
+def summary(
+    db: Session,
+    *,
+    user_ctx: UserContext,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
     """本期变化：orders_ytd / lines_ytd / 成本五件套 + 环比基期（§4.4）。
 
     allowed_project_ids 非空 = 本人范围账号：全部计数与成本必须收敛到该范围
@@ -488,7 +568,8 @@ def summary(db: Session, *, user_ctx: UserContext,
             "orders_ytd": not_imported(),
             "lines_ytd": not_imported(),
             "known_apply_cost_inc_tax": (
-                restricted() if not can_cost else not_imported()),
+                restricted() if not can_cost else not_imported()
+            ),
         }
         return {
             "window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
@@ -499,22 +580,29 @@ def summary(db: Session, *, user_ctx: UserContext,
             },
         }
     orders, lines = _window_counts(db, window, allowed_project_ids=allowed_project_ids)
-    prev_orders, prev_lines = _window_counts(db, prev,
-                                             allowed_project_ids=allowed_project_ids)
+    prev_orders, prev_lines = _window_counts(
+        db, prev, allowed_project_ids=allowed_project_ids
+    )
     return {
         "window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
         "orders_ytd": ready(orders),
         "lines_ytd": ready(lines),
         "known_apply_cost_inc_tax": _cost_bundle(
-            db, window=window, can_cost=can_cost,
-            allowed_project_ids=allowed_project_ids),
+            db,
+            window=window,
+            can_cost=can_cost,
+            allowed_project_ids=allowed_project_ids,
+        ),
         "prev_window": {
             "window": {"from": prev[0].isoformat(), "to": prev[1].isoformat()},
             "orders_ytd": ready(prev_orders),
             "lines_ytd": ready(prev_lines),
             "known_apply_cost_inc_tax": _cost_bundle(
-                db, window=prev, can_cost=can_cost,
-                allowed_project_ids=allowed_project_ids),
+                db,
+                window=prev,
+                can_cost=can_cost,
+                allowed_project_ids=allowed_project_ids,
+            ),
         },
     }
 
@@ -545,26 +633,46 @@ def _card_receipt_rates(db: Session, project_ids: list[str]) -> dict[str, dict]:
             func.count(FMaintenanceLine.qty),
         )
         .select_from(FMaintenanceOrder)
-        .join(MaintenanceSourceOrderAssignment, and_(
-            MaintenanceSourceOrderAssignment.source_order_id == FMaintenanceOrder.raw_order_id,
-            MaintenanceSourceOrderAssignment.is_active.is_(True),
-        ))
-        .outerjoin(FMaintenanceLine, and_(
-            FMaintenanceOrder.id == FMaintenanceLine.order_id,
-            FMaintenanceLine.is_active.is_(True),
-        ))
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               beta_active_demand_condition(FMaintenanceOrder))
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
+        .outerjoin(
+            FMaintenanceLine,
+            and_(
+                FMaintenanceOrder.id == FMaintenanceLine.order_id,
+                FMaintenanceLine.is_active.is_(True),
+            ),
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            beta_active_demand_condition(FMaintenanceOrder),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
-    demands = {pid: (total, count, filled) for pid, total, count, filled in
-               db.execute(active_orders(demand_stmt, FMaintenanceOrder))}
-    received = dict(db.execute(
-        select(MaintenanceRkdReturnLine.project_id, func.sum(MaintenanceRkdReturnLine.qty))
-        .where(MaintenanceRkdReturnLine.project_id.in_(project_ids),
-               MaintenanceRkdReturnLine.line_status == "active")
-        .group_by(MaintenanceRkdReturnLine.project_id)
-    ).all())
+    demands = {
+        pid: (total, count, filled)
+        for pid, total, count, filled in db.execute(
+            active_orders(demand_stmt, FMaintenanceOrder)
+        )
+    }
+    received = dict(
+        db.execute(
+            select(
+                MaintenanceRkdReturnLine.project_id,
+                func.sum(MaintenanceRkdReturnLine.qty),
+            )
+            .where(
+                MaintenanceRkdReturnLine.project_id.in_(project_ids),
+                MaintenanceRkdReturnLine.line_status == "active",
+            )
+            .group_by(MaintenanceRkdReturnLine.project_id)
+        ).all()
+    )
     result = {}
     for pid in project_ids:
         total, count, filled = demands.get(pid, (None, 0, 0))
@@ -573,7 +681,9 @@ def _card_receipt_rates(db: Session, project_ids: list[str]) -> dict[str, dict]:
         result[pid] = {
             "returned_qty": format(returned, ".3f"),
             "demand_qty": format(Decimal(total), ".3f") if total is not None else None,
-            "rate_pct": float(round(returned / Decimal(total) * 100, 1)) if complete else None,
+            "rate_pct": float(round(returned / Decimal(total) * 100, 1))
+            if complete
+            else None,
             "state": "ready" if complete else "basis_incomplete",
         }
     return result
@@ -604,8 +714,10 @@ def _attention_demand(db: Session) -> dict[str, dict]:
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
-    return {pid: {"demand_qty": Decimal(d or 0), "demand_return_qty": Decimal(r or 0)}
-            for pid, d, r in rows}
+    return {
+        pid: {"demand_qty": Decimal(d or 0), "demand_return_qty": Decimal(r or 0)}
+        for pid, d, r in rows
+    }
 
 
 def _current_contract_budget_stats():
@@ -705,14 +817,22 @@ def _current_contract_budget_stats():
         select(
             MaintenanceProjectContract.project_id.label("project_id"),
             func.count().filter(counted).label("effective_count"),
-            func.count().filter(and_(
-                current,
-                MaintenanceProjectContract.status_mapping_state != "mapped",
-            )).label("unmapped_count"),
-            func.count().filter(and_(
-                counted,
-                MaintenanceProjectContract.amount_inc_tax.is_(None),
-            )).label("missing_count"),
+            func.count()
+            .filter(
+                and_(
+                    current,
+                    MaintenanceProjectContract.status_mapping_state != "mapped",
+                )
+            )
+            .label("unmapped_count"),
+            func.count()
+            .filter(
+                and_(
+                    counted,
+                    MaintenanceProjectContract.amount_inc_tax.is_(None),
+                )
+            )
+            .label("missing_count"),
             func.sum(MaintenanceProjectContract.amount_inc_tax)
             .filter(counted)
             .label("budget"),
@@ -723,12 +843,12 @@ def _current_contract_budget_stats():
     return (
         select(
             base,
-            func.coalesce(
-                duplicate_by_project.c.duplicate_count, 0
-            ).label("duplicate_count"),
-            func.coalesce(
-                conflict_by_project.c.conflict_count, 0
-            ).label("conflict_count"),
+            func.coalesce(duplicate_by_project.c.duplicate_count, 0).label(
+                "duplicate_count"
+            ),
+            func.coalesce(conflict_by_project.c.conflict_count, 0).label(
+                "conflict_count"
+            ),
         )
         .outerjoin(
             duplicate_by_project,
@@ -774,11 +894,13 @@ def _budget_item(project, budget: Decimal, bundle: dict) -> dict | None:
     from app import config
 
     value = bundle.get("value") or {}
-    summary = {"known_cost_total": Decimal(str(value.get("known_amount") or 0)),
-               "cost_quality": value.get("quality") or "incomplete"}
+    summary = {
+        "known_cost_total": Decimal(str(value.get("known_amount") or 0)),
+        "cost_quality": value.get("quality") or "incomplete",
+    }
     decision = maintenance_cost_quality.budget_decision(
-        summary, budget=budget,
-        warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)))
+        summary, budget=budget, warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT))
+    )
     status = decision["decision_status"]
     if status not in ("red", "yellow", "incomplete_cost"):
         return None
@@ -800,8 +922,9 @@ def _budget_item(project, budget: Decimal, bundle: dict) -> dict | None:
     }
 
 
-def _pending_return_item(project, demand: dict, facts: dict | None,
-                         rkd_ready: bool) -> dict | None:
+def _pending_return_item(
+    project, demand: dict, facts: dict | None, rkd_ready: bool
+) -> dict | None:
     """③待返件多。
 
     返件率分子 = **返件类**回收（维保拆旧返件＋旧库退返 → RKD 事实 returned_bad），
@@ -819,8 +942,7 @@ def _pending_return_item(project, demand: dict, facts: dict | None,
     else:
         recovered = recovered or Decimal(0)
         pending = ready(demand_return - recovered)
-        rate = ready(round(recovered / demand_qty * 100, 1)
-                     if demand_qty > 0 else None)
+        rate = ready(round(recovered / demand_qty * 100, 1) if demand_qty > 0 else None)
     return {
         "kind": "pending_return",
         "project_id": project.project_id,
@@ -837,8 +959,13 @@ def _pending_return_item(project, demand: dict, facts: dict | None,
     }
 
 
-def attention(db: Session, *, user_ctx: UserContext, limit: int = 10,
-              allowed_project_ids: set[str] | None = None) -> dict:
+def attention(
+    db: Session,
+    *,
+    user_ctx: UserContext,
+    limit: int = 10,
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
     """需关注队列 ≤10 条（M0-A 已拍板：只有 ①超预算 与 ③待返件多）。
 
     无成本权限的账号看不到 ①——预算条目本身就是金额派生物，「它在不在队列里」
@@ -851,42 +978,57 @@ def attention(db: Session, *, user_ctx: UserContext, limit: int = 10,
     project_filters = [MaintenanceProject.is_active.is_(True)]
     if allowed_project_ids is not None:
         project_filters.append(
-            MaintenanceProject.project_id.in_(allowed_project_ids or {""}))
-    projects = db.execute(
-        select(MaintenanceProject).where(*project_filters)
-    ).scalars().all()
+            MaintenanceProject.project_id.in_(allowed_project_ids or {""})
+        )
+    projects = (
+        db.execute(select(MaintenanceProject).where(*project_filters)).scalars().all()
+    )
     if not projects:
-        return {"items": [], "registered_kinds": list(ATTENTION_KINDS),
-                "ranking": ATTENTION_RANKING, "threshold": None}
+        return {
+            "items": [],
+            "registered_kinds": list(ATTENTION_KINDS),
+            "ranking": ATTENTION_RANKING,
+            "threshold": None,
+        }
     project_ids = [p.project_id for p in projects]
     demand = _attention_demand(db)
     facts = maintenance_boss_facts.project_totals(db, project_ids=project_ids)
-    rkd_ready = (maintenance_source_health.source_health(db)["sources"]
-                 ["rkd_inbound"]["readiness"] != "not_imported")
+    rkd_ready = (
+        maintenance_source_health.source_health(db)["sources"]["rkd_inbound"][
+            "readiness"
+        ]
+        != "not_imported"
+    )
 
     budget_items: list[dict] = []
     if can_cost and can_contract:
         budgets = _attention_budget(db)
         bundles = _cost_bundles_by_project(
-            db, window=(_FULL_LIFETIME_START, business_today()),
-            project_ids=project_ids, can_cost=True)
+            db,
+            window=(_FULL_LIFETIME_START, business_today()),
+            project_ids=project_ids,
+            can_cost=True,
+        )
         for project in projects:
             budget = budgets.get(project.project_id)
             if budget is None or budget <= 0:
-                continue           # 无台账合同额 → 谈不上预算余量，不编造
-            item = _budget_item(project, budget,
-                                bundles.get(project.project_id, {}))
+                continue  # 无台账合同额 → 谈不上预算余量，不编造
+            item = _budget_item(project, budget, bundles.get(project.project_id, {}))
             if item is not None:
                 budget_items.append(item)
     _STATUS_WEIGHT = {"red": 0, "yellow": 1, "incomplete_cost": 2}
-    budget_items.sort(key=lambda i: (_STATUS_WEIGHT[i["value"]["status"]],
-                                     i["project_code"]))
+    budget_items.sort(
+        key=lambda i: (_STATUS_WEIGHT[i["value"]["status"]], i["project_code"])
+    )
 
     return_items = [
-        item for item in (
-            _pending_return_item(p, demand.get(p.project_id, {}),
-                                 facts.get(p.project_id), rkd_ready)
-            for p in projects)
+        item
+        for item in (
+            _pending_return_item(
+                p, demand.get(p.project_id, {}), facts.get(p.project_id), rkd_ready
+            )
+            for p in projects
+        )
         if item is not None
     ]
     return_items.sort(key=lambda i: (-i.pop("_rank"), i["project_code"]))
@@ -925,13 +1067,17 @@ def sort_project_ids_by_cost_ratio(
     Unknown ratios (no positive contract amount or no resolved cost bundle) are
     deliberately last; project IDs provide a deterministic final tie-breaker.
     """
+
     def ratio(project_id: str) -> Decimal | None:
         contract = contracts.get(project_id) or {}
         amount = contract.get("amount_inc_tax")
         bundle = cost_bundles.get(project_id) or {}
-        if (contract.get("contract_incomplete")
-                or not amount or Decimal(str(amount)) <= 0
-                or bundle.get("state") not in {"ready", "partial", "stale"}):
+        if (
+            contract.get("contract_incomplete")
+            or not amount
+            or Decimal(str(amount)) <= 0
+            or bundle.get("state") not in {"ready", "partial", "stale"}
+        ):
             return None
         value = bundle.get("value") or {}
         # partial 且覆盖率为 0 = 所有行都缺价；known_amount=0 只是聚合单位元，
@@ -953,15 +1099,22 @@ def sort_project_ids_by_cost_ratio(
     )
 
 
-def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
-             page_size: int = 20, lifecycle: str = "all",
-             sort: str = "name", q_text: str | None = None,
-             has_activity: bool | None = None,
-             card_status_filter: str | None = None,
-             date_from: date | None = None,
-             date_to: date | None = None,
-             business_type: str = "all",
-             allowed_project_ids: set[str] | None = None) -> dict:
+def projects(
+    db: Session,
+    *,
+    user_ctx: UserContext,
+    page: int = 1,
+    page_size: int = 20,
+    lifecycle: str = "all",
+    sort: str = "name",
+    q_text: str | None = None,
+    has_activity: bool | None = None,
+    card_status_filter: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    business_type: str = "all",
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
     """全项目分页列表 + 未归属桶（§4.5）。
 
     项目集合口径：全量项目（不按窗口过滤）＋未归属桶；窗口只影响 has_activity_in_window
@@ -1000,9 +1153,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     carries_orders = (
         select(1)
         .select_from(MaintenanceSourceOrderAssignment)
-        .where(MaintenanceSourceOrderAssignment.project_id
-               == MaintenanceProject.project_id,
-               MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id
+            == MaintenanceProject.project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
         .exists()
     )
     filters = [or_(MaintenanceProject.is_active.is_(True), carries_orders)]
@@ -1021,15 +1176,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         )
         from app.services import maintenance_demands
 
-        by_contract = (
-            select(MaintenanceProjectContract.project_id)
-            .where(MaintenanceProjectContract.contract_no
-                   .icontains(needle, autoescape=True))
+        by_contract = select(MaintenanceProjectContract.project_id).where(
+            MaintenanceProjectContract.contract_no.icontains(needle, autoescape=True)
         )
-        by_alias = (
-            select(MaintenanceProjectAlias.project_id)
-            .where(MaintenanceProjectAlias.alias_name
-                   .icontains(needle, autoescape=True))
+        by_alias = select(MaintenanceProjectAlias.project_id).where(
+            MaintenanceProjectAlias.alias_name.icontains(needle, autoescape=True)
         )
         active_assignment = and_(
             MaintenanceSourceOrderAssignment.source_order_id
@@ -1041,27 +1192,27 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             .select_from(FMaintenanceOrder)
             .join(MaintenanceSourceOrderAssignment, active_assignment)
             .where(
-                FMaintenanceOrder.salesperson.icontains(
-                    needle, autoescape=True
-                ),
+                FMaintenanceOrder.salesperson.icontains(needle, autoescape=True),
                 maintenance_demands.active_demand_condition(),
             )
         )
-        filters.append(or_(
-            MaintenanceProject.project_code.icontains(needle, autoescape=True),
-            MaintenanceProject.display_name.icontains(needle, autoescape=True),
-            MaintenanceProject.salesperson.icontains(needle, autoescape=True),
-            MaintenanceProject.project_id.in_(by_contract),
-            MaintenanceProject.project_id.in_(by_alias),
-            and_(
-                MaintenanceProject.salesperson_override_active.is_(False),
-                or_(
-                    MaintenanceProject.salesperson.is_(None),
-                    MaintenanceProject.salesperson == "",
+        filters.append(
+            or_(
+                MaintenanceProject.project_code.icontains(needle, autoescape=True),
+                MaintenanceProject.display_name.icontains(needle, autoescape=True),
+                MaintenanceProject.salesperson.icontains(needle, autoescape=True),
+                MaintenanceProject.project_id.in_(by_contract),
+                MaintenanceProject.project_id.in_(by_alias),
+                and_(
+                    MaintenanceProject.salesperson_override_active.is_(False),
+                    or_(
+                        MaintenanceProject.salesperson.is_(None),
+                        MaintenanceProject.salesperson == "",
+                    ),
+                    MaintenanceProject.project_id.in_(by_order_salesperson),
                 ),
-                MaintenanceProject.project_id.in_(by_order_salesperson),
-            ),
-        ))
+            )
+        )
 
     # —— 回款已完成桶（2026-09-04 客户反馈：回款已完成的项目不用再盯）——
     # 判定复用卡片同一取数（_payment_complete_ids），桶成员与卡片上显示回款
@@ -1072,26 +1223,31 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     if lifecycle == "payment_complete" and not can_contract:
         raise BoardCostContractNotPermitted()
     if lifecycle == "payment_complete" or (
-            lifecycle in ("ongoing", "ended", "missing") and can_contract):
+        lifecycle in ("ongoing", "ended", "missing") and can_contract
+    ):
         # Both the selected rows and the hidden count need the same payment
         # membership after clearing only business type. Keep scope/search and
         # lifecycle constraints; one batched calculation serves both queries.
         scoped = [f for f in filters if f is not business_type_clause]
         if lifecycle != "payment_complete":
             scoped.append(lifecycle_expr == lifecycle)
-        candidate_ids = list(db.execute(
-            select(MaintenanceProject.project_id).where(*scoped)
-        ).scalars())
+        candidate_ids = list(
+            db.execute(select(MaintenanceProject.project_id).where(*scoped)).scalars()
+        )
         payment_complete_ids = _payment_complete_ids(db, candidate_ids)
         if lifecycle == "payment_complete":
-            filters.append(MaintenanceProject.project_id.in_(
-                payment_complete_ids or {"__payment_complete_none__"}))
+            filters.append(
+                MaintenanceProject.project_id.in_(
+                    payment_complete_ids or {"__payment_complete_none__"}
+                )
+            )
         else:
             filters.append(lifecycle_expr == lifecycle)
             if payment_complete_ids:
                 # 回款已完成的项目整体移出三个期限桶（含期限缺失）：不再需要盯。
                 filters.append(
-                    MaintenanceProject.project_id.not_in(payment_complete_ids))
+                    MaintenanceProject.project_id.not_in(payment_complete_ids)
+                )
     elif lifecycle in ("ongoing", "ended", "missing"):
         filters.append(lifecycle_expr == lifecycle)
 
@@ -1112,9 +1268,13 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         )
         .select_from(FMaintenanceOrder)
         .join(MaintenanceSourceOrderAssignment, active)
-        .outerjoin(FMaintenanceLine,
-                   and_(FMaintenanceLine.order_id == FMaintenanceOrder.id,
-                        FMaintenanceLine.is_active.is_(True)))
+        .outerjoin(
+            FMaintenanceLine,
+            and_(
+                FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                FMaintenanceLine.is_active.is_(True),
+            ),
+        )
         .outerjoin(
             MaintenanceManualCostOverride,
             and_(
@@ -1126,14 +1286,18 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     window_stats = active_orders(
-        window_stats_stmt, FMaintenanceOrder,
+        window_stats_stmt,
+        FMaintenanceOrder,
     ).subquery()
     # sort=attention 的两个注册口径（AB-2）。都做成子查询，排序才是**全量**排序，
     # 而不是「先取一页再排」那种只在当页内成立的假排序。
     return_stats_stmt = (
-        select(MaintenanceSourceOrderAssignment.project_id.label("project_id"),
-               func.coalesce(func.sum(FMaintenanceLine.return_qty), 0)
-               .label("demand_return_qty"))
+        select(
+            MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+            func.coalesce(func.sum(FMaintenanceLine.return_qty), 0).label(
+                "demand_return_qty"
+            ),
+        )
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .join(MaintenanceSourceOrderAssignment, active)
@@ -1141,7 +1305,8 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     return_stats = active_orders(
-        return_stats_stmt, FMaintenanceOrder,
+        return_stats_stmt,
+        FMaintenanceOrder,
     ).subquery()
     budget_stats = (
         _budget_overspend_stats()
@@ -1149,11 +1314,15 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         else None
     )
 
-    base = (select(MaintenanceProject)
-            .outerjoin(window_stats,
-                       window_stats.c.project_id == MaintenanceProject.project_id)
-            .outerjoin(return_stats,
-                       return_stats.c.project_id == MaintenanceProject.project_id))
+    base = (
+        select(MaintenanceProject)
+        .outerjoin(
+            window_stats, window_stats.c.project_id == MaintenanceProject.project_id
+        )
+        .outerjoin(
+            return_stats, return_stats.c.project_id == MaintenanceProject.project_id
+        )
+    )
     if budget_stats is not None:
         base = base.outerjoin(
             budget_stats,
@@ -1165,19 +1334,24 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     elif has_activity is False:
         base = base.where(func.coalesce(window_stats.c.orders_n, 0) == 0)
 
-    total = int(db.execute(
-        select(func.count()).select_from(base.subquery())).scalar_one())
+    total = int(
+        db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    )
 
     # R5：隐藏必须可计数、可撤销。hidden = 同条件下去掉业务类型子句的候选数 − total，
     # 不能拿全库总数硬减（那样切了期限档之后数字就不对了）。不过滤时不发这条 SQL，
     # 默认路径的 SELECT 条数与改动前一致（perf 基线不动）。
     business_type_hidden = 0
     if business_type_clause is not None:
-        wide = (select(MaintenanceProject)
-                .outerjoin(window_stats,
-                           window_stats.c.project_id == MaintenanceProject.project_id)
-                .outerjoin(return_stats,
-                           return_stats.c.project_id == MaintenanceProject.project_id))
+        wide = (
+            select(MaintenanceProject)
+            .outerjoin(
+                window_stats, window_stats.c.project_id == MaintenanceProject.project_id
+            )
+            .outerjoin(
+                return_stats, return_stats.c.project_id == MaintenanceProject.project_id
+            )
+        )
         if budget_stats is not None:
             wide = wide.outerjoin(
                 budget_stats,
@@ -1188,15 +1362,26 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
             wide = wide.where(func.coalesce(window_stats.c.orders_n, 0) > 0)
         elif has_activity is False:
             wide = wide.where(func.coalesce(window_stats.c.orders_n, 0) == 0)
-        business_type_hidden = max(0, int(db.execute(
-            select(func.count()).select_from(wide.subquery())).scalar_one()) - total)
+        business_type_hidden = max(
+            0,
+            int(
+                db.execute(
+                    select(func.count()).select_from(wide.subquery())
+                ).scalar_one()
+            )
+            - total,
+        )
 
     if sort == "orders":
-        order_by = (func.coalesce(window_stats.c.orders_n, 0).desc(),
-                    MaintenanceProject.project_code)
+        order_by = (
+            func.coalesce(window_stats.c.orders_n, 0).desc(),
+            MaintenanceProject.project_code,
+        )
     elif sort == "known_cost":
-        order_by = (func.coalesce(window_stats.c.known_cost, 0).desc(),
-                    MaintenanceProject.project_code)
+        order_by = (
+            func.coalesce(window_stats.c.known_cost, 0).desc(),
+            MaintenanceProject.project_code,
+        )
     elif sort == "attention":
         # M0-A 已拍板（AB-2）：注册口径 = ①超预算 ③待返件多。这里按注册口径中
         # **可在 SQL 表达**的两项排序：应返数量（Σ退货列，白名单内）优先，其次本期
@@ -1206,8 +1391,11 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         if can_cost and can_contract:
             assert budget_stats is not None
             attn.insert(0, func.coalesce(budget_stats.c.overspend, 0).desc())
-        order_by = (*attn, func.coalesce(window_stats.c.orders_n, 0).desc(),
-                    MaintenanceProject.project_code)
+        order_by = (
+            *attn,
+            func.coalesce(window_stats.c.orders_n, 0).desc(),
+            MaintenanceProject.project_code,
+        )
     elif sort == "cost_ratio":
         # This branch is handled after the candidate query below because the
         # card's ratio depends on the same Python cost bundle and contract
@@ -1227,12 +1415,15 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
         )
         by_id = {project.project_id: project for project in candidates}
         rows = [by_id[project_id] for project_id in ordered_ids]
-        rows = rows[(page - 1) * page_size: page * page_size]
+        rows = rows[(page - 1) * page_size : page * page_size]
     else:
-        rows = db.execute(
-            base.order_by(*order_by)
-            .offset((page - 1) * page_size).limit(page_size)
-        ).scalars().all()
+        rows = (
+            db.execute(
+                base.order_by(*order_by).offset((page - 1) * page_size).limit(page_size)
+            )
+            .scalars()
+            .all()
+        )
 
     project_ids = [p.project_id for p in rows]
     receipt_rates = _card_receipt_rates(db, project_ids)
@@ -1241,20 +1432,24 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     # WBDD 未导入时，需求单/明细/成本一律 not_imported——不得用 0 冒充「没有申请」
     wbdd_ready = wbdd_imported(db)
     cost_bundles = _cost_bundles_by_project(
-        db, window=window, project_ids=project_ids, can_cost=can_cost)
-    fact_totals = (maintenance_boss_facts.project_totals(db, project_ids=project_ids)
-                   if project_ids else {})
+        db, window=window, project_ids=project_ids, can_cost=can_cost
+    )
+    fact_totals = (
+        maintenance_boss_facts.project_totals(db, project_ids=project_ids)
+        if project_ids
+        else {}
+    )
     pre_delivery = _pre_delivery_counts(db, project_ids)
     source_states = maintenance_source_health.source_health(db)["sources"]
     # 项目卡墙补充数据（REQUIREMENTS #34/#35/#41），逐项一次分组查询，与页大小无关
     contracts = _card_contracts(db, project_ids)
     procured = _card_procured_qty(db, window, project_ids)
     collections = _card_collections(db, project_ids)
-    manager_names = _manager_display_names(
-        db, [p.project_manager_id for p in rows])
+    manager_names = _manager_display_names(db, [p.project_manager_id for p in rows])
     cost_ex = _card_cost_ex_tax(db, window, project_ids)
     expense_costs, requisition_costs = _card_expense_and_requisition_costs(
-        db, project_ids)
+        db, project_ids
+    )
     # 卡片「销售」：canonical salesperson 优先；未人工覆盖的遗留空值才用 WBDD 众数兜底。
     sales_modes = _card_salesperson_modes(db, project_ids)
     aliases = maintenance_project_identity.aliases_by_project(db, project_ids)
@@ -1263,120 +1458,152 @@ def projects(db: Session, *, user_ctx: UserContext, page: int = 1,
     out_rows = []
     for proj in rows:
         orders_n, lines_n = counts.get(proj.project_id, (0, 0))
-        out_rows.append({
-            "project_id": proj.project_id,
-            "receipt_return_rate": receipt_rates[proj.project_id],
-            "project_code": proj.project_code,
-            "display_name": proj.display_name,
-            # 原值 + 档位一起给：用户要能自证「这张卡为什么在 / 为什么不在」。
-            "business_type": proj.business_type,
-            "business_type_code": business_type_code(proj.business_type),
-            "aliases": [
-                name for name in aliases.get(proj.project_id, [])
-                if project_names.display_name_identity(name)
-                != project_names.display_name_identity(proj.display_name)
-            ],
-            "peer_names": [
-                name for name in peer_names.get(proj.project_id, [])
-                if project_names.display_name_identity(name)
-                != project_names.display_name_identity(proj.display_name)
-            ],
-            "lifecycle": (
-                # 回款已完成仅在 compute 过该集合的请求⾥出现（payment_complete
-                # 桶或持有合同权限的三桶请求）；lifecycle=all/无权限请求保持
-                # 纯期限口径，避免经⾮门控字段泄露回款状态。
-                "payment_complete"
-                if payment_complete_ids is not None
-                and proj.project_id in payment_complete_ids
-                else maintenance_periods.lifecycle_status(
-                    proj.period_from,
-                    proj.period_to,
-                    today,
-                )
-            ),
-            # 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值
-            "period_from": proj.period_from.isoformat() if proj.period_from else None,
-            "period_to": proj.period_to.isoformat() if proj.period_to else None,
-            # 归档但仍带单：留在列表里保住母集恒等式，用标记让老板知道它已归档
-            "is_archived": not proj.is_active,
-            "has_activity_in_window": bool(orders_n),
-            "pre_delivery_order_count": pre_delivery.get(proj.project_id, 0),
-            "orders_ytd": ready(orders_n) if wbdd_ready else not_imported(),
-            "lines_ytd": ready(lines_n) if wbdd_ready else not_imported(),
-            "known_apply_cost_inc_tax": (
-                cost_bundles[proj.project_id] if wbdd_ready
-                else (restricted() if not can_cost else not_imported())),
-            **_card_fields(proj, can_cost=can_cost, can_contract=can_contract,
-                           wbdd_ready=wbdd_ready,
-                           contracts=contracts.get(proj.project_id),
-                           procured=procured.get(proj.project_id),
-                           collected=collections.get(proj.project_id),
-                           cost_ex=cost_ex.get(proj.project_id),
-                           bundle=cost_bundles.get(proj.project_id),
-                           manager_display=manager_names.get(proj.project_manager_id or ""),
-                           salesperson=(
-                               proj.salesperson
-                               if proj.salesperson_override_active
-                               else (
-                                   proj.salesperson
-                                   or sales_modes.get(proj.project_id)
-                               )
-                           ),
-                           expense_cost=expense_costs.get(proj.project_id),
-                           requisition_cost=requisition_costs.get(proj.project_id)),
-            **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
-        })
+        out_rows.append(
+            {
+                "project_id": proj.project_id,
+                "receipt_return_rate": receipt_rates[proj.project_id],
+                "project_code": proj.project_code,
+                "display_name": proj.display_name,
+                # 原值 + 档位一起给：用户要能自证「这张卡为什么在 / 为什么不在」。
+                "business_type": proj.business_type,
+                "business_type_code": business_type_code(proj.business_type),
+                "aliases": [
+                    name
+                    for name in aliases.get(proj.project_id, [])
+                    if project_names.display_name_identity(name)
+                    != project_names.display_name_identity(proj.display_name)
+                ],
+                "peer_names": [
+                    name
+                    for name in peer_names.get(proj.project_id, [])
+                    if project_names.display_name_identity(name)
+                    != project_names.display_name_identity(proj.display_name)
+                ],
+                "lifecycle": (
+                    # 回款已完成仅在 compute 过该集合的请求⾥出现（payment_complete
+                    # 桶或持有合同权限的三桶请求）；lifecycle=all/无权限请求保持
+                    # 纯期限口径，避免经⾮门控字段泄露回款状态。
+                    "payment_complete"
+                    if payment_complete_ids is not None
+                    and proj.project_id in payment_complete_ids
+                    else maintenance_periods.lifecycle_status(
+                        proj.period_from,
+                        proj.period_to,
+                        today,
+                    )
+                ),
+                # 维保期限主数据（#51）：WBDD 聚合/名称解析回填，台账导入后为台账值
+                "period_from": proj.period_from.isoformat()
+                if proj.period_from
+                else None,
+                "period_to": proj.period_to.isoformat() if proj.period_to else None,
+                # 归档但仍带单：留在列表里保住母集恒等式，用标记让老板知道它已归档
+                "is_archived": not proj.is_active,
+                "has_activity_in_window": bool(orders_n),
+                "pre_delivery_order_count": pre_delivery.get(proj.project_id, 0),
+                "orders_ytd": ready(orders_n) if wbdd_ready else not_imported(),
+                "lines_ytd": ready(lines_n) if wbdd_ready else not_imported(),
+                "known_apply_cost_inc_tax": (
+                    cost_bundles[proj.project_id]
+                    if wbdd_ready
+                    else (restricted() if not can_cost else not_imported())
+                ),
+                **_card_fields(
+                    proj,
+                    can_cost=can_cost,
+                    can_contract=can_contract,
+                    wbdd_ready=wbdd_ready,
+                    contracts=contracts.get(proj.project_id),
+                    procured=procured.get(proj.project_id),
+                    collected=collections.get(proj.project_id),
+                    cost_ex=cost_ex.get(proj.project_id),
+                    bundle=cost_bundles.get(proj.project_id),
+                    manager_display=manager_names.get(proj.project_manager_id or ""),
+                    salesperson=(
+                        proj.salesperson
+                        if proj.salesperson_override_active
+                        else (proj.salesperson or sales_modes.get(proj.project_id))
+                    ),
+                    expense_cost=expense_costs.get(proj.project_id),
+                    requisition_cost=requisition_costs.get(proj.project_id),
+                ),
+                **_fact_envelopes(fact_totals.get(proj.project_id), source_states),
+            }
+        )
 
     # 未归属桶恒为一行（不静默丢单）：仅全范围账号可见（未归属单无「本人」范围）。
     # 搜索/生命周期筛选下不注入——桶不是搜索命中项，混入会污染结果集。
     # 业务类型筛选下同样不注入：桶不是项目、没有业务类型，混进来会污染语义。
-    if (allowed_project_ids is None and page == 1
-            and not q_text and lifecycle == "all"
-            and business_type_clause is None):
+    if (
+        allowed_project_ids is None
+        and page == 1
+        and not q_text
+        and lifecycle == "all"
+        and business_type_clause is None
+    ):
         u_orders, u_lines = _window_counts(db, window, unassigned_only=True)
-        out_rows.insert(0, {
-            "project_id": UNASSIGNED_BUCKET,
-            "project_code": UNASSIGNED_BUCKET,
-            "display_name": "未归属（待人工确认）",
-            "business_type": None,      # 键集与项目行保持一致
-            "business_type_code": "unlabeled",
-            "aliases": [],
-            "peer_names": [],
-            "lifecycle": "missing",
-            "period_from": None,       # 桶不是项目，没有期限可言
-            "period_to": None,
-            "is_archived": False,      # 键集与项目行保持一致
-            # 未归属桶不是项目，没有可发布的项目收货率；保留同构字段。
-            "receipt_return_rate": None,
-            "has_activity_in_window": bool(u_orders),
-            "pre_delivery_order_count": 0,
-            "orders_ytd": ready(u_orders) if wbdd_ready else not_imported(),
-            "lines_ytd": ready(u_lines) if wbdd_ready else not_imported(),
-            "known_apply_cost_inc_tax": (
-                _cost_bundle(db, window=window, unassigned_only=True,
-                             can_cost=can_cost) if wbdd_ready
-                else (restricted() if not can_cost else not_imported())),
-            # 桶不是项目：没有合同/经理/回款可言，一律 not_imported 而非 0
-            **_card_fields(None, can_cost=can_cost, can_contract=can_contract,
-                           wbdd_ready=wbdd_ready,
-                           contracts=None, procured=None, collected=None,
-                           cost_ex=None, bundle=None,
-                           expense_cost=None, requisition_cost=None),
-            # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
-            # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
-            **{k: fact_not_imported() for k in FACT_FIELDS},
-        })
+        out_rows.insert(
+            0,
+            {
+                "project_id": UNASSIGNED_BUCKET,
+                "project_code": UNASSIGNED_BUCKET,
+                "display_name": "未归属（待人工确认）",
+                "business_type": None,  # 键集与项目行保持一致
+                "business_type_code": "unlabeled",
+                "aliases": [],
+                "peer_names": [],
+                "lifecycle": "missing",
+                "period_from": None,  # 桶不是项目，没有期限可言
+                "period_to": None,
+                "is_archived": False,  # 键集与项目行保持一致
+                # 未归属桶不是项目，没有可发布的项目收货率；保留同构字段。
+                "receipt_return_rate": None,
+                "has_activity_in_window": bool(u_orders),
+                "pre_delivery_order_count": 0,
+                "orders_ytd": ready(u_orders) if wbdd_ready else not_imported(),
+                "lines_ytd": ready(u_lines) if wbdd_ready else not_imported(),
+                "known_apply_cost_inc_tax": (
+                    _cost_bundle(
+                        db, window=window, unassigned_only=True, can_cost=can_cost
+                    )
+                    if wbdd_ready
+                    else (restricted() if not can_cost else not_imported())
+                ),
+                # 桶不是项目：没有合同/经理/回款可言，一律 not_imported 而非 0
+                **_card_fields(
+                    None,
+                    can_cost=can_cost,
+                    can_contract=can_contract,
+                    wbdd_ready=wbdd_ready,
+                    contracts=None,
+                    procured=None,
+                    collected=None,
+                    cost_ex=None,
+                    bundle=None,
+                    expense_cost=None,
+                    requisition_cost=None,
+                ),
+                # 未归属单没有项目口径的三源事实（CKD 靠归属才落项目）——系统「无法知道」，
+                # 不是「等于 0」。用 not_imported 信封而非 ready(0)（铁律 5）。
+                **{k: fact_not_imported() for k in FACT_FIELDS},
+            },
+        )
     if card_status_filter in CARD_STATUSES:
         # 三态只由成本率决定（#43）。这里在**取完当页后**过滤而不是下推 SQL：
         # 口径必须与卡片显示的完全一致，两处各写一份迟早会漂。代价是筛选态下
         # 分页是「页内过滤」，total 如实回传过滤前的口径，前端据 rows 长度续拉。
         out_rows = [r for r in out_rows if r.get("card_status") == card_status_filter]
-    return {"rows": out_rows, "total": total, "page": page,
-            "page_size": page_size, "sort": sort,
-            "sort_applied": sort,
-            "business_type": business_type,
-            "business_type_hidden": business_type_hidden,
-            "window": {"from": window[0].isoformat(), "to": window[1].isoformat()}}
+    return {
+        "rows": out_rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "sort": sort,
+        "sort_applied": sort,
+        "business_type": business_type,
+        "business_type_hidden": business_type_hidden,
+        "window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
+    }
 
 
 FACT_FIELDS = ("shipped_qty", "returned_good_qty", "returned_bad_qty")
@@ -1408,8 +1635,10 @@ def _budget_overspend_stats():
     )
     known_actual_amount, known_estimated_amount, *_ = _cost_columns()
     spend_stmt = (
-        select(MaintenanceSourceOrderAssignment.project_id.label("project_id"),
-               (known_actual_amount + known_estimated_amount).label("spend"))
+        select(
+            MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+            (known_actual_amount + known_estimated_amount).label("spend"),
+        )
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .outerjoin(
@@ -1419,10 +1648,14 @@ def _budget_overspend_stats():
                 MaintenanceManualCostOverride.active.is_(True),
             ),
         )
-        .join(MaintenanceSourceOrderAssignment,
-              and_(MaintenanceSourceOrderAssignment.source_order_id
-                   == FMaintenanceOrder.raw_order_id,
-                   MaintenanceSourceOrderAssignment.is_active.is_(True)))
+        .join(
+            MaintenanceSourceOrderAssignment,
+            and_(
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            ),
+        )
         .where(
             _order_date_in_window((_FULL_LIFETIME_START, business_today())),
             FMaintenanceLine.is_active.is_(True),
@@ -1431,9 +1664,10 @@ def _budget_overspend_stats():
     )
     spend = active_orders(spend_stmt, FMaintenanceOrder).subquery()
     return (
-        select(contract.c.project_id.label("project_id"),
-               (func.coalesce(spend.c.spend, 0) - contract.c.budget)
-               .label("overspend"))
+        select(
+            contract.c.project_id.label("project_id"),
+            (func.coalesce(spend.c.spend, 0) - contract.c.budget).label("overspend"),
+        )
         .select_from(contract)
         .outerjoin(spend, spend.c.project_id == contract.c.project_id)
         .subquery()
@@ -1442,9 +1676,11 @@ def _budget_overspend_stats():
 
 def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
     """三源事实按各自 readiness 包信封：未导入 → not_imported（绝不 0）。"""
-    mapping_ = (("shipped_qty", "ckd", "shipped"),
-                ("returned_good_qty", "return_order", "returned_good"),
-                ("returned_bad_qty", "rkd_inbound", "returned_bad"))
+    mapping_ = (
+        ("shipped_qty", "ckd", "shipped"),
+        ("returned_good_qty", "return_order", "returned_good"),
+        ("returned_bad_qty", "rkd_inbound", "returned_bad"),
+    )
     out = {}
     for field, source_key, fact_key in mapping_:
         state = source_states[source_key]["readiness"]
@@ -1454,8 +1690,9 @@ def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
         value = (totals or {}).get(fact_key)
         value = value if value is not None else Decimal(0)
         if state == "partial":
-            out[field] = partial(value,
-                                 unlinked=source_states[source_key]["unlinked_rows"])
+            out[field] = partial(
+                value, unlinked=source_states[source_key]["unlinked_rows"]
+            )
         elif state == "stale":
             env = ready(value)
             env["state"] = "stale"
@@ -1466,8 +1703,9 @@ def _fact_envelopes(totals: dict | None, source_states: dict) -> dict:
     return out
 
 
-def _project_window_counts(db: Session, window: tuple[date, date],
-                           project_ids: list[str]) -> dict:
+def _project_window_counts(
+    db: Session, window: tuple[date, date], project_ids: list[str]
+) -> dict:
     if not project_ids:
         return {}
     active = and_(
@@ -1476,16 +1714,24 @@ def _project_window_counts(db: Session, window: tuple[date, date],
         MaintenanceSourceOrderAssignment.is_active.is_(True),
     )
     statement = (
-        select(MaintenanceSourceOrderAssignment.project_id,
-               func.count(func.distinct(FMaintenanceOrder.id)),
-               func.count(FMaintenanceLine.id))
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.count(func.distinct(FMaintenanceOrder.id)),
+            func.count(FMaintenanceLine.id),
+        )
         .select_from(FMaintenanceOrder)
         .join(MaintenanceSourceOrderAssignment, active)
-        .outerjoin(FMaintenanceLine,
-                   and_(FMaintenanceLine.order_id == FMaintenanceOrder.id,
-                        FMaintenanceLine.is_active.is_(True)))
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               _order_date_in_window(window))
+        .outerjoin(
+            FMaintenanceLine,
+            and_(
+                FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                FMaintenanceLine.is_active.is_(True),
+            ),
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            _order_date_in_window(window),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
@@ -1530,15 +1776,18 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
     from app.models.maintenance_project import MaintenanceProjectContract
     from app.models.sales import FSalesOrder
     from app.models.system import SysImportBatch
+
     if not project_ids:
         return {}
     rows = db.execute(
-        select(MaintenanceProjectContract.project_id,
-               MaintenanceProjectContract.contract_id,
-               MaintenanceProjectContract.contract_no,
-               MaintenanceProjectContract.amount_inc_tax,
-               MaintenanceProjectContract.included_in_total,
-               MaintenanceProjectContract.status_mapping_state)
+        select(
+            MaintenanceProjectContract.project_id,
+            MaintenanceProjectContract.contract_id,
+            MaintenanceProjectContract.contract_no,
+            MaintenanceProjectContract.amount_inc_tax,
+            MaintenanceProjectContract.included_in_total,
+            MaintenanceProjectContract.status_mapping_state,
+        )
         .where(
             MaintenanceProjectContract.project_id.in_(project_ids),
             MaintenanceProjectContract.effective_from <= business_today(),
@@ -1550,11 +1799,13 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
         .order_by(MaintenanceProjectContract.effective_from)
     ).all()
     included_contract_ids = {
-        contract_id for _pid, contract_id, _no, _amount, included, _mapping in rows
+        contract_id
+        for _pid, contract_id, _no, _amount, included, _mapping in rows
         if included
     }
     included_contract_nos = {
-        no for _pid, _contract_id, no, _amount, included, _mapping in rows
+        no
+        for _pid, _contract_id, no, _amount, included, _mapping in rows
         if included and no
     }
     projects_by_contract_id: dict[str, set[str]] = {}
@@ -1604,10 +1855,17 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for pid, contract_id, no, amount, included, mapping_state in rows:
         bucket = out.setdefault(
-            pid, {"contract_nos": [], "amount_inc_tax": None,
-                  "contract_shared": False, "contract_incomplete": False,
-                  "_included_contract_ids": [], "_included_contract_nos": [],
-                  "_included_count": 0})
+            pid,
+            {
+                "contract_nos": [],
+                "amount_inc_tax": None,
+                "contract_shared": False,
+                "contract_incomplete": False,
+                "_included_contract_ids": [],
+                "_included_contract_nos": [],
+                "_included_count": 0,
+            },
+        )
         if no and no not in bucket["contract_nos"]:
             bucket["contract_nos"].append(no)
         if mapping_state != "mapped":
@@ -1617,7 +1875,9 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
             bucket["_included_contract_ids"].append(contract_id)
             bucket["_included_contract_nos"].append(no)
             if amount is not None:
-                bucket["amount_inc_tax"] = (bucket["amount_inc_tax"] or Decimal(0)) + amount
+                bucket["amount_inc_tax"] = (
+                    bucket["amount_inc_tax"] or Decimal(0)
+                ) + amount
             else:
                 bucket["contract_incomplete"] = True
 
@@ -1625,13 +1885,13 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
         contract_ids = bucket.pop("_included_contract_ids")
         contract_nos = bucket.pop("_included_contract_nos")
         included_count = bucket.pop("_included_count")
-        duplicate = (
-            len(contract_ids) != len(set(contract_ids))
-            or len(contract_nos) != len(set(contract_nos))
-        )
-        shared = (
-            any(contract_id in conflicting_contract_ids for contract_id in contract_ids)
-            or any(contract_no in conflicting_contract_nos for contract_no in contract_nos)
+        duplicate = len(contract_ids) != len(set(contract_ids)) or len(
+            contract_nos
+        ) != len(set(contract_nos))
+        shared = any(
+            contract_id in conflicting_contract_ids for contract_id in contract_ids
+        ) or any(
+            contract_no in conflicting_contract_nos for contract_no in contract_nos
         )
         if included_count == 0 or duplicate or shared:
             bucket["contract_incomplete"] = True
@@ -1653,24 +1913,31 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
     )
     # 全量「XSDD→挂了哪些项目」映射：shared 判定必须看全局（不止本页），
     # 否则翻页会把共用单误标成独占。
-    xsdd_rows = db.execute(active_orders(
-        select(MaintenanceSourceOrderAssignment.project_id,
-               FMaintenanceOrder.linked_sales_order_no)
-        .select_from(FMaintenanceOrder)
-        .join(MaintenanceSourceOrderAssignment, active)
-        .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
-        .group_by(MaintenanceSourceOrderAssignment.project_id,
-                  FMaintenanceOrder.linked_sales_order_no),
-        FMaintenanceOrder,
-    )).all()
+    xsdd_rows = db.execute(
+        active_orders(
+            select(
+                MaintenanceSourceOrderAssignment.project_id,
+                FMaintenanceOrder.linked_sales_order_no,
+            )
+            .select_from(FMaintenanceOrder)
+            .join(MaintenanceSourceOrderAssignment, active)
+            .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
+            .group_by(
+                MaintenanceSourceOrderAssignment.project_id,
+                FMaintenanceOrder.linked_sales_order_no,
+            ),
+            FMaintenanceOrder,
+        )
+    ).all()
     order_projects: dict[str, set] = {}
     project_orders: dict[str, list] = {}
     for pid, ono in xsdd_rows:
         order_projects.setdefault(ono, set()).add(pid)
         if pid in fallback_ids:
             project_orders.setdefault(pid, []).append(ono)
-    all_orders = sorted({o for pid in fallback_ids
-                         for o in project_orders.get(pid, [])})
+    all_orders = sorted(
+        {o for pid in fallback_ids for o in project_orders.get(pid, [])}
+    )
     amounts: dict[str, Decimal] = {}
     ambiguous_orders: set[str] = set()
     if all_orders:
@@ -1703,18 +1970,12 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
                 FSalesOrder.id,
             )
         ).all()
-        economics_by_order: dict[
-            str, set[tuple[Decimal, Decimal, Decimal]]
-        ] = {}
+        economics_by_order: dict[str, set[tuple[Decimal, Decimal, Decimal]]] = {}
         for order_no, amount_ex_tax, tax_rate in candidates:
             ex_tax = Decimal(str(amount_ex_tax))
             rate = Decimal(str(tax_rate))
-            inc_tax = tax_policy.round_money(
-                ex_tax * (Decimal("1") + rate)
-            )
-            economics_by_order.setdefault(order_no, set()).add(
-                (ex_tax, rate, inc_tax)
-            )
+            inc_tax = tax_policy.round_money(ex_tax * (Decimal("1") + rate))
+            economics_by_order.setdefault(order_no, set()).add((ex_tax, rate, inc_tax))
         for order_no, economics in economics_by_order.items():
             if len(economics) != 1:
                 ambiguous_orders.add(order_no)
@@ -1725,8 +1986,14 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
         if not onos:
             continue
         bucket = out.setdefault(
-            pid, {"contract_nos": [], "amount_inc_tax": None,
-                  "contract_shared": False, "contract_incomplete": False})
+            pid,
+            {
+                "contract_nos": [],
+                "amount_inc_tax": None,
+                "contract_shared": False,
+                "contract_incomplete": False,
+            },
+        )
         if not bucket["contract_nos"]:
             bucket["contract_nos"] = onos
         total = sum((amounts.get(o) or Decimal(0)) for o in onos)
@@ -1739,19 +2006,17 @@ def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
         elif total > 0:
             bucket["amount_inc_tax"] = total
         bucket["contract_shared"] = any(
-            len(order_projects.get(o, set())) > 1 for o in onos)
+            len(order_projects.get(o, set())) > 1 for o in onos
+        )
         # 共享 XSDD 可保留金额作“参考”，但不能据此给多个项目计算成本率/红黄绿；
         # 否则同一合同总额会被重复当成每个项目的独占预算。
         bucket["contract_incomplete"] = (
-            bool(missing)
-            or bool(conflicts)
-            or bucket["contract_shared"]
+            bool(missing) or bool(conflicts) or bucket["contract_shared"]
         )
     return out
 
 
-def _card_salesperson_modes(db: Session,
-                            project_ids: list[str]) -> dict[str, str]:
+def _card_salesperson_modes(db: Session, project_ids: list[str]) -> dict[str, str]:
     """每项目 XSDD 需求单销售众数（2026-08-21 客户反馈：卡片显示销售）。
 
     台账 salesperson 缺省时的兜底口径，与总表导出 `_project_order_salesperson`
@@ -1760,8 +2025,7 @@ def _card_salesperson_modes(db: Session,
     """
     from app.services import maintenance_source_assignments
 
-    return maintenance_source_assignments.salesperson_modes_by_project(
-        db, project_ids)
+    return maintenance_source_assignments.salesperson_modes_by_project(db, project_ids)
 
 
 def _card_expense_and_requisition_costs(
@@ -1787,8 +2051,9 @@ def _card_expense_and_requisition_costs(
     expense_rows = db.execute(
         select(
             MaintenanceProjectExpenseAttribution.project_id,
-            func.coalesce(func.sum(
-                MaintenanceProjectExpenseAttribution.amount_inc_tax), 0),
+            func.coalesce(
+                func.sum(MaintenanceProjectExpenseAttribution.amount_inc_tax), 0
+            ),
         )
         .where(
             MaintenanceProjectExpenseAttribution.project_id.in_(project_ids),
@@ -1803,12 +2068,13 @@ def _card_expense_and_requisition_costs(
     requisition_rows = db.execute(
         select(
             MaintenanceSiteIssue.project_id,
-            func.coalesce(func.sum(
-                MaintenanceSiteIssueLine.cost_amount_inc_tax), 0),
+            func.coalesce(func.sum(MaintenanceSiteIssueLine.cost_amount_inc_tax), 0),
         )
         .select_from(MaintenanceSiteIssueLine)
-        .join(MaintenanceSiteIssue,
-              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+        .join(
+            MaintenanceSiteIssue,
+            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+        )
         .where(
             MaintenanceSiteIssue.project_id.in_(project_ids),
             MaintenanceSiteIssue.status_mapping_state == "mapped",
@@ -1821,16 +2087,21 @@ def _card_expense_and_requisition_costs(
     ).all()
     # 有领用行但全无参照价 → None（「—」= 算不出）；完全没有领用行 → 0（可知的零）
     has_lines = {
-        pid for (pid,) in db.execute(
-            select(MaintenanceSiteIssue.project_id).where(
+        pid
+        for (pid,) in db.execute(
+            select(MaintenanceSiteIssue.project_id)
+            .where(
                 MaintenanceSiteIssue.project_id.in_(project_ids),
                 MaintenanceSiteIssue.status_mapping_state == "mapped",
                 MaintenanceSiteIssue.normalized_status.in_(["confirmed", "corrected"]),
                 MaintenanceSiteIssue.issue_date <= today,
-            ).distinct())
+            )
+            .distinct()
+        )
     }
     requisition_costs: dict[str, Decimal] = {
-        pid: Decimal(v or 0) for pid, v in requisition_rows}
+        pid: Decimal(v or 0) for pid, v in requisition_rows
+    }
     for pid in project_ids:
         if pid not in requisition_costs and pid not in has_lines:
             requisition_costs[pid] = Decimal(0)
@@ -1840,8 +2111,9 @@ def _card_expense_and_requisition_costs(
     )
 
 
-def _card_procured_qty(db: Session, window: tuple[date, date],
-                       project_ids: list[str]) -> dict[str, Decimal]:
+def _card_procured_qty(
+    db: Session, window: tuple[date, date], project_ids: list[str]
+) -> dict[str, Decimal]:
     """维保备件采购数 = 库房发货 + 直采直发（REQUIREMENTS #41 业务指定公式）。
 
     这两列在需求单上，属流转状态列家族；#41 是业务对这两列的**明文授权**，
@@ -1855,16 +2127,24 @@ def _card_procured_qty(db: Session, window: tuple[date, date],
         MaintenanceSourceOrderAssignment.is_active.is_(True),
     )
     statement = (
-        select(MaintenanceSourceOrderAssignment.project_id,
-               func.coalesce(func.sum(
-                   func.coalesce(FMaintenanceLine.warehouse_shipped_qty, 0)
-                   + func.coalesce(FMaintenanceLine.direct_ship_qty, 0)), 0))
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.coalesce(
+                func.sum(
+                    func.coalesce(FMaintenanceLine.warehouse_shipped_qty, 0)
+                    + func.coalesce(FMaintenanceLine.direct_ship_qty, 0)
+                ),
+                0,
+            ),
+        )
         .select_from(FMaintenanceLine)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .join(MaintenanceSourceOrderAssignment, active)
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               _order_date_in_window(window),
-               FMaintenanceLine.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            _order_date_in_window(window),
+            FMaintenanceLine.is_active.is_(True),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
@@ -1879,9 +2159,11 @@ def _card_collections(db: Session, project_ids: list[str]) -> dict[str, Decimal]
         return {}
     rows = db.execute(
         select(MaintenanceCollectionSnapshot)
-        .where(MaintenanceCollectionSnapshot.project_id.in_(project_ids),
-               MaintenanceCollectionSnapshot.status == "confirmed",
-               MaintenanceCollectionSnapshot.report_month <= business_today())
+        .where(
+            MaintenanceCollectionSnapshot.project_id.in_(project_ids),
+            MaintenanceCollectionSnapshot.status == "confirmed",
+            MaintenanceCollectionSnapshot.report_month <= business_today(),
+        )
         .order_by(MaintenanceCollectionSnapshot.report_month)
     ).scalars()
     latest: dict[tuple[str, str], MaintenanceCollectionSnapshot] = {}
@@ -1919,8 +2201,9 @@ def _payment_complete_ids(db: Session, project_ids: list[str]) -> set[str]:
     return complete
 
 
-def _card_cost_ex_tax(db: Session, window: tuple[date, date],
-                      project_ids: list[str]) -> dict[str, dict]:
+def _card_cost_ex_tax(
+    db: Session, window: tuple[date, date], project_ids: list[str]
+) -> dict[str, dict]:
     """备件成本（未税）——与含税卡片复用同一严格成本五件套。"""
     if not project_ids:
         return {}
@@ -1944,9 +2227,11 @@ def _card_cost_ex_tax(db: Session, window: tuple[date, date],
             ),
         )
         .join(MaintenanceSourceOrderAssignment, active)
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               _order_date_in_window(window),
-               FMaintenanceLine.is_active.is_(True))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            _order_date_in_window(window),
+            FMaintenanceLine.is_active.is_(True),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
@@ -1962,18 +2247,28 @@ def _manager_display_names(db: Session, usernames: list[str | None]) -> dict[str
         return {}
     rows = db.execute(
         select(SysUser.username, SysUser.display_name).where(
-            SysUser.username.in_(wanted))
+            SysUser.username.in_(wanted)
+        )
     ).all()
     return {u: (d or u) for u, d in rows}
 
 
-def _card_fields(project, *, can_cost: bool, can_contract: bool,
-                 wbdd_ready: bool,
-                 contracts: dict | None, procured, collected, cost_ex,
-                 bundle: dict | None,
-                 manager_display: str | None = None,
-                 salesperson: str | None = None,
-                 expense_cost=None, requisition_cost=None) -> dict:
+def _card_fields(
+    project,
+    *,
+    can_cost: bool,
+    can_contract: bool,
+    wbdd_ready: bool,
+    contracts: dict | None,
+    procured,
+    collected,
+    cost_ex,
+    bundle: dict | None,
+    manager_display: str | None = None,
+    salesperson: str | None = None,
+    expense_cost=None,
+    requisition_cost=None,
+) -> dict:
     """项目卡的补充字段（REQUIREMENTS #34/#35）。
 
     成本字段（已知成本、报销/领用成本、成本未税）挂 `data_purchase_cost`；
@@ -1981,7 +2276,9 @@ def _card_fields(project, *, can_cost: bool, can_contract: bool,
     成本率与三态同时依赖两组权限，缺任一均 restricted / None，避免侧信道。
     """
     money_cost = (lambda value: ready(value)) if can_cost else (lambda _v: restricted())
-    money_contract = (lambda value: ready(value)) if can_contract else (lambda _v: restricted())
+    money_contract = (
+        (lambda value: ready(value)) if can_contract else (lambda _v: restricted())
+    )
     contract_nos = (contracts or {}).get("contract_nos") or []
     contract_amount = (contracts or {}).get("amount_inc_tax")
     contract_incomplete = bool((contracts or {}).get("contract_incomplete"))
@@ -1993,12 +2290,21 @@ def _card_fields(project, *, can_cost: bool, can_contract: bool,
         if not (bundle.get("state") == "partial" and not value.get("coverage_pct")):
             known_inc = Decimal(str(value.get("known_amount") or 0))
     ratio = None
-    if (can_cost and can_contract and not contract_incomplete and contract_amount
-            and contract_amount > 0 and known_inc is not None):
+    if (
+        can_cost
+        and can_contract
+        and not contract_incomplete
+        and contract_amount
+        and contract_amount > 0
+        and known_inc is not None
+    ):
         ratio = (known_inc / contract_amount * Decimal("100")).quantize(Decimal("0.1"))
     status_value = card_status(ratio) if (can_cost and can_contract) else None
-    if (status_value == "normal" and bundle is not None
-            and (bundle.get("value") or {}).get("quality") == "incomplete"):
+    if (
+        status_value == "normal"
+        and bundle is not None
+        and (bundle.get("value") or {}).get("quality") == "incomplete"
+    ):
         # 已知下限低于 80% 并不能证明项目正常；补齐缺价后可能直接越线。
         status_value = None
     return {
@@ -2006,16 +2312,23 @@ def _card_fields(project, *, can_cost: bool, can_contract: bool,
         "contract_nos": contract_nos,
         # 2026-08-20 修复：此处曾误填 cmo_name（张冠李戴）。项目经理 =
         # project_manager_id 解析出的账号显示名（无账号回退原值）。
-        "project_manager": manager_display or (
-            getattr(project, "project_manager_id", None) if project is not None else None),
+        "project_manager": manager_display
+        or (
+            getattr(project, "project_manager_id", None)
+            if project is not None
+            else None
+        ),
         # 2026-08-21 客户反馈：卡片改显销售（台账 salesperson 优先，XSDD 众数兜底）；
         # project_manager 字段保留给老消费方兼容，前端不再展示。
         "salesperson": salesperson,
         "contract_amount_inc_tax": (
             restricted()
             if not can_contract
-            else (partial(contract_amount) if contract_incomplete
-                  else ready(contract_amount))
+            else (
+                partial(contract_amount)
+                if contract_incomplete
+                else ready(contract_amount)
+            )
         ),
         # #51 诚实标注：XSDD 回退层的共用单/缺单提示（台账层恒 false）
         "contract_shared": bool((contracts or {}).get("contract_shared")),
@@ -2023,9 +2336,13 @@ def _card_fields(project, *, can_cost: bool, can_contract: bool,
         "known_apply_cost_ex_tax": (
             (cost_ex or _bundle_from_row(0, 0, 0, 0, 0))
             if wbdd_ready and can_cost
-            else (restricted() if not can_cost else not_imported())),
-        "procured_qty": (ready(procured if procured is not None else None)
-                         if wbdd_ready and project is not None else not_imported()),
+            else (restricted() if not can_cost else not_imported())
+        ),
+        "procured_qty": (
+            ready(procured if procured is not None else None)
+            if wbdd_ready and project is not None
+            else not_imported()
+        ),
         # 2026-08-22 客户反馈：报销/已领用成本上卡（金额位，成本权限门控，
         # 无权限 restricted 不泄露）
         "expense_cost_inc_tax": money_cost(expense_cost),
@@ -2049,12 +2366,16 @@ def _pre_delivery_counts(db: Session, project_ids: list[str]) -> dict:
         MaintenanceSourceOrderAssignment.is_active.is_(True),
     )
     statement = (
-        select(MaintenanceSourceOrderAssignment.project_id,
-               func.count(FMaintenanceOrder.id))
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.count(FMaintenanceOrder.id),
+        )
         .select_from(FMaintenanceOrder)
         .join(MaintenanceSourceOrderAssignment, active)
-        .where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-               FMaintenanceOrder.project_raw.op("~")(r"^预交付[-—－–]"))
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            FMaintenanceOrder.project_raw.op("~")(r"^预交付[-—－–]"),
+        )
         .group_by(MaintenanceSourceOrderAssignment.project_id)
     )
     rows = db.execute(active_orders(statement, FMaintenanceOrder)).all()
@@ -2063,115 +2384,174 @@ def _pre_delivery_counts(db: Session, project_ids: list[str]) -> dict:
 
 # ---------------------------------------------------------------- 下钻
 
-def project_orders(db: Session, *, user_ctx: UserContext, project_id: str,
-                   page: int = 1, page_size: int = 20,
-                   contract_no: str | None = None) -> dict:
+
+def project_orders(
+    db: Session,
+    *,
+    user_ctx: UserContext,
+    project_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    contract_no: str | None = None,
+) -> dict:
     """单据下钻（project_id 可为 unassigned 伪桶）。
 
     contract_no（#259）：按需求单挂靠的销售订单 ``linked_sales_order_no`` 归一化
     相等过滤（与报销归属同一把 normalize_contract_no 尺子：去空白、大写、去
     ``XSDD-`` 前缀）；WBDD 单号本身不含 XSDD 号，字符串包含匹配永远为空。
     """
+    from app.services.maintenance_order_contact import order_contact
+
     can_cost = can_view_cost(user_ctx)
     unassigned = project_id == UNASSIGNED_BUCKET
     base = select(FMaintenanceOrder)
-    base = _scope_stmt(base, project_id=None if unassigned else project_id,
-                       unassigned_only=unassigned)
+    base = _scope_stmt(
+        base, project_id=None if unassigned else project_id, unassigned_only=unassigned
+    )
     if contract_no is not None:
         base = base.where(
             normalized_contract_no_sql(FMaintenanceOrder.linked_sales_order_no)
-            == normalize_contract_no(contract_no))
-    total = int(db.execute(
-        select(func.count()).select_from(base.subquery())).scalar_one())
-    rows = db.execute(
-        base.order_by(FMaintenanceOrder.order_date.desc().nullslast(),
-                      FMaintenanceOrder.order_no)
-        .offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
+            == normalize_contract_no(contract_no)
+        )
+    total = int(
+        db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    )
+    rows = (
+        db.execute(
+            base.order_by(
+                FMaintenanceOrder.order_date.desc().nullslast(),
+                FMaintenanceOrder.order_no,
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
     source_states = maintenance_source_health.source_health(db)["sources"]
-    fact_totals = ({} if unassigned
-                   else maintenance_boss_facts.project_totals(
-                       db, project_ids=[project_id]))
+    fact_totals = (
+        {}
+        if unassigned
+        else maintenance_boss_facts.project_totals(db, project_ids=[project_id])
+    )
     # 单据成本与行数一次分组查出（M3-4：禁逐单 N+1）
     order_bundles = _order_cost_bundles(db, [o.id for o in rows], can_cost=can_cost)
     out = []
     for order in rows:
         bundle, line_count = order_bundles[order.id]
-        out.append({
-            "source_order_id": order.raw_order_id,
-            "order_no": order.order_no,
-            "order_date": order.order_date.isoformat() if order.order_date else None,
-            "data_status": order.data_status,          # 原样展示（铁律 3）
-            "linked_sales_order_no": order.linked_sales_order_no,  # XSDD，合同筛选依据
-            "project_raw": order.project_raw,
-            "is_pre_delivery": project_names.is_pre_delivery(order.project_raw),
-            "line_count": line_count,
-            "known_apply_cost_inc_tax": bundle,
-            # 自报四列原样返回；与事实**无判定并排**（M4-4，不产出 mismatch）
-            "self_report": {
-                "head_demand_qty": order.head_demand_qty,
-                "head_purchase_qty": order.head_purchase_qty,
-                "head_shipped_qty": order.head_shipped_qty,
-                "head_returned_qty": order.head_returned_qty,
-            },
-            # facts 是**项目级**卷积（M0-D 粒度下 CKD/RKD 无单据行级键，无法分摊到
-            # 单张需求单）。必须显式标注口径，否则与单据级自报列并排会被读成
-            # 「这张单发了 800 件」；未归属桶没有项目口径事实，返回 not_imported。
-            "facts": (_fact_envelopes(fact_totals.get(project_id), source_states)
-                      if not unassigned
-                      else {k: fact_not_imported() for k in FACT_FIELDS}),
-            "facts_scope": None if unassigned else "project",
-        })
+        out.append(
+            {
+                "source_order_id": order.raw_order_id,
+                **order_contact(order, user_ctx),
+                "order_no": order.order_no,
+                "order_date": order.order_date.isoformat()
+                if order.order_date
+                else None,
+                "data_status": order.data_status,  # 原样展示（铁律 3）
+                "linked_sales_order_no": order.linked_sales_order_no,  # XSDD，合同筛选依据
+                "project_raw": order.project_raw,
+                "is_pre_delivery": project_names.is_pre_delivery(order.project_raw),
+                "line_count": line_count,
+                "known_apply_cost_inc_tax": bundle,
+                # 自报四列原样返回；与事实**无判定并排**（M4-4，不产出 mismatch）
+                "self_report": {
+                    "head_demand_qty": order.head_demand_qty,
+                    "head_purchase_qty": order.head_purchase_qty,
+                    "head_shipped_qty": order.head_shipped_qty,
+                    "head_returned_qty": order.head_returned_qty,
+                },
+                # facts 是**项目级**卷积（M0-D 粒度下 CKD/RKD 无单据行级键，无法分摊到
+                # 单张需求单）。必须显式标注口径，否则与单据级自报列并排会被读成
+                # 「这张单发了 800 件」；未归属桶没有项目口径事实，返回 not_imported。
+                "facts": (
+                    _fact_envelopes(fact_totals.get(project_id), source_states)
+                    if not unassigned
+                    else {k: fact_not_imported() for k in FACT_FIELDS}
+                ),
+                "facts_scope": None if unassigned else "project",
+            }
+        )
     return {"rows": out, "total": total, "page": page, "page_size": page_size}
 
 
 def project_exists(db: Session, *, project_id: str) -> bool:
     """项目主档是否存在（含归档）。不存在的 id 一律 404，不返回空列表冒充成功。"""
-    return db.execute(
-        select(func.count(MaintenanceProject.project_id))
-        .where(MaintenanceProject.project_id == project_id)
-    ).scalar_one() > 0
+    return (
+        db.execute(
+            select(func.count(MaintenanceProject.project_id)).where(
+                MaintenanceProject.project_id == project_id
+            )
+        ).scalar_one()
+        > 0
+    )
 
 
 def order_exists(db: Session, *, source_order_id: str) -> bool:
-    return db.execute(
-        select(func.count(FMaintenanceOrder.id))
-        .where(FMaintenanceOrder.raw_order_id == source_order_id)
-    ).scalar_one() > 0
+    return (
+        db.execute(
+            select(func.count(FMaintenanceOrder.id)).where(
+                FMaintenanceOrder.raw_order_id == source_order_id
+            )
+        ).scalar_one()
+        > 0
+    )
 
 
 def order_project_id(db: Session, *, source_order_id: str) -> str | None:
     """单据当前的活跃归属项目；未归属返回 None（供 API 层做范围校验）。"""
     return db.execute(
         select(MaintenanceSourceOrderAssignment.project_id)
-        .join(FMaintenanceOrder,
-              FMaintenanceOrder.raw_order_id
-              == MaintenanceSourceOrderAssignment.source_order_id)
-        .where(FMaintenanceOrder.raw_order_id == source_order_id,
-               MaintenanceSourceOrderAssignment.is_active.is_(True))
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            FMaintenanceOrder.raw_order_id == source_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
     ).scalar_one_or_none()
 
 
-def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
-                page: int = 1, page_size: int = 20) -> dict:
+def order_lines(
+    db: Session,
+    *,
+    user_ctx: UserContext,
+    source_order_id: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
     """PN 证据行：流转状态列原样，成本列按权限包信封。"""
     can_cost = can_view_cost(user_ctx)
     order = db.execute(
-        select(FMaintenanceOrder)
-        .where(FMaintenanceOrder.raw_order_id == source_order_id)
+        select(FMaintenanceOrder).where(
+            FMaintenanceOrder.raw_order_id == source_order_id
+        )
     ).scalar_one_or_none()
     if order is None:
         return {"rows": [], "total": 0, "page": page, "page_size": page_size}
-    total = int(db.execute(
-        select(func.count(FMaintenanceLine.id))
-        .where(FMaintenanceLine.order_id == order.id,
-               FMaintenanceLine.is_active.is_(True))).scalar_one())
-    rows = db.execute(
-        select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id,
-                                       FMaintenanceLine.is_active.is_(True))
-        .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
-        .offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
+    total = int(
+        db.execute(
+            select(func.count(FMaintenanceLine.id)).where(
+                FMaintenanceLine.order_id == order.id,
+                FMaintenanceLine.is_active.is_(True),
+            )
+        ).scalar_one()
+    )
+    rows = (
+        db.execute(
+            select(FMaintenanceLine)
+            .where(
+                FMaintenanceLine.order_id == order.id,
+                FMaintenanceLine.is_active.is_(True),
+            )
+            .order_by(FMaintenanceLine.line_no, FMaintenanceLine.raw_line_id)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
     line_ids = [line.id for line in rows]
     overrides = {
         override.line_id: override
@@ -2183,7 +2563,8 @@ def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
         )
     }
     pools = maintenance_boss_facts.pool_membership(
-        db, {ln.pn_std for ln in rows if ln.pn_std})
+        db, {ln.pn_std for ln in rows if ln.pn_std}
+    )
     # 认不出型号时不断言「不在池」（铁律 5）：in_pool=None 表示无法判断
     no_pool = {"in_pool": False, "pool_name": None, "pool_status": None}
     unknown_pool = {"in_pool": None, "pool_name": None, "pool_status": None}
@@ -2224,47 +2605,63 @@ def order_lines(db: Session, *, user_ctx: UserContext, source_order_id: str,
                 envelope["state"] = "partial"
             return envelope
 
-        out.append({
-            "raw_line_id": ln.raw_line_id,
-            "pn_std": ln.pn_std, "pn_raw": ln.pn_raw,
-            # 归档池在前端是黄色警示（plan §4.5）
-            "pool": (pools.get(ln.pn_std, dict(no_pool)) if ln.pn_std
-                     else dict(unknown_pool)),
-            "description": ln.description,
-            "qty": ln.qty, "return_qty": ln.return_qty,
-            # 14 个流转状态列原样（铁律 3：不计算、不标注）
-            "purchase_qty": ln.purchase_qty,
-            "purchased_qty": ln.purchased_qty,
-            "pending_purchase_qty": ln.pending_purchase_qty,
-            "direct_ship_qty": ln.direct_ship_qty,
-            "warehouse_need_qty": ln.warehouse_need_qty,
-            "warehouse_shipped_qty": ln.warehouse_shipped_qty,
-            "supplied_qty": ln.supplied_qty,
-            "pending_supply_qty": ln.pending_supply_qty,
-            "returned_qty": ln.returned_qty,
-            "pending_return_qty": ln.pending_return_qty,
-            "consumed_qty": ln.consumed_qty,
-            "demand_pending_return_qty": ln.demand_pending_return_qty,
-            "change_warehouse_purchase_qty": ln.change_warehouse_purchase_qty,
-            "return_old_part": ln.return_old_part,
-            "serial_numbers": ln.serial_numbers,
-            # 成本与取价来源同属成本数据组（无权限时整体 restricted，无侧信道）
-            "known_apply_cost_inc_tax": (
-                cost_stat(inc["amount"], inc["tier"])),
-            "unit_cost_ex_tax": cost_stat(
-                (override.unit_cost_ex_tax if ex["source"] == "manual" and override
-                 else ln.unit_cost_ex_tax if ex["tier"] != "missing" else None),
-                ex["tier"],
-            ),
-            "unit_cost_inc_tax": cost_stat(
-                (override.unit_cost_inc_tax if inc["source"] == "manual" and override
-                 else ln.unit_cost_inc_tax if inc["tier"] != "missing" else None),
-                inc["tier"],
-            ),
-            "cost_source": cost_stat(resolved_source, inc["tier"]),
-            "confidence": cost_stat(
-                "high" if resolved_source == "manual" else ln.confidence,
-                inc["tier"],
-            ),
-        })
+        out.append(
+            {
+                "raw_line_id": ln.raw_line_id,
+                "pn_std": ln.pn_std,
+                "pn_raw": ln.pn_raw,
+                # 归档池在前端是黄色警示（plan §4.5）
+                "pool": (
+                    pools.get(ln.pn_std, dict(no_pool))
+                    if ln.pn_std
+                    else dict(unknown_pool)
+                ),
+                "description": ln.description,
+                "qty": ln.qty,
+                "return_qty": ln.return_qty,
+                # 14 个流转状态列原样（铁律 3：不计算、不标注）
+                "purchase_qty": ln.purchase_qty,
+                "purchased_qty": ln.purchased_qty,
+                "pending_purchase_qty": ln.pending_purchase_qty,
+                "direct_ship_qty": ln.direct_ship_qty,
+                "warehouse_need_qty": ln.warehouse_need_qty,
+                "warehouse_shipped_qty": ln.warehouse_shipped_qty,
+                "supplied_qty": ln.supplied_qty,
+                "pending_supply_qty": ln.pending_supply_qty,
+                "returned_qty": ln.returned_qty,
+                "pending_return_qty": ln.pending_return_qty,
+                "consumed_qty": ln.consumed_qty,
+                "demand_pending_return_qty": ln.demand_pending_return_qty,
+                "change_warehouse_purchase_qty": ln.change_warehouse_purchase_qty,
+                "return_old_part": ln.return_old_part,
+                "serial_numbers": ln.serial_numbers,
+                # 成本与取价来源同属成本数据组（无权限时整体 restricted，无侧信道）
+                "known_apply_cost_inc_tax": (cost_stat(inc["amount"], inc["tier"])),
+                "unit_cost_ex_tax": cost_stat(
+                    (
+                        override.unit_cost_ex_tax
+                        if ex["source"] == "manual" and override
+                        else ln.unit_cost_ex_tax
+                        if ex["tier"] != "missing"
+                        else None
+                    ),
+                    ex["tier"],
+                ),
+                "unit_cost_inc_tax": cost_stat(
+                    (
+                        override.unit_cost_inc_tax
+                        if inc["source"] == "manual" and override
+                        else ln.unit_cost_inc_tax
+                        if inc["tier"] != "missing"
+                        else None
+                    ),
+                    inc["tier"],
+                ),
+                "cost_source": cost_stat(resolved_source, inc["tier"]),
+                "confidence": cost_stat(
+                    "high" if resolved_source == "manual" else ln.confidence,
+                    inc["tier"],
+                ),
+            }
+        )
     return {"rows": out, "total": total, "page": page, "page_size": page_size}

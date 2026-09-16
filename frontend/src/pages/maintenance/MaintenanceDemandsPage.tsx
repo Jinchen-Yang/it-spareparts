@@ -17,6 +17,7 @@ import { UploadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type {
   MaintenanceDemandSummary,
+  MaintenanceDemandSearchRow,
 } from "../../api/maintenanceDemands";
 import {
   restoreMaintenanceDemand,
@@ -26,6 +27,7 @@ import {
 import type { WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImport";
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
+import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
 
 const { Title, Text } = Typography;
 
@@ -68,7 +70,7 @@ export function MaintenanceDemandsPage() {
   // ---- 区块二：需求单查询 ----
   const [keyword, setKeyword] = useState("");
   const [includeVoided, setIncludeVoided] = useState(false);
-  const [demands, setDemands] = useState<MaintenanceDemandSummary[]>([]);
+  const [demands, setDemands] = useState<MaintenanceDemandSearchRow[]>([]);
   const [demandsTotal, setDemandsTotal] = useState(0);
   const [demandPage, setDemandPage] = useState(1);
   const [demandsLoading, setDemandsLoading] = useState(false);
@@ -271,7 +273,7 @@ export function MaintenanceDemandsPage() {
     },
   ];
 
-  const demandColumns: ColumnsType<MaintenanceDemandSummary> = [
+  const demandColumns: ColumnsType<MaintenanceDemandSearchRow> = [
     {
       title: "需求单号",
       dataIndex: "order_no",
@@ -294,6 +296,12 @@ export function MaintenanceDemandsPage() {
       render: (v) => v ?? "—",
     },
     { title: "明细行数", dataIndex: "line_count", width: 90, align: "right" },
+    {
+      title: "联系信息",
+      key: "contact_info",
+      width: 340,
+      render: (_: unknown, row) => <OrderContactInfo contact={row} />,
+    },
     ...(canVoid
       ? ([
           {
@@ -317,7 +325,7 @@ export function MaintenanceDemandsPage() {
                 </Button>
               ),
           },
-        ] as ColumnsType<MaintenanceDemandSummary>)
+        ] as ColumnsType<MaintenanceDemandSearchRow>)
       : []),
   ];
 
@@ -431,12 +439,13 @@ export function MaintenanceDemandsPage() {
             </Space>
           </Space>
 
-          <Table<MaintenanceDemandSummary>
+          <Table<MaintenanceDemandSearchRow>
             rowKey="source_order_id"
             size="small"
             loading={demandsLoading}
             dataSource={demands}
             columns={demandColumns}
+            scroll={{ x: 1300 }}
             rowClassName={(row) => (isVoided(row) ? "demand-row-voided" : "")}
             locale={{ emptyText: "没有符合条件的需求单；换个关键词，或打开「含已作废」再试" }}
             pagination={{

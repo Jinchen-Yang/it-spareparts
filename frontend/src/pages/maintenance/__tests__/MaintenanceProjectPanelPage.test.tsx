@@ -612,7 +612,7 @@ describe("项目面板", () => {
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("business_type");
   });
 
-  it.each(["整体维保", "备件维保", "算力运维", "非维保", "未标注"])("基本信息可将业务类型改成 %s，携带版本和审计原因", async (label) => {
+  it.each(["整体维保", "备件维保", "算力运维", "拆改配服务", "非维保", "未标注"])("基本信息可将业务类型改成 %s，携带版本和审计原因", async (label) => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",

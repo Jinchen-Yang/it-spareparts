@@ -1,4 +1,5 @@
 import { api } from "../api";
+import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
 
 export interface MaintenanceDemandReference {
   kind: string;
@@ -27,11 +28,14 @@ export interface MaintenanceDemandSearchInput {
 }
 
 export interface MaintenanceDemandSearchResult {
-  items: MaintenanceDemandSummary[];
+  items: MaintenanceDemandSearchRow[];
   total: number;
   page: number;
   page_size: number;
 }
+
+/** Contact fields belong to search reads, never deletion-intent snapshots. */
+export interface MaintenanceDemandSearchRow extends MaintenanceDemandSummary, MaintenanceOrderContact {}
 
 export type MaintenanceDemandDeleteIntentStatus =
   | "reviewed"

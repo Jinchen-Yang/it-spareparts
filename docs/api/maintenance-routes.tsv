@@ -5,6 +5,7 @@ GET	/api/maintenance/acceptance-files/{file_id}	page_maintenance
 GET	/api/maintenance/ai-fallback/proposals	page_maintenance		
 POST	/api/maintenance/ai-fallback/propose	page_maintenance		
 POST	/api/maintenance/ai-fallback/{proposal_id}/accept	page_maintenance		
+GET	/api/maintenance/analytics/filter-options	page_maintenance
 GET	/api/maintenance/analytics/pn-ranking	page_maintenance
 GET	/api/maintenance/as-of	page_maintenance		
 POST	/api/maintenance/bad-returns	page_maintenance	action_maintenance_bad_return_manage	
