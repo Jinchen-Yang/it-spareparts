@@ -46,6 +46,8 @@ services:
       DATABASE_URL: postgresql+psycopg://spareparts:${POSTGRES_PASSWORD:-spareparts}@db:5432/spareparts
       RAW_FILE_DIR: /app/data/raw
       MCP_ENABLED: ${MCP_ENABLED:-false}
+      MCP_TEST_ENVIRONMENT: ${MCP_TEST_ENVIRONMENT:-false}
+      MCP_DATASET_LABEL: ${MCP_DATASET_LABEL:-}
       MCP_CONFIRM_ENABLED: ${MCP_CONFIRM_ENABLED:-false}
       MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
       MCP_MAX_FILE_BYTES: ${MCP_MAX_FILE_BYTES:-20971520}

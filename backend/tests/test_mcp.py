@@ -556,3 +556,19 @@ def test_parallel_upload_requests_respect_employee_quota(db, employee):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(submit, range(2))) == [200, 429]
+
+
+def test_test_environment_is_explicit_and_label_is_escaped(employee, monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mcp_test_environment", True)
+    monkeypatch.setattr(settings, "mcp_dataset_label", "TEST snapshot <script>unsafe</script>")
+    page = employee.get("/mcp-office")
+    assert page.status_code == 200
+    assert "开发测试环境 · 非生产系统" in page.text
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" in page.text
+    assert "<script>unsafe</script>" not in page.text
+    environment = call(employee, "pf_get_capabilities")["environment"]
+    assert environment["is_test"] is True
+    assert environment["dataset_label"] == settings.mcp_dataset_label
+    monkeypatch.setattr(settings, "mcp_test_environment", False)
+    assert "开发测试环境 · 非生产系统" not in employee.get("/mcp-office").text

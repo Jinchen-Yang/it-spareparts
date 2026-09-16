@@ -1,0 +1,28 @@
+{
+  "base": "https://mcp-test.yabowei.xyz",
+  "project_id": "059f6ecd-55bb-43f2-94b0-cf9c36160916",
+  "preview_id": "d0cd0379-aee9-4132-91ef-1b3b21b787fc",
+  "checks": [
+    "Public HTTPS and visible TEST database label",
+    "Official MCP client initialize / 16 tools / TEST capabilities over public HTTPS",
+    "Upload / durable worker preview / named TEST project confirmation and receipt",
+    "Worker export / protected download / SHA-256 match",
+    "Restored PN and inventory queries; download completion audit",
+    "Revoked personal token rejected"
+  ],
+  "date": "2026-09-16",
+  "test_database": "partflow_mcp_test_20260916",
+  "restored_pn_rows": 28273,
+  "production_pn_rows_at_check": 28273,
+  "production_schema": "e3a7b9c2d4f6",
+  "test_schema": "a16b7c8d9e01",
+  "production_active_accounts": 73,
+  "test_active_accounts": 1,
+  "production_contains_test_account": false,
+  "production_contains_test_project": false,
+  "production_https_status": 200,
+  "browser": "public HTTPS login and desktop/mobile passed",
+  "workbuddy_macbook": "awaiting user client test",
+  "image_id": "sha256:95154b1208ea00c0358759a9d01cf36c288a464e133b55e33da15416744261f7",
+  "backup_sha256": "eb181e165a474e7f2364dc0e5a83ab0d65131e35bb0fe127bd3aa286bbd1f2f1"
+}

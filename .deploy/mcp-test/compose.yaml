@@ -1,0 +1,59 @@
+name: partflow-mcp-test
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+services:
+  db:
+    image: postgres:15
+    container_name: partflow-mcp-test-db
+    environment:
+      POSTGRES_USER: partflow_mcp_test
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?required}
+      POSTGRES_DB: partflow_mcp_test_20260916
+    volumes: ["test_database:/var/lib/postgresql/data"]
+    networks: [test_only]
+    restart: unless-stopped
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U partflow_mcp_test -d partflow_mcp_test_20260916"]
+      interval: 5s
+      retries: 12
+  app:
+    image: partflow-mcp-test:20260916
+    container_name: partflow-mcp-test-app
+    env_file: [.env]
+    volumes: ["./raw:/app/data/raw"]
+    networks: [test_only]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
+    logging: *logging
+  worker:
+    image: partflow-mcp-test:20260916
+    container_name: partflow-mcp-test-worker
+    env_file: [.env]
+    command: [python, -m, app.mcp.worker]
+    volumes: ["./raw:/app/data/raw"]
+    networks: [test_only]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
+    logging: *logging
+  gateway:
+    image: it-spareparts-frontend:release-0422c35
+    container_name: partflow-mcp-test-gateway
+    ports: ["127.0.0.1:18093:80"]
+    volumes: ["./nginx-test.conf:/etc/nginx/conf.d/default.conf:ro"]
+    networks: [test_only, test_ingress]
+    depends_on: [app]
+    restart: unless-stopped
+    logging: *logging
+networks:
+  test_ingress:
+    name: partflow-mcp-test-ingress
+  test_only:
+    name: partflow-mcp-test-isolated
+    internal: true
+volumes:
+  test_database:
+    name: partflow_mcp_test_database_20260916

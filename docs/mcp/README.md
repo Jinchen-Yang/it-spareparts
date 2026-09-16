@@ -63,3 +63,9 @@
 `backend/tests/test_mcp_browser.py` 是可选真实浏览器验收，同时使用官方Python MCP客户端连接真实HTTP端口。设置 `MCP_BROWSER_PYTHON` 为安装Playwright的Python路径；可选 `MCP_BROWSER_EXECUTABLE` 指定Chromium、`MCP_BROWSER_OUTPUT` 指定截图目录。合成数据走登录→上传→审阅→提交→导出→下载→审计，检查桌面/手机布局与脚本错误。
 
 运行记录见 [验收记录](acceptance.md)。浏览器/官方SDK通过不等于员工WorkBuddy客户端实测通过；生产发布、客户端联调分别记录。
+
+## 独立开发测试环境（2026-09-16）
+
+已按用户授权在生产主机上创建**独立数据库副本与独立服务**，入口为 `https://mcp-test.yabowei.xyz/mcp-office`，不是生产系统上线。生产 `ybwznt.com` 未启用 MCP。公网官方 SDK 与文件往返验证已通过；MacBook WorkBuddy 待客户端实际连接。部署、数据隔离及停用方式见 [测试部署记录](../../.deploy/mcp-test/README.md)。
+
+`MCP_TEST_ENVIRONMENT=true` 在网页及协议中标记测试，`MCP_DATASET_LABEL` 标明快照日期和数据库名；这些展示标识不能替代独立数据库、卷、密钥和网络隔离。

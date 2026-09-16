@@ -1,6 +1,7 @@
 """Authenticated file data plane and human review UI; PAT cannot confirm writes."""
 
 import hashlib
+import html
 import secrets
 from datetime import timedelta
 from pathlib import Path
@@ -330,8 +331,17 @@ def download(artifact_id: str, actor: Annotated[Actor, Depends(web_actor)]):
 @router.get("/mcp-office", response_class=HTMLResponse)
 def office():
     enabled()
+    settings = get_settings()
+    banner = ""
+    if settings.mcp_test_environment:
+        banner = (
+            '<section role="status" style="background:#fff3cd;border:2px solid #ad6800">'
+            '<strong>开发测试环境 · 非生产系统</strong><br>'
+            + html.escape(settings.mcp_dataset_label)
+            + '<br>所有上传、确认和修改仅写入测试数据库。</section>'
+        )
     return HTMLResponse(
-        Path(__file__).with_name("office.html").read_text(),
+        Path(__file__).with_name("office.html").read_text().replace("<main>", "<main>" + banner),
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",

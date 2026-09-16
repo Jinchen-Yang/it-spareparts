@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     # Employee MCP: disabled by default; native business feature gates still apply.
     mcp_enabled: bool = False
+    mcp_test_environment: bool = False
+    mcp_dataset_label: str = Field(default="", max_length=200)
     mcp_confirm_enabled: bool = False
     mcp_public_base_url: str = "http://127.0.0.1:8000"
     mcp_max_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)

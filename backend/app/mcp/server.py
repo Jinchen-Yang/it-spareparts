@@ -10,7 +10,15 @@ from starlette.responses import JSONResponse
 from app.mcp.core import McpError, actor_context, authenticate, get_settings, json
 from app.mcp.tools import REGISTRY, invoke, tool_allowed
 
-server = Server("PARTFLOW", version="1.0.0")
+server = Server(
+    "PARTFLOW-TEST" if get_settings().mcp_test_environment else "PARTFLOW",
+    version="1.0.0",
+    instructions=(
+        "开发测试环境：连接的是独立测试数据库，操作不代表生产业务。"
+        "先调用 pf_get_capabilities 核对数据快照标签。"
+        if get_settings().mcp_test_environment else None
+    ),
+)
 
 
 @server.list_tools()

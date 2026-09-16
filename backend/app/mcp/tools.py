@@ -129,6 +129,11 @@ def dispatch(db, actor, name, args):
                 }
         return {
             "actor_display": actor.name,
+            "environment": {
+                "is_test": get_settings().mcp_test_environment,
+                "dataset_label": get_settings().mcp_dataset_label,
+                "base_url": get_settings().mcp_public_base_url,
+            },
             "enabled_tools": [n for n in REGISTRY if tool_allowed(actor, n)],
             "families": families,
             "capability_version": "1.0",
