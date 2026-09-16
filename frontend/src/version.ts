@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.33.0";
+export const APP_VERSION = "1.34.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.34.0",
+    date: "2026-09-17",
+    items: [
+      "维保数据分析新增「开支统计」页签：开支按天/周/月/年分桶展示，堆叠柱状图 + 按期明细，含合计行",
+      "开支可按业务类型拆分（整体维保/备件维保/算力运维/拆改配服务/非维保/未标注/未归属），并新增按销售汇总，支持按销售名称筛选",
+      "开支统计与 PN 排名共用全字段筛选，金额为已知成本合计（缺价行单列不按 0 计）；粒度与筛选写入网址，刷新保留",
+    ],
+  },
   {
     version: "1.33.0",
     date: "2026-09-16",
