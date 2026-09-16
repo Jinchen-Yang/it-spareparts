@@ -12,6 +12,7 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import ProjectProcurementPanel from "../../../components/maintenance/ProjectProcurementPanel";
+import OrderContactInfo from "../../../components/maintenance/OrderContactInfo";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import {
   COST_CATEGORY_LEGEND,
@@ -208,6 +209,12 @@ export function PartsOrdersTab({
     },
     { title: "销售订单", dataIndex: "linked_sales_order_no", render: raw },
     { title: "制单日期", dataIndex: "order_date", render: raw },
+    {
+      title: "联系信息",
+      key: "contact_info",
+      width: 340,
+      render: (_: unknown, order) => <OrderContactInfo contact={order} />,
+    },
     { title: "数据状态", dataIndex: "data_status", render: raw },
     { title: "明细行", dataIndex: "line_count" },
     {
@@ -306,6 +313,7 @@ export function PartsOrdersTab({
           loading={ordersLoading}
           dataSource={orders}
           columns={orderColumns}
+          scroll={{ x: 1500 }}
           pagination={{
             current: ordersPage,
             pageSize: ORDERS_PAGE_SIZE,

@@ -9,6 +9,11 @@ tests run with `pytest` against a Postgres on `:5433`; CI runs backend pytest + 
 To **run / drive the app locally** (launch the stack, smoke the API, screenshot the UI), use the
 `run-it-spareparts` skill (`.claude/skills/run-it-spareparts/`).
 
+For **user access testing (点按验收)**, the user deploys the frontend build to
+**https://test.yunci.ink** and click-tests there. For UI changes: finish local regression
+(pytest / vitest / `tsc && vite build`), then report the change as ready and let the user
+deploy + click through — agent-driven browser QA is for development-time debugging only.
+
 ## Agent skills
 
 The engineering skills (`to-issues`, `triage`, `to-prd`, `diagnose`, `improve-codebase-architecture`,

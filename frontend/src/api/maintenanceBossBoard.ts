@@ -1,4 +1,5 @@
 import { api } from "../api";
+import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
 
 /**
  * 维保展示板 API 客户端（plan v1.3 §4.4/§4.5）。
@@ -97,8 +98,8 @@ export type BoardProjectLifecycle =
   | "all";
 export type BoardProjectSort = "attention" | "orders" | "name" | "known_cost" | "cost_ratio";
 /**
- * 业务类型档位（2026-09-08）。维保只有三种业务类型（整体维保 / 备件维保 / 算力运维），
- * 另加「非维保」与「未标注」两档。
+ * 业务类型档位（2026-09-08；2026-09-16 新增「拆改配服务」）。维保业务类型为
+ * 整体维保 / 备件维保 / 算力运维 / 拆改配服务，另加「非维保」与「未标注」两档。
  *
  * `unlabeled` 是**显式一档且默认选中**：生产 648 个项目里 647 个 business_type 为空，
  * 把它排除掉等于把卡墙筛空（R5：项目不得静默消失）。
@@ -107,15 +108,17 @@ export type BoardBusinessTypeCode =
   | "overall"
   | "spare"
   | "computing"
+  | "refit"
   | "other"
   | "unlabeled";
 export const BOARD_BUSINESS_TYPE_CODES: BoardBusinessTypeCode[] = [
-  "overall", "spare", "computing", "other", "unlabeled",
+  "overall", "spare", "computing", "refit", "other", "unlabeled",
 ];
 export const BOARD_BUSINESS_TYPE_LABELS: Record<BoardBusinessTypeCode, string> = {
   overall: "整体维保",
   spare: "备件维保",
   computing: "算力运维",
+  refit: "拆改配服务",
   other: "非维保",
   unlabeled: "未标注",
 };
@@ -231,7 +234,7 @@ export interface BoardProjectExportDownload {
   filename: string;
 }
 
-export interface BoardOrderRow {
+export interface BoardOrderRow extends MaintenanceOrderContact {
   source_order_id: string;
   order_no: string;
   order_date: string | null;

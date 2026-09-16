@@ -157,9 +157,9 @@ describe("维保主页 · 业务类型筛选", () => {
     await toggleBusinessType("非维保");
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
     const chips = screen.getByRole("group", { name: "已应用筛选条件" });
-    expect(within(chips).getAllByRole("button")).toHaveLength(4);
-    expect(screen.getByTestId("active-filter-count").querySelector("[title='4']")).not.toBeNull();
-    for (const label of ["整体维保", "备件维保", "算力运维", "未标注"]) {
+    expect(within(chips).getAllByRole("button")).toHaveLength(5);
+    expect(screen.getByTestId("active-filter-count").querySelector("[title='5']")).not.toBeNull();
+    for (const label of ["整体维保", "备件维保", "算力运维", "拆改配服务", "未标注"]) {
       fireEvent.click(within(chips).getByRole("button", { name: `移除业务类型：${label}` }));
     }
     await waitFor(() => expect(lastArg(getBoardProjects)).toMatchObject({ business_type: "all" }));

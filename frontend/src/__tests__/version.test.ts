@@ -1,20 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.31.0 release notes", () => {
+describe("v1.33.0 release notes", () => {
+  it("publishes full-field analytics filters and the refit business type", () => {
+    expect(APP_VERSION).toBe("1.33.0");
+    expect(LATEST.version).toBe(APP_VERSION);
+    expect(LATEST.date).toBe("2026-09-16");
+    const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/全字段筛选/);
+    expect(notes).toMatch(/拆改配服务/);
+    expect(notes).toMatch(/重置一键清空/);
+  });
+});
+
+describe("v1.32.0 release notes (archived)", () => {
+  it("publishes contact visibility and project-classified analytics", () => {
+    const v132 = CHANGELOG.find((entry) => entry.version === "1.32.0")!;
+    expect(v132.date).toBe("2026-09-16");
+    const notes = v132.items.join("\n");
+    expect(notes).toMatch(/收货地址、联系人、电话/);
+    expect(notes).toMatch(/客户信息权限/);
+    expect(notes).toMatch(/当前所属项目/);
+    expect(notes).toMatch(/刷新保留筛选/);
+  });
+});
+
+describe("v1.31.0 release notes (archived)", () => {
   it("describes business-type editing and persistent collapsible filters", () => {
-    expect(LATEST.version).toBe("1.31.0");
-    expect(LATEST.date).toBe("2026-09-15");
-    expect(LATEST.items.join("\n")).toMatch(/业务类型下拉/);
-    expect(LATEST.items.join("\n")).toMatch(/展开与收起/);
-    expect(LATEST.items.join("\n")).toMatch(/排序不计入条件/);
+    const v131 = CHANGELOG.find((entry) => entry.version === "1.31.0")!;
+    expect(v131.date).toBe("2026-09-15");
+    expect(v131.items.join("\n")).toMatch(/业务类型下拉/);
+    expect(v131.items.join("\n")).toMatch(/展开与收起/);
+    expect(v131.items.join("\n")).toMatch(/排序不计入条件/);
   });
 });
 
 describe("v1.29.0 release notes (archived)", () => {
   const v129 = CHANGELOG.find((entry) => entry.version === "1.29.0")!;
   it("publishes the business-type filter and the workbook rebase fixes", () => {
-    expect(APP_VERSION).toBe("1.31.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
     expect(v129.date).toBe("2026-09-08");

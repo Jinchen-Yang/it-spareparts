@@ -43,6 +43,10 @@ const orderRow = (no: string, contract: string) => ({
   linked_sales_order_no: contract,
   project_raw: "合成项目A",
   is_pre_delivery: false,
+  contact_info_state: "visible" as "visible" | "restricted",
+  receiver_address: null as string | null,
+  receiver: null as string | null,
+  receiver_phone: null as string | null,
   line_count: 1,
   known_apply_cost_inc_tax: stat({
     actual_amount: "100.00", estimated_amount: "0.00", known_amount: "100.00",
@@ -144,6 +148,49 @@ afterEach(() => {
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
+  it("在各需求单行渲染联系信息及完整值，空字段显示 — 并区分无权限", async () => {
+    const address = "合成长地址路".repeat(70) + "1号楼";
+    mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([
+      { ...orderRow("WBDD-1", "XSDD-1"), receiver_address: address,
+        receiver: "联系人甲", receiver_phone: "010-00123456" },
+      { ...orderRow("WBDD-2", "XSDD-1"), receiver_address: "乙市2号",
+        receiver: "联系人乙", receiver_phone: "00123456789" },
+      orderRow("WBDD-3", "XSDD-1"),
+      { ...orderRow("WBDD-4", "XSDD-1"), contact_info_state: "restricted" },
+    ]));
+    renderTab();
+    await screen.findByText("联系人甲");
+    expect(screen.getByRole("columnheader", { name: "联系信息" })).toBeInTheDocument();
+
+    const first = within(orderLink("WBDD-1")!.closest("tr")!);
+    const firstContact = within(first.getByText("收货地址：").closest("td")!);
+    expect(firstContact.getByText("联系人：")).toBeInTheDocument();
+    expect(firstContact.getByText("电话：")).toBeInTheDocument();
+    expect(firstContact.getByText(address)).toBeInTheDocument();
+    expect(firstContact.getByText("联系人甲")).toBeInTheDocument();
+    expect(firstContact.getByText("010-00123456")).toBeInTheDocument();
+    expect(firstContact.getAllByRole("button")).toHaveLength(3);
+    expect(firstContact.queryByText("联系人乙")).toBeNull();
+
+    const second = within(orderLink("WBDD-2")!.closest("tr")!);
+    const secondContact = within(second.getByText("收货地址：").closest("td")!);
+    expect(secondContact.getByText("乙市2号")).toBeInTheDocument();
+    expect(secondContact.getByText("联系人乙")).toBeInTheDocument();
+    expect(secondContact.getByText("00123456789")).toBeInTheDocument();
+    expect(secondContact.queryByText("联系人甲")).toBeNull();
+
+    const empty = within(orderLink("WBDD-3")!.closest("tr")!);
+    const emptyContact = within(empty.getByText("收货地址：").closest("td")!);
+    expect(emptyContact.getAllByText("—")).toHaveLength(3);
+    expect(emptyContact.queryByRole("button")).toBeNull();
+    expect(emptyContact.queryByText("无权限查看联系信息")).toBeNull();
+
+    const restricted = within(orderLink("WBDD-4")!.closest("tr")!);
+    const restrictedContact = within(restricted.getByText("无权限查看联系信息").closest("td")!);
+    expect(restrictedContact.queryByText("—")).toBeNull();
+    expect(restrictedContact.queryByRole("button")).toBeNull();
+  });
+
   it("合同筛选走服务端相等（不是单号包含匹配），并清空已选需求单", async () => {
     renderTab();
     await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());

@@ -16,6 +16,7 @@
 MaintenanceProject 行，单列可直接下推 SQL，total / 分页 / 排序天然正确；派生会重演
 card_status 的 total 失真，且对零单据项目给不出值。
 """
+
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -61,13 +62,15 @@ def _get(client, **params) -> dict:
     return response.json()
 
 
-# ---------- 五档分派 ----------
+# ---------- 六档分派 ----------
+
 
 def test_each_code_selects_exactly_its_own_projects(db):
     projects = {
         "overall": _project(db, "整体维保项目", business_type="整体维保"),
         "spare": _project(db, "备件维保项目", business_type="备件维保"),
         "computing": _project(db, "算力运维项目", business_type="算力运维"),
+        "refit": _project(db, "拆改配服务项目", business_type="拆改配服务"),
         "other": _project(db, "整机销售项目", business_type="整机销售"),
         "blank": _project(db, "空串项目", business_type=""),
         "null": _project(db, "未标注项目", business_type=None),
@@ -77,14 +80,19 @@ def test_each_code_selects_exactly_its_own_projects(db):
     assert _ids(_get(client, lifecycle="all", business_type="overall")) == {
         projects["overall"].project_id
     }
+    assert _ids(_get(client, lifecycle="all", business_type="refit")) == {
+        projects["refit"].project_id
+    }
     assert _ids(_get(client, lifecycle="all", business_type="other")) == {
         projects["other"].project_id
     }
     assert _ids(_get(client, lifecycle="all", business_type="unlabeled")) == {
-        projects["blank"].project_id, projects["null"].project_id
+        projects["blank"].project_id,
+        projects["null"].project_id,
     }
     assert _ids(_get(client, lifecycle="all", business_type="overall,computing")) == {
-        projects["overall"].project_id, projects["computing"].project_id
+        projects["overall"].project_id,
+        projects["computing"].project_id,
     }
 
     every = {p.project_id for p in projects.values()}
@@ -92,8 +100,8 @@ def test_each_code_selects_exactly_its_own_projects(db):
     assert every <= _ids(_get(client, lifecycle="all"))
 
 
-def test_five_codes_partition_the_cohort_and_null_never_falls_out(db):
-    """母集恒等式（分档版）：五档之和 == 全集，且两两不相交。
+def test_six_codes_partition_the_cohort_and_null_never_falls_out(db):
+    """母集恒等式（分档版）：六档之和 == 全集，且两两不相交。
 
     这条是防「NULL 掉出所有档」的看门测试——SQL 三值逻辑下，无论写成 IN(三值) 还是
     NOT IN(三值)，NULL 两边都进不去，一旦这么实现，647 个生产项目会凭空消失。
@@ -102,6 +110,7 @@ def test_five_codes_partition_the_cohort_and_null_never_falls_out(db):
     _project(db, "整体维保项目", business_type="整体维保")
     _project(db, "备件维保项目", business_type="备件维保")
     _project(db, "算力运维项目", business_type="算力运维")
+    _project(db, "拆改配服务项目", business_type="拆改配服务")
     _project(db, "整机销售项目", business_type="整机销售")
     _project(db, "空串项目", business_type="")
     _project(db, "未标注项目", business_type=None)
@@ -109,7 +118,7 @@ def test_five_codes_partition_the_cohort_and_null_never_falls_out(db):
 
     buckets = {
         code: _ids(_get(client, lifecycle="all", business_type=code))
-        for code in ("overall", "spare", "computing", "other", "unlabeled")
+        for code in ("overall", "spare", "computing", "refit", "other", "unlabeled")
     }
     everything = _ids(_get(client, lifecycle="all", business_type="all"))
     everything -= {board.UNASSIGNED_BUCKET}
@@ -127,17 +136,23 @@ def test_trimmed_value_is_not_mistaken_for_another_business(db):
 
     padded = _project(db, "带空格项目", business_type=" 整体维保 ")
     client = boss_client(db)
-    assert padded.project_id in _ids(_get(client, lifecycle="all", business_type="overall"))
-    assert padded.project_id not in _ids(_get(client, lifecycle="all", business_type="other"))
+    assert padded.project_id in _ids(
+        _get(client, lifecycle="all", business_type="overall")
+    )
+    assert padded.project_id not in _ids(
+        _get(client, lifecycle="all", business_type="other")
+    )
 
 
 # ---------- 与既有筛选叠加 ----------
 
+
 def test_business_type_stacks_with_lifecycle(db):
     ongoing_overall = _project(db, "进行中整体维保", business_type="整体维保")
     _project(db, "进行中整机销售", business_type="整机销售")
-    ended_overall = _project(db, "已结束整体维保", business_type="整体维保",
-                             lifecycle="ended")
+    ended_overall = _project(
+        db, "已结束整体维保", business_type="整体维保", lifecycle="ended"
+    )
     client = boss_client(db)
 
     assert _ids(_get(client, lifecycle="ongoing", business_type="overall")) == {
@@ -170,28 +185,33 @@ def test_business_type_stacks_with_payment_complete_without_weakening_its_gate(d
         )
         db.add(relation)
         db.flush()
-        db.add(MaintenanceCollectionSnapshot(
-            collection_id=str(uuid.uuid4()),
-            project_id=project.project_id,
-            project_contract_id=relation.project_contract_id,
-            report_month=date(2026, 8, 1),
-            cumulative_amount=Decimal("1000.00"),
-            status="confirmed",
-            source="direct_api",
-            version=1,
-        ))
+        db.add(
+            MaintenanceCollectionSnapshot(
+                collection_id=str(uuid.uuid4()),
+                project_id=project.project_id,
+                project_contract_id=relation.project_contract_id,
+                report_month=date(2026, 8, 1),
+                cumulative_amount=Decimal("1000.00"),
+                status="confirmed",
+                source="direct_api",
+                version=1,
+            )
+        )
     db.commit()
 
     client = boss_client(db)
-    assert _ids(_get(client, lifecycle="payment_complete", business_type="overall")) == {
-        paid.project_id
-    }
+    assert _ids(
+        _get(client, lifecycle="payment_complete", business_type="overall")
+    ) == {paid.project_id}
 
     # 业务类型本身不需要合同财务权限
     no_profit = boss_client(db, username="board-no-profit", with_profit=False)
-    assert no_profit.get(
-        "/api/maintenance/boss-board/projects?lifecycle=ongoing&business_type=overall"
-    ).status_code == 200
+    assert (
+        no_profit.get(
+            "/api/maintenance/boss-board/projects?lifecycle=ongoing&business_type=overall"
+        ).status_code
+        == 200
+    )
     # 但既有的 payment_complete 门禁不能被新参数绕开
     blocked = no_profit.get(
         "/api/maintenance/boss-board/projects"
@@ -201,6 +221,7 @@ def test_business_type_stacks_with_payment_complete_without_weakening_its_gate(d
 
 
 # ---------- 行字段与桶 ----------
+
 
 def test_rows_carry_business_type_and_code(db):
     labelled = _project(db, "整体维保项目", business_type="整体维保")
@@ -219,9 +240,7 @@ def test_unassigned_bucket_keeps_the_key_set_and_stays_out_of_filtered_views(db)
     client = boss_client(db)
 
     default_rows = _get(client, lifecycle="all")["rows"]
-    bucket = next(
-        r for r in default_rows if r["project_id"] == board.UNASSIGNED_BUCKET
-    )
+    bucket = next(r for r in default_rows if r["project_id"] == board.UNASSIGNED_BUCKET)
     assert bucket["business_type"] is None
     assert bucket["business_type_code"] == "unlabeled"
 
@@ -232,6 +251,7 @@ def test_unassigned_bucket_keeps_the_key_set_and_stays_out_of_filtered_views(db)
 
 
 # ---------- 隐藏可计数、可撤销 ----------
+
 
 def test_hidden_count_tells_the_user_what_the_filter_swallowed(db):
     _project(db, "整体维保项目", business_type="整体维保")
@@ -257,27 +277,41 @@ def test_hidden_count_uses_the_same_other_filters(db):
 
     ongoing = _get(client, lifecycle="ongoing", business_type="overall")
     assert ongoing["total"] == 1
-    assert ongoing["business_type_hidden"] == 1, "已结束那个不在 ongoing 条件内，不该计入"
+    assert ongoing["business_type_hidden"] == 1, (
+        "已结束那个不在 ongoing 条件内，不该计入"
+    )
 
 
 def _payment_pair(db, prefix, *, business_type, lifecycle):
     pair = []
     for paid in (False, True):
-        project = _project(db, f"{prefix}-{int(paid)}", business_type=business_type,
-                           lifecycle=lifecycle)
+        project = _project(
+            db,
+            f"{prefix}-{int(paid)}",
+            business_type=business_type,
+            lifecycle=lifecycle,
+        )
         _collected(db, project, _contract(db, project), "1000" if paid else "500")
         pair.append(project)
     db.commit()
     return pair  # unpaid, paid
 
 
-@pytest.mark.parametrize("lifecycle", ["payment_complete", "ongoing", "ended", "missing"])
-def test_hidden_count_recomputes_payment_membership_across_business_types(db, lifecycle):
+@pytest.mark.parametrize(
+    "lifecycle", ["payment_complete", "ongoing", "ended", "missing"]
+)
+def test_hidden_count_recomputes_payment_membership_across_business_types(
+    db, lifecycle
+):
     period = "ongoing" if lifecycle == "payment_complete" else lifecycle
     pairs = {
         code: _payment_pair(db, code, business_type=kind, lifecycle=period)
-        for code, kind in (("overall", "整体维保"), ("spare", "备件维保"),
-                           ("other", "整机销售"), ("unlabeled", None))
+        for code, kind in (
+            ("overall", "整体维保"),
+            ("spare", "备件维保"),
+            ("other", "整机销售"),
+            ("unlabeled", None),
+        )
     }
     client = boss_client(db)
     # Clearing only the business-type selection defines the hidden count.
@@ -287,23 +321,38 @@ def test_hidden_count_recomputes_payment_membership_across_business_types(db, li
     selected = {pairs[code][index].project_id for code in ("overall", "spare")}
     seen = set()
     for page in (1, 2, 3):
-        filtered = _get(client, lifecycle=lifecycle, business_type="overall,spare",
-                        page=page, page_size=1)
+        filtered = _get(
+            client,
+            lifecycle=lifecycle,
+            business_type="overall,spare",
+            page=page,
+            page_size=1,
+        )
         assert filtered["total"] == 2
-        assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 2
+        assert (
+            filtered["business_type_hidden"]
+            == unfiltered["total"] - filtered["total"]
+            == 2
+        )
         assert len(filtered["rows"]) == (1 if page <= 2 else 0)
         seen |= _ids(filtered)
     assert seen == selected
 
 
-@pytest.mark.parametrize("lifecycle", ["payment_complete", "ongoing", "ended", "missing"])
+@pytest.mark.parametrize(
+    "lifecycle", ["payment_complete", "ongoing", "ended", "missing"]
+)
 def test_hidden_payment_count_preserves_query_scope_and_activity_filters(db, lifecycle):
     from tests.test_maintenance_return_receipts_api import _wbdd
 
     period = "ongoing" if lifecycle == "payment_complete" else lifecycle
     allowed = set()
     expected = {}
-    for code, kind in (("overall", "整体维保"), ("spare", "备件维保"), ("other", "整机销售")):
+    for code, kind in (
+        ("overall", "整体维保"),
+        ("spare", "备件维保"),
+        ("other", "整机销售"),
+    ):
         pair = _payment_pair(db, f"MATCH-{code}", business_type=kind, lifecycle=period)
         allowed.update(p.project_id for p in pair)
         expected[code] = pair[int(lifecycle == "payment_complete")].project_id
@@ -317,35 +366,54 @@ def test_hidden_payment_count_preserves_query_scope_and_activity_filters(db, lif
             elif prefix == "MATCH-archived":
                 project.is_active = False
         db.commit()
-    args = dict(user_ctx=UserContext(user_id="viewer", role="boss"), lifecycle=lifecycle,
-                q_text="MATCH", allowed_project_ids=allowed, has_activity=False, page_size=1)
+    args = dict(
+        user_ctx=UserContext(user_id="viewer", role="boss"),
+        lifecycle=lifecycle,
+        q_text="MATCH",
+        allowed_project_ids=allowed,
+        has_activity=False,
+        page_size=1,
+    )
     unfiltered = board.projects(db, business_type="all", **args)
     filtered = board.projects(db, business_type="overall,spare", **args)
     assert unfiltered["total"] == 3
     assert filtered["total"] == 2
-    assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 1
+    assert (
+        filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 1
+    )
     assert _ids(filtered) <= {expected["overall"], expected["spare"]}
 
 
 @pytest.mark.parametrize("lifecycle", ["ongoing", "ended", "missing"])
-def test_hidden_count_without_contract_permission_never_computes_payment_membership(db, monkeypatch, lifecycle):
+def test_hidden_count_without_contract_permission_never_computes_payment_membership(
+    db, monkeypatch, lifecycle
+):
     for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
         _payment_pair(db, code, business_type=kind, lifecycle=lifecycle)
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("business-type hidden count must not derive payment identities without contract permission")
+        pytest.fail(
+            "business-type hidden count must not derive payment identities without contract permission"
+        )
 
     monkeypatch.setattr(board, "_payment_complete_ids", forbidden)
     client = boss_client(db, with_profit=False)
     unfiltered = _get(client, lifecycle=lifecycle, business_type="all")
     filtered = _get(client, lifecycle=lifecycle, business_type="overall", page_size=1)
     assert unfiltered["total"] == 4 and filtered["total"] == 2
-    assert filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 2
+    assert (
+        filtered["business_type_hidden"] == unfiltered["total"] - filtered["total"] == 2
+    )
     assert all(row["lifecycle"] == lifecycle for row in unfiltered["rows"])
-    assert all(row["collection_preview_inc_tax"]["state"] == "restricted" for row in unfiltered["rows"])
+    assert all(
+        row["collection_preview_inc_tax"]["state"] == "restricted"
+        for row in unfiltered["rows"]
+    )
 
 
-def test_hidden_payment_membership_uses_batched_queries_across_pages_and_project_counts(db):
+def test_hidden_payment_membership_uses_batched_queries_across_pages_and_project_counts(
+    db,
+):
     for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
         _payment_pair(db, code, business_type=kind, lifecycle="ongoing")
     client = boss_client(db)
@@ -355,7 +423,9 @@ def test_hidden_payment_membership_uses_batched_queries_across_pages_and_project
     assert first["total"] == 1 and first["business_type_hidden"] == 1
     for number in range(10):
         for code, kind in (("overall", "整体维保"), ("other", "整机销售")):
-            _payment_pair(db, f"{code}-{number}", business_type=kind, lifecycle="ongoing")
+            _payment_pair(
+                db, f"{code}-{number}", business_type=kind, lifecycle="ongoing"
+            )
     with count_sql() as larger:
         page = _get(client, **args, page_size=1)
     with count_sql() as bigger_page:
@@ -367,6 +437,7 @@ def test_hidden_payment_membership_uses_batched_queries_across_pages_and_project
 
 
 # ---------- 参数校验 ----------
+
 
 def test_chinese_literal_is_rejected(db):
     """参数值是 ASCII 码，不接受中文原文——库里是自由文本，脏值变体会被带进 URL。"""

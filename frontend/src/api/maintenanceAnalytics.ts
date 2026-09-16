@@ -57,14 +57,43 @@ export interface PnRankingParams {
   date_from?: string;
   date_to?: string;
   q?: string;
+  /** Board business-type codes as CSV; the full six-code set (or `all`) disables filtering.
+   *  A legacy five-code URL is an explicit subset (it no longer equals `all`). */
+  business_type?: string;
+  /** 项目主键 CSV；空/未传不过滤。 */
+  project?: string;
+  /** 客户名包含匹配；空/未传不过滤。 */
+  customer?: string;
+  /** 销售名包含匹配；空/未传不过滤。 */
+  sp?: string;
+  /** 需求单号包含匹配；空/未传不过滤。 */
+  order_no?: string;
+  /** 需求类型码 CSV（repair|stock）；空或全选（两项）不过滤。 */
+  demand_type?: string;
+  /** 仓库值 CSV；空/未传不过滤。 */
+  warehouse?: string;
+  /** 成本来源码 CSV（linked|estimated|manual|missing）；空或全选（四项）不过滤。 */
+  cost_source?: string;
   sort?: string;
   page?: number;
   page_size?: number;
+}
+
+/** GET /maintenance/analytics/filter-options 响应：仓库下拉候选。 */
+export interface AnalyticsFilterOptions {
+  warehouses: string[];
 }
 
 export const fetchPnRanking = async (params: PnRankingParams) => {
   const resp = await api.get<PnRanking>("/maintenance/analytics/pn-ranking", {
     params,
   });
+  return resp.data;
+};
+
+export const fetchAnalyticsFilterOptions = async () => {
+  const resp = await api.get<AnalyticsFilterOptions>(
+    "/maintenance/analytics/filter-options",
+  );
   return resp.data;
 };

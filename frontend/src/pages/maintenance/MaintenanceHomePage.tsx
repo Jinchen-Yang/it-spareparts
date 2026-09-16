@@ -77,8 +77,8 @@ export function MaintenanceHomePage() {
   const canViewContract = localStorage.getItem("role") === "admin"
     || permissions.data_profit === true;
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
-  // 业务类型（2026-09-08 客户需求）：与期限状态**叠加**的独立一维。
-  // 默认五档全选＝不排除任何项目：生产 648 个项目 647 个未标注，默认排除等于把
+  // 业务类型（2026-09-08 客户需求；2026-09-16 新增拆改配服务）：与期限状态**叠加**的独立一维。
+  // 默认六档全选＝不排除任何项目：生产 648 个项目 647 个未标注，默认排除等于把
   // 卡墙筛空（R5）。用户主动取消勾选才开始收窄。
   const [businessTypes, setBusinessTypes] = useState<BoardBusinessTypeCode[]>(
     () => [...BOARD_BUSINESS_TYPE_CODES],

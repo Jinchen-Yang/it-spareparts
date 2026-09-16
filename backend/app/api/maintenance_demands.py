@@ -15,7 +15,9 @@ from app.security import (
     require_action,
     require_page,
 )
-from app.api.maintenance_project_scope import resolve_visible_project_ids as scope_resolve
+from app.api.maintenance_project_scope import (
+    resolve_visible_project_ids as scope_resolve,
+)
 from app.services import maintenance_demands
 
 
@@ -144,6 +146,7 @@ def search_demands(
         page_size=body.page_size,
         allowed_project_ids=allowed_project_ids,
         include_voided=body.include_voided,
+        user_ctx=ctx,
     )
 
 
@@ -179,7 +182,10 @@ def void_fast(
         ctx,
         "maintenance_demand_void_fast",
         "maintenance_demands",
-        {"headers": len(body.source_order_ids), "scope": "full" if allowed_project_ids is None else "owned"},
+        {
+            "headers": len(body.source_order_ids),
+            "scope": "full" if allowed_project_ids is None else "owned",
+        },
     )
     try:
         result = maintenance_demands.void_fast(

@@ -121,6 +121,35 @@ afterEach(() => {
 });
 
 describe("需求单与数据同步页", () => {
+  it("搜索结果按 WBDD 展示各自联系信息，空字段显示 — 并区分无权限", async () => {
+    const address = "合成长地址路".repeat(70) + "9号楼";
+    searchMaintenanceDemands.mockResolvedValue(demandPage([
+      demandRow("RAW-9", "XQD-009", { contact_info_state: "visible",
+        receiver_address: address, receiver: "联系人甲", receiver_phone: "010-00123456" }),
+      demandRow("RAW-10", "XQD-010", { contact_info_state: "visible",
+        receiver_address: "乙市2号", receiver: "联系人乙", receiver_phone: "00123456789" }),
+      demandRow("RAW-11", "XQD-011", { contact_info_state: "visible",
+        receiver_address: null, receiver: null, receiver_phone: null }),
+      demandRow("RAW-12", "XQD-012", { contact_info_state: "restricted",
+        receiver_address: null, receiver: null, receiver_phone: null }),
+    ]));
+    render(<MaintenanceDemandsPage />);
+    await screen.findByText("联系人甲");
+    const first = within(screen.getByText("XQD-009").closest("tr")!);
+    expect(first.getByText(address)).toBeInTheDocument();
+    expect(first.getByText("010-00123456")).toBeInTheDocument();
+    expect(first.queryByText("联系人乙")).toBeNull();
+    const second = within(screen.getByText("XQD-010").closest("tr")!);
+    expect(second.getByText("联系人乙")).toBeInTheDocument();
+    expect(second.getByText("00123456789")).toBeInTheDocument();
+    const empty = within(screen.getByText("XQD-011").closest("tr")!);
+    expect(empty.getAllByText("—")).toHaveLength(3);
+    expect(empty.queryByText("无权限查看联系信息")).toBeNull();
+    const restricted = within(screen.getByText("XQD-012").closest("tr")!);
+    expect(restricted.getByText("无权限查看联系信息")).toBeInTheDocument();
+    expect(restricted.queryByText("—")).toBeNull();
+  });
+
   it("渲染两个区块，进入页面即拉差异清单与需求单列表", async () => {
     render(<MaintenanceDemandsPage />);
 

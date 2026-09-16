@@ -657,6 +657,7 @@ function EditBasicsButton({
                 { label: "整体维保", value: "整体维保" },
                 { label: "备件维保", value: "备件维保" },
                 { label: "算力运维", value: "算力运维" },
+                { label: "拆改配服务", value: "拆改配服务" },
                 { label: "非维保", value: "非维保" },
                 { label: "未标注", value: "" },
               ]}

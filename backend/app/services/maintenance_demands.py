@@ -29,6 +29,8 @@ from app.models.maintenance import (
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_invalidation
+from app.security import UserContext
+from app.services.maintenance_order_contact import order_contact
 
 if TYPE_CHECKING:
     from app.models.maintenance_project_operations import (
@@ -222,9 +224,7 @@ def _snapshot(
         "line_count": len(lines),
         "downstream_references": downstream,
         "active_project_assignment": assignment_payload,
-        "version_digest": _digest(
-            _order_version_payload(order, lines, assignment)
-        ),
+        "version_digest": _digest(_order_version_payload(order, lines, assignment)),
     }
 
 
@@ -302,6 +302,7 @@ def search_demands(
     page_size: int,
     allowed_project_ids: set[str] | None = None,
     include_voided: bool = False,
+    user_ctx: UserContext | None = None,
 ) -> dict:
     """Search WBDD headers; joins never duplicate a header row.
 
@@ -375,6 +376,20 @@ def search_demands(
         )
     )
     snapshots = _load_snapshots(db, source_ids, active_only=not include_voided)
+    # Read-only enrichment: never add contact fields to _snapshot/_load_snapshots,
+    # which also feed persisted deletion intents and audit/digest snapshots.
+    contacts = (
+        {
+            order.raw_order_id: order_contact(order, user_ctx)
+            for order in db.scalars(
+                select(FMaintenanceOrder).where(
+                    FMaintenanceOrder.raw_order_id.in_(source_ids)
+                )
+            )
+        }
+        if source_ids
+        else {}
+    )
     if include_voided:
         voided_ids = set(
             db.execute(
@@ -382,7 +397,9 @@ def search_demands(
                     MaintenanceDemandTombstone.source_order_id.in_(source_ids),
                     MaintenanceDemandTombstone.restored_at.is_(None),
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         for source_id in source_ids:
             snapshots.setdefault(
@@ -391,7 +408,10 @@ def search_demands(
             )
             snapshots[source_id]["is_voided"] = source_id in voided_ids
     return {
-        "items": [snapshots[source_id] for source_id in source_ids],
+        "items": [
+            {**snapshots[source_id], **contacts.get(source_id, {})}
+            for source_id in source_ids
+        ],
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -430,7 +450,9 @@ def _selection_digest(items: list[dict], reason: str, operated_by: str) -> str:
     )
 
 
-def _intent_items(db: Session, intent_id: str) -> list[MaintenanceDemandDeleteIntentItem]:
+def _intent_items(
+    db: Session, intent_id: str
+) -> list[MaintenanceDemandDeleteIntentItem]:
     return list(
         db.scalars(
             select(MaintenanceDemandDeleteIntentItem)
@@ -516,9 +538,7 @@ def create_delete_intent(
             assignment = item.get("active_project_assignment")
             project_id = assignment.get("project_id") if assignment else None
             if project_id is None or project_id not in allowed_project_ids:
-                raise MaintenanceDemandForbidden(
-                    "只能删除本人负责项目下的维保需求单"
-                )
+                raise MaintenanceDemandForbidden("只能删除本人负责项目下的维保需求单")
     line_count = sum(int(item["line_count"]) for item in items)
     if line_count > MAX_DELETE_LINES:
         raise DeleteIntentConflict(f"一次最多涉及 {MAX_DELETE_LINES} 行备件")
@@ -625,7 +645,10 @@ def _expire_if_needed(
     now: datetime,
 ) -> None:
     if now <= intent.expires_at or intent.status in {
-        "executed", "cancelled", "conflicted", "expired"
+        "executed",
+        "cancelled",
+        "conflicted",
+        "expired",
     }:
         return
     intent.status = "expired"
@@ -770,9 +793,7 @@ def _bump_workbook_revisions(
     from app.services import maintenance_project_operations as operations
 
     for project_id in sorted(changed_project_ids):
-        operations.bump_locked_workbook_revision(
-            db, state=locked_states[project_id]
-        )
+        operations.bump_locked_workbook_revision(db, state=locked_states[project_id])
 
 
 def execute_delete_intent(
@@ -819,7 +840,10 @@ def execute_delete_intent(
         conflict_cause = "missing_or_tombstoned"
     else:
         for expected in expected_items:
-            if current[expected.source_order_id]["version_digest"] != expected.version_digest:
+            if (
+                current[expected.source_order_id]["version_digest"]
+                != expected.version_digest
+            ):
                 conflict_cause = f"version_changed:{expected.source_order_id}"
                 break
         if conflict_cause is None:
@@ -849,9 +873,7 @@ def execute_delete_intent(
             assignment = current[source_id].get("active_project_assignment")
             project_id = assignment.get("project_id") if assignment else None
             if project_id is None or project_id not in allowed_project_ids:
-                raise MaintenanceDemandForbidden(
-                    "执行时项目范围已变化，整批删除已取消"
-                )
+                raise MaintenanceDemandForbidden("执行时项目范围已变化，整批删除已取消")
 
     for item in expected_items:
         _upsert_active_tombstone(
@@ -947,19 +969,23 @@ def _cascade_candidate(db: Session, source_order_id: str) -> bool:
 
     order_id = db.scalar(
         select(FMaintenanceOrder.id).where(
-            FMaintenanceOrder.raw_order_id == source_order_id)
+            FMaintenanceOrder.raw_order_id == source_order_id
+        )
     )
     if order_id is None:
         return False
     already = db.get(MaintenanceDemandTombstone, source_order_id)
     if already is not None and already.restored_at is None:
         return False
-    active_lines = int(db.scalar(
-        select(func.count(FMaintenanceLine.id)).where(
-            FMaintenanceLine.order_id == order_id,
-            FMaintenanceLine.is_active.is_(True),
+    active_lines = int(
+        db.scalar(
+            select(func.count(FMaintenanceLine.id)).where(
+                FMaintenanceLine.order_id == order_id,
+                FMaintenanceLine.is_active.is_(True),
+            )
         )
-    ) or 0)
+        or 0
+    )
     return active_lines == 0
 
 
@@ -994,9 +1020,7 @@ def cascade_tombstone_orders(
         {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
     )
     candidates = [
-        source_id
-        for source_id in source_order_ids
-        if _cascade_candidate(db, source_id)
+        source_id for source_id in source_order_ids if _cascade_candidate(db, source_id)
     ]
     if not candidates:
         return tombstoned_now
@@ -1014,15 +1038,17 @@ def cascade_tombstone_orders(
             .with_for_update()
         )
     }
-    locked_assignments = list(db.scalars(
-        select(MaintenanceSourceOrderAssignment)
-        .where(
-            MaintenanceSourceOrderAssignment.source_order_id.in_(candidates),
-            MaintenanceSourceOrderAssignment.is_active.is_(True),
+    locked_assignments = list(
+        db.scalars(
+            select(MaintenanceSourceOrderAssignment)
+            .where(
+                MaintenanceSourceOrderAssignment.source_order_id.in_(candidates),
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+            .order_by(MaintenanceSourceOrderAssignment.source_order_id)
+            .with_for_update()
         )
-        .order_by(MaintenanceSourceOrderAssignment.source_order_id)
-        .with_for_update()
-    ))
+    )
     if any(
         assignment.project_id not in probed_owner_ids
         for assignment in locked_assignments
@@ -1036,19 +1062,23 @@ def cascade_tombstone_orders(
         already = db.get(MaintenanceDemandTombstone, source_id)
         if already is not None and already.restored_at is None:
             continue
-        active_lines = int(db.scalar(
-            select(func.count(FMaintenanceLine.id)).where(
-                FMaintenanceLine.order_id == order.id,
-                FMaintenanceLine.is_active.is_(True),
+        active_lines = int(
+            db.scalar(
+                select(func.count(FMaintenanceLine.id)).where(
+                    FMaintenanceLine.order_id == order.id,
+                    FMaintenanceLine.is_active.is_(True),
+                )
             )
-        ) or 0)
+            or 0
+        )
         if active_lines > 0:
             continue
         intent = MaintenanceDemandDeleteIntent(
             intent_id=str(uuid4()),
             idempotency_key=f"workbook-cascade:{source_id}:{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}",
-            request_digest=_digest({"cascade": source_id, "reason": reason,
-                                    "operated_by": operated_by}),
+            request_digest=_digest(
+                {"cascade": source_id, "reason": reason, "operated_by": operated_by}
+            ),
             selection_digest=_digest({"cascade": source_id}),
             status="executed",
             reason=reason,
@@ -1070,9 +1100,14 @@ def cascade_tombstone_orders(
             delete_reason=reason,
             deleted_at=now,
         )
-        result = {"intent_id": intent.intent_id, "status": "executed",
-                  "mode": "workbook_cascade", "source_order_id": source_id,
-                  "order_no": order.order_no, "executed_at": now.isoformat()}
+        result = {
+            "intent_id": intent.intent_id,
+            "status": "executed",
+            "mode": "workbook_cascade",
+            "source_order_id": source_id,
+            "order_no": order.order_no,
+            "executed_at": now.isoformat(),
+        }
         intent.result_json = result
         _event(
             db,
@@ -1089,15 +1124,20 @@ def cascade_tombstone_orders(
     db.flush()
     if tombstoned_now:
         changed_project_ids = _deactivate_assignments(
-            db, source_order_ids=tombstoned_now,
-            operated_by=operated_by, reason=reason, now=now,
+            db,
+            source_order_ids=tombstoned_now,
+            operated_by=operated_by,
+            reason=reason,
+            now=now,
         )
         # 只为本次实际打墓碑/停用挂靠的项目 bump OCC 版本。
         _bump_workbook_revisions(db, locked_states, changed_project_ids)
         from app.services import maintenance_warehouse
 
         maintenance_warehouse.reconcile_project_assignment_links(
-            db, operated_by=operated_by, reason=reason,
+            db,
+            operated_by=operated_by,
+            reason=reason,
             source_order_ids=set(tombstoned_now),
         )
     return tombstoned_now
@@ -1145,7 +1185,8 @@ def _deactivate_assignments(
         # archived_at 必须 >= created_at（ck_..._archive_state）：调用方传入的
         # now 可能被测试冻结在 created_at 之前，取 max 保证约束恒成立。
         assignment.archived_at = (
-            now if assignment.created_at is None or now >= assignment.created_at
+            now
+            if assignment.created_at is None or now >= assignment.created_at
             else assignment.created_at
         )
         db.add(
@@ -1266,20 +1307,22 @@ def void_fast(
                 {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
             )
             replay_source_ids = {
-                str(value)
-                for value in replay.get("source_order_ids", ())
-                if value
+                str(value) for value in replay.get("source_order_ids", ()) if value
             }
-            active_tombstones = set(
-                db.scalars(
-                    select(MaintenanceDemandTombstone.source_order_id).where(
-                        MaintenanceDemandTombstone.source_order_id.in_(
-                            sorted(replay_source_ids)
-                        ),
-                        MaintenanceDemandTombstone.restored_at.is_(None),
+            active_tombstones = (
+                set(
+                    db.scalars(
+                        select(MaintenanceDemandTombstone.source_order_id).where(
+                            MaintenanceDemandTombstone.source_order_id.in_(
+                                sorted(replay_source_ids)
+                            ),
+                            MaintenanceDemandTombstone.restored_at.is_(None),
+                        )
                     )
                 )
-            ) if replay_source_ids else set()
+                if replay_source_ids
+                else set()
+            )
             if active_tombstones != replay_source_ids:
                 raise DeleteIntentConflict(
                     "该幂等键对应的历史作废已被恢复；如需再次作废请使用新幂等键"
@@ -1301,19 +1344,21 @@ def void_fast(
                 MaintenanceDemandTombstone.source_order_id.in_(source_order_ids),
                 MaintenanceDemandTombstone.restored_at.is_(None),
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     unknown = [sid for sid in source_order_ids if sid not in tombstoned]
     # OCC 写者失效：无锁 probe 新作废单的当前归属 → 按序锁工作簿状态 →
     # 加锁重读订单/挂靠（全局顺序 advisory → states → order → assignment）。
     # already_voided 的单不 probe 也不补停用——幂等路径必须 +0。
     locked_states, probed_owner_ids = _lock_workbook_states_for_owners(db, unknown)
-    snapshots = _load_snapshots(db, unknown, lock=True, active_only=True) if unknown else {}
+    snapshots = (
+        _load_snapshots(db, unknown, lock=True, active_only=True) if unknown else {}
+    )
     missing = [sid for sid in unknown if sid not in snapshots]
     if missing:
-        raise MaintenanceDemandNotFound(
-            "所选 WBDD 已不存在或状态发生变化，整批未作废"
-        )
+        raise MaintenanceDemandNotFound("所选 WBDD 已不存在或状态发生变化，整批未作废")
     # probe 之后新出现的归属：其 state 未预锁，整批冲突零写，
     # 不允许持锁后补拿新 state。
     for item in snapshots.values():
@@ -1328,9 +1373,7 @@ def void_fast(
             assignment = item.get("active_project_assignment")
             project_id = assignment.get("project_id") if assignment else None
             if project_id is None or project_id not in allowed_project_ids:
-                raise MaintenanceDemandForbidden(
-                    "只能作废本人负责项目下的维保需求单"
-                )
+                raise MaintenanceDemandForbidden("只能作废本人负责项目下的维保需求单")
     line_count = sum(int(item["line_count"]) for item in items)
     if line_count > MAX_DELETE_LINES:
         raise DeleteIntentConflict(f"一次最多涉及 {MAX_DELETE_LINES} 行备件")

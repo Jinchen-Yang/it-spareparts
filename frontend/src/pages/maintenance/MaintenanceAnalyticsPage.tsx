@@ -21,10 +21,22 @@ import { useSearchParams } from "react-router-dom";
 import dayjs from "dayjs";
 import { BarChartOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
+  fetchAnalyticsFilterOptions,
   fetchPnRanking,
   type PnRanking,
+  type PnRankingParams,
   type PnRankingRow,
 } from "../../api/maintenanceAnalytics";
+import {
+  getMaintenanceProject,
+  searchMaintenanceProjects,
+} from "../../api/maintenanceProjects";
+import {
+  BOARD_BUSINESS_TYPE_CODES,
+  BOARD_BUSINESS_TYPE_LABELS,
+  boardBusinessTypeParam,
+  type BoardBusinessTypeCode,
+} from "../../api/maintenanceBossBoard";
 import { readPermissionMap } from "../../nav";
 import PageHeader from "../../components/PageHeader";
 import { PnTopBar } from "../../components/charts/PnTopBar";
@@ -86,6 +98,43 @@ const SORTER_TO_KEY: Record<string, string> = {
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
+const DEMAND_TYPE_OPTIONS = [
+  { label: "报修供货", value: "repair" },
+  { label: "补库供货", value: "stock" },
+];
+const DEMAND_TYPE_CODES = DEMAND_TYPE_OPTIONS.map((option) => option.value);
+
+const COST_SOURCE_OPTIONS = [
+  { label: "系统关联", value: "linked" },
+  { label: "估算", value: "estimated" },
+  { label: "人工回填", value: "manual" },
+  { label: "缺失", value: "missing" },
+];
+const COST_SOURCE_CODES = COST_SOURCE_OPTIONS.map((option) => option.value);
+
+/** URL CSV → 去重选中值（空串/空段丢弃）。 */
+function csvValues(spec: string | null): string[] {
+  if (!spec) return [];
+  return [...new Set(spec.split(",").map((value) => value.trim()).filter(Boolean))];
+}
+
+/** URL CSV → 原样值（仓库用）：库内原值精确匹配，去空白会让「 广州仓 」选不中自己。 */
+function csvRawValues(spec: string | null): string[] {
+  if (!spec) return [];
+  return [...new Set(spec.split(",").filter((value) => value !== ""))];
+}
+
+/** 选中集合 → URL CSV：空集或全选返回 null（参数省略，等于不过滤）。 */
+function csvParam(selected: string[], all: string[]): string | null {
+  if (!selected.length || selected.length === all.length) return null;
+  return selected.join(",");
+}
+
+/** 项目 id 兜底短标签：项目名取不到时不展示裸长 id。 */
+function shortProjectLabel(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
 function KpiCard({ label, value, sub, loading }: {
   label: string; value: string; sub?: string; loading?: boolean;
 }) {
@@ -102,7 +151,8 @@ function KpiCard({ label, value, sub, loading }: {
 
 /**
  * 维保数据分析看板：PN 成本排名 + 损坏频率（2026-08-21）。
- * URL 即筛选状态（PoolAnalysis 范式）：range/sort/q/page/ps/from/to 全入 query，
+ * URL 即筛选状态（PoolAnalysis 范式）：range/sort/q/business_type/page/ps/from/to 与
+ * 全字段筛选（project/customer/sp/order_no/demand_type/warehouse/cost_source）全入 query，
  * 刷新/分享不丢上下文。
  */
 export function MaintenanceAnalyticsPage() {
@@ -110,10 +160,45 @@ export function MaintenanceAnalyticsPage() {
   const rangeKey = sp.get("range") ?? "ytd";
   const sort = sp.get("sort") ?? "cost_inc";
   const q = sp.get("q") ?? "";
+  const [searchDraft, setSearchDraft] = useState(q);
+  useEffect(() => { setSearchDraft(q); }, [q]);
   const page = Number(sp.get("page") ?? "1") || 1;
   const pageSize = Number(sp.get("ps") ?? "20") || 20;
   const customFrom = sp.get("from");
   const customTo = sp.get("to");
+  const businessTypeSpec = sp.get("business_type") ?? "all";
+  const businessTypes = useMemo(() => {
+    const selected = BOARD_BUSINESS_TYPE_CODES.filter((code) => businessTypeSpec.split(",").includes(code));
+    return selected.length && businessTypeSpec !== "all" ? selected : [...BOARD_BUSINESS_TYPE_CODES];
+  }, [businessTypeSpec]);
+  const businessType = boardBusinessTypeParam(businessTypes);
+  const projectSpec = sp.get("project") ?? "";
+  const projectIds = useMemo(() => csvValues(projectSpec), [projectSpec]);
+  const customer = sp.get("customer") ?? "";
+  const sales = sp.get("sp") ?? "";
+  const orderNo = sp.get("order_no") ?? "";
+  const demandTypeSpec = sp.get("demand_type") ?? "";
+  const demandTypes = useMemo(
+    () => DEMAND_TYPE_CODES.filter((code) => csvValues(demandTypeSpec).includes(code)),
+    [demandTypeSpec],
+  );
+  const demandTypeParam = csvParam(demandTypes, DEMAND_TYPE_CODES);
+  const warehouseSpec = sp.get("warehouse") ?? "";
+  const warehouses = useMemo(() => csvRawValues(warehouseSpec), [warehouseSpec]);
+  const costSourceSpec = sp.get("cost_source") ?? "";
+  const costSources = useMemo(
+    () => COST_SOURCE_CODES.filter((code) => csvValues(costSourceSpec).includes(code)),
+    [costSourceSpec],
+  );
+  const costSourceParam = csvParam(costSources, COST_SOURCE_CODES);
+
+  const [customerDraft, setCustomerDraft] = useState(customer);
+  useEffect(() => { setCustomerDraft(customer); }, [customer]);
+  const [salesDraft, setSalesDraft] = useState(sales);
+  useEffect(() => { setSalesDraft(sales); }, [sales]);
+  const [orderNoDraft, setOrderNoDraft] = useState(orderNo);
+  useEffect(() => { setOrderNoDraft(orderNo); }, [orderNo]);
+
   const perms = readPermissionMap();
   const canCost = !!perms.data_purchase_cost;
 
@@ -128,6 +213,113 @@ export function MaintenanceAnalyticsPage() {
     }, { replace: true });
   }, [setSp]);
 
+  // 项目远程搜索：300ms 防抖 + 代次守卫；id→项目名缓存保证已选标签不被新搜索顶掉。
+  const [projectOptions, setProjectOptions] = useState<{ value: string; label: string }[]>([]);
+  const [projectLabels, setProjectLabels] = useState<Record<string, string>>({});
+  const [projectSearching, setProjectSearching] = useState(false);
+  const projectSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const projectSearchGen = useRef(0);
+
+  const cacheProjectLabels = useCallback((entries: { project_id: string; display_name: string }[]) => {
+    setProjectLabels((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const entry of entries) {
+        if (next[entry.project_id] !== entry.display_name) {
+          next[entry.project_id] = entry.display_name;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  // URL 已选项目回填标签：并发取详情，失败退回短 id（页面照常可用）。
+  useEffect(() => {
+    const missing = projectIds.filter((id) => !projectLabels[id]);
+    if (!missing.length) return;
+    let cancelled = false;
+    void Promise.allSettled(missing.map((id) => getMaintenanceProject(id))).then((results) => {
+      if (cancelled) return;
+      cacheProjectLabels(results.map((result, index) => ({
+        project_id: missing[index],
+        display_name: result.status === "fulfilled"
+          ? result.value.data.project.display_name
+          : shortProjectLabel(missing[index]),
+      })));
+    });
+    return () => { cancelled = true; };
+  }, [projectIds, projectLabels, cacheProjectLabels]);
+
+  const onProjectSearch = useCallback((keyword: string) => {
+    if (projectSearchTimer.current) clearTimeout(projectSearchTimer.current);
+    const term = keyword.trim();
+    if (term.length < 2) {
+      projectSearchGen.current += 1;
+      setProjectOptions([]);
+      setProjectSearching(false);
+      return;
+    }
+    projectSearchTimer.current = setTimeout(() => {
+      const gen = ++projectSearchGen.current;
+      setProjectSearching(true);
+      void searchMaintenanceProjects({ q: term, page_size: 20 })
+        .then((resp) => {
+          if (gen !== projectSearchGen.current) return;
+          const rows = resp.data.rows ?? [];
+          setProjectOptions(rows.map((p) => ({ value: p.project_id, label: p.display_name })));
+          cacheProjectLabels(rows);
+        })
+        .catch(() => {
+          if (gen === projectSearchGen.current) setProjectOptions([]);
+        })
+        .finally(() => {
+          if (gen === projectSearchGen.current) setProjectSearching(false);
+        });
+    }, 300);
+  }, [cacheProjectLabels]);
+
+  useEffect(() => () => {
+    if (projectSearchTimer.current) clearTimeout(projectSearchTimer.current);
+  }, []);
+
+  const projectSelectOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: { value: string; label: string }[] = [];
+    for (const id of projectIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push({ value: id, label: projectLabels[id] ?? shortProjectLabel(id) });
+    }
+    for (const option of projectOptions) {
+      if (seen.has(option.value)) continue;
+      seen.add(option.value);
+      merged.push(option);
+    }
+    return merged;
+  }, [projectIds, projectLabels, projectOptions]);
+
+  // 仓库候选：挂载时拉一次；失败只提示，不阻塞页面。
+  const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAnalyticsFilterOptions()
+      .then((data) => { if (!cancelled) setWarehouseOptions(data.warehouses ?? []); })
+      .catch(() => { if (!cancelled) message.error("仓库选项加载失败"); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const warehouseSelectOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: { value: string; label: string }[] = [];
+    for (const value of [...warehouses, ...warehouseOptions]) {
+      if (seen.has(value)) continue;
+      seen.add(value);
+      merged.push({ value, label: value });
+    }
+    return merged;
+  }, [warehouses, warehouseOptions]);
+
   const [data, setData] = useState<PnRanking | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,11 +330,20 @@ export function MaintenanceAnalyticsPage() {
     seqRef.current = seq;
     setLoading(true);
     setError(null);
+    setData(null);
     try {
-      const payload: Record<string, unknown> = {
+      const payload: PnRankingParams = {
         range: rangeKey, sort, page, page_size: pageSize,
+        business_type: businessType,
       };
       if (q.trim()) payload.q = q.trim();
+      if (projectIds.length) payload.project = projectIds.join(",");
+      if (customer.trim()) payload.customer = customer.trim();
+      if (sales.trim()) payload.sp = sales.trim();
+      if (orderNo.trim()) payload.order_no = orderNo.trim();
+      if (demandTypeParam) payload.demand_type = demandTypeParam;
+      if (warehouses.length) payload.warehouse = warehouses.join(",");
+      if (costSourceParam) payload.cost_source = costSourceParam;
       if (rangeKey === "custom") {
         if (customFrom) payload.date_from = customFrom;
         if (customTo) payload.date_to = customTo;
@@ -152,6 +353,7 @@ export function MaintenanceAnalyticsPage() {
       setData(resp);
     } catch (err) {
       if (seqRef.current !== seq) return;
+      setData(null);
       const detail = (err as { response?: { data?: { detail?: { message?: string } | string } } })
         .response?.data?.detail;
       const msg = typeof detail === "string" ? detail : detail?.message;
@@ -160,7 +362,10 @@ export function MaintenanceAnalyticsPage() {
     } finally {
       if (seqRef.current === seq) setLoading(false);
     }
-  }, [rangeKey, sort, q, page, pageSize, customFrom, customTo]);
+  }, [
+    rangeKey, sort, q, page, pageSize, customFrom, customTo, businessType,
+    projectIds, customer, sales, orderNo, demandTypeParam, warehouses, costSourceParam,
+  ]);
 
   useEffect(() => {
     void load();
@@ -206,7 +411,13 @@ export function MaintenanceAnalyticsPage() {
         subtitle="全项目 PN 维度：备件消耗成本排名 + 损坏频率（RKD 坏件返还佐证）"
         extra={(
           <Space>
-            <Button onClick={() => setSp(new URLSearchParams(), { replace: true })}>
+            <Button onClick={() => {
+              setSearchDraft("");
+              setCustomerDraft("");
+              setSalesDraft("");
+              setOrderNoDraft("");
+              setSp(new URLSearchParams(), { replace: true });
+            }}>
               重置筛选
             </Button>
             <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
@@ -226,17 +437,90 @@ export function MaintenanceAnalyticsPage() {
               onChange={(v) => patch({
                 from: v?.[0] ? v[0].format("YYYY-MM-DD") : null,
                 to: v?.[1] ? v[1].format("YYYY-MM-DD") : null,
+                page: null,
               })}
               allowEmpty={[true, true]}
             />
           ) : null}
+          <Select<BoardBusinessTypeCode[]>
+            mode="multiple"
+            aria-label="业务类型筛选"
+            placeholder="业务类型（全部）"
+            allowClear
+            maxTagCount="responsive"
+            value={businessTypes}
+            style={{ width: 280, maxWidth: "calc(100vw - 96px)" }}
+            options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
+              label: BOARD_BUSINESS_TYPE_LABELS[code], value: code,
+            }))}
+            onChange={(values) => patch({ business_type: boardBusinessTypeParam(values), page: null })}
+          />
           <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
             onChange={(v) => patch({ sort: v, page: null })} />
-          <Input.Search allowClear defaultValue={q} placeholder="搜 PN / 描述" style={{ width: 220 }}
+          <Input.Search allowClear value={searchDraft} placeholder="搜 PN / 描述" style={{ width: 220 }}
+            onChange={(event) => setSearchDraft(event.target.value)}
             onSearch={(v) => patch({ q: v || null, page: null })} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            成本＝系统回填已知成本（缺价行单列，不按 0 计）；损坏佐证＝RKD 坏件返还
+            成本＝系统回填已知成本（缺价行单列，不按 0 计）；损坏佐证＝RKD 坏件返还（按项目范围）
           </Text>
+        </Space>
+        <Space wrap size={12} style={{ marginTop: 12 }}>
+          <Select<string[]>
+            mode="multiple"
+            showSearch
+            filterOption={false}
+            aria-label="项目筛选"
+            placeholder="项目（全部）"
+            allowClear
+            maxCount={50}
+            value={projectIds}
+            style={{ width: 280, maxWidth: "calc(100vw - 96px)" }}
+            options={projectSelectOptions}
+            onSearch={onProjectSearch}
+            loading={projectSearching}
+            notFoundContent={projectSearching ? "搜索中…" : "输入至少 2 个字搜索项目"}
+            onChange={(values) => patch({ project: values.length ? values.join(",") : null, page: null })}
+          />
+          <Input.Search allowClear value={customerDraft} placeholder="客户" style={{ width: 180 }}
+            onChange={(event) => setCustomerDraft(event.target.value)}
+            onSearch={(v) => patch({ customer: v || null, page: null })} />
+          <Input.Search allowClear value={salesDraft} placeholder="销售" style={{ width: 160 }}
+            onChange={(event) => setSalesDraft(event.target.value)}
+            onSearch={(v) => patch({ sp: v || null, page: null })} />
+          <Input.Search allowClear value={orderNoDraft} placeholder="需求单号" style={{ width: 180 }}
+            onChange={(event) => setOrderNoDraft(event.target.value)}
+            onSearch={(v) => patch({ order_no: v || null, page: null })} />
+          <Select<string[]>
+            mode="multiple"
+            aria-label="需求类型筛选"
+            placeholder="需求类型（全部）"
+            allowClear
+            value={demandTypes}
+            style={{ width: 200 }}
+            options={DEMAND_TYPE_OPTIONS}
+            onChange={(values) => patch({ demand_type: csvParam(values, DEMAND_TYPE_CODES), page: null })}
+          />
+          <Select<string[]>
+            mode="multiple"
+            aria-label="仓库筛选"
+            placeholder="仓库（全部）"
+            allowClear
+            maxCount={10}
+            value={warehouses}
+            style={{ width: 200 }}
+            options={warehouseSelectOptions}
+            onChange={(values) => patch({ warehouse: values.length ? values.join(",") : null, page: null })}
+          />
+          <Select<string[]>
+            mode="multiple"
+            aria-label="成本来源筛选"
+            placeholder="成本来源（全部）"
+            allowClear
+            value={costSources}
+            style={{ width: 220 }}
+            options={COST_SOURCE_OPTIONS}
+            onChange={(values) => patch({ cost_source: csvParam(values, COST_SOURCE_CODES), page: null })}
+          />
         </Space>
       </Card>
 
