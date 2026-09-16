@@ -1,15 +1,17 @@
 /** 维保数据分析页：URL 状态、金额千分位、表头排序联动（2026-08-21 视觉升级）。 */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { message } from "antd";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 const fetchPnRanking = vi.fn();
+const fetchSpendTrend = vi.fn();
 const fetchAnalyticsFilterOptions = vi.fn();
 const searchMaintenanceProjects = vi.fn();
 const getMaintenanceProject = vi.fn();
 vi.mock("../../../api/maintenanceAnalytics", () => ({
   fetchPnRanking: (...a: unknown[]) => fetchPnRanking(...a),
+  fetchSpendTrend: (...a: unknown[]) => fetchSpendTrend(...a),
   fetchAnalyticsFilterOptions: (...a: unknown[]) => fetchAnalyticsFilterOptions(...a),
 }));
 vi.mock("../../../api/maintenanceProjects", () => ({
@@ -31,6 +33,71 @@ const mockRow = {
   cost_share_pct: 22.8, missing_lines: 0, monthly_avg_qty: 143.0,
   bad_return_qty: "0.000", bad_return_rate_pct: null,
   first_date: null, last_date: null,
+};
+
+/** 开支统计响应 fixture：含 ready/restricted/not_imported 三类信封与 null 销售。 */
+const spendFixture = {
+  granularity: "month",
+  window: { range: "ytd", date_from: null, date_to: null },
+  buckets: [
+    {
+      bucket: "2026-07-01", order_count: 2, qty: "6.000", effective_qty: "5.000", missing_lines: 0,
+      cost_inc: { state: "ready", value: "1500.00" },
+      cost_ex: { state: "ready", value: "1327.43" },
+      by_business_type: {
+        overall: { state: "ready", value: "1000.00" },
+        spare: { state: "ready", value: "500.00" },
+        computing: { state: "ready", value: "0" },
+        refit: { state: "not_imported" },
+        other: { state: "restricted" },
+        unlabeled: { state: "ready", value: "0" },
+        unassigned: { state: "ready", value: "0" },
+      },
+    },
+    {
+      bucket: "2026-08-01", order_count: 1, qty: "4.000", effective_qty: "4.000", missing_lines: 1,
+      cost_inc: { state: "ready", value: "600.00" },
+      cost_ex: { state: "ready", value: "530.97" },
+      by_business_type: {
+        overall: { state: "ready", value: "600.00" },
+        spare: { state: "ready", value: "0" },
+        computing: { state: "ready", value: "0" },
+        refit: { state: "ready", value: "0" },
+        other: { state: "ready", value: "0" },
+        unlabeled: { state: "ready", value: "0" },
+        unassigned: { state: "ready", value: "0" },
+      },
+    },
+  ],
+  by_business_type: [
+    {
+      code: "overall", label: "整体维保", order_count: 3, qty: "10.000", effective_qty: "9.000",
+      missing_lines: 1, cost_inc: { state: "ready", value: "1600.00" },
+      cost_ex: { state: "ready", value: "1415.93" }, cost_share_pct: 76.2,
+    },
+    {
+      code: "other", label: "非维保", order_count: 0, qty: "0", effective_qty: "0",
+      missing_lines: 0, cost_inc: { state: "restricted" },
+      cost_ex: { state: "restricted" }, cost_share_pct: null,
+    },
+  ],
+  by_salesperson: [
+    {
+      salesperson: "张三", order_count: 2, qty: "6.000", effective_qty: "5.000",
+      cost_inc: { state: "ready", value: "1500.00" },
+      cost_ex: { state: "ready", value: "1327.43" }, cost_share_pct: 71.4,
+    },
+    {
+      salesperson: null, order_count: 1, qty: "4.000", effective_qty: "4.000",
+      cost_inc: { state: "ready", value: "600.00" },
+      cost_ex: { state: "ready", value: "530.97" }, cost_share_pct: 28.6,
+    },
+  ],
+  summary: {
+    bucket_count: 2, order_count: 3, qty: "10.000", effective_qty: "9.000", missing_lines: 1,
+    total_cost_inc: { state: "ready", value: "2100.00" },
+    total_cost_ex: { state: "ready", value: "1858.40" }, wbdd_ready: true,
+  },
 };
 
 function renderPage(initialPath = "/maintenance/analytics") {
@@ -115,6 +182,8 @@ describe("维保数据分析页", () => {
       },
       sort: "cost_inc",
     });
+    fetchSpendTrend.mockReset();
+    fetchSpendTrend.mockResolvedValue(spendFixture);
     fetchAnalyticsFilterOptions.mockReset();
     fetchAnalyticsFilterOptions.mockResolvedValue({ warehouses: ["广州仓", "北京仓"] });
     searchMaintenanceProjects.mockReset();
@@ -447,5 +516,97 @@ describe("维保数据分析页", () => {
     expect(screen.getByPlaceholderText("销售")).toHaveValue("");
     expect(screen.getByPlaceholderText("需求单号")).toHaveValue("");
     expect(screen.queryByText("项目-p1")).not.toBeInTheDocument();
+  });
+
+  it("默认页签是 PN：只请求 pn-ranking，不发 spend-trend", async () => {
+    renderPage();
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
+    expect(fetchSpendTrend).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "开支统计" })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("切到开支统计页签：按当前筛选 + 默认 granularity=month 请求，不丢筛选、不动 PN", async () => {
+    renderPage("/maintenance/analytics?range=all&sort=qty&customer=客户A&business_type=spare");
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("tab", { name: "开支统计" }));
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
+    expect(fetchSpendTrend).toHaveBeenLastCalledWith(expect.objectContaining({
+      range: "all", granularity: "month", business_type: "spare", customer: "客户A",
+    }));
+    expect(query().get("view")).toBe("spend");
+    expect(query().get("granularity")).toBeNull();
+    expect(query().get("customer")).toBe("客户A");
+    expect(query().get("business_type")).toBe("spare");
+    expect(fetchPnRanking).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("¥2,586,637.81")).toBeInTheDocument();
+  });
+
+  it("开支页签切粒度：更新 URL 与请求，不重新请求 PN", async () => {
+    renderPage("/maintenance/analytics?view=spend&customer=客户A");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("按天"));
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenLastCalledWith(
+      expect.objectContaining({ granularity: "day", customer: "客户A" })));
+    expect(query().get("granularity")).toBe("day");
+    expect(query().get("view")).toBe("spend");
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+  });
+
+  it("刷新按钮重取当前页签数据", async () => {
+    renderPage("/maintenance/analytics?view=spend");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /刷新/ }));
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(2));
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+  });
+
+  it("开支三表渲染 fixture：null 销售=未标注、受限信封不渲染数字", async () => {
+    renderPage("/maintenance/analytics?view=spend");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalled());
+    // 合计 KPI 行：金额/期数来自 summary（含税 2100、期数 2）
+    expect(await screen.findByText("开支合计（含税）")).toBeInTheDocument();
+    expect(screen.getByText("开支合计（未税）")).toBeInTheDocument();
+    expect(screen.getByText(/2,100/)).toBeInTheDocument();
+    expect(screen.getByText("期数")).toBeInTheDocument();
+    const business = screen.getByTestId("spend-by-business-type");
+    expect(await within(business).findByText("整体维保")).toBeInTheDocument();
+    expect(within(business).getByText("¥1,600")).toBeInTheDocument();
+    expect(within(business).getAllByText("🔒 无权限").length).toBeGreaterThan(0);
+    const sales = screen.getByTestId("spend-by-salesperson");
+    expect(within(sales).getByText("张三")).toBeInTheDocument();
+    expect(within(sales).getByText("未标注")).toBeInTheDocument();
+    expect(within(sales).getByText("¥1,500")).toBeInTheDocument();
+    const buckets = screen.getByTestId("spend-bucket-detail");
+    expect(within(buckets).getByText("2026-07")).toBeInTheDocument();
+    expect(within(buckets).getByText("2026-08")).toBeInTheDocument();
+    expect(within(buckets).getByText("¥1,500")).toBeInTheDocument();
+    expect(within(buckets).getByText("尚未导入")).toBeInTheDocument();
+  });
+
+  it("旧粒度请求迟到成功不能覆盖新粒度的失败空态", async () => {
+    let resolveOld!: (value: unknown) => void;
+    fetchSpendTrend.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }));
+    vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+    renderPage("/maintenance/analytics?view=spend");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
+    fetchSpendTrend.mockRejectedValueOnce(new Error("network"));
+    fireEvent.click(screen.getByText("按周"));
+    await screen.findByText("加载失败");
+    await act(async () => { resolveOld(spendFixture); });
+    expect(screen.getByText("加载失败")).toBeInTheDocument();
+    expect(screen.queryByText("¥1,600")).not.toBeInTheDocument();
+  });
+
+  it("开支页签下重置筛选：清空 view/granularity/筛选并回到默认 PN 查询", async () => {
+    renderPage("/maintenance/analytics?view=spend&granularity=day&customer=客户A&range=all");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenLastCalledWith(
+      expect.objectContaining({ granularity: "day", customer: "客户A" })));
+    fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
+    await waitFor(() => expect(query().toString()).toBe(""));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
+      business_type: "all", range: "ytd", sort: "cost_inc", page: 1, page_size: 20,
+    }));
+    expect(fetchSpendTrend).toHaveBeenCalledTimes(1);
   });
 });

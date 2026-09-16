@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("../../api", () => ({ api: { get } }));
 
-import { fetchAnalyticsFilterOptions, fetchPnRanking } from "../maintenanceAnalytics";
+import { fetchAnalyticsFilterOptions, fetchPnRanking, fetchSpendTrend } from "../maintenanceAnalytics";
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -29,6 +29,30 @@ describe("维保数据分析 API 契约", () => {
     await fetchPnRanking({ range: "12m", sort: "qty", page: 2, page_size: 50 });
     expect(get).toHaveBeenCalledWith("/maintenance/analytics/pn-ranking", {
       params: { range: "12m", sort: "qty", page: 2, page_size: 50 },
+    });
+  });
+
+  it("spend-trend 透传粒度与全字段筛选（与 pn-ranking 同参数）", async () => {
+    get.mockResolvedValueOnce({ data: { buckets: [] } });
+    await fetchSpendTrend({
+      range: "ytd", granularity: "month", business_type: "all",
+      project: "p1,p2", customer: "客户A", sp: "张三", order_no: "REQ-1",
+      demand_type: "repair", warehouse: "广州仓", cost_source: "linked,missing",
+    });
+    expect(get).toHaveBeenCalledWith("/maintenance/analytics/spend-trend", {
+      params: {
+        range: "ytd", granularity: "month", business_type: "all",
+        project: "p1,p2", customer: "客户A", sp: "张三", order_no: "REQ-1",
+        demand_type: "repair", warehouse: "广州仓", cost_source: "linked,missing",
+      },
+    });
+  });
+
+  it("spend-trend 省略的可选筛选不伪造空串，粒度可单独指定", async () => {
+    get.mockResolvedValueOnce({ data: { granularity: "day" } });
+    await fetchSpendTrend({ range: "12m", granularity: "day" });
+    expect(get).toHaveBeenCalledWith("/maintenance/analytics/spend-trend", {
+      params: { range: "12m", granularity: "day" },
     });
   });
 

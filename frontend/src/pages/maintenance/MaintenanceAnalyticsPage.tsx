@@ -12,6 +12,7 @@ import {
   Skeleton,
   Space,
   Table,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -23,9 +24,16 @@ import { BarChartOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   fetchAnalyticsFilterOptions,
   fetchPnRanking,
+  fetchSpendTrend,
   type PnRanking,
   type PnRankingParams,
   type PnRankingRow,
+  type SpendBusinessTypeRow,
+  type SpendSalespersonRow,
+  type SpendTrendBucket,
+  type SpendTrendGranularity,
+  type SpendTrendParams,
+  type SpendTrendResponse,
 } from "../../api/maintenanceAnalytics";
 import {
   getMaintenanceProject,
@@ -40,6 +48,13 @@ import {
 import { readPermissionMap } from "../../nav";
 import PageHeader from "../../components/PageHeader";
 import { PnTopBar } from "../../components/charts/PnTopBar";
+import {
+  SPEND_CATEGORY_CODES,
+  SPEND_CATEGORY_LABELS,
+  SPEND_GRANULARITY_LABELS,
+  SpendTrendBar,
+  formatSpendBucket,
+} from "../../components/charts/SpendTrendBar";
 import { raw } from "../maintenance/panel/panelUtils";
 import { moneyExact, qty as qtyFmt } from "../../utils/format";
 
@@ -111,6 +126,22 @@ const COST_SOURCE_OPTIONS = [
   { label: "缺失", value: "missing" },
 ];
 const COST_SOURCE_CODES = COST_SOURCE_OPTIONS.map((option) => option.value);
+
+/** 开支统计粒度（URL 参数 granularity；未知值退回本月度）。 */
+const GRANULARITY_OPTIONS = (Object.keys(SPEND_GRANULARITY_LABELS) as SpendTrendGranularity[])
+  .map((value) => ({ label: SPEND_GRANULARITY_LABELS[value], value }));
+
+function readGranularity(spec: string | null): SpendTrendGranularity {
+  return spec === "day" || spec === "week" || spec === "year" ? spec : "month";
+}
+
+/** 后端 detail（字符串或 {message}）→ 页面可读错误文案。 */
+function apiErrorMessage(err: unknown): string {
+  const detail = (err as { response?: { data?: { detail?: { message?: string } | string } } })
+    .response?.data?.detail;
+  const msg = typeof detail === "string" ? detail : detail?.message;
+  return msg || "加载失败";
+}
 
 /** URL CSV → 去重选中值（空串/空段丢弃）。 */
 function csvValues(spec: string | null): string[] {
@@ -191,6 +222,9 @@ export function MaintenanceAnalyticsPage() {
     [costSourceSpec],
   );
   const costSourceParam = csvParam(costSources, COST_SOURCE_CODES);
+  /** 视图页签：pn（默认）/ spend；granularity 仅 spend 使用，但都入 URL 便于分享。 */
+  const view = sp.get("view") === "spend" ? "spend" : "pn";
+  const granularity = readGranularity(sp.get("granularity"));
 
   const [customerDraft, setCustomerDraft] = useState(customer);
   useEffect(() => { setCustomerDraft(customer); }, [customer]);
@@ -354,11 +388,9 @@ export function MaintenanceAnalyticsPage() {
     } catch (err) {
       if (seqRef.current !== seq) return;
       setData(null);
-      const detail = (err as { response?: { data?: { detail?: { message?: string } | string } } })
-        .response?.data?.detail;
-      const msg = typeof detail === "string" ? detail : detail?.message;
-      setError(msg || "加载失败");
-      message.error(msg || "维保分析数据加载失败");
+      const msg = apiErrorMessage(err);
+      setError(msg);
+      message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
     } finally {
       if (seqRef.current === seq) setLoading(false);
     }
@@ -368,9 +400,60 @@ export function MaintenanceAnalyticsPage() {
   ]);
 
   useEffect(() => {
+    if (view !== "pn") return;
     void load();
     return () => { seqRef.current += 1; };
-  }, [load]);
+  }, [load, view]);
+
+  // 开支统计：独立请求 + 独立代次守卫；切粒度/筛选只影响 spend，不碰 PN 状态。
+  const [spendData, setSpendData] = useState<SpendTrendResponse | null>(null);
+  const [spendLoading, setSpendLoading] = useState(false);
+  const [spendError, setSpendError] = useState<string | null>(null);
+  const spendSeqRef = useRef(0);
+
+  const loadSpend = useCallback(async () => {
+    const seq = spendSeqRef.current + 1;
+    spendSeqRef.current = seq;
+    setSpendLoading(true);
+    setSpendError(null);
+    setSpendData(null);
+    try {
+      const payload: SpendTrendParams = {
+        range: rangeKey, granularity, business_type: businessType,
+      };
+      if (projectIds.length) payload.project = projectIds.join(",");
+      if (customer.trim()) payload.customer = customer.trim();
+      if (sales.trim()) payload.sp = sales.trim();
+      if (orderNo.trim()) payload.order_no = orderNo.trim();
+      if (demandTypeParam) payload.demand_type = demandTypeParam;
+      if (warehouses.length) payload.warehouse = warehouses.join(",");
+      if (costSourceParam) payload.cost_source = costSourceParam;
+      if (rangeKey === "custom") {
+        if (customFrom) payload.date_from = customFrom;
+        if (customTo) payload.date_to = customTo;
+      }
+      const resp = await fetchSpendTrend(payload);
+      if (spendSeqRef.current !== seq) return; // 代次守卫：旧响应不覆盖新粒度
+      setSpendData(resp);
+    } catch (err) {
+      if (spendSeqRef.current !== seq) return;
+      setSpendData(null);
+      const msg = apiErrorMessage(err);
+      setSpendError(msg);
+      message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
+    } finally {
+      if (spendSeqRef.current === seq) setSpendLoading(false);
+    }
+  }, [
+    rangeKey, granularity, businessType, projectIds, customer, sales, orderNo,
+    demandTypeParam, warehouses, costSourceParam, customFrom, customTo,
+  ]);
+
+  useEffect(() => {
+    if (view !== "spend") return;
+    void loadSpend();
+    return () => { spendSeqRef.current += 1; };
+  }, [loadSpend, view]);
 
   const onTableChange: TableProps<PnRankingRow>["onChange"] = (pg, _fl, sorter) => {
     const field = Array.isArray(sorter) ? sorter[0]?.field : sorter?.field;
@@ -389,6 +472,10 @@ export function MaintenanceAnalyticsPage() {
   const columns: ColumnsType<PnRankingRow> = useMemoColumns(sort);
 
   const summary = data?.summary;
+  const activeError = view === "spend" ? spendError : error;
+  const showWbddWarning = view === "spend"
+    ? spendData !== null && !spendData.summary.wbdd_ready
+    : summary !== undefined && !summary.wbdd_ready;
   const costItems = (data?.rows ?? []).map((r) => ({
     pn: r.pn,
     value: r.cost_inc.state === "ready" && r.cost_inc.value !== null
@@ -398,6 +485,57 @@ export function MaintenanceAnalyticsPage() {
     pn: r.pn,
     value: Number(r.effective_qty) || null,
   }));
+
+  const spendByBusinessColumns: ColumnsType<SpendBusinessTypeRow> = useMemo(() => [
+    { title: "分类", dataIndex: "label", width: 140, render: (v: string, r) => v || r.code },
+    { title: "含税金额", dataIndex: "cost_inc", width: 160, align: "right",
+      render: (_: unknown, r: SpendBusinessTypeRow) => statMoney(r.cost_inc) },
+    { title: "未税金额", dataIndex: "cost_ex", width: 160, align: "right",
+      render: (_: unknown, r: SpendBusinessTypeRow) => statMoney(r.cost_ex) },
+    { title: "有效数量", dataIndex: "effective_qty", width: 110, align: "right",
+      render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
+    { title: "单数", dataIndex: "order_count", width: 90, align: "right",
+      render: (v: number) => qtyFmt(v) },
+    { title: "缺价行", dataIndex: "missing_lines", width: 90, align: "right",
+      render: (v: number) => qtyFmt(v) },
+    { title: "占比", dataIndex: "cost_share_pct", width: 100, align: "right",
+      render: (v: number | null) => (v === null ? "—" : `${v}%`) },
+  ], []);
+
+  const spendBySalespersonColumns: ColumnsType<SpendSalespersonRow> = useMemo(() => [
+    { title: "销售", dataIndex: "salesperson", width: 160,
+      render: (v: string | null) => (v ? v : <Text type="secondary">未标注</Text>) },
+    { title: "含税金额", dataIndex: "cost_inc", width: 160, align: "right",
+      render: (_: unknown, r: SpendSalespersonRow) => statMoney(r.cost_inc) },
+    { title: "未税金额", dataIndex: "cost_ex", width: 160, align: "right",
+      render: (_: unknown, r: SpendSalespersonRow) => statMoney(r.cost_ex) },
+    { title: "有效数量", dataIndex: "effective_qty", width: 110, align: "right",
+      render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
+    { title: "单数", dataIndex: "order_count", width: 90, align: "right",
+      render: (v: number) => qtyFmt(v) },
+    { title: "占比", dataIndex: "cost_share_pct", width: 100, align: "right",
+      render: (v: number | null) => (v === null ? "—" : `${v}%`) },
+  ], []);
+
+  const spendBucketColumns: ColumnsType<SpendTrendBucket> = useMemo(() => [
+    { title: "时间", dataIndex: "bucket", width: 110, fixed: "left" as const,
+      render: (v: string) => formatSpendBucket(v, granularity) },
+    ...SPEND_CATEGORY_CODES.map((code) => ({
+      title: SPEND_CATEGORY_LABELS[code],
+      key: code,
+      width: 130,
+      align: "right" as const,
+      render: (_: unknown, r: SpendTrendBucket) => statMoney(r.by_business_type?.[code]),
+    })),
+    { title: "合计含税", key: "cost_inc", width: 150, align: "right" as const,
+      render: (_: unknown, r: SpendTrendBucket) => statMoney(r.cost_inc) },
+    { title: "合计未税", key: "cost_ex", width: 150, align: "right" as const,
+      render: (_: unknown, r: SpendTrendBucket) => statMoney(r.cost_ex) },
+    { title: "有效数量", dataIndex: "effective_qty", width: 110, align: "right" as const,
+      render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
+    { title: "缺价行", dataIndex: "missing_lines", width: 90, align: "right" as const,
+      render: (v: number) => qtyFmt(v) },
+  ], [granularity]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -420,7 +558,9 @@ export function MaintenanceAnalyticsPage() {
             }}>
               重置筛选
             </Button>
-            <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
+            <Button icon={<ReloadOutlined />}
+              onClick={() => { if (view === "spend") void loadSpend(); else void load(); }}
+              loading={view === "spend" ? spendLoading : loading}>
               刷新
             </Button>
           </Space>
@@ -524,62 +664,169 @@ export function MaintenanceAnalyticsPage() {
         </Space>
       </Card>
 
-      {error ? <Alert type="error" showIcon message={error} /> : null}
-      {summary && !summary.wbdd_ready ? (
+      {activeError ? <Alert type="error" showIcon message={activeError} /> : null}
+      {showWbddWarning ? (
         <Alert type="warning" showIcon message="维保需求单尚未导入，暂无分析数据" />
       ) : null}
 
-      <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }}>
-        <KpiCard label="备件总成本（含税）" loading={loading}
-          value={statMoney(summary?.total_cost_inc)}
-          sub={canCost ? "点表格含税成本列头可按成本排序" : "需要成本查看权限"} />
-        <KpiCard label="涉及 PN 数" loading={loading}
-          value={qtyFmt(summary?.part_count ?? null)} />
-        <KpiCard label="总有效消耗量" loading={loading}
-          value={qtyFmt(summary ? Number(summary.total_effective_qty) : null)}
-          sub="需求数量 − 退货数量" />
-        <KpiCard label="坏件返还总量" loading={loading}
-          value={qtyFmt(summary ? Number(summary.total_bad_return_qty) : null)}
-          sub="RKD 入库确认的坏品/坏件/故障" />
-      </Row>
+      <Tabs
+        activeKey={view}
+        onChange={(key) => patch({ view: key === "spend" ? "spend" : null })}
+        items={[
+          {
+            key: "pn",
+            label: "PN 排名",
+            children: (
+              <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }}>
+                  <KpiCard label="备件总成本（含税）" loading={loading}
+                    value={statMoney(summary?.total_cost_inc)}
+                    sub={canCost ? "点表格含税成本列头可按成本排序" : "需要成本查看权限"} />
+                  <KpiCard label="涉及 PN 数" loading={loading}
+                    value={qtyFmt(summary?.part_count ?? null)} />
+                  <KpiCard label="总有效消耗量" loading={loading}
+                    value={qtyFmt(summary ? Number(summary.total_effective_qty) : null)}
+                    sub="需求数量 − 退货数量" />
+                  <KpiCard label="坏件返还总量" loading={loading}
+                    value={qtyFmt(summary ? Number(summary.total_bad_return_qty) : null)}
+                    sub="RKD 入库确认的坏品/坏件/故障" />
+                </Row>
 
-      <Row gutter={16}>
-        <Col xs={24} lg={12}>
-          <Card size="small">
-            <PnTopBar items={costItems} title="Top PN 成本" kind="money"
-              metricLabel="金额合计（含税）" loading={loading} error={error}
-              testId="pn-cost-chart" />
-          </Card>
-        </Col>
-        <Col xs={24} lg={12}>
-          <Card size="small">
-            <PnTopBar items={qtyItems} title="Top PN 消耗频率" kind="qty"
-              metricLabel="数量合计（有效数量）" loading={loading} error={error}
-              testId="pn-qty-chart" />
-          </Card>
-        </Col>
-      </Row>
+                <Row gutter={16}>
+                  <Col xs={24} lg={12}>
+                    <Card size="small">
+                      <PnTopBar items={costItems} title="Top PN 成本" kind="money"
+                        metricLabel="金额合计（含税）" loading={loading} error={error}
+                        testId="pn-cost-chart" />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={12}>
+                    <Card size="small">
+                      <PnTopBar items={qtyItems} title="Top PN 消耗频率" kind="qty"
+                        metricLabel="数量合计（有效数量）" loading={loading} error={error}
+                        testId="pn-qty-chart" />
+                    </Card>
+                  </Col>
+                </Row>
 
-      <Card size="small" title={`PN 排名（共 ${qtyFmt(data?.total ?? null)} 个）`}>
-        <Table<PnRankingRow>
-          rowKey="part_id"
-          size="small"
-          loading={loading}
-          dataSource={data?.rows ?? []}
-          columns={columns}
-          onChange={onTableChange}
-          scroll={{ x: 1600 }}
-          pagination={{
-            current: page,
-            pageSize,
-            total: data?.total ?? 0,
-            pageSizeOptions: PAGE_SIZE_OPTIONS,
-            showSizeChanger: true,
-            showTotal: (t, range) => `第 ${range[0]}–${range[1]} 条 / 共 ${t} 个 PN`,
-          }}
-          locale={{ emptyText: "当前窗口没有分析数据" }}
-        />
-      </Card>
+                <Card size="small" title={`PN 排名（共 ${qtyFmt(data?.total ?? null)} 个）`}>
+                  <Table<PnRankingRow>
+                    rowKey="part_id"
+                    size="small"
+                    loading={loading}
+                    dataSource={data?.rows ?? []}
+                    columns={columns}
+                    onChange={onTableChange}
+                    scroll={{ x: 1600 }}
+                    pagination={{
+                      current: page,
+                      pageSize,
+                      total: data?.total ?? 0,
+                      pageSizeOptions: PAGE_SIZE_OPTIONS,
+                      showSizeChanger: true,
+                      showTotal: (t, range) => `第 ${range[0]}–${range[1]} 条 / 共 ${t} 个 PN`,
+                    }}
+                    locale={{ emptyText: "当前窗口没有分析数据" }}
+                  />
+                </Card>
+              </Space>
+            ),
+          },
+          {
+            key: "spend",
+            label: "开支统计",
+            children: (
+              <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                <Card size="small">
+                  <Space wrap size={12} align="center">
+                    <Segmented options={GRANULARITY_OPTIONS} value={granularity}
+                      onChange={(v) => patch({ granularity: String(v) })} />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      粒度只影响分桶展示；金额口径＝已知成本合计（含税，缺价行单列、不按 0 计）
+                    </Text>
+                  </Space>
+                </Card>
+
+                <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }}>
+                  <KpiCard label="开支合计（含税）" loading={spendLoading}
+                    value={statMoney(spendData?.summary.total_cost_inc)}
+                    sub="已知成本合计；缺价行单列、不按 0 计" />
+                  <KpiCard label="开支合计（未税）" loading={spendLoading}
+                    value={statMoney(spendData?.summary.total_cost_ex)} />
+                  <KpiCard label="有效数量" loading={spendLoading}
+                    value={qtyFmt(spendData ? Number(spendData.summary.effective_qty) : null)}
+                    sub="需求数量 − 退货数量" />
+                  <KpiCard label="期数" loading={spendLoading}
+                    value={qtyFmt(spendData?.summary.bucket_count ?? null)}
+                    sub={`按${SPEND_GRANULARITY_LABELS[granularity]}分桶`} />
+                  <KpiCard label="缺价行" loading={spendLoading}
+                    value={qtyFmt(spendData?.summary.missing_lines ?? null)}
+                    sub="未计入金额" />
+                </Row>
+
+                <Card size="small">
+                  <SpendTrendBar
+                    buckets={spendData?.buckets ?? []}
+                    granularity={granularity}
+                    loading={spendLoading}
+                    error={spendError}
+                    testId="spend-trend-chart"
+                  />
+                </Card>
+
+                <div data-testid="spend-by-business-type">
+                  <Card size="small" title="按业务类型汇总">
+                    <Table<SpendBusinessTypeRow>
+                      rowKey="code"
+                      size="small"
+                      loading={spendLoading}
+                      dataSource={spendData?.by_business_type ?? []}
+                      columns={spendByBusinessColumns}
+                      pagination={false}
+                      scroll={{ x: 900 }}
+                      locale={{ emptyText: "当前窗口没有开支数据" }}
+                    />
+                  </Card>
+                </div>
+
+                <div data-testid="spend-by-salesperson">
+                  <Card size="small" title="按销售汇总">
+                    <Table<SpendSalespersonRow>
+                      rowKey={(r) => r.salesperson ?? "__unlabeled__"}
+                      size="small"
+                      loading={spendLoading}
+                      dataSource={spendData?.by_salesperson ?? []}
+                      columns={spendBySalespersonColumns}
+                      pagination={false}
+                      scroll={{ x: 800 }}
+                      locale={{ emptyText: "当前窗口没有开支数据" }}
+                    />
+                  </Card>
+                </div>
+
+                <div data-testid="spend-bucket-detail">
+                  <Card size="small" title="按期明细">
+                    <Table<SpendTrendBucket>
+                      rowKey="bucket"
+                      size="small"
+                      loading={spendLoading}
+                      dataSource={spendData?.buckets ?? []}
+                      columns={spendBucketColumns}
+                      scroll={{ x: 1560 }}
+                      pagination={{
+                        pageSize: 20,
+                        showSizeChanger: false,
+                        showTotal: (t) => `共 ${t} 期`,
+                      }}
+                      locale={{ emptyText: "当前窗口没有开支数据" }}
+                    />
+                  </Card>
+                </div>
+              </Space>
+            ),
+          },
+        ]}
+      />
     </Space>
   );
 }

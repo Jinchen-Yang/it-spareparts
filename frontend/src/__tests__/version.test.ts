@@ -1,12 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.33.0 release notes", () => {
-  it("publishes full-field analytics filters and the refit business type", () => {
-    expect(APP_VERSION).toBe("1.33.0");
+describe("v1.34.0 release notes", () => {
+  it("publishes the spend breakdown tab with granularity and salesperson views", () => {
+    expect(APP_VERSION).toBe("1.34.0");
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-16");
+    expect(LATEST.date).toBe("2026-09-17");
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/开支统计/);
+    expect(notes).toMatch(/按天\/周\/月\/年分桶/);
+    expect(notes).toMatch(/按销售汇总/);
+    expect(notes).toMatch(/拆改配服务/);
+  });
+});
+
+describe("v1.33.0 release notes (archived)", () => {
+  it("publishes full-field analytics filters and the refit business type", () => {
+    const v133 = CHANGELOG.find((entry) => entry.version === "1.33.0")!;
+    expect(v133.date).toBe("2026-09-16");
+    const notes = v133.items.join("\n");
     expect(notes).toMatch(/全字段筛选/);
     expect(notes).toMatch(/拆改配服务/);
     expect(notes).toMatch(/重置一键清空/);

@@ -79,6 +79,97 @@ export interface PnRankingParams {
   page_size?: number;
 }
 
+// ===== 开支统计（v1.34 spend-trend）：参数/权限/范围与 pn-ranking 同口径 =====
+
+/** 时间统计粒度：分桶起点为 date_trunc(granularity)，周桶为周一。 */
+export type SpendTrendGranularity = "day" | "week" | "month" | "year";
+
+/** 开支分类：四类业务档 + 非维保 + 未标注 + 未归属（无活跃挂靠项目）。 */
+export type SpendBusinessTypeCode =
+  | "overall"
+  | "spare"
+  | "computing"
+  | "refit"
+  | "other"
+  | "unlabeled"
+  | "unassigned";
+
+export interface SpendTrendParams {
+  range?: string;
+  date_from?: string;
+  date_to?: string;
+  granularity?: SpendTrendGranularity;
+  business_type?: string;
+  /** 项目主键 CSV；空/未传不过滤。 */
+  project?: string;
+  /** 客户名包含匹配；空/未传不过滤。 */
+  customer?: string;
+  /** 销售名包含匹配；空/未传不过滤。 */
+  sp?: string;
+  /** 需求单号包含匹配；空/未传不过滤。 */
+  order_no?: string;
+  /** 需求类型码 CSV（repair|stock）；空或全选（两项）不过滤。 */
+  demand_type?: string;
+  /** 仓库值 CSV；空/未传不过滤。 */
+  warehouse?: string;
+  /** 成本来源码 CSV（linked|estimated|manual|missing）；空或全选（四项）不过滤。 */
+  cost_source?: string;
+}
+
+export interface SpendTrendBucket {
+  /** 桶起点 YYYY-MM-DD（周桶为周一）。 */
+  bucket: string;
+  order_count: number;
+  qty: string;
+  effective_qty: string;
+  missing_lines: number;
+  cost_inc: Stat<string>;
+  cost_ex: Stat<string>;
+  /** 桶内只给有数据的档位（零数据档位后端省略）——读取端一律按缺省 null 处理。 */
+  by_business_type: Partial<Record<SpendBusinessTypeCode, Stat<string>>>;
+}
+
+export interface SpendBusinessTypeRow {
+  code: SpendBusinessTypeCode;
+  label: string;
+  order_count: number;
+  qty: string;
+  effective_qty: string;
+  missing_lines: number;
+  cost_inc: Stat<string>;
+  cost_ex: Stat<string>;
+  cost_share_pct: number | null;
+}
+
+export interface SpendSalespersonRow {
+  /** null = 需求单未标注销售（页面显示「未标注」，不猜 0）。 */
+  salesperson: string | null;
+  order_count: number;
+  qty: string;
+  effective_qty: string;
+  cost_inc: Stat<string>;
+  cost_ex: Stat<string>;
+  cost_share_pct: number | null;
+}
+
+export interface SpendTrendResponse {
+  granularity: SpendTrendGranularity;
+  window: { range: string; date_from: string | null; date_to: string | null };
+  buckets: SpendTrendBucket[];
+  by_business_type: SpendBusinessTypeRow[];
+  by_salesperson: SpendSalespersonRow[];
+  summary: {
+    bucket_count: number;
+    order_count: number;
+    qty: string;
+    effective_qty: string;
+    missing_lines: number;
+    total_cost_inc: Stat<string>;
+    total_cost_ex: Stat<string>;
+    wbdd_ready: boolean;
+  };
+}
+
 /** GET /maintenance/analytics/filter-options 响应：仓库下拉候选。 */
 export interface AnalyticsFilterOptions {
   warehouses: string[];
@@ -88,6 +179,14 @@ export const fetchPnRanking = async (params: PnRankingParams) => {
   const resp = await api.get<PnRanking>("/maintenance/analytics/pn-ranking", {
     params,
   });
+  return resp.data;
+};
+
+export const fetchSpendTrend = async (params: SpendTrendParams) => {
+  const resp = await api.get<SpendTrendResponse>(
+    "/maintenance/analytics/spend-trend",
+    { params },
+  );
   return resp.data;
 };
 
