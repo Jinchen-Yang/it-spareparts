@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.34.0";
+export const APP_VERSION = "1.35.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.35.0",
+    date: "2026-09-17",
+    items: [
+      "开支统计新增「按项目汇总」：哪个项目花了多少一目了然，项目名可点入项目面板；未归属项目单列一行",
+      "销售口径改为项目主档优先：项目面板改过的销售（含清空）即为统计口径，订单源旧名不再干扰；销售筛选在 PN 排名与开支统计两页签同步生效",
+      "维保主页筛选（期限/业务类型/状态/排序/关键词）写入网址：筛选后进入项目、返回项目墙仍保持筛选，链接可直接分享",
+    ],
+  },
   {
     version: "1.34.0",
     date: "2026-09-17",

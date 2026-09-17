@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Modal, message } from "antd";
 
@@ -1192,5 +1192,49 @@ describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => 
     expect(screen.getByText(/已被 张三 于 2026-09-06 10:03 作废，修改未生效/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /确认回传/ }));
     await waitFor(() => expect(applyProjectMaster).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
+  function LocationProbe() {
+    const location = useLocation();
+    return <output data-testid="panel-location">{location.pathname + location.search}</output>;
+  }
+
+  function renderPanelWithWall(initialEntries: string[]) {
+    return render(
+      <MemoryRouter initialEntries={initialEntries}>
+        <Routes>
+          <Route path="/maintenance" element={<div data-testid="wall-stub">项目墙</div>} />
+          <Route path="/maintenance/projects/:projectId"
+                 element={<MaintenanceProjectPanelPage />} />
+        </Routes>
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  afterEach(() => {
+    // window.history.state 与路由无关（MemoryRouter 不碰它），但本组测试用它模拟
+    // 浏览器历史深度：清掉避免渗到后续测试。
+    window.history.replaceState(null, "");
+  });
+
+  it("从筛选后的墙进入面板：返回按钮 navigate(-1) 回到带筛选的墙 URL", async () => {
+    window.history.replaceState({ idx: 1 }, "");
+    renderPanelWithWall(["/maintenance?business_type=computing", "/maintenance/projects/p1"]);
+    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: /返回项目墙/ }));
+    await waitFor(() => expect(screen.getByTestId("panel-location").textContent)
+      .toBe("/maintenance?business_type=computing"));
+  });
+
+  it("直达面板无历史：返回退化为默认墙 /maintenance", async () => {
+    window.history.replaceState(null, "");
+    renderPanelWithWall(["/maintenance/projects/p1"]);
+    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: /返回项目墙/ }));
+    await waitFor(() => expect(screen.getByTestId("panel-location").textContent)
+      .toBe("/maintenance"));
   });
 });

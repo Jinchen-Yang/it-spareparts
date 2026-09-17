@@ -159,6 +159,22 @@ def _cost_source_clause(cost_sources: list[str] | None):
     return or_(*clauses) if len(clauses) > 1 else clauses[0]
 
 
+def _effective_salesperson():
+    """有效销售 SQL 表达式（v1.35，两查询共用）。
+
+    项目主档优先：有活跃挂靠项目时，人工改过（salesperson_override_active，
+    含清空）→ 主档值即权威，不回退订单源旧值；未改过且主档空 → 回退订单源；
+    无活跃挂靠 → 订单源。两侧都 btrim 去空白，NULL/空白并成同一档（JSON null）。
+    """
+    master = func.nullif(func.btrim(MaintenanceProject.salesperson), "")
+    source = func.nullif(func.btrim(FMaintenanceOrder.salesperson), "")
+    return case(
+        (MaintenanceProject.project_id.is_(None), source),
+        (MaintenanceProject.salesperson_override_active.is_(True), master),
+        else_=func.coalesce(master, source),
+    )
+
+
 def pn_ranking(
     db: Session,
     *,
@@ -191,6 +207,9 @@ def pn_ranking(
     全字段筛选（项目/客户/销售/单号/需求类型/仓库/取价来源）同样在聚合前
     落到 where：行集、total、summary、成本占比与分页随之收敛；project_ids
     与 allowed_project_ids 取交集，绝不放大行键范围。
+    销售口径（v1.35 有效销售）：有活跃挂靠 → 项目主档销售（人工改过即权威，
+    清空即未标注，不回退订单源旧值）；主档空且未改过 → 回退订单源；无项目 →
+    订单源。sp 筛选与 spend_trend 的 by_salesperson 同口径，禁止两页签分叉。
     """
     start, end = resolve_window(range_, date_from, date_to)
     months = _window_months(start, end)
@@ -262,12 +281,20 @@ def pn_ranking(
             )
             & MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
+        # v1.35 有效销售：主聚合 outerjoin 项目主档，sp 筛选读主档销售
+        .outerjoin(
+            MaintenanceProject,
+            MaintenanceProject.project_id
+            == MaintenanceSourceOrderAssignment.project_id,
+        )
         .where(FMaintenanceLine.is_active.is_(True))
         .group_by(FMaintenanceLine.part_id)
     )
     stmt = query_filters.active_orders(stmt, FMaintenanceOrder)
     if business_type_clause is not None:
         # EXISTS 显式要求项目存在，避免 outer join 的 NULL 被归入「未标注」。
+        # 显式只关联挂靠：主聚合已 outerjoin 项目主档，auto-correlate 会连
+        # 项目一起收走，子查询会丢 FROM（与 _spend_filters 同款）。
         stmt = stmt.where(
             select(1)
             .where(
@@ -275,6 +302,7 @@ def pn_ranking(
                 == MaintenanceSourceOrderAssignment.project_id,
                 business_type_clause,
             )
+            .correlate(MaintenanceSourceOrderAssignment)
             .exists()
         )
     if allowed_project_ids is not None:
@@ -292,8 +320,9 @@ def pn_ranking(
             FMaintenanceOrder.end_customer.icontains(customer, autoescape=True)
         )
     if salesperson:
+        # v1.35 有效销售口径：匹配 _effective_salesperson（项目主档优先）
         stmt = stmt.where(
-            FMaintenanceOrder.salesperson.icontains(salesperson, autoescape=True)
+            _effective_salesperson().icontains(salesperson, autoescape=True)
         )
     if order_no:
         stmt = stmt.where(
@@ -539,6 +568,8 @@ _BUSINESS_TYPE_SPLIT_LABELS: dict[str, str] = {
 }
 # 销售明细上限：销售人数可能很多，超出部分对看板只增噪声
 _SALESPERSON_LIMIT = 200
+# 按项目汇总上限：项目数可能很多，超出部分对看板只增噪声
+_PROJECT_LIMIT = 200
 
 
 def _cost_envelope(value, *, can_cost: bool, wbdd_ready: bool) -> dict:
@@ -578,6 +609,39 @@ def _business_type_split_case():
     )
 
 
+def _spend_base(stmt):
+    """开支统计三条分组查询（主聚合/销售/项目）共用的 FROM 与基础行过滤。
+
+    v1.35 起统一 outerjoin 项目主档：有效销售表达式与 by_project 都要读它。
+    """
+    return (
+        stmt.select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            (MaintenanceManualCostOverride.line_id == FMaintenanceLine.id)
+            & MaintenanceManualCostOverride.active.is_(True),
+        )
+        .outerjoin(
+            MaintenanceSourceOrderAssignment,
+            (
+                MaintenanceSourceOrderAssignment.source_order_id
+                == FMaintenanceOrder.raw_order_id
+            )
+            & MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .outerjoin(
+            MaintenanceProject,
+            MaintenanceProject.project_id
+            == MaintenanceSourceOrderAssignment.project_id,
+        )
+        .where(
+            FMaintenanceLine.is_active.is_(True),
+            FMaintenanceOrder.order_date.is_not(None),
+        )
+    )
+
+
 def _spend_filters(
     stmt,
     *,
@@ -593,9 +657,11 @@ def _spend_filters(
     start: date | None,
     end: date | None,
 ):
-    """pn_ranking 同款筛选子句（主聚合与销售汇总共用，口径单一）。
+    """pn_ranking 同款筛选子句（主聚合/销售/项目三条分组查询共用，口径单一）。
 
-    无日期行无法上时间轴：调用方在两处都先加 order_date IS NOT NULL。
+    无日期行无法上时间轴：调用方在各查询都先加 order_date IS NOT NULL。
+    sp 走 v1.35 有效销售口径（_effective_salesperson，项目主档优先），
+    调用方必须已 outerjoin 项目主档。
     """
     if business_type_clause is not None:
         # EXISTS 显式要求项目存在，避免 outer join 的 NULL 被归入「未标注」。
@@ -625,8 +691,9 @@ def _spend_filters(
             FMaintenanceOrder.end_customer.icontains(customer, autoescape=True)
         )
     if salesperson:
+        # v1.35 有效销售口径：匹配 _effective_salesperson（项目主档优先）
         stmt = stmt.where(
-            FMaintenanceOrder.salesperson.icontains(salesperson, autoescape=True)
+            _effective_salesperson().icontains(salesperson, autoescape=True)
         )
     if order_no:
         stmt = stmt.where(
@@ -664,7 +731,7 @@ def spend_trend(
     can_cost: bool,
     allowed_project_ids: set[str] | None = None,
 ) -> dict:
-    """开支统计：按期（日/周/月/年）× 业务类型 × 销售拆分已知成本（2026-09-16）。
+    """开支统计：按期（日/周/月/年）× 业务类型 × 销售 × 项目拆分已知成本。
 
     口径与 pn_ranking 完全一致：行 is_active、active_orders()，成本只认
     sql_normalized_line_cost 的已知成本（缺价行不进 SUM，missing_lines 单列，
@@ -672,10 +739,15 @@ def spend_trend(
     不存在 → unassigned；项目类型 NULL/空白 → unlabeled；标准字面量 → 对应码；
     其余非空文本 → other。显式分类筛选（含六档全选）不混入未归属，未归属只进
     默认 all。
+    销售口径（v1.35 有效销售）：有活跃挂靠 → 项目主档销售（人工改过即权威，
+    清空即未标注，不回退订单源旧值）；主档空且未改过 → 回退订单源；无项目 →
+    订单源。by_salesperson 分组与 sp 筛选都用该口径（见 _effective_salesperson）。
+    by_project（v1.35）：按当前活跃挂靠项目分组，未归属单列一行（display_name
+    「未归属（无项目）」），与主聚合同筛选同口径，上限 200 行。
     allowed_project_ids 非 None（own_maintenance_projects_only 开）时行集收敛到
-    该范围：未归属行一并排除，不得经分桶/销售/汇总泄露他人项目。
+    该范围：未归属行一并排除，不得经分桶/销售/项目/汇总泄露他人项目。
     分桶 = date_trunc(granularity, order_date)::date（周桶从周一开始）；无日期行
-    无法上时间轴，主聚合与销售汇总一并排除。
+    无法上时间轴，主聚合与销售/项目汇总一并排除。
     """
     if granularity not in GRANULARITIES:
         raise AnalyticsValidationError(f"粒度必须是 {'/'.join(GRANULARITIES)}")
@@ -731,7 +803,7 @@ def spend_trend(
     # ---- 主聚合：按 (时间桶, 业务类型档) 分组，Python 侧透视 ----
     bucket = func.date_trunc(granularity, FMaintenanceOrder.order_date).cast(Date)
     split = _business_type_split_case()
-    stmt = (
+    stmt = _spend_base(
         select(
             bucket.label("bucket"),
             split.label("business_type"),
@@ -744,32 +816,7 @@ def spend_trend(
             func.sum(cost_ex).label("cost_ex"),
             func.count().filter(missing_inc).label("missing_lines"),
         )
-        .select_from(FMaintenanceLine)
-        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
-        .outerjoin(
-            MaintenanceManualCostOverride,
-            (MaintenanceManualCostOverride.line_id == FMaintenanceLine.id)
-            & MaintenanceManualCostOverride.active.is_(True),
-        )
-        .outerjoin(
-            MaintenanceSourceOrderAssignment,
-            (
-                MaintenanceSourceOrderAssignment.source_order_id
-                == FMaintenanceOrder.raw_order_id
-            )
-            & MaintenanceSourceOrderAssignment.is_active.is_(True),
-        )
-        .outerjoin(
-            MaintenanceProject,
-            MaintenanceProject.project_id
-            == MaintenanceSourceOrderAssignment.project_id,
-        )
-        .where(
-            FMaintenanceLine.is_active.is_(True),
-            FMaintenanceOrder.order_date.is_not(None),
-        )
-        .group_by(bucket, split)
-    )
+    ).group_by(bucket, split)
     stmt = query_filters.active_orders(stmt, FMaintenanceOrder)
     stmt = apply_filters(stmt)
     rows = db.execute(stmt).all()
@@ -889,11 +936,12 @@ def spend_trend(
     ]
 
     # ---- 销售汇总：单独一次分组查询（同筛选同口径） ----
-    # NULL 与空白（含纯空格）并成同一档，JSON 里统一为 null，不产生重复的「无人」行。
-    sp_name = func.nullif(func.btrim(FMaintenanceOrder.salesperson), "")
-    sp_stmt = (
+    # v1.35 有效销售（_effective_salesperson）：项目主档优先；NULL 与空白
+    # （含纯空格）并成同一档，JSON 里统一为 null，不产生重复的「无人」行。
+    effective_sp = _effective_salesperson()
+    sp_stmt = _spend_base(
         select(
-            sp_name.label("salesperson"),
+            effective_sp.label("salesperson"),
             func.count(func.distinct(FMaintenanceOrder.order_no)).label("order_count"),
             func.coalesce(func.sum(FMaintenanceLine.qty), Decimal("0")).label("qty"),
             func.coalesce(func.sum(FMaintenanceLine.return_qty), Decimal("0")).label(
@@ -902,27 +950,7 @@ def spend_trend(
             func.sum(cost_inc).label("cost_inc"),
             func.sum(cost_ex).label("cost_ex"),
         )
-        .select_from(FMaintenanceLine)
-        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
-        .outerjoin(
-            MaintenanceManualCostOverride,
-            (MaintenanceManualCostOverride.line_id == FMaintenanceLine.id)
-            & MaintenanceManualCostOverride.active.is_(True),
-        )
-        .outerjoin(
-            MaintenanceSourceOrderAssignment,
-            (
-                MaintenanceSourceOrderAssignment.source_order_id
-                == FMaintenanceOrder.raw_order_id
-            )
-            & MaintenanceSourceOrderAssignment.is_active.is_(True),
-        )
-        .where(
-            FMaintenanceLine.is_active.is_(True),
-            FMaintenanceOrder.order_date.is_not(None),
-        )
-        .group_by(sp_name)
-    )
+    ).group_by(effective_sp)
     sp_stmt = query_filters.active_orders(sp_stmt, FMaintenanceOrder)
     sp_stmt = apply_filters(sp_stmt)
     people = [
@@ -959,6 +987,67 @@ def spend_trend(
         for t in people[:_SALESPERSON_LIMIT]
     ]
 
+    # ---- 按项目汇总：单独一次分组查询（同筛选同口径，v1.35） ----
+    # 按当前活跃挂靠的 assignment.project_id 分组；无活跃挂靠归 project_id=NULL
+    # 行，display_name 渲染「未归属（无项目）」，业务类型档为 unassigned。
+    proj_stmt = _spend_base(
+        select(
+            MaintenanceSourceOrderAssignment.project_id.label("project_id"),
+            func.max(MaintenanceProject.display_name).label("display_name"),
+            func.max(_business_type_split_case()).label("business_type"),
+            func.count(func.distinct(FMaintenanceOrder.order_no)).label("order_count"),
+            func.coalesce(func.sum(FMaintenanceLine.qty), Decimal("0")).label("qty"),
+            func.coalesce(func.sum(FMaintenanceLine.return_qty), Decimal("0")).label(
+                "return_qty"
+            ),
+            func.sum(cost_inc).label("cost_inc"),
+            func.sum(cost_ex).label("cost_ex"),
+        )
+    ).group_by(MaintenanceSourceOrderAssignment.project_id)
+    proj_stmt = query_filters.active_orders(proj_stmt, FMaintenanceOrder)
+    proj_stmt = apply_filters(proj_stmt)
+    project_rows = [
+        {
+            "project_id": r.project_id,
+            "display_name": r.display_name,
+            "business_type_code": r.business_type,
+            "order_count": int(r.order_count or 0),
+            "qty": Decimal(r.qty or 0),
+            "return_qty": Decimal(r.return_qty or 0),
+            "cost_inc": Decimal(r.cost_inc or 0),
+            "cost_ex": Decimal(r.cost_ex or 0),
+        }
+        for r in db.execute(proj_stmt).all()
+    ]
+    if can_cost and total_cost_inc:
+        project_rows.sort(key=lambda t: (-t["cost_inc"], t["display_name"] or ""))
+    else:
+        # 无成本权限或全部缺价时按数量排序：成本序本身会泄露受限金额
+        project_rows.sort(key=lambda t: (-t["qty"], t["display_name"] or ""))
+    by_project = [
+        {
+            "project_id": t["project_id"],
+            "display_name": t["display_name"] or "未归属（无项目）",
+            "business_type_code": t["business_type_code"],
+            "business_type_label": _BUSINESS_TYPE_SPLIT_LABELS.get(
+                t["business_type_code"], t["business_type_code"]
+            ),
+            "order_count": t["order_count"],
+            "qty": str(t["qty"]),
+            "effective_qty": str(t["qty"] - t["return_qty"]),
+            "cost_inc": _cost_envelope(
+                t["cost_inc"], can_cost=can_cost, wbdd_ready=wbdd_ready
+            ),
+            "cost_ex": _cost_envelope(
+                t["cost_ex"], can_cost=can_cost, wbdd_ready=wbdd_ready
+            ),
+            "cost_share_pct": _cost_share_pct(
+                t["cost_inc"], total_cost_inc, can_cost=can_cost
+            ),
+        }
+        for t in project_rows[:_PROJECT_LIMIT]
+    ]
+
     return {
         "granularity": granularity,
         "window": {
@@ -969,6 +1058,7 @@ def spend_trend(
         "buckets": buckets,
         "by_business_type": by_business_type,
         "by_salesperson": by_salesperson,
+        "by_project": by_project,
         "summary": {
             "bucket_count": len(buckets),
             "order_count": sum((t["order_count"] for t in raw_rows), 0),

@@ -152,12 +152,27 @@ export interface SpendSalespersonRow {
   cost_share_pct: number | null;
 }
 
+/** 按项目汇总行（v1.35）：project_id=null 是未归属（无活跃挂靠项目）行。 */
+export interface SpendProjectRow {
+  project_id: string | null;
+  display_name: string;
+  business_type_code: string;
+  business_type_label: string;
+  order_count: number;
+  qty: string;
+  effective_qty: string;
+  cost_inc: Stat<string>;
+  cost_ex: Stat<string>;
+  cost_share_pct: number | null;
+}
+
 export interface SpendTrendResponse {
   granularity: SpendTrendGranularity;
   window: { range: string; date_from: string | null; date_to: string | null };
   buckets: SpendTrendBucket[];
   by_business_type: SpendBusinessTypeRow[];
   by_salesperson: SpendSalespersonRow[];
+  by_project: SpendProjectRow[];
   summary: {
     bucket_count: number;
     order_count: number;
