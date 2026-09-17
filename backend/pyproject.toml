@@ -20,6 +20,8 @@ dependencies = [
     "pdfplumber>=0.11.9",
     "pillow>=12.3.0",
     "xlrd==2.0.2",
+    "mcp>=1.30,<2",
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
@@ -35,3 +37,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.mcp" = ["*.json", "*.html", "*.js"]

@@ -250,3 +250,5 @@ __all__ = [
     "ReplenishmentCartDraft",
     "ReplenishmentCartDraftLine",
 ]
+
+from app.models.mcp import McpCredential, McpRecord, McpAuditEvent  # noqa: F401

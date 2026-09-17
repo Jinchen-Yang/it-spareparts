@@ -1,0 +1,14 @@
+[Unit]
+Description=PARTFLOW developer TEST MCP HTTPS tunnel
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+ExecStart=/opt/partflow-mcp-test/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:20243 run --token-file /opt/partflow-mcp-test/secrets/tunnel-token
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

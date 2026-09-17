@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "partflow": {
+      "type": "streamableHttp",
+      "url": "${API_BASE_URL}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PARTFLOW_TOKEN}"
+      },
+      "timeout": 30000
+    }
+  }
+}

@@ -1,0 +1,891 @@
+[
+  {
+    "name": "pf_get_capabilities",
+    "title": "查询身份与已开放能力",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "scope": "mcp.use",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查询身份与已开放能力。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_create_upload_session",
+    "title": "创建文件暂存会话",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20971520
+              },
+              "mime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "name",
+              "size_bytes",
+              "mime"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 10
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "document_import",
+            "attachment_organize",
+            "workbook_return"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "files",
+        "purpose",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.files.upload",
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "创建文件暂存会话。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_upload_session",
+    "title": "查询暂存文件状态",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "upload_session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "upload_session_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.files.upload",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查询暂存文件状态。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_inspect_document",
+    "title": "查看文件结构与单据分类",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "include_sample": {
+          "type": "boolean",
+          "default": false,
+          "const": false
+        }
+      },
+      "required": [
+        "file_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.files.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查看文件结构与单据分类。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_search_projects",
+    "title": "定位员工可见项目",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.projects.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "定位员工可见项目。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_preview_import",
+    "title": "创建持久导入预览",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "minItems": 1,
+          "maxItems": 10
+        },
+        "family": {
+          "type": "string",
+          "enum": [
+            "legacy_trade",
+            "acceptance_checklist",
+            "expense_collection"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "upsert"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "file_ids",
+        "family",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.import.preview",
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "创建持久导入预览。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_import_preview",
+    "title": "读取预览详情和逐行问题",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "preview_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "section": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "changes",
+            "issues"
+          ]
+        }
+      },
+      "required": [
+        "preview_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.import.preview",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "读取预览详情和逐行问题。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_open_review",
+    "title": "生成登录审阅入口",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "preview_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "preview_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.import.preview",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "生成登录审阅入口。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_job",
+    "title": "查询任务与处理回执",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.jobs.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查询任务与处理回执。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_export_options",
+    "title": "查询允许导出的模板与字段",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "scope": "mcp.export",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查询允许导出的模板与字段。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_create_export",
+    "title": "生成业务导出任务",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "export_kind": {
+          "type": "string",
+          "enum": [
+            "acceptance_checklist",
+            "expense_collection"
+          ]
+        },
+        "project_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "export_kind",
+        "idempotency_key",
+        "project_ids"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.export",
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "生成业务导出任务。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_download",
+    "title": "获取权限保护的下载入口",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.files.download",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "获取权限保护的下载入口。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_project_materials",
+    "title": "查看项目材料与已知缺项",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.projects.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "查看项目材料与已知缺项。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_search_parts",
+    "title": "PN与描述查询",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.parts.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "PN与描述查询。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_get_inventory",
+    "title": "批量查询配件库存",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "warehouse": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.inventory.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "批量查询配件库存。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pf_search_audit",
+    "title": "检索本人或授权范围审计",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date_from": {
+          "type": "string",
+          "format": "date"
+        },
+        "date_to": {
+          "type": "string",
+          "format": "date"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 1
+        }
+      },
+      "required": [
+        "date_from",
+        "date_to"
+      ],
+      "additionalProperties": false
+    },
+    "scope": "mcp.audit.read",
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "description": "检索本人或授权范围审计。仅处理当前账号已授权业务；结果含 request_id。",
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+]

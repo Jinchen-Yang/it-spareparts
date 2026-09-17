@@ -125,6 +125,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "mcp_audit_event", "mcp_record", "mcp_credential",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",
