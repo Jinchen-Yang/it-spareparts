@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Badge,
@@ -52,8 +52,40 @@ const STATUS_LABELS: Record<CardStatus, string> = { normal: "正常", warning: "
 // 无声全空，用户无从区分「没项目」和「周期未维护」。默认仍是进行中（#37）。
 // payment_complete＝回款已完成（2026-09-04 客户反馈：收满回款的项目不用再盯），
 // 由合同额+回款推得且优先于三个期限桶；只对持有合同财务权限的账号展示与放行。
-type LifecycleFilter = "ongoing" | "ended" | "missing" | "payment_complete";
+type LifecycleFilter = "ongoing" | "ended" | "missing" | "payment_complete" | "all";
 type ProjectSort = "name" | "attention" | "orders" | "known_cost" | "cost_ratio";
+
+// ===== 筛选 URL 化（v1.35 #N3）：期限/业务类型/状态/排序/关键词全入 query，
+// 浏览器后退与项目面板「返回项目墙」都能回到筛选后的墙。分页/滚动位置不入 URL。 =====
+
+/** URL lifecycle → 有效值；非法/缺省回退「进行中」（all 是后端原生值，直开 URL 可带入）。 */
+function readLifecycle(spec: string | null, canViewContract: boolean): LifecycleFilter {
+  if (spec === "ended" || spec === "missing" || spec === "all") return spec;
+  // 回款已完成桶由合同财务数据推得：无权限的账号与旧 UI 一致，不让 URL 直开绕过。
+  if (spec === "payment_complete" && canViewContract) return spec;
+  return "ongoing";
+}
+
+/** URL CSV → 选中业务类型档；缺省/空/全是未知码 → 六档全选（空选=全选语义不变）。 */
+function readBusinessTypes(spec: string | null): BoardBusinessTypeCode[] {
+  if (!spec) return [...BOARD_BUSINESS_TYPE_CODES];
+  const selected = spec.split(",").map((value) => value.trim()).filter(Boolean);
+  const known = BOARD_BUSINESS_TYPE_CODES.filter((code) => selected.includes(code));
+  return known.length ? known : [...BOARD_BUSINESS_TYPE_CODES];
+}
+
+/** URL status → 卡片三态；非法值回退不过滤。 */
+function readStatus(spec: string | null): CardStatus | undefined {
+  return spec === "normal" || spec === "warning" || spec === "alert" ? spec : undefined;
+}
+
+/** URL sort → 排序；非法/越权（成本类排序）回退权限默认。 */
+function readSortParam(spec: string | null, canViewCost: boolean): ProjectSort {
+  if (spec === "name" || spec === "orders") return spec;
+  if ((spec === "cost_ratio" || spec === "known_cost" || spec === "attention")
+    && canViewCost) return spec;
+  return canViewCost ? "cost_ratio" : "name";
+}
 
 /**
  * 维保主页（项目卡墙）——页面定稿两页之一（REQUIREMENTS #33/#34/#35/#37/#38）。
@@ -76,18 +108,34 @@ export function MaintenanceHomePage() {
   // 不展示该页签（后端同样 422 拒绝），也不做期限桶排除。
   const canViewContract = localStorage.getItem("role") === "admin"
     || permissions.data_profit === true;
-  const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const lifecycle = readLifecycle(searchParams.get("lifecycle"), canViewContract);
   // 业务类型（2026-09-08 客户需求；2026-09-16 新增拆改配服务）：与期限状态**叠加**的独立一维。
   // 默认六档全选＝不排除任何项目：生产 648 个项目 647 个未标注，默认排除等于把
   // 卡墙筛空（R5）。用户主动取消勾选才开始收窄。
-  const [businessTypes, setBusinessTypes] = useState<BoardBusinessTypeCode[]>(
-    () => [...BOARD_BUSINESS_TYPE_CODES],
+  const businessTypeSpec = searchParams.get("business_type");
+  const businessTypes = useMemo(
+    () => readBusinessTypes(businessTypeSpec),
+    [businessTypeSpec],
   );
   const [hiddenByBusinessType, setHiddenByBusinessType] = useState(0);
-  const [status, setStatus] = useState<CardStatus | undefined>();
-  const [sort, setSort] = useState<ProjectSort>(() => canViewCost ? "cost_ratio" : "name");
-  const [keyword, setKeyword] = useState("");
-  const [searchInput, setSearchInput] = useState("");
+  const status = readStatus(searchParams.get("status"));
+  const sort = readSortParam(searchParams.get("sort"), canViewCost);
+  // 关键词是已提交的 URL 参数：输入框只存本地草稿，回车/搜索按钮才提交（与分析页同范式）。
+  const keyword = searchParams.get("q") ?? "";
+  const [searchInput, setSearchInput] = useState(keyword);
+  useEffect(() => { setSearchInput(keyword); }, [keyword]);
+  /** 筛选写穿到 URL（merge + replace）：默认值/空值删除参数，保持 URL 只携带有效筛选。 */
+  const patchParams = useCallback((next: Record<string, string | null>) => {
+    setSearchParams((prev) => {
+      const merged = new URLSearchParams(prev);
+      for (const [key, value] of Object.entries(next)) {
+        if (value === null || value === "") merged.delete(key);
+        else merged.set(key, value);
+      }
+      return merged;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [filtersExpanded, setFiltersExpanded] = useState(() => {
     try {
       return localStorage.getItem(FILTERS_EXPANDED_KEY) !== "false";
@@ -257,7 +305,7 @@ export function MaintenanceHomePage() {
           <Col style={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
           <Segmented
             value={lifecycle}
-            onChange={(value) => setLifecycle(value as LifecycleFilter)}
+            onChange={(value) => patchParams({ lifecycle: value === "ongoing" ? null : String(value) })}
             options={[
               { label: "进行中", value: "ongoing" },
               { label: "已结束", value: "ended" },
@@ -296,7 +344,9 @@ export function MaintenanceHomePage() {
             aria-label="业务类型筛选"
             style={{ width: "100%", marginTop: 4 }}
             value={businessTypes}
-            onChange={(value) => setBusinessTypes(value as BoardBusinessTypeCode[])}
+            onChange={(value) => patchParams({
+              business_type: boardBusinessTypeParam(value as BoardBusinessTypeCode[]),
+            })}
             options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
               label: BOARD_BUSINESS_TYPE_LABELS[code],
               value: code,
@@ -311,7 +361,7 @@ export function MaintenanceHomePage() {
             aria-label="项目状态筛选"
             style={{ width: "100%", marginTop: 4 }}
             value={status}
-            onChange={(value) => setStatus(value as CardStatus | undefined)}
+            onChange={(value) => patchParams({ status: (value as CardStatus | undefined) ?? null })}
             options={[
               { label: "正常", value: "normal" },
               { label: "提醒", value: "warning" },
@@ -325,7 +375,9 @@ export function MaintenanceHomePage() {
             aria-label="项目排序"
             style={{ width: "100%", marginTop: 4 }}
             value={sort}
-            onChange={(value) => setSort(value as ProjectSort)}
+            onChange={(value) => patchParams({
+              sort: value === (canViewCost ? "cost_ratio" : "name") ? null : String(value),
+            })}
             options={[
               ...(canViewCost ? [{ label: "成本率降序", value: "cost_ratio" as const }] : []),
               { label: "项目名称", value: "name" as const },
@@ -344,7 +396,7 @@ export function MaintenanceHomePage() {
             style={{ width: "100%", marginTop: 4 }}
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
-            onSearch={(value) => setKeyword(value.trim())}
+            onSearch={(value) => patchParams({ q: value.trim() || null })}
           />
           </Col>
         </Row>
@@ -358,16 +410,19 @@ export function MaintenanceHomePage() {
                 closable
                 closeIcon={<button type="button" aria-label={`移除业务类型：${BOARD_BUSINESS_TYPE_LABELS[code]}`}
                   style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
-                onClose={() => setBusinessTypes((current) => current.filter((value) => value !== code))}
+                onClose={() => patchParams({
+                  business_type: boardBusinessTypeParam(
+                    businessTypes.filter((value) => value !== code)),
+                })}
                 style={{ borderRadius: 16 }}
               >业务类型：{BOARD_BUSINESS_TYPE_LABELS[code]}</Tag>
             ))}
             {status ? <Tag color="blue" closable
               closeIcon={<button type="button" aria-label="移除状态筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
-              onClose={() => setStatus(undefined)} style={{ borderRadius: 16 }}>状态：{STATUS_LABELS[status]}</Tag> : null}
+              onClose={() => patchParams({ status: null })} style={{ borderRadius: 16 }}>状态：{STATUS_LABELS[status]}</Tag> : null}
             {keyword.trim() ? <Tag color="blue" closable
               closeIcon={<button type="button" aria-label="移除关键词筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
-              onClose={() => { setKeyword(""); setSearchInput(""); }}
+              onClose={() => patchParams({ q: null })}
               style={{ borderRadius: 16, maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }}
             >关键词：{keyword.trim()}</Tag> : null}
           </Space>
@@ -383,7 +438,7 @@ export function MaintenanceHomePage() {
             <Button
               size="small"
               type="link"
-              onClick={() => setBusinessTypes([...BOARD_BUSINESS_TYPE_CODES])}
+              onClick={() => patchParams({ business_type: null })}
             >
               查看全部
             </Button>

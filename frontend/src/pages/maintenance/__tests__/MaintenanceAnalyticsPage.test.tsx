@@ -93,6 +93,20 @@ const spendFixture = {
       cost_ex: { state: "ready", value: "530.97" }, cost_share_pct: 28.6,
     },
   ],
+  by_project: [
+    {
+      project_id: "p-100", display_name: "联想数据中心项目", business_type_code: "computing",
+      business_type_label: "算力运维", order_count: 2, qty: "6.000", effective_qty: "5.000",
+      cost_inc: { state: "ready", value: "1500.00" },
+      cost_ex: { state: "ready", value: "1327.43" }, cost_share_pct: 71.4,
+    },
+    {
+      project_id: null, display_name: "未归属（无项目）", business_type_code: "unassigned",
+      business_type_label: "未归属", order_count: 1, qty: "4.000", effective_qty: "4.000",
+      cost_inc: { state: "ready", value: "600.00" },
+      cost_ex: { state: "ready", value: "530.97" }, cost_share_pct: 28.6,
+    },
+  ],
   summary: {
     bucket_count: 2, order_count: 3, qty: "10.000", effective_qty: "9.000", missing_lines: 1,
     total_cost_inc: { state: "ready", value: "2100.00" },
@@ -582,6 +596,23 @@ describe("维保数据分析页", () => {
     expect(within(buckets).getByText("2026-08")).toBeInTheDocument();
     expect(within(buckets).getByText("¥1,500")).toBeInTheDocument();
     expect(within(buckets).getByText("尚未导入")).toBeInTheDocument();
+  });
+
+  it("按项目汇总：金额/数量/占比渲染，项目名是面板链接，未归属行不渲染链接", async () => {
+    renderPage("/maintenance/analytics?view=spend");
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalled());
+    const project = screen.getByTestId("spend-by-project");
+    const link = within(project).getByRole("link", { name: "联想数据中心项目" });
+    expect(link).toHaveAttribute("href", "/maintenance/projects/p-100");
+    expect(within(project).getByText("算力运维")).toBeInTheDocument();
+    expect(within(project).getByText("¥1,500")).toBeInTheDocument();
+    expect(within(project).getByText("¥530.97")).toBeInTheDocument();
+    expect(within(project).getByText("5")).toBeInTheDocument();
+    expect(within(project).getByText("71.4%")).toBeInTheDocument();
+    expect(within(project).getByText("共 2 项")).toBeInTheDocument();
+    // 未归属（无项目）是纯文本行，不是链接
+    expect(within(project).getByText("未归属（无项目）")).toBeInTheDocument();
+    expect(within(project).queryByRole("link", { name: /未归属/ })).toBeNull();
   });
 
   it("旧粒度请求迟到成功不能覆盖新粒度的失败空态", async () => {

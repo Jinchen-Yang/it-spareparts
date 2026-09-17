@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -193,6 +193,7 @@ export function MaintenanceProjectPanelPage() {
 }
 
 function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
+  const navigate = useNavigate();
   const [row, setRow] = useState<BoardProjectRow | null>(null);
   const [project, setProject] = useState<MaintenanceProject | null>(null);
   const [operationsProject, setOperationsProject] =
@@ -398,7 +399,17 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Flex justify="space-between" align="flex-start" wrap gap={12}>
         <Space align="center" wrap>
-          <Link to="/maintenance">← 返回项目墙</Link>
+          {/* 返回保持（v1.35 #N3）：有来路（含筛选后的项目墙）就原路返回；直达面板
+              无历史时退化为默认墙。href 兜底给中键/新标签一个可用的落点。 */}
+          <a
+            href="/maintenance"
+            onClick={(event) => {
+              event.preventDefault();
+              const historyIdx = (window.history.state as { idx?: number } | null)?.idx;
+              if (historyIdx != null && historyIdx > 0) navigate(-1);
+              else navigate("/maintenance");
+            }}
+          >← 返回项目墙</a>
           <Title level={4} style={{ margin: 0 }}>
             {row?.display_name ?? project?.display_name ?? projectId}
           </Title>

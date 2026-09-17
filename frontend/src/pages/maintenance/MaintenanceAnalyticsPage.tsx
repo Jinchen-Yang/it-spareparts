@@ -18,7 +18,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import dayjs from "dayjs";
 import { BarChartOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
@@ -29,6 +29,7 @@ import {
   type PnRankingParams,
   type PnRankingRow,
   type SpendBusinessTypeRow,
+  type SpendProjectRow,
   type SpendSalespersonRow,
   type SpendTrendBucket,
   type SpendTrendGranularity,
@@ -502,6 +503,25 @@ export function MaintenanceAnalyticsPage() {
       render: (v: number | null) => (v === null ? "—" : `${v}%`) },
   ], []);
 
+  const spendByProjectColumns: ColumnsType<SpendProjectRow> = useMemo(() => [
+    { title: "项目", dataIndex: "display_name", width: 240,
+      render: (v: string, r: SpendProjectRow) => (r.project_id !== null
+        ? <Link to={`/maintenance/projects/${r.project_id}`}>{v}</Link>
+        : <Text type="secondary">未归属（无项目）</Text>) },
+    { title: "业务类型", dataIndex: "business_type_label", width: 120,
+      render: (v: string) => v || "—" },
+    { title: "含税金额", dataIndex: "cost_inc", width: 160, align: "right",
+      render: (_: unknown, r: SpendProjectRow) => statMoney(r.cost_inc) },
+    { title: "未税金额", dataIndex: "cost_ex", width: 160, align: "right",
+      render: (_: unknown, r: SpendProjectRow) => statMoney(r.cost_ex) },
+    { title: "有效数量", dataIndex: "effective_qty", width: 110, align: "right",
+      render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
+    { title: "单数", dataIndex: "order_count", width: 90, align: "right",
+      render: (v: number) => qtyFmt(v) },
+    { title: "占比", dataIndex: "cost_share_pct", width: 100, align: "right",
+      render: (v: number | null) => (v === null ? "—" : `${v}%`) },
+  ], []);
+
   const spendBySalespersonColumns: ColumnsType<SpendSalespersonRow> = useMemo(() => [
     { title: "销售", dataIndex: "salesperson", width: 160,
       render: (v: string | null) => (v ? v : <Text type="secondary">未标注</Text>) },
@@ -784,6 +804,25 @@ export function MaintenanceAnalyticsPage() {
                       columns={spendByBusinessColumns}
                       pagination={false}
                       scroll={{ x: 900 }}
+                      locale={{ emptyText: "当前窗口没有开支数据" }}
+                    />
+                  </Card>
+                </div>
+
+                <div data-testid="spend-by-project">
+                  <Card size="small" title="按项目汇总">
+                    <Table<SpendProjectRow>
+                      rowKey={(r) => r.project_id ?? "__unassigned__"}
+                      size="small"
+                      loading={spendLoading}
+                      dataSource={spendData?.by_project ?? []}
+                      columns={spendByProjectColumns}
+                      pagination={{
+                        pageSize: 20,
+                        showSizeChanger: false,
+                        showTotal: (t) => `共 ${t} 项`,
+                      }}
+                      scroll={{ x: 980 }}
                       locale={{ emptyText: "当前窗口没有开支数据" }}
                     />
                   </Card>

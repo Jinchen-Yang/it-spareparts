@@ -519,6 +519,7 @@ def test_api_granularity_validation_and_response_shape(db):
         "window",
         "buckets",
         "by_business_type",
+        "by_project",
         "by_salesperson",
         "summary",
     }
