@@ -1581,13 +1581,17 @@ def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money
     )
     assert workspace.status_code == 200, workspace.text
     rows = workspace.json()["collection_snapshots"]["rows"]
-    assert [row["status"] for row in rows] == ["confirmed", "unconfirmed", "void"]
+    # 2026-08-20 起未来月份实收不再被 as_of 静默隐藏（770c68a：页面空白无解释的
+    # 根因）——行集含四月，指标计算仍只认 <= as_of。
+    assert [row["status"] for row in rows] == [
+        "confirmed", "unconfirmed", "void", "confirmed"]
     assert [row["report_month"] for row in rows] == [
         "2026-01-01",
         "2026-02-01",
         "2026-03-01",
+        "2026-04-01",
     ]
-    assert workspace.json()["collection_snapshots"]["total"] == 3
+    assert workspace.json()["collection_snapshots"]["total"] == 4
     assert rows[0] == {
         "collection_id": created[0]["collection_id"],
         "project_contract_id": contract["project_contract_id"],
@@ -1613,7 +1617,7 @@ def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money
     )
     assert hidden.status_code == 200, hidden.text
     hidden_rows = hidden.json()["collection_snapshots"]["rows"]
-    assert len(hidden_rows) == 3
+    assert len(hidden_rows) == 4
     assert {row["status"] for row in hidden_rows} == {
         "confirmed",
         "unconfirmed",
@@ -1636,6 +1640,8 @@ def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money
     )
     assert restricted_workbook is not None
     workbook_rows = restricted_workbook["collection_snapshots"]
+    # 工作簿读路径（project_workbook_workspace）是 Excel 总表的时点快照语义，
+    # 与面板行集（上面含未来月）不同口径——仍按 <= as_of 过滤。
     assert [row["status"] for row in workbook_rows] == [
         "confirmed",
         "unconfirmed",

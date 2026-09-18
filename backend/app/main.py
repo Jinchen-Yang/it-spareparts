@@ -20,6 +20,7 @@ from app.api import (
     maintenance_acceptance,
     maintenance_acceptance_checklist,
     maintenance_audit,
+    maintenance_manager_directory,
     maintenance_ai_fallback,
     maintenance_bad_returns,
     maintenance_bad_salvage,
@@ -132,9 +133,9 @@ app.include_router(
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
-# 负责人账号搜索（稳定版面板下拉数据源）不随 Beta 总闸——见该文件 stable_router 注释
+# 负责人账号搜索（稳定版面板下拉数据源）不随 Beta 总闸——见该模块 docstring
 app.include_router(
-    maintenance_project_assignments.stable_router,
+    maintenance_manager_directory.router,
     prefix=settings.api_prefix,
 )
 app.include_router(

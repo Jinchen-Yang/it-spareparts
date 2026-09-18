@@ -4701,7 +4701,8 @@ def project_workspace(
             .select_from(MaintenanceCollectionSnapshot)
             .where(
                 MaintenanceCollectionSnapshot.project_id == project_id,
-                MaintenanceCollectionSnapshot.report_month <= as_of,
+                # 2026-08-21：total 与行集同口径——未来月份照常计数（770c68a 改了
+                # 行集漏了计数，出现 rows=4/total=3 的分页错位）。指标仍 <= as_of。
             )
         )
         or 0

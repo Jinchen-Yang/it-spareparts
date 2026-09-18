@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
 from app import auth
+from app.api import maintenance_manager_directory
 from app.api import maintenance_project_assignments, maintenance_project_operations
 from app.api import maintenance_projects
 from app.auth import hash_password
@@ -36,6 +37,7 @@ def _admin_client(db, *, username: str) -> TestClient:
     app = FastAPI()
     app.include_router(auth.router, prefix="/api")
     app.include_router(maintenance_project_assignments.router, prefix="/api")
+    app.include_router(maintenance_manager_directory.router, prefix="/api")
     app.include_router(maintenance_project_operations.router, prefix="/api")
     client = TestClient(app)
     login = client.post(
@@ -64,6 +66,7 @@ def _existing_user_client(db, *, username: str) -> TestClient:
     app = FastAPI()
     app.include_router(auth.router, prefix="/api")
     app.include_router(maintenance_project_assignments.router, prefix="/api")
+    app.include_router(maintenance_manager_directory.router, prefix="/api")
     app.include_router(maintenance_project_operations.router, prefix="/api")
     app.include_router(maintenance_projects.router, prefix="/api")
     client = TestClient(app)
@@ -542,10 +545,11 @@ def test_boss_defaults_to_all_projects_without_explicit_assignment(db):
     assert [row["project_id"] for row in response.json()["rows"]] == [
         project.project_id
     ]
+    # 目录搜索 2026-08-21 起对维保页面权限开放（boss 恒有 page_maintenance）
     assert client.post(
         "/api/maintenance/project-manager-assignments/search",
         json={"q": target.username},
-    ).status_code == 403
+    ).status_code == 200
     assert client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/manager-assignment",
         json={"user_id": target.id, "reason": "老板只读全量不代表可改授权关系"},
@@ -590,7 +594,10 @@ def test_custom_action_permission_cannot_delegate_manager_mapping_outside_admin(
         json={"user_id": target.id, "reason": "尝试通过自定义 action 扩权"},
     )
 
-    assert account_search.status_code == 403
+    # 2026-08-21 客户反馈：负责人目录搜索迁稳定版（page_maintenance 门）——
+    # 有维保页面权限的非管理员可搜索候选账号（只读目录：账号/显示名/在职状态）。
+    # 改派/归档仍是 admin 专属，本测试的护栏就是下面这条。
+    assert account_search.status_code == 200
     assert assignment.status_code == 403
     assert db.scalar(
         select(MaintenanceProjectUserAssignment.assignment_id).where(

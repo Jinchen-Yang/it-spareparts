@@ -390,6 +390,8 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_bad_return_manage",
                                    "action_maintenance_acceptance_submit",
                                    "action_maintenance_acceptance_review",
+                                   # 2026-08-21 客户反馈：验收需求清单导入
+                                   "action_maintenance_acceptance_checklist_import",
                                    "action_maintenance_warehouse_manage",
                                    "action_maintenance_migration_review",
                                    "action_maintenance_ledger_import",

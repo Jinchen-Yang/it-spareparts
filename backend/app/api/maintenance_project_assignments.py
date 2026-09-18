@@ -70,47 +70,7 @@ def _require_assignment_admin(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可管理项目负责人")
 
 
-# 稳定版子路由：项目面板「编辑项目基本信息」的负责人下拉走这里（page_maintenance
-# 门）。主 router 挂在 Beta 总闸下（main.py registration），改派/归档维持 Beta+admin，
-# 但 search 是稳定版面板的数据源，必须在稳定版路径上可达（2026-08-21 客户反馈）。
-stable_router = APIRouter(prefix="/maintenance", tags=["maintenance"])
-
-
-@stable_router.post("/project-manager-assignments/search")
-def search_manager_accounts(
-    body: ManagerAccountSearch,
-    db: Session = Depends(get_db),
-    _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    ctx: UserContext = Depends(get_current_user_context),
-) -> dict:
-    # 2026-08-21 客户反馈：面板「编辑项目基本信息」的维保负责人下拉改走本端点
-    # （原走 /accounts 受 page_accounts 门，无该权限的角色下拉空白）。搜索只读、
-    # 只返回账号/显示名/在职状态，放开到 page_maintenance；改派/归档仍仅 admin。
-    q = body.q.strip()
-    if len(q) > 128:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "负责人账号搜索条件无效",
-        )
-    payload = assignments.search_active_users(
-        db,
-        q_text=q,
-        page=body.page,
-        page_size=body.page_size,
-    )
-    record_access_log(
-        ctx,
-        "maintenance_project_manager_account_search",
-        "sys_user",
-        {
-            "searched": bool(q),
-            "page": body.page,
-            "page_size": body.page_size,
-            "result_count": len(payload["rows"]),
-        },
-    )
-    return payload
+# 负责人账号搜索已迁 maintenance_manager_directory（稳定版，page_maintenance 门）。
 
 
 @router.post(
