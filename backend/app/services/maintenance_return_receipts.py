@@ -558,13 +558,15 @@ def update_receipt(
             values[key] = _optional_text(updates[key], key, limit)
     if "occurred_at" in updates:
         values["occurred_at"] = _occurred_at(updates["occurred_at"])
+    if "serial_numbers" in updates and row.receipt_kind == "machine":
+        # Explicit SN edits on machine rows are rejected; a plain qty edit
+        # keeps its own "固定记 1 台" guard above and must not hit this one.
+        raise ReturnReceiptValidation("整机返还不单独记录 SN 明细")
     if "serial_numbers" in updates or "qty" in updates:
         # SN evidence must stay consistent with the FINAL quantity of the row:
         # changing qty alone against an SN-bearing row must fail loudly, not
         # leave stale serials behind.
         final_qty = int(values.get("qty", row.qty))
-        if row.receipt_kind == "machine":
-            raise ReturnReceiptValidation("整机返还不单独记录 SN 明细")
         proposed_serials = (
             updates["serial_numbers"] if "serial_numbers" in updates
             else list(row.serial_numbers or [])
