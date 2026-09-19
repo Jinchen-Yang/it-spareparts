@@ -194,6 +194,11 @@ class MaintenanceRkdReturnLine(Base):
     pn: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(String(256))
     qty: Mapped[Decimal] = mapped_column(Qty, nullable=False)
+    # 手工登记的逐件 SN 凭证（v1.36）：有 SN 时 qty 必须等于 SN 数（服务层校验）；
+    # rkd_import 行恒为空列表。
+    serial_numbers: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     test_result: Mapped[str | None] = mapped_column(String(64))
     note: Mapped[str | None] = mapped_column(String(512))
     evidence_ref: Mapped[str | None] = mapped_column(String(128))

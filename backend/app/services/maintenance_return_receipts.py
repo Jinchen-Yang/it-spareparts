@@ -47,6 +47,7 @@ ALLOWED_UPDATE_FIELDS = frozenset(
         "note",
         "evidence_ref",
         "occurred_at",
+        "serial_numbers",
     }
 )
 
@@ -138,6 +139,7 @@ def _receipt_dict(row: MaintenanceRkdReturnLine, order_no: str | None = None) ->
         "pn": row.pn,
         "description": row.description,
         "qty": _qty(Decimal(row.qty)),
+        "serial_numbers": list(row.serial_numbers or []),
         "condition": row.test_result,
         "note": row.note,
         "evidence_ref": row.evidence_ref,
@@ -267,6 +269,48 @@ def _validate_manual_fields(
     return pn.strip(), Decimal(qty)
 
 
+_MAX_SERIALS = 1000
+
+
+def _validate_serial_numbers(
+    serials: object,
+    *,
+    qty: int,
+    label: str = "SN",
+) -> list[str]:
+    """Normalize and validate per-unit SN evidence for manual registration.
+
+    Rules: each SN is trimmed, non-empty and unique within the list; when any
+    SN is provided the quantity must equal the SN count (1 unit = 1 SN).
+    An empty/None value means "no SN evidence" and is stored as [].
+    """
+    if serials is None:
+        return []
+    if not isinstance(serials, list):
+        raise ReturnReceiptValidation(f"{label} 必须是字符串列表")
+    if len(serials) > _MAX_SERIALS:
+        raise ReturnReceiptValidation(f"{label} 数量超出单条上限（{_MAX_SERIALS}）")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in serials:
+        if not isinstance(item, str):
+            raise ReturnReceiptValidation(f"{label} 必须是字符串")
+        value = item.strip()
+        if not value:
+            raise ReturnReceiptValidation(f"{label} 不能为空白")
+        if len(value) > 128:
+            raise ReturnReceiptValidation(f"{label} 长度不能超过 128")
+        if value in seen:
+            raise ReturnReceiptValidation(f"{label} 重复：{value}")
+        seen.add(value)
+        cleaned.append(value)
+    if cleaned and len(cleaned) != qty:
+        raise ReturnReceiptValidation(
+            f"带 {label} 时数量必须等于 {label} 个数（当前数量 {qty}，{label} {len(cleaned)} 个）"
+        )
+    return cleaned
+
+
 def register_receipt(
     db: Session,
     *,
@@ -280,6 +324,7 @@ def register_receipt(
     note: str | None = None,
     evidence_ref: str | None = None,
     occurred_at: datetime | None = None,
+    serial_numbers: list[str] | None = None,
     idempotency_key: str | None = None,
     operated_by: str,
 ) -> dict:
@@ -288,6 +333,7 @@ def register_receipt(
     pn_clean, qty_clean = _validate_manual_fields(
         pn=pn, qty=qty, condition=condition
     )
+    serials_clean = _validate_serial_numbers(serial_numbers, qty=qty)
     source_order_id = (
         _resolve_source_order_id(db, wbdd_no.strip(), project_id)
         if wbdd_no
@@ -305,6 +351,7 @@ def register_receipt(
         "description": (description.strip() or None) if description else None,
         "condition": condition, "note": (note.strip() or None) if note else None,
         "evidence_ref": (evidence_ref.strip() or None) if evidence_ref else None,
+        "serial_numbers": serials_clean,
     }
     request_values["occurred_at"] = occurred_at.isoformat() if occurred_at else None
     if idempotency_key:
@@ -354,6 +401,7 @@ def register_receipt(
         pn=pn_clean,
         description=(description.strip() or None) if description else None,
         qty=qty_clean,
+        serial_numbers=serials_clean,
         test_result=condition,
         note=(note.strip() or None) if note else None,
         evidence_ref=(evidence_ref.strip() or None) if evidence_ref else None,
@@ -510,6 +558,20 @@ def update_receipt(
             values[key] = _optional_text(updates[key], key, limit)
     if "occurred_at" in updates:
         values["occurred_at"] = _occurred_at(updates["occurred_at"])
+    if "serial_numbers" in updates or "qty" in updates:
+        # SN evidence must stay consistent with the FINAL quantity of the row:
+        # changing qty alone against an SN-bearing row must fail loudly, not
+        # leave stale serials behind.
+        final_qty = int(values.get("qty", row.qty))
+        if row.receipt_kind == "machine":
+            raise ReturnReceiptValidation("整机返还不单独记录 SN 明细")
+        proposed_serials = (
+            updates["serial_numbers"] if "serial_numbers" in updates
+            else list(row.serial_numbers or [])
+        )
+        values["serial_numbers"] = _validate_serial_numbers(
+            proposed_serials, qty=final_qty
+        )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     after_order_no = _order_no(db, values.get("source_order_id", row.source_order_id))
     for key, value in values.items():
