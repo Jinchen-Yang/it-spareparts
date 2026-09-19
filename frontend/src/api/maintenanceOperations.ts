@@ -1119,6 +1119,42 @@ export const getMaintenanceProjectWorkspace = (
   api.get<MaintenanceProjectWorkspace>(`${projectBase(projectId)}/workspace`, { params })
     .then((response) => ({ ...response, data: normalizeWorkspace(response.data) }));
 
+/** v1.36：实收回款（05 快照）页面 CRUD——后端 operations_beta_router。 */
+export interface CollectionCreateInput {
+  project_contract_id: string;
+  report_month: string;
+  cumulative_amount: number;
+  status: "confirmed" | "unconfirmed";
+  receipt_reference?: string | null;
+  remark?: string | null;
+  reason: string;
+}
+
+export interface CollectionPatchInput {
+  version: number;
+  reason: string;
+  report_month?: string;
+  cumulative_amount?: number;
+  status?: "confirmed" | "unconfirmed" | "void";
+  receipt_reference?: string | null;
+  remark?: string | null;
+}
+
+export const createProjectCollection = (
+  projectId: string,
+  input: CollectionCreateInput,
+) => api.post<MaintenanceCollectionSnapshotRow>(
+  `${projectBase(projectId)}/collections`, input,
+);
+
+export const patchProjectCollection = (
+  collectionId: string,
+  input: CollectionPatchInput,
+) => api.patch<MaintenanceCollectionSnapshotRow>(
+  `/maintenance/projects/stable/collections/${encodeURIComponent(collectionId)}`,
+  input,
+);
+
 export const downloadMaintenanceProjectWorkbook = (projectId: string) =>
   api.get<Blob>(`${projectBase(projectId)}/workbook`, { responseType: "blob" });
 
