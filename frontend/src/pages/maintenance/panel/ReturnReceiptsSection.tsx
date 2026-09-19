@@ -14,6 +14,7 @@ import {
 import { readPermissionMap } from "../../../nav";
 import { raw, readError } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
+import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
 
 const { Text } = Typography;
 
@@ -50,6 +51,7 @@ interface ReceiptFormValues {
   note?: string;
   evidence_ref?: string;
   reason?: string;
+  serials_text?: string;
 }
 
 interface PickedPart {
@@ -261,6 +263,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       condition: (receipt.condition as Condition | null) ?? undefined,
       note: receipt.note ?? undefined,
       evidence_ref: receipt.evidence_ref ?? undefined,
+      serials_text: receipt.serial_numbers?.length ? receipt.serial_numbers.join("\n") : "",
       reason: undefined,
     });
     setModalOpen(true);
@@ -276,6 +279,18 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     }
     if (editing && !values.reason?.trim()) {
       message.error("修改必须填写原因");
+      return;
+    }
+    // SN 凭证（v1.36）：非空时逐行 trim/去重，且数量必须等于 SN 行数（与后端一致）
+    const serialsRaw = (values.serials_text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const finalQty = editing ? (values.qty ?? Number(editing.qty)) : values.qty!;
+    if (serialsRaw.length && serialsRaw.length !== finalQty) {
+      setSubmitError(`带 SN 时数量必须等于 SN 个数（当前数量 ${finalQty}，SN ${serialsRaw.length} 个）`);
+      return;
+    }
+    const serialSet = new Set(serialsRaw);
+    if (serialSet.size !== serialsRaw.length) {
+      setSubmitError("SN 存在重复，请核对后重试");
       return;
     }
     setSubmitting(true);
@@ -294,6 +309,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           ...((values.condition ?? null) !== editing.condition ? { condition: values.condition ?? null } : {}),
           note: values.note?.trim() || null,
           evidence_ref: values.evidence_ref?.trim() || null,
+          ...(editing.receipt_kind !== "machine" && (serialsRaw.length || editing.serial_numbers?.length)
+            ? { serial_numbers: serialsRaw }
+            : {}),
         });
         if (seq !== contextSeq.current) return;
         message.success("返还记录已修改");
@@ -307,6 +325,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           condition: values.condition ?? null,
           note: values.note?.trim() || null,
           evidence_ref: values.evidence_ref?.trim() || null,
+          serial_numbers: serialsRaw.length ? serialsRaw : null,
         };
         const content = JSON.stringify(payload);
         if (createAttempt.current?.content !== content) {
@@ -516,7 +535,13 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
         <Space>
           {canManage ? (
-            <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
+            <>
+              <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
+              <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => {
+                await load(page, includeVoided);
+                if (onChanged) await onChanged();
+              }} />
+            </>
           ) : null}
           <Text type="secondary" style={{ fontSize: 12 }}>
             登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致
@@ -678,6 +703,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           <Form.Item name="evidence_ref" label="来源单号/凭据（可选）">
             <Input placeholder="如原始入库单号、快递单号" maxLength={128} />
           </Form.Item>
+          {editing?.receipt_kind !== "machine" ? (
+            <Form.Item
+              name="serials_text"
+              label="逐件 SN 凭证（可选，每行一个）"
+              extra="填写时数量必须等于 SN 行数；清空表示不留逐件凭证。整机返还不单独记录 SN。"
+              validateStatus={submitError?.includes("SN") ? "error" : undefined}
+            >
+              <Input.TextArea rows={3} placeholder={"SN-A001\nSN-A002"} style={{ fontFamily: "monospace" }} />
+            </Form.Item>
+          ) : null}
           <Form.Item name="note" label="备注（可选）">
             <Input.TextArea rows={2} maxLength={512} placeholder="现场说明" />
           </Form.Item>

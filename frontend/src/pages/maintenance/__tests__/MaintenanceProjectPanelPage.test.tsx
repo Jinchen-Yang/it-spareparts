@@ -67,6 +67,13 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     searchMaintenanceManagerAccounts: (...a: unknown[]) =>
       searchMaintenanceManagerAccounts(...a),
     searchSiteIssues: (...a: unknown[]) => searchSiteIssues(...a),
+    // v1.36 挂载的领用工作台（SiteIssueWorkflowPanel）拉取候选与适配器状态：空态
+    searchSiteIssueCandidates: vi.fn().mockResolvedValue({
+      data: {
+        rows: [], total: 0, page: 1, page_size: 50,
+        adapter: { key: "test", state: "synthetic_ready", production_ready: true },
+      },
+    }),
     searchMaintenanceReturnObligations: (...a: unknown[]) =>
       searchMaintenanceReturnObligations(...a),
     searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
@@ -1156,15 +1163,19 @@ describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => 
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
     expect(await screen.findByText("CKD-VOID-1")).toBeInTheDocument();
-    expect(screen.getByText("CKD-LIVE-1")).toBeInTheDocument();
+    // v1.36 起该 tab 同时挂载领用工作台（SiteIssueWorkflowPanel），
+    // 活单单号会同时出现在工作台列表与下方领用记录表——不再唯一
+    expect(screen.getAllByText("CKD-LIVE-1").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/作废于/)).toBeInTheDocument();
     // 领用状态列 + 返还状态列都是「领用已作废」
     expect(screen.getAllByText("领用已作废")).toHaveLength(2);
-    // 操作列：作废单是「已作废」标签，只有活单有作废按钮（AntD 两字按钮渲染为「作 废」）
-    expect(screen.getByText("已作废")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /^作\s?废$/ })).toHaveLength(1);
+    // 操作列：作废单是「已作废」标签（工作台列表同样渲染，不再唯一），只有活单有作废按钮
+    // v1.36 工作台对活单也提供作废入口 → 按钮数 >= 1（工作台 + 领用记录表）
+    expect(screen.getAllByText("已作废").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByRole("button", { name: /^作\s?废$/ }).length).toBeGreaterThanOrEqual(1);
     // 作废摘要行不是明细：作废活单时弹窗按活行数计
-    fireEvent.click(screen.getByRole("button", { name: /^作\s?废$/ }));
+    // v1.36：工作台（先渲染）与领用记录表都有作废按钮；此测试针对领用记录表的弹窗（第 2 个）
+    fireEvent.click(screen.getAllByRole("button", { name: /^作\s?废$/ })[1]);
     expect(await screen.findByText(/作废领用单 CKD-LIVE-1（共 1 行）/)).toBeInTheDocument();
   });
 

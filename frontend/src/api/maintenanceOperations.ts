@@ -1706,6 +1706,8 @@ export interface ReturnReceipt {
   review_required?: boolean;
   /**三位小数字符串（后端 _qty 约定）；手工登记恒为整数。 */
   qty: string;
+  /**逐件 SN 凭证（v1.36）：非空时长度恒等于数量；导入行/未登记者为空数组。 */
+  serial_numbers?: string[];
   condition: "成品" | "坏品" | "废品" | string | null;
   note: string | null;
   evidence_ref: string | null;
@@ -1750,6 +1752,7 @@ export interface ReturnReceiptCreateInput {
   condition?: "成品" | "坏品" | "废品" | null;
   note?: string | null;
   evidence_ref?: string | null;
+  serial_numbers?: string[] | null;
   idempotency_key?: string | null;
 }
 
@@ -1765,6 +1768,7 @@ export interface ReturnReceiptUpdateInput {
   condition?: "成品" | "坏品" | "废品" | null;
   note?: string | null;
   evidence_ref?: string | null;
+  serial_numbers?: string[] | null;
 }
 
 export interface ReturnReceiptAuditEntry {
