@@ -35,6 +35,9 @@ from app.services.query_filters import active_beta_maintenance_orders
 
 MANUAL_CONDITIONS = ("成品", "坏品", "废品")
 
+# 凭据字段上限（v1.36）：扫描多个 SN/快递单需要长文本；DB 列为 Text。
+_EVIDENCE_REF_MAX = 16384
+
 ALLOWED_UPDATE_FIELDS = frozenset(
     {
         "project_id",
@@ -342,7 +345,7 @@ def register_receipt(
     resolved_part_id = _resolve_part_id(db, pn_clean, part_id)
     description = _optional_text(description, "描述", 256)
     note = _optional_text(note, "备注", 512)
-    evidence_ref = _optional_text(evidence_ref, "凭证", 128)
+    evidence_ref = _optional_text(evidence_ref, "凭证", _EVIDENCE_REF_MAX)
     occurred_at = _occurred_at(occurred_at)
     idempotency_key = _optional_text(idempotency_key, "幂等键", 128)
     request_values = {
@@ -553,7 +556,8 @@ def update_receipt(
             db, current_order_no, new_project_id
         ) != row.source_order_id:
             raise ReturnReceiptValidation("维保需求单归属已变化，请重新选择或明确清空")
-    for key, limit in (("description", 256), ("note", 512), ("evidence_ref", 128)):
+    for key, limit in (("description", 256), ("note", 512),
+                       ("evidence_ref", _EVIDENCE_REF_MAX)):
         if key in updates:
             values[key] = _optional_text(updates[key], key, limit)
     if "occurred_at" in updates:

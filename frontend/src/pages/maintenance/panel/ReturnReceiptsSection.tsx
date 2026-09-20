@@ -20,6 +20,9 @@ import PanelActionBar from "./PanelActionBar";
 const { Text } = Typography;
 
 const CONDITIONS = ["成品", "坏品", "废品"] as const;
+
+/** 凭据字段上限（v1.36）：与后端 _EVIDENCE_REF_MAX 对齐。 */
+const EVIDENCE_MAX = 16384;
 type Condition = (typeof CONDITIONS)[number];
 
 const CONDITION_COLOR: Record<string, string> = {
@@ -227,6 +230,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
 
   // ---- 登记与修改 ----
   const [form] = Form.useForm<ReceiptFormValues>();
+  const evidenceValue = Form.useWatch("evidence_ref", form);
+  const evidenceLength = evidenceValue?.length ?? 0;
   const [editing, setEditing] = useState<ReturnReceipt | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -274,6 +279,11 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     const seq = contextSeq.current;
     const values = await form.validateFields().catch(() => null);
     if (!values || seq !== contextSeq.current) return;
+    // 超限硬闸：不依赖 maxLength 截断（会静默丢扫描内容），按钮直接不发请求
+    if ((values.evidence_ref?.length ?? 0) > EVIDENCE_MAX) {
+      setSubmitError(`凭据超过 ${EVIDENCE_MAX} 字符上限（当前 ${values.evidence_ref!.length}），请删减后再保存`);
+      return;
+    }
     if (!pickedPart?.pn) {
       message.error("请先搜索并选择返件 PN");
       return;
@@ -702,8 +712,18 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
               />
             </Form.Item>
           </Space>
-          <Form.Item name="evidence_ref" label="来源单号/凭据（可选）">
-            <Input placeholder="如原始入库单号、快递单号" maxLength={128} />
+          <Form.Item
+            name="evidence_ref"
+            label="来源单号/凭据（可选）"
+            extra={`支持逐行扫描 SN / 粘贴快递单号等长凭据；当前 ${evidenceLength}/16384 字符${evidenceLength > EVIDENCE_MAX ? "，已超限，请删减" : ""}`}
+            validateStatus={evidenceLength > EVIDENCE_MAX ? "error" : undefined}
+            help={evidenceLength > EVIDENCE_MAX ? "凭据超过 16384 字符上限，后端会拒绝保存" : undefined}
+          >
+            <Input.TextArea
+              rows={3}
+              placeholder={"原始入库单号、快递单号；扫多个 SN 可直接逐行扫入：\nSN-A001\nSN-A002"}
+              style={{ fontFamily: "monospace" }}
+            />
           </Form.Item>
           {editing?.receipt_kind !== "machine" ? (
             <Form.Item

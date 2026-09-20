@@ -111,7 +111,7 @@ class ReceiptCreate(BaseModel):
     description: str | None = Field(default=None, max_length=256)
     condition: Literal["成品", "坏品", "废品"] | None = None
     note: str | None = Field(default=None, max_length=512)
-    evidence_ref: str | None = Field(default=None, max_length=128)
+    evidence_ref: str | None = Field(default=None, max_length=16384)
     occurred_at: datetime | None = None
     serial_numbers: list[str] | None = Field(default=None, max_length=1000)
     idempotency_key: str | None = Field(default=None, max_length=128)
@@ -130,7 +130,7 @@ class ReceiptUpdate(BaseModel):
     qty: int | None = Field(default=None, gt=0, lt=10**11, strict=True)
     condition: Literal["成品", "坏品", "废品"] | None = None
     note: str | None = Field(default=None, max_length=512)
-    evidence_ref: str | None = Field(default=None, max_length=128)
+    evidence_ref: str | None = Field(default=None, max_length=16384)
     occurred_at: datetime | None = None
     serial_numbers: list[str] | None = Field(default=None, max_length=1000)
 

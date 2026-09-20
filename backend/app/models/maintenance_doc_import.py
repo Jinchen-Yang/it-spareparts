@@ -19,6 +19,7 @@ from sqlalchemy import (UniqueConstraint,
     Index,
     Integer,
     String,
+    Text,
     func,
     text,
 )
@@ -201,7 +202,8 @@ class MaintenanceRkdReturnLine(Base):
     )
     test_result: Mapped[str | None] = mapped_column(String(64))
     note: Mapped[str | None] = mapped_column(String(512))
-    evidence_ref: Mapped[str | None] = mapped_column(String(128))
+    # 来源单号/凭据：用户扫描多个 SN/快递单，v1.36 由 128 扩为 Text（16384 校验上限在 service）
+    evidence_ref: Mapped[str | None] = mapped_column(Text)
     occurred_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     line_status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default=text("'active'")
