@@ -232,6 +232,19 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
   const [form] = Form.useForm<ReceiptFormValues>();
   const evidenceValue = Form.useWatch("evidence_ref", form);
   const evidenceLength = evidenceValue?.length ?? 0;
+  const serialsValue = Form.useWatch("serials_text", form);
+  const qtyValue = Form.useWatch("qty", form);
+  const snPendingQty = qtyValue ?? 0;
+  const snStats = useMemo(() => {
+    const lines = (serialsValue ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const sn of lines) {
+      if (seen.has(sn)) duplicates.push(sn);
+      else seen.add(sn);
+    }
+    return { count: lines.length, duplicates };
+  }, [serialsValue]);
   const [editing, setEditing] = useState<ReturnReceipt | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -302,6 +315,10 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     const serialSet = new Set(serialsRaw);
     if (serialSet.size !== serialsRaw.length) {
       setSubmitError("SN 存在重复，请核对后重试");
+      return;
+    }
+    if (serialsRaw.length > 1000) {
+      setSubmitError(`SN 超过单条 1000 个上限（当前 ${serialsRaw.length}），请拆分成多条登记`);
       return;
     }
     setSubmitting(true);
@@ -729,10 +746,23 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
             <Form.Item
               name="serials_text"
               label="逐件 SN 凭证（可选，每行一个）"
-              extra="填写时数量必须等于 SN 行数；清空表示不留逐件凭证。整机返还不单独记录 SN。"
-              validateStatus={submitError?.includes("SN") ? "error" : undefined}
+              extra={`逐行扫描或整段粘贴（换行分隔）；Enter 换行不提交表单。已录入 ${snStats.count} 个${snStats.duplicates.length ? `，重复 ${snStats.duplicates.length} 个：${snStats.duplicates.slice(0, 5).join("、")}${snStats.duplicates.length > 5 ? " 等" : ""}` : ""}${snStats.count > 0 ? `；需与数量一致（当前数量 ${snPendingQty}）` : ""}。清空表示不留逐件凭证；整机返还不单独记录 SN。`}
+              validateStatus={snStats.duplicates.length || snStats.count > 1000 || (snStats.count > 0 && snStats.count !== snPendingQty) || (submitError?.includes("SN") ?? false) ? "error" : undefined}
             >
-              <Input.TextArea rows={3} placeholder={"SN-A001\nSN-A002"} style={{ fontFamily: "monospace" }} />
+              <Input.TextArea
+                rows={6}
+                placeholder={"扫码枪逐个扫描（每扫一个自动换行），或从 Excel 整列粘贴：\nSN-A001\nSN-A002"}
+                style={{ fontFamily: "monospace" }}
+                onPressEnter={(e) => {
+                  // 扫描场景：Enter 只换行，绝不触发表单提交
+                  e.preventDefault();
+                  const target = e.currentTarget as HTMLTextAreaElement;
+                  const { selectionStart, selectionEnd, value } = target;
+                  target.value = `${value.slice(0, selectionStart)}\n${value.slice(selectionEnd)}`;
+                  target.setSelectionRange(selectionStart + 1, selectionStart + 1);
+                  form.setFieldValue("serials_text", target.value);
+                }}
+              />
             </Form.Item>
           ) : null}
           <Form.Item name="note" label="备注（可选）">
