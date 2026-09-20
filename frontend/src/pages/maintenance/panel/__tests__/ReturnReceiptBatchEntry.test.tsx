@@ -112,9 +112,36 @@ describe("parseBatchText", () => {
     expect(lines[0].error).toContain("PN 不能为空");
   });
 
+  it("前导 tab 首列空 PN（Excel 粘贴真实形态）：整行 trim 后再拆分会把 SN 移位当 PN，必须报错", () => {
+    const lines = parseBatchText("\tSN1\tSN2");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].pn).toBe("");
+    expect(lines[0].serials).toEqual([]);
+    expect(lines[0].error).toContain("PN 不能为空");
+  });
+
+  it("连续逗号的空中间列报错（不得折叠吞掉）", () => {
+    const lines = parseBatchText("PN-A,,SN-B");
+    expect(lines[0].serials).toEqual(["", "SN-B"]);
+    expect(lines[0].error).toContain("SN 不能为空白");
+  });
+
+  it("连续 tab 的空中间列报错（不得折叠吞掉）", () => {
+    const lines = parseBatchText("PN-A\t\tSN-B");
+    expect(lines[0].serials).toEqual(["", "SN-B"]);
+    expect(lines[0].error).toContain("SN 不能为空白");
+  });
+
   it("尾随空列容忍（Excel 复制常见），不报错", () => {
     const lines = parseBatchText("PN-1,SN-A,");
     expect(lines[0].serials).toEqual(["SN-A"]);
+    expect(lines[0].error).toBeNull();
+  });
+
+  it("正常 Excel 行为保留：tab 分隔 SN 行与尾随空列均不受单分隔符拆分影响", () => {
+    const lines = parseBatchText("PN-1\tSN-A\tSN-B\t");
+    expect(lines[0].pn).toBe("PN-1");
+    expect(lines[0].serials).toEqual(["SN-A", "SN-B"]);
     expect(lines[0].error).toBeNull();
   });
 
@@ -254,28 +281,32 @@ describe("ReturnReceiptBatchEntry", () => {
     expect(screen.getByRole("button", { name: "登记 1 条" })).toBeEnabled();
   });
 
-  it("部分失败后仅重试失败行：成功行不再提交、失败行复用同一 idempotency_key", async () => {
+  it("HTTP 500 归「结果未知」：重试复用同 key 幂等重放，unknown 未清前「新批次」禁用", async () => {
     mocks.createReturnReceipt
       .mockResolvedValueOnce({ data: { replayed: false, receipt_id: "r-1" } })
       .mockRejectedValueOnce(httpError(500, "服务器内部错误"))
       .mockResolvedValueOnce({ data: { replayed: true, receipt_id: "r-2" } });
     await fillPreviewSubmit("PN-1,SN-A\nPN-2,SN-B");
 
-    await waitFor(() => expect(screen.getByText("失败")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("结果未知")).toBeTruthy());
     await waitFor(() => expect(screen.getByText("已登记")).toBeTruthy());
     const firstKeys = mocks.createReturnReceipt.mock.calls.map((c) => c[1].idempotency_key);
+    // unknown 在场：「新批次」禁用（先重试核对结果），「关闭」仍可用
+    expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeEnabled();
 
     await waitFor(() => expect(screen.getByRole("button", { name: "重试 1 条" })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "重试 1 条" }));
 
     await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(3));
     expect(screen.getByText("幂等重放")).toBeTruthy();
-    // 只有失败行（PN-2）被重发，成功行（PN-1）没有第二次提交
+    // 只有未知行（PN-2）被重发，成功行（PN-1）没有第二次提交
     expect(mocks.createReturnReceipt.mock.calls[2][1].pn).toBe("PN-2");
     // 重试行原样复用首次保存的幂等键（未重算）
     expect(mocks.createReturnReceipt.mock.calls[2][1].idempotency_key).toBe(firstKeys[1]);
+    // 重试全部落定后（unknown 清空）「新批次」恢复可用
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy());
+      expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeEnabled());
   });
 
   it("服务器成功但响应丢失：行标记「结果未知」，重试复用同 key 幂等重放", async () => {
@@ -292,6 +323,86 @@ describe("ReturnReceiptBatchEntry", () => {
     await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(2));
     expect(mocks.createReturnReceipt.mock.calls[1][1].idempotency_key).toBe(firstKey);
     await waitFor(() => expect(screen.getByText("幂等重放")).toBeTruthy());
+  });
+
+  // 首次响应丢失→unknown；重试被 401/403 拒只证明“本次被拒”，不能证明首次没登记成功。
+  // 行必须保持 unknown（不降级 failed），「新批次」保持禁用，key/payload 与首次完全一致；
+  // 直到第三次 API 成功（幂等重放）才解锁。
+  it.each([401, 403] as const)(
+    "首次网络超时→重试 %d 被拒：仍「结果未知」且「新批次」禁用；第三次幂等重放成功才解锁",
+    async (rejectionStatus) => {
+      mocks.createReturnReceipt
+        .mockRejectedValueOnce(networkError())
+        .mockRejectedValueOnce(httpError(rejectionStatus, "登录已过期"));
+      await fillPreviewSubmit("PN-1,SN-A");
+
+      await waitFor(() => expect(screen.getByText("结果未知")).toBeTruthy());
+      const firstPayload = mocks.createReturnReceipt.mock.calls[0][1];
+
+      fireEvent.click(screen.getByRole("button", { name: "重试 1 条" }));
+      await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(2));
+      // 重试被 4xx 拒：不降级 failed、保持 unknown、新批次仍锁
+      await waitFor(() => expect(screen.getByText("结果未知")).toBeTruthy());
+      expect(screen.queryByText("失败")).toBeNull();
+      expect(screen.getByText(/仍按未知处理/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeDisabled();
+      // 重试 key/payload 与首次完全一致（原样复用保存的幂等身份，未重算）
+      expect(mocks.createReturnReceipt.mock.calls[1][1]).toEqual(firstPayload);
+
+      // 第三次（恢复登录后）：原 key 幂等重放返回已有登记 → unknown 清空、新批次解锁
+      mocks.createReturnReceipt.mockResolvedValueOnce({ data: { replayed: true, receipt_id: "r-1" } });
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "重试 1 条" })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: "重试 1 条" }));
+      await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(3));
+      expect(mocks.createReturnReceipt.mock.calls[2][1].idempotency_key)
+        .toBe(firstPayload.idempotency_key);
+      await waitFor(() => expect(screen.getByText("幂等重放")).toBeTruthy());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeEnabled());
+    },
+  );
+
+  it("网络未知后「新批次」禁用；重试核对成功后恢复可用且换新 key", async () => {
+    mocks.createReturnReceipt
+      .mockRejectedValueOnce(networkError())
+      .mockResolvedValueOnce({ data: { replayed: true, receipt_id: "r-1" } })
+      .mockResolvedValueOnce({ data: { replayed: false, receipt_id: "r-2" } });
+    await fillPreviewSubmit("PN-1,SN-A");
+
+    await waitFor(() => expect(screen.getByText("结果未知")).toBeTruthy());
+    const oldKey = mocks.createReturnReceipt.mock.calls[0][1].idempotency_key;
+    // unknown 在场：新批次被禁（关掉旧 key=放弃核对义务，可能重复登记），关闭仍可用
+    expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeEnabled();
+
+    // 重试用原 key 核对出确定结果（幂等重放=服务器早已登记成功）
+    fireEvent.click(screen.getByRole("button", { name: "重试 1 条" }));
+    await waitFor(() => expect(screen.getByText("幂等重放")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeEnabled());
+
+    // 新批次恢复后可用，再登记同内容拿到全新 key（绝不复用旧 key）
+    fireEvent.click(screen.getByRole("button", { name: /新\s*批\s*次/ }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "PN-1,SN-A" } });
+    fireEvent.click(screen.getByRole("button", { name: /解\s*析\s*预\s*览/ }));
+    await waitFor(() => expect(screen.getByText("共 1 行，合计 1 件")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "登记 1 条" }));
+    await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(3));
+    const newKey = mocks.createReturnReceipt.mock.calls[2][1].idempotency_key;
+    expect(newKey).not.toBe(oldKey);
+    await waitFor(() => expect(screen.getByText("已登记")).toBeTruthy());
+  });
+
+  it("代理 502 归「结果未知」而非确定失败：「新批次」同样被禁", async () => {
+    mocks.createReturnReceipt.mockRejectedValueOnce(httpError(502, "Bad Gateway"));
+    await fillPreviewSubmit("PN-1,SN-A");
+
+    await waitFor(() => expect(screen.getByText("结果未知")).toBeTruthy());
+    expect(screen.queryByText("失败")).toBeNull();
+    expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重试 1 条" })).toBeEnabled();
   });
 
   it("网络未知→关闭→重开：同批重试身份保留，重试复用原 key（新批次才清空）", async () => {

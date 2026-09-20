@@ -60,6 +60,13 @@ interface ResultRow {
   pn: string;
   qty: number;
   status: "pending" | "ok" | "replayed" | "failed" | "unknown";
+  /**
+   * 本行历史上是否曾落为「结果未知」（响应丢失，服务器可能已登记）。一旦为 true，
+   * 除非 API 成功或幂等重放核实，任何后续错误都不得把行降级为 failed——重试被 4xx 拒
+   * （登录过期 401/权限变化 403 等）只证明“本次重试被拒”，不能证明首次没登记成功。
+   * 随行存进 results 跨重试轮次存活；重试置 pending 时靠对象展开自动携带。
+   */
+  wasUnknown: boolean;
   detail: string;
 }
 
@@ -72,6 +79,11 @@ interface ResultRow {
  * 铁律：禁止凭“全数字”猜数量。纯数字/前导零（如 007、1001）一律按 SN 候选保留字符串；
  * 无 SN 数量必须显式写 qty: 前缀。空行忽略；# 开头视为注释行；SN 行内/跨行去重报错；
  * 首列空 = PN 空（报错，不移位）；SN 中间空列报错（尾随空列容忍，Excel 复制常见）。
+ *
+ * 拆分必须保留真实列边界：对原 rowText 按 \t/, 逐个单分隔符拆分再逐 cell trim——绝不能
+ * 先 trim 整行（会吃掉 Excel 首列空 PN 的前导 tab，把 SN 移位当 PN），也不能用 /[\t,]+/
+ * 折叠连续分隔符（会把 PN-A,,SN-B 的空中间列藏起来）。空格不是分隔符（只在 cell 内部
+ * 被 trim），与旧行为一致。
  */
 export function parseBatchText(text: string): BatchLine[] {
   const lines: BatchLine[] = [];
@@ -80,8 +92,10 @@ export function parseBatchText(text: string): BatchLine[] {
   rows.forEach((rowText, index) => {
     const trimmed = rowText.trim();
     if (!trimmed || trimmed.startsWith("#")) return;
-    const cells = trimmed
-      .split(/[\t,]+/)
+    // 对原 rowText 按 \t/, 逐个分隔（连续分隔符不折叠），再逐 cell trim：
+    // 前导 tab 留出空 PN 位、连续分隔符留出空中间列位，二者都必须报错而非被吞掉
+    const cells = rowText
+      .split(/[\t,]/)
       .map((cell) => cell.trim());
     // 只去尾部空列（Excel 复制常带尾逗号）；首列保留原位——空 PN 必须报错，不能移位成 SN 当 PN
     while (cells.length && cells[cells.length - 1] === "") cells.pop();
@@ -142,9 +156,16 @@ export function validateLineConstraints(line: BatchLine): string | null {
   return null;
 }
 
-/** axios 错误是否“有服务端响应”（4xx/5xx=明确失败）；无响应=网络层，结果未知 */
-function hasResponse(error: unknown): boolean {
-  return (error as { response?: unknown })?.response !== undefined;
+/**
+ * 错误分类（failed vs unknown 的唯一判据）：只有“确定的客户端拒绝”才算 failed——
+ * 非 408 的 4xx（校验不过/业务规则拒绝，服务器明确没登记，丢弃 key 安全）。
+ * 其余一律 unknown：无响应（网络断/超时）自不必说；5xx/代理 502 同样可能是数据库
+ * 已成功后上游断响应——服务端对全新 key 无法兜底，只能靠原 key 幂等重放核对，
+ * 绝不能当确定失败放开「新批次」守卫。408 归 unknown（请求超时，服务器可能已处理）。
+ */
+function isDefiniteRejection(error: unknown): boolean {
+  const status = (error as { response?: { status?: unknown } })?.response?.status;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 408;
 }
 
 /** 提交会话：isCurrent 通过对象引用同一性判定；任何切换/关闭/unmount 置 null 即全部作废 */
@@ -153,7 +174,7 @@ interface SubmitSession {
 }
 
 /**
- * 批量录入返还（v1.36 Phase B → v1.36.1 重做）：
+ * 批量录入返还（v1.36 批量返还登记）：
  * 粘贴多行 → 预览校验（本地约束镜像）→ 逐条登记（行级稳定幂等键）→ 结果表。
  * 部分失败语义：每行独立成败；失败/未知行单独重试（直接复用保存的 key+冻结 payload 走幂等
  * 重放），成功行锁定不可再提交。关闭只隐藏不清结果：重开可继续同批重试，「新批次」显式清空。
@@ -209,9 +230,15 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     if (hadSuccess) void onDone();
   };
 
-  /** 显式开新批次：清掉本批结果与重试身份（按钮旁的提示说明后果） */
+  /**
+   * 显式开新批次：清掉本批结果与重试身份（按钮旁的提示说明后果）。
+   * 存在 unknown 行时禁止开新批次——旧 key 一丢，若服务器其实已登记，同内容新 key
+   * 提交就是重复登记；必须先点「重试」用原 key 核对出确定结果（failed 行无此风险：
+   * 服务器确定没登记）。busyRef 是同步守卫（setState 异步不可靠）。
+   */
   const startNewBatch = () => {
     if (busyRef.current) return;
+    if (results.some((r) => r.status === "unknown")) return;
     sessionRef.current = null;
     setResults([]);
     setText("");
@@ -247,6 +274,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
           pn: line.pn,
           qty: fingerprint.qty,
           status: "pending" as const,
+          wasUnknown: false,
           detail: "",
         };
       });
@@ -287,14 +315,24 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
       } catch (err) {
         if (!isCurrent()) return;
         const idx = rows.findIndex((r) => r.idempotencyKey === row.idempotencyKey);
-        rows[idx] = hasResponse(err)
-          ? { ...row, status: "failed", detail: readError(err, "登记失败") }
-          // 响应丢失（网络断/超时）：服务器可能已登记 → 未知；重试复用同 key 幂等重放，不会重复登记
-          : {
-              ...row,
-              status: "unknown",
-              detail: `${readError(err, "网络错误，结果未知")}——可重试（复用原幂等键，不会重复登记）`,
-            };
+        const definite = isDefiniteRejection(err);
+        // 曾 unknown 的行即使本次重试被确定 4xx 拒（登录过期 401/权限变化 403/409），
+        // 也只证明“本次重试被拒”，不能证明首次没登记成功——必须保持 unknown，
+        // 锁住「新批次」直到 API 成功或幂等重放核实。普通首次 4xx 才是 failed。
+        if (definite && !row.wasUnknown) {
+          rows[idx] = { ...row, status: "failed", detail: readError(err, "登记失败") };
+        } else {
+          rows[idx] = {
+            ...row,
+            status: "unknown",
+            wasUnknown: true,
+            detail: definite
+              ? `${readError(err, "登记失败")}——此前结果未知，仍按未知处理（重试被拒不能证明首次未登记，恢复后继续原 key 重试）`
+              // 5xx/代理 502/无响应：数据库可能已成功、响应断在下游 → 未知；重试复用同 key
+              // 幂等重放核对结果，不会重复登记。绝不当作确定失败丢弃 key。
+              : `${readError(err, "网络错误，结果未知")}——可重试（复用原幂等键，不会重复登记）`,
+          };
+        }
       }
       if (isCurrent()) setResults([...rows]);
     }
@@ -308,6 +346,8 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
 
   const retryable = results.filter((r) => r.status === "failed" || r.status === "unknown").length;
   const hasPending = results.some((r) => r.status === "pending");
+  /** unknown 在场 = 旧 key 的核对义务还在，新批次被锁（详见 startNewBatch 注释） */
+  const hasUnknown = results.some((r) => r.status === "unknown");
 
   const resultColumns: ColumnsType<ResultRow> = [
     { title: "PN", dataIndex: "pn" },
@@ -362,13 +402,13 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
       </Button>,
     ]
     : retryable > 0 ? [
-      <Button key="new" disabled={submitting} onClick={startNewBatch}>新批次</Button>,
+      <Button key="new" disabled={submitting || hasUnknown} onClick={startNewBatch}>新批次</Button>,
       <Button key="close" disabled={submitting} onClick={close}>关闭</Button>,
       <Button key="retry" type="primary" loading={submitting}
         onClick={() => { void submitAll(true); }}>{`重试 ${retryable} 条`}</Button>,
     ]
     : [
-      <Button key="new" disabled={submitting} onClick={startNewBatch}>新批次</Button>,
+      <Button key="new" disabled={submitting || hasUnknown} onClick={startNewBatch}>新批次</Button>,
       <Button key="close" type="primary" loading={submitting} onClick={close}>关闭</Button>,
     ];
 
@@ -434,7 +474,10 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
                 showIcon
                 message={`有 ${retryable} 条失败/结果未知：点「重试 ${retryable} 条」仅重试这些行`
                   + `（原样复用已保存的幂等键，服务器侧不会重复登记），成功行已锁定不可再提交。`
-                  + `关闭窗口会保留本批结果与重试身份，重开可继续；「新批次」将清空以上身份。`}
+                  + `关闭窗口会保留本批结果与重试身份，重开可继续。`
+                  + (hasUnknown
+                    ? `存在「结果未知」行：「新批次」已禁用——请先点「重试」用原幂等键核对出确定结果，再开新批次。`
+                    : `「新批次」将清空以上身份。`)}
               />
             ) : null}
             <Table<ResultRow>
