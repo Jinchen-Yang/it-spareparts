@@ -131,3 +131,71 @@ export const cancelMaintenanceDemandDeleteIntent = (intentId: string, digest: st
     `/maintenance/demands/delete-intents/${intentId}/cancel`,
     { digest },
   );
+
+// ---------- v1.36 Phase E：需求单行页面直改/直建 ----------
+
+export interface DemandLinePatchResult {
+  changed: boolean;
+  raw_line_id: string;
+  qty: string | null;
+  return_qty: string | null;
+  serial_numbers: string | null;
+  description: string | null;
+  pn_raw: string | null;
+  pn_std: string | null;
+  edited_source: string;
+  manual_override: Record<string, { value: unknown; source_value: unknown; updated_by: string; updated_at: string }>;
+}
+
+export const patchDemandLine = (
+  rawLineId: string,
+  updates: Record<string, unknown>,
+  reason: string,
+) => api.patch<DemandLinePatchResult>(
+  `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}`,
+  { updates, reason },
+);
+
+export const createDemandLine = (input: {
+  order_date: string;
+  project_id: string;
+  pn_std: string;
+  qty: number;
+  return_qty?: number;
+  serial_numbers?: string | null;
+  description?: string | null;
+  reason: string;
+}) => api.post<DemandLinePatchResult & { order_no: string }>(
+  "/maintenance/demands/lines", input,
+);
+
+export interface DemandLineRow {
+  raw_line_id: string;
+  order_raw_id: string;
+  order_no: string | null;
+  line_no: number | null;
+  part_id: number | null;
+  pn_std: string | null;
+  pn_raw: string | null;
+  description: string | null;
+  qty: string | null;
+  return_qty: string | null;
+  serial_numbers: string | null;
+  edited_source: string;
+  manual_override: Record<string, { value: unknown; source_value: unknown; updated_by: string; updated_at: string }>;
+  is_active: boolean;
+}
+
+export const listDemandLines = (sourceOrderId: string) =>
+  api.get<{ items: DemandLineRow[] }>(
+    `/maintenance/demands/orders/${encodeURIComponent(sourceOrderId)}/lines`,
+  );
+
+export const clearDemandLineOverride = (
+  rawLineId: string,
+  fieldName: string,
+  reason: string,
+) => api.post<DemandLinePatchResult>(
+  `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}/clear-override`,
+  { field_name: fieldName, reason },
+);

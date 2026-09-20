@@ -541,3 +541,82 @@ def clear_override(
     except Exception:
         db.rollback()
         raise
+
+
+class DemandLineOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    raw_line_id: str
+    order_raw_id: str
+    order_no: str | None
+    line_no: int | None
+    part_id: int | None
+    pn_std: str | None
+    pn_raw: str | None
+    description: str | None
+    qty: str | None
+    return_qty: str | None
+    serial_numbers: str | None
+    edited_source: str
+    manual_override: dict
+    is_active: bool
+
+
+@router.get("/orders/{source_order_id}/lines")
+def list_demand_lines(
+    source_order_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """列出一个需求单头下的明细行（页面行编辑的数据源）。
+
+    可见性：scope 受限账号只能看自己项目内的单（失败关闭）；
+    include_inactive=false 默认只回活行（作废行不可编辑也无须展示）。
+    """
+    from app.models.maintenance import FMaintenanceLine
+
+    visible = scope_resolve(db, ctx)
+    if visible is not None:
+        assigned = db.scalars(
+            select(maintenance_demands.MaintenanceSourceOrderAssignment.project_id).where(
+                maintenance_demands.MaintenanceSourceOrderAssignment.source_order_id
+                == source_order_id,
+                maintenance_demands.MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ).all()
+        if not assigned or not set(assigned) <= set(visible):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "该项目不在你的可见范围")
+    order = db.scalar(
+        select(maintenance_demands.FMaintenanceOrder).where(
+            maintenance_demands.FMaintenanceOrder.raw_order_id == source_order_id
+        )
+    )
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "需求单不存在")
+    rows = db.execute(
+        select(FMaintenanceLine)
+        .where(FMaintenanceLine.order_id == order.id,
+               FMaintenanceLine.is_active.is_(True))
+        .order_by(FMaintenanceLine.line_no)
+    ).scalars().all()
+    return {"items": [
+        {
+            "raw_line_id": r.raw_line_id,
+            "order_raw_id": source_order_id,
+            "order_no": order.order_no,
+            "line_no": r.line_no,
+            "part_id": r.part_id,
+            "pn_std": r.pn_std,
+            "pn_raw": r.pn_raw,
+            "description": r.description,
+            "qty": str(r.qty) if r.qty is not None else None,
+            "return_qty": str(r.return_qty) if r.return_qty is not None else None,
+            "serial_numbers": r.serial_numbers,
+            "edited_source": r.edited_source,
+            "manual_override": dict(r.manual_override or {}),
+            "is_active": r.is_active,
+        }
+        for r in rows
+    ]}

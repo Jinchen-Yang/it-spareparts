@@ -28,6 +28,7 @@ import type { WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImp
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
+import DemandLinesEditor from "./DemandLinesEditor";
 
 const { Title, Text } = Typography;
 
@@ -57,6 +58,9 @@ export function MaintenanceDemandsPage() {
   // 恢复接口后端硬性要求 admin（require_admin），非 admin 给了按钮也只会吃 403
   const isAdmin = localStorage.getItem("role") === "admin";
   const canRestore = canVoid && isAdmin;
+  // v1.36：需求单行页面直改（override 保护）
+  const canEditLines = !!permissions.action_maintenance_demand_manage;
+  const [linesEditorFor, setLinesEditorFor] = useState<MaintenanceDemandSummary | null>(null);
 
   // ---- 区块一：氚云快照同步 + 差异清单 ----
   const [missing, setMissing] = useState<WbddMissing | null>(null);
@@ -316,13 +320,20 @@ export function MaintenanceDemandsPage() {
                   </Button>
                 ) : null
               ) : (
-                <Button
-                  size="small"
-                  danger
-                  onClick={() => openVoidModal([row.source_order_id])}
-                >
-                  作废
-                </Button>
+                <Space size={4}>
+                  {canEditLines ? (
+                    <Button size="small" onClick={() => setLinesEditorFor(row)}>
+                      编辑明细
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => openVoidModal([row.source_order_id])}
+                  >
+                    作废
+                  </Button>
+                </Space>
               ),
           },
         ] as ColumnsType<MaintenanceDemandSearchRow>)
@@ -517,6 +528,14 @@ export function MaintenanceDemandsPage() {
           />
         </Space>
       </Modal>
+      {linesEditorFor ? (
+        <DemandLinesEditor
+          key={linesEditorFor.source_order_id}
+          sourceOrderId={linesEditorFor.source_order_id}
+          orderNo={linesEditorFor.order_no}
+          onClose={() => setLinesEditorFor(null)}
+        />
+      ) : null}
     </Space>
   );
 }
@@ -545,6 +564,7 @@ function readVoidError(error: unknown): string {
   }
   return readError(error, "作废失败");
 }
+
 
 function readError(error: unknown, fallback: string): string {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response
