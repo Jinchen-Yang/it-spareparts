@@ -20,6 +20,7 @@ import {
 import type { CollectionPlanRow } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
+import CollectionBatchMaintenance from "./CollectionBatchMaintenance";
 import { readPermissionMap } from "../../../nav";
 import {
   COLLECTION_STATUS,
@@ -46,7 +47,7 @@ type DialogMode = "create" | "edit" | "void" | "restore";
 /** 报告月份输入 YYYY-MM → 当月首日 ISO（后端要求 day==1）。 */
 function normalizeMonth(value: string): string | null {
   const match = /^(\d{4})-(\d{2})$/.exec(value.trim());
-  if (!match) return null;
+  if (!match || match[1] === "0000") return null;
   const month = Number(match[2]);
   if (month < 1 || month > 12) return null;
   return `${match[1]}-${match[2]}-01`;
@@ -93,6 +94,7 @@ export function CollectionTab({
   registerRefresh: RegisterPanelRefresh;
 }) {
   const [planRows, setPlanRows] = useState<CollectionPlanRow[]>([]);
+  const [selectedCollectionIds, setSelectedCollectionIds] = useState<string[]>([]);
   const requestSeq = useRef(0);
 
   // ---- v1.36：实收回款页面 CRUD（后端 snapshot POST/PATCH，OCC + reason 留痕） ----
@@ -179,6 +181,7 @@ export function CollectionTab({
     modalProjectRef.current = projectId;
     setContracts(null);
     setContractsState("idle");
+    setSelectedCollectionIds([]);
     setCreateOpen(false);
     setEditing(null);
     setMode("create");
@@ -389,6 +392,7 @@ export function CollectionTab({
     : mode === "void" ? "如：银行冲正，该月金额作废"
     : mode === "restore" ? "如：误作废，恢复该月回款"
     : "如：核对银行回单后修正金额";
+  const selectedCollectionRows = rows.filter((row) => selectedCollectionIds.includes(row.collection_id));
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -406,9 +410,16 @@ export function CollectionTab({
           />
         )}
         actions={canManageCollections ? (
-          <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>
+          <Space size={4} wrap>
+            <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>
+            <CollectionBatchMaintenance
+              projectId={projectId}
+              selectedRows={selectedCollectionRows}
+              onRefresh={onRefresh}
+            />
+          </Space>
         ) : undefined}
-        hint="Excel 在左（在哪下载就在哪上传，可回填累计实收/状态/凭证号/备注）；单条登记/修改/作废/恢复在下方记录表操作列，登记时合同从当前项目下拉选择"
+        hint="Excel 在左；页面支持单条登记/修改/作废/恢复，也支持批量登记及勾选多行后批量修改、批量作废"
       />
       <Card
         size="small"
@@ -427,6 +438,16 @@ export function CollectionTab({
       <Card size="small" title="实收回款记录（05）">
         <Table<MaintenanceCollectionSnapshotRow>
           rowKey="collection_id"
+          rowSelection={canManageCollections ? {
+            selectedRowKeys: selectedCollectionIds,
+            onChange: (keys) => setSelectedCollectionIds(keys.map(String)),
+            getCheckboxProps: (row) => ({
+              disabled: row.status === "void",
+              "aria-label": row.status === "void"
+                ? `已作废记录 ${row.contract_no ?? row.collection_id} 不可选择`
+                : `选择回款记录 ${row.contract_no ?? row.collection_id} ${row.report_month.slice(0, 7)}`,
+            }),
+          } : undefined}
           size="small"
           loading={loading}
           dataSource={rows}
@@ -552,6 +573,7 @@ export function CollectionTab({
                 options={contractRows.map((contract) => ({
                   value: contract.project_contract_id,
                   label: contractOptionLabel(contract),
+                  disabled: !contract.is_effective,
                 }))}
               />
             </Form.Item>

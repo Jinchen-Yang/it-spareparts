@@ -162,6 +162,9 @@ describe("回款页面登记的合同选择", () => {
     expect(screen.queryByRole("button", btn("登记回款"))).not.toBeInTheDocument();
     expect(screen.queryByRole("button", btn("修改"))).not.toBeInTheDocument();
     expect(screen.queryByRole("button", btn("作废"))).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", btn("批量登记"))).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批\s*量\s*修\s*改/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批\s*量\s*作\s*废/ })).not.toBeInTheDocument();
     expect(mocks.workspace).not.toHaveBeenCalled();
   });
 
@@ -321,5 +324,29 @@ describe("快速切项目与在途提交隔离", () => {
     fireEvent.mouseDown(within(dialogB).getByLabelText("关联合同（当前项目内选择）"));
     await waitFor(() => expect(screen.getAllByTitle("HT-B-002").length).toBeGreaterThan(0));
     expect(screen.queryByTitle("HT-A-OLD")).not.toBeInTheDocument();
+  });
+});
+
+describe("批量入口与列表勾选接线", () => {
+  it("有效行可勾选并传给批量修改；已作废行选择框禁用", async () => {
+    grantManage();
+    const active = snapshot({ collection_id: "active-1", contract_no: "HT-ACTIVE" });
+    const voided = snapshot({
+      collection_id: "void-1",
+      contract_no: "HT-VOID",
+      report_month: "2026-07-01",
+      status: "void",
+    });
+    render(<CollectionTab {...props({ rows: [active, voided] })} />);
+
+    const modify = await screen.findByRole("button", { name: /批\s*量\s*修\s*改/ });
+    expect(modify).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /已作废记录 HT-VOID 不可选择/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /选择回款记录 HT-ACTIVE 2026-08/ }));
+    expect(await screen.findByRole("button", { name: /批\s*量\s*修\s*改.*1/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*修\s*改.*1/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("HT-ACTIVE")).toBeInTheDocument();
+    expect(within(dialog).getByText("v3")).toBeInTheDocument();
   });
 });
