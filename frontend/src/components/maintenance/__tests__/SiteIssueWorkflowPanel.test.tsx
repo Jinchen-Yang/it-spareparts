@@ -146,7 +146,7 @@ describe("SiteIssueWorkflowPanel", () => {
       .toBeInTheDocument();
     expect(within(panel).getByText(/真实适配器接入前不得用于生产确认/))
       .toBeInTheDocument();
-    fireEvent.click(within(panel).getByRole("button", { name: "新建领用单" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "从仓库发货领用" }));
     expect(await screen.findByText("PN-001")).toBeInTheDocument();
     expect(screen.getByText(/可领 5.000/)).toBeInTheDocument();
     expect(screen.getByText(/稳定来源（WBDD\/source_order_id）：order-1 · 行 line-1/))
@@ -228,7 +228,7 @@ describe("SiteIssueWorkflowPanel", () => {
     );
 
     const panel = await screen.findByTestId("site-issue-workflow");
-    fireEvent.click(within(panel).getByRole("button", { name: "新建领用单" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "从仓库发货领用" }));
     const editorDialog = await screen.findByRole("dialog", { name: "新建现场领用草稿" });
     fireEvent.change(within(editorDialog).getByLabelText("接收人"), { target: { value: "王五" } });
     fireEvent.change(within(editorDialog).getByLabelText("发出人"), { target: { value: "赵六" } });
@@ -376,6 +376,9 @@ describe("SiteIssueWorkflowPanel", () => {
 
     expect(await screen.findByText("现场领用单加载失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
-    expect(screen.getByText("真实发货适配器尚未接入")).toBeInTheDocument();
+    expect(screen.getByText(/真实发货适配器尚未接入/)).toBeInTheDocument();
+    // v1.36：告警文案点名「从仓库发货领用」通道；人工登记入口不受该闸门影响
+    expect(screen.getByText(/人工登记领用/, { selector: "div.ant-alert-description" })).toBeInTheDocument();
+    expect(screen.getByTestId("manual-site-issue-section")).toBeInTheDocument();
   });
 });

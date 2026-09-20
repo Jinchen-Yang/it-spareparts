@@ -332,6 +332,8 @@ export interface SiteIssueDocument {
   issue_no: string;
   issue_date: string;
   workflow_status: SiteIssueWorkflowStatus;
+  /** 单据来源：如 direct_api / workbook / page_manual。 */
+  source?: string;
   receiver: string;
   issued_by: string;
   site_location: string;
@@ -395,6 +397,75 @@ export interface SiteIssueCommandInput {
   project_id: string;
   version: number;
   idempotency_key: string;
+  reason: string;
+}
+
+/** 页面人工登记领用行：PN 身份用 part_id（PartPicker），不传展示文本。 */
+export interface ManualSiteIssueLineInput {
+  /** 更正时显式保留原行身份；新增行不传。 */
+  issue_line_id?: string;
+  part_id: number;
+  quantity: number;
+  serial_number?: string | null;
+  no_return?: boolean | null;
+  demand_order_no?: string | null;
+  remark?: string | null;
+}
+
+export interface ManualSiteIssueBaseInput {
+  idempotency_key: string;
+  issue_date: string;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  lines: ManualSiteIssueLineInput[];
+  reason: string;
+}
+
+export interface ManualSiteIssueCreateInput extends ManualSiteIssueBaseInput {
+  issue_no?: string | null;
+}
+
+/** 预览返回：每行带成本证据（缺价时金额为 null，绝不编造）。 */
+export interface ManualSiteIssuePreviewLine {
+  part_id: number;
+  pn: string;
+  quantity: string;
+  serial_number: string | null;
+  no_return: boolean | null;
+  demand_order_no: string | null;
+  remark: string | null;
+  cost_source: string | null;
+  cost_source_label: string | null;
+  cost_is_estimate: boolean;
+  unit_cost_ex_tax: string | null;
+  cost_amount_ex_tax: string | null;
+  cost_amount_inc_tax: string | null;
+  cost_gap: boolean;
+}
+
+export interface ManualSiteIssuePreview {
+  project_id: string;
+  issue_date: string;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  lines: ManualSiteIssuePreviewLine[];
+  inventory_effect: "none";
+  total_cost_ex_tax: string | null;
+  total_cost_inc_tax: string | null;
+}
+
+export interface ManualSiteIssuePatchInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  issue_date?: string;
+  issue_no?: string | null;
+  receiver?: string;
+  issued_by?: string;
+  site_location?: string;
+  lines?: ManualSiteIssueLineInput[];
   reason: string;
 }
 
@@ -1426,6 +1497,31 @@ export const voidSiteIssue = (
   issueId: string,
   input: SiteIssueCommandInput,
 ) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);
+
+/** 页面人工登记领用（page_manual）：不依赖仓库发货候选，录入即确认。 */
+export const previewManualSiteIssue = (
+  projectId: string,
+  input: Omit<ManualSiteIssueBaseInput, "idempotency_key" | "reason">,
+) => api.post<ManualSiteIssuePreview>(
+  `/maintenance/site-issues/manual/preview?project_id=${encodeURIComponent(projectId)}`,
+  input,
+);
+
+export const createManualSiteIssue = (
+  projectId: string,
+  input: ManualSiteIssueCreateInput,
+) => api.post<SiteIssueDocument>(
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/manual`,
+  input,
+);
+
+export const patchManualSiteIssue = (
+  issueId: string,
+  input: ManualSiteIssuePatchInput,
+) => api.patch<SiteIssueDocument>(
+  `/maintenance/site-issues/manual/${encodeURIComponent(issueId)}`,
+  input,
+);
 
 export const searchMaintenanceReturnObligations = (
   input: MaintenanceReturnObligationSearchInput,

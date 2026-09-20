@@ -32,6 +32,7 @@ import {
   type SiteIssueLineInput,
   type SiteIssuePreview,
 } from "../../api/maintenanceOperations";
+import ManualSiteIssueSection from "./ManualSiteIssueSection";
 
 const { Text, Title } = Typography;
 
@@ -410,7 +411,7 @@ export default function SiteIssueWorkflowPanel({
     <Card
       data-testid="site-issue-workflow"
       title="现场备件领用单"
-      extra={<Button type="primary" onClick={() => openEditor(null)}>新建领用单</Button>}
+      extra={<Button onClick={() => openEditor(null)}>从仓库发货领用</Button>}
     >
       <Space direction="vertical" size={14} style={{ width: "100%" }}>
         <Alert
@@ -423,8 +424,11 @@ export default function SiteIssueWorkflowPanel({
           <Alert
             type={adapter.state === "unavailable" ? "error" : "warning"}
             showIcon
-            message="发货来源适配器尚未达到生产就绪"
-            description={adapter.detail || "系统不会按项目名猜测发货来源"}
+            message="从仓库发货领用：发货来源适配器尚未达到生产就绪"
+            description={
+              (adapter.detail || "系统不会按项目名猜测发货来源")
+              + " 无发货单的人工领用请使用下方「人工登记领用」，不受此闸门影响。"
+            }
           />
         )}
         {candidateError && (
@@ -518,6 +522,16 @@ export default function SiteIssueWorkflowPanel({
             )}
           </>
         )}
+        <ManualSiteIssueSection
+          projectId={projectId}
+          canManage={canManage}
+          issues={issues}
+          onChanged={onChanged}
+          reloadIssues={async () => {
+            setIssueQuery("");
+            await loadIssues("", 1);
+          }}
+        />
       </Space>
 
       <Modal
