@@ -14,6 +14,7 @@ import {
 import ProjectProcurementPanel from "../../../components/maintenance/ProjectProcurementPanel";
 import OrderContactInfo from "../../../components/maintenance/OrderContactInfo";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import PanelActionBar from "./PanelActionBar";
 import {
   COST_CATEGORY_LEGEND,
   CostSourceTag,
@@ -281,16 +282,20 @@ export function PartsOrdersTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <WorkbookRoundTrip
-        size="small"
-        title="备件成本"
-        filename={`${exportBase}-${SHEETS.parts}.xlsx`}
-        canUpload={canUpload}
+      <PanelActionBar
+        workbook={(
+          <WorkbookRoundTrip
+            size="small"
+            title="备件成本"
+            filename={`${exportBase}-${SHEETS.parts}.xlsx`}
+            canUpload={canUpload}
+            onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
+            onValidate={(file) => validateProjectMaster(projectId, file)}
+            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+            onAfterApply={onChanged}
+          />
+        )}
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
-        onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
-        onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-        onAfterApply={onChanged}
       />
       <Card
         size="small"

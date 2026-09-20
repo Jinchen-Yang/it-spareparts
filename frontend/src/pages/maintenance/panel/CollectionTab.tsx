@@ -15,6 +15,7 @@ import {
 } from "../../../api/maintenanceWorkbooks";
 import type { CollectionPlanRow } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import PanelActionBar from "./PanelActionBar";
 import { readPermissionMap } from "../../../nav";
 import {
   COLLECTION_STATUS,
@@ -244,16 +245,23 @@ export function CollectionTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <WorkbookRoundTrip
-        size="small"
-        title="回款"
-        filename={`${exportBase}-${SHEETS.collection}.xlsx`}
-        canUpload={canUpload}
-        hint="下载后可回填累计实收、状态、凭证号和备注"
-        onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
-        onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-        onAfterApply={onRefresh}
+      <PanelActionBar
+        workbook={(
+          <WorkbookRoundTrip
+            size="small"
+            title="回款"
+            filename={`${exportBase}-${SHEETS.collection}.xlsx`}
+            canUpload={canUpload}
+            onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
+            onValidate={(file) => validateProjectMaster(projectId, file)}
+            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+            onAfterApply={onRefresh}
+          />
+        )}
+        actions={canManageCollections ? (
+          <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>
+        ) : undefined}
+        hint="Excel 在左（在哪下载就在哪上传，可回填累计实收/状态/凭证号/备注）；单条登记/修改在下方记录表操作列"
       />
       <Card
         size="small"
@@ -269,9 +277,7 @@ export function CollectionTab({
           locale={{ emptyText: "暂无回款计划——在总表 02_回款计划 填写后会显示在这里" }}
         />
       </Card>
-      <Card size="small" title="实收回款记录（05）" extra={canManageCollections ? (
-        <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>
-      ) : undefined}>
+      <Card size="small" title="实收回款记录（05）">
         <Table<MaintenanceCollectionSnapshotRow>
           rowKey="collection_id"
         size="small"

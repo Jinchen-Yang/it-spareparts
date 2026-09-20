@@ -9,6 +9,7 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import PanelActionBar from "./PanelActionBar";
 import { type RegisterPanelRefresh, raw, readError } from "./panelUtils";
 
 /** 报销 tab：04 表的 web 呈现（含备注，#47）+ 下载上传（两阶段回传）。只展示，不散改。 */
@@ -59,16 +60,20 @@ export function ExpenseTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <WorkbookRoundTrip
-        size="small"
-        title="报销"
-        filename={`${exportBase}-${SHEETS.expense}.xlsx`}
-        canUpload={canUpload}
+      <PanelActionBar
+        workbook={(
+          <WorkbookRoundTrip
+            size="small"
+            title="报销"
+            filename={`${exportBase}-${SHEETS.expense}.xlsx`}
+            canUpload={canUpload}
+            onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
+            onValidate={(file) => validateProjectMaster(projectId, file)}
+            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+            onAfterApply={onChanged}
+          />
+        )}
         hint="在哪下载就在哪上传：黄底的「未税金额」「备注」两列可改"
-        onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
-        onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-        onAfterApply={onChanged}
       />
       <Table<ProjectExpenseRow>
         rowKey="raw_line_id"

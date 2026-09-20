@@ -15,6 +15,7 @@ import { readPermissionMap } from "../../../nav";
 import { raw, readError } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
 import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
+import PanelActionBar from "./PanelActionBar";
 
 const { Text } = Typography;
 
@@ -532,38 +533,39 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         </Col>
       </Row>
 
-      <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
-        <Space>
-          {canManage ? (
-            <>
-              <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
-              <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => {
-                await load(page, includeVoided);
-                if (onChanged) await onChanged();
-              }} />
-            </>
-          ) : null}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致
-          </Text>
-        </Space>
-        {canImport && canManage ? <ReturnReceiptImport onApplied={async () => {
-          await load(page, includeVoided);
-          if (onChanged) await onChanged();
-        }} /> : null}
-        <Button
-          size="small"
-          type={includeVoided ? "primary" : "default"}
-          onClick={() => {
-            const next = !includeVoided;
-            setIncludeVoided(next);
-            setPage(1);
-            void load(1, next);
-          }}
-        >
-          {includeVoided ? "含已作废" : "只看有效"}
-        </Button>
-      </Space>
+      <PanelActionBar
+        actions={canManage ? (
+          <>
+            <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
+            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => {
+              await load(page, includeVoided);
+              if (onChanged) await onChanged();
+            }} />
+          </>
+        ) : undefined}
+        workbook={canImport && canManage ? (
+          <ReturnReceiptImport onApplied={async () => {
+            await load(page, includeVoided);
+            if (onChanged) await onChanged();
+          }} />
+        ) : undefined}
+        trailing={(
+          <Button
+            size="small"
+            type={includeVoided ? "primary" : "default"}
+            onClick={() => {
+              const next = !includeVoided;
+              setIncludeVoided(next);
+              setPage(1);
+              void load(1, next);
+            }}
+          >
+            {includeVoided ? "含已作废" : "只看有效"}
+          </Button>
+        )}
+        hint="登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致"
+      />
+
 
       {summary ? <Table
         size="small"

@@ -16,6 +16,7 @@ import {
 } from "../../../api/maintenanceWorkbooks";
 import SiteIssueWorkflowPanel from "../../../components/maintenance/SiteIssueWorkflowPanel";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
 import { readPermissionMap } from "../../../nav";
 import {
@@ -200,16 +201,20 @@ export function SiteReturnTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <WorkbookRoundTrip
-        size="small"
-        title="维保领用与返还"
-        filename={`${exportBase}-${SHEETS.site}.xlsx`}
-        canUpload={canUpload}
-        hint="可回填领用事实和是否应返还；上传后页面立即刷新"
-        onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
-        onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-        onAfterApply={onChanged}
+      <PanelActionBar
+        workbook={(
+          <WorkbookRoundTrip
+            size="small"
+            title="维保领用与返还"
+            filename={`${exportBase}-${SHEETS.site}.xlsx`}
+            canUpload={canUpload}
+            onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
+            onValidate={(file) => validateProjectMaster(projectId, file)}
+            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+            onAfterApply={onChanged}
+          />
+        )}
+        hint="Excel：在哪下载就在哪上传，可回填领用事实和是否应返还；上传后页面立即刷新"
       />
       {/* v1.36：复活 v1.21 的领用工作台（新增/编辑/确认，candidate 适配器门禁），
           入口与作废同门禁：site_issue_manage + 成本可见。 */}
