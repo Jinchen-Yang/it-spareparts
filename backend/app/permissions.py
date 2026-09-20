@@ -561,6 +561,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_demand_delete",
     "action_maintenance_demand_manage",
     "action_maintenance_site_issue_manage",
+    "action_maintenance_bad_return_manage",
     "action_maintenance_acceptance_review",
     "action_maintenance_acceptance_checklist_import",
     "action_maintenance_warehouse_manage",
