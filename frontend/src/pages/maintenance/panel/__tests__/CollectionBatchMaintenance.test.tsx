@@ -220,6 +220,27 @@ describe("批量登记真实交互", () => {
 });
 
 describe("批量修改与作废", () => {
+  it("清空已有累计金额会阻止连同备注一起提交，原金额为null时仍可只改备注", async () => {
+    const { unmount } = render(<CollectionBatchMaintenance projectId="p-1" selectedRows={[snapshot()]} onRefresh={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*修\s*改/ }));
+    fireEvent.change(screen.getByLabelText("第1行修改金额"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("第1行修改备注"), { target: { value: "已核对" } });
+    fireEvent.change(screen.getByLabelText("共同操作原因"), { target: { value: "更正" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存\s*批\s*量\s*修\s*改/ }));
+    expect(await screen.findByText("第 1 行已有累计金额不能清空")).toBeInTheDocument();
+    expect(mocks.patch).not.toHaveBeenCalled();
+    unmount();
+
+    render(<CollectionBatchMaintenance projectId="p-1" selectedRows={[snapshot({ cumulative_amount: null })]} onRefresh={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*修\s*改/ }));
+    fireEvent.change(screen.getByLabelText("第1行修改备注"), { target: { value: "只改备注" } });
+    fireEvent.change(screen.getByLabelText("共同操作原因"), { target: { value: "核对" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存\s*批\s*量\s*修\s*改/ }));
+    await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith("c-1", {
+      version: 3, reason: "核对", remark: "只改备注",
+    }));
+  });
+
   it("两条不同 version 中只发送真正变化行，并把空凭据/备注显式发 null", async () => {
     const rows = [
       snapshot({ collection_id: "c-1", version: 3, cumulative_amount: 100 }),
@@ -262,6 +283,46 @@ describe("批量修改与作废", () => {
     expect(mocks.patch.mock.calls.every((call) => call[1].status === "void")).toBe(true);
     expect(await screen.findByText("冲突待人工核对")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /重\s*试/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("未知结果在冲突核对期间保留请求", () => {
+  it.each(["create", "patch"] as const)("%s 响应丢失后409且读回不匹配不能关闭或清批次，匹配后才解锁", async (kind) => {
+    const write = kind === "create" ? mocks.create : mocks.patch;
+    write.mockRejectedValueOnce(new Error("response lost"))
+      .mockRejectedValueOnce({ response: { status: 409 } })
+      .mockRejectedValueOnce({ response: { status: 409 } });
+    const target = kind === "create"
+      ? snapshot({ cumulative_amount: 150, status: "unconfirmed", receipt_reference: null, remark: null })
+      : snapshot({ cumulative_amount: 150 });
+    const onRefresh = vi.fn().mockResolvedValue(true);
+    render(<CollectionBatchMaintenance projectId="p-1" selectedRows={[snapshot()]} onRefresh={onRefresh} />);
+    fireEvent.click(screen.getByRole("button", { name: kind === "create" ? /批\s*量\s*登\s*记/ : /批\s*量\s*修\s*改/ }));
+    if (kind === "create") await fillCreateRow(1, "HT-1", "2026-08", "150");
+    else fireEvent.change(screen.getByLabelText("第1行修改金额"), { target: { value: "150" } });
+    fireEvent.change(screen.getByLabelText("共同操作原因"), { target: { value: "核对" } });
+    fireEvent.click(screen.getByRole("button", { name: kind === "create" ? /登\s*记 1 条/ : /保\s*存\s*批\s*量\s*修\s*改/ }));
+    expect(await screen.findByText("结果未知")).toBeInTheDocument();
+    const original = write.mock.calls[0];
+    mocks.workspace.mockResolvedValueOnce(workspace([], [{ ...target, cumulative_amount: 999 }]))
+      .mockResolvedValueOnce(workspace([], [target]));
+
+    fireEvent.click(screen.getByRole("button", { name: /重\s*试 1 条/ }));
+    expect(await screen.findByText(/此前请求结果仍未知；保留原请求/)).toBeInTheDocument();
+    expect(screen.getByText("结果未知")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /新\s*批\s*次/ }));
+    fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape", keyCode: 27 });
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /重\s*试 1 条/ }));
+    expect(await screen.findByText("已核对当前值")).toBeInTheDocument();
+    expect(write.mock.calls).toEqual([original, original, original]);
+    expect(screen.getByRole("button", { name: /新\s*批\s*次/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeEnabled();
   });
 });
 

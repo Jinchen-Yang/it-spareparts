@@ -102,13 +102,13 @@ describe("DemandLineBatchCreate", () => {
     await fillTwoRows();
     fireEvent.click(screen.getByRole("button", { name: "提交整批" }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(2));
-    await screen.findByText(/批次结果：成功 1 行，失败 1 行/);
+    await screen.findByText(/批次结果：成功 1 行，失败 0 行，结果未知 1 行/);
 
     const successfulRequest = mocks.create.mock.calls[0][0];
     const failedRequest = mocks.create.mock.calls[1][0];
     expect(successfulRequest.idempotency_key).not.toBe(failedRequest.idempotency_key);
 
-    fireEvent.click(screen.getByRole("button", { name: /重试失败行/ }));
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成行/ }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(3));
     expect(mocks.create.mock.calls[2][0]).toEqual(failedRequest);
     expect(mocks.create.mock.calls.filter((call) => call[0] === successfulRequest)).toHaveLength(1);
@@ -125,7 +125,7 @@ describe("DemandLineBatchCreate", () => {
     await fillTwoRows();
     fireEvent.click(screen.getByRole("button", { name: "提交整批" }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(2));
-    const retry = screen.getByRole("button", { name: /重试失败行/ });
+    const retry = screen.getByRole("button", { name: /重试未完成行/ });
     await waitFor(() => expect(retry).toBeDisabled());
     fireEvent.click(retry);
     expect(mocks.create).toHaveBeenCalledTimes(2);
@@ -190,5 +190,44 @@ describe("DemandLineBatchCreate", () => {
     await act(async () => { await Promise.resolve(); });
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(onCommitted).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 408, 409])("首次408未知后收到%s仍保留原幂等键，核实前不能关闭", async (status) => {
+    const onClose = vi.fn();
+    mocks.create
+      .mockRejectedValueOnce({ response: { status: 408 } })
+      .mockRejectedValueOnce({ response: { status } })
+      .mockResolvedValueOnce(created("PAGE-REPLAY"));
+    render(<DemandLineBatchCreate fixedProjectId="P1" onClose={onClose} onCommitted={vi.fn()} />);
+    await pickPart(0);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "第1行需求数量" }), {
+      target: { value: "2" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "共同创建原因" }), {
+      target: { value: "补录" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交整批" }));
+    expect(await screen.findByText("结果未知")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /重试未完成行/ })).not.toHaveClass("ant-btn-loading"));
+    const original = mocks.create.mock.calls[0][0];
+    expect(original.idempotency_key).toBeTruthy();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成行/ }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: /重试未完成行/ })).not.toHaveClass("ant-btn-loading"));
+    expect(screen.getByText("结果未知")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape", keyCode: 27 });
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成行/ }));
+    expect(await screen.findByText("PAGE-REPLAY")).toBeInTheDocument();
+    expect(mocks.create.mock.calls.map((call) => call[0])).toEqual([original, original, original]);
+    await waitFor(() => expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

@@ -228,7 +228,8 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   const epochRef = useRef(0);
 
   const activeSelected = useMemo(() => selectedRows.filter((row) => row.status !== "void"), [selectedRows]);
-  const hasUnknown = results.some((row) => row.outcome === "unknown");
+  const hasUnknown = results.some((row) => row.outcome === "unknown"
+    || (row.wasUnknown && row.outcome !== "ok" && row.outcome !== "verified"));
 
   useEffect(() => {
     epochRef.current += 1;
@@ -298,7 +299,7 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   };
 
   const close = async () => {
-    if (busyRef.current) return;
+    if (busyRef.current || hasUnknown) return;
     setOpen(false);
     const shouldRefresh = results.some((row) => ["ok", "verified", "unknown", "conflict"].includes(row.outcome));
     if (!shouldRefresh) return;
@@ -408,6 +409,10 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
       }
       if (!normalizeBatchMonth(draft.report_month)) {
         setError(`第 ${index + 1} 行月份须为真实的 YYYY-MM，且年份不能为 0000`);
+        return null;
+      }
+      if (draft.cumulative_amount == null && draft.base.cumulative_amount != null) {
+        setError(`第 ${index + 1} 行已有累计金额不能清空`);
         return null;
       }
       if (draft.cumulative_amount != null) {
@@ -521,13 +526,15 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
                   && row.report_month === line.report_month);
                 next = existing && createRowMatches(existing, line)
                   ? { ...pendingRow, outcome: "verified", detail: "唯一约束冲突后已全分页核对存在；不归因于本次请求。" }
-                  : { ...pendingRow, outcome: "conflict", detail: "唯一键已有记录但业务字段不一致，请人工刷新核对；未自动 PATCH。" };
+                  : { ...pendingRow, outcome: "unknown", wasUnknown: true, detail: "读回记录与原请求不一致，此前请求结果仍未知；保留原请求继续核对，不能关闭或开启新批次。" };
               } else {
                 const existing = allRows.find((row) => row.collection_id === line.collection_id);
                 const check = existing ? patchTargetsReached(existing, line) : { reached: false, misses: ["记录"] };
                 next = check.reached
                   ? { ...pendingRow, outcome: "verified", detail: "版本冲突后已核对当前值达到目标；不归因于本次请求。" }
-                  : { ...pendingRow, outcome: "conflict", detail: `版本冲突，当前值未达目标（${check.misses.join("、")}）；请刷新后重新选择，绝不升级 version 重放。` };
+                  : pendingRow.wasUnknown
+                    ? { ...pendingRow, outcome: "unknown", detail: `当前值未达目标（${check.misses.join("、")}），此前请求结果仍未知；保留原请求继续核对，不能关闭或开启新批次。` }
+                    : { ...pendingRow, outcome: "conflict", detail: `版本冲突，当前值未达目标（${check.misses.join("、")}）；请刷新后重新选择，绝不升级 version 重放。` };
               }
             } catch (verifyError) {
               next = pendingRow.wasUnknown
@@ -714,14 +721,15 @@ export default function CollectionBatchMaintenance(props: BatchHookArgs) {
         title={batch.mode === "create" ? "批量登记回款" : batch.mode === "edit" ? "批量修改回款" : "批量作废回款"}
         width={1100}
         destroyOnHidden={false}
-        maskClosable={!batch.submitting}
-        closable={!batch.submitting}
+        maskClosable={!batch.submitting && !batch.hasUnknown}
+        closable={!batch.submitting && !batch.hasUnknown}
+        keyboard={!batch.submitting && !batch.hasUnknown}
         onCancel={() => { void batch.close(); }}
         footer={batch.phase === "results" ? (
           <Space>
             <Button disabled={batch.submitting || batch.hasUnknown} onClick={batch.startNewBatch}>新批次</Button>
             {retryable ? <Button disabled={batch.submitting} onClick={() => { void batch.retry(); }}>重试 {retryable} 条</Button> : null}
-            <Button type="primary" disabled={batch.submitting} onClick={() => { void batch.close(); }}>关闭</Button>
+            <Button type="primary" disabled={batch.submitting || batch.hasUnknown} onClick={() => { void batch.close(); }}>关闭</Button>
           </Space>
         ) : (
           <Space>

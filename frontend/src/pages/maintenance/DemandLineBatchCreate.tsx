@@ -55,7 +55,7 @@ function readError(error: unknown, fallback: string): string {
 
 function isUnknownOutcome(error: unknown): boolean {
   const status = (error as { response?: { status?: number } })?.response?.status;
-  return status === undefined || status >= 500;
+  return !(typeof status === "number" && status >= 400 && status < 500 && status !== 408);
 }
 
 const statusTag: Record<CreateStatus, { color: string; text: string }> = {
@@ -183,12 +183,13 @@ export default function DemandLineBatchCreate({
         });
       } catch (cause) {
         if (epochRef.current !== epoch) return;
-        const unknown = isUnknownOutcome(cause);
+        // 后续拒绝只能说明本次重试未写入，不能否定此前丢失响应的写入。
+        const unknown = Boolean(target.unknown) || isUnknownOutcome(cause);
         syncFrozen(target.id, {
           status: "failed",
           unknown,
           error: unknown
-            ? `${readError(cause, "网络异常，结果未知")}；请保留当前结果并点“重试失败行”，系统只会继续处理失败行，避免重复创建成功行`
+            ? `${readError(cause, "网络异常")}；此前请求结果仍未知，请保留当前批次并重试未完成行，核实前不能关闭或重新登记`
             : readError(cause, "创建失败；请核对项目、PN 与字段范围"),
         });
       }
@@ -324,7 +325,9 @@ export default function DemandLineBatchCreate({
         const result = results[row.id];
         return result ? (
           <Space direction="vertical" size={2}>
-            <Tag color={statusTag[result.status].color}>{statusTag[result.status].text}</Tag>
+            <Tag color={result.unknown ? "warning" : statusTag[result.status].color}>
+              {result.unknown ? "结果未知" : statusTag[result.status].text}
+            </Tag>
             {result.orderNo ? <Text copyable>{result.orderNo}</Text> : null}
             {result.error ? <Text type="danger" style={{ fontSize: 12 }}>{result.error}</Text> : null}
           </Space>
@@ -340,30 +343,30 @@ export default function DemandLineBatchCreate({
     },
   ];
 
-  const failedCount = Object.values(results).filter((row) => row.status === "failed").length;
+  const retryCount = Object.values(results).filter((row) => row.status === "failed").length;
+  const unknownCount = Object.values(results).filter((row) => row.unknown).length;
+  const failedCount = Object.values(results).filter((row) => row.status === "failed" && !row.unknown).length;
   const succeededCount = Object.values(results).filter((row) => row.status === "succeeded").length;
+  const close = () => {
+    if (writeLock.current || frozenRef.current?.some((row) => row.unknown)) return;
+    epochRef.current += 1;
+    onClose();
+  };
 
   return (
     <Modal
       open width={1200} title="批量新增需求"
       footer={[
-        <Button key="close" disabled={running} onClick={() => {
-          epochRef.current += 1;
-          writeLock.current = false;
-          onClose();
-        }}>关闭</Button>,
+        <Button key="close" disabled={running || unknownCount > 0} onClick={close}>关闭</Button>,
         <Button
           key="submit" type="primary" loading={running}
-          disabled={frozen && failedCount === 0}
+          disabled={frozen && retryCount === 0}
           onClick={() => { void submit(); }}
-        >{frozen ? `重试失败行${failedCount ? `（${failedCount}）` : ""}` : "提交整批"}</Button>,
+        >{frozen ? `重试未完成行${retryCount ? `（${retryCount}）` : ""}` : "提交整批"}</Button>,
       ]}
-      onCancel={() => {
-        if (running) return;
-        epochRef.current += 1;
-        writeLock.current = false;
-        onClose();
-      }}
+      onCancel={close}
+      closable={!running && unknownCount === 0}
+      keyboard={!running && unknownCount === 0}
       maskClosable={false}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -374,8 +377,8 @@ export default function DemandLineBatchCreate({
         {error ? <Alert type="error" showIcon message={error} /> : null}
         {frozen ? (
           <Alert
-            type={failedCount ? "warning" : "success"} showIcon
-            message={`批次结果：成功 ${succeededCount} 行，失败 ${failedCount} 行。结果会保留；继续重试只处理失败行，不会重复创建成功行。`}
+            type={retryCount ? "warning" : "success"} showIcon
+            message={`批次结果：成功 ${succeededCount} 行，失败 ${failedCount} 行，结果未知 ${unknownCount} 行。结果未知时不能关闭；继续重试只处理未完成行，不会重复创建成功行。`}
           />
         ) : null}
         <Space wrap align="start">
