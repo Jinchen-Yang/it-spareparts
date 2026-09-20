@@ -31,6 +31,7 @@ from app.models.maintenance_project_operations import (
 from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment,
 )
+from app.models.system import SysUser
 from app.services.query_filters import active_beta_maintenance_orders
 
 MANUAL_CONDITIONS = ("成品", "坏品", "废品")
@@ -723,9 +724,22 @@ def search_receipts(
                 "qty": raw.get("备件明细.入库数量"),
                 "condition": raw.get("备件明细.测试结果") or None,
             })
+    # Resolve only actors on this authorized page; keep stored/audited usernames
+    # unchanged, including accounts that have since been disabled.
+    usernames = {row.created_by for row, _ in rows}
+    creator_names = dict(db.execute(
+        select(SysUser.username, SysUser.display_name)
+        .where(SysUser.username.in_(usernames))
+    ).all()) if usernames else {}
     items = []
     for row, order_no in rows:
         item = _receipt_dict(row, order_no)
+        item["created_by_name"] = (creator_names.get(row.created_by) or "").strip() or None
+        # Imported SN is source evidence, not the manually maintained per-item
+        # serial list (whose length must equal qty). Do not merge the two.
+        source_metadata = (row.source_payload or {}).get("source_metadata") or {}
+        source_sn = source_metadata.get("sn")
+        item["source_serial_number"] = str(source_sn).strip() if source_sn is not None else None
         if row.receipt_kind == "machine":
             item["components"] = components.get(row.head_row_id, [])
         items.append(item)
