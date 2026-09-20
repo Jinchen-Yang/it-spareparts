@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
@@ -702,9 +702,15 @@ def patch_manual_site_issue(
                 "领用明细行不属于本单，请刷新后重试"
             )
         used_line_ids: set[str] = set()
+        # 行号唯一约束覆盖本单全部历史行，软作废行的编号也不能复用。
+        # 单头已加写锁，所有更正串行分配下一编号；身份校验仍仅接受有效行。
         next_line_no = (
-            max((line.line_no for line in old_lines), default=0) + 1
-        )
+            db.scalar(
+                select(func.max(MaintenanceSiteIssueLine.line_no)).where(
+                    MaintenanceSiteIssueLine.issue_id == issue_id,
+                )
+            ) or 0
+        ) + 1
         surviving: list[MaintenanceSiteIssueLine] = []
         for requested in normalized_lines:
             line_id = requested.get("issue_line_id")

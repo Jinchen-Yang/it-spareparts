@@ -874,6 +874,59 @@ def test_manual_patch_same_part_without_sn_keeps_both_line_identities(db):
     assert "不属于本单" in stale_patch.json()["detail"]
 
 
+def test_manual_patch_add_after_removing_last_line_keeps_history(db):
+    """连续更正删除末行再新增：新编号不能复用软作废历史行的唯一键。"""
+    project = _project(db, "project-manual-history-lines")
+    part = _part(db, "PN-MANUAL-HISTORY")
+    client = _client(db, username="manual_history_admin")
+    created = client.post(
+        f"/api/maintenance/site-issues/projects/{project.project_id}/manual",
+        json=_create_body([part, part], key=f"manual-history-{uuid4().hex}"),
+    )
+    assert created.status_code == 201, created.text
+    issue = created.json()
+    kept, removed = issue["lines"]
+    kept_payload = {
+        "issue_line_id": kept["issue_line_id"],
+        "part_id": part.id,
+        "quantity": kept["quantity"],
+    }
+    endpoint = f"/api/maintenance/site-issues/manual/{issue['issue_id']}"
+    trimmed = client.patch(endpoint, json={
+        "project_id": project.project_id,
+        "version": issue["version"],
+        "idempotency_key": f"manual-remove-{uuid4().hex}",
+        "lines": [kept_payload],
+        "reason": "删除末行，保留历史",
+    })
+    assert trimmed.status_code == 200, trimmed.text
+    appended = client.patch(endpoint, json={
+        "project_id": project.project_id,
+        "version": trimmed.json()["version"],
+        "idempotency_key": f"manual-append-{uuid4().hex}",
+        "lines": [kept_payload, _line_payload(part, "3")],
+        "reason": "再次更正新增一行",
+    })
+    assert appended.status_code == 200, appended.text
+    active = appended.json()["lines"]
+    assert active[0]["issue_line_id"] == kept["issue_line_id"]
+    assert active[1]["issue_line_id"] not in {
+        kept["issue_line_id"], removed["issue_line_id"],
+    }
+    db.expire_all()
+    history = db.query(MaintenanceSiteIssueLine).filter_by(
+        issue_id=issue["issue_id"],
+    ).order_by(MaintenanceSiteIssueLine.line_no).all()
+    assert [line.line_no for line in history] == [1, 2, 3]
+    assert [line.is_active for line in history] == [True, False, True]
+    assert history[1].issue_line_id == removed["issue_line_id"]
+    assert history[1].version > removed["version"]
+    assert history[2].quantity == Decimal("3.000")
+    assert db.query(MaintenanceProjectOperationAudit).filter_by(
+        entity_id=issue["issue_id"], action="correct",
+    ).count() == 2
+
+
 def test_manual_patch_rejects_archived_project(db):
     """归档项目只读：PATCH 与 create 同样拒绝（Codex 核对补充）。"""
     project = _project(db, "project-manual-archived")
