@@ -28,6 +28,7 @@ import type { WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImp
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
+import DemandLineCreate from "./DemandLineCreate";
 import DemandLinesEditor from "./DemandLinesEditor";
 
 const { Title, Text } = Typography;
@@ -61,6 +62,8 @@ export function MaintenanceDemandsPage() {
   // v1.36：需求单行页面直改（override 保护）
   const canEditLines = !!permissions.action_maintenance_demand_manage;
   const [linesEditorFor, setLinesEditorFor] = useState<MaintenanceDemandSummary | null>(null);
+  // v1.36 Phase E：页面直建手工需求行（独立新单）
+  const [creatingLine, setCreatingLine] = useState(false);
 
   // ---- 区块一：氚云快照同步 + 差异清单 ----
   const [missing, setMissing] = useState<WbddMissing | null>(null);
@@ -357,6 +360,11 @@ export function MaintenanceDemandsPage() {
       <Card title="氚云快照同步">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12} align="center">
+            {canEditLines ? (
+              <Button type="primary" onClick={() => setCreatingLine(true)}>
+                新增手工需求
+              </Button>
+            ) : null}
             {canImport ? (
               <Upload
                 key={`wbdd-upload-${uploadInputVersion}`}
@@ -534,6 +542,12 @@ export function MaintenanceDemandsPage() {
           sourceOrderId={linesEditorFor.source_order_id}
           orderNo={linesEditorFor.order_no}
           onClose={() => setLinesEditorFor(null)}
+        />
+      ) : null}
+      {creatingLine ? (
+        <DemandLineCreate
+          onClose={() => setCreatingLine(false)}
+          onCreated={() => { void refreshAfterCommit(false); }}
         />
       ) : null}
     </Space>

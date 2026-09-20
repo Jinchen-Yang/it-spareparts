@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Button, Card, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
 import { getBoardProjectOrders } from "../../../api/maintenanceBossBoard";
@@ -14,6 +14,8 @@ import {
 import ProjectProcurementPanel from "../../../components/maintenance/ProjectProcurementPanel";
 import OrderContactInfo from "../../../components/maintenance/OrderContactInfo";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import { readPermissionMap } from "../../../nav";
+import DemandLineCreate from "../DemandLineCreate";
 import PanelActionBar from "./PanelActionBar";
 import {
   COST_CATEGORY_LEGEND,
@@ -69,6 +71,9 @@ export function PartsOrdersTab({
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersPage, setOrdersPage] = useState(1);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
+  // v1.36 Phase E：页面直建手工需求行（action_maintenance_demand_manage）
+  const canCreateDemandLine = !!readPermissionMap().action_maintenance_demand_manage;
+  const [creatingLine, setCreatingLine] = useState(false);
   /** 点选的需求单＝行过滤（再点一次取消）；默认展示项目全部备件行。 */
   const [selectedOrder, setSelectedOrder] = useState<SelectedOrder | null>(null);
   const selectedRef = useRef<SelectedOrder | null>(null);
@@ -167,6 +172,10 @@ export function PartsOrdersTab({
 
   useEffect(() => { void loadOrders(); }, [loadOrders]);
   useEffect(() => { void loadLines(); }, [loadLines]);
+
+  // 切项目时关闭未完成的新增对话框：旧项目的表单/在途请求不能用于新项目
+  // （DemandLineCreate 内部也按 fixedProjectId 推进 epoch 兜底）。
+  useEffect(() => { setCreatingLine(false); }, [projectId]);
 
   // 落库后的读回屏障：三段各自读回，任一没完成都算没完成。采购段也在屏障里——
   // 03 回传（will_reassign_orders → 改派需求单）与概览挂靠都会改需求单归属，
@@ -295,8 +304,37 @@ export function PartsOrdersTab({
             onAfterApply={onChanged}
           />
         )}
+        actions={canCreateDemandLine ? (
+          <Button
+            type="primary"
+            size="small"
+            onClick={() => setCreatingLine(true)}
+          >
+            新增需求
+          </Button>
+        ) : undefined}
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
       />
+      {creatingLine ? (
+        <DemandLineCreate
+          key={projectId}
+          fixedProjectId={projectId}
+          fixedProjectLabel={exportBase}
+          onClose={() => setCreatingLine(false)}
+          onCreated={() => {
+            // 新单不带 XSDD 合同号：若当前有合同筛选/选中旧单，先清范围再回读，
+            // 否则独立新单被过滤挡住，用户「成功后看不到」。
+            if (contractFilter !== undefined || selectedOrder !== null) {
+              setContractFilter(undefined);
+              selectOrder(null);
+              setOrdersPage(1);
+            }
+            // onChanged＝父级 refreshProject：已含本 tab 读回（tabRefreshers
+            // 里的 parts-orders）+ 父级指标读回，不在这里重复叠 refreshAll。
+            void onChanged();
+          }}
+        />
+      ) : null}
       <Card
         size="small"
         title="需求单"

@@ -134,9 +134,17 @@ export const cancelMaintenanceDemandDeleteIntent = (intentId: string, digest: st
 
 // ---------- v1.36 Phase E：需求单行页面直改/直建 ----------
 
-export interface DemandLinePatchResult {
+/**
+ * 手工需求行写操作（PATCH / clear / create）的公共结果形状：
+ * 后端回整份行快照 + OCC digest（写后新版本 token，供下一次编辑携带）。
+ * create 额外带 order_no（手工单会新建单头）与 replayed（幂等重放命中）。
+ */
+export interface DemandLineWriteResult {
   changed: boolean;
+  /** 写后行快照的 sha256 OCC token（下次编辑/撤销必填）。 */
+  digest: string;
   raw_line_id: string;
+  part_id: number | null;
   qty: string | null;
   return_qty: string | null;
   serial_numbers: string | null;
@@ -145,18 +153,27 @@ export interface DemandLinePatchResult {
   pn_std: string | null;
   edited_source: string;
   manual_override: Record<string, { value: unknown; source_value: unknown; updated_by: string; updated_at: string }>;
+  order_no?: string;
+  replayed?: boolean;
 }
 
+/**
+ * 页面直改一条明细行（v1.36 Phase E）。
+ * expected_digest 必填：读行（GET lines）时的 OCC token；行已被他人改过 → 409，
+ * 由调用方给「重新加载最新数据」入口，绝不静默重试覆盖。
+ */
 export const patchDemandLine = (
   rawLineId: string,
   updates: Record<string, unknown>,
   reason: string,
-) => api.patch<DemandLinePatchResult>(
+  expectedDigest: string,
+) => api.patch<DemandLineWriteResult>(
   `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}`,
-  { updates, reason },
+  { updates, reason, expected_digest: expectedDigest },
 );
 
-export const createDemandLine = (input: {
+export interface DemandLineCreateInput {
+  /** YYYY-MM-DD（服务层 fromisoformat 解析）。 */
   order_date: string;
   project_id: string;
   pn_std: string;
@@ -165,9 +182,15 @@ export const createDemandLine = (input: {
   serial_numbers?: string | null;
   description?: string | null;
   reason: string;
-}) => api.post<DemandLinePatchResult & { order_no: string }>(
-  "/maintenance/demands/lines", input,
-);
+  /**
+   * 幂等键（必填，8–128 字符 [A-Za-z0-9._:-]+）：网络丢响应重试同 payload
+   * 复用同 key（后端比对完整请求指纹），改内容必须换新 key。
+   */
+  idempotency_key: string;
+}
+
+export const createDemandLine = (input: DemandLineCreateInput) =>
+  api.post<DemandLineWriteResult>("/maintenance/demands/lines", input);
 
 export interface DemandLineRow {
   raw_line_id: string;
@@ -184,6 +207,8 @@ export interface DemandLineRow {
   edited_source: string;
   manual_override: Record<string, { value: unknown; source_value: unknown; updated_by: string; updated_at: string }>;
   is_active: boolean;
+  /** OCC token：编辑/撤销时作为 expected_digest 回传（服务端 409 校验）。 */
+  digest: string;
 }
 
 export const listDemandLines = (sourceOrderId: string) =>
@@ -191,11 +216,16 @@ export const listDemandLines = (sourceOrderId: string) =>
     `/maintenance/demands/orders/${encodeURIComponent(sourceOrderId)}/lines`,
   );
 
+/**
+ * 撤销一个字段的 override（恢复氚云原值 source_value 快照）。
+ * expected_digest 必填（OCC）；PN 是一组身份，后端成对恢复 pn_std/pn_raw/part_id。
+ */
 export const clearDemandLineOverride = (
   rawLineId: string,
   fieldName: string,
   reason: string,
-) => api.post<DemandLinePatchResult>(
+  expectedDigest: string,
+) => api.post<DemandLineWriteResult>(
   `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}/clear-override`,
-  { field_name: fieldName, reason },
+  { field_name: fieldName, reason, expected_digest: expectedDigest },
 );
