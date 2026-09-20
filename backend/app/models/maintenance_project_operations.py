@@ -313,12 +313,13 @@ class MaintenanceSiteIssue(Base):
             name="ck_maintenance_site_issue_normalized_status",
         ),
         CheckConstraint(
-            "source IN ('legacy', 'direct_api', 'workbook', 'site_issue_v2')",
+            "source IN ('legacy', 'direct_api', 'workbook', 'site_issue_v2', 'page_manual')",
             name="ck_maintenance_site_issue_source",
         ),
         CheckConstraint(
             "(source = 'workbook' AND import_batch_id IS NOT NULL) OR "
-            "(source IN ('legacy', 'direct_api', 'site_issue_v2') AND import_batch_id IS NULL)",
+            "(source IN ('legacy', 'direct_api', 'site_issue_v2', 'page_manual') "
+            "AND import_batch_id IS NULL)",
             name="ck_maintenance_site_issue_import_batch",
         ),
         CheckConstraint(
@@ -514,7 +515,8 @@ class MaintenanceSiteIssueCommand(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('update', 'confirm', 'void', 'correct')",
+            # 'create'：page_manual 人工登记领用的幂等创建回执（2026-09-20）
+            "action IN ('create', 'update', 'confirm', 'void', 'correct')",
             name="ck_maintenance_site_issue_command_action",
         ),
         Index(
