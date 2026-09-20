@@ -14,7 +14,9 @@ import {
   downloadProjectMaster,
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
+import SiteIssueWorkflowPanel from "../../../components/maintenance/SiteIssueWorkflowPanel";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
 import { readPermissionMap } from "../../../nav";
 import {
@@ -152,8 +154,9 @@ export function SiteReturnTab({
   // 2026-08-23：做错的领用单可整单作废（软作废，历史与审计保留）。
   // 门禁与后端一致：site_issue_manage 动作 + 成本可见（页面权限天然具备）。
   const perms = readPermissionMap();
-  const canVoidIssues = !!perms.action_maintenance_site_issue_manage
+  const canManageIssues = !!perms.action_maintenance_site_issue_manage
     && !!perms.data_purchase_cost;
+  const canVoidIssues = canManageIssues;
   const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
@@ -198,16 +201,28 @@ export function SiteReturnTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <WorkbookRoundTrip
-        size="small"
-        title="维保领用与返还"
-        filename={`${exportBase}-${SHEETS.site}.xlsx`}
-        canUpload={canUpload}
-        hint="可回填领用事实和是否应返还；上传后页面立即刷新"
-        onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
-        onValidate={(file) => validateProjectMaster(projectId, file)}
-        onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-        onAfterApply={onChanged}
+      <PanelActionBar
+        workbook={(
+          <WorkbookRoundTrip
+            size="small"
+            title="维保领用与返还"
+            filename={`${exportBase}-${SHEETS.site}.xlsx`}
+            canUpload={canUpload}
+            onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
+            onValidate={(file) => validateProjectMaster(projectId, file)}
+            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+            onAfterApply={onChanged}
+          />
+        )}
+        hint="Excel：在哪下载就在哪上传，可回填领用事实和是否应返还；上传后页面立即刷新"
+      />
+      {/* v1.36：复活 v1.21 的领用工作台（新增/编辑/确认，candidate 适配器门禁），
+          入口与作废同门禁：site_issue_manage + 成本可见。 */}
+      <SiteIssueWorkflowPanel
+        key={projectId}
+        projectId={projectId}
+        canManage={canManageIssues}
+        onChanged={onChanged}
       />
       <ReturnReceiptsSection key={projectId} projectId={projectId} onChanged={onChanged} />
       <Typography.Title level={5} style={{ margin: 0 }}>领用记录</Typography.Title>

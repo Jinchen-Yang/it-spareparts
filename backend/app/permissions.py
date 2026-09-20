@@ -68,6 +68,8 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_project_manage",
     # WBDD 整单逻辑删除（跨页复核 + 服务端 7 秒双确认）。
     "action_maintenance_demand_delete",
+    # 页面直改/直建需求单行（v1.36）：override 账本保护 + 失败关闭字段白名单。
+    "action_maintenance_demand_manage",
     # 新建、确认、更正和作废现场实际领用单；与库存写入严格隔离。
     "action_maintenance_site_issue_manage",
     # 登记、提交和仓库确认坏件返还；不直接修改成本或库存。
@@ -140,6 +142,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_manager_workbook_apply": "项目经理月度全量表确认应用",
     "action_maintenance_project_manage": "维保项目主档管理",
     "action_maintenance_demand_delete": "维保需求单安全删除",
+    "action_maintenance_demand_manage": "维保需求单页面直改（v1.36）",
     "action_maintenance_site_issue_manage": "现场备件领用管理",
     "action_maintenance_bad_return_manage": "维保坏件返还管理",
     "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传（提交即生效）",
@@ -214,6 +217,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_manager_workbook_apply": False,
              "action_maintenance_project_manage": False,
               "action_maintenance_demand_delete": False,
+              "action_maintenance_demand_manage": False,
               "action_maintenance_site_issue_manage": False,
              "action_maintenance_bad_return_manage": False,
              "action_maintenance_acceptance_submit": False,
@@ -243,6 +247,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_manager_workbook_apply": False,
                  "action_maintenance_project_manage": False,
                   "action_maintenance_demand_delete": False,
+                  "action_maintenance_demand_manage": False,
                   "action_maintenance_site_issue_manage": False,
                  "action_maintenance_bad_return_manage": False,
                  "action_maintenance_acceptance_submit": False,
@@ -286,6 +291,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
+        "action_maintenance_demand_manage": False,
         "action_maintenance_site_issue_manage": False,
         "action_maintenance_bad_return_manage": False,
         "action_maintenance_acceptance_submit": False,
@@ -332,6 +338,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
+        "action_maintenance_demand_manage": False,
         "action_maintenance_site_issue_manage": False,
         "action_maintenance_bad_return_manage": False,
         "action_maintenance_acceptance_submit": False,
@@ -419,6 +426,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_manager_workbook_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
     "action_maintenance_demand_delete": "page_maintenance",
+    "action_maintenance_demand_manage": "page_maintenance",
     "action_maintenance_site_issue_manage": "page_maintenance",
     "action_maintenance_bad_return_manage": "page_maintenance",
     "action_maintenance_acceptance_submit": "page_maintenance",
@@ -441,6 +449,7 @@ ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
     "action_maintenance_project_manage": "page_maintenance_beta",
     "action_maintenance_demand_delete": "page_maintenance_beta",
+    "action_maintenance_demand_manage": "page_maintenance_beta",
     # 已发布的领用作废/返还收货操作仅依赖 page_maintenance；旧草稿工作流
     # 仍由独立 Beta 路由总闸与白名单保护，不因此授予任何账号新的动作。
     # 验收两键 2026-08-24 起移出 Beta 附加依赖：客户拍板验收开放给销售/项目经理/
@@ -550,6 +559,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_manager_workbook_apply",
     "action_maintenance_project_manage",
     "action_maintenance_demand_delete",
+    "action_maintenance_demand_manage",
     "action_maintenance_site_issue_manage",
     "action_maintenance_bad_return_manage",
     "action_maintenance_acceptance_review",
@@ -583,6 +593,7 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_manager_workbook_apply",
          "action_maintenance_project_manage",
          "action_maintenance_demand_delete",
+         "action_maintenance_demand_manage",
          "action_maintenance_site_issue_manage",
          "action_maintenance_bad_return_manage",
          "action_maintenance_acceptance_submit",
@@ -887,6 +898,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "管理员指定的数据维护人员"],
         "sensitivity": "critical",
         "risk": "会改变成本、库存推导、项目看板和导出的有效数据范围；系统强制服务端等待与整批原子校验。",
+    },
+    "action_maintenance_demand_manage": {
+        "label": "维保需求单页面直改",
+        "summary": "允许在页面上直接修正需求单行字段或新建手工需求行（v1.36）。",
+        "can": "在字段白名单内逐行修正（数量/退货数量/SN/描述/PN 原文），新建带 page_manual 来源标记的手工需求行。",
+        "cannot": "不能改成本列（recompute 独占）、单头字段、异常标记或任何系统身份；手工修改受 override 账本保护，不会被 Excel 重导覆盖。",
+        "typical": ["管理员", "管理员指定的数据维护人员"],
+        "sensitivity": "critical",
+        "risk": "直接改变需求事实；每次修改带 before/after 审计与实名，数量/PN 变更自动触发成本重算与工作簿版本失效。",
     },
     "action_maintenance_site_issue_manage": {
         "label": "现场备件领用管理",

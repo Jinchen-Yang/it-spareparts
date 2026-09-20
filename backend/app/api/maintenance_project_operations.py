@@ -202,6 +202,77 @@ class SiteIssueCommand(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class ManualSiteIssueLineInput(BaseModel):
+    """页面人工登记领用行：PN 身份用 part_id，绝不拿展示文本回传后端猜。
+
+    更正时已有行必须显式携带 issue_line_id（服务端校验归属本单），
+    新建行不传——行身份对齐不靠 (PN, SN) 猜测。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    issue_line_id: str | None = Field(default=None, min_length=1, max_length=64)
+    part_id: int = Field(ge=1)
+    quantity: Decimal = Field(
+        gt=0,
+        lt=Decimal("1000000000000"),
+        decimal_places=3,
+        allow_inf_nan=False,
+    )
+    serial_number: str | None = Field(default=None, max_length=32767)
+    # 行级返还规则：true=免返，false=必须返还，null=继承项目默认
+    no_return: bool | None = None
+    # 关联需求单必须属于当前项目；服务端按归属表校验，不按项目名猜
+    demand_order_no: str | None = Field(default=None, max_length=64)
+    remark: str | None = Field(default=None, max_length=32767)
+
+
+class ManualSiteIssueBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    issue_date: date
+    receiver: str = Field(min_length=1, max_length=128)
+    issued_by: str = Field(min_length=1, max_length=128)
+    site_location: str = Field(min_length=1, max_length=256)
+    lines: list[ManualSiteIssueLineInput] = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class ManualSiteIssueCreate(ManualSiteIssueBase):
+    # 留空由服务端自动生成 LYR- 前缀单号
+    issue_no: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ManualSiteIssuePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_date: date
+    receiver: str = Field(min_length=1, max_length=128)
+    issued_by: str = Field(min_length=1, max_length=128)
+    site_location: str = Field(min_length=1, max_length=256)
+    lines: list[ManualSiteIssueLineInput] = Field(min_length=1, max_length=200)
+
+
+class ManualSiteIssuePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    issue_date: date | None = None
+    issue_no: str | None = Field(default=None, min_length=1, max_length=64)
+    receiver: str | None = Field(default=None, min_length=1, max_length=128)
+    issued_by: str | None = Field(default=None, min_length=1, max_length=128)
+    site_location: str | None = Field(default=None, min_length=1, max_length=256)
+    lines: list[ManualSiteIssueLineInput] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class SiteIssuePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1517,11 +1588,156 @@ def search_stable_project_operations(
     )
 
 
+def _manual_site_issue_result(operation, *, db: Session, ident: dict, **kwargs):
+    """Shared write envelope for page-manual site-issue commands."""
+
+    from app.services import maintenance_manual_site_issue as manual_service
+    from app.services import maintenance_project_operations as ops
+
+    operator = _real_operator(db, ident)
+    try:
+        payload = operation(db, operated_by=operator, **kwargs)
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "领用单或项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "人工领用保存发生并发冲突，请刷新后重试"
+        ) from exc
+    except ops.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ops.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except ops.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except manual_service.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@stable_site_issue_router.post("/manual/preview")
+def preview_manual_site_issue(
+    body: ManualSiteIssuePreviewRequest,
+    project_id: str = Query(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    from app.services import maintenance_manual_site_issue as manual_service
+
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    try:
+        return manual_service.preview_manual_site_issue(
+            db,
+            project_id=project_id,
+            issue_date=body.issue_date,
+            receiver=body.receiver,
+            issued_by=body.issued_by,
+            site_location=body.site_location,
+            lines=[line.model_dump() for line in body.lines],
+        )
+    except manual_service.MaintenanceOperationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@stable_site_issue_router.post(
+    "/projects/{project_id}/manual", status_code=status.HTTP_201_CREATED
+)
+def create_manual_site_issue(
+    body: ManualSiteIssueCreate,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    _scope: None = Depends(require_maintenance_project_access),
+) -> dict:
+    from app.services import maintenance_manual_site_issue as manual_service
+
+    return _manual_site_issue_result(
+        manual_service.create_manual_site_issue,
+        db=db,
+        ident=ident,
+        project_id=project_id,
+        idempotency_key=body.idempotency_key,
+        issue_date=body.issue_date,
+        receiver=body.receiver,
+        issued_by=body.issued_by,
+        site_location=body.site_location,
+        lines=[line.model_dump() for line in body.lines],
+        reason=body.reason,
+        issue_no=body.issue_no,
+    )
+
+
+@stable_site_issue_router.patch("/manual/{issue_id}")
+def patch_manual_site_issue(
+    body: ManualSiteIssuePatch,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    from app.services import maintenance_manual_site_issue as manual_service
+
+    _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    return _manual_site_issue_result(
+        manual_service.patch_manual_site_issue,
+        db=db,
+        ident=ident,
+        issue_id=issue_id,
+        project_id=body.project_id,
+        version=body.version,
+        idempotency_key=body.idempotency_key,
+        issue_date=body.issue_date,
+        issue_no=body.issue_no,
+        receiver=body.receiver,
+        issued_by=body.issued_by,
+        site_location=body.site_location,
+        lines=(
+            [line.model_dump() for line in body.lines]
+            if body.lines is not None
+            else None
+        ),
+        reason=body.reason,
+    )
+
+
 # Compatibility composition for isolated API tests/embedders. Production mounts
 # the two child routers separately with their respective release gates.
 site_issue_router = APIRouter()
-site_issue_router.include_router(site_issue_beta_router)
 site_issue_router.include_router(stable_site_issue_router)
+site_issue_router.include_router(site_issue_beta_router)
 
 router = APIRouter()
 router.include_router(operations_beta_router)

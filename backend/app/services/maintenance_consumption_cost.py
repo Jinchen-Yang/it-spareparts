@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, inspect, select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -537,17 +537,24 @@ def resolve_lines(
     *,
     lines: Iterable[tuple[date, MaintenanceSiteIssueLine]],
     as_of: date | None = None,
+    preview_project_id: str | None = None,
 ) -> list[MaintenanceSiteIssueLine]:
     """Resolve one bounded batch with three evidence reads, never per-line SQL.
 
     ``as_of`` freezes the evidence horizon for reproducible migration snapshots.
     Normal operating callers omit it and retain the full before/after-seven-day
     waterfall.
+    ``preview_project_id`` supplies ownership for transient preview lines only;
+    persisted facts always resolve ownership from their saved issue header.
     """
 
     entries = list(lines)
     if not entries:
         return []
+    if preview_project_id is not None and any(
+        not inspect(line).transient for _issue_date, line in entries
+    ):
+        raise CostResolutionError("预览项目上下文只允许用于未保存的领用明细")
     part_ids = {line.part_id for _issue_date, line in entries}
 
     # 2026-08-23：维保领用的权威价格 = 该项目维保需求单（WBDD）同 PN 的
@@ -571,6 +578,9 @@ def resolve_lines(
     ):
         issue_project[issue_id] = project_id
         issue_no_by_id[issue_id] = issue_no
+    if preview_project_id is not None:
+        for issue_id in issue_ids:
+            issue_project.setdefault(issue_id, preview_project_id)
     project_ids = set(issue_project.values())
     demand_maps = _demand_price_maps(
         db, project_ids=project_ids, part_ids=part_ids, as_of=as_of)

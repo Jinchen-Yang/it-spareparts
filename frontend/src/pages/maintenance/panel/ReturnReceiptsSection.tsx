@@ -14,10 +14,16 @@ import {
 import { readPermissionMap } from "../../../nav";
 import { raw, readError } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
+import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
+import ReturnReceiptBatchMaintenance from "./ReturnReceiptBatchMaintenance";
+import PanelActionBar from "./PanelActionBar";
 
 const { Text } = Typography;
 
 const CONDITIONS = ["成品", "坏品", "废品"] as const;
+
+/** 凭据字段上限（v1.36）：与后端 _EVIDENCE_REF_MAX 对齐。 */
+const EVIDENCE_MAX = 16384;
 type Condition = (typeof CONDITIONS)[number];
 
 const CONDITION_COLOR: Record<string, string> = {
@@ -50,6 +56,7 @@ interface ReceiptFormValues {
   note?: string;
   evidence_ref?: string;
   reason?: string;
+  serials_text?: string;
 }
 
 interface PickedPart {
@@ -127,9 +134,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
   const [demandFilter, setDemandFilter] = useState<string | undefined>();
   const filters = useRef<{ q?: string; source_order_id?: string; unassigned?: boolean }>({});
   const createAttempt = useRef<{ content: string; key: string } | null>(null);
+  // 批量修改/作废勾选（v1.36）：只存当前页有效行；分页/项目/筛选一变即清空，不跨项目缓存
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const perms = readPermissionMap();
   const canManage = !!perms.action_maintenance_bad_return_manage;
+  // 冻结勾选快照交给批量组件；列表刷新后选中集清空，旧请求不会污染新数据
+  const selectedReceipts = useMemo(
+    () => receipts.filter((item) => selectedIds.includes(item.receipt_id) && item.line_status === "active"),
+    [receipts, selectedIds],
+  );
 
   const loadDemands = useCallback(async (id: string) => {
     const seq = ++demandSeq.current;
@@ -204,6 +218,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     }
   }, [projectId]);
 
+  // 批量修改/作废收尾：清选择后逐步刷新，每步都核对 contextSeq——项目已切换时旧回调立即止步，
+  // 不让旧项目的 onChanged 污染新面板（load 自身也有只认最新一发的守卫，这里是回调链的闸）
+  const refreshAfterBatch = useCallback(async () => {
+    const seq = contextSeq.current;
+    setSelectedIds([]);
+    await load(page, includeVoided);
+    if (seq !== contextSeq.current) return;
+    if (onChanged) await onChanged();
+  }, [load, page, includeVoided, onChanged]);
+
   useEffect(() => {
     setPage(1);
     setIncludeVoided(false);
@@ -216,6 +240,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     setVoiding(false);
     setQuery("");
     setDemandFilter(undefined);
+    setSelectedIds([]);
     filters.current = {};
     void loadDemands(projectId);
     void load(1, false);
@@ -224,6 +249,21 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
 
   // ---- 登记与修改 ----
   const [form] = Form.useForm<ReceiptFormValues>();
+  const evidenceValue = Form.useWatch("evidence_ref", form);
+  const evidenceLength = evidenceValue?.length ?? 0;
+  const serialsValue = Form.useWatch("serials_text", form);
+  const qtyValue = Form.useWatch("qty", form);
+  const snPendingQty = qtyValue ?? 0;
+  const snStats = useMemo(() => {
+    const lines = (serialsValue ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const sn of lines) {
+      if (seen.has(sn)) duplicates.push(sn);
+      else seen.add(sn);
+    }
+    return { count: lines.length, duplicates };
+  }, [serialsValue]);
   const [editing, setEditing] = useState<ReturnReceipt | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -261,6 +301,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       condition: (receipt.condition as Condition | null) ?? undefined,
       note: receipt.note ?? undefined,
       evidence_ref: receipt.evidence_ref ?? undefined,
+      serials_text: receipt.serial_numbers?.length ? receipt.serial_numbers.join("\n") : "",
       reason: undefined,
     });
     setModalOpen(true);
@@ -270,12 +311,33 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     const seq = contextSeq.current;
     const values = await form.validateFields().catch(() => null);
     if (!values || seq !== contextSeq.current) return;
+    // 超限硬闸：不依赖 maxLength 截断（会静默丢扫描内容），按钮直接不发请求
+    if ((values.evidence_ref?.length ?? 0) > EVIDENCE_MAX) {
+      setSubmitError(`凭据超过 ${EVIDENCE_MAX} 字符上限（当前 ${values.evidence_ref!.length}），请删减后再保存`);
+      return;
+    }
     if (!pickedPart?.pn) {
       message.error("请先搜索并选择返件 PN");
       return;
     }
     if (editing && !values.reason?.trim()) {
       message.error("修改必须填写原因");
+      return;
+    }
+    // SN 凭证（v1.36）：非空时逐行 trim/去重，且数量必须等于 SN 行数（与后端一致）
+    const serialsRaw = (values.serials_text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const finalQty = editing ? (values.qty ?? Number(editing.qty)) : values.qty!;
+    if (serialsRaw.length && serialsRaw.length !== finalQty) {
+      setSubmitError(`带 SN 时数量必须等于 SN 个数（当前数量 ${finalQty}，SN ${serialsRaw.length} 个）`);
+      return;
+    }
+    const serialSet = new Set(serialsRaw);
+    if (serialSet.size !== serialsRaw.length) {
+      setSubmitError("SN 存在重复，请核对后重试");
+      return;
+    }
+    if (serialsRaw.length > 1000) {
+      setSubmitError(`SN 超过单条 1000 个上限（当前 ${serialsRaw.length}），请拆分成多条登记`);
       return;
     }
     setSubmitting(true);
@@ -294,6 +356,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           ...((values.condition ?? null) !== editing.condition ? { condition: values.condition ?? null } : {}),
           note: values.note?.trim() || null,
           evidence_ref: values.evidence_ref?.trim() || null,
+          ...(editing.receipt_kind !== "machine" && (serialsRaw.length || editing.serial_numbers?.length)
+            ? { serial_numbers: serialsRaw }
+            : {}),
         });
         if (seq !== contextSeq.current) return;
         message.success("返还记录已修改");
@@ -307,6 +372,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           condition: values.condition ?? null,
           note: values.note?.trim() || null,
           evidence_ref: values.evidence_ref?.trim() || null,
+          serial_numbers: serialsRaw.length ? serialsRaw : null,
         };
         const content = JSON.stringify(payload);
         if (createAttempt.current?.content !== content) {
@@ -513,32 +579,57 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         </Col>
       </Row>
 
-      <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
-        <Space>
-          {canManage ? (
+      <PanelActionBar
+        actions={canManage ? (
+          <>
             <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
-          ) : null}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致
-          </Text>
-        </Space>
-        {canImport && canManage ? <ReturnReceiptImport onApplied={async () => {
-          await load(page, includeVoided);
-          if (onChanged) await onChanged();
-        }} /> : null}
-        <Button
-          size="small"
-          type={includeVoided ? "primary" : "default"}
-          onClick={() => {
-            const next = !includeVoided;
-            setIncludeVoided(next);
-            setPage(1);
-            void load(1, next);
-          }}
-        >
-          {includeVoided ? "含已作废" : "只看有效"}
-        </Button>
-      </Space>
+            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => {
+              await load(page, includeVoided);
+              if (onChanged) await onChanged();
+            }} />
+            {selectedReceipts.length ? (
+              <>
+                {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
+                <ReturnReceiptBatchMaintenance
+                  key={`update-${projectId}`}
+                  mode="update"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+                <ReturnReceiptBatchMaintenance
+                  key={`void-${projectId}`}
+                  mode="void"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+              </>
+            ) : null}
+          </>
+        ) : undefined}
+        workbook={canImport && canManage ? (
+          <ReturnReceiptImport onApplied={async () => {
+            await load(page, includeVoided);
+            if (onChanged) await onChanged();
+          }} />
+        ) : undefined}
+        trailing={(
+          <Button
+            size="small"
+            type={includeVoided ? "primary" : "default"}
+            onClick={() => {
+              const next = !includeVoided;
+              setIncludeVoided(next);
+              setPage(1);
+              setSelectedIds([]);
+              void load(1, next);
+            }}
+          >
+            {includeVoided ? "含已作废" : "只看有效"}
+          </Button>
+        )}
+        hint="登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致"
+      />
+
 
       {summary ? <Table
         size="small"
@@ -552,7 +643,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           { title: "需求单返还汇总", dataIndex: "label" },
           { title: "已返还数量", dataIndex: "qty", render: fmtQty },
           { title: "操作", render: (_v, item) => <Button size="small" type="link" onClick={() => {
-            setDemandFilter(item.key); setPage(1);
+            setDemandFilter(item.key); setPage(1); setSelectedIds([]);
             filters.current = { ...filters.current, source_order_id: item.key === "unassigned" ? undefined : item.key, unassigned: item.key === "unassigned" };
             void load(1, includeVoided);
           }}>查看明细</Button> },
@@ -560,10 +651,10 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       /> : null}
       <Space wrap>
         <Input.Search value={query} allowClear placeholder="搜索返件 PN、凭据或备注" onChange={(event) => setQuery(event.target.value)} onSearch={(value) => {
-          filters.current = { ...filters.current, q: value }; setPage(1); void load(1, includeVoided);
+          filters.current = { ...filters.current, q: value }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }} style={{ width: 280 }} />
         {demandFilter ? <Button size="small" onClick={() => {
-          setDemandFilter(undefined); filters.current = { q: query }; setPage(1); void load(1, includeVoided);
+          setDemandFilter(undefined); filters.current = { q: query }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }}>清除需求单筛选</Button> : null}
       </Space>
 
@@ -573,6 +664,12 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         loading={loading}
         dataSource={receipts}
         columns={columns}
+        rowSelection={canManage ? {
+          selectedRowKeys: selectedIds,
+          // 已作废行不可勾选；筛选/搜索变化后重置选择，避免对不可见行误操作
+          getCheckboxProps: (item) => ({ disabled: item.line_status !== "active" }),
+          onChange: (keys) => setSelectedIds(keys as string[]),
+        } : undefined}
         scroll={{ x: 1320 }}
         expandable={{ expandedRowRender: (item) => <Space direction="vertical" style={{ width: "100%" }}><Descriptions size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="备注">{raw(item.note)}</Descriptions.Item>
@@ -599,7 +696,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           pageSize: 20,
           total,
           showSizeChanger: false,
-          onChange: (next) => { setPage(next); void load(next, includeVoided); },
+          onChange: (next) => { setPage(next); setSelectedIds([]); void load(next, includeVoided); },
         }}
         locale={{ emptyText: loadError ? "记录读取失败，请重新加载" : includeVoided ? "暂无返还记录" : "暂无有效返还记录" }}
       />
@@ -675,9 +772,42 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
               />
             </Form.Item>
           </Space>
-          <Form.Item name="evidence_ref" label="来源单号/凭据（可选）">
-            <Input placeholder="如原始入库单号、快递单号" maxLength={128} />
+          <Form.Item
+            name="evidence_ref"
+            label="来源单号/凭据（可选）"
+            extra={`支持逐行扫描 SN / 粘贴快递单号等长凭据；当前 ${evidenceLength}/16384 字符${evidenceLength > EVIDENCE_MAX ? "，已超限，请删减" : ""}`}
+            validateStatus={evidenceLength > EVIDENCE_MAX ? "error" : undefined}
+            help={evidenceLength > EVIDENCE_MAX ? "凭据超过 16384 字符上限，后端会拒绝保存" : undefined}
+          >
+            <Input.TextArea
+              rows={3}
+              placeholder={"原始入库单号、快递单号；扫多个 SN 可直接逐行扫入：\nSN-A001\nSN-A002"}
+              style={{ fontFamily: "monospace" }}
+            />
           </Form.Item>
+          {editing?.receipt_kind !== "machine" ? (
+            <Form.Item
+              name="serials_text"
+              label="逐件 SN 凭证（可选，每行一个）"
+              extra={`逐行扫描或整段粘贴（换行分隔）；Enter 换行不提交表单。已录入 ${snStats.count} 个${snStats.duplicates.length ? `，重复 ${snStats.duplicates.length} 个：${snStats.duplicates.slice(0, 5).join("、")}${snStats.duplicates.length > 5 ? " 等" : ""}` : ""}${snStats.count > 0 ? `；需与数量一致（当前数量 ${snPendingQty}）` : ""}。清空表示不留逐件凭证；整机返还不单独记录 SN。`}
+              validateStatus={snStats.duplicates.length || snStats.count > 1000 || (snStats.count > 0 && snStats.count !== snPendingQty) || (submitError?.includes("SN") ?? false) ? "error" : undefined}
+            >
+              <Input.TextArea
+                rows={6}
+                placeholder={"扫码枪逐个扫描（每扫一个自动换行），或从 Excel 整列粘贴：\nSN-A001\nSN-A002"}
+                style={{ fontFamily: "monospace" }}
+                onPressEnter={(e) => {
+                  // 扫描场景：Enter 只换行，绝不触发表单提交
+                  e.preventDefault();
+                  const target = e.currentTarget as HTMLTextAreaElement;
+                  const { selectionStart, selectionEnd, value } = target;
+                  target.value = `${value.slice(0, selectionStart)}\n${value.slice(selectionEnd)}`;
+                  target.setSelectionRange(selectionStart + 1, selectionStart + 1);
+                  form.setFieldValue("serials_text", target.value);
+                }}
+              />
+            </Form.Item>
+          ) : null}
           <Form.Item name="note" label="备注（可选）">
             <Input.TextArea rows={2} maxLength={512} placeholder="现场说明" />
           </Form.Item>

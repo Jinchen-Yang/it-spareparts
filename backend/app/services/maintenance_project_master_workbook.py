@@ -2630,7 +2630,13 @@ def _v2_part_row_values(line, order, override) -> dict[str, object]:
         "备件主键": line.part_id,
         "只读哈希": "",  # 占位，下方按锁定列回填
         "备注": line.line_note or "",
-        "来源": "工作簿" if line.edited_source == "workbook_manual" else "WBDD",
+        # 三来源口径（v1.36）：workbook_manual→工作簿；page_manual→页面人工登记
+        # （新建手工需求行，不得谎报 WBDD）；其余（wbdd）→ WBDD 原口径。
+        "来源": (
+            "工作簿" if line.edited_source == "workbook_manual"
+            else "页面人工登记" if line.edited_source == "page_manual"
+            else "WBDD"
+        ),
     }
 
 

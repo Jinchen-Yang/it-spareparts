@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getBoardProjectOrders: vi.fn(),
   listProjectPartsRows: vi.fn(),
   getProjectProcurement: vi.fn(),
+  createDemandLine: vi.fn(),
 }));
 
 vi.mock("../../../../api/maintenanceBossBoard", async () => {
@@ -28,6 +29,38 @@ vi.mock("../../../../api/maintenanceProjectProcurement", async () => {
   >("../../../../api/maintenanceProjectProcurement");
   return { ...actual, getProjectProcurement: mocks.getProjectProcurement };
 });
+
+vi.mock("../../../../api/maintenanceDemands", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../../api/maintenanceDemands")
+  >("../../../../api/maintenanceDemands");
+  return { ...actual, createDemandLine: (...a: unknown[]) => mocks.createDemandLine(...a) };
+});
+
+// DemandLineCreate 是独立专项（__tests__/DemandLineCreate.test.tsx）覆盖的对象；
+// 这里只以轻桩接入，验证 tab 的入口/权限/成功后回读联动。
+// 注意路径：被测组件 import "../DemandLineCreate"（maintenance/ 目录），本测试
+// 文件在 panel/__tests__，vi.mock 的模块说明符必须相对测试文件写成 "../../DemandLineCreate"
+// 才能命中同一模块——写 "../DemandLineCreate" 指向 panel/ 下不存在的文件，桩不生效。
+vi.mock("../../DemandLineCreate", () => ({
+  default: ({ onCreated, onClose }: { onCreated: () => void; onClose: () => void }) => (
+    <div>
+      <button onClick={() => { onCreated(); onClose(); }}>桩创建成功</button>
+      <button onClick={onClose}>桩关闭</button>
+    </div>
+  ),
+}));
+
+vi.mock("../../DemandLineBatchCreate", () => ({
+  default: ({ onCommitted, onClose }: {
+    onCommitted: () => void | Promise<unknown>; onClose: () => void;
+  }) => (
+    <div>
+      <button onClick={() => { void onCommitted(); }}>桩批量保存</button>
+      <button onClick={onClose}>桩批量关闭</button>
+    </div>
+  ),
+}));
 
 import PartsOrdersTab from "../PartsOrdersTab";
 
@@ -122,6 +155,7 @@ async function chooseContract(no: string) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  localStorage.clear();
   mocks.getBoardProjectOrders.mockImplementation(
     (_id: string, params?: { contract_no?: string }) => Promise.resolve(
       params?.contract_no === "XSDD-2"
@@ -429,5 +463,110 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: "WBDD-1", contract_no: undefined,
     });
+  });
+});
+
+describe("新增需求入口（v1.36 Phase E）", () => {
+  it("无 action_maintenance_demand_manage 权限时不渲染「新增需求」按钮", async () => {
+    renderTab();
+    await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /新\s*增\s*需\s*求/ })).toBeNull();
+  });
+
+  it("有权限时批量入口打开组件，部分成功回读走 onChanged", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
+    const onChanged = vi.fn().mockResolvedValue(true);
+    render(
+      <PartsOrdersTab
+        projectId="p1"
+        exportBase="合成项目A"
+        canUpload={false}
+        contractNos={[]}
+        onChanged={onChanged}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "批量新增需求" }));
+    fireEvent.click(screen.getByText("桩批量保存"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("有权限时入口打开对话框；创建成功后走 onChanged（父级 refreshProject 机制）", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
+    const onChanged = vi.fn().mockResolvedValue(true);
+    render(
+      <PartsOrdersTab
+        projectId="p1"
+        exportBase="合成项目A"
+        canUpload={false}
+        contractNos={["XSDD-1"]}
+        onChanged={onChanged}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
+    await screen.findByText("桩创建成功");
+    fireEvent.click(screen.getByText("桩创建成功"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("创建成功时若当前有合同筛选：先清筛选再回读，让独立新单不被过滤挡住", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
+    const onChanged = vi.fn().mockResolvedValue(true);
+    render(
+      <PartsOrdersTab
+        projectId="p1"
+        exportBase="合成项目A"
+        canUpload={false}
+        contractNos={["XSDD-1", "XSDD-2"]}
+        onChanged={onChanged}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
+    await chooseContract("XSDD-2");
+    await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
+      page: 1, page_size: 200, contract_no: "XSDD-2",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
+    fireEvent.click(await screen.findByText("桩创建成功"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    // 清掉合同筛选后回读：需求单段按「全部合同」重新拉
+    await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
+      page: 1, page_size: 200, contract_no: undefined,
+    }));
+    // 对话框已随成功关闭
+    await waitFor(() => expect(screen.queryByText("桩创建成功")).toBeNull());
+  });
+
+  it("切项目关闭未完成的新增对话框", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
+    const { rerender } = render(
+      <PartsOrdersTab
+        projectId="p1"
+        exportBase="合成项目A"
+        canUpload={false}
+        contractNos={[]}
+        onChanged={vi.fn().mockResolvedValue(true)}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
+    await screen.findByText("桩创建成功");
+    // 路由切到项目 p2：对话框必须关闭（旧项目的表单不能带进新项目）
+    mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([orderRow("WBDD-9", "XSDD-1")]));
+    rerender(
+      <PartsOrdersTab
+        projectId="p2"
+        exportBase="合成项目B"
+        canUpload={false}
+        contractNos={[]}
+        onChanged={vi.fn().mockResolvedValue(true)}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByText("桩创建成功")).toBeNull());
   });
 });

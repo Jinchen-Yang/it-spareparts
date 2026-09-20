@@ -25,7 +25,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.etl import mapping, pipeline, reader, sheet_selection
-from app.models.maintenance import FMaintenanceOrder, MaintenanceDemandTombstone
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
 from app.services import maintenance_cost
 
@@ -140,6 +144,13 @@ def snapshot_diff(db: Session, file_order_nos: set[str],
     tombstoned = select(MaintenanceDemandTombstone.source_order_id).where(
         MaintenanceDemandTombstone.restored_at.is_(None)
     )
+    # v1.36（P1#4 修正）：只有页面/总表**手工建的单头**不参与"氚云已删单"比对
+    # （它们本就不在氚云导出里，报 missing 只会引诱一键作废）。
+    # 真实 WBDD 单即使行上有页面直改的 override，也照常参与对账——
+    # 按头前缀判别，不按 edited_source 判别。
+    manual_orders = select(FMaintenanceOrder.id).where(
+        FMaintenanceOrder.raw_order_id.like("page-manual-%")
+    )
     rows = db.execute(
         select(FMaintenanceOrder.order_no)
         .where(
@@ -147,6 +158,7 @@ def snapshot_diff(db: Session, file_order_nos: set[str],
             FMaintenanceOrder.order_date <= hi,
             FMaintenanceOrder.order_no.notin_(file_order_nos),
             FMaintenanceOrder.raw_order_id.notin_(tombstoned),
+            FMaintenanceOrder.id.notin_(manual_orders),
         )
         .order_by(FMaintenanceOrder.order_no)
     ).scalars().all()
@@ -171,7 +183,6 @@ def latest_missing(db: Session) -> dict:
     实时重算而非读导入时快照：批次事实（import_batch_id）与窗口都在库里，
     重算永远反映当前墓碑状态——已作废的单自动从清单消失，重复点击安全。
     """
-    from app.models.maintenance import FMaintenanceLine
     from app.models.maintenance_source_assignment import (
         MaintenanceSourceOrderAssignment,
     )
@@ -214,6 +225,13 @@ def latest_missing(db: Session) -> dict:
     tombstoned = select(MaintenanceDemandTombstone.source_order_id).where(
         MaintenanceDemandTombstone.restored_at.is_(None)
     )
+    # 与 snapshot_diff 同一手工单排除规则：明细列表与分母都不得计入
+    # page-manual-% 头。否则混合场景（真实缺失 + 手工单）计数来自
+    # snapshot_diff=1、列表却混入手工单，前端全选作废会误删手工单
+    # （review_spec）。
+    manual_orders = select(FMaintenanceOrder.id).where(
+        FMaintenanceOrder.raw_order_id.like("page-manual-%")
+    )
     active_line_count = (
         select(func.count(FMaintenanceLine.id))
         .where(
@@ -242,6 +260,7 @@ def latest_missing(db: Session) -> dict:
             FMaintenanceOrder.order_date <= hi,
             FMaintenanceOrder.order_no.notin_(file_order_nos),
             FMaintenanceOrder.raw_order_id.notin_(tombstoned),
+            FMaintenanceOrder.id.notin_(manual_orders),
         )
         .order_by(FMaintenanceOrder.order_no)
         .limit(_MISSING_DETAILS_LIMIT + 1)
@@ -251,6 +270,7 @@ def latest_missing(db: Session) -> dict:
             FMaintenanceOrder.order_date >= lo,
             FMaintenanceOrder.order_date <= hi,
             FMaintenanceOrder.raw_order_id.notin_(tombstoned),
+            FMaintenanceOrder.id.notin_(manual_orders),
         )
     ) or 0)
     base["db_active_in_window"] = active_in_window

@@ -391,3 +391,267 @@ def restore_demand(
     except Exception:
         db.rollback()
         raise
+
+
+# ---------- v1.36 Phase E：页面直改/直建需求行 ----------
+
+
+class DemandLinePatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updates: dict  # 字段白名单在 service 层失败关闭校验
+    reason: str = Field(min_length=1)
+    # OCC 必填（新接口从未上线，无须兼容无 token 的旧客户端——省略即 422，
+    # 失败关闭，杜绝绕过并发校验静默覆写）。
+    expected_digest: str = Field(min_length=64, max_length=64,
+                                 pattern=r"^[a-f0-9]{64}$")
+
+
+class DemandLineCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_date: str  # YYYY-MM-DD（服务层解析）
+    project_id: str = Field(min_length=1, max_length=36)
+    pn_std: str = Field(min_length=1, max_length=128)
+    qty: float = Field(gt=0)
+    return_qty: float = Field(default=0, ge=0)
+    serial_numbers: str | None = Field(default=None, max_length=32767)
+    description: str | None = Field(default=None, max_length=32767)
+    reason: str = Field(min_length=1)
+    # 幂等键必填（新接口未上线，无旧客户端须兼容）：防网络丢响应重试重复建行。
+    idempotency_key: str = Field(min_length=8, max_length=128,
+                                 pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+class DemandLineOverrideClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_name: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1)
+    # OCC 必填（同 DemandLinePatchRequest——省略即 422，失败关闭）。
+    expected_digest: str = Field(min_length=64, max_length=64,
+                                 pattern=r"^[a-f0-9]{64}$")
+
+
+def _raise_manual_error(exc: Exception) -> None:
+    from app.services import maintenance_demand_manual
+
+    if isinstance(exc, maintenance_demand_manual.DemandManualConflict):
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    # scope 违规是权限问题 → 403（区别于普通业务校验 400）
+    if "项目可见范围" in str(exc):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.patch("/lines/{raw_line_id}")
+def patch_demand_line(
+    body: DemandLinePatchRequest,
+    raw_line_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """页面直改一条需求明细行（override 账本 + 审计 + recompute 联动）。"""
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
+    record_access_log(ctx, "demand_line_patch", "maintenance_demands",
+                      {"raw_line_id": raw_line_id,
+                       "fields": sorted(set(body.updates)),
+                       "scope": "full" if allowed_project_ids is None else "owned"})
+    try:
+        result = maintenance_demand_manual.patch_demand_line(
+            db, raw_line_id=raw_line_id, updates=body.updates,
+            reason=body.reason, operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
+            expected_digest=body.expected_digest,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.post("/lines", status_code=status.HTTP_201_CREATED)
+def create_demand_line(
+    body: DemandLineCreateRequest,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """页面直建手工需求行（page_manual 来源，不参与氚云删单比对）。"""
+    from datetime import date as _date
+
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    try:
+        parsed_date = _date.fromisoformat(body.order_date)
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "order_date 必须是 YYYY-MM-DD"
+        ) from None
+    allowed_project_ids = scope_resolve(db, ctx)
+    record_access_log(ctx, "demand_line_create", "maintenance_demands",
+                      {"project_id": body.project_id, "pn_std": body.pn_std,
+                       "scope": "full" if allowed_project_ids is None else "owned"})
+    try:
+        result = maintenance_demand_manual.create_manual_demand_line(
+            db, order_date=parsed_date, project_id=body.project_id,
+            allowed_project_ids=allowed_project_ids,
+            idempotency_key=body.idempotency_key,
+            pn_std=body.pn_std, qty=body.qty, return_qty=body.return_qty,
+            serial_numbers=body.serial_numbers, description=body.description,
+            reason=body.reason, operated_by=operated_by,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.post("/lines/{raw_line_id}/clear-override")
+def clear_override(
+    body: DemandLineOverrideClearRequest,
+    raw_line_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """撤销一个字段的 override，恢复氚云原始值（source_value 快照）。"""
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
+    record_access_log(ctx, "demand_line_override_clear", "maintenance_demands",
+                      {"raw_line_id": raw_line_id, "field": body.field_name,
+                       "scope": "full" if allowed_project_ids is None else "owned"})
+    try:
+        result = maintenance_demand_manual.clear_override(
+            db, raw_line_id=raw_line_id, field=body.field_name,
+            reason=body.reason, operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
+            expected_digest=body.expected_digest,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise
+
+
+class DemandLineOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    raw_line_id: str
+    order_raw_id: str
+    order_no: str | None
+    line_no: int | None
+    part_id: int | None
+    pn_std: str | None
+    pn_raw: str | None
+    description: str | None
+    qty: str | None
+    return_qty: str | None
+    serial_numbers: str | None
+    edited_source: str
+    manual_override: dict
+    is_active: bool
+
+
+@router.get("/orders/{source_order_id}/lines")
+def list_demand_lines(
+    source_order_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """列出一个需求单头下的明细行（页面行编辑的数据源）。
+
+    可见性：scope 受限账号只能看自己项目内的单（失败关闭）；
+    include_inactive=false 默认只回活行（作废行不可编辑也无须展示）。
+    """
+    from app.models.maintenance import FMaintenanceLine
+
+    visible = scope_resolve(db, ctx)
+    if visible is not None:
+        assigned = db.scalars(
+            select(maintenance_demands.MaintenanceSourceOrderAssignment.project_id).where(
+                maintenance_demands.MaintenanceSourceOrderAssignment.source_order_id
+                == source_order_id,
+                maintenance_demands.MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ).all()
+        if not assigned or not set(assigned) <= set(visible):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "该项目不在你的可见范围")
+    order = db.scalar(
+        select(maintenance_demands.FMaintenanceOrder).where(
+            maintenance_demands.FMaintenanceOrder.raw_order_id == source_order_id
+        )
+    )
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "需求单不存在")
+    rows = db.execute(
+        select(FMaintenanceLine)
+        .where(FMaintenanceLine.order_id == order.id,
+               FMaintenanceLine.is_active.is_(True))
+        .order_by(FMaintenanceLine.line_no)
+    ).scalars().all()
+    from app.services.maintenance_demand_manual import (
+        _digest as _line_digest, _line_snapshot,
+    )
+
+    def _row_out(r) -> dict:
+        return {
+            "raw_line_id": r.raw_line_id,
+            "order_raw_id": source_order_id,
+            "order_no": order.order_no,
+            "line_no": r.line_no,
+            "part_id": r.part_id,
+            "pn_std": r.pn_std,
+            "pn_raw": r.pn_raw,
+            "description": r.description,
+            "qty": str(r.qty) if r.qty is not None else None,
+            "return_qty": str(r.return_qty) if r.return_qty is not None else None,
+            "serial_numbers": r.serial_numbers,
+            "edited_source": r.edited_source,
+            "manual_override": dict(r.manual_override or {}),
+            "is_active": r.is_active,
+        }
+
+    # digest 必须与 PATCH/clear 的 OCC 输入同源（canonical _line_snapshot）。
+    # 对含 order_raw_id/order_no/line_no/is_active 的展示包 hash 会造出另一个
+    # digest，前端 GET 后第一次 PATCH 就 409。
+    return {"items": [
+        {**_row_out(r), "digest": _line_digest(_line_snapshot(r))}
+        for r in rows
+    ]}
