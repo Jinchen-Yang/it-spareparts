@@ -173,7 +173,7 @@ describe("ManualSiteIssueSection", () => {
     await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledTimes(1));
     expect(await within(dialog).findByText("待补价格，金额留空")).toBeInTheDocument();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认登记" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "确认登记" }));
     await waitFor(() => expect(api.createManualSiteIssue).toHaveBeenCalledTimes(1));
     const createArg = api.createManualSiteIssue.mock.calls[0][1];
     expect(createArg.lines).toEqual([
@@ -192,12 +192,12 @@ describe("ManualSiteIssueSection", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
     await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledTimes(1));
     api.createManualSiteIssue.mockRejectedValueOnce(new Error("network"));
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认登记" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "确认登记" }));
     await waitFor(() => expect(api.createManualSiteIssue).toHaveBeenCalledTimes(1));
     const firstKey = api.createManualSiteIssue.mock.calls[0][1].idempotency_key;
 
     // 同 payload 重试 → 同 key（防丢响应重复建单）
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认登记" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "确认登记" }));
     await waitFor(() => expect(api.createManualSiteIssue).toHaveBeenCalledTimes(2));
     expect(api.createManualSiteIssue.mock.calls[1][1].idempotency_key).toBe(firstKey);
 
@@ -239,7 +239,7 @@ describe("ManualSiteIssueSection", () => {
     // 重新预览（新数量）后才可确认，且提交数量 = 6
     fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
     await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledTimes(2));
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认登记" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "确认登记" }));
     await waitFor(() => expect(api.createManualSiteIssue).toHaveBeenCalledTimes(1));
     expect(api.createManualSiteIssue.mock.calls[0][1].lines[0].quantity).toBe(6);
   });
@@ -285,7 +285,7 @@ describe("ManualSiteIssueSection", () => {
     await fillEditor(dialog);
     fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
     await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledTimes(1));
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认登记" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "确认登记" }));
     await waitFor(() => expect(api.createManualSiteIssue).toHaveBeenCalledTimes(1));
     // 弹窗已关（写成功路径），且 create 只发生一次
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "人工登记领用" })).toBeNull());

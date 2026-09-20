@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.35.0 release notes", () => {
+describe("v1.35.0 release notes (archived)", () => {
   it("publishes project-level spend, master salesperson semantics and wall URL state", () => {
-    expect(APP_VERSION).toBe("1.35.0");
-    expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-09-17");
-    const notes = LATEST.items.join("\n");
+    const v135 = CHANGELOG.find((entry) => entry.version === "1.35.0")!;
+    expect(v135.date).toBe("2026-09-17");
+    const notes = v135.items.join("\n");
     expect(notes).toMatch(/按项目汇总/);
     expect(notes).toMatch(/项目主档优先/);
     expect(notes).toMatch(/写入网址/);
