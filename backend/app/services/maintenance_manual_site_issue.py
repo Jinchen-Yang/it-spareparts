@@ -347,11 +347,12 @@ def preview_manual_site_issue(
         raise MaintenanceOperationError("项目不存在")
 
     preview_lines: list[MaintenanceSiteIssueLine] = []
+    preview_issue_id = f"preview:{uuid4()}"
     for line_no, requested in enumerate(normalized, start=1):
         preview_lines.append(
             MaintenanceSiteIssueLine(
                 issue_line_id=f"preview:{uuid4()}",
-                issue_id="preview",
+                issue_id=preview_issue_id,
                 line_no=line_no,
                 part_id=requested["part_id"],
                 pn=requested["pn"],
@@ -368,13 +369,12 @@ def preview_manual_site_issue(
                 version=1,
             )
         )
-    # 预览行不在库中，resolve_lines 找不到 issue 头 → 跳过需求单精确行层，
-    # 仍走 direct/窗口瀑布。为让需求单层生效，先用临时单头身份构造再清理。
-    # 简化且诚实的做法：直接调 resolve_lines，demand 层按 issue_no 兜底
-    # （preview 行无 issue_no，exact/same-order 需求层自然跳过）。
+    # 显式传只读项目上下文，让未落库的预览与保存使用相同需求价瀑布。
+    # 临时单头/行都不加入 Session，预览不写事实或审计。
     try:
         maintenance_consumption_cost.resolve_lines(
-            db, lines=[(issue_date, line) for line in preview_lines]
+            db, lines=[(issue_date, line) for line in preview_lines],
+            preview_project_id=project_id,
         )
     except maintenance_consumption_cost.CostResolutionError as exc:
         raise MaintenanceOperationError(str(exc)) from exc

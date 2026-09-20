@@ -28,6 +28,7 @@ from app.models.maintenance_project_operations import (
 from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment,
 )
+from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_manual_site_issue as manual_service
 
@@ -299,7 +300,7 @@ def test_manual_create_missing_price_keeps_cost_empty_never_fabricates(db):
 
 
 def test_manual_create_resolves_demand_price_and_recalculates_on_change(db):
-    """需求单价格层生效；数量变化后金额按新数量重算（同需求单价）。"""
+    """预览与保存同用本项目需求单价，优先于采购；更正按同价重算。"""
     project = _project(db, "project-manual-demand-price")
     part = _part(db, "PN-MANUAL-DEMAND")
     batch = SysImportBatch(
@@ -342,8 +343,52 @@ def test_manual_create_resolves_demand_price_and_recalculates_on_change(db):
             created_by="tester",
         )
     )
+    purchase = FPurchaseOrder(
+        raw_order_id="PO-manual-preview",
+        order_no="PO-manual-preview",
+        order_date=date(2026, 9, 20),
+        data_status="已生效",
+        is_tax_inclusive=False,
+        import_batch_id=batch.id,
+    )
+    db.add(purchase)
+    db.flush()
+    db.add(FPurchaseLine(
+        raw_line_id="POL-manual-preview",
+        order_id=purchase.id,
+        part_id=part.id,
+        qty=Decimal("1"),
+        unit_price=Decimal("25"),
+        import_batch_id=batch.id,
+    ))
     db.commit()
     client = _client(db, username="manual_demand_admin")
+
+    preview_body = {
+        "issue_date": "2026-09-20",
+        "receiver": "人工接收人",
+        "issued_by": "人工发出人",
+        "site_location": "人工现场",
+        "lines": [_line_payload(part, "2")],
+    }
+    preview = client.post(
+        f"/api/maintenance/site-issues/manual/preview?project_id={project.project_id}",
+        json=preview_body,
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["lines"][0]["cost_source"] == "maint_demand"
+    assert preview.json()["lines"][0]["unit_cost_ex_tax"] == "50.00"
+    assert db.query(MaintenanceSiteIssue).count() == 0
+    assert db.query(MaintenanceSiteIssueLine).count() == 0
+
+    # 另一项目没有需求价，只能回退采购价，不能借用前一项目的需求证据。
+    other = _project(db, "project-manual-preview-other")
+    other_preview = client.post(
+        f"/api/maintenance/site-issues/manual/preview?project_id={other.project_id}",
+        json=preview_body,
+    )
+    assert other_preview.status_code == 200, other_preview.text
+    assert other_preview.json()["lines"][0]["unit_cost_ex_tax"] == "25.00"
 
     created = client.post(
         f"/api/maintenance/site-issues/projects/{project.project_id}/manual",
@@ -358,6 +403,9 @@ def test_manual_create_resolves_demand_price_and_recalculates_on_change(db):
     assert line["cost_source"] == "maint_demand"
     assert line["unit_cost_ex_tax"] == "50.00"
     assert line["cost_amount_ex_tax"] == "100.00"
+    for field in ("cost_source", "unit_cost_ex_tax", "cost_amount_ex_tax",
+                  "cost_amount_inc_tax"):
+        assert preview.json()["lines"][0][field] == line[field]
 
     # 数量改 3 → 重算 150（同单价 × 新数量）
     patched = client.patch(
