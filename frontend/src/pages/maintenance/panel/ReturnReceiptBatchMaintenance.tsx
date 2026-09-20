@@ -513,8 +513,8 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
             <>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {isVoid
-                  ? "逐条按各自版本号作废（无事务：行间独立成败）；作废后退出项目/需求单全部有效统计，历史与审计保留。"
-                  : "逐行独立编辑、独立版本 CAS；未修改的行不会提交；清空备注/凭据会显式置空；未显示字段（项目/PN/需求单）不会被覆盖。"}
+                  ? "每条记录分别作废，结果逐条显示；作废后不再计入项目和需求单的有效统计，历史记录保留。"
+                  : "每条记录分别保存，结果逐条显示；未修改的记录不提交；清空备注或凭据会删除原内容；项目、PN 和需求单保持不变。"}
               </Text>
               {isVoid ? (
                 <Table<EditRow>
