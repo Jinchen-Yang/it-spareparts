@@ -33,7 +33,7 @@ from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_manual_site_issue as manual_service
 
 
-def _client(db, *, username: str = "manual_site_admin") -> TestClient:
+def _client(db, *, username: str = "manual_site_admin", production_routes: bool = False) -> TestClient:
     db.add(
         SysUser(
             username=username,
@@ -53,6 +53,10 @@ def _client(db, *, username: str = "manual_site_admin") -> TestClient:
     app.include_router(
         maintenance_project_operations.stable_site_issue_router, prefix="/api"
     )
+    if production_routes:
+        from app.main import app as production_app
+
+        app = production_app
     client = TestClient(app)
     login = client.post(
         "/api/auth/login",
@@ -1131,3 +1135,22 @@ def test_manual_concurrent_duplicate_issue_no_fails_closed(db):
         .count()
         == 1
     )
+
+
+def test_manual_preview_uses_literal_route_in_production_app(db):
+    project = _project(db, "project-manual-route-order")
+    part = _part(db, "PN-MANUAL-ROUTE-ORDER")
+    client = _client(db, username="manual_route_admin", production_routes=True)
+    response = client.post(
+        f"/api/maintenance/site-issues/manual/preview?project_id={project.project_id}",
+        json={
+            "issue_date": "2026-09-20",
+            "receiver": "路由验收接收人",
+            "issued_by": "路由验收发出人",
+            "site_location": "隔离现场",
+            "lines": [_line_payload(part)],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["inventory_effect"] == "none"
+    assert db.query(MaintenanceSiteIssue).count() == 0

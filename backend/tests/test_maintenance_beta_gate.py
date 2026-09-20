@@ -295,6 +295,9 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
         maintenance_project_operations.search_project_site_issues,
         maintenance_project_operations.void_project_site_issue,
         maintenance_project_operations.stable_project_workspace,
+        maintenance_project_operations.preview_manual_site_issue,
+        maintenance_project_operations.create_manual_site_issue,
+        maintenance_project_operations.patch_manual_site_issue,
     }
 
     def _routes(modules: set[str]) -> list[APIRoute]:

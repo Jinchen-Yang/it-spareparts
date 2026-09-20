@@ -1736,8 +1736,8 @@ def patch_manual_site_issue(
 # Compatibility composition for isolated API tests/embedders. Production mounts
 # the two child routers separately with their respective release gates.
 site_issue_router = APIRouter()
-site_issue_router.include_router(site_issue_beta_router)
 site_issue_router.include_router(stable_site_issue_router)
+site_issue_router.include_router(site_issue_beta_router)
 
 router = APIRouter()
 router.include_router(operations_beta_router)

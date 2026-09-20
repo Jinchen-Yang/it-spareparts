@@ -172,6 +172,12 @@ app.include_router(
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
+# Literal /manual/preview must precede the beta /{issue_id}/preview route.
+app.include_router(
+    maintenance_project_operations.stable_site_issue_router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_boss_dependencies,
+)
 app.include_router(
     maintenance_project_operations.site_issue_beta_router,
     prefix=settings.api_prefix,
@@ -179,11 +185,6 @@ app.include_router(
 )
 app.include_router(
     maintenance_project_operations.stable_workspace_router,
-    prefix=settings.api_prefix,
-    dependencies=maintenance_boss_dependencies,
-)
-app.include_router(
-    maintenance_project_operations.stable_site_issue_router,
     prefix=settings.api_prefix,
     dependencies=maintenance_boss_dependencies,
 )
