@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.35.0";
+export const APP_VERSION = "1.36.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.0",
+    date: "2026-09-20",
+    items: [
+      "需求明细可在页面直建、修改并逐字段撤销：数量、退货数量、SN、描述和 PN 的人工修正受保护，Excel 重导不会静默覆盖；需求单仍可作废与恢复",
+      "回款记录支持按当前项目合同下拉登记，并可修改、软作废和恢复；恢复先回到待确认，避免直接计入已确认累计",
+      "新增页面人工领用通道：按真实领用事实登记、更正和作废，复用既有成本与返还义务口径，不伪造仓库发货，也不改变库存",
+      "返还收货支持逐件 SN、多行批量登记，以及选中记录的批量修改和作废；无 SN 数量须显式使用 qty:，不会把纯数字猜成数量",
+      "页面批量均逐行处理并展示成功、失败、版本冲突或结果未知；成功行不重复提交，Excel 导入仍是独立入口，不与页面批量混称",
+    ],
+  },
   {
     version: "1.35.0",
     date: "2026-09-17",
