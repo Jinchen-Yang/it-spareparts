@@ -391,3 +391,153 @@ def restore_demand(
     except Exception:
         db.rollback()
         raise
+
+
+# ---------- v1.36 Phase E：页面直改/直建需求行 ----------
+
+
+class DemandLinePatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updates: dict  # 字段白名单在 service 层失败关闭校验
+    reason: str = Field(min_length=1)
+
+
+class DemandLineCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_date: str  # YYYY-MM-DD（服务层解析）
+    project_id: str = Field(min_length=1, max_length=36)
+    pn_std: str = Field(min_length=1, max_length=128)
+    qty: float = Field(gt=0)
+    return_qty: float = Field(default=0, ge=0)
+    serial_numbers: str | None = Field(default=None, max_length=32767)
+    description: str | None = Field(default=None, max_length=32767)
+    reason: str = Field(min_length=1)
+
+
+class DemandLineOverrideClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_name: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1)
+
+
+def _raise_manual_error(exc: Exception) -> None:
+    from app.services import maintenance_demand_manual
+
+    if isinstance(exc, maintenance_demand_manual.DemandManualConflict):
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.patch("/lines/{raw_line_id}")
+def patch_demand_line(
+    body: DemandLinePatchRequest,
+    raw_line_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """页面直改一条需求明细行（override 账本 + 审计 + recompute 联动）。"""
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    record_access_log(ctx, "demand_line_patch", "maintenance_demands",
+                      {"raw_line_id": raw_line_id,
+                       "fields": sorted(set(body.updates))})
+    try:
+        result = maintenance_demand_manual.patch_demand_line(
+            db, raw_line_id=raw_line_id, updates=body.updates,
+            reason=body.reason, operated_by=operated_by,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.post("/lines", status_code=status.HTTP_201_CREATED)
+def create_demand_line(
+    body: DemandLineCreateRequest,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """页面直建手工需求行（page_manual 来源，不参与氚云删单比对）。"""
+    from datetime import date as _date
+
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    try:
+        parsed_date = _date.fromisoformat(body.order_date)
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "order_date 必须是 YYYY-MM-DD"
+        ) from None
+    record_access_log(ctx, "demand_line_create", "maintenance_demands",
+                      {"project_id": body.project_id, "pn_std": body.pn_std})
+    try:
+        result = maintenance_demand_manual.create_manual_demand_line(
+            db, order_date=parsed_date, project_id=body.project_id,
+            pn_std=body.pn_std, qty=body.qty, return_qty=body.return_qty,
+            serial_numbers=body.serial_numbers, description=body.description,
+            reason=body.reason, operated_by=operated_by,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.post("/lines/{raw_line_id}/clear-override")
+def clear_override(
+    body: DemandLineOverrideClearRequest,
+    raw_line_id: str = Path(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """撤销一个字段的 override，恢复氚云原始值（source_value 快照）。"""
+    from app.services import maintenance_demand_manual
+
+    operated_by = _real_operator(db, ident)
+    record_access_log(ctx, "demand_line_override_clear", "maintenance_demands",
+                      {"raw_line_id": raw_line_id, "field": body.field_name})
+    try:
+        result = maintenance_demand_manual.clear_override(
+            db, raw_line_id=raw_line_id, field=body.field_name,
+            reason=body.reason, operated_by=operated_by,
+        )
+        db.commit()
+        return result
+    except maintenance_demand_manual.DemandManualError as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except maintenance_demand_manual.DemandManualConflict as exc:
+        db.rollback()
+        _raise_manual_error(exc)
+    except Exception:
+        db.rollback()
+        raise

@@ -362,6 +362,124 @@ def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: lis
     return out
 
 
+def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
+                              update_cols: list[str] | None = None,
+                              audit: tuple | None = None,
+                              *, batch_id: int | None = None) -> dict:
+    """f_maintenance_line 专用 upsert（v1.36）：与 _upsert_facts 的差异——
+
+    1. override 保护：manual_override 有记录的字段（页面直改）与
+       edited_source != 'wbdd' 的行（总表/页面手工）在 SET 时保留现值
+       （CASE WHEN），不被重导覆盖；
+    2. 审计/changed_keys 用「override 屏蔽后的有效值」比对，不会记下
+       从未发生的覆盖（审查 #4）；
+    3. 仅 maintenance 链路使用；其他四条事实链路继续走通用 _upsert_facts。
+
+    compare_subset（anomaly_flags 导入自有子集）语义原样保留。
+    """
+    import_flags = maintenance_cost_invalidation.IMPORT_ANOMALY_FLAGS
+
+    def _cmp_value(col: str, value):
+        if col == "anomaly_flags":
+            return sorted(v for v in (value or []) if v in import_flags)
+        return value
+
+    if not rows:
+        return {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
+    if update_cols is None:
+        # skip 模式（首次导入）：与通用路径完全一致
+        inserted = 0
+        changed_keys: set = set()
+        for chunk in _chunks(rows):
+            stmt = pg_insert(FMaintenanceLine).values(chunk).on_conflict_do_nothing(
+                index_elements=[conflict_col])
+            got = session.execute(stmt.returning(conflict_col)).all()
+            inserted += len(got)
+            changed_keys.update(r[0] for r in got)
+        return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted,
+                "changed_keys": changed_keys}
+
+    key_name = conflict_col.name
+    keys = [r[key_name] for r in rows]
+    # 既有行的 override 账本 + edited_source（一次查询带回）
+    before_by_key: dict = {}
+    for chunk in _chunks(keys):
+        sel_cols = [conflict_col, FMaintenanceLine.id,
+                    FMaintenanceLine.manual_override,
+                    FMaintenanceLine.edited_source,
+                    *[getattr(FMaintenanceLine, c) for c in update_cols]]
+        for row in session.execute(
+            select(*sel_cols).where(conflict_col.in_(chunk))
+        ).all():
+            m = row._mapping
+            before_by_key[m[key_name]] = (
+                m["id"],
+                {c: m[c] for c in update_cols},
+                m["manual_override"] or {},
+                m["edited_source"],
+            )
+    existing = len(before_by_key)
+
+    # SET 子句：白名单列中可能被保护的列（editable 白名单 ∩ update_cols）
+    from app.services.maintenance_demand_manual import DEMAND_LINE_EDITABLE_FIELDS
+    protectable = [c for c in update_cols if c in DEMAND_LINE_EDITABLE_FIELDS]
+    for chunk in _chunks(rows):
+        stmt = pg_insert(FMaintenanceLine).values(chunk)
+        set_ = {}
+        for c in update_cols:
+            col = getattr(FMaintenanceLine, c)
+            if c in protectable:
+                # 三态保护（读库时逐行判定，SQL 级表达为：
+                #   override 有该字段 → 保留现值
+                #   edited_source != 'wbdd' → 保留现值（总表/页面手工值）
+                #   否则 → 取 excluded 新值
+                from sqlalchemy import case as _sa_case
+                set_[c] = _sa_case(
+                    (FMaintenanceLine.manual_override.op('?')(c), col),
+                    (FMaintenanceLine.edited_source != 'wbdd', col),
+                    else_=stmt.excluded[c],
+                )
+            else:
+                set_[c] = stmt.excluded[c]
+        session.execute(stmt.on_conflict_do_update(
+            index_elements=[conflict_col], set_=set_))
+
+    changed_keys = set()
+    entries = []
+    for r in rows:
+        prev = before_by_key.get(r[key_name])
+        if prev is None:
+            changed_keys.add(r[key_name])
+            continue
+        eid, before, override, edited_source = prev
+        manual_protected = edited_source != "wbdd"
+        after = {c: r.get(c) for c in update_cols}
+        # 有效值 = override/手工行保护下的「导入视角」值（受保护列取库上现值）
+        effective_before = dict(before)
+        effective_after = dict(after)
+        for c in protectable:
+            if c in (override or {}) or manual_protected:
+                effective_after[c] = before.get(c)
+        if audit is not None and any(
+            _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
+            for c in update_cols if c not in _AUDIT_IGNORE
+        ):
+            entries.append((eid,
+                            {c: _jsonable(v) for c, v in effective_before.items()},
+                            {c: _jsonable(v) for c, v in effective_after.items()}))
+        if any(
+            _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
+            for c in update_cols if c not in _AUDIT_IGNORE
+        ):
+            changed_keys.add(r[key_name])
+    if audit is not None and entries:
+        op_by, b_id = audit
+        _audit_overwrites(session, "import_overwrite", FMaintenanceLine.__tablename__,
+                          entries, op_by, b_id)
+    return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0,
+            "changed_keys": changed_keys}
+
+
 def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
                   update_cols: list[str] | None = None, audit: tuple | None = None,
                   track_changed: bool = False,
@@ -816,14 +934,12 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
         **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
     } for ln in result.lines]
-    line_stats = _upsert_facts(session, FMaintenanceLine, line_rows,
-                               FMaintenanceLine.raw_line_id,
-                               _MAINT_LINE_UPD if upsert else None, audit=audit,
-                               track_changed=True,
-                               compare_subset={
-                                   "anomaly_flags":
-                                       maintenance_cost_invalidation.IMPORT_ANOMALY_FLAGS,
-                               })
+    line_stats = _upsert_maintenance_lines(
+        session, line_rows,
+        FMaintenanceLine.raw_line_id,
+        _MAINT_LINE_UPD if upsert else None, audit=audit,
+        batch_id=batch_id,
+    )
 
     # 5) 工作簿 revision 失效：写后复核（probe 外项目 → fail closed 整批回滚），
     #    再让「头或行确有业务字段变化」的单据归属项目各 bump 一次。
