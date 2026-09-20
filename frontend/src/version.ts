@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.0";
+export const APP_VERSION = "1.36.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.1",
+    date: "2026-09-21",
+    items: [
+      "返还台账登记人优先显示账号姓名，未填写姓名的数字账号不再直接显示手机号",
+      "返还台账凭据列优先展示逐件 SN 或导入 SN，保留前导零和原始凭据；没有 SN 时显示凭据或单号",
+    ],
+  },
   {
     version: "1.36.0",
     date: "2026-09-20",

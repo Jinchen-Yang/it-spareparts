@@ -489,7 +489,25 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         : <span style={{ color: "rgba(0,0,0,.35)" }}>未关联</span>,
     },
     { title: "备注", dataIndex: "note", width: 160, render: (v: string | null) => raw(v) },
-    { title: "凭据/单号", dataIndex: "evidence_ref", width: 130, render: (v: string | null) => raw(v) },
+    {
+      title: "SN / 凭据 / 单号", key: "evidence", width: 190,
+      render: (_value, item) => {
+        const serials = (item.serial_numbers ?? []).map((sn) => sn.trim()).filter(Boolean);
+        const sn = serials.length ? serials.join("\n") : item.source_serial_number?.trim();
+        const evidence = item.evidence_ref?.trim() || item.head_no?.trim();
+        return <Space direction="vertical" size={2}>
+          {sn ? <>
+            <Text strong>SN{serials.length > 1 ? `（${serials.length} 个）` : ""}</Text>
+            <div style={{ maxHeight: 96, overflowY: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              <Text copyable style={{ fontFamily: "monospace" }}>{sn}</Text>
+            </div>
+          </> : null}
+          {evidence ? <div style={{ maxHeight: 96, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>
+            <Text type={sn ? "secondary" : undefined}>{sn ? `凭据/单号：${evidence}` : evidence}</Text>
+          </div> : !sn ? raw(null) : null}
+        </Space>;
+      },
+    },
     { title: "收到时间", dataIndex: "occurred_at", width: 150, render: (v: string | null) => fmtDate(v) },
     {
       title: "登记人",
@@ -497,7 +515,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       width: 120,
       render: (value: string, item) => (
         <Space direction="vertical" size={0}>
-          <span>{value}</span>
+          <span>{item.created_by_name?.trim() || (/^\+?[\d\s()-]+$/.test(value?.trim() ?? "") ? "未填写姓名" : raw(value))}</span>
           <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>{fmtDate(item.created_at)}</span>
         </Space>
       ),

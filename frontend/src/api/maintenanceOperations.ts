@@ -1840,6 +1840,8 @@ export interface ReturnReceipt {
   qty: string;
   /**逐件 SN 凭证（v1.36）：非空时长度恒等于数量；导入行/未登记者为空数组。 */
   serial_numbers?: string[];
+  /** 导入来源中的备件/整机 SN，仅展示，不参与逐件 SN 数量校验。 */
+  source_serial_number?: string | null;
   condition: "成品" | "坏品" | "废品" | string | null;
   note: string | null;
   evidence_ref: string | null;
@@ -1847,6 +1849,8 @@ export interface ReturnReceipt {
   line_status: "active" | "voided" | string;
   version: number;
   created_by: string;
+  /** 当前账号姓名；原始 created_by 继续作为审计身份。 */
+  created_by_name?: string | null;
   created_at: string | null;
   updated_by: string | null;
   updated_at: string | null;

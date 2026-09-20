@@ -151,3 +151,36 @@ describe("返还台账的登记、更正和加载恢复", () => {
     for (const name of ["登记返还", "修改", "作废", "导入入库单"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
   });
 });
+
+
+describe("返还台账姓名与 SN 展示", () => {
+  it("显示账号姓名并优先展示逐件 SN，保留原凭据和备注", async () => {
+    mocks.search.mockResolvedValue({ data: { items: [{ ...receipt, created_by: "13800000001", created_by_name: "合成登记人", serial_numbers: ["000007", "000008"], source_serial_number: "OLD-SN" }], total: 1 } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    const name = await screen.findByText("合成登记人");
+    const row = name.closest("tr")!;
+    expect(within(row).queryByText("13800000001")).toBeNull();
+    const serials = within(row).getByText(/000007\s+000008/);
+    const cell = serials.closest("td")!;
+    expect(cell.textContent).toContain("SN（2 个）000007\n000008");
+    expect(cell.textContent!.indexOf("000007")).toBeLessThan(cell.textContent!.indexOf("旧凭据"));
+    expect(within(cell).queryByText("OLD-SN")).toBeNull();
+    expect(within(row).getByText("旧备注")).toBeTruthy();
+  });
+
+  it("导入记录展示来源 SN，未填姓名的数字账号不显示手机号", async () => {
+    mocks.search.mockResolvedValue({ data: { items: [{ ...receipt, created_by: "13800000001", created_by_name: null, serial_numbers: [], source_serial_number: "000009" }], total: 1 } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    expect(await screen.findByText("000009")).toBeTruthy();
+    expect(screen.getByText("未填写姓名")).toBeTruthy();
+    expect(screen.queryByText("13800000001")).toBeNull();
+  });
+
+  it("没有 SN 时回退凭据，再回退单号，旧姓名仍可显示", async () => {
+    mocks.search.mockResolvedValue({ data: { items: [{ ...receipt, receipt_id: "evidence", pn: "PN-EVIDENCE" }, { ...receipt, receipt_id: "head", pn: "PN-HEAD", evidence_ref: null, head_no: "RKD-FALLBACK" }], total: 2 } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    expect(await screen.findByText("RKD-FALLBACK")).toBeTruthy();
+    expect(screen.getByText("旧凭据")).toBeTruthy();
+    expect(screen.getAllByText("实名用户")).toHaveLength(2);
+  });
+});
