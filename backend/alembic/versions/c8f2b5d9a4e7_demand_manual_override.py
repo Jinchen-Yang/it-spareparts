@@ -48,6 +48,16 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    # Manual edits protected only by this ledger are lost on downgrade;
-    # the WBDD upsert will revert those fields on next import. Documented.
+    protected = op.get_bind().execute(sa.text(
+        f"SELECT count(*) FROM {_TABLE} "
+        f"WHERE manual_override <> '{{}}'::jsonb"
+    )).scalar()
+    if protected:
+        raise RuntimeError(
+            f"downgrade refused: {protected} demand lines carry field-level "
+            "override protection; clearing them would let the next WBDD "
+            "import silently revert manual edits. Export/clear overrides first, "
+            "or keep the additive schema (old app ignores the column) and "
+            "suspend WBDD imports during emergency rollback"
+        )
     op.drop_column(_TABLE, "manual_override")

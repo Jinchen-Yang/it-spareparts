@@ -38,4 +38,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    with_data = op.get_bind().execute(sa.text(
+        f"SELECT count(*) FROM {_TABLE} "
+        f"WHERE jsonb_array_length(serial_numbers) > 0"
+    )).scalar()
+    if with_data:
+        raise RuntimeError(
+            f"downgrade refused: {with_data} return receipt rows carry recorded "
+            "serial numbers; export them before dropping the column"
+        )
     op.drop_column(_TABLE, "serial_numbers")

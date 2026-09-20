@@ -60,6 +60,18 @@ def _make_project(db, *, tag: str, source_order_id: str) -> MaintenanceProject:
     return project
 
 
+def _make_project_standalone(db, *, tag: str) -> MaintenanceProject:
+    project = MaintenanceProject(
+        project_id=f"proj-{tag}-standalone",
+        display_name=f"项目{tag}", project_code=f"PC-{tag}",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    db.commit()
+    return project
+
+
 def _seed_line(db, *, order_raw="M-E1", line_raw="ML-E1", pn="PN-E1",
                qty="2") -> tuple[FMaintenanceOrder, FMaintenanceLine]:
     """走真实 loader 建行（skip 模式 = 首次导入语义），保证 schema 完整。"""
@@ -89,7 +101,9 @@ def test_patch_then_reimport_preserves_override(db):
     assert result["qty"] == "9.000"
     assert line.manual_override["qty"]["value"] == "9.000"
     assert line.manual_override["qty"]["source_value"] == "2.000"
-    assert line.edited_source == "page_manual"
+    # P1#4 修正：真实 WBDD 行的字段覆盖不升格 edited_source（行来源仍 wbdd，
+    # 删单对账照常；保护由 override 字段级承担）
+    assert line.edited_source == "wbdd"
 
     # 重导（upsert 模式，qty=5 + 新描述）
     orders = {order.raw_order_id: f.maintenance_head(order.raw_order_id, on=date(2026, 3, 1))}
@@ -141,15 +155,31 @@ def test_workbook_manual_rows_also_protected(db):
 
 
 def test_snapshot_diff_excludes_page_manual(db):
-    """手工行不在氚云导出里 → snapshot_diff 不报 missing（防一键作废陷阱）。"""
-    order, line = _seed_line(db, order_raw="M-E4", line_raw="ML-E4", pn="PN-E4")
-    line.edited_source = "page_manual"
+    """手工建的单头（page-manual- 前缀）不参与删单比对（防一键作废陷阱）。"""
+    # 真实链路：create_manual_demand_line 建的头带 page-manual- 前缀
+    project = _make_project_standalone(db, tag="E4P")
+    db.add(DimPart(pn_std="PN-E4", status="active"))
     db.commit()
+    result = manual.create_manual_demand_line(
+        db, order_date=date(2026, 3, 1), project_id=project.project_id,
+        pn_std="PN-E4", qty=1, reason="t", operated_by="tester")
+    db.commit()
+    manual_order = db.execute(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.raw_order_id.startswith("page-manual-"))).scalars().all()
+    assert any(o.order_no == result["order_no"] for o in manual_order)
 
     diff = maintenance_wbdd_import.snapshot_diff(
         db, {"SOME-OTHER-ORDER"}, [date(2026, 3, 1), date(2026, 3, 1)])
-    assert order.order_no not in diff["sample_order_nos"]
-    assert diff["missing_orders"] == 0
+    assert result["order_no"] not in diff["sample_order_nos"]
+    # 回归：被改过字段的普通 WBDD 行仍参与对账（P1#4）
+    order2, line2 = _seed_line(db, order_raw="M-E4B", line_raw="ML-E4B", pn="PN-E4B")
+    _make_project(db, tag="E4B", source_order_id=order2.raw_order_id)
+    manual.patch_demand_line(db, raw_line_id=line2.raw_line_id,
+                             updates={"qty": 5}, reason="t", operated_by="t")
+    db.commit()
+    diff2 = maintenance_wbdd_import.snapshot_diff(
+        db, {"SOME-OTHER"}, [date(2026, 3, 1), date(2026, 3, 1)])
+    assert order2.order_no in [o for o in diff2["sample_order_nos"]] or diff2["missing_orders"] >= 1
 
 
 def test_snapshot_diff_still_reports_wbdd_missing(db):

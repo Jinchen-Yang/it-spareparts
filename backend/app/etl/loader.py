@@ -422,20 +422,36 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
 
     # SET 子句：白名单列中可能被保护的列（editable 白名单 ∩ update_cols）
     from app.services.maintenance_demand_manual import DEMAND_LINE_EDITABLE_FIELDS
-    protectable = [c for c in update_cols if c in DEMAND_LINE_EDITABLE_FIELDS]
+    # part_id 是 PN 身份三元组的一环：PN 被 override 时 part_id 必须一并保护，
+    # 否则重导旧 PN 会把身份拽回（显示 B 成本按 A 的错位）。
+    protectable = [c for c in update_cols
+                   if c in DEMAND_LINE_EDITABLE_FIELDS or c == "part_id"]
     for chunk in _chunks(rows):
         stmt = pg_insert(FMaintenanceLine).values(chunk)
         set_ = {}
+        from sqlalchemy import case as _sa_case, or_ as _sa_or
+
+        def _protected_cond(col_name: str):
+            """SQL 级保护条件：override 命中该字段，或（part_id 且 PN 任一被
+            override——身份三元组联动），或行本身是手工行。"""
+            direct = FMaintenanceLine.manual_override.op('?')(col_name)
+            if col_name == "part_id":
+                pn_guard = _sa_or(
+                    FMaintenanceLine.manual_override.op('?')("pn_std"),
+                    FMaintenanceLine.manual_override.op('?')("pn_raw"),
+                )
+                return _sa_or(direct, pn_guard)
+            return direct
+
         for c in update_cols:
             col = getattr(FMaintenanceLine, c)
             if c in protectable:
                 # 三态保护（读库时逐行判定，SQL 级表达为：
-                #   override 有该字段 → 保留现值
+                #   override 有该字段（part_id 联动 PN 键）→ 保留现值
                 #   edited_source != 'wbdd' → 保留现值（总表/页面手工值）
                 #   否则 → 取 excluded 新值
-                from sqlalchemy import case as _sa_case
                 set_[c] = _sa_case(
-                    (FMaintenanceLine.manual_override.op('?')(c), col),
+                    (_protected_cond(c), col),
                     (FMaintenanceLine.edited_source != 'wbdd', col),
                     else_=stmt.excluded[c],
                 )
@@ -454,11 +470,21 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         eid, before, override, edited_source = prev
         manual_protected = edited_source != "wbdd"
         after = {c: r.get(c) for c in update_cols}
-        # 有效值 = override/手工行保护下的「导入视角」值（受保护列取库上现值）
+        # 有效值 = override/手工行保护下的「导入视角」值（受保护列取库上现值）。
+        # 保护判定必须与 SQL _protected_cond 完全一致：part_id 除自身 override
+        # 外还受 PN 联动（pn_std/pn_raw 任一被 override 即保护）——否则人工
+        # PN=B 重导 A 时 DB part_id 保持 B、audit after_json 却伪记 A，
+        # changed_keys 误报（交叉审查 ②）。
+        def _python_protected(col_name: str) -> bool:
+            ov = override or {}
+            if col_name == "part_id":
+                return ("part_id" in ov or "pn_std" in ov or "pn_raw" in ov)
+            return col_name in ov
+
         effective_before = dict(before)
         effective_after = dict(after)
         for c in protectable:
-            if c in (override or {}) or manual_protected:
+            if _python_protected(c) or manual_protected:
                 effective_after[c] = before.get(c)
         if audit is not None and any(
             _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))

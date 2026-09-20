@@ -401,6 +401,10 @@ class DemandLinePatchRequest(BaseModel):
 
     updates: dict  # 字段白名单在 service 层失败关闭校验
     reason: str = Field(min_length=1)
+    # OCC 必填（新接口从未上线，无须兼容无 token 的旧客户端——省略即 422，
+    # 失败关闭，杜绝绕过并发校验静默覆写）。
+    expected_digest: str = Field(min_length=64, max_length=64,
+                                 pattern=r"^[a-f0-9]{64}$")
 
 
 class DemandLineCreateRequest(BaseModel):
@@ -414,6 +418,9 @@ class DemandLineCreateRequest(BaseModel):
     serial_numbers: str | None = Field(default=None, max_length=32767)
     description: str | None = Field(default=None, max_length=32767)
     reason: str = Field(min_length=1)
+    # 幂等键必填（新接口未上线，无旧客户端须兼容）：防网络丢响应重试重复建行。
+    idempotency_key: str = Field(min_length=8, max_length=128,
+                                 pattern=r"^[A-Za-z0-9._:-]+$")
 
 
 class DemandLineOverrideClearRequest(BaseModel):
@@ -421,6 +428,9 @@ class DemandLineOverrideClearRequest(BaseModel):
 
     field_name: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1)
+    # OCC 必填（同 DemandLinePatchRequest——省略即 422，失败关闭）。
+    expected_digest: str = Field(min_length=64, max_length=64,
+                                 pattern=r"^[a-f0-9]{64}$")
 
 
 def _raise_manual_error(exc: Exception) -> None:
@@ -428,6 +438,9 @@ def _raise_manual_error(exc: Exception) -> None:
 
     if isinstance(exc, maintenance_demand_manual.DemandManualConflict):
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    # scope 违规是权限问题 → 403（区别于普通业务校验 400）
+    if "项目可见范围" in str(exc):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
@@ -445,13 +458,17 @@ def patch_demand_line(
     from app.services import maintenance_demand_manual
 
     operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
     record_access_log(ctx, "demand_line_patch", "maintenance_demands",
                       {"raw_line_id": raw_line_id,
-                       "fields": sorted(set(body.updates))})
+                       "fields": sorted(set(body.updates)),
+                       "scope": "full" if allowed_project_ids is None else "owned"})
     try:
         result = maintenance_demand_manual.patch_demand_line(
             db, raw_line_id=raw_line_id, updates=body.updates,
             reason=body.reason, operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
+            expected_digest=body.expected_digest,
         )
         db.commit()
         return result
@@ -487,11 +504,15 @@ def create_demand_line(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "order_date 必须是 YYYY-MM-DD"
         ) from None
+    allowed_project_ids = scope_resolve(db, ctx)
     record_access_log(ctx, "demand_line_create", "maintenance_demands",
-                      {"project_id": body.project_id, "pn_std": body.pn_std})
+                      {"project_id": body.project_id, "pn_std": body.pn_std,
+                       "scope": "full" if allowed_project_ids is None else "owned"})
     try:
         result = maintenance_demand_manual.create_manual_demand_line(
             db, order_date=parsed_date, project_id=body.project_id,
+            allowed_project_ids=allowed_project_ids,
+            idempotency_key=body.idempotency_key,
             pn_std=body.pn_std, qty=body.qty, return_qty=body.return_qty,
             serial_numbers=body.serial_numbers, description=body.description,
             reason=body.reason, operated_by=operated_by,
@@ -523,12 +544,16 @@ def clear_override(
     from app.services import maintenance_demand_manual
 
     operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
     record_access_log(ctx, "demand_line_override_clear", "maintenance_demands",
-                      {"raw_line_id": raw_line_id, "field": body.field_name})
+                      {"raw_line_id": raw_line_id, "field": body.field_name,
+                       "scope": "full" if allowed_project_ids is None else "owned"})
     try:
         result = maintenance_demand_manual.clear_override(
             db, raw_line_id=raw_line_id, field=body.field_name,
             reason=body.reason, operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
+            expected_digest=body.expected_digest,
         )
         db.commit()
         return result
@@ -601,8 +626,12 @@ def list_demand_lines(
                FMaintenanceLine.is_active.is_(True))
         .order_by(FMaintenanceLine.line_no)
     ).scalars().all()
-    return {"items": [
-        {
+    from app.services.maintenance_demand_manual import (
+        _digest as _line_digest, _line_snapshot,
+    )
+
+    def _row_out(r) -> dict:
+        return {
             "raw_line_id": r.raw_line_id,
             "order_raw_id": source_order_id,
             "order_no": order.order_no,
@@ -618,5 +647,11 @@ def list_demand_lines(
             "manual_override": dict(r.manual_override or {}),
             "is_active": r.is_active,
         }
+
+    # digest 必须与 PATCH/clear 的 OCC 输入同源（canonical _line_snapshot）。
+    # 对含 order_raw_id/order_no/line_no/is_active 的展示包 hash 会造出另一个
+    # digest，前端 GET 后第一次 PATCH 就 409。
+    return {"items": [
+        {**_row_out(r), "digest": _line_digest(_line_snapshot(r))}
         for r in rows
     ]}
