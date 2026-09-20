@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Alert, Button, Input, InputNumber, Modal, Space, Table, Tag, Typography, message,
+  Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -9,6 +9,7 @@ import {
   listDemandLines,
   patchDemandLine,
 } from "../../api/maintenanceDemands";
+import DemandLineBatchEdit from "./DemandLineBatchEdit";
 
 const { Text } = Typography;
 
@@ -96,6 +97,9 @@ export default function DemandLinesEditor({
   } | null>(null);
   /** 撤销在途（防双击）。 */
   const [clearing, setClearing] = useState(false);
+  /** 表格多选只保存 raw id；打开批量弹窗时再冻结完整行快照。 */
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [batchEditingRows, setBatchEditingRows] = useState<DemandLineRow[] | null>(null);
   const seq = useRef(0);
   /** 操作代次：关闭表单/撤销弹窗、换 sourceOrderId、卸载都推进。 */
   const opEpoch = useRef(0);
@@ -111,6 +115,8 @@ export default function DemandLinesEditor({
       const resp = await listDemandLines(sourceOrderId);
       if (seq.current !== current) return null;
       setRows(resp.data.items);
+      setSelectedRowKeys((current) => current.filter((key) =>
+        resp.data.items.some((row) => row.raw_line_id === key)));
       return resp.data.items;
     } catch (err) {
       if (seq.current === current) {
@@ -139,6 +145,8 @@ export default function DemandLinesEditor({
     setClearing(false);
     setSaveError(null);
     setConflict(false);
+    setSelectedRowKeys([]);
+    setBatchEditingRows(null);
     setError(null);
     return () => {
       opEpoch.current += 1;
@@ -240,7 +248,7 @@ export default function DemandLinesEditor({
     try {
       await patchDemandLine(editing.raw_line_id, updates, reason.trim(), editing.digest);
       if (opEpoch.current !== epoch) return;
-      message.success("明细行已修改（override 保护中，Excel 重导不会覆盖）");
+      message.success("明细行已修改");
       setEditing(null);
       await load();
     } catch (err) {
@@ -282,13 +290,13 @@ export default function DemandLinesEditor({
         // 禁确认，只给关闭指引。
         setClearAsk({
           ...clearAsk, conflict: false, gone: true,
-          error: "该行最新数据里这个字段已没有 override（可能已被他人撤销）；请关闭弹窗查看最新行。",
+          error: "该行最新数据里这个字段已没有待撤销的修改（可能已被他人撤销）；请关闭弹窗查看最新行。",
         });
         return;
       }
       setClearAsk({
         ...clearAsk, row: fresh, conflict: false, gone: false,
-        error: "已重新加载最新数据（digest 已更新）；请核对后重新点「确认撤销」。",
+        error: "已重新加载最新数据；请核对后重新点「确认撤销」。",
       });
     } finally {
       if (opEpoch.current === epoch) writeLock.current = false;
@@ -402,20 +410,34 @@ export default function DemandLinesEditor({
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          白名单字段可编辑：数量 / 退货数量 / SN / 描述 / PN。修改后字段进入 override
-          保护（Excel 重导不覆盖），可逐字段撤销恢复氚云原值。成本列与单头信息请走既有通道。
+          可修改数量、退货数量、SN、描述和型号；导入遇到已修改字段会按冲突规则处理；
+          撤销可恢复该字段首次手工修改前的值。成本列与单头信息请走既有通道。
         </Text>
         {error ? (
           <Alert type="error" showIcon message={error} action={
             <Button size="small" onClick={() => { void load(); }}>重试</Button>
           } />
         ) : null}
+        <div>
+          <Button
+            type="primary"
+            disabled={!selectedRowKeys.length || loading}
+            onClick={() => setBatchEditingRows(rows.filter((row) =>
+              selectedRowKeys.includes(row.raw_line_id)))}
+          >
+            批量修改选中行{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ""}
+          </Button>
+        </div>
         <Table<DemandLineRow>
           rowKey="raw_line_id"
           size="small"
           loading={loading}
           dataSource={rows}
           columns={columns}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys as string[]),
+          }}
           pagination={false}
           scroll={{ x: 880 }}
           locale={{ emptyText: "该单没有有效明细行" }}
@@ -477,7 +499,7 @@ export default function DemandLinesEditor({
           <div>
             <Text type="secondary" style={{ fontSize: 12, display: "block" }}>修改原因（必填，审计留痕）</Text>
             <Input.TextArea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
-              placeholder="如：氚云数量录入错误，按实物更正" />
+              placeholder="如：数量录入错误，按实物更正" />
           </div>
         </Space>
       </Modal>
@@ -501,10 +523,31 @@ export default function DemandLinesEditor({
       >
         <Space direction="vertical" size={8} style={{ width: "100%" }}>
           <Text>
-            撤销后该字段恢复氚云原始值（source_value 快照），不再受页面直改保护，
-            后续 Excel 重导会正常覆盖。PN 是一组身份，撤销 PN 会同时恢复
-            pn_std / pn_raw / 型号主数据关联。
+            撤销后会恢复该字段首次手工修改前的值；撤销型号时会一起恢复原型号及其关联。
+            之后再导入数据时，会按正常冲突规则处理该字段。
           </Text>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, display: "block" }}>选择要撤销的字段</Text>
+            <Select
+              aria-label="选择要撤销的字段"
+              style={{ width: 260 }}
+              value={clearAsk?.field}
+              disabled={clearing || clearAsk?.gone}
+              options={clearAsk ? OVERRIDABLE_FIELDS
+                .filter(({ field }) => Boolean(clearAsk.row.manual_override?.[field]))
+                .map(({ field, label }) => ({
+                  value: field,
+                  label: field === "pn_std" ? `${label}（型号及其关联一起恢复）` : label,
+                })) : []}
+              onChange={(field) => setClearAsk((previous) => previous ? {
+                ...previous,
+                field,
+                conflict: false,
+                error: null,
+                gone: false,
+              } : previous)}
+            />
+          </div>
           {clearAsk?.error ? (
             <Alert
               type={clearAsk.conflict ? "warning" : "error"}
@@ -525,11 +568,20 @@ export default function DemandLinesEditor({
               onChange={(e) => setClearAsk((prev) =>
                 prev ? { ...prev, reason: e.target.value } : prev)}
               rows={2}
-              placeholder="如：页面改错了，恢复氚云原值"
+              placeholder="如：页面改错了，恢复修改前的值"
             />
           </div>
         </Space>
       </Modal>
+
+      {batchEditingRows ? (
+        <DemandLineBatchEdit
+          sourceOrderId={sourceOrderId}
+          rows={batchEditingRows}
+          onClose={() => setBatchEditingRows(null)}
+          onCommitted={load}
+        />
+      ) : null}
     </Modal>
   );
 }

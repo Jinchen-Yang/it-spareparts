@@ -28,6 +28,7 @@ import type { WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImp
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
+import DemandLineBatchCreate from "./DemandLineBatchCreate";
 import DemandLineCreate from "./DemandLineCreate";
 import DemandLinesEditor from "./DemandLinesEditor";
 
@@ -64,6 +65,7 @@ export function MaintenanceDemandsPage() {
   const [linesEditorFor, setLinesEditorFor] = useState<MaintenanceDemandSummary | null>(null);
   // v1.36 Phase E：页面直建手工需求行（独立新单）
   const [creatingLine, setCreatingLine] = useState(false);
+  const [creatingBatch, setCreatingBatch] = useState(false);
 
   // ---- 区块一：氚云快照同步 + 差异清单 ----
   const [missing, setMissing] = useState<WbddMissing | null>(null);
@@ -309,12 +311,12 @@ export function MaintenanceDemandsPage() {
       width: 340,
       render: (_: unknown, row) => <OrderContactInfo contact={row} />,
     },
-    ...(canVoid
+    ...(canVoid || canEditLines
       ? ([
           {
             title: "操作",
             key: "actions",
-            width: 120,
+            width: 160,
             render: (_: unknown, row: MaintenanceDemandSummary) =>
               isVoided(row) ? (
                 canRestore ? (
@@ -329,13 +331,15 @@ export function MaintenanceDemandsPage() {
                       编辑明细
                     </Button>
                   ) : null}
-                  <Button
-                    size="small"
-                    danger
-                    onClick={() => openVoidModal([row.source_order_id])}
-                  >
-                    作废
-                  </Button>
+                  {canVoid ? (
+                    <Button
+                      size="small"
+                      danger
+                      onClick={() => openVoidModal([row.source_order_id])}
+                    >
+                      作废
+                    </Button>
+                  ) : null}
                 </Space>
               ),
           },
@@ -361,9 +365,14 @@ export function MaintenanceDemandsPage() {
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12} align="center">
             {canEditLines ? (
-              <Button type="primary" onClick={() => setCreatingLine(true)}>
-                新增手工需求
-              </Button>
+              <>
+                <Button type="primary" onClick={() => setCreatingLine(true)}>
+                  新增手工需求
+                </Button>
+                <Button onClick={() => setCreatingBatch(true)}>
+                  批量新增需求
+                </Button>
+              </>
             ) : null}
             {canImport ? (
               <Upload
@@ -548,6 +557,12 @@ export function MaintenanceDemandsPage() {
         <DemandLineCreate
           onClose={() => setCreatingLine(false)}
           onCreated={() => { void refreshAfterCommit(false); }}
+        />
+      ) : null}
+      {creatingBatch ? (
+        <DemandLineBatchCreate
+          onClose={() => setCreatingBatch(false)}
+          onCommitted={() => refreshAfterCommit(false)}
         />
       ) : null}
     </Space>

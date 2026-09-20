@@ -51,6 +51,17 @@ vi.mock("../../DemandLineCreate", () => ({
   ),
 }));
 
+vi.mock("../../DemandLineBatchCreate", () => ({
+  default: ({ onCommitted, onClose }: {
+    onCommitted: () => void | Promise<unknown>; onClose: () => void;
+  }) => (
+    <div>
+      <button onClick={() => { void onCommitted(); }}>桩批量保存</button>
+      <button onClick={onClose}>桩批量关闭</button>
+    </div>
+  ),
+}));
+
 import PartsOrdersTab from "../PartsOrdersTab";
 
 const stat = <T,>(value: T) => ({ state: "ready" as const, value, as_of: null });
@@ -462,6 +473,24 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     expect(screen.queryByRole("button", { name: /新\s*增\s*需\s*求/ })).toBeNull();
   });
 
+  it("有权限时批量入口打开组件，部分成功回读走 onChanged", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
+    const onChanged = vi.fn().mockResolvedValue(true);
+    render(
+      <PartsOrdersTab
+        projectId="p1"
+        exportBase="合成项目A"
+        canUpload={false}
+        contractNos={[]}
+        onChanged={onChanged}
+        registerRefresh={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "批量新增需求" }));
+    fireEvent.click(screen.getByText("桩批量保存"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
+
   it("有权限时入口打开对话框；创建成功后走 onChanged（父级 refreshProject 机制）", async () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const onChanged = vi.fn().mockResolvedValue(true);
@@ -476,7 +505,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
       />,
     );
     await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: /新\s*增\s*需\s*求/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
     await screen.findByText("桩创建成功");
     fireEvent.click(screen.getByText("桩创建成功"));
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
@@ -500,7 +529,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 200, contract_no: "XSDD-2",
     }));
-    fireEvent.click(screen.getByRole("button", { name: /新\s*增\s*需\s*求/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
     fireEvent.click(await screen.findByText("桩创建成功"));
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
     // 清掉合同筛选后回读：需求单段按「全部合同」重新拉
@@ -524,7 +553,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
       />,
     );
     await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: /新\s*增\s*需\s*求/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
     await screen.findByText("桩创建成功");
     // 路由切到项目 p2：对话框必须关闭（旧项目的表单不能带进新项目）
     mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([orderRow("WBDD-9", "XSDD-1")]));

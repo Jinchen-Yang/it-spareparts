@@ -20,6 +20,12 @@ vi.mock("../../../api/maintenanceDemands", async () => {
   };
 });
 
+vi.mock("../DemandLineBatchCreate", () => ({
+  default: ({ onCommitted }: { onCommitted: () => void | Promise<unknown> }) => (
+    <button onClick={() => { void onCommitted(); }}>桩全局批量保存</button>
+  ),
+}));
+
 vi.mock("../../../api/maintenanceWbddImport", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
     "../../../api/maintenanceWbddImport",
@@ -96,7 +102,11 @@ async function confirmVoidWithReason(reason: string) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  searchMaintenanceDemands.mockReset();
+  voidFastMaintenanceDemands.mockReset();
+  restoreMaintenanceDemand.mockReset();
+  uploadWbdd.mockReset();
+  getWbddMissing.mockReset();
   localStorage.clear();
   getWbddMissing.mockResolvedValue({ data: missingPayload });
   searchMaintenanceDemands.mockResolvedValue(demandPage([demandRow("RAW-9", "XQD-009")]));
@@ -121,6 +131,34 @@ afterEach(() => {
 });
 
 describe("需求单与数据同步页", () => {
+  it("需求管理权限控制单条、批量新增与明细编辑入口", async () => {
+    render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    expect(screen.queryByRole("button", { name: "新增手工需求" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "批量新增需求" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "编辑明细" })).toBeNull();
+    cleanup();
+
+    localStorage.setItem("permissions", JSON.stringify({
+      action_maintenance_demand_manage: true,
+    }));
+    render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    expect(screen.getByRole("button", { name: "新增手工需求" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "批量新增需求" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "编辑明细" })).toBeTruthy();
+  });
+
+  it("全局批量新增入口在部分成功后刷新当前需求列表", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      action_maintenance_demand_manage: true,
+    }));
+    render(<MaintenanceDemandsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "批量新增需求" }));
+    fireEvent.click(screen.getByText("桩全局批量保存"));
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+  });
+
   it("搜索结果按 WBDD 展示各自联系信息，空字段显示 — 并区分无权限", async () => {
     const address = "合成长地址路".repeat(70) + "9号楼";
     searchMaintenanceDemands.mockResolvedValue(demandPage([

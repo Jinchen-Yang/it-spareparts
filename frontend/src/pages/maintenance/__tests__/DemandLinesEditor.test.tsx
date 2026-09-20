@@ -73,11 +73,11 @@ const qtyInput = (dialog: HTMLElement) =>
 
 /** 编辑弹窗的原因框（按 placeholder 精确定位，避开 SN/描述框）。 */
 const editReason = (dialog: HTMLElement) =>
-  within(dialog).getByPlaceholderText("如：氚云数量录入错误，按实物更正") as HTMLTextAreaElement;
+  within(dialog).getByPlaceholderText("如：数量录入错误，按实物更正") as HTMLTextAreaElement;
 
 /** 撤销弹窗的原因框。 */
 const clearReason = (dialog: HTMLElement) =>
-  within(dialog).getByPlaceholderText("如：页面改错了，恢复氚云原值") as HTMLTextAreaElement;
+  within(dialog).getByPlaceholderText("如：页面改错了，恢复修改前的值") as HTMLTextAreaElement;
 
 beforeEach(() => {
   // mockReset 清掉 implementation 与 once 队列；每个用例自己重设独立数据，
@@ -214,6 +214,34 @@ describe("DemandLinesEditor 撤销（override clear）", () => {
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
   });
 
+  it("可从本行实际修改字段中选择任意字段撤销，并保留已填原因", async () => {
+    mocks.list.mockResolvedValue(listResp([row({
+      qty: "6.000",
+      description: "新描述",
+      manual_override: {
+        description: { value: "新描述", source_value: "旧描述", updated_by: "alice", updated_at: "2026-09-20T00:00:00" },
+        qty: { value: 6, source_value: 5, updated_by: "alice", updated_at: "2026-09-20T00:00:00" },
+      },
+    })]));
+    mocks.clear.mockResolvedValue({ data: { changed: true, digest: D2 } });
+    render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" onClose={vi.fn()} />);
+    fireEvent.click((await screen.findAllByRole("button", { name: /^撤\s*销$/ }))[0]);
+    const dialog = await clearDialog();
+    fireEvent.change(clearReason(dialog), { target: { value: "恢复数量" } });
+    const select = within(dialog).getByRole("combobox", { name: "选择要撤销的字段" });
+    fireEvent.mouseDown(select);
+    await waitFor(() => expect(document.querySelector(
+      '.ant-select-item-option[title="数量"]',
+    )).toBeTruthy());
+    fireEvent.click(document.querySelector('.ant-select-item-option[title="数量"]')!);
+    expect(clearReason(dialog).value).toBe("恢复数量");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: /确\s*认\s*撤\s*销/ }));
+    });
+    await waitFor(() => expect(mocks.clear).toHaveBeenCalledTimes(1));
+    expect(mocks.clear.mock.calls[0]).toEqual(["L1", "qty", "恢复数量", D1]);
+  });
+
   it("撤销 409：弹窗保留原因 → 点重载换新 digest → 重新确认成功（不自动重试）", async () => {
     mocks.list
       .mockResolvedValueOnce(listResp([overridden()]))
@@ -238,7 +266,7 @@ describe("DemandLinesEditor 撤销（override clear）", () => {
     expect(clearReason(dialog).value).toBe("页面改错了，恢复原值");
     // 点重载：row/digest 换成服务器最新
     fireEvent.click(within(dialog).getByRole("button", { name: /重新加载最新数据/ }));
-    await waitFor(() => expect(screen.getByText(/digest 已更新/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/已重新加载最新数据/)).toBeTruthy());
     // 重新确认：带新 digest D2，成功
     await act(async () => {
       fireEvent.click(within(dialog).getByRole("button", { name: /确\s*认\s*撤\s*销/ }));
@@ -262,12 +290,29 @@ describe("DemandLinesEditor 撤销（override clear）", () => {
     });
     await waitFor(() => expect(mocks.clear).toHaveBeenCalledTimes(1));
     fireEvent.click(within(dialog).getByRole("button", { name: /重新加载最新数据/ }));
-    await waitFor(() => expect(screen.getByText(/已没有 override/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/已没有待撤销的修改/)).toBeTruthy());
     const ok = within(dialog).getByRole("button", { name: /确\s*认\s*撤\s*销/ });
     await waitFor(() => expect(ok).toBeDisabled());
     await act(async () => { fireEvent.click(ok); });
     await act(async () => { await Promise.resolve(); });
     expect(mocks.clear).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DemandLinesEditor 批量选择入口", () => {
+  it("勾选多行后打开批量修改组件", async () => {
+    mocks.list.mockResolvedValue(listResp([
+      row(),
+      row({ raw_line_id: "L2", line_no: 2, pn_std: "PN-B", digest: D2 }),
+    ]));
+    render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" onClose={vi.fn()} />);
+    await screen.findByText("PN-B");
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+    fireEvent.click(checkboxes[2]);
+    const open = screen.getByRole("button", { name: /批量修改选中行（2）/ });
+    fireEvent.click(open);
+    expect(await screen.findByText("批量修改选中行（2 行）")).toBeTruthy();
   });
 });
 
