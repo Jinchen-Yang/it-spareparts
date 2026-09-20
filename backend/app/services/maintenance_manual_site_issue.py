@@ -346,9 +346,39 @@ def preview_manual_site_issue(
     if project is None:
         raise MaintenanceOperationError("项目不存在")
 
+    requested_ids = [
+        line["issue_line_id"] for line in normalized if line.get("issue_line_id")
+    ]
+    if len(set(requested_ids)) != len(requested_ids):
+        raise MaintenanceOperationError("领用明细行不能在同一单中重复出现")
+    existing_lines = {
+        line.issue_line_id: line
+        for line in db.scalars(
+            select(MaintenanceSiteIssueLine)
+            .join(
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+            )
+            .where(
+                MaintenanceSiteIssueLine.issue_line_id.in_(requested_ids),
+                MaintenanceSiteIssueLine.is_active.is_(True),
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssue.source == SOURCE,
+                MaintenanceSiteIssue.normalized_status.in_(["confirmed", "corrected"]),
+            )
+        )
+    } if requested_ids else {}
+    if set(existing_lines) != set(requested_ids):
+        raise MaintenanceOperationError(
+            "领用明细行不属于当前项目的有效人工登记单，请刷新后重试"
+        )
+
     preview_lines: list[MaintenanceSiteIssueLine] = []
     preview_issue_id = f"preview:{uuid4()}"
     for line_no, requested in enumerate(normalized, start=1):
+        existing = existing_lines.get(requested.get("issue_line_id"))
+        # 与 PATCH 换绑规则一致：人工价格证据仅属于原型号，预览只复制到临时行。
+        same_part = existing is not None and existing.part_id == requested["part_id"]
         preview_lines.append(
             MaintenanceSiteIssueLine(
                 issue_line_id=f"preview:{uuid4()}",
@@ -361,7 +391,11 @@ def preview_manual_site_issue(
                 demand_order_no=requested.get("demand_order_no"),
                 remark=requested.get("remark"),
                 no_return=requested.get("no_return"),
-                manual_unit_cost=None,
+                manual_unit_cost=existing.manual_unit_cost if same_part else None,
+                manual_unit_cost_inc_tax=(
+                    existing.manual_unit_cost_inc_tax if same_part else None
+                ),
+                manual_evidence=existing.manual_evidence if same_part else None,
                 reference_sample_ids=[],
                 reference_sample_count=0,
                 reference_samples=[],

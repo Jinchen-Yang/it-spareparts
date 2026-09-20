@@ -428,6 +428,102 @@ def test_manual_create_resolves_demand_price_and_recalculates_on_change(db):
     assert updated["cost_amount_ex_tax"] == "150.00"
 
 
+def test_manual_preview_preserves_only_owned_same_part_manual_cost(db):
+    """人工补价预览与更正同价；跨项目、无效身份拒绝，换型号清旧价。"""
+    from app.services import maintenance_project_operations as ops
+
+    project = _project(db, "project-preview-manual-cost")
+    other = _project(db, "project-preview-cost-other")
+    part = _part(db, "PN-PREVIEW-MANUAL-COST")
+    replacement = _part(db, "PN-PREVIEW-REPLACEMENT")
+    client = _client(db, username="manual_preview_cost_admin")
+    created = client.post(
+        f"/api/maintenance/site-issues/projects/{project.project_id}/manual",
+        json=_create_body([part], key=f"manual-priced-{uuid4().hex}"),
+    )
+    assert created.status_code == 201, created.text
+    issue = created.json()
+    line = issue["lines"][0]
+    filled = ops.fill_manual_cost(
+        db, project_id=project.project_id,
+        issue_line_id=line["issue_line_id"], version=line["version"],
+        manual_unit_cost=Decimal("40"), evidence="现场采购凭证",
+        reason="补齐缺价", operated_by="tester",
+    )
+    assert filled["manual_applied"] is True
+    db.commit()
+    preview_body = {
+        "issue_date": issue["issue_date"],
+        "receiver": issue["receiver"],
+        "issued_by": issue["issued_by"],
+        "site_location": issue["site_location"],
+        "lines": [{
+            "issue_line_id": line["issue_line_id"],
+            "part_id": part.id, "quantity": "3",
+        }],
+    }
+    preview_url = "/api/maintenance/site-issues/manual/preview?project_id="
+    for target_project, target_id in (
+        (other.project_id, line["issue_line_id"]),
+        (project.project_id, "missing-line-id"),
+    ):
+        rejected = client.post(preview_url + target_project, json={
+            **preview_body,
+            "lines": [{**preview_body["lines"][0], "issue_line_id": target_id}],
+        })
+        assert rejected.status_code == 400, rejected.text
+
+    audit_count = db.query(MaintenanceProjectOperationAudit).count()
+    preview = client.post(preview_url + project.project_id, json=preview_body)
+    assert preview.status_code == 200, preview.text
+    priced = preview.json()["lines"][0]
+    assert priced["cost_source"] == "manual"
+    assert priced["cost_amount_ex_tax"] == "120.00"
+    db.expire_all()
+    stored = db.get(MaintenanceSiteIssueLine, line["issue_line_id"])
+    assert stored.quantity == Decimal("2.000")
+    assert stored.version == filled["version"]
+    assert db.query(MaintenanceProjectOperationAudit).count() == audit_count
+
+    endpoint = f"/api/maintenance/site-issues/manual/{issue['issue_id']}"
+    patched = client.patch(endpoint, json={
+        **preview_body, "project_id": project.project_id,
+        "version": issue["version"],
+        "idempotency_key": f"manual-priced-edit-{uuid4().hex}",
+        "reason": "只更正数量，保留原人工价格",
+    })
+    assert patched.status_code == 200, patched.text
+    for field in ("cost_source", "unit_cost_ex_tax", "cost_amount_ex_tax",
+                  "cost_amount_inc_tax", "manual_evidence"):
+        assert priced[field] == patched.json()["lines"][0][field]
+
+    preview_body["lines"][0]["part_id"] = replacement.id
+    rebound_preview = client.post(preview_url + project.project_id, json=preview_body)
+    assert rebound_preview.status_code == 200, rebound_preview.text
+    assert rebound_preview.json()["lines"][0]["cost_source"] is None
+    assert rebound_preview.json()["lines"][0]["manual_unit_cost"] is None
+    rebound = client.patch(endpoint, json={
+        **preview_body, "project_id": project.project_id,
+        "version": patched.json()["version"],
+        "idempotency_key": f"manual-rebind-{uuid4().hex}",
+        "reason": "换型号不得沿用旧价格证据",
+    })
+    assert rebound.status_code == 200, rebound.text
+    assert rebound.json()["lines"][0]["cost_source"] is None
+    assert rebound.json()["lines"][0]["manual_evidence"] is None
+
+    # 同项目也不继承非页面来源或已软作废行的证据。
+    db.expire_all()
+    saved_issue = db.get(MaintenanceSiteIssue, issue["issue_id"])
+    saved_issue.source = "legacy"
+    db.commit()
+    assert client.post(preview_url + project.project_id, json=preview_body).status_code == 400
+    saved_issue.source = "page_manual"
+    db.get(MaintenanceSiteIssueLine, line["issue_line_id"]).is_active = False
+    db.commit()
+    assert client.post(preview_url + project.project_id, json=preview_body).status_code == 400
+
+
 def test_manual_demand_order_must_belong_to_same_project(db):
     project = _project(db, "project-manual-demand-scope")
     stranger = _project(db, "project-manual-demand-stranger")

@@ -1654,7 +1654,7 @@ def preview_manual_site_issue(
             site_location=body.site_location,
             lines=[line.model_dump() for line in body.lines],
         )
-    except maintenance_project_operations.operations.MaintenanceOperationError as exc:
+    except manual_service.MaintenanceOperationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
