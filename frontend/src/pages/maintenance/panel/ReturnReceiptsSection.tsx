@@ -15,6 +15,7 @@ import { readPermissionMap } from "../../../nav";
 import { raw, readError } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
 import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
+import ReturnReceiptBatchMaintenance from "./ReturnReceiptBatchMaintenance";
 import PanelActionBar from "./PanelActionBar";
 
 const { Text } = Typography;
@@ -133,9 +134,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
   const [demandFilter, setDemandFilter] = useState<string | undefined>();
   const filters = useRef<{ q?: string; source_order_id?: string; unassigned?: boolean }>({});
   const createAttempt = useRef<{ content: string; key: string } | null>(null);
+  // 批量修改/作废勾选（v1.36）：只存当前页有效行；分页/项目/筛选一变即清空，不跨项目缓存
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const perms = readPermissionMap();
   const canManage = !!perms.action_maintenance_bad_return_manage;
+  // 冻结勾选快照交给批量组件；列表刷新后选中集清空，旧请求不会污染新数据
+  const selectedReceipts = useMemo(
+    () => receipts.filter((item) => selectedIds.includes(item.receipt_id) && item.line_status === "active"),
+    [receipts, selectedIds],
+  );
 
   const loadDemands = useCallback(async (id: string) => {
     const seq = ++demandSeq.current;
@@ -210,6 +218,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     }
   }, [projectId]);
 
+  // 批量修改/作废收尾：清选择后逐步刷新，每步都核对 contextSeq——项目已切换时旧回调立即止步，
+  // 不让旧项目的 onChanged 污染新面板（load 自身也有只认最新一发的守卫，这里是回调链的闸）
+  const refreshAfterBatch = useCallback(async () => {
+    const seq = contextSeq.current;
+    setSelectedIds([]);
+    await load(page, includeVoided);
+    if (seq !== contextSeq.current) return;
+    if (onChanged) await onChanged();
+  }, [load, page, includeVoided, onChanged]);
+
   useEffect(() => {
     setPage(1);
     setIncludeVoided(false);
@@ -222,6 +240,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     setVoiding(false);
     setQuery("");
     setDemandFilter(undefined);
+    setSelectedIds([]);
     filters.current = {};
     void loadDemands(projectId);
     void load(1, false);
@@ -568,6 +587,23 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
               await load(page, includeVoided);
               if (onChanged) await onChanged();
             }} />
+            {selectedReceipts.length ? (
+              <>
+                {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
+                <ReturnReceiptBatchMaintenance
+                  key={`update-${projectId}`}
+                  mode="update"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+                <ReturnReceiptBatchMaintenance
+                  key={`void-${projectId}`}
+                  mode="void"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+              </>
+            ) : null}
           </>
         ) : undefined}
         workbook={canImport && canManage ? (
@@ -584,6 +620,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
               const next = !includeVoided;
               setIncludeVoided(next);
               setPage(1);
+              setSelectedIds([]);
               void load(1, next);
             }}
           >
@@ -606,7 +643,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           { title: "需求单返还汇总", dataIndex: "label" },
           { title: "已返还数量", dataIndex: "qty", render: fmtQty },
           { title: "操作", render: (_v, item) => <Button size="small" type="link" onClick={() => {
-            setDemandFilter(item.key); setPage(1);
+            setDemandFilter(item.key); setPage(1); setSelectedIds([]);
             filters.current = { ...filters.current, source_order_id: item.key === "unassigned" ? undefined : item.key, unassigned: item.key === "unassigned" };
             void load(1, includeVoided);
           }}>查看明细</Button> },
@@ -614,10 +651,10 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       /> : null}
       <Space wrap>
         <Input.Search value={query} allowClear placeholder="搜索返件 PN、凭据或备注" onChange={(event) => setQuery(event.target.value)} onSearch={(value) => {
-          filters.current = { ...filters.current, q: value }; setPage(1); void load(1, includeVoided);
+          filters.current = { ...filters.current, q: value }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }} style={{ width: 280 }} />
         {demandFilter ? <Button size="small" onClick={() => {
-          setDemandFilter(undefined); filters.current = { q: query }; setPage(1); void load(1, includeVoided);
+          setDemandFilter(undefined); filters.current = { q: query }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }}>清除需求单筛选</Button> : null}
       </Space>
 
@@ -627,6 +664,12 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         loading={loading}
         dataSource={receipts}
         columns={columns}
+        rowSelection={canManage ? {
+          selectedRowKeys: selectedIds,
+          // 已作废行不可勾选；筛选/搜索变化后重置选择，避免对不可见行误操作
+          getCheckboxProps: (item) => ({ disabled: item.line_status !== "active" }),
+          onChange: (keys) => setSelectedIds(keys as string[]),
+        } : undefined}
         scroll={{ x: 1320 }}
         expandable={{ expandedRowRender: (item) => <Space direction="vertical" style={{ width: "100%" }}><Descriptions size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="备注">{raw(item.note)}</Descriptions.Item>
@@ -653,7 +696,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           pageSize: 20,
           total,
           showSizeChanger: false,
-          onChange: (next) => { setPage(next); void load(next, includeVoided); },
+          onChange: (next) => { setPage(next); setSelectedIds([]); void load(next, includeVoided); },
         }}
         locale={{ emptyText: loadError ? "记录读取失败，请重新加载" : includeVoided ? "暂无返还记录" : "暂无有效返还记录" }}
       />
