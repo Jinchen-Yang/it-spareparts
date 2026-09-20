@@ -24,3 +24,12 @@
 
 任一条件变化都会使 CI 失败。若项目以后引入 SSR/RSC，必须删除此例外并先升级到
 官方修复版本。
+
+## AnyIO 安全下限（v1.36）
+
+发布前审计检出 `anyio 4.13.0` 的两条漏洞：
+
+- [CVE-2026-63374 / 官方公告](https://github.com/agronholm/anyio/security/advisories/GHSA-82r6-8w77-94w6)：国际化域名的 TLS 证书主机名匹配问题。
+- [CVE-2026-64847 / 官方公告](https://github.com/agronholm/anyio/security/advisories/GHSA-5p39-cfhj-2xmp)：进程池 worker 的 stderr 管道未排空可能导致阻塞。
+
+两项官方修复版本均为 `4.14.2`。`pyproject.toml` 声明安全下限 `anyio>=4.14.2,<5`，保护 Starlette/httpx 的既有传递依赖；`uv.lock` 与生产镜像使用的 `requirements.lock` 同步锁定 `4.14.2` 及包 hash。其他包版本保持不变，未添加漏洞豁免。更新后的生产依赖审计未检出已知漏洞，兼容性与全量回归以发布 PR 的检查为准。
