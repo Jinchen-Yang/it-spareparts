@@ -618,73 +618,29 @@ ATTENTION_KINDS: tuple[str, ...] = ("budget_remaining", "pending_return")
 ATTENTION_RANKING = "budget_status_desc,pending_return_qty_desc"
 
 
-def _card_receipt_rates(db: Session, project_ids: list[str]) -> dict[str, dict]:
-    """项目有效收货 / 全生命周期有效 WBDD 明细数量；不按 PN 或件况匹配。"""
-    from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
-    from app.services.maintenance_demands import beta_active_demand_condition
+def _card_receipt_rates(
+    db: Session,
+    project_ids: list[str],
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, dict]:
+    """Effective receipt quantity / confirmed actual issue quantity in one window."""
+    from app.services.maintenance_return_metrics import project_totals, rate_pct
 
-    if not project_ids:
-        return {}
-    demand_stmt = (
-        select(
-            MaintenanceSourceOrderAssignment.project_id,
-            func.sum(FMaintenanceLine.qty),
-            func.count(FMaintenanceOrder.id),
-            func.count(FMaintenanceLine.qty),
-        )
-        .select_from(FMaintenanceOrder)
-        .join(
-            MaintenanceSourceOrderAssignment,
-            and_(
-                MaintenanceSourceOrderAssignment.source_order_id
-                == FMaintenanceOrder.raw_order_id,
-                MaintenanceSourceOrderAssignment.is_active.is_(True),
-            ),
-        )
-        .outerjoin(
-            FMaintenanceLine,
-            and_(
-                FMaintenanceOrder.id == FMaintenanceLine.order_id,
-                FMaintenanceLine.is_active.is_(True),
-            ),
-        )
-        .where(
-            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
-            beta_active_demand_condition(FMaintenanceOrder),
-        )
-        .group_by(MaintenanceSourceOrderAssignment.project_id)
-    )
-    demands = {
-        pid: (total, count, filled)
-        for pid, total, count, filled in db.execute(
-            active_orders(demand_stmt, FMaintenanceOrder)
-        )
-    }
-    received = dict(
-        db.execute(
-            select(
-                MaintenanceRkdReturnLine.project_id,
-                func.sum(MaintenanceRkdReturnLine.qty),
-            )
-            .where(
-                MaintenanceRkdReturnLine.project_id.in_(project_ids),
-                MaintenanceRkdReturnLine.line_status == "active",
-            )
-            .group_by(MaintenanceRkdReturnLine.project_id)
-        ).all()
+    totals = project_totals(
+        db, project_ids=project_ids, date_from=date_from, date_to=date_to,
     )
     result = {}
     for pid in project_ids:
-        total, count, filled = demands.get(pid, (None, 0, 0))
-        returned = Decimal(received.get(pid) or 0)
-        complete = count > 0 and count == filled and total is not None and total > 0
+        facts = totals.get(pid, {})
+        issued = facts.get("issued_qty", Decimal("0"))
+        returned = facts.get("returned_qty", Decimal("0"))
         result[pid] = {
             "returned_qty": format(returned, ".3f"),
-            "demand_qty": format(Decimal(total), ".3f") if total is not None else None,
-            "rate_pct": float(round(returned / Decimal(total) * 100, 1))
-            if complete
-            else None,
-            "state": "ready" if complete else "basis_incomplete",
+            "issued_qty": format(issued, ".3f"),
+            "rate_pct": rate_pct(returned, issued),
+            "state": "ready" if issued > 0 else "basis_incomplete",
         }
     return result
 
@@ -1426,7 +1382,9 @@ def projects(
         )
 
     project_ids = [p.project_id for p in rows]
-    receipt_rates = _card_receipt_rates(db, project_ids)
+    receipt_rates = _card_receipt_rates(
+        db, project_ids, date_from=window[0], date_to=window[1],
+    )
     # 一次性取本页项目的窗口计数、成本五件套与三源事实（M3-4：查询数与页大小无关）
     counts = _project_window_counts(db, window, project_ids)
     # WBDD 未导入时，需求单/明细/成本一律 not_imported——不得用 0 冒充「没有申请」

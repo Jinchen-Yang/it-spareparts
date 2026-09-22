@@ -50,10 +50,11 @@ function comparisonValue(row: ReturnImportRow, field: string, side: "before" | "
 }
 
 /** 专用后台解析任务；原件重试、业务更正和重新预览分别保留明确入口。 */
-export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Promise<void> }) {
+export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Promise<void | boolean> }) {
   const [open, setOpen] = useState(false);
   const [job, setJob] = useState<ReturnImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
@@ -96,7 +97,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     if (!attempt.current || operationLock.current) return;
     operationLock.current = true;
     const seq = ++generation.current;
-    setBusy(true); setError(null); setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1); setAction(null);
+    setBusy(true); setError(null); setRefreshWarning(null); setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1); setAction(null);
     try {
       const response = await uploadReturnReceiptImport(attempt.current.file, attempt.current.key);
       if (seq !== generation.current) return;
@@ -114,11 +115,26 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     }
   };
 
+  const refreshApplied = async (seq: number, recovered: boolean) => {
+    let refreshed = false;
+    try { refreshed = (await onApplied()) !== false; }
+    catch { /* 写入已确认成功；读回异常不能把导入误报成失败。 */ }
+    if (seq !== generation.current) return;
+    if (refreshed) {
+      setRefreshWarning(null);
+      message.success(recovered ? "已确认导入成功，台账已刷新" : "入库返件已写入台账");
+    } else {
+      const warning = "导入已成功，但台账刷新失败；请刷新页面查看，不要重复导入。";
+      setRefreshWarning(warning);
+      message.warning(warning);
+    }
+  };
+
   const command = async (kind: "cancel" | "retry" | "apply") => {
     if (!job || operationLock.current) return;
     operationLock.current = true;
     const seq = ++generation.current;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setRefreshWarning(null);
     try {
       let response;
       if (kind === "cancel") response = await cancelReturnReceiptImport(job.batch_id);
@@ -137,8 +153,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
       if (seq !== generation.current) return;
       setJob(response.data);
       if (kind === "apply") {
-        message.success("入库返件已写入台账");
-        await onApplied();
+        await refreshApplied(seq, false);
       }
     } catch (err) {
       if (seq !== generation.current) return;
@@ -149,8 +164,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
         if (seq !== generation.current) return;
         setJob(response.data);
         if (response.data.status === "applied") {
-          await onApplied();
-          message.success("已确认导入成功，台账已刷新");
+          await refreshApplied(seq, true);
         } else setError(detail);
       } catch {
         if (seq === generation.current) setError(detail);
@@ -207,6 +221,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
         {running ? <Alert type="info" showIcon message="后台正在校验完整原件与项目归属，可稍后查看进度。关闭窗口后任务继续。" /> : null}
         {error || job?.error ? <Alert type="error" showIcon message={error ?? job?.error?.message}
           action={job ? <Button disabled={busy} onClick={() => { void refresh(job.batch_id); }}>重新查询状态</Button> : undefined} /> : null}
+        {refreshWarning ? <Alert type="warning" showIcon message={refreshWarning} /> : null}
         {job?.excluded_reasons && Object.keys(job.excluded_reasons).length ? <Alert type="info" showIcon message="不纳入返还的源单据" description={Object.entries(job.excluded_reasons).map(([category, count]) => `${category} ${count} 单`).join("；")} /> : null}
         {counts ? <>
           <Space wrap>

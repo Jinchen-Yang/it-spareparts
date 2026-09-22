@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Modal, message } from "antd";
+import { MAINTENANCE_CHANGED_STORAGE_KEY } from "../../../utils/maintenanceRefresh";
 
 const getBoardProject = vi.fn();
 const getBoardProjectOrders = vi.fn();
@@ -604,6 +605,18 @@ describe("项目面板", () => {
       items: [{ source_order_id: "RAW-9" }],
     });
     await waitFor(() => expect(getMaintenanceProjectWorkspace.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("初次打开项目不发变更通知，成功修改后才通知其他分析页", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    expect(storage.mock.calls.filter(([key]) => key === MAINTENANCE_CHANGED_STORAGE_KEY)).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(storage).toHaveBeenCalledWith(MAINTENANCE_CHANGED_STORAGE_KEY, expect.stringMatching(/^\d+$/)));
   });
 
   it("基础信息不再把来源负责人原文伪装成账号改派", async () => {

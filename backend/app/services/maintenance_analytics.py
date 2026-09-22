@@ -5,8 +5,8 @@
   标准三过滤：行 is_active、active_orders()（生效/墓碑）、order_date ∈ 窗口。
 - 成本口径 = recompute 回填的 cost_amount_inc_tax/ex_tax（缺价行不按 0，
   missing_lines 单列——铁律 5）。
-- 损坏佐证 = RKD 坏件返还量（maintenance_rkd_return_line.qty，按 PN 对齐，
-  保持既有全时段口径）；坏返率 = 坏件量 / 有效消耗量，分母为零不显示。
+- 返还与实际领用取同项目、权限与业务日期窗口的有效事实；返还率分母为
+  已确认现场领用数量。需求数量/退货仍只用于原有需求成本与消耗展示。
 - 聚合只引用 AGGREGATE_SOURCE_COLUMNS 白名单列（铁律 3）：单头 order_no/
   order_date + 行 qty/return_qty + 成本回填列；当前挂靠用于项目计数及业务类型筛选。
 - 权限：无 data_purchase_cost → 成本列整体 restricted()（键集与 ready 一致），
@@ -29,7 +29,7 @@ from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_quality, query_filters
-from app.services.maintenance_return_receipts import legacy_bad_return_filter
+from app.services.maintenance_return_metrics import pn_totals, rate_pct
 from app.services.maintenance_boss_board import (
     BUSINESS_TYPE_CODES,
     BUSINESS_TYPE_LABELS,
@@ -53,6 +53,9 @@ SORTS = (
     "monthly_avg",
     "bad_qty",
     "bad_rate",
+    "issued_qty",
+    "receipt_qty",
+    "receipt_rate",
     "missing_lines",
     "cost_share",
     "pn",
@@ -335,61 +338,70 @@ def pn_ranking(
     cost_source_clause = _cost_source_clause(cost_sources)
     if cost_source_clause is not None:
         stmt = stmt.where(cost_source_clause)
+    # Demand filters match linked facts; occurrence dates are handled separately.
+    fact_source_ids = None
+    demand_part_scope = None
+    if customer or salesperson or order_no or demand_types or warehouses or cost_source_clause is not None:
+        fact_source_ids = set(db.scalars(
+            stmt.with_only_columns(FMaintenanceOrder.raw_order_id)
+            .group_by(None).distinct()
+        ))
+    if cost_source_clause is not None:
+        demand_part_scope = {
+            (pid, oid, part_id)
+            for pid, oid, part_id in db.execute(
+                stmt.with_only_columns(MaintenanceSourceOrderAssignment.project_id,
+                                       FMaintenanceOrder.raw_order_id,
+                                       FMaintenanceLine.part_id)
+                .group_by(None).distinct()
+            ) if pid is not None and part_id is not None
+        }
     if start is not None:
         stmt = stmt.where(FMaintenanceOrder.order_date >= start)
     if end is not None:
         stmt = stmt.where(FMaintenanceOrder.order_date <= end)
     rows = db.execute(stmt).all()
 
-    # ---- 坏件佐证：RKD 坏件返还按 part_id 聚合（口径冻结：rkd_import + 坏品类 + 有效行）----
-    # RKD 行没有订单头维度：只吃项目级筛选（business_type + project_ids）；
-    # 订单级筛选（客户/销售/单号/需求类型/仓库/取价来源）有意不作用于坏件佐证。
-    rkd_stmt = select(
-        MaintenanceRkdReturnLine.part_id,
-        func.upper(MaintenanceRkdReturnLine.pn),
-        func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")),
-    ).group_by(
-        MaintenanceRkdReturnLine.part_id, func.upper(MaintenanceRkdReturnLine.pn)
-    )
-    rkd_stmt = rkd_stmt.where(*legacy_bad_return_filter())
-    if business_type_clause is not None:
-        rkd_stmt = rkd_stmt.where(
-            select(1)
-            .where(
-                MaintenanceProject.project_id == MaintenanceRkdReturnLine.project_id,
-                business_type_clause,
-            )
-            .exists()
-        )
+    # Actual issues and receipts share project permissions and business dates.
+    fact_project_ids = None if project_ids is None else set(project_ids)
     if allowed_project_ids is not None:
-        rkd_stmt = rkd_stmt.where(
-            MaintenanceRkdReturnLine.project_id.in_(allowed_project_ids or {""})
-        )
-    if project_ids is not None:
-        # 坏件佐证只能按项目收窄（订单级筛选不适用于 RKD 行，见上方注释）
-        rkd_stmt = rkd_stmt.where(
-            MaintenanceRkdReturnLine.project_id.in_(project_ids or {""})
-        )
-    rkd = db.execute(rkd_stmt).all()
-    bad_by_part = {p: q for p, _pn, q in rkd if p is not None}
-    bad_by_pn = {pn.upper(): q for _p, pn, q in rkd}
+        fact_project_ids = (set(allowed_project_ids) if fact_project_ids is None
+                            else fact_project_ids & set(allowed_project_ids))
+    if business_type_clause is not None:
+        classified = set(db.scalars(select(MaintenanceProject.project_id)
+                                   .where(business_type_clause)))
+        fact_project_ids = (classified if fact_project_ids is None
+                            else fact_project_ids & classified)
+    facts = pn_totals(db, project_ids=fact_project_ids, date_from=start, date_to=end,
+                      source_order_ids=fact_source_ids, demand_part_scope=demand_part_scope)
+    by_part = {f["part_id"]: f for f in facts if f["part_id"] is not None}
+    by_pn = {}
+    ambiguous_pns = set()
+    for fact in facts:
+        key = fact["pn"].strip().upper()
+        if key in by_pn:
+            ambiguous_pns.add(key)
+        by_pn[key] = fact
+    for key in ambiguous_pns:
+        del by_pn[key]
+    matched_facts: set[int] = set()
 
     # ---- 关键词过滤（PN/描述包含，大小写不敏感） ----
     term = (q or "").strip().upper()
     items = []
     for r in rows:
         pn = (r.pn_std or "").strip()
-        if (
-            term
-            and term not in pn.upper()
-            and term not in (r.description or "").upper()
-        ):
+        # Match identity before filtering text: a renamed PN keeps its demand
+        # quantities/costs when searched by its current canonical name.
+        fact = (by_part.get(r.part_id) if r.part_id is not None
+                else by_pn.get(pn.upper())) or {}
+        search_values = (pn, r.description, fact.get("pn"), fact.get("description"))
+        if term and not any(term in (value or "").upper() for value in search_values):
             continue
         effective = (r.qty or Decimal("0")) - (r.return_qty or Decimal("0"))
-        # part_id 优先，缺 part_id 的 RKD 行按 PN 大写文本回退（boss_facts 同口径）
-        bad_qty = (
-            bad_by_part.get(r.part_id) or bad_by_pn.get(pn.upper()) or Decimal("0")
-        )
+        if fact:
+            matched_facts.add(id(fact))
+        bad_qty = fact.get("bad_returned_qty", Decimal("0"))
         items.append(
             {
                 "part_id": r.part_id,
@@ -413,10 +425,29 @@ def pn_ranking(
                 ),
                 "missing_lines": int(r.missing_lines),
                 "bad_return_qty": bad_qty,
+                "issued_qty": fact.get("issued_qty", Decimal("0")),
+                "receipt_qty": fact.get("returned_qty", Decimal("0")),
                 "first_date": r.first_date.isoformat() if r.first_date else None,
                 "last_date": r.last_date.isoformat() if r.last_date else None,
             }
         )
+
+    # Facts without demand rows remain visible, with no fabricated demand cost.
+    for fact in facts:
+        if id(fact) in matched_facts:
+            continue
+        if term and term not in fact["pn"].upper() and term not in (fact["description"] or "").upper():
+            continue
+        items.append({
+            "part_id": fact["part_id"], "pn": fact["pn"],
+            "description": fact["description"], "occurrences": 0,
+            "order_count": 0, "project_count": len(fact["project_ids"]),
+            "qty": Decimal("0"), "return_qty": Decimal("0"),
+            "effective_qty": Decimal("0"), "cost_inc": None, "cost_ex": None,
+            "missing_lines": 0, "bad_return_qty": fact["bad_returned_qty"],
+            "issued_qty": fact["issued_qty"], "receipt_qty": fact["returned_qty"],
+            "first_date": None, "last_date": None,
+        })
 
     # ---- 汇总（过滤后全集上计算，占比分母用全集） ----
     total_cost_inc = sum((i["cost_inc"] or Decimal("0")) for i in items)
@@ -440,15 +471,8 @@ def pn_ranking(
             if months is not None
             else None
         )
-        i["bad_return_rate_pct"] = (
-            float(
-                ((i["bad_return_qty"] / i["effective_qty"]) * 100).quantize(
-                    Decimal("0.1")
-                )
-            )
-            if i["effective_qty"] > 0 and i["bad_return_qty"] > 0
-            else None
-        )
+        i["bad_return_rate_pct"] = rate_pct(i["bad_return_qty"], i["issued_qty"])
+        i["receipt_return_rate_pct"] = rate_pct(i["receipt_qty"], i["issued_qty"])
 
     def sort_key(i):
         return {
@@ -463,6 +487,10 @@ def pn_ranking(
             "monthly_avg": (i["monthly_avg_qty"] or 0, i["effective_qty"]),
             "bad_qty": (i["bad_return_qty"], i["effective_qty"]),
             "bad_rate": (i["bad_return_rate_pct"] or 0, i["bad_return_qty"]),
+            "issued_qty": (i["issued_qty"], i["receipt_qty"]),
+            "receipt_qty": (i["receipt_qty"], i["issued_qty"]),
+            "receipt_rate": (i["receipt_return_rate_pct"] is not None,
+                             i["receipt_return_rate_pct"] or 0, i["receipt_qty"]),
             "missing_lines": (i["missing_lines"],),
             "cost_share": (i["cost_share_pct"] or 0,),
             "pn": (i["pn"],),
@@ -513,6 +541,8 @@ def pn_ranking(
             "total_cost_ex": ready(str(total_cost_ex)) if can_cost else restricted(),
             "total_effective_qty": str(total_effective),
             "total_bad_return_qty": str(total_bad),
+            "total_issued_qty": str(sum((i["issued_qty"] for i in items), Decimal("0"))),
+            "total_receipt_qty": str(sum((i["receipt_qty"] for i in items), Decimal("0"))),
             "wbdd_ready": wbdd_ready,
         },
         "sort": sort,

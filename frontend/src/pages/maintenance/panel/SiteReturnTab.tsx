@@ -219,12 +219,13 @@ export function SiteReturnTab({
       {/* v1.36：复活 v1.21 的领用工作台（新增/编辑/确认，candidate 适配器门禁），
           入口与作废同门禁：site_issue_manage + 成本可见。 */}
       <SiteIssueWorkflowPanel
-        key={projectId}
+        key={`workflow-${projectId}`}
         projectId={projectId}
         canManage={canManageIssues}
         onChanged={onChanged}
+        registerRefresh={registerRefresh}
       />
-      <ReturnReceiptsSection key={projectId} projectId={projectId} onChanged={onChanged} />
+      <ReturnReceiptsSection key={`receipts-${projectId}`} projectId={projectId} onChanged={onChanged} registerRefresh={registerRefresh} />
       <Typography.Title level={5} style={{ margin: 0 }}>领用记录</Typography.Title>
       {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
       <Table<SiteReturnRow>

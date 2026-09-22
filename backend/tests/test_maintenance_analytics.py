@@ -249,7 +249,12 @@ def test_ranking_bad_return_join_and_rate(db):
     out = ana.pn_ranking(db, range_="all", sort="bad_qty", can_cost=True)
     row = out["rows"][0]
     assert row["bad_return_qty"] == Decimal("4")
-    assert row["bad_return_rate_pct"] == 40.0  # 4/10
+    assert row["bad_return_rate_pct"] is None  # Demand alone is not an issue.
+    from tests.test_maintenance_return_metrics import _issue
+    _issue(db, proj, part, "8", issue_date=date(2026, 4, 1))
+    row = ana.pn_ranking(db, range_="all", sort="bad_qty", can_cost=True)["rows"][0]
+    assert row["issued_qty"] == Decimal("8")
+    assert row["bad_return_rate_pct"] == 50.0  # 4/actual 8; demand 10 is irrelevant.
     assert out["summary"]["total_bad_return_qty"] == "4.000"
 
 

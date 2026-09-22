@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.1";
+export const APP_VERSION = "1.36.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.2",
+    date: "2026-09-23",
+    items: [
+      "返还率统一为所选期间返还数量 ÷ 同期间实际领用数量，返还包含页面登记、入库导入和全部件况；无领用时不显示百分比",
+      "PN 分析新增实际领用列，返还数量和返还率与项目卡片采用相同统计口径；超过 100% 如实展示",
+      "登记、修改或作废领用与返还后关联面板同步刷新；分析页收到变更通知、重新聚焦或可见期间每 30 秒更新，保留筛选和页码",
+    ],
+  },
   {
     version: "1.36.1",
     date: "2026-09-21",

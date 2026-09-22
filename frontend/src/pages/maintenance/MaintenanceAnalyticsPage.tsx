@@ -13,7 +13,6 @@ import {
   Space,
   Table,
   Tabs,
-  Tag,
   Typography,
   message,
 } from "antd";
@@ -58,6 +57,7 @@ import {
 } from "../../components/charts/SpendTrendBar";
 import { raw } from "../maintenance/panel/panelUtils";
 import { moneyExact, qty as qtyFmt } from "../../utils/format";
+import { useVisibleMaintenanceRefresh } from "../../utils/maintenanceRefresh";
 
 const { Text } = Typography;
 
@@ -91,7 +91,9 @@ const SORT_OPTIONS = [
   { label: "有效数量", value: "effective_qty" },
   { label: "需求数量", value: "qty" },
   { label: "行次数", value: "occurrences" },
-  { label: "坏件返还量", value: "bad_qty" },
+  { label: "实际领用", value: "issued_qty" },
+  { label: "返还数量", value: "receipt_qty" },
+  { label: "返还率", value: "receipt_rate" },
 ];
 
 /** 表头排序 → 服务端排序键（服务端分页：必须整库排序，不能只排当页）。 */
@@ -107,8 +109,9 @@ const SORTER_TO_KEY: Record<string, string> = {
   cost_inc: "cost_inc",
   cost_ex: "cost_ex",
   cost_share_pct: "cost_share",
-  bad_return_qty: "bad_qty",
-  bad_return_rate_pct: "bad_rate",
+  issued_qty: "issued_qty",
+  receipt_qty: "receipt_qty",
+  receipt_return_rate_pct: "receipt_rate",
   missing_lines: "missing_lines",
 };
 
@@ -182,7 +185,7 @@ function KpiCard({ label, value, sub, loading }: {
 }
 
 /**
- * 维保数据分析看板：PN 成本排名 + 损坏频率（2026-08-21）。
+ * 维保数据分析看板：PN 成本排名与同期间实际领用、返还。
  * URL 即筛选状态（PoolAnalysis 范式）：range/sort/q/business_type/page/ps/from/to 与
  * 全字段筛选（project/customer/sp/order_no/demand_type/warehouse/cost_source）全入 query，
  * 刷新/分享不丢上下文。
@@ -190,7 +193,8 @@ function KpiCard({ label, value, sub, loading }: {
 export function MaintenanceAnalyticsPage() {
   const [sp, setSp] = useSearchParams();
   const rangeKey = sp.get("range") ?? "ytd";
-  const sort = sp.get("sort") ?? "cost_inc";
+  const sortSpec = sp.get("sort") ?? "cost_inc";
+  const sort = sortSpec === "bad_qty" ? "receipt_qty" : sortSpec === "bad_rate" ? "receipt_rate" : sortSpec;
   const q = sp.get("q") ?? "";
   const [searchDraft, setSearchDraft] = useState(q);
   useEffect(() => { setSearchDraft(q); }, [q]);
@@ -247,6 +251,11 @@ export function MaintenanceAnalyticsPage() {
       return merged;
     }, { replace: true });
   }, [setSp]);
+
+  // 历史分享链接迁移到收货台账指标，保留已有窗口、筛选与页码。
+  useEffect(() => {
+    if (sort !== sortSpec) patch({ sort });
+  }, [sort, sortSpec, patch]);
 
   // 项目远程搜索：300ms 防抖 + 代次守卫；id→项目名缓存保证已选标签不被新搜索顶掉。
   const [projectOptions, setProjectOptions] = useState<{ value: string; label: string }[]>([]);
@@ -359,13 +368,19 @@ export function MaintenanceAnalyticsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
+  const pnRequests = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (mode: "initial" | "manual" | "background" = "initial") => {
+    if (mode !== "initial" && pnRequests.current > 0) return false;
+    const background = mode === "background";
+    pnRequests.current += 1;
     const seq = seqRef.current + 1;
     seqRef.current = seq;
-    setLoading(true);
-    setError(null);
-    setData(null);
+    if (!background) {
+      setLoading(true);
+      setError(null);
+      setData(null);
+    }
     try {
       const payload: PnRankingParams = {
         range: rangeKey, sort, page, page_size: pageSize,
@@ -384,17 +399,20 @@ export function MaintenanceAnalyticsPage() {
         if (customTo) payload.date_to = customTo;
       }
       const resp = await fetchPnRanking(payload);
-      if (seqRef.current !== seq) return; // 代次守卫：旧响应不覆盖新请求
+      if (seqRef.current !== seq) return true; // 代次守卫：旧响应不覆盖新请求
       setData(resp);
+      setError(null);
     } catch (err) {
-      if (seqRef.current !== seq) return;
+      if (seqRef.current !== seq) return true;
       setData(null);
       const msg = apiErrorMessage(err);
       setError(msg);
-      message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
+      if (!background) message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
     } finally {
+      pnRequests.current -= 1;
       if (seqRef.current === seq) setLoading(false);
     }
+    return true;
   }, [
     rangeKey, sort, q, page, pageSize, customFrom, customTo, businessType,
     projectIds, customer, sales, orderNo, demandTypeParam, warehouses, costSourceParam,
@@ -411,13 +429,19 @@ export function MaintenanceAnalyticsPage() {
   const [spendLoading, setSpendLoading] = useState(false);
   const [spendError, setSpendError] = useState<string | null>(null);
   const spendSeqRef = useRef(0);
+  const spendRequests = useRef(0);
 
-  const loadSpend = useCallback(async () => {
+  const loadSpend = useCallback(async (mode: "initial" | "manual" | "background" = "initial") => {
+    if (mode !== "initial" && spendRequests.current > 0) return false;
+    const background = mode === "background";
+    spendRequests.current += 1;
     const seq = spendSeqRef.current + 1;
     spendSeqRef.current = seq;
-    setSpendLoading(true);
-    setSpendError(null);
-    setSpendData(null);
+    if (!background) {
+      setSpendLoading(true);
+      setSpendError(null);
+      setSpendData(null);
+    }
     try {
       const payload: SpendTrendParams = {
         range: rangeKey, granularity, business_type: businessType,
@@ -434,17 +458,20 @@ export function MaintenanceAnalyticsPage() {
         if (customTo) payload.date_to = customTo;
       }
       const resp = await fetchSpendTrend(payload);
-      if (spendSeqRef.current !== seq) return; // 代次守卫：旧响应不覆盖新粒度
+      if (spendSeqRef.current !== seq) return true; // 代次守卫：旧响应不覆盖新粒度
       setSpendData(resp);
+      setSpendError(null);
     } catch (err) {
-      if (spendSeqRef.current !== seq) return;
+      if (spendSeqRef.current !== seq) return true;
       setSpendData(null);
       const msg = apiErrorMessage(err);
       setSpendError(msg);
-      message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
+      if (!background) message.error(msg === "加载失败" ? "维保分析数据加载失败" : msg);
     } finally {
+      spendRequests.current -= 1;
       if (spendSeqRef.current === seq) setSpendLoading(false);
     }
+    return true;
   }, [
     rangeKey, granularity, businessType, projectIds, customer, sales, orderNo,
     demandTypeParam, warehouses, costSourceParam, customFrom, customTo,
@@ -455,6 +482,8 @@ export function MaintenanceAnalyticsPage() {
     void loadSpend();
     return () => { spendSeqRef.current += 1; };
   }, [loadSpend, view]);
+
+  useVisibleMaintenanceRefresh(() => view === "spend" ? loadSpend("background") : load("background"));
 
   const onTableChange: TableProps<PnRankingRow>["onChange"] = (pg, _fl, sorter) => {
     const field = Array.isArray(sorter) ? sorter[0]?.field : sorter?.field;
@@ -566,7 +595,7 @@ export function MaintenanceAnalyticsPage() {
             <span>维保数据分析</span>
           </Space>
         )}
-        subtitle="全项目 PN 维度：备件消耗成本排名 + 损坏频率（RKD 坏件返还佐证）"
+        subtitle="全项目 PN 维度：备件成本与实际领用、返还统计"
         extra={(
           <Space>
             <Button onClick={() => {
@@ -579,7 +608,7 @@ export function MaintenanceAnalyticsPage() {
               重置筛选
             </Button>
             <Button icon={<ReloadOutlined />}
-              onClick={() => { if (view === "spend") void loadSpend(); else void load(); }}
+              onClick={() => { if (view === "spend") void loadSpend("manual"); else void load("manual"); }}
               loading={view === "spend" ? spendLoading : loading}>
               刷新
             </Button>
@@ -621,7 +650,8 @@ export function MaintenanceAnalyticsPage() {
             onChange={(event) => setSearchDraft(event.target.value)}
             onSearch={(v) => patch({ q: v || null, page: null })} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            成本＝系统回填已知成本（缺价行单列，不按 0 计）；损坏佐证＝RKD 坏件返还（按项目范围）
+            成本＝系统回填已知成本（缺价行单列，不按 0 计）；返还率＝所选期间返还数量 ÷ 同期实际领用数量，包含全部件况。
+            按需求单号、需求类型、仓库或成本来源筛选时，仅统计关联需求单的领用与返还。
           </Text>
         </Space>
         <Space wrap size={12} style={{ marginTop: 12 }}>
@@ -707,9 +737,12 @@ export function MaintenanceAnalyticsPage() {
                   <KpiCard label="总有效消耗量" loading={loading}
                     value={qtyFmt(summary ? Number(summary.total_effective_qty) : null)}
                     sub="需求数量 − 退货数量" />
-                  <KpiCard label="坏件返还总量" loading={loading}
-                    value={qtyFmt(summary ? Number(summary.total_bad_return_qty) : null)}
-                    sub="RKD 入库确认的坏品/坏件/故障" />
+                  <KpiCard label="实际领用总量" loading={loading}
+                    value={qtyFmt(summary ? Number(summary.total_issued_qty) : null)}
+                    sub="所选期间已确认的实际领用" />
+                  <KpiCard label="返还总量" loading={loading}
+                    value={qtyFmt(summary ? Number(summary.total_receipt_qty) : null)}
+                    sub="所选期间收到的返件，包含全部件况" />
                 </Row>
 
                 <Row gutter={16}>
@@ -731,13 +764,13 @@ export function MaintenanceAnalyticsPage() {
 
                 <Card size="small" title={`PN 排名（共 ${qtyFmt(data?.total ?? null)} 个）`}>
                   <Table<PnRankingRow>
-                    rowKey="part_id"
+                    rowKey={(r) => r.part_id == null ? `pn:${r.pn}` : `part:${r.part_id}`}
                     size="small"
                     loading={loading}
                     dataSource={data?.rows ?? []}
                     columns={columns}
                     onChange={onTableChange}
-                    scroll={{ x: 1600 }}
+                    scroll={{ x: 1700 }}
                     pagination={{
                       current: page,
                       pageSize,
@@ -870,7 +903,7 @@ export function MaintenanceAnalyticsPage() {
   );
 }
 
-/** 列定义工厂：memo 化，避免每次渲染重建 15 列。 */
+/** 列定义工厂：memo 化，避免每次渲染重建列。 */
 function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
   return useMemo<ColumnsType<PnRankingRow>>(() => [
     { title: "#", dataIndex: "rank", width: 60, fixed: "left" as const },
@@ -904,11 +937,12 @@ function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
       render: (_: unknown, r: PnRankingRow) => statMoney(r.cost_ex) },
     { title: "成本占比", dataIndex: "cost_share_pct", sorter: true, width: 100,
       render: (v: number | null) => (v === null ? "—" : `${v}%`) },
-    { title: "坏件返还", dataIndex: "bad_return_qty", sorter: true, width: 100,
+    { title: "实际领用", dataIndex: "issued_qty", sorter: true, width: 100,
       render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
-    { title: "坏返率", dataIndex: "bad_return_rate_pct", sorter: true, width: 90,
-      render: (v: number | null) => (v === null ? "—"
-        : <Tag color={v > 50 ? "red" : v > 20 ? "orange" : "default"}>{v}%</Tag>) },
+    { title: "返还数量", dataIndex: "receipt_qty", sorter: true, width: 100,
+      render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
+    { title: "返还率", dataIndex: "receipt_return_rate_pct", sorter: true, width: 90,
+      render: (v: number | null) => v == null ? "—" : `${v}%` },
     { title: "缺价行", dataIndex: "missing_lines", sorter: true, width: 80,
       render: (v: number) => qtyFmt(v) },
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -288,13 +288,13 @@ export function ProjectCard({ row }: ProjectCardProps) {
           />
           {!isBucket ? (
             <div data-testid="receipt-return-rate">
-              <Text>坏件返还率：{row.receipt_return_rate?.rate_pct == null
+              <Text>返还率：{row.receipt_return_rate?.rate_pct == null
                 ? "暂不可计算"
                 : `${row.receipt_return_rate.rate_pct}%`}</Text>
               <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>
                 已返还 {row.receipt_return_rate ? qty(Number(row.receipt_return_rate.returned_qty)) : "—"}
-                {" / 需求备件 "}{row.receipt_return_rate?.demand_qty == null
-                  ? "—" : qty(Number(row.receipt_return_rate.demand_qty))}
+                {" / 实际领用 "}{row.receipt_return_rate?.issued_qty == null
+                  ? "—" : qty(Number(row.receipt_return_rate.issued_qty))}
                 {"（含好件、坏件及其他件况）"}
               </div>
               {row.receipt_return_rate?.rate_pct != null ? (

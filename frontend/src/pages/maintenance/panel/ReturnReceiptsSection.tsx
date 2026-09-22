@@ -12,7 +12,7 @@ import {
   searchReturnReceipts, updateReturnReceipt, voidReturnReceipt,
 } from "../../../api/maintenanceOperations";
 import { readPermissionMap } from "../../../nav";
-import { raw, readError } from "./panelUtils";
+import { raw, readError, type RegisterPanelRefresh } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
 import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
 import ReturnReceiptBatchMaintenance from "./ReturnReceiptBatchMaintenance";
@@ -109,8 +109,9 @@ function auditValue(value: unknown, item?: { field?: string }): string {
  * 项目必选、需求单可选、PN 不限原领用、按数量统计；登记即视为已收到返件；
  * 修改/作废带版本 CAS 与审计。汇总满足恒等式 Σ(需求单) + 未关联 = 项目总量。
  */
-export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }: {
+export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, registerRefresh }: {
   projectId: string; canImport?: boolean; onChanged?: () => Promise<boolean>;
+  registerRefresh?: RegisterPanelRefresh;
 }) {
   const [summary, setSummary] = useState<ReturnReceiptSummary | null>(null);
   const [receipts, setReceipts] = useState<ReturnReceipt[]>([]);
@@ -193,7 +194,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
     setLoading(true);
     setLoadError(null);
     try {
-      const [summaryResponse, listResponse] = await Promise.all([
+      const [summaryResult, listResult] = await Promise.allSettled([
         getReturnReceiptSummary(projectId),
         searchReturnReceipts(projectId, {
           page: targetPage,
@@ -202,10 +203,13 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           ...filters.current,
         }),
       ]);
-      if (seq !== requestSeq.current) return;
-      setSummary(summaryResponse.data);
-      setReceipts(listResponse.data.items ?? []);
-      setTotal(listResponse.data.total ?? 0);
+      if (seq !== requestSeq.current) return false;
+      if (summaryResult.status === "rejected") throw summaryResult.reason;
+      if (listResult.status === "rejected") throw listResult.reason;
+      setSummary(summaryResult.value.data);
+      setReceipts(listResult.value.data.items ?? []);
+      setTotal(listResult.value.data.total ?? 0);
+      return true;
     } catch (err) {
       if (seq === requestSeq.current) {
         setSummary(null);
@@ -213,20 +217,33 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         setTotal(0);
         setLoadError(readError(err, "返还记录加载失败；若刚刚已提交成功，请重试刷新，不要重复登记。"));
       }
+      return false;
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
   }, [projectId]);
 
-  // 批量修改/作废收尾：清选择后逐步刷新，每步都核对 contextSeq——项目已切换时旧回调立即止步，
-  // 不让旧项目的 onChanged 污染新面板（load 自身也有只认最新一发的守卫，这里是回调链的闸）
-  const refreshAfterBatch = useCallback(async () => {
+  const refresh = useCallback(() => load(page, includeVoided), [load, page, includeVoided]);
+  useEffect(() => {
+    registerRefresh?.("return-receipts", refresh);
+    return () => registerRefresh?.("return-receipts", null);
+  }, [refresh, registerRefresh]);
+
+  // 注册后由项目统一读回自己及兄弟区域；独立使用时仍自行刷新，不重复请求。
+  const refreshAfterChange = useCallback(async () => {
+    if (registerRefresh && onChanged) return onChanged();
     const seq = contextSeq.current;
+    const loaded = await refresh();
+    if (seq !== contextSeq.current) return false;
+    const changed = onChanged ? await onChanged() : true;
+    return loaded && changed;
+  }, [refresh, registerRefresh, onChanged]);
+
+  // 批量收尾只清选择并进入同一读回屏障；独立挂载的跨项目守卫由 refreshAfterChange 处理。
+  const refreshAfterBatch = useCallback(async () => {
     setSelectedIds([]);
-    await load(page, includeVoided);
-    if (seq !== contextSeq.current) return;
-    if (onChanged) await onChanged();
-  }, [load, page, includeVoided, onChanged]);
+    await refreshAfterChange();
+  }, [refreshAfterChange]);
 
   useEffect(() => {
     setPage(1);
@@ -383,8 +400,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         message.success(response.data.replayed ? "重复提交：返回已有登记，未重复计数" : "返还已登记");
       }
       setModalOpen(false);
-      await load(page, includeVoided);
-      if (onChanged) await onChanged();
+      await refreshAfterChange();
     } catch (err) {
       if (seq === contextSeq.current) setSubmitError(readError(err, editing ? "修改失败。版本冲突时请加载最新记录后重新修改；网络失败可原样重试。" : "登记失败，可原样重试；相同内容不会重复登记。"));
     } finally {
@@ -410,8 +426,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
       message.success("返还记录已作废，不再计入统计");
       setVoidTarget(null);
       setVoidReason("");
-      await load(page, includeVoided);
-      if (onChanged) await onChanged();
+      await refreshAfterChange();
     } catch (err) {
       if (seq === contextSeq.current) message.error(readError(err, "作废失败，请刷新后重试"));
     } finally {
@@ -601,10 +616,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
         actions={canManage ? (
           <>
             <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
-            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => {
-              await load(page, includeVoided);
-              if (onChanged) await onChanged();
-            }} />
+            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => { await refreshAfterChange(); }} />
             {selectedReceipts.length ? (
               <>
                 {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
@@ -625,10 +637,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged }
           </>
         ) : undefined}
         workbook={canImport && canManage ? (
-          <ReturnReceiptImport onApplied={async () => {
-            await load(page, includeVoided);
-            if (onChanged) await onChanged();
-          }} />
+          <ReturnReceiptImport onApplied={refreshAfterChange} />
         ) : undefined}
         trailing={(
           <Button

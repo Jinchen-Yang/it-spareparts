@@ -47,6 +47,7 @@ import PartsOrdersTab from "./panel/PartsOrdersTab";
 import ExpenseTab from "./panel/ExpenseTab";
 import CollectionTab from "./panel/CollectionTab";
 import SiteReturnTab from "./panel/SiteReturnTab";
+import { publishMaintenanceChange } from "../../utils/maintenanceRefresh";
 import AcceptanceTab from "./panel/AcceptanceTab";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import {
@@ -364,6 +365,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   }, []);
 
   const refreshProject = useCallback(async () => {
+    // 初始取数走独立 loader；此入口由业务成功后的 onChanged/onAfterApply 调用。
+    publishMaintenanceChange();
     // 快照在调用开始时固定：父级两个读回 + 当前已挂载 tab 的读回都结束，才允许
     // WorkbookRoundTrip 报“已覆盖并刷新”。某个 tab 失败时它负责清空自己的旧值。
     const refreshers: PanelRefresh[] = [
