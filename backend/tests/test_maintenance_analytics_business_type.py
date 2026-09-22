@@ -98,8 +98,8 @@ def bad_return(db, proj, part, qty, *, fallback=False, **kwargs):
         pn=part.pn_std.lower(),
         qty=Decimal(qty),
         test_result="坏品",
-        # Deliberately outside the demand window: retain the existing RKD time semantics.
-        occurred_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        # A dated receipt participates in the same business window as actual issues.
+        occurred_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
     )
     for key, value in kwargs.items():
         setattr(r, key, value)
@@ -231,6 +231,10 @@ def test_rkd_evidence_intersects_type_and_user_scope_before_pn_matching(db, fall
     elsewhere = project(db, "elsewhere", "整体维保")
     spare = project(db, "spare", "备件维保")
     shared = _part(db, "TYPE-RKD")
+    from tests.test_maintenance_return_metrics import _issue
+    _issue(db, own, shared, "10", issue_date=date(2026, 6, 1))
+    _issue(db, elsewhere, shared, "20", issue_date=date(2026, 6, 1))
+    _issue(db, spare, shared, "30", issue_date=date(2026, 6, 1))
     line(db, own, shared, "10", "100")
     line(db, elsewhere, shared, "20", "200")
     line(db, spare, shared, "30", "300")
@@ -267,18 +271,18 @@ def test_rkd_evidence_intersects_type_and_user_scope_before_pn_matching(db, fall
         date_to=date(2026, 6, 30),
     )
     out = ranking(db, "overall", **scoped)
-    assert out["rows"][0]["bad_return_qty"] == 2
-    assert out["rows"][0]["bad_return_rate_pct"] == 20
-    assert Decimal(out["summary"]["total_bad_return_qty"]) == 2
-    assert ranking(db, "overall")["rows"][0]["bad_return_qty"] == 7
-    assert ranking(db, "overall,spare", **scoped)["rows"][0]["bad_return_qty"] == 11
+    assert out["rows"][0]["bad_return_qty"] == 102
+    assert out["rows"][0]["bad_return_rate_pct"] == 1020
+    assert Decimal(out["summary"]["total_bad_return_qty"]) == 102
+    assert ranking(db, "overall")["rows"][0]["bad_return_qty"] == 107
+    assert ranking(db, "overall,spare", **scoped)["rows"][0]["bad_return_qty"] == 111
     assert ranking(db, ALL_CODES, **scoped) == ranking(db, **scoped)
     assert ranking(db, "overall", allowed_project_ids=set())["total"] == 0
     assert ranking(db, "spare", allowed_project_ids={own.project_id})["total"] == 0
     own.business_type = "备件维保"
     db.commit()
     assert ranking(db, "overall", **scoped)["total"] == 0
-    assert ranking(db, "spare", **scoped)["rows"][0]["bad_return_qty"] == 11
+    assert ranking(db, "spare", **scoped)["rows"][0]["bad_return_qty"] == 111
 
 
 def test_api_validates_csv_preserves_permissions_and_row_scope(db):

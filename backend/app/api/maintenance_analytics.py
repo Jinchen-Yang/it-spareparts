@@ -47,7 +47,7 @@ def pn_ranking(
     ),
     sort: str = Query(
         "cost_inc",
-        pattern="^(cost_inc|cost_ex|qty|return_qty|effective_qty|occurrences|order_count|project_count|monthly_avg|bad_qty|bad_rate|missing_lines|cost_share|pn)$",
+        pattern="^(" + "|".join(maintenance_analytics.SORTS) + ")$",
     ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -56,7 +56,7 @@ def pn_ranking(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """全项目 PN 维度：备件消耗成本排名 + 损坏频率（含 RKD 坏件佐证）。
+    """全项目 PN 维度：备件需求成本排名 + 同期间实际领用与返还。
 
     成本列挂 data_purchase_cost 权限（restricted 信封）；无权限按成本排序
     返回 422（不静默降级——boss-board 同款）。

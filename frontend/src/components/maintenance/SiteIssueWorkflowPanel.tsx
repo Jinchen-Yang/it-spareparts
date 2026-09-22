@@ -16,7 +16,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   confirmSiteIssue,
@@ -33,6 +33,7 @@ import {
   type SiteIssuePreview,
 } from "../../api/maintenanceOperations";
 import ManualSiteIssueSection from "./ManualSiteIssueSection";
+import type { RegisterPanelRefresh } from "../../pages/maintenance/panel/panelUtils";
 
 const { Text, Title } = Typography;
 
@@ -81,10 +82,12 @@ export default function SiteIssueWorkflowPanel({
   projectId,
   canManage,
   onChanged,
+  registerRefresh,
 }: {
   projectId: string;
   canManage: boolean;
-  onChanged: () => void;
+  onChanged: () => void | Promise<boolean | void>;
+  registerRefresh?: RegisterPanelRefresh;
 }) {
   const [issues, setIssues] = useState<SiteIssueDocument[]>([]);
   const [candidates, setCandidates] = useState<SiteIssueCandidate[]>([]);
@@ -101,6 +104,8 @@ export default function SiteIssueWorkflowPanel({
   const [candidateQuery, setCandidateQuery] = useState("");
   const issueGeneration = useRef(0);
   const candidateGeneration = useRef(0);
+  const issueSearch = useRef("");
+  const candidateSearch = useRef("");
   const activeProject = useRef(projectId);
 
   const [editorOpen, setEditorOpen] = useState(false);
@@ -121,80 +126,121 @@ export default function SiteIssueWorkflowPanel({
 
   activeProject.current = projectId;
 
-  const loadIssues = async (q = issueQuery, page = 1, append = false) => {
+  const loadIssues = useCallback(async (q = "", page = 1, append = false, reloadVisible = false) => {
+    if (!reloadVisible) issueSearch.current = q;
     const request = ++issueGeneration.current;
     const requestedProject = projectId;
     setIssueLoading(true);
     setIssueError(false);
     try {
-      const { data } = await searchSiteIssues({
-        project_id: requestedProject,
-        q,
-        page,
-        page_size: 20,
-      });
-      if (request !== issueGeneration.current || activeProject.current !== requestedProject) return;
+      const rows: SiteIssueDocument[] = [];
+      let total = 0;
+      let loadedPage = page;
+      for (let nextPage = reloadVisible ? 1 : page; nextPage <= page; nextPage += 1) {
+        const { data } = await searchSiteIssues({ project_id: requestedProject, q, page: nextPage, page_size: 20 });
+        if (request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
+        rows.push(...data.rows);
+        total = data.total;
+        loadedPage = data.page;
+        if (!reloadVisible || rows.length >= total) break;
+        if (!data.rows.length) throw new Error("Incomplete issue pagination");
+      }
       setIssues((current) => append
-        ? [...current, ...data.rows.filter((row) => !current.some((item) => item.issue_id === row.issue_id))]
-        : data.rows);
-      setIssueTotal(data.total);
-      setIssuePage(data.page);
+        ? [...current, ...rows.filter((row) => !current.some((item) => item.issue_id === row.issue_id))]
+        : rows);
+      setIssueTotal(total);
+      setIssuePage(loadedPage);
+      return true;
     } catch {
-      if (request !== issueGeneration.current || activeProject.current !== requestedProject) return;
+      if (request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
       if (!append) {
         setIssues([]);
         setIssueTotal(0);
         setIssuePage(1);
       }
       setIssueError(true);
+      return false;
     } finally {
       if (request === issueGeneration.current && activeProject.current === requestedProject) {
         setIssueLoading(false);
       }
     }
-  };
+  }, [projectId]);
 
-  const loadCandidates = async (q = candidateQuery, page = 1, append = false) => {
+  const loadCandidates = useCallback(async (q = "", page = 1, append = false, reloadVisible = false) => {
+    if (!reloadVisible) candidateSearch.current = q;
     const request = ++candidateGeneration.current;
     const requestedProject = projectId;
     setCandidateLoading(true);
     setCandidateError(false);
     try {
-      const { data } = await searchSiteIssueCandidates(requestedProject, {
-        q,
-        page,
-        page_size: 50,
-      });
-      if (
-        request !== candidateGeneration.current
-        || activeProject.current !== requestedProject
-      ) return;
+      const rows: SiteIssueCandidate[] = [];
+      let total = 0;
+      let loadedPage = page;
+      let currentAdapter: SiteIssueAdapterState | null = null;
+      for (let nextPage = reloadVisible ? 1 : page; nextPage <= page; nextPage += 1) {
+        const { data } = await searchSiteIssueCandidates(requestedProject, { q, page: nextPage, page_size: 50 });
+        if (request !== candidateGeneration.current || activeProject.current !== requestedProject) return false;
+        rows.push(...data.rows);
+        total = data.total;
+        loadedPage = data.page;
+        currentAdapter = data.adapter;
+        if (!reloadVisible || rows.length >= total) break;
+        if (!data.rows.length) throw new Error("Incomplete candidate pagination");
+      }
       setCandidates((current) => append
-        ? [...current, ...data.rows.filter((row) => !current.some((item) => item.delivery_line_id === row.delivery_line_id))]
-        : data.rows);
-      setCandidateTotal(data.total);
-      setCandidatePage(data.page);
-      setAdapter(data.adapter);
+        ? [...current, ...rows.filter((row) => !current.some((item) => item.delivery_line_id === row.delivery_line_id))]
+        : rows);
+      setCandidateTotal(total);
+      setCandidatePage(loadedPage);
+      setAdapter(currentAdapter);
+      return true;
     } catch {
       if (
         request !== candidateGeneration.current
         || activeProject.current !== requestedProject
-      ) return;
+      ) return false;
       if (!append) {
         setCandidates([]);
         setCandidateTotal(0);
         setCandidatePage(1);
+        setAdapter(null);
       }
       setCandidateError(true);
+      return false;
     } finally {
       if (
         request === candidateGeneration.current
         && activeProject.current === requestedProject
       ) setCandidateLoading(false);
     }
+  }, [projectId]);
+
+  const refresh = useCallback(async () => {
+    if (!canManage) return true;
+    const results = await Promise.allSettled([
+      loadIssues(issueSearch.current, issuePage, false, true),
+      loadCandidates(candidateSearch.current, candidatePage, false, true),
+    ]);
+    return results.every((result) => result.status === "fulfilled" && result.value);
+  }, [canManage, loadIssues, loadCandidates, issuePage, candidatePage]);
+
+  useEffect(() => {
+    if (!canManage) return;
+    registerRefresh?.("site-workflow", refresh);
+    return () => registerRefresh?.("site-workflow", null);
+  }, [canManage, refresh, registerRefresh]);
+
+  const refreshAfterChange = async () => {
+    if (registerRefresh) return (await onChanged()) !== false;
+    const requestedProject = projectId;
+    const loaded = await refresh();
+    if (activeProject.current !== requestedProject) return false;
+    return (await onChanged()) !== false && loaded;
   };
 
   useEffect(() => {
+    activeProject.current = projectId;
     issueGeneration.current += 1;
     candidateGeneration.current += 1;
     setIssues([]);
@@ -213,6 +259,7 @@ export default function SiteIssueWorkflowPanel({
     void loadIssues("");
     void loadCandidates("");
     return () => {
+      activeProject.current = "";
       issueGeneration.current += 1;
       candidateGeneration.current += 1;
     };
@@ -292,10 +339,7 @@ export default function SiteIssueWorkflowPanel({
       if (activeProject.current !== requestedProject) return;
       setEditorOpen(false);
       message.success(editing?.workflow_status === "draft" ? "草稿已更新" : editing ? "领用单已更正" : "草稿已保存");
-      setIssueQuery("");
-      setCandidateQuery("");
-      await Promise.all([loadIssues("", 1), loadCandidates("", 1)]);
-      onChanged();
+      await refreshAfterChange();
     } catch {
       if (activeProject.current === requestedProject) {
         setEditorError(editing ? "现场领用单保存失败，请刷新后重试" : "现场领用草稿保存失败，请重试");
@@ -337,10 +381,7 @@ export default function SiteIssueWorkflowPanel({
       if (activeProject.current !== requestedProject) return;
       setPreview(null);
       message.success("现场领用已确认，成本证据与返还义务来源已冻结");
-      setIssueQuery("");
-      setCandidateQuery("");
-      await Promise.all([loadIssues("", 1), loadCandidates("", 1)]);
-      onChanged();
+      await refreshAfterChange();
     } catch {
       if (activeProject.current === requestedProject) message.error("确认失败，发货余额或版本可能已变化");
     } finally {
@@ -370,10 +411,7 @@ export default function SiteIssueWorkflowPanel({
       setVoidTarget(null);
       setVoidReason("");
       message.success("现场领用单已作废");
-      setIssueQuery("");
-      setCandidateQuery("");
-      await Promise.all([loadIssues("", 1), loadCandidates("", 1)]);
-      onChanged();
+      await refreshAfterChange();
     } catch {
       if (activeProject.current === requestedProject) {
         setVoidError("作废失败；若返还模块已生成下游事实，请改走更正并刷新后重试");
@@ -526,10 +564,9 @@ export default function SiteIssueWorkflowPanel({
           projectId={projectId}
           canManage={canManage}
           issues={issues}
-          onChanged={onChanged}
+          onChanged={() => undefined}
           reloadIssues={async () => {
-            setIssueQuery("");
-            await loadIssues("", 1);
+            if (!(await refreshAfterChange())) throw new Error("Project refresh failed");
           }}
         />
       </Space>

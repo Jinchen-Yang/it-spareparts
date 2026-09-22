@@ -11,6 +11,7 @@ vi.mock("../../../../components/PartPicker", () => ({ default: ({ onChange }: { 
   <button onClick={() => onChange(12, { pn_std: "RETURN-PN", description: "返件型号" })}>选择测试返件</button> }));
 vi.mock("../ReturnReceiptImport", () => ({ default: () => <button>导入入库单</button> }));
 import ReturnReceiptsSection from "../ReturnReceiptsSection";
+import type { PanelRefresh, RegisterPanelRefresh } from "../panelUtils";
 const receipt = { receipt_id: "r1", project_id: "p1", source: "manual", source_order_id: "d1", order_no: "WBDD-1", batch_id: null,
   head_no: "MANUAL-1", part_id: 12, pn: "PN-1", description: "旧描述", qty: "2.000", condition: "坏品", note: "旧备注", evidence_ref: "旧凭据",
   occurred_at: null, line_status: "active", version: 3, created_by: "实名用户", created_at: null, updated_by: null, updated_at: null, voided_by: null, voided_at: null, void_reason: null };
@@ -26,6 +27,28 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("返还台账的登记、更正和加载恢复", () => {
+  it("父级读回保留当前分页、已作废开关、搜索条件以及未提交的更正输入", async () => {
+    let refresh!: PanelRefresh;
+    const registerRefresh: RegisterPanelRefresh = (_key, read) => { if (read) refresh = read; };
+    mocks.search.mockResolvedValue({ data: { items: [receipt], total: 25 } });
+    render(<ReturnReceiptsSection projectId="p1" registerRefresh={registerRefresh} />);
+    await screen.findByText("PN-1");
+    fireEvent.click(screen.getByRole("button", { name: "只看有效" }));
+    const search = screen.getByPlaceholderText("搜索返件 PN、凭据或备注");
+    fireEvent.change(search, { target: { value: "已搜索凭据" } });
+    fireEvent.keyDown(search, { key: "Enter", code: "Enter", charCode: 13 });
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ q: "已搜索凭据" })));
+    fireEvent.click(screen.getByTitle("Next Page"));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 })));
+    fireEvent.click(screen.getByRole("button", { name: "修改" }));
+    const note = within(screen.getByRole("dialog")).getByLabelText("备注（可选）");
+    fireEvent.change(note, { target: { value: "尚未保存的输入" } });
+    await act(async () => { expect(await refresh()).toBe(true); });
+    expect(mocks.search).toHaveBeenLastCalledWith("p1", { page: 2, page_size: 20, line_status: "all", q: "已搜索凭据" });
+    expect(note).toHaveValue("尚未保存的输入");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("提交响应丢失后同一表单重试保持幂等键", async () => {
     mocks.create.mockRejectedValueOnce(new Error("network"));
     render(<ReturnReceiptsSection projectId="p1" />);

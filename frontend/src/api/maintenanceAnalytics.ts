@@ -10,7 +10,7 @@ export interface Stat<T = string | number> {
 
 export interface PnRankingRow {
   rank: number;
-  part_id: number;
+  part_id: number | null;
   pn: string;
   description: string | null;
   occurrences: number;
@@ -24,6 +24,12 @@ export interface PnRankingRow {
   cost_share_pct: number | null;
   missing_lines: number;
   monthly_avg_qty: number | null;
+  /** 所选期间已确认实际领用；不以需求数量替代。 */
+  issued_qty: string;
+  /** 所选期间有效收货台账数量，包含全部件况。 */
+  receipt_qty: string;
+  receipt_return_rate_pct: number | null;
+  /** 历史坏件辅助字段；正式返还展示使用上面的 receipt 字段。 */
   bad_return_qty: string;
   bad_return_rate_pct: number | null;
   first_date: string | null;
@@ -46,6 +52,8 @@ export interface PnRanking {
     total_cost_inc: Stat<string>;
     total_cost_ex: Stat<string>;
     total_effective_qty: string;
+    total_issued_qty: string;
+    total_receipt_qty: string;
     total_bad_return_qty: string;
     wbdd_ready: boolean;
   };

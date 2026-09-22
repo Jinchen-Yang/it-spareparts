@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { message } from "antd";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { MAINTENANCE_CHANGED_STORAGE_KEY, publishMaintenanceChange } from "../../../utils/maintenanceRefresh";
+import type { PnRanking, PnRankingRow } from "../../../api/maintenanceAnalytics";
 
 const fetchPnRanking = vi.fn();
 const fetchSpendTrend = vi.fn();
@@ -24,15 +26,33 @@ vi.mock("../../../components/charts/EChartContainer", () => ({
     empty ? <div>{emptyText ?? "空"}</div> : <div data-testid="chart" />,
 }));
 
-const mockRow = {
+const mockRow: PnRankingRow = {
   rank: 1, part_id: 1, pn: "ST1800MM0129", description: "硬盘",
   occurrences: 442, order_count: 442, project_count: 9,
   qty: "1200.000", return_qty: "56.000", effective_qty: "1144.000",
   cost_inc: { state: "ready", value: "2586637.81", as_of: null },
   cost_ex: { state: "ready", value: "2290000.00", as_of: null },
   cost_share_pct: 22.8, missing_lines: 0, monthly_avg_qty: 143.0,
+  issued_qty: "10.000", receipt_qty: "12.000", receipt_return_rate_pct: 120,
   bad_return_qty: "0.000", bad_return_rate_pct: null,
   first_date: null, last_date: null,
+};
+
+const rankingFixture: PnRanking = {
+  rows: [mockRow],
+  total: 1, page: 1, page_size: 20,
+  window: { range: "ytd", date_from: "2026-01-01", date_to: "2026-08-21", months: 8 },
+  summary: {
+    part_count: 1,
+    total_cost_inc: { state: "ready", value: "11335390694.72", as_of: null },
+    total_cost_ex: { state: "ready", value: "10000000000.00", as_of: null },
+    total_effective_qty: "29708.000",
+    total_issued_qty: "10.000",
+    total_receipt_qty: "12.000",
+    total_bad_return_qty: "0.000",
+    wbdd_ready: true,
+  },
+  sort: "cost_inc",
 };
 
 /** 开支统计响应 fixture：含 ready/restricted/not_imported 三类信封与 null 销售。 */
@@ -176,26 +196,13 @@ async function selectedLabels() {
   return labels;
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); localStorage.clear(); });
 
 describe("维保数据分析页", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fetchPnRanking.mockReset();
-    fetchPnRanking.mockResolvedValue({
-      rows: [mockRow],
-      total: 1, page: 1, page_size: 20,
-      window: { range: "ytd", date_from: "2026-01-01", date_to: "2026-08-21", months: 8 },
-      summary: {
-        part_count: 1,
-        total_cost_inc: { state: "ready", value: "11335390694.72", as_of: null },
-        total_cost_ex: { state: "ready", value: "10000000000.00", as_of: null },
-        total_effective_qty: "29708.000",
-        total_bad_return_qty: "0.000",
-        wbdd_ready: true,
-      },
-      sort: "cost_inc",
-    });
+    fetchPnRanking.mockResolvedValue(rankingFixture);
     fetchSpendTrend.mockReset();
     fetchSpendTrend.mockResolvedValue(spendFixture);
     fetchAnalyticsFilterOptions.mockReset();
@@ -205,6 +212,117 @@ describe("维保数据分析页", () => {
     getMaintenanceProject.mockReset();
     getMaintenanceProject.mockImplementation((id: string) =>
       Promise.resolve({ data: { project: { project_id: id, display_name: `项目-${id}` } } }));
+  });
+
+  it("正式返还显示全部件况台账与实际领用，忽略历史坏件字段且保留超过100%的比例", async () => {
+    fetchPnRanking.mockResolvedValue({ ...rankingFixture, rows: [{ ...mockRow, bad_return_qty: "999", bad_return_rate_pct: 77 }] });
+    renderPage();
+    const pn = await screen.findByText("ST1800MM0129");
+    const row = pn.closest("tr")!;
+    const headers = screen.getAllByRole("columnheader");
+    const value = (label: string) => within(row).getAllByRole("cell")[headers.findIndex((header) => header.textContent?.startsWith(label))];
+    expect(value("实际领用")).toHaveTextContent(/^10$/);
+    expect(value("返还数量")).toHaveTextContent(/^12$/);
+    expect(value("返还率")).toHaveTextContent(/^120%$/);
+    expect(within(row).queryByText("999")).not.toBeInTheDocument();
+    expect(within(row).queryByText("77%")).not.toBeInTheDocument();
+    expect(row.querySelector(".ant-tag-red, .ant-tag-orange")).toBeNull();
+    expect(screen.getByText("实际领用总量").closest(".ant-card")).toHaveTextContent("10");
+    expect(screen.getByText("返还总量").closest(".ant-card")).toHaveTextContent("12");
+    expect(screen.queryByText("坏件返还总量")).not.toBeInTheDocument();
+    expect(screen.getByText(/返还率＝所选期间返还数量 ÷ 同期实际领用数量/)).toHaveTextContent("包含全部件况");
+  });
+
+  it.each([
+    { issued: "10", receipt: "0", rate: 0, expected: "0%" },
+    { issued: "0", receipt: "2", rate: null, expected: "—" },
+  ])("实际领用$issued、返还$receipt时显示$expected，不把空分母伪装为0%", async ({ issued, receipt, rate, expected }) => {
+    fetchPnRanking.mockResolvedValue({ ...rankingFixture, rows: [{ ...mockRow, issued_qty: issued, receipt_qty: receipt, receipt_return_rate_pct: rate }] });
+    renderPage();
+    const row = (await screen.findByText("ST1800MM0129")).closest("tr")!;
+    const index = screen.getAllByRole("columnheader").findIndex((header) => header.textContent?.startsWith("返还率"));
+    expect(within(row).getAllByRole("cell")[index].textContent).toBe(expected);
+  });
+
+  it.each([
+    ["实际领用", "issued_qty"], ["返还数量", "receipt_qty"], ["返还率", "receipt_rate"],
+  ])("点击%s表头使用%s在服务端排序并回到第一页", async (label, key) => {
+    renderPage("/maintenance/analytics?page=2&q=ST");
+    await screen.findByText("ST1800MM0129");
+    fireEvent.click(screen.getByRole("columnheader", { name: new RegExp(label) }));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: key, page: 1, q: "ST" })));
+    expect(query().get("sort")).toBe(key);
+  });
+
+  it.each([["bad_qty", "receipt_qty"], ["bad_rate", "receipt_rate"]])("旧排序链接%s迁移到%s，保留窗口和筛选分页且不重复取数", async (legacy, current) => {
+    renderPage(`/maintenance/analytics?sort=${legacy}&range=all&page=2&ps=50&q=ST`);
+    await screen.findByText("ST1800MM0129");
+    await waitFor(() => expect(query().get("sort")).toBe(current));
+    expect(query().get("range")).toBe("all");
+    expect(query().get("page")).toBe("2");
+    expect(fetchPnRanking).toHaveBeenCalledTimes(1);
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: current, range: "all", page: 2, page_size: 50, q: "ST" }));
+  });
+
+  it("跨tab变更通知静默刷新当前筛选和页码，取数期间保留已显示表格", async () => {
+    renderPage("/maintenance/analytics?q=ST&page=2&ps=50");
+    await screen.findByText("ST1800MM0129");
+    const initial = await fetchPnRanking.mock.results[0].value;
+    let resolve!: (value: unknown) => void;
+    fetchPnRanking.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    window.dispatchEvent(new StorageEvent("storage", { key: MAINTENANCE_CHANGED_STORAGE_KEY, newValue: "123" }));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("ST1800MM0129")).toBeInTheDocument();
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "ST", page: 2, page_size: 50 }));
+    expect(query().get("page")).toBe("2");
+    expect(screen.getByRole("button", { name: /刷新/ })).not.toHaveClass("ant-btn-loading");
+    await act(async () => resolve({ ...initial, rows: [{ ...mockRow, pn: "REFRESHED-PN" }] }));
+    await screen.findByText("REFRESHED-PN");
+    expect(screen.queryByText("ST1800MM0129")).not.toBeInTheDocument();
+  });
+
+  it("背景刷新失败会失效旧表格并显示错误，但重复轮询不重复弹toast", async () => {
+    const errorToast = vi.spyOn(message, "error").mockImplementation(() => (() => {}) as ReturnType<typeof message.error>);
+    renderPage();
+    await screen.findByText("ST1800MM0129");
+    fetchPnRanking.mockRejectedValue({ response: { data: { detail: "暂时离线" } } });
+    publishMaintenanceChange();
+    await screen.findByText("暂时离线");
+    expect(screen.queryByText("ST1800MM0129")).not.toBeInTheDocument();
+    publishMaintenanceChange();
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(3));
+    expect(errorToast).not.toHaveBeenCalled();
+  });
+
+  it("手动请求进行中收到多个变更信号，只在请求完成后补一次背景读回", async () => {
+    renderPage();
+    await screen.findByText("ST1800MM0129");
+    const initial = await fetchPnRanking.mock.results[0].value;
+    let resolve!: (value: unknown) => void;
+    fetchPnRanking.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    fireEvent.click(screen.getByRole("button", { name: /刷新/ }));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(2));
+    vi.useFakeTimers();
+    publishMaintenanceChange(); publishMaintenanceChange();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetchPnRanking).toHaveBeenCalledTimes(2);
+    await act(async () => resolve(initial));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(fetchPnRanking).toHaveBeenCalledTimes(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(fetchPnRanking).toHaveBeenCalledTimes(3);
+  });
+
+  it("开支视图收到通知只刷新开支数据，等待期间保留原值", async () => {
+    renderPage("/maintenance/analytics?view=spend&granularity=month");
+    await screen.findByText(/2,100/);
+    let resolve!: (value: unknown) => void;
+    fetchSpendTrend.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    publishMaintenanceChange();
+    await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/2,100/)).toBeInTheDocument();
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+    await act(async () => resolve(spendFixture));
   });
 
   it("KPI 金额走千分位格式化（不渲染原始长数字）", async () => {

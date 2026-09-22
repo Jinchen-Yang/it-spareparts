@@ -131,7 +131,7 @@ export const boardBusinessTypeParam = (codes: BoardBusinessTypeCode[]): string =
 export interface BoardProjectRow {
   receipt_return_rate?: {
     returned_qty: string;
-    demand_qty: string | null;
+    issued_qty: string;
     rate_pct: number | null;
     state: "ready" | "basis_incomplete";
   } | null;
