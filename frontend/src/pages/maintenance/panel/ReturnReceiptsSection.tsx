@@ -637,7 +637,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           </>
         ) : undefined}
         workbook={canImport && canManage ? (
-          <ReturnReceiptImport onApplied={async () => { await refreshAfterChange(); }} />
+          <ReturnReceiptImport onApplied={refreshAfterChange} />
         ) : undefined}
         trailing={(
           <Button

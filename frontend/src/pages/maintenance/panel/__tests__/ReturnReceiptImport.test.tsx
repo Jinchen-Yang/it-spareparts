@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { message } from "antd";
 const mocks = vi.hoisted(() => ({ upload: vi.fn(), get: vi.fn(), apply: vi.fn(), cancel: vi.fn(), retry: vi.fn(), download: vi.fn(), saveBlob: vi.fn() }));
 vi.mock("../../../../api/maintenanceReturnReceiptImports", () => ({
   uploadReturnReceiptImport: mocks.upload, getReturnReceiptImport: mocks.get, applyReturnReceiptImport: mocks.apply,
@@ -17,7 +18,7 @@ beforeEach(() => {
   mocks.apply.mockResolvedValue({ data: { ...ready, status: "applied" } }); mocks.cancel.mockResolvedValue({ data: { ...ready, status: "cancelled" } });
   mocks.retry.mockResolvedValue({ data: { batch_id: "job-1", status: "queued" } });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe("返件 Excel 异步预览和明确更正", () => {
   it("展示分类、原值待审；更正必须勾选并填原因后才应用凭证", async () => {
     const applied = vi.fn().mockResolvedValue(undefined); render(<ReturnReceiptImport onApplied={applied} />);
@@ -159,5 +160,31 @@ describe("返件 Excel 异步预览和明确更正", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认导入有效返件" }));
     await waitFor(() => expect(applied).toHaveBeenCalledOnce()); expect(mocks.apply).toHaveBeenCalledOnce();
     expect(await screen.findByText("导入已完成；无变化行不会重复计数。")).toBeInTheDocument();
+  });
+
+  it.each([
+    { lost: false, rejected: false }, { lost: false, rejected: true },
+    { lost: true, rejected: false }, { lost: true, rejected: true },
+  ])("导入成功后刷新失败不误报已刷新或允许重复应用（响应丢失=$lost，刷新抛错=$rejected）", async ({ lost, rejected }) => {
+    const success = vi.spyOn(message, "success").mockImplementation(() => (() => {}) as ReturnType<typeof message.success>);
+    const warning = vi.spyOn(message, "warning").mockImplementation(() => (() => {}) as ReturnType<typeof message.warning>);
+    const applied = rejected ? vi.fn().mockRejectedValue(new Error("refresh offline")) : vi.fn().mockResolvedValue(false);
+    if (lost) mocks.apply.mockRejectedValueOnce(new Error("apply response lost"));
+    mocks.get.mockResolvedValue({ data: { ...ready, status: "applied" } });
+    render(<ReturnReceiptImport onApplied={applied} />);
+    fireEvent.click(screen.getByRole("button", { name: "导入入库单" })); selectFile();
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.change(screen.getByPlaceholderText(/更正原因/), { target: { value: "核对" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认导入有效返件" }));
+    expect(await screen.findByText("导入已成功，但台账刷新失败；请刷新页面查看，不要重复导入。")).toBeInTheDocument();
+    expect(screen.getByText("已应用")).toBeInTheDocument();
+    expect(screen.getByText("导入已完成；无变化行不会重复计数。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认导入有效返件" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新查询状态" })).not.toBeInTheDocument();
+    expect(mocks.apply).toHaveBeenCalledTimes(1);
+    expect(mocks.get).toHaveBeenCalledTimes(lost ? 1 : 0);
+    expect(applied).toHaveBeenCalledTimes(1);
+    expect(success).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("不要重复导入"));
   });
 });
