@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.2";
+export const APP_VERSION = "1.36.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.3",
+    date: "2026-09-23",
+    items: [
+      "领用与返还页面改为现场操作优先：登记返还置于首屏，返还台账排在领用流程之前",
+      "返还区按登记动作、概况、搜索台账、需求单核对排列；Excel 批量维护下移到领用明细区",
+      "新增返还、领用和批量维护分区标题，改善长页面定位和辅助技术阅读顺序",
+    ],
+  },
   {
     version: "1.36.2",
     date: "2026-09-23",

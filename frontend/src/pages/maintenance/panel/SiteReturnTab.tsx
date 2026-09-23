@@ -201,34 +201,59 @@ export function SiteReturnTab({
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <PanelActionBar
-        workbook={(
-          <WorkbookRoundTrip
-            size="small"
-            title="维保领用与返还"
-            filename={`${exportBase}-${SHEETS.site}.xlsx`}
-            canUpload={canUpload}
-            onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
-            onValidate={(file) => validateProjectMaster(projectId, file)}
-            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-            onAfterApply={onChanged}
+      <section aria-labelledby="return-receipts-heading">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Typography.Title id="return-receipts-heading" level={4} style={{ margin: 0 }}>
+            返还登记与台账
+          </Typography.Title>
+          <ReturnReceiptsSection
+            key={`receipts-${projectId}`}
+            projectId={projectId}
+            onChanged={onChanged}
+            registerRefresh={registerRefresh}
           />
-        )}
-        hint="Excel：在哪下载就在哪上传，可回填领用事实和是否应返还；上传后页面立即刷新"
-      />
-      {/* v1.36：复活 v1.21 的领用工作台（新增/编辑/确认，candidate 适配器门禁），
-          入口与作废同门禁：site_issue_manage + 成本可见。 */}
-      <SiteIssueWorkflowPanel
-        key={`workflow-${projectId}`}
-        projectId={projectId}
-        canManage={canManageIssues}
-        onChanged={onChanged}
-        registerRefresh={registerRefresh}
-      />
-      <ReturnReceiptsSection key={`receipts-${projectId}`} projectId={projectId} onChanged={onChanged} registerRefresh={registerRefresh} />
-      <Typography.Title level={5} style={{ margin: 0 }}>领用记录</Typography.Title>
-      {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
-      <Table<SiteReturnRow>
+        </Space>
+      </section>
+
+      <section aria-labelledby="site-issue-heading">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Typography.Title id="site-issue-heading" level={4} style={{ margin: "12px 0 0" }}>
+            领用登记与单据
+          </Typography.Title>
+          {/* v1.36：复活 v1.21 的领用工作台（新增/编辑/确认，candidate 适配器门禁），
+              入口与作废同门禁：site_issue_manage + 成本可见。 */}
+          <SiteIssueWorkflowPanel
+            key={`workflow-${projectId}`}
+            projectId={projectId}
+            canManage={canManageIssues}
+            onChanged={onChanged}
+            registerRefresh={registerRefresh}
+          />
+        </Space>
+      </section>
+
+      <section aria-labelledby="site-issue-details-heading">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Typography.Title id="site-issue-details-heading" level={5} style={{ margin: "12px 0 0" }}>
+            领用明细与批量维护
+          </Typography.Title>
+          <PanelActionBar
+            workbook={(
+              <WorkbookRoundTrip
+                size="small"
+                title="维保领用与返还"
+                filename={`${exportBase}-${SHEETS.site}.xlsx`}
+                canUpload={canUpload}
+                onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
+                onValidate={(file) => validateProjectMaster(projectId, file)}
+                onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
+                onAfterApply={onChanged}
+              />
+            )}
+            hint="Excel 批量维护：下载后回填领用事实和是否应返还，再在此上传；上传成功后页面自动刷新"
+          />
+          {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
+          <Table<SiteReturnRow>
         rowKey="issueLineId"
         size="small"
         loading={loading}
@@ -304,7 +329,9 @@ export function SiteReturnTab({
               }]
             : []),
         ]}
-      />
+          />
+        </Space>
+      </section>
       <Modal
         open={voidTarget !== null}
         title={voidTarget

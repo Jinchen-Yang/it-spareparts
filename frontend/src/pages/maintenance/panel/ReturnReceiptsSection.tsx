@@ -567,6 +567,52 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <PanelActionBar
+        actionsFirst
+        actions={canManage ? (
+          <>
+            <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
+            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => { await refreshAfterChange(); }} />
+            {selectedReceipts.length ? (
+              <>
+                {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
+                <ReturnReceiptBatchMaintenance
+                  key={`update-${projectId}`}
+                  mode="update"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+                <ReturnReceiptBatchMaintenance
+                  key={`void-${projectId}`}
+                  mode="void"
+                  receipts={selectedReceipts}
+                  onDone={() => refreshAfterBatch()}
+                />
+              </>
+            ) : null}
+          </>
+        ) : undefined}
+        workbook={canImport && canManage ? (
+          <ReturnReceiptImport onApplied={refreshAfterChange} />
+        ) : undefined}
+        trailing={(
+          <Button
+            size="small"
+            type={includeVoided ? "primary" : "default"}
+            onClick={() => {
+              const next = !includeVoided;
+              setIncludeVoided(next);
+              setPage(1);
+              setSelectedIds([]);
+              void load(1, next);
+            }}
+          >
+            {includeVoided ? "含已作废" : "只看有效"}
+          </Button>
+        )}
+        hint="先登记现场收到的返件；批量录入或入库单导入用于一次处理多条记录。PN 不要求与领用一致"
+      />
+
       {loadError ? (
         <Alert
           type="error"
@@ -612,70 +658,6 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         </Col>
       </Row>
 
-      <PanelActionBar
-        actions={canManage ? (
-          <>
-            <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
-            <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => { await refreshAfterChange(); }} />
-            {selectedReceipts.length ? (
-              <>
-                {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
-                <ReturnReceiptBatchMaintenance
-                  key={`update-${projectId}`}
-                  mode="update"
-                  receipts={selectedReceipts}
-                  onDone={() => refreshAfterBatch()}
-                />
-                <ReturnReceiptBatchMaintenance
-                  key={`void-${projectId}`}
-                  mode="void"
-                  receipts={selectedReceipts}
-                  onDone={() => refreshAfterBatch()}
-                />
-              </>
-            ) : null}
-          </>
-        ) : undefined}
-        workbook={canImport && canManage ? (
-          <ReturnReceiptImport onApplied={refreshAfterChange} />
-        ) : undefined}
-        trailing={(
-          <Button
-            size="small"
-            type={includeVoided ? "primary" : "default"}
-            onClick={() => {
-              const next = !includeVoided;
-              setIncludeVoided(next);
-              setPage(1);
-              setSelectedIds([]);
-              void load(1, next);
-            }}
-          >
-            {includeVoided ? "含已作废" : "只看有效"}
-          </Button>
-        )}
-        hint="登记即视为已收到返件；数量按项目统计，需求单为可选归属，PN 不要求与领用一致"
-      />
-
-
-      {summary ? <Table
-        size="small"
-        rowKey="key"
-        pagination={false}
-        dataSource={[
-          ...summary.by_demand.map((item) => ({ key: item.source_order_id, label: item.order_no ?? item.source_order_id, qty: item.qty })),
-          { key: "unassigned", label: "未关联需求单", qty: summary.unassigned_qty },
-        ]}
-        columns={[
-          { title: "需求单返还汇总", dataIndex: "label" },
-          { title: "已返还数量", dataIndex: "qty", render: fmtQty },
-          { title: "操作", render: (_v, item) => <Button size="small" type="link" onClick={() => {
-            setDemandFilter(item.key); setPage(1); setSelectedIds([]);
-            filters.current = { ...filters.current, source_order_id: item.key === "unassigned" ? undefined : item.key, unassigned: item.key === "unassigned" };
-            void load(1, includeVoided);
-          }}>查看明细</Button> },
-        ]}
-      /> : null}
       <Space wrap>
         <Input.Search value={query} allowClear placeholder="搜索返件 PN、凭据或备注" onChange={(event) => setQuery(event.target.value)} onSearch={(value) => {
           filters.current = { ...filters.current, q: value }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
@@ -727,6 +709,25 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         }}
         locale={{ emptyText: loadError ? "记录读取失败，请重新加载" : includeVoided ? "暂无返还记录" : "暂无有效返还记录" }}
       />
+
+      {summary ? <Table
+        size="small"
+        rowKey="key"
+        pagination={false}
+        dataSource={[
+          ...summary.by_demand.map((item) => ({ key: item.source_order_id, label: item.order_no ?? item.source_order_id, qty: item.qty })),
+          { key: "unassigned", label: "未关联需求单", qty: summary.unassigned_qty },
+        ]}
+        columns={[
+          { title: "按需求单核对返还", dataIndex: "label" },
+          { title: "已返还数量", dataIndex: "qty", render: fmtQty },
+          { title: "操作", render: (_v, item) => <Button size="small" type="link" onClick={() => {
+            setDemandFilter(item.key); setPage(1); setSelectedIds([]);
+            filters.current = { ...filters.current, source_order_id: item.key === "unassigned" ? undefined : item.key, unassigned: item.key === "unassigned" };
+            void load(1, includeVoided);
+          }}>查看明细</Button> },
+        ]}
+      /> : null}
 
       <Modal
         open={modalOpen}
