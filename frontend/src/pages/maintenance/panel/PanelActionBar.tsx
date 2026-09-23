@@ -8,8 +8,7 @@ const { Text } = Typography;
  *
  * 布局约定（用户 2026-09-20 拍板）：
  * - 一律放在 tab 内容最顶部；
- * - Excel 往返（下载/上传覆盖）在左侧——「在哪下载就在哪上传」；
- * - 页面登记类按钮（登记返还/批量录入/登记回款…）紧随其后同一行；
+ * - 默认保持 Excel 往返在前；现场高频页可用 actionsFirst 将登记动作提到最前；
  * - 视图切换（含已作废等）靠右。
  * - 说明文字（hint）单独一行置于按钮行下方，字号 11.5 次要色。
  */
@@ -18,15 +17,18 @@ export default function PanelActionBar({
   actions,
   trailing,
   hint,
+  actionsFirst = false,
 }: {
-  /** Excel 下载/上传往返组件（WorkbookRoundTrip）。 */
+  /** Excel 下载/上传或导入等批量动作。 */
   workbook?: ReactNode;
-  /** 登记类主按钮组（紧跟 Excel 往返之后）。 */
+  /** 登记类主按钮组。 */
   actions?: ReactNode;
   /** 视图切换/次要控件（右对齐）。 */
   trailing?: ReactNode;
   /** 一行说明文字。 */
   hint?: string;
+  /** 高频登记场景把 actions 排在 Excel/导入动作之前。 */
+  actionsFirst?: boolean;
 }) {
   const hasLeading = workbook != null || actions != null;
   return (
@@ -42,8 +44,8 @@ export default function PanelActionBar({
           }
         >
           <Space size={8} wrap>
-            {workbook}
-            {actions}
+            {actionsFirst ? actions : workbook}
+            {actionsFirst ? workbook : actions}
           </Space>
           {trailing}
         </Space>

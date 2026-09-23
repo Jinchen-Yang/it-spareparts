@@ -27,6 +27,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("返还台账的登记、更正和加载恢复", () => {
+  it("登记动作置顶，返还记录先于需求单核对汇总", async () => {
+    render(<ReturnReceiptsSection projectId="p1" />);
+    const register = await screen.findByRole("button", { name: "登记返还" });
+    const total = screen.getByText("项目已返还（有效）");
+    const receiptRow = screen.getByText("PN-1");
+    const demandSummary = screen.getByText("按需求单核对返还");
+    expect(register.compareDocumentPosition(total) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(receiptRow.compareDocumentPosition(demandSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("父级读回保留当前分页、已作废开关、搜索条件以及未提交的更正输入", async () => {
     let refresh!: PanelRefresh;
     const registerRefresh: RegisterPanelRefresh = (_key, read) => { if (read) refresh = read; };

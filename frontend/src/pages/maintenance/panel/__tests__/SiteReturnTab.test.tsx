@@ -5,12 +5,25 @@ vi.mock("../../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<typeof import("../../../../api/maintenanceOperations")>("../../../../api/maintenanceOperations"),
   searchSiteIssues: mocks.search,
 }));
-vi.mock("../../../../components/maintenance/WorkbookRoundTrip", () => ({ default: () => null }));
-vi.mock("../ReturnReceiptsSection", () => ({ default: () => null }));
+vi.mock("../../../../components/maintenance/WorkbookRoundTrip", () => ({ default: () => <button>Excel 批量维护</button> }));
+vi.mock("../../../../components/maintenance/SiteIssueWorkflowPanel", () => ({ default: () => <div>领用工作台内容</div> }));
+vi.mock("../ReturnReceiptsSection", () => ({ default: () => <div>返还台账内容</div> }));
 import SiteReturnTab from "../SiteReturnTab";
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); });
 afterEach(cleanup);
 describe("领用行要求以服务端快照为准", () => {
+  it("按返还操作、领用登记、领用明细和 Excel 批量维护的顺序展示", async () => {
+    mocks.search.mockResolvedValue({ data: { total: 0, rows: [] } });
+    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    const returnSection = screen.getByRole("heading", { name: "返还登记与台账" });
+    const issueSection = screen.getByRole("heading", { name: "领用登记与单据" });
+    const detailsSection = screen.getByRole("heading", { name: "领用明细与批量维护" });
+    const excel = screen.getByRole("button", { name: "Excel 批量维护" });
+    expect(returnSection.compareDocumentPosition(issueSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(issueSection.compareDocumentPosition(detailsSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(detailsSection.compareDocumentPosition(excel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it.each([
     { no_return: true, status: "required", expected: "应返", absent: "免返" },
     { no_return: false, status: "exempt", expected: "免返", absent: "应返" },
