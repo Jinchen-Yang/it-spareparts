@@ -128,7 +128,11 @@ def get_project_acceptance(
 
 
 @router.post("/projects/stable/{project_id}/acceptance/attachments")
-async def upload_project_acceptance_attachment(
+# 同步 def：FastAPI 自动把整个 handler 派进线程池。此前是 async def 且直接在
+# 事件循环上跑同步 DB 写——2026-09-24 生产事故中它与另一条持有行锁的事务互等
+# （对方协程停在 await 等事件循环），事件循环被本端点的 INSERT 卡死，全站
+# （含 /health、登录）无响应 1.5 小时。改同步后事件循环永不被 DB 调用阻塞。
+def upload_project_acceptance_attachment(
     project_id: str = ApiPath(..., min_length=1, max_length=36),
     # 2026-08-25 客户口径：一个上传口——传文件即落库，不做版本握手；
     # 字段保留为可选（旧客户端兼容），服务端忽略。幂等键同样可选
@@ -151,7 +155,8 @@ async def upload_project_acceptance_attachment(
     try:
         # Read one byte beyond the hard ceiling so oversize input is rejected
         # without buffering an unbounded request in application memory.
-        content = await file.read(acceptance.MAX_ACCEPTANCE_FILE_BYTES + 1)
+        # 同步端点直接读底层缓冲文件（等价于原 await file.read）。
+        content = file.file.read(acceptance.MAX_ACCEPTANCE_FILE_BYTES + 1)
         result, path = acceptance.upload_attachment(
             db,
             project_id=project_id,
@@ -169,7 +174,7 @@ async def upload_project_acceptance_attachment(
         _rollback_file(db, path)
         _raise_http(exc)
     finally:
-        await file.close()
+        file.file.close()
     record_access_log(
         ctx,
         "upload_maintenance_acceptance_attachment",

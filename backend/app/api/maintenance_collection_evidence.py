@@ -60,7 +60,9 @@ def list_milestone_evidence(
     "/collection-milestones/{milestone_id}/evidence",
     status_code=status.HTTP_201_CREATED,
 )
-async def upload_milestone_evidence(
+# 同步 def：handler 整体跑在线程池，事件循环不被同步 DB/落盘调用阻塞
+# （防 2026-09-24 生产事故同类冻死，详见 maintenance_acceptance 上传端点注释）。
+def upload_milestone_evidence(
     milestone_id: str = Path(..., min_length=1, max_length=36),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -79,7 +81,7 @@ async def upload_milestone_evidence(
         )
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
-    content = await file.read(MAX_UPLOAD_READ_BYTES + 1)
+    content = file.file.read(MAX_UPLOAD_READ_BYTES + 1)
     if len(content) > MAX_UPLOAD_READ_BYTES:
         _domain_error(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

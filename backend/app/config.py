@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     # 数据库：默认指向 docker-compose 中的 db 服务；本地裸跑可用 .env 覆盖
     database_url: str = "postgresql+psycopg://spareparts:spareparts@db:5432/spareparts"
 
+    # 数据库超时兜底（毫秒，0=禁用）。2026-09-24 生产事故：async 端点在事件循环上
+    # 同步等行锁、对端事务停摆，PG 三项超时全为 0（无限等），全站冻死 1.5 小时。
+    # lock_timeout 让等锁请求快速失败回滚（单请求 5xx，而非全站挂起）；
+    # statement_timeout / idle_in_transaction_session_timeout 取宽裕上限，
+    # 不影响既有 ETL/导入长事务，只兜底“永远不返回”的语句与僵尸事务。
+    db_lock_timeout_ms: int = 10_000
+    db_statement_timeout_ms: int = 600_000
+    db_idle_in_transaction_timeout_ms: int = 900_000
+
     # 原始上传文件归档目录
     raw_file_dir: str = "./data/raw"
 

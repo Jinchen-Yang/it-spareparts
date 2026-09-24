@@ -250,7 +250,10 @@ class SysAccessLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64))
     role: Mapped[str | None] = mapped_column(String(32))
-    action: Mapped[str] = mapped_column(String(32))        # search/overview/.../login_success/login_failed…
+    # 64：动作名最长 40（upload_maintenance_acceptance_attachment 等）。
+    # 曾是 32——超长动作写入直接 SQL 报错被 best-effort 吞掉，生产累计静默丢审计
+    # 6 千余条（2026-09-24 排障发现）。
+    action: Mapped[str] = mapped_column(String(64))        # search/overview/.../login_success/login_failed…
     resource: Mapped[str | None] = mapped_column(Text)     # 查的型号/客户/维度
     detail: Mapped[dict | None] = mapped_column(JSONB)
     ip_address: Mapped[str | None] = mapped_column(String(64))     # 登录源(暴力破解排查);X-Forwarded-For 优先
