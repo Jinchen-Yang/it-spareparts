@@ -57,6 +57,7 @@ from app.api import (
     profit,
     purchases,
     replenishment,
+    resale_export,
     role_templates,
     substitutes,
     system_settings,
@@ -116,6 +117,7 @@ app.include_router(maintenance_expense_collection_workbook.router, prefix=settin
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
+app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_batch_transfer.router, prefix=settings.api_prefix)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)

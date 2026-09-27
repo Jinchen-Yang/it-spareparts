@@ -40,6 +40,21 @@ class Settings(BaseSettings):
     # CORS 允许来源（前端开发服务器）
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # Dedicated, default-off server-to-server export for the independent resale app.
+    resale_export_token_sha256: SecretStr = SecretStr("")
+
+    @field_validator("resale_export_token_sha256")
+    @classmethod
+    def validate_resale_export_hash(cls, value: SecretStr) -> SecretStr:
+        digest = value.get_secret_value().strip()
+        if digest and (
+            len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise ValueError(
+                "RESALE_EXPORT_TOKEN_SHA256 必须是 64 位小写十六进制 SHA256 摘要"
+            )
+        return SecretStr(digest)
+
     # ---- 二期 AI 定价助手（LLM）----
     # provider 抽象：openai_compatible 可对接 DeepSeek/Qwen/Kimi/GLM 等一切 OpenAI 兼容端点，
     # 换厂商只改 base_url+model+key；将来要接 Anthropic 在 provider.py 加分支即可
