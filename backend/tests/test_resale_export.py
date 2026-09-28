@@ -13,6 +13,7 @@ from pydantic import SecretStr, ValidationError
 
 from app.api import resale_export
 from app.config import Settings
+from app.models.dimensions import DimPart
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from tests.test_site_issue_v2_api import _project
 
@@ -133,6 +134,45 @@ def test_cross_project_pagination_whitelist_and_voided_state(db, monkeypatch):
     assert (
         client.get(
             "/api/integrations/resale/bad-receipts", params={"after": "not-a-uuid"}
+        ).status_code
+        == 422
+    )
+
+
+def test_opt_in_v2_keeps_legacy_shape_and_links_source_part_without_private_notes(
+    db, monkeypatch
+):
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-BROKEN-1", description="规范描述")
+    db.add(part)
+    db.flush()
+    receipt = _receipt(db, project.project_id, serials=["SN-01"])
+    receipt.part_id = part.id
+    db.commit()
+    client = _client(db, monkeypatch)
+
+    legacy = client.get(
+        "/api/integrations/resale/bad-receipts",
+        params={"receipt_id": receipt.rkd_line_id},
+    )
+    assert legacy.status_code == 200
+    assert legacy.json()["schemaVersion"] == 1
+    assert "partId" not in legacy.json()["items"][0]
+
+    enriched = client.get(
+        "/api/integrations/resale/bad-receipts",
+        params={"receipt_id": receipt.rkd_line_id, "contract": 2},
+    )
+    assert enriched.status_code == 200
+    assert enriched.json()["schemaVersion"] == 2
+    item = enriched.json()["items"][0]
+    assert item["partId"] == part.id
+    assert item["description"] == "故障备件"
+    assert "private-source-note" not in enriched.text
+    assert "private-evidence-reference" not in enriched.text
+    assert (
+        client.get(
+            "/api/integrations/resale/bad-receipts", params={"contract": 3}
         ).status_code
         == 422
     )

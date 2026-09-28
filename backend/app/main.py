@@ -1,4 +1,5 @@
 """FastAPI 入口。"""
+
 import logging
 
 from fastapi import Depends, FastAPI
@@ -58,6 +59,7 @@ from app.api import (
     purchases,
     replenishment,
     resale_export,
+    resale_catalog_export,
     role_templates,
     substitutes,
     system_settings,
@@ -77,7 +79,9 @@ if _sec_warns:
     if settings.environment == "prod":
         raise RuntimeError("生产环境禁止使用默认口令/密钥：" + "；".join(_sec_warns))
     for w in _sec_warns:
-        _log.warning("[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w)
+        _log.warning(
+            "[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w
+        )
 
 app = FastAPI(title=settings.app_name)
 
@@ -113,13 +117,20 @@ app.include_router(maintenance.router, prefix=settings.api_prefix)
 # 维保展示板（plan v1.3）：独立 flag 闸（router 自带 require_maintenance_boss），
 # 不挂 Beta 依赖——回滚=关 maintenance_boss_dashboard_enabled。
 app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
-app.include_router(maintenance_expense_collection_workbook.router, prefix=settings.api_prefix)
+app.include_router(
+    maintenance_expense_collection_workbook.router, prefix=settings.api_prefix
+)
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
-app.include_router(maintenance_project_master_workbook.router, prefix=settings.api_prefix)
+app.include_router(
+    maintenance_project_master_workbook.router, prefix=settings.api_prefix
+)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
+app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
-app.include_router(maintenance_project_batch_transfer.router, prefix=settings.api_prefix)
+app.include_router(
+    maintenance_project_batch_transfer.router, prefix=settings.api_prefix
+)
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
 maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
 # 新 2 页（卡墙/项目面板，plan v1.3）依赖的 router 随 boss 总闸走：beta 总闸在 v1.23

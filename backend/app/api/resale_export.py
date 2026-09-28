@@ -37,7 +37,7 @@ def _source_id(value: str) -> str:
         raise HTTPException(status_code=422, detail="返件来源 ID 无效") from exc
 
 
-def _receipt_item(row: MaintenanceRkdReturnLine) -> dict:
+def _receipt_item(row: MaintenanceRkdReturnLine, *, contract: int = 1) -> dict:
     serials = row.serial_numbers
     if (
         not isinstance(serials, list)
@@ -47,7 +47,7 @@ def _receipt_item(row: MaintenanceRkdReturnLine) -> dict:
         raise HTTPException(
             status_code=503, detail="返件序列号记录不完整，请核对上游来源"
         )
-    return {
+    item = {
         "receiptId": row.rkd_line_id,
         "version": row.version,
         "lineStatus": row.line_status,
@@ -60,6 +60,10 @@ def _receipt_item(row: MaintenanceRkdReturnLine) -> dict:
         "occurredAt": row.occurred_at.isoformat() if row.occurred_at else None,
         "changedAt": (row.updated_at or row.created_at).isoformat(),
     }
+    if contract == 2:
+        item["partId"] = row.part_id
+        item["description"] = row.description
+    return item
 
 
 @router.get("/bad-receipts")
@@ -71,6 +75,7 @@ def list_bad_receipts(
     receipt_id: str | None = Query(default=None, max_length=36),
     receipt_ids: list[str] | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=200),
+    contract: int = Query(default=1, ge=1, le=2),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     if sum(bool(option) for option in (after, receipt_id, receipt_ids)) > 1:
@@ -101,8 +106,8 @@ def list_bad_receipts(
     has_more = not receipt_id and not receipt_ids and len(rows) > limit
     selected = rows[:limit]
     return {
-        "schemaVersion": 1,
-        "items": [_receipt_item(row) for row in selected],
+        "schemaVersion": contract,
+        "items": [_receipt_item(row, contract=contract) for row in selected],
         "nextCursor": selected[-1].rkd_line_id if has_more else None,
         "hasMore": has_more,
     }
