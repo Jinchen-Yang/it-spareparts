@@ -81,6 +81,11 @@ services:
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       VISION_MODEL: ${VISION_MODEL:-qwen-vl-max}
+      # 聊天会话总闸（config.enable_agent，默认 true）：compose 不透传时 .env 里的
+      # 设置会静默失效（issue #257），与上方 LLM_* 同样必须显式列出。
+      ENABLE_AGENT: ${ENABLE_AGENT:-true}
+      # AI 兜底列映射外呼开关（默认 false，需显式开通才把表头+脱敏样本发给外部 LLM）
+      LLM_MAPPING_EXTERNAL_ENABLED: ${LLM_MAPPING_EXTERNAL_ENABLED:-false}
     depends_on:
       db:
         condition: service_healthy
