@@ -2,9 +2,39 @@ import { readFileSync, readdirSync } from "node:fs";
 import { extname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const ALLOWED_ADVISORY =
-  "https://github.com/advisories/GHSA-qwww-vcr4-c8h2";
-const ALLOWED_PACKAGES = new Set(["react-router", "react-router-dom"]);
+// 白名单 = 「已评审、暂不阻塞」的运行时漏洞。每条必须写明评审结论与退出条件；
+// 修复版发布后应升级依赖并删除条目（处理方式参照下方 axios 条目注释）。
+const ALLOWED_ADVISORIES = {
+  // 2026-10-07：npm 漏洞库对 axios <1.20.0 一次性收录 12 个 high 级通告
+  // （原型污染 gadget、ReDoS、头部注入、HTTP/2 代理/DNS 绕过等），
+  // 官方尚无修复版（patched_versions: None），升级不可行。
+  // 本项目 axios 仅用于浏览器端调用自家后端 /api（src/api.ts 的共享实例），
+  // 通告受影响面集中在 Node 端适配器（fromDataURI 解析、proxy/DNS 归一、
+  // HTTP/2 adapter）与未使用的 toFormData 选项；浏览器 XHR/fetch 路径的
+  // 实际风险经评审可接受。退出条件：axios 发布 1.20.0 修复版后升级并移除本条目。
+  axios: new Set([
+    "https://github.com/advisories/GHSA-vh66-26gq-q6x8",
+    "https://github.com/advisories/GHSA-9fr6-4gfg-395g",
+    "https://github.com/advisories/GHSA-c29m-xwm3-cm6r",
+    "https://github.com/advisories/GHSA-mghh-pgcx-3jjj",
+    "https://github.com/advisories/GHSA-x97p-jq2g-jp4f",
+    "https://github.com/advisories/GHSA-3pq3-5fj3-cg6v",
+    "https://github.com/advisories/GHSA-542g-h47m-68v8",
+    "https://github.com/advisories/GHSA-j8rh-479h-cp32",
+    "https://github.com/advisories/GHSA-4hqw-qxg8-jxx2",
+    "https://github.com/advisories/GHSA-m8m8-qj5v-23w3",
+    "https://github.com/advisories/GHSA-44g4-m2mj-wpvx",
+    "https://github.com/advisories/GHSA-r4gj-5m52-g5wh",
+  ]),
+  // 既有例外（2026 年评审）：React Router RSC 系列通告；
+  // BrowserRouter SPA 契约已从结构上排除 RSC 模式（见下方 FORBIDDEN_RSC_SOURCE）。
+  "react-router": new Set([
+    "https://github.com/advisories/GHSA-qwww-vcr4-c8h2",
+  ]),
+  "react-router-dom": new Set([
+    "https://github.com/advisories/GHSA-qwww-vcr4-c8h2",
+  ]),
+};
 const FORBIDDEN_RSC_DEPENDENCIES = new Set([
   "@react-router/dev",
   "@react-router/node",
@@ -93,31 +123,19 @@ if (packageNames.length === 0) {
 }
 
 for (const packageName of packageNames) {
-  if (!ALLOWED_PACKAGES.has(packageName)) {
+  const allowed = ALLOWED_ADVISORIES[packageName];
+  if (!allowed) {
     fail(`unexpected vulnerable runtime package: ${packageName}`);
   }
   for (const advisory of vulnerabilities[packageName].via ?? []) {
-    if (
-      typeof advisory === "object" &&
-      advisory.url !== ALLOWED_ADVISORY
-    ) {
+    if (typeof advisory === "object" && !allowed.has(advisory.url)) {
       fail(`unexpected runtime advisory: ${advisory.url ?? advisory.title}`);
     }
   }
 }
 
-const advisoryUrls = new Set(
-  packageNames.flatMap((packageName) =>
-    (vulnerabilities[packageName].via ?? [])
-      .filter((item) => typeof item === "object")
-      .map((item) => item.url),
-  ),
-);
-if (advisoryUrls.size !== 1 || !advisoryUrls.has(ALLOWED_ADVISORY)) {
-  fail("runtime advisories do not match the reviewed RSC-only exception");
-}
-
 console.log(
-  "PRODUCTION_AUDIT_OK: only GHSA-qwww-vcr4-c8h2 remains; " +
-    "the BrowserRouter SPA contract excludes React Router RSC mode",
+  "PRODUCTION_AUDIT_OK: only allowlisted advisories remain " +
+    "(react-router RSC-only exception; axios <1.20.0 batch pending upstream fix, " +
+    "see ALLOWED_ADVISORIES)",
 );
