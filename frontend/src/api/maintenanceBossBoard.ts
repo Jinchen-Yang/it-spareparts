@@ -6,7 +6,7 @@ import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
  *
  * 六态信封（§4.6）：ready / partial / stale / not_imported / restricted / error。
  * not_imported / restricted / error 的 value 恒为 null —— 前端**任何状态都不渲染 0**
- * （铁律 5：未导入绝不伪装成 0）。渲染唯一入口是 components/maintenance/boss/StatCell。
+ * （铁律 5：未导入绝不伪装成 0）。各看板组件按六态信封自行渲染，不得把 null 当 0。
  */
 export type StatState =
   | "ready"
