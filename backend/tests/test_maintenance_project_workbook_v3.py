@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from app import auth
 from app.api import maintenance_project_workbook_v3
 from app.auth import hash_password
+from app.business_time import business_today
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.maintenance_project import (
@@ -32,7 +33,23 @@ from app.services import maintenance_front_stock as front_stock
 from app.services import maintenance_project_workbook_v3 as workbook_v3
 
 
+def _snapshot_months() -> tuple[date, date]:
+    """回款快照夹具用的（过去月, 未来月），各以当月 1 号表示。
+
+    导出按 `report_month <= business_today()` 过滤未来快照（round-6 Blocker 7）。
+    夹具若写死绝对月份，真实时间走到那个月就会把「未来快照」变成「已到期」，
+    顶掉首行并炸掉两条断言——2026-10-07 CI 就是这么炸的（原写死 2026-08/2026-10）。
+    日期一律相对今天取，各留 2 个月余量避免月初/月末边界。
+    """
+    today = business_today()
+    month_index = today.year * 12 + (today.month - 1)
+    past = date((month_index - 2) // 12, (month_index - 2) % 12 + 1, 1)
+    future = date((month_index + 2) // 12, (month_index + 2) % 12 + 1, 1)
+    return past, future
+
+
 def _seed(db):
+    past_month, future_month = _snapshot_months()
     project = MaintenanceProject(
         project_id="wb3-project-1",
         project_code="WB3测试项目",
@@ -152,7 +169,7 @@ def _seed(db):
             collection_id="wb3-snap-1",
             project_id="wb3-project-1",
             project_contract_id="wb3-pc-1",
-            report_month=date(2026, 8, 1),
+            report_month=past_month,
             cumulative_amount=Decimal("2986.57"),
             status="confirmed",
             receipt_reference="HKD-0001",
@@ -164,7 +181,7 @@ def _seed(db):
             collection_id="wb3-snap-future",
             project_id="wb3-project-1",
             project_contract_id="wb3-pc-1",
-            report_month=date(2026, 10, 1),
+            report_month=future_month,
             cumulative_amount=Decimal("9999"),
             status="confirmed",
         )
@@ -212,6 +229,7 @@ def _seed(db):
 
 
 def test_build_workbook_sheets_and_data(db):
+    past_month, future_month = _snapshot_months()
     _seed(db)
     data = workbook_v3.build_project_workbook(db, "wb3-project-1")
     workbook = load_workbook(io.BytesIO(data))
@@ -252,10 +270,10 @@ def test_build_workbook_sheets_and_data(db):
     ws05 = workbook["05_项目经理回款单"]
     rows = list(ws05.iter_rows(values_only=True))
     assert rows[1][1] == "XSDD-20260731-0086"
-    assert rows[1][2] == "2026-08"
+    assert rows[1][2] == past_month.strftime("%Y-%m")
     assert rows[1][3] == 2986.57
-    # 未来 2026-10 快照被 as_of 过滤
-    assert all(row[2] != "2026-10" for row in rows[1:] if row[2])
+    # 未来月度快照被 as_of 过滤，不得进入导出
+    assert all(row[2] != future_month.strftime("%Y-%m") for row in rows[1:] if row[2])
 
     ws06 = workbook["06_现场领用与返还"]
     rows = list(ws06.iter_rows(values_only=True))
