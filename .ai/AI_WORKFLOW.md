@@ -1,3 +1,7 @@
+> **[已降级为历史 2026-10-05]** 本文件引用的 `.ai/PROJECT_CONTEXT.md` 等上下文文件多数不存在，
+> 继续照此执行会误导代理。对一切 AI 代理生效的工作协议已收敛到仓库根目录 **`AGENTS.md`**，
+> 已拍板口径在 `docs/decisions/`。本文件仅作早期工作流设计的历史参考，不再维护。
+
 # AI Development Workflow
 
 > 所有 AI Coding Agent（Claude Code、OpenCode、Cursor 等）在本仓库开发时必须遵守本协议。
