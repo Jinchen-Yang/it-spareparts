@@ -10,6 +10,7 @@ from app.api import (
     accounts,
     agent,
     chat_sessions,
+    circulation,
     dashboard,
     data_quality,
     data_quality_calibration,
@@ -275,6 +276,7 @@ app.include_router(dashboard.router, prefix=settings.api_prefix)
 app.include_router(pools.router, prefix=settings.api_prefix)
 app.include_router(pool_analysis.router, prefix=settings.api_prefix)
 app.include_router(system_settings.router, prefix=settings.api_prefix)
+app.include_router(circulation.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
