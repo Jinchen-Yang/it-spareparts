@@ -7,6 +7,7 @@
 """
 import logging
 import os
+from decimal import Decimal
 
 from fastapi import (
     APIRouter,
@@ -21,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.imports import _save_upload_to_temp
-from app.models.circulation import RecycleBatch, RecycleLine
+from app.models.circulation import CirculationSnItem, RecycleBatch, RecycleLine
 from app.security import (
     UserContext,
     get_current_user_context,
@@ -29,7 +30,7 @@ from app.security import (
     require_action,
 )
 from app.db import get_db
-from app.services import recycle_import as recycler
+from app.services import detection, recycle_import as recycler
 from app.services.recycle_import import RecycleImportError
 
 _log = logging.getLogger(__name__)
@@ -201,5 +202,104 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)) -> dict:
                 "price_mismatch": ln.price_mismatch,
             }
             for ln in lines
+        ],
+    }
+
+
+# ───────────────────────── 检测单（D-2/D-23） ─────────────────────────
+
+
+@router.post("/detection-sheets")
+def create_detection_sheet(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """创建检测单：校验 + 原子落库（检测单/明细/SN 台账）。任何违规 422 零写入。
+
+    请求体：{batch_id, inspector?, note?, items: [{line_id, received_qty,
+    actual_condition, handling, actual_pn_raw?, sns?: [..]}]}
+    """
+    try:
+        draft = detection.DetectionSheetDraft(
+            batch_id=str(payload.get("batch_id") or ""),
+            inspector=str(payload.get("inspector") or user_ctx.user_id or ""),
+            note=payload.get("note"),
+            items=[
+                detection.DetectionItemDraft(
+                    line_id=str(it.get("line_id") or ""),
+                    received_qty=Decimal(str(it.get("received_qty"))),
+                    actual_condition=str(it.get("actual_condition") or ""),
+                    handling=str(it.get("handling") or ""),
+                    sns=[str(s) for s in (it.get("sns") or [])],
+                    actual_pn_raw=it.get("actual_pn_raw"),
+                )
+                for it in (payload.get("items") or [])
+            ],
+        )
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "bad_payload", "message": "请求体字段缺失或数值非法（received_qty 必须为数字）"},
+        )
+    try:
+        sheet = detection.apply_detection_sheet(db, draft, operator=user_ctx.user_id or "unknown")
+    except detection.DetectionValidationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "detection_invalid", "message": str(exc)},
+        )
+    record_access_log(user_ctx, "detection_sheet_create", "circulation_detection",
+                      {"sheet_id": sheet.sheet_id, "batch_id": sheet.batch_id})
+    return {"sheet_id": sheet.sheet_id, "batch_id": sheet.batch_id,
+            "inspector": sheet.inspector, "created_at": sheet.created_at.isoformat()}
+
+
+@router.get("/detection-sheets")
+def list_detection_sheets(batch_id: str | None = None, db: Session = Depends(get_db)) -> dict:
+    stmt = select(detection.DetectionSheet).order_by(detection.DetectionSheet.created_at.desc())
+    if batch_id:
+        stmt = stmt.where(detection.DetectionSheet.batch_id == batch_id)
+    rows = db.execute(stmt).scalars().all()
+    return {
+        "sheets": [
+            {"sheet_id": s.sheet_id, "batch_id": s.batch_id, "inspector": s.inspector,
+             "note": s.note, "created_at": s.created_at.isoformat()}
+            for s in rows
+        ]
+    }
+
+
+@router.get("/detection-sheets/{sheet_id}")
+def get_detection_sheet(sheet_id: str, db: Session = Depends(get_db)) -> dict:
+    sheet = db.get(detection.DetectionSheet, sheet_id)
+    if sheet is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, {"code": "not_found", "message": "检测单不存在"})
+    items = db.execute(
+        select(detection.DetectionItem).where(detection.DetectionItem.sheet_id == sheet_id)
+    ).scalars().all()
+    sns = db.execute(
+        select(CirculationSnItem).where(CirculationSnItem.detection_item_id.in_([i.item_id for i in items] or ["-"]))
+    ).scalars().all()
+    sns_by_item: dict[str, list] = {}
+    for s in sns:
+        sns_by_item.setdefault(s.detection_item_id, []).append(s.sn)
+    return {
+        "sheet": {"sheet_id": sheet.sheet_id, "batch_id": sheet.batch_id,
+                  "inspector": sheet.inspector, "note": sheet.note,
+                  "created_at": sheet.created_at.isoformat()},
+        "items": [
+            {
+                "item_id": i.item_id,
+                "nominal_pn_raw": i.nominal_pn_raw,
+                "actual_pn_raw": i.actual_pn_raw,
+                "pn_corrected": bool(i.actual_pn_raw and i.actual_pn_raw != i.nominal_pn_raw),
+                "received_qty": str(i.received_qty),
+                "actual_condition": i.actual_condition,
+                "handling": i.handling,
+                "sn_count": i.sn_count,
+                "sns": sns_by_item.get(i.item_id, []),
+            }
+            for i in items
         ],
     }
