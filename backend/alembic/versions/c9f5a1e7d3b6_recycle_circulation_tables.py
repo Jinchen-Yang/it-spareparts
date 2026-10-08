@@ -62,8 +62,8 @@ def upgrade() -> None:
             name="uq_recycle_line_aggregate",
         ),
     )
-    op.create_index("ix_recycle_line_batch", "recycle_line", ["batch_id"])
-    op.create_index("ix_recycle_line_part", "recycle_line", ["part_id"])
+    op.create_index("ix_recycle_line_batch_id", "recycle_line", ["batch_id"])
+    op.create_index("ix_recycle_line_part_id", "recycle_line", ["part_id"])
     op.create_table(
         "circulation_sn_item",
         sa.Column("sn", sa.String(128), primary_key=True),
@@ -78,15 +78,15 @@ def upgrade() -> None:
             name="ck_sn_lifecycle",
         ),
     )
-    op.create_index("ix_circulation_sn_item_part", "circulation_sn_item", ["part_id"])
+    op.create_index("ix_circulation_sn_item_part_id", "circulation_sn_item", ["part_id"])
     op.create_index("ix_circulation_sn_item_pn_std", "circulation_sn_item", ["pn_std"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_circulation_sn_item_pn_std", table_name="circulation_sn_item")
-    op.drop_index("ix_circulation_sn_item_part", table_name="circulation_sn_item")
+    op.drop_index("ix_circulation_sn_item_part_id", table_name="circulation_sn_item")
     op.drop_table("circulation_sn_item")
-    op.drop_index("ix_recycle_line_part", table_name="recycle_line")
-    op.drop_index("ix_recycle_line_batch", table_name="recycle_line")
+    op.drop_index("ix_recycle_line_part_id", table_name="recycle_line")
+    op.drop_index("ix_recycle_line_batch_id", table_name="recycle_line")
     op.drop_table("recycle_line")
     op.drop_table("recycle_batch")
