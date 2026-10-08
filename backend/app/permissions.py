@@ -169,6 +169,7 @@ LABELS: dict[str, str] = {
     "page_replenishment_beta": "补库申请",
     "action_replenishment_create": "补库申请创建与复提（按维保项目范围）",
     "action_replenishment_review": "补库审核结果回写",
+    "action_recycle_manage": "备件循环回收清单导入",
 }
 
 
@@ -627,6 +628,9 @@ UI_GROUPS: list[dict] = [
                "action_maintenance_ledger_import",
                "action_maintenance_doc_import",
                "action_maintenance_wbdd_import",
+               # 备件循环（板块 D）：回收清单导入/检测登记——默认关闭
+               # （DEFAULT_OFF_ACTION_KEYS），仅管理员逐账号显式授予。
+               "action_recycle_manage",
                # 2026-08-25 摘除 action_maintenance_acceptance_checklist_import
                # 死键（同上：无端点消费的假权限，不再展示）。
                "action_maintenance_expense_collection_upload"]},
@@ -1035,6 +1039,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "受控审核集成账号"],
         "sensitivity": "critical",
         "risk": "审核结论决定哪些行可进入最终 WBDD 子集导出，仅管理员可授予本权限。",
+    },
+    "action_recycle_manage": {
+        "label": "备件循环回收清单导入",
+        "summary": "允许导入回收清单批次、查看回收台账，并在检测环节登记逐件 SN。",
+        "can": "上传/预检/应用回收清单 xlsx，查看批次与聚合明细，检测时录入 SN、实物 PN 与处理方式。",
+        "cannot": "不写成本与库存主账，不自动上架、不自动决定送修或报废；AI 产出的任何提案仍需专门审批账号批准。",
+        "typical": ["管理员", "仓库/循环台账管理员"],
+        "sensitivity": "medium",
+        "risk": "导入会形成循环台账批次事实（幂等可回溯但不自动改价）；默认对一切角色关闭，仅管理员逐账号授予。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
