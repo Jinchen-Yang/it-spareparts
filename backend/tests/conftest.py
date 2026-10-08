@@ -125,6 +125,9 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    # 备件循环（板块 D）：truncate 顺序在 dim_part 之前无关（CASCADE 兜底），
+    # 但必须在列表里，否则回收批次跨测试泄漏（SHA 唯一锚点会让重放测试误判）。
+    "circulation_sn_item", "recycle_line", "recycle_batch",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",

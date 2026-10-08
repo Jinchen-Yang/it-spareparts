@@ -52,6 +52,12 @@ ACCOUNT_SCOPED_ACTION_KEYS: frozenset[str] = frozenset({
     "action_maintenance_collection_follow_up",
     "action_maintenance_collection_plan_import",
 })
+# 默认关闭的动作键：_full() 不再自动全开，任何角色模板都拿不到，
+# 必须由权限中心逐账号显式授权（与 ACCOUNT_SCOPED_ACTION_KEYS 的区别：
+# 这些键走常规 require_action，admin 运行时短路仍然生效）。
+DEFAULT_OFF_ACTION_KEYS: frozenset[str] = frozenset({
+    "action_recycle_manage",   # 备件循环（板块 D）：回收清单导入/检测登记
+})
 # 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
     "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
@@ -102,6 +108,9 @@ ACTION_KEYS: list[str] = [
     # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
     "action_replenishment_create",
     "action_replenishment_review",
+    # 备件循环（板块 D）：回收清单导入/批次查看、检测单登记（D-1/D-2）。
+    # 模板默认 false，失败关闭；谁用循环功能由权限中心逐账号显式授权。
+    "action_recycle_manage",
 ]
 ROW_KEYS: list[str] = [
     "own_customers_only",
@@ -173,6 +182,8 @@ def _full(own: bool = False) -> dict[str, bool]:
     d.update({k: True for k in PAGE_KEYS})
     d.update({k: True for k in ACTION_KEYS})
     for key in ACCOUNT_SCOPED_ACTION_KEYS:
+        d[key] = False
+    for key in DEFAULT_OFF_ACTION_KEYS:
         d[key] = False
     d["own_customers_only"] = own
     # 维保行级收敛键不进全开图：admin/boss 恒全范围（is_scoped_maintenance 双保险）
