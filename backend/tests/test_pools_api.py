@@ -404,7 +404,10 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_collection_follow_up",
                                    "action_maintenance_collection_plan_import",
                                    "action_replenishment_create",
-                                   "action_replenishment_review"]
+                                   "action_replenishment_review",
+                                   # 备件循环（板块 D）：默认关闭（DEFAULT_OFF_ACTION_KEYS），
+                                   # 仅管理员逐账号显式授予
+                                   "action_recycle_manage"]
 
 
 # ---------------------------------------------------------------- 端到端闭环
