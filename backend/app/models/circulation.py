@@ -32,6 +32,10 @@ from app.models._types import Money, Qty, TZDateTime
 CONDITIONS = ("好件", "坏件")
 # SN 台账生命周期（D-2 检测单切片扩展：检测好件入 in_stock，坏件入 bad_stock）
 SN_LIFECYCLE = ("pending_detection", "in_stock", "bad_stock", "retired")
+# 循环档案上架状态（D-22）：资料齐全自动可上架（list），不全需强制（force_listed）
+LISTING_STATUS = ("pending", "listed", "force_listed", "delisted")
+# 循环档案附件种类：照片 / 检测报告（可上架 = 两类各至少一份）
+ARCHIVE_ATTACHMENT_KINDS = ("photo", "report")
 
 
 class RecycleBatch(Base):
@@ -192,4 +196,66 @@ class DetectionItem(Base):
     __table_args__ = (
         CheckConstraint("actual_condition IN ('好件', '坏件')", name="ck_detection_item_condition"),
         CheckConstraint("received_qty > 0", name="ck_detection_item_qty_positive"),
+    )
+
+
+class CirculationArchive(Base):
+    """循环档案（D-22）：挂在 PN 上，一个 PN 一份档案。
+
+    可上架判定 = 照片 ≥1 且检测报告 ≥1（资料齐全自动满足上架条件；
+    上架本身仍是显式动作）。资料不全时，持 action_recycle_force_list
+    的账号可强制上架，留标记、原因与实名审计。
+    """
+
+    __tablename__ = "circulation_archive"
+
+    archive_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    pn_std: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    part_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dim_part.id"), nullable=True, index=True
+    )
+    listing_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    force_listed_by: Mapped[str | None] = mapped_column(String(64))
+    force_listed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    force_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "listing_status IN ('pending', 'listed', 'force_listed', 'delisted')",
+            name="ck_circulation_archive_listing_status",
+        ),
+    )
+
+
+class CirculationAttachment(Base):
+    """循环档案附件：照片 / 检测报告。文件落本地目录，元数据入库。"""
+
+    __tablename__ = "circulation_attachment"
+
+    attachment_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    archive_id: Mapped[str] = mapped_column(
+        ForeignKey("circulation_archive.archive_id"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)  # photo / report
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(256), nullable=False)  # 相对 circulation_files_dir
+    uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('photo', 'report')", name="ck_circulation_attachment_kind"),
+        CheckConstraint("size_bytes > 0", name="ck_circulation_attachment_size"),
     )

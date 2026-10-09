@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # 原始上传文件归档目录
     raw_file_dir: str = "./data/raw"
+    circulation_files_dir: str = "./data/circulation_files"  # 循环档案附件（照片/检测报告）
 
     # 最小登录（§0/§15）
     admin_password: str = "admin"        # 初始化管理员口令，部署时用 .env 覆盖
