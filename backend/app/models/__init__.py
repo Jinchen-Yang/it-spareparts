@@ -1,5 +1,7 @@
 """导入所有模型，确保 Base.metadata 完整（供 Alembic autogenerate）。"""
 from app.models.circulation import (
+    CirculationArchive,
+    CirculationAttachment,
     CirculationSnItem,
     DetectionItem,
     DetectionSheet,
