@@ -23,6 +23,7 @@ import {
   TeamOutlined,
   ToolOutlined,
   WarningOutlined,
+  CameraOutlined,
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
 
@@ -96,6 +97,8 @@ const loadPoolManagement = () => import("./pages/PoolManagementPage");
 const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 const loadSystemSettings = () => import("./pages/SystemSettingsPage");
+// 备件循环（板块 D）：循环拍照建档（D-6，先查 PN、已有照片跳过）
+const loadPhotoArchive = () => import("./pages/circulation/PhotoArchivePage");
 
 const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
@@ -118,6 +121,7 @@ const PoolManagementPage = lazy(loadPoolManagement);
 const ChatPage = lazy(loadChat);
 const AccountsPage = lazy(loadAccounts);
 const SystemSettingsPage = lazy(loadSystemSettings);
+const PhotoArchivePage = lazy(loadPhotoArchive);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
@@ -199,6 +203,21 @@ export const NAV_GROUPS: NavGroup[] = [
       // 补库申请是维保业务动作（业务指示 2026-08-17 迁出销售组）：
       // 权限/betaFeature/页面不变，仅归组与路径；旧 /sales/replenishment-beta 有重定向
       { key: "replenishment-beta", path: "/maintenance/replenishment", label: "补库申请", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", betaFeature: "replenishment", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
+    ],
+  },
+  {
+    key: "grp-circulation",
+    label: "备件循环",
+    items: [
+      {
+        key: "circulation-photo",
+        path: "/circulation/photo",
+        label: "循环拍照建档",
+        icon: <CameraOutlined />,
+        anyPerm: ["action_recycle_manage"],
+        page: PhotoArchivePage,
+        load: loadPhotoArchive,
+      },
     ],
   },
   {
