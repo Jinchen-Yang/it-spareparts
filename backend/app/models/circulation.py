@@ -30,8 +30,8 @@ from app.models._types import Money, Qty, TZDateTime
 
 # 回收清单「备件状态」列的受控枚举（甲方清单原词）
 CONDITIONS = ("好件", "坏件")
-# SN 台账生命周期（第一批最小集；检测/出库流转随 D-2 检测单切片扩展）
-SN_LIFECYCLE = ("pending_detection", "in_stock", "retired")
+# SN 台账生命周期（D-2 检测单切片扩展：检测好件入 in_stock，坏件入 bad_stock）
+SN_LIFECYCLE = ("pending_detection", "in_stock", "bad_stock", "retired")
 
 
 class RecycleBatch(Base):
@@ -120,6 +120,10 @@ class CirculationSnItem(Base):
     source_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("recycle_batch.batch_id"), nullable=True
     )
+    # 检测单明细关联（D-23）：SN 在检测环节采集，可回溯到具体检测记录
+    detection_item_id: Mapped[str | None] = mapped_column(
+        ForeignKey("detection_item.item_id"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )
@@ -129,7 +133,63 @@ class CirculationSnItem(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "lifecycle_status IN ('pending_detection', 'in_stock', 'retired')",
+            "lifecycle_status IN ('pending_detection', 'in_stock', 'bad_stock', 'retired')",
             name="ck_sn_lifecycle",
         ),
+    )
+
+
+class DetectionSheet(Base):
+    """检测单（D-2）：针对一个回收批次的检测作业，检测人实名。
+
+    检测单是循环入库的权威事实单据（D-23）：检测完成生成 SN 台账记录，
+    好件入前置库可用、坏件入坏件标记；同一批次允许多张检测单（分批检测）。
+    """
+
+    __tablename__ = "detection_sheet"
+
+    sheet_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("recycle_batch.batch_id"), nullable=False, index=True
+    )
+    inspector: Mapped[str] = mapped_column(String(64), nullable=False)  # 检测人（实名）
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class DetectionItem(Base):
+    """检测明细：一条回收聚合行的检测结果。
+
+    字段对齐甲方检测清单：PN/好坏/实收数量/SN（挂 circulation_sn_item）/
+    实物PN/处理方式/检测人。实物 PN 与标称不符时以实物为准（D-23），
+    标称值保留在本行实现修正留痕。
+    """
+
+    __tablename__ = "detection_item"
+
+    item_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sheet_id: Mapped[str] = mapped_column(
+        ForeignKey("detection_sheet.sheet_id"), nullable=False, index=True
+    )
+    line_id: Mapped[str] = mapped_column(
+        ForeignKey("recycle_line.line_id"), nullable=False, index=True
+    )
+    nominal_pn_raw: Mapped[str] = mapped_column(String(128), nullable=False)  # 来源清单标称 PN
+    actual_pn_raw: Mapped[str | None] = mapped_column(String(128))            # 实物 PN（以实物为准）
+    part_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dim_part.id"), nullable=True, index=True
+    )  # 按实物 PN（无则标称）解析；未收录为空
+    received_qty: Mapped[Decimal] = mapped_column(Qty, nullable=False)  # 实收数量
+    actual_condition: Mapped[str] = mapped_column(String(8), nullable=False)  # 实测好坏
+    handling: Mapped[str] = mapped_column(String(32), nullable=False)   # 处理方式（J11 枚举确认前自由文本）
+    sn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("actual_condition IN ('好件', '坏件')", name="ck_detection_item_condition"),
+        CheckConstraint("received_qty > 0", name="ck_detection_item_qty_positive"),
     )
