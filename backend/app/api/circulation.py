@@ -24,13 +24,15 @@ from sqlalchemy.orm import Session
 from app.api.imports import _save_upload_to_temp
 from app.models.circulation import CirculationSnItem, RecycleBatch, RecycleLine
 from app.security import (
+    FULL_SCOPE_ROLES,
     UserContext,
     get_current_user_context,
     record_access_log,
     require_action,
 )
 from app.db import get_db
-from app.services import detection, recycle_import as recycler
+from app.services import archive, detection, recycle_import as recycler
+from app.services.archive import ArchivePermissionError, ArchiveValidationError
 from app.services.recycle_import import RecycleImportError
 
 _log = logging.getLogger(__name__)
@@ -303,3 +305,131 @@ def get_detection_sheet(sheet_id: str, db: Session = Depends(get_db)) -> dict:
             for i in items
         ],
     }
+
+
+# ───────────────────────── 循环档案（D-3/D-22） ─────────────────────────
+
+
+def _archive_payload(db: Session, ar) -> dict:
+    summary = archive.attachment_summary(db, ar)
+    return {
+        "archive_id": ar.archive_id,
+        "pn_std": ar.pn_std,
+        "part_id": ar.part_id,
+        "listing_status": ar.listing_status,
+        "requirements_met": summary["requirements_met"],
+        "photo_count": summary["photo_count"],
+        "report_count": summary["report_count"],
+        "force_listed_by": ar.force_listed_by,
+        "force_listed_at": ar.force_listed_at.isoformat() if ar.force_listed_at else None,
+        "force_reason": ar.force_reason,
+        "attachments": summary["attachments"],
+    }
+
+
+@router.get("/archives")
+def list_archives(status: str | None = None, db: Session = Depends(get_db)) -> dict:
+    stmt = select(archive.CirculationArchive).order_by(archive.CirculationArchive.pn_std)
+    if status:
+        stmt = stmt.where(archive.CirculationArchive.listing_status == status)
+    rows = db.execute(stmt).scalars().all()
+    return {"archives": [_archive_payload(db, a) for a in rows]}
+
+
+@router.get("/archives/{pn_std}")
+def get_archive(pn_std: str, db: Session = Depends(get_db)) -> dict:
+    aid = archive._get_archive_id(db, pn_std)
+    if aid is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, {"code": "not_found", "message": "该 PN 尚无循环档案"})
+    return _archive_payload(db, db.get(archive.CirculationArchive, aid))
+
+
+@router.post("/archives/{pn_std}/attachments")
+def upload_archive_attachment(
+    pn_std: str,
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+    db: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """上传照片/检测报告；PN 无档案时自动建档。"""
+    data = await_file_bytes(file)
+    try:
+        att = archive.add_attachment(
+            db, pn_std, kind, file.filename or "file", data,
+            operator=user_ctx.user_id or "unknown",
+        )
+    except ArchiveValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            {"code": "attachment_invalid", "message": str(exc)})
+    record_access_log(user_ctx, "archive_attachment_upload", "circulation_archive",
+                      {"pn_std": pn_std, "kind": kind})
+    ar = db.get(archive.CirculationArchive, att.archive_id)
+    return _archive_payload(db, ar)
+
+
+@router.delete("/archives/{pn_std}/attachments/{attachment_id}")
+def delete_archive_attachment(
+    pn_std: str, attachment_id: str,
+    db: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    try:
+        archive.remove_attachment(db, pn_std, attachment_id, operator=user_ctx.user_id or "unknown")
+    except ArchiveValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            {"code": "attachment_invalid", "message": str(exc)})
+    return {"deleted": True}
+
+
+@router.post("/archives/{pn_std}/listing")
+def set_archive_listing(
+    pn_std: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    action = str(payload.get("action") or "")
+    # 与 require_action 同口径：admin/boss 恒有全量动作；其余账号看 token 内权限图
+    has_force = user_ctx.role in FULL_SCOPE_ROLES or bool(
+        (user_ctx.permissions or {}).get("action_recycle_force_list"))
+    try:
+        ar = archive.set_listing(
+            db, pn_std, action, operator=user_ctx.user_id or "unknown",
+            has_force_permission=has_force, reason=payload.get("reason"),
+        )
+    except ArchivePermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, {"code": "forbidden", "message": str(exc)})
+    except ArchiveValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            {"code": "listing_invalid", "message": str(exc)})
+    record_access_log(user_ctx, f"archive_{action}", "circulation_archive", {"pn_std": pn_std})
+    return _archive_payload(db, ar)
+
+
+@router.get("/sn-items")
+def list_sn_ledger(
+    pn_std: str | None = None, lifecycle_status: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        rows = archive.list_sn_ledger(db, pn_std=pn_std, lifecycle_status=lifecycle_status)
+    except ArchiveValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            {"code": "bad_filter", "message": str(exc)})
+    return {"sn_items": [
+        {"sn": s.sn, "pn_std": s.pn_std, "part_id": s.part_id,
+         "lifecycle_status": s.lifecycle_status,
+         "source_batch_id": s.source_batch_id,
+         "detection_item_id": s.detection_item_id,
+         "created_at": s.created_at.isoformat()}
+        for s in rows
+    ]}
+
+
+def await_file_bytes(file: UploadFile) -> bytes:
+    # 注意：不走 _save_upload_to_temp（那是导入管道专用，仅收 .xlsx）；
+    # 档案附件是照片/PDF，直接读 UploadFile 流。
+    data = file.file.read()
+    file.file.seek(0)
+    return data

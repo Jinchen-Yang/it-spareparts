@@ -57,6 +57,7 @@ ACCOUNT_SCOPED_ACTION_KEYS: frozenset[str] = frozenset({
 # 这些键走常规 require_action，admin 运行时短路仍然生效）。
 DEFAULT_OFF_ACTION_KEYS: frozenset[str] = frozenset({
     "action_recycle_manage",   # 备件循环（板块 D）：回收清单导入/检测登记
+    "action_recycle_force_list",  # 循环档案强制上架（资料不全凭本键上架）
 })
 # 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
@@ -111,6 +112,8 @@ ACTION_KEYS: list[str] = [
     # 备件循环（板块 D）：回收清单导入/批次查看、检测单登记（D-1/D-2）。
     # 模板默认 false，失败关闭；谁用循环功能由权限中心逐账号显式授权。
     "action_recycle_manage",
+    # 循环档案强制上架（D-22）：资料不全时凭本键上架，留标记与实名审计。
+    "action_recycle_force_list",
 ]
 ROW_KEYS: list[str] = [
     "own_customers_only",
@@ -170,6 +173,7 @@ LABELS: dict[str, str] = {
     "action_replenishment_create": "补库申请创建与复提（按维保项目范围）",
     "action_replenishment_review": "补库审核结果回写",
     "action_recycle_manage": "备件循环回收清单导入",
+    "action_recycle_force_list": "循环档案强制上架（资料不全）",
 }
 
 
@@ -631,6 +635,8 @@ UI_GROUPS: list[dict] = [
                # 备件循环（板块 D）：回收清单导入/检测登记——默认关闭
                # （DEFAULT_OFF_ACTION_KEYS），仅管理员逐账号显式授予。
                "action_recycle_manage",
+               # 循环档案强制上架：同上默认关闭，且绕过资料齐全校验，风险更高。
+               "action_recycle_force_list",
                # 2026-08-25 摘除 action_maintenance_acceptance_checklist_import
                # 死键（同上：无端点消费的假权限，不再展示）。
                "action_maintenance_expense_collection_upload"]},
@@ -1048,6 +1054,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "仓库/循环台账管理员"],
         "sensitivity": "medium",
         "risk": "导入会形成循环台账批次事实（幂等可回溯但不自动改价）；默认对一切角色关闭，仅管理员逐账号授予。",
+    },
+    "action_recycle_force_list": {
+        "label": "循环档案强制上架",
+        "summary": "允许在照片或检测报告不全的情况下，把循环档案标记为已上架。",
+        "can": "对资料不全的循环档案执行强制上架，必须填写原因，留实名审计。",
+        "cannot": "不能豁免 AI 审批红线，不能修改或伪造照片、检测报告内容；下架与恢复仍走常规流程。",
+        "typical": ["管理员", "循环台账管理员"],
+        "sensitivity": "high",
+        "risk": "资料不全即上架意味着对外展示未经完整核验的物品信息；仅授予确实需要应急上架的账号。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
