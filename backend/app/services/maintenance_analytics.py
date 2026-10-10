@@ -60,7 +60,7 @@ SORTS = (
     "cost_share",
     "pn",
 )
-COST_SORTS = {"cost_inc", "cost_ex"}
+COST_SORTS = {"cost_inc", "cost_ex", "cost_share"}
 # 需求类型码 ↔ 库内字面量（API 只收 repair/stock 码，服务层收字面量）
 DEMAND_TYPE_LITERALS = {"repair": "报修供货", "stock": "补库供货"}
 
@@ -214,6 +214,8 @@ def pn_ranking(
     清空即未标注，不回退订单源旧值）；主档空且未改过 → 回退订单源；无项目 →
     订单源。sp 筛选与 spend_trend 的 by_salesperson 同口径，禁止两页签分叉。
     """
+    if sort in COST_SORTS and not can_cost:
+        raise AnalyticsValidationError("按成本排序需要成本查看权限（data_purchase_cost）")
     start, end = resolve_window(range_, date_from, date_to)
     months = _window_months(start, end)
     business_type_clause = _business_type_clause(business_type)
@@ -463,7 +465,7 @@ def pn_ranking(
                     Decimal("0.1")
                 )
             )
-            if total_cost_inc
+            if can_cost and total_cost_inc
             else None
         )
         i["monthly_avg_qty"] = (
@@ -480,7 +482,7 @@ def pn_ranking(
             "cost_ex": (i["cost_ex"] or Decimal("0"), i["effective_qty"]),
             "qty": (i["qty"] or Decimal("0"), i["occurrences"]),
             "return_qty": (i["return_qty"] or Decimal("0"),),
-            "effective_qty": (i["effective_qty"], i["cost_inc"] or Decimal("0")),
+            "effective_qty": (i["effective_qty"], (i["cost_inc"] or Decimal("0")) if can_cost else Decimal("0")),
             "occurrences": (i["occurrences"], i["effective_qty"]),
             "order_count": (i["order_count"], i["effective_qty"]),
             "project_count": (i["project_count"], i["effective_qty"]),
@@ -496,6 +498,9 @@ def pn_ranking(
             "pn": (i["pn"],),
         }[sort]
 
+    # Equal public metrics have a deterministic identity tie-break, independent
+    # of hidden amounts or the database's aggregate iteration order.
+    items.sort(key=lambda item: (item["pn"], item["part_id"] or 0))
     items.sort(key=sort_key, reverse=(sort != "pn"))  # PN 按字母升序更自然
     for rank, i in enumerate(items, 1):
         i["rank"] = rank
