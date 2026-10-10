@@ -6,7 +6,9 @@
 
 ## 0. 分支与管理员审批（最高优先级）
 
-**main 是生产发布线，test 是 Beta 测试线。日常功能 PR 指向 test。**
+**main 是生产发布线；test 仅用于远期实验，不是近期功能的必经集成线。**
+近期要进入正式系统的功能从最新 main 创建独立分支，PR 指向 main；
+不要携入 test 上的其他实验功能。该分工以杨金臣 2026-10-10 的后续更正为准。
 任何 main 合并必须先联系杨金臣（yangjinchen，GitHub **@Jinchen-Yang**），
 取得其对当前候选 SHA 的人工 GitHub APPROVED review；CI 通过或他人批准不能替代。
 禁止代理代批、管理员绕过、强推 main、关闭保护或自动将 test 发布到生产。
@@ -29,15 +31,15 @@ Docker Compose 交付。当前主线是维保业务闭环（见 issue #128）与
    （单一 `CONTEXT.md` + `docs/adr/`）。
 5. `git fetch` 对齐远端，**别在过期 ref 上开工**。
 
-**UI 改动的验收路径**：本地回归（pytest / vitest / `tsc && vite build`）完成后报告"待验收"，
-由用户把前端构建部署到 **https://test.yunci.ink** 点按验收；代理驱动浏览器只用于开发期调试，
-不代替点按验收。
+**UI 改动的验收路径**：基于 main 的候选完成本地回归（pytest / vitest / `tsc && vite build`）后报告"待验收"，
+由用户安排候选构建的实际点按验收；验收环境与远期 test 分支是不同概念，不要求先合入 test。
+代理驱动浏览器只用于开发期调试，不代替用户点按验收。
 
 ## 3. 四条纪律（都是事故换来的）
 
 1. **不要从历史 PR/issue 反推口径。** 口径只在 `docs/decisions/`；PR 描述里必须写
    `决策: D-NNNN` 或 `决策: 无`（CI 校验该行存在）。
-2. **日常开发合入 test；main 只收管理员批准的发布。** 两个必需 CI 检查全绿，
+2. **近期正式功能以 main 为基线；main 合并必须经管理员批准。** 两个必需 CI 检查全绿，
    main 还须 @Jinchen-Yang 的 Code Owner 批准，遵循 `docs/BRANCH_POLICY.md`；禁止从功能分支直接部署生产。
 3. **同一模块被多工具反复改，必带契约测试。** 高危区：`services/maintenance_project_master_workbook.py`、
    `etl/loader.py`、`services/maintenance_project_identity.py` —— 并发语义与 bump 调用点。
@@ -54,7 +56,7 @@ cd frontend && npm ci && npx tsc && npx vitest run && npx vite build
 # 本地起完整栈 / API 冒烟 / UI 截图：用 .claude/skills/run-it-spareparts/ 技能
 ```
 
-分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可，日常 PR base 一律 `test`；面向 `main` 的发布 PR 必须走管理员审批。
+分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可；近期正式功能的 PR base 为 `main`，仅明确安排的远期实验指向 `test`。main 的发布 PR 必须走管理员审批。
 
 ## 5. 提交与文档约定
 

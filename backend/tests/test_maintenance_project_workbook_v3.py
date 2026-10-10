@@ -211,7 +211,9 @@ def _seed(db):
     db.commit()
 
 
-def test_build_workbook_sheets_and_data(db):
+def test_build_workbook_sheets_and_data(db, monkeypatch):
+    # 固定本用例的快照时点，使 08 月始终为过去、10 月始终为未来。
+    monkeypatch.setattr(workbook_v3, "business_today", lambda: date(2026, 9, 1))
     _seed(db)
     data = workbook_v3.build_project_workbook(db, "wb3-project-1")
     workbook = load_workbook(io.BytesIO(data))

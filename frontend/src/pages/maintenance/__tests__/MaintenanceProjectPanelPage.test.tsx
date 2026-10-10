@@ -98,6 +98,13 @@ vi.mock("../../../api/maintenanceProjectProcurement", async () => {
     getProjectProcurement: (...a: unknown[]) => getProjectProcurement(...a),
   };
 });
+vi.mock("../panel/MaintenanceProjectAnalyticsContext", () => ({
+  default: ({ projectId, analyticsReturn }: { projectId: string; analyticsReturn: string | null }) => (
+    <div data-testid="project-analytics-context" data-project-id={projectId}>
+      {analyticsReturn ?? "无分析来源"}
+    </div>
+  ),
+}));
 
 import MaintenanceProjectPanelPage from "../MaintenanceProjectPanelPage";
 
@@ -1230,6 +1237,7 @@ describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
       <MemoryRouter initialEntries={initialEntries}>
         <Routes>
           <Route path="/maintenance" element={<div data-testid="wall-stub">项目墙</div>} />
+          <Route path="/maintenance/analytics" element={<div data-testid="analytics-stub">分析页</div>} />
           <Route path="/maintenance/projects/:projectId"
                  element={<MaintenanceProjectPanelPage />} />
         </Routes>
@@ -1260,5 +1268,53 @@ describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
     fireEvent.click(screen.getByRole("link", { name: /返回项目墙/ }));
     await waitFor(() => expect(screen.getByTestId("panel-location").textContent)
       .toBe("/maintenance"));
+  });
+
+  it("无成本权限也可直达分析定位，刷新后的返回保留布局、PN、筛选和页码", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true, data_purchase_cost: false,
+    }));
+    const returnPath = "/maintenance/analytics?layout=matrix&focus=part%3A23&range=custom&from=2026-01-01&to=2026-09-30&page=3";
+    const params = new URLSearchParams({ tab: "analytics", return: returnPath });
+    // A single history entry represents a refreshed URL or a newly opened tab.
+    renderPanelWithWall([`/maintenance/projects/p1?${params}`]);
+    expect(await screen.findByRole("tab", { name: "分析定位" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("project-analytics-context")).toHaveAttribute("data-project-id", "p1");
+    expect(screen.getByTestId("project-analytics-context")).toHaveTextContent(returnPath);
+    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("p1"));
+    expect(searchSiteIssues).not.toHaveBeenCalled();
+    expect(getBoardProjectOrders).not.toHaveBeenCalled();
+    const back = screen.getByRole("link", { name: /返回分析/ });
+    expect(back).toHaveAttribute("href", returnPath);
+    fireEvent.click(back);
+    await waitFor(() => expect(screen.getByTestId("panel-location")).toHaveTextContent(returnPath));
+    expect(screen.getByTestId("analytics-stub")).toBeInTheDocument();
+  });
+
+  it("切换原有页签更新 URL，保留分析来路，回到分析页签才挂载定位组件", async () => {
+    const returnPath = "/maintenance/analytics?layout=pareto&focus=part%3A42&metric=issued";
+    const params = new URLSearchParams({ tab: "analytics", return: returnPath });
+    renderPanelWithWall([`/maintenance/projects/p1?${params}`]);
+    expect(await screen.findByTestId("project-analytics-context")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "备件与需求单" }));
+    expect(await screen.findByText("WBDD-1")).toBeInTheDocument();
+    const location = new URL(screen.getByTestId("panel-location").textContent!, "https://maintenance.invalid");
+    expect(location.searchParams.get("tab")).toBe("parts-orders");
+    expect(location.searchParams.get("return")).toBe(returnPath);
+    expect(screen.queryByTestId("project-analytics-context")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "分析定位" }));
+    expect(await screen.findByTestId("project-analytics-context")).toHaveTextContent(returnPath);
+    expect(searchSiteIssues).not.toHaveBeenCalled();
+  });
+
+  it("非法页签不挂载业务明细，外部返回链接不进入 href 或分析组件", async () => {
+    const params = new URLSearchParams({ tab: "unknown", return: "https://example.com/maintenance/analytics" });
+    renderPanelWithWall([`/maintenance/projects/p1?${params}`]);
+    expect(await screen.findByRole("tab", { name: "概览" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("link", { name: /返回项目墙/ })).toHaveAttribute("href", "/maintenance");
+    expect(searchSiteIssues).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("project-analytics-context")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "分析定位" }));
+    expect(await screen.findByTestId("project-analytics-context")).toHaveTextContent("无分析来源");
   });
 });
