@@ -59,6 +59,22 @@ describe("三视图与跳转", () => {
     const data = fixture(); data.page = 2; data.rows = [row("part:40", "PAGE-2-PN")]; fetchExplorer.mockResolvedValue(data); mount("/maintenance/analytics?page=2");
     expect(await screen.findByRole("button", { name: /PN-A，实际领用/ })).toBeInTheDocument(); expect(screen.queryByRole("button", { name: /PAGE-2-PN，实际领用/ })).not.toBeInTheDocument(); expect(screen.getByText("PAGE-2-PN")).toBeInTheDocument();
   });
+  it("需求单数排名第2页的非Top项展示自己的去重单数", async () => {
+    const data = fixture();
+    data.metric = "orders";
+    data.meta.additive = false;
+    data.page = 2;
+    data.total = 40;
+    data.rows = [{ ...row("part:40", "PAGE-2-ORDERS", "1234"), order_count: 1234, issued_qty: "7", effective_qty: "8" }];
+    fetchExplorer.mockResolvedValue(data);
+    mount("/maintenance/analytics?metric=orders&page=2");
+    const detailRow = (await screen.findByText("PAGE-2-ORDERS")).closest("tr")!;
+    const orderColumn = screen.getAllByRole("columnheader").findIndex(header => header.textContent === "需求单数");
+    expect(orderColumn).toBeGreaterThan(-1);
+    expect(within(detailRow).getAllByRole("cell")[orderColumn]).toHaveTextContent(/^1,234$/);
+    expect(screen.queryByRole("button", { name: /PAGE-2-ORDERS，需求单数/ })).not.toBeInTheDocument();
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ metric: "orders", page: 2 }), expect.any(AbortSignal));
+  });
   it.each(["orders", "negative", "zero", "unknown"])("%s不绘累计百分比、不伪造集中度", async state => {
     const data = fixture();
     if (state === "orders") { data.meta.additive = false; data.metric = "orders"; }
@@ -72,6 +88,23 @@ describe("三视图与跳转", () => {
   it("累计比例直接使用后端精确累计值，不相加已舍入的行占比", async () => {
     const data = fixture(); data.chart_rows = [ { ...first, share_pct: "33.3", cumulative_share_pct: "33.3" }, { ...second, share_pct: "33.3", cumulative_share_pct: "66.7" } ]; data.summary.top_share_pct = "66.7";
     fetchExplorer.mockResolvedValue(data); mount("/maintenance/analytics?layout=B"); const line = await screen.findByTestId("pareto-cumulative"); const points = line.getAttribute("points")!.split(" "); const lastY = Number(points[1].split(",")[1]); expect(lastY).toBeCloseTo(255 - .667 * (255 - 32)); expect(screen.getByText("66.7%")).toBeInTheDocument();
+  });
+  it("排列图真实零与未知仅显示标签，极小非零柱保持真实比例", async () => {
+    const data = fixture();
+    data.chart_rows = [row("part:10", "ONE-PN", "1"), row("part:11", "TINY-PN", "0.001"), row("part:12", "ZERO-PN", "0"), { ...row("part:13", "UNKNOWN-PN"), value: null }];
+    fetchExplorer.mockResolvedValue(data);
+    mount("/maintenance/analytics?layout=B");
+    const chart = await screen.findByRole("group", { name: "排名排列图" });
+    const zero = within(chart).getByRole("button", { name: /ZERO-PN，实际领用 0，/ });
+    const unknown = within(chart).getByRole("button", { name: /UNKNOWN-PN，实际领用 未知，/ });
+    expect(zero.querySelector("rect")).toBeNull();
+    expect(within(zero).getByText("0")).toBeInTheDocument();
+    expect(unknown.querySelector("rect")).toBeNull();
+    expect(within(unknown).getByText("未知")).toBeInTheDocument();
+    expect(chart.querySelectorAll("rect")).toHaveLength(2);
+    const tiny = within(chart).getByRole("button", { name: /TINY-PN，实际领用 0.001，/ });
+    expect(Number(tiny.querySelector("rect")!.getAttribute("height"))).toBeCloseTo(.001 * (255 - 32));
+    expect(tiny).toHaveAttribute("tabindex", "0");
   });
   it("未知成本项不生成归零的累计点，固定图例解释金线", async () => {
     const data = fixture(); data.metric = "cost"; data.chart_rows = [first, { ...second, value: null, cost_inc: null, cost_state: "unknown", cumulative_share_pct: null }];
