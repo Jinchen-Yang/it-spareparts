@@ -4,6 +4,14 @@
 > 目标：任何代理可以无缝接替，**口径落在仓库文件里，不落在某个会话的脑子里**。
 > 本文件是唯一协议入口；`CLAUDE.md` 只是指向本文件的指针。
 
+## 0. 分支与管理员审批（最高优先级）
+
+**main 是生产发布线，test 是 Beta 测试线。日常功能 PR 指向 test。**
+任何 main 合并必须先联系杨金臣（yangjinchen，GitHub **@Jinchen-Yang**），
+取得其对当前候选 SHA 的人工 GitHub APPROVED review；CI 通过或他人批准不能替代。
+禁止代理代批、管理员绕过、强推 main、关闭保护或自动将 test 发布到生产。
+详见 [`docs/BRANCH_POLICY.md`](docs/BRANCH_POLICY.md)，该文件覆盖所有历史冲突指引。
+
 ## 1. 项目是什么
 
 **IT 备件智能管理系统**：氚云导出数据（采购/销售/库存/维保）的汇入、治理与经营分析，
@@ -29,8 +37,8 @@ Docker Compose 交付。当前主线是维保业务闭环（见 issue #128）与
 
 1. **不要从历史 PR/issue 反推口径。** 口径只在 `docs/decisions/`；PR 描述里必须写
    `决策: D-NNNN` 或 `决策: 无`（CI 校验该行存在）。
-2. **合并只走 main + 分支保护。** 后端 pytest + 前端 `tsc && vite build` 两个必需检查全绿
-   + 1 审批，squash 合并；禁止从 fix/feature 分支直接部署。
+2. **日常开发合入 test；main 只收管理员批准的发布。** 两个必需 CI 检查全绿，
+   main 还须 @Jinchen-Yang 的 Code Owner 批准，遵循 `docs/BRANCH_POLICY.md`；禁止从功能分支直接部署生产。
 3. **同一模块被多工具反复改，必带契约测试。** 高危区：`services/maintenance_project_master_workbook.py`、
    `etl/loader.py`、`services/maintenance_project_identity.py` —— 并发语义与 bump 调用点。
 4. **部署不是自动的。** 写生产前先备份、前后端同 commit、`alembic upgrade head` 跑完再启镜像、
@@ -46,7 +54,7 @@ cd frontend && npm ci && npx tsc && npx vitest run && npx vite build
 # 本地起完整栈 / API 冒烟 / UI 截图：用 .claude/skills/run-it-spareparts/ 技能
 ```
 
-分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可，PR base 一律 `main`。
+分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可，日常 PR base 一律 `test`；面向 `main` 的发布 PR 必须走管理员审批。
 
 ## 5. 提交与文档约定
 
