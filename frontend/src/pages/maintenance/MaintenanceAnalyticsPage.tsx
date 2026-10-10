@@ -3,7 +3,6 @@ import {
   Alert,
   Button,
   Card,
-  Col,
   DatePicker,
   Input,
   Row,
@@ -47,7 +46,7 @@ import {
 } from "../../api/maintenanceBossBoard";
 import { readPermissionMap } from "../../nav";
 import PageHeader from "../../components/PageHeader";
-import { PnTopBar } from "../../components/charts/PnTopBar";
+import MaintenanceRankingsExplorer from "./MaintenanceRankingsExplorer";
 import {
   SPEND_CATEGORY_CODES,
   SPEND_CATEGORY_LABELS,
@@ -227,8 +226,9 @@ export function MaintenanceAnalyticsPage() {
     [costSourceSpec],
   );
   const costSourceParam = csvParam(costSources, COST_SOURCE_CODES);
-  /** 视图页签：pn（默认）/ spend；granularity 仅 spend 使用，但都入 URL 便于分享。 */
-  const view = sp.get("view") === "spend" ? "spend" : "pn";
+  /** 默认多维排名；旧 view=pn / spend 链接继续指向原明细与开支统计。 */
+  const view = sp.get("view") === "spend" ? "spend" : sp.get("view") === "pn" ? "pn" : "rankings";
+  const [explorerRefresh, setExplorerRefresh] = useState(0);
   const granularity = readGranularity(sp.get("granularity"));
 
   const [customerDraft, setCustomerDraft] = useState(customer);
@@ -240,10 +240,14 @@ export function MaintenanceAnalyticsPage() {
 
   const perms = readPermissionMap();
   const canCost = !!perms.data_purchase_cost;
+  const canCustomer = !!perms.data_customer;
 
   const patch = useCallback((next: Record<string, string | null>) => {
     setSp((prev) => {
       const merged = new URLSearchParams(prev);
+      if (Object.keys(next).some(key => ["range", "from", "to", "q", "business_type", "project", "customer", "sp", "order_no", "demand_type", "warehouse", "cost_source"].includes(key))) {
+        merged.delete("focus_page");
+      }
       for (const [k, v] of Object.entries(next)) {
         if (v === null || v === "") merged.delete(k);
         else merged.set(k, v);
@@ -483,7 +487,7 @@ export function MaintenanceAnalyticsPage() {
     return () => { spendSeqRef.current += 1; };
   }, [loadSpend, view]);
 
-  useVisibleMaintenanceRefresh(() => view === "spend" ? loadSpend("background") : load("background"));
+  useVisibleMaintenanceRefresh(() => view === "spend" ? loadSpend("background") : view === "pn" ? load("background") : Promise.resolve(true));
 
   const onTableChange: TableProps<PnRankingRow>["onChange"] = (pg, _fl, sorter) => {
     const field = Array.isArray(sorter) ? sorter[0]?.field : sorter?.field;
@@ -502,19 +506,10 @@ export function MaintenanceAnalyticsPage() {
   const columns: ColumnsType<PnRankingRow> = useMemoColumns(sort);
 
   const summary = data?.summary;
-  const activeError = view === "spend" ? spendError : error;
+  const activeError = view === "spend" ? spendError : view === "pn" ? error : null;
   const showWbddWarning = view === "spend"
     ? spendData !== null && !spendData.summary.wbdd_ready
-    : summary !== undefined && !summary.wbdd_ready;
-  const costItems = (data?.rows ?? []).map((r) => ({
-    pn: r.pn,
-    value: r.cost_inc.state === "ready" && r.cost_inc.value !== null
-      ? Number(r.cost_inc.value) : null,
-  }));
-  const qtyItems = (data?.rows ?? []).map((r) => ({
-    pn: r.pn,
-    value: Number(r.effective_qty) || null,
-  }));
+    : view === "pn" && summary !== undefined && !summary.wbdd_ready;
 
   const spendByBusinessColumns: ColumnsType<SpendBusinessTypeRow> = useMemo(() => [
     { title: "分类", dataIndex: "label", width: 140, render: (v: string, r) => v || r.code },
@@ -595,7 +590,7 @@ export function MaintenanceAnalyticsPage() {
             <span>维保数据分析</span>
           </Space>
         )}
-        subtitle="全项目 PN 维度：备件成本与实际领用、返还统计"
+        subtitle="从多维排名查看 PN 的项目分布，追溯实际领用与需求成本"
         extra={(
           <Space>
             <Button onClick={() => {
@@ -608,8 +603,8 @@ export function MaintenanceAnalyticsPage() {
               重置筛选
             </Button>
             <Button icon={<ReloadOutlined />}
-              onClick={() => { if (view === "spend") void loadSpend("manual"); else void load("manual"); }}
-              loading={view === "spend" ? spendLoading : loading}>
+              onClick={() => { if (view === "spend") void loadSpend("manual"); else if (view === "pn") void load("manual"); else setExplorerRefresh(value => value + 1); }}
+              loading={view === "spend" ? spendLoading : view === "pn" && loading}>
               刷新
             </Button>
           </Space>
@@ -644,14 +639,15 @@ export function MaintenanceAnalyticsPage() {
             }))}
             onChange={(values) => patch({ business_type: boardBusinessTypeParam(values), page: null })}
           />
-          <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
-            onChange={(v) => patch({ sort: v, page: null })} />
-          <Input.Search allowClear value={searchDraft} placeholder="搜 PN / 描述" style={{ width: 220 }}
+          {view === "pn" && <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
+            onChange={(v) => patch({ sort: v, page: null })} />}
+          <Input.Search allowClear value={searchDraft} placeholder={view === "rankings" ? "搜 PN / 描述 / 项目" : "搜 PN / 描述"} style={{ width: 220 }}
             onChange={(event) => setSearchDraft(event.target.value)}
             onSearch={(v) => patch({ q: v || null, page: null })} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            成本＝系统回填已知成本（缺价行单列，不按 0 计）；返还率＝所选期间返还数量 ÷ 同期实际领用数量，包含全部件况。
+            成本＝当前可用的已知需求成本（缺价行单列，不按 0 计）；返还率＝所选期间返还数量 ÷ 同期实际领用数量，包含全部件况。
             按需求单号、需求类型、仓库或成本来源筛选时，仅统计关联需求单的领用与返还。
+            成本来源按记录标记筛选；缺价明细排名按实际成本是否可用统计，两者口径不同。
           </Text>
         </Space>
         <Space wrap size={12} style={{ marginTop: 12 }}>
@@ -671,9 +667,9 @@ export function MaintenanceAnalyticsPage() {
             notFoundContent={projectSearching ? "搜索中…" : "输入至少 2 个字搜索项目"}
             onChange={(values) => patch({ project: values.length ? values.join(",") : null, page: null })}
           />
-          <Input.Search allowClear value={customerDraft} placeholder="客户" style={{ width: 180 }}
+          {canCustomer && <Input.Search allowClear value={customerDraft} placeholder="客户" style={{ width: 180 }}
             onChange={(event) => setCustomerDraft(event.target.value)}
-            onSearch={(v) => patch({ customer: v || null, page: null })} />
+            onSearch={(v) => patch({ customer: v || null, page: null })} />}
           <Input.Search allowClear value={salesDraft} placeholder="销售" style={{ width: 160 }}
             onChange={(event) => setSalesDraft(event.target.value)}
             onSearch={(v) => patch({ sp: v || null, page: null })} />
@@ -721,11 +717,12 @@ export function MaintenanceAnalyticsPage() {
 
       <Tabs
         activeKey={view}
-        onChange={(key) => patch({ view: key === "spend" ? "spend" : null })}
+        onChange={(key) => patch({ view: key === "rankings" ? null : key })}
         items={[
+          { key: "rankings", label: "多维排名", children: view === "rankings" ? <MaintenanceRankingsExplorer refreshKey={explorerRefresh} /> : null },
           {
             key: "pn",
-            label: "PN 排名",
+            label: "PN 明细",
             children: (
               <Space direction="vertical" size={16} style={{ width: "100%" }}>
                 <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }}>
@@ -743,23 +740,6 @@ export function MaintenanceAnalyticsPage() {
                   <KpiCard label="返还总量" loading={loading}
                     value={qtyFmt(summary ? Number(summary.total_receipt_qty) : null)}
                     sub="所选期间收到的返件，包含全部件况" />
-                </Row>
-
-                <Row gutter={16}>
-                  <Col xs={24} lg={12}>
-                    <Card size="small">
-                      <PnTopBar items={costItems} title="Top PN 成本" kind="money"
-                        metricLabel="金额合计（含税）" loading={loading} error={error}
-                        testId="pn-cost-chart" />
-                    </Card>
-                  </Col>
-                  <Col xs={24} lg={12}>
-                    <Card size="small">
-                      <PnTopBar items={qtyItems} title="Top PN 消耗频率" kind="qty"
-                        metricLabel="数量合计（有效数量）" loading={loading} error={error}
-                        testId="pn-qty-chart" />
-                    </Card>
-                  </Col>
                 </Row>
 
                 <Card size="small" title={`PN 排名（共 ${qtyFmt(data?.total ?? null)} 个）`}>
