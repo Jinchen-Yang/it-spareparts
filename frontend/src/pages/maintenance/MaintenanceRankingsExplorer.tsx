@@ -99,7 +99,7 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
           ]} pagination={{ current: data.page, pageSize: data.page_size, total: data.total, pageSizeOptions: [20, 50, 100], showSizeChanger: true, onChange: (page, size) => patch({ page: size === data.page_size ? String(page) : "1", ps: String(size) }), showTotal: total => `共 ${total} 项` }} />
         </Card>
       </>}
-      <Typography.Paragraph type="secondary" className="me-caption">三种图与明细来自同一次后端统计。统计时点：{data.meta.as_of}。客户与销售按关联需求单归属；无法关联的领用归入“未明确”，不按项目客户推测分摊。</Typography.Paragraph>
+      <Typography.Paragraph type="secondary" className="me-caption">三种图与明细来自同一次后端统计。统计时点：{data.meta.as_of}。客户按关联需求单归属，无法关联时归入“未明确”；销售以项目主档有效归属为先，未设置且未人工覆盖时回退来源需求单。</Typography.Paragraph>
     </>}
   </div>;
 }
