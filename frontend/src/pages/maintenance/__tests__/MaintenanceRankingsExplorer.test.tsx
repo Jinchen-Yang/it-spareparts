@@ -8,10 +8,10 @@ import { explorerParamsFromSearch, formatExplorerValue } from "../analyticsExplo
 const fetchExplorer = vi.fn();
 vi.mock("../../../api/maintenanceAnalytics", () => ({ fetchMaintenanceExplorer: (...args: unknown[]) => fetchExplorer(...args) }));
 vi.mock("../../../nav", () => ({ readPermissionMap: () => JSON.parse(localStorage.getItem("permissions") || "{}") }));
-const row = (key: string, label: string, value = "4.125"): ExplorerRow => ({ key, label, value, subtitle: "备件说明", part_id: 1, project_id: null, pn: label, issued_qty: value, effective_qty: "8.125", cost_inc: "10.005", cost_state: "partial", order_count: 1, missing_lines: 1, project_count: 2, pn_count: 1, share_pct: "41.3", cumulative_share_pct: "41.3" });
+const row = (key: string, label: string, value = "4.125"): ExplorerRow => ({ key, label, value, can_open_project: false, subtitle: "备件说明", part_id: 1, project_id: null, pn: label, issued_qty: value, effective_qty: "8.125", cost_inc: "10.005", cost_state: "partial", order_count: 1, missing_lines: 1, project_count: 2, pn_count: 1, share_pct: "41.3", cumulative_share_pct: "41.3" });
 const first = row("part:1", "PN-A");
 const second = row("part:2", "PN-B", "0.125");
-const project = { ...row("project-1", "项目甲"), project_id: "project-1", part_id: null, pn: null };
+const project = { ...row("project-1", "项目甲"), project_id: "project-1", can_open_project: true, part_id: null, pn: null };
 const project2 = { ...project, key: "project-2", label: "项目乙", project_id: "project-2" };
 function fixture(): MaintenanceExplorerResponse {
   return { window: { range: "all", date_from: null, date_to: null }, dimension: "pn", metric: "issued", total: 2, page: 1, page_size: 20,
@@ -120,6 +120,75 @@ describe("三视图与跳转", () => {
   it("未归属项目和没有事实的格子不能跳转", async () => {
     const data = fixture(); data.focus.rows = [{ ...project, key: "__unassigned__", project_id: null, label: "未归属" }]; data.matrix.columns[1] = { ...project2, project_id: null };
     fetchExplorer.mockResolvedValue(data); mount("/maintenance/analytics?layout=C"); expect(await screen.findByRole("button", { name: /未归属，实际领用/ })).toBeDisabled(); expect(screen.getByRole("button", { name: /PN-B × 项目乙/ })).toBeDisabled(); expect(screen.getByRole("button", { name: /PN-A × 项目乙/ })).toBeDisabled();
+  });
+  it.each(["A", "B", "C"])("%s 视图明确授权的项目分布可跳转", async layout => {
+    mount(`/maintenance/analytics?layout=${layout}`);
+    const detail = await screen.findByRole("button", { name: /项目甲，实际领用/ });
+    expect(detail).toBeEnabled();
+    fireEvent.click(detail);
+    expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/projects/project-1?");
+  });
+  it.each(["A", "B", "C"].flatMap(layout => [false, "missing"].map(permission => ({ layout, permission }))))("$layout 视图项目权限为 $permission 时保持数值且禁用钻取", async ({ layout, permission }) => {
+    const data = fixture();
+    const blocked = { ...project, can_open_project: false };
+    if (permission === "missing") Reflect.deleteProperty(blocked, "can_open_project");
+    data.focus.rows = [blocked];
+    data.matrix.columns = [blocked];
+    fetchExplorer.mockResolvedValue(data);
+    mount(`/maintenance/analytics?layout=${layout}`);
+    const detail = await screen.findByRole("button", { name: /项目甲，实际领用 4.125，无项目详情权限/ });
+    expect(detail).toBeDisabled();
+    expect(within(detail).getByText("4.125")).toBeInTheDocument();
+    expect(within(detail).getByText("无项目详情权限")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "查看分布" })[0]).toBeEnabled();
+    fireEvent.click(detail);
+    expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/analytics?");
+    if (layout === "C") {
+      const cell = screen.getByRole("button", { name: /PN-A × 项目甲：4.125，无项目详情权限/ });
+      expect(cell).toBeDisabled();
+      expect(within(cell).getByText("4.125")).toBeInTheDocument();
+    }
+  });
+  it.each(["A", "B", "C"].flatMap(layout => [true, false, "missing"].map(permission => ({ layout, permission }))))("项目维度 $layout 的 PN 钻取取项目行授权 $permission，不取 PN 行", async ({ layout, permission }) => {
+    const data = fixture();
+    const targetProject = { ...project, can_open_project: permission === true };
+    if (permission === "missing") Reflect.deleteProperty(targetProject, "can_open_project");
+    data.dimension = "project";
+    data.rows = [targetProject];
+    data.chart_rows = [targetProject];
+    data.focus = { ...data.focus, row: targetProject, dimension: "pn", rows: [first] };
+    data.matrix = { ...data.matrix, row_dimension: "project", column_dimension: "pn", rows: [targetProject], columns: [first], cells: [{ row_key: targetProject.key, column_key: first.key, value: "4.125", cost_state: "known" }] };
+    fetchExplorer.mockResolvedValue(data);
+    mount(`/maintenance/analytics?dim=project&layout=${layout}`);
+    const detail = await screen.findByRole("button", { name: /PN-A，实际领用 4.125，/ });
+    expect(screen.getByRole("button", { name: "查看分布" })).toBeEnabled();
+    const clickTarget = layout === "C" ? screen.getByRole("button", { name: /项目甲 × PN-A：4.125/ }) : detail;
+    if (permission === true) {
+      // PN itself has no project identity or detail grant; the enclosing project authorizes this link.
+      expect(detail).toBeEnabled();
+      expect(clickTarget).toBeEnabled();
+      fireEvent.click(clickTarget);
+      expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/projects/project-1?");
+      expect(query().get("pnKey")).toBe("part:1");
+    } else {
+      expect(detail).toBeDisabled();
+      expect(clickTarget).toBeDisabled();
+      expect(within(detail).getByText("无项目详情权限")).toBeInTheDocument();
+      expect(within(clickTarget).getByText("4.125")).toBeInTheDocument();
+      fireEvent.click(clickTarget);
+      expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/analytics?");
+    }
+  });
+  it.each(["customer", "salesperson", "business"] as const)("%s 矩阵按项目列授权，分组仍可选择", async dimension => {
+    const data = fixture();
+    data.dimension = dimension;
+    data.matrix.row_dimension = dimension;
+    data.matrix.columns = [{ ...project, can_open_project: false }];
+    fetchExplorer.mockResolvedValue(data);
+    mount(`/maintenance/analytics?dim=${dimension}&layout=C`);
+    const cell = await screen.findByRole("button", { name: /PN-A × 项目甲：4.125，无项目详情权限/ });
+    expect(cell).toBeDisabled();
+    expect(screen.getByRole("button", { name: "PN-A" })).toBeEnabled();
   });
   it("客户分组矩阵携带独立目标，不覆盖原返回focus", async () => {
     const data = fixture(); data.dimension = "customer"; data.matrix.rows = [{ ...first, key: "客户乙", label: "客户乙" }]; data.matrix.cells = [{ row_key: "客户乙", column_key: project.key, value: "4.125", cost_state: "known" }];

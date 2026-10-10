@@ -13,6 +13,10 @@ const layouts = [ { key: "A", label: "分栏钻取", icon: <BarChartOutlined /> 
 const percent = (value: string | number | null) => value == null ? "—" : `${Number(value).toFixed(1)}%`;
 const valueNumber = (value: string | null) => value == null ? 0 : Number(value);
 const selectedCost = (row: ExplorerRow) => row.cost_state === "restricted" ? "无权限" : `${fmt(row.cost_inc, "cost")}${row.cost_state === "partial" ? "（部分缺价）" : ""}`;
+const projectAccessReason = (row: ExplorerRow | null): string | null => {
+  if (!row?.project_id || row.project_id === "__unassigned__") return "未归属项目";
+  return row.can_open_project === true ? null : "无项目详情权限";
+};
 
 export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refreshKey?: number }) {
   const [search, setSearch] = useSearchParams();
@@ -33,8 +37,9 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
     return next;
   }, { replace: true }), [setSearch]);
   const focus = (row: ExplorerRow) => patch({ focus: row.key, focus_page: null });
-  const goProject = (projectId: string | null, origin: ExplorerRow | null, pnKey?: string) => {
-    if (!projectId || projectId === "__unassigned__") return;
+  const goProject = (project: ExplorerRow | null, origin: ExplorerRow | null, pnKey?: string) => {
+    const projectId = project?.project_id;
+    if (!projectId || projectId === "__unassigned__" || project?.can_open_project !== true) return;
     const target = new URLSearchParams({ tab: "analytics", return: `${location.pathname}${location.search}` });
     if (origin) { target.set("analysis_dimension", dimension); target.set("analysis_focus", origin.key); }
     if (pnKey) target.set("pnKey", pnKey);
@@ -42,8 +47,8 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
   };
   const detailClick = (row: ExplorerRow) => {
     if (!data?.focus.row) return;
-    if (dimension === "project") goProject(data.focus.row.project_id, data.focus.row, row.key);
-    else goProject(row.project_id, data.focus.row, dimension === "pn" ? data.focus.row.key : undefined);
+    if (dimension === "project") goProject(data.focus.row, data.focus.row, row.key);
+    else goProject(row, data.focus.row, dimension === "pn" ? data.focus.row.key : undefined);
   };
   const selected = data?.focus.row;
   const cumulativeEnabled = !!data?.meta.additive && !data.meta.has_negative && data.summary.value != null && Number(data.summary.value) > 0;
@@ -61,7 +66,7 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
     <div className="me-layouts" role="group" aria-label="图表方式">
       {layouts.map(item => <Button key={item.key} aria-label={item.label} icon={item.icon} type={layout === item.key ? "primary" : "default"} aria-pressed={layout === item.key} onClick={() => patch({ layout: item.key })}>{item.label}</Button>)}
     </div>
-    <Typography.Paragraph type="secondary" className="me-method">{EXPLORER_METRICS[metric].note} 点击排名查看分布，再点击项目进入“分析定位”；返回时保留全部筛选。</Typography.Paragraph>
+    <Typography.Paragraph type="secondary" className="me-method">{EXPLORER_METRICS[metric].note} 点击排名查看分布，再点击有详情权限的项目进入“分析定位”；返回时保留全部筛选。</Typography.Paragraph>
     {loading && !data ? <Card><Skeleton active paragraph={{ rows: 6 }} /></Card> : error ? <Alert type="error" showIcon message={error} action={<Button onClick={reload}>重试</Button>} /> : data && <>
       <div className="me-kpis">
         <Kpi label="实际领用" value={`${fmt(data.summary.issued_qty)} 件`} note="当前期间的确认领用" />
@@ -81,9 +86,9 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
         </>}
         {layout === "C" && <>
           <Card title="项目热力矩阵" extra={<Tag>颜色按当前可见单元格</Tag>}><HeatMatrix data={data} metric={metric} onFocus={focus} onCell={(row, column) => {
-            if (data.matrix.column_dimension === "pn") goProject(row.project_id, row, column.key);
-            else goProject(column.project_id, row, dimension === "pn" ? row.key : undefined);
-          }} /><div className="me-caption">只展示前 {data.matrix.rows.length} 项与前 {data.matrix.columns.length} 个{data.matrix.column_dimension === "pn" ? " PN" : "项目"}。空白表示没有对应记录，未知成本单独标记；点击有记录的单元格进入项目。</div></Card>
+            if (data.matrix.column_dimension === "pn") goProject(row, row, column.key);
+            else goProject(column, row, dimension === "pn" ? row.key : undefined);
+          }} /><div className="me-caption">只展示前 {data.matrix.rows.length} 项与前 {data.matrix.columns.length} 个{data.matrix.column_dimension === "pn" ? " PN" : "项目"}。空白表示没有对应记录，未知成本单独标记；点击有记录且有详情权限的单元格进入项目。</div></Card>
           <Distribution data={data} metric={metric} onRow={detailClick} onPage={page => patch({ focus_page: String(page) })} />
         </>}
         <Card title={`排名明细 · ${fmt(data.total)} 项`} extra={<Typography.Text type="secondary">全范围排序</Typography.Text>}>
@@ -109,16 +114,17 @@ function Kpi({ label, value, note }: { label: string; value: string; note: strin
   return <Card size="small" className="me-kpi"><div className="me-kpi-label">{label}</div><strong>{value}</strong><div className="me-caption">{note}</div></Card>;
 }
 
-function RankingList({ rows, metric, selected, onSelect, disabled, offset = 0 }: { rows: ExplorerRow[]; metric: ExplorerMetric; selected?: string; onSelect: (row: ExplorerRow) => void; disabled?: (row: ExplorerRow) => boolean; offset?: number }) {
+function RankingList({ rows, metric, selected, onSelect, disabledReason, offset = 0 }: { rows: ExplorerRow[]; metric: ExplorerMetric; selected?: string; onSelect: (row: ExplorerRow) => void; disabledReason?: (row: ExplorerRow) => string | null; offset?: number }) {
   const maximum = Math.max(0, ...rows.map(row => valueNumber(row.value)));
   const minimum = Math.min(0, ...rows.map(row => valueNumber(row.value)));
   const span = maximum - minimum || 1;
   const zero = -minimum / span * 100;
   return <div className="me-ranking">{rows.map((row, index) => {
     const amount = valueNumber(row.value);
-    const isDisabled = disabled?.(row) || false;
-    return <button key={row.key} type="button" className={`me-rank-row ${row.key === selected ? "is-selected" : ""}`} aria-pressed={selected === undefined ? undefined : row.key === selected} aria-label={`${row.label}，${EXPLORER_METRICS[metric].label} ${fmt(row.value, metric)}${isDisabled ? "，未归属项目" : "，查看详情"}`} disabled={isDisabled} onClick={() => onSelect(row)}>
-      <span className="me-rank-index">{String(offset + index + 1).padStart(2, "0")}</span><span className="me-rank-label"><strong title={row.label}>{row.label}</strong><small title={row.subtitle}>{row.subtitle || `${row.project_count} 个项目 · ${row.pn_count} 个 PN`}</small><span className="me-rank-track" aria-hidden="true"><i className="me-zero-line" style={{ left: `${zero}%` }} /><i className={amount < 0 ? "is-negative" : ""} style={{ left: `${amount < 0 ? zero + amount / span * 100 : zero}%`, width: `${Math.abs(amount) / span * 100}%` }} /></span></span><span className="me-rank-value">{fmt(row.value, metric)}{metric === "cost" && row.cost_state === "partial" && <small>部分缺价</small>}{row.share_pct != null && <small>{percent(row.share_pct)}</small>}{!isDisabled && <ArrowRightOutlined />}</span>
+    const reason = disabledReason?.(row) || null;
+    const isDisabled = reason !== null;
+    return <button key={row.key} type="button" className={`me-rank-row ${row.key === selected ? "is-selected" : ""}`} aria-pressed={selected === undefined ? undefined : row.key === selected} aria-label={`${row.label}，${EXPLORER_METRICS[metric].label} ${fmt(row.value, metric)}${reason ? `，${reason}` : "，查看详情"}`} disabled={isDisabled} onClick={() => { if (!reason) onSelect(row); }}>
+      <span className="me-rank-index">{String(offset + index + 1).padStart(2, "0")}</span><span className="me-rank-label"><strong title={row.label}>{row.label}</strong><small title={row.subtitle}>{row.subtitle || `${row.project_count} 个项目 · ${row.pn_count} 个 PN`}</small><span className="me-rank-track" aria-hidden="true"><i className="me-zero-line" style={{ left: `${zero}%` }} /><i className={amount < 0 ? "is-negative" : ""} style={{ left: `${amount < 0 ? zero + amount / span * 100 : zero}%`, width: `${Math.abs(amount) / span * 100}%` }} /></span></span><span className="me-rank-value">{fmt(row.value, metric)}{metric === "cost" && row.cost_state === "partial" && <small>部分缺价</small>}{row.share_pct != null && <small>{percent(row.share_pct)}</small>}{reason ? <small>{reason}</small> : <ArrowRightOutlined />}</span>
     </button>;
   })}</div>;
 }
@@ -128,8 +134,8 @@ function Distribution({ data, metric, onRow, onPage }: { data: ExplorerData; met
   return <Card className="me-distribution" title={focus.dimension === "pn" ? "项目内 PN 分布" : "项目使用分布"}>
     {!focus.row ? <Empty description="选中项在当前筛选中没有记录，请从排名中重新选择。" /> : <>
       <div className="me-focus-heading"><div><strong>{focus.row.label}</strong><p>{focus.row.subtitle}</p></div><Tag>{fmt(focus.row.value, metric)} {EXPLORER_METRICS[metric].unit}</Tag></div>
-      <Typography.Paragraph type="secondary">{focus.dimension === "pn" ? "点击 PN，进入当前项目的分析定位。" : "点击项目条形，进入该项目并保留当前筛选。"} 共 {focus.total} 项。{metric === "cost" ? "占比只覆盖已知成本。" : ""}</Typography.Paragraph>
-      {!focus.rows.length ? <Empty description="当前选中项暂无可展示分布" /> : <RankingList rows={focus.rows} metric={metric} offset={(focus.page - 1) * focus.page_size} onSelect={onRow} disabled={row => focus.dimension === "project" ? !row.project_id : !focus.row?.project_id} />}
+      <Typography.Paragraph type="secondary">{focus.dimension === "pn" ? "有项目详情权限时，点击 PN 进入当前项目的分析定位。" : "有项目详情权限时，点击项目条形进入该项目并保留当前筛选。"} 共 {focus.total} 项。{metric === "cost" ? "占比只覆盖已知成本。" : ""}</Typography.Paragraph>
+      {!focus.rows.length ? <Empty description="当前选中项暂无可展示分布" /> : <RankingList rows={focus.rows} metric={metric} offset={(focus.page - 1) * focus.page_size} onSelect={onRow} disabledReason={row => projectAccessReason(focus.dimension === "project" ? row : focus.row)} />}
       {focus.total > focus.page_size && <Pagination size="small" current={focus.page} pageSize={focus.page_size} total={focus.total} onChange={onPage} showSizeChanger={false} />}
       {focus.rows.some(row => focus.dimension === "project" && !row.project_id) && <div className="me-caption">未归属项目保留统计，不提供无效跳转。</div>}
     </>}
@@ -159,13 +165,14 @@ function HeatMatrix({ data, metric, onFocus, onCell }: { data: ExplorerData; met
   const cells = useMemo(() => new Map(matrix.cells.map(cell => [`${cell.row_key}\0${cell.column_key}`, cell])), [matrix.cells]);
   const max = Math.max(Math.abs(Number(matrix.scale_max)), Math.abs(Number(matrix.scale_min)));
   const colorSpan = max > 0 ? max : 1;
-  return <div className="me-matrix-scroll"><table className="me-matrix"><caption className="me-visually-hidden">点击有记录的单元格查看对应项目；行是排名分组，列是{matrix.column_dimension === "pn" ? "PN" : "项目"}。</caption><thead><tr><th scope="col">{EXPLORER_DIMENSIONS[data.dimension]}</th>{matrix.columns.map(column => <th scope="col" key={column.key} title={column.label}>{column.label}</th>)}</tr></thead><tbody>{matrix.rows.map(row => <tr key={row.key}><th scope="row"><button className="me-name-button" onClick={() => onFocus(row)}>{row.label}</button></th>{matrix.columns.map(column => {
+  return <div className="me-matrix-scroll"><table className="me-matrix"><caption className="me-visually-hidden">点击有详情权限的单元格查看对应项目；行是排名分组，列是{matrix.column_dimension === "pn" ? "PN" : "项目"}。</caption><thead><tr><th scope="col">{EXPLORER_DIMENSIONS[data.dimension]}</th>{matrix.columns.map(column => <th scope="col" key={column.key} title={column.label}>{column.label}</th>)}</tr></thead><tbody>{matrix.rows.map(row => <tr key={row.key}><th scope="row"><button className="me-name-button" onClick={() => onFocus(row)}>{row.label}</button></th>{matrix.columns.map(column => {
     const cell = cells.get(`${row.key}\0${column.key}`);
-    const projectId = matrix.column_dimension === "pn" ? row.project_id : column.project_id;
+    const project = matrix.column_dimension === "pn" ? row : column;
+    const reason = projectAccessReason(project);
     const magnitude = cell?.value == null ? 0 : Math.min(1, Math.abs(Number(cell.value)) / colorSpan);
     const negative = Number(cell?.value) < 0;
     const background = cell?.value == null ? "#f2f3f5" : `rgba(${negative ? "174,75,60" : "62,111,209"},${.08 + magnitude * .82})`;
     const text = !cell ? "—" : cell.cost_state === "restricted" && metric === "cost" ? "无权限" : fmt(cell.value, metric);
-    return <td key={column.key}><button disabled={!cell || !projectId} style={{ background, color: magnitude > .65 ? "white" : "#2c405b" }} aria-label={`${row.label} × ${column.label}：${text}${!projectId ? "，未归属项目" : "，查看项目"}`} title={`${row.label} × ${column.label}：${text}`} onClick={() => onCell(row, column)}>{text}{metric === "cost" && cell?.cost_state === "partial" && <small>部分缺价</small>}</button></td>;
+    return <td key={column.key}><button disabled={!cell || reason !== null} style={{ background, color: magnitude > .65 ? "white" : "#2c405b" }} aria-label={`${row.label} × ${column.label}：${text}${!cell ? "，无对应记录" : reason ? `，${reason}` : "，查看项目"}`} title={`${row.label} × ${column.label}：${text}${reason && cell ? `，${reason}` : ""}`} onClick={() => { if (cell && !reason) onCell(row, column); }}>{text}{metric === "cost" && cell?.cost_state === "partial" && <small>部分缺价</small>}{cell && reason && <small>{reason}</small>}</button></td>;
   })}</tr>)}</tbody></table><div className="me-heat-legend"><span>低</span><i /><span>高 · 可见最大绝对值 {fmt(String(max), metric)}</span>{Number(matrix.scale_min) < 0 && <span> · 红色为负值</span>}</div></div>;
 }
