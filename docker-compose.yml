@@ -81,6 +81,10 @@ services:
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       VISION_MODEL: ${VISION_MODEL:-qwen-vl-max}
+      # AI 闸门透传（#257）：此前未透传，运维在 .env 设置会静默失效。
+      # 默认值与 backend config 一致：外部映射保持冻结(false)，agent 总开关默认开(true)。
+      LLM_MAPPING_EXTERNAL_ENABLED: ${LLM_MAPPING_EXTERNAL_ENABLED:-false}
+      ENABLE_AGENT: ${ENABLE_AGENT:-true}
     depends_on:
       db:
         condition: service_healthy
