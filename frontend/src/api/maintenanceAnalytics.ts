@@ -237,6 +237,8 @@ export interface ExplorerStats {
   pn_count: number;
 }
 export interface ExplorerRow extends ExplorerStats {
+  /** 服务端判断项目详情访问权；客户端仅接受显式 true。 */
+  can_open_project: boolean;
   key: string;
   label: string;
   subtitle: string;

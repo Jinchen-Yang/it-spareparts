@@ -3,11 +3,15 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
+from app.config import get_settings
 from app.db import get_db
+from app.models.maintenance_project import MaintenanceProject
 from app.security import (
+    FULL_SCOPE_ROLES,
     UserContext,
     get_current_user_context,
     is_field_hidden,
@@ -29,6 +33,36 @@ def _require_customer_filter(ctx: UserContext, customer: str | None) -> None:
             "code": "filter_requires_customer_permission",
             "message": "按客户筛选需要客户信息权限（data_customer）",
         })
+
+
+def _annotate_project_links(db: Session, ctx: UserContext, payload: dict) -> None:
+    """Detail access is narrower than aggregate visibility; never filter facts here."""
+    from app.services import maintenance_project_assignments
+
+    rows = [
+        *payload["rows"], *payload["chart_rows"], *payload["focus"]["rows"],
+        *payload["matrix"]["rows"], *payload["matrix"]["columns"],
+    ]
+    if payload["focus"]["row"] is not None:
+        rows.append(payload["focus"]["row"])
+    project_ids = {row["project_id"] for row in rows if row["project_id"]}
+    openable: set[str] = set()
+    if get_settings().maintenance_boss_dashboard_enabled and project_ids:
+        if ctx.role in FULL_SCOPE_ROLES:
+            openable = project_ids
+        else:
+            # Match can_access_project, including canonical sales for accounts
+            # without own_maintenance_projects_only. Query only returned ids once.
+            condition = MaintenanceProject.project_id.in_(
+                maintenance_project_assignments.owned_project_ids(ctx)
+            )
+            if ctx.salesperson_name:
+                condition = or_(condition, MaintenanceProject.salesperson == ctx.salesperson_name)
+            openable = set(db.scalars(select(MaintenanceProject.project_id).where(
+                MaintenanceProject.project_id.in_(project_ids), condition,
+            )))
+    for row in rows:
+        row["can_open_project"] = row["project_id"] in openable
 
 
 @router.get("/pn-ranking")
@@ -338,7 +372,7 @@ def explorer(
             "focus": focus is not None, "scope": "full" if allowed is None else "scoped",
             "customer": bool(customer), "project": bool(project_ids), "q": bool(q),
         })
-        return maintenance_analytics_explorer.explorer(
+        payload = maintenance_analytics_explorer.explorer(
             db, dimension=dimension, metric=metric, focus=focus, page=page, page_size=page_size,
             top_n=top_n, focus_page=focus_page, focus_page_size=focus_page_size,
             range_=range_, date_from=date_from, date_to=date_to, q=q,
@@ -347,5 +381,7 @@ def explorer(
             warehouses=warehouses, cost_sources=cost_sources, can_cost=can_cost,
             can_customer=can_customer, allowed_project_ids=allowed,
         )
+        _annotate_project_links(db, ctx, payload)
+        return payload
     except maintenance_analytics.AnalyticsValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
