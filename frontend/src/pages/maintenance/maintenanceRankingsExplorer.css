@@ -1,0 +1,56 @@
+.maintenance-explorer { display: grid; gap: 18px; min-width: 0; color: #27384d; }
+.maintenance-explorer .me-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; }
+.maintenance-explorer .me-dimensions, .maintenance-explorer .me-layouts { display: flex; flex-wrap: wrap; gap: 8px; }
+.maintenance-explorer .me-layouts { border-bottom: 1px solid #e8edf4; padding-bottom: 14px; }
+.maintenance-explorer .me-method { margin: -4px 0 0; font-size: 12px; }
+.maintenance-explorer .me-kpis { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+.maintenance-explorer .me-kpi-label { color: #6b7789; font-size: 12px; }
+.maintenance-explorer .me-kpi strong { display: block; font-size: clamp(17px,1.55vw,25px); margin: 8px 0 5px; font-variant-numeric: tabular-nums; word-break: break-all; }
+.maintenance-explorer .me-caption { color: #758095; font-size: 12px; margin-top: 12px; }
+.maintenance-explorer .me-scope { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; color: #728095; font-size: 12px; }
+.maintenance-explorer .me-split { display: grid; grid-template-columns: minmax(0,1.1fr) minmax(0,.9fr); gap: 18px; align-items: start; }
+.maintenance-explorer .ant-card { min-width: 0; border-color: #e5eaf1; }
+.maintenance-explorer .me-ranking { display: grid; gap: 6px; }
+.maintenance-explorer .me-rank-row { width: 100%; display: grid; grid-template-columns: 25px minmax(0,1fr) minmax(85px,auto); gap: 10px; align-items: center; border: 1px solid transparent; padding: 11px 10px; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.maintenance-explorer .me-rank-row:hover, .maintenance-explorer .me-rank-row.is-selected { border-color: #c5d5f1; background: #f3f7fe; }
+.maintenance-explorer .me-rank-row:disabled { cursor: default; }
+.maintenance-explorer .me-rank-row:focus-visible, .maintenance-explorer .me-name-button:focus-visible, .maintenance-explorer .me-matrix button:focus-visible, .maintenance-explorer .me-svg-bar:focus-visible { outline: 3px solid #3e6fd1; outline-offset: 2px; }
+.maintenance-explorer .me-rank-index { color: #8c99ab; font-size: 12px; }
+.maintenance-explorer .me-rank-label { min-width: 0; }
+.maintenance-explorer .me-rank-label strong, .maintenance-explorer .me-rank-label small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-explorer .me-rank-label strong { font-size: 13px; font-weight: 600; }
+.maintenance-explorer .me-rank-label small { color: #8190a2; font-size: 11px; margin: 3px 0 6px; }
+.maintenance-explorer .me-rank-track { display: block; position: relative; height: 6px; background: #edf1f7; border-radius: 4px; }
+.maintenance-explorer .me-rank-track i { position: absolute; display: block; height: 100%; background: #6189d3; border-radius: 3px; }
+.maintenance-explorer .me-rank-track i.is-negative { background: #b96559; }
+.maintenance-explorer .me-rank-track .me-zero-line { width: 1px; top: -2px; height: 10px; z-index: 1; background: #8b99ac; }
+.maintenance-explorer .me-rank-value { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+.maintenance-explorer .me-rank-value small { display: block; color: #8090a5; font-size: 10px; }
+.maintenance-explorer .me-rank-value .anticon { margin-left: 7px; color: #9ca9bb; }
+.maintenance-explorer .me-focus-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.maintenance-explorer .me-focus-heading strong { font-size: 18px; word-break: break-word; }
+.maintenance-explorer .me-focus-heading p { color: #8a96a7; font-size: 12px; }
+.maintenance-explorer .me-name-button { border: 0; background: transparent; text-align: left; padding: 3px 0; color: #3765b1; cursor: pointer; font: inherit; max-width: 100%; overflow-wrap: anywhere; }
+.maintenance-explorer .me-name-button small { display: block; color: #8c98aa; }
+.maintenance-explorer .me-selected-row > td { background: #f1f6fe; }
+.maintenance-explorer .me-chart-scroll, .maintenance-explorer .me-matrix-scroll { width: 100%; overflow-x: auto; }
+.maintenance-explorer .me-svg-bar { cursor: pointer; }
+.maintenance-explorer .me-svg-bar:hover rect { filter: brightness(.88); }
+.maintenance-explorer .me-matrix { border-collapse: separate; border-spacing: 4px; min-width: 640px; width: 100%; table-layout: fixed; }
+.maintenance-explorer .me-matrix th { text-align: center; font-weight: 500; font-size: 11px; color: #6b7a91; width: 115px; overflow-wrap: anywhere; }
+.maintenance-explorer .me-matrix th:first-child { text-align: left; width: 190px; }
+.maintenance-explorer .me-matrix td button { width: 100%; min-height: 45px; padding: 5px; border: 1px solid transparent; border-radius: 5px; cursor: pointer; font-size: 12px; font-variant-numeric: tabular-nums; }
+.maintenance-explorer .me-matrix td button:disabled { cursor: default; }
+.maintenance-explorer .me-matrix td button:not(:disabled):hover { border-color: #244884; }
+.maintenance-explorer .me-matrix td button small { display: block; font-size: 9px; }
+.maintenance-explorer .me-heat-legend { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 12px; font-size: 11px; color: #738196; }
+.maintenance-explorer .me-heat-legend i { display: inline-block; width: 90px; height: 9px; background: linear-gradient(90deg,#f0f4fc,#3e6fd1); border-radius: 2px; }
+.maintenance-explorer .me-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media(max-width:1050px) { .maintenance-explorer .me-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); } .maintenance-explorer .me-split { grid-template-columns: minmax(0,1fr); } }
+@media(max-width:600px) { .maintenance-explorer .ant-card-body { padding: 14px; } .maintenance-explorer .me-rank-row { grid-template-columns: 19px minmax(0,1fr) 90px; gap: 6px; padding: 10px 2px; } .maintenance-explorer .me-rank-value { font-size: 11px; } .maintenance-explorer .me-layouts .ant-btn { font-size: 12px; padding-inline: 9px; } .maintenance-explorer .me-focus-heading { flex-direction: column; } }
+
+.maintenance-explorer .me-chart-legend { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; font-size: 12px; color: #6b7a91; padding-bottom: 8px; }
+.maintenance-explorer .me-chart-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.maintenance-explorer .me-bar-key { width: 12px; height: 12px; background: #507dcc; border-radius: 2px; }
+.maintenance-explorer .me-line-key { width: 19px; height: 3px; background: #be853a; }
+.maintenance-explorer .me-scroll-hint { margin-left: auto; font-size: 11px; }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -47,6 +47,8 @@ import PartsOrdersTab from "./panel/PartsOrdersTab";
 import ExpenseTab from "./panel/ExpenseTab";
 import CollectionTab from "./panel/CollectionTab";
 import SiteReturnTab from "./panel/SiteReturnTab";
+import MaintenanceProjectAnalyticsContext from "./panel/MaintenanceProjectAnalyticsContext";
+import { maintenanceAnalyticsReturnPath, readProjectPanelTab } from "./analysisNavigation";
 import { publishMaintenanceChange } from "../../utils/maintenanceRefresh";
 import AcceptanceTab from "./panel/AcceptanceTab";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
@@ -195,6 +197,9 @@ export function MaintenanceProjectPanelPage() {
 
 function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = readProjectPanelTab(searchParams.get("tab"));
+  const analyticsReturn = maintenanceAnalyticsReturnPath(searchParams.get("return"));
   const [row, setRow] = useState<BoardProjectRow | null>(null);
   const [project, setProject] = useState<MaintenanceProject | null>(null);
   const [operationsProject, setOperationsProject] =
@@ -405,14 +410,20 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           {/* 返回保持（v1.35 #N3）：有来路（含筛选后的项目墙）就原路返回；直达面板
               无历史时退化为默认墙。href 兜底给中键/新标签一个可用的落点。 */}
           <a
-            href="/maintenance"
+            href={analyticsReturn ?? "/maintenance"}
             onClick={(event) => {
+              // Keep the href usable for new tabs and modifier-clicks after a refresh.
+              if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
               event.preventDefault();
+              if (analyticsReturn) {
+                navigate(analyticsReturn);
+                return;
+              }
               const historyIdx = (window.history.state as { idx?: number } | null)?.idx;
               if (historyIdx != null && historyIdx > 0) navigate(-1);
               else navigate("/maintenance");
             }}
-          >← 返回项目墙</a>
+          >{analyticsReturn ? "← 返回分析 · 保留筛选" : "← 返回项目墙"}</a>
           <Title level={4} style={{ margin: 0 }}>
             {row?.display_name ?? project?.display_name ?? projectId}
           </Title>
@@ -449,6 +460,16 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       <HealthBand row={row} metrics={metrics} />
 
       <Tabs
+        activeKey={activeTab}
+        onChange={(tab) => {
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            const selected = readProjectPanelTab(tab);
+            if (selected === "overview") next.delete("tab");
+            else next.set("tab", selected);
+            return next;
+          }, { replace: true });
+        }}
         items={[
           {
             key: "overview",
@@ -464,6 +485,16 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
                 registerRefresh={registerTabRefresh}
               />
             ),
+          },
+          {
+            key: "analytics",
+            label: "分析定位",
+            children: activeTab === "analytics" ? (
+              <MaintenanceProjectAnalyticsContext
+                projectId={projectId}
+                analyticsReturn={analyticsReturn}
+              />
+            ) : null,
           },
           {
             key: "parts-orders",
