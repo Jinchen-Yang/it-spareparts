@@ -352,15 +352,17 @@ def test_latest_missing_mixed_real_and_manual_consistent(db):
     upper, upper_line = _seed_line(db, order_raw="M-P1M3", line_raw="ML-P1M3", pn="PN-P1M3")
     upper.order_no = "WBDD-20260301-0004"
     db.commit()
+    source_batch_id = _batch(db)
+    db.commit()
     snapshot = _source_snapshot((in_file, [_l0]), (upper, [upper_line]))
-    batch = db.get(SysImportBatch, in_file.import_batch_id)
+    batch = db.get(SysImportBatch, source_batch_id)
     batch.report_json = {"_wbdd_source_snapshot": snapshot}
     # The receipt points at an immutable source set, never mutable batch stamps.
     from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
     db.add(MaintenanceWbddImportReceipt(
-        batch_id=in_file.import_batch_id, idempotency_key="missing-mix-key-0001",
+        batch_id=source_batch_id, idempotency_key="missing-mix-key-0001",
         uploaded_by="t", file_hash="hash-mix-0001",
-        report_json={"batch_id": in_file.import_batch_id},
+        report_json={"batch_id": source_batch_id},
     ))
     db.commit()
 

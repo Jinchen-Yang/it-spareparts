@@ -1515,8 +1515,10 @@ def test_latest_missing_source_snapshot_ignores_orders_created_after_upload(db):
         order_date=lower.order_date, data_status="已生效", import_batch_id=_batch(db))
     db.add_all([old_missing, upper])
     db.commit()
+    source_batch_id = _batch(db)
+    db.commit()
     snapshot = _source_snapshot((lower, [lower_line]), (upper, []))
-    source_batch = db.get(SysImportBatch, lower.import_batch_id)
+    source_batch = db.get(SysImportBatch, source_batch_id)
     source_batch.report_json = {"_wbdd_source_snapshot": snapshot}
     db.add(MaintenanceWbddImportReceipt(
         batch_id=source_batch.id, idempotency_key="source-snapshot-fixed",
@@ -1886,12 +1888,14 @@ def test_latest_missing_allows_full_sync_at_any_ratio(db):
         others.append(o)
         db.add(o)
     db.commit()
+    source_batch_id = _batch(db)
+    db.commit()
     snapshot = _source_snapshot((order, [_line]), (upper, []))
-    db.get(SysImportBatch, order.import_batch_id).report_json = {"_wbdd_source_snapshot": snapshot}
+    db.get(SysImportBatch, source_batch_id).report_json = {"_wbdd_source_snapshot": snapshot}
     db.add(MaintenanceWbddImportReceipt(
-        batch_id=order.import_batch_id, idempotency_key="suspicious-key-0001",
+        batch_id=source_batch_id, idempotency_key="suspicious-key-0001",
         uploaded_by="tester", file_hash=uuid.uuid4().hex,
-        report_json={"batch_id": order.import_batch_id},
+        report_json={"batch_id": source_batch_id},
     ))
     db.commit()
     result = wbdd.latest_missing(db)
