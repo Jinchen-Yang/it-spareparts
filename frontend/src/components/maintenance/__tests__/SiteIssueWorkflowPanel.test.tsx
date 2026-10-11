@@ -116,6 +116,44 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SiteIssueWorkflowPanel", () => {
+  it("更正时显示并完整保存多行领用地址，不从其他地址字段代填", async () => {
+    render(<SiteIssueWorkflowPanel projectId="project-1" canManage onChanged={vi.fn()} />);
+    const panel = await screen.findByTestId("site-issue-workflow");
+    await within(panel).findByText("领用地址：");
+    fireEvent.click(within(panel).getByRole("button", { name: "编辑草稿" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑现场领用草稿" });
+    const input = within(dialog).getByLabelText("领用地址（现场位置）");
+    expect(input).toHaveValue("现场 A");
+    const address = "合成实际领用地点\n2 楼机房";
+    fireEvent.change(input, { target: { value: address } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(api.patchSiteIssue).toHaveBeenCalledWith(
+      "issue-1", expect.objectContaining({ site_location: address }),
+    ));
+  });
+
+  it("历史未填地址显示未填写，编辑保持空白且仍执行必填与长度校验", async () => {
+    api.searchSiteIssues.mockResolvedValue({ data: {
+      project_id: "project-1", adapter, rows: [{ ...draft, site_location: null }],
+      total: 1, page: 1, page_size: 20,
+    } });
+    render(<SiteIssueWorkflowPanel projectId="project-1" canManage onChanged={vi.fn()} />);
+    const panel = await screen.findByTestId("site-issue-workflow");
+    await within(panel).findByText("未填写");
+    fireEvent.click(within(panel).getByRole("button", { name: "编辑草稿" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑现场领用草稿" });
+    const input = within(dialog).getByLabelText("领用地址（现场位置）");
+    expect(input).toHaveValue("");
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    expect(await within(dialog).findByText("请填写日期、领用/接收人、领用地址、原因，并至少选择一条正数量发货明细")).toBeInTheDocument();
+    const address = "合".repeat(257);
+    fireEvent.change(input, { target: { value: address } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    expect(await within(dialog).findByText("领用地址最多 256 个字符，请缩短后再提交")).toBeInTheDocument();
+    expect(input).toHaveValue(address);
+    expect(api.patchSiteIssue).not.toHaveBeenCalled();
+  });
+
   it("没有现场领用权限时完全隐藏入口且不发请求", () => {
     render(
       <SiteIssueWorkflowPanel
@@ -232,7 +270,7 @@ describe("SiteIssueWorkflowPanel", () => {
     const editorDialog = await screen.findByRole("dialog", { name: "新建现场领用草稿" });
     fireEvent.change(within(editorDialog).getByLabelText("接收人"), { target: { value: "王五" } });
     fireEvent.change(within(editorDialog).getByLabelText("发出人"), { target: { value: "赵六" } });
-    fireEvent.change(within(editorDialog).getByLabelText("现场位置"), { target: { value: "井场 B" } });
+    fireEvent.change(within(editorDialog).getByLabelText("领用地址（现场位置）"), { target: { value: "井场 B" } });
     fireEvent.change(within(editorDialog).getByLabelText("操作原因"), { target: { value: "月度现场实际领用" } });
     fireEvent.click(within(editorDialog).getByRole("checkbox"));
     fireEvent.change(within(editorDialog).getByLabelText("PN-001 领用数量"), { target: { value: "2" } });
@@ -280,7 +318,7 @@ describe("SiteIssueWorkflowPanel", () => {
     expect(within(panel).getByText("已确认")).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "更正" }));
     const editorDialog = await screen.findByRole("dialog", { name: "更正现场领用单" });
-    fireEvent.change(within(editorDialog).getByLabelText("现场位置"), { target: { value: "井场 C" } });
+    fireEvent.change(within(editorDialog).getByLabelText("领用地址（现场位置）"), { target: { value: "井场 C" } });
     fireEvent.click(within(editorDialog).getByRole("button", { name: "提交更正" }));
     await waitFor(() => expect(api.patchSiteIssue).toHaveBeenCalledWith(
       "issue-1",

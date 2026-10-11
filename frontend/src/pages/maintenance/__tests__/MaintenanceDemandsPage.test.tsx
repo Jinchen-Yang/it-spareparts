@@ -413,6 +413,51 @@ describe("需求单与数据同步页", () => {
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
 
+  it("地址冲突显示单号和数据行，列表刷新失败也保留上传回执", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    const warning = "需求单 WBDD-合成001（数据行 1、2）：同单填写了不同的非空地址，该单原地址保留，其他合法字段照常处理";
+    uploadWbdd.mockResolvedValueOnce({ data: {
+      batch_id: 8,
+      address_report: { mode: "upsert", set: 1, keep: 2, clear: 1, conflict: 1,
+        warnings: [{ order_no: "WBDD-合成001", data_rows: [1, 2], message: warning }] },
+    } });
+    searchMaintenanceDemands
+      .mockResolvedValueOnce(demandPage([demandRow("RAW-9", "XQD-009")]))
+      .mockRejectedValueOnce(new Error("readback failed"));
+    const { container } = render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "conflict.xlsx")] },
+    });
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.getByText("地址处理：填写 1 张，未提供或保留 2 张，清空 1 张，冲突 1 张"))
+      .toBeInTheDocument();
+    expect(screen.getByText("数据行从表头后的第 1 行开始计数。"))
+      .toBeInTheDocument();
+    await screen.findByText(/快照已同步（批次 #8）.*但页面刷新失败/);
+    expect(screen.getByText(warning)).toBeInTheDocument();
+  });
+
+  it("新上传失败时不把上一批地址回执显示为本次结果", async () => {
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    uploadWbdd.mockResolvedValueOnce({ data: {
+      batch_id: 8,
+      address_report: { mode: "upsert", set: 1, keep: 0, clear: 0, conflict: 0, warnings: [] },
+    } }).mockRejectedValueOnce(new Error("second upload failed"));
+    const { container } = render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "first.xlsx")] },
+    });
+    expect(await screen.findByText(/地址处理：填写 1 张/)).toBeInTheDocument();
+    await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx2"], "second.xlsx")] },
+    });
+    await screen.findByText("快照上传失败");
+    expect(screen.queryByText(/地址处理：填写 1 张/)).toBeNull();
+  });
+
   it("快照已同步但需求单读回失败时清空旧列表，不误报上传失败", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     searchMaintenanceDemands

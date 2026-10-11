@@ -939,10 +939,30 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "data_status": o["data_status"], "import_batch_id": batch_id,
         **{f: o.get(f) for f in mapping.MAINTENANCE_HEAD_DISPLAY_FIELDS},
     } for o in orders.values()]
-    order_stats = _upsert_facts(session, FMaintenanceOrder, order_rows,
-                                FMaintenanceOrder.raw_order_id,
-                                _MAINT_ORDER_UPD if upsert else None, audit=audit,
-                                track_changed=True)
+    # D-26: a missing/blank/conflicting address is not a request to clear it.
+    # Split only the order update whitelist; INSERT still permits a NULL address.
+    # The existing shared upsert/audit/change detection and lock order stay intact.
+    address_write_ids = {
+        raw_id for raw_id, patch in result.maintenance_address_patches.items()
+        if patch.action in {"set", "clear"}
+    }
+    if not result.maintenance_address_patches:
+        # Direct loader callers can still explicitly provide a nonempty address.
+        address_write_ids = {o["raw_order_id"] for o in orders.values()
+                             if o.get("receiver_address")}
+    order_stats = {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
+    for write_address in (True, False):
+        rows = [row for row in order_rows
+                if (row["raw_order_id"] in address_write_ids) == write_address]
+        update_cols = (_MAINT_ORDER_UPD if write_address else
+                       [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
+        stats = _upsert_facts(session, FMaintenanceOrder, rows,
+                              FMaintenanceOrder.raw_order_id,
+                              update_cols if upsert else None, audit=audit,
+                              track_changed=True)
+        for key in ("inserted", "updated", "skipped"):
+            order_stats[key] += stats[key]
+        order_stats["changed_keys"].update(stats["changed_keys"])
     raw_ids = [o["raw_order_id"] for o in orders.values()]
     oid_map = dict(session.execute(
         select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)

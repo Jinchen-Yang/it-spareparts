@@ -137,12 +137,43 @@ function renderSection(issues = [manualIssue], projectId = "project-1") {
 async function fillEditor(dialog: HTMLElement) {
   fireEvent.change(within(dialog).getByLabelText("接收人"), { target: { value: "张三" } });
   fireEvent.change(within(dialog).getByLabelText("发出人"), { target: { value: "李四" } });
-  fireEvent.change(within(dialog).getByLabelText("现场位置"), { target: { value: "现场 A" } });
+  fireEvent.change(within(dialog).getByLabelText("领用地址（现场位置）"), { target: { value: "现场 A" } });
   fireEvent.change(within(dialog).getByLabelText("第 1 行数量"), { target: { value: "2" } });
   fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
 }
 
 describe("ManualSiteIssueSection", () => {
+  it.each([256, 257])("领用地址按字符校验长度 %i，不静默截断", async (length) => {
+    renderSection();
+    fireEvent.click(screen.getByRole("button", { name: "人工登记领用" }));
+    const dialog = await screen.findByRole("dialog", { name: "人工登记领用" });
+    await fillEditor(dialog);
+    const input = within(dialog).getByLabelText("领用地址（现场位置）");
+    const address = "😀".repeat(length);
+    fireEvent.change(input, { target: { value: address } });
+    expect(input).toHaveValue(address);
+    fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
+    if (length > 256) {
+      expect(await within(dialog).findByText("领用地址最多 256 个字符，请缩短后再提交")).toBeInTheDocument();
+      expect(api.previewManualSiteIssue).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledWith(
+        "project-1", expect.objectContaining({ site_location: address }),
+      ));
+    }
+  });
+
+  it("领用地址仍必填，清空普通表单不能提交", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("button", { name: "人工登记领用" }));
+    const dialog = await screen.findByRole("dialog", { name: "人工登记领用" });
+    await fillEditor(dialog);
+    fireEvent.change(within(dialog).getByLabelText("领用地址（现场位置）"), { target: { value: "" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
+    expect(await within(dialog).findByText("请填写日期、接收人、发出人、领用地址和原因")).toBeInTheDocument();
+    expect(api.previewManualSiteIssue).not.toHaveBeenCalled();
+  });
+
   it("无权限时隐藏整块入口", () => {
     const { container } = render(
       <ManualSiteIssueSection
@@ -255,7 +286,7 @@ describe("ManualSiteIssueSection", () => {
     ).toBeInTheDocument());
 
     // 改头字段 → 预览失效，必须重新预览
-    fireEvent.change(within(dialog).getByLabelText("现场位置"), { target: { value: "井场 C" } });
+    fireEvent.change(within(dialog).getByLabelText("领用地址（现场位置）"), { target: { value: "井场 C" } });
     expect(
       within(dialog).getByRole("button", { name: "预览实际消耗" }),
     ).toBeInTheDocument();

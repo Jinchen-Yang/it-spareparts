@@ -24,7 +24,7 @@ import {
   searchMaintenanceDemands,
   voidFastMaintenanceDemands,
 } from "../../api/maintenanceDemands";
-import type { WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImport";
+import type { WbddAddressReport, WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImport";
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
@@ -71,6 +71,7 @@ export function MaintenanceDemandsPage() {
   const [missing, setMissing] = useState<WbddMissing | null>(null);
   const [missingLoading, setMissingLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [addressReport, setAddressReport] = useState<WbddAddressReport | null>(null);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const missingRequestSeq = useRef(0);
@@ -184,6 +185,7 @@ export function MaintenanceDemandsPage() {
 
   const handleWbddUpload = async (file: File) => {
     setUploading(true);
+    setAddressReport(null);
     const fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
     if (uploadAttempt.current?.fingerprint !== fingerprint) {
       uploadAttempt.current = {
@@ -193,6 +195,7 @@ export function MaintenanceDemandsPage() {
     }
     try {
       const resp = await uploadWbdd(file, uploadAttempt.current.key);
+      setAddressReport(resp.data.address_report ?? null);
       const diffCount = resp.data.snapshot_diff?.missing_orders ?? 0;
       const summary = `快照已同步（批次 #${resp.data.batch_id}）` +
         (diffCount ? `，发现 ${diffCount} 张消失的单，请核对下方差异清单` : "");
@@ -398,6 +401,27 @@ export function MaintenanceDemandsPage() {
               </Text>
             ) : null}
           </Space>
+
+          {canImport ? (
+            <Text type="secondary">
+              收货地址或地址列可放在任意位置；缺列、留空保留原地址。需要清空时，增加“地址操作”列填写“清空”。同单地址矛盾时保留原地址并提示。
+            </Text>
+          ) : null}
+          {canImport && addressReport ? (
+            <Alert
+              type={addressReport.conflict ? "warning" : "info"}
+              showIcon
+              message={`地址处理：填写 ${addressReport.set} 张，未提供或保留 ${addressReport.keep} 张，清空 ${addressReport.clear} 张，冲突 ${addressReport.conflict} 张`}
+              description={addressReport.warnings.length ? (
+                <div style={{ maxHeight: 240, overflowY: "auto", overflowWrap: "anywhere" }}>
+                  {addressReport.warnings.map((warning, index) => (
+                    <div key={`${warning.order_no}-${index}`}>{warning.message}</div>
+                  ))}
+                  <Text type="secondary">数据行从表头后的第 1 行开始计数。</Text>
+                </div>
+              ) : null}
+            />
+          ) : null}
 
           {/* 2026-08-24 用户拍板：解除「疑似不完整导出」50% 拦截——差异清单
               恒展开、批量作废不再按占比禁用，可 100% 全量跟随修改。 */}

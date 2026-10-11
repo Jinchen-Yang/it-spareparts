@@ -17,6 +17,11 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.download.mockResolvedValue({ data: new Blob(["archive"]) }); mocks.upload.mockResolvedValue({ data: ready }); mocks.get.mockResolvedValue({ data: ready });
   mocks.apply.mockResolvedValue({ data: { ...ready, status: "applied" } }); mocks.cancel.mockResolvedValue({ data: { ...ready, status: "cancelled" } });
   mocks.retry.mockResolvedValue({ data: { batch_id: "job-1", status: "queued" } });
+  // 静态 message 使用独立 React root，不受 RTL cleanup 管理。这里只验证反馈调用，
+  // 避免通知的异步渲染或关闭动画在 jsdom 拆除后继续提交。
+  vi.spyOn(message, "success").mockImplementation(() => (() => {}) as ReturnType<typeof message.success>);
+  vi.spyOn(message, "warning").mockImplementation(() => (() => {}) as ReturnType<typeof message.warning>);
+  vi.spyOn(message, "error").mockImplementation(() => (() => {}) as ReturnType<typeof message.error>);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe("返件 Excel 异步预览和明确更正", () => {
@@ -29,6 +34,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     fireEvent.change(screen.getByPlaceholderText(/更正原因/), { target: { value: "核实原件" } }); fireEvent.click(apply);
     await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", { plan_hash: "hash-1", preview_token: "token-1", confirm_changes: true, confirm_possible_duplicates: false, reason: "核实原件" }));
     await waitFor(() => expect(applied).toHaveBeenCalledOnce());
+    await waitFor(() => expect(message.success).toHaveBeenCalledWith("入库返件已写入台账"));
   });
   it("更正展开为中文当前与拟导入对照，保留必要来源追溯", async () => {
     mocks.upload.mockResolvedValue({ data: { ...ready, rows: [{ ...row,
