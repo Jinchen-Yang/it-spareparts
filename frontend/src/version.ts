@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.3";
+export const APP_VERSION = "1.36.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.4",
+    date: "2026-10-12",
+    items: [
+      "需求单按表头识别收货地址，地址列可移动；缺列和留空保留原值，同单地址矛盾会提示单号与行号",
+      "领用地址与现场位置统一，支持页面查看、复制及领用 Excel 新增、修改和导出",
+      "清空地址须在地址操作列明确填写清空；兼容旧模板，保留既有单据编号、数量、成本和删除规则",
+    ],
+  },
   {
     version: "1.36.3",
     date: "2026-09-23",
