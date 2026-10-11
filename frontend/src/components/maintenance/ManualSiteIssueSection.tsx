@@ -16,6 +16,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PartPicker from "../PartPicker";
+import SiteIssueAddress from "./SiteIssueAddress";
 import {
   createManualSiteIssue,
   patchManualSiteIssue,
@@ -135,7 +136,10 @@ const buildRequest = (
     !header.issue_date || !header.receiver || !header.issued_by
     || !header.site_location || !header.reason
   ) {
-    return { ok: false, error: "请填写日期、接收人、发出人、现场位置和原因" };
+    return { ok: false, error: "请填写日期、接收人、发出人、领用地址和原因" };
+  }
+  if ([...header.site_location].length > 256) {
+    return { ok: false, error: "领用地址最多 256 个字符，请缩短后再提交" };
   }
   if (!lines.length) return { ok: false, error: "请至少添加一条领用明细" };
   const clean: ManualSiteIssueLineInput[] = [];
@@ -563,9 +567,10 @@ export default function ManualSiteIssueSection({
                 <Space direction="vertical" size={4} style={{ width: "100%" }}>
                   <Space wrap>
                     <Text strong>{issue.issue_no}</Text>
-                    <Text type="secondary">{issue.issue_date} · {issue.site_location}</Text>
+                    <Text type="secondary">{issue.issue_date}</Text>
                     <Tag>{issue.workflow_status === "corrected" ? "已更正" : "已确认"}</Tag>
                   </Space>
+                  <SiteIssueAddress value={issue.site_location} />
                   <Text type="secondary">
                     {issue.receiver} 接收 · {issue.issued_by} 发出 · {issue.lines.length} 行
                   </Text>
@@ -631,8 +636,9 @@ export default function ManualSiteIssueSection({
             <label>领用单号（选填）<Input aria-label="领用单号（选填）" disabled={formLocked} value={editor.issueNo} onChange={(event) => updateEditor({ issueNo: event.target.value })} placeholder="留空自动生成" /></label>
             <label>接收人<Input aria-label="接收人" disabled={formLocked} value={editor.receiver} onChange={(event) => updateEditor({ receiver: event.target.value })} /></label>
             <label>发出人<Input aria-label="发出人" disabled={formLocked} value={editor.issuedBy} onChange={(event) => updateEditor({ issuedBy: event.target.value })} /></label>
-            <label>现场位置<Input aria-label="现场位置" disabled={formLocked} value={editor.siteLocation} onChange={(event) => updateEditor({ siteLocation: event.target.value })} /></label>
+            <label>领用地址（现场位置）<Input.TextArea aria-label="领用地址（现场位置）" autoSize={{ minRows: 2, maxRows: 4 }} disabled={formLocked} value={editor.siteLocation} onChange={(event) => updateEditor({ siteLocation: event.target.value })} placeholder="填写实际领用地址，最多 256 个字符" /></label>
           </div>
+          <Text type="secondary">领用地址填写实际使用地点，与需求单收货地址分别保存。</Text>
           <label>操作原因<Input aria-label="操作原因" disabled={formLocked} value={editor.reason} onChange={(event) => updateEditor({ reason: event.target.value })} /></label>
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Space style={{ width: "100%", justifyContent: "space-between" }}>

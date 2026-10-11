@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PanelRefresh, RegisterPanelRefresh } from "../panelUtils";
 
@@ -70,6 +70,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("领用返还统一读回", () => {
+  it("工作簿领用的实际地址出现在列表和展开详情，长地址完整保留", async () => {
+    const address = "合成地址路".repeat(25) + "\n2 楼机房";
+    api.searchSiteIssues.mockImplementation(async ({ page, page_size }) => ({
+      data: { rows: [{ ...issue(), source: "workbook", site_location: address }], total: 1, page, page_size },
+    }));
+    render(<Harness />);
+    const details = screen.getByRole("region", { name: "领用明细与批量维护" });
+    const table = await within(details).findByRole("table");
+    await within(table).findByText("ISSUE-0");
+    expect(within(table).getByRole("columnheader", { name: "领用地址" })).toBeInTheDocument();
+    expect(within(table).getByText(address, { normalizer: (text) => text })).toBeInTheDocument();
+    fireEvent.click(within(table).getByRole("button", { name: "Expand row" }));
+    expect(within(table).getByText("领用地址（现场位置）")).toBeInTheDocument();
+    expect(within(table).getAllByText(address, { normalizer: (text) => text })).toHaveLength(2);
+  });
+
   it("工作簿完成后同时更新返还台账、上方领用工作台及领用明细，等待全部读回才成功", async () => {
     render(<Harness />);
     await screen.findByText("RETURN-0");

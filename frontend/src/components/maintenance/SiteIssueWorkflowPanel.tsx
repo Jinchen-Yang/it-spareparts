@@ -33,6 +33,7 @@ import {
   type SiteIssuePreview,
 } from "../../api/maintenanceOperations";
 import ManualSiteIssueSection from "./ManualSiteIssueSection";
+import SiteIssueAddress from "./SiteIssueAddress";
 import type { RegisterPanelRefresh } from "../../pages/maintenance/panel/panelUtils";
 
 const { Text, Title } = Typography;
@@ -275,7 +276,7 @@ export default function SiteIssueWorkflowPanel({
       issueDate: issue.issue_date,
       receiver: issue.receiver,
       issuedBy: issue.issued_by,
-      siteLocation: issue.site_location,
+      siteLocation: issue.site_location ?? "",
       reason: issue.workflow_status === "draft" ? "修改现场领用草稿" : "更正已确认现场领用",
     } : emptyEditor());
     setSelected(Object.fromEntries(
@@ -306,7 +307,11 @@ export default function SiteIssueWorkflowPanel({
       || !clean.reason
       || lines.length === 0
     ) {
-      setEditorError("请填写日期、领用/接收人、现场位置、原因，并至少选择一条正数量发货明细");
+      setEditorError("请填写日期、领用/接收人、领用地址、原因，并至少选择一条正数量发货明细");
+      return;
+    }
+    if ([...clean.siteLocation].length > 256) {
+      setEditorError("领用地址最多 256 个字符，请缩短后再提交");
       return;
     }
     setSaving(true);
@@ -482,7 +487,7 @@ export default function SiteIssueWorkflowPanel({
           value={issueQuery}
           onChange={(event) => setIssueQuery(event.target.value)}
           onSearch={(value) => void loadIssues(value, 1)}
-          placeholder="搜索系统单号、领用/接收人或现场位置"
+          placeholder="搜索系统单号、领用/接收人或领用地址"
           allowClear
           enterButton="搜索"
           maxLength={256}
@@ -516,7 +521,8 @@ export default function SiteIssueWorkflowPanel({
                           <Text strong>{issue.issue_no}</Text>
                           <Tag color={state.color}>{state.label}</Tag>
                         </Space>
-                        <Text type="secondary">{issue.issue_date} · {issue.site_location}</Text>
+                        <Text type="secondary">{issue.issue_date}</Text>
+                        <SiteIssueAddress value={issue.site_location} />
                         <Text>{issue.receiver} 接收 · {issue.issued_by} 发出 · {issue.lines.length} 行</Text>
                         {missing > 0
                           ? <Tag color="orange">{missing} 行暂无价格成本，数量仍完整展示</Tag>
@@ -591,8 +597,9 @@ export default function SiteIssueWorkflowPanel({
             <label>领用日期<Input type="date" aria-label="领用日期" value={editor.issueDate} onChange={(event) => setEditor({ ...editor, issueDate: event.target.value })} /></label>
             <label>接收人<Input aria-label="接收人" value={editor.receiver} onChange={(event) => setEditor({ ...editor, receiver: event.target.value })} /></label>
             <label>发出人<Input aria-label="发出人" value={editor.issuedBy} onChange={(event) => setEditor({ ...editor, issuedBy: event.target.value })} /></label>
-            <label>现场位置<Input aria-label="现场位置" value={editor.siteLocation} onChange={(event) => setEditor({ ...editor, siteLocation: event.target.value })} /></label>
+            <label>领用地址（现场位置）<Input.TextArea aria-label="领用地址（现场位置）" autoSize={{ minRows: 2, maxRows: 4 }} value={editor.siteLocation} onChange={(event) => setEditor({ ...editor, siteLocation: event.target.value })} placeholder="填写实际领用地址，最多 256 个字符" /></label>
           </div>
+          <Text type="secondary">领用地址填写实际使用地点，与需求单收货地址分别保存。</Text>
           <label>操作原因<Input aria-label="操作原因" value={editor.reason} onChange={(event) => setEditor({ ...editor, reason: event.target.value })} /></label>
           <Input.Search
             aria-label="搜索发货候选"

@@ -154,7 +154,8 @@ V2_EXPENSE_HEADERS = ["操作", "费用单号", "明细序号", "报销日期", 
 V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID",
                       "基线令牌"]
 V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注",
-                   "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌", "关联需求单号"]
+                   "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌", "关联需求单号",
+                   "领用地址", "地址操作"]
 # 行级基线令牌域（2.7.0）：把每行可编辑字段的导出值签进隐藏列，上传侧据此做
 # 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
 _V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
@@ -165,6 +166,8 @@ V2_EXPENSE_BASE_FIELDS = ("报销日期", "报销人员", "报销类别", "费�
                           "维保销售订单（归集键）", "原始报销金额", "未税金额", "流程状态", "备注")
 V2_RECEIPT_BASE_FIELDS = ("累计实收金额（含税）", "状态", "回款凭证号", "备注")
 V2_SITE_BASE_FIELDS = ("领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注")
+# 保留旧七字段用于缺行哈希和自动编号重放；地址不改变删除或身份契约。
+V2_SITE_ADDRESS_GUARD_FIELDS = (*V2_SITE_BASE_FIELDS, "领用地址")
 
 
 # ------------------------------------------------------------------ 计划
@@ -233,6 +236,8 @@ class SiteReturnFlag:
     serial_number: str | None = None
     quantity: Decimal | None = None
     remark: str | None = None
+    site_location_action: str = "keep"
+    site_location: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1965,6 +1970,8 @@ class V2RowGuard:
     entity_id: str
     row_label: str
     digest: str
+    fields: tuple[str, ...] = ()
+    entity_type: str = "line"
 
 
 class _V2MergeContext:
@@ -2036,7 +2043,7 @@ class _V2MergeContext:
 
         self.guards.append(V2RowGuard(
             sheet=sheet, entity_id=str(entity_id), row_label=row_label,
-            digest=_v2_row_base_hash(values, fields)))
+            digest=_v2_row_base_hash(values, fields), fields=fields))
 
     def record_row_conflict(
         self, *, sheet: str, row_label: str, entity_id, action: str,
@@ -2815,6 +2822,8 @@ def _v2_site_row_values(line, issue, details=None) -> dict[str, object]:
         "返还单号": "按项目/需求单汇总，不逐行分配",
         "实体ID": line.issue_line_id,
         "关联需求单号": line.demand_order_no or "",
+        "领用地址": issue.site_location or "",
+        "地址操作": "",
     }
 
 
@@ -2870,7 +2879,8 @@ def _v2_note_voided_site_row(
 
 def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_SITE)
-    _v2_header(ws, V2_SITE_HEADERS, editable={1, 2, 3, 4, 5, 6, 7})
+    editable = {1, 2, 3, 4, 5, 6, 7, 14, 15}
+    _v2_header(ws, V2_SITE_HEADERS, editable=editable)
     # D-01：作废不进导出。行看 is_active，单看单头状态——面板整单作废之前
     # （d2d819b 以前）只置单头 void 不动明细，那些行也不能漏进 06 表。
     rows = db.execute(select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).join(
@@ -2886,10 +2896,13 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
         values = _v2_site_row_values(line, issue, details.get(line.issue_line_id))
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="06_领用返还", entity_id=line.issue_line_id,
-            values={name: values.get(name) for name in (*V2_SITE_BASE_FIELDS, "应返数量", "返还状态", "返还单号")})
+            values={name: values.get(name) for name in (*V2_SITE_ADDRESS_GUARD_FIELDS, "应返数量", "返还状态", "返还单号")})
         base_hashes[str(line.issue_line_id)] = _v2_row_base_hash(
             values, V2_SITE_BASE_FIELDS)
         ws.append([values[name] for name in V2_SITE_HEADERS])
+        # 用户输入的地址永远作为文本导出，避免以 = 开头的地点被当公式。
+        if "领用地址" in V2_SITE_HEADERS:
+            ws.cell(ws.max_row, V2_SITE_HEADERS.index("领用地址") + 1).data_type = "s"
     _v2_append_example_row(ws, V2_SITE_HEADERS, {
         "领用单号": "",
         "领用日期": "2026-09-01",
@@ -2900,9 +2913,13 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
         "备注": "【示例】新增领用：实体ID留空，完整日期/PN/数量必填；单号留空自动编号，有关联 WBDD 可填入单号列",
     })
     _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
-                 editable={1, 2, 3, 4, 5, 6, 7})
+                 editable=editable, operation_col=(15 if len(V2_SITE_HEADERS) >= 15 else None),
+                 operation_choices=("保留", "设置", "清空"))
     ws.column_dimensions["M"].hidden = False
     ws.column_dimensions["M"].width = 26
+    for column, width in (("N", 42), ("O", 16)):
+        ws.column_dimensions[column].hidden = False
+        ws.column_dimensions[column].width = width
     return base_hashes
 
 
@@ -2928,6 +2945,7 @@ def _v2_build_usage(wb) -> None:
         ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
         ("【06 领用返还】", "新增领用填完整日期 YYYY-MM-DD、PN、正数量，实体ID留空；领用单号选填，留空时自动编号。WBDD 填在单号列时保留为关联需求单号，并另生成领用编号。"),
         ("自动编号与重传", "同一本文件原样重传或排序不会重复新增；相同内容的多行仍分别保留。首次导入后请重新下载，后续修改保留实体ID；不要把已导入记录再次作为新行粘贴。关联需求单号只读。"),
+        ("领用地址", "实际领用地址，同单只需改一行。缺列或留空保留已有地址；清空请在地址操作填‘清空’。同单填写不同新地址时保留原址并提示，其他合法内容继续处理。"),
         ("删除领用行", "2026-08-23 起：直接把该行整行删掉再上传 = 该领用行作废（退出成本与返还计算）；一张单的行全删 = 整单作废。"),
         ("【灰色示例行】", "每个数据页最后一行灰色斜体是填写示例，系统上传时自动忽略，不会入库——照着它的格式填，填完可保留或删除该行。"),
         ("", ""),
@@ -2961,6 +2979,8 @@ def _v2_build_dictionary(wb) -> None:
         ("计划回款金额", "合同期次计划金额", "maintenance_collection_milestone.planned_amount", "可编辑", "正数", "节点 incomplete", "更新计划节点并触发提醒复核"),
         ("最新累计实收", "已确认回款快照累计额", "maintenance_collection_snapshot.cumulative_amount", "只读", "金额", "未上报，不等于0", "仅影响展示和到款状态"),
         ("实体ID", "稳定写回身份", "各事实表主键", "只读", "UUID/字符串", "非法文件", "缺失或跨项目拒绝"),
+        ("领用地址", "实际领用地址（现场位置）", "maintenance_site_issue.site_location", "可编辑", "最多256字符；兼容地址/现场位置表头", "保留原值", "同单共用；不同新地址提示并保留原值"),
+        ("地址操作", "明确设置或清空领用地址", "地址更新意图", "可编辑", "保留/设置/清空", "有值设置，空白保留", "清空只作用于地址，不影响领用明细"),
     ]
     for row in rows:
         ws.append(row)
@@ -3908,6 +3928,135 @@ def _v2_auto_site_no(project_id, export_id, raw_pn, issue_date, serial_number, d
     return _v2_auto_site_prefix(project_id, export_id) + digest
 
 
+@dataclass(frozen=True)
+class _SiteAddressPatch:
+    action: str = "keep"
+    value: str | None = None
+
+
+def _v2_site_address_patches(db, project_id, ws, index, merge):
+    """D-26：先按单汇总地址意图，旧签名/空白不产生清空或回写。"""
+    address_columns = [i for i, cell in enumerate(ws[1])
+                       if cell.value in {"领用地址", "地址", "现场位置"}]
+    operation_columns = [i for i, cell in enumerate(ws[1])
+                         if cell.value in {"地址操作", "领用地址操作"}]
+    rows = list(enumerate(ws.iter_rows(min_row=2, values_only=True), 2))
+    active_baselines = {}
+    rename_candidates = defaultdict(dict)
+    for row_no, row in rows:
+        raw_id = _cell(row, index, "实体ID")
+        if not raw_id or _is_example_row(row):
+            continue
+        line = db.get(MaintenanceSiteIssueLine, str(raw_id))
+        issue = db.get(MaintenanceSiteIssue, line.issue_id) if line else None
+        if (line is None or not line.is_active or issue is None
+                or issue.project_id != project_id or issue.normalized_status == "void"):
+            continue
+        baseline = _parse_v2_row_base_token(
+            _cell(row, index, V2_BASE_COLUMN), sheet=V2_SHEET_SITE,
+            entity_id=raw_id, row_no=row_no)
+        if "领用地址" in baseline:
+            active_baselines[issue.issue_id] = baseline
+        requested_no = str(_cell(row, index, "领用单号") or "").strip()
+        if requested_no and requested_no != baseline.get("领用单号", issue.issue_no):
+            rename_candidates[requested_no][issue.issue_id] = issue
+    renamed_issues = {name: next(iter(candidates.values()))
+                      for name, candidates in rename_candidates.items() if len(candidates) == 1}
+    if not address_columns and not operation_columns:
+        return {}, renamed_issues
+    groups = {}
+    patches = {}
+    for row_no, row in rows:
+        if not row or all(value in (None, "") for value in row) or _is_example_row(row):
+            continue
+        raw_id = str(_cell(row, index, "实体ID") or "")
+        issue_no = str(_cell(row, index, "领用单号") or "").strip()
+        issue = None
+        baseline = {}
+        blocked = False
+        if raw_id:
+            line = db.get(MaintenanceSiteIssueLine, raw_id)
+            if line is None:
+                continue  # 正式解析器报告稳定的实体错误。
+            issue = db.get(MaintenanceSiteIssue, line.issue_id)
+            if issue is None or issue.project_id != project_id:
+                continue
+            baseline = _parse_v2_row_base_token(
+                _cell(row, index, V2_BASE_COLUMN), sheet=V2_SHEET_SITE,
+                entity_id=raw_id, row_no=row_no)
+            blocked = not line.is_active or issue.normalized_status == "void"
+        elif issue_no and not re.fullmatch(r"WBDD-\d{8}-\d+", issue_no):
+            candidates = rename_candidates.get(issue_no, {})
+            issue = (next(iter(candidates.values())) if len(candidates) == 1 else
+                     db.scalar(select(MaintenanceSiteIssue).where(
+                         MaintenanceSiteIssue.project_id == project_id,
+                         MaintenanceSiteIssue.issue_no == issue_no)))
+            blocked = issue is not None and issue.normalized_status == "void"
+        # 空单号/WBDD 输入按现有规则逐行自动编号，不是同一个领用单头。
+        new_key = (row_no if not issue_no or re.fullmatch(r"WBDD-\d{8}-\d+", issue_no)
+                   else issue_no)
+        key = ("issue", issue.issue_id) if issue else ("new", new_key)
+        values = {str(row[column]).strip() for column in address_columns
+                  if column < len(row) and row[column] not in (None, "")
+                  and str(row[column]).strip()}
+        ops = {str(row[column]).strip() for column in operation_columns
+               if column < len(row) and row[column] not in (None, "")
+               and str(row[column]).strip()}
+        # 导出同行的原地址是基线，不是第二个新地址；旧签名缺此键时，
+        # 非空新列仍可设置，空列依然不清空。
+        if len(values) == 1 and "领用地址" in baseline and ops != {"设置"}:
+            values -= {baseline["领用地址"]}
+        if blocked:
+            # 作废行只产生原有的作废优先回执，不参与活跃单头地址投票。
+            if (values or ops) and ops != {"保留"}:
+                patches[row_no] = _SiteAddressPatch("set", next(iter(values), None))
+            continue
+        if any(len(value) > 256 for value in values):
+            raise WorkbookError("invalid_site_address",
+                                f"06_领用返还第 {row_no} 行领用地址不能超过 256 字符")
+        group = groups.setdefault(key, {"rows": [], "values": set(), "ops": set(),
+                                        "issue": issue, "baseline": active_baselines.get(issue.issue_id, baseline) if issue else baseline,
+                                        "label": issue.issue_no if issue else issue_no or "自动编号领用单"})
+        if not values and not ops:
+            continue
+        group["rows"].append(row_no)
+        group["values"].update(values)
+        group["ops"].update(ops)
+        if "领用地址" in baseline:
+            group["baseline"] = baseline
+    for group in groups.values():
+        rows, values, ops = group["rows"], group["values"], group["ops"]
+        if not rows:
+            continue
+        if len(values) > 1 or len(ops) > 1 or ops - {"保留", "设置", "清空"} or (ops == {"设置"} and not values):
+            merge.warnings.append(
+                f"06_领用返还：领用单 {group['label']} 第 {'、'.join(map(str, rows))} 行地址或地址操作冲突，保留原地址；其他合法内容继续处理")
+            continue
+        action = "clear" if ops == {"清空"} else "keep" if ops == {"保留"} else "set" if values else "keep"
+        if action == "keep":
+            continue
+        value = next(iter(values)) if action == "set" else None
+        issue = group["issue"]
+        if issue is not None and (issue.site_location or "") == (value or ""):
+            continue
+        if issue is not None:
+            old = issue.site_location or ""
+            base = group["baseline"].get("领用地址", old)
+            merge.record(sheet=V2_SHEET_SITE, row_label=group["label"],
+                         entity_id=issue.issue_id, field="领用地址",
+                         old=old, new=value or "", base=base,
+                         conflict=old != base)
+            # 即使代表行是新加明细，单头地址也必须受预检→应用并发保护。
+            merge.guards.append(V2RowGuard(
+                sheet=V2_SHEET_SITE, entity_id=issue.issue_id,
+                row_label=group["label"],
+                digest=_v2_row_base_hash({"领用地址": old}, ("领用地址",)),
+                fields=("领用地址",), entity_type="site_issue"))
+        # 单头只写一次；其他同行依旧走原来的未触碰/三路合并规则。
+        patches[rows[0]] = _SiteAddressPatch(action, value)
+    return patches, renamed_issues
+
+
 def _v2_parse_site(
     db: Session, project_id: str, ws, merge: _V2MergeContext, *, export_id: str = "",
 ) -> tuple[list[SiteReturnFlag], set[str]]:
@@ -3917,6 +4066,7 @@ def _v2_parse_site(
         raise WorkbookError("template_version_mismatch",
                             "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     _v2_site_preflight(db, ws, index, merge)
+    address_patches, renamed_issues = _v2_site_address_patches(db, project_id, ws, index, merge)
     auto_scope_used = bool(export_id and db.scalar(select(MaintenanceSiteIssue.issue_id).where(
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.issue_no.startswith(_v2_auto_site_prefix(project_id, export_id)),
@@ -3937,6 +4087,7 @@ def _v2_parse_site(
         if _is_example_row(row):
             continue
         raw_id = _cell(row, index, "实体ID")
+        address_patch = address_patches.get(row_no, _SiteAddressPatch())
         if raw_id not in (None, ""):
             present_ids.add(str(raw_id))
         issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
@@ -4026,7 +4177,8 @@ def _v2_parse_site(
                     }
                     if (_v2_row_base_hash(replay_values, V2_SITE_BASE_FIELDS)
                             != _v2_row_base_hash(_v2_site_row_values(existing_line, existing_issue), V2_SITE_BASE_FIELDS)
-                            or (generated and existing_line.demand_order_no != demand_no)):
+                            or (generated and existing_line.demand_order_no != demand_no)
+                            or (address_patch.action != "keep" and (address_patch.value or "") != (existing_issue.site_location or ""))):
                         raise WorkbookError("stale_site_replay", f"第 {row_no} 行与已入库领用记录不同，请重新下载总表，保留实体ID后修改；新增领用请使用新行身份")
                     present_ids.add(str(raw_id))
                     continue
@@ -4050,15 +4202,21 @@ def _v2_parse_site(
                         issue=void_header, issue_no=issue_no, entity_id=raw_id,
                     )
                     continue
-                base = db.scalar(
-                    select(func.max(MaintenanceSiteIssueLine.line_no))
-                    .join(MaintenanceSiteIssue,
-                          MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-                    .where(
-                        MaintenanceSiteIssue.project_id == project_id,
-                        MaintenanceSiteIssue.issue_no == issue_no,
-                    )
-                ) or 0
+                renamed_issue = renamed_issues.get(issue_no)
+                if renamed_issue is not None:
+                    # 新号还未写库，按签名行定位的稳定单头分配后续明细序号。
+                    base = db.scalar(select(func.max(MaintenanceSiteIssueLine.line_no)).where(
+                        MaintenanceSiteIssueLine.issue_id == renamed_issue.issue_id)) or 0
+                else:
+                    base = db.scalar(
+                        select(func.max(MaintenanceSiteIssueLine.line_no))
+                        .join(MaintenanceSiteIssue,
+                              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+                        .where(
+                            MaintenanceSiteIssue.project_id == project_id,
+                            MaintenanceSiteIssue.issue_no == issue_no,
+                        )
+                    ) or 0
                 new_counts[issue_no] = new_counts.get(issue_no, 0) + 1
                 line_no = int(base) + new_counts[issue_no]
                 previous_date = new_issue_dates.setdefault(issue_no, issue_date)
@@ -4100,7 +4258,7 @@ def _v2_parse_site(
                 # 不再让 _expected_site_ids 把整本打成 site_line_not_in_project。
                 if _v2_touched_fields(
                         row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
-                        baseline=baseline):
+                        baseline=baseline) or address_patch.action != "keep":
                     _v2_note_voided_site_row(
                         db, merge, project_id=project_id, row_no=row_no,
                         issue=issue, line=existing_line, entity_id=raw_id,
@@ -4113,8 +4271,17 @@ def _v2_parse_site(
                     entity_id=raw_id,
                     row=row, index=index, base_fields=V2_SITE_BASE_FIELDS,
                     server_values=server_values, baseline=baseline, ctx=merge)
-            if merged_row is None:
+            if merged_row is None and address_patch.action == "keep":
                 continue
+            if merged_row is None:
+                # 地址是单头独立补丁；同行其他字段必须取服务端现值，
+                # 避免旧文件仅改地址时回退别人已改的数量/备注。
+                merged = list(row)
+                for name in V2_SITE_BASE_FIELDS:
+                    column = index.get(name)
+                    if column is not None and column < len(merged):
+                        merged[column] = server_values.get(name)
+                merged_row = tuple(merged)
             # 未触碰的基线字段已换成服务端现值。下游 SiteReturnFlag 用的是**合并之前**
             # 解析出来的局部量，不重解析就会拿导出时的旧值静默盖掉他人改动
             # （D-02，2026-09-08 审查 P1；cd3abfe 03e8b8f 与 #321 同机修复，此处合并）。
@@ -4135,7 +4302,8 @@ def _v2_parse_site(
             flag = str(_cell(row, index, "是否应返还") or "").strip()
             merge.guard(sheet=V2_SHEET_SITE, entity_id=raw_id,
                         row_label=str(server_values.get("领用单号") or raw_id),
-                        values=server_values, fields=V2_SITE_BASE_FIELDS)
+                        values=server_values, fields=(V2_SITE_ADDRESS_GUARD_FIELDS
+                            if address_patch.action != "keep" else V2_SITE_BASE_FIELDS))
             if pn is not None and pn != existing_line.pn:
                 part = _exact_part_for_pn(db, pn)
                 if part is None:
@@ -4180,6 +4348,8 @@ def _v2_parse_site(
             serial_number=serial_number,
             quantity=quantity,
             remark=str(_cell(row, index, "备注") or "").strip() or None,
+            site_location_action=address_patch.action,
+            site_location=address_patch.value,
         ))
     present_ids |= {f.issue_line_id for f in out if not f.is_create}
     chosen_headers: dict[str, tuple[str, date]] = {}
@@ -5056,8 +5226,9 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
     """锁后复核：每个受保护实体的服务端指纹必须仍等于 validate 时刻的值。
 
     调用位置必须在 _v2_assert_entity_scope(lock_rows=True) 之后、任何写之前。
-    那次调用已经把 03/04/06 三族的行 FOR UPDATE 锁住并读成新鲜的，因此本函数
-    不取任何新锁、也不引入新的锁序边；每族只发常数条批量查询，语句数与行数无关。
+    那次调用已经把 03/04/06 三族的既有行 FOR UPDATE 锁住并读成新鲜的。
+    地址来自新增明细时，单头可能不在既有行锁集合中；本函数在项目 state 锁已持有
+    的前提下按 ID 顺序补锁地址单头。每族只发常数条批量查询，语句数与行数无关。
 
     不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」跟基线
     比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
@@ -5130,7 +5301,21 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
                 _v2_expense_row_values(expense, ""), V2_EXPENSE_BASE_FIELDS,
             )
 
-    site_guards = by_sheet.get(V2_SHEET_SITE, [])
+    all_site_guards = by_sheet.get(V2_SHEET_SITE, [])
+    header_guards = [guard for guard in all_site_guards if guard.entity_type == "site_issue"]
+    if header_guards:
+        issues = {issue.issue_id: issue for issue in db.scalars(
+            select(MaintenanceSiteIssue).where(
+                MaintenanceSiteIssue.issue_id.in_([g.entity_id for g in header_guards]),
+                MaintenanceSiteIssue.project_id == plan.project_id,
+                MaintenanceSiteIssue.normalized_status != "void",
+            ).order_by(MaintenanceSiteIssue.issue_id).with_for_update()
+            .execution_options(populate_existing=True))}
+        for guard in header_guards:
+            issue = issues.get(guard.entity_id)
+            fresh_by_key[(guard.sheet, guard.entity_id)] = (
+                ({"领用地址": issue.site_location or ""}, ("领用地址",)) if issue else None)
+    site_guards = [guard for guard in all_site_guards if guard.entity_type != "site_issue"]
     if site_guards:
         site_ids = [g.entity_id for g in site_guards]
         site_lines = {
@@ -5183,7 +5368,7 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
         fresh = fresh_by_key.get((guard.sheet, guard.entity_id))
         # fresh is None：行已消失/父单不见了。_v2_assert_entity_scope 通常已经
         # 拦过，这里只兜底，同样按漂移处理，绝不放行。
-        if fresh is None or _v2_row_base_hash(fresh[0], fresh[1]) != guard.digest:
+        if fresh is None or _v2_row_base_hash(fresh[0], guard.fields or fresh[1]) != guard.digest:
             drifted.append({
                 "sheet": guard.sheet, "row": guard.row_label,
                 "entity_id": guard.entity_id, "field": "（整行）",
@@ -6274,7 +6459,24 @@ def apply_project_master_v2(
     # all rows of the same issue carry one chosen value, but recheck the plan so
     # a forged in-process plan cannot restore row-order-dependent behavior.
     requested_headers: dict[str, tuple[str, date]] = {}
+    requested_addresses: dict[str, str | None] = {}
+    new_addresses: dict[str, str | None] = {}
     for flag in plan.site_flags:
+        if not flag.is_void and flag.site_location_action != "keep":
+            if flag.site_location_action not in {"set", "clear"} or (
+                    flag.site_location_action == "set" and
+                    (not flag.site_location or len(flag.site_location) > 256)):
+                raise WorkbookError("invalid_site_address", "领用地址更新无效，本次未写入")
+            address = flag.site_location if flag.site_location_action == "set" else None
+            address_issue = (db.get(MaintenanceSiteIssue, flag.issue_id)
+                             if flag.issue_id else db.scalar(select(MaintenanceSiteIssue).where(
+                                 MaintenanceSiteIssue.project_id == plan.project_id,
+                                 MaintenanceSiteIssue.issue_no == flag.issue_no)))
+            address_map = requested_addresses if address_issue else new_addresses
+            address_key = address_issue.issue_id if address_issue else flag.issue_no
+            if address_key in address_map and address_map[address_key] != address:
+                raise WorkbookError("conflicting_issue_address", "同一领用单包含不同地址，本次未写入")
+            address_map[address_key] = address
         if flag.is_void or flag.issue_id is None:
             continue
         requested = (flag.issue_no, flag.issue_date)
@@ -6286,20 +6488,37 @@ def apply_project_master_v2(
                 "conflicting_issue_header",
                 "同一领用单的多行包含不同单号或日期，本次未写入",
             )
+    # 签名行改名 A→B 与同文件新增 B 明细属于同一单头；地址预汇总
+    # 已用 A 的签名基线校验，在实际改名前把 B 的地址接回稳定身份。
+    for issue_id, (requested_no, _requested_date) in requested_headers.items():
+        if requested_no in new_addresses:
+            address = new_addresses.pop(requested_no)
+            if issue_id in requested_addresses and requested_addresses[issue_id] != address:
+                raise WorkbookError("conflicting_issue_address", "同一领用单包含不同地址，本次未写入")
+            requested_addresses[issue_id] = address
+    for issue_id in requested_addresses:
+        address_issue = db.get(MaintenanceSiteIssue, issue_id)
+        requested_headers.setdefault(issue_id, (address_issue.issue_no, address_issue.issue_date))
     header_changed_issue_ids: set[str] = set()
     for issue_id, (issue_no, issue_date) in requested_headers.items():
         issue = db.get(MaintenanceSiteIssue, issue_id)
         if issue is None or issue.project_id != plan.project_id:
             raise WorkbookError("project_mismatch", "领用单归属已变化，请重新下载")
-        if issue.issue_no != issue_no or issue.issue_date != issue_date:
+        header_changed = issue.issue_no != issue_no or issue.issue_date != issue_date
+        address_changed = issue_id in requested_addresses and issue.site_location != requested_addresses[issue_id]
+        if header_changed or address_changed:
             before_header = {
                 "issue_no": issue.issue_no,
                 "issue_date": issue.issue_date.isoformat(),
+                "site_location": issue.site_location,
             }
             issue.issue_no = issue_no
             issue.issue_date = issue_date
+            if address_changed:
+                issue.site_location = requested_addresses[issue_id]
             issue.version += 1
-            header_changed_issue_ids.add(issue_id)
+            if header_changed:
+                header_changed_issue_ids.add(issue_id)
             _write_audit(
                 db,
                 project_id=plan.project_id,
@@ -6312,9 +6531,15 @@ def apply_project_master_v2(
                 after={
                     "issue_no": issue_no,
                     "issue_date": issue_date.isoformat(),
+                    "site_location": issue.site_location,
                 },
             )
             operating_fact_changed = True
+
+    if header_changed_issue_ids:
+        # Session 禁用 autoflush；同文件新明细随后按新单号查头，必须先
+        # 刷出本次合法改名，否则会误建同号新单并撞唯一键。
+        db.flush()
 
     # Recheck generated scopes under the apply locks. A second validation of
     # an edited original file must not add a second copy after the first wins.
@@ -6384,6 +6609,7 @@ def apply_project_master_v2(
                     project_id=plan.project_id,
                     issue_no=flag.issue_no,
                     issue_date=flag.issue_date,
+                    site_location=new_addresses.get(flag.issue_no),
                     raw_status="已确认",
                     status_mapping_state="mapped",
                     normalized_status="confirmed",

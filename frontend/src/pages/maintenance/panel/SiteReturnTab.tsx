@@ -15,6 +15,7 @@ import {
   validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import SiteIssueWorkflowPanel from "../../../components/maintenance/SiteIssueWorkflowPanel";
+import SiteIssueAddress from "../../../components/maintenance/SiteIssueAddress";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
@@ -250,7 +251,7 @@ export function SiteReturnTab({
                 onAfterApply={onChanged}
               />
             )}
-            hint="Excel 批量维护：下载后回填领用事实和是否应返还，再在此上传；上传成功后页面自动刷新"
+            hint="Excel 批量维护：下载后回填领用事实、领用地址和是否应返还，再在此上传；地址留空保留原值，清空请在地址操作列填写“清空”"
           />
           {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
           <Table<SiteReturnRow>
@@ -258,7 +259,7 @@ export function SiteReturnTab({
         size="small"
         loading={loading}
         dataSource={rows}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1320 }}
         expandable={{
           rowExpandable: (row) => !!row.line,
           expandedRowRender: (row) => <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
@@ -268,7 +269,7 @@ export function SiteReturnTab({
             <Descriptions.Item label="单位">{raw(row.line?.unit)}</Descriptions.Item>
             <Descriptions.Item label="领用人">{raw(row.issue.receiver)}</Descriptions.Item>
             <Descriptions.Item label="发出人">{raw(row.issue.issued_by)}</Descriptions.Item>
-            <Descriptions.Item label="现场位置">{raw(row.issue.site_location)}</Descriptions.Item>
+            <Descriptions.Item label="领用地址（现场位置）"><SiteIssueAddress value={row.issue.site_location} showLabel={false} /></Descriptions.Item>
             <Descriptions.Item label="关联需求单">{raw(row.line?.demand_order_no ?? row.line?.source_order_id)}</Descriptions.Item>
             <Descriptions.Item label="来源明细">{raw(row.line?.source_line_id)}</Descriptions.Item>
           </Descriptions>,
@@ -278,6 +279,7 @@ export function SiteReturnTab({
         columns={[
           { title: "领用单号", render: (_value, item) => raw(item.issue.issue_no) },
           { title: "领用日期", render: (_value, item) => raw(item.issue.issue_date) },
+          { title: "领用地址", width: 220, render: (_value, item) => <SiteIssueAddress value={item.issue.site_location} showLabel={false} /> },
           {
             title: "领用状态",
             render: (_value, item) => {

@@ -336,7 +336,8 @@ export interface SiteIssueDocument {
   source?: string;
   receiver: string;
   issued_by: string;
-  site_location: string;
+  /** 实际领用地址；历史工作簿可能未填写。 */
+  site_location: string | null;
   version: number;
   /** 整单作废时间（ISO）；面板作废后的单靠它给出「已作废」摘要行。 */
   voided_at?: string | null;
