@@ -660,6 +660,11 @@ def run_import(session: Session, file_path: str, original_name: str,
                       {"row_no": e.row_no, "error_type": e.error_type, "detail": e.error_detail}
                       for e in result.errors[:10]
                   ]}
+        if result.file_type == mapping.MAINTENANCE:
+            from app.etl.maintenance_addresses import address_report
+
+            report["address_report"] = address_report(
+                result.orders, result.maintenance_address_patches, mode=mode)
         if auto_assignment is not None:
             report["auto_assignment"] = auto_assignment
         if sales_project_sync is not None:

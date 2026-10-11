@@ -1,10 +1,20 @@
 import { api } from "../api";
 
+export interface WbddAddressReport {
+  mode: "skip" | "upsert";
+  /** 已解析单据的地址处理意图；并非数据库实际变更数。 */
+  set: number;
+  keep: number;
+  clear: number;
+  conflict: number;
+  warnings: { order_no: string; data_rows: number[]; message: string }[];
+}
+
 /** WBDD 专用上传（plan v1.3 §4.1）。非 WBDD 文件后端 422 零写入。 */
 export interface WbddImportReport {
   batch_id: number;
   file_hash: string;
-  layout: "91" | "90";
+  layout: "91" | "90" | "name";
   replayed: boolean;
   orders_inserted?: number;
   orders_updated?: number;
@@ -14,6 +24,7 @@ export interface WbddImportReport {
   headless_orders?: number;
   headless_order_ids_sample?: string[];
   rows_display_issue?: number;
+  address_report?: WbddAddressReport;
   snapshot_diff?: {
     missing_orders: number;
     sample_order_nos: string[];

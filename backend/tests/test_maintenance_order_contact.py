@@ -294,7 +294,7 @@ def test_search_enrichment_never_enters_delete_snapshots(db, seeded):
 @pytest.mark.parametrize(
     "columns", [COLUMNS_90, COLUMNS_91], ids=["90-columns", "91-columns"]
 )
-def test_canonical_import_headers_refresh_and_clear_contacts(db, tmp_path, columns):
+def test_canonical_import_headers_refresh_contacts_and_preserve_blank_address(db, tmp_path, columns):
     orders = _import(db, tmp_path, columns=columns)
     for order, expected in zip(orders, CONTACTS):
         assert {key: getattr(order, key) for key in HEADERS} == expected
@@ -307,5 +307,8 @@ def test_canonical_import_headers_refresh_and_clear_contacts(db, tmp_path, colum
         name="contacts-refreshed.xlsx",
     )
     assert len(orders) == 4
-    for order, expected in zip(orders, refreshed):
-        assert {key: getattr(order, key) for key in HEADERS} == expected
+    for order, expected, previous in zip(orders, refreshed, CONTACTS):
+        assert {key: getattr(order, key) for key in HEADERS} == {
+            **expected,
+            "receiver_address": expected["receiver_address"] or previous["receiver_address"],
+        }
