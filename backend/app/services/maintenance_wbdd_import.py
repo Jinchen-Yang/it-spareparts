@@ -1,18 +1,14 @@
 """维保备件需求单（WBDD）专用上传（plan v1.3 M1-6/M1-7/M1-8）。
 
 流程（单步端点，fail-closed）：
-  幂等重放检查 → 零写入预检（文件类型门 + 90/91 布局门）→ 通用管线快照 upsert
+  幂等重放检查 → 零写入预检（文件类型门 + 命名字段门）→ 通用管线快照 upsert
   → 快照差异报告 → 回执落库 → 成本回填（复用 maintenance_cost.recompute(commit=False)，
   引擎零改动）→ 单次提交（同 Idempotency-Key 重放返回原报告）。
   2026-08-26 起导入事实、回执、成本重算与项目工作簿 revision bump 在同一事务：
   任一步失败整体回滚，不留「新事实 + 旧成本」的可见窗口。
 
-布局规则（事实档案 §1.1）：
-  91 列（当前年度版）：头段 [0..6]∪[44..90]，明细段 [7..43]；
-  90 列（历史版）　：头段 [0..52]，明细段 [53..89]；
-  锚定列 =「需求明细.数据ID(不可修改)」位置 D：D<44 → 91 列布局；D≥44 → 90 列布局。
-  位置数学自检：91 = 头 54 + 明细 37；90 = 头 53 + 明细 37（差集恰为 91 列独有的
-  「是否可以接受通用号」）。任一自检不过 → 整批拒绝，零写入。
+D-26：核心身份、日期、PN和数量按表头名称校验。保留旧 90/91 反馈标签，
+扩展/缺少可选列的文件标记为 name；地址位置不决定头/明细身份。
 """
 from __future__ import annotations
 
@@ -51,7 +47,7 @@ def _import_lock_identity(operator: str, idempotency_key: str) -> str:
 
 
 class WbddImportError(Exception):
-    """零写入拒绝（422 语义）。code ∈ not_wbdd_file / layout_unknown / segment_mismatch。"""
+    """零写入拒绝（422 语义）：错类型、缺核心字段或重复表头。"""
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -60,51 +56,27 @@ class WbddImportError(Exception):
 
 
 def validate_wbdd_layout(columns: list[str]) -> str:
-    """按列名序列做布局探测与按段防御校验；返回 "91" / "90"。
-
-    列名须为 canonicalize 后的规范键（reader._inspect_frame 已做）。
-    """
+    """Named schema gate; optional columns may be absent or at any position."""
     cols = list(columns)
-    if _LINE_ANCHOR not in cols:
+    required = {"数据ID(不可修改)", "需求单号", "制单日期", _LINE_ANCHOR,
+                "需求明细.需供货产品", "需求明细.需求数量"}
+    missing = sorted(required - set(cols))
+    if missing:
         raise WbddImportError(
             "layout_unknown",
-            "未找到「需求明细.数据ID(不可修改)」列，无法判定 90/91 列布局",
+            "缺少需求单核心字段：" + "、".join(missing),
         )
-    anchor = cols.index(_LINE_ANCHOR)
-    total = len(cols)
-    if anchor < 44:
-        layout, head_idx, line_idx = "91", set(range(0, 7)) | set(range(44, total)), set(range(7, 44))
-        expected = 91
-    else:
-        layout, head_idx, line_idx = "90", set(range(0, 53)), set(range(53, total))
-        expected = 90
-    if total != expected:
+    duplicates = sorted({name for name in cols if name and cols.count(name) > 1})
+    if duplicates:
         raise WbddImportError(
             "layout_unknown",
-            f"列数 {total} 与 {layout} 列布局不符（锚定列位置 {anchor}），"
-            "请确认为氚云维保备件需求单标准导出",
+            "重复表头无法确定字段来源：" + "、".join(duplicates),
         )
-    # 按段防御校验：头字段必须落在头段、明细字段必须落在明细段（plan M1-1）
-    positions = {name: i for i, name in enumerate(cols)}
-    for name in mapping.MAINTENANCE_HEAD:
-        pos = positions.get(name)
-        if pos is not None and pos not in head_idx:
-            raise WbddImportError(
-                "segment_mismatch",
-                f"头字段「{name}」出现在明细段（位置 {pos}，{layout} 列布局），整批拒绝",
-            )
-    for name in mapping.MAINTENANCE_LINE:
-        pos = positions.get(name)
-        if pos is not None and pos not in line_idx:
-            raise WbddImportError(
-                "segment_mismatch",
-                f"明细字段「{name}」出现在头段（位置 {pos}，{layout} 列布局），整批拒绝",
-            )
-    return layout
+    return str(len(cols)) if len(cols) in (90, 91) else "name"
 
 
 def precheck_wbdd_file(file_path: str) -> str:
-    """零写入预检：必须是 WBDD 文件且为完整 90/91 列布局。返回布局。"""
+    """零写入预检：必须是 WBDD 文件且包含核心命名字段。返回布局标签。"""
     reader.reject_roundtrip_workbook(file_path)
     inspected = reader.inspect_workbook(file_path, load_data=False)
     selection = sheet_selection.select_workbook_sheets(inspected)

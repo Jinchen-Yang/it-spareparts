@@ -1,4 +1,4 @@
-"""M1-1/M1-2/M1-3：WBDD 双布局探测、按段防御、无明细单头保留、展示列落库（plan v1.3 §2.2）。
+"""WBDD 命名字段校验、旧双布局兼容、无明细单头保留与展示列落库。
 
 全部使用合成 fixture（import-field-contract §9.2：禁真实业务数据）。
 """
@@ -18,11 +18,11 @@ from tests.wbdd_fixtures import (
 
 # ---------- 布局探测（纯列名，零 IO） ----------
 
-def test_layout_91_detected_by_anchor_position():
+def test_layout_91_compatibility_label():
     assert wbdd.validate_wbdd_layout(COLUMNS_91) == "91"
 
 
-def test_layout_90_detected_by_anchor_position():
+def test_layout_90_compatibility_label():
     assert wbdd.validate_wbdd_layout(COLUMNS_90) == "90"
 
 
@@ -33,21 +33,27 @@ def test_missing_anchor_column_rejected():
     assert exc.value.code == "layout_unknown"
 
 
-def test_unexpected_width_rejected():
-    with pytest.raises(wbdd.WbddImportError) as exc:
-        wbdd.validate_wbdd_layout(COLUMNS_91 + ["多余列"])   # 92 列
-    assert exc.value.code == "layout_unknown"
+def test_optional_columns_can_be_added_or_removed():
+    assert wbdd.validate_wbdd_layout(COLUMNS_91 + ["地址操作"]) == "name"
+    assert wbdd.validate_wbdd_layout([c for c in COLUMNS_90 if c != "收货地址"]) == "name"
 
 
-def test_head_field_in_line_segment_rejected():
-    # 把头字段「维保工单」挪进明细段（与明细段一列互换），列数不变
+def test_head_and_detail_columns_can_move_without_changing_identity():
     cols = list(COLUMNS_91)
     i_head = cols.index("维保工单")
     i_line = cols.index("需求明细.备注")
     cols[i_head], cols[i_line] = cols[i_line], cols[i_head]
+    assert wbdd.validate_wbdd_layout(cols) == "91"
+
+
+def test_duplicate_headers_rejected():
     with pytest.raises(wbdd.WbddImportError) as exc:
-        wbdd.validate_wbdd_layout(cols)
-    assert exc.value.code == "segment_mismatch"
+        wbdd.validate_wbdd_layout(COLUMNS_91 + ["需求单号"])
+    assert exc.value.code == "layout_unknown"
+
+
+def test_blank_header_cells_follow_reader_compatibility():
+    assert wbdd.validate_wbdd_layout(COLUMNS_91 + ["", ""]) == "name"
 
 
 def test_mapping_counts_match_plan():

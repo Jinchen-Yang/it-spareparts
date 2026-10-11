@@ -30,6 +30,7 @@ const REPORT_LABEL: Record<string, string> = {
   fact_rows_updated: "更新", fact_rows_skipped: "跳过", fact_rows_error: "错误行",
   rows_inactive: "非生效行", rows_skipped_no_data: "空行跳过",
   import_mode: "导入模式",
+  address_report: "地址处理",
   expense_rows_replaced: "修复模式覆盖范围（行）",
   expense_rows_voided: "作废旧行",
   expense_rows_void_protected: "免于作废（删除侧未生效）",
@@ -50,6 +51,11 @@ const VOID_SUPPRESSED_REASON: Record<string, string> = {
 };
 function reportValue(k: string, v: unknown): string {
   if (k === "expense_void_suppressed_reason") return VOID_SUPPRESSED_REASON[String(v)] ?? String(v);
+  if (k === "address_report" && v && typeof v === "object") {
+    const address = v as Record<string, unknown>;
+    const counts = `填写 ${address.set ?? 0} 张，未提供或保留 ${address.keep ?? 0} 张，清空 ${address.clear ?? 0} 张，冲突 ${address.conflict ?? 0} 张`;
+    return address.mode === "skip" ? `文件地址：${counts}；已有单据按跳过模式保留` : counts;
+  }
   return String(v);
 }
 const JOB_STATUS: Record<string, { label: string; color: string }> = {
@@ -391,6 +397,7 @@ export default function ImportPage() {
   const ERR_LABEL: Record<string, { label: string; color: string }> = {
     empty_pn_inactive: { label: "草稿/取消单·可忽略", color: "default" },
     missing_date_in_progress: { label: "审批未完成·可忽略", color: "default" },
+    maintenance_address_conflict: { label: "地址冲突·原地址保留", color: "gold" },
   };
   const errCols: ColumnsType<any> = [
     { title: "行号", dataIndex: "row_no", width: 80 },

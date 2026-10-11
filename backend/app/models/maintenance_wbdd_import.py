@@ -27,7 +27,7 @@ class MaintenanceWbddImportReceipt(Base):
     idempotency_key: Mapped[str] = mapped_column(String(128))
     uploaded_by: Mapped[str] = mapped_column(String(64))
     file_hash: Mapped[str] = mapped_column(String(64))
-    layout: Mapped[str | None] = mapped_column(String(4))  # "91" / "90"
+    layout: Mapped[str | None] = mapped_column(String(4))  # "91" / "90" / "name" (D-26)
     report_json: Mapped[dict] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 

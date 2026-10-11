@@ -12,10 +12,12 @@ import pandas as pd
 
 from app import config, tax_policy
 from app.etl import anomaly, cleaner, mapping
+from app.etl.maintenance_addresses import AddressPatch, collect_addresses
 from app.services.maintenance_expense_integrity import content_key_digest
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
-SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress"})
+SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress",
+                              "maintenance_address_conflict"})
 
 
 @dataclass
@@ -48,6 +50,7 @@ class TransformResult:
     # WBDD 专用（plan v1.3 M1-2/M1-3）：
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
+    maintenance_address_patches: dict[str, AddressPatch] = field(default_factory=dict)
 
 
 def _row_dict(row, field_map) -> dict:
@@ -368,6 +371,17 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
         _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
         if res.orders[raw_order_id].get("_future_date"):
             res.lines[-1]["anomaly_flags"] = ["future_date"]
+
+    res.maintenance_address_patches = collect_addresses(df)
+    for raw_id, head in res.orders.items():
+        patch = res.maintenance_address_patches.get(raw_id, AddressPatch())
+        head["receiver_address"] = patch.value
+        if patch.action == "conflict":
+            res.errors.append(ErrorRec(
+                patch.rows[0], "maintenance_address_conflict", patch.detail,
+                {"raw_order_id": raw_id, "order_no": head["order_no"],
+                 "data_rows": list(patch.rows)},
+            ))
 
     res.rows_inactive = sum(
         1 for ln in res.lines

@@ -174,6 +174,32 @@ describe("批量文件数量提示", () => {
 });
 
 describe("完整导入问题明细下载", () => {
+  it.each(["upsert", "skip"])("%s 模式用中文显示地址回执和冲突，不把地址提示计成整行失败", async (mode) => {
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 7, filename: "合成需求单.xlsx", file_type: "maintenance", status: "success",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 2, rows_inserted: 2, rows_skipped: 0, rows_error: 0, rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/7") return Promise.resolve({ data: {
+        id: 7, filename: "合成需求单.xlsx", issue_count: 1,
+        report: { address_report: { mode, set: 1, keep: 0, clear: 0, conflict: 1, warnings: [] } },
+        errors: [{ row_no: 1, nature: "提示", error_type: "maintenance_address_conflict",
+          detail: "需求单 WBDD-合成001（数据行 1、2）：地址不同，原地址保留" }],
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    fireEvent.click(await screen.findByText("详情"));
+    expect(await screen.findByText("地址处理")).toBeInTheDocument();
+    expect(screen.getByText(mode === "skip"
+      ? "文件地址：填写 1 张，未提供或保留 0 张，清空 0 张，冲突 1 张；已有单据按跳过模式保留"
+      : "填写 1 张，未提供或保留 0 张，清空 0 张，冲突 1 张")).toBeInTheDocument();
+    expect(screen.getByText("地址冲突·原地址保留")).toBeInTheDocument();
+    expect(screen.getByText(/需求单 WBDD-合成001（数据行 1、2）/)).toBeInTheDocument();
+    expect(screen.queryByText("[object Object]")).toBeNull();
+  });
+
   it("批次有问题时显示完整数量和可忽略提示说明", async () => {
     get.mockImplementation((url: string) => {
       if (url === "/import/batches") return Promise.resolve({ data: [{
