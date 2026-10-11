@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.4";
+export const APP_VERSION = "1.36.5";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.5",
+    date: "2026-10-12",
+    items: [
+      "维保分析新增排名与分布、Pareto 排列图、项目热力图三种视图",
+      "支持按 PN、项目、客户、销售和业务类型排名，并从 PN 追踪到具体项目",
+      "项目分析定位保留筛选条件，支持一键返回；沿用现有数据和项目权限",
+    ],
+  },
   {
     version: "1.36.4",
     date: "2026-10-12",

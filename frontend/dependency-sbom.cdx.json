@@ -761,11 +761,11 @@
       "version": "0.4.0"
     },
     {
-      "bom-ref": "pkg:npm/axios@1.19.0?path=node_modules%2Faxios",
+      "bom-ref": "pkg:npm/axios@1.20.0?path=node_modules%2Faxios",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "86dfe2b986571231712c7fc791ece077b9ba24a9471d71144a779a0f3f2e65ed468f9419b429e9c83b1c92f0221274fcf4e11b08b9a7b5ee11e2c9fb3f410a17"
+          "content": "afc68e87c8fd7062a981002aa73ad41e748873a6b9f58dd77ff72ff2ccb50eb1c29191f340612ea2ad6d01193aa92c8376d4064838296fd90596bbb33efae0c2"
         }
       ],
       "name": "axios",
@@ -779,9 +779,9 @@
           "value": "false"
         }
       ],
-      "purl": "pkg:npm/axios@1.19.0",
+      "purl": "pkg:npm/axios@1.20.0",
       "type": "library",
-      "version": "1.19.0"
+      "version": "1.20.0"
     },
     {
       "bom-ref": "pkg:npm/bail@2.0.2?path=node_modules%2Fbail",
