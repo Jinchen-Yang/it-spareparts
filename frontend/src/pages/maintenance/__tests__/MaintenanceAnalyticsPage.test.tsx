@@ -20,6 +20,7 @@ vi.mock("../../../api/maintenanceProjects", () => ({
   searchMaintenanceProjects: (...a: unknown[]) => searchMaintenanceProjects(...a),
   getMaintenanceProject: (...a: unknown[]) => getMaintenanceProject(...a),
 }));
+vi.mock("../MaintenanceRankingsExplorer", () => ({ default: () => <div>多维排名占位</div> }));
 // jsdom 无 canvas：mock 图表壳，只保留空态文案
 vi.mock("../../../components/charts/EChartContainer", () => ({
   default: ({ empty, emptyText }: { empty?: boolean; emptyText?: string }) =>
@@ -134,8 +135,12 @@ const spendFixture = {
   },
 };
 
+// 该套回归专门覆盖旧 PN 明细和开支合同；默认多维排名由独立 explorer 测试覆盖。
 function renderPage(initialPath = "/maintenance/analytics") {
-  localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: true, page_maintenance: true }));
+  const path = new URL(initialPath, "http://localhost");
+  if (!path.searchParams.has("view")) path.searchParams.set("view", "pn");
+  initialPath = path.pathname + path.search;
+  localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: true, data_customer: true, page_maintenance: true }));
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       {/* 直接渲染页面组件（内部 useSearchParams 走 MemoryRouter） */}
@@ -156,8 +161,8 @@ function LocationProbe() {
   const navigate = useNavigate();
   return <>
     <output data-testid="location">{location.search}</output>
-    <button onClick={() => navigate("?business_type=spare&sort=qty")}>跳转备件分类</button>
-    <button onClick={() => navigate("?q=QA-SECOND-PN&business_type=spare")}>跳转搜索</button>
+    <button onClick={() => navigate("?view=pn&business_type=spare&sort=qty")}>跳转备件分类</button>
+    <button onClick={() => navigate("?view=pn&q=QA-SECOND-PN&business_type=spare")}>跳转搜索</button>
     <button onClick={() => navigate(-1)}>后退</button>
     <button onClick={() => navigate(1)}>前进</button>
   </>;
@@ -212,6 +217,17 @@ describe("维保数据分析页", () => {
     getMaintenanceProject.mockReset();
     getMaintenanceProject.mockImplementation((id: string) =>
       Promise.resolve({ data: { project: { project_id: id, display_name: `项目-${id}` } } }));
+  });
+
+  it("无view参数默认进入多维排名，保留旧PN明细和开支入口", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: true, data_customer: true }));
+    render(<MemoryRouter initialEntries={["/maintenance/analytics"]}><MaintenanceAnalyticsPage /></MemoryRouter>);
+    await screen.findByText("多维排名占位");
+    expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "PN 明细" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "开支统计" })).toBeInTheDocument();
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+    expect(fetchSpendTrend).not.toHaveBeenCalled();
   });
 
   it("正式返还显示全部件况台账与实际领用，忽略历史坏件字段且保留超过100%的比例", async () => {
@@ -410,11 +426,9 @@ describe("维保数据分析页", () => {
     renderPage("/maintenance/analytics?business_type=spare&range=all&sort=qty&page=4&ps=50&q=disk");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
-      business_type: "all", range: "ytd", sort: "cost_inc", page: 1, page_size: 20,
-    }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true"));
     expect(query().toString()).toBe("");
-    expect(screen.getByPlaceholderText("搜 PN / 描述")).toHaveValue("");
+    expect(screen.getByPlaceholderText("搜 PN / 描述 / 项目")).toHaveValue("");
     expect(await selectedLabels()).toHaveLength(6);
   });
 
@@ -434,10 +448,8 @@ describe("维保数据分析页", () => {
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
     expect(input).toHaveValue("");
     expect(query().toString()).toBe("");
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
-      business_type: "all", range: "ytd", sort: "cost_inc", page: 1, page_size: 20,
-    }));
-    expect(fetchPnRanking).toHaveBeenCalledTimes(submitted ? 3 : 1);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true"));
+    expect(fetchPnRanking).toHaveBeenCalledTimes(submitted ? 2 : 1);
   });
 
   it("URL 导航和前进后退同步搜索文本，未提交草稿不覆盖已提交条件", async () => {
@@ -640,9 +652,7 @@ describe("维保数据分析页", () => {
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
     expect(await screen.findByText("项目-p1")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
-      business_type: "all", range: "ytd", sort: "cost_inc", page: 1, page_size: 20,
-    }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true"));
     expect(query().toString()).toBe("");
     expect(screen.getByPlaceholderText("客户")).toHaveValue("");
     expect(screen.getByPlaceholderText("销售")).toHaveValue("");
@@ -650,7 +660,7 @@ describe("维保数据分析页", () => {
     expect(screen.queryByText("项目-p1")).not.toBeInTheDocument();
   });
 
-  it("默认页签是 PN：只请求 pn-ranking，不发 spend-trend", async () => {
+  it("旧 view=pn 链接只请求 pn-ranking，不发 spend-trend", async () => {
     renderPage();
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
     expect(fetchSpendTrend).not.toHaveBeenCalled();
@@ -747,15 +757,14 @@ describe("维保数据分析页", () => {
     expect(screen.queryByText("¥1,600")).not.toBeInTheDocument();
   });
 
-  it("开支页签下重置筛选：清空 view/granularity/筛选并回到默认 PN 查询", async () => {
+  it("开支页签下重置筛选：清空 view/granularity/筛选并回到多维排名", async () => {
     renderPage("/maintenance/analytics?view=spend&granularity=day&customer=客户A&range=all");
     await waitFor(() => expect(fetchSpendTrend).toHaveBeenLastCalledWith(
       expect.objectContaining({ granularity: "day", customer: "客户A" })));
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
     await waitFor(() => expect(query().toString()).toBe(""));
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
-      business_type: "all", range: "ytd", sort: "cost_inc", page: 1, page_size: 20,
-    }));
+    expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true");
+    expect(fetchPnRanking).not.toHaveBeenCalled();
     expect(fetchSpendTrend).toHaveBeenCalledTimes(1);
   });
 });

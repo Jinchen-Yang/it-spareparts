@@ -219,3 +219,75 @@ export const fetchAnalyticsFilterOptions = async () => {
   );
   return resp.data;
 };
+
+
+/** 三种图共享同一响应，数量与金额保留服务端 Decimal 字符串。 */
+export type ExplorerDimension = "pn" | "project" | "customer" | "salesperson" | "business";
+export type ExplorerMetric = "issued" | "cost" | "effective" | "orders" | "missing";
+export type ExplorerCostState = "known" | "partial" | "unknown" | "restricted";
+export interface ExplorerStats {
+  value: string | null;
+  issued_qty: string;
+  effective_qty: string;
+  cost_inc: string | null;
+  cost_state: ExplorerCostState;
+  order_count: number;
+  missing_lines: number;
+  project_count: number;
+  pn_count: number;
+}
+export interface ExplorerRow extends ExplorerStats {
+  /** 服务端判断项目详情访问权；客户端仅接受显式 true。 */
+  can_open_project: boolean;
+  key: string;
+  label: string;
+  subtitle: string;
+  part_id: number | null;
+  project_id: string | null;
+  pn: string | null;
+  share_pct: string | null;
+  cumulative_share_pct: string | null;
+}
+export interface MaintenanceExplorerParams extends Omit<PnRankingParams, "sort"> {
+  dimension?: ExplorerDimension;
+  metric?: ExplorerMetric;
+  focus?: string;
+  top_n?: number;
+  focus_page?: number;
+  focus_page_size?: number;
+}
+export interface MaintenanceExplorerResponse {
+  window: { range: string; date_from: string | null; date_to: string | null };
+  dimension: ExplorerDimension;
+  metric: ExplorerMetric;
+  total: number;
+  page: number;
+  page_size: number;
+  summary: ExplorerStats & { top_share_pct: string | null };
+  rows: ExplorerRow[];
+  chart_rows: ExplorerRow[];
+  focus: { row: ExplorerRow | null; dimension: "pn" | "project"; rows: ExplorerRow[]; total: number; page: number; page_size: number };
+  matrix: {
+    row_dimension: ExplorerDimension;
+    column_dimension: "pn" | "project";
+    rows: ExplorerRow[];
+    columns: ExplorerRow[];
+    cells: { row_key: string; column_key: string; value: string | null; cost_state: ExplorerCostState }[];
+    scale_max: string;
+    scale_min: string;
+  };
+  meta: {
+    as_of: string;
+    quantity_scale: 3;
+    cost_basis: "inc";
+    additive: boolean;
+    has_negative: boolean;
+    cost_visibility: "visible" | "restricted";
+    customer_visibility: "visible" | "restricted";
+    unknown_count: number;
+  };
+}
+export const fetchMaintenanceExplorer = async (params: MaintenanceExplorerParams, signal?: AbortSignal) => {
+  const resp = await api.get<MaintenanceExplorerResponse>("/maintenance/analytics/explorer", { params, signal });
+  return resp.data;
+};

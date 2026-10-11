@@ -5,7 +5,7 @@
 """
 import io
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -40,6 +40,7 @@ from app.models.system import SysImportBatch
 from app.security import UserContext
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_project_operations as operations
+from tests.test_demand_manual_edit import _source_snapshot
 
 
 def _make_project_with_line(db, *, qty=Decimal("2"), unit_cost=Decimal("100.00"),
@@ -1468,12 +1469,12 @@ def test_void_fast_already_tombstoned_is_idempotent(db):
     assert second["already_voided"] == 1 and second["voided"] == 0
 
 
-def test_latest_missing_reports_disappeared_orders(db):
+def test_latest_missing_requires_snapshot_for_legacy_receipt(db):
     from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
     from app.services import maintenance_wbdd_import as wbdd
 
     project, _part, order, _line = _make_project_with_line(db)
-    # 用 order 所在批次造一张回执：文件单集 = 该批次全部单（含 order）
+    # A historical receipt alone cannot prove which rows its original file had.
     batch_id = order.import_batch_id
     db.add(MaintenanceWbddImportReceipt(
         batch_id=batch_id, idempotency_key="test-key-0001",
@@ -1482,15 +1483,13 @@ def test_latest_missing_reports_disappeared_orders(db):
     ))
     db.commit()
     result = wbdd.latest_missing(db)
-    assert result["readiness"] == "ready"
-    # 文件里存在 order → 不在缺失清单
-    assert all(m["source_order_id"] != order.raw_order_id
-               for m in result["missing_orders"])
+    assert result["readiness"] == "snapshot_required"
+    assert result["missing_orders"] == []
 
-    # 再造一张挂在别的批次的新单（库里有、回执批次文件里没有）→ 进缺失清单
+    # Later database rows must not turn a receipt into invented source evidence.
     other_batch = _batch(db)
     ghost = FMaintenanceOrder(
-        raw_order_id=f"raw-ghost-{uuid.uuid4()}", order_no="WBDD-GHOST-001",
+        raw_order_id=f"raw-ghost-{uuid.uuid4()}", order_no="WBDD-20260801-0002",
         order_date=order.order_date, linked_sales_order_no="XSDD-EDIT-001",
         project_raw="可编辑测试", data_status="已生效",
         import_batch_id=other_batch,
@@ -1498,12 +1497,53 @@ def test_latest_missing_reports_disappeared_orders(db):
     db.add(ghost)
     db.commit()
     result2 = wbdd.latest_missing(db)
-    assert any(m["source_order_id"] == ghost.raw_order_id
-               for m in result2["missing_orders"])
-    entry = next(m for m in result2["missing_orders"]
-                 if m["source_order_id"] == ghost.raw_order_id)
-    assert entry["order_no"] == "WBDD-GHOST-001"
-    assert entry["line_count"] == 0
+    assert result2["readiness"] == "snapshot_required"
+    assert result2["missing_orders"] == []
+
+
+def test_latest_missing_source_snapshot_ignores_orders_created_after_upload(db):
+    from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+    from app.services import maintenance_wbdd_import as wbdd
+
+    _project, _part, lower, lower_line = _make_project_with_line(db)
+    lower.order_no = "WBDD-20260801-0001"
+    old_missing = FMaintenanceOrder(
+        raw_order_id=f"raw-missing-{uuid.uuid4()}", order_no="WBDD-20260801-0002",
+        order_date=lower.order_date, data_status="已生效", import_batch_id=_batch(db))
+    upper = FMaintenanceOrder(
+        raw_order_id=f"raw-upper-{uuid.uuid4()}", order_no="WBDD-20260801-0004",
+        order_date=lower.order_date, data_status="已生效", import_batch_id=_batch(db))
+    db.add_all([old_missing, upper])
+    db.commit()
+    source_batch_id = _batch(db)
+    db.commit()
+    snapshot = _source_snapshot((lower, [lower_line]), (upper, []))
+    source_batch = db.get(SysImportBatch, source_batch_id)
+    source_batch.report_json = {"_wbdd_source_snapshot": snapshot}
+    db.add(MaintenanceWbddImportReceipt(
+        batch_id=source_batch.id, idempotency_key="source-snapshot-fixed",
+        uploaded_by="tester", file_hash=uuid.uuid4().hex,
+        report_json={"batch_id": source_batch.id}))
+    db.commit()
+    before = wbdd.latest_missing(db)
+    assert [row["source_order_id"] for row in before["missing_orders"]] == [old_missing.raw_order_id]
+
+    after_capture = datetime.fromisoformat(snapshot["captured_at"]) + timedelta(seconds=1)
+    later_batch_id = _batch(db)
+    db.get(SysImportBatch, later_batch_id).uploaded_at = after_capture
+    later = FMaintenanceOrder(
+        raw_order_id=f"raw-later-{uuid.uuid4()}", order_no="WBDD-20260801-0003",
+        order_date=lower.order_date, data_status="已生效", import_batch_id=later_batch_id,
+        created_at=after_capture)
+    db.add(later)
+    # A subsequent import changing the fact's batch stamp must not rewrite the
+    # earlier file's membership, or expand its candidates to later creations.
+    lower.import_batch_id = later_batch_id
+    db.commit()
+    after = wbdd.latest_missing(db)
+    assert [row["source_order_id"] for row in after["missing_orders"]] == [old_missing.raw_order_id]
+    assert later.raw_order_id not in {row["source_order_id"] for row in after["missing_orders"]}
+    assert db.get(SysImportBatch, source_batch.id).report_json["_wbdd_source_snapshot"] == snapshot
 
 
 def test_void_fast_returns_per_order_results(db):
@@ -1826,35 +1866,47 @@ def test_v22_template_has_usage_sheet_dropdown_and_yellow_editable(db):
 
 
 def test_latest_missing_allows_full_sync_at_any_ratio(db):
-    """2026-08-24 用户拍板：缺失占比任意（含 >50%/100%）都不再拦截——
-    差异清单与批量作废解锁，可全量跟随修改；占比仅作展示。"""
+    """A valid daily sequence window is not blocked by a >50% missing ratio."""
     from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
     from app.services import maintenance_wbdd_import as wbdd
 
     project, _part, order, _line = _make_project_with_line(db)
-    # 再造 4 张同窗口、不在文件批次里的单 → 库内 5 张活跃，文件只有 1 张（80%）
+    order.order_no = "WBDD-20260801-0001"
+    upper = FMaintenanceOrder(
+        raw_order_id=f"raw-upper-{uuid.uuid4()}", order_no="WBDD-20260801-0006",
+        order_date=order.order_date, data_status="已生效", import_batch_id=_batch(db))
+    db.add(upper)
+    # Two source endpoints surround four missing existing orders (4/6 >50%).
     others = []
     for i in range(4):
         b = _batch(db)
         o = FMaintenanceOrder(
-            raw_order_id=f"raw-ghost-{i}-{uuid.uuid4()}", order_no=f"WBDD-GHOST-{i}",
+            raw_order_id=f"raw-ghost-{i}-{uuid.uuid4()}", order_no=f"WBDD-20260801-{i + 2:04d}",
             order_date=order.order_date, linked_sales_order_no="XSDD-EDIT-001",
             project_raw="可编辑测试", data_status="已生效", import_batch_id=b,
         )
         others.append(o)
         db.add(o)
+    db.commit()
+    source_batch_id = _batch(db)
+    db.commit()
+    snapshot = _source_snapshot((order, [_line]), (upper, []))
+    db.get(SysImportBatch, source_batch_id).report_json = {"_wbdd_source_snapshot": snapshot}
     db.add(MaintenanceWbddImportReceipt(
-        batch_id=order.import_batch_id, idempotency_key="suspicious-key-0001",
+        batch_id=source_batch_id, idempotency_key="suspicious-key-0001",
         uploaded_by="tester", file_hash=uuid.uuid4().hex,
-        report_json={"batch_id": order.import_batch_id},
+        report_json={"batch_id": source_batch_id},
     ))
     db.commit()
     result = wbdd.latest_missing(db)
+    assert result["readiness"] == "ready"
     assert result["missing_count"] == 4
-    assert result["db_active_in_window"] == 5
     assert "suspicious" not in result
-    assert result["missing_ratio"] > 0.5
     assert len(result["missing_orders"]) == 4
+    assert result["missing_count"] / (len(others) + result["coverage"]["source_order_count"]) > 0.5
+    assert result["candidate_digest"]
+    assert result["coverage"]["daily_windows"] == [
+        {"date": "2026-08-01", "from_sequence": 1, "to_sequence": 6}]
 
 
 def test_e2e_fix_single_row_delete_allowed(db):

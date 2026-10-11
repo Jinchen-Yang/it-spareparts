@@ -520,9 +520,33 @@ def run_import(session: Session, file_path: str, original_name: str,
                                file_hash=file_hash, storage_path=storage_path))
         snapshot = datetime.now(timezone.utc).date()
 
+        # Capture identities from the same reader-selected page before PN/qty
+        # validation can discard source rows. This private set belongs to the
+        # import event, not the mutable facts' latest import_batch_id.
+        wbdd_source_snapshot = None
+        if loaded.primary is not None and loaded.primary.file_type == mapping.MAINTENANCE:
+            from app.services import maintenance_wbdd_source_snapshot
+
+            wbdd_source_snapshot = maintenance_wbdd_source_snapshot.capture_source_snapshot(
+                loaded.primary.df,
+                sheet_name=loaded.primary.sheet_name,
+                ignored_wbdd_sheets=[
+                    sheet.sheet_name for sheet in selection.ignored_recognized
+                    if sheet.file_type == mapping.MAINTENANCE
+                ],
+            )
+
         transformed = transform_workbook(loaded)
         result, extra_report, src_cols = (
             transformed.result, transformed.extra_report, transformed.src_cols)
+        if wbdd_source_snapshot is not None:
+            wbdd_source_snapshot = maintenance_wbdd_source_snapshot.block_snapshot_errors(
+                wbdd_source_snapshot, result.errors)
+            wbdd_source_snapshot.update({
+                "mode": mode,
+                "file_hash": file_hash,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            })
 
         # 错误行入 sys_import_error（失败批次也保留，便于按行修正）
         for e in result.errors:
@@ -573,6 +597,10 @@ def run_import(session: Session, file_path: str, original_name: str,
         maintenance_lock_envelope = None
         assignment_service = None
         warehouse_service = None
+        if wbdd_source_snapshot is not None:
+            from app.services.maintenance_wbdd_identity import validate_source_identities
+
+            validate_source_identities(session, result, wbdd_source_snapshot)
         if auto_assign_maintenance_projects and result.file_type == mapping.MAINTENANCE:
             # 身份锁与所有可能既有目标必须早于 WBDD 事实行锁；load 后只能
             # 在此信封内 apply，禁止 order/line → workbook_state 反序。
@@ -665,6 +693,8 @@ def run_import(session: Session, file_path: str, original_name: str,
 
             report["address_report"] = address_report(
                 result.orders, result.maintenance_address_patches, mode=mode)
+        if wbdd_source_snapshot is not None:
+            report["_wbdd_source_snapshot"] = wbdd_source_snapshot
         if auto_assignment is not None:
             report["auto_assignment"] = auto_assignment
         if sales_project_sync is not None:

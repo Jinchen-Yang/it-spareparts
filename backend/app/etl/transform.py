@@ -342,6 +342,11 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
             _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
             continue
 
+        # D-27: the source header (including cancellation) exists independently
+        # of whether its child has a valid PN/quantity. Never silently retain a
+        # previous header status just because every child failed validation.
+        _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
+
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
             res.errors.append(_empty_pn_error(

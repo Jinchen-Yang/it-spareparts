@@ -14,25 +14,22 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
-from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.etl import mapping, pipeline, reader, sheet_selection
 from app.models.maintenance import (
-    FMaintenanceLine,
     FMaintenanceOrder,
-    MaintenanceDemandTombstone,
 )
 from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
+from app.models.system import SysImportBatch
+from app.services import maintenance_wbdd_reconciliation
 from app.services import maintenance_cost
 
 _log = logging.getLogger(__name__)
 
 _LINE_ANCHOR = "需求明细.数据ID(不可修改)"
-_SNAPSHOT_DIFF_SAMPLE = 50
 
 
 def _import_lock_identity(operator: str, idempotency_key: str) -> str:
@@ -102,165 +99,32 @@ def find_receipt(db: Session, *, uploaded_by: str,
     ).scalar_one_or_none()
 
 
-def snapshot_diff(db: Session, file_order_nos: set[str],
-                  file_dates: list[date]) -> dict:
-    """快照差异（F1 默认）：库内在本文件业务日期窗内、但本文件未出现的活跃单。
+def public_report(report: dict) -> dict:
+    """Private source membership stays server-side, including replay responses."""
+    return {key: value for key, value in report.items() if not key.startswith("_")}
 
-    只报告不删除不打标；已 tombstone（未恢复）的单属预期缺失，不计。
-    窗口取文件自身 order_date [min, max]——历史全量库与年度快照文件天然只在窗内可比。
-    """
-    if not file_dates or not file_order_nos:
-        return {"missing_orders": 0, "sample_order_nos": [],
-                "window": None}
-    lo, hi = min(file_dates), max(file_dates)
-    tombstoned = select(MaintenanceDemandTombstone.source_order_id).where(
-        MaintenanceDemandTombstone.restored_at.is_(None)
+
+def latest_source_batch(db: Session) -> SysImportBatch | None:
+    return db.scalar(select(SysImportBatch).where(
+        SysImportBatch.file_type == mapping.MAINTENANCE,
+        SysImportBatch.status == "success",
+        SysImportBatch.report_json.op("?")("_wbdd_source_snapshot"),
+    ).order_by(SysImportBatch.id.desc()).limit(1))
+
+
+def latest_missing(db: Session, *, allowed_project_ids: set[str] | None = None) -> dict:
+    """D-27: compare the immutable source, never mutable last-import ownership."""
+    batch = latest_source_batch(db)
+    if batch is None:
+        return {"readiness": "snapshot_required", "missing_orders": [],
+                "missing_lines": [], "missing_count": 0, "missing_line_count": 0,
+                "total_candidate_count": 0, "truncated": False,
+                "batch_id": None, "uploaded_at": None, "candidate_digest": None,
+                "coverage": {"daily_windows": [], "source_order_count": 0, "blocked_order_count": 0},
+                "warnings": ["历史上传没有保存完整来源集合，请重新上传需要核对的需求单原件。"]}
+    return maintenance_wbdd_reconciliation.build_candidates(
+        db, batch, allowed_project_ids=allowed_project_ids,
     )
-    # v1.36（P1#4 修正）：只有页面/总表**手工建的单头**不参与"氚云已删单"比对
-    # （它们本就不在氚云导出里，报 missing 只会引诱一键作废）。
-    # 真实 WBDD 单即使行上有页面直改的 override，也照常参与对账——
-    # 按头前缀判别，不按 edited_source 判别。
-    manual_orders = select(FMaintenanceOrder.id).where(
-        FMaintenanceOrder.raw_order_id.like("page-manual-%")
-    )
-    rows = db.execute(
-        select(FMaintenanceOrder.order_no)
-        .where(
-            FMaintenanceOrder.order_date >= lo,
-            FMaintenanceOrder.order_date <= hi,
-            FMaintenanceOrder.order_no.notin_(file_order_nos),
-            FMaintenanceOrder.raw_order_id.notin_(tombstoned),
-            FMaintenanceOrder.id.notin_(manual_orders),
-        )
-        .order_by(FMaintenanceOrder.order_no)
-    ).scalars().all()
-    return {
-        "missing_orders": len(rows),
-        "sample_order_nos": list(rows[:_SNAPSHOT_DIFF_SAMPLE]),
-        "window": {"from": lo.isoformat(), "to": hi.isoformat()},
-    }
-
-
-# 差异清单明细上限（#265 契约）：与 void-fast 的 MAX_DELETE_HEADERS 对齐，
-# 超出部分 truncated=true，前端提示分批作废。
-_MISSING_DETAILS_LIMIT = 1_000
-# 2026-08-24 用户拍板：解除「疑似不完整导出」50% 拦截（原 _MISSING_SUSPICIOUS_RATIO
-# = 0.5，超阈值前端禁用批量作废并收起差异清单）——需要能 100% 全量跟随修改。
-# missing_ratio 仍计算并返回，仅作展示；误传风险由前端确认弹窗与审计兜底。
-
-
-def latest_missing(db: Session) -> dict:
-    """最近一次快照的差异清单明细（#264/#267：氚云删单 → 系统跟随作废）。
-
-    实时重算而非读导入时快照：批次事实（import_batch_id）与窗口都在库里，
-    重算永远反映当前墓碑状态——已作废的单自动从清单消失，重复点击安全。
-    """
-    from app.models.maintenance_source_assignment import (
-        MaintenanceSourceOrderAssignment,
-    )
-
-    receipt = db.execute(
-        select(MaintenanceWbddImportReceipt)
-        .order_by(MaintenanceWbddImportReceipt.created_at.desc(),
-                  MaintenanceWbddImportReceipt.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if receipt is None:
-        return {"readiness": "not_imported", "missing_orders": [],
-                "truncated": False}
-
-    file_rows = db.execute(
-        select(FMaintenanceOrder.order_no, FMaintenanceOrder.order_date)
-        .where(FMaintenanceOrder.import_batch_id == receipt.batch_id)
-    ).all()
-    file_order_nos = {r.order_no for r in file_rows}
-    file_dates = [r.order_date for r in file_rows if r.order_date is not None]
-    diff = snapshot_diff(db, file_order_nos, file_dates)
-    base = {
-        "readiness": "ready",
-        "batch_id": receipt.batch_id,
-        "uploaded_at": receipt.created_at.isoformat(),
-        "window": diff.get("window"),
-        "missing_count": diff["missing_orders"],
-        "missing_orders": [],
-        "truncated": False,
-        "db_active_in_window": None,
-        "missing_ratio": None,
-        # 2026-08-24 用户拍板：不再输出 suspicious——任意缺失占比都允许
-        # 全量跟随作废（含 100%），前端差异清单恒展开。
-    }
-    if diff["missing_orders"] == 0 or not diff.get("window"):
-        return base
-
-    lo = date.fromisoformat(diff["window"]["from"])
-    hi = date.fromisoformat(diff["window"]["to"])
-    tombstoned = select(MaintenanceDemandTombstone.source_order_id).where(
-        MaintenanceDemandTombstone.restored_at.is_(None)
-    )
-    # 与 snapshot_diff 同一手工单排除规则：明细列表与分母都不得计入
-    # page-manual-% 头。否则混合场景（真实缺失 + 手工单）计数来自
-    # snapshot_diff=1、列表却混入手工单，前端全选作废会误删手工单
-    # （review_spec）。
-    manual_orders = select(FMaintenanceOrder.id).where(
-        FMaintenanceOrder.raw_order_id.like("page-manual-%")
-    )
-    active_line_count = (
-        select(func.count(FMaintenanceLine.id))
-        .where(
-            FMaintenanceLine.order_id == FMaintenanceOrder.id,
-            FMaintenanceLine.is_active.is_(True),
-        )
-        .correlate(FMaintenanceOrder)
-        .scalar_subquery()
-    )
-    rows = db.execute(
-        select(
-            FMaintenanceOrder.raw_order_id,
-            FMaintenanceOrder.order_no,
-            FMaintenanceOrder.order_date,
-            MaintenanceSourceOrderAssignment.project_id,
-            active_line_count.label("line_count"),
-        )
-        .outerjoin(
-            MaintenanceSourceOrderAssignment,
-            (MaintenanceSourceOrderAssignment.source_order_id
-             == FMaintenanceOrder.raw_order_id)
-            & MaintenanceSourceOrderAssignment.is_active.is_(True),
-        )
-        .where(
-            FMaintenanceOrder.order_date >= lo,
-            FMaintenanceOrder.order_date <= hi,
-            FMaintenanceOrder.order_no.notin_(file_order_nos),
-            FMaintenanceOrder.raw_order_id.notin_(tombstoned),
-            FMaintenanceOrder.id.notin_(manual_orders),
-        )
-        .order_by(FMaintenanceOrder.order_no)
-        .limit(_MISSING_DETAILS_LIMIT + 1)
-    ).all()
-    active_in_window = int(db.scalar(
-        select(func.count(FMaintenanceOrder.id)).where(
-            FMaintenanceOrder.order_date >= lo,
-            FMaintenanceOrder.order_date <= hi,
-            FMaintenanceOrder.raw_order_id.notin_(tombstoned),
-            FMaintenanceOrder.id.notin_(manual_orders),
-        )
-    ) or 0)
-    base["db_active_in_window"] = active_in_window
-    if active_in_window:
-        ratio = Decimal(diff["missing_orders"]) / Decimal(active_in_window)
-        base["missing_ratio"] = float(round(ratio, 4))
-    base["truncated"] = len(rows) > _MISSING_DETAILS_LIMIT
-    base["missing_orders"] = [
-        {
-            "source_order_id": r.raw_order_id,
-            "order_no": r.order_no,
-            "order_date": r.order_date.isoformat() if r.order_date else None,
-            "line_count": int(r.line_count or 0),
-            "assigned_project_id": r.project_id,
-        }
-        for r in rows[:_MISSING_DETAILS_LIMIT]
-    ]
-    return base
 
 
 def import_wbdd(db: Session, *, file_path: str, original_name: str,
@@ -280,6 +144,8 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     ))))
     existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key)
     if existing is not None:
+        if existing.file_hash != pipeline.sha256_file(file_path):
+            raise WbddImportError("idempotency_file_mismatch", "同一上传请求不能更换文件，请重新选择文件上传")
         report = dict(existing.report_json or {})
         if report.get("recompute") is None:
             # 只可能命中单事务化之前两半提交留下的历史回执（事实已提交、重算缺失）。
@@ -292,7 +158,7 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
             except Exception:
                 db.rollback()
                 raise
-        return report, True
+        return public_report(report), True
 
     layout = precheck_wbdd_file(file_path)  # 零写入门：非 WBDD / 布局不符在此拒绝
 
@@ -306,16 +172,15 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     )
     report_counts = dict(batch.report_json or {})
 
-    # 快照差异：文件内 order_no 集合与业务日期窗（从已入库批次读会混入历史，须用本批文件）
-    # run_import 已完成 transform+load；order_no/日期从本批次事实反查（import_batch_id 定位）。
-    file_rows = db.execute(
-        select(FMaintenanceOrder.order_no, FMaintenanceOrder.order_date)
-        .where(FMaintenanceOrder.import_batch_id == batch.id)
-    ).all()
-    # upsert 更新既有单时 import_batch_id 也被白名单刷新为本批，故本批文件的全部单都能反查到
-    file_order_nos = {r.order_no for r in file_rows}
-    file_dates = [r.order_date for r in file_rows if r.order_date is not None]
-    diff = snapshot_diff(db, file_order_nos, file_dates)
+    # The raw source identities were captured before business validation by the
+    # shared pipeline. They remain immutable after later imports and edits.
+    candidates = maintenance_wbdd_reconciliation.build_candidates(db, batch)
+    diff = {
+        "missing_orders": candidates.get("missing_count", 0),
+        "missing_lines": candidates.get("missing_line_count", 0),
+        "coverage": candidates.get("coverage", []),
+        "window": None,
+    }
 
     report = {
         "batch_id": batch.id,
@@ -351,7 +216,7 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     # 赋独立新对象，使 JSONB 变化可被 ORM 稳定检测并写入 receipt。
     receipt.report_json = dict(report)
     db.commit()
-    return report, False
+    return public_report(report), False
 
 
 def latest_health(db: Session) -> dict:
