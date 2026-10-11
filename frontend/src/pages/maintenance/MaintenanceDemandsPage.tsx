@@ -24,10 +24,11 @@ import {
   searchMaintenanceDemands,
   voidFastMaintenanceDemands,
 } from "../../api/maintenanceDemands";
-import type { WbddAddressReport, WbddMissing, WbddMissingOrder } from "../../api/maintenanceWbddImport";
+import type { WbddAddressReport, WbddMissing } from "../../api/maintenanceWbddImport";
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
+import WbddReconciliation from "../../components/maintenance/WbddReconciliation";
 import DemandLineBatchCreate from "./DemandLineBatchCreate";
 import DemandLineCreate from "./DemandLineCreate";
 import DemandLinesEditor from "./DemandLinesEditor";
@@ -46,12 +47,10 @@ function idempotencyKey(prefix: string): string {
 /**
  * 需求单与数据同步（#267 前端任务 1+2）。
  *
- * 布局按用户操作顺序讲一个故事：传氚云快照 → 看差异清单 → 按氚云现状批量作废
- * → 日常查单 / 单张作废 / 恢复。进入页面即拉一次差异清单（后端实时重算口径，
- * 已作废的单自动从清单消失，重复作废幂等安全）。
+ * 上传原件更新资料 → 核对本次范围的整单与明细缺项 → 选择并确认同步。
+ * D-27 差异操作绑定不可变来源与预览摘要；普通手工作废/恢复保留各自入口。
  *
- * 写按钮按动作键显隐：作废/批量作废＝action_maintenance_demand_delete，
- * 快照上传＝action_maintenance_wbdd_import；页面可见性本身由路由 page_maintenance 控制。
+ * 确认同步同时需要上传与作废动作权限；页面可见性由 page_maintenance 控制。
  */
 export function MaintenanceDemandsPage() {
   const permissions = readPermissionMap();
@@ -75,7 +74,6 @@ export function MaintenanceDemandsPage() {
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const missingRequestSeq = useRef(0);
-  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
 
   // ---- 区块二：需求单查询 ----
   const [keyword, setKeyword] = useState("");
@@ -107,14 +105,11 @@ export function MaintenanceDemandsPage() {
       const resp = await getWbddMissing();
       if (seq !== missingRequestSeq.current) return false;
       setMissing(resp.data);
-      // 清单已重算，旧勾选可能已不在清单里，直接清空
-      setSelectedRowKeys([]);
       return true;
     } catch (error) {
       if (seq !== missingRequestSeq.current) return false;
       // 还没传过快照（404）是合法空态；其他失败也必须失效旧差异清单。
       setMissing(null);
-      setSelectedRowKeys([]);
       const status = (error as { response?: { status?: number } })?.response?.status;
       if (status !== 404 && notifyFailure) {
         message.error(readError(error, "差异清单加载失败"));
@@ -198,7 +193,7 @@ export function MaintenanceDemandsPage() {
       setAddressReport(resp.data.address_report ?? null);
       const diffCount = resp.data.snapshot_diff?.missing_orders ?? 0;
       const summary = `快照已同步（批次 #${resp.data.batch_id}）` +
-        (diffCount ? `，发现 ${diffCount} 张消失的单，请核对下方差异清单` : "");
+        (diffCount ? `，发现 ${diffCount} 张缺失候选，请核对下方差异清单` : "");
       uploadAttempt.current = null;
       // 上传接口刚返回 batch_id，此时 missing 读回 404 不能当合法空态。
       if (await refreshAfterCommit(true, true)) {
@@ -273,17 +268,6 @@ export function MaintenanceDemandsPage() {
       setRestoring(false);
     }
   };
-
-  const missingColumns: ColumnsType<WbddMissingOrder> = [
-    { title: "需求单号", dataIndex: "order_no" },
-    { title: "制单日期", dataIndex: "order_date", render: (v) => v ?? "—" },
-    { title: "行数", dataIndex: "line_count", width: 80, align: "right" },
-    {
-      title: "挂靠项目ID",
-      dataIndex: "assigned_project_id",
-      render: (v) => v ?? "—",
-    },
-  ];
 
   const demandColumns: ColumnsType<MaintenanceDemandSearchRow> = [
     {
@@ -360,7 +344,7 @@ export function MaintenanceDemandsPage() {
           需求单与数据同步
         </Title>
         <Text type="secondary">
-          每次从氚云导出需求单快照后，来这里同步并处理消失的单。
+          上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。
         </Text>
       </div>
 
@@ -423,47 +407,13 @@ export function MaintenanceDemandsPage() {
             />
           ) : null}
 
-          {/* 2026-08-24 用户拍板：解除「疑似不完整导出」50% 拦截——差异清单
-              恒展开、批量作废不再按占比禁用，可 100% 全量跟随修改。 */}
-          {missing?.truncated ? (
-            <Alert
-              type="warning"
-              showIcon
-              message="消失的单太多，这里只显示前 1000 条；处理完这批后请重新拉取差异清单。"
-            />
-          ) : null}
-
-          <Table<WbddMissingOrder>
-            rowKey="source_order_id"
-            size="small"
+          <WbddReconciliation
+            data={missing}
             loading={missingLoading}
-            dataSource={missing?.missing_orders ?? []}
-            columns={missingColumns}
-            pagination={false}
-            locale={{ emptyText: "最近一份快照没有消失的单" }}
-            rowSelection={
-              canVoid
-                ? {
-                    selectedRowKeys,
-                    onChange: (keys) => setSelectedRowKeys(keys as string[]),
-                  }
-                : undefined
-            }
+            canReconcile={canVoid && canImport}
+            onRefresh={loadMissing}
+            onCommitted={() => refreshAfterCommit(true, true)}
           />
-
-          {canVoid ? (
-            <div>
-              <Button
-                type="primary"
-                danger
-                disabled={!selectedRowKeys.length}
-                onClick={() => openVoidModal(selectedRowKeys)}
-              >
-                按氚云现状批量作废
-                {selectedRowKeys.length ? `（已选 ${selectedRowKeys.length} 张）` : ""}
-              </Button>
-            </div>
-          ) : null}
         </Space>
       </Card>
 

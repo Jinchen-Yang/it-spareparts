@@ -53,23 +53,46 @@ export const uploadWbdd = (file: File, idempotencyKey: string) => {
 export const getWbddLatest = () =>
   api.get<WbddLatest>("/maintenance/wbdd-imports/latest");
 
-/** #265 冻结契约 + 置顶评论：差异清单（最近一份快照里消失的需求单）。 */
+/** D-27: immutable source snapshot + current facts produce reviewable candidates. */
 export interface WbddMissingOrder {
   source_order_id: string;
   order_no: string;
   order_date: string | null;
   line_count: number;
   assigned_project_id: string | null;
+  project_name?: string | null;
+  linked_site_line_count?: number;
+}
+
+export interface WbddMissingLine {
+  line_id: number;
+  source_order_id: string;
+  order_no: string;
+  pn: string | null;
+  qty: string | null;
+  project_name?: string | null;
+  linked_site_line_count: number;
 }
 
 export interface WbddMissing {
+  readiness?: "ready" | "not_imported" | "snapshot_required" | "blocked";
   batch_id: number | null;
   uploaded_at: string | null;
-  window: { from: string; to: string } | null;
+  window?: { from: string; to: string } | null;
   missing_count: number;
   /** true＝清单被截断（只返回前 1000 条），页面要提示。 */
   truncated: boolean;
   missing_orders: WbddMissingOrder[];
+  missing_lines?: WbddMissingLine[];
+  missing_line_count?: number;
+  total_candidate_count?: number;
+  candidate_digest?: string | null;
+  coverage?: {
+    daily_windows: { date: string; from_sequence: number; to_sequence: number }[];
+    source_order_count: number;
+    blocked_order_count: number;
+  };
+  warnings?: string[];
   /** 库内同日期窗的活跃单总数（判断误报用）。 */
   db_active_in_window?: number | null;
   /** 缺失占比 = missing_count / db_active_in_window（2026-08-24 起仅展示，
@@ -78,11 +101,30 @@ export interface WbddMissing {
 }
 
 /**
- * 差异清单明细：后端实时重算（已作废的单自动消失，重复作废安全），
- * 零新增 schema。权限 page_maintenance + action_maintenance_wbdd_import。
+ * 差异清单基于最近上传的不可变原件成员；历史缺少成员时要求重新上传。
+ * 执行确认必须回传本次 candidate_digest，不能绕回普通手工作废接口。
  */
 export const getWbddMissing = () =>
   api.get<WbddMissing>("/maintenance/wbdd-imports/latest/missing");
+
+export interface WbddReconcileRequest {
+  expected_digest: string;
+  source_order_ids: string[];
+  line_ids: number[];
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface WbddReconcileResult {
+  voided_orders: number;
+  voided_lines: number;
+  voided_site_lines: number;
+  voided_site_issues: number;
+  replayed?: boolean;
+}
+
+export const reconcileWbdd = (batchId: number, payload: WbddReconcileRequest) =>
+  api.post<WbddReconcileResult>(`/maintenance/wbdd-imports/${batchId}/reconcile`, payload);
 
 /** 已应用单据头行的项目重解析（M4-3：先传 RKD 后建归属也能关联）。 */
 export const relinkDocProjects = () =>

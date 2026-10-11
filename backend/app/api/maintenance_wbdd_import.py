@@ -10,10 +10,11 @@ import os
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, status
 from fastapi import UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.imports import _save_upload_to_temp
-from app.auth import current_role
+from app.auth import current_identity, current_role
 from app.db import get_db
 from app.etl import loader, pipeline
 from app.etl.reader import ReaderError
@@ -109,6 +110,12 @@ def upload_wbdd(
                 {"code": "duplicate_file",
                  "message": f"该文件已成功导入（batch {exc.batch_id}）"},
             ) from exc
+        except loader.ImportIntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {"code": "source_identity_conflict", "message": str(exc)},
+            ) from exc
         except ReaderError as exc:
             db.commit()  # failed batch 已记录（与通用导入语义一致）
             raise HTTPException(
@@ -139,7 +146,66 @@ def latest_missing(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY)),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """最近一次快照的差异清单明细（#264/#267）：供「按氚云现状批量作废」页面。"""
     response.headers["Cache-Control"] = "no-store"
-    return wbdd.latest_missing(db)
+    from app.services.maintenance_project_assignments import maintenance_scope_project_ids
+
+    return wbdd.latest_missing(
+        db, allowed_project_ids=maintenance_scope_project_ids(db, ctx),
+    )
+
+
+class ReconciliationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_order_ids: list[str] = Field(default_factory=list)
+    line_ids: list[int] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+@router.post("/{batch_id}/reconcile")
+def reconcile(
+    batch_id: int,
+    body: ReconciliationRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _upload: None = Depends(require_action(_ACTION_KEY)),
+    _delete: None = Depends(require_action("action_maintenance_demand_delete")),
+    identity: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """Apply only the explicitly selected source differences, under one transaction."""
+    from app.api.maintenance_demands import _real_operator
+    from app.services import maintenance_wbdd_sync
+    from app.services.maintenance_project_assignments import maintenance_scope_project_ids
+
+    response.headers["Cache-Control"] = "no-store"
+    operator = _real_operator(db, identity)
+    try:
+        result = maintenance_wbdd_sync.apply_reconciliation(
+            db, batch_id=batch_id, expected_digest=body.expected_digest,
+            source_order_ids=body.source_order_ids, line_ids=body.line_ids,
+            reason=body.reason, operated_by=operator,
+            allowed_project_ids=maintenance_scope_project_ids(db, ctx),
+            idempotency_key=body.idempotency_key,
+        )
+        db.commit()
+        return result
+    except maintenance_wbdd_sync.ReconciliationConflict as exc:
+        db.rollback()
+        raise HTTPException(409, {"code": "reconciliation_changed", "message": str(exc)}) from exc
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise

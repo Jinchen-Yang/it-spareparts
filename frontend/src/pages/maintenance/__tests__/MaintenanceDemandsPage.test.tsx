@@ -7,6 +7,7 @@ const voidFastMaintenanceDemands = vi.fn();
 const restoreMaintenanceDemand = vi.fn();
 const uploadWbdd = vi.fn();
 const getWbddMissing = vi.fn();
+const reconcileWbdd = vi.fn();
 
 vi.mock("../../../api/maintenanceDemands", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -34,6 +35,7 @@ vi.mock("../../../api/maintenanceWbddImport", async () => {
     ...actual,
     uploadWbdd: (...args: unknown[]) => uploadWbdd(...args),
     getWbddMissing: (...args: unknown[]) => getWbddMissing(...args),
+    reconcileWbdd: (...args: unknown[]) => reconcileWbdd(...args),
   };
 });
 
@@ -45,6 +47,13 @@ const BOTH_PERMS = {
 };
 
 const missingPayload = {
+  readiness: "ready",
+  candidate_digest: "preview-digest",
+  missing_lines: [],
+  missing_line_count: 0,
+  total_candidate_count: 2,
+  coverage: { daily_windows: [], source_order_count: 3, blocked_order_count: 0 },
+  warnings: [],
   batch_id: 7,
   uploaded_at: "2026-08-19 09:30",
   window: { from: "2026-08-01", to: "2026-08-19" },
@@ -101,12 +110,20 @@ async function confirmVoidWithReason(reason: string) {
   fireEvent.click(within(dialog).getByRole("button", { name: /确认作废/ }));
 }
 
+async function confirmSyncWithReason(reason: string) {
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "同步原因" }), { target: { value: reason } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认同步" }));
+}
+
 beforeEach(() => {
   searchMaintenanceDemands.mockReset();
   voidFastMaintenanceDemands.mockReset();
   restoreMaintenanceDemand.mockReset();
   uploadWbdd.mockReset();
   getWbddMissing.mockReset();
+  reconcileWbdd.mockReset();
+  reconcileWbdd.mockResolvedValue({ data: { voided_orders: 1, voided_lines: 3, voided_site_lines: 0, voided_site_issues: 0 } });
   localStorage.clear();
   getWbddMissing.mockResolvedValue({ data: missingPayload });
   searchMaintenanceDemands.mockResolvedValue(demandPage([demandRow("RAW-9", "XQD-009")]));
@@ -216,15 +233,15 @@ describe("需求单与数据同步页", () => {
       data: { ...missingPayload, missing_count: 0, missing_orders: [] },
     });
     render(<MaintenanceDemandsPage />);
-    expect(await screen.findByText("最近一份快照没有消失的单")).toBeInTheDocument();
+    expect(await screen.findByText("当前比较范围内没有缺失需求单")).toBeInTheDocument();
   });
 
-  it("勾选差异清单行 → 填原因 → 批量作废 → 刷新清单与列表", async () => {
+  it("勾选差异清单行 → 填原因 → 确认同步 → 刷新清单与列表", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     render(<MaintenanceDemandsPage />);
 
     await screen.findByText("XQD-001");
-    const batchBtn = screen.getByRole("button", { name: /按氚云现状批量作废/ });
+    const batchBtn = screen.getByRole("button", { name: /^确认同步/ });
     expect(batchBtn).toBeDisabled();
 
     // 勾选第一行
@@ -235,23 +252,23 @@ describe("需求单与数据同步页", () => {
 
     // 原因必填：空原因时确认按钮不可用
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByRole("button", { name: /确认作废/ })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: /确认同步/ })).toBeDisabled();
 
-    await confirmVoidWithReason("氚云侧已删除该单");
+    await confirmSyncWithReason("氚云侧已删除该单");
 
-    await waitFor(() => expect(voidFastMaintenanceDemands).toHaveBeenCalledTimes(1));
-    expect(voidFastMaintenanceDemands.mock.calls[0][0]).toMatchObject({
+    await waitFor(() => expect(reconcileWbdd).toHaveBeenCalledTimes(1));
+    expect(reconcileWbdd.mock.calls[0][1]).toMatchObject({
       source_order_ids: ["RAW-1"],
       reason: "氚云侧已删除该单",
     });
-    expect(voidFastMaintenanceDemands.mock.calls[0][0].idempotency_key).toBeTruthy();
+    expect(reconcileWbdd.mock.calls[0][1].idempotency_key).toBeTruthy();
 
     // 成功后差异清单与需求单列表都刷新
     await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
 
-  it("差异清单支持全选后批量作废", async () => {
+  it("差异清单支持全选后确认同步", async () => {
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     render(<MaintenanceDemandsPage />);
 
@@ -260,11 +277,11 @@ describe("需求单与数据同步页", () => {
     const table = screen.getByText("XQD-001").closest("table")!;
     fireEvent.click(within(table).getAllByRole("checkbox")[0]);
 
-    fireEvent.click(screen.getByRole("button", { name: /按氚云现状批量作废/ }));
-    await confirmVoidWithReason("整批消失");
+    fireEvent.click(screen.getByRole("button", { name: /^确认同步/ }));
+    await confirmSyncWithReason("整批消失");
 
-    await waitFor(() => expect(voidFastMaintenanceDemands).toHaveBeenCalledTimes(1));
-    expect(voidFastMaintenanceDemands.mock.calls[0][0].source_order_ids).toEqual([
+    await waitFor(() => expect(reconcileWbdd).toHaveBeenCalledTimes(1));
+    expect(reconcileWbdd.mock.calls[0][1].source_order_ids).toEqual([
       "RAW-1",
       "RAW-2",
     ]);
@@ -552,7 +569,7 @@ describe("需求单与数据同步页", () => {
     await screen.findByText("XQD-009");
 
     expect(screen.queryByRole("button", { name: /上传氚云需求单快照/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /按氚云现状批量作废/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^确认同步/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^作\s*废$/ })).toBeNull();
     // 无作废权限时差异清单也不给勾选框
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);

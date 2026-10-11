@@ -25,7 +25,7 @@ from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.services import maintenance_demand_manual as manual
 from tests import factories as f
 from tests.test_demand_manual_edit import (
-    _batch, _make_project, _make_project_standalone, _seed_line,
+    _batch, _make_project, _make_project_standalone, _seed_line, _source_snapshot,
 )
 
 
@@ -324,26 +324,38 @@ def test_pn_same_field_twice_clear_triple(db):
 
 def test_latest_missing_mixed_real_and_manual_consistent(db):
     """review_spec：混合"1 条真实缺失 WBDD + 1 条页面手工单"时，
-    latest_missing 的计数、明细列表、分母必须与 snapshot_diff 同口径
-    （都排除 page-manual-%）——否则前端全选作废会误删手工单。"""
+    原件快照的计数和明细列表都排除 page-manual-%，防全选误删手工单。"""
     from app.services import maintenance_wbdd_import as wbdd
+    from app.services.maintenance_wbdd_reconciliation import build_candidates
+    from app.models.system import SysImportBatch
 
     # 文件里有的单（真实 WBDD，进回执批次 → 不算缺失）
     in_file, _l0 = _seed_line(db, order_raw="M-P1M0", line_raw="ML-P1M0", pn="PN-P1M0")
+    in_file.order_no = "WBDD-20260301-0001"
     _make_project(db, tag="P1M0", source_order_id=in_file.raw_order_id)
     # 真实缺失 WBDD 单（不在文件里）
     order, line = _seed_line(db, order_raw="M-P1M1", line_raw="ML-P1M1", pn="PN-P1M1")
+    order.order_no = "WBDD-20260301-0002"
     _make_project(db, tag="P1M1", source_order_id=order.raw_order_id)
     # 页面手工单（page-manual- 前缀头，同日期窗）
     project2 = _make_project_standalone(db, tag="P1M2")
     db.add(DimPart(pn_std="PN-P1M2", status="active"))
     db.commit()
-    manual.create_manual_demand_line(
+    manual_result = manual.create_manual_demand_line(
         db, order_date=date(2026, 3, 1), project_id=project2.project_id,
         pn_std="PN-P1M2", qty=1, reason="手工单", operated_by="tester",
         idempotency_key="idem-missing-mix-001",
     )
-    # 回执挂在 in_file 的批次：文件单集 = {in_file}（非空 → diff 生效）
+    manual_order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.order_no == manual_result["order_no"]))
+    manual_order.order_no = "WBDD-20260301-0003"
+    upper, upper_line = _seed_line(db, order_raw="M-P1M3", line_raw="ML-P1M3", pn="PN-P1M3")
+    upper.order_no = "WBDD-20260301-0004"
+    db.commit()
+    snapshot = _source_snapshot((in_file, [_l0]), (upper, [upper_line]))
+    batch = db.get(SysImportBatch, in_file.import_batch_id)
+    batch.report_json = {"_wbdd_source_snapshot": snapshot}
+    # The receipt points at an immutable source set, never mutable batch stamps.
     from app.models.maintenance_wbdd_import import MaintenanceWbddImportReceipt
     db.add(MaintenanceWbddImportReceipt(
         batch_id=in_file.import_batch_id, idempotency_key="missing-mix-key-0001",
@@ -352,8 +364,8 @@ def test_latest_missing_mixed_real_and_manual_consistent(db):
     ))
     db.commit()
 
-    diff = wbdd.snapshot_diff(db, {in_file.order_no}, [date(2026, 3, 1), date(2026, 3, 1)])
-    assert diff["missing_orders"] == 1, "snapshot_diff 只报真实缺失（排除手工单）"
+    direct = build_candidates(db, batch)
+    assert direct["missing_count"] == 1
 
     result = wbdd.latest_missing(db)
     assert result["readiness"] == "ready"
@@ -363,9 +375,9 @@ def test_latest_missing_mixed_real_and_manual_consistent(db):
     assert all(not sid.startswith("page-manual-") for sid in listed), \
         "手工单不得混入缺失列表（全选作废会误删）"
     assert len(listed) == result["missing_count"] == 1, "计数与列表一致"
-    # 分母 = 窗口内活跃单（in_file + 缺失单 = 2），不含手工单（否则会是 3）
-    assert result["db_active_in_window"] == 2
-    assert result["missing_ratio"] == 0.5
+    assert result["coverage"]["source_order_count"] == 2
+    assert result["total_candidate_count"] == len(listed)
+    assert result["candidate_digest"] == direct["candidate_digest"]
 
 
 def test_loader_audit_part_id_effective_value_matches_db(db):

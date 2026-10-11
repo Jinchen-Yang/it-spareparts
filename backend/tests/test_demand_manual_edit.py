@@ -5,15 +5,16 @@
    但未保护字段照常更新；
 2. edited_source 保护：wbdd 行被页面改过后升为 page_manual，此后整行可保护字段
    均不被重导覆盖（含既有总表 workbook_manual 语义的统一）；
-3. snapshot_diff 排除 page_manual 行（防"手工单被报氚云已删→一键作废"陷阱）；
+3. 原件缺项候选排除手工建单，但不排除人工改过字段的真实 WBDD；
 4. 白名单失败关闭：成本列/未知字段/头字段全拒；无项目挂靠拒绝（审计落点要求）。
 附：clear_override 恢复 source_value；手工建行合成头/批次身份。
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+import pandas as pd
 from sqlalchemy import select
 
 from app.etl import loader
@@ -27,7 +28,8 @@ from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment,
 )
 from app.services import maintenance_demand_manual as manual
-from app.services import maintenance_wbdd_import
+from app.services.maintenance_wbdd_reconciliation import build_candidates
+from app.services.maintenance_wbdd_source_snapshot import capture_source_snapshot
 from tests import factories as f
 
 
@@ -85,6 +87,26 @@ def _seed_line(db, *, order_raw="M-E1", line_raw="ML-E1", pn="PN-E1",
     line = db.execute(select(FMaintenanceLine).where(
         FMaintenanceLine.raw_line_id == line_raw)).scalar_one()
     return order, line
+
+
+def _source_snapshot(*members):
+    rows = [{"数据ID(不可修改)": order.raw_order_id, "需求单号": order.order_no,
+             "需求明细.数据ID(不可修改)": line.raw_line_id if line else None}
+            for order, lines in members for line in (lines or [None])]
+    snapshot = capture_source_snapshot(pd.DataFrame(rows), sheet_name="合成原件")
+    return {**snapshot, "mode": "upsert", "captured_at": datetime.now(timezone.utc).isoformat(),
+            "file_hash": "a" * 64}
+
+
+def _source_window(db, *, tag):
+    lower, lower_line = _seed_line(db, order_raw=f"window-low-{tag}",
+                                   line_raw=f"window-low-line-{tag}", pn=f"PN-LOW-{tag}")
+    upper, upper_line = _seed_line(db, order_raw=f"window-high-{tag}",
+                                   line_raw=f"window-high-line-{tag}", pn=f"PN-HIGH-{tag}")
+    lower.order_no = "WBDD-20260301-0001"
+    upper.order_no = "WBDD-20260301-0009"
+    db.commit()
+    return ((lower, [lower_line]), (upper, [upper_line]))
 
 
 def test_patch_then_reimport_preserves_override(db):
@@ -154,7 +176,7 @@ def test_workbook_manual_rows_also_protected(db):
     assert line.qty == Decimal("7.000"), "workbook_manual 行的手工值必须存活"
 
 
-def test_snapshot_diff_excludes_page_manual(db):
+def test_source_candidates_exclude_page_manual_but_keep_overridden_wbdd(db):
     """手工建的单头（page-manual- 前缀）不参与删单比对（防一键作废陷阱）。"""
     # 真实链路：create_manual_demand_line 建的头带 page-manual- 前缀
     project = _make_project_standalone(db, tag="E4P")
@@ -167,27 +189,31 @@ def test_snapshot_diff_excludes_page_manual(db):
     manual_order = db.execute(select(FMaintenanceOrder).where(
         FMaintenanceOrder.raw_order_id.startswith("page-manual-"))).scalars().all()
     assert any(o.order_no == result["order_no"] for o in manual_order)
-
-    diff = maintenance_wbdd_import.snapshot_diff(
-        db, {"SOME-OTHER-ORDER"}, [date(2026, 3, 1), date(2026, 3, 1)])
-    assert result["order_no"] not in diff["sample_order_nos"]
+    # A valid in-range number makes this test exercise the manual identity guard,
+    # rather than accidentally excluding the row for malformed numbering.
+    manual_order[0].order_no = "WBDD-20260301-0002"
     # 回归：被改过字段的普通 WBDD 行仍参与对账（P1#4）
     order2, line2 = _seed_line(db, order_raw="M-E4B", line_raw="ML-E4B", pn="PN-E4B")
     _make_project(db, tag="E4B", source_order_id=order2.raw_order_id)
     manual.patch_demand_line(db, raw_line_id=line2.raw_line_id,
                              updates={"qty": 5}, reason="t", operated_by="t")
+    order2.order_no = "WBDD-20260301-0003"
     db.commit()
-    diff2 = maintenance_wbdd_import.snapshot_diff(
-        db, {"SOME-OTHER"}, [date(2026, 3, 1), date(2026, 3, 1)])
-    assert order2.order_no in [o for o in diff2["sample_order_nos"]] or diff2["missing_orders"] >= 1
+    result = build_candidates(db, _source_snapshot(*_source_window(db, tag="E4")))
+    missing = {row["source_order_id"] for row in result["missing_orders"]}
+    assert manual_order[0].raw_order_id not in missing
+    assert missing == {order2.raw_order_id}
+    assert line2.manual_override["qty"]["value"] == "5.000"
 
 
-def test_snapshot_diff_still_reports_wbdd_missing(db):
+def test_source_candidates_still_report_missing_wbdd(db):
     """回归：正常 WBDD 行缺位仍要报（保护不能误伤对账）。"""
     order, _ = _seed_line(db, order_raw="M-E5", line_raw="ML-E5", pn="PN-E5")
-    diff = maintenance_wbdd_import.snapshot_diff(
-        db, {"SOME-OTHER"}, [date(2026, 3, 1), date(2026, 3, 1)])
-    assert diff["missing_orders"] >= 1
+    order.order_no = "WBDD-20260301-0004"
+    db.commit()
+    result = build_candidates(db, _source_snapshot(*_source_window(db, tag="E5")))
+    assert result["missing_count"] == 1
+    assert result["missing_orders"][0]["source_order_id"] == order.raw_order_id
 
 
 def test_whitelist_rejects_cost_and_unknown(db):

@@ -4,7 +4,7 @@ const { post, get } = vi.hoisted(() => ({ post: vi.fn(), get: vi.fn() }));
 
 vi.mock("../../api", () => ({ api: { post, get } }));
 
-import { getWbddMissing, uploadWbdd } from "../maintenanceWbddImport";
+import { getWbddMissing, reconcileWbdd, uploadWbdd } from "../maintenanceWbddImport";
 
 describe("WBDD import API contract", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -22,5 +22,12 @@ describe("WBDD import API contract", () => {
   it("missing diff list reads the latest snapshot endpoint (#265)", () => {
     getWbddMissing();
     expect(get).toHaveBeenCalledWith("/maintenance/wbdd-imports/latest/missing");
+  });
+
+  it("reconciles selected identities using the exact preview and idempotency key", () => {
+    const payload = { expected_digest: "preview-digest", source_order_ids: ["source-a"],
+      line_ids: [3], reason: "已核对原件", idempotency_key: "reconcile-key" };
+    reconcileWbdd(17, payload);
+    expect(post).toHaveBeenCalledWith("/maintenance/wbdd-imports/17/reconcile", payload);
   });
 });

@@ -46,6 +46,13 @@ _IMPORT_INTEGRITY_ERROR = "导入数据无法通过费用归属完整性校验�
 _HTTP_REQUEST_ENTITY_TOO_LARGE = 413
 
 
+def _public_import_report(report: dict | None) -> dict | None:
+    """Source membership is private import evidence, never an API payload."""
+    if report is None:
+        return None
+    return {key: value for key, value in report.items() if not key.startswith("_")}
+
+
 def _enforce_import_file_limit(files: list[UploadFile]) -> None:
     if len(files) > MAX_IMPORT_FILES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -302,7 +309,7 @@ def upload(
             post_recompute_stats,
         )
         return {"batch_id": batch.id, "file_type": batch.file_type,
-                "status": batch.status, "report": batch.report_json,
+                "status": batch.status, "report": _public_import_report(batch.report_json),
                 # recompute 保留旧兼容口径；两个显式命名字段避免调用方再猜
                 # “这是利润重算还是维保成本重算”。
                 "recompute": apply_profit_recompute_visibility(recompute_stats, ctx),
@@ -635,7 +642,8 @@ def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     ).scalars().all()
     return {
         "id": b.id, "filename": b.filename, "file_type": b.file_type, "status": b.status,
-        "uploaded_at": b.uploaded_at, "uploaded_by": b.uploaded_by, "report": b.report_json,
+        "uploaded_at": b.uploaded_at, "uploaded_by": b.uploaded_by,
+        "report": _public_import_report(b.report_json),
         "issue_count": issue_count,
         "errors": [{"row_no": e.row_no,
                     "nature": "提示" if e.error_type in SOFT_ERROR_TYPES else "错误",
