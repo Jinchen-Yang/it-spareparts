@@ -16,6 +16,7 @@ from app.api.maintenance_project_scope import (
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
+from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProjectContract
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
@@ -34,6 +35,8 @@ from app.security import (
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_project_procurement as procurement
+from app.services import maintenance_return_receipts as receipts
+from app.services.maintenance_order_contact import order_contact
 
 
 operations_beta_router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
@@ -652,6 +655,83 @@ def search_project_site_issue_candidates(
         },
     )
     return payload
+
+
+# stable 路由（boss 闸）而非 beta 路由：人工登记领用的 preview/create/patch 全在
+# stable_site_issue_router，生产 beta 总闸恒 false，挂 beta 会整组 404（PR #361 P1）。
+@stable_site_issue_router.get("/projects/{project_id}/demand-candidates")
+def site_issue_demand_candidates(
+    project_id: str = Path(..., min_length=1, max_length=36),
+    part_id: int | None = Query(default=None, ge=1),
+    q: str | None = Query(default=None, max_length=128),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """人工登记领用的「关联需求单」候选（2026-10-12 按 PN 建议口径）。
+
+    只读建议端点：权限栈与 return-receipt-demands 候选端点同构，不挂提交动作
+    权限——建议可见不等于可提交，提交链路仍走 _resolve_demand_project 校验。
+    """
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    try:
+        payload = receipts.demand_candidates(
+            db,
+            project_id=project_id,
+            q=q,
+            page=page,
+            page_size=page_size,
+            part_id=part_id,
+        )
+    except receipts.ReturnReceiptNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except receipts.ReturnReceiptError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    # demand_candidates 只回 {source_order_id, order_no, order_date}；收货地址等
+    # 脱敏字段需要订单实体，这里按 raw_order_id 一次性补查后逐行附加。
+    orders = {
+        order.raw_order_id: order
+        for order in db.scalars(
+            select(FMaintenanceOrder).where(
+                FMaintenanceOrder.raw_order_id.in_(
+                    [row["source_order_id"] for row in payload["rows"]]
+                )
+            )
+        )
+    }
+    rows = []
+    for row in payload["rows"]:
+        order = orders.get(row["source_order_id"])
+        if order is None:
+            # 同请求内理论上不可达；万一实体缺失按 fail-closed 返回受限态。
+            contact = {
+                "contact_info_state": "restricted",
+                "receiver_address": None,
+                "receiver": None,
+                "receiver_phone": None,
+            }
+        else:
+            contact = order_contact(order, ctx)
+        rows.append({**row, **contact})
+    record_access_log(
+        ctx,
+        "site_issue_demand_candidates",
+        "maintenance_project",
+        {
+            "project_id": project_id,
+            "part_id": part_id,
+            "searched": bool(q and q.strip()),
+            "total": payload["total"],
+        },
+    )
+    return {
+        "rows": rows,
+        "total": payload["total"],
+        "page": payload["page"],
+        "page_size": payload["page_size"],
+    }
 
 
 @operations_beta_router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)

@@ -4,6 +4,7 @@ import {
   Row, Select, Space, Table, Tag, Timeline, Tooltip, Typography, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import type { DefaultOptionType } from "antd/es/select";
 import PartPicker from "../../../components/PartPicker";
 import { listMaintenanceProjects } from "../../../api/maintenanceProjects";
 import {
@@ -124,6 +125,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const requestSeq = useRef(0);
   const contextSeq = useRef(0);
   const demandSeq = useRef(0);
+  // PN 建议请求序号：选/换/清 PN 与换项目都会发新请求，晚到的旧响应不得覆盖新结果
+  const pnDemandSeq = useRef(0);
   const auditSeq = useRef(0);
   const projectSeq = useRef(0);
   const [demandError, setDemandError] = useState<string | null>(null);
@@ -258,10 +261,11 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     setQuery("");
     setDemandFilter(undefined);
     setSelectedIds([]);
+    setPnMatchedDemands(null);
     filters.current = {};
     void loadDemands(projectId);
     void load(1, false);
-    return () => { contextSeq.current += 1; requestSeq.current += 1; demandSeq.current += 1; auditSeq.current += 1; projectSeq.current += 1; };
+    return () => { contextSeq.current += 1; requestSeq.current += 1; demandSeq.current += 1; pnDemandSeq.current += 1; auditSeq.current += 1; projectSeq.current += 1; };
   }, [load, loadDemands]);
 
   // ---- 登记与修改 ----
@@ -287,11 +291,61 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [submitError, setSubmitError] = useState<string | null>(null);
   // PartPicker 只回 part_id；pn/description 在选中时一并暂存，登记时随 part_id 提交
   const [pickedPart, setPickedPart] = useState<PickedPart | null>(null);
+  // 按 PN 建议需求单（2026-10-12 方案 §3.2）：选定返件 PN 后存「含此 PN」候选；
+  // null 表示未选 PN 或建议未就绪/已降级，此时需求单下拉维持全量单列表（现状）
+  const [pnMatchedDemands, setPnMatchedDemands] = useState<DemandOption[] | null>(null);
+
+  // 选定 PN 后按 part_id 拉建议（page_size 50，建议只需置顶展示不必穷尽）；
+  // 失败静默降级为全量列表，不打断填单。竞态沿用组件内既有序号守卫。
+  const loadPnMatchedDemands = useCallback(async (project: string, partId: number | null) => {
+    const seq = ++pnDemandSeq.current;
+    if (partId == null) {
+      setPnMatchedDemands(null);
+      return;
+    }
+    try {
+      const response = await getReturnReceiptDemands(project, { part_id: partId, page_size: 50 });
+      if (seq !== pnDemandSeq.current) return;
+      const options = (response.data.rows ?? []).map((row) => ({ value: row.order_no,
+        label: row.order_date ? `${row.order_no}（${row.order_date}）` : row.order_no }));
+      setPnMatchedDemands(options);
+      // 恰好一张且用户尚未选择时预填建议；已有选择（含此刻正选的别的单）绝不覆盖
+      if (options.length === 1) {
+        const current = form.getFieldValue("wbdd_no");
+        if (current == null || current === "") form.setFieldValue("wbdd_no", options[0].value);
+      }
+    } catch (err) {
+      if (seq === pnDemandSeq.current) {
+        console.warn("按 PN 匹配需求单失败，已回退为全量需求单列表", err);
+        setPnMatchedDemands(null);
+      }
+    }
+  }, [form]);
+
+  // 清空/重开表单时撤销建议：取消在途请求并回到全量单列表，不动用户已选的 wbdd_no
+  const resetPnSuggestion = useCallback(() => {
+    pnDemandSeq.current += 1;
+    setPnMatchedDemands(null);
+  }, []);
+
+  // 需求单候选：未选 PN 维持全量单列表（现状）；选定 PN 后「含此 PN」置顶，其余全量
+  // 候选扣除匹配单归入「其他需求单」；匹配为空时分组下提示无候选（禁用项，不可选）。
+  const wbddOptions = useMemo<DefaultOptionType[]>(() => {
+    if (pickedPart?.part_id == null || !pnMatchedDemands) return demands;
+    const matchedValues = new Set(pnMatchedDemands.map((option) => option.value));
+    const others = demands.filter((option) => !matchedValues.has(option.value));
+    return [
+      { label: "含此 PN", options: pnMatchedDemands.length ? pnMatchedDemands
+        : [{ value: "__pn_no_match__", label: "本项目无含此 PN 的需求单", disabled: true }] },
+      ...(others.length ? [{ label: "其他需求单", options: others }] : []),
+    ];
+  }, [demands, pickedPart, pnMatchedDemands]);
 
   const openCreate = () => {
     setSubmitError(null);
     setEditing(null);
     setPickedPart(null);
+    resetPnSuggestion();
     form.resetFields();
     form.setFieldsValue({ project_id: projectId });
     setTargetProject(projectId);
@@ -308,6 +362,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       pn: receipt.pn,
       description: receipt.description,
     });
+    // 编辑回填的 PN 不主动拉建议（未经过 PartPicker onChange）；清掉上一张单据残留的建议
+    resetPnSuggestion();
     setTargetProject(receipt.project_id);
     void loadDemands(receipt.project_id);
     void loadProjects();
@@ -746,7 +802,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         <Form form={form} layout="vertical" disabled={submitting}>
           <Form.Item name="project_id" label={editing ? "项目（转移需同时具备原项目和目标项目修改权限）" : "项目（当前项目）"} rules={[{ required: true, message: "请选择项目" }]}>
             <Select disabled={!editing} showSearch optionFilterProp="label" options={projects.some((item) => item.value === projectId) ? projects : [{ value: projectId, label: "当前项目" }, ...projects]} onChange={(value: string) => {
-              form.setFieldValue("wbdd_no", null); setTargetProject(value); void loadDemands(value);
+              form.setFieldValue("wbdd_no", null); setTargetProject(value); void loadDemands(value); void loadPnMatchedDemands(value, pickedPart?.part_id ?? null);
             }} />
           </Form.Item>
           {editing && projectError ? <Alert type="error" message={projectError} action={<Button size="small" onClick={() => { void loadProjects(); }}>重试加载项目</Button>} /> : null}
@@ -760,7 +816,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
               showSearch
               optionFilterProp="label"
               placeholder={demands.length ? "选择需求单（可搜索单号）" : "本项目暂无可选需求单"}
-              options={demands}
+              options={wbddOptions}
               loading={demandLoading}
             />
           </Form.Item>
@@ -772,6 +828,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
                 setPickedPart(item
                   ? { part_id: partId, pn: item.pn_std, description: item.description ?? null }
                   : null);
+                // 选/换 PN 拉建议；清空 PN 只撤建议分组，不撤销用户已选的 wbdd_no
+                void loadPnMatchedDemands(targetProject, partId);
               }}
               key={editing?.receipt_id ?? "create"}
               disabled={submitting}
