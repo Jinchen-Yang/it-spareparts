@@ -32,6 +32,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
@@ -153,9 +154,10 @@ V2_EXPENSE_HEADERS = ["操作", "费用单号", "明细序号", "报销日期", 
                       "基线令牌"]
 V2_RECEIPT_HEADERS = ["合同编号", "报告月份", "累计实收金额（含税）", "状态", "回款凭证号", "备注", "实体ID",
                       "基线令牌"]
+V2_SITE_DEMAND_ADDRESS_COLUMN = "需求单收货地址（参考）"
 V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注",
                    "应返数量", "返还状态", "返还单号", "实体ID", "基线令牌", "关联需求单号",
-                   "领用地址", "地址操作"]
+                   "领用地址", "地址操作", V2_SITE_DEMAND_ADDRESS_COLUMN]
 # 行级基线令牌域（2.7.0）：把每行可编辑字段的导出值签进隐藏列，上传侧据此做
 # 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
 _V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
@@ -2877,7 +2879,7 @@ def _v2_note_voided_site_row(
     )
 
 
-def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
+def _v2_build_site(wb, db, project_id: str, *, include_demand_addresses: bool = False) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_SITE)
     editable = {1, 2, 3, 4, 5, 6, 7, 14, 15}
     _v2_header(ws, V2_SITE_HEADERS, editable=editable)
@@ -2891,9 +2893,31 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
     ).order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)).all()
     from app.services.maintenance_site_return_requirements import line_details
     details = line_details(db, [line for line, _ in rows], project=db.get(MaintenanceProject, project_id))
+    # Reference data is read once, inside the existing scoped export snapshot.
+    # A caller without customer-data visibility does not load source addresses.
+    references = None
+    if include_demand_addresses and rows:
+        from app.services.maintenance_site_address_reference import AddressReferenceIndex
+        from app.services import maintenance_demands
+        source_rows = db.execute(
+            select(FMaintenanceLine, FMaintenanceOrder,
+                   MaintenanceSourceOrderAssignment.project_id)
+            .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .join(MaintenanceSourceOrderAssignment,
+                  (MaintenanceSourceOrderAssignment.source_order_id == FMaintenanceOrder.raw_order_id)
+                  & MaintenanceSourceOrderAssignment.is_active.is_(True))
+            .where(MaintenanceSourceOrderAssignment.project_id == project_id,
+                   FMaintenanceLine.is_active.is_(True),
+                   FMaintenanceOrder.data_status == "已生效",
+                   maintenance_demands.beta_active_demand_condition())
+        ).all()
+        references = AddressReferenceIndex.from_rows(source_rows)
     base_hashes: dict[str, str] = {}
     for line, issue in rows:
         values = _v2_site_row_values(line, issue, details.get(line.issue_line_id))
+        values[V2_SITE_DEMAND_ADDRESS_COLUMN] = (
+            references.resolve(line, issue) if references is not None
+            else "无客户信息权限" if not include_demand_addresses else "未找到对应需求单")
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="06_领用返还", entity_id=line.issue_line_id,
             values={name: values.get(name) for name in (*V2_SITE_ADDRESS_GUARD_FIELDS, "应返数量", "返还状态", "返还单号")})
@@ -2903,6 +2927,8 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
         # 用户输入的地址永远作为文本导出，避免以 = 开头的地点被当公式。
         if "领用地址" in V2_SITE_HEADERS:
             ws.cell(ws.max_row, V2_SITE_HEADERS.index("领用地址") + 1).data_type = "s"
+        if V2_SITE_DEMAND_ADDRESS_COLUMN in V2_SITE_HEADERS:
+            ws.cell(ws.max_row, V2_SITE_HEADERS.index(V2_SITE_DEMAND_ADDRESS_COLUMN) + 1).data_type = "s"
     _v2_append_example_row(ws, V2_SITE_HEADERS, {
         "领用单号": "",
         "领用日期": "2026-09-01",
@@ -2920,6 +2946,10 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
     for column, width in (("N", 42), ("O", 16)):
         ws.column_dimensions[column].hidden = False
         ws.column_dimensions[column].width = width
+    if V2_SITE_DEMAND_ADDRESS_COLUMN in V2_SITE_HEADERS:
+        column = get_column_letter(V2_SITE_HEADERS.index(V2_SITE_DEMAND_ADDRESS_COLUMN) + 1)
+        ws.column_dimensions[column].hidden = False
+        ws.column_dimensions[column].width = 48
     return base_hashes
 
 
@@ -2945,6 +2975,7 @@ def _v2_build_usage(wb) -> None:
         ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
         ("【06 领用返还】", "新增领用填完整日期 YYYY-MM-DD、PN、正数量，实体ID留空；领用单号选填，留空时自动编号。WBDD 填在单号列时保留为关联需求单号，并另生成领用编号。"),
         ("自动编号与重传", "同一本文件原样重传或排序不会重复新增；相同内容的多行仍分别保留。首次导入后请重新下载，后续修改保留实体ID；不要把已导入记录再次作为新行粘贴。关联需求单号只读。"),
+        ("需求单地址引用", "06最右列按当前项目对应需求单及PN自动显示收货地址。多地址或缺地址会提示；参考列回传不修改实际领用地址，改PN后重新下载更新引用。"),
         ("领用地址", "实际领用地址，同单只需改一行。缺列或留空保留已有地址；清空请在地址操作填‘清空’。同单填写不同新地址时保留原址并提示，其他合法内容继续处理。"),
         ("删除领用行", "2026-08-23 起：直接把该行整行删掉再上传 = 该领用行作废（退出成本与返还计算）；一张单的行全删 = 整单作废。"),
         ("【灰色示例行】", "每个数据页最后一行灰色斜体是填写示例，系统上传时自动忽略，不会入库——照着它的格式填，填完可保留或删除该行。"),
@@ -2980,6 +3011,7 @@ def _v2_build_dictionary(wb) -> None:
         ("最新累计实收", "已确认回款快照累计额", "maintenance_collection_snapshot.cumulative_amount", "只读", "金额", "未上报，不等于0", "仅影响展示和到款状态"),
         ("实体ID", "稳定写回身份", "各事实表主键", "只读", "UUID/字符串", "非法文件", "缺失或跨项目拒绝"),
         ("领用地址", "实际领用地址（现场位置）", "maintenance_site_issue.site_location", "可编辑", "最多256字符；兼容地址/现场位置表头", "保留原值", "同单共用；不同新地址提示并保留原值"),
+        (V2_SITE_DEMAND_ADDRESS_COLUMN, "需求单收货地址引用", "f_maintenance_order.receiver_address", "下载参考", "当前项目、有效需求及对应备件；需客户信息权限", "不作为地址写入意图", "多地址待核对，不按PN跨项目猜测；修改参考列不改变实际领用地址"),
         ("地址操作", "明确设置或清空领用地址", "地址更新意图", "可编辑", "保留/设置/清空", "有值设置，空白保留", "清空只作用于地址，不影响领用明细"),
     ]
     for row in rows:
@@ -3050,6 +3082,7 @@ def build_project_master_v2(
     *,
     project_id: str,
     sheets: tuple[str, ...] | None = None,
+    include_demand_addresses: bool = False,
 ) -> bytes | None:
     if db.scalar(
         select(MaintenanceProject.project_id).where(
@@ -3100,7 +3133,8 @@ def build_project_master_v2(
         base_hash_maps["receipt"] = _v2_build_receipts(
             wb, db, project_id, current_contracts)
     if V2_SHEET_SITE in wanted:
-        base_hash_maps["site"] = _v2_build_site(wb, db, project_id)
+        base_hash_maps["site"] = _v2_build_site(
+            wb, db, project_id, include_demand_addresses=include_demand_addresses)
     receipt_ledger_hash = (_v2_build_return_ledger(wb, db, project_id)
                            if V2_SHEET_SITE in wanted else None)
     _v2_build_dictionary(wb)
@@ -3866,11 +3900,18 @@ def _v2_parse_parts(
     )
 
 
+def _v2_site_row_is_empty(row, index) -> bool:
+    # A pure reference pasted into an otherwise empty row is not a new issue.
+    reference_column = index.get(V2_SITE_DEMAND_ADDRESS_COLUMN)
+    return all(value in (None, "") for column, value in enumerate(row)
+               if column != reference_column)
+
+
 def _v2_site_preflight(db: Session, ws, index, merge: _V2MergeContext) -> None:
     """Collect independent input problems before parsing any writable site rows."""
     errors: list[WorkbookError] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
-        if all(v in (None, "") for v in row) or _is_example_row(row):
+        if _v2_site_row_is_empty(row, index) or _is_example_row(row):
             continue
         is_new = _cell(row, index, "实体ID") in (None, "")
         raw_date = _cell(row, index, "领用日期")
@@ -3967,7 +4008,7 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
     groups = {}
     patches = {}
     for row_no, row in rows:
-        if not row or all(value in (None, "") for value in row) or _is_example_row(row):
+        if not row or _v2_site_row_is_empty(row, index) or _is_example_row(row):
             continue
         raw_id = str(_cell(row, index, "实体ID") or "")
         issue_no = str(_cell(row, index, "领用单号") or "").strip()
@@ -4082,7 +4123,7 @@ def _v2_parse_site(
     header_changes: dict[str, dict[str, object]] = {}
     new_issue_dates: dict[str, date] = {}
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
-        if not row or all(value in (None, "") for value in row):
+        if not row or _v2_site_row_is_empty(row, index):
             continue
         if _is_example_row(row):
             continue

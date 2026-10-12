@@ -21,7 +21,8 @@ from tests.test_maintenance_project_master_v2_editable import (
 def _download(db, project, *, monkeypatch=None, legacy=False):
     if legacy:
         with monkeypatch.context() as patch:
-            patch.setattr(master, "V2_SITE_HEADERS", master.V2_SITE_HEADERS[:-2])
+            patch.setattr(master, "V2_SITE_HEADERS", [name for name in master.V2_SITE_HEADERS
+                if name not in {"领用地址", "地址操作", master.V2_SITE_DEMAND_ADDRESS_COLUMN}])
             patch.setattr(master, "V2_SITE_ADDRESS_GUARD_FIELDS", master.V2_SITE_BASE_FIELDS)
             data = master.build_project_master_v2(db, project_id=project.project_id,
                                                   sheets=(master.V2_SHEET_SITE,))
