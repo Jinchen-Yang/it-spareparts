@@ -1451,6 +1451,39 @@ export const searchSiteIssueCandidates = (
   },
 );
 
+export interface SiteIssueDemandCandidate {
+  source_order_id: string;
+  order_no: string;
+  order_date: string;
+  receiver_address: string | null;
+  receiver: string | null;
+  receiver_phone: string | null;
+  contact_info_state: string;
+}
+
+export interface SiteIssueDemandCandidateResult {
+  rows: SiteIssueDemandCandidate[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 人工登记领用表单的关联维保需求单候选：收货地址建议预填的数据来源。 */
+export const getSiteIssueDemandCandidates = (
+  projectId: string,
+  input: { partId?: number; q?: string; page?: number; pageSize?: number } = {},
+) => api.get<SiteIssueDemandCandidateResult>(
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/demand-candidates`,
+  {
+    params: {
+      page: input.page ?? 1,
+      page_size: input.pageSize ?? 50,
+      ...(input.partId ? { part_id: input.partId } : {}),
+      ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    },
+  },
+);
+
 export const searchSiteIssues = (
   input: {
     project_id: string;
@@ -1923,10 +1956,13 @@ export interface ReturnReceiptAuditEntry {
 const returnReceiptBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipts`;
 
-export const getReturnReceiptDemands = (projectId: string, input: { page?: number; page_size?: number; q?: string } = {}) =>
+export const getReturnReceiptDemands = (
+  projectId: string,
+  input: { page?: number; page_size?: number; q?: string; part_id?: number } = {},
+) =>
   api.get<{ rows: { source_order_id: string; order_no: string; order_date: string | null }[]; total: number; page: number; page_size: number }>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-demands`,
-    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}) } },
+    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}) } },
   );
 
 export const getReturnReceiptSummary = (projectId: string) =>

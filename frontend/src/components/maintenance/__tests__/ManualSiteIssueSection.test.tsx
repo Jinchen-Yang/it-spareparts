@@ -1,4 +1,5 @@
-/** 人工登记领用（page_manual）组件：入口可用、预览冻结、幂等键、epoch、锁。 */
+/** 人工登记领用（page_manual）组件：入口可用、预览冻结、幂等键、epoch、锁、
+ * 按 PN 的需求单候选与领用地址建议预填。 */
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ const api = vi.hoisted(() => ({
   voidSiteIssue: vi.fn(),
   searchSiteIssues: vi.fn(),
   searchSiteIssueCandidates: vi.fn(),
+  getSiteIssueDemandCandidates: vi.fn(),
 }));
 
 vi.mock("../../../api/maintenanceOperations", async () => {
@@ -96,6 +98,35 @@ const previewPayload = {
   }],
 };
 
+/** 按 PN 的需求单候选默认夹具：两张单、两张不同收货地址（visible 态）。 */
+const demandCandidateRows = [
+  {
+    source_order_id: "order-1",
+    order_no: "WXD-20260901-001",
+    order_date: "2026-09-01",
+    receiver_address: "上海市浦东新区张江路 88 号",
+    receiver: "王五",
+    receiver_phone: "13800000000",
+    contact_info_state: "visible",
+  },
+  {
+    source_order_id: "order-2",
+    order_no: "WXD-20260910-002",
+    order_date: "2026-09-10",
+    receiver_address: "南京市江宁区天元路 1 号",
+    receiver: "赵六",
+    receiver_phone: "13900000000",
+    contact_info_state: "visible",
+  },
+];
+
+const demandCandidatesResult = {
+  rows: demandCandidateRows,
+  total: 2,
+  page: 1,
+  page_size: 50,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   PartPickerMock.default.mockImplementation(
@@ -115,6 +146,7 @@ beforeEach(() => {
   api.voidSiteIssue.mockResolvedValue({
     data: { ...manualIssue, workflow_status: "void" as const, version: 2 },
   });
+  api.getSiteIssueDemandCandidates.mockResolvedValue({ data: demandCandidatesResult });
 });
 
 afterEach(cleanup);
@@ -140,6 +172,22 @@ async function fillEditor(dialog: HTMLElement) {
   fireEvent.change(within(dialog).getByLabelText("领用地址（现场位置）"), { target: { value: "现场 A" } });
   fireEvent.change(within(dialog).getByLabelText("第 1 行数量"), { target: { value: "2" } });
   fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+}
+
+/** 打开「人工登记领用」新建弹窗。 */
+async function openCreateDialog() {
+  fireEvent.click(screen.getByRole("button", { name: "人工登记领用" }));
+  return screen.findByRole("dialog", { name: "人工登记领用" });
+}
+
+/** 在指定行的「关联需求单」下拉里选定候选；返回该行输入框。 */
+async function pickDemandOption(lineLabel: string, optionText: string) {
+  const demandInput = screen.getByRole("combobox", { name: lineLabel });
+  fireEvent.mouseDown(demandInput);
+  const opt = await screen.findByText(optionText);
+  fireEvent.click(opt.closest(".ant-select-item-option") || opt);
+  await waitFor(() => expect(demandInput).toHaveValue(optionText.split("（")[0]));
+  return demandInput;
 }
 
 describe("ManualSiteIssueSection", () => {
@@ -389,5 +437,116 @@ describe("ManualSiteIssueSection", () => {
     // 弹窗已关、列表为新项目空态
     expect(screen.queryByRole("dialog", { name: "人工登记领用" })).toBeNull();
     expect(screen.getByText("本项目还没有页面人工登记的领用单")).toBeInTheDocument();
+  });
+
+  it("按 PN 建议需求单：选 PN 后按 part_id 拉候选，下拉展示单号（日期），手输叠加 q", async () => {
+    renderSection();
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ partId: 1 }),
+    ));
+    fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "第 1 行关联需求单" }));
+    expect(await screen.findByText("WXD-20260901-001（2026-09-01）")).toBeInTheDocument();
+    expect(screen.getByText("WXD-20260910-002（2026-09-10）")).toBeInTheDocument();
+
+    // 手输搜索词：防抖后请求叠加 q 参数
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "第 1 行关联需求单" }), {
+      target: { value: "WXD-09" },
+    });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ partId: 1, q: "WXD-09" }),
+    ), { timeout: 2000 });
+  });
+
+  it("唯一需求单 + 空地址未编辑：按收货地址预填并标注来源", async () => {
+    renderSection();
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalled());
+    await pickDemandOption("第 1 行关联需求单", "WXD-20260901-001（2026-09-01）");
+    const address = within(dialog).getByLabelText("领用地址（现场位置）");
+    await waitFor(() => expect(address).toHaveValue("上海市浦东新区张江路 88 号"));
+    expect(within(dialog).getByText("已按需求单〈WXD-20260901-001〉收货地址预填，可修改")).toBeInTheDocument();
+  });
+
+  it("手动编辑过领用地址：本表单会话内不再自动预填", async () => {
+    renderSection();
+    const dialog = await openCreateDialog();
+    const address = within(dialog).getByLabelText("领用地址（现场位置）");
+    fireEvent.change(address, { target: { value: "临时地址" } });
+    fireEvent.change(address, { target: { value: "" } }); // 编辑痕迹保留（dirty）
+    fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalled());
+    await pickDemandOption("第 1 行关联需求单", "WXD-20260901-001（2026-09-01）");
+    expect(address).toHaveValue("");
+    expect(within(dialog).queryByText(/收货地址预填/)).toBeNull();
+  });
+
+  it("两行选定不同需求单：不预填地址", async () => {
+    renderSection();
+    const dialog = await openCreateDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加明细行" }));
+    const pickers = within(dialog).getAllByLabelText("型号选择");
+    fireEvent.change(pickers[0], { target: { value: "1" } });
+    fireEvent.change(pickers[1], { target: { value: "2" } });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ partId: 2 }),
+    ));
+    await pickDemandOption("第 1 行关联需求单", "WXD-20260901-001（2026-09-01）");
+    // 第 2 行手输恰好等于候选单号：同样计为该行选定了需求单
+    const secondDemand = within(dialog).getByRole("combobox", { name: "第 2 行关联需求单" });
+    fireEvent.mouseDown(secondDemand);
+    fireEvent.change(secondDemand, { target: { value: "WXD-20260910-002" } });
+    await waitFor(() => expect(secondDemand).toHaveValue("WXD-20260910-002"));
+    // 两行指向不同单：地址不保留任何一张单的预填
+    const address = within(dialog).getByLabelText("领用地址（现场位置）");
+    await waitFor(() => expect(address).toHaveValue(""));
+    expect(within(dialog).queryByText(/收货地址预填/)).toBeNull();
+  });
+
+  it("restricted 候选：不预填地址，显示无客户信息权限中性提示", async () => {
+    api.getSiteIssueDemandCandidates.mockResolvedValue({
+      data: {
+        rows: [{
+          source_order_id: "order-r",
+          order_no: "WXD-20260905-009",
+          order_date: "2026-09-05",
+          receiver_address: null,
+          receiver: null,
+          receiver_phone: null,
+          contact_info_state: "restricted",
+        }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+    });
+    renderSection();
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+    await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalled());
+    await pickDemandOption("第 1 行关联需求单", "WXD-20260905-009（2026-09-05）");
+    const address = within(dialog).getByLabelText("领用地址（现场位置）");
+    await waitFor(() => expect(address).toHaveValue(""));
+    expect(await within(dialog).findByText("无客户信息权限，地址建议不可用")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/收货地址预填/)).toBeNull();
+  });
+
+  it("未选 PN 不调候选接口，也不预填地址", async () => {
+    renderSection();
+    const dialog = await openCreateDialog();
+    // 未选 PN：placeholder 提示先选 PN（rc-select 的 placeholder 是 span 文本）
+    expect(within(dialog).getByText("先选择 PN 后可按需求单候选")).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "第 1 行关联需求单" }), {
+      target: { value: "WXD-1" },
+    });
+    // 超过防抖窗口仍未发请求：未选 PN 时手输只留在本地，服务端校验兜底
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+    expect(api.getSiteIssueDemandCandidates).not.toHaveBeenCalled();
+    expect(within(dialog).getByLabelText("领用地址（现场位置）")).toHaveValue("");
   });
 });

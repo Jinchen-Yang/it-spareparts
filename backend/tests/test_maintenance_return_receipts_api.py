@@ -17,7 +17,7 @@ from app.api import maintenance_return_receipts
 from app.auth import hash_password
 from app.db import SessionLocal
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
@@ -88,6 +88,22 @@ def _wbdd(db, *, project: MaintenanceProject, order_no: str = "WBDD-20260911-000
     )
     db.commit()
     return order
+
+
+def _line(
+    db, order: FMaintenanceOrder, part: DimPart, *, is_active: bool = True,
+) -> FMaintenanceLine:
+    """给需求单补一条明细行（part_id 过滤建议的命中源）。"""
+    row = FMaintenanceLine(
+        raw_line_id=f"line-{uuid4()}",
+        order_id=order.id,
+        part_id=part.id,
+        import_batch_id=order.import_batch_id,
+        is_active=is_active,
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 def _summary(client: TestClient, project_id: str) -> dict:
@@ -410,3 +426,108 @@ def test_part_id_resolved_from_pn(db):
         json={"pn": "PN-RESOLVE-1", "qty": 1},
     ).json()
     assert created["part_id"] == part.id
+
+
+def _demands(client: TestClient, project_id: str, **params) -> dict:
+    resp = client.get(
+        f"/api/maintenance/projects/stable/{project_id}/return-receipt-demands",
+        params=params,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_demand_candidates_part_id_hits_and_excludes(db):
+    """按 PN 建议（2026-10-12）：含该备件活跃行的单返回，不含的排除。"""
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-SUGGEST-HIT", description="建议备件")
+    other = DimPart(pn_std="PN-SUGGEST-MISS", description="其他备件")
+    db.add_all([part, other])
+    db.commit()
+    hit = _wbdd(db, project=project, order_no="WBDD-PN-HIT-0001")
+    miss = _wbdd(db, project=project, order_no="WBDD-PN-MISS-0002")
+    _line(db, hit, part)
+    _line(db, miss, other)
+    client = _client(db, username="rcp-user-12")
+    body = _demands(client, project.project_id, part_id=part.id)
+    assert [row["order_no"] for row in body["rows"]] == [hit.order_no]
+    assert body["total"] == 1
+    # 响应行结构不变（与既有候选口径一致）
+    assert set(body["rows"][0]) == {"source_order_id", "order_no", "order_date"}
+    assert body["rows"][0]["source_order_id"] == hit.raw_order_id
+
+
+def test_demand_candidates_same_order_duplicate_pn_lines_appear_once(db):
+    """同单多行同 PN：EXISTS 只判存在，天然去重不重复出现。"""
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-SUGGEST-DUP", description="去重备件")
+    db.add(part)
+    db.commit()
+    order = _wbdd(db, project=project, order_no="WBDD-PN-DUP-0003")
+    _line(db, order, part)
+    _line(db, order, part)
+    client = _client(db, username="rcp-user-13")
+    body = _demands(client, project.project_id, part_id=part.id)
+    ids = [row["source_order_id"] for row in body["rows"]]
+    assert ids.count(order.raw_order_id) == 1
+    assert body["total"] == 1
+
+
+def test_demand_candidates_inactive_line_not_matched(db):
+    """行级作废（is_active=false）不构成命中，但单本身仍在全量候选里。"""
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-SUGGEST-VOID", description="作废行备件")
+    db.add(part)
+    db.commit()
+    order = _wbdd(db, project=project, order_no="WBDD-PN-VOID-0004")
+    _line(db, order, part, is_active=False)
+    client = _client(db, username="rcp-user-14")
+    filtered = _demands(client, project.project_id, part_id=part.id)
+    assert filtered["rows"] == []
+    assert filtered["total"] == 0
+    # 回归对照：不传 part_id 时该单照常可见（行作废不影响单级候选）
+    plain = _demands(client, project.project_id)
+    assert [row["order_no"] for row in plain["rows"]] == [order.order_no]
+    assert plain["total"] == 1
+
+
+def test_demand_candidates_without_part_id_keeps_legacy_behavior(db):
+    """回归：不传 part_id 返回全量活跃需求单，排序与行结构与现状一致。"""
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-SUGGEST-REG", description="回归备件")
+    db.add(part)
+    db.commit()
+    first = _wbdd(db, project=project, order_no="WBDD-PN-REG-0006")
+    second = _wbdd(db, project=project, order_no="WBDD-PN-REG-0005")
+    only_first = _wbdd(db, project=project, order_no="WBDD-PN-REG-0007")
+    _line(db, only_first, part)
+    client = _client(db, username="rcp-user-15")
+    plain = _demands(client, project.project_id)
+    # 现状口径：order_no asc, raw_order_id
+    assert [row["order_no"] for row in plain["rows"]] == [
+        second.order_no, first.order_no, only_first.order_no,
+    ]
+    assert plain["total"] == 3
+    assert all(set(row) == {"source_order_id", "order_no", "order_date"}
+               for row in plain["rows"])
+    # part_id 只是叠加过滤，不改变其余行的形状
+    filtered = _demands(client, project.project_id, part_id=part.id)
+    assert [row["order_no"] for row in filtered["rows"]] == [only_first.order_no]
+
+
+def test_demand_candidates_part_id_and_q_combined(db):
+    """part_id 与 q 叠加：先按备件命中，再按单号模糊收窄。"""
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="PN-SUGGEST-COMBO", description="叠加备件")
+    db.add(part)
+    db.commit()
+    alpha = _wbdd(db, project=project, order_no="WBDD-PN-COMBO-A")
+    beta = _wbdd(db, project=project, order_no="WBDD-PN-COMBO-B")
+    _line(db, alpha, part)
+    _line(db, beta, part)
+    client = _client(db, username="rcp-user-16")
+    both = _demands(client, project.project_id, part_id=part.id)
+    assert {row["order_no"] for row in both["rows"]} == {alpha.order_no, beta.order_no}
+    narrowed = _demands(client, project.project_id, part_id=part.id, q="COMBO-B")
+    assert [row["order_no"] for row in narrowed["rows"]] == [beta.order_no]
+    assert narrowed["total"] == 1

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  AutoComplete,
   Button,
   Card,
   Empty,
@@ -19,12 +20,14 @@ import PartPicker from "../PartPicker";
 import SiteIssueAddress from "./SiteIssueAddress";
 import {
   createManualSiteIssue,
+  getSiteIssueDemandCandidates,
   patchManualSiteIssue,
   previewManualSiteIssue,
   voidSiteIssue,
   type ManualSiteIssueLineInput,
   type ManualSiteIssuePreview,
   type ManualSiteIssuePreviewLine,
+  type SiteIssueDemandCandidate,
   type SiteIssueDocument,
 } from "../../api/maintenanceOperations";
 
@@ -48,6 +51,13 @@ const { Text } = Typography;
  *   不从当前表单重组（防「保存未预览的内容」）。
  * - 提交/预览/作废用同步 ref 锁防双击；await 后先查 epoch 再动状态。
  * - 写成功与刷新失败分开提示：已 200 的登记不因刷新失败被误报为失败。
+ *
+ * 按 PN 建议需求单 + 地址建议预填（2026-10-12 方案 §3.3）：
+ * - 行内「关联需求单」升级为 AutoComplete：按行内 part_id 拉候选、手输仍允许
+ *   任意值（服务端校验兜底）；各行命中的候选（含脱敏收货地址）按行上报。
+ * - 地址建议只做「预填」不做「覆盖」（D-26 规则 1）：仅新建表单、领用地址为空、
+ *   用户从未手动编辑过、且各行已选需求单恰好指向同一张单时，填入该单收货地址
+ *   并标注来源；用户一旦手动编辑过，本表单会话内建议永久退位。
  */
 
 const commandKey = (prefix: string) => {
@@ -185,6 +195,113 @@ const previewColumns: ColumnsType<ManualSiteIssuePreviewLine> = [
   },
 ];
 
+/** 候选行在行内下拉里的展示文本：单号（日期）。 */
+const demandOptionLabel = (row: SiteIssueDemandCandidate) => `${row.order_no}（${row.order_date}）`;
+
+/**
+ * 行内「关联需求单」自动完成（按 PN 建议需求单，2026-10-12 方案 §3.3）：
+ * - 行内已选 PN → 按 part_id 拉本项目含该 PN 的活跃需求单候选；手输时 300ms
+ *   防抖叠加 q 参数（与 PartPicker 同范式：代次守卫防慢响应竞态）。
+ * - 未选 PN → 不拉数据（placeholder 提示先选 PN）；仍允许手输任意值，
+ *   服务端 _resolve_demand_project 校验兜底，手输不在候选内也能提交。
+ * - 选定候选（或手输值恰好等于某候选单号）时向头级上报该候选（含脱敏收货地址），
+ *   供领用地址建议预填使用；restricted 候选三字段为 null，前端不显示脱敏数据。
+ */
+function DemandOrderAutoComplete({
+  projectId,
+  lineKey,
+  partId,
+  ariaLabel,
+  value,
+  disabled,
+  onValueChange,
+  onCandidateChange,
+}: {
+  projectId: string;
+  /** 行 key：候选信息按行上报，行删除后父级记录自然失联。 */
+  lineKey: string;
+  partId: number | null;
+  ariaLabel: string;
+  value: string;
+  disabled?: boolean;
+  onValueChange: (next: string) => void;
+  onCandidateChange: (lineKey: string, candidate: SiteIssueDemandCandidate | null) => void;
+}) {
+  const [options, setOptions] = useState<SiteIssueDemandCandidate[]>([]);
+  // 代次守卫：只认最新一次请求，慢响应不覆盖新输入（PartPicker 同范式）。
+  const gen = useRef(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchCandidates = useCallback((q: string) => {
+    if (partId == null) return;
+    const g = ++gen.current;
+    getSiteIssueDemandCandidates(projectId, {
+      partId,
+      ...(q ? { q } : {}),
+      pageSize: 50,
+    })
+      .then(({ data }) => {
+        if (g !== gen.current) return;
+        setOptions(data.rows ?? []);
+      })
+      .catch(() => {
+        if (g !== gen.current) return;
+        setOptions([]);
+      });
+  }, [projectId, partId]);
+
+  // 选定 PN（或项目变化）即拉一次该 PN 的候选；未选 PN 不拉，避免无界下拉。
+  useEffect(() => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    gen.current += 1; // 作废在途请求
+    if (partId == null) {
+      setOptions([]);
+      return;
+    }
+    fetchCandidates("");
+  }, [fetchCandidates, partId]);
+
+  // 卸载：清掉防抖定时器并作废在途响应，不许写已卸载的行。
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+    gen.current += 1;
+  }, []);
+
+  const onSearch = (text: string) => {
+    if (timer.current) clearTimeout(timer.current);
+    const q = text.trim();
+    if (partId == null || !q) return; // 未选 PN / 清空搜索：退回已加载的 PN 候选
+    timer.current = setTimeout(() => fetchCandidates(q), 300);
+  };
+
+  // 值或候选集变化后重算本行命中：选中、清空、手输恰好等于候选单号都同步上报。
+  useEffect(() => {
+    const key = value.trim();
+    onCandidateChange(
+      lineKey,
+      key ? options.find((row) => row.order_no === key) ?? null : null,
+    );
+  }, [options, value, lineKey, onCandidateChange]);
+
+  return (
+    <AutoComplete
+      aria-label={ariaLabel}
+      value={value}
+      disabled={disabled}
+      allowClear
+      style={{ width: 240 }}
+      placeholder={partId == null ? "先选择 PN 后可按需求单候选" : "本项目需求单号，可输入搜索"}
+      notFoundContent={partId == null ? "先选择 PN 后可按需求单候选" : "无匹配需求单，可手输单号"}
+      options={options.map((row) => ({ value: row.order_no, label: demandOptionLabel(row) }))}
+      onSearch={onSearch}
+      onChange={(next) => onValueChange(typeof next === "string" ? next : "")}
+    />
+  );
+}
+
 export default function ManualSiteIssueSection({
   projectId,
   canManage,
@@ -215,11 +332,21 @@ export default function ManualSiteIssueSection({
     key: string;
   } | null>(null);
   const voidAttemptRef = useRef<{ content: string; key: string } | null>(null);
+  // 领用地址建议预填的 dirty 追踪：用户手动 onChange 过 site_location 即置 dirty，
+  // 本表单会话内不再自动预填；打开新建 / 编辑回填时重置（回填值不算 dirty）。
+  const siteLocationDirtyRef = useRef(false);
+  // 当前由建议预填写入的地址（撤回建议时只清这个值，绝不触碰用户输入）。
+  const prefilledAddressRef = useRef<string | null>(null);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<SiteIssueDocument | null>(null);
   const [editor, setEditor] = useState<EditorValues>(emptyEditor);
   const [lines, setLines] = useState<EditorLine[]>([emptyLine()]);
+  // 各行命中的需求单候选（含脱敏收货地址）：派生 UI 状态，不进提交 payload，
+  // 更新也不失效预览（值本身的变化才走 updateLine 失效预览）。
+  const [demandCandidates, setDemandCandidates] = useState<
+    Record<string, SiteIssueDemandCandidate | null>
+  >({});
   const [editorError, setEditorError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ManualSiteIssuePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -255,6 +382,9 @@ export default function ManualSiteIssueSection({
     setEditing(null);
     setEditor(emptyEditor());
     setLines([emptyLine()]);
+    setDemandCandidates({});
+    siteLocationDirtyRef.current = false;
+    prefilledAddressRef.current = null;
     setPreview(null);
     setEditorError(null);
     setPreviewLoading(false);
@@ -291,6 +421,68 @@ export default function ManualSiteIssueSection({
     setLines((current) => current.filter((line) => line.key !== key));
   }, [invalidatePreview]);
 
+  // —— 按 PN 建议需求单：各行候选上报 + 领用地址建议预填（方案 §3.3）——
+  const recordDemandCandidate = useCallback(
+    (lineKey: string, candidate: SiteIssueDemandCandidate | null) => {
+      setDemandCandidates((current) => (
+        current[lineKey] === candidate ? current : { ...current, [lineKey]: candidate }
+      ));
+    },
+    [],
+  );
+
+  // 恰好所有已选需求单的行指向同一张单（非空单号集合 size == 1）才认定「唯一」。
+  const uniqueSelectedDemandNo = useMemo(() => {
+    const nos = Array.from(new Set(
+      lines.map((line) => line.demandOrderNo.trim()).filter(Boolean),
+    ));
+    return nos.length === 1 ? nos[0] : null;
+  }, [lines]);
+
+  const uniqueDemandCandidate = useMemo(() => {
+    if (uniqueSelectedDemandNo == null) return null;
+    for (const line of lines) {
+      const candidate = demandCandidates[line.key];
+      if (candidate?.order_no === uniqueSelectedDemandNo) return candidate;
+    }
+    return null;
+  }, [lines, demandCandidates, uniqueSelectedDemandNo]);
+
+  // 有客户信息权限且地址非空才构成建议；restricted 时三字段为 null（fail-closed）。
+  const suggestedAddress = uniqueDemandCandidate != null
+    && uniqueDemandCandidate.contact_info_state !== "restricted"
+    && uniqueDemandCandidate.receiver_address
+    ? uniqueDemandCandidate.receiver_address.trim()
+    : null;
+  const suggestedOrderNo = suggestedAddress != null && uniqueDemandCandidate != null
+    ? uniqueDemandCandidate.order_no
+    : null;
+
+  // 地址建议预填（D-26：只建议、不覆盖）：仅新建、未手动编辑过时把空地址填为
+  // 唯一已选需求单的收货地址；建议条件消失时只撤回我们自己填入且未被改动的值。
+  // 任何能触发本效果的行/候选变化都先经过 updateLine（已失效预览），这里再失效
+  // 一次兜底，确保冻结 payload 不与表单漂移。
+  useEffect(() => {
+    if (!editorOpen || editing || siteLocationDirtyRef.current) return;
+    const current = editor.siteLocation;
+    if (suggestedAddress == null) {
+      if (prefilledAddressRef.current != null && current === prefilledAddressRef.current) {
+        prefilledAddressRef.current = null;
+        invalidatePreview();
+        setEditor((state) => ({ ...state, siteLocation: "" }));
+      }
+      return;
+    }
+    if (current === suggestedAddress) {
+      prefilledAddressRef.current = suggestedAddress;
+      return;
+    }
+    if (current !== "" && prefilledAddressRef.current !== current) return; // 用户/回填内容，不动
+    prefilledAddressRef.current = suggestedAddress;
+    invalidatePreview();
+    setEditor((state) => ({ ...state, siteLocation: suggestedAddress }));
+  }, [editorOpen, editing, editor.siteLocation, suggestedAddress, invalidatePreview]);
+
   const newDialogEpoch = useCallback(() => {
     epochRef.current += 1;
     previewGenerationRef.current += 1;
@@ -309,6 +501,10 @@ export default function ManualSiteIssueSection({
     setEditing(null);
     setEditor(emptyEditor());
     setLines([emptyLine()]);
+    // 新表单会话：地址建议的 dirty / 预填痕迹、行候选记录全部清零。
+    siteLocationDirtyRef.current = false;
+    prefilledAddressRef.current = null;
+    setDemandCandidates({});
     setEditorOpen(true);
   };
 
@@ -334,6 +530,10 @@ export default function ManualSiteIssueSection({
       demandOrderNo: line.demand_order_no ?? "",
       remark: line.remark ?? "",
     })));
+    // 编辑回填：既有地址不算 dirty，但编辑态不做地址建议预填；痕迹一并清零。
+    siteLocationDirtyRef.current = false;
+    prefilledAddressRef.current = null;
+    setDemandCandidates({});
     setEditorOpen(true);
   };
 
@@ -531,6 +731,25 @@ export default function ManualSiteIssueSection({
   // 因而迟到结果只能被丢弃。真正写入期间才冻结字段。
   const formLocked = submitting;
 
+  // 地址建议的展示文案（仅新建会话；dirty 后全部隐去，restricted 显示中性提示，
+  // 不显示 restricted 原文）。
+  let addressPrefillNote: string | null = null;
+  if (
+    !editing
+    && !siteLocationDirtyRef.current
+    && suggestedOrderNo != null
+    && suggestedAddress != null
+    && editor.siteLocation === suggestedAddress
+  ) {
+    addressPrefillNote = `已按需求单〈${suggestedOrderNo}〉收货地址预填，可修改`;
+  }
+  const restrictedHint = !editing
+    && !siteLocationDirtyRef.current
+    && uniqueDemandCandidate?.contact_info_state === "restricted"
+    && editor.siteLocation.trim() === ""
+    ? "无客户信息权限，地址建议不可用"
+    : null;
+
   return (
     <Card
       data-testid="manual-site-issue-section"
@@ -636,7 +855,19 @@ export default function ManualSiteIssueSection({
             <label>领用单号（选填）<Input aria-label="领用单号（选填）" disabled={formLocked} value={editor.issueNo} onChange={(event) => updateEditor({ issueNo: event.target.value })} placeholder="留空自动生成" /></label>
             <label>接收人<Input aria-label="接收人" disabled={formLocked} value={editor.receiver} onChange={(event) => updateEditor({ receiver: event.target.value })} /></label>
             <label>发出人<Input aria-label="发出人" disabled={formLocked} value={editor.issuedBy} onChange={(event) => updateEditor({ issuedBy: event.target.value })} /></label>
-            <label>领用地址（现场位置）<Input.TextArea aria-label="领用地址（现场位置）" autoSize={{ minRows: 2, maxRows: 4 }} disabled={formLocked} value={editor.siteLocation} onChange={(event) => updateEditor({ siteLocation: event.target.value })} placeholder="填写实际领用地址，最多 256 个字符" /></label>
+            <label>领用地址（现场位置）<Input.TextArea aria-label="领用地址（现场位置）" autoSize={{ minRows: 2, maxRows: 4 }} disabled={formLocked} value={editor.siteLocation} onChange={(event) => {
+              // 用户手动改动即置 dirty：本表单会话内地址建议预填永久退位（D-26）。
+              siteLocationDirtyRef.current = true;
+              prefilledAddressRef.current = null;
+              updateEditor({ siteLocation: event.target.value });
+            }} placeholder="填写实际领用地址，最多 256 个字符" />
+              {addressPrefillNote && (
+                <Text type="secondary" style={{ display: "block" }}>{addressPrefillNote}</Text>
+              )}
+              {restrictedHint && (
+                <Text type="secondary" style={{ display: "block" }}>{restrictedHint}</Text>
+              )}
+            </label>
           </div>
           <Text type="secondary">领用地址填写实际使用地点，与需求单收货地址分别保存。</Text>
           <label>操作原因<Input aria-label="操作原因" disabled={formLocked} value={editor.reason} onChange={(event) => updateEditor({ reason: event.target.value })} /></label>
@@ -708,13 +939,15 @@ export default function ManualSiteIssueSection({
                     </label>
                     <label>
                       关联需求单（选填）
-                      <Input
-                        aria-label={`第 ${index + 1} 行关联需求单`}
-                        disabled={formLocked}
+                      <DemandOrderAutoComplete
+                        projectId={projectId}
+                        lineKey={line.key}
+                        partId={line.partId}
+                        ariaLabel={`第 ${index + 1} 行关联需求单`}
                         value={line.demandOrderNo}
-                        onChange={(event) => updateLine(line.key, { demandOrderNo: event.target.value })}
-                        placeholder="本项目需求单号"
-                        style={{ width: 200 }}
+                        disabled={formLocked}
+                        onValueChange={(next) => updateLine(line.key, { demandOrderNo: next })}
+                        onCandidateChange={recordDemandCandidate}
                       />
                     </label>
                     <label>

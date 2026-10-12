@@ -177,14 +177,17 @@ def receipt_demand_candidates(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=200),
     q: str | None = Query(default=None, max_length=128),
+    part_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
+        # part_id 是可选的 PN 建议过滤（2026-10-12）：不传时行为与旧版逐字节一致。
         return receipts.demand_candidates(
             db, project_id=project_id, page=page, page_size=page_size, q=q,
+            part_id=part_id,
         )
     except receipts.ReturnReceiptError as exc:
         _raise_service_error(exc)

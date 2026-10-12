@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, RKD_RETURN_CATEGORIES, RKD_RETURN_TEST_RESULTS
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_doc_import import MaintenanceDocLineRow, MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
@@ -462,6 +462,7 @@ def _order_no(db: Session, source_order_id: str | None) -> str | None:
 
 def demand_candidates(
     db: Session, *, project_id: str, page: int, page_size: int, q: str | None = None,
+    part_id: int | None = None,
 ) -> dict:
     """Receipt selectors expose only effective WBDD identities in this project."""
     _get_project(db, project_id)
@@ -477,6 +478,17 @@ def demand_candidates(
     )
     if q and q.strip():
         stmt = stmt.where(FMaintenanceOrder.order_no.icontains(q.strip(), autoescape=True))
+    if part_id is not None:
+        # 按 PN 建议需求单（2026-10-12）：EXISTS 相关子查询只判断「单内存在该备件
+        # 的活跃明细行」，不 join——同单多行同 PN 天然不重复，count/分页口径不变，
+        # 且能吃 ix_ml_order_active 索引。
+        stmt = stmt.where(
+            select(FMaintenanceLine.id).where(
+                FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                FMaintenanceLine.is_active.is_(True),
+                FMaintenanceLine.part_id == part_id,
+            ).exists()
+        )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.execute(stmt.order_by(FMaintenanceOrder.order_no, FMaintenanceOrder.raw_order_id)
                       .offset((page - 1) * page_size).limit(page_size)).all()
