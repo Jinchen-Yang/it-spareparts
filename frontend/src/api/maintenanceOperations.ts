@@ -1454,7 +1454,7 @@ export const searchSiteIssueCandidates = (
 export interface SiteIssueDemandCandidate {
   source_order_id: string;
   order_no: string;
-  order_date: string;
+  order_date: string | null;
   receiver_address: string | null;
   receiver: string | null;
   receiver_phone: string | null;

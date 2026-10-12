@@ -657,7 +657,9 @@ def search_project_site_issue_candidates(
     return payload
 
 
-@site_issue_beta_router.get("/projects/{project_id}/demand-candidates")
+# stable 路由（boss 闸）而非 beta 路由：人工登记领用的 preview/create/patch 全在
+# stable_site_issue_router，生产 beta 总闸恒 false，挂 beta 会整组 404（PR #361 P1）。
+@stable_site_issue_router.get("/projects/{project_id}/demand-candidates")
 def site_issue_demand_candidates(
     project_id: str = Path(..., min_length=1, max_length=36),
     part_id: int | None = Query(default=None, ge=1),

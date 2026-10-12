@@ -195,8 +195,9 @@ const previewColumns: ColumnsType<ManualSiteIssuePreviewLine> = [
   },
 ];
 
-/** 候选行在行内下拉里的展示文本：单号（日期）。 */
-const demandOptionLabel = (row: SiteIssueDemandCandidate) => `${row.order_no}（${row.order_date}）`;
+/** 候选行在行内下拉里的展示文本：单号（日期）；order_date 可空，缺日期不带括号。 */
+const demandOptionLabel = (row: SiteIssueDemandCandidate) =>
+  row.order_date ? `${row.order_no}（${row.order_date}）` : row.order_no;
 
 /**
  * 行内「关联需求单」自动完成（按 PN 建议需求单，2026-10-12 方案 §3.3）：
