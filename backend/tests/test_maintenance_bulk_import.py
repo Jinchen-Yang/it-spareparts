@@ -274,7 +274,7 @@ def test_sales_conflicting_duplicate_blocks_entire_order(monkeypatch):
     )
 
 
-def test_receipt_risk_row_blocks_all_months_without_partial_cumulative(monkeypatch):
+def test_receipt_remark_annotation_keeps_complete_cumulative(monkeypatch):
     contract = SimpleNamespace(
         project_id="project-1",
         project_contract_id="relation-1",
@@ -297,19 +297,17 @@ def test_receipt_risk_row_blocks_all_months_without_partial_cumulative(monkeypat
 
     plan = bulk.ReceiptCollectionAdapter().build_plan(_ScalarsOnlyDb(), detected)
 
-    assert {operation["action"] for operation in plan["operations"]} == {"conflict"}
+    assert {operation["action"] for operation in plan["operations"]} == {"create"}
     assert {operation["report_month"] for operation in plan["operations"]} == {
         "2026-01-01",
         "2026-02-01",
     }
-    assert all(
-        operation["new_cumulative_amount"] is None
-        for operation in plan["operations"]
-    )
-    assert not any(
-        operation["action"] in {"create", "noop"}
-        for operation in plan["operations"]
-    )
+    assert [operation["new_cumulative_amount"] for operation in plan["operations"]] == [
+        "120.00", "170.00",
+    ]
+    assert all(any(issue["code"] == "receipt_remark_annotation" for issue in operation["issues"])
+               for operation in plan["operations"])
+    assert plan["issues"] == []
 
 
 _RECEIPT_CONTRACT = SimpleNamespace(

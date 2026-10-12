@@ -47,6 +47,7 @@ import {
   type MaintenanceBatchTransferOptions,
 } from "../../api/maintenanceBatchTransfer";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
+import CollectionProgressPreview from "./CollectionProgressPreview";
 
 const { Text, Paragraph } = Typography;
 const DEFAULT_MAX_FILES = 20;
@@ -125,11 +126,12 @@ const RULING_CODES = new Set(["receipt_conflict", "receipt_voided_upstream"]);
 /** 台账冲突人工裁决只开放给 admin / boss（后端再校验实名账号与利润权限）。 */
 const RULING_ROLES = new Set(["admin", "boss"]);
 
-type MatchFilter = "all" | MaintenanceBatchMatchState;
+type MatchFilter = "all" | "maintenance" | MaintenanceBatchMatchState;
 
 export interface MaintenanceBatchTransferButtonProps {
   filters: Omit<MaintenanceBatchDownloadInput, "forms" | "fields">;
   onApplied: () => void | Promise<unknown>;
+  receiptOnly?: boolean;
 }
 
 function readDetail(data: unknown): string | null {
@@ -500,15 +502,16 @@ function MappingPreview({ file }: { file: MaintenanceBatchPreviewFile }) {
 interface ImportPanelProps {
   options: MaintenanceBatchTransferOptions;
   onApplied: () => void | Promise<unknown>;
+  receiptOnly?: boolean;
 }
 
-function ImportPanel({ options, onApplied }: ImportPanelProps) {
+function ImportPanel({ options, onApplied, receiptOnly = false }: ImportPanelProps) {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [preview, setPreview] = useState<MaintenanceBatchPreviewResponse | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<MatchFilter>("all");
+  const [filter, setFilter] = useState<MatchFilter>(receiptOnly ? "maintenance" : "all");
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [result, setResult] = useState<MaintenanceBatchApplyResponse | null>(null);
   // 台账冲突人工裁决弹窗（D-16 / REQ #56 #57）
@@ -533,7 +536,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     setPreview(null);
     setResult(null);
     setSelectedRowKeys([]);
-    setFilter("all");
+    setFilter(receiptOnly ? "maintenance" : "all");
   };
 
   const invalidatePreview = () => {
@@ -551,6 +554,10 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       const isXlsx = /\.xlsx$/i.test(file.name);
       if (!isXlsx) {
         message.error(`${file.name} 不是 .xlsx 文件`);
+        return Upload.LIST_IGNORE;
+      }
+      if (file.size > (options.max_file_bytes ?? 32 * 1024 * 1024)) {
+        message.error(`${file.name} 超过单文件上传上限`);
         return Upload.LIST_IGNORE;
       }
       return false;
@@ -580,12 +587,14 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     setError(null);
     setResult(null);
     try {
-      const { data } = await previewMaintenanceBatchTransfer(sourceFiles);
+      const { data } = await (receiptOnly
+        ? previewMaintenanceBatchTransfer(sourceFiles, "receipt")
+        : previewMaintenanceBatchTransfer(sourceFiles));
       if (generation !== requestGeneration.current) return;
       setPreview(data);
       // 覆盖既有累计的行默认不勾选，必须由用户逐行确认（D-16）
       setSelectedRowKeys(defaultSelectedKeys(data.rows));
-      setFilter("all");
+      setFilter(receiptOnly ? "maintenance" : "all");
     } catch (reason) {
       if (generation !== requestGeneration.current) return;
       setError(await errorMessage(reason, "批量预览失败，请检查文件后重试"));
@@ -599,7 +608,9 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     [preview],
   );
   const visibleRows = useMemo(
-    () => preview?.rows.filter((row) => filter === "all" || row.match_state === filter) ?? [],
+    () => preview?.rows.filter((row) => filter === "all" || (filter === "maintenance"
+      ? !!row.matched_contract_id || ["maintenance", "maintenance_unmatched"].includes(String(row.canonical.scope_classification))
+      : row.match_state === filter)) ?? [],
     [filter, preview],
   );
   const selectableKeys = useMemo(
@@ -873,13 +884,15 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         type="info"
         showIcon
         message="先预览，再提交"
-        description="系统自动识别表单、字段和项目归属。字段映射只读展示；正式提交只消费冻结的预览凭证。歧义、未匹配或无效行不能勾选；收款单已在台账的行自动跳过，覆盖既有已确认累计的行默认不勾选，需逐行确认。"
+        description={receiptOnly
+          ? "上传整份公司收款单，系统按销售订单匹配维保合同和项目，其他业务跳过。到账按日期记入月度累计，期次进度按累计实收覆盖计划计算；有歧义、未归属或冲突的内容须先核对。"
+          : "系统自动识别表单、字段和项目归属。字段映射只读展示；正式提交只消费冻结的预览凭证。歧义、未匹配或无效行不能勾选；收款单已在台账的行自动跳过，覆盖既有已确认累计的行默认不勾选，需逐行确认。"}
       />
 
       <Upload.Dragger {...uploadProps}>
         <p className="ant-upload-drag-icon"><InboxOutlined /></p>
         <p className="ant-upload-text">拖入一个或多个 .xlsx，或点击选择文件</p>
-        <p className="ant-upload-hint">最多 {maxFiles} 个；可混合销售合同与回款表，实际类型由服务端识别</p>
+        <p className="ant-upload-hint">最多 {maxFiles} 个；{receiptOnly ? `仅收款单，每个文件最多 ${(options.max_file_bytes ?? 32 * 1024 * 1024) / 1024 / 1024} MB` : "可混合销售合同与回款表，实际类型由服务端识别"}</p>
       </Upload.Dragger>
 
       <Space wrap>
@@ -904,6 +917,12 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
 
       {preview ? (
         <>
+          {preview.files.filter(file => file.source_filter).map(file => {
+            const summary = file.source_filter!;
+            return <Alert key={file.file_id} type="info" showIcon
+              message={`${file.filename}：扫描 ${summary.total_rows} 行，维保及待归属 ${summary.maintenance_rows} 行`}
+              description={`跳过其他业务及无订单 ${summary.ignored_nonmaintenance_rows} 行（其中无销售订单 ${summary.ignored_without_order_rows} 行）；${summary.maintenance_unmatched_rows} 行维保尚待归属。${summary.ignored_samples_truncated ? "跳过项仅展示部分样例，计数为完整文件统计。" : ""}`} />;
+          })}
           <Collapse
             size="small"
             items={preview.files.map((file) => ({
@@ -919,6 +938,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                 value={filter}
                 onChange={setFilter}
                 options={[
+                  ...(receiptOnly ? [{ value: "maintenance" as const, label: "维保及待处理" }] : []),
                   { value: "all", label: `全部 ${preview.rows.length}` },
                   { value: "matched", label: `已匹配 ${counts.matched}` },
                   { value: "ambiguous", label: `有歧义 ${counts.ambiguous}` },
@@ -982,6 +1002,9 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
               </Row>
             </Space>
           </Card>
+          {!!preview.collection_progress?.length && <CollectionProgressPreview
+            progress={preview.collection_progress} selectedRowKeys={safeSelectedKeys.map(String)}
+            selectionValid={!selectionInconsistent} />}
 
           <Modal
             open={rulingRow !== null}
@@ -1234,6 +1257,7 @@ function DownloadPanel({ options, filters }: DownloadPanelProps) {
 export default function MaintenanceBatchTransferButton({
   filters,
   onApplied,
+  receiptOnly = false,
 }: MaintenanceBatchTransferButtonProps) {
   const [open, setOpen] = useState(false);
   const [options, setOptions] = useState<MaintenanceBatchTransferOptions | null>(null);
@@ -1266,12 +1290,12 @@ export default function MaintenanceBatchTransferButton({
 
   return (
     <>
-      <Button aria-label="批量导入 / 下载" icon={<SwapOutlined />} onClick={() => setOpen(true)}>
-        批量导入 / 下载
+      <Button aria-label={receiptOnly ? "维保收款单导入" : "批量导入 / 下载"} icon={<SwapOutlined />} onClick={() => setOpen(true)}>
+        {receiptOnly ? "维保收款单导入" : "批量导入 / 下载"}
       </Button>
       <Modal
         open={open}
-        title="维保项目批量导入 / 下载"
+        title={receiptOnly ? "维保收款单批量导入" : "维保项目批量导入 / 下载"}
         width={1180}
         footer={null}
         onCancel={() => setOpen(false)}
@@ -1287,7 +1311,7 @@ export default function MaintenanceBatchTransferButton({
             message={error}
             action={<Button size="small" onClick={() => void loadOptions()}>重试</Button>}
           />
-        ) : options ? (
+        ) : options ? (receiptOnly ? <ImportPanel options={options} onApplied={onApplied} receiptOnly /> : (
           <Tabs
             items={[
               {
@@ -1302,7 +1326,7 @@ export default function MaintenanceBatchTransferButton({
               },
             ]}
           />
-        ) : (
+        )) : (
           <Paragraph type="secondary">暂无可用配置</Paragraph>
         )}
       </Modal>

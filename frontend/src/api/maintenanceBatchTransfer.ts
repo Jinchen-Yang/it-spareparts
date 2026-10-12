@@ -87,6 +87,44 @@ export interface MaintenanceBatchPreviewFile {
   header_rows: number[];
   detected_fields: MaintenanceBatchDetectedField[];
   mapping_conflicts: MaintenanceBatchMappingConflict[];
+  source_filter?: MaintenanceReceiptSourceFilter | null;
+}
+
+export interface MaintenanceReceiptSourceFilter {
+  total_rows: number;
+  maintenance_rows: number;
+  maintenance_unmatched_rows: number;
+  ignored_nonmaintenance_rows: number;
+  ignored_without_order_rows: number;
+  ignored_amount: string;
+  ignored_amount_unknown_count: number;
+  ignored_sample_rows: number;
+  ignored_samples_truncated: boolean;
+}
+
+export interface MaintenanceCollectionMilestoneProgress {
+  milestone_id: string;
+  sequence: number;
+  planned_date: string | null;
+  planned_amount: string | null;
+  payment_state: "paid" | "partial" | "unpaid" | "not_due" | "not_reported" | "incomplete";
+  received_for_period: string | null;
+  remaining_amount: string | null;
+}
+
+export interface MaintenanceCollectionProgressState {
+  report_month: string | null;
+  cumulative_received: string | null;
+  milestones: MaintenanceCollectionMilestoneProgress[];
+}
+
+export interface MaintenanceCollectionProgress {
+  contract_id: string;
+  project_id: string | null;
+  contract_no: string | null;
+  project_name?: string | null;
+  before: MaintenanceCollectionProgressState;
+  candidates: { row_key: string; report_month: string; after: MaintenanceCollectionProgressState }[];
 }
 
 export interface MaintenanceBatchPreviewRow {
@@ -163,6 +201,7 @@ export interface MaintenanceBatchPreviewResponse {
   rows: MaintenanceBatchPreviewRow[];
   summary: MaintenanceBatchCounts;
   can_apply: boolean;
+  collection_progress?: MaintenanceCollectionProgress[];
 }
 
 export interface MaintenanceBatchApplyRequest {
@@ -265,6 +304,7 @@ export interface MaintenanceBatchTransferOptions {
   can_import: boolean;
   can_download: boolean;
   max_files: number;
+  max_file_bytes?: number;
   accepted_extensions: string[];
   import_kinds: MaintenanceBatchImportKindOption[];
   download_forms: MaintenanceBatchDownloadForm[];
@@ -292,9 +332,13 @@ export interface MaintenanceBatchDownloadResult {
 export const getMaintenanceBatchTransferOptions = () =>
   api.get<MaintenanceBatchTransferOptions>(`${MAINTENANCE_BATCH_TRANSFER_BASE}/options`);
 
-export const previewMaintenanceBatchTransfer = (files: File[]) => {
+export const previewMaintenanceBatchTransfer = (files: File[], importKind?: "receipt") => {
   const body = new FormData();
   files.forEach((file) => body.append("files", file));
+  if (importKind) body.append("import_kind", importKind);
+  if (importKind) return api.post<MaintenanceBatchPreviewResponse>(
+    `${MAINTENANCE_BATCH_TRANSFER_BASE}/preview`, body, { timeout: 180_000 },
+  );
   return api.post<MaintenanceBatchPreviewResponse>(
     `${MAINTENANCE_BATCH_TRANSFER_BASE}/preview`,
     body,

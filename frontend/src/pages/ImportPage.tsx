@@ -14,6 +14,8 @@ import {
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
 import ExpenseVoidPreviewPanel from "./import/ExpenseVoidPreviewPanel";
+import MaintenanceBatchTransferButton from "../components/maintenance/MaintenanceBatchTransferButton";
+import { readPermissionMap } from "../nav";
 
 const MAX_IMPORT_FILES = 20;
 
@@ -94,6 +96,9 @@ interface PrecheckSnapshot {
 }
 
 export default function ImportPage() {
+  const permissions = readPermissionMap();
+  const canImportMaintenanceReceipts = localStorage.getItem("role") === "admin"
+    || !!(permissions.page_maintenance && permissions.action_maintenance_ledger_import && permissions.data_profit);
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [staged, setStaged] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -447,6 +452,12 @@ export default function ImportPage() {
         title="数据导入"
         subtitle="上传氚云导出的 Excel（采购 / 销售 / 库存 / 维保出库）或项目追踪工作簿（报销明细页），自动清洗入库并留痕"
       />
+      {canImportMaintenanceReceipts && <Card title="维保收款单">
+        <Space direction="vertical">
+          <span>上传整份收款单，自动匹配维保项目和合同；其他业务跳过，预览各期到账进度后再确认导入。</span>
+          <MaintenanceBatchTransferButton receiptOnly filters={{}} onApplied={loadBatches} />
+        </Space>
+      </Card>}
       <Card title="上传文件"
         extra={
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">

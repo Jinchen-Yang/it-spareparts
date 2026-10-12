@@ -101,6 +101,8 @@ function readSortParam(spec: string | null, canViewCost: boolean): ProjectSort {
  */
 export function MaintenanceHomePage() {
   const permissions = readPermissionMap();
+  const canImportReceipts = localStorage.getItem("role") === "admin"
+    || !!(permissions.page_maintenance && permissions.action_maintenance_ledger_import && permissions.data_profit);
   const canUpload = !!permissions.action_maintenance_expense_collection_upload;
   const canViewCost = localStorage.getItem("role") === "admin"
     || permissions.data_purchase_cost === true;
@@ -250,6 +252,8 @@ export function MaintenanceHomePage() {
             <Link to="/maintenance/demands">
               <Button>需求单与同步</Button>
             </Link>
+            {canImportReceipts && <MaintenanceBatchTransferButton receiptOnly
+              filters={{}} onApplied={() => latestLoad.current(1, true)} />}
             <MaintenanceBatchTransferButton
               filters={{
                 lifecycle,

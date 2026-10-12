@@ -1244,3 +1244,43 @@ describe("MaintenanceBatchTransferButton", () => {
     );
   });
 });
+
+it("收款专用入口默认只看维保和待归属，且向服务端约束文件类型", async () => {
+  mocks.preview.mockResolvedValue({ data: {
+    ...receiptPreview,
+    files: receiptPreview.files.map(file => ({ ...file, source_filter: {
+      total_rows: 98054, maintenance_rows: 1322, maintenance_unmatched_rows: 371,
+      ignored_nonmaintenance_rows: 96732, ignored_without_order_rows: 1265,
+      ignored_sample_rows: 100, ignored_samples_truncated: true,
+    } })),
+    rows: [
+      receiptRow({ row_key: "matched-receipt", source_row: 3, normalized_key: "MAINT-ORDER",
+        canonical: { sales_order_no: "MAINT-ORDER", report_month: "2026-10-01", cumulative_received_inc_tax: "100.00" },
+        action: "upsert_collection_snapshot", row_status: "ready" }),
+      receiptRow({ row_key: "unmatched-maint", matched_contract_id: null, matched_project_id: null,
+        source_row: 4, normalized_key: "PENDING-MAINT",
+        canonical: { sales_order_no: "PENDING-MAINT", scope_classification: "maintenance_unmatched" },
+        match_state: "unmatched", action: "skip", row_status: "unchanged" }),
+      receiptRow({ row_key: "unmatched-other", matched_contract_id: null, matched_project_id: null,
+        source_row: 5, normalized_key: "OTHER-SALE",
+        canonical: { sales_order_no: "OTHER-SALE", scope_classification: "other" },
+        match_state: "unmatched", action: "skip", row_status: "unchanged" }),
+    ],
+  } });
+  render(<MaintenanceBatchTransferButton receiptOnly filters={{}} onApplied={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "维保收款单导入" }));
+  await screen.findByText("先预览，再提交");
+  expect(screen.queryByRole("tab", { name: "批量下载" })).not.toBeInTheDocument();
+  const file = new File(["receipt"], "整份收款单.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [file] } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "自动识别并预览" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "自动识别并预览" }));
+  await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith([file], "receipt"));
+  expect(await screen.findByText(/sales_order_no: MAINT-ORDER/)).toBeInTheDocument();
+  expect(screen.getByText(/sales_order_no: PENDING-MAINT/)).toBeInTheDocument();
+  expect(screen.queryByText(/sales_order_no: OTHER-SALE/)).not.toBeInTheDocument();
+  expect(screen.getByText(/扫描 98054 行/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "提交 1 行" })).toBeEnabled();
+  fireEvent.click(screen.getByText("全部 3"));
+  expect(screen.getByText(/sales_order_no: OTHER-SALE/)).toBeInTheDocument();
+});
