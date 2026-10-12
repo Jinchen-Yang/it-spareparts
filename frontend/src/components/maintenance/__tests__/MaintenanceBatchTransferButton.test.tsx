@@ -1276,11 +1276,11 @@ it("收款专用入口默认只看维保和待归属，且向服务端约束文�
   await waitFor(() => expect(screen.getByRole("button", { name: "自动识别并预览" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "自动识别并预览" }));
   await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith([file], "receipt"));
-  expect(await screen.findByText(/sales_order_no: MAINT-ORDER/)).toBeInTheDocument();
-  expect(screen.getByText(/sales_order_no: PENDING-MAINT/)).toBeInTheDocument();
-  expect(screen.queryByText(/sales_order_no: OTHER-SALE/)).not.toBeInTheDocument();
+  expect(await screen.findByText(/销售订单: MAINT-ORDER/)).toBeInTheDocument();
+  expect(screen.getByText(/销售订单: PENDING-MAINT/)).toBeInTheDocument();
+  expect(screen.queryByText(/销售订单: OTHER-SALE/)).not.toBeInTheDocument();
   expect(screen.getByText(/扫描 98054 行/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "提交 1 行" })).toBeEnabled();
   fireEvent.click(screen.getByText("全部 3"));
-  expect(screen.getByText(/sales_order_no: OTHER-SALE/)).toBeInTheDocument();
+  expect(screen.getByText(/销售订单: OTHER-SALE/)).toBeInTheDocument();
 });

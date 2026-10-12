@@ -434,11 +434,19 @@ function issueText(row: MaintenanceBatchPreviewRow): string {
   return "—";
 }
 
-function canonicalText(row: MaintenanceBatchPreviewRow): string {
-  const pairs = Object.entries(row.canonical)
-    .filter(([, value]) => value !== null && value !== "")
-    .slice(0, 4)
-    .map(([key, value]) => `${key}: ${String(value)}`);
+const RECEIPT_FIELD_LABELS: Record<string, string> = {
+  sales_order_no: "销售订单", report_month: "月份",
+  cumulative_received_inc_tax: "累计实收", receipt_reference: "收款凭证",
+  receipt_no: "收款单号", receipt_date: "收款日期", actual_amount: "实收金额",
+  business_type: "业务类型",
+};
+
+function canonicalText(row: MaintenanceBatchPreviewRow, receiptOnly = false): string {
+  const entries = Object.entries(row.canonical)
+    .filter(([key, value]) => value !== null && value !== ""
+      && (!receiptOnly || !["receipt_key", "scope_classification"].includes(key)));
+  const pairs = (receiptOnly ? entries : entries.slice(0, 4))
+    .map(([key, value]) => `${receiptOnly ? RECEIPT_FIELD_LABELS[key] ?? key : key}: ${String(value)}`);
   return pairs.length ? pairs.join("；") : "—";
 }
 
@@ -808,8 +816,9 @@ function ImportPanel({ options, onApplied, receiptOnly = false }: ImportPanelPro
     {
       title: "识别内容",
       key: "canonical",
+      width: 320,
       ellipsis: true,
-      render: (_, row) => <Text title={canonicalText(row)}>{canonicalText(row)}</Text>,
+      render: (_, row) => <Text title={canonicalText(row, receiptOnly)}>{canonicalText(row, receiptOnly)}</Text>,
     },
     {
       title: "台账/覆盖提示",
@@ -952,7 +961,7 @@ function ImportPanel({ options, onApplied, receiptOnly = false }: ImportPanelPro
                 dataSource={visibleRows}
                 columns={rowColumns}
                 pagination={{ pageSize: 10, showSizeChanger: false }}
-                scroll={{ x: 980 }}
+                scroll={{ x: 1480 }}
                 rowSelection={{
                   selectedRowKeys: safeSelectedKeys,
                   preserveSelectedRowKeys: true,
