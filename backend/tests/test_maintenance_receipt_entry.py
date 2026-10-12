@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_project_operations import MaintenanceCollectionReceipt
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysAccessLog
 from app.services import maintenance_bulk_import as bulk
 from tests.boss_board_helpers import client_for
 from tests.test_maintenance_receipt_ledger_import import ORDER_NO, _project_with_contract, _receipt_xlsx, _preview, _apply
@@ -41,6 +41,9 @@ def test_receipt_entry_previews_instalments_without_recording_money(db):
         ("paid", "100.00"), ("partial", "50.00")]
     assert db.scalar(select(func.count()).select_from(MaintenanceCollectionReceipt)) == 0
     assert client.get(f"{BASE}/options").json()["max_file_bytes"] == 32 * 1024 * 1024
+    assert db.scalar(select(func.count()).select_from(SysAccessLog).where(
+        SysAccessLog.action == "maintenance_batch_preview",
+        SysAccessLog.username == "receipt-entry-admin")) == 1
 
 
 def test_receipt_only_entry_rejects_sales_form_before_freezing_a_preview(db):
@@ -94,3 +97,14 @@ def test_known_receipts_still_require_project_scope_before_exposing_finances(db,
         allowed_project_ids={forbidden.project_id}, import_kind="receipt")
     assert own["summary"]["ready"] == 0
     assert own["collection_progress"][0]["before"]["cumulative_received"] == "25.00"
+
+
+def test_batch_download_records_access_audit_without_a_schema_change(db):
+    _project_with_contract(db)
+    client = client_for(db, username="receipt-download-admin", role="admin")
+    response = client.post(f"{BASE}/download", json={
+        "forms": ["project_master"], "fields": ["project_code"]})
+    assert response.status_code == 200, response.text
+    assert db.scalar(select(func.count()).select_from(SysAccessLog).where(
+        SysAccessLog.action == "maintenance_batch_download",
+        SysAccessLog.username == "receipt-download-admin")) == 1

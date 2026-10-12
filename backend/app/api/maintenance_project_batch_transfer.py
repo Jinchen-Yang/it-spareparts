@@ -334,7 +334,7 @@ async def preview_transfer(
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
     record_access_log(
         ctx,
-        "maintenance_project_batch_preview",
+        "maintenance_batch_preview",
         "maintenance",
         {
             "file_count": len(payloads),
@@ -594,7 +594,7 @@ def download_transfer(
         )
     record_access_log(
         ctx,
-        "maintenance_project_batch_download",
+        "maintenance_batch_download",
         "maintenance",
         {"forms": body.forms, "field_count": len(body.fields)},
     )
