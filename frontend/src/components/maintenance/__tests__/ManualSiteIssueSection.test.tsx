@@ -472,6 +472,22 @@ describe("ManualSiteIssueSection", () => {
     expect(within(dialog).getByText("已按需求单〈WXD-20260901-001〉收货地址预填，可修改")).toBeInTheDocument();
   });
 
+  it("2026-10-13 口径：候选恰好一张时自动选单，选完 PN 地址随之带入（无需手点）", async () => {
+    api.getSiteIssueDemandCandidates.mockResolvedValue({
+      data: { rows: [demandCandidateRows[0]], total: 1, page: 1, page_size: 50 },
+    });
+    renderSection();
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
+    // 唯一候选自动写入行内关联需求单
+    const demand = within(dialog).getByRole("combobox", { name: "第 1 行关联需求单" });
+    await waitFor(() => expect(demand).toHaveValue("WXD-20260901-001"));
+    // 地址链路随之自动带入并标注来源
+    const address = within(dialog).getByLabelText("领用地址（现场位置）");
+    await waitFor(() => expect(address).toHaveValue("上海市浦东新区张江路 88 号"));
+    expect(within(dialog).getByText("已按需求单〈WXD-20260901-001〉收货地址预填，可修改")).toBeInTheDocument();
+  });
+
   it("手动编辑过领用地址：本表单会话内不再自动预填", async () => {
     renderSection();
     const dialog = await openCreateDialog();

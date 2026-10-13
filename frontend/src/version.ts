@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.5";
+export const APP_VERSION = "1.36.7";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,23 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.7",
+    date: "2026-10-13",
+    items: [
+      "需求单候选搜索支持直接输 PN：登记返还和人工登记领用的需求单框里打 PN 也能搜出对应单（匹配单号或单内明细 PN）",
+      "领用登记选 PN 后若本项目只有一张含该 PN 的需求单，自动关联并按其联系地址带入领用地址，仍可改选/手改",
+      "业务口径：领用地址即维保需求单联系地址（2026-10-13 裁定，决策 0004 已补记）；存量单按关联需求单回填地址",
+    ],
+  },
+  {
+    version: "1.36.6",
+    date: "2026-10-12",
+    items: [
+      "登记返还：选定返件 PN 后需求单下拉出现「含此 PN」置顶建议，唯一匹配自动预选，多匹配全部列出",
+      "人工登记领用：行内关联需求单升级为按 PN 过滤的候选下拉，选定后可按需求单收货地址预填领用地址",
+    ],
+  },
   {
     version: "1.36.5",
     date: "2026-10-12",

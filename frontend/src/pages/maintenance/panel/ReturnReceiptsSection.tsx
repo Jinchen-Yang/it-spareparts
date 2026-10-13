@@ -125,6 +125,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const requestSeq = useRef(0);
   const contextSeq = useRef(0);
   const demandSeq = useRef(0);
+  // 需求单下拉服务端搜索的防抖定时器（2026-10-13：q 匹配单号或单内 PN）
+  const demandSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // PN 建议请求序号：选/换/清 PN 与换项目都会发新请求，晚到的旧响应不得覆盖新结果
   const pnDemandSeq = useRef(0);
   const auditSeq = useRef(0);
@@ -149,7 +151,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     [receipts, selectedIds],
   );
 
-  const loadDemands = useCallback(async (id: string) => {
+  const loadDemands = useCallback(async (id: string, q?: string) => {
     const seq = ++demandSeq.current;
     setDemandLoading(true);
     setDemandError(null);
@@ -157,7 +159,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     const options: DemandOption[] = [];
     try {
       for (let p = 1; ; p += 1) {
-        const response = await getReturnReceiptDemands(id, { page: p, page_size: 100 });
+        const response = await getReturnReceiptDemands(id, {
+          page: p, page_size: 100, ...(q ? { q } : {}),
+        });
         if (seq !== demandSeq.current) return;
         const rows = response.data.rows ?? [];
         options.push(...rows.map((row) => ({ value: row.order_no,
@@ -265,7 +269,10 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     filters.current = {};
     void loadDemands(projectId);
     void load(1, false);
-    return () => { contextSeq.current += 1; requestSeq.current += 1; demandSeq.current += 1; pnDemandSeq.current += 1; auditSeq.current += 1; projectSeq.current += 1; };
+    return () => {
+      if (demandSearchTimer.current) clearTimeout(demandSearchTimer.current);
+      contextSeq.current += 1; requestSeq.current += 1; demandSeq.current += 1; pnDemandSeq.current += 1; auditSeq.current += 1; projectSeq.current += 1;
+    };
   }, [load, loadDemands]);
 
   // ---- 登记与修改 ----
@@ -814,8 +821,17 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
             <Select
               allowClear
               showSearch
-              optionFilterProp="label"
-              placeholder={demands.length ? "选择需求单（可搜索单号）" : "本项目暂无可选需求单"}
+              filterOption={false}
+              onSearch={(text) => {
+                // 2026-10-13：服务端搜索——q 同时匹配单号与单内 PN 文本，直接打
+                // PN 也能搜出需求单；清空搜索词回全量。300ms 防抖，demandSeq 防竞态。
+                if (demandSearchTimer.current) clearTimeout(demandSearchTimer.current);
+                const q = text.trim();
+                demandSearchTimer.current = setTimeout(() => {
+                  void loadDemands(targetProject, q || undefined);
+                }, 300);
+              }}
+              placeholder={demands.length ? "选择或搜索需求单（可搜单号 / PN）" : "本项目暂无可选需求单"}
               options={wbddOptions}
               loading={demandLoading}
             />

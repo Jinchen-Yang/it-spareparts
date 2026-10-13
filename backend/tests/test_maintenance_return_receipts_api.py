@@ -531,3 +531,36 @@ def test_demand_candidates_part_id_and_q_combined(db):
     narrowed = _demands(client, project.project_id, part_id=part.id, q="COMBO-B")
     assert [row["order_no"] for row in narrowed["rows"]] == [beta.order_no]
     assert narrowed["total"] == 1
+
+
+def test_demand_candidates_q_matches_line_pn_text(db):
+    """2026-10-13 口径：q 除单号外还匹配单内活跃明细行的 PN 文本——候选框里
+    直接输 PN 也要能搜出单。pn_raw 与非活跃行各覆盖一路。"""
+    project = _project(db, project_id=str(uuid4()))
+    hit_part = DimPart(pn_std="PN-QTEXT-01", description="q文本命中")
+    miss_part = DimPart(pn_std="PN-OTHER-99", description="q文本不命中")
+    db.add_all([hit_part, miss_part])
+    db.commit()
+    # 命中：行 pn_std 含搜索文本
+    std_hit = _wbdd(db, project=project, order_no="WBDD-QTEXT-STD")
+    # 命中：行 pn_raw 含搜索文本（pn_std 不同）
+    raw_hit = _wbdd(db, project=project, order_no="WBDD-QTEXT-RAW")
+    # 不命中：单号与行 PN 都不含
+    miss = _wbdd(db, project=project, order_no="WBDD-QTEXT-NO")
+    _line(db, std_hit, hit_part)
+    _line(db, miss, miss_part)
+    raw_line = _line(db, raw_hit, miss_part)
+    raw_line.pn_raw = "兼容盘 PN-QTEXT-02 原始文本"
+    # 同一张单有一条非活跃行含文本也不应命中（只看活跃行）
+    inactive = _wbdd(db, project=project, order_no="WBDD-QTEXT-DEAD")
+    dead_line = _line(db, inactive, miss_part, is_active=False)
+    dead_line.pn_raw = "PN-QTEXT-03-已作废行"
+    db.commit()
+    client = _client(db, username="rcp-user-qtext")
+    result = _demands(client, project.project_id, q="PN-QTEXT")
+    assert {row["order_no"] for row in result["rows"]} == {std_hit.order_no, raw_hit.order_no}
+    assert result["total"] == 2
+    # 单号匹配路径不受影响（回归）
+    by_no = _demands(client, project.project_id, q="QTEXT-STD")
+    assert [row["order_no"] for row in by_no["rows"]] == [std_hit.order_no]
+

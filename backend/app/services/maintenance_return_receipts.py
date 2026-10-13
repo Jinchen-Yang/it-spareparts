@@ -477,7 +477,21 @@ def demand_candidates(
         FMaintenanceOrder,
     )
     if q and q.strip():
-        stmt = stmt.where(FMaintenanceOrder.order_no.icontains(q.strip(), autoescape=True))
+        # 2026-10-13 口径：q 匹配「单号 或 单内任一活跃明细行的 PN 文本」——
+        # 需求单候选框里直接输 PN 也要能搜出单（原话：输入 pn 自行匹配维保订单）。
+        # 仍用 EXISTS 子查询不 join，同单多行命中不重复，count/分页口径不变。
+        text_q = q.strip()
+        stmt = stmt.where(or_(
+            FMaintenanceOrder.order_no.icontains(text_q, autoescape=True),
+            select(FMaintenanceLine.id).where(
+                FMaintenanceLine.order_id == FMaintenanceOrder.id,
+                FMaintenanceLine.is_active.is_(True),
+                or_(
+                    FMaintenanceLine.pn_std.icontains(text_q, autoescape=True),
+                    FMaintenanceLine.pn_raw.icontains(text_q, autoescape=True),
+                ),
+            ).exists(),
+        ))
     if part_id is not None:
         # 按 PN 建议需求单（2026-10-12）：EXISTS 相关子查询只判断「单内存在该备件
         # 的活跃明细行」，不 join——同单多行同 PN 天然不重复，count/分页口径不变，
