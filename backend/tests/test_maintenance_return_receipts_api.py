@@ -535,13 +535,14 @@ def test_demand_candidates_part_id_and_q_combined(db):
 
 def test_demand_candidates_q_matches_line_pn_text(db):
     """2026-10-13 口径：q 除单号外还匹配单内活跃明细行的 PN 文本——候选框里
-    直接输 PN 也要能搜出单。pn_raw 与非活跃行各覆盖一路。"""
+    直接输 PN 也要能搜出单。pn_raw / 非活跃行 / 型号主数据当前 PN 各覆盖一路。"""
     project = _project(db, project_id=str(uuid4()))
     hit_part = DimPart(pn_std="PN-QTEXT-01", description="q文本命中")
     miss_part = DimPart(pn_std="PN-OTHER-99", description="q文本不命中")
     db.add_all([hit_part, miss_part])
     db.commit()
-    # 命中：行 pn_std 含搜索文本
+    # 命中：行 pn_std/pn_raw 为空，但型号主数据 pn_std 含搜索文本（治理合并后
+    # 行内旧 PN 过期的兜底路径）
     std_hit = _wbdd(db, project=project, order_no="WBDD-QTEXT-STD")
     # 命中：行 pn_raw 含搜索文本（pn_std 不同）
     raw_hit = _wbdd(db, project=project, order_no="WBDD-QTEXT-RAW")
@@ -555,6 +556,7 @@ def test_demand_candidates_q_matches_line_pn_text(db):
     inactive = _wbdd(db, project=project, order_no="WBDD-QTEXT-DEAD")
     dead_line = _line(db, inactive, miss_part, is_active=False)
     dead_line.pn_raw = "PN-QTEXT-03-已作废行"
+    dead_line.pn_std = "PN-QTEXT-03-已作废行"
     db.commit()
     client = _client(db, username="rcp-user-qtext")
     result = _demands(client, project.project_id, q="PN-QTEXT")
