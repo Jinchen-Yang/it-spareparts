@@ -147,6 +147,8 @@ def test_scoped_to_project_and_part_with_visible_contact(db):
 
 
 def test_contact_restricted_without_data_customer(db):
+    """2026-10-13 裁定后口径反转：领用表单候选端点不再受 customer_info 门禁——
+    无 data_customer 的维保页用户同样拿到联系地址（领用地址=需求单联系地址）。"""
     project = make_project(db, "领用建议受限项目")
     part = DimPart(pn_std="PN-LY-RESTRICT-1", description="受限建议备件")
     db.add(part)
@@ -166,13 +168,11 @@ def test_contact_restricted_without_data_customer(db):
     resp = _get(client, project.project_id, part_id=part.id)
     assert resp.status_code == 200, resp.text
     row = resp.json()["rows"][0]
-    # 无客户信息权限：fail-closed，三字段 null + restricted，不泄露原文
-    assert row["contact_info_state"] == "restricted"
-    assert (row["receiver_address"], row["receiver"], row["receiver_phone"]) == (
-        None, None, None,
-    )
-    for value in CONTACT.values():
-        assert value not in resp.text
+    # 无客户信息权限也可见：裁定明确维保页+项目范围即可（0004 2026-10-13 补记）
+    assert row["contact_info_state"] == "visible"
+    assert row["receiver_address"] == CONTACT["receiver_address"]
+    assert row["receiver"] == CONTACT["receiver"]
+    assert row["receiver_phone"] == CONTACT["receiver_phone"]
 
 
 def test_excludes_voided_tombstoned_and_unassigned(db):

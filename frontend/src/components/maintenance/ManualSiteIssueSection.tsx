@@ -215,6 +215,7 @@ function DemandOrderAutoComplete({
   ariaLabel,
   value,
   disabled,
+  autoLink = true,
   onValueChange,
   onCandidateChange,
 }: {
@@ -225,6 +226,9 @@ function DemandOrderAutoComplete({
   ariaLabel: string;
   value: string;
   disabled?: boolean;
+  /** 唯一候选自动关联只允许新建（2026-10-13 裁定范围）；编辑既有单时不自动写入，
+   *  避免无关更正悄悄改动历史关联。 */
+  autoLink?: boolean;
   onValueChange: (next: string) => void;
   onCandidateChange: (lineKey: string, candidate: SiteIssueDemandCandidate | null) => void;
 }) {
@@ -287,6 +291,17 @@ function DemandOrderAutoComplete({
     );
   }, [options, value, lineKey, onCandidateChange]);
 
+  // 2026-10-13 口径（领用地址=需求单联系地址）：含该 PN 的候选恰好一张且本行
+  // 还没关联任何单时自动选上——仅限新建（autoLink），编辑既有单不自动写入。
+  // 用户仍可清空改选或手输其他单号。多张候选不自动选，避免替用户猜单。
+  const autoSelectedRef = useRef(false);
+  useEffect(() => {
+    if (!autoLink || partId == null || autoSelectedRef.current) return;
+    if (value.trim() || options.length !== 1) return;
+    autoSelectedRef.current = true;
+    onValueChange(options[0].order_no);
+  }, [options, value, partId, autoLink, onValueChange]);
+
   return (
     <AutoComplete
       aria-label={ariaLabel}
@@ -294,7 +309,7 @@ function DemandOrderAutoComplete({
       disabled={disabled}
       allowClear
       style={{ width: 240 }}
-      placeholder={partId == null ? "先选择 PN 后可按需求单候选" : "本项目需求单号，可输入搜索"}
+      placeholder={partId == null ? "先选择 PN 后可按需求单候选" : "可搜需求单号或 PN"}
       notFoundContent={partId == null ? "先选择 PN 后可按需求单候选" : "无匹配需求单，可手输单号"}
       options={options.map((row) => ({ value: row.order_no, label: demandOptionLabel(row) }))}
       onSearch={onSearch}
@@ -947,6 +962,7 @@ export default function ManualSiteIssueSection({
                         ariaLabel={`第 ${index + 1} 行关联需求单`}
                         value={line.demandOrderNo}
                         disabled={formLocked}
+                        autoLink={editing == null}
                         onValueChange={(next) => updateLine(line.key, { demandOrderNo: next })}
                         onCandidateChange={recordDemandCandidate}
                       />
