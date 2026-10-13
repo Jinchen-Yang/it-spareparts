@@ -21,6 +21,14 @@ vi.mock("../../api/imports", () => ({
   previewExpenseVoid: (...args: unknown[]) => previewExpenseVoid(...args),
 }));
 
+vi.mock("../../components/maintenance/MaintenanceBatchTransferButton", () => ({
+  default: ({ receiptOnly, onApplied }: { receiptOnly?: boolean; onApplied: () => void }) => (
+    <button type="button" onClick={onApplied}>
+      {receiptOnly ? "维保收款单导入" : "批量导入 / 下载"}
+    </button>
+  ),
+}));
+
 import ImportPage from "../ImportPage";
 
 const cleanResult: ImportPrecheckResult = {
@@ -101,8 +109,33 @@ function stage(file = new File(["xlsx"], "采购.xlsx")) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   get.mockResolvedValue({ data: [] });
   precheckImportFiles.mockResolvedValue(cleanResult);
+});
+
+describe("维保收款单独立入口", () => {
+  it.each([
+    ["admin", {}, true],
+    ["manager", { page_maintenance: true, action_maintenance_ledger_import: true, data_profit: true }, true],
+    ["manager", { page_maintenance: true, action_maintenance_ledger_import: true }, false],
+    ["manager", { page_maintenance: true, data_profit: true }, false],
+    ["manager", { action_maintenance_ledger_import: true, data_profit: true }, false],
+  ])("按角色和完整权限显示入口：%s %j", (role, permissions, visible) => {
+    localStorage.setItem("role", role);
+    localStorage.setItem("permissions", JSON.stringify(permissions));
+    render(<ImportPage />);
+    expect(!!screen.queryByRole("button", { name: "维保收款单导入" })).toBe(visible);
+  });
+
+  it("回款导入完成会刷新导入记录", async () => {
+    localStorage.setItem("role", "admin");
+    render(<ImportPage />);
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "维保收款单导入" }));
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    expect(get).toHaveBeenLastCalledWith("/import/batches");
+  });
 });
 
 afterEach(() => {

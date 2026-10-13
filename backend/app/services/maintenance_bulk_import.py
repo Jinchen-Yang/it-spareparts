@@ -54,8 +54,10 @@ from app.services import maintenance_project_identity
 from app.services import maintenance_project_operations as operations
 
 PROTOCOL_VERSION = "maintenance-bulk-import-v1"
-MAX_PREVIEW_BYTES = 16 * 1024 * 1024
+MAX_PREVIEW_BYTES = 32 * 1024 * 1024
 MAX_PREVIEW_ROWS = 50_000
+MAX_SOURCE_ROWS = 250_000
+STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024
 HEADER_SCAN_ROWS = 20
 MONEY_LIMIT = Decimal("1000000000000")
 SUPPORTED_BATCH_TYPES = ("maint_contract", "maint_receipt")
@@ -365,7 +367,64 @@ class HeaderAdapter:
         return stable_hits * 100 + len(indexes), indexes, matches
 
 
+def _detect_streamed(data: bytes) -> tuple[FormAdapter, DetectedSheet]:
+    from app.services.maintenance_import_streaming import (
+        StreamingWorkbookError, detect_streaming,
+    )
+    try:
+        adapter, sheet = detect_streaming(
+            data, _ADAPTERS, header_scan_rows=HEADER_SCAN_ROWS,
+            max_source_rows=MAX_SOURCE_ROWS,
+        )
+    except StreamingWorkbookError as exc:
+        raise BulkImportInvalid(str(exc), issues=exc.issues) from exc
+    if adapter.key != "receipt_collection" and len(sheet["rows"]) > MAX_PREVIEW_ROWS:
+        raise BulkImportInvalid(f"数据行超过安全上限 {MAX_PREVIEW_ROWS}")
+    return adapter, DetectedSheet(**sheet)
+
+
+def _has_receipt_header(data: bytes) -> bool:
+    """Probe only the header band before loading small receipts into memory.
+
+    Compression size does not tell us how many company-wide receipt rows will
+    need filtering.  Fixed columns also avoid the streaming reader truncating
+    a malformed A1-dimension sheet whose cells occur in reverse column order.
+    Full adapter selection and ambiguity checks remain in the actual reader.
+    """
+    workbook = None
+    try:
+        workbook = load_workbook(
+            io.BytesIO(data), read_only=True, data_only=True, keep_links=False,
+        )
+        receipt = _ADAPTERS["receipt_collection"]
+        for sheet in workbook.worksheets:
+            if sheet.sheet_state != "visible" or sheet.title.lower().startswith("hidden_"):
+                continue
+            sheet.reset_dimensions()
+            headers = [
+                tuple(_text(value) for value in values)
+                for values in sheet.iter_rows(
+                    min_row=1, max_row=HEADER_SCAN_ROWS, max_col=256,
+                    values_only=True,
+                )
+            ]
+            for index, captions in enumerate(headers):
+                systems = headers[index - 1] if index else None
+                if receipt.recognize(captions, systems) is not None:
+                    return True
+    except Exception:  # noqa: BLE001
+        # Keep the ordinary reader's existing compatibility and error message
+        # for non-receipt workbooks or a header this bounded probe cannot read.
+        return False
+    finally:
+        if workbook is not None:
+            workbook.close()
+    return False
+
+
 def _detect(data: bytes) -> tuple[FormAdapter, DetectedSheet]:
+    if len(data) > STREAM_THRESHOLD_BYTES or _has_receipt_header(data):
+        return _detect_streamed(data)
     try:
         # Some Tritium exports have malformed worksheet dimensions/cell order:
         # openpyxl's streaming reader then exposes only column A although the
@@ -449,6 +508,11 @@ def _detect(data: bytes) -> tuple[FormAdapter, DetectedSheet]:
         indexes,
         matches,
     ) = best[0]
+    if adapter.key == "receipt_collection":
+        # Unusual header layouts missed by the cheap probe must still use the
+        # same source-row limit as larger receipts, never the preview-row cap.
+        workbook.close()
+        return _detect_streamed(data)
     sheet = workbook[sheet_name]
     merged_fill = _expand_merged_cells(
         sheet, header_row=header_row, adapter=adapter, indexes=indexes
@@ -1848,6 +1912,7 @@ class ReceiptCollectionAdapter(HeaderAdapter):
     key = "receipt_collection"
     file_type = "maint_receipt"
     label = "收款单累计实收"
+    maintenance_business_types = frozenset({"整体维保", "备件维保", "算力运维"})
     aliases = {
         "order_no": ("收款明细.销售订单(必填)", "收款明细.销售订单", "销售订单", "合同编号"),
         "receipt_no": ("收款单号(必填)", "收款单号", "凭证号"),
@@ -1855,7 +1920,9 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         "gross_amount": ("收款明细.销售收款金额(必填)", "销售收款金额"),
         "discount_amount": ("收款明细.优惠金额", "优惠金额"),
         "actual_amount": ("收款明细.实收金额", "实收金额", "到账金额"),
-        "remark": ("收款明细.备注", "备注"),
+        "remark": ("收款明细.备注", "明细备注", "备注"),
+        "document_remark": ("备注", "收款备注", "收款单备注", "主表备注"),
+        "business_type": ("收款明细.业务类型", "业务类型", "业务类型#"),
         "receipt_status": ("数据状态", "收款状态", "状态"),
     }
     system_aliases = {
@@ -1866,11 +1933,37 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         "discount_amount": ("F0000061",),
         "actual_amount": ("F0000062",),
         "remark": ("F0000037",),
+        "document_remark": ("F0000007",),
+        "business_type": ("F0000067",),
         "receipt_status": ("Status",),
     }
     required_fields = frozenset({"order_no", "receipt_no", "receipt_date", "actual_amount"})
     # 逐行金额：合并即拒绝（一笔钱不能铺成多笔）。主表汇总列没被映射，不受影响。
     merge_guarded_fields = frozenset({"actual_amount", "gross_amount", "discount_amount"})
+
+    def recognize(
+        self,
+        headers: tuple[str, ...],
+        system_headers: tuple[str, ...] | None = None,
+    ) -> tuple[int, dict[str, int], dict[str, dict]] | None:
+        result = super().recognize(headers, system_headers)
+        if result is None:
+            return None
+        score, indexes, matches = result
+        # 无系统字段行的老模板同时有“备注”和“收款明细.备注”时，
+        # 明确的子表列优先；只有一个“备注”的更老模板仍按原语义读取。
+        if "remark" not in indexes:
+            detail = [i for i, label in enumerate(headers)
+                      if _header(label) in {_header("收款明细.备注"), _header("明细备注")}]
+            if len(detail) == 1:
+                indexes["remark"] = detail[0]
+                matches["remark"] = {
+                    "source_column": headers[detail[0]],
+                    "system_field": None,
+                    "confidence": "alias",
+                }
+                score += 1
+        return score, indexes, matches
 
     @staticmethod
     def _refs(values: list[tuple[date, str]]) -> str:
@@ -1878,34 +1971,117 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         joined = ",".join(refs)
         return joined if len(joined) <= 128 else f"{refs[0]}等{len(refs)}笔"
 
+    @staticmethod
+    def _source_remark(sheet: DetectedSheet, values: tuple[Any, ...]) -> str:
+        document = _text(_value(sheet, values, "document_remark"))
+        detail = _text(_value(sheet, values, "remark"))
+        if document == detail:
+            return document
+        if document and detail:
+            return f"主表备注：{document}\n明细备注：{detail}"
+        return document or detail
+
+    @staticmethod
+    def _financial_values(
+        sheet: DetectedSheet, values: tuple[Any, ...]
+    ) -> tuple[date, Decimal, Decimal | None, Decimal]:
+        receipt_date = _date(_value(sheet, values, "receipt_date"), label="收款日期")
+        actual = _decimal(_value(sheet, values, "actual_amount"), label="实收金额")
+        gross = _optional_decimal(_value(sheet, values, "gross_amount"), label="销售收款金额")
+        discount = _optional_decimal(_value(sheet, values, "discount_amount"), label="优惠金额") or Decimal("0.00")
+        if gross is not None and abs((gross - discount) - actual) > Decimal("0.01"):
+            raise BulkImportInvalid("销售收款金额-优惠金额与实收金额不一致")
+        return receipt_date, actual, gross, discount
+
     def build_plan(self, db: Session, sheet: DetectedSheet) -> dict:
         all_contracts, safe_contracts = _contract_maps(db)
         source_rows: list[dict] = []
         hard_issues: list[dict] = []
         by_order: dict[str, list[dict]] = defaultdict(list)
         seen_keys: dict[tuple[str, str], tuple[date, Decimal, int]] = {}
+        # 全公司原件可以很大。先完整确定涉及维保的资金凭证，再裁剪展示；
+        # 被裁剪的非维保负数腿仍必须使同 SKD 的维保正数腿失败关闭。
+        maintenance_rows: set[int] = set()
+        unmatched_maintenance_rows: set[int] = set()
+        maintenance_receipts: set[str] = set()
+        for row_no, values in sheet.rows:
+            norm = normalize_order_no(_value(sheet, values, "order_no"))
+            business_type = _text(_value(sheet, values, "business_type"))
+            if all_contracts.get(norm) or business_type in self.maintenance_business_types:
+                maintenance_rows.add(row_no)
+                if not all_contracts.get(norm):
+                    unmatched_maintenance_rows.add(row_no)
+                receipt_no = _text(_value(sheet, values, "receipt_no"))
+                if receipt_no:
+                    maintenance_receipts.add(receipt_no)
+
+        ignored_count = ignored_without_order = ignored_unknown_amount = 0
+        ignored_amount = Decimal("0.00")
+        ignored_samples = 0
+        ignored_sample_limit = 100
+        peer_errors: dict[str, list[int]] = defaultdict(list)
+        peer_seen: dict[tuple[str, str], tuple[date, Decimal]] = {}
 
         for row_no, values in sheet.rows:
             upstream_status: str | None = None
             order_raw = _text(_value(sheet, values, "order_no"))
             receipt_no = _text(_value(sheet, values, "receipt_no"))
             norm = normalize_order_no(order_raw)
+            business_type = _text(_value(sheet, values, "business_type"))
             base = {
                 "row_no": row_no,
                 "business_key": f"{receipt_no}|{order_raw}",
                 "normalized_order_no": norm,
                 "receipt_no": receipt_no,
+                "business_type": business_type or None,
+                "scope_classification": (
+                    "maintenance" if all_contracts.get(norm)
+                    else "maintenance_unmatched" if row_no in unmatched_maintenance_rows
+                    else "other" if business_type else "unknown"
+                ),
                 "issues": [],
             }
-            # 归属先于校验（2026-09-08）：收款单导出是全公司的，实拍 298 行里 297 行是
-            # 备件销售 / 销售换货 / 租赁 / 整机销售。这些订单没有维保合同，本来就一分钱
-            # 都不会写进维保，却要先撞金额（退货负数）、状态、备注三道校验，报出一堆与
-            # 维保无关的硬错误，把真正该看的错误淹掉；「其他收款」那种有单号无订单的行
-            # 报的还是「销售订单号和收款单号不能为空」，与事实不符。
-            #
-            # 判定权威仍是**维保合同**而不是业务类型——业务类型只作分类、维保业务=是 才是
-            # 建项依据（2026-09-03 拍板，见 _is_explicit_maintenance_row）。这里只是把
-            # 已有的合同匹配提前，不新增任何按业务类型挡钱的规则。
+            if receipt_no in maintenance_receipts and not all_contracts.get(norm):
+                try:
+                    receipt_date, actual, _gross, _discount = self._financial_values(sheet, values)
+                    if "receipt_status" in sheet.field_indexes and _text(_value(sheet, values, "receipt_status")) != config.ACTIVE_STATUS:
+                        raise BulkImportInvalid("收款状态未生效")
+                    key = (norm, receipt_no)
+                    if key in peer_seen and peer_seen[key] != (receipt_date, actual):
+                        raise BulkImportInvalid("同一收款单与销售订单的金额/日期不一致")
+                    peer_seen[key] = (receipt_date, actual)
+                except BulkImportInvalid:
+                    peer_errors[receipt_no].append(row_no)
+            if row_no not in maintenance_rows:
+                ignored_count += 1
+                ignored_without_order += int(not norm)
+                # 这里只作排除项统计，绝不把这些金额送进台账。负数如实展示；
+                # 空值/非法值单列 unknown，不用 0 冒充金额完整。
+                try:
+                    raw_amount = _text(_value(sheet, values, "actual_amount"))
+                    amount = Decimal(raw_amount.replace(",", "").replace("￥", "").replace("¥", ""))
+                    if not amount.is_finite() or abs(amount) >= MONEY_LIMIT:
+                        raise InvalidOperation
+                    ignored_amount += amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                except (InvalidOperation, ValueError):
+                    ignored_unknown_amount += 1
+                if ignored_samples >= ignored_sample_limit:
+                    continue
+                ignored_samples += 1
+                base.update(
+                    action="unmatched",
+                    issues=[_row_issue(
+                        row_no,
+                        "project_not_found" if norm else "receipt_without_order",
+                        "销售订单未关联当前维保项目，本批跳过且不创建项目"
+                        if norm else "没有销售订单，无法归属维保合同，本批跳过",
+                        severity="warning",
+                    )],
+                )
+                source_rows.append(base)
+                continue
+
+            # 业务类型只决定是否保留待核对项，不替代维保合同，也不创建项目。
             if norm and norm not in safe_contracts and not all_contracts.get(norm):
                 base.update(
                     action="unmatched",
@@ -1945,29 +2121,16 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                     # （receipt_voided_upstream，走裁决）；台账已裁为 0 = 已知跳过；
                     # 台账从未见过的仍判无效（见下方 state == "voided" 分支）。
                     upstream_status = receipt_status
-                receipt_date = _date(_value(sheet, values, "receipt_date"), label="收款日期")
-                actual = _decimal(_value(sheet, values, "actual_amount"), label="实收金额")
-                gross = _optional_decimal(
-                    _value(sheet, values, "gross_amount"), label="销售收款金额"
-                )
-                discount = _optional_decimal(
-                    _value(sheet, values, "discount_amount"), label="优惠金额"
-                ) or Decimal("0.00")
-                if gross is not None and abs((gross - discount) - actual) > Decimal("0.01"):
-                    raise BulkImportInvalid("销售收款金额-优惠金额与实收金额不一致")
-                remark = _text(_value(sheet, values, "remark"))
-                risk_word = next(
-                    (
-                        word
-                        for word in ("坏账", "红冲", "冲销", "作废")
-                        if word in remark
-                    ),
-                    None,
-                )
-                if risk_word:
-                    raise BulkImportInvalid(
-                        f"备注命中“{risk_word}”，需要人工确认，不能自动累计"
-                    )
+                receipt_date, actual, gross, discount = self._financial_values(sheet, values)
+                remark = self._source_remark(sheet, values)
+                risk_words = [word for word in ("坏账", "红冲", "冲销", "作废") if word in remark]
+                if risk_words:
+                    base["issues"].append(_row_issue(
+                        row_no,
+                        "receipt_remark_annotation",
+                        f"第 {row_no} 行备注提到{'、'.join(risk_words)}；原文已保留，仍按实收金额核算，请核对",
+                        severity="warning",
+                    ))
             except BulkImportInvalid as exc:
                 issue = _row_issue(row_no, "invalid_receipt", str(exc))
                 base.update(action="error", issues=[issue])
@@ -2193,6 +2356,22 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 blocked_norms.add(peer)
                 if peer != norm:
                     blocking_receipts[peer].add(receipt_no)
+        for receipt_no, invalid_rows in peer_errors.items():
+            for norm in orders_by_receipt.get(receipt_no, ()):
+                if norm not in by_order:
+                    continue
+                blocked_norms.add(norm)
+                blocking_receipts[norm].add(receipt_no)
+                # 不复制非维保行的客户/金额；只把同凭证资金行不完整的事实带到
+                # 可见维保候选，保证展示筛选不会裁掉资金完整性校验。
+                for source in source_rows:
+                    if source.get("normalized_order_no") == norm:
+                        source.setdefault("issues", []).append(_row_issue(
+                            int(source["row_no"]),
+                            "receipt_peer_invalid",
+                            "同一收款单的其他业务明细存在金额、日期或状态问题"
+                            f"（原件第 {'、'.join(str(v) for v in invalid_rows[:10])} 行），本批整单不入账",
+                        ))
         blocked_operations: list[dict] = []
         for norm in sorted(blocked_norms):
             order_sources = [
@@ -2291,10 +2470,26 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 hard_issues=hard_issues,
                 previous_operators=previous_operators,
             )
+            for item in items:
+                month = date.fromisoformat(item["report_month"])
+                annotated = [
+                    row for row in receipts
+                    if _month_start(row["receipt_date"]) <= month
+                    and any(issue.get("code") == "receipt_remark_annotation" for issue in row["source"]["issues"])
+                ]
+                if annotated:
+                    item.setdefault("issues", []).append(_row_issue(
+                        int(item["row_no"]),
+                        "receipt_remark_annotation",
+                        f"累计涉及 {len(annotated)} 条带坏账/红冲等备注的收款"
+                        f"（原件第 {'、'.join(str(row['row_no']) for row in annotated[:10])} 行）；"
+                        "备注已保留，仍按实收金额核算，请核对",
+                        severity="warning",
+                    ))
             operations_plan.extend(items)
             contract_states[contract.project_contract_id] = state
 
-        return _finish_plan(
+        plan = _finish_plan(
             sheet,
             source_rows,
             operations_plan,
@@ -2312,6 +2507,19 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                     "conflicts": ledger_conflicts,
                 },
                 "contract_states": contract_states,
+                "source_filter": {
+                    "total_rows": len(sheet.rows),
+                    "maintenance_rows": len(maintenance_rows),
+                    "maintenance_unmatched_rows": len(unmatched_maintenance_rows),
+                    "ignored_nonmaintenance_rows": ignored_count,
+                    "ignored_without_order_rows": ignored_without_order,
+                    "ignored_amount": _jsonable(ignored_amount),
+                    "ignored_amount_unknown_count": ignored_unknown_amount,
+                    "ignored_amount_basis": "仅汇总可解析的非维保实收金额，不记入维保回款",
+                    "ignored_sample_rows": ignored_samples,
+                    "ignored_sample_limit": ignored_sample_limit,
+                    "ignored_samples_truncated": ignored_count > ignored_samples,
+                },
                 "source_warnings": (
                     [
                         {
@@ -2325,6 +2533,12 @@ class ReceiptCollectionAdapter(HeaderAdapter):
                 ),
             },
         )
+        plan["summary"]["source_rows"] = len(sheet.rows)
+        plan["summary"]["source_actions"]["unmatched"] = (
+            plan["summary"]["source_actions"].get("unmatched", 0)
+            + ignored_count - ignored_samples
+        )
+        return plan
 
     def _contract_operations(
         self,
@@ -4192,6 +4406,8 @@ def _public_receipt_rows(
         canonical: dict[str, Any] = {
             "receipt_key": source.get("business_key"),
             "sales_order_no": source.get("normalized_order_no"),
+            "business_type": source.get("business_type"),
+            "scope_classification": source.get("scope_classification"),
         }
         # 解析成功的收款行（已入账 / 台账冲突 / 整单阻断）带本文件的单号、日期、金额；
         # 台账冲突行另给 before = 台账现值，裁决界面按结构化字段对照，不解析提示文字。
@@ -4287,6 +4503,7 @@ def preview_transfer(
     *,
     operated_by: str,
     allowed_project_ids: set[str] | None = None,
+    import_kind: str = "all",
 ) -> dict:
     if not files or len(files) > MAX_TRANSFER_FILES:
         raise BulkImportInvalid(f"一次必须上传 1–{MAX_TRANSFER_FILES} 个文件")
@@ -4294,26 +4511,38 @@ def preview_transfer(
     if total_bytes > MAX_TRANSFER_TOTAL_BYTES:
         raise BulkImportInvalid("批量上传总大小超过 64 MiB")
     artifacts = [build_preview(db, data, filename) for filename, data in files]
-    _enforce_project_scope(
-        [
-            operation
-            for artifact in artifacts
-            for operation in artifact.plan.get("operations") or []
-        ],
-        allowed_project_ids,
+    if import_kind not in {"all", "receipt"}:
+        raise BulkImportInvalid("未知批量导入类型")
+    if import_kind == "receipt" and any(
+        artifact.adapter_key != "receipt_collection" for artifact in artifacts
+    ):
+        raise BulkImportInvalid("维保收款入口只接受收款单原件，请移除其他类型文件")
+    # Known/unchanged source rows may have no operation. They still expose
+    # ledger facts and drive the read-only instalment preview, so check their
+    # project before returning any financial information.
+    scope_targets = [
+        operation
+        for artifact in artifacts
+        for operation in artifact.plan.get("operations") or []
+    ]
+    scope_targets.extend(
+        source
+        for artifact in artifacts
+        for source in artifact.plan.get("rows") or []
+        if source.get("project_id")
     )
+    _enforce_project_scope(scope_targets, allowed_project_ids)
     hashes = [artifact.file_hash for artifact in artifacts]
     if len(hashes) != len(set(hashes)):
         raise BulkImportInvalid("同一批次包含内容完全相同的重复文件")
-    if sum(int(artifact.plan["summary"]["source_rows"]) for artifact in artifacts) > MAX_PREVIEW_ROWS:
-        raise BulkImportInvalid(f"多文件数据行合计超过安全上限 {MAX_PREVIEW_ROWS}")
+    if sum(int(artifact.plan["summary"]["source_rows"]) for artifact in artifacts) > MAX_SOURCE_ROWS:
+        raise BulkImportInvalid(f"多文件源数据行合计超过安全上限 {MAX_SOURCE_ROWS}")
 
     plans = []
     file_payloads = []
     project_ids = {
         str(item["project_id"])
-        for artifact in artifacts
-        for item in artifact.plan.get("operations") or []
+        for item in scope_targets
         if item.get("project_id")
     }
     project_names_by_id = _project_names_for_ids(db, project_ids)
@@ -4353,6 +4582,7 @@ def preview_transfer(
                     ),
                 ),
                 "mapping_conflicts": [],
+                "source_filter": plan.get("source_filter"),
             }
         )
         if artifact.adapter_key == "sales_contract_amount":
@@ -4435,6 +4665,16 @@ def preview_transfer(
     public_rows.sort(
         key=lambda row: (row["filename"], row["source_row"], row["row_key"])
     )
+    if len(public_rows) > MAX_PREVIEW_ROWS:
+        raise BulkImportInvalid(f"维保业务预览行数超过安全上限 {MAX_PREVIEW_ROWS}")
+    from app.services.maintenance_collection_progress import build_collection_progress
+
+    receipt_file_ids = {
+        item["file_id"] for item in file_payloads if item["import_kind"] == "receipt"
+    }
+    collection_progress = build_collection_progress(
+        db, [row for row in public_rows if row["file_id"] in receipt_file_ids],
+    )
     summary = _transfer_summary(public_rows)
     expires_at = datetime.now(timezone.utc) + TRANSFER_TOKEN_TTL
     data_version = _canonical_hash(
@@ -4449,6 +4689,7 @@ def preview_transfer(
     public_payload = {
         "schema_version": TRANSFER_SCHEMA_VERSION,
         "files": file_payloads,
+        "collection_progress": collection_progress,
         "rows": public_rows,
         "summary": summary,
         "can_apply": summary["ready"] > 0,

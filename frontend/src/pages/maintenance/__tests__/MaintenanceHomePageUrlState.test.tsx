@@ -33,7 +33,11 @@ vi.mock("../../../components/maintenance/MaintenanceProjectExportButton", () => 
 }));
 
 vi.mock("../../../components/maintenance/MaintenanceBatchTransferButton", () => ({
-  default: () => <button type="button">批量导入 / 下载</button>,
+  default: ({ receiptOnly, onApplied }: { receiptOnly?: boolean; onApplied: () => void }) => (
+    <button type="button" onClick={onApplied}>
+      {receiptOnly ? "维保收款单导入" : "批量导入 / 下载"}
+    </button>
+  ),
 }));
 
 import MaintenanceHomePage from "../MaintenanceHomePage";
@@ -124,6 +128,30 @@ function renderWall(initialPath = "/maintenance") {
     </MemoryRouter>,
   );
 }
+
+describe("维保主页收款入口", () => {
+  it.each([
+    ["admin", {}, true],
+    ["manager", { page_maintenance: true, action_maintenance_ledger_import: true, data_profit: true }, true],
+    ["manager", { page_maintenance: true, action_maintenance_ledger_import: true }, false],
+    ["manager", { page_maintenance: true, data_profit: true }, false],
+    ["manager", { action_maintenance_ledger_import: true, data_profit: true }, false],
+  ])("按角色和完整权限显示入口：%s %j", async (role, permissions, visible) => {
+    localStorage.setItem("role", role);
+    localStorage.setItem("permissions", JSON.stringify(permissions));
+    renderWall();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    expect(!!screen.queryByRole("button", { name: "维保收款单导入" })).toBe(visible);
+  });
+
+  it("回款导入完成会刷新项目卡片", async () => {
+    localStorage.setItem("role", "admin");
+    renderWall();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "维保收款单导入" }));
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(2));
+  });
+});
 
 describe("维保主页 · 筛选 URL 化（v1.35）", () => {
   it("URL 直开恢复筛选：business_type/lifecycle=all 落到请求，q 走搜索端点并回填输入框", async () => {

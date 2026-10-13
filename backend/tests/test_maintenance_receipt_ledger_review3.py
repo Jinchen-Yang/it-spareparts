@@ -429,6 +429,7 @@ def test_conflict_and_known_rows_carry_structured_values_and_hints(db):
     assert conflict["canonical"] == {
         "receipt_key": f"SK-1|{ORDER_NO}", "sales_order_no": "20240101-0001",
         "receipt_no": "SK-1", "receipt_date": "2026-01-10", "actual_amount": "120.00",
+        "business_type": None, "scope_classification": "maintenance",
     }
     assert conflict["before"] == {
         "receipt_no": "SK-1", "receipt_date": "2026-01-10", "actual_amount": "100.00",

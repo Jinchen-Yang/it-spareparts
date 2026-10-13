@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.5";
+export const APP_VERSION = "1.36.6";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.6",
+    date: "2026-10-12",
+    items: [
+      "数据导入和维保主页新增维保收款单导入，可直接上传公司收款原件，自动匹配维保合同和项目",
+      "默认筛选维保及待归属内容，显示其他业务跳过数量；支持大文件和合并单元格",
+      "回款期次按累计到账计算，预览本次勾选对各期进度的影响，重复收款不会重复记账",
+    ],
+  },
   {
     version: "1.36.5",
     date: "2026-10-12",

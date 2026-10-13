@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { message } from "antd";
 
 const mocks = vi.hoisted(() => ({
   createReturnReceipt: vi.fn(),
@@ -16,6 +17,17 @@ import ReturnReceiptBatchEntry, {
   parseBatchText,
   validateLineConstraints,
 } from "../ReturnReceiptBatchEntry";
+
+beforeEach(() => {
+  // AntD 静态消息有独立 React root，不受 RTL cleanup 管理；只验证反馈调用，
+  // 避免通知关闭定时器在 jsdom 销毁后继续更新该 root。
+  vi.spyOn(message, "success").mockImplementation(() => (() => {}) as ReturnType<typeof message.success>);
+  vi.spyOn(message, "warning").mockImplementation(() => (() => {}) as ReturnType<typeof message.warning>);
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 /** 造一个“有服务端响应”的 HTTP 错误（明确失败，非响应丢失） */
 function httpError(status: number, detail: string) {
@@ -205,7 +217,6 @@ describe("ReturnReceiptBatchEntry", () => {
   beforeEach(() => {
     mocks.createReturnReceipt.mockReset();
   });
-  afterEach(() => cleanup());
 
   it("粘贴→预览→逐条登记→结果表（部分失败语义）", async () => {
     mocks.createReturnReceipt
@@ -223,7 +234,7 @@ describe("ReturnReceiptBatchEntry", () => {
     fireEvent.click(screen.getByRole("button", { name: "登记 2 条" }));
 
     await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByText("批量登记结束：成功 1 条，失败/未知 1 条")).toBeTruthy());
+    await waitFor(() => expect(message.warning).toHaveBeenCalledWith("批量登记结束：成功 1 条，失败/未知 1 条"));
     expect(screen.getByText("已登记")).toBeTruthy();
     expect(screen.getByText("失败")).toBeTruthy();
     const [args0, args1] = mocks.createReturnReceipt.mock.calls;
@@ -246,7 +257,7 @@ describe("ReturnReceiptBatchEntry", () => {
     expect(args1[1].qty).toBe(3);
     expect(args0[1].idempotency_key).not.toBe(args1[1].idempotency_key);
     await waitFor(() =>
-      expect(screen.getByText("批量登记完成：2 条")).toBeTruthy());
+      expect(message.success).toHaveBeenCalledWith("批量登记完成：2 条"));
   });
 
   it("纯数字 SN 的行按字符串提交（qty=SN 数，带幂等键）", async () => {
@@ -513,7 +524,6 @@ describe("ReturnReceiptBatchEntry 项目切换与卸载", () => {
   beforeEach(() => {
     mocks.createReturnReceipt.mockReset();
   });
-  afterEach(() => cleanup());
 
   it("提交在途时切换项目：旧回调作废不发后续行；P2 开始在途后 P1 迟到 resolve，P2 仍锁定无污染", async () => {
     // P1 两行：第一行挂起（在途），第二行不该发出

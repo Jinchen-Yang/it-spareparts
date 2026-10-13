@@ -21,7 +21,7 @@ from datetime import date
 from decimal import Decimal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -248,6 +248,7 @@ def transfer_options(
         "can_import": _can_import(ctx),
         "can_download": True,
         "max_files": bulk.MAX_TRANSFER_FILES,
+        "max_file_bytes": bulk.MAX_PREVIEW_BYTES,
         "accepted_extensions": [".xlsx"],
         "import_kinds": [
             {
@@ -289,6 +290,7 @@ def transfer_options(
 async def preview_transfer(
     response: Response,
     files: list[UploadFile] = File(...),
+    import_kind: str = Form("all"),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
@@ -308,6 +310,7 @@ async def preview_transfer(
             },
         )
     payloads: list[tuple[str, bytes]] = []
+    total_bytes = 0
     for file in files:
         filename = file.filename or ""
         if not filename.lower().endswith(".xlsx"):
@@ -317,6 +320,9 @@ async def preview_transfer(
             )
         try:
             data = await import_safety.read_limited(file, bulk.MAX_PREVIEW_BYTES)
+            total_bytes += len(data)
+            if total_bytes > bulk.MAX_TRANSFER_TOTAL_BYTES:
+                raise import_safety.UploadSafetyError("批量上传总大小超过 64 MiB")
             import_safety.validate_xlsx_zip(data, max_bytes=bulk.MAX_PREVIEW_BYTES)
         except import_safety.UploadSafetyError as exc:
             raise HTTPException(
@@ -328,7 +334,7 @@ async def preview_transfer(
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
     record_access_log(
         ctx,
-        "maintenance_project_batch_preview",
+        "maintenance_batch_preview",
         "maintenance",
         {
             "file_count": len(payloads),
@@ -337,11 +343,13 @@ async def preview_transfer(
         },
     )
     try:
-        return bulk.preview_transfer(
+        return await import_safety.parse_in_threadpool(
+            bulk.preview_transfer,
             db,
             payloads,
             operated_by=operator,
             allowed_project_ids=allowed_project_ids,
+            import_kind=import_kind,
         )
     except bulk.BulkImportScopeDenied as exc:
         db.rollback()
@@ -586,7 +594,7 @@ def download_transfer(
         )
     record_access_log(
         ctx,
-        "maintenance_project_batch_download",
+        "maintenance_batch_download",
         "maintenance",
         {"forms": body.forms, "field_count": len(body.fields)},
     )
