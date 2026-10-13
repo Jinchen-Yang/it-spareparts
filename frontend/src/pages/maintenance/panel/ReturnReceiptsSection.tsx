@@ -134,6 +134,14 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [demandError, setDemandError] = useState<string | null>(null);
   const [demandLoading, setDemandLoading] = useState(false);
   const [targetProject, setTargetProject] = useState(projectId);
+  // 防抖回调读当前目标项目的引用，避免 300ms 窗口内切项目/换弹窗后陈旧闭包
+  // 用旧项目发请求覆盖新上下文（PR #363 评审 P2）。
+  const targetProjectRef = useRef(projectId);
+  const switchTargetProject = (next: string) => {
+    if (demandSearchTimer.current) clearTimeout(demandSearchTimer.current);
+    targetProjectRef.current = next;
+    setTargetProject(next);
+  };
   const [projects, setProjects] = useState<{ value: string; label: string }[]>([]);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -255,7 +263,6 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   useEffect(() => {
     setPage(1);
     setIncludeVoided(false);
-    setTargetProject(projectId);
     setModalOpen(false);
     setEditing(null);
     setAuditTarget(null);
@@ -266,6 +273,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     setDemandFilter(undefined);
     setSelectedIds([]);
     setPnMatchedDemands(null);
+    switchTargetProject(projectId);
     filters.current = {};
     void loadDemands(projectId);
     void load(1, false);
@@ -355,7 +363,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     resetPnSuggestion();
     form.resetFields();
     form.setFieldsValue({ project_id: projectId });
-    setTargetProject(projectId);
+    switchTargetProject(projectId);
     createAttempt.current = null;
     void loadDemands(projectId);
     setModalOpen(true);
@@ -371,7 +379,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     });
     // 编辑回填的 PN 不主动拉建议（未经过 PartPicker onChange）；清掉上一张单据残留的建议
     resetPnSuggestion();
-    setTargetProject(receipt.project_id);
+    switchTargetProject(receipt.project_id);
     void loadDemands(receipt.project_id);
     void loadProjects();
     form.setFieldsValue({
@@ -809,7 +817,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         <Form form={form} layout="vertical" disabled={submitting}>
           <Form.Item name="project_id" label={editing ? "项目（转移需同时具备原项目和目标项目修改权限）" : "项目（当前项目）"} rules={[{ required: true, message: "请选择项目" }]}>
             <Select disabled={!editing} showSearch optionFilterProp="label" options={projects.some((item) => item.value === projectId) ? projects : [{ value: projectId, label: "当前项目" }, ...projects]} onChange={(value: string) => {
-              form.setFieldValue("wbdd_no", null); setTargetProject(value); void loadDemands(value); void loadPnMatchedDemands(value, pickedPart?.part_id ?? null);
+              form.setFieldValue("wbdd_no", null); switchTargetProject(value); void loadDemands(value); void loadPnMatchedDemands(value, pickedPart?.part_id ?? null);
             }} />
           </Form.Item>
           {editing && projectError ? <Alert type="error" message={projectError} action={<Button size="small" onClick={() => { void loadProjects(); }}>重试加载项目</Button>} /> : null}
@@ -824,11 +832,12 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
               filterOption={false}
               onSearch={(text) => {
                 // 2026-10-13：服务端搜索——q 同时匹配单号与单内 PN 文本，直接打
-                // PN 也能搜出需求单；清空搜索词回全量。300ms 防抖，demandSeq 防竞态。
+                // PN 也能搜出需求单；清空搜索词回全量。300ms 防抖读 targetProjectRef
+                // 防陈旧闭包，切换项目/重开弹窗时由 switchTargetProject 清定时器。
                 if (demandSearchTimer.current) clearTimeout(demandSearchTimer.current);
                 const q = text.trim();
                 demandSearchTimer.current = setTimeout(() => {
-                  void loadDemands(targetProject, q || undefined);
+                  void loadDemands(targetProjectRef.current, q || undefined);
                 }, 300);
               }}
               placeholder={demands.length ? "选择或搜索需求单（可搜单号 / PN）" : "本项目暂无可选需求单"}

@@ -36,7 +36,6 @@ from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_project_procurement as procurement
 from app.services import maintenance_return_receipts as receipts
-from app.services.maintenance_order_contact import order_contact
 
 
 operations_beta_router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
@@ -713,7 +712,16 @@ def site_issue_demand_candidates(
                 "receiver_phone": None,
             }
         else:
-            contact = order_contact(order, ctx)
+            # 2026-10-13 裁定（0004 补记）：领用地址=需求单联系地址，本端点服务于
+            # 领用表单的地址自动带入，维保页+项目范围权限即可见，不再走
+            # order_contact 的 customer_info fail-closed 门禁（需求单搜索页各自的
+            # 脱敏口径不变）。
+            contact = {
+                "contact_info_state": "visible",
+                "receiver_address": order.receiver_address,
+                "receiver": order.receiver,
+                "receiver_phone": order.receiver_phone,
+            }
         rows.append({**row, **contact})
     record_access_log(
         ctx,
