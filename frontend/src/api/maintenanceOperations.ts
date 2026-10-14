@@ -330,6 +330,8 @@ export interface SiteIssueDocument {
   issue_id: string;
   project_id: string;
   issue_no: string;
+  /** 展示号（LY-YYYYMMDD-NNNN）：LY-AUTO 自动单给可读号，其余等于 issue_no。 */
+  display_no?: string | null;
   issue_date: string;
   workflow_status: SiteIssueWorkflowStatus;
   /** 单据来源：如 direct_api / workbook / page_manual。 */

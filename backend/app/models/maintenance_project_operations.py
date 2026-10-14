@@ -277,6 +277,9 @@ class MaintenanceSiteIssue(Base):
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
     issue_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 人类可读展示号（LY-YYYYMMDD-NNNN）：仅覆盖 LY-AUTO 自动单的对外展示，
+    # 行身份、去重与唯一约束仍以 issue_no 为准（决策 0006）。
+    display_no: Mapped[str | None] = mapped_column(String(32))
     issue_date: Mapped[date] = mapped_column(Date, nullable=False)
     raw_status: Mapped[str] = mapped_column(String(64), nullable=False)
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -327,6 +330,10 @@ class MaintenanceSiteIssue(Base):
             name="ck_maintenance_site_issue_unmapped_unknown",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_site_issue_version"),
+        CheckConstraint(
+            "display_no IS NULL OR display_no ~ '^LY-[0-9]{8}-[0-9]{4,}$'",
+            name="ck_maintenance_site_issue_display_no_format",
+        ),
         UniqueConstraint("project_id", "issue_no", name="uq_maintenance_site_issue_project_no"),
         Index(
             "uq_maintenance_site_issue_v2_no",
@@ -335,12 +342,49 @@ class MaintenanceSiteIssue(Base):
             postgresql_where=text("source = 'site_issue_v2'"),
         ),
         Index(
+            "ux_maintenance_site_issue_display_no",
+            "display_no",
+            unique=True,
+            postgresql_where=text("display_no IS NOT NULL"),
+        ),
+        Index(
             "uq_maintenance_site_issue_idempotency",
             "idempotency_key",
             unique=True,
             postgresql_where=text("idempotency_key IS NOT NULL"),
         ),
         Index("ix_maintenance_site_issue_project_date", "project_id", "issue_date"),
+    )
+
+    @property
+    def display_no_effective(self) -> str:
+        """对外展示号：LY-AUTO 自动单且有可读号时展示后者，否则展示 issue_no。
+
+        用户后来给自动单改号后（issue_no 不再带 LY-AUTO 前缀）以用户号为准。
+        """
+        if self.display_no and (self.issue_no or "").startswith("LY-AUTO-"):
+            return self.display_no
+        return self.issue_no
+
+
+class MaintenanceSiteIssueDisplayCounter(Base):
+    """Per-day locked counter backing LY-YYYYMMDD-NNNN display numbers.
+
+    Allocation happens inside the apply transaction via
+    INSERT ... ON CONFLICT DO UPDATE ... RETURNING, so the row lock plus the
+    partial unique index on display_no together guarantee no reuse.
+    """
+
+    __tablename__ = "maintenance_site_issue_display_counter"
+
+    issue_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "last_sequence >= 1",
+            name="ck_maintenance_site_issue_display_counter_seq",
+        ),
     )
 
 

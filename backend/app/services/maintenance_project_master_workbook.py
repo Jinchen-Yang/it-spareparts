@@ -35,6 +35,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app import config
@@ -57,6 +58,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookOperation,
     MaintenanceSiteIssue,
+    MaintenanceSiteIssueDisplayCounter,
     MaintenanceSiteIssueLine,
 )
 from app.models.system import SysImportBatch
@@ -637,7 +639,7 @@ def _sheet_site(wb, db: Session, project_id: str) -> None:
     ).all()
     for line, issue in rows:
         ws.append([
-            issue.issue_no, issue.issue_date.isoformat() if issue.issue_date else "",
+            issue.display_no_effective, issue.issue_date.isoformat() if issue.issue_date else "",
             line.pn, line.serial_number or "", _num(line.quantity),
             "" if line.no_return is None else ("否" if line.no_return else "是"),
             "",
@@ -1113,6 +1115,9 @@ def _parse_site_flags(
         # cost provenance.
         if existing_line is None or existing_issue is None:
             raise WorkbookError("line_not_found", f"第 {row_no} 行领用事实已不存在")
+        if issue_no is not None and issue_no == existing_issue.display_no:
+            # 导出展示的是可读展示号（决策 0006）：不是身份修改。
+            issue_no = None
         requested_no = issue_no or existing_issue.issue_no
         requested_date = parsed_date or existing_issue.issue_date
         requested_pn = pn or existing_line.pn
@@ -2806,7 +2811,7 @@ def _v2_site_row_values(line, issue, details=None) -> dict[str, object]:
     state = requirement["requirement_status"] if requirement else (
         "exempt" if line.no_return is True else "required" if line.no_return is False else "pending_category")
     return {
-        "领用单号": issue.issue_no,
+        "领用单号": issue.display_no_effective,
         "领用日期": issue.issue_date,
         "PN": line.pn,
         "SN": line.serial_number or "",
@@ -2825,6 +2830,19 @@ def _v2_site_row_values(line, issue, details=None) -> dict[str, object]:
         "领用地址": issue.site_location or "",
         "地址操作": "",
     }
+
+
+def _v2_site_identity_values(line, issue, details=None) -> dict[str, object]:
+    """06 一行的**身份口径**值：领用单号恒取 issue_no（hash 身份）。
+
+    决策 0006：导出单元格展示可读号，但 replay 比对、99_元数据 base_hashes
+    与删行守卫必须钉在不可变身份上——否则旧版（hash 号）导出的在途文件一上传
+    就会因展示列变化被误判「服务端该行已变」。display_no 分配后永不变更，
+    身份口径下新旧文件同一把尺子。
+    """
+    values = _v2_site_row_values(line, issue, details)
+    values["领用单号"] = issue.issue_no
+    return values
 
 
 def _v2_site_void_audit(
@@ -2867,7 +2885,10 @@ def _v2_note_voided_site_row(
         voided_at.astimezone(BUSINESS_TZ).strftime("%Y-%m-%d %H:%M")
         if voided_at else "此前"
     )
-    label = issue_no or issue.issue_no
+    # 回执面向用户：拿到的是 hash 身份号时换可读展示号（决策 0006）。
+    label = issue_no
+    if label is None or label == issue.issue_no:
+        label = issue.display_no_effective
     merge.record_voided_row(
         sheet="06_领用返还", row_no=row_no, row_label=label,
         entity_id=entity_id, voided_by=voided_by, voided_at=voided_at,
@@ -2898,7 +2919,8 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
             sheet="06_领用返还", entity_id=line.issue_line_id,
             values={name: values.get(name) for name in (*V2_SITE_ADDRESS_GUARD_FIELDS, "应返数量", "返还状态", "返还单号")})
         base_hashes[str(line.issue_line_id)] = _v2_row_base_hash(
-            values, V2_SITE_BASE_FIELDS)
+            _v2_site_identity_values(line, issue, details.get(line.issue_line_id)),
+            V2_SITE_BASE_FIELDS)
         ws.append([values[name] for name in V2_SITE_HEADERS])
         # 用户输入的地址永远作为文本导出，避免以 = 开头的地点被当公式。
         if "领用地址" in V2_SITE_HEADERS:
@@ -3928,6 +3950,24 @@ def _v2_auto_site_no(project_id, export_id, raw_pn, issue_date, serial_number, d
     return _v2_auto_site_prefix(project_id, export_id) + digest
 
 
+def _v2_allocate_site_display_no(db: Session, issue_date: date) -> str:
+    """分配人类可读展示号 LY-YYYYMMDD-NNNN（决策 0006，仅在 apply 事务内调用）。
+
+    按日计数器行上的 INSERT .. ON CONFLICT DO UPDATE .. RETURNING 原子递增，
+    行锁 + display_no 部分唯一索引共同保证不重号；分配与领用单 INSERT 同事务，
+    整本回滚时一并撤销。apply 全程持有 DATA_CHANGE_ADVISORY_LOCK_KEY，天然串行；
+    将来若有其他分配路径，计数器行锁同样兜底。display_no 分配后永不变更。
+    """
+    stmt = pg_insert(MaintenanceSiteIssueDisplayCounter).values(
+        issue_date=issue_date, last_sequence=1,
+    ).on_conflict_do_update(
+        index_elements=[MaintenanceSiteIssueDisplayCounter.issue_date],
+        set_={"last_sequence": MaintenanceSiteIssueDisplayCounter.last_sequence + 1},
+    ).returning(MaintenanceSiteIssueDisplayCounter.last_sequence)
+    sequence = db.execute(stmt).scalar_one()
+    return f"LY-{issue_date:%Y%m%d}-{sequence:04d}"
+
+
 @dataclass(frozen=True)
 class _SiteAddressPatch:
     action: str = "keep"
@@ -4016,7 +4056,7 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
                                 f"06_领用返还第 {row_no} 行领用地址不能超过 256 字符")
         group = groups.setdefault(key, {"rows": [], "values": set(), "ops": set(),
                                         "issue": issue, "baseline": active_baselines.get(issue.issue_id, baseline) if issue else baseline,
-                                        "label": issue.issue_no if issue else issue_no or "自动编号领用单"})
+                                        "label": issue.display_no_effective if issue else issue_no or "自动编号领用单"})
         if not values and not ops:
             continue
         group["rows"].append(row_no)
@@ -4137,7 +4177,7 @@ def _v2_parse_site(
                                               serial_number, demand_no, quantity, flag,
                                               str(_cell(row, index, "备注") or "").strip(), occurrences)
                     generated = True
-                    merge.warnings.append(f"06_领用返还第 {row_no} 行已生成领用编号 {issue_no}"
+                    merge.warnings.append(f"06_领用返还第 {row_no} 行已自动登记领用，单号由系统在导入时分配，导入后可在总表/面板查看"
                                           + (f"，关联需求单 {demand_no}" if demand_no else ""))
             identity = "|".join([project_id, issue_no, pn, serial_number or ""])
             raw_id = f"manual-site:{hashlib.sha1(identity.encode('utf-8')).hexdigest()}"
@@ -4176,7 +4216,7 @@ def _v2_parse_site(
                         "是否应返还": flag, "备注": str(_cell(row, index, "备注") or "").strip(),
                     }
                     if (_v2_row_base_hash(replay_values, V2_SITE_BASE_FIELDS)
-                            != _v2_row_base_hash(_v2_site_row_values(existing_line, existing_issue), V2_SITE_BASE_FIELDS)
+                            != _v2_row_base_hash(_v2_site_identity_values(existing_line, existing_issue), V2_SITE_BASE_FIELDS)
                             or (generated and existing_line.demand_order_no != demand_no)
                             or (address_patch.action != "keep" and (address_patch.value or "") != (existing_issue.site_location or ""))):
                         raise WorkbookError("stale_site_replay", f"第 {row_no} 行与已入库领用记录不同，请重新下载总表，保留实体ID后修改；新增领用请使用新行身份")
@@ -4234,6 +4274,9 @@ def _v2_parse_site(
             issue = db.get(MaintenanceSiteIssue, existing_line.issue_id)
             if issue is None or issue.project_id != project_id:
                 raise WorkbookError("project_mismatch", f"第 {row_no} 行领用事实不属于本项目")
+            if issue_no is not None and issue_no == issue.display_no:
+                # 导出单号列展示的是可读展示号：不是用户改号，回写 hash 身份（决策 0006）。
+                issue_no = issue.issue_no
             if "关联需求单号" in index and str(_cell(row, index, "关联需求单号") or "").strip() != (existing_line.demand_order_no or ""):
                 raise WorkbookError("readonly_field_changed", f"第 {row_no} 行关联需求单号为只读来源，请重新下载")
             issue_id = existing_line.issue_id
@@ -4293,6 +4336,10 @@ def _v2_parse_site(
             # 只留序列值（#321）。
             row = merged_row
             issue_no = str(_cell(row, index, "领用单号") or "").strip() or None
+            if issue_no is not None and issue_no == issue.display_no:
+                # rebase 会把服务端现值（可读展示号）写进未触碰的单号列——
+                # 展示口径不是改号，同样回写身份号。
+                issue_no = issue.issue_no
             issue_date = _v2_date(_cell(row, index, "领用日期"), row_no=row_no,
                                   label="领用", epoch=ws.parent.epoch)
             pn = str(_cell(row, index, "PN") or "").strip() or None
@@ -4302,7 +4349,8 @@ def _v2_parse_site(
             flag = str(_cell(row, index, "是否应返还") or "").strip()
             merge.guard(sheet=V2_SHEET_SITE, entity_id=raw_id,
                         row_label=str(server_values.get("领用单号") or raw_id),
-                        values=server_values, fields=(V2_SITE_ADDRESS_GUARD_FIELDS
+                        values=_v2_site_identity_values(existing_line, issue),
+                        fields=(V2_SITE_ADDRESS_GUARD_FIELDS
                             if address_patch.action != "keep" else V2_SITE_BASE_FIELDS))
             if pn is not None and pn != existing_line.pn:
                 part = _exact_part_for_pn(db, pn)
@@ -5333,7 +5381,7 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
             issue = issues.get(line.issue_id) if line is not None else None
             fresh_by_key[(guard.sheet, guard.entity_id)] = (
                 None if line is None or issue is None
-                else (_v2_site_row_values(line, issue), V2_SITE_BASE_FIELDS)
+                else (_v2_site_identity_values(line, issue), V2_SITE_BASE_FIELDS)
             )
 
     receipt_guards = by_sheet.get(V2_SHEET_RECEIPTS, [])
@@ -5523,14 +5571,18 @@ def validate_project_master_v2(
             if (line_row is not None and line_row.is_active
                     and (issue_row is None
                          or issue_row.normalized_status != "void")):
-                values = _v2_site_row_values(line_row, issue_row) if issue_row else {}
+                # 删行守卫与导出 meta 同口径：领用单号取身份号（hash），
+                # 与旧版文件兼容；回执标签给用户看可读号。
+                values = _v2_site_identity_values(line_row, issue_row) if issue_row else {}
+                row_label = str(
+                    issue_row.display_no_effective if issue_row is not None else sid)
                 exported_hash = export_site_hashes.get(sid)
                 if (exported_hash is not None
                         and _v2_row_base_hash(values, V2_SITE_BASE_FIELDS)
                         != exported_hash):
                     if not merge.record_row_conflict(
                             sheet="06_领用返还",
-                            row_label=str(values.get("领用单号") or sid),
+                            row_label=row_label,
                             entity_id=sid, action="删行=作废（服务端该行已变）"):
                         continue
                 # 哈希吻合（没人动过）也要发指纹：那才是删行的常态路径
@@ -5538,7 +5590,7 @@ def validate_project_master_v2(
                 if values:
                     merge.guard(
                         sheet=V2_SHEET_SITE, entity_id=sid,
-                        row_label=str(values.get("领用单号") or sid),
+                        row_label=row_label,
                         values=values, fields=V2_SITE_BASE_FIELDS)
                 site_flags.append(SiteReturnFlag(
                     issue_line_id=sid, no_return=None, is_void=True))
@@ -6608,6 +6660,12 @@ def apply_project_master_v2(
                     issue_id=str(uuid4()),
                     project_id=plan.project_id,
                     issue_no=flag.issue_no,
+                    # LY-AUTO 自动单首次落库时分配可读展示号；用户单号不带展示号。
+                    # replay 永远命中上方 issue 查询，不会二次分配（决策 0006）。
+                    display_no=(
+                        _v2_allocate_site_display_no(db, flag.issue_date)
+                        if flag.issue_no.startswith("LY-AUTO-") else None
+                    ),
                     issue_date=flag.issue_date,
                     site_location=new_addresses.get(flag.issue_no),
                     raw_status="已确认",

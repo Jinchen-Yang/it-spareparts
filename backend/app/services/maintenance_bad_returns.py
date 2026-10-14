@@ -1026,6 +1026,7 @@ def search_return_obligations(
             or_(
                 MaintenanceReturnObligation.pn.icontains(search, autoescape=True),
                 MaintenanceSiteIssue.issue_no.icontains(search, autoescape=True),
+                MaintenanceSiteIssue.display_no.icontains(search, autoescape=True),
             )
         )
     total = int(
@@ -1042,7 +1043,10 @@ def search_return_obligations(
     )
     rows = list(
         db.execute(
-            select(MaintenanceReturnObligation, MaintenanceSiteIssue.issue_no)
+            # 展示口径（决策 0006）：LY-AUTO 自动单给可读展示号，其余给 issue_no。
+            select(MaintenanceReturnObligation,
+                   MaintenanceSiteIssue.issue_no,
+                   MaintenanceSiteIssue.display_no)
             .join(
                 MaintenanceSiteIssue,
                 MaintenanceSiteIssue.issue_id == MaintenanceReturnObligation.issue_id,
@@ -1057,14 +1061,14 @@ def search_return_obligations(
         )
     )
     quantities = _registered_quantities(
-        db, {row.obligation_id for row, _issue_no in rows}
+        db, {row.obligation_id for row, _no, _display in rows}
     )
     return {
         "project_id": project_id,
         "rows": [
             _obligation_dict(
                 row,
-                issue_no=issue_no,
+                issue_no=(display if display and (no or "").startswith("LY-AUTO-") else no),
                 registered_quantity=quantities.get(
                     row.obligation_id,
                     (Decimal("0"), Decimal("0")),
@@ -1074,7 +1078,7 @@ def search_return_obligations(
                     (Decimal("0"), Decimal("0")),
                 )[1],
             )
-            for row, issue_no in rows
+            for row, no, display in rows
         ],
         "total": total,
         "page": page,
