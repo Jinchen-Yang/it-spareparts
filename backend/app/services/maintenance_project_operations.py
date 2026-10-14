@@ -940,6 +940,9 @@ def site_issue_dict(
         "issue_id": row.issue_id,
         "project_id": row.project_id,
         "issue_no": row.issue_no,
+        # 对外展示号（决策 0006）：LY-AUTO 自动单给可读号，否则等于 issue_no。
+        # 前端展示一律 display_no || issue_no；写操作仍用 issue_no/issue_id。
+        "display_no": row.display_no_effective,
         "issue_date": row.issue_date.isoformat(),
         "workflow_status": row.normalized_status,
         "raw_status": row.raw_status,
@@ -2265,6 +2268,7 @@ def search_site_issues(
         filters.append(
             or_(
                 MaintenanceSiteIssue.issue_no.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.display_no.icontains(q, autoescape=True),
                 MaintenanceSiteIssue.receiver.icontains(q, autoescape=True),
                 MaintenanceSiteIssue.issued_by.icontains(q, autoescape=True),
                 MaintenanceSiteIssue.site_location.icontains(q, autoescape=True),

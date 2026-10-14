@@ -146,6 +146,9 @@ _TABLES = [
     "part_pool_price_policy", "part_pool_member", "part_pool",
     "f_part_inquiry", "part_substitute", "inventory",
     "maintenance_manual_cost_override",
+    # 展示号按日计数器（决策 0006）：无外键，TRUNCATE CASCADE 到不了，须显式清理，
+    # 否则上一用例分配过的水位会漏进下一用例的 LY-YYYYMMDD-NNNN 断言。
+    "maintenance_site_issue_display_counter",
     "maintenance_roundtrip_operation",
     "maintenance_demand_delete_event",
     "maintenance_demand_tombstone",

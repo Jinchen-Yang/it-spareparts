@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.36.7";
+export const APP_VERSION = "1.36.8";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.36.8",
+    date: "2026-10-15",
+    items: [
+      "工作簿自动登记的领用单新增人类可读展示号 LY-YYYYMMDD-NNNN：列表、详情、导出与回执显示可读号，用户填写的需求单号照旧展示",
+      "可读号在首次导入时按日顺序分配、终身不变；重复上传同一文件仍复用原号，不产生重复行",
+      "搜索与返还台账支持按可读号检索；内部身份与去重逻辑保持不变（决策 0006）",
+    ],
+  },
   {
     version: "1.36.7",
     date: "2026-10-13",

@@ -241,6 +241,25 @@ def test_confirm_projects_exact_category_evidence_and_incomplete_rate(db):
     assert unchanged_rows[disk.delivery_line_id]["classification"] == "exempt"
     assert unchanged_rows[disk.delivery_line_id]["category_major_snapshot"] == "硬盘"
 
+    # 决策 0006：LY-AUTO 自动单在返还义务目录展示可读号，且可按可读号搜索。
+    issue = db.get(MaintenanceSiteIssue, confirmed["issue_id"])
+    issue.issue_no = "LY-AUTO-" + "a" * 20 + "-" + "b" * 24
+    issue.display_no = "LY-20260101-0007"
+    db.commit()
+    shown = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "page": 1, "page_size": 20},
+    )
+    assert shown.status_code == 200, shown.text
+    assert {row["issue_no"] for row in shown.json()["rows"]} == {"LY-20260101-0007"}
+    found = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "q": "LY-20260101-0007",
+              "page": 1, "page_size": 20},
+    )
+    assert found.status_code == 200, found.text
+    assert len(found.json()["rows"]) == 3
+
 
 def test_correction_deactivates_replaced_obligation_without_double_counting(db):
     project = _project(db, project_id="project-bad-return-correction")

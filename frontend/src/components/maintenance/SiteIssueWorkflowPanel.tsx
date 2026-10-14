@@ -518,7 +518,7 @@ export default function SiteIssueWorkflowPanel({
                     <Card size="small" className="site-issue-document-card">
                       <Space direction="vertical" size={8} style={{ width: "100%" }}>
                         <Space wrap>
-                          <Text strong>{issue.issue_no}</Text>
+                          <Text strong>{issue.display_no || issue.issue_no}</Text>
                           <Tag color={state.color}>{state.label}</Tag>
                         </Space>
                         <Text type="secondary">{issue.issue_date}</Text>
@@ -775,7 +775,7 @@ export default function SiteIssueWorkflowPanel({
       </Modal>
 
       <Modal
-        title={voidTarget ? `作废 ${voidTarget.issue_no}` : "作废现场领用单"}
+        title={voidTarget ? `作废 ${voidTarget.display_no || voidTarget.issue_no}` : "作废现场领用单"}
         open={voidTarget != null}
         okText="确认作废"
         cancelText="取消"

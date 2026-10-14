@@ -245,7 +245,7 @@ def _site_issue_rows(db: Session, project_id: str) -> list[dict]:
                 status, return_no = linked
         rows.append(
             {
-                "现场领用单号": issue.issue_no,
+                "现场领用单号": issue.display_no_effective,
                 "领用日期": issue.issue_date.isoformat(),
                 "PN": line.pn,
                 "备件SN": (line.serial_number or "")[:64],

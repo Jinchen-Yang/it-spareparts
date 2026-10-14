@@ -185,7 +185,7 @@ export function SiteReturnTab({
         idempotency_key: voidAttempt.current.key,
         reason: voidReason.trim(),
       });
-      const issueNo = voidTarget.issue_no;
+      const issueNo = voidTarget.display_no || voidTarget.issue_no;
       setVoidTarget(null);
       setVoidReason("");
       if (await onChanged()) {
@@ -277,7 +277,7 @@ export function SiteReturnTab({
         pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: loadError ? "领用记录读取失败，请重新加载" : "本项目暂无维保领用记录" }}
         columns={[
-          { title: "领用单号", render: (_value, item) => raw(item.issue.issue_no) },
+          { title: "领用单号", render: (_value, item) => raw(item.issue.display_no || item.issue.issue_no) },
           { title: "领用日期", render: (_value, item) => raw(item.issue.issue_date) },
           { title: "领用地址", width: 220, render: (_value, item) => <SiteIssueAddress value={item.issue.site_location} showLabel={false} /> },
           {
@@ -337,7 +337,7 @@ export function SiteReturnTab({
       <Modal
         open={voidTarget !== null}
         title={voidTarget
-          ? `作废领用单 ${voidTarget.issue_no}（共 ${linesPerIssue.get(voidTarget.issue_id) ?? voidTarget.lines.length} 行）`
+          ? `作废领用单 ${voidTarget.display_no || voidTarget.issue_no}（共 ${linesPerIssue.get(voidTarget.issue_id) ?? voidTarget.lines.length} 行）`
           : ""}
         confirmLoading={voiding}
         okText="确认作废"
