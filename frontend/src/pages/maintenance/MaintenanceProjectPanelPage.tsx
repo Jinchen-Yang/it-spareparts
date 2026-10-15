@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -224,6 +224,11 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
     || !!row?.can_edit_master_workbook
     || !!project?.can_edit_master_workbook;
   const canManageProject = !!perms.action_maintenance_project_manage;
+  const canEditBasics = canManageProject && project?.is_active !== false && (
+    localStorage.getItem("role") === "admin"
+    || (!!perms.page_maintenance && !!perms.data_profit)
+  );
+  const editBasicsRef = useRef<{ open: () => void }>(null);
   // 验收清单导入 2026-08-22 起跟随维保页面权限（与 maintenancePermissions 同口径），
   // 不再看已停用的 action_maintenance_acceptance_checklist_import 旧键。
   const canImportChecklist = readMaintenanceCapabilities().canImportAcceptanceChecklist;
@@ -384,12 +389,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       result.status === "fulfilled" && result.value !== false);
   }, [loadProject, loadWorkspace]);
 
-  const refreshAfterChange = useCallback(async () => {
-    if (!(await refreshProject())) {
-      message.warning("操作已写入，但页面刷新失败；旧数据已失效，请点击重试。");
-    }
-  }, [refreshProject]);
-
   useEffect(() => {
     void loadProject();
     void loadWorkspace();
@@ -430,9 +429,11 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           {row?.is_archived ? <Tag>已归档</Tag> : null}
           {lifecycle ? <Tag>{LIFECYCLE_LABEL[lifecycle] ?? lifecycle}</Tag> : null}
           <EditBasicsButton
+            key={projectId}
+            ref={editBasicsRef}
             projectId={projectId}
-            disabled={!canManageProject}
-            onSaved={() => { void refreshAfterChange(); }}
+            disabled={!canEditBasics}
+            onSaved={refreshProject}
           />
           {operationsProject ? (
             <ProjectManagerAssignmentControl
@@ -483,6 +484,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
                 canAssign={canManageProject}
                 onAssigned={refreshProject}
                 registerRefresh={registerTabRefresh}
+                onEditBasics={canEditBasics ? () => editBasicsRef.current?.open() : undefined}
               />
             ),
           },
@@ -569,25 +571,32 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
 }
 
 /** 项目名旁的编辑入口：改名称、销售、期限与可见账号；负责人账号走独立 OCC 接口。 */
-function EditBasicsButton({
+const EditBasicsButton = forwardRef<{ open: () => void }, {
+  projectId: string;
+  disabled: boolean;
+  onSaved: () => Promise<boolean>;
+}>(function EditBasicsButton({
   projectId,
   disabled,
   onSaved,
-}: {
-  projectId: string;
-  disabled: boolean;
-  onSaved: () => void;
-}) {
+}, ref) {
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
   const salespersonEditedRef = useRef(false);
   const businessTypeEditedRef = useRef(false);
+  const noteEditedRef = useRef(false);
+  const requestSeq = useRef(0);
+
+  useEffect(() => () => { requestSeq.current += 1; }, []);
 
   const openModal = async () => {
+    if (disabled) return;
+    const seq = ++requestSeq.current;
     try {
       const resp = await getMaintenanceProject(projectId);
+      if (seq !== requestSeq.current) return;
       // 后端契约是 {project: {...}}（MaintenanceProjectOverview）
       const proj = resp.data.project;
       // Form 实例跨 Modal 开关持久存在；每次回显前清掉上一次编辑的值和
@@ -595,10 +604,12 @@ function EditBasicsButton({
       form.resetFields();
       salespersonEditedRef.current = false;
       businessTypeEditedRef.current = false;
+      noteEditedRef.current = false;
       form.setFieldsValue({
         display_name: proj.display_name,
         salesperson: proj.salesperson,
         business_type: proj.business_type?.trim() || "",
+        no_return_note: proj.no_return_note ?? "",
         version: proj.version,
         period:
           proj.period_from || proj.period_to
@@ -617,19 +628,30 @@ function EditBasicsButton({
         // 拉满 500（后端上限），超出极端规模再考虑远程搜索。
         const accountsResp = await searchMaintenanceManagerAccounts(
           { page: 1, page_size: 500 });
+        if (seq !== requestSeq.current) return;
         setAccounts(accountsResp.data.rows);
       } catch {
+        if (seq !== requestSeq.current) return;
         setAccounts([]);
       }
       setOpen(true);
     } catch (err) {
-      message.error(readError(err, "读取项目主档失败"));
+      if (seq === requestSeq.current) message.error(readError(err, "读取项目主档失败"));
     }
   };
+  useImperativeHandle(ref, () => ({ open: () => { void openModal(); } }));
 
   const submit = async () => {
-    const values = await form.validateFields();
-    const { period, salesperson, business_type, ...rest } = values as {
+    let values: Record<string, unknown>;
+    try {
+      values = await form.validateFields();
+    } catch {
+      // Form 已显示字段错误；不要把校验拒绝抛成未处理 Promise。
+      return;
+    }
+    if (disabled) return;
+    const seq = requestSeq.current;
+    const { period, salesperson, business_type, no_return_note, ...rest } = values as {
       period?: [Dayjs | null, Dayjs | null] | null;
     } & Record<string, unknown>;
     const payload = {
@@ -639,6 +661,10 @@ function EditBasicsButton({
         : {}),
       // 只提交用户明确修改的类型，保留未编辑的历史自由文本与旧接口缺字段。
       ...(businessTypeEditedRef.current ? { business_type: business_type ?? "" } : {}),
+      ...(noteEditedRef.current ? {
+        no_return_note: typeof no_return_note === "string" && no_return_note.trim()
+          ? no_return_note : null,
+      } : {}),
       // 期限整组提交（#39/#51）；清空即回 missing
       period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
       period_to: period?.[1] ? period[1].format("YYYY-MM-DD") : null,
@@ -650,14 +676,24 @@ function EditBasicsButton({
         projectId,
         payload as Parameters<typeof updateMaintenanceProject>[1],
       );
-      message.success("已保存");
-      setOpen(false);
-      onSaved();
     } catch (err) {
-      message.error(readError(err, "保存失败"));
+      if (seq === requestSeq.current) message.error(readError(err, "保存失败"));
+      return;
     } finally {
-      setSaving(false);
+      if (seq === requestSeq.current) setSaving(false);
     }
+    if (seq !== requestSeq.current) return;
+    setOpen(false);
+    // PATCH 已提交，读回回调拒绝不能将成功的写入误报为“保存失败”。
+    let refreshed = false;
+    try {
+      refreshed = await onSaved();
+    } catch {
+      // 下方独立报告刷新失败；不假定意外拒绝时旧快照已经失效。
+    }
+    if (seq !== requestSeq.current) return;
+    if (refreshed) message.success("已保存并刷新");
+    else message.warning("已保存，但页面刷新失败，请重试。");
   };
 
   return (
@@ -673,9 +709,12 @@ function EditBasicsButton({
       <Modal
         open={open}
         title="编辑项目基本信息"
-        onCancel={() => setOpen(false)}
+        onCancel={() => { if (!saving) setOpen(false); }}
         onOk={submit}
         confirmLoading={saving}
+        cancelButtonProps={{ disabled: saving }}
+        closable={!saving}
+        maskClosable={!saving}
         destroyOnHidden
       >
         <Form
@@ -688,6 +727,9 @@ function EditBasicsButton({
             if (Object.prototype.hasOwnProperty.call(changedValues, "business_type")) {
               businessTypeEditedRef.current = true;
             }
+            if (Object.prototype.hasOwnProperty.call(changedValues, "no_return_note")) {
+              noteEditedRef.current = true;
+            }
           }}
         >
           <Form.Item name="display_name" label="项目名称">
@@ -695,6 +737,17 @@ function EditBasicsButton({
           </Form.Item>
           <Form.Item name="salesperson" label="销售人员">
             <Input allowClear maxLength={64} placeholder="可手工填写或清空" />
+          </Form.Item>
+          <Form.Item
+            name="no_return_note"
+            label="免返标注"
+            extra="仅作提醒，返还要求以明细标记和规则为准。清空后显示未标注。"
+            rules={[{ validator: async (_, value: string | undefined) => {
+              if (Array.from(value ?? "").length > 2000) throw new Error("免返标注最多 2000 个字符");
+            } }]}
+          >
+            <Input.TextArea autoSize={{ minRows: 3, maxRows: 8 }} allowClear
+              showCount={{ formatter: ({ value }) => `${Array.from(value).length} / 2000` }} />
           </Form.Item>
           <Form.Item name="business_type" label="业务类型">
             <Select
@@ -740,6 +793,6 @@ function EditBasicsButton({
       </Modal>
     </>
   );
-}
+});
 
 export default MaintenanceProjectPanelPage;

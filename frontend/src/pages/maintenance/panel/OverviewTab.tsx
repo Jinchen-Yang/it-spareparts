@@ -41,6 +41,7 @@ export function OverviewTab({
   canAssign,
   onAssigned,
   registerRefresh,
+  onEditBasics,
 }: {
   projectId: string;
   row: BoardProjectRow | null;
@@ -51,6 +52,7 @@ export function OverviewTab({
   canAssign: boolean;
   onAssigned: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
+  onEditBasics?: () => void;
 }) {
   const [candidates, setCandidates] = useState<MaintenanceSourceOrderRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -176,6 +178,15 @@ export function OverviewTab({
             const lc = row?.lifecycle ?? project?.lifecycle_status;
             return lc ? LIFECYCLE_LABEL[lc] ?? lc : "—";
           })()}
+        </Descriptions.Item>
+        <Descriptions.Item label="免返标注" span={2}>
+          <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+            {project ? project.no_return_note || "未标注" : "暂不可用"}
+          </div>
+          <Text type="secondary">仅作提醒，返还要求以明细标记和规则为准。</Text>
+          {onEditBasics ? (
+            <Button type="link" size="small" onClick={onEditBasics}>编辑免返标注</Button>
+          ) : null}
         </Descriptions.Item>
       </Descriptions>
 

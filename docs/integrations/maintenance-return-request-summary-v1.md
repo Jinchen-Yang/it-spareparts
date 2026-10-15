@@ -4,7 +4,7 @@
 - 日期：2026-10-15。
 - 状态：**拟定，尚未实现**。Python 名称、DTO 和错误码是后续实现约束，不代表当前已有接口或已通过测试。
 - 决策：D-31（含第 8 款 2026-10-15 修订）；免返提醒沿用 D-32。
-- 版本：v1.1-draft（2026-10-15：NULL 需求数量按 0；全部为免返硬盘的单为 not_required 无需核对；免返硬盘从 N/R 剔除；同日补充行级显式免返 `line_no_return` 亦剔除）。
+- 版本：v1.1-draft（2026-10-15：NULL 需求数量按 0；方案 A——免返不剔除、本轮不发布 `return_status`，取代同日的剔除与 not_required 写法）。
 - 提供方：P1／S-A；消费方：P1 需求单列表、详情、录入候选和 P4／S-C 待返分析适配层。
 
 ## 依据与命名
@@ -51,14 +51,14 @@ def get_return_requests_outstanding_summary(
 | `pending_qty`（P） | 仅 `effective=true`、基数完整且 N>0 时为 `max(N-R,0)`，否则 `null` |
 | `remaining_qty` | 当前可操作且基数完整时与 P 相同；仅为容量展示，不能作为写授权令牌 |
 | `over_received_qty` | N/R 完整时为 `max(R-N,0)`，否则 `null`；不得截断 R |
-| `return_status` | 满足可核对条件时，R≥N 为 `returned`（已返），R<N 为 `not_returned`（未返）；部分仍未返；其余 `null` |
-| `basis_state` | `complete / not_required / incomplete / inactive / ownership_conflict`（`not_required`=无需核对，v1.1），是读取结果的完整性，不是持久业务状态 |
-| `reason_codes` | 原因数组，如 `all_exempt_disk`、`negative_demand_qty`、`zero_demand_qty`、`no_active_lines`、`inactive_order`、`ownership_conflict`、`undated_receipts` |
+| `return_status` | **v1.1 方案 A：本轮不发布**（不产出或恒为 `null`，界面不显示已返／未返）。后续发布时：R≥N 为 `returned`，R<N 为 `not_returned` |
+| `basis_state` | `complete / incomplete / inactive / ownership_conflict`，是读取结果的完整性，不是持久业务状态 |
+| `reason_codes` | 原因数组，如 `zero_demand_qty`、`negative_demand_qty`、`zero_demand_qty`、`no_active_lines`、`inactive_order`、`ownership_conflict`、`undated_receipts` |
 | `undated_receipt_qty` | 当前累计中业务日期缺失的收货数量；计入 R 并提示，缺日期本身不使当前累计失真 |
 
-没有收货且可完整核对时 R=`0.000`。**v1.1（金臣 2026-10-15）：需求数量 NULL 的明细按 0 计入 N**（与 D-35 PN 分析、旧 pn_ranking 及库存口径一致），不再因此置 N=`null`；非法负量或无有效明细时 N=`null`，不以头自报值或已知部分补齐。**无需核对（`not_required`，v1.1）**：有效单在剔除免返硬盘前 N>0、剔除后 N=0（即全部需求为免返硬盘）时，`basis_state=not_required`、`reason_codes` 含 `all_exempt_disk`，P/`return_status`/`over_received_qty` 为 `null`；不计入 `unknown_order_count`，不使 P4 快照标为不完整，界面显示“无需核对”。其他 N=0（非免返剔除所致）仍标不完整，不能自动已返。数量为 `Decimal | None`，JSON 一律十进制三位字符串或 `null`，不输出浮点数；该接口不提供金额。
+没有收货且可完整核对时 R=`0.000`。**v1.1（金臣 2026-10-15）：需求数量 NULL 的明细按 0 计入 N**（与 D-35 PN 分析、旧 pn_ranking 及库存口径一致），不再因此置 N=`null`；非法负量或无有效明细时 N=`null`，不以头自报值或已知部分补齐。N=0 仍标不完整，不能自动已返。数量为 `Decimal | None`，JSON 一律十进制三位字符串或 `null`，不输出浮点数；该接口不提供金额。
 
-**v1.1 修订（2026-10-15）：**免返硬盘不计入返还核对（金臣 2026-10-15 裁定）：领用单、返还单和手工录入备件中，按现行免返判定（与 `maintenance_bad_returns` 的 `exemption_source` 一致：行级显式免返 `line_no_return`、项目默认免返 `project_default_no_return` 或硬盘品类默认免返 `category_disk`，三种来源均剔除；行级显式“必须返”优先，仍计入）判为免返的硬盘，从需求单核对的下单量 N 与已收量 R 中同时剔除，不参与已返／未返判断与差额。项目免返提醒文本仍只作提醒，不驱动剔除。实现须在汇总中分别给出剔除的免返硬盘需求数量与收货数量，便于核对。免返**文本**仍仅独立提醒。P 是“按下单数量核对的差额”，不称为免返后的催收义务。卡墙与 PN 分析返还率仍为同期实际返还÷同期实际领用，与本契约的 N/P 分开，不能用 N 替代返还率分母。
+**v1.1 修订（2026-10-15，方案 A）：** 需求单只交付品类筛选、原始下单量 N、实收 R 与差额 `max(N-R,0)`；**免返件不从 N/R 剔除**（预购未用件必须返还并可追溯，按金臣原话），**本轮不发布任何返还状态**（不显示已返／未返、收齐／未收齐、无需核对或按免返调整的状态），也不发布依赖状态的 P4 待返结论。免返的完整优化（区分已用旧件与未用新件等）留待后续需求另定。免返文本和免返要求仅独立提醒，不抵扣 N/R/P。P 是“按下单数量核对的差额”，不称为免返后的催收义务。卡墙与 PN 分析返还率仍为同期实际返还÷同期实际领用，与本契约的 N/P 分开，不能用 N 替代返还率分母。
 
 跨项目历史收货与当前需求单归属不一致时，返回 `ownership_conflict`，`received_qty/pending_qty/remaining_qty/over_received_qty/undated_receipt_qty/return_status` 全部置 `null`，不得由衍生值泄露旧项目事实或形成确定结论。即使调用者可见当前项目，也不能把旧项目收货当成零量；无权旧项目的数量、名称不返回。容量写守卫仍须在完整稳定身份上检查异常，不能重新发满额度；本接口不自动迁移收货。
 
@@ -104,7 +104,7 @@ P4 对完整筛选集先取得所有每单结果，之后归组和分页。总�
       "pending_qty": "0.000",
       "remaining_qty": "0.000",
       "over_received_qty": "2.000",
-      "return_status": "returned",
+      "return_status": null,
       "basis_state": "complete",
       "reason_codes": [],
       "undated_receipt_qty": "0.000"
@@ -119,7 +119,7 @@ P4 对完整筛选集先取得所有每单结果，之后归组和分页。总�
       "pending_qty": "4.000",
       "remaining_qty": "4.000",
       "over_received_qty": "0.000",
-      "return_status": "not_returned",
+      "return_status": null,
       "basis_state": "complete",
       "reason_codes": ["undated_receipts"],
       "undated_receipt_qty": "1.000"
@@ -168,8 +168,8 @@ P4 对完整筛选集先取得所有每单结果，之后归组和分页。总�
 
 | 目标／角色与起点 | 操作 | 可观察预期 |
 |---|---|---|
-| P1/P4 同口径；有权核对人；上述 A/B 及未关联夹具 | 查列表、详情、项目和全集总计并翻页 | A 已返且超额 2，B 未返且差额 4，总差额 4；未关联独立 3；分页不改变合计 |
-| 整单筛选；有权分析人员；同单有多个 PN、退货与不同件况 | 只筛其中 PN／品类，再按需求日期窗口读取 | N 仍为整单 qty，R 含全部 PN/件况与窗口前收货，不扣退货；免返硬盘按 v1.1 从 N、R 中剔除 |
+| P1/P4 同口径；有权核对人；上述 A/B 及未关联夹具 | 查列表、详情、项目和全集总计并翻页 | A：N/R 齐全、超收 2、差额 0；B：差额 4；总差额 4；`return_status` 均不出现或为 `null`、界面无已返／未返文案（v1.1 方案 A）；未关联独立 3；分页不改变合计 |
+| 整单筛选；有权分析人员；同单有多个 PN、退货与不同件况 | 只筛其中 PN／品类，再按需求日期窗口读取 | N 仍为整单 qty，R 含全部 PN/件况与窗口前收货，不扣退货或免返 |
 | 未知和范围；仅新项目权限账号；缺量、零量、跨项目关联 | 读取完整筛选集及空 scope | 未知不补零，统计不完整；旧项目数量/名字不泄露；空 scope 零数据 |
 | 查询一致性；隔离真实 PostgreSQL 双连接；超过 500 单 | 一个连接提交完整改量/作废/补关联，另一个生成快照 | 总计、明细、未关联桶和各批来自同一版本；无 JOIN 放大和逐单查询 |
 | 既有指标保护；有权账号 | 原件减量形成超收后查旧卡墙/PN率与新摘要 | 收货不截断，新摘要超额；旧率仍实际返还÷实际领用，digest 不含富化字段 |
