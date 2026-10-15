@@ -480,6 +480,7 @@ def _assigned_lines(
     否则 03 行级分页切片跨页会重复/漏行（打平行的顺序由堆序决定，不稳定）。
     """
     from app.services import maintenance_demands
+    from app.services.query_filters import active_orders
 
     stmt = (
         select(FMaintenanceLine, FMaintenanceOrder,
@@ -494,6 +495,10 @@ def _assigned_lines(
         .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
                   FMaintenanceLine.line_no, FMaintenanceLine.id)
     )
+    # Source workflow status and the system tombstone are independent. Keep
+    # inactive source headers out of every effective project/export view even
+    # when the tombstone cutover remains disabled.
+    stmt = active_orders(stmt, FMaintenanceOrder)
     if project_id is not None:
         stmt = stmt.where(MaintenanceSourceOrderAssignment.project_id == project_id)
     if allowed_project_ids is not None:

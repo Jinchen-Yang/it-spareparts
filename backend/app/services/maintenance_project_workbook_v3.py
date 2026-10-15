@@ -41,6 +41,7 @@ from app.services import maintenance_periods
 from app.services import maintenance_project_operations as operations
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_workbook_export import safe_xlsx_text
+from app.services.query_filters import active_orders
 
 WORKBOOK_PROTOCOL_VERSION = "maintenance-project-workbook-v3.2"
 GRAY = PatternFill("solid", fgColor="D9D9D9")  # 只读/系统生成
@@ -155,27 +156,23 @@ def _expenses(
 
 
 def _wbdd_lines(db: Session, project_id: str) -> list[tuple[FMaintenanceOrder, FMaintenanceLine]]:
-    return list(
-        db.execute(
-            select(FMaintenanceOrder, FMaintenanceLine)
-            .join(
-                MaintenanceSourceOrderAssignment,
-                MaintenanceSourceOrderAssignment.source_order_id
-                == FMaintenanceOrder.raw_order_id,
-            )
-            .join(
-                FMaintenanceLine,
-                FMaintenanceLine.order_id == FMaintenanceOrder.id,
-            )
-            .where(
-                MaintenanceSourceOrderAssignment.project_id == project_id,
-                MaintenanceSourceOrderAssignment.is_active.is_(True),
-                # 2026-08-19：作废明细行不进工作簿 v3（#55）
-                FMaintenanceLine.is_active.is_(True),
-            )
-            .order_by(FMaintenanceOrder.order_date, FMaintenanceLine.line_no)
-        ).all()
+    stmt = (
+        select(FMaintenanceOrder, FMaintenanceLine)
+        .join(
+            MaintenanceSourceOrderAssignment,
+            MaintenanceSourceOrderAssignment.source_order_id
+            == FMaintenanceOrder.raw_order_id,
+        )
+        .join(FMaintenanceLine, FMaintenanceLine.order_id == FMaintenanceOrder.id)
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+            # 2026-08-19：作废明细行不进工作簿 v3（#55）
+            FMaintenanceLine.is_active.is_(True),
+        )
+        .order_by(FMaintenanceOrder.order_date, FMaintenanceLine.line_no)
     )
+    return list(db.execute(active_orders(stmt, FMaintenanceOrder)).all())
 
 
 def _obligation_map(

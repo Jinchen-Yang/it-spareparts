@@ -2362,7 +2362,7 @@ def project_orders(
 
     can_cost = can_view_cost(user_ctx)
     unassigned = project_id == UNASSIGNED_BUCKET
-    base = select(FMaintenanceOrder)
+    base = active_orders(select(FMaintenanceOrder), FMaintenanceOrder)
     base = _scope_stmt(
         base, project_id=None if unassigned else project_id, unassigned_only=unassigned
     )
