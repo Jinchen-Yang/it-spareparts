@@ -407,8 +407,14 @@ def download_project_master(
                 master.SHEET_SITE: master.V2_SHEET_SITE,
             }
             v2_wanted = tuple(v2_names.get(name, name) for name in wanted)
+            from app import permissions as _permissions
+            graph = (ctx.permissions if ctx.permissions is not None
+                     else _permissions.effective(ctx.role, None))
+            include_demand_addresses = (not config.ENABLE_RBAC or ctx.role == "admin"
+                or bool(_permissions.runtime_safe(graph).get("data_customer")))
             content = master.build_project_master_v2(
                 db, project_id=project_id, sheets=v2_wanted,
+                include_demand_addresses=include_demand_addresses,
             )
         else:
             content = master.build_project_master(db, project_id=project_id,
