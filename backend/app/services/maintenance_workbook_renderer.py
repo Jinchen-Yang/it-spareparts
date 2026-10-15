@@ -525,9 +525,66 @@ def _populate_contract_workbook(
     _hdr_row(parts_sheet, 1, len(part_headers))
     parts_sheet.freeze_panes = "A2"
     previous_order, band = None, False
-    rendered_order_ids: set[int] = set()
-    for line, order in data["lines"]:
-        rendered_order_ids.add(order.id)
+    # contract_workbook_data already orders headers and details using D-33.
+    # Merge existing headless placeholders into that header order; stable sort
+    # preserves every order's existing detail sequence.
+    ordered_rows = list(data["lines"])
+    detail_order_ids = {order.id for _line, order in ordered_rows}
+    order_positions = {
+        order.id: index for index, order in enumerate(data.get("orders", []))
+    }
+    ordered_rows.extend(
+        (None, order) for order in data.get("orders", [])
+        if order.id not in detail_order_ids
+    )
+    ordered_rows.sort(key=lambda pair: order_positions.get(pair[1].id, len(order_positions)))
+    for line, order in ordered_rows:
+        if line is None:
+            band = not band
+            parts_sheet.append([
+                safe_text(order.order_no),
+                order.order_date.isoformat() if order.order_date else None,
+                safe_text(order.linked_sales_order_no),
+                safe_text(order.project_raw or order.project_std),
+                safe_text(order.demand_type),
+                safe_text(order.warehouse),
+                safe_text(order.salesperson),
+                safe_text(order.business_type),
+                None,
+                None,
+                "暂无配件明细",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "成本缺失",
+                None,
+                None,
+                None,
+                None,
+                "成本缺失",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ])
+            rendered_row = parts_sheet.max_row
+            for column in range(1, len(part_headers) + 1):
+                cell = parts_sheet.cell(row=rendered_row, column=column)
+                cell.border = _BORDER
+                if band:
+                    cell.fill = _ALT_FILL
+            continue
         first = order.order_no != previous_order
         if first:
             band = not band
@@ -621,53 +678,6 @@ def _populate_contract_workbook(
                 color="B8860B",
                 bold=True,
             )
-    for order in data.get("orders", []):
-        if order.id in rendered_order_ids:
-            continue
-        band = not band
-        parts_sheet.append([
-            safe_text(order.order_no),
-            order.order_date.isoformat() if order.order_date else None,
-            safe_text(order.linked_sales_order_no),
-            safe_text(order.project_raw or order.project_std),
-            safe_text(order.demand_type),
-            safe_text(order.warehouse),
-            safe_text(order.salesperson),
-            safe_text(order.business_type),
-            None,
-            None,
-            "暂无配件明细",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "成本缺失",
-            None,
-            None,
-            None,
-            None,
-            "成本缺失",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ])
-        rendered_row = parts_sheet.max_row
-        for column in range(1, len(part_headers) + 1):
-            cell = parts_sheet.cell(row=rendered_row, column=column)
-            cell.border = _BORDER
-            if band:
-                cell.fill = _ALT_FILL
     parts_sheet.auto_filter.ref = (
         f"A1:{get_column_letter(len(part_headers))}{parts_sheet.max_row}"
     )

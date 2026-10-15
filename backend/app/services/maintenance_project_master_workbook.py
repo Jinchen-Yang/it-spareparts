@@ -76,6 +76,10 @@ from app.services.maintenance_expense_collection_workbook import (
     TAX_RATE,
     WorkbookError,
 )
+from app.services.maintenance_site_issue_facts import (
+    LegacySiteIssueEditContext,
+    apply_locked_site_issue_edits,
+)
 
 PROTOCOL_VERSION = "project-master-v1"
 V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
@@ -470,6 +474,7 @@ def _assigned_lines(
     project_id: str | None,
     window: tuple[date, date] | None,
     allowed_project_ids: set[str] | None = None,
+    export_order: bool = False,
 ):
     """需求单明细 + 其项目归属（未归属单不进这两张表——它们还没有项目口径）。
 
@@ -479,9 +484,16 @@ def _assigned_lines(
     与行序解耦，Excel 回传不受行序影响。
     #259 修正：line_no 可空，同单同日的行在前三键上会打平；行 id 作尾键，
     否则 03 行级分页切片跨页会重复/漏行（打平行的顺序由堆序决定，不稳定）。
+    D-33：下载显式选择完整业务日期升序，网页仍沿用上述倒序。
     """
     from app.services import maintenance_demands
     from app.services.query_filters import active_orders
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
+
+    ordering = wbdd_export_order_by() if export_order else (
+        FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
+        FMaintenanceLine.line_no, FMaintenanceLine.id,
+    )
 
     stmt = (
         select(FMaintenanceLine, FMaintenanceOrder,
@@ -493,8 +505,7 @@ def _assigned_lines(
               & MaintenanceSourceOrderAssignment.is_active.is_(True))
         .where(FMaintenanceLine.is_active.is_(True),
                maintenance_demands.active_demand_condition())
-        .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
-                  FMaintenanceLine.line_no, FMaintenanceLine.id)
+        .order_by(*ordering)
     )
     # Source workflow status and the system tombstone are independent. Keep
     # inactive source headers out of every effective project/export view even
@@ -665,7 +676,7 @@ def build_project_master(db: Session, *, project_id: str,
         raise WorkbookError("unknown_sheet", f"未知 sheet：{'、'.join(unknown)}")
     contracts = ec._contracts(db, project_id)
     current_contracts = _current_contracts(db, project_id)
-    lines = _assigned_lines(db, project_id=project_id, window=None)
+    lines = _assigned_lines(db, project_id=project_id, window=None, export_order=True)
     line_ids = [line.id for line, _order, _project_id in lines]
     active_overrides = {
         override.line_id: override
@@ -820,6 +831,7 @@ def build_global_lines(
         project_id=None,
         window=window,
         allowed_project_ids=allowed_project_ids,
+        export_order=True,
     )
     project_ids = {project_id for _line, _order, project_id in lines}
     names = dict(db.execute(
@@ -1297,37 +1309,34 @@ def apply(
         if line is None:
             raise WorkbookError("line_not_found",
                                 f"领用行 {flag.issue_line_id} 已不存在，请重新下载")
-        if line.no_return != flag.no_return:
-            line.no_return = flag.no_return
-            operating_fact_changed = True
-        # 2026-08-17 全面放开：领用行级字段覆盖
-        if flag.pn is not None and flag.pn != line.pn:
-            line.pn = flag.pn
-            operating_fact_changed = True
-        if (flag.serial_number is not None
-                and flag.serial_number != line.serial_number):
-            line.serial_number = flag.serial_number
-            operating_fact_changed = True
-        if flag.quantity is not None and flag.quantity != line.quantity:
-            line.quantity = flag.quantity
-            operating_fact_changed = True
-        if flag.remark is not None and flag.remark != line.remark:
-            line.remark = flag.remark
-            operating_fact_changed = True
-        # 现场领用单头字段（issue_no/issue_date）需要通过关联的单头更新
-        if flag.issue_no is not None or flag.issue_date is not None:
-            issue = db.get(MaintenanceSiteIssue, line.issue_id)
-            if issue is not None:
-                if flag.issue_no is not None and flag.issue_no != issue.issue_no:
-                    issue.issue_no = flag.issue_no
-                    operating_fact_changed = True
-                if (flag.issue_date is not None
-                        and flag.issue_date != issue.issue_date):
-                    issue.issue_date = flag.issue_date
-                    operating_fact_changed = True
+        issue = db.get(MaintenanceSiteIssue, line.issue_id)
+        patch = {"no_return": flag.no_return, **{
+            key: value for key in ("pn", "serial_number", "quantity", "remark")
+            if (value := getattr(flag, key)) is not None
+        }}
+        header = {key: value for key in ("issue_no", "issue_date")
+                  if (value := getattr(flag, key)) is not None}
+        edited = apply_locked_site_issue_edits(
+            db, project=db.get(MaintenanceProject, plan.project_id), issue=issue,
+            line_changes={line.issue_line_id: patch}, header_changes=header,
+            operated_by=operated_by, reason="项目总表返还要求更正",
+            legacy_context=LegacySiteIssueEditContext("v1"),
+        )
+        operating_fact_changed = edited.changed or operating_fact_changed
 
-    requirements.record_corrections(db, project_id=plan.project_id, before=requirement_before,
-                                   operated_by=operated_by, reason="项目总表返还要求更正")
+    # Preserve one P3 correction/event per issue, including caller-owned VOID.
+    corrections_by_issue: dict[str, dict] = {}
+    for line_id, snapshot in requirement_before.items():
+        issue_id = db.get(MaintenanceSiteIssueLine, line_id).issue_id
+        corrections_by_issue.setdefault(issue_id, {})[line_id] = snapshot
+    for issue_id, snapshots in corrections_by_issue.items():
+        apply_locked_site_issue_edits(
+            db, project=db.get(MaintenanceProject, plan.project_id),
+            issue=db.get(MaintenanceSiteIssue, issue_id),
+            line_changes={}, header_changes=None,
+            operated_by=operated_by, reason="项目总表返还要求更正",
+            legacy_context=LegacySiteIssueEditContext("v1", snapshots),
+        )
     if plan.inner is not None:
         inner_result = ec.apply(
             db,
@@ -3135,7 +3144,7 @@ def build_project_master_v2(
     unknown = [name for name in wanted if name not in V2_ALL_SHEETS[:-2]]
     if unknown:
         raise WorkbookError("unsupported_sheet", f"不支持的 V2 工作表：{'、'.join(unknown)}")
-    lines = (_assigned_lines(db, project_id=project_id, window=None)
+    lines = (_assigned_lines(db, project_id=project_id, window=None, export_order=True)
              if V2_SHEET_OVERVIEW in wanted or V2_SHEET_PARTS in wanted else [])
     wb = SafeTextWorkbook()
     wb.remove(wb.active)
@@ -6693,10 +6702,15 @@ def apply_project_master_v2(
                 "issue_date": issue.issue_date.isoformat(),
                 "site_location": issue.site_location,
             }
-            issue.issue_no = issue_no
-            issue.issue_date = issue_date
-            if address_changed:
-                issue.site_location = requested_addresses[issue_id]
+            apply_locked_site_issue_edits(
+                db, project=project, issue=issue, line_changes={},
+                operated_by=operated_by, reason=audit_reason,
+                legacy_context=LegacySiteIssueEditContext("v2"),
+                header_changes={
+                    "issue_no": issue_no, "issue_date": issue_date,
+                    **({"site_location": requested_addresses[issue_id]} if address_changed else {}),
+                },
+            )
             issue.version += 1
             if header_changed:
                 header_changed_issue_ids.add(issue_id)
@@ -6828,57 +6842,41 @@ def apply_project_master_v2(
             continue
         if line is None:
             raise WorkbookError("line_not_found", f"领用行 {flag.issue_line_id} 已不存在，请重新下载")
-        if line.no_return != flag.no_return:
-            line.no_return = flag.no_return
-            operating_fact_changed = True
+        patch = {"no_return": flag.no_return}
         if flag.pn is not None and (
             flag.pn != line.pn
             or (flag.part_id is not None and flag.part_id != line.part_id)
         ):
-            line.pn = flag.pn
             if flag.part_id is None:
                 raise WorkbookError(
                     "part_not_found", "PN 已变化但未解析到备件主数据"
                 )
-            line.part_id = flag.part_id
-            # A line-specific manual override is evidence for the old part and
-            # cannot follow a PN identity change.
-            line.manual_unit_cost = None
-            line.manual_unit_cost_inc_tax = None
-            line.manual_evidence = None
-            issue_for_price = db.get(MaintenanceSiteIssue, line.issue_id)
-            if issue_for_price is not None:
-                pricing_entries[line.issue_line_id] = (
-                    issue_for_price.issue_date,
-                    line,
-                )
-            operating_fact_changed = True
-        if (flag.serial_number is not None
-                and flag.serial_number != line.serial_number):
-            line.serial_number = flag.serial_number
-            operating_fact_changed = True
-        if flag.quantity is not None and flag.quantity != line.quantity:
-            # 先把金额同步到新数量再等批量重取价——赋值后任何 autoflush 都会
-            # 把 UPDATE 刷进库，若金额停留在旧数量口径会撞
-            # ck_maintenance_site_issue_line_dual_tax_amounts（金额=数量×单价）。
-            line.quantity = flag.quantity
-            if line.unit_cost_ex_tax is not None:
-                line.cost_amount_ex_tax = (
-                    Decimal(line.quantity) * line.unit_cost_ex_tax
-                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                line.cost_amount_inc_tax = (
-                    Decimal(line.quantity) * line.unit_cost_inc_tax
-                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                line.cost_amount = line.cost_amount_ex_tax
-            qty_issue = db.get(MaintenanceSiteIssue, line.issue_id)
-            if qty_issue is not None:
-                pricing_entries[line.issue_line_id] = (qty_issue.issue_date, line)
-            operating_fact_changed = True
-        if flag.remark is not None and flag.remark != line.remark:
-            line.remark = flag.remark
-            operating_fact_changed = True
-    requirements.record_corrections(db, project_id=plan.project_id, before=requirement_before,
-                                   operated_by=operated_by, reason=audit_reason)
+            patch.update(pn=flag.pn, part_id=flag.part_id)
+        patch.update({key: value for key in ("serial_number", "quantity", "remark")
+                      if (value := getattr(flag, key)) is not None})
+        issue_for_price = db.get(MaintenanceSiteIssue, line.issue_id)
+        edited = apply_locked_site_issue_edits(
+            db, project=project, issue=issue_for_price,
+            line_changes={line.issue_line_id: patch}, header_changes=None,
+            operated_by=operated_by, reason=audit_reason,
+            legacy_context=LegacySiteIssueEditContext("v2"),
+        )
+        if edited.pricing_line_ids:
+            pricing_entries[line.issue_line_id] = (issue_for_price.issue_date, line)
+        operating_fact_changed = edited.changed or operating_fact_changed
+    # Preserve one P3 correction/event per issue, including caller-owned VOID.
+    corrections_by_issue: dict[str, dict] = {}
+    for line_id, snapshot in requirement_before.items():
+        issue_id = db.get(MaintenanceSiteIssueLine, line_id).issue_id
+        corrections_by_issue.setdefault(issue_id, {})[line_id] = snapshot
+    for issue_id, snapshots in corrections_by_issue.items():
+        apply_locked_site_issue_edits(
+            db, project=db.get(MaintenanceProject, plan.project_id),
+            issue=db.get(MaintenanceSiteIssue, issue_id),
+            line_changes={}, header_changes=None,
+            operated_by=operated_by, reason=audit_reason,
+            legacy_context=LegacySiteIssueEditContext("v2", snapshots),
+        )
     if header_changed_issue_ids:
         for issue, line in db.execute(
             select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)

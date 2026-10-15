@@ -1583,16 +1583,16 @@ def iter_project_lines(
     yield_per: int = 1000,
 ):
     """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
-    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
     statement = _project_lines_query(
         project,
         month,
         date_from,
         date_to,
         user_ctx=user_ctx,
-    ).order_by(
-        mo.order_date.desc().nullslast(), ml.id.desc(),
-    ).execution_options(stream_results=True, yield_per=yield_per)
+    ).order_by(*wbdd_export_order_by()).execution_options(
+        stream_results=True, yield_per=yield_per,
+    )
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
     result = db.execute(statement)
     try:
@@ -2153,6 +2153,8 @@ def contract_workbook_data(
     date_to: date | None = None,
 ) -> dict:
     """§16.4 工作簿导出数据：合同抬头 + 月度×分类汇总 + 出库明细(单据级回填) + 报销明细。"""
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
+
     date_filtered = date_from is not None or date_to is not None
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     stmt = (
@@ -2166,12 +2168,7 @@ def contract_workbook_data(
         )
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
-    stmt = stmt.order_by(
-        mo.order_date.asc().nullslast(),
-        mo.order_no,
-        ml.line_no.asc().nullslast(),
-        ml.id,
-    )
+    stmt = stmt.order_by(*wbdd_export_order_by())
     selected = db.execute(stmt).all()
     orders = []
     seen_order_ids: set[int] = set()
