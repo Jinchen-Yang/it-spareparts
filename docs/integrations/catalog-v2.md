@@ -68,7 +68,7 @@ node 的品牌、品类取主数据库 PN 文本列，不隐式 join 字典名�
 
 `catalog:read`、`catalog:submit`、`gallery:read` 使用独立凭据；旧 v1 Bearer 不扩权。凭据仅在后端运行环境注入，浏览器、模型、日志、离线样例均不接触。集成写入口仅供受控服务网络，跨网络 TLS／双向验证；商城本地 BFF 仍检查有效登录会话和 CSRF。
 
-写请求与查重、回执查询都需 `catalog:submit`，并携带 `X-Catalog-Actor-Assertion`。**拟定签名格式**为 compact JWS `HS256`，受信 `kid` 定位商城独立提交签名密钥；payload 只含 `actor_mapping_id,body_hash,issued_at,nonce`。issued_at 为UTC字符串，允许时钟偏差±300秒；nonce为至少128位随机值，按(client_id,nonce)唯一并保留10分钟。签名验证精确按其原始 JWS 字节；body_hash 按 §6计算。服务端实时从受信映射查有效实名 SysUser及当前编辑权限；拒绝未映射、停用、共享回退身份与无权限用户，不信任商城／浏览器自报角色。不把读token、Agent或目录服务 actor 映射成人工编辑者。
+写请求与查重、回执查询都需 `catalog:submit`，并携带 `X-Catalog-Actor-Assertion`。**拟定签名格式**为 compact JWS `HS256`，受信 `kid` 定位商城独立提交签名密钥；payload 只含 `shop_subject,actor_mapping_id,body_hash,issued_at,nonce`：`shop_subject` 是商城 BFF 从**当前已认证会话**取得的商城用户ID，`actor_mapping_id` 由 BFF 按该会话**在服务端查出**，浏览器或请求参数提供的映射ID一律忽略，不得透传。issued_at 为UTC字符串，允许时钟偏差±300秒；nonce为至少128位随机值，按(client_id,nonce)唯一并保留10分钟。签名验证精确按其原始 JWS 字节；body_hash 按 §6计算。服务端实时从受信映射查有效实名 SysUser及当前编辑权限，并校验：映射属于本 client_id、映射登记的商城用户等于断言中的 `shop_subject`、请求体中的 `actor_mapping_id`（如有）与断言一致；任一不符按 401 invalid_actor_assertion 拒绝，防止冒用他人的特权映射；拒绝未映射、停用、共享回退身份与无权限用户，不信任商城／浏览器自报角色。不把读token、Agent或目录服务 actor 映射成人工编辑者。
 
 POST的 body_hash 对应去掉 body_hash 的规范请求体；GET回执查询的断言 body_hash 对应 `{"method":"GET","path":"/api/integrations/catalog/v2/commands/<request_id>"}` 的规范字节。正常重试保留业务 request_id／内容但换新nonce与签名，nonce防重放独立于业务幂等。鉴权失败不暴露字段差异或原回执。
 
