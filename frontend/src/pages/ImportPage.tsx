@@ -14,8 +14,34 @@ import {
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
 import ExpenseVoidPreviewPanel from "./import/ExpenseVoidPreviewPanel";
+import WbddUploadFeedback from "../components/maintenance/WbddUploadFeedback";
 
 const MAX_IMPORT_FILES = 20;
+const WBDD_FEEDBACK_KEYS = new Set([
+  "import_mode", "fact_rows_inserted", "fact_rows_updated", "fact_rows_skipped",
+  "fact_rows_semantic_updated", "fact_rows_unchanged", "fact_rows_protected",
+  "protected_field_counts", "fact_rows_legacy_review", "snapshot_diff",
+]);
+
+function WbddImportModeNotice({ mode }: { mode: ImportMode }) {
+  return (
+    <Alert
+      type="info"
+      showIcon
+      style={{ marginTop: 12, marginBottom: 12 }}
+      message={mode === "skip"
+        ? "WBDD 当前为跳过模式：已有单据和明细不覆盖"
+        : "WBDD 当前为更新模式：保留人工保护，缺项不自动作废"}
+      description={(
+        <span>
+          {mode === "skip" ? "跳过模式不提供缺项作废候选，需更新模式重传。" : null}
+          原件需要覆盖或核对缺项时，可在专用入口更新上传后核对差异；缺项仍需选择、填写原因并确认。
+          <a href="/maintenance/demands">前往需求单专用上传</a>（需要相应页面和上传权限）。
+        </span>
+      )}
+    />
+  );
+}
 
 // 历史询价（inquiry）导入为合同 Step 4 规划，后端尚未实装（B7 去重口径待客户确认），实装后再加回
 const FILE_TYPE: Record<string, string> = {
@@ -541,6 +567,8 @@ export default function ImportPage() {
               }}>清空</Button>
             </Space>
             {importError && <Alert type="error" showIcon message={importError} style={{ marginTop: 12 }} />}
+            {snapshot?.result.files.some((file) => file.file_type === "maintenance")
+              ? <WbddImportModeNotice mode={snapshot.mode} /> : null}
             {snapshot && <ImportPrecheckPanel
               result={snapshot.result}
               onOpenBatch={(batchId) => { void openDetail(batchId, true); }}
@@ -587,6 +615,13 @@ export default function ImportPage() {
       >
         {detail && (
           <>
+            {detail.file_type === "maintenance" && detail.report ? (
+              <>
+                {detail.report.import_mode === "skip" || detail.report.import_mode === "upsert"
+                  ? <WbddImportModeNotice mode={detail.report.import_mode} /> : null}
+                <WbddUploadFeedback report={{ ...detail.report, batch_id: detail.id }} />
+              </>
+            ) : null}
             {detail.report?.missing_price_columns && (
               <Alert
                 type="warning" showIcon style={{ marginBottom: 12 }}
@@ -635,7 +670,8 @@ export default function ImportPage() {
             )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
               {Object.entries(detail.report || {})
-                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns" && v != null)
+                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns" && v != null
+                  && !(detail.file_type === "maintenance" && WBDD_FEEDBACK_KEYS.has(k)))
                 .map(([k, v]) => (
                   <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{reportValue(k, v)}</Descriptions.Item>
                 ))}

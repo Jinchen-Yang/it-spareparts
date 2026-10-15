@@ -384,8 +384,13 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
             return sorted(v for v in (value or []) if v in import_flags)
         return value
 
+    # 回执只增加聚合字段；旧 updated 仍表示同键既有行，不改保护或写入语义。
+    # protected 计实际挡住了不同源值的行，可与 semantic_updated/unchanged 重叠。
+    feedback = {"semantic_updated": 0, "unchanged": 0, "protected": 0,
+                "protected_field_counts": {}, "legacy_review": 0}
     if not rows:
-        return {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
+        return {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
+                **feedback}
     if update_cols is None:
         # skip 模式（首次导入）：与通用路径完全一致
         inserted = 0
@@ -397,12 +402,14 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
             inserted += len(got)
             changed_keys.update(r[0] for r in got)
         return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted,
-                "changed_keys": changed_keys}
+                "changed_keys": changed_keys, **feedback}
 
     key_name = conflict_col.name
     keys = [r[key_name] for r in rows]
     # 既有行的 override 账本 + edited_source（一次查询带回）
     before_by_key: dict = {}
+    from app.services.maintenance_wbdd_reconciliation import is_manual_line
+
     for chunk in _chunks(keys):
         sel_cols = [conflict_col, FMaintenanceLine.id,
                     FMaintenanceLine.manual_override,
@@ -417,6 +424,7 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
                 {c: m[c] for c in update_cols},
                 m["manual_override"] or {},
                 m["edited_source"],
+                is_manual_line(row),
             )
     existing = len(before_by_key)
 
@@ -467,7 +475,7 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         if prev is None:
             changed_keys.add(r[key_name])
             continue
-        eid, before, override, edited_source = prev
+        eid, before, override, edited_source, manually_created = prev
         manual_protected = edited_source != "wbdd"
         after = {c: r.get(c) for c in update_cols}
         # 有效值 = override/手工行保护下的「导入视角」值（受保护列取库上现值）。
@@ -483,27 +491,36 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
 
         effective_before = dict(before)
         effective_after = dict(after)
+        blocked_fields = []
         for c in protectable:
             if _python_protected(c) or manual_protected:
                 effective_after[c] = before.get(c)
-        if audit is not None and any(
+                if _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c)):
+                    blocked_fields.append(c)
+        if blocked_fields:
+            feedback["protected"] += 1
+            for c in blocked_fields:
+                counts = feedback["protected_field_counts"]
+                counts[c] = counts.get(c, 0) + 1
+            if manual_protected and not manually_created:
+                feedback["legacy_review"] += 1
+        changed = any(
             _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
             for c in update_cols if c not in _AUDIT_IGNORE
-        ):
+        )
+        feedback["semantic_updated" if changed else "unchanged"] += 1
+        if audit is not None and changed:
             entries.append((eid,
                             {c: _jsonable(v) for c, v in effective_before.items()},
                             {c: _jsonable(v) for c, v in effective_after.items()}))
-        if any(
-            _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
-            for c in update_cols if c not in _AUDIT_IGNORE
-        ):
+        if changed:
             changed_keys.add(r[key_name])
     if audit is not None and entries:
         op_by, b_id = audit
         _audit_overwrites(session, "import_overwrite", FMaintenanceLine.__tablename__,
                           entries, op_by, b_id)
     return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0,
-            "changed_keys": changed_keys}
+            "changed_keys": changed_keys, **feedback}
 
 
 def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
@@ -1018,6 +1035,12 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "orders_updated": order_stats["updated"],
         "import_mode": mode,
         "new_parts": new_parts,
+        # 新反馈不改变 fact_rows_updated 的旧同键匹配口径。
+        "fact_rows_semantic_updated": line_stats["semantic_updated"],
+        "fact_rows_unchanged": line_stats["unchanged"],
+        "fact_rows_protected": line_stats["protected"],
+        "protected_field_counts": line_stats["protected_field_counts"],
+        "fact_rows_legacy_review": line_stats["legacy_review"],
         # plan v1.3 M1-2/M1-3：无明细单头保留计数（样例 ≤50）与展示列坏值计数
         "headless_orders": len(result.headless_order_ids),
         "headless_order_ids_sample": result.headless_order_ids[:50],

@@ -24,11 +24,12 @@ import {
   searchMaintenanceDemands,
   voidFastMaintenanceDemands,
 } from "../../api/maintenanceDemands";
-import type { WbddAddressReport, WbddMissing } from "../../api/maintenanceWbddImport";
+import type { WbddImportReport, WbddMissing } from "../../api/maintenanceWbddImport";
 import { getWbddMissing, uploadWbdd } from "../../api/maintenanceWbddImport";
 import { readPermissionMap } from "../../nav";
 import OrderContactInfo from "../../components/maintenance/OrderContactInfo";
 import WbddReconciliation from "../../components/maintenance/WbddReconciliation";
+import WbddUploadFeedback from "../../components/maintenance/WbddUploadFeedback";
 import DemandLineBatchCreate from "./DemandLineBatchCreate";
 import DemandLineCreate from "./DemandLineCreate";
 import DemandLinesEditor from "./DemandLinesEditor";
@@ -70,7 +71,8 @@ export function MaintenanceDemandsPage() {
   const [missing, setMissing] = useState<WbddMissing | null>(null);
   const [missingLoading, setMissingLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [addressReport, setAddressReport] = useState<WbddAddressReport | null>(null);
+  const [uploadReport, setUploadReport] = useState<WbddImportReport | null>(null);
+  const addressReport = uploadReport?.address_report ?? null;
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const missingRequestSeq = useRef(0);
@@ -180,7 +182,7 @@ export function MaintenanceDemandsPage() {
 
   const handleWbddUpload = async (file: File) => {
     setUploading(true);
-    setAddressReport(null);
+    setUploadReport(null);
     const fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
     if (uploadAttempt.current?.fingerprint !== fingerprint) {
       uploadAttempt.current = {
@@ -190,10 +192,15 @@ export function MaintenanceDemandsPage() {
     }
     try {
       const resp = await uploadWbdd(file, uploadAttempt.current.key);
-      setAddressReport(resp.data.address_report ?? null);
-      const diffCount = resp.data.snapshot_diff?.missing_orders ?? 0;
+      setUploadReport(resp.data);
+      const missingOrders = resp.data.snapshot_diff?.missing_orders ?? 0;
+      const missingLines = resp.data.snapshot_diff?.missing_lines ?? 0;
+      const differences = [
+        ...(missingOrders > 0 ? [`${missingOrders} 张缺失整单`] : []),
+        ...(missingLines > 0 ? [`${missingLines} 行缺失明细`] : []),
+      ];
       const summary = `快照已同步（批次 #${resp.data.batch_id}）` +
-        (diffCount ? `，发现 ${diffCount} 张缺失候选，请核对下方差异清单` : "");
+        (differences.length ? `，发现 ${differences.join("、")}，请核对下方差异清单` : "");
       uploadAttempt.current = null;
       // 上传接口刚返回 batch_id，此时 missing 读回 404 不能当合法空态。
       if (await refreshAfterCommit(true, true)) {
@@ -391,6 +398,7 @@ export function MaintenanceDemandsPage() {
               收货地址或地址列可放在任意位置；缺列、留空保留原地址。需要清空时，增加“地址操作”列填写“清空”。同单地址矛盾时保留原地址并提示。
             </Text>
           ) : null}
+          {canImport && uploadReport ? <WbddUploadFeedback report={uploadReport} /> : null}
           {canImport && addressReport ? (
             <Alert
               type={addressReport.conflict ? "warning" : "info"}
