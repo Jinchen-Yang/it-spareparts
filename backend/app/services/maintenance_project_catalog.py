@@ -41,6 +41,7 @@ def project_dict(project: MaintenanceProject) -> dict:
         # 业务类型（2026-09-08）：卡墙筛选的唯一判定列。生产 647/648 为空，
         # 既靠建项写入补新项目，也靠这里的可编辑面把存量补回来。
         "business_type": project.business_type,
+        "no_return_note": project.no_return_note,
         # 维保期限主数据（#51）：面板可显示、可编辑（#39）
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
@@ -124,6 +125,8 @@ def _lock_project_for_master_write(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
+        # 锁前的权限/调用者可能已读入旧实体；锁只序列化数据库，不刷新 identity map。
+        .execution_options(populate_existing=True)
     )
     return project, state
 
@@ -203,10 +206,19 @@ def update_project(
     allowed = {key: value for key, value in updates.items() if key in {
         "display_name", "salesperson", "project_manager_id", "period_from",
         "period_to", "business_type",
+        "no_return_note",
     }}
     if not allowed:
         raise MaintenanceProjectCatalogError("没有可修改的项目字段")
     clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
+    if "no_return_note" in allowed:
+        value = allowed["no_return_note"]
+        # 与 API 按原串的字符数校验一致；服务调用也不能绕过长度/类型门禁。
+        if value is not None and (not isinstance(value, str) or len(value) > 2000):
+            raise MaintenanceProjectCatalogError("免返标注必须为文本，最多 2000 个字符")
+        allowed["no_return_note"] = _clean_optional(
+            value, label="免返标注", max_length=2000,
+        )
     if "display_name" in allowed:
         allowed["display_name"] = _clean_required(
             allowed["display_name"],
@@ -247,6 +259,8 @@ def update_project(
         project.business_type = _clean_optional(
             allowed["business_type"], label="业务类型", max_length=16,
         )
+    if "no_return_note" in allowed:
+        project.no_return_note = allowed["no_return_note"]
     # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交）。期限双源 P1 修复后
     # project.period_* 是唯一事实源：统一走 canonical helper 同步 projection 投影，
     # lifecycle 按新期限快照口径重算；起>止由 helper 拒绝。

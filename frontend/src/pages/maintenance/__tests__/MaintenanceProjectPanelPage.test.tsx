@@ -64,6 +64,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   );
   return {
     ...actual,
+    listMaintenancePartCategories: async () => ({ data: { categories: [] } }),
     getMaintenanceProjectWorkspace: (...a: unknown[]) => getMaintenanceProjectWorkspace(...a),
     searchMaintenanceManagerAccounts: (...a: unknown[]) =>
       searchMaintenanceManagerAccounts(...a),
@@ -191,6 +192,173 @@ beforeEach(() => {
     will_reassign_orders: [],
   });
   applyProjectMaster.mockResolvedValue({ expense_updates: 1 });
+});
+
+describe("免返标注", () => {
+  const allowEdit = () => localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true, data_profit: true, action_maintenance_project_manage: true,
+  }));
+  const noteProject = (note: string | null = "原提醒", id = "p1") => ({ data: { project: {
+    project_id: id, project_code: id, display_name: id,
+    is_active: true, version: 2, no_return_note: note,
+  } } });
+  it("在基础信息显示多行纯文本，并从该区域打开同一个编辑弹窗", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true, data_profit: true, action_maintenance_project_manage: true,
+    }));
+    getMaintenanceProject.mockResolvedValue({ data: { project: {
+      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+      is_active: true, version: 2, no_return_note: "硬盘免返\n<b>其他按合同</b>",
+    } } });
+    renderPanel();
+    expect(await screen.findByText("硬盘免返 <b>其他按合同</b>")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    expect(within(dialog).getByRole("textbox", { name: "免返标注" }))
+      .toHaveValue("硬盘免返\n<b>其他按合同</b>");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("保存后读回纯文本，清空显式提交null；未触碰不提交标注", async () => {
+    allowEdit();
+    let note: string | null = "原提醒";
+    getMaintenanceProject.mockImplementation(async () => noteProject(note));
+    updateMaintenanceProject.mockImplementation(async (_, body) => {
+      if (Object.prototype.hasOwnProperty.call(body, "no_return_note")) note = body.no_return_note;
+      return { data: {} };
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), {
+      target: { value: "硬盘免返\n<img src=x onerror=alert(1)>" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByText("硬盘免返 <img src=x onerror=alert(1)>")).toBeVisible();
+    expect(screen.getByText("硬盘免返 <img src=x onerror=alert(1)>").querySelector("img")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "  " } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenLastCalledWith("p1", expect.objectContaining({ no_return_note: null })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByText("未标注")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "未保存草稿" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /取 消|Cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("textbox", { name: "免返标注" })).toHaveValue("");
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(updateMaintenanceProject.mock.calls[2][1]).not.toHaveProperty("no_return_note");
+  });
+
+  it.each(["page_maintenance", "data_profit", "action_maintenance_project_manage"])(
+    "缺少%s时只读标注", async (missing) => {
+      localStorage.setItem("permissions", JSON.stringify({
+        page_maintenance: true, data_profit: true, action_maintenance_project_manage: true, [missing]: false,
+      }));
+      getMaintenanceProject.mockResolvedValue(noteProject());
+      renderPanel();
+      expect(await screen.findByText("原提醒")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "编辑免返标注" })).toBeNull();
+      expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeDisabled();
+    },
+  );
+
+  it("中文组合输入保留原文，2001字符拒绝且2000个emoji可提交", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("textbox", { name: "免返标注" });
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "硬盘按合同免返" } });
+    fireEvent.compositionEnd(input);
+    expect(input).toHaveValue("硬盘按合同免返");
+    fireEvent.change(input, { target: { value: "中".repeat(2001) } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await within(dialog).findByText("免返标注最多 2000 个字符")).toBeVisible();
+    expect(updateMaintenanceProject).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "😀".repeat(2000) } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ no_return_note: "😀".repeat(2000) })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it.each([403, 409])("保存遇%s保留草稿且不报告成功", async (status) => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    updateMaintenanceProject.mockRejectedValue({ response: { status, data: { detail: "请刷新权限或版本后重试" } } });
+    const success = vi.spyOn(message, "success");
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "冲突草稿" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await screen.findByText("请刷新权限或版本后重试")).toBeVisible();
+    expect(within(dialog).getByRole("textbox", { name: "免返标注" })).toHaveValue("冲突草稿");
+    expect(success).not.toHaveBeenCalled();
+  });
+
+  it("保存已写入但回读失败时提示刷新失败并失效旧标注", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    updateMaintenanceProject.mockImplementation(async () => {
+      getMaintenanceProject.mockRejectedValue(new Error("读回失败"));
+      return { data: {} };
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "新提醒" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await screen.findByText("已保存，但页面刷新失败，请重试。")).toBeVisible();
+    expect(screen.queryByText("原提醒")).toBeNull();
+  });
+
+  it("PATCH成功后刷新回调拒绝仍报告已保存，不能误报保存失败", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "已提交提醒" } });
+    const originalDispatch = window.dispatchEvent.bind(window);
+    const notify = vi.spyOn(window, "dispatchEvent").mockImplementation((event) => {
+      if (event.type === "maintenance-data-changed") throw new Error("合成刷新通知故障");
+      return originalDispatch(event);
+    });
+    try {
+      fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+      expect(await screen.findByText("已保存，但页面刷新失败，请重试。")).toBeVisible();
+      expect(updateMaintenanceProject).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("保存失败")).toBeNull();
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it("切换项目后编辑弹窗的旧响应不能串入新项目", async () => {
+    allowEdit();
+    let resolveOld!: (value: ReturnType<typeof noteProject>) => void;
+    getMaintenanceProject.mockImplementation(async (id) => noteProject(id === "p1" ? "甲提醒" : "乙提醒", id));
+    renderPanel(true);
+    expect(await screen.findByText("甲提醒")).toBeVisible();
+    getMaintenanceProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    fireEvent.click(screen.getByRole("link", { name: "切到项目B" }));
+    expect(await screen.findByText("乙提醒")).toBeVisible();
+    await act(async () => resolveOld(noteProject("旧甲草稿")));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText("旧甲草稿")).toBeNull();
+  });
 });
 
 afterEach(() => {
@@ -596,7 +764,7 @@ describe("项目面板", () => {
 
   it("有项目管理动作键时概览给出归属挂靠（#45 判定依据＝XSDD）", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     listMaintenanceSourceOrders.mockResolvedValue({
       data: { rows: [{ raw_order_id: "RAW-9", order_no: "WBDD-9",
                        order_date: "2026-07-20", project_raw: "某项目",
@@ -615,7 +783,7 @@ describe("项目面板", () => {
   });
 
   it("初次打开项目不发变更通知，成功修改后才通知其他分析页", async () => {
-    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     const storage = vi.spyOn(Storage.prototype, "setItem");
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
@@ -628,7 +796,7 @@ describe("项目面板", () => {
 
   it("基础信息不再把来源负责人原文伪装成账号改派", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
     const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
@@ -640,7 +808,7 @@ describe("项目面板", () => {
   });
 
   it.each(["整体维保", "备件维保", "算力运维", "拆改配服务", "非维保", "未标注"])("基本信息可将业务类型改成 %s，携带版本和审计原因", async (label) => {
-    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
       business_type: label === "未标注" ? "整体维保" : null,
@@ -661,7 +829,7 @@ describe("项目面板", () => {
   });
 
   it("未修改的历史自由文本类型保留，取消后再次打开不会提交上次未保存的选择", async () => {
-    localStorage.setItem("permissions", JSON.stringify({ action_maintenance_project_manage: true }));
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
       business_type: "历史特殊类型", version: 3, is_active: true,
@@ -684,7 +852,7 @@ describe("项目面板", () => {
 
   it("历史销售为空时仅修改项目名称不会提交 salesperson", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({
       data: {
         project: {
@@ -720,7 +888,7 @@ describe("项目面板", () => {
 
   it("基础信息回显并提交可手工编辑的销售人员", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({
       data: {
         project: {
@@ -759,7 +927,7 @@ describe("项目面板", () => {
 
   it("基础信息允许清空销售人员并显式提交 null", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({
       data: {
         project: {
@@ -793,7 +961,7 @@ describe("项目面板", () => {
 
   it("重新打开基础信息不会沿用上一次销售编辑标记", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({
       data: {
         project: {
@@ -844,7 +1012,7 @@ describe("项目面板", () => {
   it("只有实名 admin 且有管理动作键时显示真实负责人 OCC 控件", async () => {
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProjectWorkspace.mockResolvedValue({
       data: {
         project: {
@@ -883,7 +1051,7 @@ describe("项目面板", () => {
   it("非 admin 即使拥有项目管理动作键也不显示负责人账号改派", async () => {
     localStorage.setItem("role", "maintenance_manager");
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProjectWorkspace.mockResolvedValue({
       data: {
         project: {
@@ -962,7 +1130,7 @@ describe("项目面板", () => {
 describe("归属挂靠候选按 XSDD 预筛（#48）", () => {
   it("把本项目 id 交给后端排序，而不是前端筛（前端只拿一页会漏选）", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     renderPanel();
     await waitFor(() => expect(listMaintenanceSourceOrders).toHaveBeenCalled());
     expect(listMaintenanceSourceOrders.mock.calls[0][0]).toMatchObject({
@@ -973,7 +1141,7 @@ describe("归属挂靠候选按 XSDD 预筛（#48）", () => {
 
   it("命中本项目 XSDD 的候选打「同 XSDD」标", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_project_manage: true }));
+      JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     listMaintenanceSourceOrders.mockResolvedValue({
       data: { rows: [
         { raw_order_id: "RAW-A", order_no: "WBDD-A", order_date: "2026-07-20",
