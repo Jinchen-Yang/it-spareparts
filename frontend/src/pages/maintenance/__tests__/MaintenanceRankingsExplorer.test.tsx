@@ -91,6 +91,38 @@ describe("三视图与跳转", () => {
     await screen.findByRole("group", { name: "排名排列图" }); expect(screen.queryByTestId("pareto-cumulative")).not.toBeInTheDocument(); expect(screen.getByText("不计算")).toBeInTheDocument();
     if (state === "unknown") expect(screen.getByRole("group", { name: "排名排列图" }).querySelectorAll("rect")).toHaveLength(0);
   });
+  it.each([false, true])("需求净量 Top 全正且全集总量为正时，集中度遵循 meta.has_negative=%s", async hasNegative => {
+    const data = fixture();
+    data.metric = "effective";
+    data.meta.has_negative = hasNegative;
+    data.total = hasNegative ? 3 : 2;
+    data.chart_rows = [
+      { ...first, value: "8", effective_qty: "8", share_pct: hasNegative ? null : "80.0", cumulative_share_pct: hasNegative ? null : "80.0" },
+      { ...second, value: "2", effective_qty: "2", share_pct: hasNegative ? null : "20.0", cumulative_share_pct: hasNegative ? null : "100.0" },
+    ];
+    data.rows = data.chart_rows;
+    // With a negative PN outside Top, the full net quantity is still positive.
+    data.summary = { ...data.summary, value: hasNegative ? "9" : "10", effective_qty: hasNegative ? "9" : "10", top_share_pct: hasNegative ? null : "100.0" };
+    fetchExplorer.mockResolvedValue(data);
+    mount("/maintenance/analytics?layout=B&metric=effective");
+
+    const chart = await screen.findByRole("group", { name: "排名排列图" });
+    expect(within(chart).getByRole("button", { name: /PN-A，需求净量 8，/ })).toBeInTheDocument();
+    expect(within(chart).getByRole("button", { name: /PN-B，需求净量 2，/ })).toBeInTheDocument();
+    if (hasNegative) {
+      expect(screen.queryByTestId("pareto-cumulative")).not.toBeInTheDocument();
+      expect(screen.getByText("不计算")).toBeInTheDocument();
+      expect(screen.getByText("包含负值，关闭集中度")).toBeInTheDocument();
+      expect(screen.queryByText("金线：累计占比（分母为筛选全集）")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByTestId("pareto-cumulative").getAttribute("points")!.split(" ")).toHaveLength(2);
+      expect(screen.getByText("100.0%")).toBeInTheDocument();
+      expect(screen.getByText("金线：累计占比（分母为筛选全集）")).toBeInTheDocument();
+      expect(screen.queryByText("不计算")).not.toBeInTheDocument();
+      expect(screen.queryByText("包含负值，关闭集中度")).not.toBeInTheDocument();
+    }
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective" }), expect.any(AbortSignal));
+  });
   it("累计比例直接使用后端精确累计值，不相加已舍入的行占比", async () => {
     const data = fixture(); data.chart_rows = [ { ...first, share_pct: "33.3", cumulative_share_pct: "33.3" }, { ...second, share_pct: "33.3", cumulative_share_pct: "66.7" } ]; data.summary.top_share_pct = "66.7";
     fetchExplorer.mockResolvedValue(data); mount("/maintenance/analytics?layout=B"); const line = await screen.findByTestId("pareto-cumulative"); const points = line.getAttribute("points")!.split(" "); const lastY = Number(points[1].split(",")[1]); expect(lastY).toBeCloseTo(255 - .667 * (255 - 32)); expect(screen.getByText("66.7%")).toBeInTheDocument();
