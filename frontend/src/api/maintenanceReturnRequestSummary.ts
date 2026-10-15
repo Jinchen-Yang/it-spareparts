@@ -13,4 +13,6 @@ export interface DemandReturnSummary {
   basis_state: "complete" | "incomplete" | "inactive" | "ownership_conflict";
   reason_codes: string[];
   undated_receipt_qty: string | null;
+  excluded_exempt_disk_demand_qty: string | null;
+  excluded_exempt_disk_received_qty: string | null;
 }

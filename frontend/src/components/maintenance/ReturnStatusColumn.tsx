@@ -1,9 +1,10 @@
 import { Space, Tag, Typography } from "antd";
 import type { DemandReturnSummary } from "../../api/maintenanceReturnRequestSummary";
 
-const SCOPE = "所选需求单截至当前累计核对，免返不扣减差额";
+const SCOPE = "所选需求单截至当前累计核对，免返硬盘已从下单与已收数量中剔除";
 const REASONS: Record<string, string> = {
   missing_demand_qty: "下单数量缺失",
+  invalid_demand_qty: "下单数量格式无效",
   negative_demand_qty: "下单数量含负数",
   zero_demand_qty: "下单数量为零",
   no_active_lines: "没有有效明细",
@@ -11,6 +12,7 @@ const REASONS: Record<string, string> = {
   inactive_project: "项目当前无效",
   unassigned_order: "需求单未归属项目",
   ownership_conflict: "归属待核对",
+  ambiguous_disk_receipt_basis: "同型号应返与免返混合，收货无法逐行核对",
   undated_receipts: "存在未填业务日期的收货，已计入当前累计",
 };
 
@@ -29,6 +31,6 @@ export default function ReturnStatusColumn({ summary }: { summary?: DemandReturn
     {summary ? <Typography.Text style={{ fontSize: 12 }}>已收 {quantity(summary.received_qty)} / 下单 {quantity(summary.demand_qty)}</Typography.Text> : null}
     {over && /[1-9]/.test(over) ? <Typography.Text type="warning" style={{ fontSize: 12 }}>超额 {quantity(over)}</Typography.Text> : null}
     {reasons.length ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{[...new Set(reasons)].join("；")}</Typography.Text> : null}
-    <Typography.Text type="secondary" style={{ fontSize: 11 }}>整单当前累计，免返不扣差额</Typography.Text>
+    <Typography.Text type="secondary" style={{ fontSize: 11 }}>整单当前累计，免返硬盘不参与核对</Typography.Text>
   </Space>;
 }

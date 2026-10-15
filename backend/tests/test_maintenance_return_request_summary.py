@@ -6,7 +6,7 @@ from threading import Event, Thread
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from app.db import engine
@@ -14,12 +14,13 @@ from app.db import engine
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine
 from app.models.maintenance import FMaintenanceOrder
+from app.models.master_data import ProductCategory
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_return_request_summary as summaries
 from app.services.maintenance_return_receipts import register_receipt
 from tests.test_maintenance_return_receipts_api import _wbdd
 from tests.test_site_issue_v2_api import _project
-from tests.test_maintenance_return_metrics import _receipt
+from tests.test_maintenance_return_metrics import _issue, _receipt
 from tests.test_maintenance_demand_safe_delete import _admin_client
 
 
@@ -34,6 +35,223 @@ def _demand(db, project, part, index, quantities, *, status="已生效"):
         ))
     db.commit()
     return order
+
+
+@pytest.mark.parametrize("project_default", [False, True])
+def test_exempt_disks_are_excluded_from_both_demand_and_receipts(db, project_default):
+    project = _project(db, project_id=str(uuid4()))
+    project.no_return_default = project_default
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    memory_category = ProductCategory(category_major="内存", category_minor="DDR4")
+    db.add_all([category, memory_category])
+    db.flush()
+    disk = DimPart(pn_std="EXEMPT-DISK", category_id=category.id)
+    other = DimPart(pn_std="NON-DISK", category_id=memory_category.id)
+    db.add_all([disk, other])
+    db.commit()
+    order = _demand(db, project, disk, 1, ["5"])
+    db.add(FMaintenanceLine(
+        raw_line_id=str(uuid4()), order_id=order.id, part_id=other.id,
+        qty=Decimal("4"), is_active=True, import_batch_id=order.import_batch_id,
+    ))
+    _receipt(db, project, disk, "3", source_order_id=order.raw_order_id)
+    _receipt(db, project, disk, "2", source_order_id=order.raw_order_id, source="rkd_import")
+    _receipt(db, project, other, "1", source_order_id=order.raw_order_id)
+    db.commit()
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
+    )[order.raw_order_id].to_dict()
+    assert result["demand_qty"] == "4.000"
+    assert result["received_qty"] == "1.000"
+    assert result["pending_qty"] == "3.000"
+    assert result["return_status"] == "not_returned"
+    assert result["excluded_exempt_disk_demand_qty"] == "5.000"
+    assert result["excluded_exempt_disk_received_qty"] == "5.000"
+
+
+@pytest.mark.parametrize("reference", ["demand_line", "manual", "warehouse_line", "warehouse_with_inherited_line"])
+def test_explicit_required_disk_overrides_defaults_for_demand_and_receipts(db, reference):
+    project = _project(db, project_id=str(uuid4()))
+    project.no_return_default = True
+    category = ProductCategory(category_major="硬盘", category_minor="HDD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="REQUIRED-DISK", category_id=category.id)
+    db.add(disk)
+    db.commit()
+    order = _demand(db, project, disk, 1, ["5"])
+    line = _issue(db, project, disk, "5", no_return=False,
+                  source_order_id=None if reference == "manual" else order.raw_order_id)
+    if reference == "manual":
+        line.demand_order_no = order.order_no
+    elif reference.startswith("warehouse"):
+        line.source_line_id = "warehouse-shipment-line-1"
+        if reference == "warehouse_with_inherited_line":
+            inherited = _issue(db, project, disk, "5", source_order_id=order.raw_order_id)
+            inherited.source_line_id = db.scalar(select(FMaintenanceLine.raw_line_id).where(
+                FMaintenanceLine.order_id == order.id,
+            ))
+    else:
+        line.source_line_id = db.scalar(select(FMaintenanceLine.raw_line_id).where(
+            FMaintenanceLine.order_id == order.id,
+        ))
+    _receipt(db, project, disk, "2", source_order_id=order.raw_order_id)
+    db.commit()
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
+    )[order.raw_order_id].to_dict()
+    assert result["demand_qty"] == "5.000"
+    assert result["received_qty"] == "2.000"
+    assert result["pending_qty"] == "3.000"
+    assert result["excluded_exempt_disk_demand_qty"] == "0.000"
+    assert result["excluded_exempt_disk_received_qty"] == "0.000"
+
+
+def test_only_exempt_disks_leave_zero_basis_and_hide_cross_project_excluded_receipts(db):
+    project = _project(db, project_id=str(uuid4()))
+    old_project = _project(db, project_id=str(uuid4()))
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="ALL-EXEMPT", category_id=category.id)
+    db.add(disk)
+    db.commit()
+    order = _demand(db, project, disk, 1, ["5"])
+    _receipt(db, project, disk, "2", occurred_at=None, source_order_id=order.raw_order_id)
+    db.commit()
+    kwargs = dict(source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id})
+    result = summaries.summarize_demand_returns(db, **kwargs)[order.raw_order_id].to_dict()
+    assert result["demand_qty"] == result["received_qty"] == "0.000"
+    assert result["undated_receipt_qty"] == "0.000"
+    assert result["excluded_exempt_disk_demand_qty"] == "5.000"
+    assert result["excluded_exempt_disk_received_qty"] == "2.000"
+    assert result["basis_state"] == "incomplete"
+    assert "zero_demand_qty" in result["reason_codes"]
+    assert result["return_status"] is result["pending_qty"] is result["over_received_qty"] is None
+    _receipt(db, old_project, disk, "99", source_order_id=order.raw_order_id)
+    db.commit()
+    conflict = summaries.summarize_demand_returns(db, **kwargs)[order.raw_order_id].to_dict()
+    assert conflict["basis_state"] == "ownership_conflict"
+    assert conflict["received_qty"] is conflict["excluded_exempt_disk_received_qty"] is None
+
+
+def test_mixed_same_disk_requirements_do_not_allocate_receipts_to_required_lines(db):
+    project = _project(db, project_id=str(uuid4()))
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="MIXED-DISK", category_id=category.id)
+    db.add(disk)
+    db.commit()
+    order = _demand(db, project, disk, 1, ["1", "9"])
+    required = _issue(db, project, disk, "1", no_return=False, source_order_id=order.raw_order_id)
+    required.source_line_id = db.scalar(select(FMaintenanceLine.raw_line_id).where(
+        FMaintenanceLine.order_id == order.id, FMaintenanceLine.line_no == 1,
+    ))
+    _receipt(db, project, disk, "9", source_order_id=order.raw_order_id)
+    db.commit()
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
+    )[order.raw_order_id].to_dict()
+    assert result["demand_qty"] == "1.000"
+    assert result["excluded_exempt_disk_demand_qty"] == "9.000"
+    assert result["basis_state"] == "incomplete"
+    assert "ambiguous_disk_receipt_basis" in result["reason_codes"]
+    for field in ("received_qty", "pending_qty", "over_received_qty", "return_status",
+                  "undated_receipt_qty", "excluded_exempt_disk_received_qty"):
+        assert result[field] is None
+
+
+def test_disk_text_and_line_exemption_do_not_expand_the_two_exclusion_sources(db):
+    project = _project(db, project_id=str(uuid4()))
+    project.display_name = "硬盘免返提醒，不作为判定来源"
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="LINE-EXEMPT", category_id=category.id)
+    text_only = DimPart(pn_std="TEXT-ONLY", category_major="硬盘")
+    db.add_all([disk, text_only])
+    db.commit()
+    order = _demand(db, project, disk, 1, ["2"])
+    _issue(db, project, disk, "2", no_return=True, source_order_id=order.raw_order_id)
+    db.add(FMaintenanceLine(
+        raw_line_id=str(uuid4()), order_id=order.id, part_id=text_only.id,
+        qty=Decimal("3"), is_active=True, import_batch_id=order.import_batch_id,
+    ))
+    _receipt(db, project, disk, "1", source_order_id=order.raw_order_id)
+    db.commit()
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
+    )[order.raw_order_id]
+    assert result.demand_qty == Decimal("5")
+    assert result.received_qty == Decimal("1")
+    assert result.excluded_exempt_disk_demand_qty == Decimal("0")
+    assert result.excluded_exempt_disk_received_qty == Decimal("0")
+
+
+def test_snapshot_counts_inactive_separately_and_never_reports_their_overage(db):
+    project = _project(db, project_id=str(uuid4()))
+    archived = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="INACTIVE-COUNTS")
+    db.add(part)
+    db.commit()
+    inactive = _demand(db, project, part, 1, ["1"], status="已取消")
+    unassigned = _demand(db, project, part, 2, ["1"])
+    assignment = db.scalar(select(MaintenanceSourceOrderAssignment).where(
+        MaintenanceSourceOrderAssignment.source_order_id == unassigned.raw_order_id,
+    ))
+    assignment.is_active = False
+    assignment.version += 1
+    assignment.archived_by = "test-fixture"
+    assignment.archived_at = assignment.created_at
+    archived_order = _demand(db, archived, part, 3, ["1"])
+    archived.is_active = False
+    incomplete = _demand(db, project, part, 4, [None])
+    complete = _demand(db, project, part, 5, ["3"])
+    _receipt(db, project, part, "8", source_order_id=inactive.raw_order_id)
+    db.commit()
+    ids = [order.raw_order_id for order in (inactive, unassigned, archived_order, incomplete, complete)]
+    readonly_engine = engine.execution_options(isolation_level="REPEATABLE READ", postgresql_readonly=True)
+    with Session(readonly_engine) as reader:
+        payload = summaries.get_return_requests_outstanding_summary(
+            reader, source_order_ids=ids, allowed_project_ids=None, project_ids=None,
+        ).to_dict()
+    assert payload["contract_version"] == "v1.1-draft"
+    assert payload["summary"] == {
+        "known_pending_qty": "3.000", "unknown_order_count": 1,
+        "inactive_order_count": 3, "incomplete": True,
+    }
+    by_id = {item["source_order_id"]: item for item in payload["orders"]}
+    for order in (inactive, unassigned, archived_order, incomplete):
+        assert by_id[order.raw_order_id]["over_received_qty"] is None
+
+
+def test_required_flags_do_not_cross_project_stable_identity_or_ambiguous_display_number(db):
+    project = _project(db, project_id=str(uuid4()))
+    other_project = _project(db, project_id=str(uuid4()))
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="REQUIRED-SCOPE", category_id=category.id)
+    db.add(disk)
+    db.commit()
+    first = _demand(db, project, disk, 1, ["5"])
+    second = _demand(db, project, disk, 2, ["5"])
+    duplicate = _demand(db, project, disk, 3, ["5"])
+    duplicate.order_no = first.order_no
+    stable = _issue(db, project, disk, "5", no_return=False, source_order_id=second.raw_order_id)
+    stable.demand_order_no = first.order_no  # 稳定身份不能被展示号覆盖。
+    _issue(db, other_project, disk, "5", no_return=False, source_order_id=first.raw_order_id)
+    manual = _issue(db, project, disk, "5", no_return=False)
+    manual.demand_order_no = first.order_no  # 同名多单不可猜配。
+    db.commit()
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[first.raw_order_id, second.raw_order_id, duplicate.raw_order_id],
+        allowed_project_ids={project.project_id},
+    )
+    assert result[first.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("5")
+    assert result[duplicate.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("5")
+    assert result[second.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("0")
 
 
 def test_summary_uses_whole_order_quantities_and_all_received_conditions(db):
@@ -99,7 +317,8 @@ def test_snapshot_requires_real_readonly_repeatable_read_and_separates_unassigne
             reader, source_order_ids=[source_id], allowed_project_ids={project_id}, project_ids=None,
         ).to_dict()
         assert result["summary"] == {
-            "known_pending_qty": "3.000", "unknown_order_count": 0, "incomplete": False,
+            "known_pending_qty": "3.000", "unknown_order_count": 0,
+            "inactive_order_count": 0, "incomplete": False,
         }
         assert result["unassigned_by_project"] == [{"project_id": project_id, "received_qty": "3.000"}]
         assert result["orders"][0]["pending_qty"] == "3.000"

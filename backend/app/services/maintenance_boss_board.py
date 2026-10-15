@@ -41,6 +41,7 @@ from app.services.maintenance_expense_integrity import (
     normalize_contract_no,
     normalized_contract_no_sql,
 )
+from app.services.maintenance_return_request_summary import summarize_demand_returns
 from app.services.query_filters import active_orders
 
 # 未归属桶的伪项目 ID（§4.5）：与真实 project_id 不可能冲突
@@ -2394,6 +2395,11 @@ def project_orders(
     )
     # 单据成本与行数一次分组查出（M3-4：禁逐单 N+1）
     order_bundles = _order_cost_bundles(db, [o.id for o in rows], can_cost=can_cost)
+    # API 已校验项目权限且每页最多 200 单；只为当前页批量富化。
+    return_summaries = summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id for order in rows],
+        allowed_project_ids=None if unassigned else {project_id},
+    )
     out = []
     for order in rows:
         bundle, line_count = order_bundles[order.id]
@@ -2411,6 +2417,10 @@ def project_orders(
                 "is_pre_delivery": project_names.is_pre_delivery(order.project_raw),
                 "line_count": line_count,
                 "known_apply_cost_inc_tax": bundle,
+                "return_summary": (
+                    return_summaries[order.raw_order_id].to_dict()
+                    if order.raw_order_id in return_summaries else None
+                ),
                 # 自报四列原样返回；与事实**无判定并排**（M4-4，不产出 mismatch）
                 "self_report": {
                     "head_demand_qty": order.head_demand_qty,
