@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -30,6 +33,7 @@ _MAX_MERGE_HOPS = 10
 _SALES_TYPES = frozenset({"备件销售", "整机销售", "销售换货"})
 _PURCHASE_TYPES = frozenset({"销售订单", "指定采购", "维保需求"})
 _ORDER_STATES = frozenset({"已生效", "已取消", "草稿", "进行中"})
+_logger = logging.getLogger(__name__)
 
 
 def _catalog_key(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -104,6 +108,32 @@ def _safe_specs(db: Session, part_ids: list[int]) -> dict[int, list[dict]]:
     return specs
 
 
+def _sales_record_counts(
+    db: Session, part_ids: list[int]
+) -> tuple[dict[int, int] | None, str | None]:
+    """D-36: sorting-only counts; never mistake an unavailable batch for zero."""
+    if not part_ids:
+        return {}, None
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        # A failed PostgreSQL statement must not poison the request transaction.
+        with db.begin_nested():
+            rows = db.execute(
+                select(FSalesLine.part_id, func.count())
+                .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+                .where(
+                    FSalesLine.part_id.in_(part_ids),
+                    FSalesOrder.data_status == "已生效",
+                )
+                .group_by(FSalesLine.part_id)
+            ).all()
+        return dict(rows), observed_at
+    except SQLAlchemyError:
+        # Do not log SQL/parameters or publish partially read counts.
+        _logger.warning("Catalog snapshot sales counts unavailable")
+        return None, None
+
+
 @router.post("/resolve")
 def resolve_parts(
     body: ResolveRequest, response: Response, _key: CatalogKey, db: DbSession
@@ -173,11 +203,18 @@ def part_snapshots(
             raise HTTPException(422, "partId 必须为正整数")
         part, merged = _canonical(db, db.get(DimPart, requested_id))
         rows.append((requested_id, part, merged))
-    specs = _safe_specs(db, list({row.id for _, row, _ in rows if row is not None}))
+    part_ids = sorted({row.id for _, row, _ in rows if row is not None})
+    specs = _safe_specs(db, part_ids)
+    sales_counts, sales_counts_as_of = _sales_record_counts(db, part_ids)
     items = []
     for requested_id, part, merged in rows:
         if part is None:
-            items.append({"requestedPartId": requested_id, "status": "not_found"})
+            items.append({
+                "requestedPartId": requested_id,
+                "status": "not_found",
+                "salesRecordCount": None,
+                "salesRecordCountAsOf": None,
+            })
             continue
         items.append(
             {
@@ -195,6 +232,9 @@ def part_snapshots(
                 "lockedFields": sorted(part.locked_fields or []),
                 "updatedAt": part.updated_at.isoformat() if part.updated_at else None,
                 "specs": specs.get(part.id, []),
+                "salesRecordCount": sales_counts.get(part.id, 0)
+                if sales_counts is not None else None,
+                "salesRecordCountAsOf": sales_counts_as_of,
             }
         )
     return {"schemaVersion": 1, "items": items}

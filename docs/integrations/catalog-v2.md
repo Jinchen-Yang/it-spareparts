@@ -12,6 +12,8 @@
 
 商城仅由数据处理页实名人员选字段并确认，向主数据库发起一次受控提交；“只保存在商城”独立于此动作。AI、搜索、找图和文案获取只能由人另行点击，结果默认留商城；目录同步、建品、读取、命令成功都不授权研究。目录及普通资料命令不传采购、销售、库存、项目、审批／申请状态、价格、人员、客户、合同、SN或原件。业务智能体写业务状态的禁令继续有效。
 
+D-36 于 2026-10-15 18:16Z 确认的窄例外仅适用于既有只读 resale v1 `/snapshots`：传 `salesRecordCount` 与 `salesRecordCountAsOf`，仅供商城排序，详见 [resale-catalog-v1](resale-catalog-v1.md)。目录仍禁传销售明细、价格、客户、单号、人员及销售行／订单标识；计数不进入人工资料命令。本文 v2 node、hash 输入、发布捕获范围和版本均不因该 v1 例外而扩展。
+
 图库由商城拥有，主数据库按稳定 part_id 只读关联，详见同目录 [gallery-v1.md](gallery-v1.md)。历史参考价仍沿原点击查询链路，不随目录批量拉取。
 
 ## 2. 通用 JSON 形状与版本
@@ -293,11 +295,11 @@ published_sequence仅供观察，不是checkpoint。只在 source／part_id／id
 
 | 生产者／消费者 | 可用能力 | 兼容处理 |
 |---|---|---|
-| 现有resale v1／现有v1客户端 | `/api/integrations/resale/parts/{resolve,snapshots,price-evidence,search}` 原camelCase、schemaVersion=1、认证／错误 | 完全保留；不往旧响应塞v2或用旧读token写；v2关停不影响旧链路。 |
+| 现有resale v1／现有v1客户端 | `/api/integrations/resale/parts/{resolve,snapshots,price-evidence,search}` 原camelCase、schemaVersion=1、认证／错误；`snapshots` 按 [v1 契约](resale-catalog-v1.md)兼容增加两个可空销售计数字段 | 旧客户端可忽略新增字段；新客户端对旧响应缺失计数保留未知 NULL，不补0。不往旧响应塞v2或用旧读token写；v2关停不影响旧链路。 |
 | catalog v2／尚未升级的商城 | v2独立URL与凭据 | 不启新消费；v1继续。 |
 | 本文v2.0-draft双方模拟／实现 | 本文节点、快照、批次、哈希、命令及错误 | 同副本、golden与真实PG契约通过后才能逐项开关；本文不是已实现OpenAPI。 |
 | schema_version>2／v2消费者 | 不受支持 | 停批、告警、留原已应用水位；先规范升级，再消费者与生产者兼容启用。 |
 | v2已启用身份组／回退构建 | 旧资料可读、库存与图库照常，提交／应用可关闭 | 只用仍认识身份组的兼容版；不能直接回到按单PN读库存的旧版。 |
 | catalog v2／gallery v1 | 独立协议及scope | gallery失败不阻塞目录／资料编辑；catalog成功不证明图库可读。 |
 
-后续实现验收至少包含：快照中途增改／合并仍固定hash；源100晚提交与101早提交均发布；T1改A／T2改A+B固定点不漏B；merge/unmerge／alias换属闭包和删除；超大规格批分片缺失／乱序／重复／错hash均零应用零水位推进；epoch／过期全量恢复；v1全DTO不变；读token、无映射／停用／无权限人拒写；同字段整次冲突、异字段合并；显式clear/remove；同键异内容拒绝；主数据库成功而商城失败及feed先到／回执晚到不重复建品、不盖新草稿；无点击零AI；好坏库存及原图／原件各自守恒。浏览器调试不代替用户对候选实际点按验收。
+后续实现验收至少包含：快照中途增改／合并仍固定hash；源100晚提交与101早提交均发布；T1改A／T2改A+B固定点不漏B；merge/unmerge／alias换属闭包和删除；超大规格批分片缺失／乱序／重复／错hash均零应用零水位推进；epoch／过期全量恢复；v1既有字段与行为保持兼容，销售计数新增字段按v1契约验证；读token、无映射／停用／无权限人拒写；同字段整次冲突、异字段合并；显式clear/remove；同键异内容拒绝；主数据库成功而商城失败及feed先到／回执晚到不重复建品、不盖新草稿；无点击零AI；好坏库存及原图／原件各自守恒。浏览器调试不代替用户对候选实际点按验收。
