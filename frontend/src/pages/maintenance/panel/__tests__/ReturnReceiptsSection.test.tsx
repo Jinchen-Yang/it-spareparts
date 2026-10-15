@@ -1,10 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), audit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), audit: vi.fn(), categories: vi.fn() }));
 vi.mock("../../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<typeof import("../../../../api/maintenanceOperations")>("../../../../api/maintenanceOperations"),
   getReturnReceiptDemands: mocks.demands, getReturnReceiptSummary: mocks.summary, searchReturnReceipts: mocks.search, createReturnReceipt: mocks.create,
   updateReturnReceipt: mocks.update, getReturnReceiptAudit: mocks.audit,
+  listMaintenancePartCategories: mocks.categories,
 }));
 vi.mock("../../../../api/maintenanceProjects", () => ({ listMaintenanceProjects: mocks.projects }));
 vi.mock("../../../../components/PartPicker", () => ({ default: ({ onChange }: { onChange: (id: number, part: unknown) => void }) =>
@@ -20,6 +21,7 @@ function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promi
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear(); localStorage.setItem("permissions", JSON.stringify({ action_maintenance_bad_return_manage: true }));
   mocks.summary.mockResolvedValue({ data: summary }); mocks.search.mockResolvedValue({ data: { items: [receipt], total: 1 } });
+  mocks.categories.mockResolvedValue({ data: { categories: [{ major: "硬盘", minors: ["SAS"] }] } });
   // 默认口径：全量候选 1 张；按 part_id 的建议请求默认无匹配（不预填，老用例保持 wbdd_no 为空）
   mocks.demands.mockImplementation((_id: string, input: { part_id?: number } = {}) =>
     input.part_id
@@ -31,6 +33,26 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("返还台账的登记、更正和加载恢复", () => {
+  it("品类筛选回第一页并清除选择，父级读回保留已执行品类和未提交文字", async () => {
+    let refresh!: PanelRefresh;
+    mocks.search.mockResolvedValue({ data: { items: [receipt], total: 25 } });
+    render(<ReturnReceiptsSection projectId="p1" registerRefresh={(_key, reader) => { if (reader) refresh = reader; }} />);
+    await screen.findByText("PN-1");
+    fireEvent.click(screen.getByTitle("Next Page"));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 })));
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    expect(screen.getByRole("button", { name: "批量修改" })).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "返还一级品类" }));
+    fireEvent.click(await screen.findByText("硬盘", { selector: ".ant-select-item-option-content" }));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 })));
+    expect(screen.queryByRole("button", { name: "批量修改" })).not.toBeInTheDocument();
+    const search = screen.getByPlaceholderText("搜索返件 PN、凭据或备注");
+    fireEvent.change(search, { target: { value: "未提交文本" } });
+    await act(async () => { await refresh(); });
+    expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 }));
+    expect(mocks.search.mock.calls[mocks.search.mock.calls.length - 1]?.[1]).not.toHaveProperty("q");
+    expect(search).toHaveValue("未提交文本");
+  });
   it("登记动作置顶，返还记录先于需求单核对汇总", async () => {
     render(<ReturnReceiptsSection projectId="p1" />);
     const register = await screen.findByRole("button", { name: "登记返还" });

@@ -94,6 +94,21 @@ afterEach(() => {
 });
 
 describe("DemandLinesEditor 编辑（OCC digest）", () => {
+  it("只读用户可看整单返还摘要和明细，但没有编辑、撤销和批量入口", async () => {
+    mocks.list.mockResolvedValue({ data: { items: [row({ manual_override: { qty: { value: "5.000", source_value: "4.000", updated_by: "合成用户", updated_at: "2026-10-15T00:00:00Z" } } })], return_summary: {
+      source_order_id: "O1", order_no: "XQD-1", project_id: "p1", effective: true,
+      demand_qty: "5.000", received_qty: "2.000", pending_qty: "3.000", remaining_qty: "3.000", over_received_qty: "0.000",
+      return_status: "not_returned", basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000",
+    } } });
+    render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" readOnly onClose={vi.fn()} />);
+    expect(await screen.findByText("未返")).toBeInTheDocument();
+    expect(screen.getByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(screen.getByText("PN-A")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^编\s*辑$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^撤\s*销$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批量修改选中行/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
   it("提交携带读取时的 digest；成功后重读行列表", async () => {
     mocks.list.mockResolvedValue(listResp([row()]));
     mocks.patch.mockResolvedValue({ data: { changed: true, digest: D2, raw_line_id: "L1" } });
@@ -108,6 +123,22 @@ describe("DemandLinesEditor 编辑（OCC digest）", () => {
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
     expect(mocks.patch.mock.calls[0]).toEqual(["L1", { qty: 6 }, "按实物更正", D1]);
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+  });
+
+  it("写成功后同时刷新父需求单摘要，父读回失败明确提示且不重复写", async () => {
+    mocks.list.mockResolvedValue(listResp([row()]));
+    mocks.patch.mockResolvedValue({ data: { changed: true, digest: D2 } });
+    const onChanged = vi.fn().mockResolvedValue(false);
+    render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" onClose={vi.fn()} onChanged={onChanged} />);
+    fireEvent.click((await screen.findAllByRole("button", { name: /^编\s*辑$/ }))[0]);
+    const dialog = await editDialog();
+    fireEvent.change(qtyInput(dialog), { target: { value: "6" } });
+    fireEvent.change(editReason(dialog), { target: { value: "按实物更正" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存\s*修\s*改/ }));
+    expect(await screen.findByText("修改已保存，但明细或需求单返还情况刷新失败，请重试刷新，不要重复提交")).toBeInTheDocument();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(mocks.patch).toHaveBeenCalledTimes(1);
   });
 
   it("快速双击保存只发一次（同步锁在任何 await 之前）", async () => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReturnStatusColumn from "../../../components/maintenance/ReturnStatusColumn";
 import { Button, Card, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
@@ -232,6 +233,7 @@ export function PartsOrdersTab({
     },
     { title: "数据状态", dataIndex: "data_status", render: raw },
     { title: "明细行", dataIndex: "line_count" },
+    { title: "返还情况（当前累计）", dataIndex: "return_summary", width: 215, render: (value) => <ReturnStatusColumn summary={value} /> },
     {
       title: "已知申请估算成本(含税)",
       render: (_: unknown, order) =>
