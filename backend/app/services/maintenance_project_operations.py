@@ -2244,6 +2244,9 @@ def search_site_issues(
     workflow_statuses: list[str],
     page: int,
     page_size: int,
+    category_major: str | None = None,
+    category_minor: str | None = None,
+    category_state: str | None = None,
 ) -> dict | None:
     project = db.get(MaintenanceProject, project_id)
     if project is None:
@@ -2251,6 +2254,15 @@ def search_site_issues(
     allowed = {"draft", "confirmed", "corrected", "void"}
     if not workflow_statuses or any(item not in allowed for item in workflow_statuses):
         raise MaintenanceOperationError("现场领用状态筛选无效")
+    from app.services.maintenance_return_category_filter import category_match
+
+    try:
+        part_match = category_match(
+            MaintenanceSiteIssueLine.part_id, category_major=category_major,
+            category_minor=category_minor, category_state=category_state,
+        )
+    except ValueError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
     filters = [
         MaintenanceSiteIssue.project_id == project_id,
         # 2026-08-18：search 是只读展示，须显示工作簿(workbook)/旧数据(legacy)/线上(site_issue_v2)
@@ -2261,6 +2273,12 @@ def search_site_issues(
         ),
         MaintenanceSiteIssue.normalized_status.in_(workflow_statuses),
     ]
+    if part_match is not None:
+        filters.append(select(1).where(
+            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+            MaintenanceSiteIssueLine.is_active.is_(True),
+            part_match,
+        ).exists())
     q = (q_text or "").strip()
     if len(q) > 256:
         raise MaintenanceOperationError("现场领用搜索条件无效")
@@ -2303,6 +2321,7 @@ def search_site_issues(
                 ),
                 # 2026-08-19：03 行作废级联软删的领用行不在面板展示（#55）
                 MaintenanceSiteIssueLine.is_active.is_(True),
+                *([part_match] if part_match is not None else []),
             )
             .order_by(
                 MaintenanceSiteIssueLine.issue_id,
@@ -2319,9 +2338,21 @@ def search_site_issues(
     )
     from app.services.maintenance_site_return_requirements import line_details
     details = line_details(db, line_rows, project=project)
+    rows = [site_issue_dict(issue, by_issue[issue.issue_id], line_details=details) for issue in issues]
+    if part_match is not None and issues:
+        # The existing void action affects the complete issue, even when the
+        # read view contains only matching lines. Keep that scope explicit.
+        line_counts = dict(db.execute(select(
+            MaintenanceSiteIssueLine.issue_id, func.count(),
+        ).where(
+            MaintenanceSiteIssueLine.issue_id.in_([issue.issue_id for issue in issues]),
+            MaintenanceSiteIssueLine.is_active.is_(True),
+        ).group_by(MaintenanceSiteIssueLine.issue_id)).all())
+        for row in rows:
+            row["total_line_count"] = line_counts.get(row["issue_id"], 0)
     return {
         "project_id": project_id,
-        "rows": [site_issue_dict(issue, by_issue[issue.issue_id], line_details=details) for issue in issues],
+        "rows": rows,
         "total": total,
         "page": page,
         "page_size": page_size,

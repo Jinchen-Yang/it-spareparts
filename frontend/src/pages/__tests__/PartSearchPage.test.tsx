@@ -12,9 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
+import type { Overview } from "../../api";
 
 const unifiedSearch = vi.fn();
 const fetchOverview = vi.fn();
+const fetchMasterEditState = vi.fn();
 const fetchPoolReference = vi.fn();
 const masterCategories = vi.fn();
 const masterEdit = vi.fn();
@@ -29,7 +31,9 @@ vi.mock("../../api/search", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../api/search")>();
   return { ...mod,
     unifiedSearch: (...a: unknown[]) => unifiedSearch(...a),
-    fetchOverview: (...a: unknown[]) => fetchOverview(...a) };
+    fetchOverview: (...a: unknown[]) => fetchOverview(...a),
+    fetchMasterEditState: (...a: unknown[]) => fetchMasterEditState(...a),
+    fetchMasterEditCategories: async () => (await masterCategories()).data.categories };
 });
 vi.mock("../../api/poolAnalysis", () => ({
   fetchPoolReference: (...a: unknown[]) => fetchPoolReference(...a),
@@ -70,6 +74,17 @@ const ovFix = (id = 42, pn = "02311DYQ") => ({
   sales_recent_restricted: false,
 });
 
+const editorState = (part: Overview["part"]) => ({
+  part_id: part.id, pn_std: part.pn_std,
+  identity: { part_id: part.id, pn_std: part.pn_std, status: "active", merged_into_id: null },
+  fields: {
+    description: part.description, brand: part.brand,
+    category_major: part.category_major, category_minor: part.category_minor,
+    machine_or_part: part.machine_or_part, unit: part.unit,
+  },
+  specs: {}, version_mode: "field_snapshot",
+});
+
 const emptyResp = { total: 0, page: 1, page_size: 20, exact: false, ambiguous: false,
                     low_confidence: true, items: [], similar_items: [] };
 
@@ -101,6 +116,11 @@ beforeEach(() => {
   localStorage.setItem("role", "admin");
   unifiedSearch.mockResolvedValue(emptyResp);
   fetchOverview.mockResolvedValue(ovFix());
+  fetchMasterEditState.mockImplementation(async (id: number) => editorState({
+    ...ovFix(id, id === 100 ? "SUB-002" : "SUB-001").part,
+    description: id === 100 ? "第二型号描述" : "目标型号描述",
+    category_major: "服务器配件", category_minor: "磁盘",
+  }));
   masterCategories.mockResolvedValue({ data: { categories: [] } });
   masterEdit.mockResolvedValue({
     data: { id: 99, pn_std: "SUB-001", updated: ["description"], locked_fields: ["description"] },
@@ -442,7 +462,9 @@ describe("通用号 PN 查看与详情编辑", () => {
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     await waitFor(() => expect(masterEdit).toHaveBeenCalledWith({
+      part_id: 99,
       pn_std: "SUB-001",
+      base_snapshot: editorState(targetOverview.part),
       description: "新描述：2TB SAS 企业盘",
       category_major: "存储设备",
       category_minor: "硬盘",

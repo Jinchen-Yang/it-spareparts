@@ -31,6 +31,14 @@ from app.services.governance import _nonstd_clause
 _TRAILING_JUNK = re.compile(r"[\s0-9]+$")
 
 
+def acquire_master_write_lock(db: Session) -> None:
+    """人工命令与全量 refresh 共用的事务锁，必须早于 PN/字典/规格写锁。
+
+    首期串行协调这两类写者；其他治理和 ETL 入口仍由后续适配收敛锁序。
+    """
+    db.execute(text("SELECT pg_advisory_xact_lock(742031, 1)"))
+
+
 # ============================================================
 # 品牌
 # ============================================================
@@ -49,6 +57,27 @@ def normalize_brand(raw: str | None) -> str | None:
         if s == ph or s.startswith(ph):
             return None
     return s
+
+
+def bind_part_dictionaries(db: Session, part: DimPart, fields) -> None:
+    """人工命令中重绑当前文本对应的字典（包括已有 ID 和显式清空）。不提交。"""
+    if "brand" in fields:
+        norm = normalize_brand(part.brand)
+        part.brand_id = None
+        if norm is not None:
+            db.execute(pg_insert(Brand).values(
+                brand_name=part.brand, normalized_name=norm
+            ).on_conflict_do_nothing(index_elements=[Brand.normalized_name]))
+            part.brand_id = db.scalar(select(Brand.id).where(Brand.normalized_name == norm))
+    if {"category_major", "category_minor"}.intersection(fields):
+        part.category_id = None
+        if part.category_major:
+            db.execute(pg_insert(ProductCategory).values(
+                category_major=part.category_major, category_minor=part.category_minor
+            ).on_conflict_do_nothing(constraint="uq_category_major_minor"))
+            part.category_id = db.scalar(select(ProductCategory.id).where(
+                ProductCategory.category_major == part.category_major,
+                ProductCategory.category_minor.is_not_distinct_from(part.category_minor)))
 
 
 def backfill_brands(db: Session) -> dict:
@@ -517,6 +546,7 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
 
 def refresh(db: Session) -> dict:
     """字典回填 → 别名/询价关联 → 规格抽取 → 质量扫描 → 质量分。单事务提交。"""
+    acquire_master_write_lock(db)
     stats = {}
     stats["brands"] = backfill_brands(db)
     stats["categories"] = backfill_categories(db)

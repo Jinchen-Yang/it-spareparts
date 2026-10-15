@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { message } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { BoardOrderRow } from "../../../../api/maintenanceBossBoard";
 
 const mocks = vi.hoisted(() => ({
   getBoardProjectOrders: vi.fn(),
@@ -182,6 +183,30 @@ afterEach(() => {
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
+  it("项目需求单展示未扣免返的原始下单、实收和差额，不发布返还状态", async () => {
+    const row: BoardOrderRow = {
+      ...orderRow("WBDD-1", "XSDD-1"),
+      known_apply_cost_inc_tax: stat({
+        actual_amount: "100.00", estimated_amount: "0.00", known_amount: "100.00",
+        missing_lines: 0, coverage_pct: 100, quality: "actual_only",
+      }),
+      return_summary: {
+        source_order_id: "RAW-WBDD-1", order_no: "WBDD-1", project_id: "p1", effective: true,
+        demand_qty: "5.000", received_qty: "3.000", pending_qty: "2.000", remaining_qty: "2.000",
+        over_received_qty: "0.000", basis_state: "complete",
+        reason_codes: [], undated_receipt_qty: "0.000",
+      },
+    };
+    mocks.getBoardProjectOrders.mockResolvedValue({ data: { rows: [row], total: 1, page: 1, page_size: 200 } });
+    renderTab();
+    await screen.findByText("已收 3 / 下单 5");
+    const order = within(orderLink("WBDD-1")!.closest("tr")!);
+    expect(order.getByText("已收 3 / 下单 5")).toBeInTheDocument();
+    expect(order.getByText("差额 2")).toBeInTheDocument();
+    expect(order.queryByText(/收齐|未收齐|已返|未返|无需核对|剔除|不参与核对/)).not.toBeInTheDocument();
+    expect(order.queryByText("—（待核对）")).not.toBeInTheDocument();
+  });
+
   it("在各需求单行渲染联系信息及完整值，空字段显示 — 并区分无权限", async () => {
     const address = "合成长地址路".repeat(70) + "1号楼";
     mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([
