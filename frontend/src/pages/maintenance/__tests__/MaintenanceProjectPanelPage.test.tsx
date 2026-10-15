@@ -152,7 +152,7 @@ beforeEach(() => {
       project: {
         project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
         project_manager_id: null, lifecycle_status: "ongoing",
-        is_active: true, version: 1,
+        is_active: true, version: 1, can_edit_master: true,
       },
     },
   });
@@ -198,17 +198,61 @@ describe("免返标注", () => {
   const allowEdit = () => localStorage.setItem("permissions", JSON.stringify({
     page_maintenance: true, data_profit: true, action_maintenance_project_manage: true,
   }));
-  const noteProject = (note: string | null = "原提醒", id = "p1") => ({ data: { project: {
+  const noteProject = (note: string | null = "原提醒", id = "p1", canEditMaster = true) => ({ data: { project: {
     project_id: id, project_code: id, display_name: id,
-    is_active: true, version: 2, no_return_note: note,
+    is_active: true, version: 2, no_return_note: note, can_edit_master: canEditMaster,
   } } });
+  it.each([false, undefined])(
+    "服务端主档编辑权为%s时，残留本地admin权限与工作簿上传权不能显示编辑按钮", async (canEditMaster) => {
+      localStorage.setItem("token", "shared-admin-token");
+      localStorage.setItem("role", "admin");
+      allowEdit();
+      const detail = noteProject();
+      getMaintenanceProject.mockResolvedValue({ data: { project: {
+        ...detail.data.project, can_edit_master: canEditMaster, can_edit_master_workbook: true,
+      } } });
+      renderPanel();
+      expect(await screen.findByText("原提醒")).toBeVisible();
+      expect(await screen.findByRole("button", { name: /上传覆盖/ })).toBeVisible();
+      expect(screen.queryByRole("button", { name: "编辑免返标注" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /编辑基本信息/ })).toBeNull();
+    },
+  );
+  it.each([null, "readonly"])(
+    "服务端允许主档编辑时，缺失或过时本地角色%s与权限快照不遮住编辑入口", async (role) => {
+      if (role) {
+        localStorage.setItem("role", role);
+        localStorage.setItem("permissions", JSON.stringify({
+          page_maintenance: false, data_profit: false, action_maintenance_project_manage: false,
+        }));
+      }
+      getMaintenanceProject.mockResolvedValue(noteProject());
+      renderPanel();
+      expect(await screen.findByRole("button", { name: "编辑免返标注" })).toBeVisible();
+      expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+      const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+      expect(within(dialog).getByRole("textbox", { name: "免返标注" })).toHaveValue("原提醒");
+    },
+  );
+  it("停用项目即使携带主档编辑标志也隐藏编辑入口", async () => {
+    const detail = noteProject();
+    getMaintenanceProject.mockResolvedValue({ data: { project: {
+      ...detail.data.project, is_active: false,
+    } } });
+    renderPanel();
+    expect(await screen.findByText("原提醒")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "编辑免返标注" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /编辑基本信息/ })).toBeNull();
+  });
   it("在基础信息显示多行纯文本，并从该区域打开同一个编辑弹窗", async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true, data_profit: true, action_maintenance_project_manage: true,
     }));
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
-      is_active: true, version: 2, no_return_note: "硬盘免返\n<b>其他按合同</b>",
+      is_active: true, version: 2, no_return_note: "硬盘免返\n<b>其他按合同</b>", can_edit_master: true,
     } } });
     renderPanel();
     expect(await screen.findByText("硬盘免返 <b>其他按合同</b>")).toBeVisible();
@@ -259,15 +303,15 @@ describe("免返标注", () => {
   });
 
   it.each(["page_maintenance", "data_profit", "action_maintenance_project_manage"])(
-    "缺少%s时只读标注", async (missing) => {
+    "服务端判定缺少%s时只读标注", async (missing) => {
       localStorage.setItem("permissions", JSON.stringify({
         page_maintenance: true, data_profit: true, action_maintenance_project_manage: true, [missing]: false,
       }));
-      getMaintenanceProject.mockResolvedValue(noteProject());
+      getMaintenanceProject.mockResolvedValue(noteProject("原提醒", "p1", false));
       renderPanel();
       expect(await screen.findByText("原提醒")).toBeVisible();
       expect(screen.queryByRole("button", { name: "编辑免返标注" })).toBeNull();
-      expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: /编辑基本信息/ })).toBeNull();
     },
   );
 
@@ -755,11 +799,15 @@ describe("项目面板", () => {
     expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
   });
 
-  it("无项目管理动作键时不显示归属挂靠与编辑入口", async () => {
+  it("无项目管理动作键且服务端未给主档编辑权时不显示归属挂靠与编辑入口", async () => {
+    getMaintenanceProject.mockResolvedValue({ data: { project: {
+      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
+      is_active: true, version: 1, can_edit_master: false,
+    } } });
     renderPanel();
     await screen.findByTestId("panel-health-band");
     expect(screen.queryByText(/归属挂靠/)).toBeNull();
-    expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /编辑基本信息/ })).toBeNull();
   });
 
   it("有项目管理动作键时概览给出归属挂靠（#45 判定依据＝XSDD）", async () => {
@@ -812,7 +860,7 @@ describe("项目面板", () => {
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
       business_type: label === "未标注" ? "整体维保" : null,
-      version: 7, is_active: true, period_from: null, period_to: null,
+      version: 7, is_active: true, period_from: null, period_to: null, can_edit_master: true,
     } } });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
@@ -832,7 +880,7 @@ describe("项目面板", () => {
     localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true, data_profit: true, action_maintenance_project_manage: true }));
     getMaintenanceProject.mockResolvedValue({ data: { project: {
       project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
-      business_type: "历史特殊类型", version: 3, is_active: true,
+      business_type: "历史特殊类型", version: 3, is_active: true, can_edit_master: true,
     } } });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /编辑基本信息/ }));
@@ -866,6 +914,7 @@ describe("项目面板", () => {
           lifecycle_status: "ongoing",
           is_active: true,
           version: 3,
+          can_edit_master: true,
           visible_usernames: [],
         },
       },
@@ -902,6 +951,7 @@ describe("项目面板", () => {
           lifecycle_status: "ongoing",
           is_active: true,
           version: 4,
+          can_edit_master: true,
           visible_usernames: [],
         },
       },
@@ -941,6 +991,7 @@ describe("项目面板", () => {
           lifecycle_status: "ongoing",
           is_active: true,
           version: 5,
+          can_edit_master: true,
           visible_usernames: [],
         },
       },
@@ -975,6 +1026,7 @@ describe("项目面板", () => {
           lifecycle_status: "ongoing",
           is_active: true,
           version: 6,
+          can_edit_master: true,
           visible_usernames: [],
         },
       },

@@ -4732,7 +4732,13 @@ def test_operations_directory_card_matches_workspace_summary(db):
 
     assert workspace.status_code == 200, workspace.text
     assert directory.status_code == 200, directory.text
-    assert directory.json()["rows"] == [workspace.json()["project"]]
+    summary = workspace.json()["project"]
+    assert summary["no_return_note"] is None
+    assert "no_return_note" not in directory.json()["rows"][0]
+    # 卡片省略长提醒，其余经营口径仍须与项目工作区保持一致。
+    assert directory.json()["rows"] == [
+        {key: value for key, value in summary.items() if key != "no_return_note"}
+    ]
 
 
 def test_workspace_details_are_independently_paged_without_truncating_totals_or_workbook(db):

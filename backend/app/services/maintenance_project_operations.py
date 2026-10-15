@@ -6237,6 +6237,8 @@ def _project_cards_for_ids(
             ),
             manager_tracking_facts=manager_tracking_by_project.get(project.project_id),
         )
+        # 仅卡墙省略长提醒；共用组装器的工作区/项目详情仍保留原文。
+        card.pop("no_return_note", None)
         _attach_manager_and_missing_labels(
             card,
             manager_assignments.get(project.project_id),

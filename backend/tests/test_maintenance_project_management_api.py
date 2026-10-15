@@ -96,6 +96,7 @@ def test_admin_can_create_project_and_read_it_back(db):
     # （2026-09-06：稳定详情随卡片一起下发 can_edit_master_workbook，管理员恒为 True）
     assert read_back.json()["project"] == {
         **project, "visible_usernames": [], "can_edit_master_workbook": True,
+        "can_edit_master": True,
     }
     audit = db.scalar(select(MaintenanceProjectAuditLog))
     assert audit is not None
@@ -149,6 +150,7 @@ def test_project_patch_is_explicit_versioned_and_stale_safe(db):
     ).json()["project"]
     assert read_back == {
         **changed.json(), "visible_usernames": [], "can_edit_master_workbook": True,
+        "can_edit_master": True,
     }
     audits = list(
         db.scalars(

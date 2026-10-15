@@ -27,6 +27,9 @@ from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_operations as operations
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
+_require_master_manage_action = require_action(
+    "action_maintenance_project_manage", require_data="data_profit"
+)
 
 
 class StableProjectCreate(BaseModel):
@@ -142,9 +145,7 @@ def patch_stable_project(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
-    ),
+    _action: None = Depends(_require_master_manage_action),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operated_by = _real_operator(db, ident)
@@ -187,6 +188,7 @@ def patch_stable_project(
                     select(MaintenanceProject)
                     .where(MaintenanceProject.project_id == project_id)
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
                 if project is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
@@ -413,6 +415,7 @@ def stable_project_overview(
     as_of: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
+    ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
     _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
@@ -442,6 +445,15 @@ def stable_project_overview(
             db, project_id=project_id, user_ctx=ctx,
         )
     )
+    # 详情已通过页面/项目范围门；复用 PATCH 的动作/数据与实名门，避免前端按角色猜测。
+    # 总表编辑权还会授予本人项目负责人，不能替代项目主档编辑权。
+    try:
+        _require_master_manage_action(ctx)
+        _real_operator(db, ident)
+    except HTTPException:
+        payload["project"]["can_edit_master"] = False
+    else:
+        payload["project"]["can_edit_master"] = bool(payload["project"]["is_active"])
     return payload
 
 

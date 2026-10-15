@@ -224,10 +224,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
     || !!row?.can_edit_master_workbook
     || !!project?.can_edit_master_workbook;
   const canManageProject = !!perms.action_maintenance_project_manage;
-  const canEditBasics = canManageProject && project?.is_active !== false && (
-    localStorage.getItem("role") === "admin"
-    || (!!perms.page_maintenance && !!perms.data_profit)
-  );
+  // 主档编辑与总表上传是两种权限；只采用当前服务端身份下发的主档能力。
+  const canEditBasics = project?.can_edit_master === true && project.is_active !== false;
   const editBasicsRef = useRef<{ open: () => void }>(null);
   // 验收清单导入 2026-08-22 起跟随维保页面权限（与 maintenancePermissions 同口径），
   // 不再看已停用的 action_maintenance_acceptance_checklist_import 旧键。
@@ -698,14 +696,13 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
 
   return (
     <>
-      <Button
+      {disabled ? null : <Button
         size="small"
         icon={<EditOutlined />}
-        disabled={disabled}
         onClick={openModal}
       >
         编辑基本信息
-      </Button>
+      </Button>}
       <Modal
         open={open}
         title="编辑项目基本信息"

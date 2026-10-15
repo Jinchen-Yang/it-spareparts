@@ -9,7 +9,7 @@ from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 from alembic import command
 
-from app.db import SessionLocal, engine
+from app.db import SessionLocal, engine, get_db
 from app.main import app
 from app.auth import _make_token
 from app.models.maintenance_project import MaintenanceProject
@@ -36,7 +36,9 @@ def test_note_patch_reads_back_and_records_one_versioned_change(db):
     assert changed.status_code == 200, changed.text
     assert changed.json()["no_return_note"] == "硬盘免返\n其他按合同"
     assert changed.json()["version"] == 2
-    assert client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]["no_return_note"] == "硬盘免返\n其他按合同"
+    overview = client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]
+    assert overview["no_return_note"] == "硬盘免返\n其他按合同"
+    assert overview["can_edit_master"] is True
     assert client.get("/api/maintenance/projects/stable").json()["rows"][0]["no_return_note"] == "硬盘免返\n其他按合同"
     state = db.scalar(select(MaintenanceProjectWorkbookState))
     assert state.revision == 1
@@ -81,6 +83,37 @@ def test_concurrent_note_changes_refresh_preloaded_project_before_cas(db, second
     project = client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]
     assert project["version"] == 2
     assert project["no_return_note"] in ({"甲的提醒", "乙的提醒"} if second_field == "no_return_note" else {"甲的提醒", None})
+
+
+def test_viewer_only_patch_refreshes_preloaded_project_before_version_check(db):
+    client, pid = _project(db)
+    _permission_client(db, username="latest_note_viewer", permissions={"page_maintenance": True})
+    with SessionLocal() as stale_session:
+        # 保持同一 ORM 实体强引用，模拟请求在获锁前已经读过旧版本。
+        preloaded = stale_session.get(MaintenanceProject, pid)
+        assert preloaded.version == 1
+        latest = _patch(client, pid, 1, no_return_note="另一账号刚更新的提醒",
+                        visible_usernames=["latest_note_viewer"])
+        assert latest.status_code == 200, latest.text
+        assert latest.json()["version"] == 2
+        assert preloaded.version == 1
+
+        def request_db():
+            yield stale_session
+
+        app.dependency_overrides[get_db] = request_db
+        try:
+            stale = _patch(client, pid, 1, visible_usernames=[])
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
+        assert stale.status_code == 409, stale.text
+        assert "当前版本 2" in stale.json()["detail"]
+
+    read_back = client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]
+    assert read_back["version"] == 2
+    assert read_back["no_return_note"] == "另一账号刚更新的提醒"
+    assert read_back["visible_usernames"] == ["latest_note_viewer"]
 
 
 def test_note_and_workbook_apply_keep_both_changes_and_bumps(db):
@@ -191,8 +224,45 @@ def test_note_keeps_existing_master_permission_matrix(db, missing):
              "action_maintenance_project_manage": True, missing: False}
     client = _permission_client(db, username="note_limited", permissions=perms)
     assert _patch(client, pid, 1, no_return_note="越权提醒").status_code == 403
+    overview = client.get(f"/api/maintenance/projects/stable/{pid}")
     if missing != "page_maintenance":
-        assert client.get(f"/api/maintenance/projects/stable/{pid}").status_code == 200
+        assert overview.status_code == 200, overview.text
+        assert overview.json()["project"]["can_edit_master"] is False
+    else:
+        assert overview.status_code == 403
+
+
+def test_project_master_capability_matches_authorized_boss_and_archived_state(db):
+    admin, pid = _project(db)
+    authorized = _permission_client(db, username="note_authorized_boss", permissions={
+        "page_maintenance": True, "page_maintenance_beta": True,
+        "data_purchase_cost": True, "data_profit": True,
+        "action_maintenance_project_manage": True,
+    })
+    overview = authorized.get(f"/api/maintenance/projects/stable/{pid}")
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["project"]["can_edit_master"] is True
+    assert _patch(authorized, pid, 1, no_return_note="有权账号的提醒").status_code == 200
+
+    archived = admin.post(f"/api/maintenance/projects/stable/{pid}/archive", json={
+        "version": 2, "reason": "核对归档后编辑能力",
+    })
+    assert archived.status_code == 200, archived.text
+    overview = authorized.get(f"/api/maintenance/projects/stable/{pid}")
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["project"]["can_edit_master"] is False
+    assert _patch(authorized, pid, 3, no_return_note="归档后禁止修改").status_code == 400
+
+
+def test_legacy_token_never_advertises_master_edit_even_with_same_name_real_user(db):
+    _, pid = _project(db)
+    token, _ = _make_token("admin", "note_contract_admin", None, token_version=0)
+    legacy = TestClient(app)
+    legacy.headers["Authorization"] = f"Bearer {token}"
+    overview = legacy.get(f"/api/maintenance/projects/stable/{pid}")
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["project"]["can_edit_master"] is False
+    assert _patch(legacy, pid, 1, no_return_note="旧共享令牌禁止编辑").status_code == 403
 
 
 def test_shared_identity_and_unowned_project_cannot_write_note(db):
@@ -201,6 +271,10 @@ def test_shared_identity_and_unowned_project_cannot_write_note(db):
                            fallback=True, perms={"action_maintenance_project_manage": True})
     shared = TestClient(app)
     shared.headers["Authorization"] = f"Bearer {token}"
+    overview = shared.get(f"/api/maintenance/projects/stable/{pid}")
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["project"]["can_edit_master"] is False
+    assert overview.json()["project"]["can_edit_master_workbook"] is True
     assert _patch(shared, pid, 1, no_return_note="共享身份写入").status_code == 403
     limited = _permission_client(db, username="note_own_only", permissions={
         "page_maintenance": True, "data_profit": True,
@@ -214,6 +288,7 @@ def test_shared_identity_and_unowned_project_cannot_write_note(db):
         "username": "note_own_only", "password": "synthetic-password-123",
     })
     limited.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    assert limited.get(f"/api/maintenance/projects/stable/{pid}").status_code == 403
     assert _patch(limited, pid, 1, no_return_note="越项目写入").status_code == 403
     assert client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]["no_return_note"] is None
 
