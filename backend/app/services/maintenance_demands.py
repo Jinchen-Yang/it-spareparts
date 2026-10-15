@@ -31,6 +31,7 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.services import maintenance_cost_invalidation
 from app.security import UserContext
 from app.services.maintenance_order_contact import order_contact
+from app.services.maintenance_return_request_summary import summarize_demand_returns
 
 if TYPE_CHECKING:
     from app.models.maintenance_project_operations import (
@@ -376,6 +377,10 @@ def search_demands(
         )
     )
     snapshots = _load_snapshots(db, source_ids, active_only=not include_voided)
+    # Keep the derived receipt status outside the deletion snapshot/digest.
+    return_summaries = summarize_demand_returns(
+        db, source_order_ids=source_ids, allowed_project_ids=allowed_project_ids,
+    )
     # Read-only enrichment: never add contact fields to _snapshot/_load_snapshots,
     # which also feed persisted deletion intents and audit/digest snapshots.
     contacts = (
@@ -409,7 +414,9 @@ def search_demands(
             snapshots[source_id]["is_voided"] = source_id in voided_ids
     return {
         "items": [
-            {**snapshots[source_id], **contacts.get(source_id, {})}
+            {**snapshots[source_id], **contacts.get(source_id, {}),
+             "return_summary": (return_summaries[source_id].to_dict()
+                                if source_id in return_summaries else None)}
             for source_id in source_ids
         ],
         "page": page,

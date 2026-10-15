@@ -695,8 +695,20 @@ def search_receipts(
     source_order_id: str | None = None,
     source: str | None = None,
     unassigned: bool = False,
+    category_major: str | None = None,
+    category_minor: str | None = None,
+    category_state: str | None = None,
 ) -> dict:
     _get_project(db, project_id)
+    from app.services.maintenance_return_category_filter import category_match
+
+    try:
+        part_match = category_match(
+            MaintenanceRkdReturnLine.part_id, category_major=category_major,
+            category_minor=category_minor, category_state=category_state,
+        )
+    except ValueError as exc:
+        raise ReturnReceiptValidation(str(exc)) from exc
     stmt = (
         select(MaintenanceRkdReturnLine, FMaintenanceOrder.order_no)
         .outerjoin(
@@ -706,6 +718,8 @@ def search_receipts(
         )
         .where(MaintenanceRkdReturnLine.project_id == project_id)
     )
+    if part_match is not None:
+        stmt = stmt.where(part_match)
     if line_status in ("active", "voided"):
         stmt = stmt.where(MaintenanceRkdReturnLine.line_status == line_status)
     if source_order_id is not None:

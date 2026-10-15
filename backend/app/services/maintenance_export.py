@@ -20,6 +20,7 @@ from app.models.maintenance import (
 )
 from app.security import UserContext, apply_field_visibility, is_field_hidden
 from app.services import maintenance_cost_quality, maintenance_demands
+from app.services.maintenance_export_ordering import wbdd_export_order_by
 
 
 ORDER_HEADERS = (
@@ -262,7 +263,7 @@ def _build_workbook(
                 ),
             )
             .where(*_date_filters(date_from, date_to))
-            .order_by(FMaintenanceOrder.id, FMaintenanceLine.id)
+            .order_by(*wbdd_export_order_by())
             .execution_options(stream_results=True, yield_per=1000)
         )
         previous_order_id = None

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
 import {
   Alert,
   Button,
@@ -299,6 +300,10 @@ export function MaintenanceDemandsPage() {
       render: (v) => v ?? "—",
     },
     { title: "明细行数", dataIndex: "line_count", width: 90, align: "right" },
+    { title: "数量核对（当前累计）", key: "return_summary", width: 215, render: (_, row) => <Space direction="vertical" size={0}>
+      <ReturnStatusColumn summary={row.return_summary} />
+      {!canEditLines && !isVoided(row) ? <Button type="link" size="small" onClick={() => setLinesEditorFor(row)}>查看明细</Button> : null}
+    </Space> },
     {
       title: "联系信息",
       key: "contact_info",
@@ -532,6 +537,8 @@ export function MaintenanceDemandsPage() {
           key={linesEditorFor.source_order_id}
           sourceOrderId={linesEditorFor.source_order_id}
           orderNo={linesEditorFor.order_no}
+          readOnly={!canEditLines}
+          onChanged={() => refreshAfterCommit(false)}
           onClose={() => setLinesEditorFor(null)}
         />
       ) : null}
