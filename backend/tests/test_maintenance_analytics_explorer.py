@@ -80,41 +80,60 @@ def test_pn_overview_restricted_cost_cannot_change_quantity_ranking(db):
     assert changed["pn_overview"] == overview
 
 
-@pytest.mark.parametrize("return_qty", ["0", "3"])
-def test_pn_overview_null_demand_qty_is_unknown_not_zero_or_negative(db, return_qty):
+@pytest.mark.parametrize("overview_options", [{}, {"include_pn_overview": True}], ids=["default", "overview"])
+@pytest.mark.parametrize("can_cost", [True, False], ids=["visible-cost", "restricted-cost"])
+def test_null_demand_qty_counts_as_zero_in_totals_and_shares(db, overview_options, can_cost):
     project = _project(db, "EX-NULL-QTY")
-    unknown, mixed, zero, negative = [_part(db, f"EX-NULL-QTY-{name}")
-                                      for name in ("UNKNOWN", "MIXED", "ZERO", "NEGATIVE")]
-    for part in (unknown, mixed):
-        line = demand(db, project, part, "1", "10", return_qty=Decimal(return_qty))
+    null_only, mixed, known = [_part(db, f"EX-NULL-QTY-{name}")
+                              for name in ("NULL", "MIXED", "KNOWN")]
+    for part, returned in ((null_only, None), (mixed, Decimal("0"))):
+        line = demand(db, project, part, "1", "10", return_qty=returned)
         line.qty = None
-    demand(db, project, mixed, "5", "20")
-    demand(db, project, zero, "0", "0")
-    demand(db, project, negative, "1", "1", return_qty=Decimal("2"))
-    # Other fact streams must not turn an unknown demand quantity into zero.
-    _issue(db, project, unknown, "2")
-    _receipt(db, project, unknown, "1")
+    demand(db, project, mixed, "6", "20", return_qty=Decimal("1"))
+    demand(db, project, known, "3", "30")
+    # Independent actual facts do not change demand net quantities.
+    _issue(db, project, null_only, "2")
+    _receipt(db, project, null_only, "1")
     db.commit()
 
-    result = explore(db, metric="effective", include_pn_overview=True)
-    overview = result["pn_overview"]
-    rows = {row["key"]: row for row in overview["effective_rows"]}
-    for part in (unknown, mixed):
-        assert rows[f"part:{part.id}"]["value"] is None
-        assert rows[f"part:{part.id}"]["effective_qty"] is None
-    assert [row["key"] for row in overview["effective_rows"][:2]] == [f"part:{zero.id}", f"part:{negative.id}"]
-    assert Decimal(rows[f"part:{zero.id}"]["value"]) == 0
-    assert rows[f"part:{negative.id}"]["value"] == "-1.000"
-    assert result["summary"]["effective_qty"] is None
-    assert result["meta"]["unknown_count"] == 2
-    assert overview["has_negative"] is True
-    # A quantity gap must not erase separately known cost evidence.
-    costs = {row["key"]: row for row in overview["cost_rows"]}
-    assert costs[f"part:{unknown.id}"]["value"] == "10.00"
-    assert costs[f"part:{mixed.id}"]["value"] == "30.00"
+    result = explore(db, metric="effective", can_cost=can_cost, **overview_options)
+    # NULL-only=0; mixed=0+(6-1)=5; known=3; total=8.
+    expected_keys = [f"part:{part.id}" for part in (mixed, known, null_only)]
+    rankings = [result["rows"], result["chart_rows"]]
+    if overview_options:
+        rankings.append(result["pn_overview"]["effective_rows"])
+        assert result["pn_overview"]["has_negative"] is False
+        if can_cost:
+            costs = {row["key"]: row["value"] for row in result["pn_overview"]["cost_rows"]}
+            assert costs[f"part:{null_only.id}"] == "10.00"
+            assert costs[f"part:{mixed.id}"] == "30.00"
+        else:
+            assert result["pn_overview"]["cost_rows"] is None
+    else:
+        assert "pn_overview" not in result
+    for rows in rankings:
+        assert [row["key"] for row in rows] == expected_keys
+        assert [Decimal(row["value"]) for row in rows] == [Decimal("5"), Decimal("3"), Decimal("0")]
+        assert [Decimal(row["effective_qty"]) for row in rows] == [Decimal("5"), Decimal("3"), Decimal("0")]
+        assert [row["share_pct"] for row in rows] == ["62.5", "37.5", "0.0"]
+        assert [row["cumulative_share_pct"] for row in rows] == ["62.5", "100.0", "100.0"]
+    assert result["summary"]["value"] == "8.000"
+    assert result["summary"]["effective_qty"] == "8.000"
+    assert result["summary"]["top_share_pct"] == "100.0"
+    assert result["summary"]["order_count"] == 4
+    assert result["summary"]["issued_qty"] == "2.000"
+    assert result["summary"]["receipt_qty"] == "1.000"
+    assert result["meta"]["unknown_count"] == 0
+    assert result["meta"]["has_negative"] is False
+    assert result["focus"]["row"]["key"] == f"part:{mixed.id}"
+    assert result["focus"]["rows"][0]["value"] == "5.000"
+    assert {cell["row_key"]: Decimal(cell["value"]) for cell in result["matrix"]["cells"]} == {
+        f"part:{mixed.id}": Decimal("5"), f"part:{known.id}": Decimal("3"), f"part:{null_only.id}": Decimal("0"),
+    }
 
 
-def test_pn_overview_unknown_quantity_does_not_create_negative_or_shares(db):
+@pytest.mark.parametrize("overview_options", [{}, {"include_pn_overview": True}], ids=["default", "overview"])
+def test_null_demand_qty_with_returns_keeps_negative_net_and_disables_shares(db, overview_options):
     project = _project(db, "EX-UNKNOWN-QTY-SHARES")
     unknown, known = _part(db, "EX-UNKNOWN-QTY"), _part(db, "EX-KNOWN-QTY")
     line = demand(db, project, unknown, return_qty=Decimal("3"))
@@ -122,13 +141,20 @@ def test_pn_overview_unknown_quantity_does_not_create_negative_or_shares(db):
     demand(db, project, known, "5")
     db.commit()
 
-    result = explore(db, metric="effective", include_pn_overview=True, can_cost=False)
-    rows = result["pn_overview"]["effective_rows"]
-    assert [(row["key"], row["value"]) for row in rows] == [(f"part:{known.id}", "5.000"), (f"part:{unknown.id}", None)]
-    assert result["pn_overview"]["has_negative"] is False
-    assert result["meta"]["has_negative"] is False
-    assert result["meta"]["unknown_count"] == 1
-    assert result["summary"]["effective_qty"] is None
+    result = explore(db, metric="effective", can_cost=False, **overview_options)
+    rows = result["rows"]
+    # NULL-3=-3; the other PN contributes 5, so the full net quantity is 2.
+    assert [(row["key"], row["value"]) for row in rows] == [(f"part:{known.id}", "5.000"), (f"part:{unknown.id}", "-3.000")]
+    if overview_options:
+        assert result["pn_overview"]["has_negative"] is True
+        assert [(row["key"], row["value"]) for row in result["pn_overview"]["effective_rows"]] == [
+            (f"part:{known.id}", "5.000"), (f"part:{unknown.id}", "-3.000"),
+        ]
+        assert all(row["share_pct"] is None and row["cumulative_share_pct"] is None
+                   for row in result["pn_overview"]["effective_rows"])
+    assert result["meta"]["has_negative"] is True
+    assert result["meta"]["unknown_count"] == 0
+    assert result["summary"]["effective_qty"] == "2.000"
     assert result["summary"]["top_share_pct"] is None
     assert all(row["share_pct"] is None and row["cumulative_share_pct"] is None for row in rows)
 
