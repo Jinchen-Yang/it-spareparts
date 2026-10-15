@@ -474,6 +474,7 @@ def _assigned_lines(
     project_id: str | None,
     window: tuple[date, date] | None,
     allowed_project_ids: set[str] | None = None,
+    export_order: bool = False,
 ):
     """需求单明细 + 其项目归属（未归属单不进这两张表——它们还没有项目口径）。
 
@@ -483,9 +484,16 @@ def _assigned_lines(
     与行序解耦，Excel 回传不受行序影响。
     #259 修正：line_no 可空，同单同日的行在前三键上会打平；行 id 作尾键，
     否则 03 行级分页切片跨页会重复/漏行（打平行的顺序由堆序决定，不稳定）。
+    D-33：下载显式选择完整业务日期升序，网页仍沿用上述倒序。
     """
     from app.services import maintenance_demands
     from app.services.query_filters import active_orders
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
+
+    ordering = wbdd_export_order_by() if export_order else (
+        FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
+        FMaintenanceLine.line_no, FMaintenanceLine.id,
+    )
 
     stmt = (
         select(FMaintenanceLine, FMaintenanceOrder,
@@ -497,8 +505,7 @@ def _assigned_lines(
               & MaintenanceSourceOrderAssignment.is_active.is_(True))
         .where(FMaintenanceLine.is_active.is_(True),
                maintenance_demands.active_demand_condition())
-        .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
-                  FMaintenanceLine.line_no, FMaintenanceLine.id)
+        .order_by(*ordering)
     )
     # Source workflow status and the system tombstone are independent. Keep
     # inactive source headers out of every effective project/export view even
@@ -669,7 +676,7 @@ def build_project_master(db: Session, *, project_id: str,
         raise WorkbookError("unknown_sheet", f"未知 sheet：{'、'.join(unknown)}")
     contracts = ec._contracts(db, project_id)
     current_contracts = _current_contracts(db, project_id)
-    lines = _assigned_lines(db, project_id=project_id, window=None)
+    lines = _assigned_lines(db, project_id=project_id, window=None, export_order=True)
     line_ids = [line.id for line, _order, _project_id in lines]
     active_overrides = {
         override.line_id: override
@@ -824,6 +831,7 @@ def build_global_lines(
         project_id=None,
         window=window,
         allowed_project_ids=allowed_project_ids,
+        export_order=True,
     )
     project_ids = {project_id for _line, _order, project_id in lines}
     names = dict(db.execute(
@@ -3118,7 +3126,7 @@ def build_project_master_v2(
     unknown = [name for name in wanted if name not in V2_ALL_SHEETS[:-2]]
     if unknown:
         raise WorkbookError("unsupported_sheet", f"不支持的 V2 工作表：{'、'.join(unknown)}")
-    lines = (_assigned_lines(db, project_id=project_id, window=None)
+    lines = (_assigned_lines(db, project_id=project_id, window=None, export_order=True)
              if V2_SHEET_OVERVIEW in wanted or V2_SHEET_PARTS in wanted else [])
     wb = Workbook()
     wb.remove(wb.active)
