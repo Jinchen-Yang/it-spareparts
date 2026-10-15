@@ -51,6 +51,7 @@ class StableProjectPatch(BaseModel):
     # 在界面上无法自救——卡墙的业务类型筛选也就永远只有「未标注」一档可用。
     # 传空串 = 改回未标注。
     business_type: str | None = Field(default=None, max_length=16)
+    no_return_note: str | None = Field(default=None, max_length=2000)
     # 维保期限（#39/#51）：面板「编辑基本信息」可改起止日期
     period_from: date | None = None
     period_to: date | None = None

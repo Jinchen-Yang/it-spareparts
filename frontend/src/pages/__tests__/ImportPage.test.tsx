@@ -174,6 +174,70 @@ describe("批量文件数量提示", () => {
 });
 
 describe("完整导入问题明细下载", () => {
+  it("仅 WBDD 预检解释默认跳过不覆盖，并指向专用上传入口", async () => {
+    precheckImportFiles.mockResolvedValueOnce({
+      ...cleanResult,
+      files: [{ ...cleanResult.files[0], filename: "需求单.xlsx", file_type: "maintenance" }],
+    });
+    render(<ImportPage />);
+    stage(new File(["xlsx"], "需求单.xlsx"));
+    fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText("WBDD 当前为跳过模式：已有单据和明细不覆盖"))
+      .toBeInTheDocument();
+    expect(screen.getByText(/跳过模式不提供缺项作废候选，需更新模式重传/))
+      .toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "前往需求单专用上传" }))
+      .toHaveAttribute("href", "/maintenance/demands");
+    expect(precheckImportFiles).toHaveBeenCalledWith(
+      expect.any(Array), "skip", expect.any(AbortSignal),
+    );
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("采购预检仍按默认跳过模式处理，不出现 WBDD 专用提示", async () => {
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
+
+    await screen.findByRole("button", { name: "开始导入" });
+    expect(screen.queryByText(/^WBDD 当前为/)).toBeNull();
+    expect(screen.queryByRole("link", { name: "前往需求单专用上传" })).toBeNull();
+    expect(precheckImportFiles).toHaveBeenCalledWith(
+      expect.any(Array), "skip", expect.any(AbortSignal),
+    );
+  });
+
+  it("WBDD 批次详情以中文解释单头和明细回执，不重复展示原始统计键", async () => {
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 7, filename: "需求单.xlsx", file_type: "maintenance", status: "success",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 5, rows_inserted: 0, rows_skipped: 0, rows_error: 0, rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/7") return Promise.resolve({ data: {
+        id: 7, filename: "需求单.xlsx", file_type: "maintenance", issue_count: 0,
+        report: { import_mode: "upsert", orders_semantic_updated: 1, fact_rows_updated: 5,
+          fact_rows_semantic_updated: 2, fact_rows_unchanged: 3, fact_rows_protected: 1,
+          protected_field_counts: { qty: 1 } },
+        errors: [],
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    fireEvent.click(await screen.findByText("详情"));
+
+    expect(await screen.findByText("匹配已有 5 行")).toBeInTheDocument();
+    expect(screen.getByText("新增或变更单头 1 张")).toBeInTheDocument();
+    expect(screen.getAllByText(/^新增或变更单头/)).toHaveLength(1);
+    expect(screen.queryByText("orders_semantic_updated")).toBeNull();
+    expect(screen.getByText("实际变更 2 行")).toBeInTheDocument();
+    expect(screen.getByText("人工保护 1 行")).toBeInTheDocument();
+    expect(screen.getByText("需求数量 1 行")).toBeInTheDocument();
+    expect(screen.queryByText("[object Object]")).toBeNull();
+    expect(screen.queryByText("protected_field_counts")).toBeNull();
+  });
+
   it.each(["upsert", "skip"])("%s 模式用中文显示地址回执和冲突，不把地址提示计成整行失败", async (mode) => {
     get.mockImplementation((url: string) => {
       if (url === "/import/batches") return Promise.resolve({ data: [{
