@@ -7,7 +7,7 @@ GPU/电源/网卡等没有"容量/接口"统一语义，不强行抽取。
 抽取结果 source='auto'，只补缺不覆盖（人工维护的 source='manual' 行优先）。
 """
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -229,6 +229,62 @@ def refresh_part_specs(db: Session, part_id: int, description: str | None) -> No
     if rows:
         db.execute(pg_insert(ProductSpec).values(rows).on_conflict_do_nothing(
             constraint="uq_spec_part_key"))
+
+
+def validate_manual_specs(updates: dict) -> dict:
+    """逐键 set/remove；数值使用规范单位，拒绝未知键或有损 Numeric 舍入。"""
+    if not isinstance(updates, dict):
+        raise ValueError("规格必须按键提交")
+    clean = {}
+    for key, spec in updates.items():
+        if key not in SPEC_KEYS:
+            raise ValueError(f"未知规格键: {key}")
+        if spec is None:
+            clean[key] = None
+            continue
+        if (not isinstance(spec, dict) or set(spec) != {"value", "unit", "numeric_value"}
+                or not isinstance(spec["value"], str) or not spec["value"].strip()
+                or len(spec["value"].strip()) > 128):
+            raise ValueError(f"规格值非法: {key}")
+        if spec["unit"] != SPEC_KEYS[key][1]:
+            raise ValueError(f"规格单位非法: {key}")
+        number = spec["numeric_value"]
+        if number is not None:
+            try:
+                if not isinstance(number, str):
+                    raise ValueError()
+                number = Decimal(number)
+                if (not number.is_finite() or number < 0 or number >= Decimal("1e14")
+                        or number != number.quantize(Decimal("0.0001"))):
+                    raise ValueError()
+            except (InvalidOperation, ValueError):
+                raise ValueError(f"规格数值非法: {key}") from None
+            # 人工输入不受自动抽取的盘容量下限等召回规则限制；用 Decimal 校验单位换算。
+            matched = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([A-Za-z/]*)", spec["value"].strip())
+            factors = {
+                "capacity": {"GB": "1", "TB": "1000", "MB": "0.001"},
+                "rpm": {"K": "1000", "RPM": "1", "": "1"},
+                "speed": {"GBPS": "1", "GB/S": "1"},
+                "cache": {"MB": "1"}, "frequency": {"MHZ": "1", "": "1"},
+            }.get(key, {})
+            factor = factors.get(matched[2].upper()) if matched else None
+            if factor is None or Decimal(matched[1]) * Decimal(factor) != number:
+                raise ValueError(f"规格展示值与数值不一致: {key}")
+        clean[key] = {"spec_value": spec["value"].strip(), "spec_unit": spec["unit"],
+                      "numeric_value": number, "source": "manual"}
+    return clean
+
+
+def apply_manual_specs(db: Session, part_id: int, updates: dict) -> None:
+    """父 PN 已由调用方锁定；描述 auto 刷新之后应用本次 manual，不提交。"""
+    for key in sorted(updates):
+        spec = updates[key]
+        if spec is None:
+            db.execute(delete(ProductSpec).where(ProductSpec.part_id == part_id,
+                                                  ProductSpec.spec_key == key))
+        else:
+            db.execute(pg_insert(ProductSpec).values(part_id=part_id, spec_key=key, **spec)
+                       .on_conflict_do_update(constraint="uq_spec_part_key", set_=spec))
 
 
 def backfill_specs(db: Session, rebuild: bool = False) -> dict:

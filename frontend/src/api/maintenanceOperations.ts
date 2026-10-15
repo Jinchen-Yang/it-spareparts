@@ -345,6 +345,8 @@ export interface SiteIssueDocument {
   voided_at?: string | null;
   /** 只含活行：整单作废后为空数组（明细已软作废）。 */
   lines: SiteIssueLine[];
+  /** 品类筛选只回命中行；整单作废仍影响本单全部有效明细。 */
+  total_line_count?: number;
   inventory_effect?: "none";
   idempotent_replay?: boolean;
   return_obligation_event?: {
@@ -1486,6 +1488,29 @@ export const getSiteIssueDemandCandidates = (
   },
 );
 
+export interface MaintenanceCategoryFilterInput {
+  category_major?: string;
+  category_minor?: string;
+  category_state?: "unclassified" | "unlinked";
+}
+
+export interface MaintenancePartCategory {
+  major: string;
+  minors: string[];
+}
+
+/** 只读当前主数据库品类；不使用需要主数据编辑权的分类管理端点。 */
+export const listMaintenancePartCategories = () =>
+  api.get<{ categories: MaintenancePartCategory[] }>("/parts/categories");
+
+function categoryFilterParams(input: MaintenanceCategoryFilterInput): MaintenanceCategoryFilterInput {
+  return {
+    ...(input.category_major?.trim() ? { category_major: input.category_major } : {}),
+    ...(input.category_minor?.trim() ? { category_minor: input.category_minor } : {}),
+    ...(input.category_state ? { category_state: input.category_state } : {}),
+  };
+}
+
 export const searchSiteIssues = (
   input: {
     project_id: string;
@@ -1493,9 +1518,10 @@ export const searchSiteIssues = (
     workflow_statuses?: SiteIssueWorkflowStatus[];
     page?: number;
     page_size?: number;
-  },
+  } & MaintenanceCategoryFilterInput,
 ) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
   project_id: input.project_id,
+  ...categoryFilterParams(input),
   ...(input.q?.trim() ? { q: input.q.trim() } : {}),
   workflow_statuses: input.workflow_statuses
     ?? ["draft", "confirmed", "corrected", "void"],
@@ -1980,9 +2006,10 @@ export const searchReturnReceipts = (
     source_order_id?: string;
     source?: "rkd_import" | "manual";
     unassigned?: boolean;
-  } = {},
+  } & MaintenanceCategoryFilterInput = {},
 ) => api.get<ReturnReceiptSearchResult>(returnReceiptBase(projectId), {
   params: {
+    ...categoryFilterParams(input),
     page: input.page ?? 1,
     page_size: input.page_size ?? 50,
     line_status: input.line_status ?? "active",

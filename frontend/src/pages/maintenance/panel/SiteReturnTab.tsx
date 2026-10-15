@@ -3,6 +3,7 @@ import { Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Typograph
 import type {
   SiteIssueDocument,
   SiteIssueLine,
+  MaintenanceCategoryFilterInput,
 } from "../../../api/maintenanceOperations";
 import {
   searchSiteIssues,
@@ -16,6 +17,7 @@ import {
 } from "../../../api/maintenanceWorkbooks";
 import SiteIssueWorkflowPanel from "../../../components/maintenance/SiteIssueWorkflowPanel";
 import SiteIssueAddress from "../../../components/maintenance/SiteIssueAddress";
+import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
@@ -53,12 +55,14 @@ function formatVoidedAt(value: string | null | undefined): string | null {
 
 async function fetchAllRows<T>(
   loadPage: (page: number) => Promise<{ data: { rows: T[]; total: number } }>,
+  isCurrent: () => boolean,
 ): Promise<T[]> {
   const rows: T[] = [];
   let page = 1;
   let total = 0;
   do {
     const response = await loadPage(page);
+    if (!isCurrent()) return [];
     total = response.data.total;
     const nextRows = response.data.rows;
     if (!nextRows.length) break;
@@ -101,18 +105,22 @@ export function SiteReturnTab({
   registerRefresh: RegisterPanelRefresh;
 }) {
   const [rows, setRows] = useState<SiteReturnRow[]>([]);
+  const [linesPage, setLinesPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const requestSeq = useRef(0);
+  const [categoryFilter, setCategoryFilter] = useState<MaintenanceCategoryFilterInput>({});
+  const categoryFilterRef = useRef<MaintenanceCategoryFilterInput>({});
 
   const load = useCallback(async () => {
     const seq = ++requestSeq.current;
     setLoading(true);
+    const appliedFilter = { ...categoryFilterRef.current };
     try {
       setLoadError(null);
       const issues = await fetchAllRows<SiteIssueDocument>((page) => searchSiteIssues({
-        project_id: projectId, page, page_size: 100,
-      }));
+        project_id: projectId, page, page_size: 100, ...appliedFilter,
+      }), () => seq === requestSeq.current);
       if (seq !== requestSeq.current) return false;
       setRows(issues.flatMap((issue): SiteReturnRow[] => {
         if (issue.workflow_status === "void" && !issue.lines.length) {
@@ -144,6 +152,9 @@ export function SiteReturnTab({
   }, [projectId]);
 
   useEffect(() => {
+    categoryFilterRef.current = {};
+    setCategoryFilter({});
+    setLinesPage(1);
     registerRefresh("site", load);
     void load();
     return () => {
@@ -253,6 +264,15 @@ export function SiteReturnTab({
             )}
             hint="Excel 批量维护：下载后回填领用事实、领用地址和是否应返还，再在此上传；地址留空保留原值，清空请在地址操作列填写“清空”"
           />
+          <MaintenanceCategoryFilter labelPrefix="领用" value={categoryFilter} onChange={(next) => {
+            categoryFilterRef.current = next;
+            setCategoryFilter(next);
+            setLinesPage(1);
+            void load();
+          }} />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            按当前主数据库品类筛选领用明细；作废操作仍影响整张领用单。
+          </Typography.Text>
           {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
           <Table<SiteReturnRow>
         rowKey="issueLineId"
@@ -274,7 +294,7 @@ export function SiteReturnTab({
             <Descriptions.Item label="来源明细">{raw(row.line?.source_line_id)}</Descriptions.Item>
           </Descriptions>,
         }}
-        pagination={{ pageSize: 10, showSizeChanger: false }}
+        pagination={{ current: linesPage, onChange: setLinesPage, pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: loadError ? "领用记录读取失败，请重新加载" : "本项目暂无维保领用记录" }}
         columns={[
           { title: "领用单号", render: (_value, item) => raw(item.issue.display_no || item.issue.issue_no) },
@@ -337,7 +357,7 @@ export function SiteReturnTab({
       <Modal
         open={voidTarget !== null}
         title={voidTarget
-          ? `作废领用单 ${voidTarget.display_no || voidTarget.issue_no}（共 ${linesPerIssue.get(voidTarget.issue_id) ?? voidTarget.lines.length} 行）`
+          ? `作废领用单 ${voidTarget.display_no || voidTarget.issue_no}（共 ${voidTarget.total_line_count ?? linesPerIssue.get(voidTarget.issue_id) ?? voidTarget.lines.length} 行）`
           : ""}
         confirmLoading={voiding}
         okText="确认作废"
