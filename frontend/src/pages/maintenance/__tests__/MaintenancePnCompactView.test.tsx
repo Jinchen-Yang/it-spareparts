@@ -58,6 +58,7 @@ describe("PN 紧凑图", () => {
     expect(within(capture).getByText(/搜索：项目甲/)).toBeInTheDocument();
     expect(within(capture).getByText(/2026-10-15T17:00:00\+08:00/)).toBeInTheDocument();
     expect(within(cost).getByText("部分缺价")).toBeInTheDocument();
+    expect(within(capture).getByText(/部分缺价的 PN 按已知金额排序/)).toBeInTheDocument();
     expect(fetchExplorer).toHaveBeenCalledTimes(1);
     expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective", top_n: 15, include_pn_overview: true }), expect.any(AbortSignal));
   });

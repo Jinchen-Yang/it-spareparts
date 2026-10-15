@@ -69,7 +69,7 @@ export default function MaintenancePnCompactView({ refreshKey = 0, projectLabels
               <MaintenancePnCompactRanking title="需求净量" metricLabel="按需求日期 · 件 · 需求数量减退货数量" items={chartItems(overview.effective_rows)} visibleCount={params.top_n} />
             </div>
             <footer className="mpc-footer">
-              <p>{canCost ? `${fmt(data.summary.missing_lines)} 行缺价；未知不等于零，部分缺价仅展示已知金额。` : ""}需求净量不等同实际领用，不按返还收货冲减。{overview.has_negative ? "包含负值，条形保留方向，不计算集中度。" : ""}</p>
+              <p>{canCost ? `${fmt(data.summary.missing_lines)} 行缺价；未知不等于零，部分缺价仅展示已知金额；部分缺价的 PN 按已知金额排序。` : ""}需求净量不等同实际领用，不按返还收货冲减。{overview.has_negative ? "包含负值，条形保留方向，不计算集中度。" : ""}</p>
               <p>两榜与 KPI 来自同一次统计 · 统计时点：{data.meta.as_of}</p>
             </footer>
           </section>}

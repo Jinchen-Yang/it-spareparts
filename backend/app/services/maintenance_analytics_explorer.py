@@ -94,7 +94,7 @@ def build_statement(*, start, end, q, business_type, project_ids, customer,
         kind="demand", project_id=A.project_id, part_id=L.part_id, pn=L.pn_std,
         description=L.description, business_date=O.order_date,
         source_order_id=O.raw_order_id, order_id=O.id,
-        effective=func.coalesce(L.qty, ZERO) - func.coalesce(L.return_qty, ZERO),
+        effective=L.qty - func.coalesce(L.return_qty, ZERO),
         cost=ci if can_cost else cast(literal(None), Numeric), missing=missing,
         customer_visible=can_customer,
     )).select_from(L).join(O, O.id == L.order_id).outerjoin(
@@ -195,6 +195,7 @@ def build_statement(*, start, end, q, business_type, project_ids, customer,
         func.count().filter(raw.c.kind == "demand").label("demand_count"),
         func.count().filter(raw.c.kind == "issue").label("issue_count"),
         func.count(raw.c.cost_inc).label("known_count"),
+        func.count().filter(and_(raw.c.kind == "demand", raw.c.effective_qty.is_(None))).label("unknown_effective_count"),
         func.count().filter(and_(raw.c.kind == "demand", raw.c.effective_qty < ZERO)).label("negative_effective_count"),
         func.array_agg(func.distinct(raw.c.order_id)).filter(raw.c.order_id.is_not(None)).label("orders"),
         func.statement_timestamp().label("as_of"),
@@ -227,6 +228,7 @@ def _decimal(value):
 def _stats(records, metric, can_cost):
     issued = effective = received = cost = ZERO
     missing = known = 0
+    unknown_effective = False
     orders, projects, parts = set(), set(), set()
     for record in records:
         issued += record["issued_qty"] or ZERO
@@ -235,12 +237,16 @@ def _stats(records, metric, can_cost):
         cost += record["cost_inc"] or ZERO
         missing += record["missing_lines"] or 0
         known += record["known_count"]
+        unknown_effective |= record["unknown_effective_count"] > 0
         orders.update(record["orders"] or ())
         if _has_metric(record, metric):
             if record["project_id"]:
                 projects.add(record["project_id"])
             if record["pn"]:
                 parts.add(_key(record, "pn"))
+    # Any missing demand quantity makes the complete net quantity unknown,
+    # even alongside known demands or independent issue/receipt facts.
+    effective = None if unknown_effective else effective
     amount = cost if known and can_cost else None
     value = {"issued": issued, "effective": effective, "cost": amount,
              "orders": Decimal(len(orders)), "missing": Decimal(missing)}[metric]
@@ -281,7 +287,8 @@ def _rank(records, dimension, metric, can_cost):
     additive = metric != "orders"
     negative = _negative(records, metric)
     total = sum((Decimal(row["value"] or "0") for row in ranked), ZERO)
-    if additive and not negative and total > ZERO:
+    unknown_effective = metric == "effective" and any(row["value"] is None for row in ranked)
+    if additive and not negative and not unknown_effective and total > ZERO:
         cumulative = ZERO
         for row in ranked:
             if row["value"] is not None:

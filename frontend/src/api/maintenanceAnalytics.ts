@@ -228,7 +228,8 @@ export type ExplorerCostState = "known" | "partial" | "unknown" | "restricted";
 export interface ExplorerStats {
   value: string | null;
   issued_qty: string;
-  effective_qty: string;
+  /** 任一需求行数量缺失时为未知；不以已知小计冒充完整净量。 */
+  effective_qty: string | null;
   cost_inc: string | null;
   cost_state: ExplorerCostState;
   order_count: number;

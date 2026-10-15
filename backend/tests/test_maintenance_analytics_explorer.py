@@ -80,6 +80,96 @@ def test_pn_overview_restricted_cost_cannot_change_quantity_ranking(db):
     assert changed["pn_overview"] == overview
 
 
+@pytest.mark.parametrize("return_qty", ["0", "3"])
+def test_pn_overview_null_demand_qty_is_unknown_not_zero_or_negative(db, return_qty):
+    project = _project(db, "EX-NULL-QTY")
+    unknown, mixed, zero, negative = [_part(db, f"EX-NULL-QTY-{name}")
+                                      for name in ("UNKNOWN", "MIXED", "ZERO", "NEGATIVE")]
+    for part in (unknown, mixed):
+        line = demand(db, project, part, "1", "10", return_qty=Decimal(return_qty))
+        line.qty = None
+    demand(db, project, mixed, "5", "20")
+    demand(db, project, zero, "0", "0")
+    demand(db, project, negative, "1", "1", return_qty=Decimal("2"))
+    # Other fact streams must not turn an unknown demand quantity into zero.
+    _issue(db, project, unknown, "2")
+    _receipt(db, project, unknown, "1")
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True)
+    overview = result["pn_overview"]
+    rows = {row["key"]: row for row in overview["effective_rows"]}
+    for part in (unknown, mixed):
+        assert rows[f"part:{part.id}"]["value"] is None
+        assert rows[f"part:{part.id}"]["effective_qty"] is None
+    assert [row["key"] for row in overview["effective_rows"][:2]] == [f"part:{zero.id}", f"part:{negative.id}"]
+    assert Decimal(rows[f"part:{zero.id}"]["value"]) == 0
+    assert rows[f"part:{negative.id}"]["value"] == "-1.000"
+    assert result["summary"]["effective_qty"] is None
+    assert result["meta"]["unknown_count"] == 2
+    assert overview["has_negative"] is True
+    # A quantity gap must not erase separately known cost evidence.
+    costs = {row["key"]: row for row in overview["cost_rows"]}
+    assert costs[f"part:{unknown.id}"]["value"] == "10.00"
+    assert costs[f"part:{mixed.id}"]["value"] == "30.00"
+
+
+def test_pn_overview_unknown_quantity_does_not_create_negative_or_shares(db):
+    project = _project(db, "EX-UNKNOWN-QTY-SHARES")
+    unknown, known = _part(db, "EX-UNKNOWN-QTY"), _part(db, "EX-KNOWN-QTY")
+    line = demand(db, project, unknown, return_qty=Decimal("3"))
+    line.qty = None
+    demand(db, project, known, "5")
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True, can_cost=False)
+    rows = result["pn_overview"]["effective_rows"]
+    assert [(row["key"], row["value"]) for row in rows] == [(f"part:{known.id}", "5.000"), (f"part:{unknown.id}", None)]
+    assert result["pn_overview"]["has_negative"] is False
+    assert result["meta"]["has_negative"] is False
+    assert result["meta"]["unknown_count"] == 1
+    assert result["summary"]["effective_qty"] is None
+    assert result["summary"]["top_share_pct"] is None
+    assert all(row["share_pct"] is None and row["cumulative_share_pct"] is None for row in rows)
+
+
+@pytest.mark.parametrize("status", ["已取消", "草稿", "进行中", "", None])
+def test_pn_overview_excludes_demands_from_non_effective_source_heads(db, status):
+    project = _project(db, "EX-HEAD-STATUS")
+    valid, excluded = _part(db, "EX-VALID-HEAD"), _part(db, "EX-NON-EFFECTIVE-HEAD")
+    demand(db, project, valid, "2", "6")
+    line = demand(db, project, excluded, "100", "1000")
+    _set_order(db, line, data_status=status)
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True)
+    for ranking in ("cost_rows", "effective_rows"):
+        assert [row["key"] for row in result["pn_overview"][ranking]] == [f"part:{valid.id}"]
+    assert result["summary"]["effective_qty"] == "2.000"
+    assert result["summary"]["cost_inc"] == "6.00"
+    assert result["summary"]["order_count"] == 1
+
+
+def test_pn_overview_cancelled_source_counts_again_when_current_status_is_effective(db):
+    project = _project(db, "EX-REVERSIBLE-CANCEL")
+    part = _part(db, "EX-RESTORED-HEAD")
+    line = demand(db, project, part, "4", "40")
+    order = _set_order(db, line, data_status="已取消")
+    db.commit()
+    cancelled = explore(db, metric="effective", include_pn_overview=True)
+    assert cancelled["pn_overview"]["cost_rows"] == []
+    assert cancelled["pn_overview"]["effective_rows"] == []
+
+    order.data_status = "已生效"
+    db.commit()
+    restored = explore(db, metric="effective", include_pn_overview=True)
+    for ranking in ("cost_rows", "effective_rows"):
+        assert [row["key"] for row in restored["pn_overview"][ranking]] == [f"part:{part.id}"]
+    assert restored["summary"]["effective_qty"] == "4.000"
+    assert restored["summary"]["cost_inc"] == "40.00"
+    assert restored["summary"]["order_count"] == 1
+
+
 def test_pn_overview_api_opt_in_validation_and_scope(db):
     mine, hidden = _project(db, "EX-OV-API-MINE"), _project(db, "EX-OV-API-HIDDEN")
     mine_pn, hidden_pn = _part(db, "EX-OV-API-PN"), _part(db, "EX-HIDDEN-PN")
