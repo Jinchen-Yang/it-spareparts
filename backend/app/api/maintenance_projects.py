@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import has_illegal_excel_chars
 from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.business_time import business_today
@@ -67,6 +68,9 @@ class StableProjectPatch(BaseModel):
         # 按输入原串的 Unicode 字符数校验，不能先 trim 再放过超长空白。
         if isinstance(value, str) and len(value) > 500:
             raise ValueError("项目备注最多 500 个字符")
+        if has_illegal_excel_chars(value):
+            # 这类字符写进主档后，项目总表导出会整本失败（openpyxl IllegalCharacterError）。
+            raise ValueError("项目备注含不可见控制字符，请删除后重试")
         return value
 
 

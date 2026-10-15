@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import has_illegal_excel_chars
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
@@ -58,6 +59,8 @@ def _clean_required(value: str | None, *, label: str, max_length: int) -> str:
     cleaned = (value or "").strip()
     if not cleaned:
         raise MaintenanceProjectCatalogError(f"{label}不能为空")
+    if has_illegal_excel_chars(cleaned):
+        raise MaintenanceProjectCatalogError(f"{label}含不可见控制字符，请删除后重试")
     if len(cleaned) > max_length:
         raise MaintenanceProjectCatalogError(f"{label}过长（最多 {max_length} 个字符）")
     return cleaned
@@ -69,6 +72,8 @@ def _clean_optional(value: str | None, *, label: str, max_length: int) -> str | 
     cleaned = value.strip()
     if not cleaned:
         return None
+    if has_illegal_excel_chars(cleaned):
+        raise MaintenanceProjectCatalogError(f"{label}含不可见控制字符，请删除后重试")
     if len(cleaned) > max_length:
         raise MaintenanceProjectCatalogError(f"{label}过长（最多 {max_length} 个字符）")
     return cleaned

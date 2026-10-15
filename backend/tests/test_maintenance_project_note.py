@@ -233,3 +233,31 @@ def test_note_migration_single_head_roundtrip_and_nonempty_downgrade_guard(db):
             assert connection.scalar(text("SELECT project_note FROM maintenance_project WHERE project_id=:pid"), {"pid": pid}) == "有内容必须保留"
     finally:
         command.upgrade(cfg, "head")
+
+
+@pytest.mark.parametrize("value", ["前\x00后", "垂直\x0b制表", "换页\x0c", "\x1f结尾", "非字符\ufffe", "非字符\uffff"])
+def test_api_rejects_excel_illegal_control_characters(db, value):
+    client, pid = _project(db)
+    response = _patch(client, pid, project_note=value)
+    assert response.status_code == 422, response.text
+    assert "不可见控制字符" in response.text
+    assert client.get(f"/api/maintenance/projects/stable/{pid}").json()["project"]["version"] == 1
+
+
+def test_api_keeps_tab_newline_and_carriage_return(db):
+    client, pid = _project(db)
+    response = _patch(client, pid, project_note="第一行\t制表\r\n第二行")
+    assert response.status_code == 200, response.text
+    assert response.json()["project_note"] == "第一行\t制表\r\n第二行"
+
+
+@pytest.mark.parametrize("field", ["project_note", "no_return_note", "display_name", "salesperson"])
+def test_catalog_service_rejects_control_characters_on_workbook_text_fields(db, field):
+    _project(db)
+    pid = db.scalar(select(MaintenanceProject.project_id).where(
+        MaintenanceProject.project_code == "PROJECT-NOTE"))
+    with pytest.raises(catalog.MaintenanceProjectCatalogError, match="不可见控制字符"):
+        catalog.update_project(db, project_id=pid, version=1,
+            updates={field: "坏\x0b字符"}, reason="服务层也要拦截",
+            operated_by="project_note_admin")
+    db.rollback()

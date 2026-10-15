@@ -30,7 +30,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app import config
+from app.services.excel_text_safety import SafeTextWorkbook, has_illegal_excel_upload_text
 from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app.models.dimensions import DimPart, PartAlias
@@ -678,7 +679,7 @@ def build_project_master(db: Session, *, project_id: str,
         ).all()
     } if line_ids else {}
 
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     for name in sheets:
         if name == SHEET_BASICS:
@@ -835,7 +836,7 @@ def build_global_lines(
         ).all()
     } if line_ids else {}
 
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     ws = wb.create_sheet(GLOBAL_SHEET)
     _style(ws, _GLOBAL_HEADERS, [_READONLY] * 9 + [_EDITABLE, _READONLY, _EDITABLE])
@@ -3136,7 +3137,7 @@ def build_project_master_v2(
         raise WorkbookError("unsupported_sheet", f"不支持的 V2 工作表：{'、'.join(unknown)}")
     lines = (_assigned_lines(db, project_id=project_id, window=None)
              if V2_SHEET_OVERVIEW in wanted or V2_SHEET_PARTS in wanted else [])
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     base_hash_maps: dict[str, dict[str, str]] = {}
     if V2_SHEET_OVERVIEW in wanted:
@@ -5495,6 +5496,8 @@ def _v2_parse_project_note(
             raise WorkbookError("invalid_project_note", "项目备注请填写纯文本，不能使用公式或其他类型")
         if value is not None and len(value) > 500:
             raise WorkbookError("invalid_project_note", "项目备注最多 500 个字符，请缩短后重新上传（不会自动截断）")
+        if has_illegal_excel_upload_text(value):
+            raise WorkbookError("invalid_project_note", "项目备注含不可见控制字符，请删除后重新上传")
         cleaned = (value.strip() or None) if value is not None else None
     finally:
         raw_wb.close()

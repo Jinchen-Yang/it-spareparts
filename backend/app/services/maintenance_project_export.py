@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
-import re
 from typing import Callable, Literal
 
 from openpyxl import Workbook
@@ -20,6 +19,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import ILLEGAL_EXCEL_CHARS
 from app.models.maintenance_project import MaintenanceProject
 from app.security import UserContext
 from app.services import maintenance_boss_board as board
@@ -28,7 +28,7 @@ from app.services import maintenance_boss_board as board
 MAX_EXPORT_ROWS = 5_000
 MAX_DYNAMIC_TEXT_BYTES = 16 * 1024 * 1024
 MAX_WORKBOOK_BYTES = 32 * 1024 * 1024
-_INVALID_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_INVALID_XML_CONTROL = ILLEGAL_EXCEL_CHARS
 
 DEFAULT_FIELDS = (
     "project_name",
