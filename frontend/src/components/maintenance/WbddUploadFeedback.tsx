@@ -10,7 +10,7 @@ const FIELD_LABELS: Record<string, string> = {
 
 /** 聚合回执只解释本批处理结果，不用原始身份或字段值生成样例。 */
 export default function WbddUploadFeedback({ report }: { report: Partial<WbddImportReport> }) {
-  const counts: [string, number | undefined][] = [
+  const counts: [string, number | null | undefined][] = [
     ["新增", report.fact_rows_inserted],
     ["匹配已有", report.fact_rows_updated],
     ["跳过", report.fact_rows_skipped],
@@ -35,10 +35,12 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
           {report.import_mode ? (
             <Text>{report.import_mode === "skip" ? "跳过模式：已有单据和明细不覆盖" : "更新模式：更新合法源值并保留人工保护"}</Text>
           ) : null}
+          <Text>单头实际变更 {report.orders_semantic_updated ?? "—"} 张</Text>
           <Text>本批明细处理行数（不含单头状态、地址变化）</Text>
           <Space wrap>
-            {counts.map(([label, count]) => typeof count === "number"
-              ? <Text key={label}>{label} {count} 行</Text> : null)}
+            {counts.map(([label, count]) => (
+              <Text key={label}>{label} {count ?? "—"} 行</Text>
+            ))}
           </Space>
           {report.snapshot_diff ? (
             <Space wrap>

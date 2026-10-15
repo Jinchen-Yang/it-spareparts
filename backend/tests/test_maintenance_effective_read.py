@@ -1,6 +1,7 @@
 """P2-1: source status constrains effective views, while history survives."""
 import io
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
@@ -8,7 +9,9 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine, FMaintenanceOrder, MaintenanceManualCostOverride,
+)
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_analytics
@@ -19,6 +22,110 @@ from tests.test_maintenance_return_metrics import _issue, _receipt
 from tests.test_maintenance_wbdd_import_api import _upload
 from tests.test_maintenance_project_workbook_v3 import _seed as seed_v3
 from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
+
+
+def test_global_validation_rejects_non_effective_header(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "maintenance_cutover_enabled", False)
+    project = make_project(db)
+    order, = import_wbdd(db, tmp_path)
+    assign(db, order, project)
+    workbook = load_workbook(io.BytesIO(master.build_global_lines(
+        db, preset="custom", date_from=order.order_date, date_to=order.order_date,
+    )))
+    workbook[master.GLOBAL_SHEET].cell(row=2, column=10, value=88)
+    payload = io.BytesIO()
+    workbook.save(payload)
+
+    order.data_status = "已取消"
+    db.commit()
+    with pytest.raises(master.WorkbookError) as excinfo:
+        master.validate_global(db, data=payload.getvalue())
+    assert excinfo.value.code == "project_scope_denied"
+    assert db.scalars(select(MaintenanceManualCostOverride)).all() == []
+
+
+def test_global_apply_rejects_header_that_became_non_effective(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "maintenance_cutover_enabled", False)
+    project = make_project(db)
+    order, = import_wbdd(db, tmp_path)
+    assign(db, order, project)
+    workbook = load_workbook(io.BytesIO(master.build_global_lines(
+        db, preset="custom", date_from=order.order_date, date_to=order.order_date,
+    )))
+    workbook[master.GLOBAL_SHEET].cell(row=2, column=10, value=88)
+    payload = io.BytesIO()
+    workbook.save(payload)
+    plan = master.validate_global(db, data=payload.getvalue())
+
+    order.data_status = "已取消"
+    db.commit()
+    with pytest.raises(master.WorkbookError) as excinfo:
+        master.apply_global_lines(
+            db, plan, operated_by="effective-test", import_batch_id=str(uuid4()),
+        )
+    assert excinfo.value.code == "project_scope_denied"
+    assert db.scalars(select(MaintenanceManualCostOverride)).all() == []
+
+
+@pytest.mark.parametrize("phase", ["validate", "apply"])
+def test_v2_rejects_non_effective_part_entity(db, tmp_path, monkeypatch, phase):
+    monkeypatch.setattr(get_settings(), "maintenance_cutover_enabled", False)
+    project = make_project(db)
+    order, = import_wbdd(db, tmp_path)
+    assign(db, order, project)
+    line = db.scalar(select(FMaintenanceLine))
+    workbook = load_workbook(io.BytesIO(master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,),
+    )))
+    ws = workbook[master.V2_SHEET_PARTS]
+    ws.cell(row=2, column=master.V2_PART_HEADERS.index("需求数量") + 1, value=7)
+    payload = io.BytesIO()
+    workbook.save(payload)
+    if phase == "apply":
+        plan = master.validate_project_master_v2(
+            db, project_id=project.project_id, data=payload.getvalue(),
+        )
+
+    order.data_status = "已取消"
+    db.commit()
+    with pytest.raises(master.WorkbookError) as excinfo:
+        if phase == "validate":
+            master.validate_project_master_v2(
+                db, project_id=project.project_id, data=payload.getvalue(),
+            )
+        else:
+            master.apply_project_master_v2(
+                db, plan, operated_by="effective-test", import_batch_id=str(uuid4()),
+            )
+    assert excinfo.value.code == "line_not_in_project"
+    db.refresh(line)
+    assert line.qty == Decimal("3")
+
+
+@pytest.mark.parametrize("view", ["overview", "search"])
+def test_salesperson_fallback_only_uses_effective_headers(db, tmp_path, view):
+    project = make_project(db)
+    orders = import_wbdd(db, tmp_path, orders=3)
+    for index, order in enumerate(orders):
+        order.salesperson = "有效销售" if index == 0 else "取消销售"
+        order.data_status = "已生效" if index == 0 else "已取消"
+        assign(db, order, project)
+    db.commit()
+    if view == "overview":
+        workbook = load_workbook(io.BytesIO(master.build_project_master_v2(
+            db, project_id=project.project_id, sheets=(master.V2_SHEET_OVERVIEW,),
+        )))
+        overview = {row[0]: row[1] for row in workbook[master.V2_SHEET_OVERVIEW].values if row[0]}
+        assert overview["销售人员"] == "有效销售"
+    else:
+        client = client_for(db, username="effective-sales-search", role="admin")
+        url = "/api/maintenance/boss-board/projects/search"
+        cancelled = client.post(url, json={"q": "取消销售"})
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["total"] == 0
+        effective = client.post(url, json={"q": "有效销售"})
+        assert effective.status_code == 200, effective.text
+        assert [row["project_id"] for row in effective.json()["rows"]] == [project.project_id]
 
 
 @pytest.mark.parametrize("cutover", [False, True])

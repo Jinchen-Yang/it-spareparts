@@ -11,15 +11,49 @@ describe("原件上传聚合回执", () => {
     expect(screen.getByText("本批明细处理行数（不含单头状态、地址变化）"))
       .toBeInTheDocument();
     expect(screen.getByText("匹配已有 4 行")).toBeInTheDocument();
+    expect(screen.getByText("实际变更 — 行")).toBeInTheDocument();
+    expect(screen.getByText("无变化 — 行")).toBeInTheDocument();
+    expect(screen.getByText("人工保护 — 行")).toBeInTheDocument();
     expect(screen.queryByText(/^实际变更 \d+ 行$/)).toBeNull();
     expect(screen.queryByText(/^无变化 \d+ 行$/)).toBeNull();
     expect(screen.queryByText(/^人工保护 \d+ 行$/)).toBeNull();
     expect(screen.getByText(/未提供的统计不代表 0/)).toBeInTheDocument();
   });
 
-  it("跳过、实际变更与保护独立展示，白名单外的身份和值不进入反馈", () => {
+  it("显式 null 表示未评估，显示破折号并保留已知的零计数", () => {
+    render(<WbddUploadFeedback report={{
+      import_mode: "skip", fact_rows_skipped: 5, fact_rows_inserted: 0,
+      fact_rows_semantic_updated: null, fact_rows_unchanged: null,
+      fact_rows_protected: null, fact_rows_legacy_review: null,
+      protected_field_counts: null,
+    }} />);
+
+    expect(screen.getByText("跳过 5 行")).toBeInTheDocument();
+    expect(screen.getByText("新增 0 行")).toBeInTheDocument();
+    expect(screen.getByText("实际变更 — 行")).toBeInTheDocument();
+    expect(screen.getByText("无变化 — 行")).toBeInTheDocument();
+    expect(screen.getByText("人工保护 — 行")).toBeInTheDocument();
+    expect(screen.getByText("历史保护待核对 — 行")).toBeInTheDocument();
+    expect(screen.queryByText(/^实际变更 0 行$/)).toBeNull();
+  });
+
+  it.each([
+    [undefined, "—"],
+    [null, "—"],
+    [0, "0"],
+    [2, "2"],
+  ])("单头实际变更独立按张展示（%s）", (count, display) => {
+    render(<WbddUploadFeedback report={{
+      orders_semantic_updated: count, fact_rows_semantic_updated: 0,
+    }} />);
+
+    expect(screen.getByText(`单头实际变更 ${display} 张`)).toBeInTheDocument();
+    expect(screen.getByText("实际变更 0 行")).toBeInTheDocument();
+  });
+
+  it("实际变更与保护独立展示，白名单外的身份和值不进入反馈", () => {
     const report = {
-      import_mode: "skip" as const, fact_rows_skipped: 5, fact_rows_semantic_updated: 0,
+      import_mode: "upsert" as const, fact_rows_skipped: 0, fact_rows_semantic_updated: 0,
       fact_rows_protected: 2,
       protected_field_counts: { qty: 2, serial_numbers: 1, "private-source-identity": 99 },
       source_order_ids: ["private-order"],
@@ -27,8 +61,8 @@ describe("原件上传聚合回执", () => {
     };
     const { container } = render(<WbddUploadFeedback report={report} />);
 
-    expect(screen.getByText("跳过模式：已有单据和明细不覆盖")).toBeInTheDocument();
-    expect(screen.getByText("跳过 5 行")).toBeInTheDocument();
+    expect(screen.getByText("更新模式：更新合法源值并保留人工保护")).toBeInTheDocument();
+    expect(screen.getByText("跳过 0 行")).toBeInTheDocument();
     expect(screen.getByText("实际变更 0 行")).toBeInTheDocument();
     expect(screen.getByText("人工保护 2 行")).toBeInTheDocument();
     expect(screen.getByText("需求数量 2 行")).toBeInTheDocument();

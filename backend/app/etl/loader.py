@@ -388,11 +388,16 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
     # protected 计实际挡住了不同源值的行，可与 semantic_updated/unchanged 重叠。
     feedback = {"semantic_updated": 0, "unchanged": 0, "protected": 0,
                 "protected_field_counts": {}, "legacy_review": 0}
+    if update_cols is None:
+        # skip 只尝试新增；没有比对既有值或评估人工保护，不能声称已评估为 0。
+        feedback = {key: None for key in feedback}
     if not rows:
         return {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
                 **feedback}
+    # 事实计数按原始明细身份去重；source_rows_total 仍保留原件输入行数。
+    unique_rows = len({row[conflict_col.name] for row in rows})
     if update_cols is None:
-        # skip 模式（首次导入）：与通用路径完全一致
+        # skip 写入沿用通用路径；回执按唯一明细身份计数。
         inserted = 0
         changed_keys: set = set()
         for chunk in _chunks(rows):
@@ -401,12 +406,15 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
             got = session.execute(stmt.returning(conflict_col)).all()
             inserted += len(got)
             changed_keys.update(r[0] for r in got)
-        return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted,
+        return {"inserted": inserted, "updated": 0, "skipped": unique_rows - inserted,
                 "changed_keys": changed_keys, **feedback}
 
     key_name = conflict_col.name
     keys = [r[key_name] for r in rows]
-    # 既有行的 override 账本 + edited_source（一次查询带回）
+    # 既有行的 override 账本 + edited_source（一次查询带回）。
+    # manually_created 由原始 ID 前缀判断，不等于 edited_source 非 wbdd：
+    # legacy_review 仅指保留源 ID、沿用整行人工保护且本次挡住不同源值的行；
+    # 真正人工新增的行不属于这种历史保护待核对。
     before_by_key: dict = {}
     from app.services.maintenance_wbdd_reconciliation import is_manual_line
 
@@ -469,6 +477,12 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
             index_elements=[conflict_col], set_=set_))
 
     changed_keys = set()
+    # transform 保留原件行，重复 raw_line_id 可能跨 SQL chunk 出现。
+    # 新反馈按原始身份取并集，沿用本批曾发生有效差异的 changed_keys 语义；
+    # 不改变既有 SQL、审计、旧同键命中计数或 revision 失效判定。
+    protected_keys: set = set()
+    protected_field_keys: dict[str, set] = {}
+    legacy_review_keys: set = set()
     entries = []
     for r in rows:
         prev = before_by_key.get(r[key_name])
@@ -498,17 +512,15 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
                 if _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c)):
                     blocked_fields.append(c)
         if blocked_fields:
-            feedback["protected"] += 1
+            protected_keys.add(r[key_name])
             for c in blocked_fields:
-                counts = feedback["protected_field_counts"]
-                counts[c] = counts.get(c, 0) + 1
+                protected_field_keys.setdefault(c, set()).add(r[key_name])
             if manual_protected and not manually_created:
-                feedback["legacy_review"] += 1
+                legacy_review_keys.add(r[key_name])
         changed = any(
             _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
             for c in update_cols if c not in _AUDIT_IGNORE
         )
-        feedback["semantic_updated" if changed else "unchanged"] += 1
         if audit is not None and changed:
             entries.append((eid,
                             {c: _jsonable(v) for c, v in effective_before.items()},
@@ -519,7 +531,14 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         op_by, b_id = audit
         _audit_overwrites(session, "import_overwrite", FMaintenanceLine.__tablename__,
                           entries, op_by, b_id)
-    return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0,
+    feedback.update(
+        semantic_updated=len(changed_keys & before_by_key.keys()),
+        unchanged=len(before_by_key.keys() - changed_keys),
+        protected=len(protected_keys),
+        protected_field_counts={c: len(keys) for c, keys in protected_field_keys.items()},
+        legacy_review=len(legacy_review_keys),
+    )
+    return {"inserted": unique_rows - existing, "updated": existing, "skipped": 0,
             "changed_keys": changed_keys, **feedback}
 
 
@@ -1036,6 +1055,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "import_mode": mode,
         "new_parts": new_parts,
         # 新反馈不改变 fact_rows_updated 的旧同键匹配口径。
+        "orders_semantic_updated": len(order_stats["changed_keys"]),
         "fact_rows_semantic_updated": line_stats["semantic_updated"],
         "fact_rows_unchanged": line_stats["unchanged"],
         "fact_rows_protected": line_stats["protected"],

@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 
 from app.etl import loader
@@ -14,16 +15,15 @@ from app.services import maintenance_project_operations as ops
 from tests import factories as f
 
 
-def _load(db, lines, *, mode="upsert"):
+def _load(db, lines, *, mode="upsert", head_updates=None):
     batch = SysImportBatch(
         filename="feedback.xlsx", file_type="maintenance",
         file_hash=uuid4().hex, status="success",
     )
     db.add(batch)
     db.flush()
-    result = f.maintenance_result(
-        {"feedback-order": f.maintenance_head("feedback-order")}, lines,
-    )
+    head = {**f.maintenance_head("feedback-order"), **(head_updates or {})}
+    result = f.maintenance_result({"feedback-order": head}, lines)
     report = loader.load(
         db, result, batch.id, date(2026, 10, 15), mode=mode,
         operated_by="feedback-test", audit_overwrites=True,
@@ -122,14 +122,33 @@ def test_protection_can_overlap_real_update_and_audit_records_effective_values(d
 
 
 def test_legacy_review_excludes_manually_created_identity(db):
-    _load(db, [_line("source-workbook"), _line("manual-line:created")])
-    for line in db.scalars(select(FMaintenanceLine)):
-        line.edited_source = "workbook_manual"
-        line.qty = Decimal("8")
-        line.description = "人工描述"
+    _load(db, [_line("source-workbook")])
+    imported = db.scalar(select(FMaintenanceLine))
+    imported.edited_source = "workbook_manual"
+    imported.qty = Decimal("8")
+    imported.description = "人工描述"
+    # 与总表 CREATE 一致：新建人工身份、专属批次，挂在原需求单下；
+    # 不能先把假人工行从 WBDD 导入，再仅凭改 edited_source 模拟 CREATE。
+    manual_batch = SysImportBatch(
+        filename="manual-demand-line-workbook.xlsx", file_type="maintenance",
+        file_hash=uuid4().hex, status="success",
+        report_json={"source": "workbook_manual_create"},
+    )
+    db.add(manual_batch)
+    db.flush()
+    manual_id = "manual-line:" + "a" * 48
+    manual = FMaintenanceLine(
+        raw_line_id=manual_id, order_id=imported.order_id, line_no=2,
+        part_id=imported.part_id, pn_std=imported.pn_std, pn_raw=imported.pn_raw,
+        qty=Decimal("8"), return_qty=Decimal("0"), description="人工描述",
+        edited_source="workbook_manual",
+        is_active=True, import_batch_id=manual_batch.id,
+    )
+    db.add(manual)
     db.commit()
 
-    report = _load(db, [_line("source-workbook"), _line("manual-line:created")])
+    manual_incoming = {**_line(manual_id), "line_no": 2, "return_qty": Decimal("0")}
+    report = _load(db, [_line("source-workbook"), manual_incoming])
 
     assert report["fact_rows_updated"] == 2
     assert report["fact_rows_semantic_updated"] == 0
@@ -152,13 +171,34 @@ def test_skip_counts_existing_rows_without_claiming_updates_or_protection(db):
     assert report["fact_rows_inserted"] == 1
     assert report["fact_rows_updated"] == 0
     assert report["fact_rows_skipped"] == 1
-    assert report["fact_rows_semantic_updated"] == 0
-    assert report["fact_rows_unchanged"] == 0
-    assert report["fact_rows_protected"] == 0
-    assert report["protected_field_counts"] == {}
-    assert report["fact_rows_legacy_review"] == 0
+    assert report["fact_rows_semantic_updated"] is None
+    assert report["fact_rows_unchanged"] is None
+    assert report["fact_rows_protected"] is None
+    assert report["protected_field_counts"] is None
+    assert report["fact_rows_legacy_review"] is None
     db.refresh(line)
     assert line.qty == Decimal("7")
+
+
+def test_header_only_updates_are_reported_separately_from_unchanged_lines(db):
+    first = _load(db, [_line("known")])
+    assert first["orders_semantic_updated"] == 1
+
+    unchanged = _load(db, [_line("known")])
+    assert unchanged["orders_semantic_updated"] == 0
+
+    cancelled = _load(db, [_line("known")], head_updates={"data_status": "已取消"})
+    assert cancelled["orders_updated"] == 1  # 旧协议同键匹配数不变
+    assert cancelled["orders_semantic_updated"] == 1
+    assert cancelled["fact_rows_semantic_updated"] == 0
+    assert cancelled["fact_rows_unchanged"] == 1
+
+    address = _load(db, [_line("known")], head_updates={
+        "data_status": "已取消", "receiver_address": "测试收货地址",
+    })
+    assert address["orders_semantic_updated"] == 1
+    assert address["fact_rows_semantic_updated"] == 0
+    assert address["fact_rows_unchanged"] == 1
 
 
 def test_pn_identity_group_protection_is_counted_without_false_changes(db):
@@ -190,6 +230,60 @@ def test_pn_identity_group_protection_is_counted_without_false_changes(db):
     )).all() == []
 
 
+def test_feedback_counts_distinct_line_ids_across_upsert_chunks(db, monkeypatch):
+    _load(db, [_line(raw_id) for raw_id in (
+        "changed", "unchanged", "protected", "legacy",
+    )])
+    protected = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.raw_line_id == "protected",
+    ))
+    protected.qty = Decimal("7")
+    protected.manual_override = {"qty": {"value": "7", "source_value": "2"}}
+    legacy = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.raw_line_id == "legacy",
+    ))
+    legacy.qty = Decimal("8")
+    legacy.edited_source = "workbook_manual"
+    db.commit()
+
+    # 同一原始身份落在不同 SQL chunk；混合同值重复与先变更再同值的重复。
+    # 曾发生有效差异的身份只计一次，且不再同时计入无变化。
+    original_chunks = loader._chunks
+    monkeypatch.setattr(loader, "_chunks", lambda rows, n=2: original_chunks(rows, n))
+    report = _load(db, [
+        _line("changed", qty="3"), _line("protected", qty="5"),
+        _line("changed"), _line("legacy", qty="5"),
+        _line("unchanged"), _line("protected", qty="5"),
+        _line("unchanged"), _line("legacy", qty="5"),
+    ])
+
+    assert report["source_rows_total"] == 8
+    assert report["fact_rows_inserted"] == 0
+    assert report["fact_rows_updated"] == 4
+    assert report["fact_rows_semantic_updated"] == 1
+    assert report["fact_rows_unchanged"] == 3
+    assert report["fact_rows_protected"] == 2
+    assert report["protected_field_counts"] == {"qty": 2}
+    assert report["fact_rows_legacy_review"] == 1
+
+
+@pytest.mark.parametrize("mode", ["upsert", "skip"])
+def test_duplicate_input_counts_unique_facts(db, monkeypatch, mode):
+    _load(db, [_line("known")])
+    original_chunks = loader._chunks
+    monkeypatch.setattr(loader, "_chunks", lambda rows, n=2: original_chunks(rows, n))
+
+    report = _load(db, [
+        _line("known"), _line("new"), _line("known"), _line("new"),
+    ], mode=mode)
+
+    assert report["source_rows_total"] == 4  # 原始输入行数保留，不冒充唯一事实数。
+    assert report["fact_rows_inserted"] == 1
+    assert report["fact_rows_updated"] == (1 if mode == "upsert" else 0)
+    assert report["fact_rows_skipped"] == (1 if mode == "skip" else 0)
+    assert len(db.scalars(select(FMaintenanceLine)).all()) == 2
+
+
 def test_upload_response_and_replay_keep_feedback_and_missing_lines_separate(db, tmp_path):
     from tests.test_maintenance_wbdd_import_api import _client, _upload
     from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
@@ -215,6 +309,7 @@ def test_upload_response_and_replay_keep_feedback_and_missing_lines_separate(db,
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["fact_rows_updated"] == 1
+    assert payload["orders_semantic_updated"] == 0
     assert payload["fact_rows_semantic_updated"] == 0
     assert payload["fact_rows_unchanged"] == 1
     assert payload["fact_rows_protected"] == 1

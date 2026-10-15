@@ -1143,14 +1143,15 @@ def projects(
             == FMaintenanceOrder.raw_order_id,
             MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
-        by_order_salesperson = (
+        by_order_salesperson = active_orders(
             select(MaintenanceSourceOrderAssignment.project_id)
             .select_from(FMaintenanceOrder)
             .join(MaintenanceSourceOrderAssignment, active_assignment)
             .where(
                 FMaintenanceOrder.salesperson.icontains(needle, autoescape=True),
                 maintenance_demands.active_demand_condition(),
-            )
+            ),
+            FMaintenanceOrder,
         )
         filters.append(
             or_(
