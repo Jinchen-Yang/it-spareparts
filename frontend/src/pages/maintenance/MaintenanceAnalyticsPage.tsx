@@ -47,6 +47,7 @@ import {
 import { readPermissionMap } from "../../nav";
 import PageHeader from "../../components/PageHeader";
 import MaintenanceRankingsExplorer from "./MaintenanceRankingsExplorer";
+import MaintenancePnCompactView from "./MaintenancePnCompactView";
 import {
   SPEND_CATEGORY_CODES,
   SPEND_CATEGORY_LABELS,
@@ -227,7 +228,7 @@ export function MaintenanceAnalyticsPage() {
   );
   const costSourceParam = csvParam(costSources, COST_SOURCE_CODES);
   /** 默认多维排名；旧 view=pn / spend 链接继续指向原明细与开支统计。 */
-  const view = sp.get("view") === "spend" ? "spend" : sp.get("view") === "pn" ? "pn" : "rankings";
+  const view = sp.get("view") === "spend" ? "spend" : sp.get("view") === "pn" ? "pn" : sp.get("view") === "pn-compact" ? "pn-compact" : "rankings";
   const [explorerRefresh, setExplorerRefresh] = useState(0);
   const granularity = readGranularity(sp.get("granularity"));
 
@@ -582,7 +583,7 @@ export function MaintenanceAnalyticsPage() {
   ], [granularity]);
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+    <Space direction="vertical" size={16} className="maintenance-analytics-page" style={{ width: "100%" }}>
       <PageHeader
         title={(
           <Space>
@@ -602,7 +603,7 @@ export function MaintenanceAnalyticsPage() {
             }}>
               重置筛选
             </Button>
-            <Button icon={<ReloadOutlined />}
+            <Button aria-label="刷新" icon={<ReloadOutlined />}
               onClick={() => { if (view === "spend") void loadSpend("manual"); else if (view === "pn") void load("manual"); else setExplorerRefresh(value => value + 1); }}
               loading={view === "spend" ? spendLoading : view === "pn" && loading}>
               刷新
@@ -641,13 +642,15 @@ export function MaintenanceAnalyticsPage() {
           />
           {view === "pn" && <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
             onChange={(v) => patch({ sort: v, page: null })} />}
-          <Input.Search allowClear value={searchDraft} placeholder={view === "rankings" ? "搜 PN / 描述 / 项目" : "搜 PN / 描述"} style={{ width: 220 }}
+          <Input.Search allowClear value={searchDraft} placeholder={view === "rankings" || view === "pn-compact" ? "搜 PN / 描述 / 项目" : "搜 PN / 描述"} style={{ width: 220 }}
             onChange={(event) => setSearchDraft(event.target.value)}
             onSearch={(v) => patch({ q: v || null, page: null })} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            成本＝当前可用的已知需求成本（缺价行单列，不按 0 计）；返还率＝所选期间返还数量 ÷ 同期实际领用数量，包含全部件况。
-            按需求单号、需求类型、仓库或成本来源筛选时，仅统计关联需求单的领用与返还。
-            成本来源按记录标记筛选；缺价明细排名按实际成本是否可用统计，两者口径不同。
+            {view === "pn-compact" ? "需求净量＝有效需求数量 − 退货数量，按需求日期统计。两榜从完整筛选集分别排名；已知需求成本含税，缺价不当作零元。" : <>
+              成本＝当前可用的已知需求成本（缺价行单列，不按 0 计）；返还率＝所选期间返还数量 ÷ 同期实际领用数量，包含全部件况。
+              按需求单号、需求类型、仓库或成本来源筛选时，仅统计关联需求单的领用与返还。
+              成本来源按记录标记筛选；缺价明细排名按实际成本是否可用统计，两者口径不同。
+            </>}
           </Text>
         </Space>
         <Space wrap size={12} style={{ marginTop: 12 }}>
@@ -720,6 +723,7 @@ export function MaintenanceAnalyticsPage() {
         onChange={(key) => patch({ view: key === "rankings" ? null : key })}
         items={[
           { key: "rankings", label: "多维排名", children: view === "rankings" ? <MaintenanceRankingsExplorer refreshKey={explorerRefresh} /> : null },
+          { key: "pn-compact", label: "PN 紧凑图", children: view === "pn-compact" ? <MaintenancePnCompactView refreshKey={explorerRefresh} projectLabels={projectLabels} /> : null },
           {
             key: "pn",
             label: "PN 明细",
