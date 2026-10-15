@@ -32,6 +32,10 @@ from app.services import (
     maintenance_consumption_cost,
     maintenance_site_return_requirements as requirements,
 )
+from app.services.maintenance_site_issue_facts import (
+    LegacySiteIssueEditContext,
+    apply_locked_site_issue_edits,
+)
 from app.services.maintenance_project_operations import (
     MaintenanceOperationConflict,
     MaintenanceOperationError,
@@ -285,43 +289,6 @@ def _record_command(
             response_json=response,
         )
     )
-
-
-def _record_requirement_corrections(
-    db: Session,
-    *,
-    project_id: str,
-    before: dict,
-    operated_by: str,
-    reason: str,
-) -> None:
-    """Workbook 同款：行事实变化 → 行级返还义务修正审计。
-
-    ``record_corrections`` 内部逐行比对 before/after、无变化即跳过；新建行不在
-    before 里，天然不产生伪审计。软作废行 is_active 已翻 false，会被记为
-    quantity 口径变化——与 06 删行的义务撤回语义一致。
-    """
-
-    requirements.record_corrections(
-        db,
-        project_id=project_id,
-        before=before,
-        operated_by=operated_by,
-        reason=reason,
-    )
-
-
-def _sync_amounts_before_flush(line: MaintenanceSiteIssueLine) -> None:
-    """数量变化先行同步金额，避免 autoflush 撞 dual-tax CHECK（06 同款规则）。"""
-
-    if line.unit_cost_ex_tax is not None:
-        line.cost_amount_ex_tax = (
-            Decimal(line.quantity) * line.unit_cost_ex_tax
-        ).quantize(Decimal("0.01"))
-        line.cost_amount_inc_tax = (
-            Decimal(line.quantity) * line.unit_cost_inc_tax
-        ).quantize(Decimal("0.01"))
-        line.cost_amount = line.cost_amount_ex_tax
 
 
 def preview_manual_site_issue(
@@ -752,37 +719,18 @@ def patch_manual_site_issue(
             if existing is not None:
                 used_line_ids.add(existing.issue_line_id)
                 surviving.append(existing)
-                line_dirty = False
-                if existing.quantity != requested["quantity"]:
-                    existing.quantity = requested["quantity"]
-                    _sync_amounts_before_flush(existing)
-                    line_dirty = True
-                if existing.no_return != requested.get("no_return"):
-                    existing.no_return = requested.get("no_return")
-                    line_dirty = True
-                if existing.demand_order_no != requested.get("demand_order_no"):
-                    existing.demand_order_no = requested.get("demand_order_no")
-                    line_dirty = True
-                if existing.remark != requested.get("remark"):
-                    existing.remark = requested.get("remark")
-                    line_dirty = True
+                patch = {key: requested.get(key) for key in (
+                    "quantity", "no_return", "demand_order_no", "remark", "serial_number",
+                )}
                 if existing.part_id != requested["part_id"]:
-                    # 同一行换型号 = 行身份内换绑：清旧件手工价证据（06 同款）。
-                    existing.part_id = requested["part_id"]
-                    existing.pn = requested["pn"]
-                    existing.manual_unit_cost = None
-                    existing.manual_unit_cost_inc_tax = None
-                    existing.manual_evidence = None
-                    line_dirty = True
-                if existing.serial_number != requested.get("serial_number"):
-                    existing.serial_number = requested.get("serial_number")
-                    line_dirty = True
-                if line_dirty:
-                    # 行事实变化必须 bump line.version：fill_manual_cost 等
-                    # 补价入口按 line.version 做 CAS，不 bump 会接受更正前
-                    # 的过期补价凭据（Codex 复审 P1，2026-09-20）。
-                    existing.version += 1
-                    lines_changed = True
+                    patch.update(part_id=requested["part_id"], pn=requested["pn"])
+                edited = apply_locked_site_issue_edits(
+                    db, project=project, issue=issue,
+                    line_changes={existing.issue_line_id: patch}, header_changes=None,
+                    operated_by=operated_by, reason=clean_reason,
+                    legacy_context=LegacySiteIssueEditContext("manual"),
+                )
+                lines_changed = edited.changed or lines_changed
                 pricing_entries[existing.issue_line_id] = (candidate_date, existing)
             else:
                 new_line = MaintenanceSiteIssueLine(
@@ -866,19 +814,22 @@ def patch_manual_site_issue(
         except maintenance_consumption_cost.CostResolutionError as exc:
             raise MaintenanceOperationError(str(exc)) from exc
 
-    _record_requirement_corrections(
-        db,
-        project_id=project_id,
-        before=requirement_before,
-        operated_by=operated_by,
-        reason=clean_reason,
+    apply_locked_site_issue_edits(
+        db, project=project, issue=issue, line_changes={}, header_changes=None,
+        operated_by=operated_by, reason=clean_reason,
+        legacy_context=LegacySiteIssueEditContext("manual", requirement_before),
     )
 
-    issue.issue_date = candidate_date
-    issue.issue_no = candidate_no
-    issue.receiver = candidate_receiver
-    issue.issued_by = candidate_issued_by
-    issue.site_location = candidate_location
+    apply_locked_site_issue_edits(
+        db, project=project, issue=issue, line_changes={},
+        operated_by=operated_by, reason=clean_reason,
+        legacy_context=LegacySiteIssueEditContext("manual"),
+        header_changes={
+            "issue_date": candidate_date, "issue_no": candidate_no,
+            "receiver": candidate_receiver, "issued_by": candidate_issued_by,
+            "site_location": candidate_location,
+        },
+    )
     issue.raw_status = "corrected"
     issue.normalized_status = "corrected"
     issue.status_mapping_version = STATUS_MAPPING_VERSION
