@@ -146,6 +146,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   cleanup();
   message.destroy();
 });
@@ -449,6 +450,57 @@ describe("需求单与数据同步页", () => {
     expect(uploadWbdd.mock.calls[0][1]).toBeTruthy(); // 幂等键
     await waitFor(() => expect(getWbddMissing).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
+  });
+
+  it("只有缺失明细也在上传提示中告知，不要求同时存在缺失整单", async () => {
+    const successMessage = vi.spyOn(message, "success");
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    uploadWbdd.mockResolvedValueOnce({ data: {
+      batch_id: 8, import_mode: "upsert",
+      snapshot_diff: { missing_orders: 0, missing_lines: 2, sample_order_nos: [], window: null },
+    } });
+    const { container } = render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "missing-lines.xlsx")] },
+    });
+
+    await waitFor(() => expect(successMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/快照已同步（批次 #8）.*2 行缺失明细.*请核对/),
+    ));
+    expect(screen.getByText("缺失明细 2 行")).toBeInTheDocument();
+  });
+
+  it("区分匹配、实际变更、无变化和保护；刷新失败仍保留本批回执", async () => {
+    const warningMessage = vi.spyOn(message, "warning");
+    localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
+    uploadWbdd.mockResolvedValueOnce({ data: {
+      batch_id: 8, import_mode: "upsert", fact_rows_inserted: 1,
+      fact_rows_updated: 5, fact_rows_skipped: 0,
+      fact_rows_semantic_updated: 2, fact_rows_unchanged: 3,
+      fact_rows_protected: 2, protected_field_counts: { qty: 2 },
+      fact_rows_legacy_review: 1,
+      snapshot_diff: { missing_orders: 0, missing_lines: 0, sample_order_nos: [], window: null },
+    } });
+    searchMaintenanceDemands
+      .mockResolvedValueOnce(demandPage([demandRow("RAW-9", "XQD-009")]))
+      .mockRejectedValueOnce(new Error("readback failed"));
+    const { container } = render(<MaintenanceDemandsPage />);
+    await screen.findByText("XQD-009");
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["xlsx"], "feedback.xlsx")] },
+    });
+
+    await waitFor(() => expect(warningMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/快照已同步（批次 #8）.*但页面刷新失败/),
+    ));
+    for (const text of ["新增 1 行", "匹配已有 5 行", "实际变更 2 行", "无变化 3 行",
+      "人工保护 2 行", "历史保护待核对 1 行", "需求数量 2 行"]) {
+      expect(screen.getByText(text)).toBeInTheDocument();
+    }
+    expect(screen.getByText(/人工保护与实际变更或无变化可出现在同一行/)).toBeInTheDocument();
+    expect(screen.queryByText("快照上传失败")).toBeNull();
+    expect(uploadWbdd).toHaveBeenCalledTimes(1);
   });
 
   it("地址冲突显示单号和数据行，列表刷新失败也保留上传回执", async () => {

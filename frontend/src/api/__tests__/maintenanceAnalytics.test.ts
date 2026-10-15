@@ -3,11 +3,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("../../api", () => ({ api: { get } }));
 
-import { fetchAnalyticsFilterOptions, fetchPnRanking, fetchSpendTrend } from "../maintenanceAnalytics";
+import { fetchAnalyticsFilterOptions, fetchMaintenanceExplorer, fetchPnRanking, fetchSpendTrend } from "../maintenanceAnalytics";
 
 beforeEach(() => vi.clearAllMocks());
 
 describe("维保数据分析 API 契约", () => {
+  it("explorer 双榜扩展按需透传，保留取消信号和仓库原值", async () => {
+    get.mockResolvedValueOnce({ data: { pn_overview: { effective_rows: [], cost_rows: null } } });
+    const signal = new AbortController().signal;
+    const params = { dimension: "pn" as const, metric: "effective" as const, include_pn_overview: true, top_n: 15, warehouse: " 广州仓 " };
+    await fetchMaintenanceExplorer(params, signal);
+    expect(get).toHaveBeenCalledWith("/maintenance/analytics/explorer", { params, signal });
+    get.mockResolvedValueOnce({ data: { rows: [] } });
+    await fetchMaintenanceExplorer({ dimension: "project" });
+    expect(get).toHaveBeenLastCalledWith("/maintenance/analytics/explorer", { params: { dimension: "project" }, signal: undefined });
+  });
   it("pn-ranking 透传全字段筛选（项目/客户/销售/需求单号/需求类型/仓库/成本来源）", async () => {
     get.mockResolvedValueOnce({ data: { rows: [] } });
     await fetchPnRanking({

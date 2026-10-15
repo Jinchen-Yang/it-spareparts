@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExplorerRow, MaintenanceExplorerResponse } from "../../../api/maintenanceAnalytics";
 import MaintenanceRankingsExplorer from "../MaintenanceRankingsExplorer";
 import MaintenanceProjectAnalyticsContext from "../panel/MaintenanceProjectAnalyticsContext";
-import { explorerParamsFromSearch, formatExplorerValue } from "../analyticsExplorerModel";
+import { explorerParamsFromSearch, formatExplorerValue, pnCompactParamsFromSearch } from "../analyticsExplorerModel";
 const fetchExplorer = vi.fn();
 vi.mock("../../../api/maintenanceAnalytics", () => ({ fetchMaintenanceExplorer: (...args: unknown[]) => fetchExplorer(...args) }));
 vi.mock("../../../nav", () => ({ readPermissionMap: () => JSON.parse(localStorage.getItem("permissions") || "{}") }));
@@ -27,6 +27,12 @@ beforeEach(() => { localStorage.setItem("permissions", JSON.stringify({ data_pur
 afterEach(() => { cleanup(); localStorage.clear(); });
 
 describe("分析数据展示合同", () => {
+  it("紧凑图只继承公共筛选，固定需求净量与独立Top，不继承旧排名意图", () => {
+    const params = pnCompactParamsFromSearch(new URLSearchParams("view=pn-compact&range=custom&from=2026-01-01&to=2026-01-31&project=p1,p2&customer=客户&sp=销售&order_no=O1&demand_type=repair&warehouse=+广州仓+&cost_source=missing&q=PN&business_type=spare&dim=customer&metric=cost&focus=客户&layout=C&page=2&ps=50&top=30&pn_top=10&focus_page=2"));
+    expect(params).toEqual({ range: "custom", date_from: "2026-01-01", date_to: "2026-01-31", project: "p1,p2", customer: "客户", sp: "销售", order_no: "O1", demand_type: "repair", warehouse: " 广州仓 ", cost_source: "missing", q: "PN", business_type: "spare", dimension: "pn", metric: "effective", top_n: 10, include_pn_overview: true });
+    expect(pnCompactParamsFromSearch(new URLSearchParams()).top_n).toBe(15);
+    expect(pnCompactParamsFromSearch(new URLSearchParams("pn_top=30")).top_n).toBe(15);
+  });
   it.each([["1.005", "¥1.01"], ["-1.005", "¥-1.01"], ["0", "¥0.00"], [null, "未知"], ["9007199254740993.995", "¥9,007,199,254,740,994.00"]])("金额%s以十进制四舍五入为%s", (value, expected) => expect(formatExplorerValue(value, "cost")).toBe(expected));
   it("数量保留千分位精度，零和未知不同", () => { expect(formatExplorerValue("0.001")).toBe("0.001"); expect(formatExplorerValue("0")).toBe("0"); expect(formatExplorerValue(null)).toBe("未知"); });
   it("保留所有旧筛选参数与仓库空格，不传布局/回跳地址", () => {

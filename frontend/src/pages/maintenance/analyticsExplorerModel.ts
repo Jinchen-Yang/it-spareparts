@@ -36,6 +36,26 @@ export function explorerParamsFromSearch(search: URLSearchParams): MaintenanceEx
   return params;
 }
 
+/** 紧凑图只接受公共筛选，旧多维排名的焦点、分页与指标互不影响。 */
+export function pnCompactParamsFromSearch(search: URLSearchParams): MaintenanceExplorerParams {
+  const params: MaintenanceExplorerParams = {
+    range: search.get("range") || "ytd",
+    dimension: "pn",
+    metric: "effective",
+    top_n: search.get("pn_top") === "10" ? 10 : 15,
+    include_pn_overview: true,
+  };
+  for (const key of ["q", "business_type", "project", "customer", "sp", "order_no", "demand_type", "warehouse", "cost_source"] as const) {
+    const value = search.get(key);
+    if (value) params[key] = value;
+  }
+  if (params.range === "custom") {
+    params.date_from = search.get("from") || undefined;
+    params.date_to = search.get("to") || undefined;
+  }
+  return params;
+}
+
 /** 展示格式化不把 Decimal 先转成浮点，避免大金额在浏览器中丢分。 */
 export function formatExplorerValue(value: string | number | null | undefined, metric?: ExplorerMetric): string {
   if (value == null) return "未知";

@@ -16,10 +16,21 @@ export interface WbddImportReport {
   file_hash: string;
   layout: "91" | "90" | "name";
   replayed: boolean;
+  import_mode?: "skip" | "upsert";
   orders_inserted?: number;
   orders_updated?: number;
+  /** 单头有效字段实际变化数（含新增）；null 或缺失表示未提供统计。 */
+  orders_semantic_updated?: number | null;
   fact_rows_inserted?: number;
   fact_rows_updated?: number;
+  fact_rows_skipped?: number;
+  /** 旧 updated 是匹配已有行数；以下可选统计才描述有效值实际变化，null 表示未评估。 */
+  fact_rows_semantic_updated?: number | null;
+  fact_rows_unchanged?: number | null;
+  /** 人工保护挡下不同源值的行数；可与 semantic_updated 重叠。 */
+  fact_rows_protected?: number | null;
+  protected_field_counts?: Record<string, number> | null;
+  fact_rows_legacy_review?: number | null;
   fact_rows_error?: number;
   headless_orders?: number;
   headless_order_ids_sample?: string[];
@@ -27,6 +38,7 @@ export interface WbddImportReport {
   address_report?: WbddAddressReport;
   snapshot_diff?: {
     missing_orders: number;
+    missing_lines?: number;
     sample_order_nos: string[];
     window: { from: string; to: string } | null;
   };
