@@ -555,7 +555,7 @@ def test_transferred_source_does_not_leak_customer_or_match_filters(db):
     assert not explore(db, customer="TRANSFER-SECRET")["rows"]
 
 
-def test_cumulative_percent_is_computed_once_and_hidden_negative_remains_flagged(db):
+def test_cumulative_percent_uses_aggregated_pn_net_despite_negative_source_line(db):
     project = _project(db, "EX-CUMULATIVE")
     parts = [_part(db, f"EX-CUMULATIVE-{n}") for n in range(6)]
     for part in parts:
@@ -568,11 +568,128 @@ def test_cumulative_percent_is_computed_once_and_hidden_negative_remains_flagged
     assert costs["rows"][-1]["cumulative_share_pct"] == "100.0"
     assert sum(Decimal(row["share_pct"]) for row in costs["rows"]) == Decimal("100.2")
     assert costs["summary"]["top_share_pct"] == "100.0"
-    effective = explore(db, metric="effective")
+    effective = explore(db, metric="effective", include_pn_overview=True)
     assert all(Decimal(row["value"]) > 0 for row in effective["rows"])
-    assert effective["meta"]["has_negative"] is True
-    assert all(row["share_pct"] is None and row["cumulative_share_pct"] is None for row in effective["rows"])
-    assert all(row["share_pct"] is None for row in effective["focus"]["rows"])
+    assert effective["meta"]["has_negative"] is False
+    assert effective["pn_overview"]["has_negative"] is False
+    for rows in (effective["rows"], effective["pn_overview"]["effective_rows"]):
+        assert rows[0]["value"] == "2.000"
+        assert rows[0]["share_pct"] == "28.6"
+        assert rows[-1]["cumulative_share_pct"] == "100.0"
+    assert effective["summary"]["top_share_pct"] == "100.0"
+
+
+@pytest.mark.parametrize("positive_qty,net,share", [("3", "0", "0.0"), ("5", "2", "50.0")])
+@pytest.mark.parametrize("can_cost", [True, False])
+def test_pn_negative_check_combines_scoped_cells_by_stable_identity(db, positive_qty, net, share, can_cost):
+    negative, positive = _project(db, "EX-NET-NEG"), _project(db, "EX-NET-POS")
+    mixed, other = _part(db, "EX-NET-MIXED"), _part(db, "EX-NET-OTHER")
+    line = demand(db, negative, mixed, return_qty=Decimal("3"))
+    line.qty = None  # NULL is still zero: this cell contributes -3.
+    _set_order(db, line, end_customer="NET-NEG-CUSTOMER")
+    offset = demand(db, positive, mixed, positive_qty)
+    # Historical display text must not split the same stable part identity.
+    offset.pn_std = " historical-net-mixed "
+    _set_order(db, offset, end_customer="NET-POS-CUSTOMER")
+    demand(db, positive, other, "2")
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True,
+                     can_cost=can_cost, focus=f"part:{mixed.id}")
+    assert result["meta"]["has_negative"] is False
+    assert result["pn_overview"]["has_negative"] is False
+    for rows in (result["rows"], result["pn_overview"]["effective_rows"]):
+        mixed_row = next(row for row in rows if row["key"] == f"part:{mixed.id}")
+        assert Decimal(mixed_row["effective_qty"]) == Decimal(net)
+        assert mixed_row["share_pct"] == share
+        assert rows[-1]["cumulative_share_pct"] == "100.0"
+    assert result["summary"]["top_share_pct"] == "100.0"
+    assert len(result["focus"]["rows"]) == 2
+    assert all(row["share_pct"] is None for row in result["focus"]["rows"])
+    # The non-PN project ranking retains its negative-value guard.
+    projects = explore(db, metric="effective", dimension="project", can_cost=can_cost)
+    assert projects["meta"]["has_negative"] is True
+    assert all(row["share_pct"] is None for row in projects["rows"])
+
+
+@pytest.mark.parametrize("metric", ["effective", "issued", "cost"])
+def test_negative_pn_outside_top_and_page_still_disables_pn_shares(db, metric):
+    project = _project(db, "EX-NET-TOP")
+    positive, negative = _part(db, "EX-NET-TOP-POS"), _part(db, "EX-NET-TOP-NEG")
+    demand(db, project, positive, "10", "100")
+    demand(db, project, negative, "1", "1", return_qty=Decimal("2"))
+    _issue(db, project, positive, "1")
+    db.commit()
+
+    result = explore(db, metric=metric, include_pn_overview=True, page_size=1, top_n=1)
+    assert result["rows"][0]["key"] == f"part:{positive.id}"
+    assert result["pn_overview"]["effective_rows"][0]["value"] == "10.000"
+    assert result["pn_overview"]["has_negative"] is True
+    assert result["meta"]["has_negative"] is (metric == "effective")
+    assert all(row["share_pct"] is None and row["cumulative_share_pct"] is None
+               for row in result["pn_overview"]["effective_rows"])
+    if metric == "effective":
+        assert result["summary"]["value"] == "9.000"
+        assert result["summary"]["top_share_pct"] is None
+        assert result["chart_rows"][0]["share_pct"] is None
+        second_page = explore(db, metric=metric, include_pn_overview=True, page=2, page_size=1, top_n=1)
+        assert second_page["rows"][0]["value"] == "-1.000"
+        assert second_page["pn_overview"] == result["pn_overview"]
+        assert second_page["meta"]["has_negative"] is True
+
+
+def test_pn_negative_check_only_offsets_within_current_filters_and_permissions(db):
+    negative, positive = _project(db, "EX-SCOPE-NEG"), _project(db, "EX-SCOPE-POS")
+    part = _part(db, "EX-NET-SCOPE")
+    line = demand(db, negative, part, "1", return_qty=Decimal("4"), order_date=date(2026, 9, 1))
+    _set_order(db, line, end_customer="NET-SCOPE-NEG")
+    demand(db, positive, part, "5", order_date=date(2026, 9, 2))
+    db.commit()
+
+    cases = [({}, False), ({"project_ids": [negative.project_id]}, True),
+             ({"allowed_project_ids": {negative.project_id}}, True),
+             ({"customer": "NET-SCOPE-NEG"}, True),
+             ({"range_": "custom", "date_from": date(2026, 9, 1), "date_to": date(2026, 9, 1)}, True),
+             ({"allowed_project_ids": {positive.project_id}}, False),
+             ({"allowed_project_ids": set()}, False)]
+    for options, expected in cases:
+        result = explore(db, metric="effective", include_pn_overview=True, **options)
+        assert result["meta"]["has_negative"] is expected, options
+        assert result["pn_overview"]["has_negative"] is expected, options
+
+
+def test_same_raw_pn_does_not_offset_different_part_identities(db):
+    project = _project(db, "EX-NET-IDENTITY")
+    positive, negative = _part(db, "EX-NET-CASE"), _part(db, "ex-net-case")
+    demand(db, project, positive, "5")
+    line = demand(db, project, negative, "1", return_qty=Decimal("3"))
+    line.pn_std = positive.pn_std
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True)
+    assert result["total"] == 2
+    assert {row["key"] for row in result["rows"]} == {
+        f"part:{positive.id}", f"part:{negative.id}",
+    }
+    assert result["summary"]["value"] == "3.000"
+    assert result["meta"]["has_negative"] is True
+    assert result["pn_overview"]["has_negative"] is True
+
+
+def test_exactly_offset_pn_has_no_negative_but_zero_total_has_no_shares(db):
+    project = _project(db, "EX-NET-ZERO")
+    part = _part(db, "EX-NET-ZERO")
+    demand(db, project, part, "1", return_qty=Decimal("3"))
+    demand(db, project, part, "2")
+    db.commit()
+
+    result = explore(db, metric="effective", include_pn_overview=True)
+    assert result["meta"]["has_negative"] is False
+    assert result["pn_overview"]["has_negative"] is False
+    assert Decimal(result["summary"]["value"]) == 0
+    assert result["summary"]["top_share_pct"] is None
+    assert result["rows"][0]["share_pct"] is None
+    assert result["pn_overview"]["effective_rows"][0]["cumulative_share_pct"] is None
 
 
 def test_void_lines_orders_and_unconfirmed_issues_are_excluded(db):

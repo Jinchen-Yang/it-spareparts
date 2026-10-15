@@ -216,8 +216,19 @@ def _has_metric(row, metric):
     return row["issue_count"] > 0 if metric == "issued" else row["demand_count"] > 0
 
 
-def _negative(records, metric):
-    return metric == "effective" and any(row["negative_effective_count"] for row in records)
+def _negative(records, metric, dimension):
+    if metric != "effective":
+        return False
+    if dimension != "pn":
+        # Keep the existing guard for project/attribution distributions: a PN
+        # can be nonnegative overall while one of its projects remains negative.
+        return any(row["negative_effective_count"] for row in records)
+    # SQL cells also split by project and attribution. Decide only after all
+    # scoped cells for each stable PN identity have been combined (D-37).
+    quantities = defaultdict(lambda: ZERO)
+    for row in records:
+        quantities[_key(row, "pn")] += row["effective_qty"] or ZERO
+    return any(quantity < ZERO for quantity in quantities.values())
 
 
 def _decimal(value):
@@ -279,7 +290,7 @@ def _rank(records, dimension, metric, can_cost):
                            "share_pct": None, "cumulative_share_pct": None})
     ranked.sort(key=lambda row: (row["value"] is None, -Decimal(row["value"] or "0"), row["label"], row["key"]))
     additive = metric != "orders"
-    negative = _negative(records, metric)
+    negative = _negative(records, metric, dimension)
     total = sum((Decimal(row["value"] or "0") for row in ranked), ZERO)
     if additive and not negative and total > ZERO:
         cumulative = ZERO
@@ -359,7 +370,7 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
                    "scale_max": _decimal(max(values, default=ZERO)), "scale_min": _decimal(min(values, default=ZERO))},
         "meta": {"as_of": (records[0]["as_of"] if records else datetime.now(timezone.utc)).isoformat(),
                  "quantity_scale": 3, "cost_basis": "inc", "additive": metric != "orders",
-                 "has_negative": _negative(records, metric),
+                 "has_negative": _negative(records, metric, dimension),
                  "cost_visibility": "visible" if can_cost else "restricted",
                  "customer_visibility": "visible" if can_customer else "restricted",
                  "unknown_count": sum(row["value"] is None for row in ranks)},
@@ -373,6 +384,6 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
                           _rank(records, "pn", "cost", can_cost)[:top_n]] if can_cost else None,
             "effective_rows": [{**row, "can_open_project": False} for row in
                                _rank(records, "pn", "effective", can_cost)[:top_n]],
-            "has_negative": _negative(records, "effective"),
+            "has_negative": _negative(records, "effective", "pn"),
         }
     return payload
