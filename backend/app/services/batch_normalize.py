@@ -28,7 +28,7 @@ def _proposed(part: DimPart) -> dict:
     if canon and canon != (part.description or "") and "description" not in locked:
         changes["description"] = canon
     l1, l2 = sug.get("category_l1"), sug.get("category_l2")
-    if l1 and "category_major" not in locked and (
+    if l1 and not {"category_major", "category_minor"}.intersection(locked) and (
             l1 != (part.category_major or "") or (l2 or "") != (part.category_minor or "")):
         changes["category_major"] = l1
         changes["category_minor"] = l2
@@ -122,15 +122,18 @@ def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
     want = set(fields or ["description", "category", "brand"])
     applied = skipped = 0
     for pid in part_ids:
-        part = db.get(DimPart, pid)
+        # 建议和人工锁必须来自锁后的现值；旧 Session 缓存不能决定本次写集。
+        part = master_edit.lock_part(db, part_id=pid)
         if part is None or part.status != "active":
             skipped += 1
+            db.commit()
             continue
         prop = _proposed(part)
         # §17 服务端门槛：仅 AUTO_OK（类型/分类确定、无校验错、无猜测字段）才批量写回；
         # REVIEW_REQUIRED 交单条人工，绝不批量写低置信结果。
         if prop["suggestion"].get("review_status") != standardize.AUTO_OK:
             skipped += 1
+            db.commit()
             continue
         changes = prop["changes"]
         updates: dict = {}
@@ -143,6 +146,7 @@ def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
             updates["brand"] = changes["brand"]
         if not updates:
             skipped += 1
+            db.commit()
             continue
         master_edit.edit_part(db, pn_std=part.pn_std, updates=updates, operated_by=operated_by)
         applied += 1

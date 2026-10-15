@@ -305,6 +305,9 @@ class SiteIssueSearch(BaseModel):
     )
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
+    category_major: str | None = Field(default=None, max_length=64)
+    category_minor: str | None = Field(default=None, max_length=128)
+    category_state: str | None = Field(default=None, pattern="^(unclassified|unlinked)$")
 
 
 class SiteIssueStatusPatch(BaseModel):
@@ -1051,6 +1054,9 @@ def search_project_site_issues(
             workflow_statuses=body.workflow_statuses,
             page=body.page,
             page_size=body.page_size,
+            category_major=body.category_major,
+            category_minor=body.category_minor,
+            category_state=body.category_state,
         )
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
