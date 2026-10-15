@@ -6,8 +6,9 @@
  * 身份口径：一律用 part_id 往后端传（PartPicker 也只回传 part_id），
  * 不要把用户展示文本回传后端再猜。
  */
-import { api } from "../api";
-import type { Overview } from "../api";
+import { api, masterEdit } from "../api";
+import type { CategoryNode, MasterEditPayload, MasterEditSnapshot, MasterFields, Overview } from "../api";
+export type { MasterEditPayload, MasterEditSnapshot } from "../api";
 
 /** 后端 resolver 的匹配类型（按最强证据分类） */
 export type MatchType =
@@ -79,7 +80,74 @@ export async function unifiedSearch(
 /** 型号全景：稳定深链主键 part_id 优先；pn 仅作兼容入口（/parts?pn=）。 */
 export async function fetchOverview(
   key: { part_id: number } | { pn_std: string },
+  token?: string,
 ): Promise<Overview> {
-  const { data } = await api.get("/parts/overview", { params: key });
+  const { data } = await api.get("/parts/overview", {
+    params: key,
+    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+  });
   return data;
+}
+
+export async function fetchMasterEditState(partId: number, token: string): Promise<MasterEditSnapshot> {
+  const { data } = await api.get<MasterEditSnapshot>(`/parts/master/${partId}/edit-state`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return data;
+}
+
+export const saveMasterEdit = (payload: MasterEditPayload, token: string) => masterEdit(payload, token);
+
+export async function fetchMasterEditCategories(token: string): Promise<CategoryNode[]> {
+  const { data } = await api.get<{ categories: CategoryNode[] }>("/parts/master/categories", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return data.categories || [];
+}
+
+export function masterEditErrorMessage(error: any, fallback: string): string {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  return typeof detail?.message === "string" ? detail.message : fallback;
+}
+
+/** 服务端允许字段的三方差异仅作文本展示，不修改本次编辑基线。 */
+export function masterEditConflictLines(error: any): string[] {
+  const detail = error?.response?.data?.detail;
+  if (error?.response?.status !== 409
+    || !["field_conflict", "identity_conflict"].includes(detail?.code)
+    || !Array.isArray(detail?.conflicts)) return [];
+  const labels: Record<string, string> = {
+    description: "描述", brand: "品牌", category_major: "一级品类", category_minor: "二级品类",
+    machine_or_part: "类型", unit: "单位", pn_std: "PN", identity: "型号身份",
+    status: "身份状态", merged_into_id: "合并目标", part_id: "型号 ID",
+  };
+  const valueText = (value: unknown) => value === null ? "未填" : value === undefined ? "未提供"
+    : typeof value === "string" ? value : JSON.stringify(value);
+  return detail.conflicts.filter((conflict: any) => typeof conflict?.field === "string")
+    .map((conflict: any) => `${labels[conflict.field] || conflict.field}：打开时「${valueText(conflict.baseline)}」；当前「${valueText(conflict.current)}」；本次「${valueText(conflict.proposed)}」`);
+}
+
+/** 刷新基线只重放人工改动；两级品类必须一起保留，身份变化必须重新打开编辑。 */
+export function rebaseMasterEditDraft(
+  baseline: MasterEditSnapshot, latest: MasterEditSnapshot, draft: MasterFields,
+): Required<MasterFields> {
+  if (latest.part_id !== baseline.part_id || latest.pn_std !== baseline.pn_std
+    || latest.identity.status !== "active"
+    || latest.identity.part_id !== baseline.identity.part_id
+    || latest.identity.pn_std !== baseline.identity.pn_std
+    || latest.identity.merged_into_id !== baseline.identity.merged_into_id) {
+    throw new Error("型号身份已变化，草稿已保留，请关闭后重新打开编辑");
+  }
+  const normalized = (value: string | null | undefined) => value?.trim() || null;
+  const changed = (key: keyof MasterFields) => key in draft
+    && normalized(draft[key]) !== normalized(baseline.fields[key]);
+  const categoryChanged = changed("category_major") || changed("category_minor");
+  const fields = { ...latest.fields };
+  (Object.keys(fields) as (keyof MasterFields)[]).forEach((key) => {
+    if (changed(key) || (categoryChanged && (key === "category_major" || key === "category_minor"))) {
+      fields[key] = draft[key] ?? null;
+    }
+  });
+  return fields;
 }

@@ -400,6 +400,30 @@ export interface MasterFields {
   category_major?: string | null; category_minor?: string | null;
   machine_or_part?: string | null; unit?: string | null;
 }
+/** 人工编辑现值基线；不是持久单调版本。必须使用服务端返回的原始快照。 */
+export interface MasterEditSnapshot {
+  part_id: number;
+  pn_std: string;
+  identity: {
+    part_id: number;
+    pn_std: string;
+    status: "active" | "merged";
+    merged_into_id: number | null;
+  };
+  fields: Required<MasterFields>;
+  specs: Record<string, {
+    value: string;
+    unit: string | null;
+    numeric_value: string | null;
+    source: "auto" | "manual";
+  }>;
+  version_mode: "field_snapshot";
+}
+export type MasterEditPayload = MasterFields & {
+  part_id: number;
+  pn_std: string;
+  base_snapshot: MasterEditSnapshot;
+};
 export const searchParts = (q: string, page = 1, page_size = 20, browse = false) =>
   api.get<{ items: PartHit[]; total: number }>("/parts/search",
     { params: { q, page, page_size, ...(browse ? { browse: true } : {}) } });
@@ -414,8 +438,9 @@ export const masterCheck = (pn_std: string) =>
 export const masterCreate = (body: MasterFields & { pn_std: string; force?: boolean }) =>
   api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string }>(
     "/parts/master", body);
-export const masterEdit = (body: MasterFields & { pn_std: string }, token?: string) =>
-  api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[] }>(
+export const masterEdit = (body: MasterEditPayload, token?: string) =>
+  api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[];
+    audit_id: number; edit_state: MasterEditSnapshot }>(
     "/parts/master", body,
     token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
 
