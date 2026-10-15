@@ -43,7 +43,7 @@ npx tsc && npx vitest run && npx vite build
 
 ## 迁移和回滚
 
-无新增 Alembic revision、DDL 或数据回填，既有 head `c8f3d1a7e2b9`。独立于 P2-1/P2-2，未堆叠分支。
+无新增 Alembic revision、DDL 或数据回填，既有唯一 head `f307604fa4d7`（随 main 合入 #371）。独立于 P2-1/P2-2，未堆叠分支。
 
 应用回退恢复先前已批准的同 commit 构建。原语不引入持久化新形状，不用数据回填撤销编辑；已发生的人工作业只按既有实名更正流程处理。后续 S-A 接入后应同时回退依赖调用点，不能撤去仍被导入的原语。
 
