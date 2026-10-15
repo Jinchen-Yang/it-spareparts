@@ -9,6 +9,8 @@ export interface MaintenanceProject {
   project_manager_id: string | null;
   /** 项目主档原值；空值表示未标注。 */
   business_type?: string | null;
+  /** D-32：仅作提醒，不参与返还要求或收货计算。 */
+  no_return_note?: string | null;
   /** 维保期限主数据（#39/#51）：可显示、可在面板编辑。 */
   period_from: string | null;
   period_to: string | null;
@@ -50,6 +52,8 @@ export interface MaintenanceProjectUpdateInput {
   salesperson?: string | null;
   /** 中文标准类型；空串显式清除，不传则保留。 */
   business_type?: string | null;
+  /** 不传保留；null 或空白明确清除。最多 2,000 个字符。 */
+  no_return_note?: string | null;
   project_manager_id?: string | null;
   /** 维保期限（#39/#51）：YYYY-MM-DD；起止整组提交。 */
   period_from?: string | null;
