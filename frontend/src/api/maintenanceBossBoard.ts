@@ -1,5 +1,6 @@
 import { api } from "../api";
 import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
+import type { DemandReturnSummary } from "./maintenanceReturnRequestSummary";
 
 /**
  * 维保展示板 API 客户端（plan v1.3 §4.4/§4.5）。
@@ -235,6 +236,7 @@ export interface BoardProjectExportDownload {
 }
 
 export interface BoardOrderRow extends MaintenanceOrderContact {
+  return_summary?: DemandReturnSummary | null;
   source_order_id: string;
   order_no: string;
   order_date: string | null;

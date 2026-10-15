@@ -28,6 +28,7 @@ import {
   getMaintenanceProjectWorkspace,
   getReturnReceiptSummary,
   getReturnReceiptDemands,
+  listMaintenancePartCategories,
   searchReturnReceipts,
   updateReturnReceipt,
   listMaintenanceReturnCategories,
@@ -61,6 +62,18 @@ beforeEach(() => {
 });
 
 describe("maintenance operations API", () => {
+  it("品类字典只读，领用和返还筛选保留主数据库原文本及未知分类条件", () => {
+    listMaintenancePartCategories();
+    expect(get).toHaveBeenLastCalledWith("/parts/categories");
+    searchSiteIssues({ project_id: "p1", category_major: " 硬盘 ", category_minor: "SAS", category_state: "unclassified" });
+    expect(post).toHaveBeenLastCalledWith("/maintenance/site-issues/search", expect.objectContaining({
+      category_major: " 硬盘 ", category_minor: "SAS", category_state: "unclassified",
+    }));
+    searchReturnReceipts("p1", { category_state: "unlinked" });
+    expect(get).toHaveBeenLastCalledWith(expect.any(String), { params: expect.objectContaining({ category_state: "unlinked" }) });
+    searchReturnReceipts("p1", { category_major: "  " });
+    expect(get.mock.calls[get.mock.calls.length - 1]?.[1].params).not.toHaveProperty("category_major");
+  });
   it("返还汇总使用项目级路由，含作废筛选显式传 all", () => {
     getReturnReceiptSummary("project/id");
     expect(get).toHaveBeenLastCalledWith(
