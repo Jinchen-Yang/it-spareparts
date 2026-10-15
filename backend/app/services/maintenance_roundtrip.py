@@ -893,15 +893,13 @@ def _selected_data(
         )
 
     # 上述 COUNT、轻量 DISTINCT 和字节聚合都在任何 ORM 行全量物化/openpyxl 构建前完成。
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
+
     orders = db.execute(
         select(FMaintenanceOrder, DimCustomer.name_raw)
         .outerjoin(DimCustomer, DimCustomer.id == FMaintenanceOrder.customer_id)
         .where(*filters)
-        .order_by(
-            FMaintenanceOrder.order_date.asc().nullslast(),
-            FMaintenanceOrder.order_no,
-            FMaintenanceOrder.id,
-        )
+        .order_by(*wbdd_export_order_by(include_lines=False))
     ).all()
     order_ids = [order.id for order, _customer in orders]
     lines = []
@@ -910,12 +908,7 @@ def _selected_data(
             select(FMaintenanceLine, FMaintenanceOrder)
             .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
             .where(FMaintenanceLine.order_id.in_(order_ids))
-            .order_by(
-                FMaintenanceOrder.order_date.asc().nullslast(),
-                FMaintenanceOrder.order_no,
-                FMaintenanceLine.line_no.asc().nullslast(),
-                FMaintenanceLine.id,
-            )
+            .order_by(*wbdd_export_order_by())
         ).all()
 
     expenses = db.scalars(
