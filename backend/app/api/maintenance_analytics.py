@@ -335,6 +335,7 @@ def explorer(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     top_n: int = Query(20, ge=1, le=30),
+    include_pn_overview: bool = Query(False),
     focus_page: int = Query(1, ge=1),
     focus_page_size: int = Query(30, ge=1, le=100),
     range_: str = Query("ytd", alias="range", pattern="^(ytd|12m|all|custom)$"),
@@ -371,10 +372,12 @@ def explorer(
             "dimension": dimension, "metric": metric, "range": range_,
             "focus": focus is not None, "scope": "full" if allowed is None else "scoped",
             "customer": bool(customer), "project": bool(project_ids), "q": bool(q),
+            "include_pn_overview": include_pn_overview,
         })
         payload = maintenance_analytics_explorer.explorer(
             db, dimension=dimension, metric=metric, focus=focus, page=page, page_size=page_size,
             top_n=top_n, focus_page=focus_page, focus_page_size=focus_page_size,
+            include_pn_overview=include_pn_overview,
             range_=range_, date_from=date_from, date_to=date_to, q=q,
             business_type=business_type, project_ids=project_ids, customer=customer, salesperson=sp,
             order_no=order_no, demand_types=[maintenance_analytics.DEMAND_TYPE_LITERALS[code] for code in demand_codes] if demand_codes else None,

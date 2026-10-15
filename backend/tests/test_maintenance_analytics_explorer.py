@@ -28,6 +28,109 @@ def demand(db, project, part, qty="1", cost=None, **kwargs):
                  cost_inc=Decimal(cost) if cost is not None else None, **kwargs)
 
 
+def test_pn_overview_independent_full_rankings_share_one_snapshot(db):
+    project = _project(db, "EX-OVERVIEW")
+    costly, popular = _part(db, "EX-COSTLY"), _part(db, "EX-POPULAR")
+    demand(db, project, costly, "1", "123456789012.34")
+    demand(db, project, popular, "9.001", "0")
+    db.commit()
+    statements = []
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    event.listen(db.bind, "before_cursor_execute", capture)
+    try:
+        result = explore(db, metric="effective", include_pn_overview=True,
+                         top_n=1, page_size=1, page=2)
+    finally:
+        event.remove(db.bind, "before_cursor_execute", capture)
+    assert len(statements) == 1
+    overview = result["pn_overview"]
+    assert overview["cost_rows"][0]["key"] == f"part:{costly.id}"
+    assert overview["cost_rows"][0]["value"] == "123456789012.34"
+    assert overview["effective_rows"][0]["key"] == f"part:{popular.id}"
+    assert overview["effective_rows"][0]["value"] == "9.001"
+    assert result["rows"][0]["part_id"] == costly.id
+    assert result["summary"]["effective_qty"] == "10.001"
+    other_page = explore(db, metric="issued", include_pn_overview=True,
+                         top_n=1, page_size=100, focus="part:missing")
+    assert other_page["pn_overview"] == overview
+    assert "pn_overview" not in explore(db)
+
+
+def test_pn_overview_restricted_cost_cannot_change_quantity_ranking(db):
+    project = _project(db, "EX-OVERVIEW-PERMS")
+    a, b = _part(db, "EX-OVERVIEW-A"), _part(db, "EX-OVERVIEW-B")
+    first = demand(db, project, a, "1", "1")
+    second = demand(db, project, b, "1", "999")
+    _set_order(db, first, end_customer="OVERVIEW-SECRET")
+    db.commit()
+    result = explore(db, metric="effective", include_pn_overview=True,
+                     can_cost=False, can_customer=False)
+    overview = result["pn_overview"]
+    assert overview["cost_visibility"] == "restricted"
+    assert overview["cost_rows"] is None
+    assert [r["key"] for r in overview["effective_rows"]] == [f"part:{a.id}", f"part:{b.id}"]
+    assert all(r["cost_inc"] is None and r["cost_state"] == "restricted" for r in overview["effective_rows"])
+    assert "OVERVIEW-SECRET" not in str(result)
+    first.cost_amount_inc_tax, second.cost_amount_inc_tax = second.cost_amount_inc_tax, first.cost_amount_inc_tax
+    first.cost_amount, second.cost_amount = second.cost_amount, first.cost_amount
+    db.commit()
+    changed = explore(db, metric="effective", include_pn_overview=True,
+                      can_cost=False, can_customer=False)
+    assert changed["pn_overview"] == overview
+
+
+def test_pn_overview_api_opt_in_validation_and_scope(db):
+    mine, hidden = _project(db, "EX-OV-API-MINE"), _project(db, "EX-OV-API-HIDDEN")
+    mine_pn, hidden_pn = _part(db, "EX-OV-API-PN"), _part(db, "EX-HIDDEN-PN")
+    demand(db, mine, mine_pn, "0.001", "0")
+    demand(db, hidden, hidden_pn, "999", "999")
+    db.commit()
+    client = client_for(db, username="overview-scoped", overrides={
+        "page_maintenance": True, "data_purchase_cost": False, "data_customer": False,
+        "own_maintenance_projects_only": True,
+    })
+    params = {"range": "all", "metric": "effective", "include_pn_overview": True}
+    empty = client.get(URL, params=params)
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["pn_overview"]["effective_rows"] == []
+    _assign(db, mine, "overview-scoped")
+    response = client.get(URL, params={**params, "project": f"{mine.project_id},{hidden.project_id}"})
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    overview = response.json()["pn_overview"]
+    assert overview["cost_rows"] is None
+    assert [r["key"] for r in overview["effective_rows"]] == [f"part:{mine_pn.id}"]
+    assert overview["effective_rows"][0]["can_open_project"] is False
+    assert "EX-HIDDEN-PN" not in response.text
+    default = client.get(URL, params={"range": "all", "metric": "effective"}).json()
+    disabled = client.get(URL, params={**params, "include_pn_overview": False}).json()
+    assert "pn_overview" not in default
+    for payload in (default, disabled):
+        payload["meta"].pop("as_of")
+    assert disabled == default
+    for extra in ({"dimension": "project"}, {"dimension": "customer"}, {"metric": "cost"},
+                  {"customer": "secret"}, {"top_n": 0}, {"top_n": 31}, {"include_pn_overview": "invalid"}):
+        assert client.get(URL, params={**params, **extra}).status_code == 422
+    cost_project = _project(db, "EX-OV-API-COST")
+    cost_pn = _part(db, "EX-OV-API-COST-PN")
+    demand(db, cost_project, cost_pn, "0.001", "0")
+    db.commit()
+    cost_client = client_for(db, username="overview-cost-scoped", overrides={
+        "page_maintenance": True, "data_purchase_cost": True,
+        "own_maintenance_projects_only": True,
+    })
+    _assign(db, cost_project, "overview-cost-scoped")
+    visible = cost_client.get(URL, params=params)
+    assert visible.status_code == 200, visible.text
+    cost_rows = visible.json()["pn_overview"]["cost_rows"]
+    assert len(cost_rows) == 1 and cost_rows[0]["key"] == f"part:{cost_pn.id}"
+    assert isinstance(cost_rows[0]["value"], str)
+    assert Decimal(cost_rows[0]["value"]) == 0
+    assert cost_rows[0]["can_open_project"] is False
+    assert "EX-HIDDEN-PN" not in visible.text
+
+
 def test_one_statement_keeps_independent_facts_and_chart_totals(db):
     project = _project(db, "EX-UNION")
     part = _part(db, "EX-UNION-PN")
@@ -59,7 +162,8 @@ def test_one_statement_keeps_independent_facts_and_chart_totals(db):
     assert Decimal(result["matrix"]["cells"][0]["value"]) == 6
 
 
-def test_decimal_cost_missing_zero_partial_and_negative_net_are_distinct(db):
+@pytest.mark.parametrize("overview", [False, True])
+def test_decimal_cost_missing_zero_partial_and_negative_net_are_distinct(db, overview):
     project = _project(db, "EX-DECIMAL")
     parts = [_part(db, f"EX-DECIMAL-{n}") for n in range(4)]
     manual = demand(db, project, parts[0], "0.5")
@@ -71,7 +175,7 @@ def test_decimal_cost_missing_zero_partial_and_negative_net_are_distinct(db):
     demand(db, project, parts[3], "1", return_qty=Decimal("2"))
     _issue(db, project, parts[0], "0.001")
     db.commit()
-    result = explore(db, metric="cost")
+    result = explore(db, metric="cost", include_pn_overview=overview)
     by_id = {row["part_id"]: row for row in result["rows"]}
     assert Decimal(by_id[parts[0].id]["cost_inc"]) == Decimal("0.005")
     assert by_id[parts[0].id]["cost_state"] == "partial"
@@ -84,6 +188,14 @@ def test_decimal_cost_missing_zero_partial_and_negative_net_are_distinct(db):
     assert by_id[parts[2].id]["cost_state"] == "unknown"
     assert Decimal(result["summary"]["cost_inc"]) == Decimal("0.005")
     assert result["summary"]["top_share_pct"] == "100.0"
+    if overview:
+        assert result["pn_overview"]["cost_rows"] == [
+            {**row, "can_open_project": False} for row in result["rows"]
+        ]
+        assert result["pn_overview"]["has_negative"] is True
+        quantities = result["pn_overview"]["effective_rows"]
+        assert all(row["share_pct"] is None for row in quantities)
+        assert quantities[-1]["value"] == "-1.000"
     negative = explore(db, metric="effective")
     assert negative["meta"]["has_negative"] is True
     assert all(row["share_pct"] is None for row in negative["rows"])
@@ -108,7 +220,8 @@ def test_distinct_order_counts_are_not_added_between_pns(db):
     assert projects["rows"][0]["order_count"] == 1
 
 
-def test_identity_rename_and_ambiguous_raw_pn_do_not_merge(db):
+@pytest.mark.parametrize("overview", [False, True])
+def test_identity_rename_and_ambiguous_raw_pn_do_not_merge(db, overview):
     project = _project(db, "EX-IDENTITY")
     first, second = _part(db, "EX-case"), _part(db, "EX-CASE")
     demand(db, project, first, "2", "20")
@@ -117,7 +230,11 @@ def test_identity_rename_and_ambiguous_raw_pn_do_not_merge(db):
     _issue(db, project, second, "2")
     _receipt(db, project, None, "4", pn=" ex-case ")
     db.commit()
-    result = explore(db)
+    result = explore(db, include_pn_overview=overview)
+    if overview:
+        assert {row["key"] for row in result["pn_overview"]["effective_rows"]} == {
+            f"part:{first.id}", f"part:{second.id}"
+        }
     assert {row["key"] for row in result["rows"]} == {f"part:{first.id}", f"part:{second.id}"}
     assert Decimal(result["summary"]["receipt_qty"]) == 4
     assert all(Decimal(row["receipt_qty"]) == 0 for row in result["rows"])

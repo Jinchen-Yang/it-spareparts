@@ -298,12 +298,15 @@ def _page(rows, page, size):
 
 def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
              page=1, page_size=20, top_n=20, focus_page=1, focus_page_size=30,
+             include_pn_overview=False,
              range_="ytd", date_from: date | None = None, date_to: date | None = None,
              q=None, business_type="all", project_ids=None, customer=None, salesperson=None,
              order_no=None, demand_types=None, warehouses=None, cost_sources=None,
              can_cost: bool, can_customer: bool = True, allowed_project_ids=None):
     if dimension not in DIMENSIONS or metric not in METRICS:
         raise legacy.AnalyticsValidationError("不支持的排名维度或指标")
+    if include_pn_overview and dimension != "pn":
+        raise legacy.AnalyticsValidationError("PN 紧凑双榜仅支持 PN 维度")
     if not can_cost and metric == "cost":
         raise legacy.AnalyticsValidationError("查看成本排名需要成本查看权限（data_purchase_cost）")
     if not can_customer and (dimension == "customer" or customer):
@@ -345,7 +348,7 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
             stats = _stats(group, metric, can_cost)
             cells.append({"row_key": a, "column_key": b, "value": stats["value"], "cost_state": stats["cost_state"]})
     values = [Decimal(cell["value"]) for cell in cells if cell["value"] is not None]
-    return {
+    payload = {
         "window": {"range": range_, "date_from": start.isoformat() if start else None, "date_to": end.isoformat() if end else None},
         "dimension": dimension, "metric": metric, "total": len(ranks), "page": actual_page, "page_size": page_size,
         "summary": summary, "rows": paged_rows, "chart_rows": chart_rows,
@@ -361,3 +364,15 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
                  "customer_visibility": "visible" if can_customer else "restricted",
                  "unknown_count": sum(row["value"] is None for row in ranks)},
     }
+    if include_pn_overview:
+        # Rank each metric over the complete, already scoped statement result.
+        # Hidden cost never participates in selecting or ordering quantity rows.
+        payload["pn_overview"] = {
+            "cost_visibility": "visible" if can_cost else "restricted",
+            "cost_rows": [{**row, "can_open_project": False} for row in
+                          _rank(records, "pn", "cost", can_cost)[:top_n]] if can_cost else None,
+            "effective_rows": [{**row, "can_open_project": False} for row in
+                               _rank(records, "pn", "effective", can_cost)[:top_n]],
+            "has_negative": _negative(records, "effective"),
+        }
+    return payload
