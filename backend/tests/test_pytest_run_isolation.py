@@ -2360,3 +2360,33 @@ def test_raw_delete_failure_retains_quarantine_without_clobbering_canary(
                 os.rename(parent / "entry", handle.run_dir)
                 parent.rmdir()
                 cleanup_raw_run(handle)
+
+
+def test_probe_publishes_ready_marker_atomically(tmp_path, monkeypatch):
+    """父进程以 exists() 判就绪；marker 必须一次性以完整内容出现（os.replace）。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_isolation_probe_under_test", PROBE)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+
+    marker = tmp_path / "A.json"
+    monkeypatch.setenv("ISOLATION_PROBE_MARKER", str(marker))
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@h/spareparts_test_1_x")
+    monkeypatch.setenv("RAW_FILE_DIR", str(tmp_path / "raw"))
+
+    published = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        assert not Path(dst).exists(), "marker 在原子发布前就已出现"
+        assert json.loads(Path(src).read_text(encoding="utf-8"))["pid"] == os.getpid()
+        published.append(Path(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(probe.os, "replace", spy_replace)
+    probe._write_state()
+
+    assert published == [marker]
+    assert json.loads(marker.read_text(encoding="utf-8"))["database_name"] == "spareparts_test_1_x"
+    assert [p.name for p in tmp_path.iterdir() if p.name != "raw"] == ["A.json"]
