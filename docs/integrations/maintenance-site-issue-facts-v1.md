@@ -127,7 +127,8 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 | `site_issue_edit_identity_conflict` | 409 | 项目不匹配、行不存在或不属于锁定本单；重新读取，不猜匹配 |
 | `site_issue_edit_inactive` | 409 | 项目停用、单头或行已作废；拒绝复活 |
 | `site_issue_edit_source_blocked` | 409 | 来源/冻结义务/生产守卫不允许本命令；走批准的原入口 |
-| `site_issue_edit_permission_denied` | 403 | 实名操作者或更正原因不满足；不写事实 |
+| `site_issue_edit_permission_denied` | 403 | 调用方无权执行该更正；不写事实 |
+| `site_issue_edit_actor_required` | 422 | 缺实名操作者（空或超过 64 字符）或缺更正原因；修正输入后重试，不写事实 |
 | `site_issue_edit_demand_project_mismatch` | 409 | 关联需求单不存在、没有本项目的活跃归属或跨项目；核对单号或显式留空 |
 
 现有工作簿 apply 与 page_manual 写入包装器窄捕获 `SiteIssueEditError`，先 rollback，再按 `status_code` 返回既有结构化错误格式：

@@ -49,6 +49,8 @@ class SiteIssueEditError(ValueError):
         "site_issue_edit_inactive": 409,
         "site_issue_edit_source_blocked": 409,
         "site_issue_edit_permission_denied": 403,
+        # 缺实名操作者或更正原因是请求本身不完整，不是权限问题：422 让调用方修正输入。
+        "site_issue_edit_actor_required": 422,
         "site_issue_edit_demand_project_mismatch": 409,
     }
 
@@ -228,7 +230,7 @@ def apply_locked_site_issue_edits(
         raise SiteIssueEditError("site_issue_edit_source_blocked", "只有已确认或已更正的领用事实可编辑")
     if profile is None and (not isinstance(operated_by, str) or not operated_by.strip() or len(operated_by) > 64
             or not isinstance(reason, str) or not reason.strip()):
-        raise SiteIssueEditError("site_issue_edit_permission_denied", "领用更正需要实名操作者与原因")
+        raise SiteIssueEditError("site_issue_edit_actor_required", "领用更正需要实名操作者与原因")
     headers = dict(header_changes or {})
     if set(headers) - _HEADER_FIELDS:
         raise SiteIssueEditError("site_issue_edit_invalid_fields", "包含不可编辑的领用单头字段")

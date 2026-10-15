@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 
 from app import permissions
 from app.api import maintenance_project_master_workbook as workbook_api
@@ -43,6 +43,23 @@ def _enable_v2(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _bounded_lock_waits():
+    """本文件所有 SessionLocal 会话（测试会话与 HTTP 请求会话）每个事务都带 lock_timeout。
+
+    测试会话持锁未提交时，HTTP 请求在 lock_workbook_states 上会一直等；有了
+    lock_timeout 这类夹具错误会以 LockNotAvailable 报错，而不是把 CI 挂住。
+    """
+    def bound(session, _transaction, connection):
+        connection.execute(text("SET LOCAL lock_timeout = '10s'"))
+
+    event.listen(SessionLocal, "after_begin", bound)
+    try:
+        yield
+    finally:
+        event.remove(SessionLocal, "after_begin", bound)
+
+
 def _site_file(db, project, lines):
     book, sheet, columns, rows = _site_workbook(db, project)
     for line in lines:
@@ -54,7 +71,10 @@ def _site_file(db, project, lines):
     return output.getvalue()
 
 
-def _post(client, project, data):
+def _post(db, client, project, data):
+    # 测试会话里 _site_file / build_project_master_v2 等可能已建 workbook_state 等行；
+    # 不提交就会以 idle in transaction 持锁，HTTP 会话在 lock_workbook_states 上等它。
+    db.commit()
     return client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/master-workbook/apply",
         files={"file": ("synthetic-receipt.xlsx", data, _XLSX)},
@@ -110,7 +130,7 @@ def test_http_reupload_keeps_complete_receipt_after_later_fact_change(db, later_
     # carry revision_drift=True. Replays must preserve it too.
     operations.bump_workbook_revision(db, project_id=project.project_id)
     db.commit()
-    response = _post(client, project, data)
+    response = _post(db, client, project, data)
     assert response.status_code == 200, response.text
     first = response.json()
     assert first["replayed"] is False
@@ -120,7 +140,7 @@ def test_http_reupload_keeps_complete_receipt_after_later_fact_change(db, later_
     audit = _assert_snapshot(db, project=project, first=first)
     audit_snapshot = deepcopy(audit.after_json)
     before_immediate_replay = _side_effects(db, project=project, issue=issue, lines=lines)
-    immediate = _post(client, project, data)
+    immediate = _post(db, client, project, data)
     assert immediate.status_code == 200, immediate.text
     assert immediate.json() == {**first, "replayed": True}
     db.expire_all()
@@ -145,7 +165,7 @@ def test_http_reupload_keeps_complete_receipt_after_later_fact_change(db, later_
         )
     db.commit()
     before_late_replay = _side_effects(db, project=project, issue=issue, lines=lines)
-    replay = _post(client, project, data)
+    replay = _post(db, client, project, data)
     assert replay.status_code == 200, replay.text
     assert replay.json() == {**first, "replayed": True}
     db.expire_all()
@@ -171,13 +191,13 @@ def test_completion_audit_failure_rolls_back_facts_events_revision_and_receipt(d
     event.listen(MaintenanceProjectOperationAudit, "before_insert", fail_completion)
     try:
         with pytest.raises(RuntimeError, match="合成完成回执审计写入失败"):
-            _post(client, project, data)
+            _post(db, client, project, data)
     finally:
         event.remove(MaintenanceProjectOperationAudit, "before_insert", fail_completion)
     db.expire_all()
     assert _side_effects(db, project=project, issue=issue, lines=lines) == before
     assert _completion_audits(db) == []
-    retry = _post(client, project, data)
+    retry = _post(db, client, project, data)
     assert retry.status_code == 200, retry.text
     assert retry.json()["replayed"] is False
     _assert_snapshot(db, project=project, first=retry.json())
@@ -222,7 +242,7 @@ def test_http_replay_rechecks_completion_when_another_writer_wins_during_validat
 
     monkeypatch.setattr(master, "get_project_master_v2_replay", observe_lookup)
     monkeypatch.setattr(master, "validate_project_master_v2", winner_commits_before_validation_finishes)
-    response = _post(client, project, data)
+    response = _post(db, client, project, data)
     assert response.status_code == 200, response.text
     assert len(first_results) == 1
     first = first_results[0]
@@ -264,7 +284,7 @@ def test_legacy_receipt_without_snapshot_rebuilds_without_writes_or_history_back
         db, project_id=project.project_id, file_sha256=hashlib.sha256(data).hexdigest(),
         operated_by=operator,
     ) is None
-    response = _post(client, project, data)
+    response = _post(db, client, project, data)
     assert response.status_code == 200, response.text
     assert response.json()["replayed"] is True
     assert response.json()["changes"] == []
@@ -279,7 +299,7 @@ def test_noop_upload_records_one_receipt_without_business_versions_or_events(db)
     data = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_SITE,),
     )
-    response = _post(client, project, data)
+    response = _post(db, client, project, data)
     assert response.status_code == 200, response.text
     first = response.json()
     assert first["changes"] == [] and first["replayed"] is False
@@ -289,7 +309,7 @@ def test_noop_upload_records_one_receipt_without_business_versions_or_events(db)
     assert before_replay["audits"] == before_replay["workbook_operations"] == 1
     assert (issue.version, *(line.version for line in lines)) == (1, 1, 1)
     _assert_snapshot(db, project=project, first=first)
-    replay = _post(client, project, data)
+    replay = _post(db, client, project, data)
     assert replay.status_code == 200, replay.text
     assert replay.json() == {**first, "replayed": True}
     db.expire_all()
@@ -301,13 +321,13 @@ def test_replay_still_requires_current_upload_permission(db):
     username = "receipt-revoked"
     client = uploader(db, username=username)
     data = _site_file(db, project, lines)
-    first = _post(client, project, data)
+    first = _post(db, client, project, data)
     assert first.status_code == 200, first.text
     _change_permissions(db, client, username=username, changes={
         "action_maintenance_expense_collection_upload": False,
     })
     before = _side_effects(db, project=project, issue=issue, lines=lines)
-    denied = _post(client, project, data)
+    denied = _post(db, client, project, data)
     assert denied.status_code == 403, denied.text
     assert "changes" not in denied.json()
     db.expire_all()
@@ -319,7 +339,7 @@ def test_replay_is_bound_to_original_operator_and_project(db):
     username = "receipt-bound"
     client = uploader(db, username=username)
     data = _site_file(db, project, lines)
-    first = _post(client, project, data)
+    first = _post(db, client, project, data)
     assert first.status_code == 200, first.text
     other_project, _other_issue, _other_lines, _other_part = _facts(db)
     file_hash = hashlib.sha256(data).hexdigest()
@@ -331,7 +351,7 @@ def test_replay_is_bound_to_original_operator_and_project(db):
             db, project_id=project_id, file_sha256=file_hash, operated_by=operator,
         ) is None
     before = _side_effects(db, project=project, issue=issue, lines=lines)
-    denied = _post(client, other_project, data)
+    denied = _post(db, client, other_project, data)
     assert denied.status_code == 403, denied.text
     assert "changes" not in denied.json()
     db.expire_all()
@@ -356,7 +376,7 @@ def test_contract_amount_replay_rechecks_current_amount_permission(db):
     output = io.BytesIO()
     book.save(output)
     data = output.getvalue()
-    first = _post(client, project, data)
+    first = _post(db, client, project, data)
     assert first.status_code == 200, first.text
     assert first.json()["contract_updates"] == 1
     _assert_snapshot(db, project=project, first=first.json(), requires_amount=True)
@@ -365,7 +385,7 @@ def test_contract_amount_replay_rechecks_current_amount_permission(db):
     })
     audits_before = db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit))
     revision_before = operations.get_or_create_workbook_state(db, project_id=project.project_id).revision
-    denied = _post(client, project, data)
+    denied = _post(db, client, project, data)
     assert denied.status_code == 403, denied.text
     assert "changes" not in denied.json()
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit)) == audits_before

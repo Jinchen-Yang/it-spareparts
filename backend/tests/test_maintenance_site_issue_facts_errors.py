@@ -125,8 +125,8 @@ def test_invalid_field_intents_have_stable_code_without_partial_assignment(db):
     ("line_inactive", "site_issue_edit_inactive", 409),
     ("source", "site_issue_edit_source_blocked", 409),
     ("status", "site_issue_edit_source_blocked", 409),
-    ("operator", "site_issue_edit_permission_denied", 403),
-    ("reason", "site_issue_edit_permission_denied", 403),
+    ("operator", "site_issue_edit_actor_required", 422),
+    ("reason", "site_issue_edit_actor_required", 422),
 ])
 def test_domain_failure_codes_leave_facts_versions_and_audits_untouched(db, scenario, code, http):
     project, issue, lines, _part = _facts(db)
@@ -272,6 +272,7 @@ def test_http_adapters_return_structured_domain_errors_and_roll_back(db, monkeyp
         ("site_issue_edit_inactive", 409),
         ("site_issue_edit_source_blocked", 409),
         ("site_issue_edit_permission_denied", 403),
+        ("site_issue_edit_actor_required", 422),
         ("site_issue_edit_demand_project_mismatch", 409),
     ]:
         # Inject a domain failure after a flushed write at the service boundary.
