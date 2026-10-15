@@ -42,12 +42,23 @@ describe("原件上传聚合回执", () => {
     [null, "—"],
     [0, "0"],
     [2, "2"],
-  ])("单头实际变更独立按张展示（%s）", (count, display) => {
+  ])("新增或变更单头独立按张展示（%s）", (count, display) => {
     render(<WbddUploadFeedback report={{
       orders_semantic_updated: count, fact_rows_semantic_updated: 0,
     }} />);
 
-    expect(screen.getByText(`单头实际变更 ${display} 张`)).toBeInTheDocument();
+    expect(screen.getByText(`新增或变更单头 ${display} 张`)).toBeInTheDocument();
+    expect(screen.getByText("实际变更 0 行")).toBeInTheDocument();
+  });
+
+  it("首次新增单头计入合并计数，明细变更仍单独展示", () => {
+    render(<WbddUploadFeedback report={{
+      orders_inserted: 1, orders_updated: 0, orders_semantic_updated: 1,
+      fact_rows_semantic_updated: 0,
+    }} />);
+
+    expect(screen.getByText("新增或变更单头 1 张")).toBeInTheDocument();
+    expect(screen.queryByText(/^单头实际变更/)).toBeNull();
     expect(screen.getByText("实际变更 0 行")).toBeInTheDocument();
   });
 

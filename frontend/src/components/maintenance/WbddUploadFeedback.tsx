@@ -35,7 +35,7 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
           {report.import_mode ? (
             <Text>{report.import_mode === "skip" ? "跳过模式：已有单据和明细不覆盖" : "更新模式：更新合法源值并保留人工保护"}</Text>
           ) : null}
-          <Text>单头实际变更 {report.orders_semantic_updated ?? "—"} 张</Text>
+          <Text>新增或变更单头 {report.orders_semantic_updated ?? "—"} 张</Text>
           <Text>本批明细处理行数（不含单头状态、地址变化）</Text>
           <Space wrap>
             {counts.map(([label, count]) => (

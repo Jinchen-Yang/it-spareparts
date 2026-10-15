@@ -208,7 +208,7 @@ describe("完整导入问题明细下载", () => {
     );
   });
 
-  it("WBDD 批次详情以中文解释实际变更和保护字段，保留旧匹配计数", async () => {
+  it("WBDD 批次详情以中文解释单头和明细回执，不重复展示原始统计键", async () => {
     get.mockImplementation((url: string) => {
       if (url === "/import/batches") return Promise.resolve({ data: [{
         id: 7, filename: "需求单.xlsx", file_type: "maintenance", status: "success",
@@ -217,7 +217,7 @@ describe("完整导入问题明细下载", () => {
       }] });
       if (url === "/import/batches/7") return Promise.resolve({ data: {
         id: 7, filename: "需求单.xlsx", file_type: "maintenance", issue_count: 0,
-        report: { import_mode: "upsert", fact_rows_updated: 5,
+        report: { import_mode: "upsert", orders_semantic_updated: 1, fact_rows_updated: 5,
           fact_rows_semantic_updated: 2, fact_rows_unchanged: 3, fact_rows_protected: 1,
           protected_field_counts: { qty: 1 } },
         errors: [],
@@ -228,6 +228,9 @@ describe("完整导入问题明细下载", () => {
     fireEvent.click(await screen.findByText("详情"));
 
     expect(await screen.findByText("匹配已有 5 行")).toBeInTheDocument();
+    expect(screen.getByText("新增或变更单头 1 张")).toBeInTheDocument();
+    expect(screen.getAllByText(/^新增或变更单头/)).toHaveLength(1);
+    expect(screen.queryByText("orders_semantic_updated")).toBeNull();
     expect(screen.getByText("实际变更 2 行")).toBeInTheDocument();
     expect(screen.getByText("人工保护 1 行")).toBeInTheDocument();
     expect(screen.getByText("需求数量 1 行")).toBeInTheDocument();

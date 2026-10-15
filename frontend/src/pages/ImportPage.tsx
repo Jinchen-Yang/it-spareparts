@@ -18,7 +18,7 @@ import WbddUploadFeedback from "../components/maintenance/WbddUploadFeedback";
 
 const MAX_IMPORT_FILES = 20;
 const WBDD_FEEDBACK_KEYS = new Set([
-  "import_mode", "fact_rows_inserted", "fact_rows_updated", "fact_rows_skipped",
+  "import_mode", "orders_semantic_updated", "fact_rows_inserted", "fact_rows_updated", "fact_rows_skipped",
   "fact_rows_semantic_updated", "fact_rows_unchanged", "fact_rows_protected",
   "protected_field_counts", "fact_rows_legacy_review", "snapshot_diff",
 ]);
@@ -56,6 +56,7 @@ const REPORT_LABEL: Record<string, string> = {
   fact_rows_updated: "更新", fact_rows_skipped: "跳过", fact_rows_error: "错误行",
   rows_inactive: "非生效行", rows_skipped_no_data: "空行跳过",
   import_mode: "导入模式",
+  orders_semantic_updated: "新增或变更单头",
   address_report: "地址处理",
   expense_rows_replaced: "修复模式覆盖范围（行）",
   expense_rows_voided: "作废旧行",
