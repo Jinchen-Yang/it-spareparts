@@ -7,7 +7,8 @@
  * 不要把用户展示文本回传后端再猜。
  */
 import { api, masterEdit } from "../api";
-import type { CategoryNode, MasterFields, Overview } from "../api";
+import type { CategoryNode, MasterEditPayload, MasterEditSnapshot, MasterFields, Overview } from "../api";
+export type { MasterEditPayload, MasterEditSnapshot } from "../api";
 
 /** 后端 resolver 的匹配类型（按最强证据分类） */
 export type MatchType =
@@ -88,32 +89,6 @@ export async function fetchOverview(
   return data;
 }
 
-/** 人工编辑原始基线；字段快照不是持久单调版本。不要从表单默认值重建它。 */
-export interface MasterEditSnapshot {
-  part_id: number;
-  pn_std: string;
-  identity: {
-    part_id: number;
-    pn_std: string;
-    status: "active" | "merged";
-    merged_into_id: number | null;
-  };
-  fields: Required<MasterFields>;
-  specs: Record<string, {
-    value: string;
-    unit: string | null;
-    numeric_value: string | null;
-    source: "auto" | "manual";
-  }>;
-  version_mode: "field_snapshot";
-}
-
-export type MasterEditPayload = MasterFields & {
-  part_id: number;
-  pn_std: string;
-  base_snapshot: MasterEditSnapshot;
-};
-
 export async function fetchMasterEditState(partId: number, token: string): Promise<MasterEditSnapshot> {
   const { data } = await api.get<MasterEditSnapshot>(`/parts/master/${partId}/edit-state`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -151,4 +126,28 @@ export function masterEditConflictLines(error: any): string[] {
     : typeof value === "string" ? value : JSON.stringify(value);
   return detail.conflicts.filter((conflict: any) => typeof conflict?.field === "string")
     .map((conflict: any) => `${labels[conflict.field] || conflict.field}：打开时「${valueText(conflict.baseline)}」；当前「${valueText(conflict.current)}」；本次「${valueText(conflict.proposed)}」`);
+}
+
+/** 刷新基线只重放人工改动；两级品类必须一起保留，身份变化必须重新打开编辑。 */
+export function rebaseMasterEditDraft(
+  baseline: MasterEditSnapshot, latest: MasterEditSnapshot, draft: MasterFields,
+): Required<MasterFields> {
+  if (latest.part_id !== baseline.part_id || latest.pn_std !== baseline.pn_std
+    || latest.identity.status !== "active"
+    || latest.identity.part_id !== baseline.identity.part_id
+    || latest.identity.pn_std !== baseline.identity.pn_std
+    || latest.identity.merged_into_id !== baseline.identity.merged_into_id) {
+    throw new Error("型号身份已变化，草稿已保留，请关闭后重新打开编辑");
+  }
+  const normalized = (value: string | null | undefined) => value?.trim() || null;
+  const changed = (key: keyof MasterFields) => key in draft
+    && normalized(draft[key]) !== normalized(baseline.fields[key]);
+  const categoryChanged = changed("category_major") || changed("category_minor");
+  const fields = { ...latest.fields };
+  (Object.keys(fields) as (keyof MasterFields)[]).forEach((key) => {
+    if (changed(key) || (categoryChanged && (key === "category_major" || key === "category_minor"))) {
+      fields[key] = draft[key] ?? null;
+    }
+  });
+  return fields;
 }

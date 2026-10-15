@@ -10,8 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import current_role
+from app.auth import current_identity, current_role
 from app.db import get_db
+from app.models.system import SysUser
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context,
     record_access_log, require_page,
@@ -241,6 +242,17 @@ class PartEdit(BaseModel):
     spec_updates: dict | None = None
 
 
+def _real_operator(db: Session, ident: dict) -> str:
+    """人工主数据库写入拒绝共享回退/旧凭证和不存在的实名账号。"""
+    username = str(ident.get("sub") or "").strip()
+    if ident.get("authn") != "sys_user" or ident.get("fb") or not username:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "主数据库编辑必须使用实名系统账号，请重新登录")
+    user = db.scalar(select(SysUser).where(SysUser.username == username, SysUser.is_active.is_(True)))
+    if user is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "主数据库编辑必须使用实名系统账号，请重新登录")
+    return username
+
+
 @router.get("/master/check")
 def master_check_duplicates(
     pn_std: str = Query(..., min_length=1),
@@ -260,14 +272,18 @@ def master_create(
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     ctx: UserContext = Depends(get_current_user_context),
     _: None = Depends(require_page("page_master_data")),
+    ident: dict = Depends(current_identity),
 ) -> dict:
     """采购手工新建型号。near_duplicates 非空且未 force → 不建、返回候选待确认。"""
+    operated_by = _real_operator(db, ident)
     try:
         res = master_edit.create_part(
             db, pn_std=body.pn_std, description=body.description, brand=body.brand,
             category_major=body.category_major, category_minor=body.category_minor,
             machine_or_part=body.machine_or_part, unit=body.unit,
-            force=body.force, operated_by=(ctx.user_id or ctx.role))
+            force=body.force, operated_by=operated_by)
+    except master_edit.MasterEditConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return res
@@ -280,15 +296,17 @@ def master_edit_part(
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     ctx: UserContext = Depends(get_current_user_context),
     _: None = Depends(require_page("page_master_data")),
+    ident: dict = Depends(current_identity),
 ) -> dict:
     """编辑任意型号的人工字段（描述/品类/品牌/单位/类型）；改过的字段重导不覆盖。"""
+    operated_by = _real_operator(db, ident)
     updates = body.model_dump(exclude={"pn_std", "part_id", "base_snapshot", "spec_updates"},
                               exclude_unset=True)
     try:
         res = master_edit.edit_part(db, pn_std=body.pn_std, part_id=body.part_id,
                                     base_snapshot=body.base_snapshot.model_dump(), updates=updates,
                                     spec_updates=body.spec_updates,
-                                    operated_by=(ctx.user_id or ctx.role))
+                                    operated_by=operated_by)
     except master_edit.MasterEditConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:

@@ -31,6 +31,14 @@ from app.services.governance import _nonstd_clause
 _TRAILING_JUNK = re.compile(r"[\s0-9]+$")
 
 
+def acquire_master_write_lock(db: Session) -> None:
+    """人工命令与全量 refresh 共用的事务锁，必须早于 PN/字典/规格写锁。
+
+    首期串行协调这两类写者；其他治理和 ETL 入口仍由后续适配收敛锁序。
+    """
+    db.execute(text("SELECT pg_advisory_xact_lock(742031, 1)"))
+
+
 # ============================================================
 # 品牌
 # ============================================================
@@ -538,6 +546,7 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
 
 def refresh(db: Session) -> dict:
     """字典回填 → 别名/询价关联 → 规格抽取 → 质量扫描 → 质量分。单事务提交。"""
+    acquire_master_write_lock(db)
     stats = {}
     stats["brands"] = backfill_brands(db)
     stats["categories"] = backfill_categories(db)

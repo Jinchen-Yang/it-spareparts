@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Alert, Input, Modal, Select, Space, message } from "antd";
+import { Alert, Button, Input, Modal, Select, Space, message } from "antd";
 import { type CategoryNode, type MasterFields } from "../../api";
 import {
-  fetchMasterEditCategories, fetchMasterEditState, fetchOverview, masterEditConflictLines, masterEditErrorMessage, saveMasterEdit,
+  fetchMasterEditCategories, fetchMasterEditState, fetchOverview, masterEditConflictLines, masterEditErrorMessage, rebaseMasterEditDraft, saveMasterEdit,
   type MasterEditPayload, type MasterEditSnapshot,
 } from "../../api/search";
 
@@ -41,6 +41,8 @@ export default function InlinePartEditModal({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflictLines, setConflictLines] = useState<string[]>([]);
+  const [canRebase, setCanRebase] = useState(false);
+  const [rebasing, setRebasing] = useState(false);
   const loadSeq = useRef(0);
   const sessionSeq = useRef(0);
   const mountedToken = useRef(localStorage.getItem("token"));
@@ -63,6 +65,8 @@ export default function InlinePartEditModal({
     ++loadSeq.current;
     sessionToken.current = permittedOpen ? mountedToken.current : null;
     setSaving(false);
+    setRebasing(false);
+    setCanRebase(false);
     setSaveError(null);
     setConflictLines([]);
     return () => { sessionSeq.current += 1; ++loadSeq.current; };
@@ -80,6 +84,7 @@ export default function InlinePartEditModal({
     setLoadError(null);
     setSaveError(null);
     setConflictLines([]);
+    setCanRebase(false);
     setForm(null);
     setInitial(null);
     setBaseline(null);
@@ -144,7 +149,7 @@ export default function InlinePartEditModal({
   const save = async () => {
     const authToken = sessionToken.current;
     if (!canEditNow() || !authToken || localStorage.getItem("token") !== authToken
-      || !form || !initial || !baseline || saving) return;
+      || !form || !initial || !baseline || saving || rebasing) return;
     const session = sessionSeq.current;
     const isCurrentSession = () => session === sessionSeq.current && canEditNow()
       && localStorage.getItem("token") === authToken;
@@ -164,6 +169,7 @@ export default function InlinePartEditModal({
     setSaving(true);
     setSaveError(null);
     setConflictLines([]);
+    setCanRebase(false);
     try {
       const { data } = await saveMasterEdit(payload, authToken);
       if (!isCurrentSession()) return;
@@ -181,9 +187,38 @@ export default function InlinePartEditModal({
       if (isCurrentSession()) {
         setSaveError(masterEditErrorMessage(error, "保存失败，请重试"));
         setConflictLines(masterEditConflictLines(error));
+        setCanRebase(error?.response?.status === 409
+          && error?.response?.data?.detail?.code === "field_conflict");
       }
     } finally {
       if (isCurrentSession()) setSaving(false);
+    }
+  };
+
+  const rebaseDraft = async () => {
+    const authToken = sessionToken.current;
+    if (!canRebase || !canEditNow() || !authToken || !form || !baseline || saving || rebasing
+      || localStorage.getItem("token") !== authToken) return;
+    const session = sessionSeq.current;
+    const seq = ++loadSeq.current;
+    const isCurrent = () => seq === loadSeq.current && session === sessionSeq.current
+      && canEditNow() && localStorage.getItem("token") === authToken;
+    setRebasing(true);
+    try {
+      const latest = await fetchMasterEditState(baseline.part_id, authToken);
+      if (!isCurrent()) return;
+      const next = rebaseMasterEditDraft(baseline, latest, form);
+      setBaseline(latest);
+      setInitial({ pn_std: latest.pn_std, ...latest.fields });
+      setForm({ pn_std: latest.pn_std, ...next });
+      setSaveError(null); setConflictLines([]); setCanRebase(false);
+      message.info("已更新编辑基线并保留草稿，请核对后再次保存");
+    } catch (error: any) {
+      if (isCurrent()) {
+        setSaveError(masterEditErrorMessage(error, error?.message || "基线加载失败，请重试"));
+      }
+    } finally {
+      if (isCurrent()) setRebasing(false);
     }
   };
 
@@ -196,7 +231,7 @@ export default function InlinePartEditModal({
       okText="保存"
       cancelText="取消"
       confirmLoading={saving}
-      okButtonProps={{ disabled: !canEdit || loading || !form || Boolean(loadError) }}
+      okButtonProps={{ disabled: !canEdit || loading || rebasing || !form || Boolean(loadError) }}
       width={560}
     >
       <Space direction="vertical" size={14} style={{ width: "100%" }}>
@@ -208,7 +243,11 @@ export default function InlinePartEditModal({
         {saveError && <Alert type="error" showIcon message={saveError}
           description={<div style={{ overflowWrap: "anywhere" }}>
             {conflictLines.map((line, index) => <div key={index} style={{ whiteSpace: "pre-wrap" }}>{line}</div>)}
-            <div>草稿已保留；核对后可先复制草稿，再重新打开获取最新资料。</div>
+            <div>草稿已保留；请核对当前值与本次修改。</div>
+            {canRebase && <Button loading={rebasing} disabled={saving} onClick={rebaseDraft}
+              style={{ height: "auto", whiteSpace: "normal", marginTop: 8, maxWidth: "100%" }}>
+              以当前值为新基线并保留我的草稿
+            </Button>}
           </div>} />}
         {loadError ? (
           <Alert
@@ -229,7 +268,7 @@ export default function InlinePartEditModal({
                 id="inline-part-description"
                 value={form?.description ?? ""}
                 rows={3}
-                disabled={loading || saving || !form}
+                disabled={loading || saving || rebasing || !form}
                 placeholder="输入便于采购、销售和库房识别的备件描述"
                 onChange={(event) => setForm((current) => current
                   ? { ...current, description: event.target.value }
@@ -245,7 +284,7 @@ export default function InlinePartEditModal({
                   allowClear
                   showSearch
                   loading={loading}
-                  disabled={loading || saving || !form}
+                  disabled={loading || saving || rebasing || !form}
                   value={form?.category_major ?? undefined}
                   placeholder="选择一级品类"
                   options={categories.map((c) => ({ label: c.name, value: c.name }))}
@@ -261,7 +300,7 @@ export default function InlinePartEditModal({
                   style={{ width: "100%" }}
                   allowClear
                   showSearch
-                  disabled={loading || saving || !form?.category_major}
+                  disabled={loading || saving || rebasing || !form?.category_major}
                   value={form?.category_minor ?? undefined}
                   placeholder="选择二级品类"
                   options={minorOptions}

@@ -8,7 +8,7 @@ import api, {
   type CategoryNode, type ClassifySuggestion, type MasterFields, type NearDup, type PartHit,
 } from "../api";
 import {
-  fetchMasterEditState, masterEditConflictLines, masterEditErrorMessage, saveMasterEdit,
+  fetchMasterEditState, masterEditConflictLines, masterEditErrorMessage, rebaseMasterEditDraft, saveMasterEdit,
   type MasterEditPayload, type MasterEditSnapshot,
 } from "../api/search";
 
@@ -44,6 +44,8 @@ export default function MasterDataPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflictLines, setConflictLines] = useState<string[]>([]);
+  const [canRebase, setCanRebase] = useState(false);
+  const [rebasing, setRebasing] = useState(false);
   const token = useRef(localStorage.getItem("token"));
   const mounted = useRef(true);
   const editSeq = useRef(0);
@@ -101,11 +103,13 @@ export default function MasterDataPage() {
     editTarget.current = null;
     setBaseline(null); setEditLoading(false); setLoadError(null); setSaveError(null); setSaving(false);
     setConflictLines([]);
+    setCanRebase(false); setRebasing(false);
     setForm(EMPTY); setInit(EMPTY); setNear([]); setSuggest(null); setMode("create");
   };
   const closeEditor = () => {
     ++editSeq.current; ++draftSeq.current;
     setMode(null); setSaving(false); setEditLoading(false);
+    setCanRebase(false); setRebasing(false);
   };
   const openEdit = async (part: PartHit) => {
     if (!sessionIsCurrent()) return;
@@ -116,6 +120,7 @@ export default function MasterDataPage() {
     setMode("edit"); setForm({ ...EMPTY, pn_std: part.pn_std });
     setBaseline(null); setNear([]); setSuggest(null); setLoadError(null); setSaveError(null);
     setConflictLines([]);
+    setCanRebase(false); setRebasing(false);
     setEditLoading(true); setSaving(false);
     try {
       if (!part.id) throw new Error("缺少稳定型号 ID，请刷新列表后重试");
@@ -139,6 +144,7 @@ export default function MasterDataPage() {
   };
 
   const set = (patch: Partial<FormState>) => {
+    if (saving || rebasing || !sessionIsCurrent()) return;
     ++draftSeq.current;
     setForm((f) => ({ ...f, ...patch }));
     setSuggest(null);
@@ -158,7 +164,7 @@ export default function MasterDataPage() {
     } catch { /* 建议失败不打断录入 */ }
   };
   const applyNormalize = () => {
-    if (saving || !sessionIsCurrent() || !suggest || suggest.whole_system) return;
+    if (saving || rebasing || !sessionIsCurrent() || !suggest || suggest.whole_system) return;
     set({
       description: suggest.canonical_description ?? form.description,
       category_major: suggest.category_l1 ?? form.category_major,
@@ -183,12 +189,13 @@ export default function MasterDataPage() {
   };
 
   const save = async (force = false) => {
-    if (!sessionIsCurrent() || !mode || saving || editLoading || loadError) return;
+    if (!sessionIsCurrent() || !mode || saving || rebasing || editLoading || loadError) return;
     const seq = editSeq.current;
     const isCurrent = () => seq === editSeq.current && sessionIsCurrent();
     setSaving(true);
     setSaveError(null);
     setConflictLines([]);
+    setCanRebase(false);
     try {
       if (mode === "create") {
         const { data } = await api.post<{
@@ -220,9 +227,35 @@ export default function MasterDataPage() {
       if (isCurrent()) {
         setSaveError(masterEditErrorMessage(e, "保存失败，请重试"));
         setConflictLines(masterEditConflictLines(e));
+        setCanRebase(e?.response?.status === 409
+          && e?.response?.data?.detail?.code === "field_conflict");
       }
     } finally {
       if (isCurrent()) setSaving(false);
+    }
+  };
+
+  const rebaseDraft = async () => {
+    if (!canRebase || mode !== "edit" || !baseline || saving || rebasing || !sessionIsCurrent()) return;
+    const seq = ++editSeq.current;
+    ++draftSeq.current;
+    const isCurrent = () => seq === editSeq.current && sessionIsCurrent();
+    setRebasing(true);
+    try {
+      const latest = await fetchMasterEditState(baseline.part_id, token.current!);
+      if (!isCurrent()) return;
+      const fields = rebaseMasterEditDraft(baseline, latest, form);
+      setBaseline(latest);
+      setInit({ pn_std: latest.pn_std, ...latest.fields });
+      setForm({ pn_std: latest.pn_std, ...fields });
+      setSuggest(null); setSaveError(null); setConflictLines([]); setCanRebase(false);
+      message.info("已更新编辑基线并保留草稿，请核对后再次保存");
+    } catch (error: any) {
+      if (isCurrent()) {
+        setSaveError(masterEditErrorMessage(error, error?.message || "基线加载失败，请重试"));
+      }
+    } finally {
+      if (isCurrent()) setRebasing(false);
     }
   };
 
@@ -253,7 +286,7 @@ export default function MasterDataPage() {
       {mode === "create" ? (
         <div>
           <label htmlFor="master-edit-pn" style={{ display: "block", marginBottom: 4 }}>PN（产品唯一标识）<span style={{ color: "#cf1322" }}>*</span></label>
-          <Input id="master-edit-pn" value={form.pn_std} placeholder="如 ST8000NM000A" disabled={saving}
+          <Input id="master-edit-pn" value={form.pn_std} placeholder="如 ST8000NM000A" disabled={saving || rebasing}
             onChange={(e) => set({ pn_std: e.target.value })} onBlur={onCheckDup} />
         </div>
       ) : (
@@ -271,7 +304,7 @@ export default function MasterDataPage() {
 
       <div>
         <label htmlFor="master-edit-description" style={{ display: "block", marginBottom: 4 }}>描述</label>
-        <Input.TextArea id="master-edit-description" value={form.description ?? ""} rows={2} onBlur={onSuggest} disabled={saving}
+        <Input.TextArea id="master-edit-description" value={form.description ?? ""} rows={2} onBlur={onSuggest} disabled={saving || rebasing}
           onChange={(e) => set({ description: e.target.value })}
           placeholder="如 希捷 8TB 7.2K 3.5 SATA 企业级硬盘" />
         {suggest && !suggest.whole_system && (suggest.canonical_description || suggest.category_l1) && (
@@ -291,7 +324,7 @@ export default function MasterDataPage() {
               {suggest.brand_norm && (
                 <span>品牌 <Tag>{suggest.brand_norm}{suggest.brand_zh ? `（${suggest.brand_zh}）` : ""}</Tag></span>
               )}
-              <Button size="small" type="primary" ghost disabled={saving} onClick={applyNormalize}>一键规范化</Button>
+              <Button size="small" type="primary" ghost disabled={saving || rebasing} onClick={applyNormalize}>一键规范化</Button>
             </div>
             {suggest.structured_specs && Object.keys(suggest.structured_specs).length > 0 && (
               <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
@@ -323,7 +356,7 @@ export default function MasterDataPage() {
       <Space size={12} style={{ width: "100%" }} wrap>
         <div style={{ minWidth: 180 }}>
           <label htmlFor="master-edit-major" style={{ display: "block", marginBottom: 4 }}>品类（大类）</label>
-          <Select id="master-edit-major" style={{ width: 180 }} allowClear showSearch value={form.category_major ?? undefined} disabled={saving}
+          <Select id="master-edit-major" style={{ width: 180 }} allowClear showSearch value={form.category_major ?? undefined} disabled={saving || rebasing}
             placeholder="选择大类" options={cats.map((c) => ({ label: c.name, value: c.name }))}
             onChange={(v) => set({ category_major: v ?? null, category_minor: null })} />
         </div>
@@ -331,20 +364,20 @@ export default function MasterDataPage() {
           <label htmlFor="master-edit-minor" style={{ display: "block", marginBottom: 4 }}>品类（二级）</label>
           <Select id="master-edit-minor" style={{ width: 180 }} allowClear showSearch value={form.category_minor ?? undefined}
             placeholder="选择二级" options={l2opts(form.category_major)}
-            onChange={(v) => set({ category_minor: v ?? null })} disabled={saving || !form.category_major} />
+            onChange={(v) => set({ category_minor: v ?? null })} disabled={saving || rebasing || !form.category_major} />
         </div>
       </Space>
 
       <Space size={12} wrap>
         <div><label htmlFor="master-edit-brand" style={{ display: "block", marginBottom: 4 }}>品牌</label>
-          <Input id="master-edit-brand" style={{ width: 180 }} value={form.brand ?? ""} placeholder="如 Seagate / HPE" disabled={saving}
+          <Input id="master-edit-brand" style={{ width: 180 }} value={form.brand ?? ""} placeholder="如 Seagate / HPE" disabled={saving || rebasing}
             onChange={(e) => set({ brand: e.target.value })} /></div>
         <div><label htmlFor="master-edit-type" style={{ display: "block", marginBottom: 4 }}>类型</label>
-          <Select id="master-edit-type" style={{ width: 120 }} value={form.machine_or_part ?? undefined} placeholder="未填" disabled={saving}
+          <Select id="master-edit-type" style={{ width: 120 }} value={form.machine_or_part ?? undefined} placeholder="未填" disabled={saving || rebasing}
             options={[{ value: "备件" }, { value: "整机" }]}
             onChange={(v) => set({ machine_or_part: v })} /></div>
         <div><label htmlFor="master-edit-unit" style={{ display: "block", marginBottom: 4 }}>单位</label>
-          <Input id="master-edit-unit" style={{ width: 100 }} value={form.unit ?? ""} placeholder="个" disabled={saving}
+          <Input id="master-edit-unit" style={{ width: 100 }} value={form.unit ?? ""} placeholder="个" disabled={saving || rebasing}
             onChange={(e) => set({ unit: e.target.value })} /></div>
       </Space>
     </Space>
@@ -392,7 +425,7 @@ export default function MasterDataPage() {
             : [
               <Button key="c" onClick={closeEditor}>取消</Button>,
               <Button key="s" type="primary" loading={saving}
-                disabled={editLoading || Boolean(loadError) || (mode === "edit" && !baseline)
+                disabled={editLoading || rebasing || Boolean(loadError) || (mode === "edit" && !baseline)
                   || (mode === "create" && !form.pn_std.trim())}
                 onClick={() => save(false)}>保存</Button>,
             ]
@@ -405,7 +438,11 @@ export default function MasterDataPage() {
         {saveError && <Alert type="error" showIcon style={{ marginTop: 12 }} message={saveError}
           description={<div style={{ overflowWrap: "anywhere" }}>
             {conflictLines.map((line, index) => <div key={index} style={{ whiteSpace: "pre-wrap" }}>{line}</div>)}
-            <div>草稿已保留；核对后可先复制草稿，再重新打开获取最新资料。</div>
+            <div>草稿已保留；请核对当前值与本次修改。</div>
+            {canRebase && <Button loading={rebasing} disabled={saving} onClick={rebaseDraft}
+              style={{ height: "auto", whiteSpace: "normal", marginTop: 8, maxWidth: "100%" }}>
+              以当前值为新基线并保留我的草稿
+            </Button>}
           </div>} />}
       </Modal>
 

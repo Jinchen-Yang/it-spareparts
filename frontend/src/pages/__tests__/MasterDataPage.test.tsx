@@ -52,11 +52,16 @@ afterEach(() => {
   api.defaults.adapter = originalAdapter;
 });
 
-it("主数据库编辑保留原始基线，仅提交明确清空的品牌；409 后保留草稿", async () => {
+it("主数据库编辑冲突后保留品牌清空草稿，以当前基线重提时不覆盖他人描述", async () => {
   const patches: any[] = [];
+  let loads = 0;
+  const latest = { ...baseline, fields: { ...baseline.fields, brand: "Other Brand", description: "他人新描述" } };
   api.defaults.adapter = async (config) => {
     if (config.method === "patch") {
       patches.push(JSON.parse(config.data));
+      if (patches.length > 1) return response(config, {
+        id: 42, pn_std: "PN-42", updated: ["brand"], locked_fields: ["brand"],
+      });
       throw Object.assign(new Error("conflict"), { config, response: {
         status: 409,
         data: { detail: { code: "field_conflict", message: "品牌已变化，请核对", conflicts: [{
@@ -70,7 +75,9 @@ it("主数据库编辑保留原始基线，仅提交明确清空的品牌；409 
     if (config.url === "/parts/overview") {
       return response(config, { part: { id: 42, pn_std: "PN-42", ...baseline.fields } });
     }
-    if (config.url === "/parts/master/42/edit-state") return response(config, baseline);
+    if (config.url === "/parts/master/42/edit-state") {
+      return response(config, ++loads === 1 ? baseline : latest);
+    }
     return response(config, { categories: [] });
   };
   render(<MasterDataPage />);
@@ -86,6 +93,15 @@ it("主数据库编辑保留原始基线，仅提交明确清空的品牌；409 
   expect(await within(dialog).findByText("品牌已变化，请核对")).toBeInTheDocument();
   expect(within(dialog).getByText("品牌：打开时「Old Brand」；当前「Other Brand」；本次「未填」")).toBeInTheDocument();
   expect(within(dialog).getByPlaceholderText("如 Seagate / HPE")).toHaveValue("");
+  fireEvent.click(within(dialog).getByRole("button", { name: "以当前值为新基线并保留我的草稿" }));
+  await waitFor(() => expect(loads).toBe(2));
+  await within(dialog).findByDisplayValue("他人新描述");
+  expect(within(dialog).getByLabelText("品牌")).toHaveValue("");
+  fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
+  await waitFor(() => expect(patches).toHaveLength(2));
+  expect(patches[1]).toEqual({
+    part_id: 42, pn_std: "PN-42", base_snapshot: latest, brand: null,
+  });
 });
 
 it("原始类型未填时可主动选择备件，提交类型差异并保留 null 基线", async () => {
@@ -300,4 +316,70 @@ it("保存期间不能用一键规范化修改待保存的草稿", async () => {
       await delayed.promise;
     });
   }
+});
+
+it.each(["改名", "合并"])("主数据库冲突后重取基线遇到%s时不改身份并保留草稿", async (change) => {
+  let loads = 0;
+  const latest = change === "改名"
+    ? { ...baseline, pn_std: "RENAMED", identity: { ...baseline.identity, pn_std: "RENAMED" } }
+    : { ...baseline, identity: { ...baseline.identity, status: "merged", merged_into_id: 43 } };
+  api.defaults.adapter = async (config) => {
+    if (config.method === "patch") throw Object.assign(new Error("conflict"), { config, response: {
+      status: 409, data: { detail: { code: "field_conflict", message: "品牌已变化", conflicts: [] } },
+    } });
+    if (config.url === "/parts/search") return response(config, searchResult);
+    if (config.url === "/parts/master/42/edit-state") return response(config, ++loads === 1 ? baseline : latest);
+    return response(config, { categories: [] });
+  };
+  render(<MasterDataPage />);
+  await openPart("PN-42");
+  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  await within(dialog).findByDisplayValue("Old Brand");
+  fireEvent.change(within(dialog).getByLabelText("品牌"), { target: { value: "我的品牌草稿" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(await within(dialog).findByRole("button", { name: "以当前值为新基线并保留我的草稿" }));
+  expect(await within(dialog).findByText("型号身份已变化，草稿已保留，请关闭后重新打开编辑")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("PN")).toHaveValue("PN-42");
+  expect(within(dialog).getByLabelText("品牌")).toHaveValue("我的品牌草稿");
+});
+
+it.each(["账号", "型号"])("主数据库冲突基线慢加载期间切换%s，迟到结果不覆盖当前编辑", async (change) => {
+  let loads = 0;
+  let rebaseConfig: any;
+  const slow = deferred<any>();
+  api.defaults.adapter = async (config) => {
+    if (config.method === "patch") throw Object.assign(new Error("conflict"), { config, response: {
+      status: 409, data: { detail: { code: "field_conflict", message: "描述已变化", conflicts: [] } },
+    } });
+    if (config.url === "/parts/search") return response(config, searchResult);
+    if (config.url === "/parts/master/42/edit-state") {
+      if (++loads === 2) { rebaseConfig = config; return slow.promise; }
+      return response(config, baseline);
+    }
+    if (config.url === "/parts/master/43/edit-state") return response(config, second);
+    return response(config, { categories: [] });
+  };
+  render(<MasterDataPage />);
+  await openPart("PN-42");
+  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  await within(dialog).findByDisplayValue("Old Brand");
+  fireEvent.change(within(dialog).getByLabelText("描述"), { target: { value: "原账号草稿" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
+  fireEvent.click(await within(dialog).findByRole("button", { name: "以当前值为新基线并保留我的草稿" }));
+  await waitFor(() => expect(rebaseConfig).toBeDefined());
+  expect(rebaseConfig.headers.Authorization).toBe("Bearer editor-token");
+  expect(within(dialog).getByLabelText("描述")).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: /保\s*存/ })).toBeDisabled();
+  if (change === "账号") localStorage.setItem("token", "new-account");
+  else {
+    fireEvent.click(within(dialog).getByRole("button", { name: /取\s*消/ }));
+    await openPart("PN-43");
+    await screen.findByDisplayValue("第二型号描述");
+  }
+  await act(async () => {
+    slow.resolve(response(rebaseConfig, { ...baseline, fields: { ...baseline.fields, description: "迟到基线" } }));
+    await slow.promise;
+  });
+  expect(screen.getByLabelText("描述")).toHaveValue(change === "账号" ? "原账号草稿" : "第二型号描述");
+  expect(localStorage.getItem("token")).toBe(change === "账号" ? "new-account" : "editor-token");
 });

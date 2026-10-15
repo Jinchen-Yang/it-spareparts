@@ -12,7 +12,7 @@ import hashlib
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
@@ -23,6 +23,7 @@ from app.services import master_data, part_resolver, spec_extract
 # 采购可人工维护的字段（编辑这些 → 写进 locked_fields，重导不覆盖）
 EDITABLE_FIELDS = ("description", "brand", "category_major", "category_minor",
                    "machine_or_part", "unit")
+CATEGORY_FIELDS = {"category_major", "category_minor"}
 
 
 class MasterEditError(Exception):
@@ -53,10 +54,12 @@ def _edit_state(db: Session, part: DimPart) -> dict:
 
 
 def get_part_edit_state(db: Session, part_id: int) -> dict | None:
-    # 读期间保护父行，保证字段与规格来自同一人工命令状态，不跟随 canonical 跳转。
-    part = db.scalar(select(DimPart).where(DimPart.id == part_id).with_for_update(read=True)
-                     .execution_options(populate_existing=True))
-    return _edit_state(db, part) if part is not None else None
+    # 鉴权可能已开启请求事务；独立短只读快照不改变调用方事务，也不阻挡写者。
+    with Session(bind=db.get_bind()) as reader:
+        reader.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        reader.execute(text("SET TRANSACTION READ ONLY"))
+        part = reader.scalar(select(DimPart).where(DimPart.id == part_id))
+        return _edit_state(reader, part) if part is not None else None
 
 
 def _audit_state(db: Session, part: DimPart) -> dict:
@@ -66,7 +69,8 @@ def _audit_state(db: Session, part: DimPart) -> dict:
             "reviewed_at": part.reviewed_at.isoformat() if part.reviewed_at else None}
 
 
-def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: dict) -> None:
+def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: dict,
+                    manual_specs: dict) -> None:
     if (baseline.get("version_mode") != "field_snapshot"
             or not isinstance(baseline.get("fields"), dict)
             or not isinstance(baseline.get("specs"), dict)):
@@ -76,14 +80,33 @@ def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: 
             "field": "identity", "baseline": baseline.get("identity"),
             "current": current["identity"], "proposed": None}])
     conflicts = []
-    for key, proposed in updates.items():
+    checked_updates = dict(updates)
+    if CATEGORY_FIELDS.intersection(updates):
+        # 两级品类是一个人工选择；另一列也必须仍等于打开编辑器时的基线。
+        for key in CATEGORY_FIELDS:
+            if key not in baseline["fields"]:
+                raise MasterEditError(f"缺少字段基线: {key}")
+            checked_updates.setdefault(key, baseline["fields"][key])
+    for key, proposed in checked_updates.items():
         if key not in baseline["fields"]:
             raise MasterEditError(f"缺少字段基线: {key}")
-        if baseline["fields"][key] != current["fields"][key]:
+        if (baseline["fields"][key] != current["fields"][key]
+                and proposed != current["fields"][key]):
             conflicts.append({"field": key, "baseline": baseline["fields"][key],
                               "current": current["fields"][key], "proposed": proposed})
     for key, proposed in spec_updates.items():
-        if baseline["specs"].get(key) != current["specs"].get(key):
+        spec = manual_specs[key]
+        effective = None if spec is None else {
+            "value": spec["spec_value"], "unit": spec["spec_unit"],
+            "numeric_value": (format(spec["numeric_value"].normalize(), "f")
+                              if spec["numeric_value"] is not None else None),
+        }
+        current_spec = current["specs"].get(key)
+        # source 是人工确认后的落地属性；同值 auto 也允许被本次确认成 manual。
+        current_value = ({k: v for k, v in current_spec.items() if k != "source"}
+                         if current_spec is not None else None)
+        if (baseline["specs"].get(key) != current["specs"].get(key)
+                and effective != current_value):
             conflicts.append({"field": f"specs.{key}", "baseline": baseline["specs"].get(key),
                               "current": current["specs"].get(key), "proposed": proposed})
     if conflicts:
@@ -168,13 +191,16 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
     reviewed_at=now（人工建档不进"待复核"）。
     """
     pn = (pn_std or "").strip().upper()
-    if not pn or len(pn) > 128:
+    if not pn:
         raise MasterEditError("PN 不能为空")
+    if len(pn) > 128:
+        raise MasterEditError("PN 不能超过 128 个字符")
     clean = _clean_fields(fields)
     try:
         manual_specs = spec_extract.validate_manual_specs(spec_updates or {})
     except ValueError as exc:
         raise MasterEditError(str(exc)) from exc
+    master_data.acquire_master_write_lock(db)
     # 无父 ID 时以规范输入键协调本人工入口；唯一约束仍兜其他入口的竞态。
     lock_key = int.from_bytes(hashlib.sha256(f"master-pn:{pn}".encode()).digest()[:8],
                               "big", signed=True)
@@ -222,6 +248,10 @@ def create_part(db: Session, **kwargs) -> dict:
         result = create_part_in_transaction(db, **kwargs)
         db.commit()
         return result
+    except DBAPIError as exc:
+        db.rollback()
+        _raise_concurrent_write(exc)
+        raise
     except Exception:
         db.rollback()
         raise
@@ -232,6 +262,7 @@ def lock_part(db: Session, *, part_id: int | None = None,
     """先锁父 PN 并重读已驻留 ORM 实体。调用方不得提前修改该实体。"""
     condition = DimPart.id == part_id if part_id is not None else DimPart.pn_std == pn_std
     with db.no_autoflush:
+        master_data.acquire_master_write_lock(db)
         return db.scalar(select(DimPart).where(condition).with_for_update()
                          .execution_options(populate_existing=True))
 
@@ -252,7 +283,7 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
         raise MasterEditError(str(exc)) from exc
     current = _edit_state(db, part)
     if base_snapshot is not None:
-        _check_baseline(current, base_snapshot, clean, spec_updates or {})
+        _check_baseline(current, base_snapshot, clean, spec_updates or {}, manual_specs)
     if part.status == "merged" or part.pn_std != pn_std:
         if base_snapshot is not None:
             raise MasterEditConflict("identity_conflict", "型号身份已变化，请重新打开编辑器", [])
@@ -267,8 +298,9 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
         val = v.strip() if isinstance(v, str) else v
         setattr(part, k, val or None if isinstance(val, str) else val)
         locked.add(k)
-        if k in {"category_major", "category_minor"}:
-            part.category_source = "MANUAL"
+    if CATEGORY_FIELDS.intersection(clean):
+        locked.update(CATEGORY_FIELDS)
+        part.category_source = "MANUAL"
     part.locked_fields = sorted(locked)
     part.reviewed_at = _now()
     master_data.bind_part_dictionaries(db, part, clean)
@@ -295,6 +327,17 @@ def edit_part(db: Session, **kwargs) -> dict | None:
         result = edit_part_in_transaction(db, **kwargs)
         db.commit()
         return result
+    except DBAPIError as exc:
+        db.rollback()
+        _raise_concurrent_write(exc)
+        raise
     except Exception:
         db.rollback()
         raise
+
+
+def _raise_concurrent_write(exc: DBAPIError) -> None:
+    if getattr(exc.orig, "sqlstate", None) == "40P01":
+        raise MasterEditConflict(
+            "concurrent_write", "主数据库正在并发更新，本次修改未生效，请保留草稿后重试", []
+        ) from exc

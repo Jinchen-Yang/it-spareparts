@@ -10,7 +10,7 @@ from app.auth import _make_token
 from app.etl import loader
 from app.main import app
 from app.models.dimensions import DimPart
-from app.models.system import SysAuditLog, SysImportBatch
+from app.models.system import SysAuditLog, SysImportBatch, SysUser
 from app.services import master_edit, merge
 from tests import factories as f
 
@@ -18,8 +18,8 @@ _client = TestClient(app)
 
 
 def _hdr(role: str) -> dict:
-    """造一个该角色的实名 token（sub 非 sys_user 中用户 → 跳过吊销校验）。"""
-    tok, _ = _make_token(role, role, role, perms=permissions.effective(role, None))
+    """造该角色 token；需要实名的写操作由用例建立对应 SysUser。"""
+    tok, _ = _make_token(role, role, role, perms=permissions.effective(role, None), authn="sys_user")
     return {"Authorization": f"Bearer {tok}"}
 
 
@@ -140,6 +140,9 @@ def test_master_data_permission_template():
 
 def test_master_endpoint_enforces_permission(db):
     """端点级安全边界：无凭证 401、销售 403、采购可建（后端实拦，不只是前端藏菜单）。"""
+    db.add(SysUser(username="purchaser", role="purchaser", display_name="实名采购",
+                   password_hash="unused", is_active=True))
+    db.commit()
     assert _client.post("/api/parts/master", json={"pn_std": "NA"}).status_code == 401  # 硬鉴权
     r = _client.post("/api/parts/master", json={"pn_std": "API-X1"}, headers=_hdr("sales"))
     assert r.status_code == 403
