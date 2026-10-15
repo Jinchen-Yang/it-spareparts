@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -41,8 +42,13 @@ from app.services.maintenance_expense_integrity import (
     normalize_contract_no,
     normalized_contract_no_sql,
 )
-from app.services.maintenance_return_request_summary import summarize_demand_returns
+from app.services.maintenance_return_request_summary import (
+    ReturnSummaryError,
+    summarize_demand_returns,
+)
 from app.services.query_filters import active_orders
+
+logger = logging.getLogger(__name__)
 
 # 未归属桶的伪项目 ID（§4.5）：与真实 project_id 不可能冲突
 UNASSIGNED_BUCKET = "unassigned"
@@ -2396,10 +2402,19 @@ def project_orders(
     # 单据成本与行数一次分组查出（M3-4：禁逐单 N+1）
     order_bundles = _order_cost_bundles(db, [o.id for o in rows], can_cost=can_cost)
     # API 已校验项目权限且每页最多 200 单；只为当前页批量富化。
-    return_summaries = summarize_demand_returns(
-        db, source_order_ids=[order.raw_order_id for order in rows],
-        allowed_project_ids=None if unassigned else {project_id},
-    )
+    return_summary_error = None
+    try:
+        return_summaries = summarize_demand_returns(
+            db, source_order_ids=[order.raw_order_id for order in rows],
+            allowed_project_ids=None if unassigned else {project_id},
+        )
+    except ReturnSummaryError:
+        logger.exception(
+            "project orders return summary unavailable",
+            extra={"project_id": project_id, "order_count": len(rows)},
+        )
+        return_summaries = {}
+        return_summary_error = "summary_unavailable"
     out = []
     for order in rows:
         bundle, line_count = order_bundles[order.id]
@@ -2421,6 +2436,8 @@ def project_orders(
                     return_summaries[order.raw_order_id].to_dict()
                     if order.raw_order_id in return_summaries else None
                 ),
+                **({"return_summary_error": return_summary_error}
+                   if return_summary_error else {}),
                 # 自报四列原样返回；与事实**无判定并排**（M4-4，不产出 mismatch）
                 "self_report": {
                     "head_demand_qty": order.head_demand_qty,

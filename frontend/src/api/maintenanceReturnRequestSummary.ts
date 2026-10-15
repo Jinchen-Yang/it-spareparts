@@ -1,4 +1,4 @@
-/** maintenance-return-request-summary-v1：当前累计整单核对，数量保持十进制字符串。 */
+/** 方案 A 数量摘要：当前累计整单数量，数量保持十进制字符串。 */
 export interface DemandReturnSummary {
   source_order_id: string;
   order_no: string | null;
@@ -9,10 +9,7 @@ export interface DemandReturnSummary {
   pending_qty: string | null;
   remaining_qty: string | null;
   over_received_qty: string | null;
-  return_status: "returned" | "not_returned" | null;
   basis_state: "complete" | "incomplete" | "inactive" | "ownership_conflict";
   reason_codes: string[];
   undated_receipt_qty: string | null;
-  excluded_exempt_disk_demand_qty: string | null;
-  excluded_exempt_disk_received_qty: string | null;
 }

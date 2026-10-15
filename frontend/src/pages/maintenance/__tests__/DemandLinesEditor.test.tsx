@@ -94,15 +94,16 @@ afterEach(() => {
 });
 
 describe("DemandLinesEditor 编辑（OCC digest）", () => {
-  it("只读用户可看整单返还摘要和明细，但没有编辑、撤销和批量入口", async () => {
+  it("只读用户可看整单数量和差额，无返还状态、编辑、撤销和批量入口", async () => {
     mocks.list.mockResolvedValue({ data: { items: [row({ manual_override: { qty: { value: "5.000", source_value: "4.000", updated_by: "合成用户", updated_at: "2026-10-15T00:00:00Z" } } })], return_summary: {
       source_order_id: "O1", order_no: "XQD-1", project_id: "p1", effective: true,
       demand_qty: "5.000", received_qty: "2.000", pending_qty: "3.000", remaining_qty: "3.000", over_received_qty: "0.000",
-      return_status: "not_returned", basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000",
+      basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000",
     } } });
     render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" readOnly onClose={vi.fn()} />);
-    expect(await screen.findByText("未返")).toBeInTheDocument();
-    expect(screen.getByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(await screen.findByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(screen.getByText("差额 3")).toBeInTheDocument();
+    expect(screen.queryByText(/收齐|未收齐|已返|未返|无需核对/)).not.toBeInTheDocument();
     expect(screen.getByText("PN-A")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^编\s*辑$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^撤\s*销$/ })).not.toBeInTheDocument();

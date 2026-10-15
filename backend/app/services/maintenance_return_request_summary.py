@@ -1,7 +1,7 @@
-"""maintenance-return-request-summary-v1：整单下单量与实际收货的只读核对。
+"""方案 A 数量摘要：整单原始下单量、实收与数量差额。
 
 有效明细和收货先独立聚合，再结合当前归属。调用者负责身份授权；
-None 仅表示已确认的全域权限，空范围永远不扩大。这里不提供写入容量保证。
+None 仅表示已确认的全域权限，空范围永远不扩大。这里不提供写入容量保证或返还状态；免返不调整 N/R。
 """
 
 from __future__ import annotations
@@ -11,21 +11,18 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import String, and_, case, cast, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
-from app.models.dimensions import DimPart
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
-from app.models.maintenance_project_operations import MaintenanceSiteIssue, MaintenanceSiteIssueLine
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.models.master_data import ProductCategory
 from app.services.query_filters import active_beta_maintenance_orders
 
 MAX_BATCH_SIZE = 500
-CONTRACT_VERSION = "v1.1-draft"
+CONTRACT_VERSION = "v2.0-draft"
 _ZERO = Decimal("0.000")
 
 
@@ -53,21 +50,18 @@ class DemandReturnSummary:
     effective: bool
     demand_qty: Decimal | None
     received_qty: Decimal | None
+    # 兼容数量别名：仅为 max(N-R, 0)，不表示待返义务或录入授权。
     pending_qty: Decimal | None
     remaining_qty: Decimal | None
     over_received_qty: Decimal | None
-    return_status: str | None
     basis_state: str
     reason_codes: tuple[str, ...]
     undated_receipt_qty: Decimal | None
-    excluded_exempt_disk_demand_qty: Decimal | None
-    excluded_exempt_disk_received_qty: Decimal | None
 
     def to_dict(self) -> dict:
         values = asdict(self)
         for key in ("demand_qty", "received_qty", "pending_qty", "remaining_qty",
-                    "over_received_qty", "undated_receipt_qty",
-                    "excluded_exempt_disk_demand_qty", "excluded_exempt_disk_received_qty"):
+                    "over_received_qty", "undated_receipt_qty"):
             value = values[key]
             values[key] = format(value, ".3f") if value is not None else None
         values["reason_codes"] = list(self.reason_codes)
@@ -93,7 +87,7 @@ class ReturnRequestSummarySnapshot:
                 {"project_id": project_id, "received_qty": format(qty, ".3f")}
                 for project_id, qty in sorted(self.unassigned_by_project.items())
             ],
-            "summary": {"known_pending_qty": format(known, ".3f"),
+            "summary": {"known_difference_qty": format(known, ".3f"),
                         "unknown_order_count": unknown, "inactive_order_count": inactive,
                         "incomplete": bool(unknown)},
         }
@@ -109,69 +103,6 @@ def _ids(values: Collection[str] | None, *, max_length: int, nullable: bool = Fa
     return sorted(set(values))
 
 
-def _excluded_disk_quantities(row):
-    # Reuse the authoritative classifier, including its three-state precedence.
-    # JSON quantities are text: no binary float enters the Decimal calculation.
-    from app.services.maintenance_bad_returns import classify_return_obligation
-
-    demand_line_ids = {fact["raw_line_id"] for fact in row["demand_facts"] or []}
-    flags_by_part = {}
-    flags_by_line = {}
-    for item in row["issue_facts"] or []:
-        flags_by_part.setdefault(item["part_id"], []).append(item["no_return"])
-        # A warehouse shipment source_line_id is not a WBDD raw_line_id.
-        # Without a WBDD row identity its override is same-order/part evidence;
-        # explicit required still takes precedence over project/category defaults.
-        line_id = item["source_line_id"] if item["source_line_id"] in demand_line_ids else None
-        flags_by_line.setdefault((item["part_id"], line_id), []).append(item["no_return"])
-
-    def line_flag(fact, *, demand):
-        if demand:
-            flags = (flags_by_line.get((fact["part_id"], fact["raw_line_id"]), [])
-                     + flags_by_line.get((fact["part_id"], None), []))
-        else:
-            flags = flags_by_part.get(fact["part_id"], [])
-        return False if False in flags else True if True in flags else None
-
-    def excluded(fact, *, demand):
-        basis = classify_return_obligation(
-            category_id=fact["category_id"], category_major=fact["category_major"],
-            category_minor=None, no_return_line=line_flag(fact, demand=demand),
-            project_no_return_default=bool(row["no_return_default"]),
-        )
-        return (basis["category_major_snapshot"] == "硬盘" and
-                basis["exemption_source"] in {"project_default_no_return", "category_disk"})
-
-    demand_excluded = _ZERO
-    receipt_excluded = _ZERO
-    undated_excluded = _ZERO
-    # Receipts have no source-line identity. Mixed same-part evidence cannot be
-    # allocated to required/exempt demand lines by quantity or proportion.
-    demand_states = {}
-    for fact in row["demand_facts"] or []:
-        omit = excluded(fact, demand=True)
-        demand_states.setdefault(fact["part_id"], set()).add(omit)
-        if omit:
-            quantity = Decimal(fact["qty"]) if fact["qty"] is not None else None
-            if quantity is None or not quantity.is_finite() or quantity < 0:
-                demand_excluded = None
-            elif demand_excluded is not None:
-                demand_excluded += quantity
-    ambiguous = False
-    for fact in row["receipt_facts"] or []:
-        states = demand_states.get(fact["part_id"], set())
-        if len(states) > 1:
-            ambiguous = True
-        # Uniform demand evidence carries explicit required flags to receipts;
-        # for a different PN use that PN's own rule, never a quantity allocation.
-        omit = next(iter(states)) if len(states) == 1 else excluded(fact, demand=False)
-        if omit:
-            receipt_excluded += Decimal(fact["qty"])
-            if fact["undated"]:
-                undated_excluded += Decimal(fact["qty"])
-    return demand_excluded, receipt_excluded, undated_excluded, ambiguous
-
-
 def _summary(row) -> DemandReturnSummary:
     reasons = []
     count = row["line_count"] or 0
@@ -179,18 +110,12 @@ def _summary(row) -> DemandReturnSummary:
     if not count:
         reasons.append("no_active_lines")
         demand = None
-    elif row["qty_count"] != count:
-        reasons.append("missing_demand_qty")
-        demand = None
     if row["negative_count"]:
         reasons.append("negative_demand_qty")
         demand = None
     if demand is not None and not demand.is_finite():
         reasons.append("invalid_demand_qty")
         demand = None
-    excluded_demand, excluded_received, excluded_undated, ambiguous = _excluded_disk_quantities(row)
-    if demand is not None:
-        demand -= excluded_demand or _ZERO
     if demand == _ZERO:
         reasons.append("zero_demand_qty")
     effective = bool(row["header_effective"] and row["project_id"] and row["project_active"])
@@ -200,20 +125,16 @@ def _summary(row) -> DemandReturnSummary:
         reasons.append("unassigned_order")
     elif not row["project_active"]:
         reasons.append("inactive_project")
-    received = (row["received_qty"] or _ZERO) - excluded_received
-    # Undated quantity uses the same inclusion rule as R.
-    undated = (row["undated_qty"] or _ZERO) - excluded_undated
+    received = row["received_qty"] or _ZERO
+    undated = row["undated_qty"] or _ZERO
     conflict = bool(row["ownership_conflict"])
     if conflict:
         reasons.append("ownership_conflict")
-        received = undated = excluded_received = None
-    elif ambiguous:
-        reasons.append("ambiguous_disk_receipt_basis")
-        received = undated = excluded_received = None
+        received = undated = None
     elif undated:
         reasons.append("undated_receipts")
     basis = ("ownership_conflict" if conflict else "inactive" if not effective
-             else "incomplete" if demand is None or demand <= _ZERO or ambiguous else "complete")
+             else "incomplete" if demand is None or demand <= _ZERO else "complete")
     complete = basis == "complete"
     pending = max(demand - received, _ZERO) if complete else None
     return DemandReturnSummary(
@@ -222,10 +143,7 @@ def _summary(row) -> DemandReturnSummary:
         received_qty=received, pending_qty=pending, remaining_qty=pending,
         over_received_qty=(max(received - demand, _ZERO)
                            if complete else None),
-        return_status=("returned" if received >= demand else "not_returned") if complete else None,
         basis_state=basis, reason_codes=tuple(reasons), undated_receipt_qty=undated,
-        excluded_exempt_disk_demand_qty=excluded_demand,
-        excluded_exempt_disk_received_qty=excluded_received,
     )
 
 
@@ -253,7 +171,6 @@ def summarize_demand_returns(
         FMaintenanceOrder.id.in_(active).label("header_effective"),
         MaintenanceSourceOrderAssignment.project_id,
         MaintenanceProject.is_active.label("project_active"),
-        MaintenanceProject.no_return_default,
     ).outerjoin(MaintenanceSourceOrderAssignment, and_(
         MaintenanceSourceOrderAssignment.source_order_id == FMaintenanceOrder.raw_order_id,
         MaintenanceSourceOrderAssignment.is_active.is_(True),
@@ -265,17 +182,10 @@ def summarize_demand_returns(
     orders = orders.cte("return_summary_orders")
     demand = select(
         FMaintenanceLine.order_id,
-        func.count().label("line_count"), func.count(FMaintenanceLine.qty).label("qty_count"),
+        func.count().label("line_count"),
         func.count().filter(FMaintenanceLine.qty < 0).label("negative_count"),
-        func.sum(FMaintenanceLine.qty).label("demand_qty"),
-        func.jsonb_agg(func.jsonb_build_object(
-            "raw_line_id", FMaintenanceLine.raw_line_id, "part_id", FMaintenanceLine.part_id,
-            "qty", cast(FMaintenanceLine.qty, String),
-            "category_id", ProductCategory.id, "category_major", ProductCategory.category_major,
-        )).label("demand_facts"),
-    ).join(orders, FMaintenanceLine.order_id == orders.c.order_id).join(
-        DimPart, DimPart.id == FMaintenanceLine.part_id,
-    ).outerjoin(ProductCategory, ProductCategory.id == DimPart.category_id).where(
+        func.sum(func.coalesce(FMaintenanceLine.qty, _ZERO)).label("demand_qty"),
+    ).join(orders, FMaintenanceLine.order_id == orders.c.order_id).where(
         FMaintenanceLine.is_active.is_(True),
     ).group_by(FMaintenanceLine.order_id).cte("return_summary_demand")
     receipts = select(
@@ -286,48 +196,15 @@ def summarize_demand_returns(
         func.bool_or(or_(orders.c.project_id.is_(None),
                         MaintenanceRkdReturnLine.project_id != orders.c.project_id,
                         )).label("ownership_conflict"),
-        func.jsonb_agg(func.jsonb_build_object(
-            "part_id", MaintenanceRkdReturnLine.part_id,
-            "qty", cast(MaintenanceRkdReturnLine.qty, String),
-            "undated", MaintenanceRkdReturnLine.occurred_at.is_(None),
-            "category_id", ProductCategory.id, "category_major", ProductCategory.category_major,
-        )).label("receipt_facts"),
-    ).join(orders, MaintenanceRkdReturnLine.source_order_id == orders.c.source_order_id).outerjoin(
-        DimPart, DimPart.id == MaintenanceRkdReturnLine.part_id,
-    ).outerjoin(ProductCategory, ProductCategory.id == DimPart.category_id).where(
+    ).join(orders, MaintenanceRkdReturnLine.source_order_id == orders.c.source_order_id).where(
         MaintenanceRkdReturnLine.line_status == "active",
     ).group_by(MaintenanceRkdReturnLine.source_order_id).cte("return_summary_receipts")
-    # Manual issue rows can only carry a display reference. Accept it solely
-    # when unambiguous; a nonempty stable identity always takes precedence.
-    unique_order_no = select(FMaintenanceOrder.order_no).group_by(
-        FMaintenanceOrder.order_no,
-    ).having(func.count() == 1)
-    issues = select(
-        orders.c.source_order_id,
-        func.jsonb_agg(func.jsonb_build_object(
-            "part_id", MaintenanceSiteIssueLine.part_id,
-            "source_line_id", MaintenanceSiteIssueLine.source_line_id,
-            "no_return", MaintenanceSiteIssueLine.no_return,
-        )).label("issue_facts"),
-    ).select_from(orders).join(MaintenanceSiteIssueLine, or_(
-        MaintenanceSiteIssueLine.source_order_id == orders.c.source_order_id,
-        and_(MaintenanceSiteIssueLine.source_order_id.is_(None),
-             MaintenanceSiteIssueLine.demand_order_no == orders.c.order_no,
-             orders.c.order_no.in_(unique_order_no)),
-    )).join(MaintenanceSiteIssue, and_(
-        MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
-        MaintenanceSiteIssue.project_id == orders.c.project_id,
-    )).where(
-        MaintenanceSiteIssueLine.is_active.is_(True),
-        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
-    ).group_by(orders.c.source_order_id).cte("return_summary_issues")
     stmt = select(
-        orders, demand.c.line_count, demand.c.qty_count, demand.c.negative_count, demand.c.demand_qty,
+        orders, demand.c.line_count, demand.c.negative_count, demand.c.demand_qty,
         receipts.c.received_qty, receipts.c.undated_qty, receipts.c.ownership_conflict,
-        demand.c.demand_facts, receipts.c.receipt_facts, issues.c.issue_facts,
     ).outerjoin(demand, demand.c.order_id == orders.c.order_id).outerjoin(
         receipts, receipts.c.source_order_id == orders.c.source_order_id,
-    ).outerjoin(issues, issues.c.source_order_id == orders.c.source_order_id).order_by(orders.c.source_order_id)
+    ).order_by(orders.c.source_order_id)
     try:
         with db.no_autoflush:
             return {row["source_order_id"]: _summary(row) for row in db.execute(stmt).mappings()}

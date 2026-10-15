@@ -183,7 +183,7 @@ afterEach(() => {
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
-  it("项目需求单直接展示接口摘要，保留免返硬盘剔除后的整单数量", async () => {
+  it("项目需求单展示未扣免返的原始下单、实收和差额，不发布返还状态", async () => {
     const row: BoardOrderRow = {
       ...orderRow("WBDD-1", "XSDD-1"),
       known_apply_cost_inc_tax: stat({
@@ -192,17 +192,18 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
       }),
       return_summary: {
         source_order_id: "RAW-WBDD-1", order_no: "WBDD-1", project_id: "p1", effective: true,
-        demand_qty: "2.000", received_qty: "1.000", pending_qty: "1.000", remaining_qty: "1.000",
-        over_received_qty: "0.000", return_status: "not_returned", basis_state: "complete",
+        demand_qty: "5.000", received_qty: "3.000", pending_qty: "2.000", remaining_qty: "2.000",
+        over_received_qty: "0.000", basis_state: "complete",
         reason_codes: [], undated_receipt_qty: "0.000",
-        excluded_exempt_disk_demand_qty: "3.000", excluded_exempt_disk_received_qty: "2.000",
       },
     };
     mocks.getBoardProjectOrders.mockResolvedValue({ data: { rows: [row], total: 1, page: 1, page_size: 200 } });
     renderTab();
-    await screen.findByText("未返");
+    await screen.findByText("已收 3 / 下单 5");
     const order = within(orderLink("WBDD-1")!.closest("tr")!);
-    expect(order.getByText("已收 1 / 下单 2")).toBeInTheDocument();
+    expect(order.getByText("已收 3 / 下单 5")).toBeInTheDocument();
+    expect(order.getByText("差额 2")).toBeInTheDocument();
+    expect(order.queryByText(/收齐|未收齐|已返|未返|无需核对|剔除|不参与核对/)).not.toBeInTheDocument();
     expect(order.queryByText("—（待核对）")).not.toBeInTheDocument();
   });
 

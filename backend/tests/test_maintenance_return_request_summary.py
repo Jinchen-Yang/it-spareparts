@@ -1,4 +1,4 @@
-"""maintenance-return-request-summary-v1 的公开只读 Interface 契约。"""
+"""方案 A 数量摘要的公开只读 Interface 契约。"""
 
 from datetime import date
 from decimal import Decimal
@@ -37,10 +37,10 @@ def _demand(db, project, part, index, quantities, *, status="已生效"):
     return order
 
 
-@pytest.mark.parametrize("project_default", [False, True])
-def test_exempt_disks_are_excluded_from_both_demand_and_receipts(db, project_default):
+@pytest.mark.parametrize("exemption_source", ["line_no_return", "project_default_no_return", "category_disk"])
+def test_exempt_disks_remain_in_original_demand_and_receipts_without_status(db, exemption_source):
     project = _project(db, project_id=str(uuid4()))
-    project.no_return_default = project_default
+    project.no_return_default = exemption_source == "project_default_no_return"
     category = ProductCategory(category_major="硬盘", category_minor="SSD")
     memory_category = ProductCategory(category_major="内存", category_minor="DDR4")
     db.add_all([category, memory_category])
@@ -50,6 +50,8 @@ def test_exempt_disks_are_excluded_from_both_demand_and_receipts(db, project_def
     db.add_all([disk, other])
     db.commit()
     order = _demand(db, project, disk, 1, ["5"])
+    if exemption_source == "line_no_return":
+        _issue(db, project, disk, "5", no_return=True, source_order_id=order.raw_order_id)
     db.add(FMaintenanceLine(
         raw_line_id=str(uuid4()), order_id=order.id, part_id=other.id,
         qty=Decimal("4"), is_active=True, import_batch_id=order.import_batch_id,
@@ -61,12 +63,13 @@ def test_exempt_disks_are_excluded_from_both_demand_and_receipts(db, project_def
     result = summaries.summarize_demand_returns(
         db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
     )[order.raw_order_id].to_dict()
-    assert result["demand_qty"] == "4.000"
-    assert result["received_qty"] == "1.000"
-    assert result["pending_qty"] == "3.000"
-    assert result["return_status"] == "not_returned"
-    assert result["excluded_exempt_disk_demand_qty"] == "5.000"
-    assert result["excluded_exempt_disk_received_qty"] == "5.000"
+    assert result["demand_qty"] == "9.000"
+    assert result["received_qty"] == "6.000"
+    assert result["pending_qty"] == result["remaining_qty"] == "3.000"
+    assert result["basis_state"] == "complete"
+    assert result["reason_codes"] == []
+    assert "return_status" not in result
+    assert not any(key.startswith("excluded_exempt_disk_") for key in result)
 
 
 @pytest.mark.parametrize("reference", ["demand_line", "manual", "warehouse_line", "warehouse_with_inherited_line"])
@@ -103,11 +106,11 @@ def test_explicit_required_disk_overrides_defaults_for_demand_and_receipts(db, r
     assert result["demand_qty"] == "5.000"
     assert result["received_qty"] == "2.000"
     assert result["pending_qty"] == "3.000"
-    assert result["excluded_exempt_disk_demand_qty"] == "0.000"
-    assert result["excluded_exempt_disk_received_qty"] == "0.000"
+    assert result["basis_state"] == "complete"
+    assert "return_status" not in result
 
 
-def test_only_exempt_disks_leave_zero_basis_and_hide_cross_project_excluded_receipts(db):
+def test_only_exempt_disks_keep_quantities_and_hide_cross_project_receipts(db):
     project = _project(db, project_id=str(uuid4()))
     old_project = _project(db, project_id=str(uuid4()))
     category = ProductCategory(category_major="硬盘", category_minor="SSD")
@@ -121,21 +124,29 @@ def test_only_exempt_disks_leave_zero_basis_and_hide_cross_project_excluded_rece
     db.commit()
     kwargs = dict(source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id})
     result = summaries.summarize_demand_returns(db, **kwargs)[order.raw_order_id].to_dict()
-    assert result["demand_qty"] == result["received_qty"] == "0.000"
-    assert result["undated_receipt_qty"] == "0.000"
-    assert result["excluded_exempt_disk_demand_qty"] == "5.000"
-    assert result["excluded_exempt_disk_received_qty"] == "2.000"
-    assert result["basis_state"] == "incomplete"
-    assert "zero_demand_qty" in result["reason_codes"]
-    assert result["return_status"] is result["pending_qty"] is result["over_received_qty"] is None
+    assert result["demand_qty"] == "5.000"
+    assert result["received_qty"] == result["undated_receipt_qty"] == "2.000"
+    assert result["pending_qty"] == result["remaining_qty"] == "3.000"
+    assert result["over_received_qty"] == "0.000"
+    assert result["basis_state"] == "complete"
+    assert result["reason_codes"] == ["undated_receipts"]
+    assert "return_status" not in result
+    readonly_engine = engine.execution_options(isolation_level="REPEATABLE READ", postgresql_readonly=True)
+    with Session(readonly_engine) as reader:
+        payload = summaries.get_return_requests_outstanding_summary(
+            reader, **kwargs, project_ids={project.project_id},
+        ).to_dict()
+    assert payload["summary"]["known_difference_qty"] == "3.000"
+    assert payload["summary"]["unknown_order_count"] == 0
+    assert payload["summary"]["incomplete"] is False
     _receipt(db, old_project, disk, "99", source_order_id=order.raw_order_id)
     db.commit()
     conflict = summaries.summarize_demand_returns(db, **kwargs)[order.raw_order_id].to_dict()
     assert conflict["basis_state"] == "ownership_conflict"
-    assert conflict["received_qty"] is conflict["excluded_exempt_disk_received_qty"] is None
+    assert conflict["received_qty"] is conflict["pending_qty"] is conflict["over_received_qty"] is None
 
 
-def test_mixed_same_disk_requirements_do_not_allocate_receipts_to_required_lines(db):
+def test_mixed_same_disk_requirements_do_not_change_whole_order_quantities(db):
     project = _project(db, project_id=str(uuid4()))
     category = ProductCategory(category_major="硬盘", category_minor="SSD")
     db.add(category)
@@ -153,16 +164,16 @@ def test_mixed_same_disk_requirements_do_not_allocate_receipts_to_required_lines
     result = summaries.summarize_demand_returns(
         db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
     )[order.raw_order_id].to_dict()
-    assert result["demand_qty"] == "1.000"
-    assert result["excluded_exempt_disk_demand_qty"] == "9.000"
-    assert result["basis_state"] == "incomplete"
-    assert "ambiguous_disk_receipt_basis" in result["reason_codes"]
-    for field in ("received_qty", "pending_qty", "over_received_qty", "return_status",
-                  "undated_receipt_qty", "excluded_exempt_disk_received_qty"):
-        assert result[field] is None
+    assert result["demand_qty"] == "10.000"
+    assert result["received_qty"] == "9.000"
+    assert result["pending_qty"] == "1.000"
+    assert result["over_received_qty"] == "0.000"
+    assert result["basis_state"] == "complete"
+    assert result["reason_codes"] == []
+    assert "return_status" not in result
 
 
-def test_disk_text_and_line_exemption_do_not_expand_the_two_exclusion_sources(db):
+def test_line_exempt_disk_and_unclassified_part_both_count_in_whole_order(db):
     project = _project(db, project_id=str(uuid4()))
     project.display_name = "硬盘免返提醒，不作为判定来源"
     category = ProductCategory(category_major="硬盘", category_minor="SSD")
@@ -185,8 +196,76 @@ def test_disk_text_and_line_exemption_do_not_expand_the_two_exclusion_sources(db
     )[order.raw_order_id]
     assert result.demand_qty == Decimal("5")
     assert result.received_qty == Decimal("1")
-    assert result.excluded_exempt_disk_demand_qty == Decimal("0")
-    assert result.excluded_exempt_disk_received_qty == Decimal("0")
+    assert result.pending_qty == Decimal("4")
+
+
+@pytest.mark.parametrize(
+    "disk,quantities,demand,basis,reason",
+    [
+        (False, [None, "3"], "3.000", "complete", []),
+        (True, [None, "3"], "3.000", "complete", []),
+        (False, [None], "0.000", "incomplete", ["zero_demand_qty"]),
+        (True, [None], "0.000", "incomplete", ["zero_demand_qty"]),
+    ],
+)
+def test_null_demand_quantities_count_as_zero_including_exempt_disks(
+    db, disk, quantities, demand, basis, reason,
+):
+    project = _project(db, project_id=str(uuid4()))
+    category = ProductCategory(category_major="硬盘" if disk else "内存", category_minor="NULL-TEST")
+    db.add(category)
+    db.flush()
+    part = DimPart(pn_std="NULL-QUANTITY", category_id=category.id)
+    db.add(part)
+    db.commit()
+    order = _demand(db, project, part, 1, quantities)
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=[order.raw_order_id], allowed_project_ids={project.project_id},
+    )[order.raw_order_id].to_dict()
+    assert result["demand_qty"] == demand
+    assert result["received_qty"] == "0.000"
+    assert result["basis_state"] == basis
+    assert result["reason_codes"] == reason
+    if basis == "complete":
+        assert result["pending_qty"] == "3.000"
+        assert result["over_received_qty"] == "0.000"
+    else:
+        assert result["pending_qty"] is result["over_received_qty"] is None
+    assert "return_status" not in result
+
+
+@pytest.mark.parametrize("zero_quantity", [None, "0"])
+def test_zero_and_exempt_disk_lines_still_use_original_quantities(db, zero_quantity):
+    project = _project(db, project_id=str(uuid4()))
+    category = ProductCategory(category_major="硬盘", category_minor="SSD")
+    db.add(category)
+    db.flush()
+    disk = DimPart(pn_std="ZERO-REQUIRED-DISK", category_id=category.id)
+    db.add(disk)
+    db.commit()
+    order = _demand(db, project, disk, 1, [zero_quantity, "3"])
+    required = _issue(db, project, disk, "1", no_return=False, source_order_id=order.raw_order_id)
+    required.source_line_id = db.scalar(select(FMaintenanceLine.raw_line_id).where(
+        FMaintenanceLine.order_id == order.id, FMaintenanceLine.line_no == 1,
+    ))
+    _receipt(db, project, disk, "2", source_order_id=order.raw_order_id)
+    db.commit()
+    readonly_engine = engine.execution_options(isolation_level="REPEATABLE READ", postgresql_readonly=True)
+    with Session(readonly_engine) as reader:
+        payload = summaries.get_return_requests_outstanding_summary(
+            reader, source_order_ids=[order.raw_order_id],
+            allowed_project_ids={project.project_id}, project_ids=None,
+        ).to_dict()
+    result = payload["orders"][0]
+    assert result["demand_qty"] == "3.000"
+    assert result["received_qty"] == "2.000"
+    assert result["pending_qty"] == "1.000"
+    assert result["over_received_qty"] == "0.000"
+    assert result["basis_state"] == "complete"
+    assert result["reason_codes"] == []
+    assert "return_status" not in result
+    assert payload["summary"]["unknown_order_count"] == 0
+    assert payload["summary"]["incomplete"] is False
 
 
 def test_snapshot_counts_inactive_separately_and_never_reports_their_overage(db):
@@ -216,9 +295,9 @@ def test_snapshot_counts_inactive_separately_and_never_reports_their_overage(db)
         payload = summaries.get_return_requests_outstanding_summary(
             reader, source_order_ids=ids, allowed_project_ids=None, project_ids=None,
         ).to_dict()
-    assert payload["contract_version"] == "v1.1-draft"
+    assert payload["contract_version"] == "v2.0-draft"
     assert payload["summary"] == {
-        "known_pending_qty": "3.000", "unknown_order_count": 1,
+        "known_difference_qty": "3.000", "unknown_order_count": 1,
         "inactive_order_count": 3, "incomplete": True,
     }
     by_id = {item["source_order_id"]: item for item in payload["orders"]}
@@ -226,7 +305,7 @@ def test_snapshot_counts_inactive_separately_and_never_reports_their_overage(db)
         assert by_id[order.raw_order_id]["over_received_qty"] is None
 
 
-def test_required_flags_do_not_cross_project_stable_identity_or_ambiguous_display_number(db):
+def test_issue_flags_and_ambiguous_display_number_never_change_order_quantities(db):
     project = _project(db, project_id=str(uuid4()))
     other_project = _project(db, project_id=str(uuid4()))
     category = ProductCategory(category_major="硬盘", category_minor="SSD")
@@ -249,9 +328,11 @@ def test_required_flags_do_not_cross_project_stable_identity_or_ambiguous_displa
         db, source_order_ids=[first.raw_order_id, second.raw_order_id, duplicate.raw_order_id],
         allowed_project_ids={project.project_id},
     )
-    assert result[first.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("5")
-    assert result[duplicate.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("5")
-    assert result[second.raw_order_id].excluded_exempt_disk_demand_qty == Decimal("0")
+    for order in (first, second, duplicate):
+        assert result[order.raw_order_id].demand_qty == Decimal("5")
+        assert result[order.raw_order_id].received_qty == Decimal("0")
+        assert result[order.raw_order_id].pending_qty == Decimal("5")
+        assert result[order.raw_order_id].basis_state == "complete"
 
 
 def test_summary_uses_whole_order_quantities_and_all_received_conditions(db):
@@ -285,7 +366,7 @@ def test_summary_uses_whole_order_quantities_and_all_received_conditions(db):
     assert result.received_qty == Decimal("3.000")
     assert result.pending_qty == Decimal("0.500")
     assert result.remaining_qty == Decimal("0.500")
-    assert result.return_status == "not_returned"
+    assert not hasattr(result, "return_status")
     assert result.basis_state == "complete"
     assert result.to_dict()["demand_qty"] == "3.500"
 
@@ -317,11 +398,13 @@ def test_snapshot_requires_real_readonly_repeatable_read_and_separates_unassigne
             reader, source_order_ids=[source_id], allowed_project_ids={project_id}, project_ids=None,
         ).to_dict()
         assert result["summary"] == {
-            "known_pending_qty": "3.000", "unknown_order_count": 0,
+            "known_difference_qty": "3.000", "unknown_order_count": 0,
             "inactive_order_count": 0, "incomplete": False,
         }
         assert result["unassigned_by_project"] == [{"project_id": project_id, "received_qty": "3.000"}]
         assert result["orders"][0]["pending_qty"] == "3.000"
+        assert "known_pending_qty" not in result["summary"]
+        assert "return_status" not in result["orders"][0]
         empty = summaries.get_return_requests_outstanding_summary(
             reader, source_order_ids=[], allowed_project_ids={project_id}, project_ids=None,
         ).to_dict()
@@ -415,7 +498,7 @@ def test_snapshot_keeps_one_real_pg_version_across_501_orders_and_unassigned(db)
             ).to_dict()
         assert writer_errors == []
         assert len(snapshot["orders"]) == 501
-        assert snapshot["summary"]["known_pending_qty"] == "501.000"
+        assert snapshot["summary"]["known_difference_qty"] == "501.000"
         assert snapshot["unassigned_by_project"] == [{"project_id": project_id, "received_qty": "3.000"}]
         fresh = summaries.summarize_demand_returns(db, source_order_ids=[ids[-1]], allowed_project_ids={project_id})
         assert fresh[ids[-1]].demand_qty == Decimal("4")
@@ -433,8 +516,9 @@ def test_unknown_over_received_inactive_and_cross_project_facts_remain_distinct(
     db.add(part)
     db.commit()
     cases = [
-        ("no_rows", [], "已生效"), ("missing", [None, "3"], "已生效"),
-        ("negative", ["-1", "3"], "已生效"), ("zero", ["0"], "已生效"),
+        ("no_rows", [], "已生效"), ("nullable", [None, "3"], "已生效"),
+        ("negative", ["-1", "3"], "已生效"), ("invalid", ["NaN", "3"], "已生效"),
+        ("zero", ["0"], "已生效"),
         ("over", ["2"], "已生效"), ("pending", ["4"], "已生效"),
         ("inactive", ["4"], "已取消"), ("conflict", ["4"], "已生效"),
     ]
@@ -453,24 +537,27 @@ def test_unknown_over_received_inactive_and_cross_project_facts_remain_distinct(
     def item(name):
         return result[orders[name].raw_order_id]
 
-    for name, reason in (("no_rows", "no_active_lines"), ("missing", "missing_demand_qty"),
-                         ("negative", "negative_demand_qty"), ("zero", "zero_demand_qty")):
-        assert item(name).return_status is None
+    for name, reason in (("no_rows", "no_active_lines"),
+                         ("negative", "negative_demand_qty"), ("invalid", "invalid_demand_qty"),
+                         ("zero", "zero_demand_qty")):
+        assert not hasattr(item(name), "return_status")
         assert item(name).pending_qty is None
         assert reason in item(name).reason_codes
-    assert item("missing").demand_qty is None
-    assert item("negative").demand_qty is None
+    assert item("nullable").demand_qty == Decimal("3")
+    assert item("nullable").pending_qty == Decimal("3")
+    assert item("nullable").reason_codes == ()
+    assert item("negative").demand_qty is item("invalid").demand_qty is None
     assert item("over").received_qty == Decimal("3")
     assert item("over").over_received_qty == Decimal("1")
-    assert item("over").return_status == "returned"
+    assert item("over").pending_qty == Decimal("0")
     assert item("pending").pending_qty == Decimal("3")  # A 超收不能抵 B 欠返。
     assert item("pending").undated_receipt_qty == Decimal("1")
     assert item("pending").basis_state == "complete"
     assert item("inactive").basis_state == "inactive"
-    assert item("inactive").return_status is None
+    assert item("inactive").pending_qty is item("inactive").over_received_qty is None
     assert item("conflict").basis_state == "ownership_conflict"
     for field in ("received_qty", "pending_qty", "remaining_qty", "over_received_qty",
-                  "undated_receipt_qty", "return_status"):
+                  "undated_receipt_qty"):
         assert getattr(item("conflict"), field) is None
     assert summaries.summarize_demand_returns(
         db, source_order_ids=source_ids, allowed_project_ids={old_project.project_id},
@@ -533,7 +620,10 @@ def test_search_and_detail_enrich_without_changing_delete_or_line_digest(db):
                      wbdd_no=order.order_no, operated_by="summary-fixture")
     db.commit()
     after = client.post("/api/maintenance/demands/search", json={"q": order.order_no}).json()["items"][0]
-    assert after["return_summary"]["return_status"] == "returned"
+    assert after["return_summary"]["received_qty"] == "5.000"
+    assert after["return_summary"]["pending_qty"] == "0.000"
+    assert "return_status" not in row["return_summary"]
+    assert "return_status" not in after["return_summary"]
     assert after["version_digest"] == before_digest
     after_detail = client.get(lines_url).json()
     assert after_detail["items"][0]["digest"] == line_digest

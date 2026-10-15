@@ -1,5 +1,6 @@
 """项目需求单 API 按页消费共享返还汇总，不复制核对公式。"""
 
+import logging
 from decimal import Decimal
 from uuid import uuid4
 
@@ -10,6 +11,8 @@ from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProjectUserAssignment
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysUser
+from app.services import maintenance_boss_board
+from app.services.maintenance_return_request_summary import ReturnSummaryError
 from tests.boss_board_helpers import boss_client, client_for, make_project
 from tests.test_maintenance_boss_board_perf import count_sql
 from tests.test_maintenance_return_metrics import _receipt
@@ -25,6 +28,51 @@ def _demand(db, project, part, index, quantity):
     ))
     db.commit()
     return order
+
+
+def test_project_orders_degrades_summary_error_without_losing_rows(
+    db, monkeypatch, caplog,
+):
+    project = make_project(db, "项目需求单摘要降级")
+    part = DimPart(pn_std="BOARD-RETURN-FALLBACK-RAM", category_major="内存")
+    db.add(part)
+    db.commit()
+    _demand(db, project, part, 1, "5")
+    _demand(db, project, part, 2, "2")
+    client = boss_client(db)
+    url = f"/api/maintenance/boss-board/projects/{project.project_id}/orders"
+    normal = client.get(url)
+    assert normal.status_code == 200, normal.text
+
+    def unavailable_summary(*args, **kwargs):
+        raise ReturnSummaryError("summary_unavailable")
+
+    monkeypatch.setattr(
+        maintenance_boss_board, "summarize_demand_returns", unavailable_summary,
+    )
+    # 测试迁移的 logging.fileConfig 会关闭已导入的应用 logger。
+    monkeypatch.setattr(maintenance_boss_board.logger, "disabled", False)
+    with caplog.at_level(logging.ERROR, logger=maintenance_boss_board.__name__):
+        response = client.get(url)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    expected = normal.json()
+    assert body["total"] == 2
+    assert len(body["rows"]) == 2
+    for actual_row, expected_row in zip(body["rows"], expected["rows"], strict=True):
+        assert actual_row.pop("return_summary") is None
+        assert actual_row.pop("return_summary_error") == "summary_unavailable"
+        expected_row.pop("return_summary")
+        assert actual_row == expected_row
+    assert {key: value for key, value in body.items() if key != "rows"} == {
+        key: value for key, value in expected.items() if key != "rows"
+    }
+    records = [record for record in caplog.records
+               if record.name == maintenance_boss_board.__name__]
+    assert len(records) == 1
+    assert records[0].exc_info[0] is ReturnSummaryError
+    assert "return summary unavailable" in records[0].getMessage()
 
 
 def test_project_orders_exposes_serialized_return_summary_on_each_page(db):
@@ -44,11 +92,11 @@ def test_project_orders_exposes_serialized_return_summary_on_each_page(db):
     url = f"/api/maintenance/boss-board/projects/{project.project_id}/orders"
 
     expected = [
-        (partial, "5.000", "2.000", "3.000", "not_returned", "complete"),
-        (returned, "2.000", "3.000", "0.000", "returned", "complete"),
-        (incomplete, None, "0.000", None, None, "incomplete"),
+        (partial, "5.000", "2.000", "3.000", "complete"),
+        (returned, "2.000", "3.000", "0.000", "complete"),
+        (incomplete, "0.000", "0.000", None, "incomplete"),
     ]
-    for page, (order, demand, received, pending, status, basis) in enumerate(expected, 1):
+    for page, (order, demand, received, pending, basis) in enumerate(expected, 1):
         response = client.get(url, params={"page": page, "page_size": 1})
         assert response.status_code == 200, response.text
         body = response.json()
@@ -62,9 +110,9 @@ def test_project_orders_exposes_serialized_return_summary_on_each_page(db):
         assert summary["demand_qty"] == demand
         assert summary["received_qty"] == received
         assert summary["pending_qty"] == pending
-        assert summary["return_status"] == status
+        assert "return_status" not in summary
         assert summary["basis_state"] == basis
-    assert summary["reason_codes"] == ["missing_demand_qty"]
+    assert summary["reason_codes"] == ["zero_demand_qty"]
     empty = client.get(url, params={"page": 4, "page_size": 1}).json()
     assert empty["rows"] == [] and empty["total"] == 3
 
@@ -118,6 +166,7 @@ def test_project_orders_summary_stays_bounded_to_page_with_over_500_orders(db):
             assert summary["demand_qty"] == "1.000"
             assert summary["received_qty"] == "0.000"
             assert summary["pending_qty"] == "1.000"
+            assert "return_status" not in summary
     assert len(returned_ids) == 501
     assert client.get(url, params={"page_size": 501}).status_code == 422
 
@@ -169,5 +218,6 @@ def test_project_orders_summary_preserves_scope_and_unassigned_unknown_state(db)
     summary = global_response.json()["rows"][0]["return_summary"]
     assert summary["source_order_id"] == unassigned.raw_order_id
     assert summary["basis_state"] == "inactive"
-    assert summary["pending_qty"] is None and summary["return_status"] is None
+    assert summary["pending_qty"] is None
+    assert "return_status" not in summary
     assert "unassigned_order" in summary["reason_codes"]

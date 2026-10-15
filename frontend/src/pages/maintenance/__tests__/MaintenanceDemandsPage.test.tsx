@@ -151,18 +151,21 @@ afterEach(() => {
 });
 
 describe("需求单与数据同步页", () => {
-  it("只读用户从返还列查看明细，列表和详情采用同一摘要且不出现写入口", async () => {
+  it("只读用户查看列表和详情的同一数量摘要，不出现返还状态或写入口", async () => {
     const returnSummary = { source_order_id: "RAW-9", order_no: "XQD-009", project_id: "p1", effective: true,
       demand_qty: "5.000", received_qty: "2.000", pending_qty: "3.000", remaining_qty: "3.000", over_received_qty: "0.000",
-      return_status: "not_returned", basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000" };
+      basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000" };
     searchMaintenanceDemands.mockResolvedValue(demandPage([demandRow("RAW-9", "XQD-009", { return_summary: returnSummary })]));
     listDemandLines.mockResolvedValue({ data: { items: [], return_summary: returnSummary } });
     render(<MaintenanceDemandsPage />);
-    expect(await screen.findByText("未返")).toBeInTheDocument();
-    expect(screen.getByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(await screen.findByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(screen.getByText("差额 3")).toBeInTheDocument();
+    expect(screen.queryByText(/收齐|未收齐|已返|未返|无需核对/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看明细" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(within(dialog).getByText("差额 3")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/收齐|未收齐|已返|未返|无需核对/)).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: /批量修改/ })).not.toBeInTheDocument();
     expect(listDemandLines).toHaveBeenCalledWith("RAW-9");
   });
