@@ -255,6 +255,8 @@ export interface MaintenanceExplorerParams extends Omit<PnRankingParams, "sort">
   top_n?: number;
   focus_page?: number;
   focus_page_size?: number;
+  /** 默认关闭；PN 紧凑图同次聚合的两个独立全集 Top。 */
+  include_pn_overview?: boolean;
 }
 export interface MaintenanceExplorerResponse {
   window: { range: string; date_from: string | null; date_to: string | null };
@@ -266,6 +268,12 @@ export interface MaintenanceExplorerResponse {
   summary: ExplorerStats & { top_share_pct: string | null };
   rows: ExplorerRow[];
   chart_rows: ExplorerRow[];
+  pn_overview?: {
+    cost_visibility: "visible" | "restricted";
+    cost_rows: ExplorerRow[] | null;
+    effective_rows: ExplorerRow[];
+    has_negative: boolean;
+  };
   focus: { row: ExplorerRow | null; dimension: "pn" | "project"; rows: ExplorerRow[]; total: number; page: number; page_size: number };
   matrix: {
     row_dimension: ExplorerDimension;

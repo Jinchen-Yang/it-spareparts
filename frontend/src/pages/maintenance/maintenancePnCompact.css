@@ -1,0 +1,48 @@
+.maintenance-pn-compact-view { min-width: 0; width: 100%; }
+.mpc-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; font-size: 12px; color: #64748b; }
+.mpc-loading { max-width: 1120px; padding: 20px; }
+.maintenance-pn-compact { box-sizing: border-box; width: 100%; max-width: 1120px; padding: 18px 20px 12px; border: 1px solid #dce4ef; border-radius: 10px; background: white; color: #25364c; font-size: 12px; }
+.maintenance-pn-compact * { box-sizing: border-box; }
+.mpc-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; }
+.mpc-heading h2 { font-size: 20px; line-height: 1.4; margin: 0; }
+.mpc-heading small { font-size: 12px; color: #64748b; margin-left: 8px; font-weight: normal; }
+.mpc-heading > span { font-size: 12px; color: #526075; }
+.mpc-scope { margin: 6px 0 12px; color: #526075; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.mpc-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.mpc-kpis > div { min-width: 0; border-left: 3px solid #d6e3f6; padding: 3px 10px; }
+.mpc-kpis span, .mpc-kpis small { display: block; color: #64748b; line-height: 1.5; }
+.mpc-kpis strong { display: block; margin: 2px 0; font-size: clamp(16px, 1.2vw, 22px); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.5; }
+.mpc-kpis small { font-size: 11px; }
+.mpc-notice { margin: 0 0 12px; color: #64748b; }
+.mpc-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.mpc-charts-single { grid-template-columns: minmax(0, 1fr); }
+.maintenance-pn-compact .pn-top-bar { min-width: 0; }
+.maintenance-pn-compact .pn-top-bar h3 { font-size: 14px; line-height: 1.5; margin: 0 0 2px; }
+.maintenance-pn-compact .pn-top-note { font-size: 11px; color: #64748b; line-height: 1.5; margin: 0 0 8px; }
+.maintenance-pn-compact .pn-top-list { list-style: none; padding: 0; margin: 0; }
+.maintenance-pn-compact .pn-top-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) minmax(0, max-content); align-items: start; gap: 1px 6px; margin-bottom: 6px; line-height: 1.4; }
+.maintenance-pn-compact .pn-top-index { grid-row: 1 / 3; color: #8291a5; font-size: 11px; }
+.maintenance-pn-compact .pn-top-name { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.maintenance-pn-compact .pn-top-value { min-width: 0; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.maintenance-pn-compact .pn-top-value small { margin-left: 4px; color: #a46d19; font-size: 10px; }
+.maintenance-pn-compact .pn-top-track { position: relative; grid-column: 2 / -1; height: 5px; margin-top: 2px; background: #f0f4fa; overflow: hidden; }
+.maintenance-pn-compact .pn-top-zero { position: absolute; height: 100%; width: 1px; background: #9aa9bd; }
+.maintenance-pn-compact .pn-top-fill { position: absolute; top: 0; height: 100%; background: #507dcc; }
+.maintenance-pn-compact .pn-top-fill.is-negative { background: #b85c50; }
+.maintenance-pn-compact .pn-top-empty { padding: 32px 0; color: #64748b; text-align: center; }
+.mpc-footer { margin-top: 12px; border-top: 1px solid #e6ecf4; padding-top: 8px; color: #64748b; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.mpc-footer p { margin: 0 0 2px; }
+@media (max-width: 760px) {
+  .maintenance-analytics-page > .ant-space-item, .maintenance-analytics-page .ant-card .ant-space-item { min-width: 0; max-width: 100%; }
+  .maintenance-analytics-page .ant-card .ant-space { max-width: 100%; }
+  .maintenance-analytics-page .ant-segmented { max-width: 100%; overflow-x: auto; }
+  .maintenance-pn-compact { padding: 14px 12px 10px; }
+  .mpc-charts { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .mpc-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .mpc-kpis > div { padding-left: 7px; }
+  .mpc-kpis strong { font-size: 16px; }
+  .maintenance-pn-compact .pn-top-row { grid-template-columns: 18px minmax(0, 1fr); margin-bottom: 9px; }
+  .maintenance-pn-compact .pn-top-name, .maintenance-pn-compact .pn-top-value { grid-column: 2; }
+  .maintenance-pn-compact .pn-top-value { text-align: left; }
+  .maintenance-pn-compact .pn-top-index { grid-row: 1 / 4; }
+}

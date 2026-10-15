@@ -21,6 +21,7 @@ vi.mock("../../../api/maintenanceProjects", () => ({
   getMaintenanceProject: (...a: unknown[]) => getMaintenanceProject(...a),
 }));
 vi.mock("../MaintenanceRankingsExplorer", () => ({ default: () => <div>多维排名占位</div> }));
+vi.mock("../MaintenancePnCompactView", () => ({ default: ({ refreshKey }: { refreshKey: number }) => <div data-testid="compact-content" data-refresh={refreshKey}>PN 紧凑图内容</div> }));
 // jsdom 无 canvas：mock 图表壳，只保留空态文案
 vi.mock("../../../components/charts/EChartContainer", () => ({
   default: ({ empty, emptyText }: { empty?: boolean; emptyText?: string }) =>
@@ -228,6 +229,29 @@ describe("维保数据分析页", () => {
     expect(screen.getByRole("tab", { name: "开支统计" })).toBeInTheDocument();
     expect(fetchPnRanking).not.toHaveBeenCalled();
     expect(fetchSpendTrend).not.toHaveBeenCalled();
+  });
+
+  it("紧凑图URL恢复并按需挂载、刷新，保留公共筛选和旧入口且无待返死页签", async () => {
+    renderPage("/maintenance/analytics?view=pn-compact&range=all&project=p1&sp=销售甲&warehouse=+广州仓+&pn_top=10&dim=project&page=2");
+    const compact = await screen.findByTestId("compact-content");
+    expect(screen.getByRole("tab", { name: "PN 紧凑图" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByPlaceholderText("搜 PN / 描述 / 项目")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /待返/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("多维排名占位")).not.toBeInTheDocument();
+    expect(fetchPnRanking).not.toHaveBeenCalled();
+    expect(fetchSpendTrend).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    expect(compact).toHaveAttribute("data-refresh", "1");
+    fireEvent.click(screen.getByRole("tab", { name: "PN 明细" }));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
+    expect(screen.queryByTestId("compact-content")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "PN 紧凑图" }));
+    await screen.findByTestId("compact-content");
+    expect(query().get("sp")).toBe("销售甲");
+    expect(query().get("warehouse")).toBe(" 广州仓 ");
+    expect(query().get("pn_top")).toBe("10");
+    expect(query().get("dim")).toBe("project");
+    expect(query().get("page")).toBe("2");
   });
 
   it("正式返还显示全部件况台账与实际领用，忽略历史坏件字段且保留超过100%的比例", async () => {

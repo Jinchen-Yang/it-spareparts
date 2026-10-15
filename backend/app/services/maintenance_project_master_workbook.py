@@ -480,6 +480,7 @@ def _assigned_lines(
     否则 03 行级分页切片跨页会重复/漏行（打平行的顺序由堆序决定，不稳定）。
     """
     from app.services import maintenance_demands
+    from app.services.query_filters import active_orders
 
     stmt = (
         select(FMaintenanceLine, FMaintenanceOrder,
@@ -494,6 +495,10 @@ def _assigned_lines(
         .order_by(FMaintenanceOrder.order_date.desc(), FMaintenanceOrder.order_no,
                   FMaintenanceLine.line_no, FMaintenanceLine.id)
     )
+    # Source workflow status and the system tombstone are independent. Keep
+    # inactive source headers out of every effective project/export view even
+    # when the tombstone cutover remains disabled.
+    stmt = active_orders(stmt, FMaintenanceOrder)
     if project_id is not None:
         stmt = stmt.where(MaintenanceSourceOrderAssignment.project_id == project_id)
     if allowed_project_ids is not None:
@@ -904,6 +909,7 @@ def _global_line_in_scope(
 ) -> FMaintenanceLine | None:
     """Return an active, assigned demand line only when its project is visible."""
     from app.services import maintenance_demands
+    from app.services.query_filters import active_orders
 
     stmt = (
         select(FMaintenanceLine)
@@ -920,6 +926,7 @@ def _global_line_in_scope(
             maintenance_demands.active_demand_condition(),
         )
     )
+    stmt = active_orders(stmt, FMaintenanceOrder)
     if allowed_project_ids is not None:
         stmt = stmt.where(
             MaintenanceSourceOrderAssignment.project_id.in_(allowed_project_ids)
@@ -1497,6 +1504,8 @@ def _lock_global_refill_rows(
 
     # Re-read the complete join after all three lock layers.  This catches an
     # assignment/tombstone change that committed between validation and apply.
+    from app.services.query_filters import active_orders
+
     scoped_statement = (
         select(FMaintenanceLine.id)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
@@ -1512,6 +1521,7 @@ def _lock_global_refill_rows(
             maintenance_demands.active_demand_condition(),
         )
     )
+    scoped_statement = active_orders(scoped_statement, FMaintenanceOrder)
     if allowed_project_ids is not None:
         scoped_statement = scoped_statement.where(
             MaintenanceSourceOrderAssignment.project_id.in_(allowed_project_ids)
@@ -2345,8 +2355,9 @@ def _project_order_salesperson(db: Session, project_id: str) -> str | None:
     调用方仅可在 canonical salesperson 未人工覆盖时使用这个遗留兜底值。
     """
     from app.services import maintenance_demands
+    from app.services.query_filters import active_orders
 
-    rows = db.execute(
+    rows = db.execute(active_orders(
         select(FMaintenanceOrder.salesperson, func.count())
         .join(MaintenanceSourceOrderAssignment,
               (MaintenanceSourceOrderAssignment.source_order_id
@@ -2360,8 +2371,9 @@ def _project_order_salesperson(db: Session, project_id: str) -> str | None:
         )
         .group_by(FMaintenanceOrder.salesperson)
         .order_by(func.count().desc())
-        .limit(1)
-    ).all()
+        .limit(1),
+        FMaintenanceOrder,
+    )).all()
     return rows[0][0] if rows else None
 
 
@@ -5042,8 +5054,9 @@ def _expected_part_ids(db: Session, project_id: str) -> set[int]:
     """Active 03 entities whose current assignment belongs to this project."""
 
     from app.services import maintenance_demands
+    from app.services.query_filters import active_orders
 
-    return set(db.scalars(
+    return set(db.scalars(active_orders(
         select(FMaintenanceLine.id)
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .join(
@@ -5056,8 +5069,9 @@ def _expected_part_ids(db: Session, project_id: str) -> set[int]:
             MaintenanceSourceOrderAssignment.project_id == project_id,
             FMaintenanceLine.is_active.is_(True),
             maintenance_demands.active_demand_condition(),
-        )
-    ).all())
+        ),
+        FMaintenanceOrder,
+    )).all())
 
 
 def _expected_site_ids(db: Session, project_id: str) -> set[str]:
