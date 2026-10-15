@@ -156,6 +156,8 @@ def _expenses(
 
 
 def _wbdd_lines(db: Session, project_id: str) -> list[tuple[FMaintenanceOrder, FMaintenanceLine]]:
+    from app.services.maintenance_export_ordering import wbdd_export_order_by
+
     stmt = (
         select(FMaintenanceOrder, FMaintenanceLine)
         .join(
@@ -170,7 +172,7 @@ def _wbdd_lines(db: Session, project_id: str) -> list[tuple[FMaintenanceOrder, F
             # 2026-08-19：作废明细行不进工作簿 v3（#55）
             FMaintenanceLine.is_active.is_(True),
         )
-        .order_by(FMaintenanceOrder.order_date, FMaintenanceLine.line_no)
+        .order_by(*wbdd_export_order_by())
     )
     return list(db.execute(active_orders(stmt, FMaintenanceOrder)).all())
 
