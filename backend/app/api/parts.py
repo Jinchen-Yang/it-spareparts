@@ -3,9 +3,10 @@
 /parts/master*（WP1）：采购可新建/编辑备件主数据，require_page('page_master_data') 准入。
 """
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -189,6 +190,7 @@ def pool_references(
 # ---------------- 备件主数据自治（WP1，采购可新建/编辑） ----------------
 
 class PartCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     pn_std: str
     description: str | None = None
     brand: str | None = None
@@ -199,14 +201,44 @@ class PartCreate(BaseModel):
     force: bool = False   # 确认无重复后强制新建（跳过近似提示）
 
 
+class PartEditIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    part_id: int = Field(gt=0)
+    pn_std: str
+    status: Literal["active", "merged"]
+    merged_into_id: int | None
+
+
+class PartSpecBaseline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str
+    unit: str | None
+    numeric_value: str | None
+    source: str
+
+
+class PartEditBaseline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version_mode: Literal["field_snapshot"]
+    part_id: int = Field(gt=0)
+    pn_std: str
+    identity: PartEditIdentity
+    fields: dict[str, str | None]
+    specs: dict[str, PartSpecBaseline]
+
+
 class PartEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    part_id: int = Field(gt=0)
     pn_std: str           # 定位被编辑的型号
+    base_snapshot: PartEditBaseline
     description: str | None = None
     brand: str | None = None
     category_major: str | None = None
     category_minor: str | None = None
     machine_or_part: str | None = None
     unit: str | None = None
+    spec_updates: dict | None = None
 
 
 @router.get("/master/check")
@@ -250,15 +282,45 @@ def master_edit_part(
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
     """编辑任意型号的人工字段（描述/品类/品牌/单位/类型）；改过的字段重导不覆盖。"""
-    updates = body.model_dump(exclude={"pn_std"}, exclude_unset=True)
+    updates = body.model_dump(exclude={"pn_std", "part_id", "base_snapshot", "spec_updates"},
+                              exclude_unset=True)
     try:
-        res = master_edit.edit_part(db, pn_std=body.pn_std, updates=updates,
+        res = master_edit.edit_part(db, pn_std=body.pn_std, part_id=body.part_id,
+                                    base_snapshot=body.base_snapshot.model_dump(), updates=updates,
+                                    spec_updates=body.spec_updates,
                                     operated_by=(ctx.user_id or ctx.role))
+    except master_edit.MasterEditConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
     return res
+
+
+@router.get("/master/{part_id}/edit-state")
+def master_edit_state(
+    part_id: int,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    result = master_edit.get_part_edit_state(db, part_id)
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "型号不存在")
+    return result
+
+
+@router.get("/master/{part_id}/edit-history")
+def master_edit_history(
+    part_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    before_id: int | None = Query(None, gt=0),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    return master_edit.list_part_edit_history(db, part_id, limit=limit, before_id=before_id)
 
 
 @router.get("/master/categories")

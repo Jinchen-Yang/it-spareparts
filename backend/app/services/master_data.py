@@ -51,6 +51,27 @@ def normalize_brand(raw: str | None) -> str | None:
     return s
 
 
+def bind_part_dictionaries(db: Session, part: DimPart, fields) -> None:
+    """人工命令中重绑当前文本对应的字典（包括已有 ID 和显式清空）。不提交。"""
+    if "brand" in fields:
+        norm = normalize_brand(part.brand)
+        part.brand_id = None
+        if norm is not None:
+            db.execute(pg_insert(Brand).values(
+                brand_name=part.brand, normalized_name=norm
+            ).on_conflict_do_nothing(index_elements=[Brand.normalized_name]))
+            part.brand_id = db.scalar(select(Brand.id).where(Brand.normalized_name == norm))
+    if {"category_major", "category_minor"}.intersection(fields):
+        part.category_id = None
+        if part.category_major:
+            db.execute(pg_insert(ProductCategory).values(
+                category_major=part.category_major, category_minor=part.category_minor
+            ).on_conflict_do_nothing(constraint="uq_category_major_minor"))
+            part.category_id = db.scalar(select(ProductCategory.id).where(
+                ProductCategory.category_major == part.category_major,
+                ProductCategory.category_minor.is_not_distinct_from(part.category_minor)))
+
+
 def backfill_brands(db: Session) -> dict:
     """distinct 品牌文本 → 归一 seed brands → 回填 dim_part.brand_id（只填 NULL）。"""
     raw_brands = db.execute(

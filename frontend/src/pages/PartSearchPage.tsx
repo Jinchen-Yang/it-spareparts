@@ -630,6 +630,7 @@ export default function PartSearchPage() {
         open={inlineEditPn !== null}
         canEdit={canEditPartDetails}
         contextKey={`${urlPartId ?? ""}:${urlPn ?? ""}`}
+        partId={ov?.part.id ?? null}
         pn={inlineEditPn}
         onClose={() => setInlineEditPn(null)}
         onSaved={() => ov ? loadOverview({ part_id: ov.part.id }) : undefined}

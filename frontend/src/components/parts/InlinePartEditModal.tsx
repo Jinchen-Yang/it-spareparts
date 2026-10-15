@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Alert, Input, Modal, Select, Space, message } from "antd";
-import { masterCategories, masterEdit, type CategoryNode, type MasterFields } from "../../api";
-import { fetchOverview } from "../../api/search";
+import { type CategoryNode, type MasterFields } from "../../api";
+import {
+  fetchMasterEditCategories, fetchMasterEditState, fetchOverview, masterEditConflictLines, masterEditErrorMessage, saveMasterEdit,
+  type MasterEditPayload, type MasterEditSnapshot,
+} from "../../api/search";
 
 type EditablePart = Required<Pick<MasterFields, "description" | "category_major" | "category_minor">> & {
   pn_std: string;
@@ -11,6 +14,7 @@ interface Props {
   open: boolean;
   canEdit: boolean;
   contextKey: string;
+  partId?: number | null;
   pn: string | null;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
@@ -26,16 +30,20 @@ const normalized = (value: string | null | undefined) => {
  * 只开放甲方本次明确提出的描述与两级品类，不复制完整主数据页的其它能力。
  */
 export default function InlinePartEditModal({
-  open, canEdit, contextKey, pn, onClose, onSaved,
+  open, canEdit, contextKey, partId, pn, onClose, onSaved,
 }: Props) {
   const [form, setForm] = useState<EditablePart | null>(null);
   const [initial, setInitial] = useState<EditablePart | null>(null);
+  const [baseline, setBaseline] = useState<MasterEditSnapshot | null>(null);
   const [categories, setCategories] = useState<CategoryNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [conflictLines, setConflictLines] = useState<string[]>([]);
   const loadSeq = useRef(0);
   const sessionSeq = useRef(0);
+  const mountedToken = useRef(localStorage.getItem("token"));
   const sessionToken = useRef<string | null>(null);
   // 独立于父组件再取一次挂载时权限快照：既防父级误传 true，也不让后续
   // localStorage 篡改改变守卫结果。token 变化会由 App 重挂整棵页面树。
@@ -52,38 +60,67 @@ export default function InlinePartEditModal({
 
   useLayoutEffect(() => {
     sessionSeq.current += 1;
-    sessionToken.current = permittedOpen ? localStorage.getItem("token") : null;
+    ++loadSeq.current;
+    sessionToken.current = permittedOpen ? mountedToken.current : null;
     setSaving(false);
-    return () => { sessionSeq.current += 1; };
-  }, [permittedOpen, pn, contextKey]);
+    setSaveError(null);
+    setConflictLines([]);
+    return () => { sessionSeq.current += 1; ++loadSeq.current; };
+  }, [permittedOpen, partId, pn, contextKey]);
 
   const load = async () => {
     if (!canEditNow() || !sessionToken.current
       || localStorage.getItem("token") !== sessionToken.current || !pn) return;
     const seq = ++loadSeq.current;
+    const session = sessionSeq.current;
+    const authToken = sessionToken.current;
+    const isCurrent = () => seq === loadSeq.current && session === sessionSeq.current
+      && localStorage.getItem("token") === authToken;
     setLoading(true);
     setLoadError(null);
+    setSaveError(null);
+    setConflictLines([]);
     setForm(null);
+    setInitial(null);
+    setBaseline(null);
     try {
-      const [overview, categoryResp] = await Promise.all([
-        fetchOverview({ pn_std: pn }),
-        masterCategories(),
+      const [snapshot, categoryResp] = await Promise.all([
+        (async () => {
+          let stableId = partId;
+          // 兼容只携 PN 的旧调用者也不能把合并/别名重定向当作编辑目标。
+          if (stableId == null) {
+            const overview = await fetchOverview({ pn_std: pn }, authToken);
+            if (!isCurrent()) return null;
+            if (overview.part.pn_std !== pn) {
+              throw new Error("型号身份已变化，请关闭后重新打开编辑");
+            }
+            stableId = overview.part.id;
+          }
+          const state = await fetchMasterEditState(stableId, authToken);
+          if (state.part_id !== stableId || state.pn_std !== pn
+            || state.identity.status !== "active") {
+            throw new Error("型号身份已变化，请关闭后重新打开编辑");
+          }
+          return state;
+        })(),
+        fetchMasterEditCategories(authToken),
       ]);
-      if (seq !== loadSeq.current) return;
+      if (!isCurrent() || !snapshot) return;
       const next: EditablePart = {
-        pn_std: overview.part.pn_std,
-        description: overview.part.description ?? null,
-        category_major: overview.part.category_major ?? null,
-        category_minor: overview.part.category_minor ?? null,
+        pn_std: snapshot.pn_std,
+        description: snapshot.fields.description,
+        category_major: snapshot.fields.category_major,
+        category_minor: snapshot.fields.category_minor,
       };
+      setBaseline(snapshot);
       setForm(next);
       setInitial(next);
-      setCategories(categoryResp.data.categories || []);
+      setCategories(categoryResp);
     } catch (error: any) {
-      if (seq !== loadSeq.current) return;
-      setLoadError(error?.response?.data?.detail || "型号信息加载失败，请重试");
+      if (!isCurrent()) return;
+      setLoadError(masterEditErrorMessage(error, error?.message || "型号信息加载失败，请重试"));
     } finally {
-      if (seq === loadSeq.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
@@ -93,11 +130,13 @@ export default function InlinePartEditModal({
       ++loadSeq.current;
       setForm(null);
       setInitial(null);
+      setBaseline(null);
       setLoadError(null);
+      setSaveError(null);
     }
     // pn 变化必须重新加载；load 只使用当前 pn。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permittedOpen, pn]);
+  }, [permittedOpen, partId, pn, contextKey]);
 
   const minorOptions = (categories.find((c) => c.name === form?.category_major)?.children || [])
     .map((child) => ({ label: child.name, value: child.name }));
@@ -105,24 +144,28 @@ export default function InlinePartEditModal({
   const save = async () => {
     const authToken = sessionToken.current;
     if (!canEditNow() || !authToken || localStorage.getItem("token") !== authToken
-      || !form || !initial) return;
+      || !form || !initial || !baseline || saving) return;
     const session = sessionSeq.current;
     const isCurrentSession = () => session === sessionSeq.current && canEditNow()
       && localStorage.getItem("token") === authToken;
-    const payload: MasterFields & { pn_std: string } = { pn_std: form.pn_std };
+    const payload: MasterEditPayload = {
+      part_id: baseline.part_id, pn_std: baseline.pn_std, base_snapshot: baseline,
+    };
     (["description", "category_major", "category_minor"] as const).forEach((key) => {
       const before = normalized(initial[key]);
       const after = normalized(form[key]);
       if (before !== after) payload[key] = after;
     });
-    if (Object.keys(payload).length === 1) {
+    if (Object.keys(payload).length === 3) {
       message.info("没有改动");
       return;
     }
 
     setSaving(true);
+    setSaveError(null);
+    setConflictLines([]);
     try {
-      const { data } = await masterEdit(payload, authToken);
+      const { data } = await saveMasterEdit(payload, authToken);
       if (!isCurrentSession()) return;
       message.success(`已保存（${data.updated.join("、")} 将不会被重导覆盖）`);
       onClose();
@@ -136,7 +179,8 @@ export default function InlinePartEditModal({
       }
     } catch (error: any) {
       if (isCurrentSession()) {
-        message.error(error?.response?.data?.detail || "保存失败，请重试");
+        setSaveError(masterEditErrorMessage(error, "保存失败，请重试"));
+        setConflictLines(masterEditConflictLines(error));
       }
     } finally {
       if (isCurrentSession()) setSaving(false);
@@ -161,6 +205,11 @@ export default function InlinePartEditModal({
           showIcon
           message="人工修改会记录操作人；保存后的字段不会被氚云重导覆盖。"
         />
+        {saveError && <Alert type="error" showIcon message={saveError}
+          description={<div style={{ overflowWrap: "anywhere" }}>
+            {conflictLines.map((line, index) => <div key={index} style={{ whiteSpace: "pre-wrap" }}>{line}</div>)}
+            <div>草稿已保留；核对后可先复制草稿，再重新打开获取最新资料。</div>
+          </div>} />}
         {loadError ? (
           <Alert
             type="error"
@@ -180,7 +229,7 @@ export default function InlinePartEditModal({
                 id="inline-part-description"
                 value={form?.description ?? ""}
                 rows={3}
-                disabled={loading || !form}
+                disabled={loading || saving || !form}
                 placeholder="输入便于采购、销售和库房识别的备件描述"
                 onChange={(event) => setForm((current) => current
                   ? { ...current, description: event.target.value }
@@ -196,7 +245,7 @@ export default function InlinePartEditModal({
                   allowClear
                   showSearch
                   loading={loading}
-                  disabled={loading || !form}
+                  disabled={loading || saving || !form}
                   value={form?.category_major ?? undefined}
                   placeholder="选择一级品类"
                   options={categories.map((c) => ({ label: c.name, value: c.name }))}
@@ -212,7 +261,7 @@ export default function InlinePartEditModal({
                   style={{ width: "100%" }}
                   allowClear
                   showSearch
-                  disabled={loading || !form?.category_major}
+                  disabled={loading || saving || !form?.category_major}
                   value={form?.category_minor ?? undefined}
                   placeholder="选择二级品类"
                   options={minorOptions}
