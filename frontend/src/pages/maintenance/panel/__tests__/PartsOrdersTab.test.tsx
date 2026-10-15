@@ -69,7 +69,7 @@ const stat = <T,>(value: T) => ({ state: "ready" as const, value, as_of: null })
 const notImported = () => ({ state: "not_imported" as const, value: null, as_of: null });
 
 /** 需求单行：WBDD 单号与项目名都不含合同号——旧「包含匹配」在这种数据上永远为空。 */
-const orderRow = (no: string, contract: string) => ({
+const orderRow = (no: string, contract: string): BoardOrderRow => ({
   source_order_id: `RAW-${no}`,
   order_no: no,
   order_date: "2026-08-01",
@@ -183,6 +183,22 @@ afterEach(() => {
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
+  it("项目需求单摘要失败时明确提示，单号、成本和联系信息仍可查看", async () => {
+    const row: BoardOrderRow = {
+      ...orderRow("WBDD-1", "XSDD-1"),
+      receiver: "合成收货人",
+      return_summary: null,
+      return_summary_error: "summary_unavailable",
+    };
+    mocks.getBoardProjectOrders.mockResolvedValue({ data: { rows: [row], total: 1, page: 1, page_size: 200 } });
+    renderTab();
+    await screen.findByText("摘要暂不可用");
+    const order = within(orderLink("WBDD-1")!.closest("tr")!);
+    expect(order.getByText("摘要暂不可用")).toBeInTheDocument();
+    expect(order.getByText("合成收货人")).toBeInTheDocument();
+    expect(order.getByText("100.00")).toBeInTheDocument();
+    expect(order.queryByText(/已收|差额|无退回/)).not.toBeInTheDocument();
+  });
   it("项目需求单展示未扣免返的原始下单、实收和差额，不发布返还状态", async () => {
     const row: BoardOrderRow = {
       ...orderRow("WBDD-1", "XSDD-1"),

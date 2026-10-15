@@ -11,7 +11,7 @@ import {
 } from "../../api/maintenanceDemands";
 import DemandLineBatchEdit from "./DemandLineBatchEdit";
 import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
-import type { DemandReturnSummary } from "../../api/maintenanceReturnRequestSummary";
+import type { DemandReturnSummary, DemandReturnSummaryError } from "../../api/maintenanceReturnRequestSummary";
 
 const { Text } = Typography;
 
@@ -84,6 +84,7 @@ export default function DemandLinesEditor({
 }) {
   const [rows, setRows] = useState<DemandLineRow[]>([]);
   const [returnSummary, setReturnSummary] = useState<DemandReturnSummary | null>(null);
+  const [returnSummaryError, setReturnSummaryError] = useState<DemandReturnSummaryError>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<DemandLineRow | null>(null);
@@ -119,11 +120,13 @@ export default function DemandLinesEditor({
     setLoading(true);
     setError(null);
     setReturnSummary(null);
+    setReturnSummaryError(undefined);
     try {
       const resp = await listDemandLines(sourceOrderId);
       if (seq.current !== current) return null;
       setRows(resp.data.items);
       setReturnSummary(resp.data.return_summary ?? null);
+      setReturnSummaryError(resp.data.return_summary_error);
       setSelectedRowKeys((current) => current.filter((key) =>
         resp.data.items.some((row) => row.raw_line_id === key)));
       return resp.data.items;
@@ -426,7 +429,7 @@ export default function DemandLinesEditor({
       maskClosable={false}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <ReturnStatusColumn summary={returnSummary} />
+        <ReturnStatusColumn summary={returnSummary} error={returnSummaryError} />
         {!readOnly ? <Text type="secondary" style={{ fontSize: 12 }}>
           可修改数量、退货数量、SN、描述和型号；导入遇到已修改字段会按冲突规则处理；
           撤销可恢复该字段首次手工修改前的值。成本列与单头信息请走既有通道。

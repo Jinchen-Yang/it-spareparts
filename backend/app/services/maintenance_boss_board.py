@@ -888,7 +888,10 @@ def _budget_item(project, budget: Decimal, bundle: dict) -> dict | None:
 def _pending_return_item(
     project, demand: dict, facts: dict | None, rkd_ready: bool
 ) -> dict | None:
-    """③待返件多。
+    """③待返件多（既有关注项）。
+
+    P4 尚未接入 #370 的需求单数量摘要。本段保留独立的旧关注项口径，
+    不能作为 D-31 第 8 款方案 A 已发布的新待返结论；后续口径收敛另行处理。
 
     返件率分子 = **返件类**回收（维保拆旧返件＋旧库退返 → RKD 事实 returned_bad），
     分母 = 需求单「需求」数量（业务 2026-08-16 指定，不是领用列）。
@@ -2405,10 +2408,12 @@ def project_orders(
     # API 已校验项目权限且每页最多 200 单；只为当前页批量富化。
     return_summary_error = None
     try:
-        return_summaries = summarize_demand_returns(
-            db, source_order_ids=[order.raw_order_id for order in rows],
-            allowed_project_ids=None if unassigned else {project_id},
-        )
+        # Connection savepoint 隔离数据库错误，不隐式 flush 或回滚主体事务。
+        with db.no_autoflush, db.connection().begin_nested():
+            return_summaries = summarize_demand_returns(
+                db, source_order_ids=[order.raw_order_id for order in rows],
+                allowed_project_ids=None if unassigned else {project_id},
+            )
     except ReturnSummaryError:
         logger.exception(
             "project orders return summary unavailable",

@@ -10,6 +10,16 @@ const summary: DemandReturnSummary = {
 };
 afterEach(cleanup);
 describe("整单数量展示（方案 A）", () => {
+  it("摘要故障明确提示暂不可用，即使残留数量也不展示为当前结果", () => {
+    const { container, rerender } = render(<ReturnStatusColumn summary={summary} error="summary_unavailable" />);
+    expect(screen.getByText("摘要暂不可用")).toBeVisible();
+    expect(screen.queryByText(/已收|差额|超额/)).not.toBeInTheDocument();
+    expect(screen.queryByText("—（待核对）")).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/无退回|已返|未返|收齐/);
+    rerender(<ReturnStatusColumn summary={summary} />);
+    expect(screen.queryByText("摘要暂不可用")).not.toBeInTheDocument();
+    expect(screen.getByText("已收 1.25 / 下单 5")).toBeVisible();
+  });
   it("方案 A 仅展示原始下单、已收及差额，不发布返还状态或免返剔除结论", () => {
     const { container } = render(<ReturnStatusColumn summary={summary} />);
     expect(screen.getByText("已收 1.25 / 下单 5")).toBeVisible();
@@ -49,6 +59,17 @@ describe("整单数量展示（方案 A）", () => {
     expect(screen.getByText("下单数量格式无效")).toBeVisible();
     expect(screen.getByText("已收 1.25 / 下单 —")).toBeVisible();
     expect(screen.getByText("差额 —")).toBeVisible();
+  });
+  it("逻辑作废墓碑用独立原因说明，不误报摘要故障或源状态", () => {
+    render(<ReturnStatusColumn summary={{ ...summary, effective: false,
+      pending_qty: null, remaining_qty: null, over_received_qty: null,
+      basis_state: "inactive", reason_codes: ["tombstoned_order"],
+    }} />);
+    expect(screen.getByText("需求单已逻辑作废")).toBeVisible();
+    expect(screen.getByText("已收 1.25 / 下单 5")).toBeVisible();
+    expect(screen.getByText("差额 —")).toBeVisible();
+    expect(screen.queryByText("摘要暂不可用")).not.toBeInTheDocument();
+    expect(screen.queryByText("需求单当前无效")).not.toBeInTheDocument();
   });
   it("原始数量为零时仍照服务端显示，页面不推导无需核对", () => {
     const { container } = render(<ReturnStatusColumn summary={{ ...summary, demand_qty: "0.000", received_qty: "0.000", pending_qty: "0.000", remaining_qty: "0.000" }} />);

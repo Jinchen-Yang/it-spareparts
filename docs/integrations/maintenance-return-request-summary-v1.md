@@ -51,7 +51,7 @@ def get_return_requests_outstanding_summary(
 | `remaining_qty` | 与 P 完全相同的纯数量兼容别名；不表示当前可操作，不是录入授权或并发容量令牌 |
 | `over_received_qty` | 仅 `basis_state=complete`（有效且基数完整、N>0、无归属冲突）时为 `max(R-N,0)`，否则 `null`；不得截断 R |
 | `basis_state` | `complete / incomplete / inactive / ownership_conflict`，是读取结果的有效性与完整性，不是返还状态或持久业务状态 |
-| `reason_codes` | 去重原因数组：`no_active_lines`、`negative_demand_qty`、`invalid_demand_qty`、`zero_demand_qty`、`inactive_order`、`unassigned_order`、`inactive_project`、`ownership_conflict`、`undated_receipts` |
+| `reason_codes` | 去重原因数组：`no_active_lines`、`negative_demand_qty`、`invalid_demand_qty`、`zero_demand_qty`、`inactive_order`、`tombstoned_order`、`unassigned_order`、`inactive_project`、`ownership_conflict`、`undated_receipts` |
 | `undated_receipt_qty` | 当前累计中业务日期缺失的收货数量；计入 R 并提示，缺日期本身不使当前累计失真 |
 
 不存在归属冲突且没有收货时 R=`0.000`。**需求数量 NULL 的明细按 0 计入 N**，不再因此置 N=`null`；任何有效明细有负量、合计为非有限数或无有效明细时 N=`null`，分别给出 `negative_demand_qty`、`invalid_demand_qty` 或 `no_active_lines`，不以头自报值或已知部分补齐。有有效明细且全部 NULL 时 N=`0.000`，原因是 `zero_demand_qty`。N=0 仍为不完整基数。数量为 `Decimal | None`，JSON 一律十进制三位字符串或 `null`，不输出浮点数；该接口不提供金额。
@@ -90,6 +90,11 @@ P4 本轮不接待返结论，不能据 `pending_qty/remaining_qty`、零差额�
 快照入口在调用方建立的只读 `REPEATABLE READ` 事务内完成完整筛选集、全部 500 ID 批次和独立未关联桶读取；单批仍用单条聚合 SELECT。它先校验事务条件，不能在已有查询后悄悄切换隔离级别；不满足则拒绝。`as_of` 在该事务内取得一次并复用于整个响应。这样明确采用 P1 的分块方式满足 P4 的同一快照要求，不声称跨批只有一条 SQL。权限及详情能力查询可另行发生，不能据此宣称整个 HTTP 只有一条 SQL。
 
 两个入口只读业务事实：无 FOR UPDATE、无容量锁、不写审计、不 commit/rollback、不推进 version/revision，并避免隐式 autoflush。调用方事务若有待写事实，应显式 flush 后再选择合适读取方式，不能靠汇总暗中写库。写侧必须先按 P1 容量协议加锁并复验，snapshot 不是并发容量保证。
+
+可降级的页面富化由调用方在 Connection savepoint 中执行（不使用会无条件 flush 的
+`Session.begin_nested()`）。成功释放 savepoint；查询失败只回滚该 savepoint，使主体后续查询
+仍可执行，不回滚整个会话事务。此处仅多出事务控制语句，按单入口本身仍只有一条聚合 SELECT。
+快照入口保持失败即拒绝，不回退拼接数量。
 
 快照仅供内部数量消费。后续 P4 适配层须负责登录鉴权、客户/成本参数门禁、有界序列化、详情跳转能力与访问日志，本轮不据此发布待返结论。统计可见不授予项目详情访问权；台账跳转还需现行发布 flag 和详情权限。访问日志可沿用独立 best-effort 短事务，不属于本函数的业务写入或事实更正审计。
 
@@ -162,7 +167,11 @@ P4 本轮不接待返结论，不能据 `pending_qty/remaining_qty`、零差额�
 
 `unsupported_summary_filter`（建议 422）与 `summary_permission_denied`（建议 403）仅保留为后续 P4 适配层的筛选／权限错误约束，不是上述候选 Module 已实现的领域错误码。
 
-**项目内需求单列表降级（`maintenance_boss_board.project_orders`）：** 在鉴权并查询当前页后，按该页稳定 ID 批量富化 `return_summary`。捕获 `ReturnSummaryError` 时用 `logger.exception` 记录异常，各行返回 `return_summary=null`、`return_summary_error="summary_unavailable"`；保留原列表、排序、分页、`total` 与其他列，不因摘要不可用丢行或返回假零。成功时不附 `return_summary_error`；单个 ID 未返回摘要时仅为 `return_summary=null`，不能等同于整批查询异常。消费者显示摘要暂不可用，不能从自报值或旧待返算法补出结论；此处降级不表示快照入口可回退到多版本拼接，也不扩大为捕获全部异常。
+**页面富化降级（`maintenance_boss_board.project_orders`、需求单搜索与详情）：** 在鉴权并查询当前页/单据后，按稳定 ID 批量富化 `return_summary`。捕获 `ReturnSummaryError` 时用 `logger.exception` 记录异常，各行返回 `return_summary=null`、`return_summary_error="summary_unavailable"`；详情在响应顶层返回同样字段。保留 HTTP 200、原列表、排序、分页、`total`、其他列与删除/明细 digest，不因摘要不可用丢行或返回假零。成功时不附 `return_summary_error`；单个 ID 未返回摘要时仅为 `return_summary=null`，不能等同于整批查询异常。消费者显示“摘要暂不可用”并隐藏数量，不能从自报值或旧待返算法补出结论；此处降级不表示快照入口可回退到多版本拼接，也不扩大为捕获全部异常。
+
+有效墓碑使 `header_effective=false`，保留兼容原因 `inactive_order` 并增加
+`tombstoned_order`（需求单已逻辑作废）。源单头单独未生效只有 `inactive_order`；
+恢复墓碑后不再附墓碑原因，是否有效仍须检查源状态、当前归属及项目。
 
 | 提供方／消费者 | 兼容行为 |
 |---|---|
