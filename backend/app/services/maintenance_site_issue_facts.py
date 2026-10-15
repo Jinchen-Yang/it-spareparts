@@ -41,7 +41,26 @@ _LegacyProfile = Literal["v1", "v2", "manual"]
 
 
 class SiteIssueEditError(ValueError):
-    """Invalid fact intent or a stale/foreign entity; caller must roll back."""
+    """Stable domain error; HTTP adapters return ``detail`` after rollback."""
+
+    _STATUS_CODES = {
+        "site_issue_edit_invalid_fields": 422,
+        "site_issue_edit_identity_conflict": 409,
+        "site_issue_edit_inactive": 409,
+        "site_issue_edit_source_blocked": 409,
+        "site_issue_edit_permission_denied": 403,
+        "site_issue_edit_demand_project_mismatch": 409,
+    }
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = self._STATUS_CODES[code]
+
+    @property
+    def detail(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
 
 
 @dataclass(frozen=True)
@@ -122,13 +141,13 @@ def _assign_line(
 
 
 def _validated_changes(
-    db: Session, *, line: MaintenanceSiteIssueLine, patch: Mapping[str, object]
+    db: Session, *, project_id: str, line: MaintenanceSiteIssueLine, patch: Mapping[str, object]
 ) -> dict[str, object]:
     if set(patch) - _LINE_FIELDS:
-        raise SiteIssueEditError("包含不可编辑的领用明细字段")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "包含不可编辑的领用明细字段")
     result = dict(patch)
     if "no_return" in result and result["no_return"] is not None and not isinstance(result["no_return"], bool):
-        raise SiteIssueEditError("是否免返只能为是、否或空")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "是否免返只能为是、否或空")
     if "quantity" in result:
         try:
             quantity = Decimal(str(result["quantity"]))
@@ -137,30 +156,44 @@ def _validated_changes(
             if quantity != quantity.quantize(Decimal("0.001")):
                 raise ValueError
         except (ArithmeticError, ValueError, TypeError) as exc:
-            raise SiteIssueEditError("领用数量必须是最多三位小数的正数") from exc
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用数量必须是最多三位小数的正数") from exc
         result["quantity"] = quantity
     if "pn" in result and (not isinstance(result["pn"], str) or not result["pn"].strip() or len(result["pn"]) > 128):
-        raise SiteIssueEditError("领用 PN 无效")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用 PN 无效")
     if "part_id" in result and (isinstance(result["part_id"], bool) or not isinstance(result["part_id"], int)):
-        raise SiteIssueEditError("领用备件身份无效")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用备件身份无效")
     part_changed = "part_id" in result and result["part_id"] != line.part_id
     pn_changed = "pn" in result and result["pn"] != line.pn
     if part_changed or pn_changed:
         part_id = result.get("part_id", line.part_id)
         if isinstance(part_id, bool) or not isinstance(part_id, int):
-            raise SiteIssueEditError("领用备件身份无效")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用备件身份无效")
         part = db.get(DimPart, part_id)
         if part is None or part.status == "merged" or part.is_excluded:
-            raise SiteIssueEditError("领用备件不存在或不可选")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用备件不存在或不可选")
         if part_changed and "pn" not in result:
-            raise SiteIssueEditError("变更备件身份必须同时提供 PN")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "变更备件身份必须同时提供 PN")
         if result.get("pn", line.pn) != part.pn_std:
-            raise SiteIssueEditError("领用 PN 与备件身份不一致")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用 PN 与备件身份不一致")
     for key in ("serial_number", "demand_order_no", "remark"):
         if key in result and result[key] is not None and not isinstance(result[key], str):
-            raise SiteIssueEditError("领用文本字段无效")
-    if result.get("demand_order_no") and len(result["demand_order_no"]) > 64:
-        raise SiteIssueEditError("关联需求单号过长")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用文本字段无效")
+    if "demand_order_no" in result:
+        demand_no = result["demand_order_no"]
+        demand_no = (demand_no.strip() or None) if demand_no is not None else None
+        if demand_no is not None:
+            if len(demand_no) > 64:
+                raise SiteIssueEditError("site_issue_edit_invalid_fields", "关联需求单号过长")
+            # Manual commands already use this authoritative assignment check.
+            # Import lazily because that adapter imports this shared primitive.
+            from app.services.maintenance_manual_site_issue import _resolve_demand_project
+            from app.services.maintenance_project_operations import MaintenanceOperationError
+
+            try:
+                _resolve_demand_project(db, project_id=project_id, demand_order_no=demand_no)
+            except MaintenanceOperationError as exc:
+                raise SiteIssueEditError("site_issue_edit_demand_project_mismatch", str(exc)) from exc
+        result["demand_order_no"] = demand_no
     return result
 
 
@@ -173,8 +206,10 @@ def apply_locked_site_issue_edits(
 ) -> SiteIssueEditResult:
     """Apply an existing-line patch under caller-held locks and checked CAS.
 
-    No locks, commit, rollback, workbook bump, command receipt or lifecycle
-    transitions occur here. On failure the caller rolls back its whole command.
+    The caller supplies the lock prefix; existing obligation-correction locks
+    remain in its downstream service. No commit, rollback, workbook bump,
+    command receipt or lifecycle transitions occur here. On failure the caller
+    rolls back its whole command.
     ``before``/``after`` include full fact/cost evidence for the changed set.
     In the default patch protocol date/number edits reprice the whole issue:
     the caller must already hold all active line locks. That protocol rejects
@@ -184,27 +219,29 @@ def apply_locked_site_issue_edits(
     """
     profile = legacy_context.profile if legacy_context is not None else None
     if legacy_context is not None and profile not in {"v1", "v2", "manual"}:
-        raise SiteIssueEditError("未知领用编辑协议")
-    if issue.project_id != project.project_id or (profile is None and not project.is_active):
-        raise SiteIssueEditError("领用单不属于当前有效项目")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "未知领用编辑协议")
+    if issue.project_id != project.project_id:
+        raise SiteIssueEditError("site_issue_edit_identity_conflict", "领用单不属于当前项目")
+    if profile is None and (not project.is_active or issue.normalized_status == "void"):
+        raise SiteIssueEditError("site_issue_edit_inactive", "项目或领用单已作废或停用")
     if profile is None and (issue.source not in _SOURCES or issue.normalized_status not in {"confirmed", "corrected"}):
-        raise SiteIssueEditError("只有已确认或已更正的领用事实可编辑")
+        raise SiteIssueEditError("site_issue_edit_source_blocked", "只有已确认或已更正的领用事实可编辑")
     if profile is None and (not isinstance(operated_by, str) or not operated_by.strip() or len(operated_by) > 64
             or not isinstance(reason, str) or not reason.strip()):
-        raise SiteIssueEditError("领用更正需要实名操作者与原因")
+        raise SiteIssueEditError("site_issue_edit_permission_denied", "领用更正需要实名操作者与原因")
     headers = dict(header_changes or {})
     if set(headers) - _HEADER_FIELDS:
-        raise SiteIssueEditError("包含不可编辑的领用单头字段")
+        raise SiteIssueEditError("site_issue_edit_invalid_fields", "包含不可编辑的领用单头字段")
     for key, value in (headers.items() if profile is None else ()):
         if key == "issue_date":
             if type(value) is not date:
-                raise SiteIssueEditError("领用日期无效")
+                raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用日期无效")
         elif value is not None and not isinstance(value, str):
-            raise SiteIssueEditError("领用单头文本无效")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用单头文本无效")
         if key == "issue_no" and (not value or len(value) > 64):
-            raise SiteIssueEditError("领用单号无效")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用单号无效")
         if key in {"receiver", "issued_by", "site_location"} and value is not None and len(value) > (256 if key == "site_location" else 128):
-            raise SiteIssueEditError("领用单头文本过长")
+            raise SiteIssueEditError("site_issue_edit_invalid_fields", "领用单头文本过长")
     lines: dict[str, MaintenanceSiteIssueLine] = {}
     patches = {}
     # Validate every intent before assigning anything; no partial dirty state on
@@ -212,22 +249,24 @@ def apply_locked_site_issue_edits(
     with db.no_autoflush:
         for line_id, patch in sorted(line_changes.items()):
             line = db.get(MaintenanceSiteIssueLine, line_id)
-            if line is None or line.issue_id != issue.issue_id or (profile is None and not line.is_active):
-                raise SiteIssueEditError("领用明细不存在、已作废或不属于本单")
+            if line is None or line.issue_id != issue.issue_id:
+                raise SiteIssueEditError("site_issue_edit_identity_conflict", "领用明细不存在或不属于本单")
+            if profile is None and not line.is_active:
+                raise SiteIssueEditError("site_issue_edit_inactive", "领用明细已作废")
             if profile is None and line.delivery_line_id is not None:
-                raise SiteIssueEditError("发货关联领用须使用原有更正流程")
+                raise SiteIssueEditError("site_issue_edit_source_blocked", "发货关联领用须使用原有更正流程")
             lines[line_id] = line
             if profile is not None:
                 if set(patch) - _LINE_FIELDS:
-                    raise SiteIssueEditError("包含不可编辑的领用明细字段")
+                    raise SiteIssueEditError("site_issue_edit_invalid_fields", "包含不可编辑的领用明细字段")
                 patches[line_id] = dict(patch)
             else:
-                patches[line_id] = _validated_changes(db, line=line, patch=patch)
+                patches[line_id] = _validated_changes(db, project_id=project.project_id, line=line, patch=patch)
         if legacy_context is not None:
             for line_id in legacy_context.requirement_before or {}:
                 line = db.get(MaintenanceSiteIssueLine, line_id)
                 if line is None or line.issue_id != issue.issue_id:
-                    raise SiteIssueEditError("领用明细行不属于本单")
+                    raise SiteIssueEditError("site_issue_edit_identity_conflict", "领用明细行不属于本单")
                 lines[line_id] = line
         reprices_all = profile is None and any(key in headers and headers[key] != getattr(issue, key)
                            for key in ("issue_date", "issue_no"))
@@ -237,7 +276,7 @@ def apply_locked_site_issue_edits(
                 MaintenanceSiteIssueLine.is_active.is_(True),
             ).order_by(MaintenanceSiteIssueLine.line_no, MaintenanceSiteIssueLine.issue_line_id)):
                 if line.delivery_line_id is not None:
-                    raise SiteIssueEditError("发货关联领用须使用原有更正流程")
+                    raise SiteIssueEditError("site_issue_edit_source_blocked", "发货关联领用须使用原有更正流程")
                 lines[line.issue_line_id] = line
     before = {"header": _header_snapshot(issue),
               "lines": {line_id: _line_snapshot(line) for line_id, line in lines.items()}}

@@ -1687,6 +1687,7 @@ def _manual_site_issue_result(operation, *, db: Session, ident: dict, **kwargs):
 
     from app.services import maintenance_manual_site_issue as manual_service
     from app.services import maintenance_project_operations as ops
+    from app.services.maintenance_site_issue_facts import SiteIssueEditError
 
     operator = _real_operator(db, ident)
     try:
@@ -1698,6 +1699,9 @@ def _manual_site_issue_result(operation, *, db: Session, ident: dict, **kwargs):
     except HTTPException:
         db.rollback()
         raise
+    except SiteIssueEditError as exc:
+        db.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from exc
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(

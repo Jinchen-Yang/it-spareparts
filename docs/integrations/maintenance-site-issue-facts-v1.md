@@ -1,21 +1,21 @@
 # 领用事实编辑原语契约 v1
 
-- 版本：`v1.0-draft`。
-- 日期：2026-10-15。
-- 状态：**拟定，尚未实现**。本文定义后续公共原语及消费者职责，不代表当前函数已经存在。
-- 决策：D-31、D-32；提取工作簿共用写链遵循既有 D-01、D-02、D-26、D-28。
-- 唯一提供方：P2／S-B，`backend/app/services/maintenance_site_issue_facts.py`（拟新增）。消费方：P2 的 06 工作簿 Adapter 与 P1／S-A 的网页更正命令。
+- 版本：`v1.0`。
+- 日期：2026-10-16。
+- 状态：#379 已实现公共原语并接入既有 V1／V2 工作簿、page_manual 完整命令；本候选加固审计数量、需求单归属、稳定错误码及相关契约测试。默认局部补丁协议尚无 HTTP 调用方，后续 P1 接入仍须履行本文的调用者职责。
+- 决策：D-31、D-32；提取工作簿共用写链遵循既有 D-01、D-02、D-26、D-28；V2 首次完整回执遵循 [D-38](../decisions/0016-工作簿首次应用回执.md)。
+- 唯一提供方：P2／S-B，`backend/app/services/maintenance_site_issue_facts.py`。现有消费方：V1／V2 的 06 工作簿 Adapter、page_manual 完整命令；默认协议的后续消费方：P1／S-A 网页更正命令。
 
 ## 来源与范围
 
-依据《01-开工计划》§二、§五、《P1 返还台账边界》§2.2、§2.3、§3.6、§4.2及《P2 行级表工作台边界》§2、§4。P2 从现有 06 事实编辑路径提取，并在同一候选把 06 接到本原语；P1 的页内领用编辑必须等该提取先落地，只编排命令，不另写 no_return、成本、版本或事件算法。
+依据《01-开工计划》§二、§五、《P1 返还台账边界》§2.2、§2.3、§3.6、§4.2及《P2 行级表工作台边界》§2、§4。#379 已从现有 06 事实编辑路径提取本原语并接入旧入口；后续 P1 页内领用编辑只编排命令，不另写 no_return、成本、版本或事件算法。
 
 本原语只服务已经授权的人的编辑。运行时 AI 不得据此写采购、销售、库存、项目、领用或申请/审批业务状态。实际返还收货是另一独立事实链，不因领用修改而增减，不按领用行宣称已返；领用登记及更正本身无库存效应。
 
 ## Interface
 
 ```python
-# 拟新增；输入实体已按调用入口协议锁定，字段意图已完成鉴权/CAS验证。
+# 输入实体已按调用入口协议锁定，字段意图已完成鉴权/CAS验证。
 def apply_locked_site_issue_edits(
     db: Session,
     *,
@@ -25,6 +25,7 @@ def apply_locked_site_issue_edits(
     header_changes: Mapping[str, object] | None,
     operated_by: str,
     reason: str,
+    legacy_context: LegacySiteIssueEditContext | None = None,
 ) -> SiteIssueEditResult: ...
 ```
 
@@ -34,6 +35,7 @@ def apply_locked_site_issue_edits(
 | `line_changes` | key 为稳定 `issue_line_id`；值为局部字段补丁，未出现行不动，未出现字段不动；空映射合法无操作 |
 | `header_changes` | `None` 或空映射表示不改单头；只接受既有可编辑字段和归一化字段意图 |
 | `operated_by`、`reason` | 真实实名操作者及非空原因；不接受前端冒认身份；同事务审计可追溯 |
+| `legacy_context` | 默认 `None` 使用局部补丁协议；只有已接入的旧完整命令可传 `v1/v2/manual` 兼容上下文，不能由 HTTP 请求选择 |
 | `SiteIssueEditResult.changed_line_ids` | 实际发生事实、成本证据或版本变化的行 ID，按稳定顺序，不包含原样回传行 |
 | `issue_version`、`line_versions` | 本次完成后权威版本；line_versions 覆盖请求涉及及因单头日期重算实际变化的行；无变化维持原版本 |
 | `before`、`after` | 本次实际更正的单头/明细及必要成本证据快照，供审计与结果核对；不是可直接下发的脱敏 DTO |
@@ -43,6 +45,8 @@ def apply_locked_site_issue_edits(
 ## 字段意图与来源
 
 原语复验行属于本单、来源合法、当前有效、字段白名单及字段值；调用者已校验也不能省略归属和白名单防线。事实字段沿用现有 06 可编辑集合，典型包括 PN/part_id、quantity、SN、no_return、remark；不是开放任意 ORM 列。PN 文本与 part_id 必须按既有身份解析成一致的字段意图，不能直接绑定停用或歧义身份。主数据库 PN 描述、品牌、品类不由领用原语修改。
+
+默认协议对显式提供的 `demand_order_no` 去除首尾空白，空字符串归一为 `None`，表示清空关联；未提供则保留原值。非空单号必须通过既有 `_resolve_demand_project`，以需求单的活跃项目归属验证属于当前项目，不按项目名称、PN 或单号相似度推断。不存在、未归属或跨项目统一返回 `site_issue_edit_demand_project_mismatch`，message 为“关联需求单不属于当前项目，请核对单号或留空”。全部行意图和单头意图在任何赋值前完成验证；即使同次请求还有合法修改，也不得写入事实、版本、审计或事件。旧完整命令继续由原入口完成其归一化与归属校验，不借兼容上下文扩大默认协议的输入范围。
 
 `no_return=true/false/null` 分别为免返／明确应返／恢复按规则；省略表示不修改，null 不能等同省略。继续使用现行标准硬盘默认免返、逐行明确设置优先及已有冻结义务规则。项目免返文本只作提醒，不由本原语解析成事实或开启项目默认开关。
 
@@ -62,7 +66,9 @@ page_manual 保持既有完整预览冻结协议；workbook／legacy 由 P1 的�
 | 审计 | 命令结果、入口访问日志与必要外层业务动作留痕 | P3 写返还要求 correction audit/outbox；原语补齐快照外事实审计，不重写同一更正事件 |
 | workbook revision／提交 | 外层一次 bump（沿根事务按项目去重 helper）、写结果回执、一次 commit；异常 rollback | 原语不 bump、不 commit/rollback、不取调用者规定的上层锁 |
 
-P3 `snapshot` 覆盖 `issue_line_id/no_return/quantity/part_id/is_active/version`；`record_corrections` 只对这些返还要求事实变化推进 line/issue 版本并写 correction event。它不替调用者加锁、校 CAS、赋 no_return、提交或推进工作簿 revision。
+P3 `snapshot` 覆盖 `issue_line_id/no_return/quantity/part_id/is_active/version`；`record_corrections` 只对这些返还要求事实变化推进 line/issue 版本并写 correction event。它不替调用者建立上层锁前缀、校 CAS、赋 no_return、提交或推进工作簿 revision；历史义务兼容分支保留原下游锁，详见下节。
+
+默认协议每次调用只处理一张领用单：有实际变化时恰好写一条 `site_issue_facts_edited`，包含本次单头与全部受影响行的前后快照；无变化写零条。多单据命令应分别调用，每个受影响单据恰好一条；同一事务内不同的实际编辑仍分别留痕，不按 Session 或事务吞掉后续编辑。P3 的 `return_obligation_corrected` 逐行审计和每个返还要求实际变化单据一次 correction outbox 是独立职责，不计为重复的 `site_issue_facts_edited`；只有单头或备注变化不产生 P3 事件。旧 `legacy_context` 路径保留原有外层审计，不额外写默认协议的事实审计；其收口阶段按单汇总原始 P3 快照，包含外层软作废行，每单调用一次 corrections。
 
 SN-only、remark-only、仅成本证据和单头字段变化不在该 snapshot 中。原语必须补相应事实审计和 line/issue 版本，使旧编辑/补价 CAS 失效；P3 已经推进的版本不能由新命令再推进一次，无变化不制造版本。旧完整人工接口在 corrections 后可能还有既有 issue.version 推进，提取必须分别冻结旧接口兼容返回与新接口返回，不能为统一次数顺手破坏旧 CAS。
 
@@ -74,6 +80,8 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 
 06 原有全局数据锁、身份锁、state/project、需求及领用锁前缀和整本原子事务继续由 P2 Adapter 负责。原语不在拿到行锁后再补申请 state/project 等上层锁，不能自行开启另一个事务；多项目锁保持既有确定顺序。P2 接 06 时移除已由原语承担的重复 corrections 调用，保留签名、七字段身份、三路 merge、作废优先及根事务 revision 去重。
 
+原语自身的实体读取、需求单归属校验和常规 P3 correction 路径不发出 `FOR UPDATE`，依赖调用者已持有的锁。若本单已有 `maintenance-return-obligation-interface-v1` 历史事件，P3 继续调用 `maintenance_bad_returns.consume_return_event`，其既有义务行等 `FOR UPDATE` 保持不变。本候选不改变这条历史锁协议；契约验证分别观察常规路径无新增行锁，以及历史分支原有下游行锁和事务回滚，不能把“原语不自取上层锁”解释成所有历史下游路径都无锁。
+
 任一字段、成本、版本或审计失败，调用者回滚同一事务，事实、版本、审计、outbox、命令回执和 revision 不得半提交。先验证全部最终意图再赋 ORM；失败不能留下稍后被无关 commit 偷写的脏实体。不以 SQLite／PGLite 或顺序请求证明此锁序并发正确。
 
 ## 离线 JSON 示例
@@ -82,7 +90,7 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 
 ```json
 {
-  "contract_version": "v1.0-draft",
+  "contract_version": "v1.0",
   "input": {
     "project_id": "example-project",
     "issue_id": "example-issue",
@@ -111,30 +119,68 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 
 ## 错误码与恢复
 
-下表为拟定领域错误，HTTP 映射由调用 Adapter 承担，不改变旧接口已冻结的错误形状。
+`SiteIssueEditError(code, message)` 提供稳定的 `code`、面向人的 `message`、`status_code` 和 `detail={"code": code, "message": message}`；`str(exc)` 仍为 message。调用方按 code 分支，不解析中文文案。原语可抛出的错误如下：
 
-| code | 建议 HTTP | 语义／恢复 |
+| code | HTTP | 语义／恢复 |
 |---|---|---|
 | `site_issue_edit_invalid_fields` | 422 | 未知/只读字段、非法值或不合法字段意图；修正输入 |
-| `site_issue_edit_identity_conflict` | 409 | 行不属于锁定本单、身份/来源漂移；重新读取，不猜匹配 |
-| `site_issue_edit_inactive` | 409 | 单头或行已作废；拒绝复活 |
+| `site_issue_edit_identity_conflict` | 409 | 项目不匹配、行不存在或不属于锁定本单；重新读取，不猜匹配 |
+| `site_issue_edit_inactive` | 409 | 项目停用、单头或行已作废；拒绝复活 |
 | `site_issue_edit_source_blocked` | 409 | 来源/冻结义务/生产守卫不允许本命令；走批准的原入口 |
+| `site_issue_edit_permission_denied` | 403 | 实名操作者或更正原因不满足；不写事实 |
+| `site_issue_edit_demand_project_mismatch` | 409 | 关联需求单不存在、没有本项目的活跃归属或跨项目；核对单号或显式留空 |
+
+现有工作簿 apply 与 page_manual 写入包装器窄捕获 `SiteIssueEditError`，先 rollback，再按 `status_code` 返回既有结构化错误格式：
+
+```json
+{
+  "detail": {
+    "code": "site_issue_edit_demand_project_mismatch",
+    "message": "关联需求单不属于当前项目，请核对单号或留空"
+  }
+}
+```
+
+工作簿 detail 另外保留 `issues: []`。其他既有校验、冲突及权限异常仍沿用原入口的状态码和响应，不在本次统一改形；旧完整命令可能在进入原语前已由原校验拒绝输入。默认局部协议尚无 HTTP 入口，本候选不新增路由；后续 Adapter 应使用同一错误属性和响应结构。
+
+以下四码保留为后续外层命令的拟定职责，当前原语不检测调用者是否实际持锁、不执行 CAS 或幂等回执，也不把任意数据库异常转换成这些码：
+
+| code | 建议 HTTP | 外层职责／恢复 |
+|---|---|---|
 | `site_issue_edit_lock_context_required` | 503 | 调用者未建立必要事务/锁上下文；服务端修正，不能降级无锁写 |
 | `site_issue_edit_audit_unavailable` | 503 | 同事务审计无法保存；回滚，不先写事实再补审计 |
-| `site_issue_edit_permission_denied` | 403 | 外层权限或实名校验不满足；不写事实 |
 | `site_issue_edit_version_conflict` | 409 | 外层 CAS 失败；保留草稿，显式重读新基线后再确认 |
 | `site_issue_edit_idempotency_conflict` | 409 | 外层同键不同载荷/基线；不能换键盲重试 |
 
-原语本身不承诺幂等重放；外层成功结果按既有回执返回，不重复调用原语。网络结果未知时沿同一请求/键核对或回读，不能擅自判定首次未写；成功但刷新失败应保留成功结果，不再次更正。
+原语本身不承诺幂等重放；外层先检查既有回执，不重复调用原语，所有业务审计和事件条数保持不变。手工整单命令持久化完整响应，同键重放返回原回执（仅重放标志变化）；V2 完整回执及历史兼容限制见下节。网络结果未知时沿同一请求/键核对或回读，不能擅自判定首次未写；成功但刷新失败应保留成功结果，不再次更正。
+
+### V2 工作簿首次完整回执
+
+[D-38](../decisions/0016-工作簿首次应用回执.md)固化本次用户“重放返回原回执”的验收要求。V2 apply 在现有 operation 之外，复用 `MaintenanceProjectOperationAudit` 保存首次完整应用响应；不新增迁移，不让事实原语拥有回执职责：
+
+| 命令完成审计字段 | 约束 |
+|---|---|
+| `project_id`、`operated_by` | 与成功 operation 的项目和实名操作者一致 |
+| `entity_type`、`action` | `master_workbook_operation`、`apply_completed` |
+| `entity_id`、`operated_at` | `str(operation.id)`、`operation.created_at`；审计自身 id 独立生成 |
+| `after_json` | 保存 `schema=master_v2_apply_receipt_v1`、`operation_key`、首次完整 `response` 与布尔元数据 `requires_contract_amount_manage`（首次 plan 是否含合同额修改） |
+
+首次 result 的批次号、summary、changes/conflicts/overridden、warnings、voided_rows、接管与 revision 漂移标记等都属于快照。命令完成审计、operation、事实、版本和原有事实审计／事件同事务保存，快照失败则整个应用回滚；完成快照不是 `site_issue_facts_edited`，应独立计数。有快照时重放只把保存 response 的 `replayed` 改为 true，其余字段与首次完全一致；不新增任何业务审计、事件或 operation，不再次推进 revision。
+
+真实 HTTP 同文件重上传先执行原有登录、项目范围与工作簿编辑鉴权，再按文件 SHA、项目和当前实名操作者匹配已成功的应用快照，在重新验证当前事实前返回。SHA 精确匹配首次已校验的文件字节，不解析或信任客户端提交的新计划，也不读取其他项目或操作者的回执。服务端首次 plan 生成的 `requires_contract_amount_manage=true` 时，重放仍需 `_require_contract_amount_manage` 的当前资格；其余原有依赖不放宽，不能从当前已无差异的计划推断无需金额资格。提前查询只读、不加新锁或提交；service 继续保留原有锁前缀、幂等事务锁和 operation 锁，处理同次首次应用与重试竞争。已有快照若 schema、身份或布尔权限标记无效，以 `idempotency_conflict` 拒绝，不能伪装成历史缺快照降级。
+
+历史 operation 缺少完整快照时，HTTP 继续原完整 validate/apply，service 保留既有回执重建兼容路径及防重复执行。此路径无法准确恢复首次完整 response，不能承诺批次号与所有变化／警告相等；不以当前库态生成假历史快照，不做回填。有持久快照的成功应用才具备首次完整回执保证，旧 page_manual 的既有完整回执协议保持。
 
 ## 兼容、交付与验收
 
 | 提供方／消费者 | 兼容要求 |
 |---|---|
-| 当前 main／新 P1 行编辑 | 原语尚未实现；P1-3 不启用，禁止复制另一套事实算法 |
-| P2 提取／既有 06 | 同一 PR 接入并携带往返/冲突/作废/审计/版本/revision 契约测试；未选行、七字段基线和旧文件身份保持 |
+| #379／既有 06 与人工完整命令 | 已接入同一公共原语，通过 `LegacySiteIssueEditContext` 保留旧入口的版本、批量重价、审计及完整单语义 |
+| 本候选／默认局部补丁协议 | 补齐审计数量、需求单归属及稳定错误契约；尚无 HTTP 消费方，不新增路由或放开 Beta |
+| P2 提取／既有 06 | 保留往返/冲突/作废/审计/版本/revision 契约；未选行、七字段基线和旧文件身份保持 |
 | P2 v1／P1 新网页命令 | 同一事实原语，局部补丁；P1 负责权限、CAS、幂等、锁和提交 |
 | P2 v1／旧 page_manual 完整命令 | 保留预览冻结、完整单语义和旧版本兼容，不以局部补丁替代整单协议 |
+| V2 apply／原文件再上传 | 当前鉴权后读取首次持久快照，除 `replayed` 外返回原完整响应；历史无快照保留重建限制，不伪造 |
 | 后续字段扩展 | 先补白名单、字段意图、成本/版本/审计契约及两消费者测试；删除字段或改变副作用须升主版本 |
 
 默认无迁移、无历史业务回填。回退新增页内入口可保留原语及 06 兼容实现；已成功更正事实与审计保留，恢复走人的正常更正，不反向批量写 no_return。schema downgrade 不适用。
@@ -147,5 +193,9 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 | 来源和作废；workbook/legacy/page_manual/site_issue_v2 夹具 | 各来源页内更正，再尝试已作废行或受禁来源 | 支持来源走正确 Adapter；作废不复活；原生失败关闭保持 |
 | 原子性；真实 PostgreSQL 双连接＋故障注入 | 网页与 06/补价/作废并发，审计或重算中途失败 | 无死锁/丢改动/半提交；每项目每根事务 revision 至多一次，审计/outbox 不重复 |
 | 幂等和批量；有权人；同单多行、响应丢失 | 相同键重试，第二行用前行回执版本；409后保留草稿 | 成功不重复执行，冲突不自动升版本覆盖，失败行明确；批量无跨行原子承诺 |
+| 多单审计；默认协议及 V1／V2／人工完整命令合成夹具 | 一次命令改多单多行，另改单头，再重放原请求 | 默认每个变更单据一条 facts 审计；P3 每个返还要求变化单据一次事件；旧外层审计保持；手工命令与有快照的 V2 重放原完整回执，历史 V2 保留兼容 |
+| 需求单归属；同项目、跨项目及未归属需求单夹具 | 显式关联、空白清空，混合合法行与跨项目行提交 | 同项目合法；空白归一为空；跨项目返回稳定 code，所有事实、版本、审计和事件零新增 |
+| 错误和锁；默认协议、旧入口与历史 P3 事件夹具 | 覆盖六个原语错误码及 HTTP 映射，记录执行 SQL | 返回 code/message；失败零写；常规原语路径无 FOR UPDATE，历史下游锁按原协议保留 |
+| V2 原回执；真实 validate/apply 与 HTTP 夹具 | 首次包含单头／多行／接管或作废提示，再原文件重上传；撤销权限或注入快照保存失败 | 成功重放除 replayed 外完整相等且业务审计不增；当前无权拒绝；快照失败业务整体回滚；历史缺快照保留原兼容分支 |
 
-以上均为未来实现验证和用户点按场景。本批只写文档，不宣称原语、测试或业务验收已经完成。
+上述同时列出实现契约与后续用户点按场景。候选实际测试结果见 `R/logs/S-B-379fu.report.md`（R 为本次调研目录），自动化验证不代表用户点按、main 审批或部署已完成。

@@ -11,6 +11,7 @@
 权限沿用既有键：查看金额 `data_profit`，回填上传
 `action_maintenance_expense_collection_upload`（AB-3 已建，不再新增动作键）。
 """
+import hashlib
 import re
 import uuid
 from datetime import date
@@ -52,6 +53,7 @@ from app.services import maintenance_expense_collection_workbook as ec
 from app.services import maintenance_collection_milestone_restore as milestone_restore
 from app.services import maintenance_project_master_workbook as master
 from app.services import maintenance_workbook_renderer
+from app.services.maintenance_site_issue_facts import SiteIssueEditError
 from app.services.maintenance_expense_integrity import normalize_contract_no
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
@@ -832,6 +834,26 @@ async def validate_project_master(
             "sheets": list(plan.sheets), **plan.summary}
 
 
+def _completed_v2_upload(
+    db: Session, *, project_id: str, file_sha256: str,
+    ident: dict, ctx: UserContext,
+) -> dict | None:
+    replay = master.get_project_master_v2_replay(
+        db, project_id=project_id, file_sha256=file_sha256,
+        operated_by=_operator(ident),
+    )
+    if replay is None:
+        return None
+    result, requires_amount = replay
+    if requires_amount:
+        _require_contract_amount_manage(ctx, ident, db=db, project_id=project_id)
+    record_access_log(
+        ctx, "workbook_apply_replay", "maintenance_project_master_workbook",
+        {"project_id": project_id, "replayed": True},
+    )
+    return {"project_id": project_id, **result}
+
+
 @router.post(_MASTER + "/apply")
 async def apply_project_master(
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -854,9 +876,33 @@ async def apply_project_master(
     data, force_takeover = await _read_upload_with_takeover(request)
     try:
         if get_settings().maintenance_project_master_v2_enabled:
-            plan = master.validate_project_master_v2(
-                db, project_id=project_id, data=data, user_ctx=ctx,
-                force_takeover=force_takeover)
+            file_sha256 = hashlib.sha256(data).hexdigest()
+            replay = _completed_v2_upload(
+                db, project_id=project_id, file_sha256=file_sha256,
+                ident=ident, ctx=ctx,
+            )
+            if replay is not None:
+                return replay
+            try:
+                plan = master.validate_project_master_v2(
+                    db, project_id=project_id, data=data, user_ctx=ctx,
+                    force_takeover=force_takeover)
+            except ec.WorkbookError:
+                # Another first apply may commit after our initial lookup.
+                # Current facts can then fail validation before apply's locks.
+                replay = _completed_v2_upload(
+                    db, project_id=project_id, file_sha256=file_sha256,
+                    ident=ident, ctx=ctx,
+                )
+                if replay is not None:
+                    return replay
+                raise
+            replay = _completed_v2_upload(
+                db, project_id=project_id, file_sha256=file_sha256,
+                ident=ident, ctx=ctx,
+            )
+            if replay is not None:
+                return replay
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(
                     ctx, ident, db=db, project_id=project_id)
@@ -883,6 +929,14 @@ async def apply_project_master(
             plan = master.validate(db, project_id=project_id, data=data)
             result = master.apply(db, plan, operated_by=_operator(ident),
                                   import_batch_id=str(uuid.uuid4()))
+    except SiteIssueEditError as exc:
+        db.rollback()
+        record_access_log(
+            ctx, "workbook_apply_failed", "maintenance_project_master_workbook",
+            {"project_id": project_id, "code": exc.code,
+             "message": exc.message[:200]},
+        )
+        raise HTTPException(exc.status_code, {**exc.detail, "issues": []}) from exc
     except ec.WorkbookError as exc:
         db.rollback()
         record_access_log(

@@ -25,6 +25,7 @@ import hmac
 import json
 import re
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -5941,6 +5942,67 @@ def _v2_apply_result(
     }
 
 
+def _v2_stored_apply_result(
+    db: Session, receipt: MaintenanceProjectWorkbookOperation,
+) -> tuple[dict, bool] | None:
+    # The command evidence is append-only. Pin its transaction timestamp as
+    # well as its identity to use the existing project/time audit index.
+    audits = list(db.scalars(select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.project_id == receipt.project_id,
+        MaintenanceProjectOperationAudit.operated_at == receipt.created_at,
+        MaintenanceProjectOperationAudit.entity_type == "master_workbook_operation",
+        MaintenanceProjectOperationAudit.entity_id == str(receipt.id),
+        MaintenanceProjectOperationAudit.action == "apply_completed",
+    )))
+    if not audits:
+        # Historical operations did not save the response. Do not manufacture
+        # a supposedly original receipt from today's facts or backfill history.
+        return None
+    envelope = audits[0].after_json
+    if not isinstance(envelope, dict):
+        raise WorkbookError("idempotency_conflict", "工作簿原回执格式无效")
+    response = envelope.get("response")
+    requires_amount = envelope.get("requires_contract_amount_manage")
+    if (
+        len(audits) != 1
+        or audits[0].operated_by != receipt.operated_by
+        or envelope.get("schema") != "master_v2_apply_receipt_v1"
+        or envelope.get("operation_key") != receipt.operation_key
+        or not isinstance(requires_amount, bool)
+        or not isinstance(response, dict)
+        or response.get("project_id") != receipt.project_id
+        or response.get("applied_by") != receipt.operated_by
+        or response.get("replayed") is not False
+    ):
+        raise WorkbookError("idempotency_conflict", "工作簿原回执与应用身份不一致")
+    return {**deepcopy(response), "replayed": True}, requires_amount
+
+
+def get_project_master_v2_replay(
+    db: Session, *, project_id: str, file_sha256: str, operated_by: str,
+) -> tuple[dict, bool] | None:
+    """Read a completed upload before merging it against current facts.
+
+    The HTTP caller must first enforce its current identity/project/upload
+    permissions, and recheck amount permission when the returned flag is true.
+    Exact bytes are bound to the original successful validation by SHA-256;
+    an in-flight first apply remains invisible and follows the normal locks.
+    This read neither locks nor commits and never exposes another operator's
+    receipt. Operations predating stored responses retain their old path.
+    """
+    receipts = list(db.scalars(select(MaintenanceProjectWorkbookOperation).where(
+        MaintenanceProjectWorkbookOperation.project_id == project_id,
+        MaintenanceProjectWorkbookOperation.file_sha256 == file_sha256,
+        MaintenanceProjectWorkbookOperation.operated_by == operated_by,
+        MaintenanceProjectWorkbookOperation.operation_type == "file_apply",
+    )))
+    if not receipts:
+        return None
+    if len(receipts) != 1 or receipts[0].payload_hash != file_sha256:
+        raise WorkbookError("idempotency_conflict", "工作簿应用回执与当前请求不一致")
+    return _v2_stored_apply_result(db, receipts[0])
+
+
 def apply_project_master_v2(
     db: Session,
     plan: MasterV2Plan,
@@ -6123,7 +6185,10 @@ def apply_project_master_v2(
                     "idempotency_conflict",
                     "工作簿应用回执与当前请求不一致，请重新下载",
                 )
+            stored_result = _v2_stored_apply_result(db, receipt)
             db.commit()
+            if stored_result is not None:
+                return stored_result[0]
             return _v2_apply_result(
                 plan,
                 operated_by=operated_by,
@@ -6938,17 +7003,6 @@ def apply_project_master_v2(
         # One successful workbook transaction invalidates every older V3/data
         # version exactly once, regardless of how many sheets it changed.
         operations.bump_locked_workbook_revision(db, state=workbook_state)
-    if apply_operation_key is not None:
-        db.add(MaintenanceProjectWorkbookOperation(
-            project_id=plan.project_id,
-            export_id=plan.export_id,
-            file_sha256=plan.file_sha256,
-            operation_key=apply_operation_key,
-            payload_hash=plan.file_sha256,
-            operation_type="file_apply",
-            operated_by=operated_by,
-        ))
-    db.commit()
     result = _v2_apply_result(
         plan,
         operated_by=operated_by,
@@ -6958,4 +7012,33 @@ def apply_project_master_v2(
     )
     result["voided_rows"].extend(receipt_voided_rows)
     result["warnings"].extend(item["message"] for item in receipt_voided_rows)
+    if apply_operation_key is not None:
+        receipt = MaintenanceProjectWorkbookOperation(
+            project_id=plan.project_id,
+            export_id=plan.export_id,
+            file_sha256=plan.file_sha256,
+            operation_key=apply_operation_key,
+            payload_hash=plan.file_sha256,
+            operation_type="file_apply",
+            operated_by=operated_by,
+        )
+        db.add(receipt)
+        db.flush()
+        db.add(MaintenanceProjectOperationAudit(
+            project_id=plan.project_id,
+            entity_type="master_workbook_operation",
+            entity_id=str(receipt.id),
+            action="apply_completed",
+            before_json=None,
+            after_json={
+                "schema": "master_v2_apply_receipt_v1",
+                "operation_key": apply_operation_key,
+                "response": deepcopy(result),
+                "requires_contract_amount_manage": plan.contract_amount_change is not None,
+            },
+            reason=audit_reason,
+            operated_by=operated_by,
+            operated_at=receipt.created_at,
+        ))
+    db.commit()
     return result

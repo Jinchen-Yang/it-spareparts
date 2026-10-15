@@ -192,7 +192,9 @@ def test_legacy_workbook_two_line_edits_keep_one_issue_correction(db, entrypoint
         line.issue_line_id for line in lines
     }
     actions = list(db.scalars(select(MaintenanceProjectOperationAudit.action)))
-    assert actions == ["return_obligation_corrected", "return_obligation_corrected"]
+    assert actions.count("return_obligation_corrected") == 2
+    assert actions.count("apply_completed") == (1 if entrypoint == "v2" else 0)
+    assert len(actions) == (3 if entrypoint == "v2" else 2)
     assert operations.get_or_create_workbook_state(db, project_id=project.project_id).revision == 1
 
 
@@ -216,7 +218,8 @@ def test_legacy_v2_void_and_edit_share_one_final_correction(db):
     actions = list(db.scalars(select(MaintenanceProjectOperationAudit.action)))
     assert actions.count("VOID") == 1
     assert actions.count("return_obligation_corrected") == 2
-    assert len(actions) == 3
+    assert actions.count("apply_completed") == 1
+    assert len(actions) == 4
     assert operations.get_or_create_workbook_state(db, project_id=project.project_id).revision == 1
 
 
