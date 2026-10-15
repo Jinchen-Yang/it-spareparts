@@ -1,7 +1,22 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { api, masterEdit } from "../../api";
+import type { MasterEditPayload, MasterEditSnapshot } from "../search";
 
 const originalAdapter = api.defaults.adapter;
+const baseline: MasterEditSnapshot = {
+  part_id: 1, pn_std: "PN-1",
+  identity: { part_id: 1, pn_std: "PN-1", status: "active", merged_into_id: null },
+  fields: { description: null, brand: null, category_major: null, category_minor: null,
+    machine_or_part: null, unit: null },
+  specs: {}, version_mode: "field_snapshot",
+};
+const payload: MasterEditPayload = {
+  part_id: 1, pn_std: "PN-1", base_snapshot: baseline, description: "新描述",
+};
+
+it("主数据编辑类型要求稳定 ID 和原始字段基线", () => {
+  expectTypeOf<Parameters<typeof masterEdit>[0]>().toEqualTypeOf<MasterEditPayload>();
+});
 
 beforeEach(() => {
   localStorage.clear();
@@ -23,10 +38,11 @@ it("主数据保存使用编辑会话绑定的 token，不被当前 localStorage
   }));
   api.defaults.adapter = adapter;
 
-  await masterEdit({ pn_std: "PN-1", description: "新描述" }, "bound-edit-token");
+  await masterEdit(payload, "bound-edit-token");
 
   expect(adapter).toHaveBeenCalledOnce();
   expect(adapter.mock.calls[0][0].headers.Authorization).toBe("Bearer bound-edit-token");
+  expect(JSON.parse(adapter.mock.calls[0][0].data)).toEqual(payload);
 });
 
 it("旧编辑会话的迟到 401 不会清除新账号 token", async () => {
@@ -40,7 +56,7 @@ it("旧编辑会话的迟到 401 不会清除新账号 token", async () => {
   });
 
   await expect(masterEdit(
-    { pn_std: "PN-1", description: "新描述" },
+    payload,
     "old-session-token",
   )).rejects.toThrow("unauthorized");
 

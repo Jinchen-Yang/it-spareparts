@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("../../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<typeof import("../../../../api/maintenanceOperations")>("../../../../api/maintenanceOperations"),
+  listMaintenancePartCategories: async () => ({ data: { categories: [] } }),
   ...api,
 }));
 vi.mock("../../../../components/maintenance/WorkbookRoundTrip", () => ({

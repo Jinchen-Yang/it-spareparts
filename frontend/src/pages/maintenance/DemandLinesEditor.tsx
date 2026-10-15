@@ -10,6 +10,8 @@ import {
   patchDemandLine,
 } from "../../api/maintenanceDemands";
 import DemandLineBatchEdit from "./DemandLineBatchEdit";
+import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
+import type { DemandReturnSummary } from "../../api/maintenanceReturnRequestSummary";
 
 const { Text } = Typography;
 
@@ -71,12 +73,17 @@ export default function DemandLinesEditor({
   sourceOrderId,
   orderNo,
   onClose,
+  readOnly = false,
+  onChanged,
 }: {
   sourceOrderId: string;
   orderNo: string;
   onClose: () => void;
+  readOnly?: boolean;
+  onChanged?: () => Promise<boolean>;
 }) {
   const [rows, setRows] = useState<DemandLineRow[]>([]);
+  const [returnSummary, setReturnSummary] = useState<DemandReturnSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<DemandLineRow | null>(null);
@@ -111,10 +118,12 @@ export default function DemandLinesEditor({
     const current = ++seq.current;
     setLoading(true);
     setError(null);
+    setReturnSummary(null);
     try {
       const resp = await listDemandLines(sourceOrderId);
       if (seq.current !== current) return null;
       setRows(resp.data.items);
+      setReturnSummary(resp.data.return_summary ?? null);
       setSelectedRowKeys((current) => current.filter((key) =>
         resp.data.items.some((row) => row.raw_line_id === key)));
       return resp.data.items;
@@ -127,6 +136,14 @@ export default function DemandLinesEditor({
       if (seq.current === current) setLoading(false);
     }
   }, [sourceOrderId]);
+
+  const refreshAfterWrite = async () => {
+    const epoch = opEpoch.current;
+    const results = await Promise.allSettled([load(), Promise.resolve().then(() => onChanged?.())]);
+    const refreshed = results.every((result) => result.status === "fulfilled" && result.value !== false && result.value !== null);
+    if (opEpoch.current === epoch && !refreshed) message.warning("修改已保存，但明细或需求单返还情况刷新失败，请重试刷新，不要重复提交");
+    return refreshed;
+  };
 
   useEffect(() => {
     void load();
@@ -214,7 +231,7 @@ export default function DemandLinesEditor({
   };
 
   const submit = async () => {
-    if (!editing || writeLock.current) return;
+    if (readOnly || !editing || writeLock.current) return;
     if (editing.digest === "") {
       // 行已不存在/已作废（409 重载发现）：不能再发旧 snapshot。
       setSaveError("该行已不存在或已作废，请关闭后重新打开");
@@ -250,7 +267,7 @@ export default function DemandLinesEditor({
       if (opEpoch.current !== epoch) return;
       message.success("明细行已修改");
       setEditing(null);
-      await load();
+      await refreshAfterWrite();
     } catch (err) {
       if (opEpoch.current !== epoch) return;
       if (isConflict(err)) {
@@ -304,7 +321,7 @@ export default function DemandLinesEditor({
   };
 
   const confirmClear = async () => {
-    if (!clearAsk || writeLock.current || clearAsk.gone) return;
+    if (readOnly || !clearAsk || writeLock.current || clearAsk.gone) return;
     writeLock.current = true;
     const epoch = opEpoch.current;
     setClearing(true);
@@ -315,7 +332,7 @@ export default function DemandLinesEditor({
       if (opEpoch.current !== epoch) return;
       message.success(`${OVERRIDABLE_FIELDS.find((f) => f.field === clearAsk.field)?.label ?? clearAsk.field} 已恢复原值`);
       setClearAsk(null);
-      await load();
+      await refreshAfterWrite();
     } catch (err) {
       if (opEpoch.current !== epoch) return;
       if (isConflict(err)) {
@@ -409,16 +426,17 @@ export default function DemandLinesEditor({
       maskClosable={false}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <ReturnStatusColumn summary={returnSummary} />
+        {!readOnly ? <Text type="secondary" style={{ fontSize: 12 }}>
           可修改数量、退货数量、SN、描述和型号；导入遇到已修改字段会按冲突规则处理；
           撤销可恢复该字段首次手工修改前的值。成本列与单头信息请走既有通道。
-        </Text>
+        </Text> : null}
         {error ? (
           <Alert type="error" showIcon message={error} action={
             <Button size="small" onClick={() => { void load(); }}>重试</Button>
           } />
         ) : null}
-        <div>
+        {!readOnly ? <div>
           <Button
             type="primary"
             disabled={!selectedRowKeys.length || loading}
@@ -427,14 +445,14 @@ export default function DemandLinesEditor({
           >
             批量修改选中行{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ""}
           </Button>
-        </div>
+        </div> : null}
         <Table<DemandLineRow>
           rowKey="raw_line_id"
           size="small"
           loading={loading}
           dataSource={rows}
-          columns={columns}
-          rowSelection={{
+          columns={readOnly ? columns.filter((column) => column.key !== "ops") : columns}
+          rowSelection={readOnly ? undefined : {
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys as string[]),
           }}
@@ -445,7 +463,7 @@ export default function DemandLinesEditor({
       </Space>
 
       <Modal
-        open={editing !== null}
+        open={!readOnly && editing !== null}
         title={editing ? `编辑第 ${editing.line_no ?? "?"} 行（${editing.pn_std ?? ""}）` : ""}
         confirmLoading={saving}
         okText="保存修改"
@@ -505,7 +523,7 @@ export default function DemandLinesEditor({
       </Modal>
 
       <Modal
-        open={clearAsk !== null}
+        open={!readOnly && clearAsk !== null}
         title={clearAsk ? `撤销「${OVERRIDABLE_FIELDS.find((f) => f.field === clearAsk.field)?.label ?? clearAsk.field}」的页面直改` : ""}
         okText="确认撤销"
         cancelText="取消"
@@ -574,12 +592,12 @@ export default function DemandLinesEditor({
         </Space>
       </Modal>
 
-      {batchEditingRows ? (
+      {!readOnly && batchEditingRows ? (
         <DemandLineBatchEdit
           sourceOrderId={sourceOrderId}
           rows={batchEditingRows}
           onClose={() => setBatchEditingRows(null)}
-          onCommitted={load}
+          onCommitted={refreshAfterWrite}
         />
       ) : null}
     </Modal>

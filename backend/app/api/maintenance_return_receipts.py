@@ -230,6 +230,9 @@ def search_receipts(
     source_order_id: str | None = None,
     source: str | None = None,
     unassigned: bool = False,
+    category_major: str | None = Query(default=None, max_length=64),
+    category_minor: str | None = Query(default=None, max_length=128),
+    category_state: str | None = Query(default=None, pattern="^(unclassified|unlinked)$"),
     db: Session = Depends(get_db),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
@@ -246,6 +249,9 @@ def search_receipts(
             source_order_id=source_order_id,
             source=source,
             unassigned=unassigned,
+            category_major=category_major,
+            category_minor=category_minor,
+            category_state=category_state,
         )
     except HTTPException:
         raise

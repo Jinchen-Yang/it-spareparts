@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<typeof import("../../../../api/maintenanceOperations")>("../../../../api/maintenanceOperations"),
+  listMaintenancePartCategories: async () => ({ data: { categories: [] } }),
   getReturnReceiptDemands: mocks.demands, getReturnReceiptSummary: mocks.summary,
   searchReturnReceipts: mocks.search, createReturnReceipt: mocks.create,
   updateReturnReceipt: mocks.update, getReturnReceiptAudit: mocks.audit,

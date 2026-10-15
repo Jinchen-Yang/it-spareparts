@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
+import type { MaintenanceCategoryFilterInput } from "../../../api/maintenanceOperations";
 import {
   Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Modal,
   Row, Select, Space, Table, Tag, Timeline, Tooltip, Typography, message,
@@ -146,7 +148,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [projectError, setProjectError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [demandFilter, setDemandFilter] = useState<string | undefined>();
-  const filters = useRef<{ q?: string; source_order_id?: string; unassigned?: boolean }>({});
+  const filters = useRef<{ q?: string; source_order_id?: string; unassigned?: boolean } & MaintenanceCategoryFilterInput>({});
+  const [categoryFilter, setCategoryFilter] = useState<MaintenanceCategoryFilterInput>({});
   const createAttempt = useRef<{ content: string; key: string } | null>(null);
   // 批量修改/作废勾选（v1.36）：只存当前页有效行；分页/项目/筛选一变即清空，不跨项目缓存
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -270,6 +273,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     setSubmitting(false);
     setVoiding(false);
     setQuery("");
+    setCategoryFilter({});
     setDemandFilter(undefined);
     setSelectedIds([]);
     setPnMatchedDemands(null);
@@ -734,9 +738,18 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           filters.current = { ...filters.current, q: value }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }} style={{ width: 280 }} />
         {demandFilter ? <Button size="small" onClick={() => {
-          setDemandFilter(undefined); filters.current = { q: query }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
+          setDemandFilter(undefined); filters.current = { ...filters.current, source_order_id: undefined, unassigned: undefined }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }}>清除需求单筛选</Button> : null}
       </Space>
+
+      <MaintenanceCategoryFilter labelPrefix="返还" value={categoryFilter} onChange={(next) => {
+        const { category_major: _major, category_minor: _minor, category_state: _state, ...otherFilters } = filters.current;
+        filters.current = { ...otherFilters, ...next };
+        setCategoryFilter(next);
+        setPage(1);
+        setSelectedIds([]);
+        void load(1, includeVoided);
+      }} />
 
       <Table<ReturnReceipt>
         rowKey="receipt_id"

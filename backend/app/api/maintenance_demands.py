@@ -19,6 +19,7 @@ from app.api.maintenance_project_scope import (
     resolve_visible_project_ids as scope_resolve,
 )
 from app.services import maintenance_demands
+from app.services import maintenance_return_request_summary as return_summaries
 
 
 router = APIRouter(prefix="/maintenance/demands", tags=["maintenance"])
@@ -91,6 +92,8 @@ def _real_operator(db: Session, ident: dict) -> str:
 
 
 def _raise_service_error(exc: Exception) -> None:
+    if isinstance(exc, return_summaries.ReturnSummaryError):
+        raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)}) from exc
     if isinstance(exc, maintenance_demands.MaintenanceDemandForbidden):
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     if isinstance(exc, maintenance_demands.DeleteIntentTooEarly):
@@ -139,15 +142,19 @@ def search_demands(
             "scope": "full" if allowed_project_ids is None else "owned",
         },
     )
-    return maintenance_demands.search_demands(
-        db,
-        q=body.q,
-        page=body.page,
-        page_size=body.page_size,
-        allowed_project_ids=allowed_project_ids,
-        include_voided=body.include_voided,
-        user_ctx=ctx,
-    )
+    try:
+        return maintenance_demands.search_demands(
+            db,
+            q=body.q,
+            page=body.page,
+            page_size=body.page_size,
+            allowed_project_ids=allowed_project_ids,
+            include_voided=body.include_voided,
+            user_ctx=ctx,
+        )
+    except return_summaries.ReturnSummaryError as exc:
+        _raise_service_error(exc)
+        raise
 
 
 class DemandVoidFastRequest(BaseModel):
@@ -651,7 +658,14 @@ def list_demand_lines(
     # digest 必须与 PATCH/clear 的 OCC 输入同源（canonical _line_snapshot）。
     # 对含 order_raw_id/order_no/line_no/is_active 的展示包 hash 会造出另一个
     # digest，前端 GET 后第一次 PATCH 就 409。
+    try:
+        return_summary = return_summaries.summarize_demand_returns(
+            db, source_order_ids=[source_order_id], allowed_project_ids=visible,
+        ).get(source_order_id)
+    except return_summaries.ReturnSummaryError as exc:
+        _raise_service_error(exc)
+        raise
     return {"items": [
         {**_row_out(r), "digest": _line_digest(_line_snapshot(r))}
         for r in rows
-    ]}
+    ], "return_summary": return_summary.to_dict() if return_summary is not None else None}
