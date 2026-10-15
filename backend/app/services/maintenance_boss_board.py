@@ -1143,14 +1143,15 @@ def projects(
             == FMaintenanceOrder.raw_order_id,
             MaintenanceSourceOrderAssignment.is_active.is_(True),
         )
-        by_order_salesperson = (
+        by_order_salesperson = active_orders(
             select(MaintenanceSourceOrderAssignment.project_id)
             .select_from(FMaintenanceOrder)
             .join(MaintenanceSourceOrderAssignment, active_assignment)
             .where(
                 FMaintenanceOrder.salesperson.icontains(needle, autoescape=True),
                 maintenance_demands.active_demand_condition(),
-            )
+            ),
+            FMaintenanceOrder,
         )
         filters.append(
             or_(
@@ -2362,7 +2363,7 @@ def project_orders(
 
     can_cost = can_view_cost(user_ctx)
     unassigned = project_id == UNASSIGNED_BUCKET
-    base = select(FMaintenanceOrder)
+    base = active_orders(select(FMaintenanceOrder), FMaintenanceOrder)
     base = _scope_stmt(
         base, project_id=None if unassigned else project_id, unassigned_only=unassigned
     )
