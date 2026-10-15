@@ -22,7 +22,7 @@
 
 | 对象 | 字段／类型与不变量 |
 |---|---|
-| node | `part_id:int, pn_std:string, status:"active"\|"merged", merged_into_id:int\|null, canonical_part_id:int, needs_review:bool, is_excluded:bool, machine_or_part:string\|null, description:string\|null, brand:string\|null, category_major:string\|null, category_minor:string\|null, unit:string\|null, locked_fields:string[], specs:spec[], aggregate_revision:int, identity_revision:int, content_hash:sha256`。active 的 merged_into_id=null、canonical_part_id=自己；merged 的目标必须存在且最终根为 active，不允许环。merged 是保留占名的身份墓碑，不是删除节点。类型原值及 null 完整传输，不自创品类。 |
+| node | `part_id:int, pn_std:string, status:"active"\|"merged", merged_into_id:int\|null, canonical_part_id:int, needs_review:bool, is_excluded:bool, machine_or_part:string\|null, description:string\|null, brand:string\|null, category_major:string\|null, category_minor:string\|null, unit:string\|null, locked_fields:string[], specs:spec[], aggregate_revision:int, identity_revision:int, content_hash:sha256`。active 的 merged_into_id=null、canonical_part_id=自己；merged 的目标必须存在且最终根为 active，不允许环。merged 是保留占名的身份墓碑，不是删除节点。**主数据库 PN（node）不做物理删除**：退出使用只能以 merged 墓碑表达，因此增量没有 node 删除项；若发布者捕获到 PN 行 DELETE，必须停批报警（不推进水位、不发布该事务组），由人工处理后以新 epoch 全量重建，消费者不得自行推断删除。类型原值及 null 完整传输，不自创品类。 |
 | spec | `key:string, value:string, unit:string\|null, numeric_value:decimal_string\|null, source:"auto"\|"manual"`；每节点 key 唯一。目录完整发布已有键，包括人工命令白名单之外的历史键，不截断；`specs:[]` 表示参数已空，完整节点缺某键即该键已删除。 |
 | alias | `alias_id:int, pn_raw:string, part_id:int, pn_std:string, status:"active"\|"pending"\|"rejected"\|null, deleted:bool`。null 保留历史语义；deleted=true 仍带删除前归属，不能把它当成有效别名。未删除别名的 part_id／pn_std 必须对应所属节点。 |
 | item | `{"kind":"node","node":node}` 或 `{"kind":"alias","alias":alias}`。全量只含当前节点及未删除别名；增量含完整受影响节点（完整 specs）、相关别名及删除标记。别名换属需同批给出新归属和 `alias_moves:[{alias_id,old_part_id,new_part_id}]`，两父节点均在批内。 |
@@ -55,7 +55,7 @@ node 的品牌、品类取主数据库 PN 文本列，不隐式 join 字典名�
 
 ## 4. 发布与商城应用的原子边界
 
-1. 源事务一次提交 PN、参数／别名、真实操作人审计、历史、版本、outbox。捕获须覆盖 INSERT／UPDATE／DELETE、Core/upsert/bulk、merge/unmerge／路径压缩、alias换属、仅参数删除；真实无变化不发布。outbox ID 与时间戳不作为提交序。
+1. 源事务一次提交 PN、参数／别名、真实操作人审计、历史、版本、outbox。捕获须覆盖 INSERT／UPDATE／DELETE（参数／别名子行 DELETE 进增量；PN 行 DELETE 按 §2 停批报警，不进增量）、Core/upsert/bulk、merge/unmerge／路径压缩、alias换属、仅参数删除；真实无变化不发布。outbox ID 与时间戳不作为提交序。
 2. 单发布者同一一致快照内选全部已提交未发布事务组，递归展开“组→涉及PN→这些PN的全部可见未发布组→其全部PN”，并扩 canonical／alias旧新父至固定点；再物化完整聚合。T1改A、T2随后改A+B时，不能只取T1却读最新A而遗漏B。完整事务闭包、逻辑批、分片清单、当前投影、水位和具体日志标记在同一次发布事务持久化。甲先领outbox100晚提交、乙101早提交，二者都须最终发布。
 3. 一致 seed 前先开捕获，seed后版本拒倒退重放，完成才 ready；全量只从发布投影读取，不把源实时值配旧水位。若需发布者会话锁，应先取锁再建立 RR 快照。
 4. 商城网络读取在本地应用事务外。先收妥／校验，后在一个本地事务应用整个逻辑批的节点、别名、身份成员／商品投影及已应用水位，inbox 以 `(source_namespace,epoch,batch_id)`＋hash 去重。分别记录 received_sequence 与 applied_sequence；只收到片段不能显示已应用。失败整批回滚，保留 inbox 可重试。
