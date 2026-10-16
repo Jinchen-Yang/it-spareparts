@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 
 from app.models.dimensions import DimPart
+from app.models.master_data import ProductSpec
 from app.services import spec_extract
 
 DISK_A = "Toshiba 600GB 15K SAS HDD 硬盘"
@@ -105,3 +106,20 @@ def test_orm_update_paths_bump_via_onupdate(db):
     db.commit()
     assert db.scalar(select(DimPart.merged_into_id).where(DimPart.id == a.id)) == c.id
     assert _ts(db, a) > OLD
+
+
+def test_unmerge_moving_specs_back_bumps_target(db):
+    """unmerge 把迁到目标的规格改回源：目标 specs 变化，必须推进目标 updated_at。"""
+    from app.services import merge
+    src, tgt = _mk(db, "UNM-SRC", DISK_A), _mk(db, "UNM-TGT", GPU_DESC)
+    spec_extract.refresh_part_specs(db, src.id, DISK_A)
+    db.commit()
+    result = merge.merge_parts(db, "UNM-SRC", "UNM-TGT", "测试", "tester")
+    db.commit()
+    moved_keys = set(db.scalars(select(ProductSpec.spec_key).where(ProductSpec.part_id == tgt.id)))
+    assert moved_keys   # 前提：源规格已迁到目标
+    _age(db, tgt)
+    merge.unmerge(db, result["merge_log_id"], "tester")
+    db.commit()
+    assert not set(db.scalars(select(ProductSpec.spec_key).where(ProductSpec.part_id == tgt.id)))
+    assert _ts(db, tgt) > OLD
