@@ -311,6 +311,11 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
             db.execute(pg_insert(ProductSpec).values(respecs)
                        .on_conflict_do_nothing(constraint="uq_spec_part_key"))
 
+    # 规格迁回源后目标的 specs 变了：目标本身没有 ORM 更新，须显式推进 updated_at，
+    # 否则 /list 增量游标看不到目标规格变化（D-36）。源会被下方 ORM 更新推进。
+    if spec_moved or aff.get("spec_dropped"):
+        spec_extract.touch_parts(db, [target.id])
+
     # 4) 替代关系：迁移的改回、删除的按全列还原（type/source/reviewed_at 不丢）
     subs = aff.get("substitutes") or {}
     for mv in subs.get("moved", []):
