@@ -69,6 +69,7 @@ def test_main_resale_exports_remain_registered_with_separate_credentials(db, mon
     catalog_token = "synthetic-catalog-export-token-for-test"
     receipt_path = "/api/integrations/resale/bad-receipts"
     catalog_path = "/api/integrations/resale/parts/snapshots"
+    list_path = "/api/integrations/resale/parts/list"
     search_path = "/api/integrations/resale/parts/search"
     monkeypatch.setattr(settings, "resale_export_token_sha256", SecretStr(""))
     monkeypatch.setattr(settings, "resale_catalog_token_sha256", SecretStr(""))
@@ -79,15 +80,21 @@ def test_main_resale_exports_remain_registered_with_separate_credentials(db, mon
         disabled = client.post(catalog_path, json={"partIds": [part.id]})
         assert disabled.status_code == 404
         assert disabled.json()["detail"] == "PN 只读导出尚未启用"
+        disabled = client.post(list_path, json={})
+        assert disabled.status_code == 404
+        assert disabled.json()["detail"] == "PN 只读导出尚未启用"
         monkeypatch.setattr(settings, "resale_export_token_sha256",
                             SecretStr(hashlib.sha256(receipt_token.encode()).hexdigest()))
         monkeypatch.setattr(settings, "resale_catalog_token_sha256",
                             SecretStr(hashlib.sha256(catalog_token.encode()).hexdigest()))
         assert client.get(receipt_path).status_code == 401
         assert client.post(catalog_path, json={"partIds": [part.id]}).status_code == 401
+        assert client.post(list_path, json={}).status_code == 401
         # One integration's credential must never authorize the other export.
         assert client.get(receipt_path, headers={"Authorization": f"Bearer {catalog_token}"}).status_code == 401
         assert client.post(catalog_path, json={"partIds": [part.id]},
+                           headers={"Authorization": f"Bearer {receipt_token}"}).status_code == 401
+        assert client.post(list_path, json={},
                            headers={"Authorization": f"Bearer {receipt_token}"}).status_code == 401
         assert client.post(search_path, json={"q": part.pn_std},
                            headers={"Authorization": f"Bearer {receipt_token}"}).status_code == 401
@@ -99,6 +106,7 @@ def test_main_resale_exports_remain_registered_with_separate_credentials(db, mon
         assert receipts.json()["items"][0]["receiptId"] == receipt.rkd_line_id
         assert receipts.json()["items"][0]["partId"] == part.id
         for path, payload in ((catalog_path, {"partIds": [part.id]}),
+                              (list_path, {}),
                               (search_path, {"q": part.pn_std})):
             result = client.post(path, json=payload,
                                  headers={"Authorization": f"Bearer {catalog_token}"})
