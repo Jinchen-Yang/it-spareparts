@@ -90,6 +90,8 @@ class DimPart(Base):
         CheckConstraint("(status = 'merged') = (merged_into_id IS NOT NULL)", name="ck_part_merged_pair"),
         Index("ix_part_brand", "brand_id"),
         Index("ix_part_category", "category_id"),
+        # (updated_at, id)：D-36 v1 /list keyset 分页（行值比较）专用范围扫描
+        Index("ix_part_updated_id", "updated_at", "id"),
         Index("ix_part_merged_into", "merged_into_id",
               postgresql_where=text("merged_into_id IS NOT NULL")),
     )
