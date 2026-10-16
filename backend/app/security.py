@@ -319,6 +319,8 @@ def record_access_log(user_ctx: UserContext, action: str, resource: str,
     """访问审计：记到 sys_access_log（账号管理页看子账号活动）。
 
     best-effort：用独立短连接写，任何失败都不打断业务请求。
+    列宽兜底与 resource/ip/user_agent 同款截断：username 挡共享口令回退 token 里
+    无上界的请求体登录名，action 挡 agent_tool:{模型自报工具名}（注册表外名字也会落审计）。
     """
     if not config.ENABLE_ACCESS_LOG:
         return
@@ -329,14 +331,16 @@ def record_access_log(user_ctx: UserContext, action: str, resource: str,
         from app.models.system import SysAccessLog
         db = SessionLocal()
         try:
-            db.add(SysAccessLog(username=user_ctx.user_id, role=user_ctx.role,
-                                action=action, resource=(str(resource)[:500] if resource else None),
+            db.add(SysAccessLog(username=(user_ctx.user_id[:64] if user_ctx.user_id else None),
+                                role=user_ctx.role,
+                                action=action[:64],
+                                resource=(str(resource)[:500] if resource else None),
                                 detail=filters))
             db.commit()
         finally:
             db.close()
-    except Exception:  # noqa: BLE001
-        _log.warning("access log write failed")
+    except Exception as exc:  # noqa: BLE001 —— 只报异常类型：消息/SQL 参数可能含敏感值
+        _log.warning("access log write failed (%s)", type(exc).__name__)
 
 
 def record_security_event(username: str | None, role: str | None, action: str,
@@ -346,6 +350,8 @@ def record_security_event(username: str | None, role: str | None, action: str,
 
     与 record_access_log 不同：不依赖 UserContext（失败登录时无身份），可带 ip/user_agent。
     best-effort：独立短连接，任何失败都不打断业务。
+    username 截断到列宽：登录失败记的是请求体里的尝试名（无上限外部输入），
+    截断保留事件本身——比 422 拒绝或丢审计行更利于暴力破解排查。
     """
     if not config.ENABLE_ACCESS_LOG:
         return
@@ -356,12 +362,13 @@ def record_security_event(username: str | None, role: str | None, action: str,
         db = SessionLocal()
         try:
             db.add(SysAccessLog(
-                username=username, role=role, action=action,
+                username=(username[:64] if username else None), role=role,
+                action=action[:64],
                 resource=(str(resource)[:500] if resource else None), detail=detail,
                 ip_address=(ip[:64] if ip else None),
                 user_agent=(user_agent[:300] if user_agent else None)))
             db.commit()
         finally:
             db.close()
-    except Exception:  # noqa: BLE001
-        _log.warning("security event log write failed")
+    except Exception as exc:  # noqa: BLE001 —— 只报异常类型：消息/SQL 参数可能含敏感值
+        _log.warning("security event log write failed (%s)", type(exc).__name__)

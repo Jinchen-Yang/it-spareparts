@@ -250,7 +250,9 @@ class SysAccessLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64))
     role: Mapped[str | None] = mapped_column(String(32))
-    action: Mapped[str] = mapped_column(String(32))        # search/overview/.../login_success/login_failed…
+    # 最长动作名 43 字符（maintenance_warehouse_integration_reconcile），64 留余量；
+    # 写入侧 security.py 另有 [:64] 兜底，超长名由 test_access_log_action_width 静态看守
+    action: Mapped[str] = mapped_column(String(64))        # search/overview/.../login_success/login_failed…
     resource: Mapped[str | None] = mapped_column(Text)     # 查的型号/客户/维度
     detail: Mapped[dict | None] = mapped_column(JSONB)
     ip_address: Mapped[str | None] = mapped_column(String(64))     # 登录源(暴力破解排查);X-Forwarded-For 优先
