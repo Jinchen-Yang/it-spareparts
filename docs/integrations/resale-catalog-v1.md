@@ -18,7 +18,7 @@
 - 每个 ID 必须为正数；空列表、超限或非正数返回 HTTP 422。错误沿用 v1 的 `detail` 形式，不改用 v2 错误信封。
 - 按第一次出现的位置去重，响应每个去重后的请求 ID 返回一个 item，顺序保持一致。
 - 沿用既有合并解析：active PN 返回自身；merged PN 沿 `merged_into_id` 查找最终节点，响应保留 `requestedPartId`，`partId` 为最终身份，`status` 为 `merged`。不存在、目标缺失、循环或超过 10 次重定向时按 `not_found` 返回，不猜身份。
-- 这是按已知身份读取资料的接口，不是整目录列举、增量发布或 v2 固定水位快照。
+- 这是按已知身份读取资料的接口，不是增量发布或 v2 固定水位快照。整目录列举见 [resale-catalog-v1-list](resale-catalog-v1-list.md)（`POST /list`，D-36 PR1）。
 
 ## 2. 响应字段
 

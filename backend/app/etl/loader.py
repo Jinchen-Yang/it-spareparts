@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import case, delete, func, or_, select, true, and_
+from sqlalchemy import and_, case, delete, func, or_, select, true, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -284,6 +284,14 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool)
             set_["category_minor"] = _respect_lock(
                 "category_minor",
                 func.coalesce(stmt.excluded.category_minor, DimPart.category_minor))
+        # Core upsert 不触发 ORM onupdate，须显式推进 updated_at（D-36 v1 /list 游标）；
+        # 只在业务列真有变化时推进，重导同一文件不制造“伪变更”。墓碑冲突被下方 WHERE 跳过。
+        business = sorted(set_)
+        set_["updated_at"] = case(
+            (tuple_(*(set_[k] for k in business)).is_distinct_from(
+                tuple_(*(getattr(DimPart, k) for k in business))), func.now()),
+            else_=DimPart.updated_at,
+        )
         session.execute(stmt.on_conflict_do_update(
             index_elements=[DimPart.pn_std], set_=set_,
             where=(DimPart.status != "merged"),

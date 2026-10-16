@@ -9,7 +9,7 @@ GPU/电源/网卡等没有"容量/接口"统一语义，不强行抽取。
 import re
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -216,6 +216,23 @@ def extract(description: str | None) -> list[dict]:
     return []
 
 
+def touch_parts(db: Session, part_ids) -> None:
+    """只写 product_specs 的路径须同步推进 dim_part.updated_at（specs 是 /list 输出字段，
+    D-36 增量游标靠 updated_at 发现变化）。Core update 显式赋值，不依赖 ORM onupdate。"""
+    ids = sorted({int(pid) for pid in part_ids})
+    for i in range(0, len(ids), 1000):
+        db.execute(update(DimPart).where(DimPart.id.in_(ids[i:i + 1000]))
+                   .values(updated_at=func.now())
+                   .execution_options(synchronize_session=False))
+
+
+def _spec_rows(db: Session, part_id: int) -> set[tuple]:
+    return set(db.execute(
+        select(ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
+               ProductSpec.numeric_value, ProductSpec.source)
+        .where(ProductSpec.part_id == part_id)).all())
+
+
 def refresh_part_specs(db: Session, part_id: int, description: str | None) -> None:
     """description 变更后同步该型号的派生规格：删 auto 行 + 按新描述重抽。
 
@@ -223,12 +240,15 @@ def refresh_part_specs(db: Session, part_id: int, description: str | None) -> No
     规格时清空旧行（否则静默陈旧，生产 6797 条已中招）。source='manual' 行不动，
     重插撞键时 on_conflict_do_nothing 让 manual 优先。不 commit，随调用方事务。
     """
+    before = _spec_rows(db, part_id)
     db.execute(delete(ProductSpec).where(ProductSpec.part_id == part_id,
                                          ProductSpec.source == "auto"))
     rows = [{**s, "part_id": part_id, "source": "auto"} for s in extract(description)]
     if rows:
         db.execute(pg_insert(ProductSpec).values(rows).on_conflict_do_nothing(
             constraint="uq_spec_part_key"))
+    if _spec_rows(db, part_id) != before:
+        touch_parts(db, [part_id])
 
 
 def validate_manual_specs(updates: dict) -> dict:
@@ -277,6 +297,8 @@ def validate_manual_specs(updates: dict) -> dict:
 
 def apply_manual_specs(db: Session, part_id: int, updates: dict) -> None:
     """父 PN 已由调用方锁定；描述 auto 刷新之后应用本次 manual，不提交。"""
+    if updates:
+        touch_parts(db, [part_id])
     for key in sorted(updates):
         spec = updates[key]
         if spec is None:
@@ -293,8 +315,10 @@ def backfill_specs(db: Session, rebuild: bool = False) -> dict:
     rebuild=True：先删全部 source='auto' 行再重插（=全量重建派生缓存），
     治历史陈旧；manual 行保留且撞键优先。
     """
+    touched: set[int] = set()
     if rebuild:
-        db.execute(delete(ProductSpec).where(ProductSpec.source == "auto"))
+        touched.update(db.execute(delete(ProductSpec).where(ProductSpec.source == "auto")
+                                  .returning(ProductSpec.part_id)).scalars())
     parts = db.execute(
         select(DimPart.id, DimPart.description).where(
             DimPart.status == "active", DimPart.description.is_not(None))
@@ -310,6 +334,10 @@ def backfill_specs(db: Session, rebuild: bool = False) -> dict:
     for i in range(0, len(rows), 1000):
         stmt = pg_insert(ProductSpec).values(rows[i:i + 1000]).on_conflict_do_nothing(
             constraint="uq_spec_part_key")
-        inserted += len(db.execute(stmt.returning(ProductSpec.id)).all())
+        hit = db.execute(stmt.returning(ProductSpec.part_id)).scalars().all()
+        inserted += len(hit)
+        touched.update(hit)
+    # rebuild 删后重插内容相同也推进：只多一次增量重读，商城幂等跳过。
+    touch_parts(db, touched)
     return {"parts_scanned": len(parts), "parts_with_specs": parts_hit,
             "spec_rows": len(rows), "spec_inserted": inserted}
