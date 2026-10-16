@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -31,7 +32,12 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.services import maintenance_cost_invalidation
 from app.security import UserContext
 from app.services.maintenance_order_contact import order_contact
-from app.services.maintenance_return_request_summary import summarize_demand_returns
+from app.services.maintenance_return_request_summary import (
+    ReturnSummaryError,
+    summarize_demand_returns,
+)
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.models.maintenance_project_operations import (
@@ -377,10 +383,20 @@ def search_demands(
         )
     )
     snapshots = _load_snapshots(db, source_ids, active_only=not include_voided)
-    # Keep the derived receipt status outside the deletion snapshot/digest.
-    return_summaries = summarize_demand_returns(
-        db, source_order_ids=source_ids, allowed_project_ids=allowed_project_ids,
-    )
+    # 数量富化不进入删除 snapshot/digest；失败只影响摘要，不阻断主体读取。
+    return_summary_error = None
+    try:
+        # Connection savepoint 不会像 Session.begin_nested() 那样 flush 草稿。
+        # 真实数据库错误仅回滚此查询，后续联系人/墓碑读取仍使用原事务。
+        with db.no_autoflush, db.connection().begin_nested():
+            return_summaries = summarize_demand_returns(
+                db, source_order_ids=source_ids, allowed_project_ids=allowed_project_ids,
+            )
+    except ReturnSummaryError:
+        logger.exception("demand search return summary unavailable",
+                         extra={"order_count": len(source_ids)})
+        return_summaries = {}
+        return_summary_error = "summary_unavailable"
     # Read-only enrichment: never add contact fields to _snapshot/_load_snapshots,
     # which also feed persisted deletion intents and audit/digest snapshots.
     contacts = (
@@ -416,7 +432,9 @@ def search_demands(
         "items": [
             {**snapshots[source_id], **contacts.get(source_id, {}),
              "return_summary": (return_summaries[source_id].to_dict()
-                                if source_id in return_summaries else None)}
+                                if source_id in return_summaries else None),
+             **({"return_summary_error": return_summary_error}
+                if return_summary_error else {})}
             for source_id in source_ids
         ],
         "page": page,

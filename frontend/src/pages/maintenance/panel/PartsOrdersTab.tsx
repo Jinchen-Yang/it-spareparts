@@ -233,7 +233,7 @@ export function PartsOrdersTab({
     },
     { title: "数据状态", dataIndex: "data_status", render: raw },
     { title: "明细行", dataIndex: "line_count" },
-    { title: "数量核对（当前累计）", dataIndex: "return_summary", width: 215, render: (value) => <ReturnStatusColumn summary={value} /> },
+    { title: "数量核对（当前累计）", dataIndex: "return_summary", width: 215, render: (value, order) => <ReturnStatusColumn summary={value} error={order.return_summary_error} /> },
     {
       title: "已知申请估算成本(含税)",
       render: (_: unknown, order) =>

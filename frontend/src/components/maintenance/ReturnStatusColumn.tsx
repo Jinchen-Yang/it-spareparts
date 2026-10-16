@@ -1,5 +1,5 @@
 import { Space, Typography } from "antd";
-import type { DemandReturnSummary } from "../../api/maintenanceReturnRequestSummary";
+import type { DemandReturnSummary, DemandReturnSummaryError } from "../../api/maintenanceReturnRequestSummary";
 
 const SCOPE = "所选需求单截至当前累计，包含全部有效明细与精确关联的有效收货";
 const REASONS: Record<string, string> = {
@@ -8,6 +8,7 @@ const REASONS: Record<string, string> = {
   zero_demand_qty: "下单数量为零",
   no_active_lines: "没有有效明细",
   inactive_order: "需求单当前无效",
+  tombstoned_order: "需求单已逻辑作废",
   inactive_project: "项目当前无效",
   unassigned_order: "需求单未归属项目",
   ownership_conflict: "归属待核对",
@@ -19,7 +20,11 @@ function quantity(value: string | null): string {
 }
 
 /** 只展示服务端数量与数据完整性原因，不推导返还状态。 */
-export default function ReturnStatusColumn({ summary }: { summary?: DemandReturnSummary | null }) {
+export default function ReturnStatusColumn({ summary, error }: {
+  summary?: DemandReturnSummary | null;
+  error?: DemandReturnSummaryError | null;
+}) {
+  if (error) return <Typography.Text type="secondary">摘要暂不可用</Typography.Text>;
   const reasons = summary?.reason_codes.map((code) => REASONS[code] ?? "数据待核对") ?? [];
   const over = summary?.over_received_qty;
   return <Space direction="vertical" size={0} title={SCOPE}>

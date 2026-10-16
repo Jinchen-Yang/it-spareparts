@@ -17,6 +17,7 @@ from app.models.maintenance import FMaintenanceOrder
 from app.models.master_data import ProductCategory
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_return_request_summary as summaries
+from app.services import maintenance_demands
 from app.services.maintenance_return_receipts import register_receipt
 from tests.test_maintenance_return_receipts_api import _wbdd
 from tests.test_site_issue_v2_api import _project
@@ -35,6 +36,59 @@ def _demand(db, project, part, index, quantities, *, status="已生效"):
         ))
     db.commit()
     return order
+
+
+def test_tombstones_are_distinct_from_source_cancellation_and_restoration_clears_reason(db):
+    project = _project(db, project_id=str(uuid4()))
+    part = DimPart(pn_std="TOMBSTONE-SUMMARY")
+    db.add(part)
+    db.commit()
+    deleted = _demand(db, project, part, 1, ["3"])
+    deleted_with_receipt = _demand(db, project, part, 2, ["4"])
+    cancelled = _demand(db, project, part, 3, ["5"], status="已取消")
+    _receipt(db, project, part, "1", source_order_id=deleted_with_receipt.raw_order_id)
+    db.commit()
+    ids = [order.raw_order_id for order in (deleted, deleted_with_receipt, cancelled)]
+    maintenance_demands.void_fast(
+        db, source_order_ids=ids[:2], reason="摘要测试的合成作废",
+        operated_by="summary-fixture", idempotency_key="summary-tombstones",
+    )
+    db.commit()
+
+    # A real deletion archives ownership, so a global historical read can still
+    # explain its tombstone; scoped readers must not regain the archived project.
+    result = summaries.summarize_demand_returns(
+        db, source_order_ids=ids, allowed_project_ids=None,
+    )
+    inactive = result[ids[0]]
+    assert inactive.basis_state == "inactive"
+    assert not inactive.effective
+    assert inactive.demand_qty == Decimal("3")
+    assert inactive.received_qty == Decimal("0")
+    assert inactive.pending_qty is inactive.over_received_qty is None
+    assert "tombstoned_order" in inactive.reason_codes
+    assert "tombstoned_order" not in result[ids[2]].reason_codes
+    assert "inactive_order" in result[ids[2]].reason_codes
+    conflict = result[ids[1]]
+    assert conflict.basis_state == "ownership_conflict"
+    assert "tombstoned_order" in conflict.reason_codes
+    assert conflict.received_qty is conflict.pending_qty is None
+    assert summaries.summarize_demand_returns(
+        db, source_order_ids=ids[:2], allowed_project_ids={project.project_id},
+    ) == {}
+
+    maintenance_demands.restore_demand(
+        db, source_order_id=ids[0], reason="摘要测试的合成恢复",
+        operated_by="summary-fixture",
+    )
+    db.commit()
+    restored = summaries.summarize_demand_returns(
+        db, source_order_ids=[ids[0]], allowed_project_ids=None,
+    )[ids[0]]
+    assert "tombstoned_order" not in restored.reason_codes
+    assert "inactive_order" not in restored.reason_codes
+    assert restored.basis_state == "inactive"  # 恢复不自动重挂项目。
+    assert restored.reason_codes == ("unassigned_order",)
 
 
 @pytest.mark.parametrize("exemption_source", ["line_no_return", "project_default_no_return", "category_disk"])
