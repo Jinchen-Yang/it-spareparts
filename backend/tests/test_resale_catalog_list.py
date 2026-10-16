@@ -244,7 +244,10 @@ def test_cursor_past_end_returns_empty_page(db, catalog_client):
         URL, json={"cursor": _encode_list_cursor(future, 999999999)}
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {
+    payload = response.json()
+    # 越过末尾：回退点 = min(请求游标, now()-N)，即 now()-N，仍是合法游标。
+    assert payload.pop("resumeCursor")
+    assert payload == {
         "schemaVersion": 1, "items": [], "hasMore": False, "nextCursor": None,
     }
 
@@ -258,10 +261,26 @@ def test_cursor_past_end_returns_empty_page(db, catalog_client):
     _b64("2026-10-01T08:00:00.000000+00:00|abc"),            # 非整数 id
     _b64("2026-10-01T08:00:00.000000+00:00|1|2"),            # id 段带分隔符
     _b64("2026-10-01T08:00:00.000000+00:00|0"),              # id 非正
+    _b64("2026-10-01T08:00:00.000000+00:00|+1"),             # 带符号
+    _b64("2026-10-01T08:00:00.000000+00:00|1_0"),            # 下划线分组
+    _b64("2026-10-01T08:00:00.000000+00:00| 1"),             # 空白
+    _b64("2026-10-01T08:00:00.000000+00:00|\uff11"),         # 全角数字
+    _b64("2026-10-01T08:00:00.000000+00:00|\u0661"),         # 阿拉伯-印度数字
+    _b64(f"2026-10-01T08:00:00.000000+00:00|{2**63}"),       # 超出 bigint
     "",
 ])
 def test_invalid_cursors_rejected(cursor, catalog_client):
     response = catalog_client.post(URL, json={"cursor": cursor, "limit": 1})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "游标无效"
+
+
+@pytest.mark.parametrize("plain", [
+    "0001-01-01T00:00:00+01:00|1",   # 换算 UTC 低于 datetime.min
+    "9999-12-31T23:00:00-05:00|1",   # 换算 UTC 高于 datetime.max
+])
+def test_out_of_range_offset_cursor_is_422_not_500(plain, catalog_client):
+    response = catalog_client.post(URL, json={"cursor": _b64(plain), "limit": 1})
     assert response.status_code == 422
     assert response.json()["detail"] == "游标无效"
 
@@ -280,12 +299,15 @@ def test_final_page_cursor_yields_empty_continuation(db, catalog_client):
         URL, json={"cursor": final["nextCursor"], "limit": 3}
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {
+    payload = response.json()
+    resume = payload.pop("resumeCursor")
+    assert payload == {
         "schemaVersion": 1, "items": [], "hasMore": False, "nextCursor": None,
     }
+    assert resume   # 空页也给回退续传点（相对请求游标）
     # 同水位重复请求仍为空页（幂等）。
     repeat = catalog_client.post(URL, json={"cursor": final["nextCursor"], "limit": 3})
-    assert repeat.json() == response.json()
+    assert {k: v for k, v in repeat.json().items() if k != "resumeCursor"} == payload
 
 
 @pytest.mark.parametrize("body", [
@@ -367,3 +389,77 @@ def test_thirty_thousand_rows_full_walk(db, catalog_client):
     assert db.scalar(select(func.count()).select_from(DimPart)) == total
     assert elapsed < 60, f"30000 行全遍历耗时 {elapsed:.1f}s 超预算"
     print(f"\n[/list 规模] 30000 行 / {len(pages)} 页 / {elapsed:.2f}s")
+
+
+def _ids(client, cursor, limit=500):
+    body = {"limit": limit}
+    if cursor is not None:
+        body["cursor"] = cursor
+    response = client.post(URL, json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_resume_cursor_only_when_caught_up(db, catalog_client):
+    _parts(db, 3, prefix="RESUME")
+    db.commit()
+    first = _ids(catalog_client, None, limit=2)
+    assert first["hasMore"] is True and first["resumeCursor"] is None
+    last = _ids(catalog_client, first["nextCursor"], limit=2)
+    assert last["hasMore"] is False and last["resumeCursor"]
+    # 刚写入的行都在回退窗口内：resumeCursor 早于 nextCursor，重读得到窗口内全部行（含已见行）。
+    replay = _ids(catalog_client, last["resumeCursor"])
+    assert {p.id for p in db.scalars(select(DimPart).where(DimPart.pn_std.like("RESUME-%")))} <= {
+        item["partId"] for item in replay["items"]}
+
+
+def test_resume_cursor_equals_next_cursor_when_tail_older_than_lag(db, catalog_client):
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+    parts = _parts(db, 2, prefix="OLDTAIL")
+    db.execute(update(DimPart).values(updated_at=old - timedelta(days=1)))
+    db.execute(update(DimPart).where(DimPart.id.in_([p.id for p in parts])).values(updated_at=old))
+    db.commit()
+    page = _ids(catalog_client, None)
+    assert page["hasMore"] is False
+    assert page["resumeCursor"] == page["nextCursor"]
+
+
+def test_late_commit_row_missed_by_next_cursor_found_by_resume_cursor(db, catalog_client):
+    """模拟长导入事务：行的 updated_at（事务开始时间）早于消费者已越过的水位、晚于回退点。"""
+    base = datetime.now(timezone.utc) - timedelta(days=3)
+    db.execute(update(DimPart).values(updated_at=base))
+    _parts(db, 2, prefix="SEEN")
+    db.commit()
+    caught_up = _ids(catalog_client, None)
+    assert caught_up["hasMore"] is False
+    watermark = caught_up["items"][-1]["updatedAt"]
+
+    # 另一个长事务在消费者追平前就开始了（时间戳早于水位 2 分钟），现在才提交。
+    late = DimPart(pn_std="LATE-COMMIT")
+    db.add(late)
+    db.flush()
+    db.execute(update(DimPart).where(DimPart.id == late.id).values(
+        updated_at=datetime.fromisoformat(watermark) - timedelta(minutes=2)))
+    db.commit()
+
+    by_next = _ids(catalog_client, caught_up["nextCursor"])
+    assert late.id not in {item["partId"] for item in by_next["items"]}   # 漏行
+    by_resume = _ids(catalog_client, caught_up["resumeCursor"])
+    assert late.id in {item["partId"] for item in by_resume["items"]}     # 续传补回
+
+
+def test_resume_lag_is_configurable(db, catalog_client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "resale_list_resume_lag_seconds", 60)
+    base = datetime.now(timezone.utc) - timedelta(days=3)
+    db.execute(update(DimPart).values(updated_at=base))
+    recent = _parts(db, 1, prefix="LAG")[0]
+    db.execute(update(DimPart).where(DimPart.id == recent.id).values(
+        updated_at=func.now() - timedelta(minutes=5)))
+    db.commit()
+    page = _ids(catalog_client, None)
+    # 尾行早于 now()-60s → 不回退，等于 nextCursor；放大到 900s 则回退。
+    assert page["resumeCursor"] == page["nextCursor"]
+    monkeypatch.setattr(get_settings(), "resale_list_resume_lag_seconds", 900)
+    page = _ids(catalog_client, None)
+    assert page["resumeCursor"] != page["nextCursor"]
+    assert recent.id in {i["partId"] for i in _ids(catalog_client, page["resumeCursor"])["items"]}

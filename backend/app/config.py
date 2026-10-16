@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 
-from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # Dedicated, default-off server-to-server export for the independent resale app.
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
+    # D-36 /list resumeCursor 回退秒数：须大于主数据库导入单事务最长时长。
+    # 生产实测（2026-10-16，sys_import_job 单文件作业墙钟上限 244 s、多文件作业 296 s）
+    # 取约 3 倍余量 900 s。
+    resale_list_resume_lag_seconds: int = Field(default=900, ge=60, le=86400)
 
     @field_validator("resale_export_token_sha256", "resale_catalog_token_sha256")
     @classmethod

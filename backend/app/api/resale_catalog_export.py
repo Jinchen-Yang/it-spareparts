@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
@@ -38,6 +38,9 @@ _PURCHASE_TYPES = frozenset({"销售订单", "指定采购", "维保需求"})
 _ORDER_STATES = frozenset({"已生效", "已取消", "草稿", "进行中"})
 _DESCRIPTION_MAX_CHARS = 4000
 _BASE64URL = re.compile(r"[A-Za-z0-9_-]+")
+# 游标 id 段只认 ASCII 十进制：int() 会接受 "+1"、"1_0"、全角／阿拉伯-印度数字等，须先挡掉。
+_CURSOR_ID = re.compile(r"[0-9]+")
+_PG_BIGINT_MAX = 2**63 - 1
 _logger = logging.getLogger(__name__)
 
 
@@ -267,17 +270,35 @@ def _decode_list_cursor(token: str) -> tuple[datetime, int]:
         padded = token + "=" * (-len(token) % 4)
         plain = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         ts_text, separator, id_text = plain.partition("|")
-        if not separator or not ts_text or not id_text:
+        if not separator or not ts_text or not _CURSOR_ID.fullmatch(id_text):
             raise ValueError
         updated_at = datetime.fromisoformat(ts_text)
         if updated_at.tzinfo is None:
             raise ValueError
+        # 0001-01-01T00:00+01:00 / 9999-12-31T23:00-05:00 换算 UTC 越界抛 OverflowError。
+        updated_at = updated_at.astimezone(timezone.utc)
         part_id = int(id_text)
-        if part_id < 1:
+        # 超出 PG bigint 的 id 会在驱动层报错成 500，按非法游标处理。
+        if part_id < 1 or part_id > _PG_BIGINT_MAX:
             raise ValueError
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+    except (ValueError, OverflowError, binascii.Error, UnicodeDecodeError):
         raise HTTPException(422, "游标无效")
-    return updated_at.astimezone(timezone.utc), part_id
+    return updated_at, part_id
+
+
+def _resume_cursor(anchor_at: datetime, anchor_id: int, db_now: datetime) -> str:
+    """追平末尾时的回退续传点：min(锚点, 数据库 now() - N)。
+
+    updated_at 取写事务开始时间，导入整文件一个事务，晚提交的行时间戳可能早于
+    消费者已越过的水位。回退 N（resale_list_resume_lag_seconds）后重读这段窗口，
+    重复行由消费端幂等跳过。回退点早于锚点时编码为 (回退点 - 1µs, bigint 上限)，
+    等价于“回退点及之后的全部行”，且不放宽 id ≥ 1 的游标校验。
+    """
+    lag = timedelta(seconds=get_settings().resale_list_resume_lag_seconds)
+    rewind = db_now - lag
+    if anchor_at <= rewind:
+        return _encode_list_cursor(anchor_at, anchor_id)
+    return _encode_list_cursor(rewind - timedelta(microseconds=1), _PG_BIGINT_MAX)
 
 
 @router.post("/list")
@@ -288,11 +309,12 @@ def list_parts(
     response.headers["Cache-Control"] = "no-store"
     target = aliased(DimPart)
     statement = (
-        select(DimPart, target.pn_std)
+        select(DimPart, target.pn_std, func.now())
         .outerjoin(target, target.id == DimPart.merged_into_id)
         .order_by(DimPart.updated_at.asc(), DimPart.id.asc())
         .limit(body.limit + 1)
     )
+    cursor_at = cursor_id = None
     if body.cursor is not None:
         cursor_at, cursor_id = _decode_list_cursor(body.cursor)
         # 行值比较：同一 updated_at 的并列由 id 决胜，翻页不漏行。
@@ -302,7 +324,7 @@ def list_parts(
     fetched = db.execute(statement).all()
     has_more = len(fetched) > body.limit
     page = fetched[: body.limit]
-    specs = _safe_specs(db, [part.id for part, _ in page])
+    specs = _safe_specs(db, [part.id for part, _, _ in page])
     items = [
         {
             "partId": part.id,
@@ -325,8 +347,18 @@ def list_parts(
             "mergedIntoPnStd": merged_pn_std,
             "machineOrPart": part.machine_or_part,
         }
-        for part, merged_pn_std in page
+        for part, merged_pn_std, _ in page
     ]
+    resume_cursor = None
+    if not has_more:
+        # 追平末尾：给回退 N 的续传点，覆盖长事务晚提交、时间戳早于水位的行。
+        if page:
+            last = page[-1][0]
+            resume_cursor = _resume_cursor(last.updated_at, last.id, page[-1][2])
+        elif cursor_at is not None:
+            resume_cursor = _resume_cursor(
+                cursor_at, cursor_id, db.execute(select(func.now())).scalar_one()
+            )
     return {
         "schemaVersion": 1,
         "items": items,
@@ -336,6 +368,8 @@ def list_parts(
         "nextCursor": _encode_list_cursor(page[-1][0].updated_at, page[-1][0].id)
         if page
         else None,
+        # 仅 hasMore=false 时非空（空表首请求除外）；消费端追平后以它作为下次增量起点。
+        "resumeCursor": resume_cursor,
     }
 
 
