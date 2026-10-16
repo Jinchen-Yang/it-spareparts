@@ -9,6 +9,10 @@
 
 适用范围：生产使用独立正式域名，现有 Docker Caddy 终止 TLS；IT 备件
 `frontend` 只在宿主机 `127.0.0.1:8080` 和隔离的 Docker ingress 网络上提供服务。
+该 `it-spareparts-ingress` 网络现由商城（it-shop-next）frontend 以外部网络方式
+共享接入，`shop.ybwznt.com` 也由同一 Caddy 转发；跨项目操作约束与恢复步骤见
+[`docs/DEPLOY.md`](../DEPLOY.md) 第八节
+“跨项目耦合：商城（it-shop-next）依赖本栈的 ingress 与 Caddy”小节。
 
 ## 1. 发布门禁
 
