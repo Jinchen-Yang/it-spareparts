@@ -76,6 +76,7 @@ export interface WorkbookApplyResult {
   line_voids?: number;
   order_reassignments?: number;
   contract_updates?: number;
+  project_note_updates?: number;
   plan_creates?: number;
   plan_updates?: number;
   plan_voids?: number;

@@ -1,7 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Button, List, Modal, Space, Typography, Upload, message } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
-import type { UploadFile } from "antd/es/upload/interface";
 import type {
   WillReassignOrder,
   WillVoidRow,
@@ -63,6 +62,7 @@ function describe(result: Partial<WorkbookApplyResult>): string {
     parts.push(`WBDD 归属更正 ${result.order_reassignments} 张`);
   }
   if (result.contract_updates) parts.push(`项目合同总额更新 ${result.contract_updates} 项`);
+  if (result.project_note_updates) parts.push(`项目备注更新 ${result.project_note_updates} 项`);
   if (result.expense_creates) parts.push(`报销新增 ${result.expense_creates} 行`);
   if (result.expense_updates) parts.push(`报销更新 ${result.expense_updates} 行`);
   if (result.expense_voids) parts.push(`报销作废 ${result.expense_voids} 行`);
@@ -109,6 +109,32 @@ export function WorkbookRoundTrip({
   const [downloading, setDownloading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
+  const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
+  const uploadSession = localStorage.getItem("token");
+  const uploadAllowed = useRef(canUpload);
+  uploadAllowed.current = canUpload;
+  const mounted = useRef(false);
+  const uploadEpoch = useRef(0);
+  const closeConfirmation = useRef<(() => void) | null>(null);
+  const retainedFile = retainedDraft?.session === uploadSession ? retainedDraft.file : null;
+
+  useEffect(() => {
+    // 文件仅留在当前页面内存；账号或权限变化后不能复用上个操作上下文的草稿。
+    uploadEpoch.current += 1;
+    closeConfirmation.current?.();
+    setRetainedDraft(null);
+    setApplying(false);
+  }, [canUpload, uploadSession]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      uploadEpoch.current += 1;
+      // Modal.confirm 渲染在门户中，需要随页面显式销毁。
+      closeConfirmation.current?.();
+    };
+  }, []);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -123,17 +149,23 @@ export function WorkbookRoundTrip({
 
   const applyDirectly = async (
     file: File,
+    isCurrent: () => boolean,
     opts?: { forceTakeover?: boolean },
   ) => {
+    if (!isCurrent()) return;
     const result = await onApply(file, opts);
+    if (!isCurrent()) return;
+    setRetainedDraft(null);
     if (onAfterApply) {
       try {
         const refreshed = await onAfterApply();
+        if (!isCurrent()) return;
         if (refreshed === false) {
           message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
           return;
         }
       } catch {
+        if (!isCurrent()) return;
         message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
         return;
       }
@@ -144,13 +176,19 @@ export function WorkbookRoundTrip({
   };
 
   /** 两阶段：预检 → 摆变更摘要和作废预览 → 用户确认才落库。 */
-  const validateThenApply = async (file: File) => {
+  const validateThenApply = async (file: File, isCurrent: () => boolean) => {
     const preview = await onValidate!(file);
+    if (!isCurrent()) return;
     const voidRows = preview.will_void_rows ?? [];
     const reassignRows = preview.will_reassign_orders ?? [];
     const voidedRows = preview.voided_rows ?? [];
     await new Promise<void>((resolve, reject) => {
-      Modal.confirm({
+      const finish = () => {
+        modal.destroy();
+        if (closeConfirmation.current === finish) closeConfirmation.current = null;
+        resolve();
+      };
+      const modal = Modal.confirm({
         title: `确认回传${title}？`,
         width: 560,
         content: (
@@ -216,34 +254,51 @@ export function WorkbookRoundTrip({
         ),
         okText: "确认回传",
         cancelText: "取消",
-        onCancel: () => resolve(),
+        onCancel: finish,
         onOk: async () => {
           try {
-            await applyDirectly(file);
-            resolve();
+            await applyDirectly(file, isCurrent);
+            finish();
           } catch (error) {
+            modal.destroy();
+            if (closeConfirmation.current === finish) closeConfirmation.current = null;
             reject(error);
-            throw error;
           }
         },
       });
+      closeConfirmation.current = finish;
     });
   };
 
-  const handleUpload = async (file: UploadFile) => {
+  const handleUpload = async (file: File) => {
+    if (!uploadAllowed.current) return false;
+    const requestSession = localStorage.getItem("token");
+    const requestEpoch = uploadEpoch.current;
+    const isCurrent = () => mounted.current && uploadAllowed.current
+      && uploadEpoch.current === requestEpoch && localStorage.getItem("token") === requestSession;
+    setRetainedDraft(null);
     setApplying(true);
     try {
       if (onValidate) {
-        await validateThenApply(file as unknown as File);
+        await validateThenApply(file, isCurrent);
       } else {
-        await applyDirectly(file as unknown as File);
+        await applyDirectly(file, isCurrent);
       }
     } catch (error) {
+      if (!isCurrent()) return false;
+      if ((error as { response?: { status?: number } })?.response?.status === 409) {
+        setRetainedDraft({ file, session: requestSession });
+      }
       // 2.7.0 行级冲突：展示三值对照，用户确认后可强制接管重传。
       const conflicts = extractConflicts(error);
       if (conflicts?.length) {
         await new Promise<void>((resolve) => {
-          Modal.confirm({
+          const finish = () => {
+            modal.destroy();
+            if (closeConfirmation.current === finish) closeConfirmation.current = null;
+            resolve();
+          };
+          const modal = Modal.confirm({
             title: `有 ${conflicts.length} 处改动与他人冲突`,
             width: 640,
             content: (
@@ -276,15 +331,18 @@ export function WorkbookRoundTrip({
             cancelText: "取消（重新下载处理）",
             onOk: async () => {
               try {
-                await applyDirectly(file as unknown as File, {
+                await applyDirectly(file, isCurrent, {
                   forceTakeover: true,
                 });
+              } catch (takeoverError) {
+                if (isCurrent()) message.error(readError(takeoverError, "上传失败"));
               } finally {
-                resolve();
+                finish();
               }
             },
-            onCancel: () => resolve(),
+            onCancel: finish,
           });
+          closeConfirmation.current = finish;
         });
       } else {
         // 后端整份拒绝时把原文 message 显示出来：告诉用户**哪一行**不合法，
@@ -292,10 +350,12 @@ export function WorkbookRoundTrip({
         message.error(readError(error, "上传失败"));
       }
     } finally {
-      setApplying(false);
-      // 浏览器不会为同一个原生 file input 的同文件重选再次触发 change。
-      // 无论成功、失败还是预检弹窗取消，都重建 input，让用户能直接重试原文件。
-      setUploadInputVersion((current) => current + 1);
+      if (mounted.current && uploadEpoch.current === requestEpoch) {
+        setApplying(false);
+        // 浏览器不会为同一个原生 file input 的同文件重选再次触发 change。
+        // 无论成功、失败还是预检弹窗取消，都重建 input，让用户能直接重试原文件。
+        setUploadInputVersion((current) => current + 1);
+      }
     }
     return false;
   };
@@ -315,9 +375,10 @@ export function WorkbookRoundTrip({
           <Upload
             key={`workbook-upload-${uploadInputVersion}`}
             accept=".xlsx"
+            disabled={applying}
             maxCount={1}
             showUploadList={false}
-            beforeUpload={(file) => handleUpload(file as unknown as UploadFile)}
+            beforeUpload={(file) => handleUpload(file)}
           >
             <Button size={size} icon={<UploadOutlined />} loading={applying}>
               上传覆盖
@@ -325,6 +386,22 @@ export function WorkbookRoundTrip({
           </Upload>
         ) : null}
       </Space>
+      {canUpload && retainedFile ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={`待处理文件：${retainedFile.name}`}
+          description={(
+            <Space direction="vertical" size={6}>
+              <Text>原文件暂留在本页，可重试或取消。版本冲突时请重新下载，并将草稿修改搬入最新文件。</Text>
+              <Space wrap>
+                <Button size="small" disabled={applying} onClick={() => void handleUpload(retainedFile)}>重试原文件</Button>
+                <Button size="small" disabled={applying} onClick={() => setRetainedDraft(null)}>取消文件草稿</Button>
+              </Space>
+            </Space>
+          )}
+        />
+      ) : null}
       {hint ? (
         <Text type="secondary" style={{ fontSize: 11.5 }}>
           {hint}

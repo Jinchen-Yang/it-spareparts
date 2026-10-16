@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Modal, message } from "antd";
 
@@ -22,7 +22,10 @@ function uploadFile(container: HTMLElement, file: File) {
 }
 
 describe("WorkbookRoundTrip", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
   afterEach(() => {
     cleanup();
     Modal.destroyAll();
@@ -84,6 +87,17 @@ describe("WorkbookRoundTrip", () => {
     expect(await screen.findByText(/数据已写入，但页面刷新失败/)).toBeInTheDocument();
     expect(screen.queryByText(/已覆盖并刷新/)).toBeNull();
     expect(screen.queryByText("上传失败")).toBeNull();
+  });
+
+  it("项目备注更新回执显示具体数量", async () => {
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+        onApply={vi.fn().mockResolvedValue({ project_note_updates: 1 })}
+      />,
+    );
+    uploadFile(container, makeFile());
+    expect(await screen.findByText("已覆盖：项目备注更新 1 项")).toBeVisible();
   });
 
   it("two-phase: shows the void preview and applies only after confirm", async () => {
@@ -172,6 +186,114 @@ describe("WorkbookRoundTrip", () => {
       expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
     uploadFile(container, file);
     await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
+  });
+
+  it("预检409保留原文件草稿，可直接重试并在成功后清除", async () => {
+    const onValidate = vi.fn()
+      .mockRejectedValueOnce({
+        response: { status: 409, data: { detail: { message: "项目备注版本已变化，请重新核对后回传" } } },
+      })
+      .mockResolvedValue({ changes: [{ sheet: "01_项目概览", field: "项目备注", old: "旧备注", new: "草稿备注" }] });
+    const onApply = vi.fn().mockResolvedValue({
+      changes: [{ sheet: "01_项目概览", field: "项目备注", old: "旧备注", new: "草稿备注" }],
+    });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="a.xlsx" canUpload
+        onDownload={vi.fn()} onValidate={onValidate} onApply={onApply}
+      />,
+    );
+    const file = makeFile();
+    uploadFile(container, file);
+    expect(await screen.findByText("项目备注版本已变化，请重新核对后回传")).toBeVisible();
+    expect(await screen.findByText("待处理文件：回填.xlsx")).toBeVisible();
+    expect(onApply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重试原文件" }));
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
+    expect(onValidate.mock.calls[1][0]).toBe(file);
+    fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledWith(file, undefined));
+    await waitFor(() => expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull());
+  });
+
+  it.each(["取消", "权限撤销", "切换账号"])("落库409保留文件，%s后清除草稿", async (action) => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const onApply = vi.fn().mockRejectedValue({
+      response: { status: 409, data: { detail: "项目备注已被修改，整本未写入" } },
+    });
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onApply };
+    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    const firstInput = uploadFile(container, makeFile());
+    expect(await screen.findByText("待处理文件：回填.xlsx")).toBeVisible();
+    await waitFor(() => expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
+    if (action === "取消") {
+      fireEvent.click(screen.getByRole("button", { name: "取消文件草稿" }));
+    } else if (action === "权限撤销") {
+      rerender(<WorkbookRoundTrip {...props} canUpload={false} />);
+    } else {
+      localStorage.setItem("token", "synthetic-session-b");
+      rerender(<WorkbookRoundTrip {...props} />);
+    }
+    await waitFor(() => expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull());
+    expect(screen.queryByRole("button", { name: "重试原文件" })).toBeNull();
+    expect(onApply).toHaveBeenCalledTimes(1);
+    if (action === "权限撤销") {
+      rerender(<WorkbookRoundTrip {...props} />);
+      expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull();
+    }
+  });
+
+  it("账号切换后旧上传的409晚到响应不能留下文件草稿", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    let rejectOld!: (error: unknown) => void;
+    const onApply = vi.fn(() => new Promise<never>((_, reject) => { rejectOld = reject; }));
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onApply };
+    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    uploadFile(container, makeFile());
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    localStorage.setItem("token", "synthetic-session-b");
+    rerender(<WorkbookRoundTrip {...props} />);
+    await act(async () => rejectOld({ response: { status: 409, data: { detail: "旧请求版本冲突" } } }));
+    expect(screen.queryByText("旧请求版本冲突")).toBeNull();
+    expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull();
+  });
+
+  it("切换账号后旧预检的晚到响应不能打开确认弹窗", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    let resolvePreview!: (value: { will_void_rows: [] }) => void;
+    const onValidate = vi.fn(() => new Promise<{ will_void_rows: [] }>((resolve) => { resolvePreview = resolve; }));
+    const onApply = vi.fn();
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onValidate, onApply };
+    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    uploadFile(container, makeFile());
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(1));
+    localStorage.setItem("token", "synthetic-session-b");
+    rerender(<WorkbookRoundTrip {...props} />);
+    await act(async () => resolvePreview({ will_void_rows: [] }));
+    expect(screen.queryByRole("button", { name: "确认回传" })).toBeNull();
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it.each(["切换账号", "撤销权限", "切换项目"])("已有确认弹窗在%s后不能提交旧文件", async (action) => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const onValidate = vi.fn().mockResolvedValue({ will_void_rows: [] });
+    const onApply = vi.fn();
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onValidate, onApply };
+    const { container, rerender, unmount } = render(<WorkbookRoundTrip {...props} />);
+    uploadFile(container, makeFile());
+    const confirm = await screen.findByRole("button", { name: "确认回传" });
+    if (action === "切换账号") {
+      localStorage.setItem("token", "synthetic-session-b");
+      rerender(<WorkbookRoundTrip {...props} />);
+    } else if (action === "撤销权限") {
+      rerender(<WorkbookRoundTrip {...props} canUpload={false} />);
+    } else {
+      unmount();
+    }
+    // 已捕获的旧按钮即便在弹窗退场动画期间收到点击也不能写库。
+    fireEvent.click(confirm);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认回传" })).toBeNull());
+    expect(onApply).not.toHaveBeenCalled();
   });
 });
 

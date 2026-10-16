@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
-import re
 from typing import Callable, Literal
 
 from openpyxl import Workbook
@@ -20,6 +19,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import ILLEGAL_EXCEL_CHARS
 from app.models.maintenance_project import MaintenanceProject
 from app.security import UserContext
 from app.services import maintenance_boss_board as board
@@ -28,7 +28,7 @@ from app.services import maintenance_boss_board as board
 MAX_EXPORT_ROWS = 5_000
 MAX_DYNAMIC_TEXT_BYTES = 16 * 1024 * 1024
 MAX_WORKBOOK_BYTES = 32 * 1024 * 1024
-_INVALID_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_INVALID_XML_CONTROL = ILLEGAL_EXCEL_CHARS
 
 DEFAULT_FIELDS = (
     "project_name",
@@ -210,6 +210,7 @@ EXPORT_FIELDS: tuple[ExportField, ...] = (
     ExportField("project_manager_id", "维保负责人账号", "项目基础", lambda r: _value(r, "_master_project_manager_id"), width=20),
     ExportField("salesperson", "销售人员", "项目基础", lambda r: _value(r, "salesperson"), width=16),
     ExportField("no_return_default", "默认不返还", "项目基础", lambda r: _yes_no(r, "_master_no_return_default"), width=14),
+    ExportField("project_note", "项目备注", "项目基础", lambda r: _value(r, "_master_project_note"), width=54),
     ExportField("is_active", "主档有效", "项目基础", lambda r: _yes_no(r, "_master_is_active"), width=12),
     ExportField("is_archived", "已归档", "项目基础", lambda r: _yes_no(r, "is_archived"), width=12),
     ExportField("version", "主档版本", "项目基础", lambda r: _value(r, "_master_version"), number_format="0", width=12),
@@ -309,6 +310,7 @@ def _merge_master_facts(db: Session, rows: list[dict]) -> None:
             "_master_cmo_name": project.cmo_name,
             "_master_project_manager_id": project.project_manager_id,
             "_master_no_return_default": project.no_return_default,
+            "_master_project_note": project.project_note,
             "_master_is_active": project.is_active,
             "_master_version": project.version,
             "_master_created_at": project.created_at,

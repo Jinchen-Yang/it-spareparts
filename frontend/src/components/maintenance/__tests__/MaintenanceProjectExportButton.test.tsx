@@ -141,4 +141,25 @@ describe("维保项目清单导出", () => {
     expect(within(dialog).getByText("已选 6 / 6 项")).toBeInTheDocument();
     expect(within(dialog).getByRole("checkbox", { name: "累计已回款" })).toBeChecked();
   });
+
+  it("项目备注由服务端提供为可选列，默认六项不变且勾选后才导出", async () => {
+    getBoardProjectExportOptions.mockResolvedValue({ data: {
+      ...options.data,
+      fields: [
+        ...options.data.fields,
+        { key: "project_note", label: "项目备注", group: "项目基础", default_selected: false },
+      ],
+    } });
+    renderButton();
+    fireEvent.click(screen.getByRole("button", { name: /导出项目清单/ }));
+    const dialog = await screen.findByRole("dialog");
+    const note = within(dialog).getByRole("checkbox", { name: "项目备注" });
+    expect(note).not.toBeChecked();
+    expect(within(dialog).getByText("已选 6 / 7 项")).toBeInTheDocument();
+    fireEvent.click(note);
+    fireEvent.click(within(dialog).getByRole("button", { name: /下载 Excel（7 项）/ }));
+    await waitFor(() => expect(downloadBoardProjectsExport).toHaveBeenCalledWith(expect.objectContaining({
+      fields: [...options.data.default_fields, "project_note"],
+    })));
+  });
 });
