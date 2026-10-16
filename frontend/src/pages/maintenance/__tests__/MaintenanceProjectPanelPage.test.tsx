@@ -361,6 +361,158 @@ describe("免返标注", () => {
   });
 });
 
+describe("项目备注", () => {
+  const allowEdit = () => localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true, data_profit: true, action_maintenance_project_manage: true,
+  }));
+  const noteProject = (note: string | null = "原项目备注", id = "p1") => ({ data: { project: {
+    project_id: id, project_code: id, display_name: id,
+    is_active: true, version: 3, project_note: note, no_return_note: "独立免返提醒",
+  } } });
+
+  it("与免返标注分别显示多行纯文本，编辑后只提交项目备注", async () => {
+    allowEdit();
+    let note: string | null = "项目经历\n<b>只作标记</b>";
+    getMaintenanceProject.mockImplementation(async () => noteProject(note));
+    updateMaintenanceProject.mockImplementation(async (_, body) => {
+      if (Object.prototype.hasOwnProperty.call(body, "project_note")) note = body.project_note;
+      return { data: {} };
+    });
+    renderPanel();
+    expect(await screen.findByText("项目经历 <b>只作标记</b>")).toBeVisible();
+    expect(screen.getByText("独立免返提醒")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "编辑项目备注" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目基本信息" });
+    const input = within(dialog).getByRole("textbox", { name: "项目备注" });
+    expect(input).toHaveValue("项目经历\n<b>只作标记</b>");
+    fireEvent.change(input, { target: { value: "自由备注\n<img src=x onerror=alert(1)>" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({
+      version: 3, project_note: "自由备注\n<img src=x onerror=alert(1)>",
+    }));
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("no_return_note");
+    const rendered = await screen.findByText("自由备注 <img src=x onerror=alert(1)>");
+    expect(rendered.querySelector("img")).toBeNull();
+    expect(screen.getByText("独立免返提醒")).toBeVisible();
+  });
+
+  it("清空项目备注提交null；只编辑免返标注不提交项目备注且仍允许2000字符", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目备注" }), { target: { value: " \n " } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: null })));
+    expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("no_return_note");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "免".repeat(2000) } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledTimes(2));
+    expect(updateMaintenanceProject.mock.calls[1][1]).toHaveProperty("no_return_note", "免".repeat(2000));
+    expect(updateMaintenanceProject.mock.calls[1][1]).not.toHaveProperty("project_note");
+  });
+
+  it("中文组合输入不截断，501字符拒绝且500个emoji可提交", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("textbox", { name: "项目备注" });
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "项目曾经更换联系人" } });
+    fireEvent.compositionEnd(input);
+    expect(input).toHaveValue("项目曾经更换联系人");
+    fireEvent.change(input, { target: { value: "中".repeat(501) } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await within(dialog).findByText("项目备注最多 500 个字符")).toBeVisible();
+    expect(input).toHaveValue("中".repeat(501));
+    expect(updateMaintenanceProject).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "😀".repeat(500) } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: "😀".repeat(500) })));
+  });
+
+  it.each([401, 403, 409])("保存遇%s保留项目备注草稿，不报告成功", async (status) => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    updateMaintenanceProject.mockRejectedValue({ response: { status, data: { detail: "项目备注未保存，请核对权限或版本" } } });
+    const success = vi.spyOn(message, "success");
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目备注" }), { target: { value: "冲突后保留的备注" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await screen.findByText("项目备注未保存，请核对权限或版本")).toBeVisible();
+    expect(within(dialog).getByRole("textbox", { name: "项目备注" })).toHaveValue("冲突后保留的备注");
+    expect(success).not.toHaveBeenCalled();
+  });
+
+  it.each(["page_maintenance", "data_profit", "action_maintenance_project_manage"])(
+    "缺少%s时只读项目备注", async (missing) => {
+      localStorage.setItem("permissions", JSON.stringify({
+        page_maintenance: true, data_profit: true, action_maintenance_project_manage: true, [missing]: false,
+      }));
+      getMaintenanceProject.mockResolvedValue(noteProject());
+      renderPanel();
+      expect(await screen.findByText("原项目备注")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "编辑项目备注" })).toBeNull();
+      expect(screen.getByRole("button", { name: /编辑基本信息/ })).toBeDisabled();
+    },
+  );
+
+  it("取消后重开从数据库读回项目备注，不沿用未保存草稿", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目备注" }), { target: { value: "已取消草稿" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /取 消|Cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "编辑项目备注" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("textbox", { name: "项目备注" })).toHaveValue("原项目备注");
+    expect(updateMaintenanceProject).not.toHaveBeenCalled();
+  });
+
+  it("项目备注已写入但刷新失败时失效旧快照", async () => {
+    allowEdit();
+    getMaintenanceProject.mockResolvedValue(noteProject());
+    updateMaintenanceProject.mockImplementation(async () => {
+      getMaintenanceProject.mockRejectedValue(new Error("读回失败"));
+      return { data: {} };
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "项目备注" }), { target: { value: "新的项目备注" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
+    expect(await screen.findByText("已保存，但页面刷新失败，请重试。")).toBeVisible();
+    expect(screen.queryByText("原项目备注")).toBeNull();
+  });
+
+  it("切换项目后旧项目备注的晚到编辑响应不能进入新项目", async () => {
+    allowEdit();
+    let resolveOld!: (value: ReturnType<typeof noteProject>) => void;
+    getMaintenanceProject.mockImplementation(async (id) => noteProject(id === "p1" ? "甲项目备注" : "乙项目备注", id));
+    renderPanel(true);
+    expect(await screen.findByText("甲项目备注")).toBeVisible();
+    getMaintenanceProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑项目备注" }));
+    fireEvent.click(screen.getByRole("link", { name: "切到项目B" }));
+    expect(await screen.findByText("乙项目备注")).toBeVisible();
+    await act(async () => resolveOld(noteProject("旧甲项目草稿")));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText("旧甲项目草稿")).toBeNull();
+  });
+});
+
 afterEach(() => {
   cleanup();
   Modal.destroyAll();

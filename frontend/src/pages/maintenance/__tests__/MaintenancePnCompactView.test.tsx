@@ -63,6 +63,23 @@ describe("PN 紧凑图", () => {
     expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective", top_n: 15, include_pn_overview: true }), expect.any(AbortSignal));
   });
 
+  it.each([false, true])("Top 净量与总量均为正时，负值说明仍遵循全集标志 %s", async hasNegative => {
+    const data = fixture();
+    data.meta.has_negative = hasNegative;
+    data.pn_overview!.has_negative = hasNegative;
+    // A negative PN can be outside the bounded Top; the browser cannot infer the flag from these rows.
+    fetchExplorer.mockResolvedValue(data);
+    mount();
+
+    const capture = await screen.findByTestId("pn-compact-capture");
+    const effective = within(capture).getByRole("group", { name: "需求净量" });
+    expect(within(effective).getByText("12.001")).toBeInTheDocument();
+    expect(within(capture).getByText("需求净量 / 件").parentElement).toHaveTextContent("12.001");
+    const warning = within(capture).queryByText(/包含负值，条形保留方向，不计算集中度。/);
+    if (hasNegative) expect(warning).toBeInTheDocument();
+    else expect(warning).not.toBeInTheDocument();
+  });
+
   it.each(["local", "server"])("%s成本权限关闭时整榜和金额KPI隐藏，需求净量仍可用", async permission => {
     const data = fixture();
     if (permission === "local") localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: false }));

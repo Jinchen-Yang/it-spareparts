@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import has_illegal_excel_chars
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
@@ -42,6 +43,7 @@ def project_dict(project: MaintenanceProject) -> dict:
         # 既靠建项写入补新项目，也靠这里的可编辑面把存量补回来。
         "business_type": project.business_type,
         "no_return_note": project.no_return_note,
+        "project_note": project.project_note,
         # 维保期限主数据（#51）：面板可显示、可编辑（#39）
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,
@@ -57,6 +59,8 @@ def _clean_required(value: str | None, *, label: str, max_length: int) -> str:
     cleaned = (value or "").strip()
     if not cleaned:
         raise MaintenanceProjectCatalogError(f"{label}不能为空")
+    if has_illegal_excel_chars(cleaned):
+        raise MaintenanceProjectCatalogError(f"{label}含不可见控制字符，请删除后重试")
     if len(cleaned) > max_length:
         raise MaintenanceProjectCatalogError(f"{label}过长（最多 {max_length} 个字符）")
     return cleaned
@@ -68,6 +72,8 @@ def _clean_optional(value: str | None, *, label: str, max_length: int) -> str | 
     cleaned = value.strip()
     if not cleaned:
         return None
+    if has_illegal_excel_chars(cleaned):
+        raise MaintenanceProjectCatalogError(f"{label}含不可见控制字符，请删除后重试")
     if len(cleaned) > max_length:
         raise MaintenanceProjectCatalogError(f"{label}过长（最多 {max_length} 个字符）")
     return cleaned
@@ -206,11 +212,18 @@ def update_project(
     allowed = {key: value for key, value in updates.items() if key in {
         "display_name", "salesperson", "project_manager_id", "period_from",
         "period_to", "business_type",
-        "no_return_note",
+        "no_return_note", "project_note",
     }}
     if not allowed:
         raise MaintenanceProjectCatalogError("没有可修改的项目字段")
     clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
+    if "project_note" in allowed:
+        value = allowed["project_note"]
+        if value is not None and (not isinstance(value, str) or len(value) > 500):
+            raise MaintenanceProjectCatalogError("项目备注必须为文本，最多 500 个字符")
+        allowed["project_note"] = _clean_optional(
+            value, label="项目备注", max_length=500,
+        )
     if "no_return_note" in allowed:
         value = allowed["no_return_note"]
         # 与 API 按原串的字符数校验一致；服务调用也不能绕过长度/类型门禁。
@@ -261,6 +274,8 @@ def update_project(
         )
     if "no_return_note" in allowed:
         project.no_return_note = allowed["no_return_note"]
+    if "project_note" in allowed:
+        project.project_note = allowed["project_note"]
     # 维保期限编辑（#39/#51）：起止都传才生效（表单整组提交）。期限双源 P1 修复后
     # project.period_* 是唯一事实源：统一走 canonical helper 同步 projection 投影，
     # lifecycle 按新期限快照口径重算；起>止由 helper 拒绝。

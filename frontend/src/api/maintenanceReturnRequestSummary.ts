@@ -1,3 +1,5 @@
+export type DemandReturnSummaryError = "summary_unavailable";
+
 /** 方案 A 数量摘要：当前累计整单数量，数量保持十进制字符串。 */
 export interface DemandReturnSummary {
   source_order_id: string;

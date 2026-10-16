@@ -31,8 +31,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
@@ -40,6 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app import config
+from app.services.excel_text_safety import SafeTextWorkbook, has_illegal_excel_upload_text
 from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app.models.dimensions import DimPart, PartAlias
@@ -690,7 +691,7 @@ def build_project_master(db: Session, *, project_id: str,
         ).all()
     } if line_ids else {}
 
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     for name in sheets:
         if name == SHEET_BASICS:
@@ -848,7 +849,7 @@ def build_global_lines(
         ).all()
     } if line_ids else {}
 
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     ws = wb.create_sheet(GLOBAL_SHEET)
     _style(ws, _GLOBAL_HEADERS, [_READONLY] * 9 + [_EDITABLE, _READONLY, _EDITABLE])
@@ -1825,6 +1826,15 @@ class ContractAmountChange:
 
 
 @dataclass(frozen=True)
+class ProjectNoteChange:
+    """Signed 01 intent; live master CAS happens under the apply locks."""
+
+    base_version: int
+    before: str | None
+    value: str | None
+
+
+@dataclass(frozen=True)
 class MasterV2Plan:
     project_id: str
     sheets: tuple[str, ...]
@@ -1839,6 +1849,7 @@ class MasterV2Plan:
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
     assignment_changes: tuple[SourceOrderAssignmentChange, ...] = ()
     contract_amount_change: ContractAmountChange | None = None
+    project_note_change: ProjectNoteChange | None = None
     # 04 报销作废（#264/#267 契约）：显式 VOID 操作列 + 缺行=作废。
     expense_voids: tuple[str, ...] = ()
     will_void_rows: tuple[dict, ...] = ()
@@ -1865,6 +1876,7 @@ class MasterV2Plan:
             "line_voids": sum(x.operation == "VOID" for x in self.cost_refills),
             "order_reassignments": len(self.assignment_changes),
             "contract_updates": 1 if self.contract_amount_change is not None else 0,
+            "project_note_updates": 1 if self.project_note_change is not None else 0,
             "expense_creates": sum(getattr(x, "is_create", False) for x in self.expense_updates),
             "expense_updates": sum(not getattr(x, "is_create", False) for x in self.expense_updates),
             "expense_voids": len(self.expense_voids),
@@ -2557,9 +2569,16 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
             if cost_complete and total_contract and total_contract > 0 else "—"
         )),
         ("缺成本行数", missing_cost_lines),
+        ("项目备注", project.project_note),
     ]
     for item in values:
         ws.append(list(item))
+        if item[0] == "项目备注":
+            cell = ws.cell(ws.max_row, 2)
+            # A note beginning with '=' is still text, never an Excel formula.
+            cell.data_type = "s"
+            cell.fill = V2_EDITABLE
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
         if item[0] == "合同总额（含税）":
             # 只有“唯一生效且计入总额”的合同，项目总额才能无歧义地回写到一条
             # 合同事实。多合同不自动分摊；无合同不凭空创建身份。
@@ -3128,7 +3147,7 @@ def build_project_master_v2(
         raise WorkbookError("unsupported_sheet", f"不支持的 V2 工作表：{'、'.join(unknown)}")
     lines = (_assigned_lines(db, project_id=project_id, window=None, export_order=True)
              if V2_SHEET_OVERVIEW in wanted or V2_SHEET_PARTS in wanted else [])
-    wb = Workbook()
+    wb = SafeTextWorkbook()
     wb.remove(wb.active)
     base_hash_maps: dict[str, dict[str, str]] = {}
     if V2_SHEET_OVERVIEW in wanted:
@@ -3164,6 +3183,8 @@ def build_project_master_v2(
         card = _canonical_contract_read_model(db, project_id)
         exported_total = card["amount_inc_tax"]
         meta_rows.extend([
+            ("project_note_baseline", json.dumps(project.project_note, ensure_ascii=False)),
+            ("project_note_version", str(project.version)),
             ("contract_total_exported",
              "" if exported_total is None else str(exported_total)),
             ("contract_editable",
@@ -5456,12 +5477,54 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
         )
 
 
+def _v2_parse_project_note(
+    *, data: bytes, meta: dict[str, str],
+) -> ProjectNoteChange | None:
+    # Old signed workbooks carry no note intent. In particular, missing rows
+    # must never clear a note saved through the page since that export.
+    if "project_note_baseline" not in meta and "project_note_version" not in meta:
+        return None
+    try:
+        baseline = json.loads(meta["project_note_baseline"])
+        version = int(meta["project_note_version"])
+        if version < 1 or (baseline is not None and not isinstance(baseline, str)):
+            raise ValueError("invalid note baseline")
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WorkbookError("template_version_mismatch", "项目备注基线无效，请重新下载项目总表") from exc
+    # Other sheets retain their existing data_only parsing. For this editable
+    # text field inspect the original cell: an uncached formula looks blank
+    # under data_only=True and must not silently clear the saved note.
+    raw_wb = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
+    try:
+        rows = [row for row in raw_wb[V2_SHEET_OVERVIEW].iter_rows(max_col=2)
+                if str(row[0].value or "").strip() == "项目备注"]
+        if len(rows) != 1:
+            raise WorkbookError("invalid_project_note", "01_项目概览必须保留唯一的“项目备注”行，请重新下载")
+        cell = rows[0][1]
+        value = cell.value
+        if cell.data_type == "f" or (value is not None and not isinstance(value, str)):
+            raise WorkbookError("invalid_project_note", "项目备注请填写纯文本，不能使用公式或其他类型")
+        if value is not None and len(value) > 500:
+            raise WorkbookError("invalid_project_note", "项目备注最多 500 个字符，请缩短后重新上传（不会自动截断）")
+        if has_illegal_excel_upload_text(value):
+            raise WorkbookError("invalid_project_note", "项目备注含不可见控制字符，请删除后重新上传")
+        cleaned = (value.strip() or None) if value is not None else None
+    finally:
+        raw_wb.close()
+    if cleaned == baseline:
+        return None
+    # Do not compare live state here: an ACK-loss replay must reach the
+    # existing same-actor receipt before the locked master CAS is attempted.
+    return ProjectNoteChange(base_version=version, before=baseline, value=cleaned)
+
+
 def _v2_parse_contract_amount(
     db: Session,
     *,
     project_id: str,
     ws,
     meta: dict[str, str],
+    confirmed_note_replay: bool = False,
 ) -> ContractAmountChange | None:
     """解析 01 中的项目合同总额；只有唯一生效合同行可无歧义写回。"""
 
@@ -5514,7 +5577,7 @@ def _v2_parse_contract_amount(
     contract = editable_contracts[0]
     if contract.project_contract_id != contract_id:
         raise WorkbookError("contract_not_found", "合同关系已不存在或不属于当前项目，请重新下载")
-    if contract.version != base_version:
+    if contract.version != base_version and not confirmed_note_replay:
         raise WorkbookError(
             "stale_contract",
             f"合同金额已被他人更新（当前版本 {contract.version}），请重新下载后再改",
@@ -5560,12 +5623,43 @@ def validate_project_master_v2(
     uploaded_line_ids: set[int] = set()
     assignment_changes: tuple[SourceOrderAssignmentChange, ...] = ()
     contract_amount_change = None
+    project_note_change = None
     if V2_SHEET_OVERVIEW in included:
+        project_note_change = _v2_parse_project_note(data=data, meta=meta)
+        confirmed_note_replay = False
+        if project_note_change is not None:
+            merge.changes.append({
+                "sheet": V2_SHEET_OVERVIEW, "row": "项目备注", "field": "项目备注",
+                "entity_id": project_id, "old": project_note_change.before or "",
+                "new": project_note_change.value or "",
+            })
+            # A successful mixed note/contract file must reach the existing
+            # apply receipt on ACK-loss retry. Only that same actor's exact
+            # signed file may bypass the *preview* contract version check;
+            # apply still verifies its locked receipt or performs every CAS.
+            if user_ctx is not None and user_ctx.is_authenticated and user_ctx.user_id:
+                file_sha256 = hashlib.sha256(data).hexdigest()
+                key = _v2_apply_operation_key(MasterV2Plan(
+                    project_id=project_id, sheets=included,
+                    export_id=meta["export_id"], file_sha256=file_sha256,
+                ), user_ctx.user_id)
+                confirmed_note_replay = db.scalar(select(
+                    MaintenanceProjectWorkbookOperation.operation_key,
+                ).where(
+                    MaintenanceProjectWorkbookOperation.operation_key == key,
+                    MaintenanceProjectWorkbookOperation.project_id == project_id,
+                    MaintenanceProjectWorkbookOperation.export_id == meta["export_id"],
+                    MaintenanceProjectWorkbookOperation.file_sha256 == file_sha256,
+                    MaintenanceProjectWorkbookOperation.payload_hash == file_sha256,
+                    MaintenanceProjectWorkbookOperation.operated_by == user_ctx.user_id,
+                    MaintenanceProjectWorkbookOperation.operation_type == "file_apply",
+                )) is not None
         contract_amount_change = _v2_parse_contract_amount(
             db,
             project_id=project_id,
             ws=wb[V2_SHEET_OVERVIEW],
             meta=meta,
+            confirmed_note_replay=confirmed_note_replay,
         )
     if V2_SHEET_PARTS in included:
         (parsed_refills, uploaded_line_rows, uploaded_line_ids,
@@ -5902,6 +5996,7 @@ def validate_project_master_v2(
         milestone_changes=milestone_changes,
         assignment_changes=assignment_changes,
         contract_amount_change=contract_amount_change,
+        project_note_change=project_note_change,
         expense_voids=tuple(expense_voids),
         will_void_rows=tuple(will_void_rows),
         force_takeover=merge.force_takeover,
@@ -6258,6 +6353,26 @@ def apply_project_master_v2(
     # 行锁已在手且读的是新鲜值：此刻复核 validate 时刻的行指纹。必须在任何写
     # 之前 —— 冲突时整本零写入，由调用方 rollback。
     _v2_recheck_row_guards(db, plan)
+    if plan.project_note_change is not None:
+        from app.services import maintenance_project_catalog as catalog
+
+        change = plan.project_note_change
+        try:
+            # Reuse the page command before any other workbook mutations: it
+            # refreshes preloaded ORM state and performs version/audit/bump.
+            catalog.update_project(
+                db, project_id=plan.project_id, version=change.base_version,
+                updates={"project_note": change.value}, reason=audit_reason,
+                operated_by=operated_by,
+            )
+        except catalog.MaintenanceProjectCatalogConflict as exc:
+            raise WorkbookError(
+                "stale_project_note",
+                "项目备注所依据的项目版本已被他人修改，本次上传未写入任何数据；"
+                "请保留文件草稿，重新下载项目总表核对后再上传。",
+            ) from exc
+        except catalog.MaintenanceProjectCatalogError as exc:
+            raise WorkbookError("invalid_project_note", str(exc)) from exc
     locked_void_contract_nos = {
         str(value)
         for value in db.scalars(

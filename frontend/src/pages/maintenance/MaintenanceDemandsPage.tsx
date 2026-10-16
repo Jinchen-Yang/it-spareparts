@@ -301,7 +301,7 @@ export function MaintenanceDemandsPage() {
     },
     { title: "明细行数", dataIndex: "line_count", width: 90, align: "right" },
     { title: "数量核对（当前累计）", key: "return_summary", width: 215, render: (_, row) => <Space direction="vertical" size={0}>
-      <ReturnStatusColumn summary={row.return_summary} />
+      <ReturnStatusColumn summary={row.return_summary} error={row.return_summary_error} />
       {!canEditLines && !isVoided(row) ? <Button type="link" size="small" onClick={() => setLinesEditorFor(row)}>查看明细</Button> : null}
     </Space> },
     {

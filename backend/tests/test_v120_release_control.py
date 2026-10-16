@@ -2079,8 +2079,11 @@ def _write_fake_pipe_chrome(path: Path) -> None:
         failure_sentinel = os.environ.get("MOBILE_TEST_FAILURE_SENTINEL", "")
         cdp_error_method = os.environ.get("MOBILE_TEST_CDP_ERROR_METHOD")
         if args_log:
-            with open(args_log, "w", encoding="utf-8") as handle:
+            # 原子发布：探针可能在本进程刚写一半时就终止它，读方不能看到半个文件。
+            staging = f"{args_log}.{os.getpid()}.tmp"
+            with open(staging, "w", encoding="utf-8") as handle:
                 json.dump(sys.argv[1:], handle)
+            os.replace(staging, args_log)
         if os.environ.get("MOBILE_TEST_STDERR_SENTINEL") == "1":
             print(
                 f"fixture Chrome stderr: {failure_sentinel}",
@@ -2498,11 +2501,16 @@ def test_mobile_probe_overall_timeout_cancels_work_before_cleanup(
     assert not login.exists()
     assert not evidence.exists()
     assert not screenshot.exists()
-    args = json.loads(args_log.read_text(encoding="utf-8"))
-    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
-    profile = Path(profile_arg.partition("=")[2])
+    # 50ms 总超时可能早于假 Chrome 写出参数日志（解释器尚未启动完），所以不依赖
+    # 参数日志定位 profile：探针在 spawn 前就在工作目录建 chrome-profile-*，
+    # 直接断言工作目录里没有残留 profile；若参数日志已写出，再核对同一路径。
+    work = login.parent
     time.sleep(0.2)
-    assert not profile.exists()
+    assert not list(work.glob("chrome-profile-*"))
+    if args_log.exists():
+        args = json.loads(args_log.read_text(encoding="utf-8"))
+        profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+        assert not Path(profile_arg.partition("=")[2]).exists()
     assert not evidence.exists()
     assert not screenshot.exists()
 

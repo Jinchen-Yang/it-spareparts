@@ -1,5 +1,7 @@
 """WBDD header search and server-enforced safe logical deletion API."""
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -23,6 +25,7 @@ from app.services import maintenance_return_request_summary as return_summaries
 
 
 router = APIRouter(prefix="/maintenance/demands", tags=["maintenance"])
+logger = logging.getLogger(__name__)
 
 
 class DemandSearchRequest(BaseModel):
@@ -658,14 +661,19 @@ def list_demand_lines(
     # digest 必须与 PATCH/clear 的 OCC 输入同源（canonical _line_snapshot）。
     # 对含 order_raw_id/order_no/line_no/is_active 的展示包 hash 会造出另一个
     # digest，前端 GET 后第一次 PATCH 就 409。
+    return_summary_error = None
     try:
-        return_summary = return_summaries.summarize_demand_returns(
-            db, source_order_ids=[source_order_id], allowed_project_ids=visible,
-        ).get(source_order_id)
-    except return_summaries.ReturnSummaryError as exc:
-        _raise_service_error(exc)
-        raise
+        # 使用连接级 savepoint，隔离真实 SQL 错误且不 flush 调用方草稿。
+        with db.no_autoflush, db.connection().begin_nested():
+            return_summary = return_summaries.summarize_demand_returns(
+                db, source_order_ids=[source_order_id], allowed_project_ids=visible,
+            ).get(source_order_id)
+    except return_summaries.ReturnSummaryError:
+        logger.exception("demand detail return summary unavailable")
+        return_summary = None
+        return_summary_error = "summary_unavailable"
     return {"items": [
         {**_row_out(r), "digest": _line_digest(_line_snapshot(r))}
         for r in rows
-    ], "return_summary": return_summary.to_dict() if return_summary is not None else None}
+    ], "return_summary": return_summary.to_dict() if return_summary is not None else None,
+       **({"return_summary_error": return_summary_error} if return_summary_error else {})}

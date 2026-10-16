@@ -3,10 +3,11 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.excel_text_safety import has_illegal_excel_chars
 from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.business_time import business_today
@@ -52,6 +53,7 @@ class StableProjectPatch(BaseModel):
     # 传空串 = 改回未标注。
     business_type: str | None = Field(default=None, max_length=16)
     no_return_note: str | None = Field(default=None, max_length=2000)
+    project_note: str | None = Field(default=None, max_length=500)
     # 维保期限（#39/#51）：面板「编辑基本信息」可改起止日期
     period_from: date | None = None
     period_to: date | None = None
@@ -59,6 +61,17 @@ class StableProjectPatch(BaseModel):
     # 与主档字段独立，可单独提交（仅清空/调整可见账号时不必改其他字段）
     visible_usernames: list[str] | None = Field(default=None, max_length=100)
     reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("project_note", mode="before")
+    @classmethod
+    def validate_project_note_length(cls, value):
+        # 按输入原串的 Unicode 字符数校验，不能先 trim 再放过超长空白。
+        if isinstance(value, str) and len(value) > 500:
+            raise ValueError("项目备注最多 500 个字符")
+        if has_illegal_excel_chars(value):
+            # 这类字符写进主档后，项目总表导出会整本失败（openpyxl IllegalCharacterError）。
+            raise ValueError("项目备注含不可见控制字符，请删除后重试")
+        return value
 
 
 class StableProjectLifecycle(BaseModel):

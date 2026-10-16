@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 from alembic import command
+from alembic.script import ScriptDirectory
 
 from app.db import SessionLocal, engine
 from app.main import app
@@ -292,7 +293,7 @@ def test_note_migration_roundtrip_check_and_nonempty_downgrade_guard(db):
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             command.downgrade(cfg, "c8f3d1a7e2b9")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "f307604fa4d7"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == ScriptDirectory.from_config(cfg).get_current_head()
             assert connection.scalar(text("SELECT no_return_note FROM maintenance_project WHERE project_id=:pid"), {"pid": pid}) == "已保存必须保留"
     finally:
         command.upgrade(cfg, "head")

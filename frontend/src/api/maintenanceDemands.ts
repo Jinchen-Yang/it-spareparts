@@ -1,6 +1,6 @@
 import { api } from "../api";
 import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
-import type { DemandReturnSummary } from "./maintenanceReturnRequestSummary";
+import type { DemandReturnSummary, DemandReturnSummaryError } from "./maintenanceReturnRequestSummary";
 
 export interface MaintenanceDemandReference {
   kind: string;
@@ -38,6 +38,7 @@ export interface MaintenanceDemandSearchResult {
 /** Contact fields belong to search reads, never deletion-intent snapshots. */
 export interface MaintenanceDemandSearchRow extends MaintenanceDemandSummary, MaintenanceOrderContact {
   return_summary?: DemandReturnSummary | null;
+  return_summary_error?: DemandReturnSummaryError;
 }
 
 export type MaintenanceDemandDeleteIntentStatus =
@@ -215,7 +216,7 @@ export interface DemandLineRow {
 }
 
 export const listDemandLines = (sourceOrderId: string) =>
-  api.get<{ items: DemandLineRow[]; return_summary?: DemandReturnSummary | null }>(
+  api.get<{ items: DemandLineRow[]; return_summary?: DemandReturnSummary | null; return_summary_error?: DemandReturnSummaryError }>(
     `/maintenance/demands/orders/${encodeURIComponent(sourceOrderId)}/lines`,
   );
 

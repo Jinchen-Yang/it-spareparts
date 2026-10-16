@@ -310,6 +310,11 @@ function startChrome() {
   });
   cdpInput = chrome.stdio[3];
   cdpOutput = chrome.stdio[4];
+  // 管道 fd3 是双工 socket：Chrome 被终止时读端可能报 ECONNRESET（stderr 同理）。
+  // 未监听 error 会让 Node 以未处理异常退出，覆盖超时/清理的真实结论；这里统一
+  // 转为待决命令失败，清理阶段无待决命令时即为无害忽略。
+  cdpInput.on("error", (error) => rejectPending(error));
+  chrome.stderr.on("error", (error) => rejectPending(error));
   chrome.stderr.on("data", (chunk) => {
     stderrTail = (stderrTail + chunk.toString("utf8")).slice(-16_384);
   });
