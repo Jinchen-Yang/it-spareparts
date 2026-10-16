@@ -152,6 +152,26 @@ afterEach(() => {
 });
 
 describe("需求单与数据同步页", () => {
+  it("列表和详情的摘要失败均不遮住需求单及明细，明确提示暂不可用", async () => {
+    searchMaintenanceDemands.mockResolvedValue(demandPage([demandRow("RAW-9", "XQD-009", {
+      return_summary: null, return_summary_error: "summary_unavailable",
+    })]));
+    listDemandLines.mockResolvedValue({ data: { items: [{
+      raw_line_id: "L1", order_raw_id: "RAW-9", order_no: "XQD-009", line_no: 1,
+      part_id: 1, pn_std: "PN-AVAILABLE", pn_raw: "PN-AVAILABLE", description: null,
+      qty: "5.000", return_qty: "0.000", serial_numbers: null, edited_source: "wbdd",
+      manual_override: {}, is_active: true, digest: "d".repeat(64),
+    }], return_summary: null, return_summary_error: "summary_unavailable" } });
+    render(<MaintenanceDemandsPage />);
+    expect(await screen.findByText("摘要暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("XQD-009")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看明细" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("摘要暂不可用")).toBeInTheDocument();
+    expect(within(dialog).getByText("PN-AVAILABLE")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/已收|差额|无退回/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+  });
   it("只读用户查看列表和详情的同一数量摘要，不出现返还状态或写入口", async () => {
     const returnSummary = { source_order_id: "RAW-9", order_no: "XQD-009", project_id: "p1", effective: true,
       demand_qty: "5.000", received_qty: "2.000", pending_qty: "3.000", remaining_qty: "3.000", over_received_qty: "0.000",

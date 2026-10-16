@@ -94,6 +94,31 @@ afterEach(() => {
 });
 
 describe("DemandLinesEditor 编辑（OCC digest）", () => {
+  it("换单清除摘要故障，恢复后的当前摘要不被旧单故障响应覆盖", async () => {
+    let resolveOld!: (value: unknown) => void;
+    const failed = { data: { items: [row()], return_summary: null, return_summary_error: "summary_unavailable" } };
+    mocks.list
+      .mockResolvedValueOnce(failed)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ data: { items: [row({ raw_line_id: "L3", order_raw_id: "O3", pn_std: "PN-C" })], return_summary: {
+        source_order_id: "O3", order_no: "XQD-3", project_id: "p1", effective: true,
+        demand_qty: "5.000", received_qty: "2.000", pending_qty: "3.000", remaining_qty: "3.000", over_received_qty: "0.000",
+        basis_state: "complete", reason_codes: [], undated_receipt_qty: "0.000",
+      } } });
+    const { rerender } = render(<DemandLinesEditor sourceOrderId="O1" orderNo="XQD-1" readOnly onClose={vi.fn()} />);
+    expect(await screen.findByText("摘要暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("PN-A")).toBeInTheDocument();
+    rerender(<DemandLinesEditor sourceOrderId="O2" orderNo="XQD-2" readOnly onClose={vi.fn()} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("摘要暂不可用")).not.toBeInTheDocument();
+    rerender(<DemandLinesEditor sourceOrderId="O3" orderNo="XQD-3" readOnly onClose={vi.fn()} />);
+    expect(await screen.findByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(screen.getByText("PN-C")).toBeInTheDocument();
+    await act(async () => { resolveOld(failed); });
+    expect(screen.queryByText("摘要暂不可用")).not.toBeInTheDocument();
+    expect(screen.getByText("已收 2 / 下单 5")).toBeInTheDocument();
+    expect(screen.getByText("PN-C")).toBeInTheDocument();
+  });
   it("只读用户可看整单数量和差额，无返还状态、编辑、撤销和批量入口", async () => {
     mocks.list.mockResolvedValue({ data: { items: [row({ manual_override: { qty: { value: "5.000", source_value: "4.000", updated_by: "合成用户", updated_at: "2026-10-15T00:00:00Z" } } })], return_summary: {
       source_order_id: "O1", order_no: "XQD-1", project_id: "p1", effective: true,

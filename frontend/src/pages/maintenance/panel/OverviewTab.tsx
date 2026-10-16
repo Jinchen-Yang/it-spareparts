@@ -31,7 +31,7 @@ const { Text } = Typography;
 
 /**
  * 概览 tab（2026-08-19 重设计）：基本信息 + 归属挂靠（#39/#45）。
- * 01 表只读——这里不再挂下载/上传（总表在页头，含 01 sheet）；成本率已上健康带。
+ * 下载/上传统一在页头总表，01_项目概览支持项目备注回传；成本率已上健康带。
  */
 export function OverviewTab({
   projectId,
@@ -186,6 +186,14 @@ export function OverviewTab({
           <Text type="secondary">仅作提醒，返还要求以明细标记和规则为准。</Text>
           {onEditBasics ? (
             <Button type="link" size="small" onClick={onEditBasics}>编辑免返标注</Button>
+          ) : null}
+        </Descriptions.Item>
+        <Descriptions.Item label="项目备注" span={2}>
+          <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+            {project ? project.project_note || "未填写" : "暂不可用"}
+          </div>
+          {onEditBasics ? (
+            <Button type="link" size="small" onClick={onEditBasics}>编辑项目备注</Button>
           ) : null}
         </Descriptions.Item>
       </Descriptions>

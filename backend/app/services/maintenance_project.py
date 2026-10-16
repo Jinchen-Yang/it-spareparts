@@ -119,6 +119,7 @@ def project_directory(
             # 面板补录读的是同一列，三处任缺一处就会出现「改了看不到」。
             "business_type": project.business_type,
             "no_return_note": project.no_return_note,
+            "project_note": project.project_note,
             # 维保期限主数据（#39/#51），与 overview/catalog 的键集一致
             "period_from": project.period_from.isoformat() if project.period_from else None,
             "period_to": project.period_to.isoformat() if project.period_to else None,
@@ -353,6 +354,7 @@ def project_overview_from_facts(
         # 业务类型（2026-09-08）：面板「编辑基本信息」补录后回读同一份 payload
         "business_type": project.business_type,
         "no_return_note": project.no_return_note,
+        "project_note": project.project_note,
         # 维保期限主数据（#39/#51）：面板显示与编辑回读都走这份 payload
         "period_from": project.period_from.isoformat() if project.period_from else None,
         "period_to": project.period_to.isoformat() if project.period_to else None,

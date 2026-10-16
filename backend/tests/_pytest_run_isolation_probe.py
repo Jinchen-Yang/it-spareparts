@@ -15,7 +15,11 @@ if os.environ.get("ISOLATION_PROBE_COLLECTION_FAIL") == "1":
 
 def _write_state() -> None:
     marker = Path(os.environ["ISOLATION_PROBE_MARKER"])
-    marker.write_text(
+    # 原子发布：父进程以 marker.exists() 判定就绪，直接 write_text 会让父进程
+    # 读到已创建但尚未写完的空文件（CI 上出现过 JSONDecodeError）。先写同目录
+    # 临时文件再 os.replace，父进程只会看到不存在或完整内容。
+    staging = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
+    staging.write_text(
         json.dumps(
             {
                 "database_name": make_url(os.environ["DATABASE_URL"]).database,
@@ -25,6 +29,7 @@ def _write_state() -> None:
         ),
         encoding="utf-8",
     )
+    os.replace(staging, marker)
 
 
 def test_probe():

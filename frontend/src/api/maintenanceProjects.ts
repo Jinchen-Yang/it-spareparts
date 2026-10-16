@@ -11,6 +11,8 @@ export interface MaintenanceProject {
   business_type?: string | null;
   /** D-32：仅作提醒，不参与返还要求或收货计算。 */
   no_return_note?: string | null;
+  /** 项目自定义纯文本备注，与免返标注分别保存。 */
+  project_note?: string | null;
   /** 维保期限主数据（#39/#51）：可显示、可在面板编辑。 */
   period_from: string | null;
   period_to: string | null;
@@ -54,6 +56,8 @@ export interface MaintenanceProjectUpdateInput {
   business_type?: string | null;
   /** 不传保留；null 或空白明确清除。最多 2,000 个字符。 */
   no_return_note?: string | null;
+  /** 不传保留；null 或空白明确清除。最多 500 个字符。 */
+  project_note?: string | null;
   project_manager_id?: string | null;
   /** 维保期限（#39/#51）：YYYY-MM-DD；起止整组提交。 */
   period_from?: string | null;

@@ -48,6 +48,8 @@ class MaintenanceProject(Base):
     )
     # D-32：人工收货提醒；不参与返还要求或任何经营事实计算。
     no_return_note: Mapped[str | None] = mapped_column(Text)
+    # 需求00009：独立自由文本项目备注，不参与免返或其他经营事实计算。
+    project_note: Mapped[str | None] = mapped_column(Text)
     # 维保期限（#51）：台账导入时以台账为权威覆盖；台账缺位时由 WBDD 挂靠单据聚合
     # （min(maint_start)/max(maint_end)，生产覆盖 411/415）回填，名称解析（#50）兜底。
     # 甲方核心需求 §3.3 与 #39 要求期限可显示、可在面板编辑。

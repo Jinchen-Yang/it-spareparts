@@ -15,11 +15,14 @@ from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    MaintenanceDemandTombstone,
+)
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.services.query_filters import active_beta_maintenance_orders
 
 MAX_BATCH_SIZE = 500
 CONTRACT_VERSION = "v2.0-draft"
@@ -121,6 +124,8 @@ def _summary(row) -> DemandReturnSummary:
     effective = bool(row["header_effective"] and row["project_id"] and row["project_active"])
     if not row["header_effective"]:
         reasons.append("inactive_order")
+    if row["tombstoned_order"]:
+        reasons.append("tombstoned_order")
     if not row["project_id"]:
         reasons.append("unassigned_order")
     elif not row["project_active"]:
@@ -161,14 +166,17 @@ def summarize_demand_returns(
     if not ids or allowed == []:
         return {}
 
-    active = active_beta_maintenance_orders(
-        select(FMaintenanceOrder.id).where(FMaintenanceOrder.data_status == "已生效"),
-        FMaintenanceOrder,
-    ).correlate(None)
+    # Apply the Beta tombstone boundary to each selected order, rather than
+    # building a separate set of every effective order in the database.
+    tombstoned = select(1).where(
+        MaintenanceDemandTombstone.source_order_id == FMaintenanceOrder.raw_order_id,
+        MaintenanceDemandTombstone.restored_at.is_(None),
+    ).exists()
     orders = select(
         FMaintenanceOrder.id.label("order_id"),
         FMaintenanceOrder.raw_order_id.label("source_order_id"), FMaintenanceOrder.order_no,
-        FMaintenanceOrder.id.in_(active).label("header_effective"),
+        and_(FMaintenanceOrder.data_status == "已生效", ~tombstoned).label("header_effective"),
+        tombstoned.label("tombstoned_order"),
         MaintenanceSourceOrderAssignment.project_id,
         MaintenanceProject.is_active.label("project_active"),
     ).outerjoin(MaintenanceSourceOrderAssignment, and_(
@@ -221,6 +229,8 @@ def get_return_requests_outstanding_summary(
     The caller must select IDs in that same transaction. We neither discover
     more orders nor change the connection's isolation level/transaction state.
     Project filters restrict both orders and the separate unassigned buckets.
+    This is an internal quantity snapshot, not a published P4 outstanding-return
+    HTTP API; pending_qty/remaining_qty do not establish a return obligation.
     """
     ids = _ids(source_order_ids, max_length=64)
     allowed = _ids(allowed_project_ids, max_length=36, nullable=True)
