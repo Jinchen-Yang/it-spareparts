@@ -1,9 +1,9 @@
 """loader 商品身份重定向：别名重定向 / 合并墓碑不复活 / 库存路径（整改 P3 核心回归）。"""
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.etl import loader
 from app.models.dimensions import DimPart, PartAlias
@@ -99,3 +99,46 @@ def test_needs_review_alias_status_pending(db, batch):
                      [f.purchase_line("O1", "L1", "PN X1", pn_raw="pn x1", needs_review=True)])
     alias = db.scalar(select(PartAlias).where(PartAlias.pn_raw == "pn x1"))
     assert alias.status == "pending" and alias.needs_review is True
+
+
+def test_reimport_conflict_bumps_active_updated_at(db, batch):
+    """D-36 PR1：active 行冲突更新推进 updated_at（v1 /list keyset 游标）。"""
+    _import_purchase(db, batch, [f.purchase_line("O1", "L1", "PN-BUMP")])
+    part = db.scalar(select(DimPart).where(DimPart.pn_std == "PN-BUMP"))
+    db.commit()
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+
+    # enrich 冲突：description 之前为空，本次填充。
+    db.execute(update(DimPart).where(DimPart.id == part.id).values(updated_at=yesterday))
+    db.commit()
+    _import_purchase(db, batch, [f.purchase_line("O2", "L2", "PN-BUMP", description="补描述")])
+    db.refresh(part)
+    assert part.description == "补描述"
+    assert part.updated_at > yesterday
+
+    # 业务列不变的纯冲突更新：updated_at 仍要前进。
+    db.execute(update(DimPart).where(DimPart.id == part.id).values(updated_at=yesterday))
+    db.commit()
+    _import_purchase(db, batch, [f.purchase_line("O3", "L3", "PN-BUMP", description=None)])
+    db.refresh(part)
+    assert part.updated_at > yesterday
+
+
+def test_upsert_conflict_on_tombstone_keeps_updated_at(db, batch):
+    """墓碑冲突被 WHERE 跳过：updated_at 与 description 都不动，/list 游标不漂移。"""
+    _import_purchase(db, batch, [f.purchase_line("O1", "L1", "PN-FROZE"),
+                                 f.purchase_line("O1", "L2", "PN-TGT2")])
+    merge.merge_parts(db, "PN-FROZE", "PN-TGT2", "测试合并", "tester")
+    src = db.scalar(select(DimPart).where(DimPart.pn_std == "PN-FROZE"))
+    db.commit()
+    frozen = src.updated_at
+
+    loader._upsert_parts(db, {"PN-FROZE": {
+        "pn_std": "PN-FROZE", "pn_raw_sample": "PN-FROZE", "description": "复活尝试",
+        "brand": None, "machine_or_part": None, "unit": None, "needs_review": False,
+        "category_major": None, "category_minor": None,
+    }}, is_sales=False)
+    db.commit()
+    db.refresh(src)
+    assert src.updated_at == frozen
+    assert src.description is None

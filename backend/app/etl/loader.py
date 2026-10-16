@@ -265,6 +265,9 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool)
         stmt = pg_insert(DimPart).values(chunk)
         # fill-if-empty：保留已有值，空则用新值（locked 字段则完全保留人工值）
         set_ = {
+            # Core upsert 不触发 ORM onupdate，须显式推进 updated_at（D-36 v1 /list 游标）。
+            # now() 是语句/事务时间：冲突更新即使业务列没变也推进；墓碑冲突被下方 WHERE 跳过。
+            "updated_at": func.now(),
             "description": _respect_lock(
                 "description", func.coalesce(DimPart.description, stmt.excluded.description)),
             "brand": _respect_lock(
