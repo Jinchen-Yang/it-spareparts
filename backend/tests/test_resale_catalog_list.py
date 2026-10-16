@@ -383,6 +383,7 @@ def test_thirty_thousand_rows_full_walk(db, catalog_client):
     assert len(pages) == 60
     assert len(ids) == len(set(ids)) == total
     assert db.scalar(select(func.count()).select_from(DimPart)) == total
-    assert elapsed < 60, f"30000 行全遍历耗时 {elapsed:.1f}s 超预算"
+    # 本地实测 ~7 s；预算放宽到 180 s，避免共享 CI 机器抖动误报（只防数量级退化）。
+    assert elapsed < 180, f"30000 行全遍历耗时 {elapsed:.1f}s 超预算"
     print(f"\n[/list 规模] 30000 行 / {len(pages)} 页 / {elapsed:.2f}s")
 
