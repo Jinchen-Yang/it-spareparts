@@ -48,6 +48,30 @@ def test_export_options_return_whitelist_and_exact_default_fields(db):
                for field in payload["fields"])
 
 
+def test_project_note_is_optional_and_exported_as_independent_plain_text(db):
+    project = make_project(db, code="项目备注导出", lifecycle="ongoing")
+    project.project_note = "=现场改造\n联系甲方"
+    project.no_return_note = "免返标注保持独立"
+    db.commit()
+    client = boss_client(db, username="project-export-note")
+    options = client.get("/api/maintenance/boss-board/projects/export/options").json()
+    note = next(field for field in options["fields"] if field["key"] == "project_note")
+    assert note["label"] == "项目备注"
+    assert note["default_selected"] is False
+    assert "project_note" not in options["default_fields"]
+    response = client.post("/api/maintenance/boss-board/projects/export", json={
+        "fields": ["project_name", "project_note"], "lifecycle": "ongoing",
+    })
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=False)
+    try:
+        rows = list(workbook["维保项目清单"].iter_rows(values_only=True))
+        assert rows[0] == ("项目名称", "项目备注")
+        assert rows[1][1] == "'=现场改造\n联系甲方"
+    finally:
+        workbook.close()
+
+
 def test_export_options_and_post_filter_profit_fields_by_server_permission(db):
     client = boss_client(
         db,

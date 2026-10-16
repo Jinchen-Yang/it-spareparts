@@ -156,6 +156,14 @@ def _require_real_admin_restore(ctx: UserContext, ident: dict) -> None:
         )
 
 
+def _project_note_operator(db: Session, ident: dict, ctx: UserContext) -> str:
+    """A workbook editor does not automatically get master-note write rights."""
+    from app.api.maintenance_projects import _real_operator
+
+    require_action("action_maintenance_project_manage", require_data="data_profit")(ctx)
+    return _real_operator(db, ident)
+
+
 def _xlsx(content: bytes, filename: str) -> StreamingResponse:
     from urllib.parse import quote
     ascii_name = re.sub(r'[^\x20-\x7e]', '_', filename)
@@ -180,6 +188,7 @@ def _fail(exc: ec.WorkbookError):
         "stale_cost_fact",
         "stale_workbook",
         "row_conflicts",
+        "stale_project_note",
     }
     detail = {"code": exc.code, "message": exc.message, "issues": exc.issues}
     if exc.code == "row_conflicts":
@@ -795,6 +804,8 @@ async def validate_project_master(
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(
                     ctx, ident, db=db, project_id=project_id)
+            if plan.project_note_change is not None:
+                _project_note_operator(db, ident, ctx)
             record_access_log(
                 ctx, "workbook_validate", "maintenance_project_master_workbook",
                 {"project_id": project_id, "conflicts": len(plan.conflicts),
@@ -860,6 +871,8 @@ async def apply_project_master(
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(
                     ctx, ident, db=db, project_id=project_id)
+            operator = (_project_note_operator(db, ident, ctx)
+                        if plan.project_note_change is not None else _operator(ident))
             if plan.conflicts and not force_takeover:
                 record_access_log(
                     ctx, "workbook_apply_conflict",
@@ -876,7 +889,7 @@ async def apply_project_master(
                     },
                 )
             result = master.apply_project_master_v2(
-                db, plan, operated_by=_operator(ident), import_batch_id=str(uuid.uuid4()),
+                db, plan, operated_by=operator, import_batch_id=str(uuid.uuid4()),
                 user_ctx=ctx,
             )
         else:

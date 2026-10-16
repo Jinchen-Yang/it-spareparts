@@ -587,6 +587,7 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
   const salespersonEditedRef = useRef(false);
   const businessTypeEditedRef = useRef(false);
   const noteEditedRef = useRef(false);
+  const projectNoteEditedRef = useRef(false);
   const requestSeq = useRef(0);
 
   useEffect(() => () => { requestSeq.current += 1; }, []);
@@ -605,11 +606,13 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
       salespersonEditedRef.current = false;
       businessTypeEditedRef.current = false;
       noteEditedRef.current = false;
+      projectNoteEditedRef.current = false;
       form.setFieldsValue({
         display_name: proj.display_name,
         salesperson: proj.salesperson,
         business_type: proj.business_type?.trim() || "",
         no_return_note: proj.no_return_note ?? "",
+        project_note: proj.project_note ?? "",
         version: proj.version,
         period:
           proj.period_from || proj.period_to
@@ -651,7 +654,7 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
     }
     if (disabled) return;
     const seq = requestSeq.current;
-    const { period, salesperson, business_type, no_return_note, ...rest } = values as {
+    const { period, salesperson, business_type, no_return_note, project_note, ...rest } = values as {
       period?: [Dayjs | null, Dayjs | null] | null;
     } & Record<string, unknown>;
     const payload = {
@@ -664,6 +667,10 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
       ...(noteEditedRef.current ? {
         no_return_note: typeof no_return_note === "string" && no_return_note.trim()
           ? no_return_note : null,
+      } : {}),
+      ...(projectNoteEditedRef.current ? {
+        project_note: typeof project_note === "string" && project_note.trim()
+          ? project_note : null,
       } : {}),
       // 期限整组提交（#39/#51）；清空即回 missing
       period_from: period?.[0] ? period[0].format("YYYY-MM-DD") : null,
@@ -730,6 +737,9 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
             if (Object.prototype.hasOwnProperty.call(changedValues, "no_return_note")) {
               noteEditedRef.current = true;
             }
+            if (Object.prototype.hasOwnProperty.call(changedValues, "project_note")) {
+              projectNoteEditedRef.current = true;
+            }
           }}
         >
           <Form.Item name="display_name" label="项目名称">
@@ -748,6 +758,17 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
           >
             <Input.TextArea autoSize={{ minRows: 3, maxRows: 8 }} allowClear
               showCount={{ formatter: ({ value }) => `${Array.from(value).length} / 2000` }} />
+          </Form.Item>
+          <Form.Item
+            name="project_note"
+            label="项目备注"
+            extra="可自由记录项目经历和标记，最多 500 个字符；也可在项目总表的 01_项目概览中修改。"
+            rules={[{ validator: async (_, value: string | undefined) => {
+              if (Array.from(value ?? "").length > 500) throw new Error("项目备注最多 500 个字符");
+            } }]}
+          >
+            <Input.TextArea autoSize={{ minRows: 3, maxRows: 8 }} allowClear
+              showCount={{ formatter: ({ value }) => `${Array.from(value).length} / 500` }} />
           </Form.Item>
           <Form.Item name="business_type" label="业务类型">
             <Select
