@@ -214,6 +214,7 @@ _Avoid_: 销售件数、销售订单去重数、收入行数、未知补零
 - [D-34 原件字段保护与终态确认](docs/decisions/0012-原件字段保护与终态确认.md)：人工实际改过的字段受保护，无法证明的旧保护保留待核。**最终作废=已取消**（可逆：改回已生效后按当前状态重新计入）；草稿、进行中、空值仅“未生效”，不连带作废领用。最终作废须列影响并经人工确认后处理精确关联领用，返还和库存事实保留。
 - [D-35 PN 紧凑双榜与成本截图范围](docs/decisions/0013-PN紧凑双榜与成本截图范围.md)：已知需求成本（含税）与需求净量；销售可接收含成本截图，服务端权限继续沿用 D-25。
 - [D-36 主数据库与商城目录互通](docs/decisions/0014-主数据库与商城目录互通.md)：itsp＝备件系统，其 PN 主数据＝主数据库；shop＝商城。主数据库自动发布，商城数据处理页人工确认后单次提交；AI 只由人触发、结果默认留商城。图库归商城、按稳定 part_id 只读关联，身份自动镜像且不受上游排除影响。两仓同版契约：[catalog v2.0-draft](docs/integrations/catalog-v2.md)、[gallery v1.0-draft](docs/integrations/gallery-v1.md)。
+- **整目录列举（D-36 v1 过渡读面）**：`POST /api/integrations/resale/parts/list`，按 `(updated_at, id)` keyset 活读全部 `dim_part`，含身份墓碑（`status=merged`，一跳 `mergedIntoId`／`mergedIntoPnStd`，区别于维保需求单墓碑）；不带别名、销售记录数或业务字段，不是 v2 固定快照。loader `_upsert_parts` 冲突更新推进 `updated_at`。契约见 [resale-catalog-v1-list](docs/integrations/resale-catalog-v1-list.md)。
 
 ## 工作簿首次应用回执（2026-10-16，D-38）
 
