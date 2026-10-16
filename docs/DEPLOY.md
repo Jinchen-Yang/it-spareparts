@@ -238,6 +238,43 @@ sudo ss -ltnp '( sport = :8080 )'
 # 10.0.0.11:8080；不得出现 0.0.0.0:8080、[::]:8080 或其他地址。
 ```
 
+### 跨项目耦合：商城（it-shop-next）依赖本栈的 ingress 与 Caddy
+
+> 结论：`it-spareparts-ingress` 网络归本栈所有，商城 `shop.ybwznt.com` 的公网
+> 入口完全依赖这张网络和本栈生产 Caddy（`it-spareparts-caddy-1`）。任何影响
+> ingress 或 Caddy 的操作都会波及商城，执行前必须通知商城负责人。
+> 本节拓扑按 2026-10-16 生产只读核实；仓库 runbook 与 `.deploy/` 脚本中的
+> `personal-ai-assistant-caddy` 是早期入口阶段的记载，与现状不一致时以本节
+> 核实为准。
+
+- **归属与转发**：`it-spareparts-ingress`（internal bridge）由本栈 Compose 创建
+  （label `com.docker.compose.project=it-spareparts`、`network=ingress`）。商城
+  （仓库 `spareparts-shop`，compose 项目 `it-shop-next`）的 `frontend` 容器以
+  外部网络方式接入（商城 compose 声明，见 shop#56；网络名默认
+  `it-spareparts-ingress`，可用 `SHOP_INGRESS_NETWORK` 覆盖）；生产 Caddyfile
+  中 `shop.ybwznt.com` 站点按容器名转发：`reverse_proxy it-shop-next-frontend:80`。
+- **会影响商城的操作**（执行前必须通知商城负责人）：
+  1. 本栈 `docker compose down` —— 会删除 ingress 网络；若商城 frontend 仍接在
+     网上，网络删除会失败或直接断开商城公网入口。
+  2. 重建或改名 ingress 网络。
+  3. 停止或重建 Caddy。
+  4. 修改 Caddyfile 中的 `shop.ybwznt.com` 站点。
+
+  前车之鉴：2026-10-16 01:43:53–01:47:33Z 商城发布时 ingress 挂载丢失，
+  `shop.ybwznt.com` 公网 502 约 3 分 40 秒。
+- **恢复**：ingress 重建后，商城侧重新 `docker compose ... up -d --no-deps
+  frontend`（商城 compose 会自动接回 ingress），或按商城文档的兜底步骤幂等执行
+  `docker network connect`。随后回读 `https://shop.ybwznt.com/healthz` 应为
+  200、`/nc` 应为 302。
+- **别名约束**：ingress 上裸名 `frontend` 已被多个容器共享（本栈
+  `it-spareparts-frontend-1` 与旧商城遗留的 `it-shop-prod-frontend-1` 都注册了
+  该别名）。
+  Caddy 上游一律使用带项目前缀的稳定名（`it-spareparts-frontend:80`；
+  `IT_DATA_UPSTREAM` 同口径），不得改用多容器共享的裸名 `frontend`；也不得给
+  ingress 新增名为 `backend` 的服务或别名。
+- 商城侧对应说明见 spareparts-shop 仓库 `deploy/PRODUCTION.md` 的
+  “前端外部网络”一节。
+
 ---
 
 ## 九、访问
@@ -367,7 +404,8 @@ sudo docker compose restart app
 # app-owned Git 生成发布源，也不要直接 git pull。
 # HTTPS 启用后 docker-compose.yml 由 root 固定管理，直接 git pull 也会破坏安全门禁。
 
-# 停服
+# 停服（下方“完全干净重建”同理）：down 会删除 it-spareparts-ingress，
+# 波及商城 shop.ybwznt.com；先通知商城负责人，见第八节“跨项目耦合”
 sudo docker compose down
 
 # 完全干净重建(慎用, 不会删 volume)
@@ -527,7 +565,7 @@ sudo ss -tlnp | grep 8080
 curl -fsS http://127.0.0.1:8080/ >/dev/null
 
 # 检查边缘代理和证书
-sudo docker logs --tail 100 personal-ai-assistant-caddy
+sudo docker logs --tail 100 it-spareparts-caddy-1
 curl -fsSI https://<正式域名>/
 ```
 
