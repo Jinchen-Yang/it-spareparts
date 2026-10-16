@@ -102,7 +102,7 @@ def test_needs_review_alias_status_pending(db, batch):
 
 
 def test_reimport_conflict_bumps_active_updated_at(db, batch):
-    """D-36 PR1：active 行冲突更新推进 updated_at（v1 /list keyset 游标）。"""
+    """D-36 PR1：active 行冲突更新仅在业务列变化时推进 updated_at（v1 /list keyset 游标）。"""
     _import_purchase(db, batch, [f.purchase_line("O1", "L1", "PN-BUMP")])
     part = db.scalar(select(DimPart).where(DimPart.pn_std == "PN-BUMP"))
     db.commit()
@@ -116,11 +116,17 @@ def test_reimport_conflict_bumps_active_updated_at(db, batch):
     assert part.description == "补描述"
     assert part.updated_at > yesterday
 
-    # 业务列不变的纯冲突更新：updated_at 仍要前进。
+    # 业务列不变的纯冲突更新：CASE ... IS DISTINCT FROM 判定无变化，updated_at 保持。
     db.execute(update(DimPart).where(DimPart.id == part.id).values(updated_at=yesterday))
     db.commit()
     _import_purchase(db, batch, [f.purchase_line("O3", "L3", "PN-BUMP", description=None)])
     db.refresh(part)
+    assert part.updated_at == yesterday
+
+    # 品牌由空变 HPE：业务列变化，推进。
+    _import_purchase(db, batch, [f.purchase_line("O4", "L4", "PN-BUMP", brand="HPE")])
+    db.refresh(part)
+    assert part.brand == "HPE"
     assert part.updated_at > yesterday
 
 
