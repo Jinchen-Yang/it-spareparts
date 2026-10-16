@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
@@ -286,21 +286,6 @@ def _decode_list_cursor(token: str) -> tuple[datetime, int]:
     return updated_at, part_id
 
 
-def _resume_cursor(anchor_at: datetime, anchor_id: int, db_now: datetime) -> str:
-    """追平末尾时的回退续传点：min(锚点, 数据库 now() - N)。
-
-    updated_at 取写事务开始时间，导入整文件一个事务，晚提交的行时间戳可能早于
-    消费者已越过的水位。回退 N（resale_list_resume_lag_seconds）后重读这段窗口，
-    重复行由消费端幂等跳过。回退点早于锚点时编码为 (回退点 - 1µs, bigint 上限)，
-    等价于“回退点及之后的全部行”，且不放宽 id ≥ 1 的游标校验。
-    """
-    lag = timedelta(seconds=get_settings().resale_list_resume_lag_seconds)
-    rewind = db_now - lag
-    if anchor_at <= rewind:
-        return _encode_list_cursor(anchor_at, anchor_id)
-    return _encode_list_cursor(rewind - timedelta(microseconds=1), _PG_BIGINT_MAX)
-
-
 @router.post("/list")
 def list_parts(
     body: ListRequest, response: Response, _key: CatalogKey, db: DbSession
@@ -309,12 +294,11 @@ def list_parts(
     response.headers["Cache-Control"] = "no-store"
     target = aliased(DimPart)
     statement = (
-        select(DimPart, target.pn_std, func.now())
+        select(DimPart, target.pn_std)
         .outerjoin(target, target.id == DimPart.merged_into_id)
         .order_by(DimPart.updated_at.asc(), DimPart.id.asc())
         .limit(body.limit + 1)
     )
-    cursor_at = cursor_id = None
     if body.cursor is not None:
         cursor_at, cursor_id = _decode_list_cursor(body.cursor)
         # 行值比较：同一 updated_at 的并列由 id 决胜，翻页不漏行。
@@ -324,7 +308,7 @@ def list_parts(
     fetched = db.execute(statement).all()
     has_more = len(fetched) > body.limit
     page = fetched[: body.limit]
-    specs = _safe_specs(db, [part.id for part, _, _ in page])
+    specs = _safe_specs(db, [part.id for part, _ in page])
     items = [
         {
             "partId": part.id,
@@ -347,18 +331,8 @@ def list_parts(
             "mergedIntoPnStd": merged_pn_std,
             "machineOrPart": part.machine_or_part,
         }
-        for part, merged_pn_std, _ in page
+        for part, merged_pn_std in page
     ]
-    resume_cursor = None
-    if not has_more:
-        # 追平末尾：给回退 N 的续传点，覆盖长事务晚提交、时间戳早于水位的行。
-        if page:
-            last = page[-1][0]
-            resume_cursor = _resume_cursor(last.updated_at, last.id, page[-1][2])
-        elif cursor_at is not None:
-            resume_cursor = _resume_cursor(
-                cursor_at, cursor_id, db.execute(select(func.now())).scalar_one()
-            )
     return {
         "schemaVersion": 1,
         "items": items,
@@ -368,8 +342,6 @@ def list_parts(
         "nextCursor": _encode_list_cursor(page[-1][0].updated_at, page[-1][0].id)
         if page
         else None,
-        # 仅 hasMore=false 时非空（空表首请求除外）；消费端追平后以它作为下次增量起点。
-        "resumeCursor": resume_cursor,
     }
 
 
