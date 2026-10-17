@@ -45,6 +45,7 @@ uv run python scripts/backfill_sales_reconciliation.py \
 | --- | --- |
 | `totals.files_by_status` | planned / no_reconciliation_columns / archive_missing / archive_hash_mismatch / parse_failed 各多少；坏档数应与归档体检预期一致 |
 | `totals.snapshots_planned` | 将写观测数（每批次每单一条；superseded 批与后继批共用同一原件时**各计一条**——口径与执行一致） |
+| `totals.snapshots_existing` | 已在库的同批次观测数（续跑场景：某文件 planned=0 而 existing>0，说明该批已回填过，不是数据丢失） |
 | `totals.latest_per_order` | 按单最新快照的 已对账 / 退货已对账 合计——D-40 验收口径（首跑干净库）；最新 = 修改时间较新者（空值排后）、同修改时间取批次号较大者 |
 | `totals.tax_fills_planned_by_column` | 三件套各列将补多少 NULL |
 | `totals.tax_conflicts_total` + preview | 库内已有不同值的订单（不覆盖，仅报告），抽查确认口径 |
@@ -53,6 +54,13 @@ uv run python scripts/backfill_sales_reconciliation.py \
 
 D-40 验收参考（首跑干净库）：76 文件 / 10,591 单 / 已对账合计 255,011,389.07 /
 退货已对账合计 1,439,441.60（±0.01）。
+
+注意：`snapshots_planned` / `orders_with_planned_snapshots` / `snapshot_amount_totals` /
+`latest_per_order` 只统计本次**将写**的剩余计划行，两种情况下不等于全库口径（不代表
+数据丢失）：(1) 中断续跑——已完成批次的观测本轮计划为 0（`snapshots_existing` 佐证）；
+(2) 库内已有批次号更大的常规导入观测——`latest_per_order` 汇总的是回填的历史行而非
+全库按单最新。全库按单最新请在执行后经接口（与 `latest_snapshots_by_raw_order_id`
+同口径）查库核对。
 
 ## 护栏
 

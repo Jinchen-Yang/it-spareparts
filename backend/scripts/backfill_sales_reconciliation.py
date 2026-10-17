@@ -145,7 +145,12 @@ def _raw_file_for(db: Session, batch: SysImportBatch) -> SysRawFile | None:
 
 
 def _orders_with_null_tax(db: Session, batch_id: int) -> list[Any]:
-    """import_batch_id=本批次 且三件套至少一列为 NULL 的订单（税列回填候选）。"""
+    """import_batch_id=本批次 且三件套至少一列为 NULL 的订单（税列回填候选）。
+
+    定序：fills 列表顺序进 tax_fills_plan_sha256，无 ORDER BY 的行序在
+    PG 不保证稳定，dry↔execute 指纹比对可能误拒（方向安全，但没必
+    要）——按 raw_order_id 定序消除。
+    """
     return db.execute(
         select(
             FSalesOrder.raw_order_id,
@@ -160,7 +165,7 @@ def _orders_with_null_tax(db: Session, batch_id: int) -> list[Any]:
                 FSalesOrder.tax_amount.is_(None),
                 FSalesOrder.amount_inc_tax.is_(None),
             ),
-        )
+        ).order_by(FSalesOrder.raw_order_id)
     ).all()
 
 
@@ -387,6 +392,8 @@ def _totals(plans: list[dict[str, Any]]) -> dict[str, Any]:
         "files_by_status": by_status,
         "orders_with_planned_snapshots": len({r["raw_order_id"] for r in planned_rows}),
         "snapshots_planned": len(planned_rows),
+        # 已存在的同批次观测数（续跑时 planned 只剩剩余工作量的信号）
+        "snapshots_existing": sum(p["snapshots_existing"] for p in plans),
         "snapshot_amount_totals": {
             k: _money_text(v) for k, v in snapshot_totals.items()} if planned_rows else None,
         "latest_per_order": {

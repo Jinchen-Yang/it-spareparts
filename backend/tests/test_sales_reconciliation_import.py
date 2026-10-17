@@ -9,7 +9,7 @@ import openpyxl
 import pytest
 from sqlalchemy import func, select
 
-from app.etl import mapping, pipeline, reader, transform
+from app.etl import loader as etl_loader, mapping, pipeline, reader, transform
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysImportError
 from app.services.sales_reconciliation import (
@@ -247,14 +247,28 @@ def test_transform_first_row_empty_later_row_value_wins(tmp_path):
     assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("250.00")
 
 
-def test_transform_recon_collected_from_invalid_line_rows(tmp_path):
-    # 第二行数量坏值会被丢行，但其单头对账值仍属该订单
-    path = _write_xlsx(tmp_path / "s.xlsx", [
+def test_transform_recon_only_collected_from_surviving_rows(tmp_path):
+    """对账区收集点在行级校验闸门之后：只有存活行携带的值被收集。
+
+    （对抗审查发现原用例空转：有效行也带同值，断言由有效行独立满足。）
+    常规布局「值在更早行、存活行在下方」由 reader 的按单向下 ffill 兜住；
+    值只出现在校验失败行且存活行该列为空时不被收集，落 NULL。
+    """
+    # 存活行带值、坏行重复同值 → 照常收集（坏行不阻断）
+    path = _write_xlsx(tmp_path / "s1.xlsx", [
         _row(已对账金额=Decimal("70.00")),
         _second_line(**{"订单明细.订单数量": "abc"}, 已对账金额=Decimal("70.00"))])
     result = _transform_file(path)
     assert len(result.lines) == 1
     assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("70.00")
+
+    # 值只在坏行上（存活行该列为空）→ 不参与聚合，置 NULL
+    path = _write_xlsx(tmp_path / "s2.xlsx", [
+        _row(已对账金额=None),
+        _second_line(**{"订单明细.订单数量": "abc"}, 已对账金额=Decimal("70.00"))])
+    result = _transform_file(path)
+    assert len(result.lines) == 1
+    assert result.orders["RAW-RECON-1"]["reconciled_amount"] is None
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):
@@ -435,6 +449,23 @@ def test_pipeline_imports_file_with_bad_recon_value(db, tmp_path):
     snap = db.scalar(select(FSalesReconciliationSnapshot))
     assert snap.reconciled_amount is None            # 坏值 → NULL，快照仍在
     assert snap.pending_amount == Decimal("13.00")
+
+
+def test_loader_same_batch_replay_skips_existing_observation(db, tmp_path):
+    """同批次经 loader 本身重放：ON CONFLICT 吞掉，报告计数如实上报（幂等兜底）。"""
+    path = _write_xlsx(tmp_path / "a.xlsx", [_row()])
+    batch = pipeline.run_import(db, path, "a.xlsx")
+    db.commit()
+    assert len(_snapshots(db)) == 1
+
+    # 同一 transform 结果、同一批次再走一次 loader 写入路径
+    df, file_type = reader.read_excel(path)
+    result = transform.transform(df, file_type)
+    inserted, skipped = etl_loader._write_sales_reconciliation_snapshots(
+        db, result, batch.id, {})
+    db.commit()
+    assert (inserted, skipped) == (0, 1)
+    assert len(_snapshots(db)) == 1                     # 不新增重复观测
 
 
 def test_import_rollback_discards_snapshots(db, tmp_path):

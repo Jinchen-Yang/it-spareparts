@@ -352,6 +352,39 @@ def test_backfill_aba_null_times_three_observations_latest_is_a(db, tmp_path):
     assert latest["RAW-RECON-1"].reconciled_amount == Decimal("100.00")
 
 
+def test_latest_per_order_timed_beats_null_modified_time(db, tmp_path):
+    """latest_per_order 口径：无修改时间的观测让位给任何有值观测（报表层比较器）。
+
+    锁定 _is_newer_observation 的「空值排后」分支——此前该分支零覆盖，
+    且 A→B→A 断言用回文序列对选择器漂移不设防（对抗审查发现）。
+    """
+    _import_one(db, tmp_path, "m1.xlsx", [
+        _row(已对账金额=Decimal("100.00"), **{"修改时间(必填)": None})])
+    _import_one(db, tmp_path, "m2.xlsx", [
+        _row(已对账金额=Decimal("60.00"),
+             **{"修改时间(必填)": "2026-07-02 09:30:00"})])
+    _degrade_to_pre_pr2(db)
+
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 2
+    assert dry["totals"]["latest_per_order"]["reconciled_amount"] == "60.00"
+
+
+def test_latest_per_order_newer_time_beats_larger_batch(db, tmp_path):
+    """latest_per_order 口径：修改时间较新者优先于批次号较大者（报表层比较器）。"""
+    _import_one(db, tmp_path, "t1.xlsx", [
+        _row(已对账金额=Decimal("100.00"),
+             **{"修改时间(必填)": "2026-07-03 09:30:00"})])
+    _import_one(db, tmp_path, "t2.xlsx", [
+        _row(已对账金额=Decimal("60.00"),
+             **{"修改时间(必填)": "2026-07-02 09:30:00"})])
+    _degrade_to_pre_pr2(db)
+
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 2
+    assert dry["totals"]["latest_per_order"]["reconciled_amount"] == "100.00"
+
+
 def test_import_after_backfill_same_content_appends_observation(db, tmp_path):
     """回填后再常规导入同内容：新批次再记一条观测（source=import），不因内容相同被吞。"""
     b1 = _import_one(db, tmp_path, "a.xlsx", [_row()])

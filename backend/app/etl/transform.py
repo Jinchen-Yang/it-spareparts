@@ -106,10 +106,11 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
                                   recon_by_order) -> None:
     """按行收集订单级对账区值（D-40）：坏值置 NULL 记行级错误，不阻断导入。
 
-    对账区列是单头字段，同一订单的每一行都重复（ffill 后更如此）——按行序
-    聚合，调用于行级校验（PN/数量）之前：校验失败的行/延续行携带的单头值
-    同样属于该订单。比较用解析后的值（Decimal/datetime），"100" 与 "100.00"
-    不算冲突。
+    对账区列是单头字段，同一订单的每一行都重复（reader 已按单向下 ffill，
+    §6.2）——按行序聚合。调用点在行级校验（PN/数量）闸门之后：只有本订单
+    存活行携带的值会被收集；全部行校验失败的订单不产生观测（与尾部
+    「只并给至少一行有效的订单」口径一致）。比较用解析后的值
+    （Decimal/datetime），"100" 与 "100.00" 不算冲突。
     """
     slot = recon_by_order.setdefault(raw_order_id, {})
 
