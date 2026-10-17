@@ -76,6 +76,18 @@ SALES_HEAD = {
     "不含税金额": "amount_ex_tax",
     "税率": "tax_rate",
     "税金": "tax_amount",
+    # D-40 对账区单头列（2026-06-30 起新导出才有；旧格式缺列 → 全 NULL 不当 0，
+    # loader 据此不写快照）。三个金额列注册裸名：无其它文件类型注册同名，
+    # 「已对账金额(必填)」等变体由 canonicalize_columns 剥注解自动归一到裸名。
+    "已对账金额": "reconciled_amount",
+    "待对账金额": "pending_amount",
+    "退货已对账金额": "return_reconciled_amount",
+    # 修改时间与 WBDD 展示列「修改时间(必填)」(modified_at_raw) 同名，这里注册
+    # 注解形式——两个文件类型各自的映射表按此键取各自字段（「采购人员(必填)」
+    # 先例）；裸「修改时间」由 canonicalize 归一上来。刻意不注册裸名：否则
+    # _CANON_BY_STRIPPED 的规范键会从注解形翻成裸形，WBDD 裸变体导出的
+    # modified_at_raw 将静默读空。
+    "修改时间(必填)": "source_modified_at",
     "数据状态": "data_status",
 }
 SALES_LINE = {

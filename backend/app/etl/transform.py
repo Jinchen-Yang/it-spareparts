@@ -6,18 +6,20 @@
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 
 import pandas as pd
 
 from app import config, tax_policy
+from app.business_time import BUSINESS_TZ
 from app.etl import anomaly, cleaner, mapping
 from app.etl.maintenance_addresses import AddressPatch, collect_addresses
 from app.services.maintenance_expense_integrity import content_key_digest
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
 SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress",
-                              "maintenance_address_conflict"})
+                              "maintenance_address_conflict",
+                              "reconciliation_head_conflict"})
 
 
 @dataclass
@@ -51,6 +53,9 @@ class TransformResult:
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
     maintenance_address_patches: dict[str, AddressPatch] = field(default_factory=dict)
+    # D-40：销售文件是否带对账区列（至少「已对账金额」列存在）。旧格式文件为
+    # False → loader 不写快照（对账区列一个都没有时不产生 NULL 快照）。
+    has_reconciliation_columns: bool = False
 
 
 def _row_dict(row, field_map) -> dict:
@@ -69,6 +74,81 @@ def _empty_pn_error(row_no, status, label_no, raw_row) -> "ErrorRec":
     return ErrorRec(row_no, "empty_pn", f"产品名称为空{tail}", raw_row)
 
 
+# D-40 对账区单头字段（订单级累计快照，同一订单每行重复出现）
+_RECON_MONEY_FIELDS = ("reconciled_amount", "pending_amount", "return_reconciled_amount")
+_RECON_FIELD_LABELS = {
+    "reconciled_amount": "已对账金额",
+    "pending_amount": "待对账金额",
+    "return_reconciled_amount": "退货已对账金额",
+    "source_modified_at": "修改时间",
+}
+
+
+def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
+    """首个非空原始值生效（键在 slot 即视为已占用——坏值锁定 NULL，不被后续
+    行的好值悄悄顶掉）；后续行解析值不同 → 软警告留痕（可忽略）。
+
+    比较用解析后的值（Decimal/datetime），"100" 与 "100.00" 不算冲突。"""
+    if field not in slot:
+        slot[field] = value
+        return
+    prev = slot[field]
+    if prev != value:
+        res.errors.append(ErrorRec(
+            row_no, "reconciliation_head_conflict",
+            f"订单 {raw_order_id} 的{_RECON_FIELD_LABELS[field]}多行取值不一致："
+            f"保留首个非空值（{prev if prev is not None else '坏值已置空'}），"
+            f"忽略本行 {value}（可忽略）",
+            {field: str(value)}))
+
+
+def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
+                                  recon_by_order) -> None:
+    """按行收集订单级对账区值（D-40）：坏值置 NULL 记行级错误，不阻断导入。
+
+    对账区列是单头字段，同一订单的每一行都重复（ffill 后更如此）——按行序
+    聚合，调用于行级校验（PN/数量）之前：校验失败的行/延续行携带的单头值
+    同样属于该订单。比较用解析后的值（Decimal/datetime），"100" 与 "100.00"
+    不算冲突。
+    """
+    slot = recon_by_order.setdefault(raw_order_id, {})
+
+    def g(internal):
+        col = inv_head.get(internal)
+        return row.get(col) if col is not None else None
+
+    for field_name in _RECON_MONEY_FIELDS:
+        try:
+            value = cleaner.parse_money(g(field_name))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(
+                row_no, "bad_reconciliation_amount",
+                f"{_RECON_FIELD_LABELS[field_name]}{exc}（该单此列置空，不阻断导入）",
+                {field_name: str(g(field_name))}))
+            if field_name not in slot:
+                slot[field_name] = None   # 首个非空值是坏值 → 锁定 NULL
+            continue
+        if value is not None:
+            _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
+    try:
+        modified = cleaner.parse_datetime(g("source_modified_at"))
+    except ValueError as exc:
+        res.errors.append(ErrorRec(
+            row_no, "bad_source_modified_time",
+            f"{exc}（该单修改时间置空，不阻断导入）",
+            {"source_modified_at": str(g("source_modified_at"))}))
+        if "source_modified_at" not in slot:
+            slot["source_modified_at"] = None
+    else:
+        if modified is not None:
+            # 氚云导出是北京时间：naive 视为北京时间、aware 原样，折算成 UTC 交给
+            # 快照 canonical_time/落库——导入与回填共用本路径，哈希口径一致。
+            if modified.tzinfo is None:
+                modified = modified.replace(tzinfo=BUSINESS_TZ)
+            _merge_recon_value(res, slot, raw_order_id, "source_modified_at",
+                               modified.astimezone(timezone.utc), row_no)
+
+
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     res = TransformResult(file_type=file_type)
     head_map = mapping.MAPPINGS[file_type]["head"]
@@ -76,6 +156,11 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     inv_head = {v: k for k, v in head_map.items()}   # internal -> chinese
     inv_line = {v: k for k, v in line_map.items()}
     res.rows_total = len(df)
+    # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的快照值
+    recon_by_order: dict = {}
+    res.has_reconciliation_columns = (
+        file_type == mapping.SALES and inv_head.get("reconciled_amount") in df.columns
+    )
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -106,6 +191,11 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         except ValueError as exc:
             res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, full_map)))
             continue
+
+        # MUTATION: collection now after validation gauntlet — only surviving rows contribute
+        if res.has_reconciliation_columns and raw_order_id:
+            _collect_sales_reconciliation(res, row, row_no, raw_order_id,
+                                          inv_head, recon_by_order)
 
         line = {
             "_order_raw_id": raw_order_id,
@@ -142,6 +232,14 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         1 for ln in res.lines
         if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
     )
+    # 对账区聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
+    # 不入库，快照/头字段都无从落）。四个键补齐为 None：列存在但整单为空/坏值
+    # 时键仍在，值为 NULL——下游（快照 NULL 语义）与测试断言都按此口径。
+    for raw_id, values in recon_by_order.items():
+        head = res.orders.get(raw_id)
+        if head is not None:
+            for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
+                head[field_name] = values.get(field_name)
     return res
 
 
