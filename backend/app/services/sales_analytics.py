@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import tax_policy
+from app.business_time import business_today
 from app.models.dimensions import DimCustomer
 from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
 from app.services.query_filters import active_orders
@@ -128,7 +129,7 @@ def summary(
     也不用推算值冒充（D-41 §3）。无订单时合计为 None 而非 0（与 total=None 语义一致，
     区分"查无数据"与"合计为零"）。
     """
-    today = as_of or date.today()
+    today = as_of or business_today()
     base, _ = _order_query(
         date_from=date_from, date_to=date_to, business_types=business_types,
         customer=customer, salesperson=salesperson,
@@ -221,7 +222,7 @@ def orders(
     排序固定 ``<key> DESC NULLS LAST, id DESC``（PG DESC 默认 NULLS FIRST，必须显式
     NULLS LAST 才能让缺失值沉底）；并列金额按 id 倒序破并列，分页翻页不丢行/重行。
     """
-    today = as_of or date.today()
+    today = as_of or business_today()
     if sort not in ORDER_SORTS:
         sort = "amount_ex_tax"
     base, sort_cols = _order_query(
@@ -279,7 +280,7 @@ def order_detail(
     反序（旧→新：source_modified_at ASC NULLS FIRST → 批次 → id），末条与
     reconciliation 块一致。"""
 
-    today = as_of or date.today()
+    today = as_of or business_today()
     base, _ = _order_query()
     row = db.execute(base.where(FSalesOrder.id == order_id)).one_or_none()
     if row is None:

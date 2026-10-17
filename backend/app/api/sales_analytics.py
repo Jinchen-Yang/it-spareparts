@@ -12,9 +12,10 @@ apply_field_visibility 统一置空（键名登记见 config.FIELD_GROUPS["sales
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX
 from app.auth import current_role
 from app.db import get_db
 from app.security import (
@@ -95,7 +96,7 @@ def orders(
     customer: str | None = Query(None),
     salesperson: str | None = Query(None),
     sort: str = Query("amount_ex_tax", pattern="^(amount_ex_tax|amount_inc_tax|revenue)$"),
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
     page_size: int = Query(50, ge=1, le=200),
     include_returns: bool = Query(
         False, description="对账展示含退货已对账（D-40 §5，默认不含）"
@@ -127,7 +128,7 @@ def orders(
 
 @router.get("/orders/{order_id}")
 def order_detail(
-    order_id: int,
+    order_id: int = Path(..., ge=1, le=PG_INT_MAX),
     include_returns: bool = Query(False, description="对账展示含退货已对账"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),

@@ -575,3 +575,34 @@ def test_role_template_defaults():
     # readonly 是匿名兜底模板：两键必须显式 False（防 _full() 继承 True）
     assert permissions.ROLE_TEMPLATES["readonly"]["page_sales_analysis"] is False
     assert permissions.ROLE_TEMPLATES["readonly"]["data_reconciliation"] is False
+
+
+# ---------------------------------------------------------- 整数参数上界（编码检察官 #398 同类排查）
+
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX  # noqa: E402
+
+
+@pytest.mark.parametrize("page", [0, ANALYTICS_PAGE_MAX + 1, 10**18, 2**63])
+def test_orders_page_out_of_bounds_422(db, seeded, page):
+    client = _client(db, "sa-page-bound", role="boss")
+    r = client.get(ORDERS, params={"page": page})
+    assert r.status_code == 422, r.text
+
+
+def test_orders_page_at_upper_bound_ok(db, seeded):
+    client = _client(db, "sa-page-max", role="boss")
+    r = client.get(ORDERS, params={"page": ANALYTICS_PAGE_MAX, "page_size": 200})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("oid", [0, -1, PG_INT_MAX + 1, 10**20])
+def test_order_detail_id_out_of_bounds_422(db, seeded, oid):
+    client = _client(db, "sa-id-bound", role="boss")
+    r = client.get(f"{ORDERS}/{oid}")
+    assert r.status_code == 422, r.text
+
+
+def test_order_detail_id_at_upper_bound_404(db, seeded):
+    client = _client(db, "sa-id-max", role="boss")
+    r = client.get(f"{ORDERS}/{PG_INT_MAX}")
+    assert r.status_code == 404, r.text

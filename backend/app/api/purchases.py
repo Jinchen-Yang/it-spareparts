@@ -3,15 +3,21 @@
 页面级准入 require_page("page_purchases")：销售/采购/老板/只读/管理员均 page_purchases=True
 可达（甲方 2026-06-15 确认销售也要能查采购记录）。字段级仍过 apply_field_visibility：
 未授权角色的供应商等仍被遮（销售 data_supplier=False → 供应商列为空，但进价可见）。
+
+采购分析（D-39，客户需求 Round1）挂在独立页面键 page_purchase_analytics（模板仅 boss，
+admin 由 page_permission_allowed 恒放行），与上面的采购记录页共用本路由前缀。
 """
-from fastapi import APIRouter, Depends, Query
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX, DbId
 from app.auth import current_role
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
-                          record_access_log, require_page)
-from app.services import purchase_analysis, purchase_query
+                          is_field_hidden, is_scoped_sales, record_access_log, require_page)
+from app.services import purchase_analysis, purchase_analytics, purchase_query
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -88,4 +94,131 @@ def analysis_part(
     record_access_log(ctx, "analysis_part", "purchases", {"part_id": part_id, "days": days})
     data = purchase_analysis.part_purchases(
         db, ctx, part_id=part_id, days=days, exclude_designated=exclude_designated)
+    return apply_field_visibility(data, ctx)
+
+
+# ------------------------------------------------------------------ 采购分析（D-39）
+
+_GROUP_BY_PATTERN = "^(source_type|purchaser|salesperson|customer|category|month|day)$"
+
+
+def _analytics_common(
+    date_from: date | None = Query(None, description="起始日期（闭区间，含当日）；不传=全部"),
+    date_to: date | None = Query(None, description="结束日期（闭区间，含当日）；不传=全部"),
+    source_type: list[str] = Query([], description="采购类型多选（source_type_raw 原值精确匹配）"),
+    purchaser: list[str] = Query([], description="采购员多选（精确匹配）"),
+    salesperson: list[str] = Query([], description="关联销售单销售人员多选"),
+    customer_id: list[DbId] = Query([], description="关联销售单客户 id 多选（1..2^31-1）"),
+    category: list[str] = Query([], description="分类多选（dim_part.category_major；「未分类」为哨兵值）"),
+) -> dict:
+    """采购分析共用筛选（日期预设由前端折算，后端只收 date_from/date_to）。"""
+    return {
+        "date_from": date_from, "date_to": date_to,
+        "source_type": source_type, "purchaser": purchaser,
+        "salesperson": salesperson, "customer_id": customer_id,
+        "category": category,
+    }
+
+
+def _guard_customer_filter(filters: dict, ctx: UserContext,
+                           group_by: str | None = None) -> None:
+    """data_customer 不可见时不允许按客户筛选/分组/下钻（dashboard 同款 fail-closed；
+    本页面向老板/管理员的全程口径，不像 dashboard 给 scoped sales 留口）。"""
+    hidden = is_field_hidden(ctx, "customer_id")
+    if hidden and filters["customer_id"]:
+        raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户筛选")
+    if hidden and group_by == "customer":
+        raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户分组")
+
+
+def _guard_scoped(ctx: UserContext) -> None:
+    """own_customers_only 收紧账号不进本页：分析查询是全公司聚合，没有按客户收紧的
+    数据面，fail-closed（比 dashboard 更严——那边明细本身按 scope 裁剪过）。"""
+    if is_scoped_sales(ctx):
+        raise HTTPException(status_code=403, detail="采购分析为全公司口径页面，收紧账号不可访问")
+
+
+def _run(fn):
+    """服务层 FilterValidationError（越过了 Query pattern 兜底的非法参数）→ 422。"""
+    try:
+        return fn()
+    except purchase_analytics.FilterValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get("/analytics/options")
+def analytics_options(
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """采购分析筛选取值：类型原值/采购员/关联销售人员/分类（含「未分类」）。"""
+    _guard_scoped(ctx)
+    record_access_log(ctx, "analytics_options", "purchases/analytics", {})
+    data = purchase_analytics.options(db, ctx)
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/analytics/summary")
+def analytics_summary(
+    filters: dict = Depends(_analytics_common),
+    group_by: str = Query("source_type", pattern=_GROUP_BY_PATTERN,
+                          description="分组维度；category 为行级口径"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """KPI + 分组汇总（三口径一次全返回；分组合计=KPI，供前端核对）。"""
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx, group_by=group_by)
+    record_access_log(ctx, "analytics_summary", "purchases/analytics", dict(filters))
+    data = _run(lambda: purchase_analytics.summary(db, ctx, group_by=group_by, **filters))
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/analytics/orders")
+def analytics_orders(
+    filters: dict = Depends(_analytics_common),
+    group_by: str | None = Query(None, pattern=_GROUP_BY_PATTERN,
+                                 description="与上层分组维度同传，配合 group_key 下钻"),
+    group_key: str | None = Query(None, description="分组值（哨兵值/月份 YYYY-MM/日 YYYY-MM-DD）"),
+    sort: str = Query("order_date", pattern="^(order_date|amount_inc|amount_ex|amount_paid)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """分组下钻订单列表（分页+排序，同额/同日按 id 倒序稳定翻页）。"""
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx, group_by=group_by)
+    record_access_log(ctx, "analytics_orders", "purchases/analytics",
+                      {**filters, "group_by": group_by, "group_key": group_key,
+                       "sort": sort, "order": order, "page": page, "page_size": page_size})
+    data = _run(lambda: purchase_analytics.orders(
+        db, ctx, group_by=group_by, group_key=group_key, sort=sort, order=order,
+        page=page, page_size=page_size, **filters))
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/analytics/orders/{order_id}")
+def analytics_order_detail(
+    order_id: int = Path(..., ge=1, le=PG_INT_MAX),
+    category: list[str] = Query([], description="传入时行按分类过滤并附 category_matched 汇总"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """订单明细（自有实现，不依赖 page_boss_board）：单头三口径 + 单头批次行。"""
+    _guard_scoped(ctx)
+    record_access_log(ctx, "analytics_order_detail", "purchases/analytics",
+                      {"order_id": order_id, "category": category})
+    data = purchase_analytics.order_detail(db, order_id, ctx, category=category)
+    if data is None:
+        raise HTTPException(status_code=404, detail="订单不存在或不是已生效采购单")
     return apply_field_visibility(data, ctx)
