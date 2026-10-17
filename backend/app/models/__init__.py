@@ -119,7 +119,7 @@ from app.models.master_data import (
     ProductSpec,
 )
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
-from app.models.sales import FSalesLine, FSalesOrder
+from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import (
     SysAuditLog,
     SysBusinessSetting,
@@ -230,6 +230,7 @@ __all__ = [
     "MaintenanceAiMappingProposal",
     "FSalesOrder",
     "FSalesLine",
+    "FSalesReconciliationSnapshot",
     "Inventory",
     "PartSubstitute",
     "FPartInquiry",
