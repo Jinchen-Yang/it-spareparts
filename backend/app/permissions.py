@@ -44,6 +44,10 @@ PAGE_KEYS: list[str] = [
     # 销售分析页（D-41 §1，决策 2026-10-17 Q3）：挂在销售单模块下的独立页面，
     # 仅 admin/boss——看区间单量/三金额、追踪大单；不改动老板看板。模板仅 boss 开。
     "page_sales_analysis",
+    # 采购分析（D-39，客户需求 Round1）：日期区间×类型/采购员/销售/客户/分类 的
+    # 三口径（含税/不含税/实付）分析与下钻。模板仅 boss 开（admin 由
+    # page_permission_allowed 恒放行）；sales/purchaser/readonly 显式 False。
+    "page_purchase_analytics",
 ]
 # 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
@@ -142,6 +146,7 @@ LABELS: dict[str, str] = {
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
     "own_maintenance_projects_only": "只看自己负责/销售的维保项目",
     "page_accounts": "账号与权限中心（查看）",
+    "page_purchase_analytics": "采购分析（日期/分类/三口径）",
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
@@ -241,6 +246,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
              "action_replenishment_review": False},
+    # boss 的 page_purchase_analytics 由 _full() 自动 True（D-39：模板仅老板开，admin 恒放行）。
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -249,6 +255,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "page_master_data": False, "page_maintenance": False,
                  "page_maintenance_beta": False,
                  "page_boss_board": False,
+                 # 采购分析=公司整体采购经营数据（D-39），readonly 必须显式关：
+                 # _full() 打底会把新页面键置 True，guest 兜底同样继承（同上防泄漏注释）
+                 "page_purchase_analytics": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
@@ -321,6 +330,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
+        # 采购分析=公司整体采购经营数据（D-39），销售不开
+        "page_purchase_analytics": False,
         "own_customers_only": True,
         # 行键保持历史冻结口径 False（防漂移契约）；销售的项目收敛同样由
         # 迁移 a9e2f7c4d1b8 在 DB 侧开启（账号快照），代码兜底不动。
@@ -368,6 +379,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
+        # 采购分析=公司整体采购经营数据（D-39），采购员不开
+        "page_purchase_analytics": False,
         "own_maintenance_projects_only": False,
         "own_customers_only": False,
     },
@@ -710,6 +723,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["采购", "销售", "老板"],
         "sensitivity": "medium",
         "risk": "配合数据权限使用，本身只是入口。",
+    },
+    "page_purchase_analytics": {
+        "label": "采购分析（日期/分类/三口径）",
+        "summary": "按日期区间、采购类型、采购员、销售、客户、分类看采购金额（含税/不含税/实付）并可下钻。",
+        "can": "查看公司整体采购金额的三口径汇总、分组与订单下钻明细。",
+        "cannot": "不提供写操作；无「查看采购成本」时三套金额全部为空；无「查看客户信息」时不能按客户筛选。",
+        "typical": ["老板", "管理员"],
+        "sensitivity": "high",
+        "risk": "公司整体采购经营数据入口，默认仅老板；开放给其他角色会看到全部采购金额。",
     },
     "page_profit": {
         "label": "利润分析",
