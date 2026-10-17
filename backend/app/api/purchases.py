@@ -9,9 +9,10 @@ admin 由 page_permission_allowed 恒放行），与上面的采购记录页共�
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX, DbId
 from app.auth import current_role
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
@@ -107,7 +108,7 @@ def _analytics_common(
     source_type: list[str] = Query([], description="采购类型多选（source_type_raw 原值精确匹配）"),
     purchaser: list[str] = Query([], description="采购员多选（精确匹配）"),
     salesperson: list[str] = Query([], description="关联销售单销售人员多选"),
-    customer_id: list[int] = Query([], description="关联销售单客户 id 多选"),
+    customer_id: list[DbId] = Query([], description="关联销售单客户 id 多选（1..2^31-1）"),
     category: list[str] = Query([], description="分类多选（dim_part.category_major；「未分类」为哨兵值）"),
 ) -> dict:
     """采购分析共用筛选（日期预设由前端折算，后端只收 date_from/date_to）。"""
@@ -185,7 +186,7 @@ def analytics_orders(
     group_key: str | None = Query(None, description="分组值（哨兵值/月份 YYYY-MM/日 YYYY-MM-DD）"),
     sort: str = Query("order_date", pattern="^(order_date|amount_inc|amount_ex|amount_paid)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
@@ -206,7 +207,7 @@ def analytics_orders(
 
 @router.get("/analytics/orders/{order_id}")
 def analytics_order_detail(
-    order_id: int,
+    order_id: int = Path(..., ge=1, le=PG_INT_MAX),
     category: list[str] = Query([], description="传入时行按分类过滤并附 category_matched 汇总"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),

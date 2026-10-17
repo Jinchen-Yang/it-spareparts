@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import config
+from app.business_time import business_today
 from app.models import (DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder,
                         FSalesOrder)
 from app.models.system import SysImportBatch
@@ -827,7 +828,7 @@ def test_filters_echo_reflects_request(boss, ds):
         "date_from": "2026-03-01", "date_to": "2026-03-31",
         "source_type": ["指定采购"], "purchaser": [], "salesperson": [],
         "customer_id": [], "category": ["电器件"], "group_by": "month", "group_key": None}
-    assert data["as_of"] == date.today().isoformat()
+    assert data["as_of"] == business_today().isoformat()
 
 
 def test_summary_service_level_validation(db):
@@ -837,3 +838,51 @@ def test_summary_service_level_validation(db):
                                    date_to=date(2026, 3, 1))
     with pytest.raises(FilterValidationError):
         purchase_analytics.orders(db, None, sort="nope")
+
+
+# ---------------------------------------------------------- 整数参数上界（编码检察官 #398 MUST）
+# 越过 PG integer / bigint 的值必须在入口 422，不能打到数据库变 500。
+
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX  # noqa: E402
+
+
+@pytest.mark.parametrize("page", [0, ANALYTICS_PAGE_MAX + 1, 10**18, 2**63])
+def test_orders_page_out_of_bounds_422(boss, ds, page):
+    r = boss.get("/api/purchases/analytics/orders", params={"page": page})
+    assert r.status_code == 422, r.text
+
+
+def test_orders_page_at_upper_bound_ok_empty(boss, ds):
+    r = boss.get("/api/purchases/analytics/orders",
+                 params={"page": ANALYTICS_PAGE_MAX, "page_size": 200})
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []
+
+
+@pytest.mark.parametrize("path", ["/api/purchases/analytics/summary",
+                                  "/api/purchases/analytics/orders"])
+@pytest.mark.parametrize("cid", [0, -1, PG_INT_MAX + 1, 10**20])
+def test_customer_id_out_of_bounds_422(boss, ds, path, cid):
+    r = boss.get(path, params={"customer_id": [cid]})
+    assert r.status_code == 422, r.text
+    # 多值里混一个越界值同样 422
+    r = boss.get(path, params={"customer_id": [ds.c1.id, cid]})
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize("path", ["/api/purchases/analytics/summary",
+                                  "/api/purchases/analytics/orders"])
+def test_customer_id_at_upper_bound_ok(boss, ds, path):
+    r = boss.get(path, params={"customer_id": [PG_INT_MAX]})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("oid", [0, -1, PG_INT_MAX + 1, 10**20])
+def test_order_detail_id_out_of_bounds_422(boss, ds, oid):
+    r = boss.get(f"/api/purchases/analytics/orders/{oid}")
+    assert r.status_code == 422, r.text
+
+
+def test_order_detail_id_at_upper_bound_404(boss, ds):
+    r = boss.get(f"/api/purchases/analytics/orders/{PG_INT_MAX}")
+    assert r.status_code == 404, r.text

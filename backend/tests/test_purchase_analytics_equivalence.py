@@ -382,7 +382,8 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
         po.amount_ex_tax, po.amount_inc_tax, po.tax_rate, po.is_tax_inclusive)
 
     link_row = None
-    if po.linked_sales_order_no:
+    # 2026-10-18 编码检察官 #398：与列表同一真值，只滤 NULL（linked='' 命中 order_no=''）
+    if po.linked_sales_order_no is not None:
         link = _ref_sales_link()
         link_row = db.execute(
             select(link.c.salesperson, link.c.customer_id, DimCustomer.name_normalized)
@@ -789,6 +790,16 @@ def test_order_detail_equivalence(eq):
             new = purchase_analytics.order_detail(eq.db, po.id, None, category=cat)
             assert new == ref, (po.id, cat, ref, new)
 
+
+
+def test_order_detail_blank_linked_matches_list(eq):
+    """linked_sales_order_no='' 的单：明细与列表给出同一关联销售员/客户（min-id「销售空号」）。"""
+    listed = purchase_analytics.orders(eq.db, None, page_size=200)
+    row = next(i for i in listed["items"] if i["order_id"] == eq.pok.id)
+    detail = purchase_analytics.order_detail(eq.db, eq.pok.id, None)
+    assert row["salesperson"] == "销售空号"
+    assert (detail["salesperson"], detail["customer_id"], detail["customer"]) == (
+        row["salesperson"], row["customer_id"], row["customer"])
 
 # =======================================================================
 # EXPLAIN 计划守护（不 ANALYZE；先例 test_maintenance_project_foundation）

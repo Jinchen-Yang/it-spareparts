@@ -35,6 +35,7 @@ from sqlalchemy import String, and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security, tax_policy
+from app.business_time import business_today
 from app.models import DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder, FSalesOrder
 
 DEFAULT_TAX_RATE = Decimal("0.13")
@@ -498,7 +499,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
             category=category, group_by=group_by),
-        "as_of": date.today().isoformat(),
+        "as_of": business_today().isoformat(),
         "kpi": {
             "orders": kpi_row.orders,
             "lines": kpi_lines,
@@ -665,7 +666,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
             category=category, group_by=group_by, group_key=group_key),
-        "as_of": date.today().isoformat(),
+        "as_of": business_today().isoformat(),
         "items": items,
     }
 
@@ -688,7 +689,8 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         po.amount_ex_tax, po.amount_inc_tax, po.tax_rate, po.is_tax_inclusive)
 
     link_row = None
-    if po.linked_sales_order_no:
+    # 只滤 NULL 不过滤空串：与 orders() 页内补值同一真值（linked='' 等值命中 order_no=''）
+    if po.linked_sales_order_no is not None:
         # 单点查找：按 order_no 直取 id 最小一条（同一去重规则，等价性测试对拍），
         # 不再借道全表 DISTINCT ON 子查询（性能 2026-10-17）
         so = FSalesOrder
