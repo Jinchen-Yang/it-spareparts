@@ -13,8 +13,16 @@
 - **单头批次行**：所有行级统计（行数、分类分组、行级三口径、订单明细行）只计
   ``f_purchase_line.import_batch_id = f_purchase_order.import_batch_id`` 的行——库里 11 张
   已生效单残留旧批次明细行（D-39 补充决策 2026-10-17），全行求和会比单头多算。
-- 关联销售单按 ``order_no`` 先去重（DISTINCT ON，库中无唯一约束）再 LEFT JOIN，防一对多
-  扩行；无关联销售单的采购单（如批量采购）在销售/客户维度归「（无关联销售单）」组，不丢。
+- 关联销售单按 ``order_no`` 先去重（同一 order_no 多张销售单取 id 最小一条，库中无唯一
+  约束）再 LEFT JOIN，防一对多扩行；无关联销售单的采购单（如批量采购）在销售/客户维度
+  归「（无关联销售单）」组，不丢。
+- 关联去重的执行形态（性能 2026-10-17，生产 EXPLAIN：全表 DISTINCT ON 外排 5.2MB
+  ≈ 0.9–1.0s，orders 全年 2.7s）：排序键全部在采购单侧，所以订单列表先在采购单上
+  筛选/分页，页内（≤ page_size 个 order_no）再补关联销售员/客户；只有销售人员/客户
+  筛选或按销售/客户分组下钻必须在分页前关联时，DISTINCT ON 的输入先被「当前窗口
+  采购单引用的 order_no」半连接限定（options 同法）——同一去重规则（id 最小一条），
+  只对被引用子集排序；也不用 LATERAL 逐单探测（复审实测其在 po×明细行连接后按
+  行数放大，客户下钻退化）。
 
 索引（不建新表/物化视图）：``ix_po_status_date(data_status, order_date)`` 驱动状态+日期
 窗口；``ix_pl_order(order_id, id)`` 驱动按单行聚合；``ix_po_linked`` / ``ix_so_order_no``
@@ -132,19 +140,55 @@ def line_amounts_reference(line_amount, tax_rate, is_inc) -> tuple[Decimal | Non
 
 # ---------------------------------------------------------------- 共用查询构件
 
-def _sales_link():
-    """关联销售单去重子查询：``f_sales_order.order_no`` 无唯一约束（当前 0 重复），
-    DISTINCT ON 按 order_no 取 id 最小的一条（确定性），防一对多扩行。关联是身份
-    查找，不过滤销售单状态。"""
+def _sales_link_bounded(po_where):
+    """关联销售单去重子查询（有界 DISTINCT ON）：``f_sales_order.order_no`` 无唯一
+    约束，同一 order_no 多张销售单取 id 最小的一条（确定性），防一对多扩行；无匹配 →
+    LEFT JOIN 补 NULL。去重规则与旧版全表 ``DISTINCT ON (order_no) … ORDER BY
+    order_no, id`` 逐字同语义：IN 按 order_no **值**过滤、不筛行，被引用 order_no
+    的去重输出仍是全部同号行中 id 最小的（等价性测试对拍）。输入限定为 po 侧条件
+    （已生效+日期+类型/采购员筛选）命中的采购单引用的 order_no——不对全部 11.6 万
+    销售单外排去重（生产 EXPLAIN ≈0.9–1.0s/语句），也不用 LATERAL 逐单探测
+    （复审实测其在 po×明细行连接后按行数放大，客户下钻退化）。po_where 少含几条
+    po 侧条件也不影响正确性：IN 集合只需覆盖「语句实际会连的 order_no」。
+    关联是身份查找，不过滤销售单状态。"""
+    po, so = FPurchaseOrder, FSalesOrder
+    nos = select(po.linked_sales_order_no).where(
+        *po_where, po.linked_sales_order_no.is_not(None))
     return (
         select(
-            FSalesOrder.order_no.label("order_no"),
-            FSalesOrder.salesperson.label("salesperson"),
-            FSalesOrder.customer_id.label("customer_id"),
+            so.order_no.label("order_no"),
+            so.salesperson.label("salesperson"),
+            so.customer_id.label("customer_id"),
         )
-        .distinct(FSalesOrder.order_no)
-        .order_by(FSalesOrder.order_no, FSalesOrder.id)
+        .where(so.order_no.in_(nos))
+        .distinct(so.order_no)
+        .order_by(so.order_no, so.id)
     ).subquery()
+
+
+def _link_join(stmt, po, link):
+    """把有界去重关联（+客户名）挂到语句上；link 为 None 时原样返回（无销售/客户
+    参与，主语句不碰 f_sales_order，见 orders/summary 的 needs_link 判定）。"""
+    if link is None:
+        return stmt
+    return (stmt.outerjoin(link, po.linked_sales_order_no == link.c.order_no)
+            .outerjoin(DimCustomer, link.c.customer_id == DimCustomer.id))
+
+
+def _page_sales_link(db: Session, order_nos: list[str]) -> dict[str, tuple]:
+    """页内关联销售单去重（orders 无销售/客户筛选时二段补值用）：对 ≤ page_size 个
+    order_no 做与 _sales_link_bounded 同一规则的 DISTINCT ON（id 最小一条），IN
+    命中 ``ix_so_order_no``，毫秒级。返回 order_no → (salesperson, customer_id)。"""
+    if not order_nos:
+        return {}
+    so = FSalesOrder
+    rows = db.execute(
+        select(so.order_no, so.salesperson, so.customer_id)
+        .where(so.order_no.in_(order_nos))
+        .distinct(so.order_no)
+        .order_by(so.order_no, so.id)
+    ).all()
+    return {r.order_no: (r.salesperson, r.customer_id) for r in rows}
 
 
 def _batch_line_join(po=FPurchaseOrder, pl=FPurchaseLine):
@@ -277,11 +321,21 @@ def options(db: Session, user_ctx=None) -> dict:
         select(func.distinct(po.purchaser)).where(
             active, po.purchaser.is_not(None), po.purchaser != ""
         ).order_by(po.purchaser)).scalars()]
-    link = _sales_link()
+    # 销售人员取值：DISTINCT ON 先按 order_no 去重（同一去重规则，id 最小一条），
+    # 输入限定为「已生效采购单引用的 order_no」半连接命中的销售单（性能 2026-10-17：
+    # 旧版全表 DISTINCT ON 对 11.6 万销售单外排 5.2MB ≈ 1.0s；结果集合逐字不变）
+    linked_nos = select(po.linked_sales_order_no).where(
+        active, po.linked_sales_order_no.is_not(None))
+    link = (
+        select(FSalesOrder.order_no.label("order_no"),
+               FSalesOrder.salesperson.label("salesperson"))
+        .where(FSalesOrder.order_no.in_(linked_nos))
+        .distinct(FSalesOrder.order_no)
+        .order_by(FSalesOrder.order_no, FSalesOrder.id)
+    ).subquery()
     salespersons = [r for r in db.execute(
         select(func.distinct(link.c.salesperson))
-        .select_from(po).outerjoin(link, po.linked_sales_order_no == link.c.order_no)
-        .where(active, link.c.salesperson.is_not(None), link.c.salesperson != "")
+        .where(link.c.salesperson.is_not(None), link.c.salesperson != "")
         .order_by(link.c.salesperson)).scalars()]
     pl = FPurchaseLine
     dp = DimPart
@@ -325,7 +379,17 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     if group_by not in GROUP_BY_KEYS:
         raise FilterValidationError(f"不支持的分组维度：{group_by}")
     po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
-    link = _sales_link()
+    # 关联销售单按「语句是否引用」分别装配：筛选条件（销售人员/客户）引用 → KPI/
+    # 行数/分组全部语句都要连；仅分组维是销售/客户时只有分组语句（含分组行数）需要
+    # 连，KPI 与总行数语句不引用关联列——该外连接是死重（去重后按 order_no 1:1
+    # 不扩行不筛行），不连结果相同（等价性测试对拍），且免算关联（性能 2026-10-17）。
+    # 去重子查询的 IN 输入只用 po 侧条件（销售/客户条件挂在 link 上，构造时不可用）
+    po_where = _base_where(po, None, date_from=date_from, date_to=date_to,
+                           source_type=source_type, purchaser=purchaser,
+                           salesperson=None, customer_id=None)
+    link = _sales_link_bounded(po_where) if (salesperson or customer_id) else None
+    group_link = link if link is not None else (
+        _sales_link_bounded(po_where) if group_by in ("salesperson", "customer") else None)
     category = _norm_categories(category)
     line_mode = bool(category) or group_by == "category"
     cat = _category_match(category)
@@ -357,7 +421,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             func.sum(case((nominal, inc_e), else_=0)).label("nominal_inc"),
         ]
 
-    def _apply_from(stmt):
+    def _apply_from(stmt, link_variant):
         """统一 FROM 链：行级口径逐行展开（单头批次行 + 分类维），否则纯单头。"""
         if line_mode:
             stmt = (stmt.select_from(po)
@@ -365,23 +429,24 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
                     .join(dp, pl.part_id == dp.id))
         else:
             stmt = stmt.select_from(po)
-        return stmt.outerjoin(link, po.linked_sales_order_no == link.c.order_no)
+        return _link_join(stmt, po, link_variant)
 
-    def _lines_stmt(dim=None):
+    def _lines_stmt(dim, link_variant):
         """行数独立统计（仅单头口径调用；此时无分类筛选，无需 join dim_part）。"""
-        stmt = select(
-            *([dim.label("key")] if dim is not None else []),
-            func.count(pl.id).label("lines"),
-        ).select_from(po).join(pl, _batch_line_join(po, pl)) \
-            .outerjoin(link, po.linked_sales_order_no == link.c.order_no).where(*where)
+        stmt = _link_join(
+            select(
+                *([dim.label("key")] if dim is not None else []),
+                func.count(pl.id).label("lines"),
+            ).select_from(po).join(pl, _batch_line_join(po, pl)),
+            po, link_variant).where(*where)
         if dim is not None:
             stmt = stmt.group_by(dim)
         return stmt
 
-    kpi_row = db.execute(_apply_from(select(*measures)).where(*where)).one()
-    kpi_lines = kpi_row.lines if line_mode else (db.execute(_lines_stmt()).scalar() or 0)
+    kpi_row = db.execute(_apply_from(select(*measures), link).where(*where)).one()
+    kpi_lines = kpi_row.lines if line_mode else (db.execute(_lines_stmt(None, link)).scalar() or 0)
 
-    dim = _group_dim(group_by, po, link, dp)
+    dim = _group_dim(group_by, po, group_link, dp)
     # 分组排序的结构性保护（pool.py 复审三轮先例）：默认按实付合计降序，但金额组
     # 被遮蔽时组序本身就是隐藏金额排名的侧信道——apply_field_visibility 只把
     # amount_* 置空、不改组序。此时改按订单数降序 + 键升序（计数不脱敏，可用）。
@@ -391,12 +456,12 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     else:
         grp_order = (func.sum(paid_e).desc().nullslast(), dim)
     grp_rows = db.execute(
-        _apply_from(select(dim.label("key"), *measures)).where(*where).group_by(dim)
-        .order_by(*grp_order)
+        _apply_from(select(dim.label("key"), *measures), group_link).where(*where)
+        .group_by(dim).order_by(*grp_order)
     ).all()
     lines_by_key: dict[str, int] = {}
     if not line_mode:
-        lines_by_key = {r.key: r.lines for r in db.execute(_lines_stmt(dim)).all()}
+        lines_by_key = {r.key: r.lines for r in db.execute(_lines_stmt(dim, group_link)).all()}
 
     customer_names = {}
     if group_by == "customer":
@@ -461,6 +526,13 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     group_by + group_key：把上一层分组值折成对应维度精确过滤（哨兵值
     「（无关联销售单）」「(空)」「未分类」与 month/day 文本键同一真值）；
     category 分组折成分类筛选（保持行级口径与上层分组一致）。
+
+    关联销售单（性能 2026-10-17）：排序键全在采购单侧，无销售/客户参与时主语句
+    （count + 分页）不连 f_sales_order，页内再补关联值（_page_sales_link）；
+    销售/客户筛选或按销售/客户下钻必须在分页前过滤，关联去重的输入被当前窗口
+    采购单引用的 order_no 半连接限定（_sales_link_bounded，与全表 DISTINCT ON
+    同一去重规则）。
+    两种形态结果逐字一致（等价性测试对拍）。
     """
     _validate_common(date_from, date_to)
     if sort not in SORT_KEYS:
@@ -482,8 +554,15 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         sort = "order_date"
 
     po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
-    link = _sales_link()
     category = _norm_categories(category)
+    needs_link = bool(salesperson or customer_id) or (
+        bool(group_key) and group_by in ("salesperson", "customer"))
+    # 去重子查询的 IN 输入只用 po 侧条件（销售/客户条件挂在 link 上，构造时不可用；
+    # 分类是行级条件也不在此——IN 集合是超集即可，不影响正确性）
+    po_where = _base_where(po, None, date_from=date_from, date_to=date_to,
+                           source_type=source_type, purchaser=purchaser,
+                           salesperson=None, customer_id=None)
+    link = _sales_link_bounded(po_where) if needs_link else None
     # 分类分组（带或不带 group_key）一律行级口径，与 summary 同真值（对抗复审
     # 2026-10-17 确认项：无 group_key 时单头口径会与同参数 KPI 对不上账）
     line_mode = bool(category) or group_by == "category"
@@ -498,38 +577,36 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if group_key and group_by:
         where.append(_group_dim(group_by, po, link, dp) == group_key)
 
-    po_cols = (po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser,
-               link.c.salesperson, link.c.customer_id,
-               DimCustomer.name_normalized.label("customer_name"))
+    po_cols = [po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser]
+    group_cols = list(po_cols)
+    if link is None:
+        # 页内补值需要关联键（补值映射按 linked_sales_order_no 查）
+        po_cols.append(po.linked_sales_order_no)
+        group_cols.append(po.linked_sales_order_no)
+    else:
+        po_cols += [link.c.salesperson, link.c.customer_id,
+                    DimCustomer.name_normalized.label("customer_name")]
+        group_cols += [link.c.salesperson, link.c.customer_id,
+                       DimCustomer.name_normalized]
     if line_mode:
         ex_e, inc_e = _line_amount_exprs(po, pl)
         paid_e = pl.line_amount
-        base = (
+        base = _link_join(
             select(*po_cols, func.count(pl.id).label("lines"),
                    func.sum(inc_e).label("amount_inc"), func.sum(ex_e).label("amount_ex"),
                    func.sum(paid_e).label("amount_paid"))
             .select_from(po)
             .join(pl, _batch_line_join(po, pl))
-            .join(dp, pl.part_id == dp.id)
-            .outerjoin(link, po.linked_sales_order_no == link.c.order_no)
-            .outerjoin(DimCustomer, link.c.customer_id == DimCustomer.id)
-            .where(*where)
-            .group_by(po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser,
-                      link.c.salesperson, link.c.customer_id, DimCustomer.name_normalized)
-        )
+            .join(dp, pl.part_id == dp.id),
+            po, link).where(*where).group_by(*group_cols)
     else:
         ex_e, inc_e, paid_e, _nom = _order_amount_exprs(po)
-        base = (
+        base = _link_join(
             select(*po_cols, func.count(pl.id).label("lines"),
                    inc_e.label("amount_inc"), ex_e.label("amount_ex"), paid_e.label("amount_paid"))
             .select_from(po)
-            .outerjoin(pl, _batch_line_join(po, pl))
-            .outerjoin(link, po.linked_sales_order_no == link.c.order_no)
-            .outerjoin(DimCustomer, link.c.customer_id == DimCustomer.id)
-            .where(*where)
-            .group_by(po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser,
-                      link.c.salesperson, link.c.customer_id, DimCustomer.name_normalized)
-        )
+            .outerjoin(pl, _batch_line_join(po, pl)),
+            po, link).where(*where).group_by(*group_cols)
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     if line_mode:
@@ -550,16 +627,35 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         }[sort]
     direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
     stmt = base.order_by(direction, po.id.desc()).limit(page_size).offset((page - 1) * page_size)
-    items = [{
-        "order_id": r.id, "order_no": r.order_no,
-        "order_date": r.order_date.isoformat() if r.order_date else None,
-        "source_type": r.source_type_raw, "purchaser": r.purchaser,
-        "salesperson": r.salesperson, "customer_id": r.customer_id,
-        "customer": r.customer_name, "lines": r.lines,
-        "amount_inc": _f(_round2(r.amount_inc)),
-        "amount_ex": _f(_round2(r.amount_ex)),
-        "amount_paid": _f(_round2(r.amount_paid)),
-    } for r in db.execute(stmt)]
+    rows = db.execute(stmt).all()
+    # 无销售/客户参与：页内补关联销售员/客户名（≤ page_size 个 order_no 的 DISTINCT ON
+    # 命中 ix_so_order_no，毫秒级；与主语句里有界去重的取值同规则）
+    if link is None:
+        # 只滤 NULL 不过滤空串：linked='' 与 order_no='' 的等值关联和旧外连接同真值
+        sales_map = _page_sales_link(
+            db, [r.linked_sales_order_no for r in rows
+                 if r.linked_sales_order_no is not None])
+        cust_ids = sorted({cid for _sp, cid in sales_map.values() if cid is not None})
+        cust_names = (dict(db.execute(
+            select(DimCustomer.id, DimCustomer.name_normalized)
+            .where(DimCustomer.id.in_(cust_ids))).all()) if cust_ids else {})
+    items = []
+    for r in rows:
+        if link is not None:
+            sp, cid, cname = r.salesperson, r.customer_id, r.customer_name
+        else:
+            sp, cid = sales_map.get(r.linked_sales_order_no, (None, None))
+            cname = cust_names.get(cid)
+        items.append({
+            "order_id": r.id, "order_no": r.order_no,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "source_type": r.source_type_raw, "purchaser": r.purchaser,
+            "salesperson": sp, "customer_id": cid,
+            "customer": cname, "lines": r.lines,
+            "amount_inc": _f(_round2(r.amount_inc)),
+            "amount_ex": _f(_round2(r.amount_ex)),
+            "amount_paid": _f(_round2(r.amount_paid)),
+        })
     return {
         "total": total, "page": page, "page_size": page_size,
         "sort": sort, "order": order,
@@ -593,11 +689,16 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
 
     link_row = None
     if po.linked_sales_order_no:
-        link = _sales_link()
+        # 单点查找：按 order_no 直取 id 最小一条（同一去重规则，等价性测试对拍），
+        # 不再借道全表 DISTINCT ON 子查询（性能 2026-10-17）
+        so = FSalesOrder
         link_row = db.execute(
-            select(link.c.salesperson, link.c.customer_id, DimCustomer.name_normalized)
-            .select_from(link.outerjoin(DimCustomer, link.c.customer_id == DimCustomer.id))
-            .where(link.c.order_no == po.linked_sales_order_no)
+            select(so.salesperson, so.customer_id, DimCustomer.name_normalized)
+            .select_from(so)
+            .outerjoin(DimCustomer, so.customer_id == DimCustomer.id)
+            .where(so.order_no == po.linked_sales_order_no)
+            .order_by(so.id)
+            .limit(1)
         ).first()
 
     pl, dp = FPurchaseLine, DimPart
