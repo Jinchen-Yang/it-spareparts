@@ -815,6 +815,19 @@ FIELD_GROUPS = {
         "manual_limit_delta",
         "manual_limit_delta_pct",
     ],
+    # 销售单对账快照（D-40 §6，data_reconciliation）：已对账/待对账/退货已对账、
+    # 快照订单金额、数据截至与含退货展示值。全部用 reconciled_/pending_ 前缀的
+    # 全局唯一键名——绝不能登记 as_of、order_amount 这类通用键，否则会把其他
+    # 接口的同名字段一并误遮。新增派生键（如未来 KPI 对账合计）必须同步登记，
+    # 并由 tests/test_sales_analytics_api.py::test_reconciliation_keys_registered 守望。
+    "sales_reconciliation": [
+        "reconciled_amount",
+        "pending_amount",
+        "return_reconciled_amount",
+        "order_amount_at_snapshot",
+        "reconciled_as_of",
+        "reconciled_display",
+    ],
 }
 
 # 字段级脱敏的唯一真值源是 app/permissions.py 的 ROLE_TEMPLATES（按 data_* 开关）。
