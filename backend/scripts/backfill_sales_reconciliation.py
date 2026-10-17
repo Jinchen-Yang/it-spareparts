@@ -8,8 +8,9 @@ D-40（已对账快照）与 D-41（销售单金额三件套）的列在 2026-06
 file_type=sales、status=success/superseded）的归档原件逐个回放，补两样东西：
 
 1. ``f_sales_reconciliation_snapshot``：source='backfill'，import_batch_id=原件
-   所属批次；(raw_order_id, content_hash) 唯一 + ON CONFLICT DO NOTHING——内容
-   相同不重复，重跑新增 0 行（幂等、可续跑）。
+   所属批次；(raw_order_id, import_batch_id) 唯一 + ON CONFLICT DO NOTHING——
+   每批次每单记一条观测，重跑新增 0 行（幂等、可续跑）；不同批次各记一条
+   （即使内容相同，A→B→A 不被吞）。
 2. ``f_sales_order`` 含税三件套（is_tax_inclusive/tax_amount/amount_inc_tax）：
    只取该订单 ``import_batch_id`` 对应批次原件中的值（与 amount_ex_tax 出自
    同一文件，保持口径一致）；仅库内为 NULL 时填；库内已有不同值 → 记冲突不覆盖；
@@ -219,20 +220,18 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
     plan["orders_in_file"] = len(result.orders)
     plan["transform_errors"] = len(result.errors)
 
-    # ---- 1) 快照计划：库内不存在的 (raw_order_id, content_hash) 才追加 ----
+    # ---- 1) 快照计划：本批次在库内还没有观测的订单才追加 ----
     if result.has_reconciliation_columns:
         raw_ids = list(result.orders)
-        existing: set[tuple[str, str]] = set()
+        existing: set[str] = set()
         for start in range(0, len(raw_ids), 1000):
             chunk = raw_ids[start:start + 1000]
-            existing.update(
-                (rid, ch) for rid, ch in db.execute(
-                    select(
-                        FSalesReconciliationSnapshot.raw_order_id,
-                        FSalesReconciliationSnapshot.content_hash,
-                    ).where(FSalesReconciliationSnapshot.raw_order_id.in_(chunk))
-                ).all()
-            )
+            existing.update(rid for (rid,) in db.execute(
+                select(FSalesReconciliationSnapshot.raw_order_id).where(
+                    FSalesReconciliationSnapshot.raw_order_id.in_(chunk),
+                    FSalesReconciliationSnapshot.import_batch_id == batch.id,
+                )
+            ).all())
         oid_map = {}
         for start in range(0, len(raw_ids), 1000):
             chunk = raw_ids[start:start + 1000]
@@ -261,10 +260,11 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
                     source_modified_at=head.get("source_modified_at"),
                     **amounts),
             })
-        plan["_snapshot_rows"] = [r for r in rows
-                                  if (r["raw_order_id"], r["content_hash"]) not in existing]
+        plan["_snapshot_rows"] = [r for r in rows if r["raw_order_id"] not in existing]
         plan["snapshots_planned"] = len(plan["_snapshot_rows"])
         plan["snapshots_existing"] = len(rows) - len(plan["_snapshot_rows"])
+        # 清单指纹用 (raw_order_id, content_hash)：本批次内每单至多一条，
+        # raw_order_id 已唯一刻画将写行，content_hash 同时锁定将写内容
         plan["snapshots_plan_sha256"] = _canonical_sha256(
             [[r["raw_order_id"], r["content_hash"]] for r in plan["_snapshot_rows"]])
         totals = {key: None for key in
@@ -334,23 +334,31 @@ def _manifest(batches: list[SysImportBatch], plans: list[dict[str, Any]]) -> dic
     }
 
 
+def _is_newer_observation(mod: datetime | None, bid: int,
+                          prev_row: dict[str, Any]) -> bool:
+    """D-40「取每单最新」比较：source_modified_at DESC NULLS LAST、批次号 DESC。
+
+    与库内 latest_snapshots_by_raw_order_id 的排序键一致；(raw_order_id,
+    import_batch_id) 唯一约束下每单每批次至多一条，无需再比写入顺序。
+    """
+    prev_mod, prev_bid = prev_row["source_modified_at"], prev_row["import_batch_id"]
+    if mod is None:
+        return prev_mod is None and bid > prev_bid
+    if prev_mod is None:
+        return True
+    if mod != prev_mod:
+        return mod > prev_mod
+    return bid > prev_bid
+
+
 def _totals(plans: list[dict[str, Any]]) -> dict[str, Any]:
     by_status: dict[str, int] = {}
     for p in plans:
         by_status[p["status"]] = by_status.get(p["status"], 0) + 1
-    # 跨文件去重 (raw_order_id, content_hash)：单文件计划只对库内去重，同一内容
-    # 出现在多个批次（如 superseded 批与后继批共用同一原件）时各报各的——
-    # 汇总口径与执行一致（ON CONFLICT 先到先得），totals 不虚增。
-    seen: set[tuple[str, str]] = set()
-    planned_rows: list[dict[str, Any]] = []
-    for p in plans:
-        for row in p["_snapshot_rows"]:
-            key = (row["raw_order_id"], row["content_hash"])
-            if key in seen:
-                continue
-            seen.add(key)
-            planned_rows.append(row)
-    duplicates = (sum(p["snapshots_planned"] for p in plans) - len(planned_rows))
+    # 每批次每单一条观测、各自成行（不同批次即使内容相同也各写一条，如
+    # superseded 批与后继批共用同一原件）——汇总不做跨文件去重，totals
+    # 与执行真实写入数一致。
+    planned_rows: list[dict[str, Any]] = [r for p in plans for r in p["_snapshot_rows"]]
     snapshot_totals = {key: Decimal("0.00") for key in
                        ("order_amount", "reconciled_amount", "pending_amount",
                         "return_reconciled_amount")}
@@ -358,17 +366,18 @@ def _totals(plans: list[dict[str, Any]]) -> dict[str, Any]:
         for key in snapshot_totals:
             if row[key] is not None:
                 snapshot_totals[key] += row[key]
-    # 按单「最新快照」合计（D-40 口径）：计划内按 source_modified_at DESC NULLS LAST、
-    # 同时间后处理的文件胜出——首跑干净库上可直接对 D-40 验收数核对。
-    latest: dict[str, tuple] = {}
-    for seq, row in enumerate(planned_rows):
-        rid, mod = row["raw_order_id"], row["source_modified_at"]
+    # 按单「最新快照」合计（D-40 口径，见 _is_newer_observation）——
+    # 首跑干净库上可直接对 D-40 验收数核对。
+    latest: dict[str, dict[str, Any]] = {}
+    for row in planned_rows:
+        rid, mod, bid = (row["raw_order_id"], row["source_modified_at"],
+                         row["import_batch_id"])
         prev = latest.get(rid)
-        if prev is None or (mod is not None and (prev[0] is None or mod >= prev[0])):
-            latest[rid] = (mod, seq, row)
+        if prev is None or _is_newer_observation(mod, bid, prev):
+            latest[rid] = row
     latest_totals = {key: Decimal("0.00") for key in
                      ("reconciled_amount", "return_reconciled_amount")}
-    for _mod, _seq, row in latest.values():
+    for row in latest.values():
         for key in latest_totals:
             if row[key] is not None:
                 latest_totals[key] += row[key]
@@ -378,7 +387,6 @@ def _totals(plans: list[dict[str, Any]]) -> dict[str, Any]:
         "files_by_status": by_status,
         "orders_with_planned_snapshots": len({r["raw_order_id"] for r in planned_rows}),
         "snapshots_planned": len(planned_rows),
-        "snapshots_duplicate_content_across_files": duplicates,
         "snapshot_amount_totals": {
             k: _money_text(v) for k, v in snapshot_totals.items()} if planned_rows else None,
         "latest_per_order": {
@@ -417,7 +425,7 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
         chunk = plan["_snapshot_rows"][start:start + 1000]
         stmt = pg_insert(FSalesReconciliationSnapshot).values(chunk).on_conflict_do_nothing(
             index_elements=[FSalesReconciliationSnapshot.raw_order_id,
-                            FSalesReconciliationSnapshot.content_hash])
+                            FSalesReconciliationSnapshot.import_batch_id])
         inserted += len(db.execute(
             stmt.returning(FSalesReconciliationSnapshot.id)).all())
     tax_filled = 0

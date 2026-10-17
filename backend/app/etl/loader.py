@@ -747,11 +747,12 @@ def _backfill_sales_tax_columns(session: Session, order_rows: list[dict],
 def _write_sales_reconciliation_snapshots(session: Session, result: TransformResult,
                                           batch_id: int, oid_map: dict[str, int],
                                           source: str = SOURCE_IMPORT) -> tuple[int, int]:
-    """按 D-40 为本文件每个销售订单追加一条已对账快照，返回 (新增, 内容未变跳过)。
+    """按 D-40 为本批次每个销售订单记一条快照观测，返回 (新增, 同批次已存在跳过)。
 
-    (raw_order_id, content_hash) 唯一 → ON CONFLICT DO NOTHING：内容相同的重传
-    （含跨批次）幂等不重复，内容变化才追加。金额空单元格一律 NULL（哈希与落库
-    同形）。import_batch_id 记首次写入该内容的批次；sales_order_id 关联当前订单
+    (raw_order_id, import_batch_id) 唯一 → ON CONFLICT DO NOTHING：同一批次重放
+    不产生重复行；不同批次各记一条（即使内容相同——A→B→A 不被内容去重吞掉，
+    content_hash 仅供识别内容变化/报告）。金额空单元格一律 NULL（哈希与落库
+    同形）。import_batch_id 即本观测所属批次；sales_order_id 关联当前订单
     行（订单在本事务已写入/已存在，导入路径必可解析）。历史原件回填走
     scripts/backfill_sales_reconciliation 自有插入（source='backfill'，行构造
     同口径），不复用本函数——那边订单可能缺席，sales_order_id 允许 NULL。
@@ -781,7 +782,7 @@ def _write_sales_reconciliation_snapshots(session: Session, result: TransformRes
     for chunk in _chunks(rows):
         stmt = pg_insert(FSalesReconciliationSnapshot).values(chunk).on_conflict_do_nothing(
             index_elements=[FSalesReconciliationSnapshot.raw_order_id,
-                            FSalesReconciliationSnapshot.content_hash])
+                            FSalesReconciliationSnapshot.import_batch_id])
         inserted += len(session.execute(
             stmt.returning(FSalesReconciliationSnapshot.id)).all())
     return inserted, len(rows) - inserted
@@ -908,10 +909,12 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             sales_tax_backfilled = _backfill_sales_tax_columns(
                 session, order_rows, set(order_stats["changed_keys"]))
         if result.has_reconciliation_columns:
-            inserted, unchanged = _write_sales_reconciliation_snapshots(
+            inserted, skipped_same_batch = _write_sales_reconciliation_snapshots(
                 session, result, batch_id, oid_map)
+            # skipped_same_batch：同批次已存在的观测数——正常导入每批新建、
+            # 文件内每单聚合为一条，恒为 0；仅同批次重放（防御路径）时非 0
             recon_stats = {"sales_recon_snapshots_inserted": inserted,
-                           "sales_recon_snapshots_unchanged": unchanged}
+                           "sales_recon_snapshots_skipped_same_batch": skipped_same_batch}
         else:
             recon_stats = {"sales_recon_snapshots_missing_columns": len(orders)}
 

@@ -12,7 +12,10 @@ from sqlalchemy import func, select
 from app.etl import mapping, pipeline, reader, transform
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysImportError
-from app.services.sales_reconciliation import snapshot_content_hash
+from app.services.sales_reconciliation import (
+    latest_snapshots_by_raw_order_id,
+    snapshot_content_hash,
+)
 
 RECON_HEADERS = ["已对账金额", "待对账金额", "退货已对账金额", "修改时间(必填)"]
 LINE_ID = "订单明细.数据ID(不可修改)"
@@ -302,15 +305,16 @@ def test_skip_first_import_writes_tax_columns_and_snapshot(db, tmp_path):
 
     report = batch.report_json
     assert report["sales_recon_snapshots_inserted"] == 1
-    assert report["sales_recon_snapshots_unchanged"] == 0
+    assert report["sales_recon_snapshots_skipped_same_batch"] == 0
     assert report["sales_tax_columns_backfilled"] == 0
 
 
-def test_skip_reupload_same_content_snapshot_not_duplicated(db, tmp_path):
+def test_skip_reupload_same_content_appends_new_batch_observation(db, tmp_path):
+    """内容相同的重传（不同批次）各记一条观测（D-40：内容不去重），最新取批次大者。"""
     path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
-    pipeline.run_import(db, path1, "a.xlsx")
+    batch1 = pipeline.run_import(db, path1, "a.xlsx")
     db.commit()
-    # 不同文件哈希（多一个新单）、旧单对账内容未变 → 旧单快照不重复
+    # 不同文件哈希（多一个新单）、旧单对账内容未变
     path2 = _write_xlsx(tmp_path / "b.xlsx", [
         _row(),
         _row(**{"数据ID(不可修改)": "RAW-RECON-2", "订单编号(必填)": "XSDD-20260630-0002",
@@ -318,9 +322,45 @@ def test_skip_reupload_same_content_snapshot_not_duplicated(db, tmp_path):
     batch2 = pipeline.run_import(db, path2, "b.xlsx")
     db.commit()
 
-    assert batch2.report_json["sales_recon_snapshots_inserted"] == 1   # 只有新单
-    assert batch2.report_json["sales_recon_snapshots_unchanged"] == 1  # 旧单内容未变
-    assert len(_snapshots(db)) == 2
+    assert batch2.report_json["sales_recon_snapshots_inserted"] == 2   # 旧单+新单各一条
+    assert batch2.report_json["sales_recon_snapshots_skipped_same_batch"] == 0
+    assert len(_snapshots(db)) == 3
+    old_order_rows = [s for s in _snapshots(db) if s.raw_order_id == "RAW-RECON-1"]
+    assert len(old_order_rows) == 2                                   # 两批次各一条
+    assert {s.import_batch_id for s in old_order_rows} == {batch1.id, batch2.id}
+    latest = latest_snapshots_by_raw_order_id(db, ["RAW-RECON-1"])
+    assert latest["RAW-RECON-1"].import_batch_id == batch2.id         # 最新=批次较大者
+    assert latest["RAW-RECON-1"].reconciled_amount == Decimal("100.00")
+
+
+def test_import_aba_with_null_modified_times_latest_is_a(db, tmp_path):
+    """A→B→A（修改时间全空）：三个批次各一条观测，最新 = 第三批的 A（不被内容去重吞）。
+
+    三个文件字节不同（明细产品名不同，避免同哈希被 skip 模式拒绝），但
+    RAW-RECON-1 的对账内容 A→B→A；旧口径下第三批与首批同哈希会被 ON CONFLICT
+    丢弃、最新错误停在 B。
+    """
+
+    def _aba(name, reconciled, pn):
+        return _write_xlsx(tmp_path / name, [
+            _row(已对账金额=Decimal(reconciled), **{"修改时间(必填)": None,
+                                                    "订单明细.产品名称": pn})])
+
+    pipeline.run_import(db, _aba("aba1.xlsx", "100.00", "TEST-PN-A"), "aba1.xlsx")
+    db.commit()
+    pipeline.run_import(db, _aba("aba2.xlsx", "60.00", "TEST-PN-B"), "aba2.xlsx")
+    db.commit()
+    batch3 = pipeline.run_import(db, _aba("aba3.xlsx", "100.00", "TEST-PN-C"),
+                                 "aba3.xlsx")
+    db.commit()
+
+    snaps = [s for s in _snapshots(db) if s.raw_order_id == "RAW-RECON-1"]
+    assert [s.reconciled_amount for s in snaps] == [
+        Decimal("100.00"), Decimal("60.00"), Decimal("100.00")]
+    assert all(s.source_modified_at is None for s in snaps)     # 修改时间全空
+    latest = latest_snapshots_by_raw_order_id(db, ["RAW-RECON-1"])
+    assert latest["RAW-RECON-1"].import_batch_id == batch3.id
+    assert latest["RAW-RECON-1"].reconciled_amount == Decimal("100.00")
 
 
 def test_skip_reupload_fills_null_tax_keeps_existing(db, tmp_path):
@@ -341,7 +381,7 @@ def test_skip_reupload_fills_null_tax_keeps_existing(db, tmp_path):
     assert order.tax_amount == Decimal("13.00")          # NULL 补齐
     assert order.is_tax_inclusive is False               # NULL 按第二份文件值补齐
     assert batch2.report_json["sales_tax_columns_backfilled"] == 2
-    # 订单金额变了 → 快照按文件内容追加一条（追加式历史）
+    # 新批次 → 本单再记一条观测（本例文件内容也变了；内容未变同样会追加）
     assert batch2.report_json["sales_recon_snapshots_inserted"] == 1
     assert len(_snapshots(db)) == 2
 
@@ -411,7 +451,8 @@ def test_purchase_import_leaves_snapshots_untouched(db, tmp_path):
                                 "purchase.xlsx")
     db.commit()
     assert batch.file_type == mapping.PURCHASE
-    for key in ("sales_recon_snapshots_inserted", "sales_recon_snapshots_unchanged",
+    for key in ("sales_recon_snapshots_inserted",
+                "sales_recon_snapshots_skipped_same_batch",
                 "sales_recon_snapshots_missing_columns", "sales_tax_columns_backfilled"):
         assert key not in batch.report_json
     assert _snapshots(db) == []

@@ -15,6 +15,7 @@ from sqlalchemy import delete, func, select, update
 from app.etl import pipeline
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysRawFile, SysUser
+from app.services.sales_reconciliation import latest_snapshots_by_raw_order_id
 from scripts import backfill_sales_reconciliation as bs
 from tests.test_sales_reconciliation_import import _row, _write_xlsx
 
@@ -98,6 +99,7 @@ def test_execute_matches_dry_run_and_writes(db, tmp_path):
 
     assert applied["status"] == "applied"
     assert applied["totals"]["files_executed"] == 1
+    assert applied["totals"]["snapshots_inserted"] == dry["totals"]["snapshots_planned"]
     assert applied["totals"]["snapshots_inserted"] == 1
     assert applied["totals"]["tax_columns_filled"] == 3
 
@@ -129,7 +131,7 @@ def test_second_execute_adds_zero(db, tmp_path):
     bs.run_backfill(db, execute=True, operator=operator, confirm_manifest_sha256=sha1)
 
     dry2 = bs.run_backfill(db)
-    assert dry2["totals"]["snapshots_planned"] == 0    # 内容未变 → 全部已存在
+    assert dry2["totals"]["snapshots_planned"] == 0    # 同批次已记观测 → 重跑 0 新增
     assert dry2["totals"]["tax_fills_planned"] == 0    # 税列非空 → 无可填
     applied2 = bs.run_backfill(db, execute=True, operator=operator,
                                confirm_manifest_sha256=dry2["manifest_sha256"])
@@ -302,14 +304,75 @@ def test_superseded_batches_included(db, tmp_path):
 
     dry = bs.run_backfill(db)
     assert {f["batch_id"] for f in dry["files"]} == {b1.id, b2.id}  # superseded 也在范围
-    assert dry["totals"]["snapshots_planned"] == 1   # 跨批次同内容去重（= 执行真实写入数）
-    assert dry["totals"]["snapshots_duplicate_content_across_files"] == 1
+    assert dry["totals"]["snapshots_planned"] == 2   # 每批次各一条观测（内容相同不去重）
+    assert dry["totals"]["orders_with_planned_snapshots"] == 1
 
     bs.run_backfill(db, execute=True, operator=operator,
                     confirm_manifest_sha256=dry["manifest_sha256"])
     snaps = db.scalars(select(FSalesReconciliationSnapshot)).all()
-    assert len(snaps) == 1                            # 跨重复批次幂等：不因批次多而多写
-    assert snaps[0].import_batch_id == b1.id          # 先处理的批次（uploaded_at 早）落账
+    assert {s.import_batch_id for s in snaps} == {b1.id, b2.id}   # 两批各一条
+    assert len({s.content_hash for s in snaps}) == 1              # 内容确实相同
+    latest = latest_snapshots_by_raw_order_id(db, ["RAW-RECON-1"])
+    assert latest["RAW-RECON-1"].import_batch_id == max(b1.id, b2.id)
+
+
+def test_backfill_aba_null_times_three_observations_latest_is_a(db, tmp_path):
+    """回填路径的 A→B→A（修改时间全空）：三个批次各回放一条观测，最新 = 批次最大的 A。
+
+    dry-run 与 execute 计数一致；旧口径 (raw_order_id, content_hash) 唯一会把
+    第三批的 A 当重复跳过、latest_per_order 错误地按 B 汇总。
+    """
+    _import_one(db, tmp_path, "aba1.xlsx", [
+        _row(已对账金额=Decimal("100.00"),
+             **{"修改时间(必填)": None, "订单明细.产品名称": "TEST-PN-A"})])
+    _import_one(db, tmp_path, "aba2.xlsx", [
+        _row(已对账金额=Decimal("60.00"),
+             **{"修改时间(必填)": None, "订单明细.产品名称": "TEST-PN-B"})])
+    b3 = _import_one(db, tmp_path, "aba3.xlsx", [
+        _row(已对账金额=Decimal("100.00"),
+             **{"修改时间(必填)": None, "订单明细.产品名称": "TEST-PN-C"})])
+    _degrade_to_pre_pr2(db)
+
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 3
+    assert dry["totals"]["orders_with_planned_snapshots"] == 1
+    assert dry["totals"]["latest_per_order"]["reconciled_amount"] == "100.00"
+    operator = _operator(db)
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=dry["manifest_sha256"])
+    assert applied["totals"]["snapshots_inserted"] == dry["totals"]["snapshots_planned"]
+
+    snaps = db.scalars(select(FSalesReconciliationSnapshot).order_by(
+        FSalesReconciliationSnapshot.import_batch_id)).all()
+    assert [s.reconciled_amount for s in snaps] == [
+        Decimal("100.00"), Decimal("60.00"), Decimal("100.00")]
+    assert all(s.source_modified_at is None for s in snaps)
+    latest = latest_snapshots_by_raw_order_id(db, ["RAW-RECON-1"])
+    assert latest["RAW-RECON-1"].import_batch_id == b3.id
+    assert latest["RAW-RECON-1"].reconciled_amount == Decimal("100.00")
+
+
+def test_import_after_backfill_same_content_appends_observation(db, tmp_path):
+    """回填后再常规导入同内容：新批次再记一条观测（source=import），不因内容相同被吞。"""
+    b1 = _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    dry = bs.run_backfill(db)
+    operator = _operator(db)
+    bs.run_backfill(db, execute=True, operator=operator,
+                    confirm_manifest_sha256=dry["manifest_sha256"])
+    assert _snap_count(db) == 1
+
+    # 文件字节与 a.xlsx 不同（明细产品名不同，避免同哈希被 skip 模式拒绝）
+    b2 = _import_one(db, tmp_path, "c.xlsx",
+                     [_row(**{"订单明细.产品名称": "TEST-PN-AFTER"})])
+    snaps = db.scalars(select(FSalesReconciliationSnapshot).order_by(
+        FSalesReconciliationSnapshot.id)).all()
+    assert len(snaps) == 2
+    assert {s.source for s in snaps} == {"backfill", "import"}
+    assert {s.import_batch_id for s in snaps} == {b1.id, b2.id}
+    latest = latest_snapshots_by_raw_order_id(db, ["RAW-RECON-1"])
+    assert latest["RAW-RECON-1"].source == "import"
+    assert latest["RAW-RECON-1"].import_batch_id == b2.id
 
 
 def test_batch_id_scoping_and_invalid_scope(db, tmp_path):
