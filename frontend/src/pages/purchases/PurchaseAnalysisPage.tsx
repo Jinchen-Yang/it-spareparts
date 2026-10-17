@@ -238,8 +238,8 @@ export default function PurchaseAnalysisPage() {
   return (
     <>
       <PageHeader
-        title="采购分析"
-        subtitle="最近采购了哪些型号、哪些频率高、主要来自哪些业务类型——早会先看这里找频发待计划"
+        title="型号分析"
+        subtitle="最近采购了哪些型号、哪些频率高、主要来自哪些业务类型——早会先看这里找频发待计划（D-39 起采购金额分析在新「采购分析」页）"
         extra={!isMobile ? filters : undefined}
       />
       <Card>
