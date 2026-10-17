@@ -78,6 +78,7 @@ const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
+const loadSalesAnalytics = () => import("./pages/sales/analytics/SalesAnalyticsPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
 const loadPurchaseAnalytics = () => import("./pages/purchases/analytics/PurchaseAnalyticsPage");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
@@ -104,6 +105,7 @@ const PoolAnalysisPage = lazy(loadPoolAnalysis);
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
 const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
+const SalesAnalyticsPage = lazy(loadSalesAnalytics);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseAnalyticsPage = lazy(loadPurchaseAnalytics);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
@@ -148,6 +150,9 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-sales",
     label: "销售管理",
     items: [
+      // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
+      // 模板仅 admin/boss；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
+      { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", page: SalesAnalyticsPage, load: loadSalesAnalytics },
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
     ],
