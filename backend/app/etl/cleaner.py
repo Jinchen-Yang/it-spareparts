@@ -157,6 +157,31 @@ def parse_date(x) -> date | None:
     return ts.date()
 
 
+def parse_datetime(x) -> "datetime | None":
+    """氚云时刻列（销售「修改时间」等）：语义同 parse_date 但保留时分秒。
+
+    Excel 序列号（含小数天）按 1899-12-30 纪元还原；字符串/datetime 走
+    pd.to_datetime。空 → None；非法抛 ValueError（调用方置 NULL 并记行级错误，
+    不阻断该行）。返回值可能是 naive datetime——氚云导出是北京时间，时区归一
+    （北京时间 → UTC）由调用方负责，与 services/sales_reconciliation 的
+    canonical_time 约定一致。
+    """
+    from datetime import datetime
+
+    if _is_blank(x):
+        return None
+    if isinstance(x, datetime):
+        return x
+    if isinstance(x, numbers.Number) and not isinstance(x, bool):
+        if not (1 <= x <= 100000):           # 同 parse_date 的序列号界防
+            raise ValueError(f"时间非法: {x!r}")
+        return pd.to_datetime(x, unit="D", origin="1899-12-30").to_pydatetime()
+    ts = pd.to_datetime(x, errors="coerce")
+    if pd.isna(ts):
+        raise ValueError(f"时间非法: {x!r}")
+    return ts.to_pydatetime()
+
+
 def normalize_supplier_name(raw) -> tuple[str | None, str | None]:
     """返回 (name_raw, name_normalized)。规范名去全角括号后缀（质保/采购等）。"""
     name_raw = clean_str(raw)

@@ -6,18 +6,20 @@
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 
 import pandas as pd
 
 from app import config, tax_policy
+from app.business_time import BUSINESS_TZ
 from app.etl import anomaly, cleaner, mapping
 from app.etl.maintenance_addresses import AddressPatch, collect_addresses
 from app.services.maintenance_expense_integrity import content_key_digest
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
 SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress",
-                              "maintenance_address_conflict"})
+                              "maintenance_address_conflict",
+                              "reconciliation_head_conflict"})
 
 
 @dataclass
@@ -51,6 +53,9 @@ class TransformResult:
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
     maintenance_address_patches: dict[str, AddressPatch] = field(default_factory=dict)
+    # D-40：销售文件是否带对账区列（至少「已对账金额」列存在）。旧格式文件为
+    # False → loader 不写快照（对账区列一个都没有时不产生 NULL 快照）。
+    has_reconciliation_columns: bool = False
 
 
 def _row_dict(row, field_map) -> dict:
@@ -69,6 +74,114 @@ def _empty_pn_error(row_no, status, label_no, raw_row) -> "ErrorRec":
     return ErrorRec(row_no, "empty_pn", f"产品名称为空{tail}", raw_row)
 
 
+# D-40 对账区单头字段（订单级累计快照，同一订单每行重复出现）
+_RECON_MONEY_FIELDS = ("reconciled_amount", "pending_amount", "return_reconciled_amount")
+# D-41 含税三件套：与对账区同为销售单头观测，同一「首个非空 + 不一致告警」
+# 规则按行聚合（明细校验失败行的值同样属于该订单，D-40 PR-3 口径）。
+_TAX_TRIO_FIELDS = ("amount_inc_tax", "is_tax_inclusive", "tax_amount")
+_RECON_FIELD_LABELS = {
+    "reconciled_amount": "已对账金额",
+    "pending_amount": "待对账金额",
+    "return_reconciled_amount": "退货已对账金额",
+    "source_modified_at": "修改时间",
+    "amount_inc_tax": "订单金额",
+    "is_tax_inclusive": "是否含税",
+    "tax_amount": "税金",
+}
+
+
+def _fmt_head_value(value):
+    """冲突告警里的值渲染：布尔按业务语义（含税/不含税），其余原样。"""
+    if value is True:
+        return "含税"
+    if value is False:
+        return "不含税"
+    return value
+
+
+def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
+    """首个非空原始值生效（键在 slot 即视为已占用——坏值锁定 NULL，不被后续
+    行的好值悄悄顶掉）；后续行解析值不同 → 软警告留痕（可忽略）。
+
+    比较用解析后的值（Decimal/datetime/bool），"100" 与 "100.00" 不算冲突。"""
+    if field not in slot:
+        slot[field] = value
+        return
+    prev = slot[field]
+    if prev != value:
+        res.errors.append(ErrorRec(
+            row_no, "reconciliation_head_conflict",
+            f"订单 {raw_order_id} 的{_RECON_FIELD_LABELS[field]}多行取值不一致："
+            f"保留首个非空值（{_fmt_head_value(prev) if prev is not None else '坏值已置空'}），"
+            f"忽略本行 {_fmt_head_value(value)}（可忽略）",
+            {field: str(value)}))
+
+
+def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
+                                  head_obs) -> None:
+    """按行收集销售单头观测值：D-40 对账区四列 + D-41 含税三件套。
+
+    调用于订单/行 ID 校验之后、明细级校验（PN/数量/单价）闸门**之前**——
+    明细校验失败的行同样携带该订单的单头值，绝不静默跳过（Codex 审查 P1）。
+    常规布局「值在首行、下方存活行留空」由 reader 按单向下 ffill 兜住；本
+    收集点再兜住 ffill 兜不住的形态（值只在末行坏行上、坏行值与存活行不同）。
+
+    对账区（仅新格式文件）：坏值置 NULL 记行级错误（bad_reconciliation_amount /
+    bad_source_modified_time，逐行上报不阻断），首个非空是坏值 → 锁定 NULL。
+    含税三件套（新旧格式都有）：坏值沿用 _build_head 旧口径静默置 None
+    （不加新错误码），空/坏不参与聚合。全部行校验失败的订单不并入订单头
+    （订单不入库，快照/头字段无从落），但已上报的行级错误仍然可见。
+    比较用解析后的值（Decimal/datetime），"100" 与 "100.00" 不算冲突。
+    """
+    slot = head_obs.setdefault(raw_order_id, {})
+
+    def g(internal):
+        col = inv_head.get(internal)
+        return row.get(col) if col is not None else None
+
+    for field_name in ("amount_inc_tax", "tax_amount"):
+        value = _safe_money(g(field_name))
+        if value is not None:
+            _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
+    tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
+    if tax_inclusive is not None:
+        _merge_recon_value(res, slot, raw_order_id, "is_tax_inclusive",
+                           tax_inclusive, row_no)
+
+    if not res.has_reconciliation_columns:
+        return
+    for field_name in _RECON_MONEY_FIELDS:
+        try:
+            value = cleaner.parse_money(g(field_name))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(
+                row_no, "bad_reconciliation_amount",
+                f"{_RECON_FIELD_LABELS[field_name]}{exc}（该单此列置空，不阻断导入）",
+                {field_name: str(g(field_name))}))
+            if field_name not in slot:
+                slot[field_name] = None   # 首个非空值是坏值 → 锁定 NULL
+            continue
+        if value is not None:
+            _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
+    try:
+        modified = cleaner.parse_datetime(g("source_modified_at"))
+    except ValueError as exc:
+        res.errors.append(ErrorRec(
+            row_no, "bad_source_modified_time",
+            f"{exc}（该单修改时间置空，不阻断导入）",
+            {"source_modified_at": str(g("source_modified_at"))}))
+        if "source_modified_at" not in slot:
+            slot["source_modified_at"] = None
+    else:
+        if modified is not None:
+            # 氚云导出是北京时间：naive 视为北京时间、aware 原样，折算成 UTC 交给
+            # 快照 canonical_time/落库——导入与回填共用本路径，哈希口径一致。
+            if modified.tzinfo is None:
+                modified = modified.replace(tzinfo=BUSINESS_TZ)
+            _merge_recon_value(res, slot, raw_order_id, "source_modified_at",
+                               modified.astimezone(timezone.utc), row_no)
+
+
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     res = TransformResult(file_type=file_type)
     head_map = mapping.MAPPINGS[file_type]["head"]
@@ -76,6 +189,12 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     inv_head = {v: k for k, v in head_map.items()}   # internal -> chinese
     inv_line = {v: k for k, v in line_map.items()}
     res.rows_total = len(df)
+    # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的单头观测值
+    # （D-40 对账区 + D-41 含税三件套，见 _collect_sales_reconciliation）
+    head_obs_by_order: dict = {}
+    res.has_reconciliation_columns = (
+        file_type == mapping.SALES and inv_head.get("reconciled_amount") in df.columns
+    )
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -88,6 +207,12 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
                                        "缺少订单/明细数据ID", _row_dict(row, full_map)))
             continue
+
+        # D-40/D-41 单头观测在明细级校验（PN/数量/单价）之前收集：校验失败的行
+        # 同样携带该订单的对账区/含税三件套值，绝不静默跳过（Codex 审查 P1）。
+        if file_type == mapping.SALES:
+            _collect_sales_reconciliation(res, row, row_no, raw_order_id,
+                                          inv_head, head_obs_by_order)
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
@@ -142,6 +267,21 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         1 for ln in res.lines
         if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
     )
+    # 单头观测聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
+    # 不入库，快照/头字段都无从落，收集时上报的行级错误仍可见）。对账区四个键
+    # 补齐为 None：列存在但整单为空/坏值时键仍在，值为 NULL——下游（快照 NULL
+    # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值：「首个非空」
+    # 取代「首个存活行」（各行一致时结果不变；跨行不同时按文件序首个非空为准，
+    # 且已留冲突告警）。税率仍按订单头行的 不含税金额×税金 推导，不随覆盖重算。
+    for raw_id, values in head_obs_by_order.items():
+        head = res.orders.get(raw_id)
+        if head is None:
+            continue
+        if res.has_reconciliation_columns:
+            for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
+                head[field_name] = values.get(field_name)
+        for field_name in _TAX_TRIO_FIELDS:
+            head[field_name] = values.get(field_name)
     return res
 
 

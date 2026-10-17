@@ -36,10 +36,15 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
-from app.models.sales import FSalesLine, FSalesOrder
+from app.models.sales import (
+    FSalesLine,
+    FSalesOrder,
+    FSalesReconciliationSnapshot,
+)
 from app.models.system import SysAuditLog
 from app.services import maintenance_cost_invalidation
 from app.services import maintenance_project_operations as _project_ops
+from app.services.sales_reconciliation import SOURCE_IMPORT, snapshot_content_hash
 
 _log = logging.getLogger("loader")
 _CHUNK = 1000  # 每批行数，控制单语句参数数 < PostgreSQL 65535 上限
@@ -650,6 +655,7 @@ _PURCHASE_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "des
                        "recent_purchase_price", "anomaly_flags", "import_batch_id"]
 _SALES_ORDER_UPD = ["order_no", "order_date", "salesperson", "customer_id",
                      "business_type", "warehouse", "amount_ex_tax", "tax_rate",
+                     "is_tax_inclusive", "tax_amount", "amount_inc_tax",
                      "data_status", "import_batch_id"]
 _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
                     "brand", "category_major", "category_minor", "machine_or_part", "unit",
@@ -703,6 +709,83 @@ def _wbdd_raw_ids_linked_to_sales(session: Session, sales_order_nos) -> list[str
             )
         ))
     return out
+
+
+def _backfill_sales_tax_columns(session: Session, order_rows: list[dict],
+                                inserted_raw_ids: set) -> int:
+    """skip 模式补 NULL：已存在销售单的含税三件套（D-41）仅在库内为 NULL 时填入本文件值。
+
+    语义与既有列完全一致地保守：只写三个新列，绝不触碰其余列与
+    import_batch_id（ON CONFLICT 的 SET 只含这三列）；新插入的单
+    （inserted_raw_ids）已带同值，跳过以免多算。按列各发一条 UPDATE
+    （WHERE 限定该列确实要从 NULL 变非 NULL），RETURNING 行数按列累计 =
+    真实补齐的列数。
+    """
+    tax_cols = ("is_tax_inclusive", "tax_amount", "amount_inc_tax")
+    existing_rows = [r for r in order_rows if r["raw_order_id"] not in inserted_raw_ids]
+    if not existing_rows:
+        return 0
+    filled = 0
+    for chunk in _chunks(existing_rows):
+        minimal = [{"raw_order_id": r["raw_order_id"], "order_no": r["order_no"],
+                    "import_batch_id": r["import_batch_id"],
+                    **{c: r[c] for c in tax_cols}} for r in chunk]
+        for col in tax_cols:
+            stmt = pg_insert(FSalesOrder).values(minimal)
+            col_attr = getattr(FSalesOrder, col)
+            coalesced = func.coalesce(col_attr, getattr(stmt.excluded, col))
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[FSalesOrder.raw_order_id],
+                set_={col: coalesced},
+                where=col_attr.is_distinct_from(coalesced))
+            # 按列统计：RETURNING 行数 = 该列真实从 NULL 补齐的单数
+            filled += len(session.execute(
+                stmt.returning(FSalesOrder.raw_order_id)).all())
+    return filled
+
+
+def _write_sales_reconciliation_snapshots(session: Session, result: TransformResult,
+                                          batch_id: int, oid_map: dict[str, int],
+                                          source: str = SOURCE_IMPORT) -> tuple[int, int]:
+    """按 D-40 为本批次每个销售订单记一条快照观测，返回 (新增, 同批次已存在跳过)。
+
+    (raw_order_id, import_batch_id) 唯一 → ON CONFLICT DO NOTHING：同一批次重放
+    不产生重复行；不同批次各记一条（即使内容相同——A→B→A 不被内容去重吞掉，
+    content_hash 仅供识别内容变化/报告）。金额空单元格一律 NULL（哈希与落库
+    同形）。import_batch_id 即本观测所属批次；sales_order_id 关联当前订单
+    行（订单在本事务已写入/已存在，导入路径必可解析）。历史原件回填走
+    scripts/backfill_sales_reconciliation 自有插入（source='backfill'，行构造
+    同口径），不复用本函数——那边订单可能缺席，sales_order_id 允许 NULL。
+    """
+    rows = []
+    for raw_id, head in result.orders.items():
+        amounts = {
+            "order_amount": head.get("amount_inc_tax"),
+            "reconciled_amount": head.get("reconciled_amount"),
+            "pending_amount": head.get("pending_amount"),
+            "return_reconciled_amount": head.get("return_reconciled_amount"),
+        }
+        rows.append({
+            "raw_order_id": raw_id,
+            "order_no": head.get("order_no"),
+            "sales_order_id": oid_map.get(raw_id),
+            "import_batch_id": batch_id,
+            "source": source,
+            "source_modified_at": head.get("source_modified_at"),
+            **amounts,
+            "content_hash": snapshot_content_hash(
+                raw_order_id=raw_id,
+                source_modified_at=head.get("source_modified_at"),
+                **amounts),
+        })
+    inserted = 0
+    for chunk in _chunks(rows):
+        stmt = pg_insert(FSalesReconciliationSnapshot).values(chunk).on_conflict_do_nothing(
+            index_elements=[FSalesReconciliationSnapshot.raw_order_id,
+                            FSalesReconciliationSnapshot.import_batch_id])
+        inserted += len(session.execute(
+            stmt.returning(FSalesReconciliationSnapshot.id)).all())
+    return inserted, len(rows) - inserted
 
 
 def _load_orders(session: Session, result: TransformResult, batch_id: int,
@@ -790,6 +873,11 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
                 "salesperson": o.get("salesperson"),
                 "customer_id": cust_id.get(o.get("customer_name")),
                 "business_type": o.get("business_type"), "warehouse": o.get("warehouse"),
+                # D-41 含税三件套：插入即写；upsert 经 _SALES_ORDER_UPD 覆盖；
+                # skip 对既有单只补 NULL（_backfill_sales_tax_columns），不动非空值。
+                "is_tax_inclusive": o.get("is_tax_inclusive"),
+                "tax_amount": o.get("tax_amount"),
+                "amount_inc_tax": o.get("amount_inc_tax"),
             })
         else:
             base.update({
@@ -811,6 +899,24 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     oid_map = dict(session.execute(
         select(order_model.raw_order_id, order_model.id).where(order_model.raw_order_id.in_(raw_ids))
     ).all())
+
+    # 3.5) D-40/D-41 销售单增量：skip 模式给既有单的含税三件套只补 NULL；
+    #      文件带对账区列时（skip 与 upsert 都）为每单追加快照。
+    sales_tax_backfilled = 0
+    recon_stats: dict = {}
+    if is_sales:
+        if not upsert:
+            sales_tax_backfilled = _backfill_sales_tax_columns(
+                session, order_rows, set(order_stats["changed_keys"]))
+        if result.has_reconciliation_columns:
+            inserted, skipped_same_batch = _write_sales_reconciliation_snapshots(
+                session, result, batch_id, oid_map)
+            # skipped_same_batch：同批次已存在的观测数——正常导入每批新建、
+            # 文件内每单聚合为一条，恒为 0；仅同批次重放（防御路径）时非 0
+            recon_stats = {"sales_recon_snapshots_inserted": inserted,
+                           "sales_recon_snapshots_skipped_same_batch": skipped_same_batch}
+        else:
+            recon_stats = {"sales_recon_snapshots_missing_columns": len(orders)}
 
     # 4) 明细行
     line_model = FSalesLine if is_sales else FPurchaseLine
@@ -877,7 +983,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             changed_source_order_ids=_wbdd_raw_ids_linked_to_sales(session, changed_nos),
         )
 
-    return {
+    counts = {
         "source_rows_total": result.rows_total,
         "fact_rows_inserted": line_stats["inserted"],
         "fact_rows_updated": line_stats["updated"],
@@ -890,6 +996,10 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         "new_parts": new_parts,
         "workbook_projects_bumped": len(bumped_projects),
     }
+    if is_sales:
+        counts.update(recon_stats)
+        counts["sales_tax_columns_backfilled"] = sales_tax_backfilled
+    return counts
 
 
 def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
