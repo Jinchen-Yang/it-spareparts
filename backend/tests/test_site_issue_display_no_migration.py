@@ -74,31 +74,36 @@ def _read_backfill(conn) -> dict[str, str | None]:
 def test_backfill_deterministic_and_counter_seeded(db):
     db.rollback()  # 让出夹具会话快照，迁移走独立连接
     cfg = _alembic_cfg()
-    alembic_command.downgrade(cfg, _PREV)
-    _seed_legacy_rows()
-    alembic_command.upgrade(cfg, _THIS)
+    # 用例把库停在 _THIS（非 head）；无论成败都恢复到 head，否则 head 之后新增的表
+    # 会让后续用例 conftest TRUNCATE 报 UndefinedTable。
+    try:
+        alembic_command.downgrade(cfg, _PREV)
+        _seed_legacy_rows()
+        alembic_command.upgrade(cfg, _THIS)
 
-    with engine.connect() as conn:
-        assert _read_backfill(conn) == _EXPECTED_DISPLAY
-        # 用户手填号（即使长得像展示号格式）不回填。
-        assert conn.execute(text(
-            "SELECT display_no FROM maintenance_site_issue"
-            " WHERE issue_id = 'disp-backfill-user'")).scalar_one() is None
-        counters = dict(conn.execute(text(
-            "SELECT issue_date, last_sequence FROM"
-            " maintenance_site_issue_display_counter")).all())
-        assert counters == {date(2026, 9, 10): 3, date(2026, 9, 11): 2}
+        with engine.connect() as conn:
+            assert _read_backfill(conn) == _EXPECTED_DISPLAY
+            # 用户手填号（即使长得像展示号格式）不回填。
+            assert conn.execute(text(
+                "SELECT display_no FROM maintenance_site_issue"
+                " WHERE issue_id = 'disp-backfill-user'")).scalar_one() is None
+            counters = dict(conn.execute(text(
+                "SELECT issue_date, last_sequence FROM"
+                " maintenance_site_issue_display_counter")).all())
+            assert counters == {date(2026, 9, 10): 3, date(2026, 9, 11): 2}
 
-    # 确定性：再降级再升级（display_no 属实只增不改），回填结果逐字节一致。
-    alembic_command.downgrade(cfg, _PREV)
-    alembic_command.upgrade(cfg, _THIS)
-    with engine.connect() as conn:
-        assert _read_backfill(conn) == _EXPECTED_DISPLAY
+        # 确定性：再降级再升级（display_no 属实只增不改），回填结果逐字节一致。
+        alembic_command.downgrade(cfg, _PREV)
+        alembic_command.upgrade(cfg, _THIS)
+        with engine.connect() as conn:
+            assert _read_backfill(conn) == _EXPECTED_DISPLAY
 
-    # 计数器对齐回填最大值：下一次分配从 0004 起，绝不复用回填号。
-    assert master._v2_allocate_site_display_no(
-        db, date(2026, 9, 10)) == "LY-20260910-0004"
-    db.rollback()
+        # 计数器对齐回填最大值：下一次分配从 0004 起，绝不复用回填号。
+        assert master._v2_allocate_site_display_no(
+            db, date(2026, 9, 10)) == "LY-20260910-0004"
+        db.rollback()
+    finally:
+        alembic_command.upgrade(cfg, "head")
 
 
 def test_upgrade_downgrade_shape(db):
