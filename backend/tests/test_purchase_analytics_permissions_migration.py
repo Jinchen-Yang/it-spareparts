@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app import permissions
 
 _KEY = "page_purchase_analytics"
-_PREV, _REV = "7f73424a7f65", "a5e8c3f7b2d9"
+_PREV, _REV = "b8f2d6c4a1e9", "a5e8c3f7b2d9"
 
 
 def test_key_registered_everywhere():
