@@ -94,7 +94,7 @@ export function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: Tax
 }
 
 export function KpiCard({ label, value, sub, highlight }: {
-  label: string; value: ReactNode; sub?: string; highlight?: boolean;
+  label: string; value: ReactNode; sub?: ReactNode; highlight?: boolean;
 }) {
   return (
     <div style={{

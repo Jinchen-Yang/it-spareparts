@@ -79,6 +79,7 @@ const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
+const loadPurchaseAnalytics = () => import("./pages/purchases/analytics/PurchaseAnalyticsPage");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 // 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。
@@ -104,6 +105,7 @@ const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
 const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
+const PurchaseAnalyticsPage = lazy(loadPurchaseAnalytics);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
@@ -154,7 +156,11 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-purchase",
     label: "采购管理",
     items: [
-      { key: "purchases-analysis", path: "/purchases/analysis", label: "采购分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
+      // 采购分析（D-39，客户需求 Round1）：仅老板/管理员（page_purchase_analytics 模板仅
+      // boss，admin 由 App 层恒放行）；日期/分类/三口径 + 分组下钻。
+      { key: "purchases-analytics", path: "/purchases/analytics", label: "采购分析", icon: <BarChartOutlined />, perm: "page_purchase_analytics", page: PurchaseAnalyticsPage, load: loadPurchaseAnalytics },
+      // 原「采购分析」逐型号频次页（D-39 前已存在）更名「型号分析」，页面与口径不变。
+      { key: "purchases-analysis", path: "/purchases/analysis", label: "型号分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
       { key: "purchases-exceptions", path: "/purchases/exceptions", label: "采购异常", icon: <WarningOutlined />, perm: "page_purchases", page: PurchaseExceptionsPage, load: loadPurchaseExceptions },
       { key: "purchases-records", path: "/purchases/records", label: "采购明细", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchaseRecordsPage, load: loadPurchaseRecords },
     ],
