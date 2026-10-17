@@ -394,6 +394,49 @@ describe("采购分析页：URL 单一真值", () => {
     // 分类口径（行级）说明
     expect(screen.getByText(/分类口径：订单已拆到明细行/)).toBeInTheDocument();
   });
+
+  it("分类分组下钻、未筛分类：抽屉按所在行分类过滤（category=[group_key]）", async () => {
+    fetchPurchaseAnalyticsOrders.mockResolvedValue({ data: ordersResp({ basis_mode: "line" }) });
+    fetchPurchaseAnalyticsOrderDetail.mockResolvedValue({
+      data: {
+        ...ORDER_DETAIL,
+        category_matched: { lines: 1, amount_inc: 226, amount_ex: 200, amount_paid: 200 },
+      },
+    });
+    renderPage("/purchases/analytics?group_by=category&group_key=%E7%A1%AC%E7%9B%98");
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    fireEvent.click(row);
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByText(/匹配分类行合计（硬盘）/)).toBeInTheDocument());
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, ["硬盘"]);
+  });
+
+  it("分类分组下钻、多选分类筛选：抽屉只带所在行分类，不带整组多选", async () => {
+    fetchPurchaseAnalyticsOrders.mockResolvedValue({ data: ordersResp({ basis_mode: "line" }) });
+    renderPage(
+      "/purchases/analytics?group_by=category&group_key=%E7%A1%AC%E7%9B%98"
+      + "&category=%E7%A1%AC%E7%9B%98,%E5%86%85%E5%AD%98",
+    );
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    fireEvent.click(row);
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalled());
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘"]);
+    expect(fetchPurchaseAnalyticsOrderDetail).not.toHaveBeenCalledWith(101, ["硬盘", "内存"]);
+  });
+
+  it("非分类分组下钻 + 多选分类筛选：抽屉沿用筛选多选", async () => {
+    fetchPurchaseAnalyticsOrders.mockResolvedValue({ data: ordersResp({ basis_mode: "line" }) });
+    renderPage(
+      "/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD"
+      + "&category=%E7%A1%AC%E7%9B%98,%E5%86%85%E5%AD%98",
+    );
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    fireEvent.click(row);
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalled());
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘", "内存"]);
+  });
 });
 
 describe("采购分析页：健壮性", () => {

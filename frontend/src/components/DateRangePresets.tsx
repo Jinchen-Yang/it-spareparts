@@ -1,9 +1,9 @@
 // 日期预设选择（D-39 / Q10）：全部/一年/半年/30天/15天/7天/今天/昨天/前天 + 自定义区间。
-// 采购分析（PR-4a）与销售分析（PR-4b）共用；默认今天（Q10），按本地日期计算，
+// 采购分析（PR-4a）与销售分析（PR-4b）共用；默认今天（Q10），按业务时区 Asia/Shanghai 计算，
 // 「全部」= 不传 date_from/date_to（后端约定：不传即全部历史）。
 import dayjs, { type Dayjs } from "dayjs";
-import { DatePicker, Select } from "antd";
-import { ISO_DATE_FORMAT, isStrictIsoDate, strictIsoDateRange } from "../utils/date";
+import { DatePicker, Select, Typography } from "antd";
+import { ISO_DATE_FORMAT, businessToday, isStrictIsoDate, strictIsoDateRange } from "../utils/date";
 
 export type DatePreset =
   | "all"
@@ -119,7 +119,10 @@ export default function DateRangePresets({
   onChange,
   disabled,
 }: DateRangePresetsProps) {
-  const current = resolveDateRange(preset, from, to, dayjs());
+  const today = businessToday();
+  const current = resolveDateRange(preset, from, to, today);
+  // 自定义区间非法（格式错/开始晚于结束/缺边）时请求侧已回退今天，这里如实提示
+  const customInvalid = preset === "custom" && !strictIsoDateRange(from, to);
 
   const pickPreset = (next: DatePreset) => {
     if (next !== "custom") {
@@ -129,8 +132,8 @@ export default function DateRangePresets({
     // 自定义：以当前区间为起点，用户再在 RangePicker 里改
     onChange({
       preset: "custom",
-      from: current?.from ?? dayjs().format(ISO_DATE_FORMAT),
-      to: current?.to ?? dayjs().format(ISO_DATE_FORMAT),
+      from: current?.from ?? today.format(ISO_DATE_FORMAT),
+      to: current?.to ?? today.format(ISO_DATE_FORMAT),
     });
   };
 
@@ -162,6 +165,11 @@ export default function DateRangePresets({
           disabled={disabled}
           allowEmpty={[false, false]}
         />
+      )}
+      {customInvalid && (
+        <Typography.Text type="warning" role="alert">
+          自定义区间无效（日期格式错误或开始晚于结束），已按今天查询
+        </Typography.Text>
       )}
     </span>
   );

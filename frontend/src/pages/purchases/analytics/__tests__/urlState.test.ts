@@ -1,6 +1,6 @@
 // 采购分析 URL 状态层（D-39）：解析容错 / 序列化默认省略 / 双向往返 /
 // 状态 → 请求参数（「全部」不传日期、默认今天、多选全量传递）。
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
 
 import {
@@ -233,5 +233,18 @@ describe("toAnalyticsParams：URLSearchParams 序列化（FastAPI 重复键形�
     expect(p.getAll("source_type")).toEqual(["备件采购"]);
     expect(p.getAll("customer_id")).toEqual(["12"]);
     expect(p.has("sort")).toBe(false);
+  });
+});
+
+describe("toAnalyticsApiFilters：默认「今天」按 Asia/Shanghai", () => {
+  it("不传 today 时用业务日：UTC 16:30 = 上海次日", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-17T16:30:00Z"));
+      const f = toAnalyticsApiFilters(parseAnalyticsUrl(new URLSearchParams("")));
+      expect(f).toMatchObject({ date_from: "2026-10-18", date_to: "2026-10-18" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

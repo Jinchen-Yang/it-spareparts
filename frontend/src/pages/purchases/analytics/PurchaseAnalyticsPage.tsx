@@ -4,9 +4,9 @@
 // 权限：page_purchase_analytics（模板仅 boss；admin 恒放行）——路由/菜单由 nav.tsx 统一登记。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import dayjs from "dayjs";
 import { Alert, Card, message } from "antd";
 import PageHeader from "../../../components/PageHeader";
+import { businessToday } from "../../../utils/date";
 import {
   fetchPurchaseAnalyticsOptions,
   fetchPurchaseAnalyticsOrders,
@@ -50,7 +50,7 @@ export default function PurchaseAnalyticsPage() {
   const [sp, setSp] = useSearchParams();
   const state = parseAnalyticsUrl(sp);
   const patch = useAnalyticsPatch(sp, setSp);
-  const today = dayjs();
+  const today = businessToday();
 
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
@@ -70,6 +70,12 @@ export default function PurchaseAnalyticsPage() {
     orderId: customerDimBlocked ? null : state.orderId,
   };
   const effectiveGroupBy = effectiveState.groupBy;
+  // 分类分组下钻：抽屉按「所在行」的分类过滤与汇总（与该行行级口径一致），
+  // 不是顶部多选筛选（多选时会把其他分类的行也算进来；未筛时则丢掉行级口径）
+  const drawerCategory =
+    effectiveGroupBy === "category" && effectiveState.groupKey
+      ? [effectiveState.groupKey]
+      : state.category;
 
   const [options, setOptions] = useState<PurchaseAnalyticsOptions | null>(null);
   const [summary, setSummary] = useState<PurchaseAnalyticsSummary | null>(null);
@@ -275,7 +281,7 @@ export default function PurchaseAnalyticsPage() {
 
       <OrderDetailDrawer
         orderId={effectiveState.orderId}
-        category={state.category}
+        category={drawerCategory}
         basis={basis}
         onClose={() => patch({ orderId: null })}
       />

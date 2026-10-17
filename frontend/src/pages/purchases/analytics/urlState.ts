@@ -2,7 +2,7 @@
 // URL，可分享/可刷新/可后退。默认值不落 URL（零参数 = 今天 + 采购类型分组 + 三口径并排）。
 // 多选值用逗号连接（取值来自 source_type_raw / 采购员 / 分类文本，均不含 ASCII 逗号）。
 import type { SetURLSearchParams } from "react-router-dom";
-import dayjs, { type Dayjs } from "dayjs";
+import type { Dayjs } from "dayjs";
 import {
   DEFAULT_DATE_PRESET,
   isDatePreset,
@@ -11,6 +11,7 @@ import {
   type DateRange,
 } from "../../../components/DateRangePresets";
 import type { PurchaseAnalyticsFilters } from "../../../api/purchaseAnalytics";
+import { businessToday } from "../../../utils/date";
 
 export type AmountBasis = "inc" | "ex" | "paid";
 
@@ -199,7 +200,7 @@ export function resolveAnalyticsRange(state: AnalyticsUrlState, today: Dayjs): D
 
 export function toAnalyticsApiFilters(
   state: AnalyticsUrlState,
-  today: Dayjs = dayjs(),
+  today: Dayjs = businessToday(),
 ): PurchaseAnalyticsFilters {
   const range = resolveAnalyticsRange(state, today);
   return {

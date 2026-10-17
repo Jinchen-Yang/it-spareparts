@@ -216,4 +216,36 @@ describe("DateRangePresets 组件", () => {
     // RangePicker 起止两个日期输入框
     expect(container.querySelectorAll(".ant-picker input").length).toBe(2);
   });
+
+  it("自定义区间非法（开始晚于结束 / 不存在的日期 / 缺边）：如实提示已按今天查询", () => {
+    for (const [from, to] of [
+      ["2026-10-15", "2026-09-01"],
+      ["2026-02-31", "2026-03-01"],
+      ["2026-09-01", null],
+    ] as const) {
+      render(<Harness preset="custom" from={from} to={to} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("自定义区间无效");
+      cleanup();
+    }
+  });
+
+  it("自定义区间合法 / 非自定义预设：不出现无效提示", () => {
+    render(<Harness preset="custom" from="2026-09-01" to="2026-10-15" />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    cleanup();
+    render(<Harness preset="7d" />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("「今天」按 Asia/Shanghai：UTC 16:30 已是上海次日，切自定义快照次日", async () => {
+    vi.setSystemTime(new Date("2026-10-17T16:30:00Z"));
+    const onChange = vi.fn();
+    render(<Harness preset="today" onChange={onChange} />);
+    await pick("自定义");
+    expect(onChange).toHaveBeenLastCalledWith({
+      preset: "custom",
+      from: "2026-10-18",
+      to: "2026-10-18",
+    });
+  });
 });
