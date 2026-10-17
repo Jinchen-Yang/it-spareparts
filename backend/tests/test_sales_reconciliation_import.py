@@ -247,12 +247,13 @@ def test_transform_first_row_empty_later_row_value_wins(tmp_path):
     assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("250.00")
 
 
-def test_transform_recon_only_collected_from_surviving_rows(tmp_path):
-    """对账区收集点在行级校验闸门之后：只有存活行携带的值被收集。
+def test_transform_recon_collected_from_invalid_line_rows(tmp_path):
+    """对账区收集点在明细级校验（PN/数量/单价）之前：校验失败行的单头值照常收集。
 
-    （对抗审查发现原用例空转：有效行也带同值，断言由有效行独立满足。）
-    常规布局「值在更早行、存活行在下方」由 reader 的按单向下 ffill 兜住；
-    值只出现在校验失败行且存活行该列为空时不被收集，落 NULL。
+    原「闸门之后收集」口径（值只在坏行上 → 落 NULL）被 GitHub Codex 审查判定
+    P1：单头对账值绝不因明细坏行被静默跳过。本用例第二段即原
+    test_transform_recon_only_collected_from_surviving_rows 的反向断言，按新
+    口径取反（非削弱：坏行的 bad_number 仍照常上报，收集到的值进入订单头）。
     """
     # 存活行带值、坏行重复同值 → 照常收集（坏行不阻断）
     path = _write_xlsx(tmp_path / "s1.xlsx", [
@@ -262,13 +263,162 @@ def test_transform_recon_only_collected_from_surviving_rows(tmp_path):
     assert len(result.lines) == 1
     assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("70.00")
 
-    # 值只在坏行上（存活行该列为空）→ 不参与聚合，置 NULL
+    # 值只在坏行上（存活行该列为空，ffill 只向下不向上）→ 照常收集，不再落 NULL
     path = _write_xlsx(tmp_path / "s2.xlsx", [
         _row(已对账金额=None),
         _second_line(**{"订单明细.订单数量": "abc"}, 已对账金额=Decimal("70.00"))])
     result = _transform_file(path)
     assert len(result.lines) == 1
+    assert any(e.error_type == "bad_number" for e in result.errors)   # 坏行仍上报
+    assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("70.00")
+
+
+def test_transform_recon_failed_row_value_wins_with_conflict_warning(tmp_path):
+    """坏行携带的对账值与存活行不同：取文件序首个非空（坏行的），差异软告警。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 已对账金额=Decimal("70.00")),
+        _second_line(已对账金额=Decimal("200.00"))])
+    result = _transform_file(path)
+    assert len(result.lines) == 1
+    assert result.orders["RAW-RECON-1"]["reconciled_amount"] == Decimal("70.00")
+    conflicts = [e for e in result.errors if e.error_type == "reconciliation_head_conflict"]
+    assert len(conflicts) == 1
+    assert "200" in conflicts[0].error_detail
+
+
+def test_transform_bad_recon_on_detail_invalid_row_still_reported(tmp_path):
+    """明细校验失败行上的坏对账值：逐行报 bad_reconciliation_amount，不因行被拒而静默。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 已对账金额="not-a-number"),
+        _second_line(已对账金额=Decimal("100.00"))])
+    result = _transform_file(path)
+    assert len(result.lines) == 1
+    types = {e.error_type for e in result.errors}
+    assert "bad_number" in types                       # 明细坏行本身照常上报
+    assert "bad_reconciliation_amount" in types        # 坏行上的对账解析错误不再被吞
+    # 首个非空是坏值 → 锁定 NULL，存活行的好值只换来一条不一致告警（既有口径）
     assert result.orders["RAW-RECON-1"]["reconciled_amount"] is None
+    assert len([e for e in result.errors
+                if e.error_type == "reconciliation_head_conflict"]) == 1
+
+
+def test_import_all_lines_failed_no_order_no_snapshot(db, tmp_path):
+    """订单全部明细被拒：订单不入库、不写快照（与订单头一致），行级错误如实可见。
+
+    同一行再植入坏对账值/坏修改时间：对账解析错误不随订单被拒而消失（收集点在
+    明细闸门之前，逐行上报）——审查意见 1「全部明细被拒 → 错误要报」的完整锁定。
+    """
+    path = _write_xlsx(tmp_path / "a.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 已对账金额="not-a-number",
+              **{"修改时间(必填)": "乱码日期"})])
+    batch = pipeline.run_import(db, path, "a.xlsx")
+    db.commit()
+
+    assert batch.status == "success"                   # 坏行隔离，整批照常成功
+    assert batch.rows_error == 3                       # bad_number + 坏对账金额 + 坏修改时间
+    assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
+    assert _snapshots(db) == []
+    error_types = db.scalars(select(SysImportError.error_type)
+                             .where(SysImportError.batch_id == batch.id)).all()
+    assert {"bad_number", "bad_reconciliation_amount",
+            "bad_source_modified_time"} <= set(error_types)
+
+
+def test_transform_tax_trio_collected_from_invalid_line_rows(tmp_path):
+    """含税三件套同类修复：值只在明细校验失败行上 → 按行聚合，不再随首个存活行丢失。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(订单金额=None, 是否含税=None, 税金=None),
+        _second_line(**{"订单明细.订单数量": "abc"},
+                     订单金额=Decimal("226.00"), 是否含税="含税", 税金=Decimal("26.00"))])
+    result = _transform_file(path)
+    assert len(result.lines) == 1
+    head = result.orders["RAW-RECON-1"]
+    assert head["amount_inc_tax"] == Decimal("226.00")
+    assert head["tax_amount"] == Decimal("26.00")
+    assert head["is_tax_inclusive"] is True
+
+
+def test_import_tax_trio_from_invalid_line_row_persisted(db, tmp_path):
+    """上一用例经 loader 落库：三件套与快照 order_amount 都取到坏行携带的值。"""
+    path = _write_xlsx(tmp_path / "a.xlsx", [
+        _row(订单金额=None, 是否含税=None, 税金=None),
+        _second_line(**{"订单明细.订单数量": "abc"},
+                     订单金额=Decimal("226.00"), 是否含税="含税", 税金=Decimal("26.00"))])
+    pipeline.run_import(db, path, "a.xlsx")
+    db.commit()
+
+    order = db.scalar(select(FSalesOrder).where(FSalesOrder.raw_order_id == "RAW-RECON-1"))
+    assert order.amount_inc_tax == Decimal("226.00")
+    assert order.tax_amount == Decimal("26.00")
+    assert order.is_tax_inclusive is True
+    snap = db.scalar(select(FSalesReconciliationSnapshot))
+    assert snap.order_amount == Decimal("226.00")
+
+
+def test_transform_tax_trio_conflict_takes_first_nonempty(tmp_path):
+    """三件套跨行不一致（坏行 vs 存活行）：文件序首个非空生效 + 软告警（与对账区同规则）。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 税金=Decimal("26.00"), 是否含税="不含税"),
+        _second_line(税金=Decimal("13.00"), 是否含税="含税")])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["tax_amount"] == Decimal("26.00")
+    assert head["is_tax_inclusive"] is False          # 坏行的不含税先到先得
+    conflicts = [e for e in result.errors if e.error_type == "reconciliation_head_conflict"]
+    assert len(conflicts) == 2                         # 税金 + 是否含税 各一条
+    joined = "\n".join(e.error_detail for e in conflicts)
+    assert "税金" in joined and "是否含税" in joined
+    assert "不含税" in joined                           # 布尔按业务语义渲染
+
+
+def test_transform_tax_trio_equal_values_across_rows_no_conflict(tmp_path):
+    """三件套同值跨行（"113" vs 113.00）：解析值相等不算冲突。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(订单金额="113"),
+        _second_line(订单金额=Decimal("113.00"))])
+    result = _transform_file(path)
+    assert not [e for e in result.errors if e.error_type == "reconciliation_head_conflict"]
+    assert result.orders["RAW-RECON-1"]["amount_inc_tax"] == Decimal("113.00")
+
+
+def test_transform_tax_trio_old_format_collected_from_invalid_line_rows(tmp_path):
+    """旧格式（无对账区列）孪生场景：三件套聚合不依赖对账区列的存在。
+
+    D-41 回填正是重放这类 PR-2 之前的旧件——若聚合回退成「仅新格式文件生效」，
+    旧件的 file_value 会静默变 None、被误记 unresolved/漏报冲突，故必须锁死。
+    """
+    rows = [
+        _row(订单金额=None, 是否含税=None, 税金=None),
+        _second_line(**{"订单明细.订单数量": "abc"},
+                     订单金额=Decimal("226.00"), 是否含税="含税", 税金=Decimal("26.00"))]
+    for r in rows:
+        for h in RECON_HEADERS:
+            r.pop(h, None)
+    path = _write_xlsx(tmp_path / "s.xlsx", rows)
+    result = _transform_file(path)
+    assert result.has_reconciliation_columns is False
+    head = result.orders["RAW-RECON-1"]
+    assert "reconciled_amount" not in head and "source_modified_at" not in head
+    assert head["amount_inc_tax"] == Decimal("226.00")
+    assert head["tax_amount"] == Decimal("26.00")
+    assert head["is_tax_inclusive"] is True
+
+
+def test_transform_tax_trio_bad_value_falls_back_to_later_good_row(tmp_path):
+    """三件套坏值口径（docstring 承诺）：静默 None、不报错、不锁定，后续好行可补位。
+
+    与对账区「坏值锁定 NULL + 逐行报错」刻意不同（沿用 _build_head 旧口径，
+    不新增错误码）；锁定该分歧，防止未来「统一规则」的重构悄悄改变落库值。
+    """
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(订单金额="not-a-number", 税金="乱码", 是否含税="随便写的"),
+        _second_line(订单金额=Decimal("113.00"), 税金=Decimal("13.00"))])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["amount_inc_tax"] == Decimal("113.00")  # 首行坏值不锁空，次行好值补位
+    assert head["tax_amount"] == Decimal("13.00")
+    assert head["is_tax_inclusive"] is True             # 次行 含税 补位（首行无法识别）
+    assert not result.errors                           # 三件套坏值静默（既有口径）
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):

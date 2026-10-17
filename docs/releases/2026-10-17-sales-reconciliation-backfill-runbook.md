@@ -11,8 +11,11 @@ PR-2 之前的销售导入不落已对账快照（`f_sales_reconciliation_snapsh
 1. **快照**：source='backfill'，import_batch_id=原件所属批次；(raw_order_id,
    import_batch_id) 唯一——每批次每单记一条观测；同批次重跑新增 0 行；不同批次
    各记一条（即使内容相同，金额序列 A→B→A 不被吞）。
-2. **三件套**：只取该订单 `import_batch_id` 对应批次原件中的值；仅库内 NULL 时填；
-   库内已有不同值记冲突不覆盖；原件缺失/哈希不符/解析失败/无该值记未解决保持 NULL。
+2. **三件套**：比对该批次拥有的**全部**订单（不只三列含 NULL 的），只取该订单
+   `import_batch_id` 对应批次原件中的值；仅库内 NULL 时填；库内已有不同值逐字段
+   记冲突（订单号/字段/库内值/原件值）不覆盖；原件缺失/哈希不符/解析失败/无该值
+   记未解决保持 NULL。冲突明细纳入 manifest_sha256 指纹（冲突值在 dry-run 之后
+   变化 → 指纹变 → execute 拒绝，须重新 dry-run）。
 
 只写以上两处，不触碰其它列。**生产执行必须先备份，并得到杨金臣（金臣）明确授权。**
 
@@ -48,7 +51,7 @@ uv run python scripts/backfill_sales_reconciliation.py \
 | `totals.snapshots_existing` | 已在库的同批次观测数（续跑场景：某文件 planned=0 而 existing>0，说明该批已回填过，不是数据丢失） |
 | `totals.latest_per_order` | 按单最新快照的 已对账 / 退货已对账 合计——D-40 验收口径（首跑干净库）；最新 = 修改时间较新者（空值排后）、同修改时间取批次号较大者 |
 | `totals.tax_fills_planned_by_column` | 三件套各列将补多少 NULL |
-| `totals.tax_conflicts_total` + preview | 库内已有不同值的订单（不覆盖，仅报告），抽查确认口径 |
+| `totals.tax_conflicts_total` + preview | 三列已填且与本批次原件不同的字段逐条列出（订单号/字段/库内值/原件值；不覆盖，仅报告），抽查确认口径；三列已填且一致的订单不出现在任何计数里 |
 | `totals.tax_unresolved` | 保持 NULL 的列格数（原件读不了或文件里也没值） |
 | `files[].transform_errors` | 原件里的既有行级错误数（回放不修复，仅计数） |
 

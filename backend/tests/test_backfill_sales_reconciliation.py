@@ -239,6 +239,91 @@ def test_hash_valid_but_corrupt_file_is_parse_failed(db, tmp_path):
 
 # ---------- 税列口径：冲突不覆盖 / 只认订单自己批次的原件 ----------
 
+def test_tax_all_filled_matching_no_conflict_no_fill(db, tmp_path):
+    """三列全填且与原件一致：无冲突无补写（比对覆盖该批次全部订单，不只 NULL 单）。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])    # 不降级：三件套导入即写
+    dry = bs.run_backfill(db)
+
+    file0 = dry["files"][0]
+    assert file0["status"] == "planned"
+    assert file0["tax_fills_planned"] == 0
+    assert file0["tax_conflicts"] == []
+    assert file0["tax_unresolved"] == 0
+    assert dry["totals"]["tax_conflicts_total"] == 0
+
+
+def test_tax_all_filled_single_column_differs_reports_conflict_no_write(db, tmp_path):
+    """三列全填、仅税金与原件不同：报冲突不改库；dry 与 execute 冲突计数一致。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    db.execute(update(FSalesOrder).where(FSalesOrder.raw_order_id == "RAW-RECON-1")
+               .values(tax_amount=Decimal("999.00")))
+    db.commit()
+    operator = _operator(db)
+
+    dry = bs.run_backfill(db)
+    file0 = dry["files"][0]
+    assert file0["tax_fills_planned"] == 0           # 无 NULL 可补，但仍要比对
+    assert len(file0["tax_conflicts"]) == 1
+    conflict = file0["tax_conflicts"][0]
+    assert conflict["raw_order_id"] == "RAW-RECON-1"
+    assert conflict["order_no"] == "XSDD-20260630-0001"
+    assert conflict["column"] == "tax_amount"
+    assert conflict["db_value"] == "999.00"
+    assert conflict["file_value"] == "13.00"
+
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=dry["manifest_sha256"])
+    assert applied["files"][0]["tax_conflicts"] == 1         # 与 dry-run 同计数
+    assert applied["totals"]["tax_conflicts_total"] == dry["totals"]["tax_conflicts_total"]
+    assert _order(db).tax_amount == Decimal("999.00")        # 冲突不覆盖
+
+
+def test_tax_partial_null_plus_conflict_fills_and_reports(db, tmp_path):
+    """部分 NULL 部分不同：NULL 补写 + 不同报冲突；重跑幂等（零写入、冲突计数稳定）。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    db.execute(update(FSalesOrder).where(FSalesOrder.raw_order_id == "RAW-RECON-1")
+               .values(is_tax_inclusive=None, tax_amount=Decimal("999.00")))
+    db.commit()
+    operator = _operator(db)
+
+    dry = bs.run_backfill(db)
+    file0 = dry["files"][0]
+    assert file0["tax_fills_planned"] == 1           # 是否含税 NULL → 补
+    assert {c["column"] for c in file0["tax_conflicts"]} == {"tax_amount"}
+
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=dry["manifest_sha256"])
+    assert applied["totals"]["tax_columns_filled"] == 1
+    order = _order(db)
+    assert order.is_tax_inclusive is True            # NULL 已补
+    assert order.tax_amount == Decimal("999.00")     # 冲突保持库内值
+
+    dry2 = bs.run_backfill(db)                       # 重跑：0 补写，冲突如实仍在
+    file2 = dry2["files"][0]
+    assert file2["tax_fills_planned"] == 0
+    assert file2["tax_conflicts"] == file0["tax_conflicts"]
+    applied2 = bs.run_backfill(db, execute=True, operator=operator,
+                               confirm_manifest_sha256=dry2["manifest_sha256"])
+    assert applied2["totals"]["tax_columns_filled"] == 0
+    assert applied2["totals"]["tax_conflicts_total"] == 1
+
+
+def test_manifest_sha_reflects_conflict_details(db, tmp_path):
+    """冲突明细纳入 manifest 指纹：库内冲突值变化 → dry-run 指纹变化（计数不变也拦得住）。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    db.execute(update(FSalesOrder).where(FSalesOrder.raw_order_id == "RAW-RECON-1")
+               .values(tax_amount=Decimal("999.00")))
+    db.commit()
+    sha1 = bs.run_backfill(db)["manifest_sha256"]
+
+    # 冲突计数不变（仍 1 条 tax_amount），只有冲突值变了 → 旧口径（只计条数）指纹不变
+    db.execute(update(FSalesOrder).where(FSalesOrder.raw_order_id == "RAW-RECON-1")
+               .values(tax_amount=Decimal("888.00")))
+    db.commit()
+    sha2 = bs.run_backfill(db)["manifest_sha256"]
+    assert sha2 != sha1
+
+
 def test_tax_conflict_recorded_not_overwritten(db, tmp_path):
     _import_one(db, tmp_path, "a.xlsx", [_row()])
     _degrade_to_pre_pr2(db)

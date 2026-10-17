@@ -13,8 +13,10 @@ file_type=sales、status=success/superseded）的归档原件逐个回放，补�
    （即使内容相同，A→B→A 不被吞）。
 2. ``f_sales_order`` 含税三件套（is_tax_inclusive/tax_amount/amount_inc_tax）：
    只取该订单 ``import_batch_id`` 对应批次原件中的值（与 amount_ex_tax 出自
-   同一文件，保持口径一致）；仅库内为 NULL 时填；库内已有不同值 → 记冲突不覆盖；
-   原件缺失/哈希不符/解析失败/无该值 → 记未解决保持 NULL。
+   同一文件，保持口径一致）。**比对该批次拥有的全部订单**（不只三列含 NULL
+   的）：仅库内为 NULL 时填；库内已有不同值 → 逐字段记冲突（订单号/字段/
+   库内值/原件值）不覆盖；原件缺失/哈希不符/解析失败/无该值 → 记未解决保持
+   NULL。
 
 只写以上两处，绝不触碰任何其它既有列。解析复用导入同一代码路径
 （pipeline.load_workbook / transform_workbook），列映射与导入完全同源。
@@ -57,7 +59,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -144,12 +146,13 @@ def _raw_file_for(db: Session, batch: SysImportBatch) -> SysRawFile | None:
     return rows[0] if rows else None
 
 
-def _orders_with_null_tax(db: Session, batch_id: int) -> list[Any]:
-    """import_batch_id=本批次 且三件套至少一列为 NULL 的订单（税列回填候选）。
+def _orders_in_batch(db: Session, batch_id: int) -> list[Any]:
+    """import_batch_id=本批次的**全部**订单（税列比对候选）。
 
-    定序：fills 列表顺序进 tax_fills_plan_sha256，无 ORDER BY 的行序在
-    PG 不保证稳定，dry↔execute 指纹比对可能误拒（方向安全，但没必
-    要）——按 raw_order_id 定序消除。
+    runbook 承诺比对而非只补 NULL：三列已填但与本批次原件不同的订单同样
+    要报冲突，所以不能只选含 NULL 的订单。定序：fills / 冲突列表顺序都进
+    计划指纹，无 ORDER BY 的行序在 PG 不保证稳定，dry↔execute 指纹比对
+    可能误拒（方向安全，但没必要）——按 raw_order_id 定序消除。
     """
     return db.execute(
         select(
@@ -160,11 +163,6 @@ def _orders_with_null_tax(db: Session, batch_id: int) -> list[Any]:
             FSalesOrder.amount_inc_tax,
         ).where(
             FSalesOrder.import_batch_id == batch_id,
-            or_(
-                FSalesOrder.is_tax_inclusive.is_(None),
-                FSalesOrder.tax_amount.is_(None),
-                FSalesOrder.amount_inc_tax.is_(None),
-            ),
         ).order_by(FSalesOrder.raw_order_id)
     ).all()
 
@@ -187,19 +185,20 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
         "tax_fills_planned": 0,
         "tax_fills_plan_sha256": None,
         "tax_conflicts": [],
+        "tax_conflicts_sha256": _canonical_sha256([]),
         "tax_unresolved": 0,
         "transform_errors": 0,
         "_snapshot_rows": [],
         "_tax_fills": [],
     }
-    null_tax_orders = _orders_with_null_tax(db, batch.id)
+    batch_orders = _orders_in_batch(db, batch.id)
 
     def _unreadable(status: str, error: str | None = None) -> dict[str, Any]:
         # 原件读不了 → 本批次订单的 NULL 税列全部记未解决（保持 NULL）。
         # 计数单位与可读路径一致：列格数（订单×列为 NULL 的格子）。
         plan["status"] = status
         plan["tax_unresolved"] = sum(
-            1 for o in null_tax_orders for c in TAX_COLUMNS if getattr(o, c) is None)
+            1 for o in batch_orders for c in TAX_COLUMNS if getattr(o, c) is None)
         if error:
             plan["error"] = error[:300]
         return plan
@@ -283,35 +282,39 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
         # 旧格式文件没有对账区列：不写快照（D-40），状态单列以便报告区分
         plan["status"] = "no_reconciliation_columns"
 
-    # ---- 2) 税列计划：只取本批次订单 + 只填 NULL，冲突不覆盖 ----
+    # ---- 2) 税列计划：比对该批次全部订单；只补 NULL，已填且不同报冲突不覆盖 ----
     fills: list[dict[str, Any]] = []
-    for order in null_tax_orders:
+    for order in batch_orders:
         head = result.orders.get(order.raw_order_id)
         for column in TAX_COLUMNS:
             db_value = getattr(order, column)
             file_value = head.get(column) if head is not None else None
-            if db_value is not None:
-                if file_value is not None and file_value != db_value:
-                    plan["tax_conflicts"].append({
+            if db_value is None:
+                if file_value is None:
+                    plan["tax_unresolved"] += 1
+                else:
+                    fills.append({
                         "raw_order_id": order.raw_order_id,
-                        "order_no": order.order_no,
                         "column": column,
-                        "db_value": _jsonable_value(db_value),
-                        "file_value": _jsonable_value(file_value),
+                        "value": file_value,
                     })
-                continue
-            if file_value is None:
-                plan["tax_unresolved"] += 1
-            else:
-                fills.append({
+            elif file_value is not None and file_value != db_value:
+                plan["tax_conflicts"].append({
                     "raw_order_id": order.raw_order_id,
+                    "order_no": order.order_no,
                     "column": column,
-                    "value": file_value,
+                    "db_value": _jsonable_value(db_value),
+                    "file_value": _jsonable_value(file_value),
                 })
     plan["_tax_fills"] = fills
     plan["tax_fills_planned"] = len(fills)
     plan["tax_fills_plan_sha256"] = _canonical_sha256(
         [[f["raw_order_id"], f["column"], _jsonable_value(f["value"])] for f in fills])
+    # 冲突明细进计划指纹：库内冲突值在 dry-run 之后变化 → 指纹变 → execute 拒绝，
+    # 与 fills 同一确定性口径（冲突列表同样按 raw_order_id 定序）。
+    plan["tax_conflicts_sha256"] = _canonical_sha256([
+        [c["raw_order_id"], c["order_no"], c["column"], c["db_value"], c["file_value"]]
+        for c in plan["tax_conflicts"]])
     return plan
 
 
@@ -334,6 +337,7 @@ def _manifest(batches: list[SysImportBatch], plans: list[dict[str, Any]]) -> dic
             "tax_fills_planned": p["tax_fills_planned"],
             "tax_fills_plan_sha256": p["tax_fills_plan_sha256"],
             "tax_conflicts_count": len(p["tax_conflicts"]),
+            "tax_conflicts_sha256": p["tax_conflicts_sha256"],
             "tax_unresolved": p["tax_unresolved"],
         } for p in plans],
     }
@@ -465,7 +469,13 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
         reason=f"D-40/D-41 销售对账快照与含税三件套历史回填（manifest_sha256={manifest_sha256}）",
         operated_by=operator,
     ))
-    return {"snapshots_inserted": inserted, "tax_columns_filled": tax_filled}
+    return {
+        "snapshots_inserted": inserted,
+        "tax_columns_filled": tax_filled,
+        # 冲突计数与 dry-run 报告同源同口径（锁内重算的同一计划），可逐文件核对
+        "tax_conflicts": len(plan["tax_conflicts"]),
+        "tax_unresolved": plan["tax_unresolved"],
+    }
 
 
 def run_backfill(
@@ -522,6 +532,7 @@ def run_backfill(
                     "files_failed": sum(1 for r in results if r["status"] == "execute_failed"),
                     "snapshots_inserted": sum(r.get("snapshots_inserted", 0) for r in results),
                     "tax_columns_filled": sum(r.get("tax_columns_filled", 0) for r in results),
+                    "tax_conflicts_total": sum(r.get("tax_conflicts", 0) for r in results),
                 },
             }
             return report
