@@ -61,6 +61,7 @@ from app.api import (
     resale_export,
     resale_catalog_export,
     role_templates,
+    sales_analytics,
     substitutes,
     system_settings,
 )
@@ -104,6 +105,7 @@ app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
 app.include_router(profit.router, prefix=settings.api_prefix)
+app.include_router(sales_analytics.router, prefix=settings.api_prefix)
 app.include_router(inventory.router, prefix=settings.api_prefix)
 app.include_router(substitutes.router, prefix=settings.api_prefix)
 app.include_router(governance.router, prefix=settings.api_prefix)
