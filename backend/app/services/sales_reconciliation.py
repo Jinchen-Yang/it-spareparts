@@ -38,7 +38,7 @@ def _canonical_amount(value: Decimal | int | float | None) -> str | None:
     quantized = value.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
     if quantized == 0:
         # PG numeric 把 -0.00 归一成 0.00 存储；哈希与落库保持同形，
-        # 否则同一内容因符号零差异绕过 (raw_order_id, content_hash) 去重
+        # 否则符号零差异会让 content_hash 误报"内容变化"
         quantized = abs(quantized)
     return str(quantized)
 
@@ -93,12 +93,12 @@ def snapshot_content_hash(
 def latest_snapshots_by_raw_order_id(
     session: Session, raw_order_ids: Sequence[str]
 ) -> dict[str, FSalesReconciliationSnapshot]:
-    """每个氚云数据ID的最新一条快照（D-40 §3：修改时间较新者居首；拍板文本写
-    "其次批次号较大者"，实现以行 id DESC 等价替代——追加式写入下 id 与导入
-    批次同向单调，且并列时后写入者胜语义不变）。
+    """每个氚云数据ID的最新一条快照（D-40 §3）。
 
-    排序键 source_modified_at DESC NULLS LAST、id DESC：无修改时间的旧文件
-    永远让位给有修改时间的行；同为 NULL 时后插入（id 大）者胜。
+    排序键 source_modified_at DESC NULLS LAST、import_batch_id DESC、id DESC：
+    无修改时间的旧文件永远让位给有修改时间的行；修改时间相同（或都为空）时
+    批次号较大者胜——并发/回填顺序下行 id 不等于批次先后，不能当次序依据；
+    (raw_order_id, import_batch_id) 唯一约束下 id 仅为最终兜底（理论不可达）。
     """
     if not raw_order_ids:
         return {}
@@ -109,6 +109,7 @@ def latest_snapshots_by_raw_order_id(
         .order_by(
             FSalesReconciliationSnapshot.raw_order_id,
             FSalesReconciliationSnapshot.source_modified_at.desc().nulls_last(),
+            FSalesReconciliationSnapshot.import_batch_id.desc(),
             FSalesReconciliationSnapshot.id.desc(),
         )
     )

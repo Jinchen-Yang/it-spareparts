@@ -101,12 +101,13 @@ class FSalesLine(Base):
 class FSalesReconciliationSnapshot(Base):
     """销售单已对账快照（D-40）：氚云导出单头的 已对账/待对账/退货已对账 是订单级
     **累计快照**，快照只追加、不覆盖；"最新值"取
-    source_modified_at DESC NULLS LAST、其次 id DESC（见 services/sales_reconciliation）。
+    source_modified_at DESC NULLS LAST、其次 import_batch_id DESC、再次 id DESC
+    （见 services/sales_reconciliation）。
 
-    幂等去重靠 (raw_order_id, content_hash) 唯一：**内容变化**即追加一条；内容完全
-    相同的重传/重跑（含跨批次）不产生重复行（ON CONFLICT 写入由 PR-2 导入落实）。
-    注意：这是对 D-40 §3「按 (氚云数据ID, 导入批次) 唯一」的实现细化——同内容跨
-    批次重传不追加新行，决策文本待随 PR 侧勘误同步。
+    每次导入/回填对每个订单记**一条观测**，(raw_order_id, import_batch_id) 唯一：
+    同一批次重放/回填重跑不产生重复行（ON CONFLICT 写入由 PR-2 导入落实）；不同
+    批次各记一条（即使内容相同）——金额序列 A→B→A 的最后一次 A 不会被内容去重
+    吞掉。content_hash 保留用于识别内容变化/报告，不参与唯一约束。
     四个金额空单元格一律 NULL，绝不当 0。
     """
 
@@ -118,7 +119,7 @@ class FSalesReconciliationSnapshot(Base):
     order_no: Mapped[str | None] = mapped_column(String(64))
     # 可空：出现该快照时订单可能尚未入库/已被其他流程处理
     sales_order_id: Mapped[int | None] = mapped_column(ForeignKey("f_sales_order.id"))
-    # 首次出现该快照内容的导入批次
+    # 该观测所属的导入/回填批次（每批次每单至多一条观测，见唯一约束）
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     # import=常规导入，backfill=历史原件回填（D-40 §7）
     source: Mapped[str] = mapped_column(String(16))
@@ -128,7 +129,8 @@ class FSalesReconciliationSnapshot(Base):
     reconciled_amount: Mapped[Decimal | None] = mapped_column(Money)
     pending_amount: Mapped[Decimal | None] = mapped_column(Money)
     return_reconciled_amount: Mapped[Decimal | None] = mapped_column(Money)
-    # 规范化 sha256，规则单一事实源在 services/sales_reconciliation.snapshot_content_hash
+    # 规范化 sha256，规则单一事实源在 services/sales_reconciliation.snapshot_content_hash；
+    # 仅供识别内容变化/报告，不参与唯一约束
     content_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
@@ -138,15 +140,17 @@ class FSalesReconciliationSnapshot(Base):
             name="ck_sales_recon_snapshot_source",
         ),
         UniqueConstraint(
-            "raw_order_id", "content_hash", name="uq_sales_recon_snapshot_content"
+            "raw_order_id", "import_batch_id", name="uq_sales_recon_snapshot_order_batch"
         ),
-        # 取每单最新：与查询排序键 (source_modified_at DESC NULLS LAST, id DESC) 对齐。
-        # PG 索引列裸 DESC 默认是 NULLS FIRST，必须显式 NULLS LAST 才能消排序；
-        # id 是 PK 非空，裸 DESC 与 NULLS LAST 等价
+        # 取每单最新：与查询排序键 (source_modified_at DESC NULLS LAST,
+        # import_batch_id DESC, id DESC) 对齐。PG 索引列裸 DESC 默认是 NULLS FIRST，
+        # 必须显式 NULLS LAST 才能消排序；import_batch_id 与 id 均非空，
+        # 裸 DESC 与 NULLS LAST 等价
         Index(
             "ix_sales_recon_snapshot_latest",
             "raw_order_id",
             desc("source_modified_at").nulls_last(),
+            desc("import_batch_id"),
             desc("id"),
         ),
         # FK 查询路径（PG 不自动为 FK 建索引）

@@ -1,8 +1,9 @@
 """f_sales_reconciliation_snapshot 建表/约束/幂等 与 f_sales_order 含税三列契约（D-40/D-41 PR-1）。
 
-覆盖：schema 与约束、(raw_order_id, content_hash) 幂等去重、NULL 与 0 的区分、
-content_hash 规范化规则、取每单最新快照的排序语义、迁移 upgrade→downgrade→upgrade 往返、
-ORM 与迁移零漂移。
+覆盖：schema 与约束、(raw_order_id, import_batch_id) 每批次每单一条观测的幂等
+（同批次重放不新增、不同批次各一条——A→B→A 不被内容去重吞掉）、NULL 与 0 的区分、
+content_hash 规范化规则、取每单最新快照的排序语义（修改时间 → 批次号 → 写入顺序）、
+迁移 upgrade→downgrade→upgrade 往返、ORM 与迁移零漂移。
 """
 
 import os
@@ -116,21 +117,27 @@ def test_snapshot_table_constraints_and_indexes(db):
     }
     assert "ck_sales_recon_snapshot_source" in checks
     assert "source" in checks["ck_sales_recon_snapshot_source"]["sqltext"]
-    assert {
-        c["name"] for c in inspector.get_unique_constraints(_TABLE)
-    } == {"uq_sales_recon_snapshot_content"}
+    uniques = {c["name"]: c for c in inspector.get_unique_constraints(_TABLE)}
+    assert set(uniques) == {"uq_sales_recon_snapshot_order_batch"}
+    assert uniques["uq_sales_recon_snapshot_order_batch"]["column_names"] == [
+        "raw_order_id", "import_batch_id"
+    ]
     indexes = {i["name"]: i for i in inspector.get_indexes(_TABLE)}
     assert indexes["ix_sales_recon_snapshot_batch"]["column_names"] == [
         "import_batch_id"
     ]
     # DESC + NULLS LAST 排序键必须真的落进索引定义：PG 裸 DESC 默认 NULLS FIRST，
-    # 与查询排序键不匹配会导致索引永远无法消排序（复审已实测，别退回裸 DESC）
+    # 与查询排序键不匹配会导致索引永远无法消排序（复审已实测，别退回裸 DESC）。
+    # 键序必须与 latest_snapshots_by_raw_order_id 的 ORDER BY 完全一致
     latest_def = db.execute(
         text("SELECT pg_get_indexdef('ix_sales_recon_snapshot_latest'::regclass)")
     ).scalar_one()
-    assert re.search(r"source_modified_at DESC NULLS LAST", latest_def)
-    assert re.search(r"id DESC", latest_def)
     assert latest_def.startswith("CREATE INDEX ix_sales_recon_snapshot_latest")
+    index_keys = latest_def[latest_def.rindex("(") + 1:latest_def.rindex(")")].split(", ")
+    assert index_keys == [
+        "raw_order_id", "source_modified_at DESC NULLS LAST",
+        "import_batch_id DESC", "id DESC",
+    ]
     fks = {
         (fk["referred_table"], fk["constrained_columns"][0])
         for fk in inspector.get_foreign_keys(_TABLE)
@@ -151,17 +158,16 @@ def test_sales_order_amount_columns_exist_and_nullable(db):
 # ---- 幂等与约束行为 ----
 
 
-def test_on_conflict_do_nothing_swallows_duplicate_content(db):
-    """重复上传/回填重跑：同 (raw_order_id, content_hash) 被 ON CONFLICT 吞掉。"""
-    batch_a = _seed_batch(db, name="dup-a")
-    batch_b = _seed_batch(db, name="dup-b")
+def test_on_conflict_do_nothing_same_batch_replay_is_idempotent(db):
+    """同批次重放/回填重跑：同 (raw_order_id, import_batch_id) 被 ON CONFLICT 吞掉。"""
+    batch_id = _seed_batch(db, name="replay")
     snap = _add_snapshot(
-        db, batch_a, "DUP-1",
+        db, batch_id, "DUP-1",
         source_modified_at=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc),
         order_amount=Decimal("100.00"), reconciled_amount=Decimal("60.00"),
     )
     db.commit()
-    # PR-2 的写入形态：不同批次、同一内容，INSERT ... ON CONFLICT DO NOTHING
+    # PR-2 的写入形态：同批次重放，INSERT ... ON CONFLICT DO NOTHING
     result = db.execute(
         text(
             "INSERT INTO f_sales_reconciliation_snapshot "
@@ -170,10 +176,10 @@ def test_on_conflict_do_nothing_swallows_duplicate_content(db):
             " return_reconciled_amount, content_hash) "
             "VALUES ('DUP-1', NULL, NULL, :batch, 'backfill', "
             " :modified, :order_amount, :reconciled, NULL, NULL, :ch) "
-            "ON CONFLICT (raw_order_id, content_hash) DO NOTHING"
+            "ON CONFLICT (raw_order_id, import_batch_id) DO NOTHING"
         ),
         {
-            "batch": batch_b,
+            "batch": batch_id,
             "modified": datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc),
             "order_amount": Decimal("100.00"),
             "reconciled": Decimal("60.00"),
@@ -189,30 +195,32 @@ def test_on_conflict_do_nothing_swallows_duplicate_content(db):
 
 def test_duplicate_without_on_conflict_rejected(db):
     batch_id = _seed_batch(db, name="dup-raw")
-    snap = _add_snapshot(db, batch_id, "DUP-2", pending_amount=Decimal("1.00"))
+    _add_snapshot(db, batch_id, "DUP-2", pending_amount=Decimal("1.00"))
     db.flush()
-    with pytest.raises(IntegrityError, match="uq_sales_recon_snapshot_content"):
+    with pytest.raises(IntegrityError, match="uq_sales_recon_snapshot_order_batch"):
         db.execute(
             text(
                 "INSERT INTO f_sales_reconciliation_snapshot "
                 "(raw_order_id, import_batch_id, source, content_hash) "
                 "VALUES ('DUP-2', :batch, 'import', :ch)"
             ),
-            {"batch": batch_id, "ch": snap.content_hash},
+            # content_hash 故意不同：证明被拒是因为 (raw_order_id, import_batch_id)
+            {"batch": batch_id, "ch": "0" * 64},
         )
     db.rollback()
 
 
 def test_distinct_content_appends_new_row(db):
-    """快照只追加、不覆盖：对账金额变化（内容哈希不同）→ 新增一行。"""
-    batch_id = _seed_batch(db, name="append")
+    """快照只追加、不覆盖：不同批次对账金额变化（内容哈希不同）→ 各记一条。"""
+    batch1 = _seed_batch(db, name="append-1")
+    batch2 = _seed_batch(db, name="append-2")
     _add_snapshot(
-        db, batch_id, "ORD-APPEND",
+        db, batch1, "ORD-APPEND",
         source_modified_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
         reconciled_amount=Decimal("60.00"),
     )
     _add_snapshot(
-        db, batch_id, "ORD-APPEND",
+        db, batch2, "ORD-APPEND",
         source_modified_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
         reconciled_amount=Decimal("80.00"),
     )
@@ -226,11 +234,25 @@ def test_distinct_content_appends_new_row(db):
     assert rows == [Decimal("60.00"), Decimal("80.00")]
 
 
+def test_second_observation_for_same_order_and_batch_rejected(db):
+    """批次粒度：每批次每单至多一条观测——同批次第二次写入（即使内容不同）被拒。
+
+    这是「同一批次同一订单在文件里出现多次仍只写一条」的数据库层保证：
+    loader 侧先按订单聚合（取首个非空），本约束兜底。
+    """
+    batch_id = _seed_batch(db, name="append-same-batch")
+    _add_snapshot(db, batch_id, "ORD-APPEND", reconciled_amount=Decimal("60.00"))
+    with pytest.raises(IntegrityError, match="uq_sales_recon_snapshot_order_batch"):
+        _add_snapshot(db, batch_id, "ORD-APPEND", reconciled_amount=Decimal("80.00"))
+    db.rollback()
+
+
 def test_null_amount_stored_as_null_and_hashed_distinctly_from_zero(db):
-    batch_id = _seed_batch(db, name="null-vs-zero")
-    _add_snapshot(db, batch_id, "ORD-NZ", pending_amount=None,
+    batch1 = _seed_batch(db, name="null-vs-zero-1")
+    batch2 = _seed_batch(db, name="null-vs-zero-2")
+    _add_snapshot(db, batch1, "ORD-NZ", pending_amount=None,
                   source_modified_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
-    _add_snapshot(db, batch_id, "ORD-NZ", pending_amount=Decimal("0.00"),
+    _add_snapshot(db, batch2, "ORD-NZ", pending_amount=Decimal("0.00"),
                   source_modified_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
     db.commit()
     stored = db.execute(
@@ -421,54 +443,114 @@ def test_hash_roundtrip_matches_stored_value(db):
 # ---- 取每单最新 ----
 
 
+def test_aba_with_null_times_keeps_all_three_latest_is_a(db):
+    """缺陷回归（Codex 审查）：修改时间全空时 A→B→A 不被内容去重吞掉。
+
+    旧口径 (raw_order_id, content_hash) 唯一会把第三个批次与第一个批次内容
+    相同的 A 当重复丢弃（ON CONFLICT DO NOTHING），"最新"错误地停在 B；
+    新口径每批次各记一条，最新 = 批次最大的 A。
+    """
+    batch_a1 = _seed_batch(db, name="aba-1")
+    batch_b = _seed_batch(db, name="aba-2")
+    batch_a2 = _seed_batch(db, name="aba-3")
+    _add_snapshot(db, batch_a1, "ORD-ABA", reconciled_amount=Decimal("100.00"))
+    _add_snapshot(db, batch_b, "ORD-ABA", reconciled_amount=Decimal("60.00"))
+    _add_snapshot(db, batch_a2, "ORD-ABA", reconciled_amount=Decimal("100.00"))
+    db.commit()
+    assert db.execute(
+        text(f"SELECT count(*) FROM {_TABLE} WHERE raw_order_id = 'ORD-ABA'")
+    ).scalar_one() == 3
+    latest = latest_snapshots_by_raw_order_id(db, ["ORD-ABA"])
+    assert latest["ORD-ABA"].reconciled_amount == Decimal("100.00")
+    assert latest["ORD-ABA"].import_batch_id == batch_a2
+
+
+def test_same_content_different_batches_each_kept_latest_prefers_larger_batch(db):
+    """内容相同的两个不同批次各一行（不去重），"最新"取批次较大者。"""
+    batch1 = _seed_batch(db, name="same-content-1")
+    batch2 = _seed_batch(db, name="same-content-2")
+    first = _add_snapshot(db, batch1, "ORD-SAME", reconciled_amount=Decimal("7.00"))
+    second = _add_snapshot(db, batch2, "ORD-SAME", reconciled_amount=Decimal("7.00"))
+    db.commit()
+    assert first.content_hash == second.content_hash          # 内容确实相同
+    assert db.execute(
+        text(f"SELECT count(*) FROM {_TABLE} WHERE raw_order_id = 'ORD-SAME'")
+    ).scalar_one() == 2
+    latest = latest_snapshots_by_raw_order_id(db, ["ORD-SAME"])
+    assert latest["ORD-SAME"].import_batch_id == batch2
+
+
 def test_latest_prefers_newest_modified_time_despite_insert_order(db):
-    batch_id = _seed_batch(db, name="latest")
+    batch1 = _seed_batch(db, name="latest-1")
+    batch2 = _seed_batch(db, name="latest-2")
+    batch3 = _seed_batch(db, name="latest-3")
     t1 = datetime(2026, 7, 1, tzinfo=timezone.utc)
     t2 = datetime(2026, 7, 5, tzinfo=timezone.utc)
     t3 = datetime(2026, 7, 9, tzinfo=timezone.utc)
-    _add_snapshot(db, batch_id, "ORD-L1", source_modified_at=t2,
+    _add_snapshot(db, batch1, "ORD-L1", source_modified_at=t2,
                   reconciled_amount=Decimal("20.00"))
-    _add_snapshot(db, batch_id, "ORD-L1", source_modified_at=t3,
+    _add_snapshot(db, batch2, "ORD-L1", source_modified_at=t3,
                   reconciled_amount=Decimal("30.00"))
-    _add_snapshot(db, batch_id, "ORD-L1", source_modified_at=t1,
+    _add_snapshot(db, batch3, "ORD-L1", source_modified_at=t1,
                   reconciled_amount=Decimal("10.00"))
     db.commit()
     latest = latest_snapshots_by_raw_order_id(db, ["ORD-L1"])
     assert latest["ORD-L1"].reconciled_amount == Decimal("30.00")
 
 
-def test_latest_tie_breaks_by_larger_id(db):
-    batch_id = _seed_batch(db, name="latest-tie")
-    tie = datetime(2026, 7, 3, tzinfo=timezone.utc)
-    first = _add_snapshot(db, batch_id, "ORD-L2", source_modified_at=tie,
-                          reconciled_amount=Decimal("1.00"))
-    second = _add_snapshot(db, batch_id, "ORD-L2", source_modified_at=tie,
-                           reconciled_amount=Decimal("2.00"))
+def test_latest_modified_time_beats_larger_batch(db):
+    """修改时间优先于批次号：批次更大但时间更旧 → 不算最新。"""
+    batch1 = _seed_batch(db, name="time-first-1")
+    batch2 = _seed_batch(db, name="time-first-2")
+    _add_snapshot(db, batch2, "ORD-TF",
+                  source_modified_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                  reconciled_amount=Decimal("1.00"))
+    _add_snapshot(db, batch1, "ORD-TF",
+                  source_modified_at=datetime(2026, 7, 9, tzinfo=timezone.utc),
+                  reconciled_amount=Decimal("2.00"))
     db.commit()
-    assert second.id > first.id
+    latest = latest_snapshots_by_raw_order_id(db, ["ORD-TF"])
+    assert latest["ORD-TF"].import_batch_id == batch1
+    assert latest["ORD-TF"].reconciled_amount == Decimal("2.00")
+
+
+def test_latest_same_time_tie_breaks_by_larger_batch_despite_larger_row_id(db):
+    """乱序插入：批次较小的行 id 反而更大时，同时间并列的最新仍取批次较大者。"""
+    batch_small = _seed_batch(db, name="tie-small")
+    batch_large = _seed_batch(db, name="tie-large")
+    assert batch_small < batch_large
+    tie = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    large_batch_row = _add_snapshot(db, batch_large, "ORD-L2", source_modified_at=tie,
+                                    reconciled_amount=Decimal("2.00"))
+    small_batch_row = _add_snapshot(db, batch_small, "ORD-L2", source_modified_at=tie,
+                                    reconciled_amount=Decimal("1.00"))
+    db.commit()
+    assert small_batch_row.id > large_batch_row.id       # 模拟并发/回填乱序写入
     latest = latest_snapshots_by_raw_order_id(db, ["ORD-L2"])
-    assert latest["ORD-L2"].id == second.id
+    assert latest["ORD-L2"].import_batch_id == batch_large
 
 
-def test_latest_null_modified_time_loses_to_any_time_then_falls_back_to_id(db):
-    batch_id = _seed_batch(db, name="latest-null")
+def test_latest_null_modified_time_loses_to_any_time_then_falls_back_to_batch(db):
+    batch1 = _seed_batch(db, name="latest-null-1")
+    batch2 = _seed_batch(db, name="latest-null-2")
     old = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    _add_snapshot(db, batch_id, "ORD-L3", source_modified_at=None,
+    _add_snapshot(db, batch2, "ORD-L3", source_modified_at=None,
                   reconciled_amount=Decimal("1.00"))        # 旧格式：无修改时间
-    _add_snapshot(db, batch_id, "ORD-L3", source_modified_at=old,
+    _add_snapshot(db, batch1, "ORD-L3", source_modified_at=old,
                   reconciled_amount=Decimal("2.00"))
     db.commit()
     latest = latest_snapshots_by_raw_order_id(db, ["ORD-L3"])
     assert latest["ORD-L3"].reconciled_amount == Decimal("2.00")
 
-    # 全部无修改时间：退化为 id DESC（后写入者胜）
-    _add_snapshot(db, batch_id, "ORD-L4", source_modified_at=None,
-                  reconciled_amount=Decimal("7.00"))
-    newest = _add_snapshot(db, batch_id, "ORD-L4", source_modified_at=None,
-                           reconciled_amount=Decimal("8.00"))
+    # 全部无修改时间：批次较大者胜（行 id 乱序也不影响）
+    null_large_batch = _add_snapshot(db, batch2, "ORD-L4", source_modified_at=None,
+                                     reconciled_amount=Decimal("7.00"))
+    null_small_batch = _add_snapshot(db, batch1, "ORD-L4", source_modified_at=None,
+                                     reconciled_amount=Decimal("8.00"))
     db.commit()
+    assert null_small_batch.id > null_large_batch.id        # 乱序：批次小的行 id 大
     latest4 = latest_snapshots_by_raw_order_id(db, ["ORD-L4"])
-    assert latest4["ORD-L4"].id == newest.id
+    assert latest4["ORD-L4"].import_batch_id == batch2
 
 
 def test_latest_ignores_unknown_orders_and_empty_input(db):

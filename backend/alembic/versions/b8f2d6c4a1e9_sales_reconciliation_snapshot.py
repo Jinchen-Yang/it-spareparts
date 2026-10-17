@@ -1,20 +1,22 @@
 """f_sales_reconciliation_snapshot 快照表 + f_sales_order 含税金额三列（D-40/D-41 PR-1）
 
 氚云销售导出单头的 已对账/待对账/退货已对账 是订单级累计快照，同一订单多次上传、
-内容会反复出现；新表按 (raw_order_id, content_hash) 唯一，让重复上传、内容相同的
-不同文件、回填重跑都不产生重复行（ON CONFLICT 写入由 PR-2 落实）。快照可从归档
-原件回放重建（D-40 §7），因此 downgrade 直接 drop 本迁移创建的对象，不加数据守卫；
-生产回滚仍以恢复迁移前备份为准。
+内容会反复出现（含 A→B→A 改回旧值）。新表按 D-40 §3 对每次导入/回填的每个订单
+记**一条观测**，(raw_order_id, import_batch_id) 唯一：同一批次重放/回填重跑不产生
+重复行（ON CONFLICT 写入由 PR-2 落实），不同批次各记一条（即使内容相同）——内容
+去重会吞掉 A→B→A 的最后一次 A，故 content_hash 只保留用于识别内容变化/报告，
+不参与唯一约束。快照可从归档原件回放重建（D-40 §7），因此 downgrade 直接 drop
+本迁移创建的对象，不加数据守卫；生产回滚仍以恢复迁移前备份为准。
 
 f_sales_order 只加可空列 amount_inc_tax / is_tax_inclusive / tax_amount（D-41 §3
 三金额并存），不改既有列语义；loader 写入在 PR-2。
 
 索引与约束和 ORM 元数据严格对齐（alembic check 零漂移）：
-- uq_sales_recon_snapshot_content (raw_order_id, content_hash) UNIQUE；
+- uq_sales_recon_snapshot_order_batch (raw_order_id, import_batch_id) UNIQUE；
 - ix_sales_recon_snapshot_latest (raw_order_id, source_modified_at DESC NULLS LAST,
-  id DESC) 供"取每单最新"（PG 索引列裸 DESC 默认 NULLS FIRST，与查询排序键
-  source_modified_at DESC NULLS LAST 对齐必须显式写 NULLS LAST；id 为 PK 非空，
-  裸 DESC 等价）；
+  import_batch_id DESC, id DESC) 供"取每单最新"（PG 索引列裸 DESC 默认 NULLS FIRST，
+  与查询排序键 source_modified_at DESC NULLS LAST 对齐必须显式写 NULLS LAST；
+  import_batch_id 非空且 id 为 PK 非空，裸 DESC 与 NULLS LAST 等价）；
 - ix_sales_recon_snapshot_batch (import_batch_id)：FK 查询路径，PG 不自动为 FK 建索引。
 
 Revision ID: b8f2d6c4a1e9
@@ -43,6 +45,7 @@ def upgrade() -> None:
         # 可空：出现快照时订单可能尚未入库/已被其他流程处理
         sa.Column("sales_order_id", sa.Integer(), nullable=True),
         sa.Column("import_batch_id", sa.Integer(), nullable=False),
+        # ↑ 该观测所属的导入/回填批次（每批次每单至多一条观测，见唯一约束）
         sa.Column("source", sa.String(16), nullable=False),
         # 氚云「修改时间」；旧格式文件没有该列 → NULL
         sa.Column("source_modified_at", sa.DateTime(timezone=True), nullable=True),
@@ -66,7 +69,7 @@ def upgrade() -> None:
             name="ck_sales_recon_snapshot_source",
         ),
         sa.UniqueConstraint(
-            "raw_order_id", "content_hash", name="uq_sales_recon_snapshot_content"
+            "raw_order_id", "import_batch_id", name="uq_sales_recon_snapshot_order_batch"
         ),
     )
     op.create_index(
@@ -75,6 +78,7 @@ def upgrade() -> None:
         [
             "raw_order_id",
             sa.text("source_modified_at DESC NULLS LAST"),
+            sa.text("import_batch_id DESC"),
             sa.text("id DESC"),
         ],
     )
