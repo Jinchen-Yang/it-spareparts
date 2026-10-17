@@ -72,9 +72,12 @@ D-40 验收参考（首跑干净库）：76 文件 / 10,591 单 / 已对账合�
 - advisory lock 为 try 模式、绑定专用数据库连接（与 ORM 会话的事务边界无关）：
   另一回填实例在跑时立即以 `backfill_already_running` 失败（退出码 2），不阻塞等待；
   锁在任何退出路径（含异常中断）都随专用连接必定释放，不会遗留锁阻塞下一次执行。
-  前提：锁连接执行期间保持空闲——若目标库设了 `idle_session_timeout` 或中间网络
-  设备会掐空闲连接，超长回填后半程互斥可能静默失效（数据层仍有快照 ON CONFLICT /
-  税列 WHERE NULL 幂等守卫，不会写坏，但并发护栏失效）；生产执行前确认该超时
-  大于预计回填时长。
+  锁连接执行期间保持空闲：专用连接开启 TCP keepalive（idle 30s / interval 10s /
+  count 5，`application_name=backfill_sales_reconciliation_lock`），防中间网络设备掐
+  空闲 TCP；并且**每个文件提交前**按持锁连接的后端 pid 查 `pg_locks` 校验锁仍在，
+  丢锁（或无法校验）即回滚当前文件、以 `backfill_lock_lost` 中止整个执行（退出码 2；
+  已提交的文件保留，确认无并发实例后重跑即可，幂等）。`idle_session_timeout` 只作用于
+  无事务的空闲会话、keepalive 不能阻止它：生产执行前仍需确认该参数为 0 或大于预计
+  回填时长——即便触发，也只会表现为 `backfill_lock_lost` 中止，不会在丢锁状态下写入。
 - 单文件单事务 + `sys_audit_log` 审计（entity_type=`sales_reconciliation_backfill`）。
 - 幂等可续跑：中断后重跑，同批次已记的观测自动跳过（第二次 execute 新增 0 行）。

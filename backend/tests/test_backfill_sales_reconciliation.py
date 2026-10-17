@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, event, func, select, update
+from sqlalchemy import delete, event, func, select, text, update
 
 from app.db import SessionLocal
 from app.etl import pipeline
@@ -20,7 +20,11 @@ from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysRawFile, SysUser
 from app.services.sales_reconciliation import latest_snapshots_by_raw_order_id
 from scripts import backfill_sales_reconciliation as bs
-from tests.test_sales_reconciliation_import import _row, _write_xlsx
+from tests.test_sales_reconciliation_import import LINE_ID, _row, _write_xlsx
+
+# 第二张订单（不同数据ID/订单编号/行ID），用于多文件执行场景
+ROW2 = {"订单编号(必填)": "XSDD-20260630-0002", "数据ID(不可修改)": "RAW-RECON-2",
+        LINE_ID: "LINE-RECON-2"}
 
 
 def _import_one(db, tmp_path, name, rows):
@@ -238,7 +242,9 @@ def test_execute_releases_lock_despite_pool_connection_rotation(db, tmp_path):
         # 前提锁死：execute 期间至少 3 条不同底层连接被检出（专用锁连接 +
         # Session 跨事务边界轮换的 ≥2 条）。池策略（如改 LIFO）或池容量变化
         # 让轮换消失时，这里先红——而不是回归覆盖静默失效、缺陷重新溜进来。
-        assert len(seen) >= 3
+        # 专用锁连接已改为独立 NullPool engine（不进池、不计入 seen），故此处只要求
+        # Session 跨事务边界轮换 ≥2 条——旧实现的锁就落在这些轮换连接上。
+        assert len(seen) >= 2
         assert _lock_is_free(probe) is True       # 执行结束后锁不滞留
     finally:
         event.remove(engine.pool, "checkout", _record_checkout)
@@ -341,6 +347,71 @@ def test_execute_releases_lock_after_guardrail_refusals(db, tmp_path):
         assert _lock_is_free(probe) is True
     finally:
         probe.close()
+
+
+def test_lock_connection_has_tcp_keepalives_and_leaves_pool(db):
+    """专用锁连接：独立 NullPool（不进业务连接池）+ libpq TCP keepalive 已生效。"""
+    lock = bs._acquire_backfill_lock(db)
+    try:
+        params = lock.conn.connection.dbapi_connection.info.get_parameters()
+        for key, value in bs.LOCK_CONNECT_ARGS.items():
+            assert params.get(key) == str(value), key
+        assert lock.conn.engine is not db.get_bind().engine
+        app_name = db.execute(text(
+            "SELECT application_name FROM pg_stat_activity WHERE pid = :pid"),
+            {"pid": lock.pid}).scalar_one()
+        assert app_name == bs.LOCK_CONNECT_ARGS["application_name"]
+        bs._assert_lock_held(db, lock)            # 持锁时校验通过
+    finally:
+        bs._release_backfill_lock(lock)
+        db.rollback()
+    probe = db.get_bind().engine.connect()
+    try:
+        assert _lock_is_free(probe) is True
+    finally:
+        probe.close()
+
+
+def test_execute_aborts_when_lock_lost_before_commit(db, tmp_path, monkeypatch):
+    """锁连接中途被断开（模拟空闲 TCP 被掐/会话被杀）：提交前 pg_locks 校验发现丢锁，
+    回滚当前文件并中止整个执行（backfill_lock_lost），后续文件不再处理，锁不滞留。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _import_one(db, tmp_path, "b.xlsx", [_row(**ROW2)])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 2
+
+    killer = db.get_bind().engine.connect()
+    calls: list[int] = []
+    real_apply = bs._apply_file
+
+    def _apply_then_kill_lock(session, batch, plan, op, sha):
+        calls.append(batch.id)
+        out = real_apply(session, batch, plan, op, sha)
+        # 等待式终止（PG14+）：返回时持锁后端已退出、锁已释放，避免竞态
+        killed = killer.execute(text(
+            "SELECT pg_terminate_backend(l.pid, 10000) FROM pg_locks l"
+            " WHERE l.locktype = 'advisory' AND l.objsubid = 1"
+            " AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(:seed, 0)"),
+            {"seed": bs._LOCK_KEY_SEED}).scalars().all()
+        killer.rollback()
+        assert killed == [True]
+        return out
+
+    monkeypatch.setattr(bs, "_apply_file", _apply_then_kill_lock)
+    try:
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(db, execute=True, operator=operator,
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+        assert ei.value.code == "backfill_lock_lost"
+        assert len(calls) == 1                    # 中止：第二个文件没被处理
+        db.rollback()
+        assert _snap_count(db) == 0               # 丢锁的文件已回滚，什么都没落盘
+        assert all(o.amount_inc_tax is None for o in db.scalars(select(FSalesOrder)))
+        assert _lock_is_free(killer) is True      # 锁不滞留
+    finally:
+        killer.close()
 
 
 # ---------- 坏档隔离 ----------

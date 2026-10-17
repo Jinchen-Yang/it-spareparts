@@ -61,10 +61,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from app.etl import mapping, pipeline
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
@@ -76,6 +77,15 @@ _QUANTUM = Decimal("0.01")
 # 会话级 advisory lock key：hashtextextended 确定性 bigint，独立于 DATA_CHANGE_ADVISORY_LOCK_KEY
 _LOCK_KEY_SEED = "backfill_sales_reconciliation"
 _MAX_CONFLICTS_IN_REPORT = 200
+# 专用锁连接的 libpq TCP keepalive：长回填期间锁连接一直空闲，防中间设备/NAT 掐断空闲
+# TCP 导致会话级锁静默丢失（丢失仍由每文件提交前的 pg_locks 校验兜底）。
+LOCK_CONNECT_ARGS = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
+    "application_name": "backfill_sales_reconciliation_lock",
+}
 
 
 class BackfillError(Exception):
@@ -118,7 +128,41 @@ def _lock_key() -> Any:
     return func.hashtextextended(_LOCK_KEY_SEED, 0)
 
 
-def _acquire_backfill_lock(db: Session) -> Connection:
+class _BackfillLock:
+    """持锁专用连接 + 其服务端 pid（pg_locks 校验用）+ 其专属 NullPool engine。"""
+
+    def __init__(self, conn: Connection, engine: Any, pid: int):
+        self.conn = conn
+        self.engine = engine
+        self.pid = pid
+
+
+def _assert_lock_held(db: Session, lock: "_BackfillLock") -> None:
+    """每文件提交前校验：持锁连接的服务端 pid 在 pg_locks 里仍持有回填锁。
+
+    在业务 Session 上查（与锁连接无关）：锁连接若已被断开/终止，其 pid 不再持锁，
+    这里立即发现。丢锁 → backfill_lock_lost，调用方回滚当前文件并中止整个执行。
+    """
+    try:
+        held = db.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory'"
+            " AND l.pid = :pid AND l.granted AND l.objsubid = 1"
+            " AND ((l.classid::bigint << 32) | l.objid::bigint)"
+            " = hashtextextended(:seed, 0))"),
+            {"pid": lock.pid, "seed": _LOCK_KEY_SEED}).scalar_one()
+    except Exception as exc:   # noqa: BLE001 —— 无法确认持锁 = 按丢锁处理，绝不冒险提交
+        raise BackfillError(
+            "backfill_lock_lost",
+            f"无法校验回填 advisory lock（{type(exc).__name__}），按丢锁处理："
+            "已回滚当前文件并中止") from exc
+    if held is not True:
+        raise BackfillError(
+            "backfill_lock_lost",
+            f"回填 advisory lock 已丢失（持锁连接 pid={lock.pid} 不再持有），"
+            "已回滚当前文件并中止；已提交的文件不受影响，确认无并发实例后重跑即可（幂等）")
+
+
+def _acquire_backfill_lock(db: Session) -> "_BackfillLock":
     """try 模式取会话级 advisory lock，返回持有锁的**专用**连接。
 
     锁必须与持有它的连接绑定：ORM Session 每次 commit/rollback 都把连接归还
@@ -128,7 +172,15 @@ def _acquire_backfill_lock(db: Session) -> Connection:
     互不相干，取/放永远在同一条连接上。try 模式：另一实例在跑时立即失败，
     绝不无限等待。
     """
-    conn = db.get_bind().engine.connect()
+    # 专属 NullPool engine：锁连接不进连接池（close 即断开服务端会话、必然放锁），
+    # 并开 TCP keepalive（LOCK_CONNECT_ARGS）。
+    engine = create_engine(db.get_bind().engine.url, poolclass=NullPool,
+                           connect_args=dict(LOCK_CONNECT_ARGS))
+    try:
+        conn = engine.connect()
+    except BaseException:
+        engine.dispose()
+        raise
     try:
         acquired = conn.execute(
             select(func.pg_try_advisory_lock(_lock_key()))).scalar_one()
@@ -137,14 +189,16 @@ def _acquire_backfill_lock(db: Session) -> Connection:
                 "backfill_already_running",
                 "advisory lock 已被另一回填实例持有，拒绝并发启动"
                 "（确认没有实例在跑时，请排查持有该锁的数据库会话后重试）")
+        pid = conn.execute(select(func.pg_backend_pid())).scalar_one()
         conn.rollback()   # 结束取锁事务（锁是会话级，跨事务存活），避免执行期间 idle in transaction
-        return conn
+        return _BackfillLock(conn, engine, pid)
     except BaseException:
         conn.close()
+        engine.dispose()
         raise
 
 
-def _release_backfill_lock(lock_conn: Connection) -> None:
+def _release_backfill_lock(lock: "_BackfillLock") -> None:
     """在同一条连接上解锁、检查返回值并归还连接。
 
     解锁失败或解锁语句本身出错 → invalidate 废弃该连接：服务端会话断开必然
@@ -152,6 +206,7 @@ def _release_backfill_lock(lock_conn: Connection) -> None:
     的连接还回池。只告警不抛异常：本函数在 finally 里调用，抛出会顶掉正文的
     原始异常。
     """
+    lock_conn = lock.conn
     try:
         unlocked = lock_conn.execute(
             select(func.pg_advisory_unlock(_lock_key()))).scalar_one()
@@ -165,6 +220,7 @@ def _release_backfill_lock(lock_conn: Connection) -> None:
               f"已废弃锁连接强制释放（断开服务端会话即放锁）：{exc!r}", file=sys.stderr)
     finally:
         lock_conn.close()
+        lock.engine.dispose()
 
 
 def _iter_batches(db: Session, batch_ids: list[int] | None) -> list[SysImportBatch]:
@@ -546,7 +602,7 @@ def run_backfill(
         # 会话级锁在专用连接上跨单文件事务存活，防两份回填并发（导入不受此
         # 锁影响——快照 ON CONFLICT / 税列 WHERE NULL 守卫保证与导入并发也
         # 幂等安全）。取/放必须同连接，见 _acquire_backfill_lock。
-        lock_conn = _acquire_backfill_lock(db)
+        lock = _acquire_backfill_lock(db)
         try:
             if not _active_operator(db, operator):
                 raise BackfillError("operator_not_active",
@@ -566,10 +622,13 @@ def run_backfill(
                     # 锁内每文件重算计划：与 manifest 校验共用同一确定性口径
                     fresh = _plan_file(db, batch)
                     actual = _apply_file(db, batch, fresh, operator, manifest_sha256)
+                    _assert_lock_held(db, lock)   # 丢锁不提交：互斥失效时绝不落盘
                     db.commit()
                     results.append({"batch_id": batch.id, "status": "executed", **actual})
                 except Exception as exc:   # noqa: BLE001 —— 单文件失败不拖垮其余文件
                     db.rollback()
+                    if isinstance(exc, BackfillError) and exc.code == "backfill_lock_lost":
+                        raise   # 丢锁：当前文件已回滚，中止整个执行（不再继续后续文件）
                     results.append({
                         "batch_id": batch.id, "status": "execute_failed",
                         "error": str(exc)[:300]})
@@ -591,7 +650,7 @@ def run_backfill(
             return report
         finally:
             # 先放锁再收尾 Session：即使 Session 收尾出错，锁也不滞留
-            _release_backfill_lock(lock_conn)
+            _release_backfill_lock(lock)
             db.rollback()
     # dry-run：只读事务，重算同一计划（先 rollback 保证从事务起点设置只读——
     # 若会话已有打开的事务，SET TRANSACTION READ ONLY 会报错）
@@ -654,7 +713,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "failed", "dry_run": execute,
                           "code": exc.code, "message": exc.message},
                          ensure_ascii=False))
-        print("backfill failed before any write; nothing committed", file=sys.stderr)
+        if exc.code == "backfill_lock_lost":
+            print("backfill aborted: lock lost; current file rolled back, "
+                  "earlier files stay committed; rerun is idempotent", file=sys.stderr)
+        else:
+            print("backfill failed before any write; nothing committed", file=sys.stderr)
         return 2
     except Exception as exc:   # noqa: BLE001 —— 非预期错误：完整落 stderr，JSON 只给码
         print(json.dumps({"status": "failed", "dry_run": execute,
