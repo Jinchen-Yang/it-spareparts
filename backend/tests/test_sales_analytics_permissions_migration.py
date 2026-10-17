@@ -85,7 +85,7 @@ def test_upgrade_backfills_templates_and_accounts_roundtrip(db):
 
 
 def test_migration_is_single_head():
-    """本迁移接在 PR-1 head 之上，版本目录单头（CI 另有全量校验，此处锁本 PR 契约）。"""
+    """版本目录单头，且本迁移位于该 head 的祖先链上（后续 PR 接在其后时本测试不应失效）。"""
     import os
 
     from alembic.config import Config as AlembicConfig
@@ -94,5 +94,8 @@ def test_migration_is_single_head():
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option(
         "script_location", os.path.join(os.path.dirname(__file__), "..", "alembic"))
-    heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert len(heads) == 1 and _REV in heads
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1
+    chain = {rev.revision for rev in script.walk_revisions(base="base", head=heads[0])}
+    assert _REV in chain

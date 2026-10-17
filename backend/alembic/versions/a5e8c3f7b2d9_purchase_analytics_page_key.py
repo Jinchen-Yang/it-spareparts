@@ -5,11 +5,11 @@
 boss 存量账号（template_perms 快照 + legacy permissions 双写）补 true 并清掉该键
 覆盖（a9e2f7c4d1b8 同款"覆盖层让位"，管理员之后仍可在权限中心按账号收紧）。
 
-down_revision 接在 #395（f_sales_reconciliation_snapshot，b8f2d6c4a1e9）之后——#395 已合入 main，
+down_revision 接在 #397（销售分析页面键，e3a5c7d9b1f4）之后——#395/#397 已合入 main，
 本 PR rebase 后改指该 head，保持迁移链单头。
 
 Revision ID: a5e8c3f7b2d9
-Revises: b8f2d6c4a1e9
+Revises: e3a5c7d9b1f4
 """
 
 from collections.abc import Sequence
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a5e8c3f7b2d9"
-down_revision: str | None = "b8f2d6c4a1e9"
+down_revision: str | None = "e3a5c7d9b1f4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
