@@ -19,6 +19,9 @@ DATA_GROUPS: dict[str, list[str]] = {
     # 互通池价格治理：约束价（采购上限/销售下限及原始录入值）可见性（§12）。
     # 关掉后后端同时隐藏价格、约束差额与越线标记，防止靠颜色/排序反推金额。
     "data_pool_price_governance": ["pool_price_governance"],
+    # 销售单对账数据（D-40 §6）：已对账/待对账/退货已对账/快照订单金额及数据截至。
+    # 角色模板仅 boss 开；admin 恒全开（_full 含全部数据组）。
+    "data_reconciliation": ["sales_reconciliation"],
 }
 # 页面开关（与前端菜单 key 对齐）
 PAGE_KEYS: list[str] = [
@@ -38,6 +41,9 @@ PAGE_KEYS: list[str] = [
     # 权限中心 v2：账号与权限中心页面（只读查看账号/模板/活动）。critical 级——
     # 内置模板对所有非 admin 角色显式 False，保持"仅管理员可见账号管理"的既有行为。
     "page_accounts",
+    # 销售分析页（D-41 §1，决策 2026-10-17 Q3）：挂在销售单模块下的独立页面，
+    # 仅 admin/boss——看区间单量/三金额、追踪大单；不改动老板看板。模板仅 boss 开。
+    "page_sales_analysis",
 ]
 # 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
@@ -160,6 +166,8 @@ LABELS: dict[str, str] = {
     "page_replenishment_beta": "补库申请",
     "action_replenishment_create": "补库申请创建与复提（按维保项目范围）",
     "action_replenishment_review": "补库审核结果回写",
+    "page_sales_analysis": "销售分析（大单追踪）",
+    "data_reconciliation": "销售单对账数据（已对账/待对账/退货已对账）",
 }
 
 
@@ -263,6 +271,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "page_replenishment_beta": False,
                  "action_replenishment_create": False,
                  "action_replenishment_review": False,
+                 # 销售分析页与对账数据（D-40/D-41）：readonly 也是 guest/匿名兜底模板，
+                 # 必须显式关——否则未知角色继承 _full() 的 True，凭 require_page 即可读。
+                 "page_sales_analysis": False,
+                 "data_reconciliation": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -671,6 +683,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "medium",
         "risk": "关闭后池价格、约束价、差额、越线标记和价格排序会一起隐藏，避免通过顺序或颜色反推。",
     },
+    "data_reconciliation": {
+        "label": "查看销售单对账数据",
+        "summary": "允许查看销售单的已对账、待对账、退货已对账金额与数据截至时间。",
+        "can": "每张销售单最新一笔对账快照的四项金额、数据截至时间和历史快照序列。",
+        "cannot": "不含销售金额本身（不含税/含税/营收随页面可见）；不代表可以修改对账数据。",
+        "typical": ["老板", "管理员"],
+        "sensitivity": "high",
+        "risk": "已对账金额=实际回款，反映客户付款进度；对无此权限的账号一律显示「无对账数据」而非 0。",
+    },
     # ---- 页面入口 ----
     "page_parts": {
         "label": "型号查询",
@@ -806,6 +827,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员"],
         "sensitivity": "critical",
         "risk": "能看到全员权限分布与活动记录，仅管理员可授予本权限。",
+    },
+    "page_sales_analysis": {
+        "label": "销售分析（大单追踪）",
+        "summary": "可打开销售分析页：按日期/业务类型看销售单量与金额，追踪大单。",
+        "can": "查看区间订单数、不含税/含税/营收三口径金额与大单倒序列表。",
+        "cannot": "对账金额需另开「销售单对账数据」；页面只读，不能改任何单据。",
+        "typical": ["老板", "管理员"],
+        "sensitivity": "high",
+        "risk": "全公司经营视角（含各客户成交金额），仅老板与管理员默认可见。",
     },
     "page_replenishment_beta": {
         "label": "补库申请",
