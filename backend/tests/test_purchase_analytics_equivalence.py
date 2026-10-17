@@ -32,6 +32,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app import config, permissions, security, tax_policy
+from app.business_time import business_today
 from app.db import engine
 from app.models import (DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder,
                         FSalesOrder)
@@ -236,7 +237,7 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
             category=category, group_by=group_by),
-        "as_of": date.today().isoformat(),
+        "as_of": business_today().isoformat(),
         "kpi": {
             "orders": kpi_row.orders,
             "lines": kpi_lines,
@@ -361,7 +362,7 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
             category=category, group_by=group_by, group_key=group_key),
-        "as_of": date.today().isoformat(),
+        "as_of": business_today().isoformat(),
         "items": items,
     }
 
