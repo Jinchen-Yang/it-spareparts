@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, event, func, select, text, update
+from sqlalchemy.exc import ResourceClosedError
 
 from app.db import SessionLocal
 from app.etl import pipeline
@@ -25,6 +26,35 @@ from tests.test_sales_reconciliation_import import LINE_ID, _row, _write_xlsx
 # 第二张订单（不同数据ID/订单编号/行ID），用于多文件执行场景
 ROW2 = {"订单编号(必填)": "XSDD-20260630-0002", "数据ID(不可修改)": "RAW-RECON-2",
         LINE_ID: "LINE-RECON-2"}
+
+
+@pytest.fixture(autouse=True)
+def _statement_timeout_guard(db):
+    """S8 防挂死守护（不新增依赖的 SET 方案）：pytest-timeout 不在本仓 dev 依赖
+    （pyproject/uv.lock 均无），故在**连接池 checkout 事件**上给每条检出的连接
+    ``set_config('statement_timeout'/'lock_timeout', …, is_local=true)``。
+
+    本文件的历史事故是回填退回阻塞式取锁 → CI 全量确定性卡死；statement_timeout
+    兜住一切等待锁的语句（advisory lock / 行锁），超时由服务端取消报错，测试以
+    失败结束而不是拖死进程。选 is_local=true（事务级）：连接归还池时的 ROLLBACK
+    自动还原，绝不把超时泄漏给同引擎的其他测试模块；checkout 覆盖 Session 跨
+    事务边界轮换出的每条连接（commit 归还 → 下次事务重新检出即重设）。脚本内部
+    的专用锁连接不经本池、取锁又是 try 模式——其阻塞回归由
+    test_execute_refused_immediately_when_lock_held_elsewhere 的线程 join 超时兜底。
+    """
+    engine = db.get_bind()
+
+    def _set_timeouts(dbapi_conn, _record, _proxy) -> None:
+        with dbapi_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('statement_timeout', '30000', true), "
+                "set_config('lock_timeout', '10000', true)")
+
+    event.listen(engine.pool, "checkout", _set_timeouts)
+    try:
+        yield
+    finally:
+        event.remove(engine.pool, "checkout", _set_timeouts)
 
 
 def _import_one(db, tmp_path, name, rows):
@@ -439,9 +469,22 @@ def test_archive_missing_hash_mismatch_and_corrupt_are_isolated(db, tmp_path):
 
     applied = bs.run_backfill(db, execute=True, operator=operator,
                               confirm_manifest_sha256=dry["manifest_sha256"])
-    assert applied["totals"]["files_executed"] == 3      # 坏档也"执行"（零写入+审计）
+    # S4：坏档不计执行——files[].status 保持其计划状态、files_skipped 单列计数、
+    # 不触发 partial（dry-run 报告已如实预告的坏档，对执行而言是已知的零工作
+    # 量而非失败；全部坏档/空范围时同样 applied、退出码 0）
+    by_status = {f["batch_id"]: f["status"] for f in applied["files"]}
+    assert by_status == {b1.id: "archive_missing", b2.id: "archive_hash_mismatch",
+                         b3.id: "executed"}
+    assert applied["status"] == "applied"
+    assert applied["totals"]["files_executed"] == 1
+    assert applied["totals"]["files_skipped"] == 2
+    assert applied["totals"]["files_failed"] == 0
     assert applied["totals"]["snapshots_inserted"] == 1
     assert applied["totals"]["tax_columns_filled"] == 3
+    # 审计口径一致：每文件一条；坏档 action=skip（零写入留痕），好档 action=execute
+    audits = {a.entity_id: a.action for a in db.scalars(select(SysAuditLog).where(
+        SysAuditLog.entity_type == "sales_reconciliation_backfill"))}
+    assert audits == {b1.id: "skip", b2.id: "skip", b3.id: "execute"}
 
     assert _order(db, "RAW-BF-3").tax_amount == Decimal("13.00")   # 好档照常回填
     for raw_id in ("RAW-BF-1", "RAW-BF-2"):                        # 坏档保持 NULL
@@ -758,6 +801,7 @@ def test_main_dry_run_then_execute_and_exit_codes(db, tmp_path, capsys, monkeypa
                            "--confirm-manifest-sha256", dry["manifest_sha256"]]) == 0
     applied = json.loads(capsys.readouterr().out)
     assert applied["status"] == "applied"
+    assert applied["totals"]["files_executed"] == 1     # 全部成功 → applied、退出码 0
     assert applied["totals"]["snapshots_inserted"] == 1
 
     # sha 不对 → 退出码 2，拒绝写入
@@ -773,3 +817,359 @@ def test_main_requires_database_url(capsys, monkeypatch):
     assert bs.main([]) == 2
     failed = json.loads(capsys.readouterr().out)
     assert failed["code"] == "database_url_required"
+
+
+# ---------- MUST：部分失败 → partial / 退出码 3；空范围语义 ----------
+
+def test_partial_failure_reports_partial_and_exit_3(db, tmp_path, capsys, monkeypatch):
+    """单文件执行失败：报告 status=partial、CLI 退出码 3（与 0/2 区分），其余
+    文件照常提交；stderr 给出处置指引。修复后按同一 dry-run → 确认 → execute
+    流程重跑即幂等补齐（runbook「遇 3 怎么办」的操作路径锁定）。"""
+    b1 = _import_one(db, tmp_path, "a.xlsx", [_row()])
+    b2 = _import_one(db, tmp_path, "b.xlsx", [_row(**ROW2)])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db, "partial-op")
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 2
+
+    real_apply = bs._apply_file
+
+    def _apply_boom_on_second(session, batch, plan, op, sha):
+        if batch.id == b2.id:
+            raise RuntimeError("boom: simulated per-file failure")
+        return real_apply(session, batch, plan, op, sha)
+
+    monkeypatch.setattr(bs, "_apply_file", _apply_boom_on_second)
+    assert bs.main(["--execute", "--operator", operator,
+                    "--confirm-manifest-sha256", dry["manifest_sha256"]]) == 3
+    captured = capsys.readouterr()
+    applied = json.loads(captured.out)
+    assert applied["status"] == "partial"
+    assert applied["totals"]["files_executed"] == 1
+    assert applied["totals"]["files_failed"] == 1
+    assert applied["totals"]["files_skipped"] == 0
+    by_batch = {f["batch_id"]: f for f in applied["files"]}
+    assert by_batch[b1.id]["status"] == "executed"
+    assert by_batch[b2.id]["status"] == "execute_failed"
+    assert "boom" in by_batch[b2.id]["error"]
+    assert "partially applied" in captured.err
+    assert _order(db, "RAW-RECON-1").tax_amount == Decimal("13.00")   # 好文件已提交
+    order2 = _order(db, "RAW-RECON-2")                                # 失败文件零写入
+    assert order2.tax_amount is None and order2.amount_inc_tax is None
+
+    monkeypatch.setattr(bs, "_apply_file", real_apply)   # 修复"故障"后重走全流程
+    dry2 = bs.run_backfill(db)
+    assert dry2["totals"]["snapshots_planned"] == 1      # 只剩 b2 的剩余工作量
+    applied2 = bs.run_backfill(db, execute=True, operator=operator,
+                               confirm_manifest_sha256=dry2["manifest_sha256"])
+    assert applied2["status"] == "applied"
+    # 范围内两个文件都重新"执行"（b1 幂等零新增），files_executed 按文件计
+    assert applied2["totals"]["files_executed"] == 2
+    assert applied2["totals"]["snapshots_inserted"] == 1
+    assert _snap_count(db) == 2                          # a + b 各一条，无重复行
+
+
+def test_execute_with_no_files_in_scope_is_applied_exit_0(db, capsys):
+    """空范围（0 个批次）execute 语义：files_executed=0、files_failed=0 →
+    status=applied、退出码 0——partial 只由 files_failed>0 触发，「没活干」不是
+    失败；范围是否为空以 dry-run 的 files 列表为准（执行前人工核对）。"""
+    operator = _operator(db, "empty-scope-op")
+    dry = bs.run_backfill(db)
+    assert dry["files"] == []
+
+    assert bs.main(["--execute", "--operator", operator,
+                    "--confirm-manifest-sha256", dry["manifest_sha256"]]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["status"] == "applied"
+    assert applied["files"] == []
+    assert applied["totals"] == {
+        "files_executed": 0, "files_skipped": 0, "files_failed": 0,
+        "snapshots_inserted": 0, "tax_columns_filled": 0, "tax_conflicts_total": 0}
+    assert _snap_count(db) == 0
+
+
+# ---------- S1：锁内逐文件计划指纹核对 ----------
+
+def test_plan_changed_since_dry_run_fails_file_only_zero_write(db, tmp_path, monkeypatch):
+    """dry-run 后库中该批次的数据变了：锁内 fresh 计划与核准清单条目不一致 →
+    该文件 execute_failed（code=plan_changed_since_dry_run）零写入，其余文件照常
+    → partial。篡改经第二条显式连接在锁内重算时提交（无时序 sleep 竞争）。"""
+    b1 = _import_one(db, tmp_path, "a.xlsx", [_row(**{"数据ID(不可修改)": "RAW-PC-1"})])
+    b2 = _import_one(db, tmp_path, "b.xlsx", [_row(**{"数据ID(不可修改)": "RAW-PC-2"})])
+    b3 = _import_one(db, tmp_path, "c.xlsx", [_row(**{"数据ID(不可修改)": "RAW-PC-3"})])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+    assert dry["totals"]["snapshots_planned"] == 3
+
+    tamper = db.get_bind().engine.connect()      # 第二条显式连接：模拟并发改库
+    real_plan = bs._plan_file
+    calls: dict[int, int] = {}
+
+    def _plan_with_tamper(session, batch):
+        n = calls.get(batch.id, 0) + 1
+        calls[batch.id] = n
+        if batch.id == b2.id and n == 2:         # 计划阶段之后的锁内 fresh 重算
+            tamper.execute(text(
+                "UPDATE f_sales_order SET tax_amount = 999.00"
+                " WHERE raw_order_id = 'RAW-PC-2'"))
+            tamper.commit()
+        return real_plan(session, batch)
+
+    monkeypatch.setattr(bs, "_plan_file", _plan_with_tamper)
+    try:
+        applied = bs.run_backfill(db, execute=True, operator=operator,
+                                  confirm_manifest_sha256=dry["manifest_sha256"])
+    finally:
+        tamper.close()
+
+    assert applied["status"] == "partial"
+    by_batch = {f["batch_id"]: f for f in applied["files"]}
+    assert by_batch[b1.id]["status"] == "executed"
+    assert by_batch[b2.id]["status"] == "execute_failed"
+    assert by_batch[b2.id]["code"] == "plan_changed_since_dry_run"
+    assert "tax_fills_plan_sha256" in by_batch[b2.id]["error"]   # 变化字段可追溯
+    assert by_batch[b3.id]["status"] == "executed"               # 失败不拖垮其余文件
+    assert applied["totals"]["files_executed"] == 2
+    assert applied["totals"]["files_failed"] == 1
+    # b2 零写入：无快照；三件套没被回填（tax_amount 是篡改值，另两列仍 NULL）
+    order2 = _order(db, "RAW-PC-2")
+    assert order2.tax_amount == Decimal("999.00")
+    assert order2.is_tax_inclusive is None and order2.amount_inc_tax is None
+    assert {s.raw_order_id for s in db.scalars(select(FSalesReconciliationSnapshot))} \
+        == {"RAW-PC-1", "RAW-PC-3"}
+    audits = db.scalars(select(SysAuditLog.entity_id).where(
+        SysAuditLog.entity_type == "sales_reconciliation_backfill")).all()
+    assert sorted(audits) == sorted([b1.id, b3.id])              # b2 无执行审计
+
+
+# ---------- S2：税列补写 UPDATE 限定所属批次 ----------
+
+def test_tax_fill_update_scoped_to_owning_batch(db, tmp_path, monkeypatch):
+    """补写 UPDATE 必须带 import_batch_id == 本批次。raw_order_id 全局唯一使
+    「两行同 raw_order_id」当前不可能，但 loader upsert 会把既有行迁到新批次
+    （import_batch_id 随重导刷新）：dry-run 核准 A 批次补写后、UPDATE 执行前
+    行被迁到 B 批次 → 无批次谓词会把 A 批次原件的值误写到已属于 B 的行上；
+    有谓词则零命中，行保持 NULL 等待其真正批次处理。"""
+    b1 = _import_one(db, tmp_path, "a.xlsx", [_row()])           # RAW-RECON-1 → b1
+    b2 = _import_one(db, tmp_path, "b.xlsx", [_row(**ROW2)])     # 另一单；作迁移目标批次
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db, batch_ids=[b1.id])
+    assert dry["totals"]["tax_fills_planned"] == 3
+
+    mover = db.get_bind().engine.connect()
+    real_apply = bs._apply_file
+
+    def _apply_after_moving_row(session, batch, plan, op, sha):
+        # 指纹核对已过、UPDATE 未跑：此刻把行迁到 b2（并发重导的确定性模拟）
+        if batch.id == b1.id:
+            mover.execute(text(
+                "UPDATE f_sales_order SET import_batch_id = :bid"
+                " WHERE raw_order_id = 'RAW-RECON-1'"), {"bid": b2.id})
+            mover.commit()
+        return real_apply(session, batch, plan, op, sha)
+
+    monkeypatch.setattr(bs, "_apply_file", _apply_after_moving_row)
+    try:
+        applied = bs.run_backfill(db, execute=True, operator=operator,
+                                  confirm_manifest_sha256=dry["manifest_sha256"],
+                                  batch_ids=[b1.id])
+    finally:
+        mover.close()
+
+    assert applied["status"] == "applied"
+    assert applied["totals"]["tax_columns_filled"] == 0          # 行已不属 b1：零命中
+    order = _order(db, "RAW-RECON-1")
+    assert order.import_batch_id == b2.id
+    assert (order.is_tax_inclusive is None and order.tax_amount is None
+            and order.amount_inc_tax is None)
+    # 快照按 (raw_order_id, import_batch_id=b1) 计划，与本行归属无关：照常写入
+    assert _snap_count(db) == 1
+
+
+# ---------- S3：文件级 advisory xact lock（TOCTOU 兜底） ----------
+
+def test_execute_aborts_when_file_xact_lock_held_elsewhere(db, tmp_path):
+    """另一数据库会话持有某文件的 xact 键时：执行按 backfill_file_lock_busy
+    **中止**（当前文件零写入、此前文件已提交保留、会话级锁照常释放）。选中止
+    而非跳过/失败继续：文件级键被占说明互斥前提被破坏（专用锁连接疑似丢失、
+    另一实例疑似在跑同一文件），继续只会扩大交错写入面——停下排查才是安全侧。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    b2 = _import_one(db, tmp_path, "b.xlsx", [_row(**ROW2)])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+    assert len(dry["files"]) == 2
+
+    other = db.get_bind().engine.connect()
+    probe = db.get_bind().engine.connect()
+    try:
+        assert other.execute(select(
+            func.pg_try_advisory_xact_lock(bs._file_lock_key(b2.id)))).scalar_one() is True
+        # 不提交不回滚：xact 锁随这条打开的事务一直持有
+
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(db, execute=True, operator=operator,
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+        assert ei.value.code == "backfill_file_lock_busy"
+
+        assert _order(db, "RAW-RECON-1").tax_amount == Decimal("13.00")  # 文件1已提交
+        order2 = _order(db, "RAW-RECON-2")                               # 文件2零写入
+        assert order2.tax_amount is None and order2.amount_inc_tax is None
+        assert _snap_count(db) == 1
+        assert _lock_is_free(probe) is True          # 会话级锁已随 finally 释放
+    finally:
+        other.rollback()                            # 放开 xact 锁（断言失败也不外带）
+        other.close()
+        probe.close()
+
+    # 干扰解除后同一流程重跑：两个文件都重新执行（文件1 幂等零新增），文件2 补齐
+    dry2 = bs.run_backfill(db)
+    applied2 = bs.run_backfill(db, execute=True, operator=operator,
+                               confirm_manifest_sha256=dry2["manifest_sha256"])
+    assert applied2["status"] == "applied"
+    assert applied2["totals"]["files_executed"] == 2
+    assert applied2["totals"]["snapshots_inserted"] == 1
+    assert _order(db, "RAW-RECON-2").tax_amount == Decimal("13.00")
+
+
+# ---------- S9：操作员校验在每个文件事务开头重新执行 ----------
+
+def test_operator_disabled_midrun_aborts_current_file_rolled_back(db, tmp_path, monkeypatch):
+    """FOR SHARE 行锁只保当前事务（计划事务回滚后即释放）：文件1提交后操作员
+    被停用 → 文件2事务开头的重验以 operator_not_active 中止——文件2零写入零
+    审计，文件1成果保留，换有效账号重跑幂等。"""
+    b1 = _import_one(db, tmp_path, "a.xlsx", [_row()])
+    b2 = _import_one(db, tmp_path, "b.xlsx", [_row(**ROW2)])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db, "midrun-op")
+    dry = bs.run_backfill(db)
+
+    disabler = db.get_bind().engine.connect()
+    real_acquire = bs._acquire_file_xact_lock
+
+    def _acquire_then_disable(session, batch_id):
+        if batch_id == b2.id:
+            # 此刻 run_backfill 处于两个文件事务之间（无 FOR SHARE 行锁挡路），
+            # 停用立即提交；文件2事务开头的校验随即看到
+            disabler.execute(text(
+                "UPDATE sys_user SET is_active = false WHERE username = 'midrun-op'"))
+            disabler.commit()
+        return real_acquire(session, batch_id)
+
+    monkeypatch.setattr(bs, "_acquire_file_xact_lock", _acquire_then_disable)
+    try:
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(db, execute=True, operator=operator,
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+        assert ei.value.code == "operator_not_active"
+
+        assert _order(db, "RAW-RECON-1").tax_amount == Decimal("13.00")  # 文件1已提交
+        order2 = _order(db, "RAW-RECON-2")                               # 文件2零写入
+        assert order2.tax_amount is None and order2.amount_inc_tax is None
+        assert _snap_count(db) == 1
+        audits = db.scalars(select(SysAuditLog.entity_id).where(
+            SysAuditLog.entity_type == "sales_reconciliation_backfill")).all()
+        assert audits == [b1.id]
+    finally:
+        disabler.close()
+
+
+# ---------- S8：放锁/校验/中断分支 ----------
+
+def test_release_lock_unlock_false_invalidates_connection(db, capsys):
+    """放锁分支：pg_advisory_unlock 返回 false（连接实际已不持锁）→ 连接被
+    invalidate 废弃（绝不能把可能仍持锁的连接还回池）、stderr 告警清楚、不抛
+    异常（在 finally 里调用，抛出会顶掉正文原始异常）。"""
+    lock = bs._acquire_backfill_lock(db)
+    try:
+        # 先手动放锁：随后 _release_backfill_lock 里的 unlock 必返回 false
+        lock.conn.execute(select(func.pg_advisory_unlock(bs._lock_key())))
+        lock.conn.rollback()
+    except BaseException:
+        bs._release_backfill_lock(lock)
+        raise
+    bs._release_backfill_lock(lock)
+
+    assert "pg_advisory_unlock 返回 false" in capsys.readouterr().err
+    with pytest.raises(ResourceClosedError):       # 已废弃/关闭，不可复用
+        lock.conn.execute(text("SELECT 1"))
+    probe = db.get_bind().engine.connect()
+    try:
+        assert _lock_is_free(probe) is True
+    finally:
+        probe.close()
+
+
+class _PgLocksExplodingSession:
+    """代理 Session：仅持锁校验语句（查 pg_locks）报错，其余原样转发。
+
+    持锁校验查询本身失败无法用真实库状态确定性制造（pg_locks 恒可查），按语句
+    文本注入是最小可控手段；__getattr__ 转发保证其余路径走真实 Session。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def execute(self, stmt, *args, **kwargs):
+        if "pg_locks" in str(stmt):
+            raise RuntimeError("simulated pg_locks failure")
+        return self._inner.execute(stmt, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_lock_check_query_error_treated_as_lock_lost(db, tmp_path):
+    """持锁校验查询本身报错 → 无法确认持锁即按丢锁处理：backfill_lock_lost
+    中止整个执行，当前文件已回滚零落盘，会话级锁随 finally 释放。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+
+    probe = db.get_bind().engine.connect()
+    try:
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(_PgLocksExplodingSession(db), execute=True,
+                            operator=operator,
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+        assert ei.value.code == "backfill_lock_lost"
+        assert "无法校验" in ei.value.message
+
+        db.rollback()
+        assert _snap_count(db) == 0               # 当前文件已回滚，零落盘
+        assert _order(db).tax_amount is None
+        assert _lock_is_free(probe) is True
+    finally:
+        probe.close()
+
+
+def test_keyboard_interrupt_rolls_back_releases_lock_and_reraises(db, tmp_path, monkeypatch):
+    """执行中 KeyboardInterrupt（BaseException，不吃单文件失败的分寸）：当前
+    文件回滚、锁在 finally 释放、异常原样上抛——不吞咽、不转译成报告条目。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+
+    real_apply = bs._apply_file
+
+    def _apply_then_interrupt(session, batch, plan, op, sha):
+        real_apply(session, batch, plan, op, sha)   # 已产生未提交写入
+        raise KeyboardInterrupt("simulated interrupt")
+
+    monkeypatch.setattr(bs, "_apply_file", _apply_then_interrupt)
+    probe = db.get_bind().engine.connect()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            bs.run_backfill(db, execute=True, operator=operator,
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+
+        db.rollback()
+        assert _snap_count(db) == 0                 # 当前文件已回滚
+        assert _order(db).tax_amount is None
+        assert _lock_is_free(probe) is True         # finally 生效，锁不滞留
+    finally:
+        probe.close()

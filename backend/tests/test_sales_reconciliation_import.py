@@ -322,6 +322,13 @@ def test_import_all_lines_failed_no_order_no_snapshot(db, tmp_path):
                              .where(SysImportError.batch_id == batch.id)).all()
     assert {"bad_number", "bad_reconciliation_amount",
             "bad_source_modified_time"} <= set(error_types)
+    # 坏对账值错误不带业务身份（identity 只为修复模式作废豁免等真实消费方预留，
+    # 无意义的调试残留 _identity 已删）——raw_row 留痕里不应出现 _identity 键
+    bad_recon_rows = db.scalars(select(SysImportError.raw_row).where(
+        SysImportError.batch_id == batch.id,
+        SysImportError.error_type == "bad_reconciliation_amount")).all()
+    assert bad_recon_rows
+    assert all("_identity" not in (row or {}) for row in bad_recon_rows)
 
 
 def test_transform_tax_trio_collected_from_invalid_line_rows(tmp_path):

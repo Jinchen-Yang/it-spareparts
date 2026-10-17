@@ -157,7 +157,7 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
             res.errors.append(ErrorRec(
                 row_no, "bad_reconciliation_amount",
                 f"{_RECON_FIELD_LABELS[field_name]}{exc}（该单此列置空，不阻断导入）",
-                {field_name: str(g(field_name))}, identity={"_doomed": True}))
+                {field_name: str(g(field_name))}))
             if field_name not in slot:
                 slot[field_name] = None   # 首个非空值是坏值 → 锁定 NULL
             continue

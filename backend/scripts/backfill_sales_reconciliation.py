@@ -26,12 +26,20 @@ file_type=sales、status=success/superseded）的归档原件逐个回放，补�
 * 默认 dry-run：只读事务，输出 JSON 报告与计划 manifest sha256；
 * ``--execute`` 必须同时给 ``--operator``（在册有效 sys_user）与
   ``--confirm-manifest-sha256``（dry-run 指纹）；执行前在锁内重算计划，指纹
-  不一致拒绝执行；
+  不一致拒绝执行；锁内每文件再按同一口径的单文件指纹复核，变化的文件零写入
+  记 ``plan_changed_since_dry_run`` 失败（其余文件继续，最终 status=partial）；
 * PostgreSQL 会话级 advisory lock 防并发回填：锁绑定**专用连接**取/放
   （ORM Session 事务边界会归还连接，锁绝不能记在 Session 连接上），try 模式
   获取——另一实例在跑时立即以 ``backfill_already_running`` 拒绝，不阻塞等待；
-* 单文件单事务：部分失败只记入报告，不影响其他文件；每文件落 SysAuditLog
-  审计（operator + 实际计数 + manifest 指纹）；
+* 每文件事务开头取**文件级 advisory xact lock**（键由会话级锁命名空间
+  +batch_id 派生，兜住专用锁连接在提交前瞬间丢失的 TOCTOU 窗口，取不到即
+  ``backfill_file_lock_busy`` 中止）并重新校验操作员（FOR SHARE 行锁只保
+  当前事务，中途停用 → ``operator_not_active`` 中止）；
+* 单文件单事务：部分失败只记入报告（files_failed>0 → status=partial、CLI
+  退出码 3），不影响其他文件；坏档（archive_missing / archive_hash_mismatch /
+  parse_failed / unexpected_file_type）跳过不执行（保持计划状态、files_skipped
+  计数、审计 action=skip，不触发 partial）；每文件落 SysAuditLog 审计
+  （operator + 实际计数 + manifest 指纹）；
 * 只连接环境变量 ``DATABASE_URL`` 指定的库（不设则拒绝运行，绝不隐式连默认库）。
 
 用法
@@ -116,7 +124,13 @@ def _money_text(value: Decimal | None) -> str | None:
 
 
 def _active_operator(db: Session, operator: str) -> bool:
-    # FOR SHARE：授权检查与写事务之间账号不可被停用（同 remediation 脚本）。
+    """校验操作员在册且启用；FOR SHARE 锁住该行直至**当前事务**结束。
+
+    行锁不跨事务（提交/回滚即释放）：execute 在整次执行前校验一次，并在
+    **每个文件事务开头**重新校验（见 run_backfill 执行循环）——保证「校验通过
+    → 该文件提交」之间账号无法被停用；前一个文件提交后到下一个文件校验之间
+    的窗口由下一次校验兜住（中途停用 → operator_not_active 中止整个执行）。
+    """
     return db.scalar(text(
         "SELECT 1 FROM sys_user "
         "WHERE username = :operator AND is_active IS TRUE "
@@ -126,6 +140,47 @@ def _active_operator(db: Session, operator: str) -> bool:
 
 def _lock_key() -> Any:
     return func.hashtextextended(_LOCK_KEY_SEED, 0)
+
+
+def _file_lock_key(batch_id: int) -> Any:
+    """文件级 xact 锁键：会话级锁同命名空间 + ":file:" + batch_id 派生。
+
+    hashtextextended 的输出与会话级键、其他批次的文件键互不相同（64 位哈希，
+    碰撞概率可忽略）；同一命名空间派生让两类键的归属可从键名追溯。
+    """
+    return func.hashtextextended(f"{_LOCK_KEY_SEED}:file:{batch_id}", 0)
+
+
+def _acquire_file_xact_lock(db: Session, batch_id: int) -> None:
+    """文件事务级互斥（TOCTOU 兜底）：会话级锁绑定专用连接，极端情况下该连接
+    可在 ``_assert_lock_held`` 与 ``commit`` 之间断开——彼时另一份回填能取到
+    会话级锁、并发处理**同一个文件**。每文件事务开头取本锁（xact 版随提交/
+    回滚自动释放，无需显式放锁），并发实例在同一文件上的事务便无法重叠。
+
+    取不到 → ``backfill_file_lock_busy`` **中止整个执行**（而非跳过该文件）：
+    这不是单文件的数据问题，而是互斥前提被破坏（疑似存在并发实例），继续跑
+    只会扩大交错写入面；已提交文件不受影响，重跑幂等。
+    """
+    acquired = db.execute(
+        select(func.pg_try_advisory_xact_lock(_file_lock_key(batch_id)))).scalar_one()
+    if acquired is not True:
+        raise BackfillError(
+            "backfill_file_lock_busy",
+            f"batch_id={batch_id} 的文件级 advisory xact lock 被其他会话持有"
+            "（存在并发回填同一文件，或会话级互斥已被破坏）：已回滚当前文件并中止"
+            "整个执行；已提交的文件不受影响，排查并发实例后重跑（幂等）")
+
+
+# 执行循环里「中止整个执行」的错误码（其余单文件错误只记 execute_failed）：
+# 丢锁 / 文件锁被占 / 操作员失效都不是单文件数据问题，而是执行前提被破坏。
+_ABORT_ERROR_CODES = frozenset({
+    "backfill_lock_lost", "backfill_file_lock_busy", "operator_not_active",
+})
+# 坏档计划状态：execute 时跳过——保持计划状态、零写入、files_skipped 计数、
+# 审计 action=skip；dry-run 报告已如实预告，不触发 partial。
+_SKIPPED_PLAN_STATUSES = frozenset({
+    "archive_missing", "archive_hash_mismatch", "unexpected_file_type", "parse_failed",
+})
 
 
 class _BackfillLock:
@@ -432,22 +487,28 @@ def _jsonable_value(value: Any) -> Any:
     return value
 
 
+def _manifest_entry(plan: dict[str, Any]) -> dict[str, Any]:
+    """manifest 的单文件条目：dry-run 整体指纹与锁内逐文件复核共用同一口径
+    （锁内 fresh 计划与核准清单条目字段逐一比对，杜绝两套口径漂移）。"""
+    return {
+        "batch_id": plan["batch_id"],
+        "file_hash": plan["file_hash"],
+        "status": plan["status"],
+        "snapshots_planned": plan["snapshots_planned"],
+        "snapshots_plan_sha256": plan["snapshots_plan_sha256"],
+        "tax_fills_planned": plan["tax_fills_planned"],
+        "tax_fills_plan_sha256": plan["tax_fills_plan_sha256"],
+        "tax_conflicts_count": len(plan["tax_conflicts"]),
+        "tax_conflicts_sha256": plan["tax_conflicts_sha256"],
+        "tax_unresolved": plan["tax_unresolved"],
+    }
+
+
 def _manifest(batches: list[SysImportBatch], plans: list[dict[str, Any]]) -> dict[str, Any]:
     """dry-run ↔ execute 之间必须不变的计划身份（不含报告性字段与时间戳）。"""
     return {
         "batch_ids": [b.id for b in batches],
-        "files": [{
-            "batch_id": p["batch_id"],
-            "file_hash": p["file_hash"],
-            "status": p["status"],
-            "snapshots_planned": p["snapshots_planned"],
-            "snapshots_plan_sha256": p["snapshots_plan_sha256"],
-            "tax_fills_planned": p["tax_fills_planned"],
-            "tax_fills_plan_sha256": p["tax_fills_plan_sha256"],
-            "tax_conflicts_count": len(p["tax_conflicts"]),
-            "tax_conflicts_sha256": p["tax_conflicts_sha256"],
-            "tax_unresolved": p["tax_unresolved"],
-        } for p in plans],
+        "files": [_manifest_entry(p) for p in plans],
     }
 
 
@@ -554,6 +615,10 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
             update(FSalesOrder)
             .where(
                 FSalesOrder.raw_order_id == fill["raw_order_id"],
+                # 限定本批次：计划只来自 import_batch_id=本批次的订单。loader 的
+                # upsert 会把既有行迁到新批次（import_batch_id 随重导刷新），无此
+                # 谓词时并发迁移后的行会被本批次原件的值误写。
+                FSalesOrder.import_batch_id == batch.id,
                 getattr(FSalesOrder, column).is_(None),
             )
             .values({column: fill["value"]})
@@ -586,6 +651,29 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
     }
 
 
+def _record_skip_audit(db: Session, batch: SysImportBatch, plan: dict[str, Any],
+                       operator: str, manifest_sha256: str) -> None:
+    """坏档跳过的审计留痕（与执行的审计同表同 entity_type，action=skip）：
+    零写入也记一条——报告 / 审计 / 库内三者可互相对上「这批为什么没回填」。"""
+    db.add(SysAuditLog(
+        entity_type="sales_reconciliation_backfill",
+        entity_id=batch.id,
+        action="skip",
+        before_json=None,
+        after_json={
+            "status": plan["status"],
+            "snapshots_planned": 0,
+            "snapshots_inserted": 0,
+            "tax_fills_planned": 0,
+            "tax_columns_filled": 0,
+            "tax_unresolved": plan["tax_unresolved"],
+        },
+        reason=f"D-40/D-41 回填跳过坏档（status={plan['status']}，"
+               f"manifest_sha256={manifest_sha256}）",
+        operated_by=operator,
+    ))
+
+
 def run_backfill(
     db: Session,
     *,
@@ -616,24 +704,62 @@ def run_backfill(
                     "--confirm-manifest-sha256 必须精确等于当前库状态的 dry-run 指纹"
                     "（库或归档在 dry-run 之后发生了变化，请重新 dry-run 核对）")
             db.rollback()   # 计划事务结束；逐文件重开事务
+            # 核准清单按文件留底：锁内每文件重算后逐文件比对（同一口径的
+            # _manifest_entry），不一致 → 该文件零写入记失败、其余文件继续。
+            approved = {p["batch_id"]: _manifest_entry(p) for p in plans}
             results: list[dict[str, Any]] = []
-            for batch, plan in zip(batches, plans, strict=True):
+            for batch in batches:
                 try:
-                    # 锁内每文件重算计划：与 manifest 校验共用同一确定性口径
+                    # 文件事务从此条语句开始（上一文件 commit/rollback 后连接已
+                    # 归还池）：先取文件级 xact 锁、重验操作员，再重算计划比对。
+                    _acquire_file_xact_lock(db, batch.id)
+                    if not _active_operator(db, operator):
+                        raise BackfillError(
+                            "operator_not_active",
+                            f"操作员 {operator} 在执行过程中被停用/删除：已回滚当前"
+                            f"文件（batch_id={batch.id}）并中止；已提交的文件不受影响，"
+                            "换有效账号重跑即可（幂等）")
                     fresh = _plan_file(db, batch)
-                    actual = _apply_file(db, batch, fresh, operator, manifest_sha256)
+                    entry = _manifest_entry(fresh)
+                    if entry != approved[batch.id]:
+                        changed = sorted(
+                            k for k in entry if entry[k] != approved[batch.id][k])
+                        raise BackfillError(
+                            "plan_changed_since_dry_run",
+                            f"锁内重算计划与 dry-run 核准清单不一致"
+                            f"（batch_id={batch.id}，变化字段：{changed}）：本文件零写入；"
+                            "本次执行结束后请重新 dry-run 核对并重走确认流程（幂等）")
+                    if fresh["status"] in _SKIPPED_PLAN_STATUSES:
+                        # 坏档不计执行：保持计划状态、零写入，审计 action=skip
+                        _record_skip_audit(db, batch, fresh, operator, manifest_sha256)
+                        file_status = fresh["status"]
+                        actual = {
+                            "snapshots_inserted": 0,
+                            "tax_columns_filled": 0,
+                            "tax_conflicts": len(fresh["tax_conflicts"]),
+                            "tax_unresolved": fresh["tax_unresolved"],
+                        }
+                    else:
+                        actual = _apply_file(db, batch, fresh, operator, manifest_sha256)
+                        file_status = "executed"
                     _assert_lock_held(db, lock)   # 丢锁不提交：互斥失效时绝不落盘
                     db.commit()
-                    results.append({"batch_id": batch.id, "status": "executed", **actual})
+                    results.append({"batch_id": batch.id, "status": file_status, **actual})
                 except Exception as exc:   # noqa: BLE001 —— 单文件失败不拖垮其余文件
                     db.rollback()
-                    if isinstance(exc, BackfillError) and exc.code == "backfill_lock_lost":
-                        raise   # 丢锁：当前文件已回滚，中止整个执行（不再继续后续文件）
-                    results.append({
+                    if isinstance(exc, BackfillError) and exc.code in _ABORT_ERROR_CODES:
+                        raise   # 中止码：当前文件已回滚，不再继续后续文件
+                    failed: dict[str, Any] = {
                         "batch_id": batch.id, "status": "execute_failed",
-                        "error": str(exc)[:300]})
+                        "error": str(exc)[:300]}
+                    if isinstance(exc, BackfillError):
+                        failed["code"] = exc.code
+                    results.append(failed)
+            files_failed = sum(1 for r in results if r["status"] == "execute_failed")
             report = {
-                "status": "applied",
+                # files_failed>0 → partial（CLI 退出码 3）：有文件没落成，不能报
+                # applied；坏档跳过与空范围（0 个批次）不算失败，仍为 applied。
+                "status": "partial" if files_failed else "applied",
                 "dry_run": False,
                 "operator": operator,
                 "manifest_sha256": manifest_sha256,
@@ -641,7 +767,9 @@ def run_backfill(
                 "files": results,
                 "totals": {
                     "files_executed": sum(1 for r in results if r["status"] == "executed"),
-                    "files_failed": sum(1 for r in results if r["status"] == "execute_failed"),
+                    "files_skipped": sum(1 for r in results
+                                         if r["status"] in _SKIPPED_PLAN_STATUSES),
+                    "files_failed": files_failed,
                     "snapshots_inserted": sum(r.get("snapshots_inserted", 0) for r in results),
                     "tax_columns_filled": sum(r.get("tax_columns_filled", 0) for r in results),
                     "tax_conflicts_total": sum(r.get("tax_conflicts", 0) for r in results),
@@ -713,9 +841,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "failed", "dry_run": execute,
                           "code": exc.code, "message": exc.message},
                          ensure_ascii=False))
-        if exc.code == "backfill_lock_lost":
-            print("backfill aborted: lock lost; current file rolled back, "
-                  "earlier files stay committed; rerun is idempotent", file=sys.stderr)
+        if exc.code in _ABORT_ERROR_CODES:
+            # 中止码可能发生在部分文件已提交之后：已提交的保留（幂等可续跑）
+            print(f"backfill aborted ({exc.code}): current file rolled back; earlier "
+                  "committed files (if any) stay; rerun is idempotent", file=sys.stderr)
         else:
             print("backfill failed before any write; nothing committed", file=sys.stderr)
         return 2
@@ -726,6 +855,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"backfill internal error: {exc!r}", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if result.get("dry_run") is False and result.get("status") == "partial":
+        # 部分成功（MUST 口径）：3 与 0/2 区分——0=applied、2=拒绝/中止、3=partial
+        print("backfill partially applied (exit 3): inspect files[].error / files[].code, "
+              "fix the causes, then rerun the same dry-run -> confirm -> execute flow "
+              "(idempotent; already-committed files add zero rows on rerun)",
+              file=sys.stderr)
+        return 3
     return 0
 
 
