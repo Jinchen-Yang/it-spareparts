@@ -1,17 +1,20 @@
 """回填脚本 scripts/backfill_sales_reconciliation（D-40/D-41）契约：只读 dry-run、
-execute 双确认护栏、幂等重跑、坏档隔离、税列冲突不覆盖、批次口径。
+execute 双确认护栏、幂等重跑、坏档隔离、税列冲突不覆盖、批次口径、advisory
+lock 连接绑定（锁不随事务边界滞留连接池）。
 
 xlsx 构造复用 test_sales_reconciliation_import 的 helpers（同包跨测试模块导入
 是该仓既有惯例，见 test_audit_trail.py）。
 """
 import hashlib
 import json
+import threading
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, event, func, select, update
 
+from app.db import SessionLocal
 from app.etl import pipeline
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysRawFile, SysUser
@@ -179,6 +182,165 @@ def test_execute_sha_mismatch_refused_without_writes(db, tmp_path):
     assert ei.value.code == "manifest_confirmation_mismatch"
     assert _snap_count(db) == 0
     assert _order(db).tax_amount is None
+
+
+# ---------- advisory lock：连接绑定与并发拒绝（CI 卡死回归） ----------
+
+def _lock_is_free(probe) -> bool:
+    """用连接探测回填锁是否空闲：拿到即放，返回能否拿到。
+
+    probe 必须是一条在回填开始前就检出、并全程持在池外的连接——从池内探测
+    可能恰好检出滞留锁的持有者（同一会话重复取同一把锁会成功），测不出滞留。
+    """
+    got = probe.execute(select(func.pg_try_advisory_lock(bs._lock_key()))).scalar_one()
+    if got:
+        probe.execute(select(func.pg_advisory_unlock(bs._lock_key())))
+    return got is True
+
+
+def test_execute_releases_lock_despite_pool_connection_rotation(db, tmp_path):
+    """回归（CI 卡死根因）：池内多条连接轮换时，execute 全程结束后锁必须已释放。
+
+    旧实现把会话级锁记在 ORM Session 的连接上，commit/rollback 归还连接后，
+    解锁可能落在另一条连接上：解锁失效、锁随池内空闲连接滞留永不释放，之后
+    任何取同一把锁的语句永久阻塞。预热四条空闲连接（QueuePool FIFO）：探测
+    连接钉走一条、专用锁连接再占一条，Session 的「计划事务 → 单文件事务 →
+    收尾」仍轮换两条连接；若退化为把锁记在 Session 连接上（旧实现），计划
+    事务与解锁事务必然落在不同连接（池内三条空闲、三次检出），解锁失效→
+    探测连接（全程持在池外，绝不可能是锁持有者）取不到锁而变红。
+    """
+    _import_one(db, tmp_path, "good.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+
+    engine = db.get_bind()
+    warm = [engine.connect() for _ in range(4)]   # 同时检出四条再还回 → 池内四条空闲
+    for conn in warm:
+        conn.exec_driver_sql("SELECT 1")
+    for conn in warm:
+        conn.close()
+    probe = engine.connect()                      # 池外钉住：回填全程拿不到它
+    seen: set[int] = set()
+
+    def _record_checkout(dbapi_conn, _record, _proxy) -> None:
+        seen.add(id(dbapi_conn))
+
+    try:
+        event.listen(engine.pool, "checkout", _record_checkout)
+        dry = bs.run_backfill(db)
+        seen.clear()                              # 只统计 execute 期间的连接检出
+        applied = bs.run_backfill(db, execute=True, operator=operator,
+                                  confirm_manifest_sha256=dry["manifest_sha256"])
+
+        assert applied["status"] == "applied"
+        assert applied["totals"]["files_executed"] == 1
+        assert _snap_count(db) == 1
+        # 前提锁死：execute 期间至少 3 条不同底层连接被检出（专用锁连接 +
+        # Session 跨事务边界轮换的 ≥2 条）。池策略（如改 LIFO）或池容量变化
+        # 让轮换消失时，这里先红——而不是回归覆盖静默失效、缺陷重新溜进来。
+        assert len(seen) >= 3
+        assert _lock_is_free(probe) is True       # 执行结束后锁不滞留
+    finally:
+        event.remove(engine.pool, "checkout", _record_checkout)
+        probe.close()
+
+
+def test_execute_refused_immediately_when_lock_held_elsewhere(db, tmp_path, capsys):
+    """并发护栏：锁被另一数据库会话持有时，execute 立即失败 backfill_already_running。
+
+    线程超时是防回归的 CI 卡死保险：万一退回阻塞式取锁，本用例以失败告终而
+    不是拖死整个测试进程（daemon 线程不阻塞进程退出）。输入全部有效，拒绝的
+    唯一原因就是锁被占。
+    """
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+
+    other = db.get_bind().engine.connect()        # 另一数据库会话先持锁
+    worker: threading.Thread | None = None
+    try:
+        # pg_advisory_lock 返回 void 不可断言；try 版返回 bool（此刻锁空闲，必真）
+        assert other.execute(
+            select(func.pg_try_advisory_lock(bs._lock_key()))).scalar_one() is True
+        other.rollback()                          # 会话级锁跨事务存活，连接回到 idle
+
+        outcome: dict[str, object] = {}
+
+        def _attempt() -> None:
+            try:
+                with SessionLocal() as session:
+                    # sha 故意给错：锁拒绝先于 manifest 校验（拒绝路径不写库）；
+                    # 若退回阻塞式取锁、超时后 other 失效放锁，解除阻塞的 worker
+                    # 也会在 manifest 校验被拒——僵尸线程在任何情况下都写不了库，
+                    # 不会与后续用例的 TRUNCATE 交错扩散假失败。
+                    outcome["result"] = bs.run_backfill(
+                        session, execute=True, operator=operator,
+                        confirm_manifest_sha256="0" * 64)
+            except BaseException as exc:   # noqa: BLE001 —— 原样带回主线程断言
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=_attempt, daemon=True, name="backfill-lock-contention")
+        worker.start()
+        worker.join(timeout=15)
+        assert not worker.is_alive(), "run_backfill 阻塞在锁上（应立即 backfill_already_running）"
+        assert "result" not in outcome, f"应拒绝执行，却返回了 {outcome.get('result')!r}"
+        assert isinstance(outcome.get("error"), bs.BackfillError)
+        assert outcome["error"].code == "backfill_already_running"
+
+        assert _snap_count(db) == 0               # 拒绝发生在任何写入之前
+        assert _order(db).tax_amount is None
+        # CLI 同口径拒绝：退出码 2 + JSON 带 backfill_already_running（与其他错误码一致）
+        argv = ["--execute", "--operator", operator,
+                "--confirm-manifest-sha256", dry["manifest_sha256"]]
+        assert bs.main(argv) == 2
+        failed = json.loads(capsys.readouterr().out)
+        assert failed["code"] == "backfill_already_running"
+        # other 的锁没有被误放：同会话解锁成功（返回 true）
+        assert other.execute(
+            select(func.pg_advisory_unlock(bs._lock_key()))).scalar_one() is True
+    finally:
+        if worker is not None and worker.is_alive():
+            # 阻塞式取锁回归（worker 超时未归）：保持持锁连接**脱离池且不放锁**，
+            # worker 无害阻塞到进程退出（服务端会话随之结束、锁必然释放）。此刻
+            # invalidate 放锁反而会唤醒 worker 跑完整回填，回归代码下其解锁还可能
+            # 再次滞留锁——把单点红放大成后续用例挂死/污染。
+            other.detach()
+        else:
+            # invalidate 强制断开：无论断言在哪一步失败，服务端会话结束必然放锁，
+            # 绝不把可能持锁的连接还回池污染后续用例
+            other.invalidate()
+
+    # 锁让出后同一指纹可正常执行（并发拒绝不留残余状态）
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=dry["manifest_sha256"])
+    assert applied["status"] == "applied"
+    assert applied["totals"]["snapshots_inserted"] == 1
+
+
+def test_execute_releases_lock_after_guardrail_refusals(db, tmp_path):
+    """异常出口（operator 无效 / sha 不符）同样放锁——finally 路径不留滞留锁。"""
+    _import_one(db, tmp_path, "a.xlsx", [_row()])
+    _degrade_to_pre_pr2(db)
+    _operator(db, "disabled-op", active=False)
+    operator = _operator(db)
+    dry = bs.run_backfill(db)
+
+    probe = db.get_bind().engine.connect()
+    try:
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(db, execute=True, operator="disabled-op",
+                            confirm_manifest_sha256=dry["manifest_sha256"])
+        assert ei.value.code == "operator_not_active"
+        assert _lock_is_free(probe) is True
+
+        with pytest.raises(bs.BackfillError) as ei:
+            bs.run_backfill(db, execute=True, operator=operator,
+                            confirm_manifest_sha256="deadbeef")
+        assert ei.value.code == "manifest_confirmation_mismatch"
+        assert _lock_is_free(probe) is True
+    finally:
+        probe.close()
 
 
 # ---------- 坏档隔离 ----------

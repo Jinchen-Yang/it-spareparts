@@ -27,7 +27,9 @@ file_type=sales、status=success/superseded）的归档原件逐个回放，补�
 * ``--execute`` 必须同时给 ``--operator``（在册有效 sys_user）与
   ``--confirm-manifest-sha256``（dry-run 指纹）；执行前在锁内重算计划，指纹
   不一致拒绝执行；
-* 会话级 PostgreSQL advisory lock 防并发回填；
+* PostgreSQL 会话级 advisory lock 防并发回填：锁绑定**专用连接**取/放
+  （ORM Session 事务边界会归还连接，锁绝不能记在 Session 连接上），try 模式
+  获取——另一实例在跑时立即以 ``backfill_already_running`` 拒绝，不阻塞等待；
 * 单文件单事务：部分失败只记入报告，不影响其他文件；每文件落 SysAuditLog
   审计（operator + 实际计数 + manifest 指纹）；
 * 只连接环境变量 ``DATABASE_URL`` 指定的库（不设则拒绝运行，绝不隐式连默认库）。
@@ -61,6 +63,7 @@ from typing import Any
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.etl import mapping, pipeline
@@ -113,6 +116,55 @@ def _active_operator(db: Session, operator: str) -> bool:
 
 def _lock_key() -> Any:
     return func.hashtextextended(_LOCK_KEY_SEED, 0)
+
+
+def _acquire_backfill_lock(db: Session) -> Connection:
+    """try 模式取会话级 advisory lock，返回持有锁的**专用**连接。
+
+    锁必须与持有它的连接绑定：ORM Session 每次 commit/rollback 都把连接归还
+    连接池，之后的语句可能落在另一条连接上——把锁记在 Session 的连接上，
+    跨事务后的解锁会失效，锁随池内空闲连接滞留永不释放，此后任何取同一把
+    锁的语句永久阻塞（曾让 CI 全量测试确定性卡死）。专用连接与 Session 事务
+    互不相干，取/放永远在同一条连接上。try 模式：另一实例在跑时立即失败，
+    绝不无限等待。
+    """
+    conn = db.get_bind().engine.connect()
+    try:
+        acquired = conn.execute(
+            select(func.pg_try_advisory_lock(_lock_key()))).scalar_one()
+        if acquired is not True:
+            raise BackfillError(
+                "backfill_already_running",
+                "advisory lock 已被另一回填实例持有，拒绝并发启动"
+                "（确认没有实例在跑时，请排查持有该锁的数据库会话后重试）")
+        conn.rollback()   # 结束取锁事务（锁是会话级，跨事务存活），避免执行期间 idle in transaction
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _release_backfill_lock(lock_conn: Connection) -> None:
+    """在同一条连接上解锁、检查返回值并归还连接。
+
+    解锁失败或解锁语句本身出错 → invalidate 废弃该连接：服务端会话断开必然
+    释放会话级锁，而连接池归还时的 ROLLBACK 复位不会——绝不能把可能仍持锁
+    的连接还回池。只告警不抛异常：本函数在 finally 里调用，抛出会顶掉正文的
+    原始异常。
+    """
+    try:
+        unlocked = lock_conn.execute(
+            select(func.pg_advisory_unlock(_lock_key()))).scalar_one()
+        if unlocked is not True:
+            lock_conn.invalidate()
+            print("backfill_sales_reconciliation: pg_advisory_unlock 返回 false，"
+                  "已废弃锁连接强制释放（断开服务端会话即放锁）", file=sys.stderr)
+    except Exception as exc:   # noqa: BLE001 —— 解锁语句失败：连接已不可靠，废弃强制释放
+        lock_conn.invalidate()
+        print(f"backfill_sales_reconciliation: advisory lock 解锁失败，"
+              f"已废弃锁连接强制释放（断开服务端会话即放锁）：{exc!r}", file=sys.stderr)
+    finally:
+        lock_conn.close()
 
 
 def _iter_batches(db: Session, batch_ids: list[int] | None) -> list[SysImportBatch]:
@@ -491,9 +543,10 @@ def run_backfill(
             raise BackfillError(
                 "execution_confirmation_required",
                 "execute 必须同时提供 --operator 与 --confirm-manifest-sha256")
-        # 会话级锁：跨单文件事务存活，防两份回填并发（导入不受此锁影响——
-        # 快照 ON CONFLICT / 税列 WHERE NULL 守卫保证与导入并发也幂等安全）。
-        db.execute(select(func.pg_advisory_lock(_lock_key())))
+        # 会话级锁在专用连接上跨单文件事务存活，防两份回填并发（导入不受此
+        # 锁影响——快照 ON CONFLICT / 税列 WHERE NULL 守卫保证与导入并发也
+        # 幂等安全）。取/放必须同连接，见 _acquire_backfill_lock。
+        lock_conn = _acquire_backfill_lock(db)
         try:
             if not _active_operator(db, operator):
                 raise BackfillError("operator_not_active",
@@ -537,7 +590,8 @@ def run_backfill(
             }
             return report
         finally:
-            db.execute(select(func.pg_advisory_unlock(_lock_key())))
+            # 先放锁再收尾 Session：即使 Session 收尾出错，锁也不滞留
+            _release_backfill_lock(lock_conn)
             db.rollback()
     # dry-run：只读事务，重算同一计划（先 rollback 保证从事务起点设置只读——
     # 若会话已有打开的事务，SET TRANSACTION READ ONLY 会报错）
