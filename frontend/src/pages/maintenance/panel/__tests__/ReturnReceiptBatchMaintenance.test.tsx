@@ -1,5 +1,8 @@
+import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+
+afterEach(cleanupAntd);
 
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
@@ -153,7 +156,6 @@ describe("editRowError / buildEditDiff（纯函数）", () => {
 
 describe("ReturnReceiptBatchMaintenance 批量修改", () => {
   beforeEach(() => { mocks.update.mockReset(); mocks.voidReceipt.mockReset(); });
-  afterEach(() => cleanup());
 
   it("两行各自改动带各自 version 和共同 reason；未改行不发", async () => {
     mocks.update.mockResolvedValue({ data: r1 });
@@ -311,15 +313,13 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     fireEvent.click(screen.getByRole("button", { name: "修改 2 条" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
     unmount(); // 第一行在途时项目已切换
-    await first.resolve({ data: r1 });
-    await new Promise((r) => setTimeout(r, 20));
+    await act(async () => { first.resolve({ data: r1 }); });
     expect(mocks.update).toHaveBeenCalledTimes(1); // r2 不再发
   });
 });
 
 describe("ReturnReceiptBatchMaintenance 批量作废", () => {
   beforeEach(() => { mocks.update.mockReset(); mocks.voidReceipt.mockReset(); });
-  afterEach(() => cleanup());
 
   it("预览列表逐行版本 + 共同原因；逐条 void 调用", async () => {
     mocks.voidReceipt.mockResolvedValue({ data: r1 });
