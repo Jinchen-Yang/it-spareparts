@@ -44,9 +44,10 @@ from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABE
                                              _category_match, _effective_rate, _f,
                                              _filters_echo, _group_dim,
                                              _is_int_str, _line_amount_exprs,
-                                             _norm_categories, _order_amount_exprs,
-                                             _round2, _validate_common,
-                                             line_amounts_reference,
+                                             _nominal_side_expr, _norm_categories,
+                                             _order_amount_exprs, _round2,
+                                             _validate_common, line_amounts_reference,
+                                             nominal_side_reference,
                                              order_amounts_reference)
 from tests.test_purchase_analytics_api import _batch, _customer, _line, _part, _po, _sales
 
@@ -117,6 +118,13 @@ def _ref_options(db: Session, user_ctx=None) -> dict:
     return data
 
 
+def _share(nominal, total) -> float | None:
+    """名义占比参照（与服务端 _share 同语义）：分母 0/NULL → None，绝不把空当 0。"""
+    if not total or nominal is None:
+        return None
+    return round(float(Decimal(nominal) / Decimal(total)), 4)
+
+
 def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
                  date_to: date | None = None, source_type: list[str] | None = None,
                  purchaser: list[str] | None = None, salesperson: list[str] | None = None,
@@ -145,23 +153,25 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     if line_mode:
         ex_e, inc_e = _line_amount_exprs(po, pl)
         paid_e = pl.line_amount
-        nominal = func.coalesce(po.tax_rate, 0) == 0
+        side = _nominal_side_expr(po)
         measures = [
             func.count(func.distinct(po.id)).label("orders"),
             func.count(pl.id).label("lines"),
             func.sum(inc_e).label("amount_inc"),
             func.sum(ex_e).label("amount_ex"),
             func.sum(paid_e).label("amount_paid"),
-            func.sum(case((nominal, inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "inc", inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "ex", ex_e), else_=0)).label("nominal_ex"),
         ]
     else:
-        ex_e, inc_e, paid_e, nominal = _order_amount_exprs(po)
+        ex_e, inc_e, paid_e, side = _order_amount_exprs(po)
         measures = [
             func.count(func.distinct(po.id)).label("orders"),
             func.sum(inc_e).label("amount_inc"),
             func.sum(ex_e).label("amount_ex"),
             func.sum(paid_e).label("amount_paid"),
-            func.sum(case((nominal, inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "inc", inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "ex", ex_e), else_=0)).label("nominal_ex"),
         ]
 
     def _apply_from(stmt):
@@ -221,6 +231,9 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "amount_inc": _f(_round2(r.amount_inc)),
             "amount_ex": _f(_round2(r.amount_ex)),
             "amount_paid": _f(_round2(r.amount_paid)),
+            # 名义占比与 KPI 同分子分母口径（金臣 2026-10-18 名义侧裁定）
+            "nominal_inc_share": _share(r.nominal_inc, r.amount_inc),
+            "nominal_ex_share": _share(r.nominal_ex, r.amount_ex),
         }
         if group_by == "customer":
             # 客户名只放登记过的脱敏键（customer），label 不承载客户名
@@ -228,9 +241,6 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             item["customer"] = customer_names.get(int(r.key)) if _is_int_str(r.key) else None
         groups.append(item)
 
-    share = None
-    if kpi_row.amount_inc:
-        share = round(float(Decimal(kpi_row.nominal_inc) / Decimal(kpi_row.amount_inc)), 4)
     return {
         "basis_mode": "line" if line_mode else "order",
         "filters_echo": _filters_echo(
@@ -244,7 +254,8 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "amount_inc": _f(_round2(kpi_row.amount_inc)),
             "amount_ex": _f(_round2(kpi_row.amount_ex)),
             "amount_paid": _f(_round2(kpi_row.amount_paid)),
-            "nominal_inc_share": share,
+            "nominal_inc_share": _share(kpi_row.nominal_inc, kpi_row.amount_inc),
+            "nominal_ex_share": _share(kpi_row.nominal_ex, kpi_row.amount_ex),
         },
         "groups": groups,
         "groups_ranking_restricted": groups_ranking_restricted,
@@ -275,6 +286,7 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         raise purchase_analytics.FilterValidationError(f"不支持的分组维度：{group_by}")
     page = max(1, page)
     page_size = max(1, min(page_size, purchase_analytics.MAX_PAGE_SIZE))
+    requested_sort = sort
     ranking_restricted = sort != "order_date" and security.is_field_hidden(
         user_ctx, "amount_paid")
     if ranking_restricted:
@@ -299,8 +311,9 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if line_mode:
         ex_e, inc_e = _line_amount_exprs(po, pl)
         paid_e = pl.line_amount
+        side = _nominal_side_expr(po)
         base = (
-            select(*po_cols, func.count(pl.id).label("lines"),
+            select(*po_cols, side.label("nominal_side"), func.count(pl.id).label("lines"),
                    func.sum(inc_e).label("amount_inc"), func.sum(ex_e).label("amount_ex"),
                    func.sum(paid_e).label("amount_paid"))
             .select_from(po)
@@ -313,9 +326,9 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
                       link.c.salesperson, link.c.customer_id, DimCustomer.name_normalized)
         )
     else:
-        ex_e, inc_e, paid_e, _nom = _order_amount_exprs(po)
+        ex_e, inc_e, paid_e, side = _order_amount_exprs(po)
         base = (
-            select(*po_cols, func.count(pl.id).label("lines"),
+            select(*po_cols, side.label("nominal_side"), func.count(pl.id).label("lines"),
                    inc_e.label("amount_inc"), ex_e.label("amount_ex"), paid_e.label("amount_paid"))
             .select_from(po)
             .outerjoin(pl, _batch_line_join(po, pl))
@@ -349,13 +362,14 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         "source_type": r.source_type_raw, "purchaser": r.purchaser,
         "salesperson": r.salesperson, "customer_id": r.customer_id,
         "customer": r.customer_name, "lines": r.lines,
+        "nominal_side": r.nominal_side,
         "amount_inc": _f(_round2(r.amount_inc)),
         "amount_ex": _f(_round2(r.amount_ex)),
         "amount_paid": _f(_round2(r.amount_paid)),
     } for r in db.execute(stmt)]
     return {
         "total": total, "page": page, "page_size": page_size,
-        "sort": sort, "order": order,
+        "sort": requested_sort, "order": order,
         "effective_sort": sort, "ranking_restricted": ranking_restricted,
         "basis_mode": "line" if line_mode else "order",
         "filters_echo": _filters_echo(
@@ -431,6 +445,7 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
         "is_tax_inclusive": po.is_tax_inclusive,
         "tax_rate": _f(po.tax_rate),
         "tax_rate_effective": _f(_effective_rate(po.tax_rate)),
+        "nominal_side": nominal_side_reference(po.tax_rate, po.is_tax_inclusive),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
         "linked_sales_order_no": po.linked_sales_order_no,
@@ -457,7 +472,7 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
 
 @pytest.fixture()
 def eq(db):
-    """对拍数据集（返回命名空间）。已生效采购单共 10 张（2026-03～05），覆盖：
+    """对拍数据集（返回命名空间）。已生效采购单共 11 张（2026-03～05），覆盖：
 
     - 残留形态：poA（同行号新旧批次 + 旧批次多行号 + **3 批次混合**：ob2 行也不
       计入）、poC（同行号残留）、poD（单头批次无任何行，计 0 行）、poE（已取消）
@@ -470,6 +485,9 @@ def eq(db):
       poK.linked='' —— 等值关联 ''='' 命中，页内补值（IN 列表）与分页前关联/
       旧外连接必须同真值（守护 is not None 过滤 + 空串键去重方向）
     - 分类形态：' 电器件 '（btrim 同真值）、''（未分类哨兵）、None（未分类）
+    - 名义侧（2026-10-18 裁定）：poL 含税单未标税率 → nominal_side="ex"
+      （nominal_ex 分子非零）；poB/poJ 未标税率不含税单 → "inc"；poF 税率 0 与
+      NULL 同义 → "inc"；其余已标税率 → None
     """
     nb, ob1, ob2 = _batch(db, "new"), _batch(db, "old1"), _batch(db, "old2")
     p1 = _part(db, "PN-DQ", "电器件")
@@ -560,6 +578,11 @@ def eq(db):
               linked="", is_inc=True, rate=D("0.13"), amount_ex=D("700"),
               amount_inc=D("791"))
     _line(db, "PK-L1", pok, p3, nb, line_no=1, amount=D("791"))
+    # 名义侧裁定（2026-10-18）：含税单未标税率 → 名义侧 = 不含税（"ex"），
+    # nominal_ex 分子因此非零（此前唯一缺口：夹具没有 is_inc=True 且未标税率的单）
+    pol = _po(db, "PL", nb, on=date(2026, 5, 25), source_type="批量采购", purchaser="采购员甲",
+              is_inc=True, rate=None, amount_ex=None, amount_inc=D("565"))
+    _line(db, "PL-L1", pol, p3, nb, line_no=1, amount=D("565"))
 
     db.commit()
 
@@ -570,8 +593,9 @@ def eq(db):
     d.db, d.nb, d.ob1, d.ob2 = db, nb, ob1, ob2
     d.c1, d.c2, d.c3, d.c4 = c1, c2, c3, c4
     d.poa, d.pob, d.poc, d.pod, d.poe = poa, pob, poc, pod, poe
-    d.pof, d.pog, d.poh, d.poi, d.poj, d.pok = pof, pog, poh, poi, poj, pok
-    d.active_pos = [poa, pob, poc, pod, pof, pog, poh, poi, poj, pok]
+    d.pof, d.pog, d.poh, d.poi, d.poj, d.pok, d.pol = (
+        pof, pog, poh, poi, poj, pok, pol)
+    d.active_pos = [poa, pob, poc, pod, pof, pog, poh, poi, poj, pok, pol]
     d.all_pos = d.active_pos + [poe]
     return d
 
