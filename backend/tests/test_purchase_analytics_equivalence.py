@@ -18,7 +18,8 @@ orders 全年区间拖到 ≈2.7s（金臣验收线：一整年区间 >2s 即缺
 对拍完整 JSON 输出相等；另用 EXPLAIN（不 ANALYZE，先例 test_maintenance_project_
 foundation）守护计划形态防回退。
 
-参考函数与新版共用模块内未改动的表达式/条件构件（_order_amount_exprs、_base_where、
+客户候选参照独立按规格读表并在 Python 去重、匹配与分页，不复用实现的新构件。
+其余参考函数与新版共用模块内未改动的表达式/条件构件（_order_amount_exprs、_base_where、
 _group_dim 等），差异只在查询装配——这正是要证明等价的部分。
 """
 import copy
@@ -56,7 +57,7 @@ D = Decimal
 # =======================================================================
 # 参考实现：a636dbf 的旧查询装配（逐字拷贝，仅函数名加 _ref_ 前缀、内部
 # _sales_link 改调 _ref_sales_link）。不要按新思路"改进"这里的任何一行——
-# 它是等价性对拍的基准。
+# 它是等价性对拍的基准；仅 options 客户候选按后续规格独立补齐。
 # =======================================================================
 
 
@@ -75,7 +76,9 @@ def _ref_sales_link():
     ).subquery()
 
 
-def _ref_options(db: Session, user_ctx=None) -> dict:
+def _ref_options(db: Session, user_ctx=None, *, customer_q="",
+                 customer_page=1, customer_page_size=200,
+                 selected_customer_ids=None) -> dict:
     """筛选取值（全部来自已生效数据）：类型原值 / 采购员 / 关联销售人员 / 分类（含未分类）。"""
     po = FPurchaseOrder
     active = po.data_status == config.ACTIVE_STATUS
@@ -105,7 +108,30 @@ def _ref_options(db: Session, user_ctx=None) -> dict:
     categories = sorted(c for c in cat_rows if c != UNCATEGORIZED_LABEL)
     if UNCATEGORIZED_LABEL in cat_rows:
         categories.append(UNCATEGORIZED_LABEL)
+    # 客户参照按规格独立计算：简单读表，Python 取最小销售行、去重和分页；名称排序沿用数据库 collation。
+    customers, selected_customers, customers_has_more = [], [], False
+    if user_ctx is None or not security.is_field_hidden(user_ctx, "customer_id"):
+        referenced = set(db.scalars(select(po.linked_sales_order_no).where(active)))
+        first_sales = {}
+        for sale in db.scalars(select(FSalesOrder).order_by(FSalesOrder.id)):
+            first_sales.setdefault(sale.order_no, sale.customer_id)
+        ids = {cid for no, cid in first_sales.items() if no in referenced}
+        candidates = [(c.name_raw, c.id) for c in db.scalars(
+            select(DimCustomer).order_by(DimCustomer.name_raw, DimCustomer.id))
+            if c.id in ids]
+        selected_customers = [
+            {"customer_id": cid, "customer": name} for name, cid in candidates
+            if cid in (selected_customer_ids or [])]
+        matching = [(name, cid) for name, cid in candidates
+                    if customer_q.strip().lower() in name.lower()]
+        start = (customer_page - 1) * customer_page_size
+        customers_has_more = len(matching) > start + customer_page_size
+        customers = [{"customer_id": cid, "customer": name}
+                     for name, cid in matching[start:start + customer_page_size]]
     data = {
+        "customers": customers,
+        "customers_has_more": customers_has_more,
+        "selected_customers": selected_customers,
         "source_types": source_types,
         "purchasers": purchasers,
         "salespersons": salespersons,
@@ -847,7 +873,7 @@ def _capture_selects(fn):
     captured = []
 
     def _hook(conn, cursor, statement, parameters, context, executemany):
-        if statement.lstrip().upper().startswith("SELECT"):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             captured.append((statement, parameters))
 
     event.listen(engine, "before_cursor_execute", _hook)
@@ -959,6 +985,7 @@ def test_options_plan_salespersons_input_bounded_by_purchase_orders(db, eq):
     必须出现与 f_purchase_order 的 Join（旧形态是对 f_sales_order 裸全表
     [Seq] Scan + Sort 去重，去重输入不含任何 Join）。语句文本断言
     ``_BOUNDED_DEDUP_RE`` 兜底（编译期结构，不随计划形状漂移）。"""
+    # 此守护现在也覆盖客户候选共享的有界去重。
     _analyze_facts(db)
     captured = _capture_selects(lambda: purchase_analytics.options(db))
     stmts = [c for c in captured if "DISTINCT ON (f_sales_order.order_no)" in c[0]]
@@ -994,3 +1021,58 @@ def test_summary_plan_skips_sales_table_unless_link_participates(db, eq):
             sub = _dedup_on_order_no_subtree(plan)
             assert sub, (statement, plan)
             assert any("f_purchase_order" in l for l in sub), (statement, plan)
+
+
+def test_options_statement_count_constant_across_customer_paging(db, eq):
+    counts = set()
+    for size in (1, 50, 200):
+        for page in (1, 3):
+            for query in ("", "华"):
+                for selected in (None, [eq.c1.id], list(range(1, 201))):
+                    captured = _capture_selects(lambda: purchase_analytics.options(
+                        db, customer_page_size=size, customer_page=page,
+                        customer_q=query, selected_customer_ids=selected))
+                    counts.add(len(captured))
+                    dedup = [sql for sql, _ in captured
+                             if "DISTINCT ON (f_sales_order.order_no)" in sql]
+                    assert len(dedup) == 1
+                    assert dedup[0].count("DISTINCT ON (f_sales_order.order_no)") == 1
+    assert len(counts) == 1, counts
+
+
+def test_options_customer_equivalence(db, eq):
+    batch = _batch(db, "customer-options")
+    names = ["Alpha%_\\One", "alpha plain", "literal%", "literal_", "literal\\", "ALPHA other", "alpha fourth"]
+    added = []
+    for i, name in enumerate(names):
+        customer = _customer(db, name)
+        added.append(customer.id)
+        no = f"OPTIONS-{i}"
+        _sales(db, no, no, "候选销售", customer, batch)
+        _po(db, no, batch, on=Y, source_type="销售订单", linked=no)
+    # 同 order_no 后续行的客户不得进入候选。
+    excluded = _customer(db, "excluded duplicate-order customer")
+    _sales(db, "OPTIONS-DUP", "OPTIONS-0", "后续销售", excluded, batch)
+    db.flush()
+    cases = [{}, *[{"customer_q": q} for q in ("%", "_", "\\", "aLpHa")],
+             {"customer_q": "aLpHa", "customer_page_size": 4},  # 恰好 size
+             {"customer_q": "aLpHa", "customer_page_size": 3},  # size + 1
+             {"customer_q": "aLpHa", "customer_page_size": 3, "customer_page": 2},
+             {"customer_page_size": 1, "customer_page": 2},
+             {"customer_q": "no match", "selected_customer_ids": [added[0], eq.c1.id, 999999]}]
+    hidden = _masked_ctx()
+    hidden.permissions["data_customer"] = False
+    assert security.is_field_hidden(hidden, "customer_id")
+    for ctx in (None, hidden):
+        for params in cases:
+            actual = purchase_analytics.options(db, ctx, **params)
+            assert actual == _ref_options(db, ctx, **params), params
+            if ctx is not None:
+                assert actual["customers"] == actual["selected_customers"] == []
+                assert actual["customers_has_more"] is False
+    result = purchase_analytics.options(db, customer_q="aLpHa", customer_page_size=3)
+    assert len(result["customers"]) == 3 and result["customers_has_more"] is True
+    assert purchase_analytics.options(db, customer_q="aLpHa", customer_page_size=4)["customers_has_more"] is False
+    captured = _capture_selects(lambda: purchase_analytics.options(
+        db, hidden, customer_q="alpha", selected_customer_ids=added))
+    assert all("dim_customer" not in sql and "customer_id" not in sql for sql, _ in captured)

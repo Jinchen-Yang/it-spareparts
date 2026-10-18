@@ -38,6 +38,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import String, and_, case, func, or_, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
 from app import config, security, tax_policy
@@ -382,6 +383,40 @@ def _is_int_str(s) -> bool:
 
 # ---------------------------------------------------------------- options
 
+def _options_customer_array(query):
+    """把已限定/分页的客户行聚成稳定排序的 JSON；空集由调用方归一为 []。"""
+    rows = query.subquery()
+    value = func.json_build_object(
+        "customer_id", rows.c.id, "customer", rows.c.name_raw)
+    return select(func.json_agg(aggregate_order_by(
+        value, rows.c.name_raw, rows.c.id))).scalar_subquery()
+
+
+def _options_link_candidates(link, *, customer_visible, customer_q,
+                             customer_page, customer_page_size, selected_customer_ids):
+    """三项候选在同一语句读取共享 CTE；隐藏客户时不生成任何客户表达式。"""
+    people = (select(link.c.salesperson).distinct()
+              .where(link.c.salesperson.is_not(None), link.c.salesperson != "")
+              .subquery())
+    salesperson_array = select(func.json_agg(aggregate_order_by(
+        people.c.salesperson, people.c.salesperson))).scalar_subquery()
+    columns = [salesperson_array.label("salespersons")]
+    if customer_visible:
+        candidates = (select(DimCustomer.id, DimCustomer.name_raw)
+                      .join(link, link.c.customer_id == DimCustomer.id).distinct())
+        matching = candidates
+        if customer_q.strip():
+            matching = matching.where(DimCustomer.name_raw.icontains(
+                customer_q.strip(), autoescape=True))
+        page = (matching.order_by(DimCustomer.name_raw, DimCustomer.id)
+                .offset((customer_page - 1) * customer_page_size)
+                .limit(customer_page_size + 1))
+        selected = candidates.where(DimCustomer.id.in_(selected_customer_ids or []))
+        columns += [_options_customer_array(page).label("customers"),
+                    _options_customer_array(selected).label("selected_customers")]
+    return select(*columns)
+
+
 def options(db: Session, user_ctx=None, *, customer_q: str = "",
             customer_page: int = 1, customer_page_size: int = 200,
             selected_customer_ids: list[int] | None = None) -> dict:
@@ -404,41 +439,27 @@ def options(db: Session, user_ctx=None, *, customer_q: str = "",
     # 旧版全表 DISTINCT ON 对 11.6 万销售单外排 5.2MB ≈ 1.0s；结果集合逐字不变）
     linked_nos = select(po.linked_sales_order_no).where(
         active, po.linked_sales_order_no.is_not(None))
-    link = (
-        select(FSalesOrder.order_no.label("order_no"),
-               FSalesOrder.salesperson.label("salesperson"),
-               FSalesOrder.customer_id.label("customer_id"))
-        .where(FSalesOrder.order_no.in_(linked_nos))
-        .distinct(FSalesOrder.order_no)
-        .order_by(FSalesOrder.order_no, FSalesOrder.id)
-    ).subquery()
-    salespersons = [r for r in db.execute(
-        select(func.distinct(link.c.salesperson))
-        .where(link.c.salesperson.is_not(None), link.c.salesperson != "")
-        .order_by(link.c.salesperson)).scalars()]
-    # 客户直接查身份/名称，不执行全历史金额汇总。客户不可见时不查、不泄露数量。
-    customers = []
-    selected_customers = []
-    customers_has_more = False
-    if user_ctx is None or not security.is_field_hidden(user_ctx, "customer_id"):
-        customer_query = (select(DimCustomer.id, DimCustomer.name_raw)
-                          .join(link, link.c.customer_id == DimCustomer.id)
-                          .distinct())
-        if selected_customer_ids:
-            selected_rows = db.execute(customer_query.where(
-                DimCustomer.id.in_(selected_customer_ids))
-                .order_by(DimCustomer.name_raw, DimCustomer.id)).all()
-            selected_customers = [{"customer_id": r.id, "customer": r.name_raw}
-                                  for r in selected_rows]
-        if customer_q.strip():
-            customer_query = customer_query.where(
-                DimCustomer.name_raw.contains(customer_q.strip(), autoescape=True))
-        rows = db.execute(customer_query.order_by(DimCustomer.name_raw, DimCustomer.id)
-                          .offset((customer_page - 1) * customer_page_size)
-                          .limit(customer_page_size + 1)).all()
-        customers_has_more = len(rows) > customer_page_size
-        customers = [{"customer_id": r.id, "customer": r.name_raw}
-                     for r in rows[:customer_page_size]]
+    customer_visible = (user_ctx is None
+                        or not security.is_field_hidden(user_ctx, "customer_id"))
+    link_columns = [FSalesOrder.order_no.label("order_no"),
+                    FSalesOrder.salesperson.label("salesperson")]
+    if customer_visible:
+        link_columns.append(FSalesOrder.customer_id.label("customer_id"))
+    # 强制共享一次有界去重，避免分页和已选项分别扫描/排序关联销售单。
+    link = (select(*link_columns)
+            .where(FSalesOrder.order_no.in_(linked_nos))
+            .distinct(FSalesOrder.order_no)
+            .order_by(FSalesOrder.order_no, FSalesOrder.id)
+            .cte("options_sales_link").prefix_with("MATERIALIZED"))
+    candidates = db.execute(_options_link_candidates(
+        link, customer_visible=customer_visible, customer_q=customer_q,
+        customer_page=customer_page, customer_page_size=customer_page_size,
+        selected_customer_ids=selected_customer_ids)).one()
+    salespersons = candidates.salespersons or []
+    rows = (candidates.customers or []) if customer_visible else []
+    customers_has_more = len(rows) > customer_page_size
+    customers = rows[:customer_page_size]
+    selected_customers = (candidates.selected_customers or []) if customer_visible else []
     pl = FPurchaseLine
     dp = DimPart
     cat_rows = db.execute(
