@@ -38,14 +38,19 @@ export function groupByTitle(groupBy: string): string {
   return GROUP_BY_OPTIONS.find((o) => o.value === groupBy)?.label ?? groupBy;
 }
 
-/** 名义含税角标：未标税率（或 0 税率）单据的含税额是按 13% 推算值，不是票面金额。 */
-function NominalShareNote({ share }: { share: number | null }) {
+/** 名义占比角标（D-39 名义侧裁定，2026-10-18）：按侧分开——未标税率单据里，
+ * 非含税单的推算含税占含税合计（inc），含税单的推算不含税占不含税合计（ex）。 */
+function NominalShareNote({ side, share }: { side: "inc" | "ex"; share: number | null }) {
   if (share == null) return null;
+  const inc = side === "inc";
+  const title = inc
+    ? "未标税率（或税率为 0）的非含税采购单，其含税金额按 13% 从不含税额推算（名义），不是票面金额。"
+    : "未标税率（或税率为 0）的含税采购单，其不含税金额按 13% 从录入的含税额推算（名义）；录入的含税额本身是真实金额。";
   return (
     <span>
-      名义含税占比 {pct(share)}
-      <Tooltip title="未标税率（或税率为 0）的采购单，其含税金额按 13% 从不含税额推算（名义含税），不是票面金额。">
-        <span aria-label="名义含税说明" style={{ cursor: "help", borderBottom: "1px dotted", marginLeft: 4 }}>
+      名义{inc ? "含税" : "不含税"}占比 {pct(share)}
+      <Tooltip title={title}>
+        <span aria-label={inc ? "名义含税说明" : "名义不含税说明"} style={{ cursor: "help", borderBottom: "1px dotted", marginLeft: 4 }}>
           ?
         </span>
       </Tooltip>
@@ -66,7 +71,9 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
     ...basis.map((b) => ({
       title:
         b === "inc" ? (
-          <Tooltip title="未标税率（或 0 税率）单据的含税额按 13% 推算（名义含税）">{AMOUNT_TITLE[b]}</Tooltip>
+          <Tooltip title="未标税率（或 0 税率）的非含税单据，其含税额按 13% 推算（名义）">{AMOUNT_TITLE[b]}</Tooltip>
+        ) : b === "ex" ? (
+          <Tooltip title="未标税率（或 0 税率）的含税单据，其不含税额按 13% 推算（名义）">{AMOUNT_TITLE[b]}</Tooltip>
         ) : (
           AMOUNT_TITLE[b]
         ),
@@ -86,11 +93,15 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
           <KpiCard
             label="含税金额"
             value={fmtMoney(kpi?.amount_inc ?? null)}
-            sub={<NominalShareNote share={kpi?.nominal_inc_share ?? null} />}
+            sub={<NominalShareNote side="inc" share={kpi?.nominal_inc_share ?? null} />}
           />
         )}
         {basis.includes("ex") && (
-          <KpiCard label="不含税金额" value={fmtMoney(kpi?.amount_ex ?? null)} />
+          <KpiCard
+            label="不含税金额"
+            value={fmtMoney(kpi?.amount_ex ?? null)}
+            sub={<NominalShareNote side="ex" share={kpi?.nominal_ex_share ?? null} />}
+          />
         )}
         {basis.includes("paid") && (
           <KpiCard label="实付金额" value={fmtMoney(kpi?.amount_paid ?? null)} sub="原列「采购金额」" />

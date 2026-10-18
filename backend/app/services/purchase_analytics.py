@@ -10,6 +10,12 @@
 - 税率规则（Q6）：单头标了税率（≠0）就用该税率；没标或 0 按 13%；「是否含税」标记不
   覆盖已标税率，只决定哪一侧是原始录入值（含税单的含税额为原值，不含税 = 含税 ÷ (1+税率)，
   非含税单反之）。实付 = ``amount_inc_tax`` 原值（不按分类筛选时）。
+- 名义侧（金臣 2026-10-18 裁定，D-39 补充）：未标税率（NULL/0）时只有**按 13% 推算出来
+  的那一侧**是名义值，录入侧是真实值——不含税单 → ``nominal_side="inc"``（含税额为名义
+  推算），含税单 → ``nominal_side="ex"``（不含税额为名义推算），``is_tax_inclusive`` 非
+  true（False/NULL）一律按不含税单处理；税率已标 → ``nominal_side=None``，两侧都真实。
+  ``nominal_inc_share`` = 未标税率不含税单的推算含税额 ÷ 含税合计；
+  ``nominal_ex_share`` = 未标税率含税单的推算不含税额 ÷ 不含税合计（分母 0/NULL → null）。
 - **单头批次行**：所有行级统计（行数、分类分组、行级三口径、订单明细行）只计
   ``f_purchase_line.import_batch_id = f_purchase_order.import_batch_id`` 的行——库里 11 张
   已生效单残留旧批次明细行（D-39 补充决策 2026-10-17），全行求和会比单头多算。
@@ -67,12 +73,24 @@ def _rate_expr(po=FPurchaseOrder):
     return func.coalesce(func.nullif(po.tax_rate, 0), DEFAULT_TAX_RATE)
 
 
+def _nominal_side_expr(po=FPurchaseOrder):
+    """名义侧 SQL 表达式（金臣 2026-10-18 裁定）：未标税率（NULL/0）时推算侧才是
+    名义值——含税单（is_tax_inclusive=true）推算的是不含税侧 → "ex"；其余
+    （false/NULL，按不含税单处理）推算的是含税侧 → "inc"；税率已标 → NULL。"""
+    unmarked = func.coalesce(po.tax_rate, 0) == 0
+    return case(
+        (and_(unmarked, po.is_tax_inclusive.is_(True)), "ex"),
+        (unmarked, "inc"),
+    )
+
+
 def _order_amount_exprs(po=FPurchaseOrder):
     """单头三口径 SQL 表达式（每单先 round 到分再聚合，与 cancellation_stats 同款）。
 
-    返回 (amount_ex, amount_inc, amount_paid, nominal)。原始侧按 is_tax_inclusive
+    返回 (amount_ex, amount_inc, amount_paid, nominal_side)。原始侧按 is_tax_inclusive
     选定，另一侧按有效税率换算；权威侧为空时回退另一显式列（历史缺口，不混加口径）。
-    nominal = 未标税率（NULL/0）→ 含税侧为名义推算。
+    nominal_side = 未标税率时被推算的那一侧（"inc"/"ex"），已标税率 → NULL
+    （语义见 _nominal_side_expr；单头与行级同一规则）。
     """
     rate = _rate_expr(po)
     factor = Decimal(1) + rate
@@ -89,8 +107,7 @@ def _order_amount_exprs(po=FPurchaseOrder):
         else_=func.coalesce(inc_from_ex, src_inc),
     )
     amount_paid = po.amount_inc_tax  # 实付 = 「采购金额」原值，不换算
-    nominal = func.coalesce(po.tax_rate, 0) == 0
-    return amount_ex, amount_inc, amount_paid, nominal
+    return amount_ex, amount_inc, amount_paid, _nominal_side_expr(po)
 
 
 def _line_amount_exprs(po=FPurchaseOrder, pl=FPurchaseLine):
@@ -125,6 +142,17 @@ def order_amounts_reference(amount_ex, amount_inc, tax_rate, is_inc) \
     if is_inc is True:
         return (ex_from_inc if inc is not None else ex), (inc if inc is not None else inc_from_ex)
     return (ex if ex is not None else ex_from_inc), (inc_from_ex if ex is not None else inc)
+
+
+def nominal_side_reference(tax_rate, is_inc) -> str | None:
+    """名义侧的 Python 参照实现（与 _nominal_side_expr 逐行对拍）。
+
+    未标税率（None/0）：含税单（is_inc=True）→ "ex"（不含税是推算侧），
+    其余（False/None，按不含税单处理）→ "inc"；已标税率 → None。
+    """
+    if tax_rate is None or Decimal(str(tax_rate)) == 0:
+        return "ex" if is_inc is True else "inc"
+    return None
 
 
 def line_amounts_reference(line_amount, tax_rate, is_inc) -> tuple[Decimal | None, Decimal | None]:
@@ -285,6 +313,13 @@ def _round2(x) -> Decimal | None:
     return tax_policy.round_money(x) if x is not None else None
 
 
+def _share(nominal, total) -> float | None:
+    """名义占比 = 名义侧金额 ÷ 同侧合计；分母 0/NULL（无数据或合计为零）→ None。"""
+    if not total or nominal is None:
+        return None
+    return round(float(Decimal(nominal) / Decimal(total)), 4)
+
+
 def _filters_echo(*, date_from, date_to, source_type, purchaser, salesperson,
                   customer_id, category, group_by=None, group_key=None) -> dict:
     return {
@@ -403,23 +438,25 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     if line_mode:
         ex_e, inc_e = _line_amount_exprs(po, pl)
         paid_e = pl.line_amount
-        nominal = func.coalesce(po.tax_rate, 0) == 0
+        side = _nominal_side_expr(po)
         measures = [
             func.count(func.distinct(po.id)).label("orders"),
             func.count(pl.id).label("lines"),
             func.sum(inc_e).label("amount_inc"),
             func.sum(ex_e).label("amount_ex"),
             func.sum(paid_e).label("amount_paid"),
-            func.sum(case((nominal, inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "inc", inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "ex", ex_e), else_=0)).label("nominal_ex"),
         ]
     else:
-        ex_e, inc_e, paid_e, nominal = _order_amount_exprs(po)
+        ex_e, inc_e, paid_e, side = _order_amount_exprs(po)
         measures = [
             func.count(func.distinct(po.id)).label("orders"),
             func.sum(inc_e).label("amount_inc"),
             func.sum(ex_e).label("amount_ex"),
             func.sum(paid_e).label("amount_paid"),
-            func.sum(case((nominal, inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "inc", inc_e), else_=0)).label("nominal_inc"),
+            func.sum(case((side == "ex", ex_e), else_=0)).label("nominal_ex"),
         ]
 
     def _apply_from(stmt, link_variant):
@@ -483,6 +520,9 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "amount_inc": _f(_round2(r.amount_inc)),
             "amount_ex": _f(_round2(r.amount_ex)),
             "amount_paid": _f(_round2(r.amount_paid)),
+            # 名义占比与 KPI 同分子分母口径（金臣 2026-10-18 裁定）
+            "nominal_inc_share": _share(r.nominal_inc, r.amount_inc),
+            "nominal_ex_share": _share(r.nominal_ex, r.amount_ex),
         }
         if group_by == "customer":
             # 客户名只放登记过的脱敏键（customer），label 不承载客户名
@@ -490,9 +530,6 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             item["customer"] = customer_names.get(int(r.key)) if _is_int_str(r.key) else None
         groups.append(item)
 
-    share = None
-    if kpi_row.amount_inc:
-        share = round(float(Decimal(kpi_row.nominal_inc) / Decimal(kpi_row.amount_inc)), 4)
     return {
         "basis_mode": "line" if line_mode else "order",
         "filters_echo": _filters_echo(
@@ -506,7 +543,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "amount_inc": _f(_round2(kpi_row.amount_inc)),
             "amount_ex": _f(_round2(kpi_row.amount_ex)),
             "amount_paid": _f(_round2(kpi_row.amount_paid)),
-            "nominal_inc_share": share,
+            "nominal_inc_share": _share(kpi_row.nominal_inc, kpi_row.amount_inc),
+            "nominal_ex_share": _share(kpi_row.nominal_ex, kpi_row.amount_ex),
         },
         "groups": groups,
         "groups_ranking_restricted": groups_ranking_restricted,
@@ -592,8 +630,9 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if line_mode:
         ex_e, inc_e = _line_amount_exprs(po, pl)
         paid_e = pl.line_amount
+        side = _nominal_side_expr(po)
         base = _link_join(
-            select(*po_cols, func.count(pl.id).label("lines"),
+            select(*po_cols, side.label("nominal_side"), func.count(pl.id).label("lines"),
                    func.sum(inc_e).label("amount_inc"), func.sum(ex_e).label("amount_ex"),
                    func.sum(paid_e).label("amount_paid"))
             .select_from(po)
@@ -601,9 +640,9 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             .join(dp, pl.part_id == dp.id),
             po, link).where(*where).group_by(*group_cols)
     else:
-        ex_e, inc_e, paid_e, _nom = _order_amount_exprs(po)
+        ex_e, inc_e, paid_e, side = _order_amount_exprs(po)
         base = _link_join(
-            select(*po_cols, func.count(pl.id).label("lines"),
+            select(*po_cols, side.label("nominal_side"), func.count(pl.id).label("lines"),
                    inc_e.label("amount_inc"), ex_e.label("amount_ex"), paid_e.label("amount_paid"))
             .select_from(po)
             .outerjoin(pl, _batch_line_join(po, pl)),
@@ -653,6 +692,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             "source_type": r.source_type_raw, "purchaser": r.purchaser,
             "salesperson": sp, "customer_id": cid,
             "customer": cname, "lines": r.lines,
+            # 名义侧跟随单头税率标记（金臣 2026-10-18 裁定），与金额同组遮蔽
+            "nominal_side": r.nominal_side,
             "amount_inc": _f(_round2(r.amount_inc)),
             "amount_ex": _f(_round2(r.amount_ex)),
             "amount_paid": _f(_round2(r.amount_paid)),
@@ -742,6 +783,8 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         "is_tax_inclusive": po.is_tax_inclusive,
         "tax_rate": _f(po.tax_rate),
         "tax_rate_effective": _f(_effective_rate(po.tax_rate)),
+        # 名义侧（金臣 2026-10-18 裁定）：未标税率时只有推算侧是名义值
+        "nominal_side": nominal_side_reference(po.tax_rate, po.is_tax_inclusive),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
         "linked_sales_order_no": po.linked_sales_order_no,

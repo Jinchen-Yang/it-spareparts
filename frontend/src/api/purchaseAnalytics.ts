@@ -43,9 +43,14 @@ export interface PurchaseAnalyticsKpi {
   amount_inc: number | null;
   amount_ex: number | null;
   amount_paid: number | null;
-  /** 名义含税占比（未标税率单据的含税额 ÷ 含税合计）；无金额权限或无数据时 null。 */
+  /** 名义含税占比 = 未标税率非含税单的推算含税 ÷ 含税合计；无金额权限或分母为 0 时 null。 */
   nominal_inc_share: number | null;
+  /** 名义不含税占比 = 未标税率含税单的推算不含税 ÷ 不含税合计；同上（D-39 名义侧裁定）。 */
+  nominal_ex_share: number | null;
 }
+
+/** 名义侧（D-39 2026-10-18 裁定）：未标税率时按 13% 推算的那一侧；已标税率为 null。 */
+export type NominalSide = "inc" | "ex" | null;
 
 /** 分组行。customer 维度下 label 为 null、客户名放 customer（登记过的脱敏键）。 */
 export interface PurchaseAnalyticsGroup {
@@ -56,6 +61,9 @@ export interface PurchaseAnalyticsGroup {
   amount_inc: number | null;
   amount_ex: number | null;
   amount_paid: number | null;
+  /** 分组内名义占比（同 KPI 口径，仅该组分子/分母）；被遮蔽或分母 0 时 null。 */
+  nominal_inc_share?: number | null;
+  nominal_ex_share?: number | null;
   customer?: string | null;
 }
 
@@ -82,6 +90,8 @@ export interface PurchaseAnalyticsOrderRow {
   amount_inc: number | null;
   amount_ex: number | null;
   amount_paid: number | null;
+  /** 该单的名义侧（未标税率才有）；随金额一起被遮蔽（null）。 */
+  nominal_side: NominalSide;
 }
 
 export interface PurchaseAnalyticsOrdersQuery extends PurchaseAnalyticsFilters {
@@ -137,6 +147,8 @@ export interface PurchaseAnalyticsOrderDetail {
   amount_ex: number | null;
   amount_inc: number | null;
   amount_paid: number | null;
+  /** 该单的名义侧（未标税率才有）；随金额一起被遮蔽（null）。 */
+  nominal_side: NominalSide;
   linked_sales_order_no: string | null;
   salesperson: string | null;
   customer_id: number | null;

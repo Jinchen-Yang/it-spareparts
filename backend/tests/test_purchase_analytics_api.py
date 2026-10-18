@@ -26,6 +26,7 @@ from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABE
                                              EMPTY_LABEL, _line_amount_exprs,
                                              _order_amount_exprs,
                                              line_amounts_reference,
+                                             nominal_side_reference,
                                              order_amounts_reference)
 from tests.boss_board_helpers import client_for
 
@@ -217,15 +218,16 @@ def test_order_amount_sql_matches_reference(db, ex, inc, rate, is_inc):
              amount_ex=D(ex) if ex is not None else None,
              amount_inc=D(inc) if inc is not None else None)
     db.commit()
-    a_ex, a_inc, a_paid, a_nominal = _order_amount_exprs()
-    row = db.execute(select(a_ex, a_inc, a_paid, a_nominal).where(FPurchaseOrder.id == po.id)).one()
+    a_ex, a_inc, a_paid, a_side = _order_amount_exprs()
+    row = db.execute(select(a_ex, a_inc, a_paid, a_side).where(FPurchaseOrder.id == po.id)).one()
     r_ex, r_inc = order_amounts_reference(
         D(ex) if ex is not None else None, D(inc) if inc is not None else None,
         rate, is_inc)
     assert row[0] == (r_ex if r_ex is not None else None)
     assert row[1] == (r_inc if r_inc is not None else None)
     assert row[2] == (D(inc) if inc is not None else None)  # 实付=amount_inc_tax 原值
-    assert row[3] == (rate is None or D(str(rate)) == 0)     # nominal=未标税率
+    # 名义侧（金臣 2026-10-18 裁定）：未标税率时推算侧（含税单→ex，其余→inc）
+    assert row[3] == nominal_side_reference(rate, is_inc)
 
 
 @pytest.mark.parametrize("amount,rate,is_inc", [
@@ -256,11 +258,136 @@ def test_unmarked_rate_matches_legacy_order_amounts(ex, inc, rate, is_inc):
     assert r == legacy
 
 
+# ------------------------------------------------- 名义侧（金臣 2026-10-18 裁定）
+# 裁定：未标税率（NULL/0）时只有按 13% 推算的一侧是名义值——含税单录入的含税额
+# 真实、不含税是名义（side="ex"）；不含税单录入的不含税额真实、含税是名义
+# （side="inc"）；税率已标两侧都真实（side=None）。
+#
+# 矩阵数据集（五行五档税率 × 含税标记，行金额=各单挂一条「电器件」行）：
+#   O1 含税13%（双侧真实）/ O2 不含税未标（inc 名义）/ O3 含税 0 税率（ex 名义）
+#   O4 不含税 6% / O5 含税 0.6% 且含税列缺失（回退不含税列，双侧真实）
+NOMINAL_MATRIX = [
+    # (key, is_inc, rate, amount_ex, amount_inc, line_amount, expect_side)
+    ("O1", True,  "0.13", D("1000"), D("1130"), D("1130"), None),
+    ("O2", False, None,   D("2000"), None,      D("800"),  "inc"),
+    ("O3", True,  "0",    None,      D("1060"), D("1060"), "ex"),
+    ("O4", False, "0.06", D("500"),  D("530"),  D("500"),  None),
+    ("O5", True,  "0.006", D("100"), None,      D("100"),  None),
+]
+
+
+@pytest.fixture()
+def nds(db: Session):
+    """名义侧矩阵数据集：NOMINAL_MATRIX 五单 + 各单一条电器件行。"""
+    b = _batch(db, "nominal")
+    p = _part(db, "PN-NOM", "电器件")
+    pos = {}
+    for key, is_inc, rate, ex, inc, line_amt, _side in NOMINAL_MATRIX:
+        po = _po(db, f"N-{key}", b, on=date(2026, 6, 1), source_type="销售订单",
+                 is_inc=is_inc, rate=D(rate) if rate is not None else None,
+                 amount_ex=ex, amount_inc=inc)
+        _line(db, f"N-{key}-L1", po, p, b, line_no=1, amount=line_amt)
+        pos[key] = po
+    db.commit()
+    class _NDS:
+        pass
+    d = _NDS()
+    d.pos = pos
+    return d
+
+
+def test_nominal_side_order_mode_summary_and_orders(db, nds):
+    """单头口径：nominal_side 逐单回显；名义占比分子分母手算断言。
+    合计：inc = 1130 + 2260 + 1060 + 530 + 100.60 = 5080.60；
+          ex  = 1000 + 2000 + 938.05 + 500 + 100 = 4538.05。
+    nominal_inc 分子 = O2 推算含税 2260 → 2260/5080.60 = 0.4448；
+    nominal_ex  分子 = O3 推算不含税 938.05 → 938.05/4538.05 = 0.2067。"""
+    c = client_for(db, username="nominal-boss", role="boss")
+    data = _summary(c)
+    kpi = data["kpi"]
+    assert kpi["amount_inc"] == pytest.approx(5080.60)
+    assert kpi["amount_ex"] == pytest.approx(4538.05)
+    assert kpi["nominal_inc_share"] == pytest.approx(0.4448)
+    assert kpi["nominal_ex_share"] == pytest.approx(0.2067)
+    lst = _orders(c, page_size=10)
+    by_no = {i["order_no"]: i for i in lst["items"]}
+    for key, _is_inc, _rate, _ex, _inc, _amt, side in NOMINAL_MATRIX:
+        assert by_no[f"CG-N-{key}"]["nominal_side"] == side, key
+
+
+def test_nominal_side_line_mode_summary(db, nds):
+    """行级（分类）口径同理：行金额跟随单头原始侧，名义占比按行级两侧合计。
+    行合计：inc = 1130 + 904 + 1060 + 530 + 100 = 3724.00；
+            ex  = 1000 + 800 + 938.05 + 500 + 99.40 = 3337.45
+            （O5 含税单：行含税=录入 100，行不含税=100/1.006=99.40）。
+    nominal_inc 分子 = O2 行推算含税 904 → 904/3724.00 = 0.2427；
+    nominal_ex  分子 = O3 行推算不含税 938.05 → 938.05/3337.45 = 0.2811。"""
+    c = client_for(db, username="nominal-line-boss", role="boss")
+    data = _summary(c, category=["电器件"])
+    assert data["basis_mode"] == "line"
+    kpi = data["kpi"]
+    assert kpi["amount_inc"] == pytest.approx(3724.00)
+    assert kpi["amount_ex"] == pytest.approx(3337.45)
+    assert kpi["nominal_inc_share"] == pytest.approx(0.2427)
+    assert kpi["nominal_ex_share"] == pytest.approx(0.2811)
+
+
+def test_nominal_side_order_detail_and_group_rows(db, nds):
+    """明细接口回显 nominal_side；分组行也带两侧名义占比（source_type 单键组=KPI）。"""
+    c = client_for(db, username="nominal-detail-boss", role="boss")
+    for key, _is_inc, _rate, _ex, _inc, _amt, side in NOMINAL_MATRIX:
+        r = c.get(f"/api/purchases/analytics/orders/{nds.pos[key].id}")
+        assert r.status_code == 200, r.text
+        assert r.json()["nominal_side"] == side, key
+    data = _summary(c, group_by="source_type")
+    g = data["groups"][0]                       # 五单同类型 → 单键组 = KPI
+    assert g["nominal_inc_share"] == pytest.approx(0.4448)
+    assert g["nominal_ex_share"] == pytest.approx(0.2067)
+
+
+def test_nominal_side_masked_with_amounts(db, nds):
+    """无 data_purchase_cost：nominal_side 与两侧占比与金额一起遮蔽（键名保留）。"""
+    c = client_for(db, username="nominal-nocost", role="boss",
+                   overrides={"data_purchase_cost": False})
+    data = _summary(c)
+    assert data["kpi"]["nominal_inc_share"] is None
+    assert data["kpi"]["nominal_ex_share"] is None
+    for g in data["groups"]:
+        assert g["nominal_inc_share"] is None and g["nominal_ex_share"] is None
+    lst = _orders(c, page_size=10)
+    for i in lst["items"]:
+        assert i["nominal_side"] is None        # O2/O3 的 "inc"/"ex" 不得泄漏
+    r = c.get(f"/api/purchases/analytics/orders/{nds.pos['O3'].id}")
+    assert r.json()["nominal_side"] is None
+
+
+def test_null_rate_and_zero_rate_indistinguishable(db):
+    """#398 S2：生产已生效采购单税率无 NULL（2026-10-18 只读统计），0 即「未标」。
+    NULL 与显式 0 走同一 13% 推算路径：三口径与 nominal_side 完全一致。"""
+    b = _batch(db, "null-vs-zero")
+    p = _part(db, "PN-NZ", "电器件")
+    specs = [("NZ0", D("0")), ("NZN", None)]
+    for key, rate in specs:
+        po = _po(db, key, b, on=date(2026, 6, 2), source_type="销售订单",
+                 is_inc=False, rate=rate, amount_ex=D("1000"), amount_inc=None)
+        _line(db, f"{key}-L1", po, p, b, line_no=1, amount=D("1000"))
+    db.commit()
+    c = client_for(db, username="nz-boss", role="boss")
+    lst = _orders(c, page_size=10)
+    by_no = {i["order_no"]: i for i in lst["items"]}
+    a, b_ = by_no["CG-NZ0"], by_no["CG-NZN"]
+    for key in ("amount_inc", "amount_ex", "amount_paid", "nominal_side"):
+        assert a[key] == b_[key], key
+    assert a["nominal_side"] == "inc" and a["amount_inc"] == pytest.approx(1130.0)
+
+
 # ---------------------------------------------------------------- KPI（单头口径）
 
 def test_summary_kpi_order_mode(boss, ds):
     """不筛分类：单头口径。inc=7151/ex=6500/paid=4826（poB 实付 None 不计）；
-    行数=各单单头批次行之和 7（残留行不计）；nominal 占比=3955/7151。"""
+    行数=各单单头批次行之和 7（残留行不计）；nominal_inc 占比=3955/7151
+    （poB/poD/poF 三张未标税率·非含税单的推算含税额）；ds 无含税未标单 →
+    nominal_ex 占比=0.0（分子为零但分母存在，不是 null）。"""
     data = _summary(boss)
     assert data["basis_mode"] == "order"
     kpi = data["kpi"]
@@ -270,6 +397,7 @@ def test_summary_kpi_order_mode(boss, ds):
     assert kpi["amount_ex"] == pytest.approx(6500.0)
     assert kpi["amount_paid"] == pytest.approx(4826.0)
     assert kpi["nominal_inc_share"] == pytest.approx(round(3955 / 7151, 4))
+    assert kpi["nominal_ex_share"] == pytest.approx(0.0)
     # 分组合计 = KPI（实付 None 的组按 0 计入合计）
     assert sum(g["orders"] for g in data["groups"]) == kpi["orders"]
     assert sum(g["lines"] for g in data["groups"]) == kpi["lines"]
@@ -405,7 +533,8 @@ def test_empty_window_returns_zero_not_fake_amounts(boss, ds):
     assert data["kpi"]["lines"] == 0
     assert data["kpi"]["amount_inc"] is None         # 空区间金额是 None，不是 0
     assert data["kpi"]["amount_paid"] is None
-    assert data["kpi"]["nominal_inc_share"] is None
+    assert data["kpi"]["nominal_inc_share"] is None  # 分母 null → 占比 null
+    assert data["kpi"]["nominal_ex_share"] is None
     assert data["groups"] == []
 
 
@@ -698,13 +827,16 @@ def test_cost_masking_nulls_amounts_keeps_counts(db, ds):
     data = _summary(c)
     assert data["kpi"]["orders"] == 6               # 计数不遮
     assert data["kpi"]["lines"] == 7
-    for key in ("amount_inc", "amount_ex", "amount_paid", "nominal_inc_share"):
+    for key in ("amount_inc", "amount_ex", "amount_paid",
+                "nominal_inc_share", "nominal_ex_share"):
         assert data["kpi"][key] is None, key        # 金额键置 null 但键名保留
     for g in data["groups"]:
         assert g["amount_inc"] is None and g["amount_paid"] is None
+        assert g["nominal_inc_share"] is None and g["nominal_ex_share"] is None
     lst = _orders(c, page_size=10)
     for i in lst["items"]:
         assert i["amount_inc"] is None and i["amount_paid"] is None
+        assert i["nominal_side"] is None            # 名义侧随金额一起遮蔽
         assert i["lines"] is not None               # 行数仍可见
 
 
@@ -773,7 +905,7 @@ def test_order_detail_cost_masking_end_to_end(db, ds):
               params={"category": "电器件"})
     assert r.status_code == 200, r.text
     d = r.json()
-    for key in ("amount_inc", "amount_ex", "amount_paid"):
+    for key in ("amount_inc", "amount_ex", "amount_paid", "nominal_side"):
         assert d[key] is None, key
     assert d["lines_count"] == 1                          # 只剩电器件行（计数不遮）
     assert len(d["lines"]) == 1
@@ -806,10 +938,13 @@ def test_new_amount_keys_registered_for_masking():
     registered = set()
     for keys in config.FIELD_GROUPS.values():
         registered.update(keys)
-    for key in ("amount_paid", "nominal_inc_share", "line_amount_inc", "line_amount_ex"):
+    for key in ("amount_paid", "nominal_inc_share", "nominal_ex_share", "nominal_side",
+                "line_amount_inc", "line_amount_ex"):
         assert key in registered, key
     assert "amount_paid" in config.FIELD_GROUPS["purchase_cost"]
     assert "nominal_inc_share" in config.FIELD_GROUPS["purchase_cost"]
+    assert "nominal_ex_share" in config.FIELD_GROUPS["purchase_cost"]
+    assert "nominal_side" in config.FIELD_GROUPS["purchase_cost"]
     assert "line_amount_inc" in config.FIELD_GROUPS["purchase_cost"]
     assert "line_amount_ex" in config.FIELD_GROUPS["purchase_cost"]
 

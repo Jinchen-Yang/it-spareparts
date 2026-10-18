@@ -51,7 +51,7 @@ const SUMMARY = {
   kpi: {
     orders: 5, lines: 12,
     amount_inc: 1130, amount_ex: 1000, amount_paid: 1050,
-    nominal_inc_share: 0.2,
+    nominal_inc_share: 0.2, nominal_ex_share: 0.15,
   },
   groups: [
     { key: "备件采购", label: "备件采购", orders: 3, lines: 8, amount_inc: 678, amount_ex: 600, amount_paid: 630 },
@@ -65,7 +65,8 @@ const SUMMARY_MASKED = {
   ...SUMMARY,
   kpi: {
     orders: 5, lines: 12,
-    amount_inc: null, amount_ex: null, amount_paid: null, nominal_inc_share: null,
+    amount_inc: null, amount_ex: null, amount_paid: null,
+    nominal_inc_share: null, nominal_ex_share: null,
   },
   groups: SUMMARY.groups.map((g) => ({
     ...g, amount_inc: null, amount_ex: null, amount_paid: null,
@@ -89,6 +90,7 @@ const ORDER_ROW = {
   source_type: "备件采购", purchaser: "张三", salesperson: "王五",
   customer_id: 12, customer: "客户甲", lines: 2,
   amount_inc: 226, amount_ex: 200, amount_paid: 210,
+  nominal_side: null, // 已标税率（0.13）：两侧都非名义
 };
 
 const ordersResp = (over: Record<string, unknown> = {}) => ({
@@ -104,7 +106,7 @@ const ORDER_DETAIL = {
   order_id: 101, order_no: "CG-2026-101", order_date: "2026-10-16",
   source_type: "备件采购", purchaser: "张三", data_status: "已生效",
   is_tax_inclusive: true, tax_rate: 0.13, tax_rate_effective: 0.13,
-  amount_ex: 200, amount_inc: 226, amount_paid: 210,
+  amount_ex: 200, amount_inc: 226, amount_paid: 210, nominal_side: null,
   linked_sales_order_no: null, salesperson: "王五", customer_id: 12, customer: "客户甲",
   lines_count: 2,
   lines: [
@@ -184,8 +186,9 @@ describe("采购分析页：URL 单一真值", () => {
     for (const t of ["含税金额", "不含税金额", "实付金额"]) {
       expect(screen.getAllByText(t).length, t).toBe(2); // KPI 卡 + 分组列各一
     }
-    // 名义含税角标
+    // 名义占比角标按侧分开（D-39 名义侧裁定）：含税/不含税 KPI 各自的推算占比
     expect(screen.getByText(/名义含税占比/)).toBeInTheDocument();
+    expect(screen.getByText(/名义不含税占比/)).toBeInTheDocument();
   });
 
   it("「全部」预设不传任何日期参数（后端缺省 = 全部历史）", async () => {
@@ -262,6 +265,9 @@ describe("采购分析页：URL 单一真值", () => {
     expect(row.textContent).not.toContain("0.00");
     // 分组排序保护回显：按订单数排序的提示如实展示
     expect(screen.getByText(/分组按订单数排序/)).toBeInTheDocument();
+    // 名义占比随金额一起被遮蔽：null 不渲染角标（不显示 0.00%）
+    expect(screen.queryByText(/名义含税占比/)).toBeNull();
+    expect(screen.queryByText(/名义不含税占比/)).toBeNull();
   });
 
   it("金额不可见账号下钻：金额排序入口预先禁用（不等后端 ranking_restricted 回显）", async () => {
@@ -376,6 +382,40 @@ describe("采购分析页：URL 单一真值", () => {
     expect(within(dialog).getByRole("columnheader", { name: "行金额（实付）" })).toBeInTheDocument();
     // 分类未筛：不出现「匹配分类行合计」
     expect(within(dialog).queryByText(/匹配分类行合计/)).toBeNull();
+    // 已标税率（0.13）：两侧都非名义，不出现名义标注
+    expect(within(dialog).queryByText(/名义（按 13% 推算）/)).toBeNull();
+  });
+
+  it("明细抽屉：未标税率单据只给名义侧金额标注（含税单→不含税侧，D-39 名义侧裁定）", async () => {
+    // 含税单 + 0 税率：录入含税额真实，推算出的不含税额是名义 → 标注只在不含税金额旁
+    fetchPurchaseAnalyticsOrderDetail.mockResolvedValue({
+      data: { ...ORDER_DETAIL, tax_rate: 0, tax_rate_effective: 0.13, nominal_side: "ex" },
+    });
+    renderPage("/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD");
+    fireEvent.click(await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByText(/未标税率/)).toBeInTheDocument());
+    const badges = within(dialog).getAllByText(/名义（按 13% 推算）/);
+    expect(badges).toHaveLength(1);
+    // 标注挂在不含税金额那一项上（「不含税金额」串含「含税金额」子串，用前缀断言）
+    expect(badges[0].parentElement?.textContent).toMatch(/^不含税金额/);
+  });
+
+  it("明细抽屉：非含税单 NULL 税率 → 名义标注在含税金额旁（含税标记未标注同规则）", async () => {
+    fetchPurchaseAnalyticsOrderDetail.mockResolvedValue({
+      data: {
+        ...ORDER_DETAIL,
+        is_tax_inclusive: null, tax_rate: null, tax_rate_effective: 0.13,
+        nominal_side: "inc",
+      },
+    });
+    renderPage("/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD");
+    fireEvent.click(await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByText(/未标税率/)).toBeInTheDocument());
+    const badges = within(dialog).getAllByText(/名义（按 13% 推算）/);
+    expect(badges).toHaveLength(1);
+    expect(badges[0].parentElement?.textContent).toMatch(/^含税金额/);
   });
 
   it("分类筛选活跃时明细抽屉带 category，展示匹配分类行合计", async () => {
@@ -471,7 +511,7 @@ describe("采购分析页：健壮性", () => {
       Promise.resolve({
         data: q.group_by === "customer"
           ? SUMMARY_BY_CUSTOMER
-          : { ...SUMMARY, groups: [], kpi: { orders: 0, lines: 0, amount_inc: null, amount_ex: null, amount_paid: null, nominal_inc_share: null } },
+          : { ...SUMMARY, groups: [], kpi: { orders: 0, lines: 0, amount_inc: null, amount_ex: null, amount_paid: null, nominal_inc_share: null, nominal_ex_share: null } },
       }));
     renderPage("/purchases/analytics?preset=all");
     expect(await screen.findByText("当前筛选下没有采购数据")).toBeInTheDocument();

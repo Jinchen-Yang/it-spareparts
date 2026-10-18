@@ -2,7 +2,7 @@
 // 分类筛选活跃时把 category 随层传入：展示行按分类过滤并附「匹配分类行合计」。
 // 行级口径 = 只计单头所属批次的明细行（D-39 补充决策）。
 import { useEffect, useRef, useState } from "react";
-import { Alert, Descriptions, Drawer, Spin, Table, Tag } from "antd";
+import { Alert, Descriptions, Drawer, Spin, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { message } from "antd";
 import { fmt, fmtMoney } from "../shared";
@@ -21,7 +21,8 @@ export interface OrderDetailDrawerProps {
 
 function TaxTag({ detail }: { detail: PurchaseAnalyticsOrderDetail }) {
   const marked = detail.is_tax_inclusive == null ? "未标注" : detail.is_tax_inclusive ? "含税单" : "不含税单";
-  // 未标/0 税率：含税额是按 13% 从不含税额推算的名义值（Q6），要明说；标注过税率的单据不附加说明
+  // 未标/0 税率：按 13% 推算的那一侧是名义值（D-39 名义侧裁定）——含税单推算不含税侧、
+  // 非含税单推算含税侧；标注过税率的单据两侧都按票面税率换算，不附加说明
   const nominal = detail.tax_rate == null || detail.tax_rate === 0;
   const rate = nominal
     ? "未标税率"
@@ -37,6 +38,25 @@ function TaxTag({ detail }: { detail: PurchaseAnalyticsOrderDetail }) {
         {nominal ? `（${effective}；未标或 0 税率按 13%）` : ""}
       </span>
     </span>
+  );
+}
+
+/** 名义侧金额标注：只标在 nominal_side 指向的那一笔金额后面（D-39 名义侧裁定）。 */
+function NominalAmountNote({ side, kind }: { side: string | null; kind: "inc" | "ex" }) {
+  if (side !== kind) return null;
+  const tip =
+    kind === "inc"
+      ? "未标税率（或税率为 0）：此含税金额按 13% 从不含税额推算，不是票面金额。"
+      : "未标税率（或税率为 0）：此不含税金额按 13% 从含税额推算，不是票面金额。";
+  return (
+    <Tooltip title={tip}>
+      <span
+        aria-label={kind === "inc" ? "名义含税说明" : "名义不含税说明"}
+        style={{ cursor: "help", borderBottom: "1px dotted", marginLeft: 4, fontSize: 12 }}
+      >
+        名义（按 13% 推算）
+      </span>
+    </Tooltip>
   );
 }
 
@@ -121,10 +141,10 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
           />
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {basis.includes("inc") && (
-              <span>含税金额 <b>{fmtMoney(detail.amount_inc)}</b></span>
+              <span>含税金额 <b>{fmtMoney(detail.amount_inc)}</b><NominalAmountNote side={detail.nominal_side} kind="inc" /></span>
             )}
             {basis.includes("ex") && (
-              <span>不含税金额 <b>{fmtMoney(detail.amount_ex)}</b></span>
+              <span>不含税金额 <b>{fmtMoney(detail.amount_ex)}</b><NominalAmountNote side={detail.nominal_side} kind="ex" /></span>
             )}
             {basis.includes("paid") && (
               <span>实付金额 <b>{fmtMoney(detail.amount_paid)}</b></span>
