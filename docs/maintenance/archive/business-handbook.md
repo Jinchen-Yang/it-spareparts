@@ -183,7 +183,7 @@ flowchart LR
 - 总览只使用金额行和横向进度条展示回款、成本与数据完整性；不使用成本构成扇形图。成本缺失记录仍显示，并提供带上下文的“去补录”入口。
 - 兼容入口必须保留：旧 `/maintenance/downloads` 路由跳到项目工作台并打开导出面板；旧域名访问保持原路径和查询参数后跳转到 `hbzgc.icu`，避免用户重新输入地址。
 
-详见[维保导入字段契约](./import-field-contract.md)。合同级双税毛利及安全往返工作簿继续以 [DEV-15 规格](./dev15-roundtrip-and-tax-policy-spec.md)为实现依据；本手册不把合同级结果伪分摊为项目收入。
+详见[维保导入字段契约](../import-field-contract.md)。合同级双税毛利及安全往返工作簿继续以 [DEV-15 规格](./dev15-roundtrip-and-tax-policy-spec.md)为实现依据；本手册不把合同级结果伪分摊为项目收入。
 
 ## 4. 目标业务流程与角色交接
 

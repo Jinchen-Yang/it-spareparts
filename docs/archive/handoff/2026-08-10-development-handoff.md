@@ -1,3 +1,5 @@
+> 已归档 2026-10-18 · 原因：交接使命完成：对应 Issue #240 已于 2026-09-06 关闭（“维保与补库 Beta 已全面上线生产……交接使命完成”）；文中“以 `codex/maintenance-manager-combined` 为唯一代码基线”已被 2026-10-10 分支规则（main 以生产源码重建，近期功能以 main 为基线）取代 · 替代文档：[AGENTS.md](../../../AGENTS.md)、[docs/BRANCH_POLICY.md](../../BRANCH_POLICY.md)
+
 # IT_data 开发交接（2026-08-10）
 
 ## 交接结论
@@ -76,7 +78,7 @@ docker compose exec app alembic upgrade head
 cd frontend && npm run test
 ```
 
-不要复制生产 `.env`、数据库卷、上传文件、SSH 私钥、GitHub token 或任何 API key 到开发机。完整依赖和安全配置见 [密钥与服务器交接](./SECRETS-AND-SERVERS.md)。
+不要复制生产 `.env`、数据库卷、上传文件、SSH 私钥、GitHub token 或任何 API key 到开发机。完整依赖和安全配置见 [密钥与服务器交接](../../handoff/SECRETS-AND-SERVERS.md)。
 
 ## 下一步建议顺序
 
@@ -85,4 +87,4 @@ cd frontend && npm run test
 3. 创建真实试用 reader/creator、独立 canary 和白名单，但保持所有总闸关闭。
 4. 完成 production-copy 迁移演练、备份恢复、双路径验收后，才讨论 Beta 发布。
 
-更多细节以 [维保文档入口](../maintenance/README.md)、[业务运行手册](../maintenance/business-handbook.md) 和 GitHub 交接 Issue 为准。
+更多细节以 [维保文档入口](../../maintenance/README.md)、[业务运行手册](../../maintenance/archive/business-handbook.md) 和 GitHub 交接 Issue 为准。

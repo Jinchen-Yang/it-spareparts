@@ -1,3 +1,5 @@
+> 已归档 2026-10-18 · 原因：一次性状态快照，所交接的 `codex/master-workbook-full-edit` 已经 PR #304 于 2026-09-03 合入 main · 替代文档：[AGENTS.md](../../../AGENTS.md)、[docs/decisions/](../../decisions/)
+
 # 交接：维保总表全量编辑能力恢复（明早部署）
 
 - 日期：2026-09-03 凌晨
