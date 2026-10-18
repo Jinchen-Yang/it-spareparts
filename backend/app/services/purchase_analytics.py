@@ -587,6 +587,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     # 结构性排序保护（pool.py 复审三轮先例）：被脱敏的金额不能当排序键运行——
     # 行序本身是隐藏金额排名的侧信道，apply_field_visibility 只置空值不改行序。
     # amount_* 同属 purchase_cost 组，一查即全遮。
+    requested_sort = sort
     ranking_restricted = sort != "order_date" and security.is_field_hidden(
         user_ctx, "amount_paid")
     if ranking_restricted:
@@ -700,7 +701,9 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         })
     return {
         "total": total, "page": page, "page_size": page_size,
-        "sort": sort, "order": order,
+        # sort 回显请求值，effective_sort 回实际生效值（pool_price_analysis /
+        # dashboard.part_ranking 先例：金额遮蔽回退时二者不同）
+        "sort": requested_sort, "order": order,
         "effective_sort": sort, "ranking_restricted": ranking_restricted,
         "basis_mode": "line" if line_mode else "order",
         "filters_echo": _filters_echo(

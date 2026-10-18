@@ -869,6 +869,9 @@ def test_orders_amount_sort_falls_back_when_masked(db, ds, boss):
     data = _orders(c, sort="amount_paid", order="desc", page_size=10)
     assert data["ranking_restricted"] is True
     assert data["effective_sort"] == "order_date"          # 回退安全排序键
+    # sort 回显请求值、effective_sort 回显实际生效值（#398 S6/#5；pool_price_analysis /
+    # dashboard.part_ranking 先例）——遮蔽回退时二者必须可区分
+    assert data["sort"] == "amount_paid"
     assert [i["order_no"] for i in data["items"]] == \
         ["CG-PG", "CG-PF", "CG-PD", "CG-PC", "CG-PB", "CG-PA"]   # order_date 降序
     # 全权账号同参数仍按金额排（默认行为不变），且两者顺序不同
@@ -876,6 +879,7 @@ def test_orders_amount_sort_falls_back_when_masked(db, ds, boss):
     assert [i["order_no"] for i in full["items"]] == \
         ["CG-PF", "CG-PA", "CG-PC", "CG-PG", "CG-PD", "CG-PB"]
     assert full["ranking_restricted"] is False and full["effective_sort"] == "amount_paid"
+    assert full["sort"] == "amount_paid"                   # 未回退时二者一致
 
 
 def test_summary_group_order_falls_back_when_masked(db, ds, boss):
