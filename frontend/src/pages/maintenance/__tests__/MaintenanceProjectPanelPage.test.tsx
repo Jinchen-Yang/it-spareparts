@@ -1354,8 +1354,12 @@ describe("报销 tab 展示备注（#47）", () => {
       new Promise((resolve) => { resolveReadback = resolve; }));
 
     const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
-    fireEvent.change(inputs[0], {
-      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    // rc-upload 的 beforeUpload 经 Promise 链调用；先提交即时 mock 校验结果，
+    // 再查找确认按钮，避免负载下 1s 轮询先于上传预览渲染结束。
+    await act(async () => {
+      fireEvent.change(inputs[0], {
+        target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+      });
     });
     fireEvent.click(await screen.findByRole("button", { name: /确认回传/ }));
 
@@ -1394,8 +1398,12 @@ describe("报销 tab 展示备注（#47）", () => {
     await screen.findByText("BXD-OLD");
 
     const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
-    fireEvent.change(inputs[0], {
-      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    // rc-upload 的 beforeUpload 经 Promise 链调用；先提交即时 mock 校验结果，
+    // 再查找确认按钮，避免负载下 1s 轮询先于上传预览渲染结束。
+    await act(async () => {
+      fireEvent.change(inputs[0], {
+        target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+      });
     });
     fireEvent.click(await screen.findByRole("button", { name: /确认回传/ }));
 
@@ -1536,8 +1544,12 @@ describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => 
     const { container } = renderPanel();
     await screen.findByRole("button", { name: /上传覆盖/ });
     const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
-    fireEvent.change(inputs[0], {
-      target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+    // rc-upload 的 beforeUpload 经 Promise 链调用；先提交即时 mock 校验结果，
+    // 再查找确认按钮，避免负载下 1s 轮询先于上传预览渲染结束。
+    await act(async () => {
+      fireEvent.change(inputs[0], {
+        target: { files: [new File(["xlsx"], "项目总表.xlsx")] },
+      });
     });
     expect(await screen.findByText(/已作废行改动未生效 1 行/)).toBeInTheDocument();
     expect(screen.getByText(/已被 张三 于 2026-09-06 10:03 作废，修改未生效/)).toBeInTheDocument();
