@@ -16,7 +16,7 @@ const breakpoint = vi.spyOn(Grid, "useBreakpoint");
 const PREVIEW: PurchasePriceCalibration = {
   rule_code: "purchase_adjacent_price_ratio",
   rule_version: "preview-v1",
-  generated_at: "2026-07-16T10:00:00Z",
+  generated_at: "2026-07-16T16:05:00Z",
   data_through: "2026-07-15",
   eligible_pairs: 120,
   distinct_parts: 36,
@@ -113,6 +113,7 @@ describe("规则校准预览", () => {
     expect(within(samples).getByText("PN-4T")).toBeInTheDocument();
     expect(within(samples).getByText("本次变贵")).toBeInTheDocument();
     expect(within(samples).getByText("2.50 倍")).toBeInTheDocument();
+    expect(screen.getByText("2026-07-17 00:05")).toBeInTheDocument();
     expect(within(samples).getByText("CG-1 · 2026-07-01")).toBeInTheDocument();
     expect(within(samples).getByText("CG-2 · 2026-07-15")).toBeInTheDocument();
     expect(within(samples).getByText(/¥400.00 · 1 块 · 原值不含税/)).toBeInTheDocument();

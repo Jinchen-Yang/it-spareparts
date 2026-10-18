@@ -16,6 +16,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 describe("领用行要求以服务端快照为准", () => {
+  it("整单作废时间按北京时间跨午夜换日", async () => {
+    mocks.search.mockResolvedValue({ data: { total: 1, rows: [{ issue_id: "voided", issue_no: "VOID-1", workflow_status: "void", voided_at: "2026-10-01T16:05:00Z", lines: [] }] } });
+    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    expect(await screen.findByText("作废于 2026-10-02 00:05")).toBeInTheDocument();
+  });
   it("第3页切换品类后回到第1页，父级读回仍保留当前可见页", async () => {
     mocks.search.mockImplementation(async (input) => ({ data: { total: 1, rows: [{
       issue_id: "i1", issue_no: "ISSUE-1", workflow_status: "confirmed", lines: Array.from({ length: 40 }, (_, index) => ({

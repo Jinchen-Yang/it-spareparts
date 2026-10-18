@@ -185,6 +185,7 @@ describe("价格与数量疑点队列", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("规则证据")).toBeInTheDocument();
     expect(within(dialog).getByText("采购订单_20260710.xlsx")).toBeInTheDocument();
+    expect(within(dialog).getByText("2026-07-11 02:00")).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "确认数据正确" })).toBeNull();
     expect(within(dialog).queryByRole("button", { name: "确认源数据错误" })).toBeNull();
     expect(dialog).not.toHaveTextContent("无价格权限");

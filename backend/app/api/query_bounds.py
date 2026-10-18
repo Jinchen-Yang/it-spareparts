@@ -11,5 +11,6 @@ from pydantic import Field
 PG_INT_MAX = 2**31 - 1
 # 分页页码上界：page_size ≤ 200 时 OFFSET ≤ 约 200 万行，远低于 bigint，也远超实际数据量
 ANALYTICS_PAGE_MAX = 10_000
+ANALYTICS_PAGE_SIZE_MAX = 200
 
 DbId = Annotated[int, Field(ge=1, le=PG_INT_MAX)]

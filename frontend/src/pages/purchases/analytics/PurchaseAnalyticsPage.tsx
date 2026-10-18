@@ -15,7 +15,7 @@ import {
   type PurchaseAnalyticsOrdersResp,
   type PurchaseAnalyticsSummary,
 } from "../../../api/purchaseAnalytics";
-import FilterBar, { type CustomerOption } from "./FilterBar";
+import FilterBar from "./FilterBar";
 import SummaryView, { groupByTitle } from "./SummaryView";
 import DrillTable from "./DrillTable";
 import OrderDetailDrawer from "./OrderDetailDrawer";
@@ -84,46 +84,31 @@ export default function PurchaseAnalyticsPage() {
   const [orders, setOrders] = useState<PurchaseAnalyticsOrdersResp | null>(null);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
-  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
+  const [customerQuery, setCustomerQuery] = useState("");
   const [customerOptionsLoading, setCustomerOptionsLoading] = useState(false);
-  const [pageSize, setPageSize] = useState(50);
+  const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
   const summarySeq = useRef(0);
   const ordersSeq = useRef(0);
 
-  // 筛选取值（与筛选条件无关，一次拉取）
+  // 客户已选ID额外补姓名最多200项；超出部分仍保留ID筛选，不扩大后端候选上限。
+  const selectedCustomerKey = effectiveState.customerIds.slice(0, 200).join(",");
+  // 客户候选直接来自 options 的有界只读查询；输入名称可搜索首批之外的客户。
+  // 旧请求清理 alive 标志，快速输入时不让迟到响应覆盖新搜索。
   useEffect(() => {
-    let alive = true;
-    fetchPurchaseAnalyticsOptions()
-      .then(({ data }) => { if (alive) setOptions(data); })
-      .catch((err) => { if (alive) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); });
-    return () => { alive = false; };
-  }, []);
-
-  // 客户下拉取值：options 端点未提供客户清单（PR-3a 缺口），用无筛选的客户分组汇总
-  // 反查（全历史已生效）。data_customer 受限时后端 403，直接不拉。
-  useEffect(() => {
-    if (customerRestricted || !options) return;
     let alive = true;
     setCustomerOptionsLoading(true);
-    fetchPurchaseAnalyticsSummary({ group_by: "customer" })
-      .then(({ data }) => {
-        if (!alive) return;
-        const opts: CustomerOption[] = [];
-        for (const g of data.groups) {
-          if (g.key === options.no_linked_label) continue;
-          const id = Number.parseInt(g.key, 10);
-          if (Number.isInteger(id) && id > 0) {
-            opts.push({ value: id, label: g.customer || g.key });
-          }
-        }
-        opts.sort((a, b) => a.label.localeCompare(b.label, "zh"));
-        setCustomerOptions(opts);
-      })
-      .catch(() => { if (alive) message.error("客户筛选取值加载失败"); })
+    fetchPurchaseAnalyticsOptions(customerRestricted ? "" : customerQuery,
+      selectedCustomerKey ? selectedCustomerKey.split(",").map(Number) : [])
+      .then(({ data }) => { if (alive) setOptions(data); })
+      .catch((err) => { if (alive) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); })
       .finally(() => { if (alive) setCustomerOptionsLoading(false); });
     return () => { alive = false; };
-  }, [customerRestricted, options]);
+  }, [customerQuery, customerRestricted, selectedCustomerKey]);
+  const customerOptions = customerRestricted ? [] : [...new Map(
+    [...(options?.selected_customers ?? []), ...(options?.customers ?? [])]
+      .map(c => [c.customer_id, { value: c.customer_id, label: c.customer || String(c.customer_id) }]),
+  ).values()];
 
   // KPI + 分组汇总。依赖是解析后的筛选键（口径多选不在内：切换口径不触发重新请求）。
   // todayKey 进依赖：跨零点后（重试/改每页条数等触发重拉）不会沿用前一天的窗口。
@@ -208,6 +193,8 @@ export default function PurchaseAnalyticsPage() {
           categories={options?.categories ?? []}
           customerOptions={customerOptions}
           customerOptionsLoading={customerOptionsLoading}
+          onCustomerSearch={setCustomerQuery}
+          customersHasMore={options?.customers_has_more ?? false}
           costRestricted={costRestricted}
           customerRestricted={customerRestricted}
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
@@ -246,7 +233,7 @@ export default function PurchaseAnalyticsPage() {
             loading={summaryLoading}
             basis={basis}
             groupBy={effectiveGroupBy}
-            onDrill={(key) => patch({ groupKey: key, page: 1 })}
+            onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
           />
         ) : ordersError ? (
           <Alert
@@ -270,11 +257,10 @@ export default function PurchaseAnalyticsPage() {
             pageSize={pageSize}
             onSortChange={(sort: AnalyticsSort, dir) => patch({ sort, dir, page: 1 })}
             onPageChange={(page, size) => {
-              setPageSize(size);
-              patch({ page });
+              patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => patch({ orderId })}
-            onBack={() => patch({ groupKey: null, orderId: null, page: 1 })}
+            onOpenOrder={(orderId) => patch({ orderId }, { history: "push" })}
+            onBack={() => patch({ groupKey: null, orderId: null, page: 1 }, { history: "push" })}
           />
         )}
       </Card>

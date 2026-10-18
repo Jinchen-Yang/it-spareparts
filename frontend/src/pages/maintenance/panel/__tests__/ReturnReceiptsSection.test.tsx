@@ -53,6 +53,11 @@ describe("返还台账的登记、更正和加载恢复", () => {
     expect(mocks.search.mock.calls[mocks.search.mock.calls.length - 1]?.[1]).not.toHaveProperty("q");
     expect(search).toHaveValue("未提交文本");
   });
+  it("收到时间按北京时间跨午夜换日", async () => {
+    mocks.search.mockResolvedValue({ data: { items: [{ ...receipt, occurred_at: "2026-10-01T16:05:00Z" }], total: 1 } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    expect(await screen.findByText("2026-10-02 00:05")).toBeInTheDocument();
+  });
   it("登记动作置顶，返还记录先于需求单核对汇总", async () => {
     render(<ReturnReceiptsSection projectId="p1" />);
     const register = await screen.findByRole("button", { name: "登记返还" });

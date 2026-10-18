@@ -125,6 +125,13 @@ describe("约束价覆盖率与 URL 缺失筛选", () => {
     action_pool_manage: true, action_pool_set_policy: true, data_pool_price_governance: true,
   };
 
+  it("列表更新时间按北京时间跨午夜换日", async () => {
+    login("readonly", perms);
+    mockList([row({ updated_at: "2026-10-01T16:05:00Z" })]);
+    renderPage();
+    expect(await screen.findByText("2026-10-02 00:05")).toBeInTheDocument();
+  });
+
   it("深链打开即筛选；切换、清除与浏览器后退均由 URL 恢复", async () => {
     login("readonly", perms);
     mockList([row()]);

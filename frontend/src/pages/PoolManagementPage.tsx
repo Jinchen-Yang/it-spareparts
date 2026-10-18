@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin,
@@ -37,7 +38,7 @@ const fmtMoney = (v: number | null | undefined, restricted: boolean) =>
   restricted ? <span style={MUTED}>无价格权限</span>
     : v == null ? <span style={MUTED}>未设置</span>
       : Number(v).toFixed(2);
-const fmtTime = (s: string | null | undefined) => (s ? new Date(s).toLocaleString("zh-CN") : "—");
+const fmtTime = formatBusinessDateTime;
 
 /** 本地权限快照（登录时整份写入 localStorage；写坏时回退空对象，与 App.tsx 同口径）。 */
 function readLocalPerms(): Record<string, boolean> {

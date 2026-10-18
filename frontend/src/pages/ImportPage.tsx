@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
 import {
   Card, Upload, Descriptions, Tag, message, Space, Button, Modal, Progress,
@@ -461,7 +462,7 @@ export default function ImportPage() {
     { title: "导入人", dataIndex: "uploaded_by", width: 110,
       render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>-</span> },
     { title: "时间", dataIndex: "uploaded_at", width: 180,
-      render: (t) => new Date(t).toLocaleString("zh-CN") },
+      render: (t) => formatBusinessDateTime(t) },
     { title: "", width: 70, render: (_, r) => <a onClick={() => openDetail(r.id)}>详情</a> },
   ];
 

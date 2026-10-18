@@ -1,5 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { message } from "antd";
 const mocks = vi.hoisted(() => ({
   plan: vi.fn(),
   workspace: vi.fn(),
@@ -109,7 +111,10 @@ beforeEach(() => {
   localStorage.clear();
   mocks.plan.mockResolvedValue({ total: 0, rows: [] });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(async () => {
+  await cleanupAntd();
+  vi.restoreAllMocks();
+});
 
 describe("回款页面登记的合同选择", () => {
   it("登记时合同从 workspace 下拉选择而非手输 UUID", async () => {
@@ -262,6 +267,27 @@ describe("作废与恢复动作", () => {
 });
 
 describe("快速切项目与在途提交隔离", () => {
+  it("卸载后在途登记完成不发成功提示、不回读项目", async () => {
+    grantManage();
+    const pending = deferred<{ data: MaintenanceCollectionSnapshotRow }>();
+    mocks.workspace.mockResolvedValue(contractsWorkspace([contract]));
+    mocks.create.mockReturnValue(pending.promise);
+    const onRefresh = vi.fn().mockResolvedValue(true);
+    const success = vi.spyOn(message, "success");
+    const { unmount } = render(<CollectionTab {...props({ onRefresh })} />);
+    fireEvent.click(await screen.findByRole("button", btn("登记回款")));
+    const dialog = await screen.findByRole("dialog");
+    await pickContract(dialog, "HT-2026-001");
+    fillCreate(dialog);
+    fireEvent.click(within(dialog).getByRole("button", btn("登记")));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
+    const planReads = mocks.plan.mock.calls.length;
+    unmount();
+    await act(async () => { pending.resolve({ data: snapshot() }); });
+    expect(success).not.toHaveBeenCalled();
+    expect(mocks.plan).toHaveBeenCalledTimes(planReads);
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
   it("A 项目 POST pending 时切 B 开新表单：A resolve 不关 B 的对话框、不触发刷新", async () => {
     grantManage();
     const slowCreate = deferred<{ data: MaintenanceCollectionSnapshotRow }>();
@@ -287,9 +313,8 @@ describe("快速切项目与在途提交隔离", () => {
     await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p2", expect.anything()));
     await pickContract(dialogB, "HT-2026-001");
     // A 的写请求此刻才完成：不得关掉 B 的表单、不得触发任何项目的刷新链。
-    // （成功提示不做 DOM 断言：AntD message 挂 body，跨测试 cleanup 会残留。）
+    // act 等待这次响应对应的微任务与 React 更新，无须依赖固定延时。
     await act(async () => { await slowCreate.resolve({ data: snapshot() }); });
-    await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(refreshA).not.toHaveBeenCalled();
     expect(refreshB).not.toHaveBeenCalled();

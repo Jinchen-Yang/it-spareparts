@@ -1,3 +1,4 @@
+import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
 // 下钻层：分组值 → 订单列表（服务端分页 + 排序；筛选条件随层传递）。
 // 金额排序禁用要「预判」而非被动回显：后端 ranking_restricted 只在本次请求真的
 // 试图按金额排时才为 true（默认 order_date 下受限账号也返回 false），若只看响应旗标，
@@ -102,7 +103,7 @@ export default function DrillTable({
     pageSize,
     total: data?.total ?? 0,
     showSizeChanger: true,
-    pageSizeOptions: [20, 50, 100, 200],
+    pageSizeOptions: [...ANALYTICS_PAGE_SIZES],
     showTotal: (t) => `共 ${t} 单`,
     onChange: (p, ps) => onPageChange(p, ps),
   };

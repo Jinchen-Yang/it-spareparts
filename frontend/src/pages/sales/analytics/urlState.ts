@@ -1,12 +1,10 @@
 // 销售分析页 URL 状态（D-41）：筛选、日期预设、三金额多选、排序键、含退货开关、
 // 下钻抽屉全部写进 URL，可分享/可刷新/可后退。默认值不落 URL（零参数 = 今天 +
 // 三金额并排 + 不含税金额倒序 + 不含退货）。
-// 多选值用逗号连接（取值来自 business_type 原值，不含 ASCII 逗号）。
+// 多值格式与旧链接兼容规则统一见 utils/analyticsUrlState。
 import type { SetURLSearchParams } from "react-router-dom";
 import type { Dayjs } from "dayjs";
 import {
-  DEFAULT_DATE_PRESET,
-  isDatePreset,
   resolveDateRange,
   type DatePreset,
   type DateRange,
@@ -17,6 +15,13 @@ import {
   type SalesAnalyticsFilters,
   type SalesAnalyticsSortKey,
 } from "../../../api/salesAnalytics";
+
+import {
+  clampAnalyticsPage, parseAnalyticsPageSize,
+  DEFAULT_ANALYTICS_PAGE_SIZE, parsePositiveId, parseUrlList, parseUrlSelection, serializeUrlList,
+  parseAnalyticsDates, serializeAnalyticsDates, writeAnalyticsUrlPatch,
+  type UrlPatch, type AnalyticsPatchOptions,
+} from "../../../utils/analyticsUrlState";
 
 /** 三金额口径键（D-41 §2）：与后端三金额/排序键一一对应。 */
 export type AmountKey = "ex" | "inc" | "revenue";
@@ -50,6 +55,7 @@ export interface SalesAnalyticsUrlState {
   amounts: AmountKey[];
   sort: SalesAnalyticsSortKey;
   page: number;
+  pageSize: number;
   /** D-40 §5：含退货 = 已对账 + 退货已对账；默认不含。 */
   includeReturns: boolean;
   /** 非空 = 订单详情抽屉打开。 */
@@ -58,45 +64,25 @@ export interface SalesAnalyticsUrlState {
 
 // ---------------------------------------------------------------- 解析（URL → 状态）
 
-function splitList(raw: string | null): string[] {
-  if (!raw) return [];
-  // 不 trim：ETL 落库时已 clean_str（首尾空白不可能存在于 business_type 原值），
-  // 后端对筛选值也统一 strip 后精确匹配——这里保持原样只为 URL/选项值往返保真
-  // （选项值来自 /options 原值分组，静默 trim 会让 URL 与选项显示不一致）。只剔除空串。
-  return Array.from(new Set(raw.split(",").filter(Boolean)));
-}
-
-function parseAmounts(raw: string | null): AmountKey[] {
-  const valid = new Set<string>(ALL_AMOUNTS);
-  const parsed = splitList(raw).filter((v) => valid.has(v)) as AmountKey[];
-  return parsed.length ? parsed : [...DEFAULT_AMOUNTS];
-}
-
-/** 页码上界，与后端 app.api.query_bounds.ANALYTICS_PAGE_MAX 一致。 */
-export const SALES_ANALYTICS_PAGE_MAX = 10_000;
+export { ANALYTICS_PAGE_MAX as SALES_ANALYTICS_PAGE_MAX } from "../../../utils/analyticsUrlState";
 
 export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlState {
-  const presetRaw = sp.get("preset");
-  const from = sp.get("from");
-  const to = sp.get("to");
   const sortRaw = sp.get("sort");
-  const pageRaw = Number.parseInt(sp.get("page") || "", 10);
-  const orderIdRaw = Number.parseInt(sp.get("order_id") || "", 10);
+  const selected = parseUrlSelection(sp, "basis", ALL_AMOUNTS);
   return {
-    preset: isDatePreset(presetRaw) ? presetRaw : DEFAULT_DATE_PRESET,
-    from: from && to ? from : null, // 只有两个都在时才有意义（单边视为残缺）
-    to: from && to ? to : null,
-    businessType: splitList(sp.get("business_type")),
+    ...parseAnalyticsDates(sp),
+    businessType: parseUrlList(sp, "business_type"),
     customer: sp.get("customer") || null,
     salesperson: sp.get("salesperson") || null,
-    amounts: parseAmounts(sp.get("basis")),
+    amounts: selected,
     sort: (SALES_ANALYTICS_SORT_KEYS as readonly string[]).includes(sortRaw ?? "")
       ? (sortRaw as SalesAnalyticsSortKey)
       : DEFAULT_SORT,
     // 与后端 ANALYTICS_PAGE_MAX 同上界：分享链/手改 URL 的超大页码收敛到 10000，不发必 422 的请求
-    page: Number.isInteger(pageRaw) && pageRaw > 1 ? Math.min(pageRaw, SALES_ANALYTICS_PAGE_MAX) : 1,
+    page: clampAnalyticsPage(sp.get("page")),
+    pageSize: parseAnalyticsPageSize(sp.get("page_size")),
     includeReturns: sp.get("include_returns") === "1",
-    orderId: Number.isInteger(orderIdRaw) && orderIdRaw > 0 ? orderIdRaw : null,
+    orderId: parsePositiveId(sp.get("order_id")),
   };
 }
 
@@ -112,23 +98,10 @@ function amountsIsDefault(amounts: AmountKey[]): boolean {
 /** 状态增量 → URL 增量；默认值转 undefined（useSalesAnalyticsPatch 语义：undefined = 删键）。 */
 export function serializeSalesAnalyticsState(
   next: Partial<SalesAnalyticsUrlState>,
-): Record<string, string | undefined> {
-  const out: Record<string, string | undefined> = {};
-  if (next.preset !== undefined) {
-    out.preset = next.preset === DEFAULT_DATE_PRESET ? undefined : next.preset;
-    if (next.preset === "custom") {
-      out.from = next.from || undefined;
-      out.to = next.to || undefined;
-    } else {
-      // 非自定义预设：残留的 from/to 一并清掉
-      out.from = undefined;
-      out.to = undefined;
-    }
-  }
+): UrlPatch {
+  const out: UrlPatch = serializeAnalyticsDates(next);
   if (next.businessType !== undefined) {
-    out.business_type = next.businessType.length
-      ? next.businessType.join(",")
-      : undefined;
+    out.business_type = serializeUrlList(next.businessType);
   }
   if (next.customer !== undefined) {
     out.customer = next.customer || undefined;
@@ -137,13 +110,14 @@ export function serializeSalesAnalyticsState(
     out.salesperson = next.salesperson || undefined;
   }
   if (next.amounts !== undefined) {
-    out.basis = amountsIsDefault(next.amounts) ? undefined : next.amounts.join(",");
+    out.basis = amountsIsDefault(next.amounts) ? undefined : serializeUrlList(next.amounts);
   }
   if (next.sort !== undefined) {
     out.sort = next.sort === DEFAULT_SORT ? undefined : next.sort;
   }
   if (next.page !== undefined) {
-    out.page = next.page > 1 ? String(next.page) : undefined;
+    const page = clampAnalyticsPage(next.page);
+    out.page = page > 1 ? String(page) : undefined;
   }
   if (next.includeReturns !== undefined) {
     out.include_returns = next.includeReturns ? "1" : undefined;
@@ -151,24 +125,22 @@ export function serializeSalesAnalyticsState(
   if (next.orderId !== undefined) {
     out.order_id = next.orderId != null ? String(next.orderId) : undefined;
   }
+  if (next.pageSize !== undefined) {
+    const size = parseAnalyticsPageSize(next.pageSize);
+    out.page_size = size === DEFAULT_ANALYTICS_PAGE_SIZE ? undefined : String(size);
+  }
+  if (Object.values(out).some(Array.isArray)) out.url_version = "2";
   return out;
 }
 
-/** URL 增量更新（replace 不堆历史）；resetPage 供筛选变化时回到第 1 页。 */
+/** 筛选/分页默认 replace；下钻导航显式 push；resetPage 回到第 1 页。 */
 export function useSalesAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams) {
   return (
     next: Partial<SalesAnalyticsUrlState>,
-    opts?: { resetPage?: boolean },
+    opts?: AnalyticsPatchOptions,
   ) => {
-    const merged = new URLSearchParams(sp);
-    const patch = serializeSalesAnalyticsState(
-      opts?.resetPage ? { ...next, page: 1 } : next,
-    );
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined) merged.delete(k);
-      else merged.set(k, v);
-    }
-    setSp(merged, { replace: true });
+    const patch = serializeSalesAnalyticsState(opts?.resetPage ? { ...next, page: 1 } : next);
+    writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["business_type", "basis"]);
   };
 }
 

@@ -31,6 +31,7 @@ describe("parseAnalyticsUrl：默认与容错", () => {
       sort: "order_date",
       dir: "desc",
       page: 1,
+      pageSize: 50,
       basis: ["inc", "ex", "paid"],
       orderId: null,
     });
@@ -49,7 +50,7 @@ describe("parseAnalyticsUrl：默认与容错", () => {
     expect(s.basis).toEqual(["inc", "ex", "paid"]);
   });
 
-  it("customer 只收正整数 id；多选去重去空（解析后再去重，「12」与「12.5」同 id 不重复）", () => {
+  it("customer 只收正整数 id；多选去重去空（小数 ID 被拒绝）", () => {
     const s = parseAnalyticsUrl(sp("customer=12,abc,7,,7,-1,12.5,0"));
     expect(s.customerIds).toEqual([12, 7]);
   });
@@ -77,11 +78,11 @@ describe("parseAnalyticsUrl：默认与容错", () => {
 });
 
 describe("serializeAnalyticsState：默认值不落 URL", () => {
-  it("筛选空数组 → 删键；非空 → 逗号连接", () => {
+  it("筛选空数组 → 删键；非空 → 重复参数值数组 + v2 标记", () => {
     expect(serializeAnalyticsState({ sourceType: [] })).toEqual({ source_type: undefined });
     expect(serializeAnalyticsState({ sourceType: ["备件采购", "批量采购"] }))
-      .toEqual({ source_type: "备件采购,批量采购" });
-    expect(serializeAnalyticsState({ customerIds: [12, 7] })).toEqual({ customer: "12,7" });
+      .toEqual({ source_type: ["备件采购", "批量采购"], url_version: "2" });
+    expect(serializeAnalyticsState({ customerIds: [12, 7] })).toEqual({ customer: ["12", "7"], url_version: "2" });
   });
 
   it("preset=today / group_by=source_type / sort=order_date / dir=desc / page=1 都转 undefined", () => {
@@ -113,7 +114,7 @@ describe("serializeAnalyticsState：默认值不落 URL", () => {
 
   it("basis=三口径全选 → 删键（默认态）；子集才落键", () => {
     expect(serializeAnalyticsState({ basis: ["inc", "ex", "paid"] })).toEqual({ basis: undefined });
-    expect(serializeAnalyticsState({ basis: ["paid"] })).toEqual({ basis: "paid" });
+    expect(serializeAnalyticsState({ basis: ["paid"] })).toEqual({ basis: ["paid"], url_version: "2" });
   });
 });
 
@@ -131,10 +132,31 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
       // 把完整状态按段序列化回 URL，再解析，应与首次解析一致
       const full = serializeAnalyticsState(state);
       const rebuilt = new URLSearchParams();
-      for (const [k, v] of Object.entries(full)) if (v !== undefined) rebuilt.set(k, v);
+      for (const [k, v] of Object.entries(full)) {
+        if (Array.isArray(v)) v.forEach(item => rebuilt.append(k, item));
+        else if (v !== undefined) rebuilt.set(k, v);
+      }
       expect(parseAnalyticsUrl(rebuilt)).toEqual(state);
-      // 默认值不额外落键；多值逗号在 URLSearchParams 里编码为 %2C
-      expect(rebuilt.toString()).toBe(qs.split(",").join("%2C"));
+      // 原始旧链接只改变多选编码与版本标记；其余键必须完整保留（排序后比较排除键顺序）。
+      const expected = new URLSearchParams(qs);
+      let hasList = false;
+      for (const key of ["source_type", "purchaser", "salesperson", "customer", "category", "basis"]) {
+        if (!expected.has(key)) continue;
+        hasList = true;
+        const values = [...new Set(expected.getAll(key).flatMap(value => value.split(",")).filter(Boolean))];
+        expected.delete(key);
+        values.forEach(value => expected.append(key, value));
+      }
+      if (hasList) expected.set("url_version", "2");
+      const actual = new URLSearchParams(rebuilt);
+      expected.sort();
+      actual.sort();
+      expect(actual.toString()).toBe(expected.toString());
+      // 新格式必须用重复参数：已知多值键逐项保真，不再写旧逗号列表。
+      for (const [key, value] of Object.entries(full)) {
+        if (Array.isArray(value)) expect(rebuilt.getAll(key)).toEqual(value);
+        else expect(rebuilt.get(key)).toBe(value ?? null);
+      }
     });
   }
   it("URL 里显式写默认值 → 归一化为零参数（分享链接不携带冗余）", () => {

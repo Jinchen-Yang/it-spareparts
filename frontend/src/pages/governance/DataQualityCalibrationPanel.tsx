@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Button, Card, Col, Descriptions, Empty, Grid, Input, List, Row, Select,
@@ -37,16 +38,6 @@ function formatMoney(value: number) {
 
 function formatRate(value: number) {
   return `${(value * 100).toFixed(2)}%`;
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).format(date);
 }
 
 function directionTag(direction: PurchasePriceCalibrationSample["direction"]) {
@@ -201,7 +192,7 @@ function PreviewContent({ preview, isMobile }: { preview: PurchasePriceCalibrati
             <Descriptions column={1} size="small">
               <Descriptions.Item label="规则版本">{preview.rule_version}</Descriptions.Item>
               <Descriptions.Item label="数据截止">{preview.data_through || "暂无有效数据"}</Descriptions.Item>
-              <Descriptions.Item label="预览生成">{formatDateTime(preview.generated_at)}</Descriptions.Item>
+              <Descriptions.Item label="预览生成">{formatBusinessDateTime(preview.generated_at)}</Descriptions.Item>
               <Descriptions.Item label="抽样边界">每档每方向最多 {preview.sample_boundary.limit_per_threshold_direction} 条</Descriptions.Item>
             </Descriptions>
           </Card>

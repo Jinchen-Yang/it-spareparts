@@ -2,7 +2,7 @@
 // 筛选与含退货、切换金额口径不重新请求、金额/客户/对账脱敏账号的控件门控与「—」/
 // 「无对账数据」占位、排序回退如实提示（sort 回显 ≠ 请求值）、错误与空态、详情抽屉。
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { message } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -102,10 +102,13 @@ const ORDER_DETAIL = {
 // ---------------------------------------------------------------- 渲染骨架
 
 let locationSearch = "";
+let navigationType = "";
 function LocationProbe() {
   const loc = useLocation();
   locationSearch = loc.search;
-  return null;
+  navigationType = useNavigationType();
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(-1)}>浏览器后退</button>;
 }
 
 function renderPage(initial = "/sales/analytics") {
@@ -220,7 +223,8 @@ describe("销售分析页：URL 单一真值", () => {
     fireEvent.click(
       await screen.findByText("含税订单金额", { selector: ".ant-select-item-option-content" }),
     );
-    await waitFor(() => expect(locationSearch).toContain("basis=ex%2Crevenue"));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).getAll("basis")).toEqual(["ex", "revenue"]));
+    expect(navigationType).toBe("REPLACE");
     expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1);
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
     // KPI 卡与列一并消失（含税 KPI 卡的缺失披露文案随之消失，不许恒显三卡）
@@ -365,6 +369,7 @@ describe("销售分析页：URL 单一真值", () => {
       sort: "amount_inc_tax", page: 1,
     });
     expect(locationSearch).toContain("sort=amount_inc_tax");
+    expect(navigationType).toBe("REPLACE");
     expect(locationSearch).not.toContain("page=");
   });
 
@@ -642,5 +647,21 @@ describe("销售分析页：健壮性", () => {
     expect(screen.getByRole("columnheader", { name: "已对账金额" })).toBeInTheDocument();
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).not.toContain("无对账数据");
+  });
+});
+
+
+describe("URL 导航与每页条数", () => {
+  it("打开抽屉创建历史，浏览器后退恢复原筛选与每页条数", async () => {
+    renderPage("/sales/analytics?page_size=100");
+    const row = await screen.findByRole("row", { name: "查看销售单 XS-2026-201 详情" });
+    expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({ page_size: 100 });
+    fireEvent.click(row);
+    await waitFor(() => expect(new URLSearchParams(locationSearch).get("order_id")).toBe("201"));
+    expect(navigationType).toBe("PUSH");
+    fireEvent.click(screen.getByRole("button", { name: "浏览器后退" }));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).has("order_id")).toBe(false));
+    expect(new URLSearchParams(locationSearch).get("page_size")).toBe("100");
+    expect(navigationType).toBe("POP");
   });
 });

@@ -1,3 +1,4 @@
+import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
 // 大单列表：按所选金额键倒序（后端固定 DESC NULLS LAST + id DESC，只倒序不切升序），
 // 每单挂最新对账快照块（D-40 §4-§5）。排序以响应 sort 回显为准——金额键被
 // data_purchase_cost 遮蔽时后端静默回退 revenue（行序防泄漏），前端如实提示并
@@ -166,7 +167,7 @@ export default function DrillTable({
     pageSize,
     total: data?.total ?? 0,
     showSizeChanger: true,
-    pageSizeOptions: [20, 50, 100, 200], // 后端上限 200
+    pageSizeOptions: [...ANALYTICS_PAGE_SIZES], // 后端上限 200
     showTotal: (t) => `共 ${t} 单`,
   };
 

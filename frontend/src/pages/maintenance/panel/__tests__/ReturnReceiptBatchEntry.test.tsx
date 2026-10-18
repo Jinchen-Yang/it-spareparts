@@ -1,5 +1,10 @@
+import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+
+afterEach(async () => {
+  await cleanupAntd();
+});
 
 const mocks = vi.hoisted(() => ({
   createReturnReceipt: vi.fn(),
@@ -205,7 +210,6 @@ describe("ReturnReceiptBatchEntry", () => {
   beforeEach(() => {
     mocks.createReturnReceipt.mockReset();
   });
-  afterEach(() => cleanup());
 
   it("粘贴→预览→逐条登记→结果表（部分失败语义）", async () => {
     mocks.createReturnReceipt
@@ -513,7 +517,6 @@ describe("ReturnReceiptBatchEntry 项目切换与卸载", () => {
   beforeEach(() => {
     mocks.createReturnReceipt.mockReset();
   });
-  afterEach(() => cleanup());
 
   it("提交在途时切换项目：旧回调作废不发后续行；P2 开始在途后 P1 迟到 resolve，P2 仍锁定无污染", async () => {
     // P1 两行：第一行挂起（在途），第二行不该发出
@@ -546,9 +549,7 @@ describe("ReturnReceiptBatchEntry 项目切换与卸载", () => {
     expect(mocks.createReturnReceipt.mock.calls[1][0]).toBe("p-2");
 
     // P1 的迟到响应此刻才回来：不许清 P2 的锁、不许写 P2 状态、不许发 P1 第二行
-    p1d.resolve({ data: { replayed: false, receipt_id: "r-1" } });
-    await Promise.resolve();
-    await Promise.resolve();
+    await act(async () => { p1d.resolve({ data: { replayed: false, receipt_id: "r-1" } }); });
     expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(2);
     expect(screen.getByText("提交中…")).toBeTruthy(); // P2 仍在提交中被锁定
 
@@ -571,9 +572,7 @@ describe("ReturnReceiptBatchEntry 项目切换与卸载", () => {
     await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(1));
 
     unmount();
-    d.resolve({ data: { replayed: false, receipt_id: "r-1" } });
-    await Promise.resolve();
-    await Promise.resolve();
+    await act(async () => { d.resolve({ data: { replayed: false, receipt_id: "r-1" } }); });
     // 第二行绝不再发
     expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(1);
   });

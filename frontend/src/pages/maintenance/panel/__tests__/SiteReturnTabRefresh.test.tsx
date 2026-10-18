@@ -1,5 +1,6 @@
+import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { useCallback, useRef, useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PanelRefresh, RegisterPanelRefresh } from "../panelUtils";
 
@@ -68,7 +69,7 @@ beforeEach(() => {
   api.getReturnReceiptDemands.mockResolvedValue({ data: { rows: [], total: 0 } });
   api.createReturnReceipt.mockImplementation(async () => { revision += 1; return { data: { ...receipt(), replayed: false } }; });
 });
-afterEach(cleanup);
+afterEach(cleanupAntd);
 
 describe("领用返还统一读回", () => {
   it("工作簿领用的实际地址出现在列表和展开详情，长地址完整保留", async () => {
@@ -157,9 +158,13 @@ describe("领用返还统一读回", () => {
     await screen.findByText("RETURN-0");
     const search = screen.getByLabelText("搜索现场领用单");
     fireEvent.change(search, { target: { value: "已执行筛选" } });
-    fireEvent.keyDown(search, { key: "Enter", code: "Enter", charCode: 13 });
+    // API 被调用仅代表请求开始；等待即时 mock 响应对应的 React 提交，
+    // 再操作已渲染的加载更多按钮，避免高负载下读取搜索中的过渡状态。
+    await act(async () => {
+      fireEvent.keyDown(search, { key: "Enter", code: "Enter", charCode: 13 });
+    });
     await waitFor(() => expect(api.searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ q: "已执行筛选" })));
-    fireEvent.click(screen.getByRole("button", { name: "加载更多领用单" }));
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多领用单" }));
     await screen.findByText("ISSUE-PAGE-2-V0");
     fireEvent.change(search, { target: { value: "未提交的新输入" } });
     revision = 1;

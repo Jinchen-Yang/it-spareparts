@@ -25,6 +25,8 @@ export interface FilterBarProps {
   categories: string[];
   customerOptions: CustomerOption[];
   customerOptionsLoading: boolean;
+  onCustomerSearch?: (query: string) => void;
+  customersHasMore?: boolean;
   /** data_purchase_cost=false：金额不可见 → 不渲染口径控件（后端金额也已置 null）。 */
   costRestricted: boolean;
   /** data_customer=false：客户筛选/分组不可用（后端 fail-closed 403）。 */
@@ -49,6 +51,8 @@ export default function FilterBar({
   categories,
   customerOptions,
   customerOptionsLoading,
+  onCustomerSearch,
+  customersHasMore,
   costRestricted,
   customerRestricted,
   onReset,
@@ -62,6 +66,10 @@ export default function FilterBar({
       value={state.customerIds}
       disabled={customerRestricted}
       loading={customerOptionsLoading}
+      filterOption={false}
+      onSearch={onCustomerSearch}
+      notFoundContent={customerOptionsLoading ? "加载中…" : "无匹配客户"}
+      popupRender={(menu) => <>{menu}{customersHasMore && <div style={{ padding: 8 }}>仅显示前 200 项，请输入客户名称缩小范围</div>}</>}
       optionFilterProp="label"
       options={customerOptions}
       onChange={(v: number[]) => change({ customerIds: v })}

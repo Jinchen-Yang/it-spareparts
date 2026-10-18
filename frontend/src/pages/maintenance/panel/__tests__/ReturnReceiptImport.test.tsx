@@ -39,7 +39,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
   it("更正展开为中文当前与拟导入对照，保留必要来源追溯", async () => {
     mocks.upload.mockResolvedValue({ data: { ...ready, rows: [{ ...row,
       before: { qty: "1.000", review_required: false, line_status: "active" },
-      after: { qty: "1.500", review_required: true, line_status: "voided", source_metadata: { category: "旧库退返", sn: "SYNTHETIC-SN" } },
+      after: { occurred_at: "2026-10-01T16:05:00Z", qty: "1.500", review_required: true, line_status: "voided", source_metadata: { category: "旧库退返", sn: "SYNTHETIC-SN" } },
     }] } });
     const { container } = render(<ReturnReceiptImport onApplied={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "导入入库单" })); selectFile();
@@ -47,6 +47,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     fireEvent.click(container.ownerDocument.querySelector(".ant-table-row-expand-icon")!);
     expect(screen.getByRole("columnheader", { name: "当前台账" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "拟导入内容" })).toBeInTheDocument();
+    expect(screen.getByText("2026-10-02 00:05")).toBeInTheDocument();
     expect(screen.getByText("数量审核")).toBeInTheDocument();
     expect(screen.getByText("待审（保留源数量）")).toBeInTheDocument();
     expect(screen.getByText("已作废，不计入返还")).toBeInTheDocument();

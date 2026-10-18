@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -257,7 +258,7 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
             <div className="replenishment-history-version">
               <Text type="secondary">
                 {version.submitted_at
-                  ? `提交时间：${new Date(version.submitted_at).toLocaleString()}`
+                  ? `提交时间：${formatBusinessDateTime(version.submitted_at)}`
                   : "尚未提交"}
               </Text>
               {version.request_note && <Text>整单备注：{version.request_note}</Text>}
@@ -1172,7 +1173,7 @@ export default function ReplenishmentBetaPage() {
                         )}
                       </Space>
                     )}
-                    description={`v${item.latest_version_no} · ${new Date(item.updated_at).toLocaleString()}`}
+                    description={`v${item.latest_version_no} · ${formatBusinessDateTime(item.updated_at)}`}
                   />
                 </List.Item>
               )}
