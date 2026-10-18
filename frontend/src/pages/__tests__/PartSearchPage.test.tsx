@@ -1,3 +1,4 @@
+import { cleanupAntd, renderWithoutMotion as render } from "../../test/antdRender";
 /** 型号查询（统一搜索 + 稳定深链）的行为测试。
  *
  * 断言口径：
@@ -9,7 +10,7 @@
  * - 点击结果行 → part_id push 进历史；浏览器后退/前进保持/恢复选中型号。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
 import type { Overview } from "../../api";
@@ -98,6 +99,12 @@ function Probe() {
   return null;
 }
 
+// fireEvent 只等待同步更新；这里的 API mock 立即返回 Promise，须让 React 提交
+// 点击引发的 PN → part_id 规范化后再断言，避免 1s 轮询与重渲染抢时间。
+async function clickAndFlush(element: HTMLElement) {
+  await act(async () => { fireEvent.click(element); });
+}
+
 function renderAt(url: string) {
   render(
     <MemoryRouter initialEntries={[url]}>
@@ -136,7 +143,10 @@ beforeEach(() => {
       delta_to_constraint: null, relation_to_constraint: "unset" },
   });
 });
-afterEach(cleanup);
+afterEach(async () => {
+  await cleanupAntd();
+  vi.restoreAllMocks();
+});
 
 describe("稳定深链", () => {
   it("/parts?part_id=42 打开即自动加载并展示该型号全景（无需再点搜索）", async () => {
@@ -402,7 +412,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     renderAt("/parts?part_id=42");
     const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
     expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
-    fireEvent.click(viewButton);
+    await clickAndFlush(viewButton);
 
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
@@ -436,7 +446,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     expect(viewButton).toHaveAttribute("type", "button");
     viewButton.focus();
     expect(viewButton).toHaveFocus();
-    fireEvent.click(viewButton);
+    await clickAndFlush(viewButton);
 
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     const editButton = await screen.findByRole("button", { name: "修改型号 SUB-001 的描述和品类" });
@@ -484,7 +494,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     renderAt("/parts?part_id=42");
     const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
     expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
-    fireEvent.click(viewButton);
+    await clickAndFlush(viewButton);
 
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
@@ -500,7 +510,7 @@ describe("通用号 PN 查看与详情编辑", () => {
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+    await clickAndFlush(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
 
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
@@ -645,7 +655,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     masterEdit.mockReturnValueOnce(delayedSave.promise);
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+    await clickAndFlush(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     fireEvent.click(await screen.findByRole("button", { name: "修改型号 SUB-001 的描述和品类" }));
     await screen.findByDisplayValue("目标型号描述");
@@ -686,7 +696,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     });
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+    await clickAndFlush(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     fireEvent.click(await screen.findByRole("button", { name: "修改型号 SUB-001 的描述和品类" }));
     await screen.findByDisplayValue("目标型号描述");

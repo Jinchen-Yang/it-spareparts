@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanupAntd, renderWithoutMotion as render } from "../../../test/antdRender";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Modal, message } from "antd";
+import { message } from "antd";
 import { MAINTENANCE_CHANGED_STORAGE_KEY } from "../../../utils/maintenanceRefresh";
 
 const getBoardProject = vi.fn();
@@ -513,10 +514,9 @@ describe("项目备注", () => {
   });
 });
 
-afterEach(() => {
-  cleanup();
-  Modal.destroyAll();
-  message.destroy();
+afterEach(async () => {
+  await cleanupAntd();
+  vi.restoreAllMocks();
 });
 
 function renderPanel(withProjectSwitcher = false) {

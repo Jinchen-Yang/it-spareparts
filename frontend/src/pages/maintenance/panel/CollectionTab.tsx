@@ -188,6 +188,12 @@ export function CollectionTab({
     setSubmitError(null);
     setSubmitting(false);
     form.resetFields();
+    return () => {
+      // 切项目或卸载后，合同请求、校验及写请求的迟到响应不得再触发状态、
+      // 全局 message 或回读；网络请求本身仍由后端完成。
+      contractsEpoch.current += 1;
+      dialogEpoch.current += 1;
+    };
   }, [projectId, form]);
 
   const contractRows = contracts?.projectId === projectId ? contracts.rows : [];
