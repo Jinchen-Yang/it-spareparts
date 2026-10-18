@@ -43,3 +43,27 @@ export function businessToday(now: Date = new Date()): Dayjs {
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
   return dayjs(`${part("year")}-${part("month")}-${part("day")}`);
 }
+
+const BUSINESS_DATETIME_FORMAT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: BUSINESS_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/**
+ * 带时区偏移的 ISO datetime（后端统一存 UTC、isoformat 输出 +00:00）→ 业务时区
+ * Asia/Shanghai 的「YYYY-MM-DD HH:mm」。按偏移换算后再格式化，不受浏览器时区影响；
+ * 空值与无法解析的值一律「—」（不把原串当时间展示）。
+ */
+export function formatBusinessDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const parts = BUSINESS_DATETIME_FORMAT.formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
+}

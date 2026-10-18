@@ -166,7 +166,8 @@ describe("预设枚举", () => {
 describe("DateRangePresets 组件", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date(2026, 9, 17, 10, 0, 0));
+    // UTC ISO 钉死时刻（= 上海 2026-10-17 10:00），不随机器时区漂移
+    vi.setSystemTime(new Date("2026-10-17T02:00:00Z"));
   });
   afterEach(() => vi.useRealTimers());
 

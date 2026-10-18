@@ -153,7 +153,8 @@ beforeEach(() => {
     data_purchase_cost: true, data_customer: true,
   }));
   vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date(2026, 9, 17, 10, 0, 0)); // 2026-10-17（Q10 默认今天）
+  // UTC ISO 钉死时刻（= 上海 2026-10-17 10:00），不随机器时区漂移
+  vi.setSystemTime(new Date("2026-10-17T02:00:00Z"));
   fetchPurchaseAnalyticsOptions.mockResolvedValue({ data: OPTIONS });
   fetchPurchaseAnalyticsSummary.mockImplementation((q: Record<string, unknown>) =>
     Promise.resolve({ data: q.group_by === "customer" ? SUMMARY_BY_CUSTOMER : SUMMARY }));
