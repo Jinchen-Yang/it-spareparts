@@ -288,6 +288,37 @@ def test_customer_and_salesperson_wildcards_literal_only(db, seeded):
     assert kpi(customer="客户甲\\%")["orders"] == 0       # 转义写法本身也是字面
 
 
+@pytest.mark.parametrize("term", ["%", "_", "\\"])
+@pytest.mark.parametrize("field", ["customer", "salesperson"])
+def test_customer_and_salesperson_literal_characters_match(db, seeded, field, term):
+    """字面特殊字符必须命中实际含该字符的名称，且排除普通名称与其他字符。"""
+    batch = seeded["batches"][0]
+    expected_no = None
+    for index, char in enumerate(["%", "_", "\\", "普通"]):
+        name = f"字面{char}名称"
+        customer = DimCustomer(name_raw=name, name_normalized=name)
+        db.add(customer)
+        db.flush()
+        order_no = f"SO-LITERAL-{index}"
+        db.add(FSalesOrder(
+            raw_order_id=f"R-LITERAL-{index}", order_no=order_no,
+            order_date=date(2026, 1, 10), customer_id=customer.id,
+            salesperson=name, business_type="备件销售", data_status="已生效",
+            import_batch_id=batch.id,
+        ))
+        if char == term:
+            expected_no = order_no
+    db.commit()
+    client = _client(db, "sa-literal-positive", role="boss")
+    params = {field: term}
+    summary = client.get(SUMMARY, params=params)
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["kpi"]["orders"] == 1
+    orders = client.get(ORDERS, params=params)
+    assert orders.status_code == 200, orders.text
+    assert [item["order_no"] for item in orders.json()["items"]] == [expected_no]
+
+
 def test_reconciliation_timestamps_independent_of_session_timezone(db, seeded):
     """timestamptz 输出统一 UTC 带偏移（#397 carry-over）：会话时区切到
     Asia/Shanghai 后，reconciled_as_of / created_at 与 UTC 会话逐字一致——

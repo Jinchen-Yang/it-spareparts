@@ -3,6 +3,7 @@
 覆盖（#395 检察官 / #397 (7)）：
 - 迁移后：FK 显式命名且 ondelete=SET NULL、两处新索引在位；
 - downgrade 往返：回到 b8f2d6c4a1e9 原状（PG 默认 FK 名、无策略、无索引）再升回来；
+- 计划：禁用顺序/位图扫描后，business_type 查询可走 ix_so_status_btype 的 Index Scan；
 - 行为：删除订单 → 快照存活、sales_order_id 置空（观测不级联删、不阻塞删除）。
 """
 import os
@@ -59,6 +60,23 @@ def test_fk_index_and_ondelete_after_upgrade(db):
     assert snap_idx["ix_sales_recon_snapshot_sales_order"] == ["sales_order_id"]
     so_idx = {i["name"]: i["column_names"] for i in insp.get_indexes("f_sales_order")}
     assert so_idx["ix_so_status_btype"] == ["data_status", "business_type"]
+
+
+def test_business_type_index_explain(db):
+    """验证迁移索引可供筛选使用；强制计划不代表生产成本模型会自然选它。
+
+    SET LOCAL 仅影响当前测试事务，夹具 rollback 后恢复；关闭位图扫描以固定
+    Index Scan 形态，避免小型合成表上的默认 Seq Scan 或 Bitmap Heap Scan。
+    """
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    db.execute(text("SET LOCAL enable_bitmapscan = off"))
+    plan = db.execute(text(
+        "EXPLAIN (FORMAT JSON) SELECT id FROM f_sales_order "
+        "WHERE data_status = '已生效' AND business_type = '备件销售'"
+    )).scalar_one()[0]["Plan"]
+    assert plan["Node Type"] == "Index Scan", plan
+    assert plan["Index Name"] == "ix_so_status_btype", plan
+    assert "business_type" in plan["Index Cond"], plan
 
 
 def test_migration_roundtrip_restores_legacy_fk(db):
