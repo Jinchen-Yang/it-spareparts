@@ -214,6 +214,26 @@ describe("采购分析页：URL 单一真值", () => {
     expect(screen.getByText(/名义不含税占比/)).toBeInTheDocument();
   });
 
+  it("名义侧说明按实际推算方向表述，包含历史缺口翻转", async () => {
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    for (const side of ["含税", "不含税"]) {
+      const note = screen.getByLabelText(`名义${side}说明`);
+      fireEvent.mouseOver(note);
+      expect(await screen.findByText(
+        `未标税率（或税率为 0）时，名义值是实际按 13% 推算出来的那一侧；名义${side}占比 = 实际推算的${side}额之和 ÷ ${side}合计。`,
+      )).toBeInTheDocument();
+      fireEvent.mouseLeave(note);
+      const columnTitles = screen.getAllByText(`${side}金额`);
+      const columnTitle = columnTitles[columnTitles.length - 1];
+      fireEvent.mouseOver(columnTitle);
+      expect(await screen.findByText(
+        `未标税率（或税率为 0）时，只有实际按 13% 推算出来的${side}侧才是名义值。`,
+      )).toBeInTheDocument();
+      fireEvent.mouseLeave(columnTitle);
+    }
+  });
+
   it("「全部」预设不传任何日期参数（后端缺省 = 全部历史）", async () => {
     renderPage("/purchases/analytics?preset=all");
     expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();

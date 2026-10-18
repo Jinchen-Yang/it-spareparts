@@ -39,13 +39,13 @@ export function groupByTitle(groupBy: string): string {
 }
 
 /** 名义占比角标（D-39 名义侧裁定，2026-10-18）：按侧分开——未标税率单据里，
- * 非含税单的推算含税占含税合计（inc），含税单的推算不含税占不含税合计（ex）。 */
+ * 实际按 13% 推算出来的那一侧为名义值；推算含税占含税合计（inc），推算不含税占不含税合计（ex）。 */
 function NominalShareNote({ side, share }: { side: "inc" | "ex"; share: number | null }) {
   if (share == null) return null;
   const inc = side === "inc";
   const title = inc
-    ? "未标税率（或税率为 0）的非含税采购单，其含税金额按 13% 从不含税额推算（名义），不是票面金额。"
-    : "未标税率（或税率为 0）的含税采购单，其不含税金额按 13% 从录入的含税额推算（名义）；录入的含税额本身是真实金额。";
+    ? "未标税率（或税率为 0）时，名义值是实际按 13% 推算出来的那一侧；名义含税占比 = 实际推算的含税额之和 ÷ 含税合计。"
+    : "未标税率（或税率为 0）时，名义值是实际按 13% 推算出来的那一侧；名义不含税占比 = 实际推算的不含税额之和 ÷ 不含税合计。";
   return (
     <span>
       名义{inc ? "含税" : "不含税"}占比 {pct(share)}
@@ -71,9 +71,9 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
     ...basis.map((b) => ({
       title:
         b === "inc" ? (
-          <Tooltip title="未标税率（或 0 税率）的非含税单据，其含税额按 13% 推算（名义）">{AMOUNT_TITLE[b]}</Tooltip>
+          <Tooltip title="未标税率（或税率为 0）时，只有实际按 13% 推算出来的含税侧才是名义值。">{AMOUNT_TITLE[b]}</Tooltip>
         ) : b === "ex" ? (
-          <Tooltip title="未标税率（或 0 税率）的含税单据，其不含税额按 13% 推算（名义）">{AMOUNT_TITLE[b]}</Tooltip>
+          <Tooltip title="未标税率（或税率为 0）时，只有实际按 13% 推算出来的不含税侧才是名义值。">{AMOUNT_TITLE[b]}</Tooltip>
         ) : (
           AMOUNT_TITLE[b]
         ),
