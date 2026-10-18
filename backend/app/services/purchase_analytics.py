@@ -74,13 +74,32 @@ def _rate_expr(po=FPurchaseOrder):
 
 
 def _nominal_side_expr(po=FPurchaseOrder):
-    """名义侧 SQL 表达式（金臣 2026-10-18 裁定）：未标税率（NULL/0）时推算侧才是
-    名义值——含税单（is_tax_inclusive=true）推算的是不含税侧 → "ex"；其余
-    （false/NULL，按不含税单处理）推算的是含税侧 → "inc"；税率已标 → NULL。"""
+    """名义侧 SQL 表达式（金臣 2026-10-18 裁定）——**行级口径的结构性规则**：
+    未标税率（NULL/0）时推算侧才是名义值——含税单（is_tax_inclusive=true）
+    推算的是不含税侧 → "ex"；其余（false/NULL，按不含税单处理）推算的是
+    含税侧 → "inc"；税率已标 → NULL。行金额的归属侧只由单据标记决定，
+    不受单头金额列缺口影响，行级聚合一律用本表达式。"""
     unmarked = func.coalesce(po.tax_rate, 0) == 0
     return case(
         (and_(unmarked, po.is_tax_inclusive.is_(True)), "ex"),
         (unmarked, "inc"),
+    )
+
+
+def _order_nominal_side_expr(po=FPurchaseOrder):
+    """单头口径的名义侧：在结构性规则（_nominal_side_expr）之上叠加历史缺口
+    方向——权威侧金额列为空、回退另一录入列时（_order_amount_exprs 的
+    coalesce 回退），实际被推算的是**权威侧**：不含税单缺不含税额、只录入
+    含税额 → 含税额是录入真值、不含税侧才是推算值 → "ex"（镜像：含税单
+    缺含税额 → "inc"）。两侧金额列皆空 → 无从谈名义 → NULL。"""
+    unmarked = func.coalesce(po.tax_rate, 0) == 0
+    return case(
+        (and_(unmarked, po.is_tax_inclusive.is_(True)),
+         case((po.amount_inc_tax.isnot(None), "ex"),
+              (po.amount_ex_tax.isnot(None), "inc"))),
+        (unmarked,
+         case((po.amount_ex_tax.isnot(None), "inc"),
+              (po.amount_inc_tax.isnot(None), "ex"))),
     )
 
 
@@ -89,8 +108,9 @@ def _order_amount_exprs(po=FPurchaseOrder):
 
     返回 (amount_ex, amount_inc, amount_paid, nominal_side)。原始侧按 is_tax_inclusive
     选定，另一侧按有效税率换算；权威侧为空时回退另一显式列（历史缺口，不混加口径）。
-    nominal_side = 未标税率时被推算的那一侧（"inc"/"ex"），已标税率 → NULL
-    （语义见 _nominal_side_expr；单头与行级同一规则）。
+    nominal_side = 未标税率时**实际被推算**的那一侧（"inc"/"ex"），已标税率 → NULL
+    （语义见 _order_nominal_side_expr——历史缺口单的推算方向会翻转；行级口径
+    用结构性规则 _nominal_side_expr）。
     """
     rate = _rate_expr(po)
     factor = Decimal(1) + rate
@@ -107,7 +127,7 @@ def _order_amount_exprs(po=FPurchaseOrder):
         else_=func.coalesce(inc_from_ex, src_inc),
     )
     amount_paid = po.amount_inc_tax  # 实付 = 「采购金额」原值，不换算
-    return amount_ex, amount_inc, amount_paid, _nominal_side_expr(po)
+    return amount_ex, amount_inc, amount_paid, _order_nominal_side_expr(po)
 
 
 def _line_amount_exprs(po=FPurchaseOrder, pl=FPurchaseLine):
@@ -145,7 +165,8 @@ def order_amounts_reference(amount_ex, amount_inc, tax_rate, is_inc) \
 
 
 def nominal_side_reference(tax_rate, is_inc) -> str | None:
-    """名义侧的 Python 参照实现（与 _nominal_side_expr 逐行对拍）。
+    """名义侧的 Python 参照实现（与 _nominal_side_expr 逐行对拍）——行级口径
+    的结构性规则。
 
     未标税率（None/0）：含税单（is_inc=True）→ "ex"（不含税是推算侧），
     其余（False/None，按不含税单处理）→ "inc"；已标税率 → None。
@@ -153,6 +174,22 @@ def nominal_side_reference(tax_rate, is_inc) -> str | None:
     if tax_rate is None or Decimal(str(tax_rate)) == 0:
         return "ex" if is_inc is True else "inc"
     return None
+
+
+def order_nominal_side_reference(tax_rate, is_inc, amount_ex, amount_inc) -> str | None:
+    """单头口径名义侧的 Python 参照实现（与 _order_nominal_side_expr 逐行对拍）。
+
+    结构性规则（nominal_side_reference）之上叠加历史缺口方向：权威侧金额列
+    为空、只录入另一侧时，实际被推算的是权威侧（如不含税单缺不含税额 →
+    "ex"）；两侧金额列皆空 → None。
+    """
+    if tax_rate is not None and Decimal(str(tax_rate)) != 0:
+        return None
+    if amount_ex is None and amount_inc is None:
+        return None
+    if is_inc is True:
+        return "ex" if amount_inc is not None else "inc"
+    return "inc" if amount_ex is not None else "ex"
 
 
 def line_amounts_reference(line_amount, tax_rate, is_inc) -> tuple[Decimal | None, Decimal | None]:
@@ -787,7 +824,8 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         "tax_rate": _f(po.tax_rate),
         "tax_rate_effective": _f(_effective_rate(po.tax_rate)),
         # 名义侧（金臣 2026-10-18 裁定）：未标税率时只有推算侧是名义值
-        "nominal_side": nominal_side_reference(po.tax_rate, po.is_tax_inclusive),
+        "nominal_side": order_nominal_side_reference(
+            po.tax_rate, po.is_tax_inclusive, po.amount_ex_tax, po.amount_inc_tax),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
         "linked_sales_order_no": po.linked_sales_order_no,

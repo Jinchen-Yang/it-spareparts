@@ -185,3 +185,33 @@ def test_tax_fills_unknown_column_rejected(fills_db):
     with pytest.raises(ValueError, match="未登记的税列回填目标"):
         f.apply(f.db, SimpleNamespace(id=f.b1), fills)
     f.db.rollback()
+
+
+def test_tax_fills_chunked_under_bind_parameter_limit(fills_db, monkeypatch):
+    """分块执行（对抗复审 2026-10-18）：单语句绑定参数须远离 PG 65535 上限，
+    超大批次按 _TAX_FILL_CHUNK 切成多条 UPDATE——把块压到 2 验证 3 行回填
+    确实走 2 条语句、跨块行各自拿到**自己的**值（rid 关联不因分块错位）。"""
+    from sqlalchemy import event
+    from scripts import backfill_sales_reconciliation as bs
+    f = fills_db
+    monkeypatch.setattr(bs, "_TAX_FILL_CHUNK", 2)
+    fills = [{"raw_order_id": rid, "column": "tax_amount", "value": Decimal(v)}
+             for rid, v in (("R-F1", "1.00"), ("R-F2", "2.00"), ("R-F3", "9.00"))]
+    stmts: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        stmts.append(statement)
+
+    event.listen(f.db.get_bind(), "before_cursor_execute", _capture)
+    try:
+        assert f.apply(f.db, SimpleNamespace(id=f.b1), fills) == 2   # R-F3 他批次
+    finally:
+        event.remove(f.db.get_bind(), "before_cursor_execute", _capture)
+    f.db.commit()
+    updates = [s for s in stmts if s.lstrip().upper().startswith("UPDATE")]
+    assert len(updates) == 2                        # 3 行 / 块 2 → 两条语句
+    values = dict(f.db.execute(text(
+        "SELECT raw_order_id, tax_amount FROM f_sales_order"
+        " WHERE import_batch_id=:b ORDER BY raw_order_id"),
+        {"b": f.b1}).all())
+    assert values == {"R-F1": Decimal("1.00"), "R-F2": Decimal("2.00")}

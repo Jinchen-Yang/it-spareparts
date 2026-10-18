@@ -587,15 +587,20 @@ _TAX_FILL_COLUMN_TYPES: dict[str, str] = {
     "tax_amount": "numeric",
 }
 
+# 每批 fill 行数（与 loader._CHUNK / 本脚本快照插入同因）：单语句绑定参数必须
+# 远低于 PostgreSQL 65535 上限——每行 2 个参数（rid/val），1000 行 = 2001 参数。
+_TAX_FILL_CHUNK = 1000
+
 
 def _apply_tax_fills(db: Session, batch: SysImportBatch,
                      fills: list[dict[str, Any]]) -> int:
-    """税三件套回填：按列一条 UPDATE ... FROM (VALUES ...) 批量执行（#396 S6）。
+    """税三件套回填：按列分块 UPDATE ... FROM (VALUES ...) 批量执行（#396 S6）。
 
     与逐条 UPDATE 同一守卫语义：限定本批次（计划只来自 import_batch_id=本批次的
     订单；loader 的 upsert 会把既有行迁到新批次，无此谓词时并发迁移后的行会被
     本批次原件的值误写）+ 目标列 IS NULL 只补不覆盖。返回真实补齐的行数
-    （RETURNING 计数，被并发抢先补掉的行不计）。
+    （RETURNING 计数，被并发抢先补掉的行不计）。按 _TAX_FILL_CHUNK 分块，防
+    超大批次（>3 万行）撑爆单语句 65535 绑定参数上限。
     """
     by_column: dict[str, list[dict[str, Any]]] = {}
     for fill in fills:
@@ -605,26 +610,28 @@ def _apply_tax_fills(db: Session, batch: SysImportBatch,
         sql_type = _TAX_FILL_COLUMN_TYPES.get(column)
         if sql_type is None:
             raise ValueError(f"未登记的税列回填目标：{column}")
-        values_sql = ", ".join(
-            f"(:rid{i}, CAST(:val{i} AS {sql_type}))"
-            for i in range(len(column_fills))
-        )
-        params: dict[str, Any] = {"batch_id": batch.id}
-        for i, fill in enumerate(column_fills):
-            params[f"rid{i}"] = fill["raw_order_id"]
-            params[f"val{i}"] = fill["value"]
-        stmt = text(
-            f"""
-            UPDATE f_sales_order AS so
-            SET {column} = v.val
-            FROM (VALUES {values_sql}) AS v(raw_order_id, val)
-            WHERE so.raw_order_id = v.raw_order_id
-              AND so.import_batch_id = :batch_id
-              AND so.{column} IS NULL
-            RETURNING so.id
-            """
-        )
-        filled += len(db.execute(stmt, params).all())
+        for start in range(0, len(column_fills), _TAX_FILL_CHUNK):
+            chunk = column_fills[start:start + _TAX_FILL_CHUNK]
+            values_sql = ", ".join(
+                f"(:rid{i}, CAST(:val{i} AS {sql_type}))"
+                for i in range(len(chunk))
+            )
+            params: dict[str, Any] = {"batch_id": batch.id}
+            for i, fill in enumerate(chunk):
+                params[f"rid{i}"] = fill["raw_order_id"]
+                params[f"val{i}"] = fill["value"]
+            stmt = text(
+                f"""
+                UPDATE f_sales_order AS so
+                SET {column} = v.val
+                FROM (VALUES {values_sql}) AS v(raw_order_id, val)
+                WHERE so.raw_order_id = v.raw_order_id
+                  AND so.import_batch_id = :batch_id
+                  AND so.{column} IS NULL
+                RETURNING so.id
+                """
+            )
+            filled += len(db.execute(stmt, params).all())
     return filled
 
 

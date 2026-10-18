@@ -26,8 +26,8 @@ from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABE
                                              EMPTY_LABEL, _line_amount_exprs,
                                              _order_amount_exprs,
                                              line_amounts_reference,
-                                             nominal_side_reference,
-                                             order_amounts_reference)
+                                             order_amounts_reference,
+                                             order_nominal_side_reference)
 from tests.boss_board_helpers import client_for
 
 D = Decimal
@@ -205,6 +205,8 @@ CASES = [
     ("1000", "1130", None, False),
     ("1000", None, "0.13", True),       # 历史缺口：口径侧为空回退另一列
     (None, "1130", "0.06", False),
+    ("1000", None, None, True),         # 缺口翻转：含税单缺含税额 → 推算含税侧
+    (None, "1130", None, False),        # 缺口翻转：不含税单缺不含税额 → 推算不含税侧
     (None, None, None, None),           # 双侧全空 → None，不静默当 0
 ]
 
@@ -226,8 +228,11 @@ def test_order_amount_sql_matches_reference(db, ex, inc, rate, is_inc):
     assert row[0] == (r_ex if r_ex is not None else None)
     assert row[1] == (r_inc if r_inc is not None else None)
     assert row[2] == (D(inc) if inc is not None else None)  # 实付=amount_inc_tax 原值
-    # 名义侧（金臣 2026-10-18 裁定）：未标税率时推算侧（含税单→ex，其余→inc）
-    assert row[3] == nominal_side_reference(rate, is_inc)
+    # 名义侧（金臣 2026-10-18 裁定 + 历史缺口补充）：单头口径按**实际被推算的
+    # 那一侧**（缺口翻转见 order_nominal_side_reference）
+    assert row[3] == order_nominal_side_reference(
+        rate, is_inc, D(ex) if ex is not None else None,
+        D(inc) if inc is not None else None)
 
 
 @pytest.mark.parametrize("amount,rate,is_inc", [
@@ -359,6 +364,41 @@ def test_nominal_side_masked_with_amounts(db, nds):
         assert i["nominal_side"] is None        # O2/O3 的 "inc"/"ex" 不得泄漏
     r = c.get(f"/api/purchases/analytics/orders/{nds.pos['O3'].id}")
     assert r.json()["nominal_side"] is None
+
+
+def test_nominal_side_legacy_gap_orders(db):
+    """历史缺口单的名义侧随**实际推算方向**翻转（2026-10-18 对抗复审补充）：
+    G1 含税单缺含税额（录入不含税 1000）→ 含税 1130 是推算侧 → 单头 "inc"；
+    G2 不含税单缺不含税额（录入含税 2260，税率 0）→ 不含税 2000 是推算侧 →
+    单头 "ex"；G3 双侧皆空 → None。行级口径恒按标记结构（G1→"ex"，G2→"inc"），
+    与单头方向相反——两种口径各自正确。"""
+    b = _batch(db, "nominal-gap")
+    p = _part(db, "PN-NGAP", "电器件")
+    specs = [  # (key, is_inc, rate, ex, inc, line_amount)
+        ("G1", True, None, D("1000"), None, D("1130")),
+        ("G2", False, "0", None, D("2260"), D("2260")),
+        ("G3", False, None, None, None, D("500")),
+    ]
+    for key, is_inc, rate, ex, inc, line_amt in specs:
+        po = _po(db, f"N-{key}", b, on=date(2026, 6, 3), source_type="销售订单",
+                 is_inc=is_inc, rate=D(rate) if rate is not None else None,
+                 amount_ex=ex, amount_inc=inc)
+        _line(db, f"{key}-L1", po, p, b, line_no=1, amount=line_amt)
+    db.commit()
+    c = client_for(db, username="gap-boss", role="boss")
+    order_sides = {i["order_no"]: i["nominal_side"]
+                   for i in _orders(c, page_size=10)["items"]}
+    assert order_sides["CG-N-G1"] == "inc"      # 缺口翻转（正常含税单是 "ex"）
+    assert order_sides["CG-N-G2"] == "ex"       # 镜像翻转
+    assert order_sides["CG-N-G3"] is None       # 双侧皆空
+    for key, side in (("G1", "inc"), ("G2", "ex"), ("G3", None)):
+        r = c.get(f"/api/purchases/analytics/orders/"
+                  f"{db.scalar(select(FPurchaseOrder.id).where(FPurchaseOrder.raw_order_id == f'N-{key}'))}")
+        assert r.json()["nominal_side"] == side, key
+    # 行级口径按标记结构，不随缺口翻转
+    line_sides = {i["order_no"]: i["nominal_side"]
+                  for i in _orders(c, category=["电器件"], page_size=10)["items"]}
+    assert line_sides["CG-N-G1"] == "ex" and line_sides["CG-N-G2"] == "inc"
 
 
 def test_null_rate_and_zero_rate_indistinguishable(db):

@@ -47,8 +47,8 @@ from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABE
                                              _nominal_side_expr, _norm_categories,
                                              _order_amount_exprs, _round2,
                                              _validate_common, line_amounts_reference,
-                                             nominal_side_reference,
-                                             order_amounts_reference)
+                                             order_amounts_reference,
+                                             order_nominal_side_reference)
 from tests.test_purchase_analytics_api import _batch, _customer, _line, _part, _po, _sales
 
 D = Decimal
@@ -445,7 +445,8 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
         "is_tax_inclusive": po.is_tax_inclusive,
         "tax_rate": _f(po.tax_rate),
         "tax_rate_effective": _f(_effective_rate(po.tax_rate)),
-        "nominal_side": nominal_side_reference(po.tax_rate, po.is_tax_inclusive),
+        "nominal_side": order_nominal_side_reference(
+            po.tax_rate, po.is_tax_inclusive, po.amount_ex_tax, po.amount_inc_tax),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
         "linked_sales_order_no": po.linked_sales_order_no,
@@ -472,7 +473,7 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
 
 @pytest.fixture()
 def eq(db):
-    """对拍数据集（返回命名空间）。已生效采购单共 11 张（2026-03～05），覆盖：
+    """对拍数据集（返回命名空间）。已生效采购单共 12 张（2026-03～05），覆盖：
 
     - 残留形态：poA（同行号新旧批次 + 旧批次多行号 + **3 批次混合**：ob2 行也不
       计入）、poC（同行号残留）、poD（单头批次无任何行，计 0 行）、poE（已取消）
@@ -488,6 +489,9 @@ def eq(db):
     - 名义侧（2026-10-18 裁定）：poL 含税单未标税率 → nominal_side="ex"
       （nominal_ex 分子非零）；poB/poJ 未标税率不含税单 → "inc"；poF 税率 0 与
       NULL 同义 → "inc"；其余已标税率 → None
+    - 历史缺口（2026-10-18 对抗复审）：poM 不含税单缺不含税额、只录入含税额 →
+      单头口径实际推算的是不含税侧 → nominal_side="ex"（缺口翻转形态）；
+      行级口径仍按标记结构 → "inc"
     """
     nb, ob1, ob2 = _batch(db, "new"), _batch(db, "old1"), _batch(db, "old2")
     p1 = _part(db, "PN-DQ", "电器件")
@@ -583,6 +587,9 @@ def eq(db):
     pol = _po(db, "PL", nb, on=date(2026, 5, 25), source_type="批量采购", purchaser="采购员甲",
               is_inc=True, rate=None, amount_ex=None, amount_inc=D("565"))
     _line(db, "PL-L1", pol, p3, nb, line_no=1, amount=D("565"))
+    pom = _po(db, "PM", nb, on=date(2026, 5, 28), source_type="批量采购", purchaser="采购员乙",
+              is_inc=False, rate=None, amount_ex=None, amount_inc=D("452"))
+    _line(db, "PM-L1", pom, p3, nb, line_no=1, amount=D("452"))
 
     db.commit()
 
@@ -593,9 +600,9 @@ def eq(db):
     d.db, d.nb, d.ob1, d.ob2 = db, nb, ob1, ob2
     d.c1, d.c2, d.c3, d.c4 = c1, c2, c3, c4
     d.poa, d.pob, d.poc, d.pod, d.poe = poa, pob, poc, pod, poe
-    d.pof, d.pog, d.poh, d.poi, d.poj, d.pok, d.pol = (
-        pof, pog, poh, poi, poj, pok, pol)
-    d.active_pos = [poa, pob, poc, pod, pof, pog, poh, poi, poj, pok, pol]
+    d.pof, d.pog, d.poh, d.poi, d.poj, d.pok, d.pol, d.pom = (
+        pof, pog, poh, poi, poj, pok, pol, pom)
+    d.active_pos = [poa, pob, poc, pod, pof, pog, poh, poi, poj, pok, pol, pom]
     d.all_pos = d.active_pos + [poe]
     return d
 

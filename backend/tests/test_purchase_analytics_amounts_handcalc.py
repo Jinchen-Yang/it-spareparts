@@ -9,10 +9,14 @@
 - 税率：标了（≠0）用标的，否则 13%；实付 = 含税列原值（None 不计）。
 - 原始侧由「是否含税」决定：含税单含税额为原值、不含税 = round(含税/(1+率), 2)；
   非含税单不含税额为原值、含税 = round(不含税×(1+率), 2)；权威侧缺失回退另一列。
-- 名义侧：未标税率时推算侧为名义（含税单 → 不含税侧 "ex"；其余 → 含税侧 "inc"），
-  已标税率 → None；名义占比 = 名义侧金额之和 ÷ 同侧合计（手算见各断言旁注释）。
+- 名义侧：未标税率时**实际被推算**的那侧为名义（含税单 → 不含税侧 "ex"；其余 →
+  含税侧 "inc"）；已标税率 → None。历史缺口（权威侧列空、只录入另一侧）会把
+  推算方向翻转回权威侧（H9/H10）；两侧金额列皆空 → None（H11）。
+  名义占比 = 名义侧金额之和 ÷ 同侧合计（手算见各断言旁注释）。
 
-行级（分类筛选）：行金额跟随单头原始侧，另一侧按同一税率换算，名义侧同单头标记。
+行级（分类筛选）：行金额跟随单头原始侧，另一侧按同一税率换算；名义侧按单据
+标记的**结构性规则**（含税单 → "ex"，其余 → "inc"），不受单头金额列缺口影响
+——H9/H10 两种口径方向相反即为此意。
 """
 from datetime import date
 from decimal import Decimal
@@ -38,6 +42,7 @@ def _batch(db: Session, name: str) -> SysImportBatch:
 
 # (key, is_inc, rate, amount_ex_col, amount_inc_col, line_amount, purchaser)
 # 档位：13% / 6% / 0.6% / 0 / NULL × 含税/不含税（0 与 NULL 各覆盖两种标记）
+# H9/H10 = 历史缺口（权威侧列空、只录入另一侧，推算方向翻转）；H11 = 双侧皆空
 HANDCALC_ORDERS = [
     ("H1", True,  "0.13",  D("1000"), D("1130"), D("1130"), "手算采购员"),
     ("H2", False, "0.13",  D("1000"), D("1130"), D("1000"), "已标税率采购员"),
@@ -47,6 +52,9 @@ HANDCALC_ORDERS = [
     ("H6", False, None,    D("3000"), None,      D("3000"), "手算采购员"),
     ("H7", True,  "0",     None,      D("2260"), D("2260"), "手算采购员"),
     ("H8", None,  None,    D("500"),  D("500"),  D("500"),  "手算采购员"),
+    ("H9", True,  None,    D("1000"), None,      D("1130"), "手算采购员"),
+    ("H10", False, "0",    None,      D("2260"), D("2260"), "手算采购员"),
+    ("H11", False, None,   None,      None,      D("500"),  "手算采购员"),
 ]
 
 
@@ -99,6 +107,11 @@ def _detail(c, order_id):
 #   H6 不含税NULL税率→13%：原值 3000；含税 3390.00（名义）→ (3000, 3390.00, None, "inc")
 #   H7 含税0税率→13%：原值 2260；不含税 2260/1.13 = 2000.00（名义）→ (2000.00, 2260, 2260, "ex")
 #   H8 标记未标注→按不含税单：原值 500（两列同值）；含税 565.00（名义）→ (500, 565.00, 500, "inc")
+#   H9 历史缺口（含税单缺含税额）：录入不含税 1000；含税 1000×1.13 = 1130.00
+#       才是推算侧 → (1000, 1130.00, None, "inc")  ← 方向翻转：含税单却标 "inc"
+#   H10 历史缺口（不含税单缺不含税额、税率0→13%）：录入含税 2260；不含税
+#       2260/1.13 = 2000.00 才是推算侧 → (2000.00, 2260, 2260, "ex")  ← 翻转
+#   H11 双侧金额列皆空：金额全 None，无从谈名义 → (None, None, None, None)
 ORDER_EXPECTED = {
     "H1": ("1000.00", "1130.00", "1130", None),
     "H2": ("1000.00", "1130.00", "1130", None),
@@ -108,60 +121,77 @@ ORDER_EXPECTED = {
     "H6": ("3000.00", "3390.00", None, "inc"),
     "H7": ("2000.00", "2260.00", "2260", "ex"),
     "H8": ("500.00", "565.00", "500", "inc"),
+    "H9": ("1000.00", "1130.00", None, "inc"),
+    "H10": ("2000.00", "2260.00", "2260", "ex"),
+    "H11": (None, None, None, None),
 }
+
+
+def _approx_or_none(value, expected):
+    return (value == pytest.approx(float(expected))
+            if expected is not None else value is None)
 
 
 def test_handcalc_order_detail_amounts(handcalc_ds):
     c, pos = handcalc_ds
     for key, (ex, inc, paid, side) in ORDER_EXPECTED.items():
         d = _detail(c, pos[key].id)
-        assert d["amount_ex"] == pytest.approx(float(ex)), key
-        assert d["amount_inc"] == pytest.approx(float(inc)), key
-        assert (d["amount_paid"] == pytest.approx(float(paid))
-                if paid is not None else d["amount_paid"] is None), key
+        assert _approx_or_none(d["amount_ex"], ex), key
+        assert _approx_or_none(d["amount_inc"], inc), key
+        assert _approx_or_none(d["amount_paid"], paid), key
         assert d["nominal_side"] == side, key
 
 
 def test_handcalc_order_mode_summary_totals(handcalc_ds):
     """合计（单头口径）：
-    inc = 1130 + 1130 + 1060 + 1006 + 2260 + 3390 + 2260 + 565 = 12801.00
-    ex  = 1000 + 1000 + 1000 + 1000 + 2000 + 3000 + 2000 + 500  = 11500.00
-    paid = 1130 + 1130 + 1060 + 2260 + 500 = 6080（H4/H5/H6 含税列缺失不计）
-    nominal_inc 分子 = H5 2260 + H6 3390 + H8 565 = 6215 → 6215/12801 = 0.4855
-    nominal_ex  分子 = H7 2000 → 2000/11500 = 0.1739"""
+    inc = 1130+1130+1060+1006+2260+3390+2260+565 +H9 1130 +H10 2260 = 16191.00
+    ex  = 1000+1000+1000+1000+2000+3000+2000+500 +H9 1000 +H10 2000 = 14500.00
+    paid = 1130+1130+1060+2260+500 +H10 2260 = 8340（含税列缺失的单不计：
+          H4/H5/H6/H9/H11）
+    nominal_inc 分子（实际推算含税侧）= H5 2260+H6 3390+H8 565+H9 1130 = 7345
+        → 7345/16191 = 0.4536
+    nominal_ex  分子（实际推算不含税侧）= H7 2000+H10 2000 = 4000
+        → 4000/14500 = 0.2759（H10 缺口翻转：录入的含税 2260 不再被计入）"""
     c, _pos = handcalc_ds
     kpi = _summary(c)["kpi"]
-    assert kpi["orders"] == 8
-    assert kpi["amount_inc"] == pytest.approx(12801.00)
-    assert kpi["amount_ex"] == pytest.approx(11500.00)
-    assert kpi["amount_paid"] == pytest.approx(6080.00)
-    assert kpi["nominal_inc_share"] == pytest.approx(0.4855)
-    assert kpi["nominal_ex_share"] == pytest.approx(0.1739)
+    assert kpi["orders"] == 11
+    assert kpi["amount_inc"] == pytest.approx(16191.00)
+    assert kpi["amount_ex"] == pytest.approx(14500.00)
+    assert kpi["amount_paid"] == pytest.approx(8340.00)
+    assert kpi["nominal_inc_share"] == pytest.approx(0.4536)
+    assert kpi["nominal_ex_share"] == pytest.approx(0.2759)
 
 
 # ------------------------------------------------------------- 行级口径手算
 
 # 行金额（单行/单）跟随单头原始侧：含税单行不含税 = round(行/(1+率),2)，
-# 不含税单行含税 = round(行×(1+率),2)：
+# 不含税单行含税 = round(行×(1+率),2)；名义侧按**结构性规则**（标记决定，与
+# 单头金额列缺口无关）：
 #   H1 行1130 → (1000.00, 1130.00)   H2 行1000 → (1000, 1130.00)
 #   H3 行1060 → (1000.00, 1060.00)   H4 行1000 → (1000, 1006.00)
 #   H5 行2000 → (2000, 2260.00 名义) H6 行3000 → (3000, 3390.00 名义)
 #   H7 行2260 → (2000.00 名义, 2260) H8 行500  → (500, 565.00 名义)
-# 合计：inc = 1130+1130+1060+1006+2260+3390+2260+565 = 12801.00
-#       ex  = 1000+1000+1000+1000+2000+3000+2000+500 = 11500.00
-#       paid = 全部行金额 = 1130+1000+1060+1000+2000+3000+2260+500 = 11950.00
-# nominal_inc 分子 = 2260+3390+565 = 6215 → 0.4855；nominal_ex 分子 = 2000 → 0.1739
+#   H9 行1130（含税单，缺不含税列照样按标记走含税侧）→ (1000.00 名义, 1130)
+#   H10 行2260（不含税单，缺不含税列照样按标记走不含税侧）→ (2260, 2553.80 名义)
+#   H11 行500 → (500, 565.00 名义)
+# 合计：inc = 1130+1130+1060+1006+2260+3390+2260+565+1130+2553.80+565 = 17049.80
+#       ex  = 1000+1000+1000+1000+2000+3000+2000+500+1000+2260+500 = 15260.00
+#       paid = 全部行金额 = 1130+1000+1060+1000+2000+3000+2260+500
+#              +1130+2260+500 = 15840.00
+# nominal_inc 分子（结构性 "inc"：H5/H6/H8/H10/H11）= 2260+3390+565+2553.80+565
+#     = 9333.80 → 9333.80/17049.80 = 0.5474（H10 行级与单头口径方向相反，见 H10 注）
+# nominal_ex  分子（"ex"：H7/H9）= 2000+1000 = 3000 → 3000/15260 = 0.1966
 def test_handcalc_line_mode_summary_totals(handcalc_ds):
     c, _pos = handcalc_ds
     data = _summary(c, category=["电器件"])
     assert data["basis_mode"] == "line"
     kpi = data["kpi"]
-    assert kpi["orders"] == 8 and kpi["lines"] == 8
-    assert kpi["amount_inc"] == pytest.approx(12801.00)
-    assert kpi["amount_ex"] == pytest.approx(11500.00)
-    assert kpi["amount_paid"] == pytest.approx(11950.00)
-    assert kpi["nominal_inc_share"] == pytest.approx(0.4855)
-    assert kpi["nominal_ex_share"] == pytest.approx(0.1739)
+    assert kpi["orders"] == 11 and kpi["lines"] == 11
+    assert kpi["amount_inc"] == pytest.approx(17049.80)
+    assert kpi["amount_ex"] == pytest.approx(15260.00)
+    assert kpi["amount_paid"] == pytest.approx(15840.00)
+    assert kpi["nominal_inc_share"] == pytest.approx(0.5474)
+    assert kpi["nominal_ex_share"] == pytest.approx(0.1966)
 
 
 def test_handcalc_line_mode_per_order_rows(handcalc_ds):
@@ -180,6 +210,21 @@ def test_handcalc_line_mode_per_order_rows(handcalc_ds):
     assert by_no["CG-H6"]["amount_ex"] == pytest.approx(3000.00)
     assert by_no["CG-H6"]["amount_paid"] == pytest.approx(3000.00)
     assert by_no["CG-H6"]["nominal_side"] == "inc"
+    # H9/H10 历史缺口单：行级名义侧按**标记结构**（与单头口径的翻转方向相反）——
+    # H9 含税单（缺含税列）行不含税 = 1130/1.13 = 1000.00 是推算侧 → "ex"，
+    # 而其单头口径 nominal_side = "inc"（明细接口，见 ORDER_EXPECTED）
+    assert by_no["CG-H9"]["amount_ex"] == pytest.approx(1000.00)
+    assert by_no["CG-H9"]["amount_inc"] == pytest.approx(1130.00)
+    assert by_no["CG-H9"]["nominal_side"] == "ex"
+    # H10 不含税单（缺不含税列）行含税 = 2260×1.13 = 2553.80 是推算侧 → "inc"，
+    # 而其单头口径 nominal_side = "ex"
+    assert by_no["CG-H10"]["amount_ex"] == pytest.approx(2260.00)
+    assert by_no["CG-H10"]["amount_inc"] == pytest.approx(2553.80)
+    assert by_no["CG-H10"]["nominal_side"] == "inc"
+    # H11 双侧金额列皆空：行级金额仍可算（行金额在），名义侧按结构 → "inc"
+    assert by_no["CG-H11"]["amount_ex"] == pytest.approx(500.00)
+    assert by_no["CG-H11"]["amount_inc"] == pytest.approx(565.00)
+    assert by_no["CG-H11"]["nominal_side"] == "inc"
 
 
 # ------------------------------------------------------------- 名义占比边界
