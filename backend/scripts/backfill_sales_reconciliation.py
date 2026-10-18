@@ -69,7 +69,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, func, select, text, update
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
@@ -78,7 +78,10 @@ from sqlalchemy.pool import NullPool
 from app.etl import mapping, pipeline
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
-from app.services.sales_reconciliation import SOURCE_BACKFILL, snapshot_content_hash
+from app.services.sales_reconciliation import (
+    SOURCE_BACKFILL,
+    snapshot_rows_from_orders,
+)
 
 TAX_COLUMNS = ("is_tax_inclusive", "tax_amount", "amount_inc_tax")
 _QUANTUM = Decimal("0.01")
@@ -406,27 +409,10 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
                 select(FSalesOrder.raw_order_id, FSalesOrder.id)
                 .where(FSalesOrder.raw_order_id.in_(chunk))
             ).all()))
-        rows = []
-        for raw_id, head in result.orders.items():
-            amounts = {
-                "order_amount": head.get("amount_inc_tax"),
-                "reconciled_amount": head.get("reconciled_amount"),
-                "pending_amount": head.get("pending_amount"),
-                "return_reconciled_amount": head.get("return_reconciled_amount"),
-            }
-            rows.append({
-                "raw_order_id": raw_id,
-                "order_no": head.get("order_no"),
-                "sales_order_id": oid_map.get(raw_id),
-                "import_batch_id": batch.id,
-                "source": SOURCE_BACKFILL,
-                "source_modified_at": head.get("source_modified_at"),
-                **amounts,
-                "content_hash": snapshot_content_hash(
-                    raw_order_id=raw_id,
-                    source_modified_at=head.get("source_modified_at"),
-                    **amounts),
-            })
+        # 行构造与导入路径同一事实源（#396 S5：sales_reconciliation.snapshot_
+        # rows_from_orders）；本脚本只多一步「库内已有本批次观测则不追加」的预筛
+        rows = snapshot_rows_from_orders(
+            result.orders, batch_id=batch.id, source=SOURCE_BACKFILL, oid_map=oid_map)
         plan["_snapshot_rows"] = [r for r in rows if r["raw_order_id"] not in existing]
         plan["snapshots_planned"] = len(plan["_snapshot_rows"])
         plan["snapshots_existing"] = len(rows) - len(plan["_snapshot_rows"])
@@ -593,6 +579,62 @@ def _public_file_report(plan: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# 税列回填目标列 → SQL 类型（VALUES 连表里的显式 CAST，防参数类型歧义）。
+# 白名单同时防注入：列名来自计划 JSON，未来新增列必须先在这里显式登记。
+_TAX_FILL_COLUMN_TYPES: dict[str, str] = {
+    "amount_inc_tax": "numeric",
+    "is_tax_inclusive": "boolean",
+    "tax_amount": "numeric",
+}
+
+# 每批 fill 行数（与 loader._CHUNK / 本脚本快照插入同因）：单语句绑定参数必须
+# 远低于 PostgreSQL 65535 上限——每行 2 个参数（rid/val），1000 行 = 2001 参数。
+_TAX_FILL_CHUNK = 1000
+
+
+def _apply_tax_fills(db: Session, batch: SysImportBatch,
+                     fills: list[dict[str, Any]]) -> int:
+    """税三件套回填：按列分块 UPDATE ... FROM (VALUES ...) 批量执行（#396 S6）。
+
+    与逐条 UPDATE 同一守卫语义：限定本批次（计划只来自 import_batch_id=本批次的
+    订单；loader 的 upsert 会把既有行迁到新批次，无此谓词时并发迁移后的行会被
+    本批次原件的值误写）+ 目标列 IS NULL 只补不覆盖。返回真实补齐的行数
+    （RETURNING 计数，被并发抢先补掉的行不计）。按 _TAX_FILL_CHUNK 分块，防
+    超大批次（>3 万行）撑爆单语句 65535 绑定参数上限。
+    """
+    by_column: dict[str, list[dict[str, Any]]] = {}
+    for fill in fills:
+        by_column.setdefault(fill["column"], []).append(fill)
+    filled = 0
+    for column, column_fills in by_column.items():
+        sql_type = _TAX_FILL_COLUMN_TYPES.get(column)
+        if sql_type is None:
+            raise ValueError(f"未登记的税列回填目标：{column}")
+        for start in range(0, len(column_fills), _TAX_FILL_CHUNK):
+            chunk = column_fills[start:start + _TAX_FILL_CHUNK]
+            values_sql = ", ".join(
+                f"(:rid{i}, CAST(:val{i} AS {sql_type}))"
+                for i in range(len(chunk))
+            )
+            params: dict[str, Any] = {"batch_id": batch.id}
+            for i, fill in enumerate(chunk):
+                params[f"rid{i}"] = fill["raw_order_id"]
+                params[f"val{i}"] = fill["value"]
+            stmt = text(
+                f"""
+                UPDATE f_sales_order AS so
+                SET {column} = v.val
+                FROM (VALUES {values_sql}) AS v(raw_order_id, val)
+                WHERE so.raw_order_id = v.raw_order_id
+                  AND so.import_batch_id = :batch_id
+                  AND so.{column} IS NULL
+                RETURNING so.id
+                """
+            )
+            filled += len(db.execute(stmt, params).all())
+    return filled
+
+
 def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
                 operator: str, manifest_sha256: str) -> dict[str, Any]:
     """单文件执行（调用方负责事务边界：每文件一个事务，失败只回滚本文件）。
@@ -608,23 +650,7 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
                             FSalesReconciliationSnapshot.import_batch_id])
         inserted += len(db.execute(
             stmt.returning(FSalesReconciliationSnapshot.id)).all())
-    tax_filled = 0
-    for fill in plan["_tax_fills"]:
-        column = fill["column"]
-        stmt = (
-            update(FSalesOrder)
-            .where(
-                FSalesOrder.raw_order_id == fill["raw_order_id"],
-                # 限定本批次：计划只来自 import_batch_id=本批次的订单。loader 的
-                # upsert 会把既有行迁到新批次（import_batch_id 随重导刷新），无此
-                # 谓词时并发迁移后的行会被本批次原件的值误写。
-                FSalesOrder.import_batch_id == batch.id,
-                getattr(FSalesOrder, column).is_(None),
-            )
-            .values({column: fill["value"]})
-            .returning(FSalesOrder.id)
-        )
-        tax_filled += len(db.execute(stmt).all())
+    tax_filled = _apply_tax_fills(db, batch, plan["_tax_fills"])
     db.add(SysAuditLog(
         entity_type="sales_reconciliation_backfill",
         entity_id=batch.id,

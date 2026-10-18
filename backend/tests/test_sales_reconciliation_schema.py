@@ -18,8 +18,10 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from app.db import engine
+from app.etl.cleaner import parse_money
 from app.models.sales import FSalesReconciliationSnapshot
 from app.services.sales_reconciliation import (
+    _canonical_amount,
     latest_snapshots_by_raw_order_id,
     snapshot_content_hash,
 )
@@ -325,6 +327,29 @@ def test_hash_quantizes_half_up_to_money_precision():
     """量化口径与 PG numeric(14,2) 一致：half away from zero。"""
     assert _hash(order_amount=Decimal("1.005")) == _hash(order_amount=Decimal("1.01"))
     assert _hash(order_amount=Decimal("-1.005")) == _hash(order_amount=Decimal("-1.01"))
+
+
+def test_canonical_amount_idempotent_after_parse_money():
+    """两级量化幂等（#395 质询的证明，2026-10-18）。
+
+    真实链路金额先经 cleaner.parse_money（HALF_EVEN，decimal 默认上下文）
+    量化到 0.01 落库；_canonical_amount 的 ROUND_HALF_UP 再量化对两位小数
+    输入是空操作——哈希输入与落库值同形，content_hash 不因两级舍入口径
+    不同而漂移。半分边界上两种取向确实分歧（1.005 → HALF_EVEN 1.00 /
+    HALF_UP 1.01），但链路上不可达：进入 _canonical_amount 的值永远是
+    parse_money 的产物（符号零归一由
+    test_hash_normalizes_negative_zero_like_pg_storage 单独看守）。
+    """
+    # 半分边界：裸值上两级取向分歧，parse_money 产物上收敛
+    assert parse_money("1.005") == Decimal("1.00")            # HALF_EVEN → 偶
+    assert _canonical_amount(Decimal("1.005")) == "1.01"      # HALF_UP（旁路直呼才可达）
+    assert _canonical_amount(parse_money("1.005")) == "1.00"  # 真实链路：幂等空操作
+
+    for raw in ["1.005", "2.005", "1.015", "2.015", "0.005", "-1.005",
+                "1130", "99.999", "13.5", "0.001"]:
+        pm = parse_money(raw)
+        assert pm.as_tuple().exponent == -2                   # 已是两位小数
+        assert _canonical_amount(pm) == str(pm)               # 再量化不改形（哈希↔落库同形）
 
 
 def test_hash_normalizes_negative_zero_like_pg_storage():

@@ -17,9 +17,15 @@ from app.etl.maintenance_addresses import AddressPatch, collect_addresses
 from app.services.maintenance_expense_integrity import content_key_digest
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
+# bad_reconciliation_amount / bad_source_modified_time（#396 S10，2026-10-18）：行/单
+# 照常入库、仅对账区字段置 NULL——是**已入库行上的警告**，不是失败行；计入
+# fact_rows_error 会让报告把成功导入误报成有错行。行级计数单列在
+# loader counts 的 reconciliation_value_warnings，明细仍在错误列表逐条上报。
 SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress",
                               "maintenance_address_conflict",
-                              "reconciliation_head_conflict"})
+                              "reconciliation_head_conflict",
+                              "bad_reconciliation_amount",
+                              "bad_source_modified_time"})
 
 
 @dataclass

@@ -593,11 +593,13 @@ FIELD_GROUPS = {
         # §8.8 采购分析面板派生价格/金额键（任何新派生键必须登记，否则对无
         # data_purchase_cost 角色静默泄漏成本——见 2026-06-15 销售越权教训）
         "total_amount",
-        # 采购分析（D-39，Round1）三口径派生键：实付、名义含税占比、
-        # 分类拆行后按单头税率规则换算的行级含税/不含税额——漏登记即绕过
-        # data_purchase_cost 泄漏采购额（断言测试见 test_purchase_analytics_api.py）。
+        # 采购分析（D-39，Round1）三口径派生键：实付、名义占比（inc/ex 两侧）、
+        # 名义侧标记、分类拆行后按单头税率规则换算的行级含税/不含税额——漏登记即
+        # 绕过 data_purchase_cost 泄漏采购额（断言测试见 test_purchase_analytics_api.py）。
         "amount_paid",
         "nominal_inc_share",
+        "nominal_ex_share",
+        "nominal_side",
         "line_amount_inc",
         "line_amount_ex",
         "total_amount_inc",
@@ -605,6 +607,11 @@ FIELD_GROUPS = {
         "amount",
         "amount_inc",
         "amount_ex",
+        # 销售分析 KPI 合计键（D-41）：summary 的 amount_*_total 与订单行的
+        # amount_ex_tax/amount_inc_tax 同口径同组——合计值也是采购/销售金额，
+        # 漏登记会绕过 data_purchase_cost 泄漏（#397 (4)）。
+        "amount_inc_tax_total",
+        "amount_ex_tax_total",
         "price_ex",
         "price_inc",
         "price_ex_min",

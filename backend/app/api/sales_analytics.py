@@ -2,7 +2,9 @@
 
 只读。不改动老板看板 /dashboard/sales 与 OrdersBlock（决策 2026-10-17 Q3）。
 对账字段受 data_reconciliation 数据权限组控制（D-40 §6）：关闭时经
-apply_field_visibility 统一置空（键名登记见 config.FIELD_GROUPS["sales_reconciliation"]）。
+apply_field_visibility 统一置空（键名登记见 config.FIELD_GROUPS["sales_reconciliation"]），
+且 orders/order_detail 的对账整块按「无快照」形态输出（has_data=False、history=[]、
+不查快照表，#397 (2)）——连 has_data/reconciled_as_of 这类非金额字段也不泄漏。
 
 准入附加规则（本页特有的两条硬界）：
 - 受限销售（own_customers_only）即使被逐账号授予页面键也 403——本页是全公司
@@ -119,7 +121,7 @@ def orders(
         "sort": sort, "include_returns": include_returns,
     })
     data = sales_analytics.orders(
-        db, date_from=date_from, date_to=date_to, business_types=business_type,
+        db, ctx, date_from=date_from, date_to=date_to, business_types=business_type,
         customer=customer, salesperson=salesperson,
         sort=sort, page=page, page_size=page_size, include_returns=include_returns,
     )
@@ -140,7 +142,8 @@ def order_detail(
     record_access_log(ctx, "sales_analytics_order_detail", "sales_analytics", {
         "order_id": order_id, "include_returns": include_returns,
     })
-    data = sales_analytics.order_detail(db, order_id, include_returns=include_returns)
+    data = sales_analytics.order_detail(
+        db, order_id, ctx, include_returns=include_returns)
     if data is None:
         raise HTTPException(status_code=404, detail="订单不存在")
     return apply_field_visibility(data, ctx)

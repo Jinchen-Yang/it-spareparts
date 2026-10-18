@@ -22,13 +22,21 @@
   ``config.FIELD_GROUPS["sales_reconciliation"]``（data_reconciliation 组），API 层经
   ``apply_field_visibility`` 统一置空；``amount_ex_tax``/``amount_inc_tax``/``customer``
   沿用既有 purchase_cost / customer_info 组的保守遮蔽，营收口径键保持公开。
+- 无 data_reconciliation 权限的**整块契约**（#397 (2)）：orders 每单的 reconciliation
+  与 order_detail 的 reconciliation/reconciliation_history 输出统一「无快照」形态——
+  ``has_data=False``、块内全部键 null、history=[]——且**不查快照表**（连非金额字段
+  has_data / reconciled_as_of / import_batch_id / source 也不得泄漏「该单有对账数据」）。
+  该形态与真实无快照单完全一致，前端 isReconBlockEmpty 无需区分成因。
+- 时区：timestamptz 输出（reconciled_as_of / created_at）统一规范成 UTC 带偏移
+  （``astimezone(timezone.utc).isoformat()``）——PG 会话时区会改变 aware datetime 的
+  原生 isoformat 偏移，规范后输出不随会话漂移（#397 carry-over）。
 """
-from datetime import date
+from datetime import date, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import tax_policy
+from app import security, tax_policy
 from app.business_time import business_today
 from app.models.dimensions import DimCustomer
 from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
@@ -46,6 +54,11 @@ def _f(x) -> float | None:
 def _clean_multi(values: list[str] | None) -> list[str]:
     """多选筛选值清洗：去空白、去空串、保序去重（重复值对 IN 无意义，静默收敛）。"""
     return list(dict.fromkeys(v.strip() for v in (values or []) if v and v.strip()))
+
+
+def _escape_like(term: str) -> str:
+    """ILIKE 通配符转义（#397 (5)）：%/_/\\ 按字面匹配，escape 定界符用反斜杠。"""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _order_query(
@@ -84,9 +97,11 @@ def _order_query(
     if types:
         stmt = stmt.where(so.business_type.in_(types))
     if customer and customer.strip():
-        stmt = stmt.where(DimCustomer.name_normalized.ilike(f"%{customer.strip()}%"))
+        stmt = stmt.where(DimCustomer.name_normalized.ilike(
+            f"%{_escape_like(customer.strip())}%", escape="\\"))
     if salesperson and salesperson.strip():
-        stmt = stmt.where(so.salesperson.ilike(f"%{salesperson.strip()}%"))
+        stmt = stmt.where(so.salesperson.ilike(
+            f"%{_escape_like(salesperson.strip())}%", escape="\\"))
     stmt = stmt.group_by(so.id, DimCustomer.name_normalized)
     return stmt, {
         "amount_ex_tax": so.amount_ex_tax,
@@ -167,6 +182,18 @@ def summary(
     }
 
 
+def _utc_iso(dt) -> str | None:
+    """timestamptz → UTC 带偏移 isoformat（#397 carry-over）。
+
+    PG 把 timestamptz 按会话时区物化成 aware datetime，原生 isoformat 的偏移随
+    ``SET TIME ZONE`` 漂移；规范成 UTC 后输出与会话时区无关。naive（无 tzinfo）
+    无法换算，原样输出（库内快照列均为 TZDateTime，正常不会走到）。
+    """
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat() if dt.tzinfo else dt.isoformat()
+
+
 def _reconciliation_block(
     snap: FSalesReconciliationSnapshot | None, *, include_returns: bool
 ) -> dict:
@@ -174,7 +201,8 @@ def _reconciliation_block(
 
     reconciled_display：不含退货 = 已对账；含 = 已对账 + 退货已对账（不写死扣减）。
     参与求和的分量按"缺失即不存在"处理（任一有值就给该侧合计，全缺失 → None），
-    绝不把空单元格补成 0。
+    绝不把空单元格补成 0。snap=None 同时服务「无快照」与「无权限整块」两种成因，
+    输出形态一致（#397 (2)）。
     """
     if snap is None:
         return {
@@ -192,9 +220,7 @@ def _reconciliation_block(
     present = [p for p in parts if p is not None]
     return {
         "has_data": True,
-        "reconciled_as_of": (
-            snap.source_modified_at.isoformat() if snap.source_modified_at else None
-        ),
+        "reconciled_as_of": _utc_iso(snap.source_modified_at),
         "order_amount_at_snapshot": _f(snap.order_amount),
         "reconciled_amount": _f(snap.reconciled_amount),
         "pending_amount": _f(snap.pending_amount),
@@ -203,8 +229,15 @@ def _reconciliation_block(
     }
 
 
+def _reconciliation_hidden(user_ctx) -> bool:
+    """无 data_reconciliation 权限 → 对账整块按「无快照」形态输出且不查快照表。"""
+    return user_ctx is not None and security.is_field_hidden(
+        user_ctx, "reconciled_amount")
+
+
 def orders(
     db: Session,
+    user_ctx=None,
     *,
     date_from: date | None = None,
     date_to: date | None = None,
@@ -221,10 +254,13 @@ def orders(
 
     排序固定 ``<key> DESC NULLS LAST, id DESC``（PG DESC 默认 NULLS FIRST，必须显式
     NULLS LAST 才能让缺失值沉底）；并列金额按 id 倒序破并列，分页翻页不丢行/重行。
+    user_ctx 无 data_reconciliation 权限时每单 reconciliation 统一「无快照」形态，
+    不查快照表（#397 (2)，契约见模块 docstring）。
     """
     today = as_of or business_today()
     if sort not in ORDER_SORTS:
         sort = "amount_ex_tax"
+    recon_hidden = _reconciliation_hidden(user_ctx)
     base, sort_cols = _order_query(
         date_from=date_from, date_to=date_to, business_types=business_types,
         customer=customer, salesperson=salesperson,
@@ -237,7 +273,8 @@ def orders(
         .offset((page - 1) * page_size)
     )
     rows = db.execute(stmt).all()
-    snaps = latest_snapshots_by_raw_order_id(db, [r.raw_order_id for r in rows])
+    snaps = {} if recon_hidden else latest_snapshots_by_raw_order_id(
+        db, [r.raw_order_id for r in rows])
     items = []
     for r in rows:
         items.append({
@@ -270,6 +307,7 @@ def orders(
 def order_detail(
     db: Session,
     order_id: int,
+    user_ctx=None,
     *,
     include_returns: bool = False,
     as_of: date | None = None,
@@ -278,34 +316,32 @@ def order_detail(
 
     与列表同口径（已生效；非已生效单 404，由 API 层转换）。历史按最新值排序键的
     反序（旧→新：source_modified_at ASC NULLS FIRST → 批次 → id），末条与
-    reconciliation 块一致。"""
+    reconciliation 块一致。user_ctx 无 data_reconciliation 权限时 reconciliation
+    为「无快照」形态、reconciliation_history=[]，不查快照表（#397 (2)）。"""
 
     today = as_of or business_today()
     base, _ = _order_query()
     row = db.execute(base.where(FSalesOrder.id == order_id)).one_or_none()
     if row is None:
         return None
-    history_rows = db.scalars(
-        select(FSalesReconciliationSnapshot)
-        .where(FSalesReconciliationSnapshot.raw_order_id == row.raw_order_id)
-        .order_by(
-            FSalesReconciliationSnapshot.source_modified_at.asc().nulls_first(),
-            FSalesReconciliationSnapshot.import_batch_id.asc(),
-            FSalesReconciliationSnapshot.id.asc(),
-        )
-    ).all()
+    if _reconciliation_hidden(user_ctx):
+        history_rows = []
+    else:
+        history_rows = db.scalars(
+            select(FSalesReconciliationSnapshot)
+            .where(FSalesReconciliationSnapshot.raw_order_id == row.raw_order_id)
+            .order_by(
+                FSalesReconciliationSnapshot.source_modified_at.asc().nulls_first(),
+                FSalesReconciliationSnapshot.import_batch_id.asc(),
+                FSalesReconciliationSnapshot.id.asc(),
+            )
+        ).all()
     history = [
         {
             "import_batch_id": snap.import_batch_id,
             "source": snap.source,
-            "created_at": (
-                snap.created_at.isoformat() if snap.created_at else None
-            ),
-            "reconciled_as_of": (
-                snap.source_modified_at.isoformat()
-                if snap.source_modified_at
-                else None
-            ),
+            "created_at": _utc_iso(snap.created_at),
+            "reconciled_as_of": _utc_iso(snap.source_modified_at),
             "order_amount_at_snapshot": _f(snap.order_amount),
             "reconciled_amount": _f(snap.reconciled_amount),
             "pending_amount": _f(snap.pending_amount),
