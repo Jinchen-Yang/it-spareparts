@@ -49,6 +49,9 @@ class FSalesOrder(Base):
         Index("ix_so_order_no", "order_no"),
         # 高频过滤+排序：业务查询按 已生效 过滤、按 order_date 排序/窗口（架构体检 2026-06-29）
         Index("ix_so_status_date", "data_status", "order_date"),
+        # 销售分析 business_type 多选是选择性筛选（#397 (7)）：稀有类型直取，
+        # 高频类型+日期窗口仍走上面的复合索引（EXPLAIN 对拍见迁移说明）
+        Index("ix_so_status_btype", "data_status", "business_type"),
     )
 
 
@@ -117,8 +120,11 @@ class FSalesReconciliationSnapshot(Base):
     # 氚云数据ID，与 f_sales_order.raw_order_id 同源；快照允许先于订单入库
     raw_order_id: Mapped[str] = mapped_column(String(64))
     order_no: Mapped[str | None] = mapped_column(String(64))
-    # 可空：出现该快照时订单可能尚未入库/已被其他流程处理
-    sales_order_id: Mapped[int | None] = mapped_column(ForeignKey("f_sales_order.id"))
+    # 可空：出现该快照时订单可能尚未入库/已被其他流程处理。ON DELETE SET NULL：
+    # 快照是按 raw_order_id 追加的历史观测，订单删除置空链接、保留观测（D-40）
+    sales_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("f_sales_order.id", ondelete="SET NULL",
+                   name="fk_sales_recon_snapshot_sales_order"))
     # 该观测所属的导入/回填批次（每批次每单至多一条观测，见唯一约束）
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     # import=常规导入，backfill=历史原件回填（D-40 §7）
@@ -155,4 +161,6 @@ class FSalesReconciliationSnapshot(Base):
         ),
         # FK 查询路径（PG 不自动为 FK 建索引）
         Index("ix_sales_recon_snapshot_batch", "import_batch_id"),
+        # 订单侧删除/更新的引用检查路径；与显式 ON DELETE SET NULL 同批落地
+        Index("ix_sales_recon_snapshot_sales_order", "sales_order_id"),
     )
