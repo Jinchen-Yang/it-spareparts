@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app import config, permissions, security
 from app.auth import hash_password
@@ -258,6 +259,65 @@ def test_summary_customer_and_salesperson_filters(db, seeded):
     assert client.get(SUMMARY, params={"salesperson": "李四"}).json()["kpi"]["orders"] == 1
 
 
+def test_summary_kpi_amount_totals_masked_without_purchase_cost(db, seeded):
+    """KPI 金额合计随 data_purchase_cost 遮蔽（#397 (4)）：合计键与行金额同组，
+    关闭时 amount_*_total 置 null；计数类（orders / missing）与营收合计保留。"""
+    client = _client(db, "sa-mask-kpi", role="boss",
+                     overrides={"data_purchase_cost": False})
+    kpi = client.get(SUMMARY).json()["kpi"]
+    assert kpi["orders"] == 5
+    assert kpi["amount_inc_tax_missing"] == 3
+    assert kpi["amount_ex_tax_total"] is None
+    assert kpi["amount_inc_tax_total"] is None
+    assert kpi["revenue_total"] == pytest.approx(900.0)   # 营收口径公开
+
+
+def test_customer_and_salesperson_wildcards_literal_only(db, seeded):
+    """ILIKE 通配符转义（#397 (5)）：% / _ / \\ 按字面匹配，不再当通配符。
+
+    子串匹配照常（%客户% 命中双方），但裸 % 不能再当「任意串」全命中、
+    _ 不能再当单字符通配（旧实现客户_ / 张_ 会分别命中 5 / 4 单）。"""
+    client = _client(db, "sa-esc", role="boss")
+    kpi = lambda **p: client.get(SUMMARY, params=p).json()["kpi"]  # noqa: E731
+    assert kpi(customer="客户")["orders"] == 5            # 子串 ILIKE 不受影响
+    assert kpi(customer="%")["orders"] == 0               # 裸 % = 字面百分号
+    assert kpi(customer="_")["orders"] == 0
+    assert kpi(customer="客户_")["orders"] == 0           # 旧：单字符通配命中 5
+    assert kpi(salesperson="张_")["orders"] == 0          # 旧：命中张三的 4 单
+    assert kpi(salesperson="李四")["orders"] == 1         # 精确子串不受影响
+    assert kpi(customer="客户甲\\%")["orders"] == 0       # 转义写法本身也是字面
+
+
+def test_reconciliation_timestamps_independent_of_session_timezone(db, seeded):
+    """timestamptz 输出统一 UTC 带偏移（#397 carry-over）：会话时区切到
+    Asia/Shanghai 后，reconciled_as_of / created_at 与 UTC 会话逐字一致——
+    PG 会话时区原本会改变 aware datetime 的原生 isoformat 偏移。"""
+    o1 = seeded["orders"][0]
+    as_of = date(2026, 10, 17)
+    orders_utc = sales_analytics.orders(db, as_of=as_of)
+    detail_utc = sales_analytics.order_detail(db, o1.id, as_of=as_of)
+    original_tz = db.execute(text("SHOW TIME ZONE")).scalar()
+    db.execute(text("SET TIME ZONE 'Asia/Shanghai'"))
+    try:
+        orders_sh = sales_analytics.orders(db, as_of=as_of)
+        detail_sh = sales_analytics.order_detail(db, o1.id, as_of=as_of)
+    finally:
+        db.execute(text(f"SET TIME ZONE '{original_tz}'"))
+    r_utc = next(i for i in orders_utc["items"] if i["order_no"] == "SO-1")
+    r_sh = next(i for i in orders_sh["items"] if i["order_no"] == "SO-1")
+    assert r_sh["reconciliation"] == r_utc["reconciliation"]
+    assert r_utc["reconciliation"]["reconciled_as_of"].endswith("+00:00")
+    assert r_utc["reconciliation"]["reconciled_as_of"] == \
+        datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc).isoformat()
+    hist_utc = detail_utc["reconciliation_history"]
+    hist_sh = detail_sh["reconciliation_history"]
+    assert len(hist_utc) == 3
+    assert [h["created_at"] for h in hist_sh] == [h["created_at"] for h in hist_utc]
+    assert all(h["created_at"].endswith("+00:00") for h in hist_sh)
+    assert [h["reconciled_as_of"] for h in hist_sh] == \
+        [h["reconciled_as_of"] for h in hist_utc]
+
+
 def test_kpi_equals_list_totals(db, seeded):
     """D-41 验收钩子：KPI 合计 = 大单列表逐页累计（同一 SQL 口径）。"""
     client = _client(db, "sa-kpi", role="boss")
@@ -428,23 +488,24 @@ def test_order_detail_404(db, seeded):
 # ---------- 脱敏 ----------
 
 def test_data_reconciliation_hidden_masks_reconciliation_fields(db, seeded):
-    """data_reconciliation 关闭 → 对账金额/时间戳全 null（has_data 元数据保留）。"""
+    """data_reconciliation 关闭 → 对账**整块**按「无快照」形态输出（#397 (2)）：
+    has_data=False、块内全 null、history=[]——与真实无快照单（SO-2）完全一致，
+    连 has_data / reconciled_as_of / import_batch_id 这类非金额字段也不泄漏
+    「该单有对账数据」。"""
     client = _client(db, "sa-mask", role="readonly",
                      overrides={"page_sales_analysis": True})
     items = client.get(ORDERS).json()["items"]
     by_no = {i["order_no"]: i["reconciliation"] for i in items}
-    assert by_no["SO-1"]["has_data"] is True
-    for key in ("reconciled_amount", "pending_amount",
-                "return_reconciled_amount", "order_amount_at_snapshot",
-                "reconciled_as_of", "reconciled_display"):
-        assert by_no["SO-1"][key] is None, key
+    empty = {"has_data": False, "reconciled_as_of": None,
+             "order_amount_at_snapshot": None, "reconciled_amount": None,
+             "pending_amount": None, "return_reconciled_amount": None,
+             "reconciled_display": None}
+    assert by_no["SO-1"] == empty        # 有三条快照也整块置空
+    assert by_no["SO-2"] == empty        # 真实无快照：两种成因形态一致、不可区分
     o1 = seeded["orders"][0]
     detail = client.get(f"{ORDERS}/{o1.id}").json()
-    for entry in detail["reconciliation_history"]:
-        for key in ("reconciled_amount", "pending_amount",
-                    "return_reconciled_amount", "order_amount_at_snapshot",
-                    "reconciled_as_of"):
-            assert entry[key] is None, key
+    assert detail["reconciliation"] == empty
+    assert detail["reconciliation_history"] == []
 
 
 def test_service_level_masking_direct(db, seeded):
@@ -453,6 +514,12 @@ def test_service_level_masking_direct(db, seeded):
         user_id="u", role="custom",
         permissions={**permissions._full(), "data_reconciliation": False},
         is_authenticated=True)
+    # 新契约（#397 (2)）：服务层带 ctx 直调 → 无权限时整块「无快照」形态（快照表都不查）
+    hidden = sales_analytics.orders(db, ctx, as_of=date(2026, 10, 17))
+    so1h = next(i for i in hidden["items"] if i["order_no"] == "SO-1")
+    assert so1h["reconciliation"]["has_data"] is False
+    assert so1h["reconciliation"]["reconciled_amount"] is None
+    # 不带 ctx 的旧路径：服务层照常取数，遮蔽交给 apply_field_visibility 这一层
     data = sales_analytics.orders(db, as_of=date(2026, 10, 17))
     masked = security.apply_field_visibility(data, ctx)
     so1 = next(i for i in masked["items"] if i["order_no"] == "SO-1")
@@ -463,7 +530,7 @@ def test_service_level_masking_direct(db, seeded):
         user_id="u", role="custom", permissions=permissions._full(),
         is_authenticated=True)
     visible = security.apply_field_visibility(
-        sales_analytics.orders(db, as_of=date(2026, 10, 17)), ctx_on)
+        sales_analytics.orders(db, ctx_on, as_of=date(2026, 10, 17)), ctx_on)
     so1v = next(i for i in visible["items"] if i["order_no"] == "SO-1")
     assert so1v["reconciliation"]["reconciled_amount"] == pytest.approx(110.0)
 
@@ -533,16 +600,16 @@ def test_reconciliation_keys_registered_in_field_groups():
 
 def test_public_kpi_keys_not_accidentally_masked():
     """KPI 营收口径键保持公开（营收是经营报表公开口径，DATA_DATA_DEPENDENCIES 注）；
-    销售单两金额沿用 purchase_cost 既有键名（保守遮蔽），KPI 合计键不得漂进任何组。"""
+    销售单两金额沿用 purchase_cost 既有键名（保守遮蔽）。"""
     all_fields = {f for fields in config.FIELD_GROUPS.values() for f in fields}
     for public_key in ("revenue", "revenue_total", "orders",
                        "amount_inc_tax_missing", "window", "filters_echo"):
         assert public_key not in all_fields, public_key
-    # 合计键（营收口径）当前也应公开；若未来要收紧，须连列表键一起显式设计
-    for total_key in ("amount_ex_tax_total", "amount_inc_tax_total"):
-        assert total_key not in all_fields, total_key
-    # 列表行两金额键沿用 purchase_cost 组（boss/admin 全开，其余角色保守遮蔽）
-    assert {"amount_ex_tax", "amount_inc_tax"} <= set(config.FIELD_GROUPS["purchase_cost"])
+    # 两金额合计键与列表行金额同组（#397 (4)）：合计值也是金额，
+    # 漏登记会绕过 data_purchase_cost 泄漏采购/销售总额
+    assert {"amount_ex_tax", "amount_inc_tax",
+            "amount_ex_tax_total", "amount_inc_tax_total"} <= set(
+                config.FIELD_GROUPS["purchase_cost"])
     assert "customer" in set(config.FIELD_GROUPS["customer_info"])
 
 
