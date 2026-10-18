@@ -2,7 +2,7 @@
 // 下钻层、切换口径不重新请求、脱敏账号（金额/客户）控件门控与「—」占位、
 // 排序保护回显（ranking_restricted 禁用金额排序）、错误与空态。
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tagLayout = vi.hoisted(() => ({ showCustomerTags: false }));
@@ -145,10 +145,13 @@ const ORDER_DETAIL = {
 // ---------------------------------------------------------------- 渲染骨架
 
 let locationSearch = "";
+let navigationType = "";
 function LocationProbe() {
   const loc = useLocation();
   locationSearch = loc.search;
-  return null;
+  navigationType = useNavigationType();
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(-1)}>浏览器后退</button>;
 }
 
 function renderPage(initial = "/purchases/analytics") {
@@ -259,7 +262,8 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(
       await screen.findByText("含税", { selector: ".ant-select-item-option-content" }),
     );
-    await waitFor(() => expect(locationSearch).toContain("basis=ex%2Cpaid"));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).getAll("basis")).toEqual(["ex", "paid"]));
+    expect(navigationType).toBe("REPLACE");
     expect(fetchPurchaseAnalyticsOrders).not.toHaveBeenCalled();
     // 等一轮事件循环确认没有异步补发
     await waitFor(() => expect(viewSummaryCalls()).toHaveLength(1));
@@ -410,6 +414,7 @@ describe("采购分析页：URL 单一真值", () => {
     // order_date 是默认排序键 → 不落 URL；asc 非默认 → 落 URL
     expect(locationSearch).not.toContain("sort=");
     expect(locationSearch).toContain("dir=asc");
+    expect(navigationType).toBe("REPLACE");
     expect(fetchPurchaseAnalyticsOrders.mock.calls[1][0]).toMatchObject({
       sort: "order_date", order: "asc",
     });
@@ -565,5 +570,30 @@ describe("采购分析页：健壮性", () => {
     // KPI 空态金额为「—」，计数为 0（不把 null 当 0 金额）
     const kpiCards = screen.getAllByText("含税金额").map((el) => el.parentElement!);
     expect(kpiCards.some((card) => card.textContent?.includes("—"))).toBe(true);
+  });
+});
+
+
+describe("URL 导航与每页条数", () => {
+  it("打开抽屉创建历史，浏览器后退恢复原筛选与每页条数", async () => {
+    renderPage("/purchases/analytics?group_key=备件采购&page_size=100");
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    expect(fetchPurchaseAnalyticsOrders.mock.calls[0][0]).toMatchObject({ page_size: 100 });
+    fireEvent.click(row);
+    await waitFor(() => expect(new URLSearchParams(locationSearch).get("order_id")).toBe("101"));
+    expect(navigationType).toBe("PUSH");
+    fireEvent.click(screen.getByRole("button", { name: "浏览器后退" }));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).has("order_id")).toBe(false));
+    expect(new URLSearchParams(locationSearch).get("page_size")).toBe("100");
+    expect(navigationType).toBe("POP");
+  });
+  it("分组行下钻 push，浏览器后退回到分组", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("row", { name: "查看分组 备件采购 的订单列表" }));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).get("group_key")).toBe("备件采购"));
+    expect(navigationType).toBe("PUSH");
+    fireEvent.click(screen.getByRole("button", { name: "浏览器后退" }));
+    await waitFor(() => expect(new URLSearchParams(locationSearch).has("group_key")).toBe(false));
+    expect(navigationType).toBe("POP");
   });
 });

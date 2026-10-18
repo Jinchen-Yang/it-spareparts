@@ -1,17 +1,22 @@
 // 采购分析页 URL 状态（D-39）：筛选、日期预设、口径多选、group_by、下钻层全部写进
 // URL，可分享/可刷新/可后退。默认值不落 URL（零参数 = 今天 + 采购类型分组 + 三口径并排）。
-// 多选值用逗号连接（取值来自 source_type_raw / 采购员 / 分类文本，均不含 ASCII 逗号）。
+// 多值格式与旧链接兼容规则统一见 utils/analyticsUrlState。
 import type { SetURLSearchParams } from "react-router-dom";
 import type { Dayjs } from "dayjs";
 import {
-  DEFAULT_DATE_PRESET,
-  isDatePreset,
   resolveDateRange,
   type DatePreset,
   type DateRange,
 } from "../../../components/DateRangePresets";
 import type { PurchaseAnalyticsFilters } from "../../../api/purchaseAnalytics";
 import { businessToday } from "../../../utils/date";
+
+import {
+  clampAnalyticsPage, parseAnalyticsPageSize,
+  DEFAULT_ANALYTICS_PAGE_SIZE, parsePositiveId, parseUrlList, parseUrlSelection, serializeUrlList,
+  parseAnalyticsDates, serializeAnalyticsDates, writeAnalyticsUrlPatch,
+  type UrlPatch, type AnalyticsPatchOptions,
+} from "../../../utils/analyticsUrlState";
 
 export type AmountBasis = "inc" | "ex" | "paid";
 
@@ -55,6 +60,7 @@ export interface AnalyticsUrlState {
   sort: AnalyticsSort;
   dir: "asc" | "desc";
   page: number;
+  pageSize: number;
   basis: AmountBasis[];
   /** 非空 = 订单明细抽屉打开。 */
   orderId: number | null;
@@ -62,51 +68,32 @@ export interface AnalyticsUrlState {
 
 // ---------------------------------------------------------------- 解析（URL → 状态）
 
-function splitList(raw: string | null): string[] {
-  if (!raw) return [];
-  // 不 trim：筛选值要与 source_type_raw/采购员等原值精确匹配（D-39），
-  // 库里首尾带空格的取值一旦被静默 trim 就会精确匹配失败（0 行）。
-  // 只剔除空串（连续逗号/尾逗号）。
-  return Array.from(new Set(raw.split(",").filter(Boolean)));
-}
-
-function parseBasis(raw: string | null): AmountBasis[] {
-  const valid = new Set<string>(ALL_BASES);
-  const parsed = splitList(raw).filter((v) => valid.has(v)) as AmountBasis[];
-  return parsed.length ? parsed : [...DEFAULT_BASES];
-}
-
 export function parseAnalyticsUrl(sp: URLSearchParams): AnalyticsUrlState {
-  const presetRaw = sp.get("preset");
-  const from = sp.get("from");
-  const to = sp.get("to");
   const groupByRaw = sp.get("group_by");
   const sortRaw = sp.get("sort");
-  const pageRaw = Number.parseInt(sp.get("page") || "", 10);
-  const orderIdRaw = Number.parseInt(sp.get("order_id") || "", 10);
+  const selected = parseUrlSelection(sp, "basis", ALL_BASES);
   return {
-    preset: isDatePreset(presetRaw) ? presetRaw : DEFAULT_DATE_PRESET,
-    from: from && to ? from : null, // 只有两个都在时才有意义（单边视为残缺）
-    to: from && to ? to : null,
-    sourceType: splitList(sp.get("source_type")),
-    purchaser: splitList(sp.get("purchaser")),
-    salesperson: splitList(sp.get("salesperson")),
-    // 解析成 id 后再去重（"12" 与 "12.5" 字符串不同、解析后同 id）
+    ...parseAnalyticsDates(sp),
+    sourceType: parseUrlList(sp, "source_type"),
+    purchaser: parseUrlList(sp, "purchaser"),
+    salesperson: parseUrlList(sp, "salesperson"),
+    // 严格整数校验后去重，拒绝截断小数或混入文本的 ID。
     customerIds: Array.from(new Set(
-      splitList(sp.get("customer"))
-        .map((v) => Number.parseInt(v, 10))
-        .filter((n) => Number.isInteger(n) && n > 0),
+      parseUrlList(sp, "customer")
+        .map(parsePositiveId)
+        .filter((n): n is number => n !== null),
     )),
-    category: splitList(sp.get("category")),
+    category: parseUrlList(sp, "category"),
     groupBy: GROUP_BY_KEYS.includes(groupByRaw ?? "") ? groupByRaw! : DEFAULT_GROUP_BY,
     groupKey: sp.get("group_key") || null,
     sort: (SORT_KEYS as readonly string[]).includes(sortRaw ?? "")
       ? (sortRaw as AnalyticsSort)
       : DEFAULT_SORT,
     dir: sp.get("dir") === "asc" ? "asc" : "desc",
-    page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
-    basis: parseBasis(sp.get("basis")),
-    orderId: Number.isInteger(orderIdRaw) && orderIdRaw > 0 ? orderIdRaw : null,
+    page: clampAnalyticsPage(sp.get("page")),
+    pageSize: parseAnalyticsPageSize(sp.get("page_size")),
+    basis: selected,
+    orderId: parsePositiveId(sp.get("order_id")),
   };
 }
 
@@ -121,33 +108,22 @@ function basisIsDefault(basis: AmountBasis[]): boolean {
 /** 状态增量 → URL 增量；默认值转 undefined（useUrlPatch 语义：undefined = 删键）。 */
 export function serializeAnalyticsState(
   next: Partial<AnalyticsUrlState>,
-): Record<string, string | undefined> {
-  const out: Record<string, string | undefined> = {};
-  if (next.preset !== undefined) {
-    out.preset = next.preset === DEFAULT_DATE_PRESET ? undefined : next.preset;
-    if (next.preset === "custom") {
-      out.from = next.from || undefined;
-      out.to = next.to || undefined;
-    } else {
-      // 非自定义预设：残留的 from/to 一并清掉
-      out.from = undefined;
-      out.to = undefined;
-    }
-  }
+): UrlPatch {
+  const out: UrlPatch = serializeAnalyticsDates(next);
   if (next.sourceType !== undefined) {
-    out.source_type = next.sourceType.length ? next.sourceType.join(",") : undefined;
+    out.source_type = serializeUrlList(next.sourceType);
   }
   if (next.purchaser !== undefined) {
-    out.purchaser = next.purchaser.length ? next.purchaser.join(",") : undefined;
+    out.purchaser = serializeUrlList(next.purchaser);
   }
   if (next.salesperson !== undefined) {
-    out.salesperson = next.salesperson.length ? next.salesperson.join(",") : undefined;
+    out.salesperson = serializeUrlList(next.salesperson);
   }
   if (next.customerIds !== undefined) {
-    out.customer = next.customerIds.length ? next.customerIds.join(",") : undefined;
+    out.customer = serializeUrlList(next.customerIds);
   }
   if (next.category !== undefined) {
-    out.category = next.category.length ? next.category.join(",") : undefined;
+    out.category = serializeUrlList(next.category);
   }
   if (next.groupBy !== undefined) {
     out.group_by = next.groupBy === DEFAULT_GROUP_BY ? undefined : next.groupBy;
@@ -162,32 +138,31 @@ export function serializeAnalyticsState(
     out.dir = next.dir === "desc" ? undefined : next.dir;
   }
   if (next.page !== undefined) {
-    out.page = next.page > 1 ? String(next.page) : undefined;
+    const page = clampAnalyticsPage(next.page);
+    out.page = page > 1 ? String(page) : undefined;
   }
   if (next.basis !== undefined) {
-    out.basis = basisIsDefault(next.basis) ? undefined : next.basis.join(",");
+    out.basis = basisIsDefault(next.basis) ? undefined : serializeUrlList(next.basis);
   }
   if (next.orderId !== undefined) {
     out.order_id = next.orderId != null ? String(next.orderId) : undefined;
   }
+  if (next.pageSize !== undefined) {
+    const size = parseAnalyticsPageSize(next.pageSize);
+    out.page_size = size === DEFAULT_ANALYTICS_PAGE_SIZE ? undefined : String(size);
+  }
+  if (Object.values(out).some(Array.isArray)) out.url_version = "2";
   return out;
 }
 
-/** URL 增量更新（replace 不堆历史）；resetPage 供筛选变化时回到第 1 页。 */
+/** 筛选/分页默认 replace；下钻导航显式 push；resetPage 回到第 1 页。 */
 export function useAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams) {
   return (
     next: Partial<AnalyticsUrlState>,
-    opts?: { resetPage?: boolean },
+    opts?: AnalyticsPatchOptions,
   ) => {
-    const merged = new URLSearchParams(sp);
-    const patch = serializeAnalyticsState(
-      opts?.resetPage ? { ...next, page: 1 } : next,
-    );
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined) merged.delete(k);
-      else merged.set(k, v);
-    }
-    setSp(merged, { replace: true });
+    const patch = serializeAnalyticsState(opts?.resetPage ? { ...next, page: 1 } : next);
+    writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["source_type", "purchaser", "salesperson", "customer", "category", "basis"]);
   };
 }
 

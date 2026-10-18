@@ -87,7 +87,7 @@ export default function SalesAnalyticsPage() {
   const [orders, setOrders] = useState<SalesAnalyticsOrdersResp | null>(null);
   const [ordersLoading, setOrdersLoading] = useState(true);
   const [ordersError, setOrdersError] = useState<string | null>(null);
-  const [pageSize, setPageSize] = useState(50);
+  const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
   const summarySeq = useRef(0);
   const ordersSeq = useRef(0);
@@ -233,10 +233,9 @@ export default function SalesAnalyticsPage() {
             pageSize={pageSize}
             onSortChange={(sort) => patch({ sort, page: 1 })}
             onPageChange={(page, size) => {
-              setPageSize(size);
-              patch({ page });
+              patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => patch({ orderId })}
+            onOpenOrder={(orderId) => patch({ orderId }, { history: "push" })}
           />
         )}
       </Card>

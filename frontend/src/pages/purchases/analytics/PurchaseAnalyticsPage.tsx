@@ -86,7 +86,7 @@ export default function PurchaseAnalyticsPage() {
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [customerQuery, setCustomerQuery] = useState("");
   const [customerOptionsLoading, setCustomerOptionsLoading] = useState(false);
-  const [pageSize, setPageSize] = useState(50);
+  const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
   const summarySeq = useRef(0);
   const ordersSeq = useRef(0);
@@ -233,7 +233,7 @@ export default function PurchaseAnalyticsPage() {
             loading={summaryLoading}
             basis={basis}
             groupBy={effectiveGroupBy}
-            onDrill={(key) => patch({ groupKey: key, page: 1 })}
+            onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
           />
         ) : ordersError ? (
           <Alert
@@ -257,11 +257,10 @@ export default function PurchaseAnalyticsPage() {
             pageSize={pageSize}
             onSortChange={(sort: AnalyticsSort, dir) => patch({ sort, dir, page: 1 })}
             onPageChange={(page, size) => {
-              setPageSize(size);
-              patch({ page });
+              patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => patch({ orderId })}
-            onBack={() => patch({ groupKey: null, orderId: null, page: 1 })}
+            onOpenOrder={(orderId) => patch({ orderId }, { history: "push" })}
+            onBack={() => patch({ groupKey: null, orderId: null, page: 1 }, { history: "push" })}
           />
         )}
       </Card>
