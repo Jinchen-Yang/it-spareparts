@@ -382,8 +382,13 @@ def _is_int_str(s) -> bool:
 
 # ---------------------------------------------------------------- options
 
-def options(db: Session, user_ctx=None) -> dict:
-    """筛选取值（全部来自已生效数据）：类型原值 / 采购员 / 关联销售人员 / 分类（含未分类）。"""
+def options(db: Session, user_ctx=None, *, customer_q: str = "",
+            customer_page: int = 1, customer_page_size: int = 200,
+            selected_customer_ids: list[int] | None = None) -> dict:
+    """已生效采购筛选候选：类型/采购员/关联销售人员/客户/分类。
+
+    客户用 ID 去重、名称/id 排序；分页搜索由 API 边界校验。
+    """
     po = FPurchaseOrder
     active = po.data_status == config.ACTIVE_STATUS
     source_types = [r for r in db.execute(
@@ -401,7 +406,8 @@ def options(db: Session, user_ctx=None) -> dict:
         active, po.linked_sales_order_no.is_not(None))
     link = (
         select(FSalesOrder.order_no.label("order_no"),
-               FSalesOrder.salesperson.label("salesperson"))
+               FSalesOrder.salesperson.label("salesperson"),
+               FSalesOrder.customer_id.label("customer_id"))
         .where(FSalesOrder.order_no.in_(linked_nos))
         .distinct(FSalesOrder.order_no)
         .order_by(FSalesOrder.order_no, FSalesOrder.id)
@@ -410,6 +416,29 @@ def options(db: Session, user_ctx=None) -> dict:
         select(func.distinct(link.c.salesperson))
         .where(link.c.salesperson.is_not(None), link.c.salesperson != "")
         .order_by(link.c.salesperson)).scalars()]
+    # 客户直接查身份/名称，不执行全历史金额汇总。客户不可见时不查、不泄露数量。
+    customers = []
+    selected_customers = []
+    customers_has_more = False
+    if user_ctx is None or not security.is_field_hidden(user_ctx, "customer_id"):
+        customer_query = (select(DimCustomer.id, DimCustomer.name_raw)
+                          .join(link, link.c.customer_id == DimCustomer.id)
+                          .distinct())
+        if selected_customer_ids:
+            selected_rows = db.execute(customer_query.where(
+                DimCustomer.id.in_(selected_customer_ids))
+                .order_by(DimCustomer.name_raw, DimCustomer.id)).all()
+            selected_customers = [{"customer_id": r.id, "customer": r.name_raw}
+                                  for r in selected_rows]
+        if customer_q.strip():
+            customer_query = customer_query.where(
+                DimCustomer.name_raw.contains(customer_q.strip(), autoescape=True))
+        rows = db.execute(customer_query.order_by(DimCustomer.name_raw, DimCustomer.id)
+                          .offset((customer_page - 1) * customer_page_size)
+                          .limit(customer_page_size + 1)).all()
+        customers_has_more = len(rows) > customer_page_size
+        customers = [{"customer_id": r.id, "customer": r.name_raw}
+                     for r in rows[:customer_page_size]]
     pl = FPurchaseLine
     dp = DimPart
     cat_rows = db.execute(
@@ -423,6 +452,9 @@ def options(db: Session, user_ctx=None) -> dict:
     if UNCATEGORIZED_LABEL in cat_rows:
         categories.append(UNCATEGORIZED_LABEL)
     data = {
+        "selected_customers": selected_customers,
+        "customers": customers,
+        "customers_has_more": customers_has_more,
         "source_types": source_types,
         "purchasers": purchasers,
         "salespersons": salespersons,

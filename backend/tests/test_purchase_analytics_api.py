@@ -818,6 +818,78 @@ def test_options_lists_distinct_values(boss, ds):
     assert data["uncategorized_label"] == UNCATEGORIZED_LABEL
 
 
+def test_options_customers_distinct_sorted_and_same_sales_identity(boss, ds):
+    data = boss.get("/api/purchases/analytics/options").json()
+    # 同客户多张采购单不重复；同销售单号取最小 id，与 summary 的身份规则一致。
+    assert data["customers"] == [
+        {"customer_id": ds.c1.id, "customer": "华东电力"},
+        {"customer_id": ds.c2.id, "customer": "华南钢铁"},
+    ]
+    assert data["customers_has_more"] is False
+    first = boss.get("/api/purchases/analytics/options?customer_page_size=1").json()
+    second = boss.get("/api/purchases/analytics/options?customer_page_size=1&customer_page=2").json()
+    assert first["customers"] + second["customers"] == data["customers"]
+    assert first["customers_has_more"] is True
+    assert second["customers_has_more"] is False
+    end = boss.get("/api/purchases/analytics/options?customer_page=10000")
+    assert end.status_code == 200
+    assert end.json()["customers"] == []
+    found = boss.get("/api/purchases/analytics/options", params={"customer_q": "钢铁"}).json()
+    assert found["customers"] == [data["customers"][1]]
+    assert boss.get("/api/purchases/analytics/options", params={"customer_q": "%"}).json()["customers"] == []
+
+
+def test_options_customers_empty_and_hidden(db):
+    client = client_for(db, username="options-empty", role="boss")
+    data = client.get("/api/purchases/analytics/options").json()
+    assert data["customers"] == []
+    assert data["customers_has_more"] is False
+    assert data["selected_customers"] == []
+
+
+def test_options_customers_hidden_does_not_leak_candidates_or_count(db, ds):
+    client = client_for(db, username="options-hidden", role="boss", overrides={"data_customer": False})
+    data = client.get("/api/purchases/analytics/options", params={"selected_customer_id": ds.c1.id}).json()
+    assert data["customers"] == []
+    assert data["selected_customers"] == []
+    assert data["customers_has_more"] is False
+
+
+@pytest.mark.parametrize("query", [
+    "customer_page=0", "customer_page=-1", "customer_page=10001",
+    "customer_page=999999999999999999999999", "customer_page=abc",
+    "customer_page_size=0", "customer_page_size=201", "customer_q=" + "x" * 201,
+    "selected_customer_id=0", "selected_customer_id=-1", "selected_customer_id=2147483648",
+    "selected_customer_id=abc", "&".join(["selected_customer_id=1"] * 201),
+])
+def test_options_customer_query_bounds(boss, query):
+    assert boss.get("/api/purchases/analytics/options?" + query).status_code == 422
+
+
+def test_options_customers_default_cap_is_200(db):
+    batch = _batch(db, "customer-cap")
+    for i in range(201):
+        customer = _customer(db, f"客户{i:03}")
+        _sales(db, f"CAP-{i}", f"CAP-{i}", "销售", customer, batch)
+        _po(db, f"CAP-{i}", batch, on=date(2026, 1, 1), source_type="销售订单", linked=f"CAP-{i}")
+    db.commit()
+    client = client_for(db, username="options-cap", role="boss")
+    first = client.get("/api/purchases/analytics/options").json()
+    assert len(first["customers"]) == 200
+    assert first["customers_has_more"] is True
+    last = client.get("/api/purchases/analytics/options?customer_page=2").json()
+    assert [c["customer"] for c in last["customers"]] == ["客户200"]
+    assert last["customers_has_more"] is False
+    restored = client.get("/api/purchases/analytics/options", params=[
+        ("customer_q", "客户000"),
+        ("selected_customer_id", last["customers"][0]["customer_id"]),
+        ("selected_customer_id", last["customers"][0]["customer_id"]),
+    ]).json()
+    assert [c["customer"] for c in restored["customers"]] == ["客户000"]
+    assert restored["selected_customers"] == last["customers"]
+    assert client.get("/api/purchases/analytics/options?customer_q=客户200").json()["customers"] == last["customers"]
+
+
 # ---------------------------------------------------------------- 权限矩阵
 
 ENDPOINTS = ("/api/purchases/analytics/options", "/api/purchases/analytics/summary",

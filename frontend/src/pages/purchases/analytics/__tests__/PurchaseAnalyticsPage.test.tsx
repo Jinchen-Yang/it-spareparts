@@ -5,6 +5,22 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const tagLayout = vi.hoisted(() => ({ showCustomerTags: false }));
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  const { createElement, forwardRef } = await import("react");
+  return {
+    ...actual,
+    // jsdom没有宽度，responsive标签不会进入DOM。仅标签回归使用固定可见数，
+    // 仍运行真实Select/useCache，不用DOM布局替身冒充客户名称缓存。
+    Select: forwardRef<import("react").ComponentRef<typeof actual.Select>, Record<string, unknown>>((props, ref) => createElement(actual.Select, {
+      ...props,
+      ref,
+      ...(tagLayout.showCustomerTags && props["aria-label"] === "客户" ? { maxTagCount: 1 } : {}),
+    })),
+  };
+});
+
 const fetchPurchaseAnalyticsOptions = vi.fn();
 const fetchPurchaseAnalyticsSummary = vi.fn();
 const fetchPurchaseAnalyticsOrders = vi.fn();
@@ -30,6 +46,9 @@ import PurchaseAnalyticsPage from "../PurchaseAnalyticsPage";
 const TODAY = "2026-10-17";
 
 const OPTIONS = {
+  customers: [{ customer_id: 12, customer: "客户甲" }, { customer_id: 30, customer: "客户乙" }],
+  customers_has_more: false,
+  selected_customers: [],
   source_types: ["备件采购", "批量采购", "杂项采购"],
   purchasers: ["张三", "李四"],
   salespersons: ["王五"],
@@ -165,6 +184,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  tagLayout.showCustomerTags = false;
   vi.useRealTimers();
   cleanup();
 });
@@ -326,17 +346,44 @@ describe("采购分析页：URL 单一真值", () => {
     expect(option.closest(".ant-select-item-option")).toHaveClass("ant-select-item-option-disabled");
   });
 
-  it("金额可见账号：客户筛选取值经客户分组反查（排除「无关联销售单」哨兵）", async () => {
+  it("客户候选使用 options 并支持服务端名称搜索，不请求全历史客户金额汇总", async () => {
     renderPage();
     await screen.findByRole("row", { name: /备件采购/ });
-    await waitFor(() =>
-      expect(fetchPurchaseAnalyticsSummary.mock.calls.some(([q]) => (q as Record<string, unknown>).group_by === "customer"))
-        .toBe(true));
-    // 取值反查不带视图筛选（全历史客户清单）
-    const probe = fetchPurchaseAnalyticsSummary.mock.calls
-      .map(([q]) => q as Record<string, unknown>)
-      .find((q) => q.group_by === "customer");
-    expect(probe).toEqual({ group_by: "customer" });
+    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", []);
+    expect(fetchPurchaseAnalyticsSummary.mock.calls.some(([q]) => q.group_by === "customer")).toBe(false);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "客户" }));
+    expect(await screen.findByText("客户甲", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "客户" }), { target: { value: "客户乙" } });
+    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", []));
+  });
+
+  it("分享链接的已选客户不在首批候选时通过 selected_customers 恢复名称", async () => {
+    tagLayout.showCustomerTags = true;
+    fetchPurchaseAnalyticsOptions.mockResolvedValue({ data: {
+      ...OPTIONS, customers: [OPTIONS.customers[0]],
+      selected_customers: [{ customer_id: 999, customer: "首批之外客户" }],
+    } });
+    renderPage("/purchases/analytics?customer=999");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "客户" }).closest(".ant-select"))
+      .toHaveTextContent("首批之外客户"));
+    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", [999]);
+  });
+
+  it("已选客户在远程搜索返回其他候选后仍显示原客户名称", async () => {
+    tagLayout.showCustomerTags = true;
+    fetchPurchaseAnalyticsOptions.mockImplementation((query: string) => Promise.resolve({
+      data: query ? { ...OPTIONS, customers: [OPTIONS.customers[1]] } : OPTIONS,
+    }));
+    renderPage("/purchases/analytics?customer=12");
+    const input = screen.getByRole("combobox", { name: "客户" });
+    const select = input.closest(".ant-select")!;
+    await waitFor(() => expect(select.querySelector(".ant-select-selection-item-content"))
+      .toHaveTextContent("客户甲"));
+    fireEvent.mouseDown(input);
+    fireEvent.change(input, { target: { value: "客户乙" } });
+    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", [12]));
+    await waitFor(() => expect(screen.queryByText("客户甲", { selector: ".ant-select-item-option-content" })).toBeNull());
+    expect(select.querySelector(".ant-select-selection-item-content")).toHaveTextContent("客户甲");
   });
 
   it("排序保护（ranking_restricted）：金额列不可排、如实提示已按日期排序，点金额表头不重新请求", async () => {

@@ -12,7 +12,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
-from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX, DbId
+from app.api.query_bounds import ANALYTICS_PAGE_MAX, ANALYTICS_PAGE_SIZE_MAX, PG_INT_MAX, DbId
 from app.auth import current_role
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
@@ -148,15 +148,25 @@ def _run(fn):
 
 @router.get("/analytics/options")
 def analytics_options(
+    selected_customer_id: list[DbId] = Query([], max_length=ANALYTICS_PAGE_SIZE_MAX,
+                                                description="补齐已选客户名称，最多200个合法id"),
+    customer_q: str = Query("", max_length=200, description="客户名称包含搜索（字面值）"),
+    customer_page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    customer_page_size: int = Query(200, ge=1, le=ANALYTICS_PAGE_SIZE_MAX),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """采购分析筛选取值：类型原值/采购员/关联销售人员/分类（含「未分类」）。"""
+    """采购分析筛选取值；客户按名称/id稳定排序，可搜索/分页，每页最多200项。
+
+    客户候选沿用 summary 的身份规则与 data_customer 权限，不汇总金额。
+    """
     _guard_scoped(ctx)
     record_access_log(ctx, "analytics_options", "purchases/analytics", {})
-    data = purchase_analytics.options(db, ctx)
+    data = purchase_analytics.options(
+        db, ctx, customer_q=customer_q, customer_page=customer_page,
+        customer_page_size=customer_page_size, selected_customer_ids=selected_customer_id)
     return apply_field_visibility(data, ctx)
 
 

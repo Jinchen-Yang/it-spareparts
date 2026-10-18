@@ -5,6 +5,9 @@ import { api } from "../api";
 
 /** 筛选取值：类型原值 / 采购员 / 关联销售人员 / 分类（未分类固定垫底）。 */
 export interface PurchaseAnalyticsOptions {
+  customers: { customer_id: number; customer: string | null }[];
+  customers_has_more: boolean;
+  selected_customers: { customer_id: number; customer: string | null }[];
   source_types: string[];
   purchasers: string[];
   salespersons: string[];
@@ -194,8 +197,12 @@ function appendList(p: URLSearchParams, key: string, values?: string[]): void {
   }
 }
 
-export const fetchPurchaseAnalyticsOptions = () =>
-  api.get<PurchaseAnalyticsOptions>("/purchases/analytics/options");
+/** 客户候选最多200项；额外补齐最多200个已选ID（分享链接恢复姓名）。 */
+export const fetchPurchaseAnalyticsOptions = (customerQuery = "", selectedIds: number[] = []) => {
+  const params = new URLSearchParams({ customer_q: customerQuery });
+  selectedIds.forEach(id => params.append("selected_customer_id", String(id)));
+  return api.get<PurchaseAnalyticsOptions>("/purchases/analytics/options", { params });
+};
 
 export const fetchPurchaseAnalyticsSummary = (filters: PurchaseAnalyticsFilters & {
   group_by?: string;
