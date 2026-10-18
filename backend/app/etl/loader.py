@@ -44,7 +44,10 @@ from app.models.sales import (
 from app.models.system import SysAuditLog
 from app.services import maintenance_cost_invalidation
 from app.services import maintenance_project_operations as _project_ops
-from app.services.sales_reconciliation import SOURCE_IMPORT, snapshot_content_hash
+from app.services.sales_reconciliation import (
+    SOURCE_IMPORT,
+    snapshot_rows_from_orders,
+)
 
 _log = logging.getLogger("loader")
 _CHUNK = 1000  # 每批行数，控制单语句参数数 < PostgreSQL 65535 上限
@@ -753,31 +756,12 @@ def _write_sales_reconciliation_snapshots(session: Session, result: TransformRes
     不产生重复行；不同批次各记一条（即使内容相同——A→B→A 不被内容去重吞掉，
     content_hash 仅供识别内容变化/报告）。金额空单元格一律 NULL（哈希与落库
     同形）。import_batch_id 即本观测所属批次；sales_order_id 关联当前订单
-    行（订单在本事务已写入/已存在，导入路径必可解析）。历史原件回填走
-    scripts/backfill_sales_reconciliation 自有插入（source='backfill'，行构造
-    同口径），不复用本函数——那边订单可能缺席，sales_order_id 允许 NULL。
+    行（订单在本事务已写入/已存在，导入路径必可解析）。行内容由
+    sales_reconciliation.snapshot_rows_from_orders 统一构造（#396 S5，与历史
+    原件回填同一事实源）；回填侧插入策略不同（先筛 existing），行内容一致。
     """
-    rows = []
-    for raw_id, head in result.orders.items():
-        amounts = {
-            "order_amount": head.get("amount_inc_tax"),
-            "reconciled_amount": head.get("reconciled_amount"),
-            "pending_amount": head.get("pending_amount"),
-            "return_reconciled_amount": head.get("return_reconciled_amount"),
-        }
-        rows.append({
-            "raw_order_id": raw_id,
-            "order_no": head.get("order_no"),
-            "sales_order_id": oid_map.get(raw_id),
-            "import_batch_id": batch_id,
-            "source": source,
-            "source_modified_at": head.get("source_modified_at"),
-            **amounts,
-            "content_hash": snapshot_content_hash(
-                raw_order_id=raw_id,
-                source_modified_at=head.get("source_modified_at"),
-                **amounts),
-        })
+    rows = snapshot_rows_from_orders(
+        result.orders, batch_id=batch_id, source=source, oid_map=oid_map)
     inserted = 0
     for chunk in _chunks(rows):
         stmt = pg_insert(FSalesReconciliationSnapshot).values(chunk).on_conflict_do_nothing(
@@ -917,6 +901,12 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
                            "sales_recon_snapshots_skipped_same_batch": skipped_same_batch}
         else:
             recon_stats = {"sales_recon_snapshots_missing_columns": len(orders)}
+        # 对账区坏值警告（#396 S10）：行/单已照常入库、仅对账字段置 NULL，
+        # 不计 fact_rows_error（软标记），行级计数单列供报告展示
+        recon_stats["reconciliation_value_warnings"] = sum(
+            1 for e in result.errors
+            if e.error_type in ("bad_reconciliation_amount",
+                                "bad_source_modified_time"))
 
     # 4) 明细行
     line_model = FSalesLine if is_sales else FPurchaseLine

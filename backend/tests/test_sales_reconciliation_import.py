@@ -174,7 +174,9 @@ def test_transform_bad_amount_and_bad_time_do_not_block(tmp_path):
     types = {e.error_type for e in result.errors}
     assert "bad_reconciliation_amount" in types
     assert "bad_source_modified_time" in types
-    assert all(t not in transform.SOFT_ERROR_TYPES for t in
+    # #396 S10（2026-10-18）：行/单照常入库、仅对账字段置 NULL → 软标记，
+    # 不计 fact_rows_error（行级计数单列在 reconciliation_value_warnings）
+    assert all(t in transform.SOFT_ERROR_TYPES for t in
                ("bad_reconciliation_amount", "bad_source_modified_time"))
 
 
@@ -315,7 +317,10 @@ def test_import_all_lines_failed_no_order_no_snapshot(db, tmp_path):
     db.commit()
 
     assert batch.status == "success"                   # 坏行隔离，整批照常成功
-    assert batch.rows_error == 3                       # bad_number + 坏对账金额 + 坏修改时间
+    # #396 S10：坏对账金额/坏修改时间是已入库行上的警告，不再计入 rows_error；
+    # 只有 bad_number（该明细行真被拒）算错行。警告行级计数单列。
+    assert batch.rows_error == 1                       # 仅 bad_number
+    assert batch.report_json["reconciliation_value_warnings"] == 2
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
     assert _snapshots(db) == []
     error_types = db.scalars(select(SysImportError.error_type)
@@ -596,7 +601,10 @@ def test_pipeline_imports_file_with_bad_recon_value(db, tmp_path):
     db.commit()
 
     assert batch.status == "success"
-    assert batch.rows_error == 1
+    # S10（2026-10-18 裁定）：坏对账值行已照常落库，不进 rows_error，
+    # 单列 reconciliation_value_warnings 计数；SysImportError 行保留（数据不动）
+    assert batch.rows_error == 0
+    assert batch.report_json["reconciliation_value_warnings"] == 1
     error_types = db.scalars(select(SysImportError.error_type)
                              .where(SysImportError.batch_id == batch.id)).all()
     assert "bad_reconciliation_amount" in error_types
