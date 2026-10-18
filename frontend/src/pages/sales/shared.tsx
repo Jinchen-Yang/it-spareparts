@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import type { SalesReconciliationBlock } from "../../api/salesAnalytics";
+import { formatBusinessDateTime } from "../../utils/date";
 
 // 销售分析页展示辅助。fmt / fmtMoney / KpiCard 从采购分析页（PR-4a，
 // pages/purchases/shared.tsx）逐字搬运，零逻辑改动——按仓库惯例展示件按模块就近
@@ -12,12 +14,24 @@ export const fmtMoney = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /**
- * ISO datetime（如 2026-08-01T09:00:00+00:00）→ 「2026-08-01 09:00」。
- * 按原字面截断展示、不做时区换算：后端返回的是氚云修改时间原值，换算成本地时区
- * 反而与原件对不上。
+ * 「数据截至时间」等 datetime 展示：后端存 UTC（cleaner.parse_datetime），isoformat
+ * 带偏移输出（如 2026-08-01T01:00:00+00:00）；按偏移换算到业务时区 Asia/Shanghai
+ * 显示「2026-08-01 09:00」。空值/非法值「—」。
  */
-export const fmtDateTime = (v: string | null | undefined) =>
-  v ? v.replace("T", " ").slice(0, 16) : "—";
+export const fmtDateTime = formatBusinessDateTime;
+
+/**
+ * 对账块「无数据」：无快照（has_data=false），或金额与时间字段全为 null（后端按
+ * data_reconciliation 遮蔽、或快照本身全空）。不只依赖本地权限快照——本地快照
+ * 可能过期，以响应实际内容为准，避免整行「—」却不提示无数据。
+ */
+export function isReconBlockEmpty(b: SalesReconciliationBlock | null | undefined): boolean {
+  if (!b || !b.has_data) return true;
+  return [
+    b.reconciled_as_of, b.order_amount_at_snapshot, b.reconciled_amount,
+    b.pending_amount, b.return_reconciled_amount, b.reconciled_display,
+  ].every((v) => v == null);
+}
 
 export function KpiCard({ label, value, sub, highlight }: {
   label: ReactNode; value: ReactNode; sub?: ReactNode; highlight?: boolean;

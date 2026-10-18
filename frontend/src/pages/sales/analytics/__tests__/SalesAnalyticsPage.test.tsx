@@ -30,7 +30,7 @@ import SalesAnalyticsPage from "../SalesAnalyticsPage";
 
 const TODAY = "2026-10-17";
 // 顶层 as_of 与后端一致是 date-only（today.isoformat()）；对账块/历史里的
-// reconciled_as_of / created_at 才是 datetime（source_modified_at 原值）
+// reconciled_as_of / created_at 才是 datetime（后端存 UTC、带偏移输出；页面按 Asia/Shanghai 展示）
 const AS_OF = "2026-10-17";
 
 const OPTIONS = {
@@ -125,7 +125,8 @@ beforeEach(() => {
     data_purchase_cost: true, data_reconciliation: true, data_customer: true,
   }));
   vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date(2026, 9, 17, 10, 0, 0)); // 2026-10-17（默认今天）
+  // UTC ISO 钉死时刻（= 上海 2026-10-17 10:00），不随机器时区漂移
+  vi.setSystemTime(new Date("2026-10-17T02:00:00Z"));
   fetchSalesAnalyticsOptions.mockResolvedValue({ data: OPTIONS });
   fetchSalesAnalyticsSummary.mockResolvedValue({ data: SUMMARY });
   // 回显契约：sort / page / include_returns 原样回显请求值（金额被遮蔽的场景单独覆写）。
@@ -327,6 +328,29 @@ describe("销售分析页：URL 单一真值", () => {
     expect(screen.getAllByText("无对账数据").length).toBeGreaterThan(0);
   });
 
+  it("有快照但金额与时间全为 null（后端遮蔽/快照全空）：列表与抽屉都按「无对账数据」展示", async () => {
+    const EMPTY_RECON = {
+      has_data: true, reconciled_as_of: null, order_amount_at_snapshot: null,
+      reconciled_amount: null, pending_amount: null, return_reconciled_amount: null,
+      reconciled_display: null,
+    };
+    fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({
+      items: [{ ...ORDER_ROW, reconciliation: EMPTY_RECON }],
+    }) });
+    fetchSalesAnalyticsOrderDetail.mockResolvedValue({
+      data: { ...ORDER_DETAIL, reconciliation: EMPTY_RECON, reconciliation_history: [] },
+    });
+    renderPage();
+    const row = await screen.findByRole("row", { name: "查看销售单 XS-2026-201 详情" });
+    // 本地权限快照为 true（beforeEach），仍按响应内容判无数据
+    expect(row.textContent).toContain("无对账数据");
+    fireEvent.click(row);
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByText("无对账数据（对账金额与时间均为空或不可见）")).toBeInTheDocument());
+    expect(within(dialog).queryByText("对账快照（最新）")).toBeNull();
+  });
+
   it("列头点「含税订单金额」：切换排序键并回第 1 页，状态落 URL；只倒序不升序", async () => {
     // 页码 2 合法（120 单/50 每页）：本例验排序切换回第 1 页，越界收敛另有专测
     fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({ total: 120 }) });
@@ -355,8 +379,9 @@ describe("销售分析页：URL 单一真值", () => {
     // 最新对账块
     expect(within(dialog).getByText("对账快照（最新）")).toBeInTheDocument();
     expect(within(dialog).getByText(/110\.00/)).toBeInTheDocument(); // 含退货口径值
-    // 数据截至时间出现两处 = 最新块与历史末条一致（D-40：末条即最新快照）
-    expect(within(dialog).getAllByText("2026-10-15 08:00").length).toBe(2);
+    // 数据截至时间出现两处 = 最新块与历史末条一致（D-40：末条即最新快照）；
+    // 后端 UTC 08:00+00:00 → 北京时间 16:00
+    expect(within(dialog).getAllByText("2026-10-15 16:00").length).toBe(2);
     // 历史：两个批次（来源 导入/回填），导入批次号 7 在列
     expect(within(dialog).getByText("回填")).toBeInTheDocument();
     expect(within(dialog).getByText("7")).toBeInTheDocument();

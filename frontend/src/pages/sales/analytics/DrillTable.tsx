@@ -5,7 +5,7 @@
 import { Alert, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { FilterValue, SorterResult } from "antd/es/table/interface";
-import { fmtDateTime, fmtMoney } from "../shared";
+import { fmtDateTime, fmtMoney, isReconBlockEmpty } from "../shared";
 import type {
   SalesAnalyticsOrderRow,
   SalesAnalyticsOrdersResp,
@@ -57,7 +57,7 @@ export default function DrillTable({
   const sortable = (key: AmountKey) =>
     amounts.includes(key) && (key === "revenue" || !costRestricted);
 
-  const reconNoData = (b: SalesReconciliationBlock) => !b.has_data || reconRestricted;
+  const reconNoData = (b: SalesReconciliationBlock) => reconRestricted || isReconBlockEmpty(b);
 
   const amountColumn = (key: AmountKey, title: string) => {
     const sortKey = AMOUNT_SORT_KEY[key];

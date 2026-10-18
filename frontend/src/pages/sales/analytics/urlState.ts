@@ -72,6 +72,9 @@ function parseAmounts(raw: string | null): AmountKey[] {
   return parsed.length ? parsed : [...DEFAULT_AMOUNTS];
 }
 
+/** 页码上界，与后端 app.api.query_bounds.ANALYTICS_PAGE_MAX 一致。 */
+export const SALES_ANALYTICS_PAGE_MAX = 10_000;
+
 export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlState {
   const presetRaw = sp.get("preset");
   const from = sp.get("from");
@@ -90,7 +93,8 @@ export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlSt
     sort: (SALES_ANALYTICS_SORT_KEYS as readonly string[]).includes(sortRaw ?? "")
       ? (sortRaw as SalesAnalyticsSortKey)
       : DEFAULT_SORT,
-    page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
+    // 与后端 ANALYTICS_PAGE_MAX 同上界：分享链/手改 URL 的超大页码收敛到 10000，不发必 422 的请求
+    page: Number.isInteger(pageRaw) && pageRaw > 1 ? Math.min(pageRaw, SALES_ANALYTICS_PAGE_MAX) : 1,
     includeReturns: sp.get("include_returns") === "1",
     orderId: Number.isInteger(orderIdRaw) && orderIdRaw > 0 ? orderIdRaw : null,
   };

@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, Descriptions, Drawer, Spin, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { fmtDateTime, fmtMoney } from "../shared";
+import { fmtDateTime, fmtMoney, isReconBlockEmpty } from "../shared";
 import {
   fetchSalesAnalyticsOrderDetail,
   type SalesAnalyticsOrderDetail,
@@ -69,7 +69,7 @@ export default function DetailDrawer({
   }, [orderId, includeReturns]);
 
   const recon = detail?.reconciliation;
-  const reconNoData = !recon || !recon.has_data || reconRestricted;
+  const reconNoData = !recon || reconRestricted || isReconBlockEmpty(recon);
 
   const historyColumns: ColumnsType<SalesAnalyticsOrderDetail["reconciliation_history"][number]> = [
     { title: "导入批次", dataIndex: "import_batch_id", width: 84, align: "right" },
@@ -125,7 +125,13 @@ export default function DetailDrawer({
           {reconRestricted ? (
             <Alert type="info" showIcon message="无对账数据（当前账号无销售单对账数据权限）" />
           ) : reconNoData ? (
-            <Alert type="info" showIcon message="无对账数据（该单没有任何对账快照）" />
+            <Alert
+              type="info"
+              showIcon
+              message={recon?.has_data
+                ? "无对账数据（对账金额与时间均为空或不可见）"
+                : "无对账数据（该单没有任何对账快照）"}
+            />
           ) : (
             <Descriptions
               size="small"

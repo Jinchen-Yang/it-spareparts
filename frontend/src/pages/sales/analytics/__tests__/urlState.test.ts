@@ -62,6 +62,10 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
   it("page / order_id 边界：1 与非法都归默认，合法保留", () => {
     expect(parseSalesAnalyticsUrl(sp("page=1&page=0&page=abc")).page).toBe(1);
     expect(parseSalesAnalyticsUrl(sp("page=3")).page).toBe(3);
+    // 上界与后端 ANALYTICS_PAGE_MAX 一致：超大页码收敛到 10000（不发必 422 的请求）
+    expect(parseSalesAnalyticsUrl(sp("page=10000")).page).toBe(10000);
+    expect(parseSalesAnalyticsUrl(sp("page=10001")).page).toBe(10000);
+    expect(parseSalesAnalyticsUrl(sp("page=99999999999999999999")).page).toBe(10000);
     expect(parseSalesAnalyticsUrl(sp("order_id=0")).orderId).toBeNull();
     expect(parseSalesAnalyticsUrl(sp("order_id=201")).orderId).toBe(201);
   });
