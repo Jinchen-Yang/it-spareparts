@@ -1,3 +1,5 @@
+> 已归档 2026-10-18 · 原因：一次性执行 prompt，任务已完成（`f_project_expense.remark` 迁移 `d6e1f4a8c3b5` 已在 main） · 替代文档：[docs/maintenance/REQUIREMENTS.md](../../maintenance/REQUIREMENTS.md) #47/#48
+
 # 给云端 Claude 的执行 Prompt：验收补丁 P1+P2
 
 > 背景：你的「维保前端 2 页重设计」已通过独立验收（后端 11 failed/3501 passed＝环境基线零新增；

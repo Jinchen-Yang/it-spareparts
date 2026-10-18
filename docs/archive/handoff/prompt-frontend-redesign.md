@@ -1,3 +1,5 @@
+> 已归档 2026-10-18 · 原因：一次性执行 prompt，任务已完成（维保 2 页重设计已通过独立验收，见同目录 prompt-verify-patches.md；页面 `MaintenanceHomePage` / `MaintenanceProjectPanelPage` 已在 main） · 替代文档：[docs/handoff/nav-redesign-issue.md](../../handoff/nav-redesign-issue.md)、[docs/maintenance/ARCHITECTURE.md](../../maintenance/ARCHITECTURE.md)
+
 # 给云端 Claude 的执行 Prompt：维保前端 2 页重设计
 
 > 直接复制下面代码块发给云端 Claude。规格事实源都在它当前分支上（最新 `1699a4f`）。
