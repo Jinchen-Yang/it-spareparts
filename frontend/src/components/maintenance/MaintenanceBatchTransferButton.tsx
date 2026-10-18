@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../utils/date";
 import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
@@ -895,7 +896,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         </Button>
         {preview ? (
           <Text type="secondary">
-            预览有效期至 {new Date(preview.expires_at).toLocaleString("zh-CN")}
+            预览有效期至 {formatBusinessDateTime(preview.expires_at)}
           </Text>
         ) : null}
       </Space>

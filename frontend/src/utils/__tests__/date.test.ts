@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolvePresetRange } from "../../components/DateRangePresets";
-import { BUSINESS_TIME_ZONE, businessToday, formatBusinessDateTime } from "../date";
+import { BUSINESS_TIME_ZONE, businessToday, formatBusinessDate, formatBusinessDateTime } from "../date";
 
 describe("businessToday：按 Asia/Shanghai 取业务日", () => {
   it("业务时区固定为 Asia/Shanghai", () => {
@@ -73,5 +73,26 @@ describe("时区无关性：同一时刻在任意机器时区下结果一致", (
     expect(resolvePresetRange("7d", today)).toEqual({ from: "2026-10-12", to: "2026-10-18" });
     expect(resolvePresetRange("yesterday", today)).toEqual({ from: "2026-10-17", to: "2026-10-17" });
     expect(formatBusinessDateTime("2026-10-15T08:00:00+00:00")).toBe("2026-10-15 16:00");
+  });
+});
+
+
+describe("严格 ISO 业务时间输入", () => {
+  it("无偏移 datetime 按后端 UTC，跨午夜换日", () => {
+    expect(formatBusinessDateTime("2026-10-01T08:00:00")).toBe("2026-10-01 16:00");
+    expect(formatBusinessDateTime("2026-10-01T16:00:00")).toBe("2026-10-02 00:00");
+  });
+  it.each(["1", "123456", "123456789", "999999999"])("小数秒 %s 不移动分钟（包括 Safari 不支持的长小数）", (fraction) => {
+    expect(formatBusinessDateTime(`2026-10-15T15:59:59.${fraction}+00:00`)).toBe("2026-10-15 23:59");
+    expect(formatBusinessDateTime(`2026-10-15T16:00:00.${fraction}`)).toBe("2026-10-16 00:00");
+  });
+  it.each(["2026-10-01", "2026-02-29T08:00:00Z", "2026-04-31T08:00:00Z", "2026-10-01 08:00:00", "2026-10-01T24:00:00Z", "2026-10-01T08:60:00Z", "2026-10-01T08:00:60Z", "2026-10-01T08:00:00+24:00", "2026-10-01T08:00:00+08:60"])("非法/非 datetime %s → —", (value) => {
+    expect(formatBusinessDateTime(value)).toBe("—");
+  });
+  it("日期 helper 保留纯业务日期，时间戳则先换算业务时区", () => {
+    expect(formatBusinessDate("2026-10-01")).toBe("2026-10-01");
+    expect(formatBusinessDate("2026-10-01T16:00:00Z")).toBe("2026-10-02");
+    expect(formatBusinessDate("2026-02-30")).toBe("—");
+    expect(formatBusinessDate(null)).toBe("—");
   });
 });

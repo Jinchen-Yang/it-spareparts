@@ -758,11 +758,11 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
           stage: "screening_complete",
           version: 1,
           latest_version_no: 1,
-          updated_at: "2026-08-17T01:00:00Z",
+          updated_at: "2026-08-17T16:05:00Z",
         }],
       },
     });
-    getApplication.mockResolvedValue({ data: submittedApplication });
+    getApplication.mockResolvedValue({ data: { ...submittedApplication, versions: submittedApplication.versions.map((version) => ({ ...version, submitted_at: "2026-08-17T16:05:00Z" })) } });
 
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
@@ -770,6 +770,10 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /申请记录/ }));
     expect(await screen.findByText("BLK-20260817-ABC1234567")).toBeInTheDocument();
     expect(screen.getByText(/WX-2026-001 · 测试维保项目A/)).toBeInTheDocument();
+    expect(screen.getByText("v1 · 2026-08-18 00:05")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /查看详情/ }));
+    fireEvent.click(await screen.findByText("v1", { selector: ".ant-collapse-header strong" }));
+    expect(await screen.findByText("提交时间：2026-08-18 00:05")).toBeInTheDocument();
   });
 
   it("打回后「退回编辑」：预填原行（标红+推荐），可删减后全量重新提交（#10）", async () => {

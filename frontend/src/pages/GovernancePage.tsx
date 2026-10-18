@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useState } from "react";
 import {
   Card, Row, Col, Statistic, Segmented, Tag, Button, Modal, Input, message, Space,
@@ -380,7 +381,7 @@ function MergesTab({ onChanged }: { onChanged: () => void }) {
     { title: "原因", dataIndex: "reason", ellipsis: true },
     { title: "操作人", dataIndex: "created_by", width: 90 },
     { title: "时间", dataIndex: "created_at", width: 160,
-      render: (v: string) => v?.replace("T", " ").slice(0, 16) },
+      render: (v: string) => formatBusinessDateTime(v) },
     { title: "操作", width: 110, fixed: "right",
       render: (_, r) => r.reverted
         ? <Tag>已回滚</Tag>

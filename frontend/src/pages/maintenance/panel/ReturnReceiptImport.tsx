@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../../utils/date";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Checkbox, Descriptions, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
 import {
@@ -43,8 +44,7 @@ function comparisonValue(row: ReturnImportRow, field: string, side: "before" | "
     ].filter(Boolean).join("；") || "未填写";
   }
   if (field === "occurred_at") {
-    const date = new Date(String(value));
-    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+    return formatBusinessDateTime(String(value));
   }
   return String(value);
 }

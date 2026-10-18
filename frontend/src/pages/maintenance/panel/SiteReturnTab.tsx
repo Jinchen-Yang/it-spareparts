@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
 import type {
@@ -44,13 +45,6 @@ interface SiteReturnRow {
    * 没有这一行用户就无从核对「作废成功了没有」。
    */
   line: SiteIssueLine | null;
-}
-
-function formatVoidedAt(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const at = new Date(value);
-  if (Number.isNaN(at.getTime())) return value;
-  return at.toLocaleString("zh-CN", { hour12: false });
 }
 
 async function fetchAllRows<T>(
@@ -304,7 +298,7 @@ export function SiteReturnTab({
             title: "领用状态",
             render: (_value, item) => {
               const status = ISSUE_STATUS[item.issue.workflow_status];
-              const voidedAt = item.line ? null : formatVoidedAt(item.issue.voided_at);
+              const voidedAt = item.line || !item.issue.voided_at ? null : formatBusinessDateTime(item.issue.voided_at);
               return (
                 <Space direction="vertical" size={0}>
                   <Tag color={status?.color}>{status?.label ?? item.issue.workflow_status}</Tag>

@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../utils/date";
 /** 账号列表页签：筛选（模板/角色/状态/关键词）+ 多选批量 + 单账号操作。 */
 import { useMemo, useState } from "react";
 import {
@@ -16,7 +17,7 @@ import BulkModal from "./BulkModal";
 const ROLE_LABEL: Record<string, string> = {
   admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读", maintenance_manager: "维保负责人",
 };
-const fmt = (s: string | null) => (s ? new Date(s).toLocaleString("zh-CN") : "—");
+const fmt = formatBusinessDateTime;
 
 export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   meta: AccountsMeta;

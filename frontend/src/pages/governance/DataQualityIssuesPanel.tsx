@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Button, Descriptions, Drawer, Empty, Grid, Input, List, Modal, Pagination,
@@ -46,19 +47,6 @@ function reviewPermissionState() {
 
 function issueLabel(row: Pick<DataQualityIssueListItem, "order_no" | "pn_std">) {
   return `查看疑点 ${row.order_no || "无单号"} ${row.pn_std || "无型号"} 详情`;
-}
-
-function formatDateTime(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const parts = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(date);
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "";
-  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
 }
 
 function formatQuantity(quantity: number | null, unit: string | null) {
@@ -233,7 +221,7 @@ export default function DataQualityIssuesPanel() {
     { title: "单价", dataIndex: "unit_price", width: 120, align: "right", render: (value, row) => formatPrice(value, row.price_restricted) },
     { title: "规则", key: "rule", width: 190, render: (_, row) => ruleName(row) },
     { title: "导入批次", key: "batch", width: 180, render: (_, row) => row.import_batch_name || (row.import_batch_id ? `#${row.import_batch_id}` : "—") },
-    { title: "更新时间", dataIndex: "updated_at", width: 150, render: formatDateTime },
+    { title: "更新时间", dataIndex: "updated_at", width: 150, render: formatBusinessDateTime },
     { title: "操作", key: "action", width: 76, fixed: "right", render: (_, row) => (
       <Button type="link" onClick={() => void openDetail(row)} aria-label={issueLabel(row)}>查看</Button>
     ) },
@@ -444,7 +432,7 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
           <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
             <Descriptions.Item label="批次">{detail.batch.filename || `#${detail.batch.id}`}</Descriptions.Item>
             <Descriptions.Item label="导入人">{detail.batch.imported_by || "—"}</Descriptions.Item>
-            <Descriptions.Item label="导入时间">{formatDateTime(detail.batch.imported_at)}</Descriptions.Item>
+            <Descriptions.Item label="导入时间">{formatBusinessDateTime(detail.batch.imported_at)}</Descriptions.Item>
           </Descriptions>
         ) : <Text type="secondary">该记录没有可用的导入批次定位。</Text>}
       </section>
@@ -453,9 +441,9 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
         <Typography.Title level={5}>已有结论与审计摘要</Typography.Title>
         <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="发现人">{detail.detected_by || "—"}</Descriptions.Item>
-          <Descriptions.Item label="发现时间">{formatDateTime(detail.detected_at)}</Descriptions.Item>
+          <Descriptions.Item label="发现时间">{formatBusinessDateTime(detail.detected_at)}</Descriptions.Item>
           <Descriptions.Item label="最近核实人">{detail.reviewed_by || "—"}</Descriptions.Item>
-          <Descriptions.Item label="核实时间">{formatDateTime(detail.reviewed_at)}</Descriptions.Item>
+          <Descriptions.Item label="核实时间">{formatBusinessDateTime(detail.reviewed_at)}</Descriptions.Item>
           <Descriptions.Item label="核实原因" span={2}>
             {detail.review_note_restricted ? "无价格权限" : (detail.review_note || "尚无人工结论")}
           </Descriptions.Item>
@@ -463,7 +451,7 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
         {!!detail.audits?.length && (
           <List
             size="small" style={{ marginTop: 8 }} dataSource={detail.audits}
-            renderItem={(audit) => <List.Item>{formatDateTime(audit.created_at)} · {audit.username || "系统"} · {audit.note || audit.action}</List.Item>}
+            renderItem={(audit) => <List.Item>{formatBusinessDateTime(audit.created_at)} · {audit.username || "系统"} · {audit.note || audit.action}</List.Item>}
           />
         )}
       </section>

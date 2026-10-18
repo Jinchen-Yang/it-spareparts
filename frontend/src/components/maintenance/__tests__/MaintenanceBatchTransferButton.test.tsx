@@ -77,7 +77,7 @@ const preview = {
   preview_token: "signed-preview-token",
   payload_hash: "a".repeat(64),
   data_version: 17,
-  expires_at: "2026-08-28T12:30:00+08:00",
+  expires_at: "2026-08-28T16:05:00Z",
   can_apply: true,
   files: [
     {
@@ -695,6 +695,7 @@ describe("MaintenanceBatchTransferButton", () => {
     await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(1));
     expect(mocks.preview.mock.calls[0][0]).toEqual(files);
     expect(await screen.findByText("已匹配 1")).toBeInTheDocument();
+    expect(screen.getByText("预览有效期至 2026-08-29 00:05")).toBeInTheDocument();
     expect(screen.getByText("有歧义 1")).toBeInTheDocument();
     expect(screen.getByText("未匹配 1")).toBeInTheDocument();
     expect(screen.getByText("无效 1")).toBeInTheDocument();

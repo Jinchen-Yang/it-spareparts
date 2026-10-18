@@ -1,3 +1,4 @@
+import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
 import type { MaintenanceCategoryFilterInput } from "../../../api/maintenanceOperations";
@@ -72,13 +73,6 @@ function fmtQty(value: string | number | null | undefined): string {
   if (value == null) return "—";
   const text = String(value);
   return /^-?\d+(?:\.\d+)?$/.test(text) ? text.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1") : text;
-}
-
-function fmtDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  const at = new Date(value);
-  if (Number.isNaN(at.getTime())) return value;
-  return at.toLocaleString("zh-CN", { hour12: false });
 }
 
 const AUDIT_FIELD_LABEL: Record<string, string> = {
@@ -598,7 +592,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         </Space>;
       },
     },
-    { title: "收到时间", dataIndex: "occurred_at", width: 150, render: (v: string | null) => fmtDate(v) },
+    { title: "收到时间", dataIndex: "occurred_at", width: 150, render: (v: string | null) => formatBusinessDateTime(v) },
     {
       title: "登记人",
       dataIndex: "created_by",
@@ -606,7 +600,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       render: (value: string, item) => (
         <Space direction="vertical" size={0}>
           <span>{item.created_by_name?.trim() || (/^\+?[\d\s()-]+$/.test(value?.trim() ?? "") ? "未填写姓名" : raw(value))}</span>
-          <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>{fmtDate(item.created_at)}</span>
+          <span style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>{formatBusinessDateTime(item.created_at)}</span>
         </Space>
       ),
     },
@@ -770,8 +764,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           <Descriptions.Item label="导入批次">{raw(item.batch_id)}</Descriptions.Item>
           <Descriptions.Item label="原始单据身份">{raw(item.head_row_id)}</Descriptions.Item>
           <Descriptions.Item label="原始明细身份">{raw(item.source_ref)}</Descriptions.Item>
-          <Descriptions.Item label="最后修改">{raw(item.updated_by)} · {fmtDate(item.updated_at)}</Descriptions.Item>
-          {item.line_status === "voided" ? <Descriptions.Item label="作废">{raw(item.voided_by)} · {fmtDate(item.voided_at)} · {raw(item.void_reason)}</Descriptions.Item> : null}
+          <Descriptions.Item label="最后修改">{raw(item.updated_by)} · {formatBusinessDateTime(item.updated_at)}</Descriptions.Item>
+          {item.line_status === "voided" ? <Descriptions.Item label="作废">{raw(item.voided_by)} · {formatBusinessDateTime(item.voided_at)} · {raw(item.void_reason)}</Descriptions.Item> : null}
         </Descriptions>
           {item.components?.length ? <>
             <Text type="secondary">整机附属明细（仅展示，不计入已返还数量）</Text>
@@ -990,7 +984,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
                 <Descriptions
                   size="small"
                   column={1}
-                  title={`${AUDIT_ACTION_LABEL[entry.action] ?? entry.action} · ${entry.operated_by} · ${fmtDate(entry.operated_at)}`}
+                  title={`${AUDIT_ACTION_LABEL[entry.action] ?? entry.action} · ${entry.operated_by} · ${formatBusinessDateTime(entry.operated_at)}`}
                 >
                   <Descriptions.Item label="原因">{entry.reason}</Descriptions.Item>
                   <Descriptions.Item label="项目">{entry.project_id}</Descriptions.Item>

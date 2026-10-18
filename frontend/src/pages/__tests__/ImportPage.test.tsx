@@ -212,7 +212,7 @@ describe("完整导入问题明细下载", () => {
     get.mockImplementation((url: string) => {
       if (url === "/import/batches") return Promise.resolve({ data: [{
         id: 7, filename: "需求单.xlsx", file_type: "maintenance", status: "success",
-        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        uploaded_at: "2026-07-27T16:05:00Z", uploaded_by: "admin",
         rows_total: 5, rows_inserted: 0, rows_skipped: 0, rows_error: 0, rows_inactive: 0,
       }] });
       if (url === "/import/batches/7") return Promise.resolve({ data: {
@@ -225,6 +225,7 @@ describe("完整导入问题明细下载", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     render(<ImportPage />);
+    expect(await screen.findByText("2026-07-28 00:05")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
 
     expect(await screen.findByText("匹配已有 5 行")).toBeInTheDocument();
@@ -242,7 +243,7 @@ describe("完整导入问题明细下载", () => {
     get.mockImplementation((url: string) => {
       if (url === "/import/batches") return Promise.resolve({ data: [{
         id: 7, filename: "合成需求单.xlsx", file_type: "maintenance", status: "success",
-        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        uploaded_at: "2026-07-27T16:05:00Z", uploaded_by: "admin",
         rows_total: 2, rows_inserted: 2, rows_skipped: 0, rows_error: 0, rows_inactive: 0,
       }] });
       if (url === "/import/batches/7") return Promise.resolve({ data: {
@@ -254,6 +255,7 @@ describe("完整导入问题明细下载", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     render(<ImportPage />);
+    expect(await screen.findByText("2026-07-28 00:05")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
     expect(await screen.findByText("地址处理")).toBeInTheDocument();
     expect(screen.getByText(mode === "skip"
