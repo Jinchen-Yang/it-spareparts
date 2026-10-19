@@ -22,6 +22,9 @@ from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, RKD_RETURN_CATEGORIES, RKD_RETURN_TEST_RESULTS
 from app.models.dimensions import DimPart
+from app.services.maintenance_return_request_summary import (
+    demand_full_capacity_condition, summarize_demand_returns,
+)
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_doc_import import MaintenanceDocLineRow, MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
@@ -392,6 +395,13 @@ def register_receipt(
             return {"replayed": True, **_receipt_dict(existing)}
     else:
         source_ref = f"manual:{uuid4().hex}"
+    if source_order_id is not None:
+        # D-31 第 1/4 款：容量守卫在幂等重放判定之后执行——同一幂等键的重试
+        # 不因自己已占用的容量被误拒。
+        _lock_demand_capacity(db, source_order_id)
+        _enforce_demand_capacity(
+            db, source_order_id=source_order_id, additional_qty=qty_clean,
+        )
     row = MaintenanceRkdReturnLine(
         rkd_line_id=str(uuid4()),
         batch_id=None,
@@ -460,6 +470,47 @@ def _order_no(db: Session, source_order_id: str | None) -> str | None:
     )
 
 
+def _lock_demand_capacity(db: Session, source_order_id: str) -> None:
+    """同一需求单的容量判定串行化（D-31 第 1 款：所有入口共用容量守卫）。
+
+    并发登记/修改同一需求单时，后到者在前者提交后才能读到最终 R。"""
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+               {"key": f"demand-capacity:{source_order_id}"})
+
+
+def _enforce_demand_capacity(
+    db: Session, *, source_order_id: str, additional_qty: Decimal,
+    order_credit: Decimal = Decimal("0"),
+) -> None:
+    """D-31 容量守卫：关联录入不得使需求单累计实收超过需求数量合计。
+
+    - N/R 单一真值 = summarize_demand_returns（方案 A 契约，免返不调整 N/R）；
+    - order_credit：本行此前已计入该需求单 R 的数量（修改场景抵扣，避免把
+      自己的旧值当成他人占用）；
+    - basis 非 complete（无活跃明细/未生效/归属冲突）或 N 为空时不在守卫范围；
+    - 历史超额（R>N）保留并标记，但禁止再增加（D-31 第 3 款）。
+    """
+    summary = summarize_demand_returns(
+        db, source_order_ids=[source_order_id], allowed_project_ids=None,
+    ).get(source_order_id)
+    if summary is None or summary.basis_state != "complete" or summary.demand_qty is None:
+        return
+    effective_r = (summary.received_qty or Decimal("0")) - order_credit
+    allowed = summary.demand_qty - effective_r
+    label = summary.order_no or source_order_id
+    if allowed < 0:
+        raise ReturnReceiptValidation(
+            f"需求单 {label} 已超额：需求数量 {_qty(summary.demand_qty)}，"
+            f"已有效收货 {_qty(effective_r)}（历史超额保留）；不可再增加关联录入"
+        )
+    if additional_qty > allowed:
+        raise ReturnReceiptValidation(
+            f"需求单 {label} 剩余可录入 {_qty(allowed)}"
+            f"（需求数量 {_qty(summary.demand_qty)} − 已有效收货 {_qty(effective_r)}），"
+            f"本次 {_qty(Decimal(str(additional_qty)))} 超出容量"
+        )
+
+
 def demand_candidates(
     db: Session, *, project_id: str, page: int, page_size: int, q: str | None = None,
     part_id: int | None = None,
@@ -508,12 +559,28 @@ def demand_candidates(
                 FMaintenanceLine.part_id == part_id,
             ).exists()
         )
+    # D-31 第 4 款：满额（R>=N）的需求单不再出现在新增录入候选下拉；
+    # 仅过滤展示，写入路径另有事务内容量守卫（_enforce_demand_capacity）。
+    stmt = stmt.where(~demand_full_capacity_condition())
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.execute(stmt.order_by(FMaintenanceOrder.order_no, FMaintenanceOrder.raw_order_id)
                       .offset((page - 1) * page_size).limit(page_size)).all()
-    return {"rows": [{"source_order_id": row.raw_order_id, "order_no": row.order_no,
-                       "order_date": row.order_date.isoformat() if row.order_date else None}
-                      for row in rows],
+    # 富化剩余容量（供前端展示"剩余可录"）：页内 ≤200 行，一次汇总调用内
+    summaries = summarize_demand_returns(
+        db, source_order_ids=[row.raw_order_id for row in rows],
+        allowed_project_ids=None,
+    ) if rows else {}
+    enriched = []
+    for row in rows:
+        summary = summaries.get(row.raw_order_id)
+        enriched.append({
+            "source_order_id": row.raw_order_id, "order_no": row.order_no,
+            "order_date": row.order_date.isoformat() if row.order_date else None,
+            "demand_qty": summary.demand_qty if summary else None,
+            "received_qty": summary.received_qty if summary else None,
+            "remaining_qty": summary.remaining_qty if summary else None,
+        })
+    return {"rows": enriched,
             "total": total, "page": page, "page_size": page_size}
 
 
@@ -609,6 +676,17 @@ def update_receipt(
         )
         values["serial_numbers"] = _validate_serial_numbers(
             proposed_serials, qty=final_qty
+        )
+    new_source = values.get("source_order_id", row.source_order_id)
+    if new_source is not None:
+        # D-31 第 1/4 款：改数量或改关联需求单同样受容量守卫；
+        # 关联未变时按原占用抵扣（否则会把本行旧值当成他人已收）。
+        _lock_demand_capacity(db, new_source)
+        _enforce_demand_capacity(
+            db, source_order_id=new_source,
+            additional_qty=Decimal(str(values.get("qty", row.qty))),
+            order_credit=(Decimal(str(row.qty))
+                          if new_source == row.source_order_id else Decimal("0")),
         )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     after_order_no = _order_no(db, values.get("source_order_id", row.source_order_id))

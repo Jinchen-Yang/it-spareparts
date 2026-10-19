@@ -152,6 +152,29 @@ def _summary(row) -> DemandReturnSummary:
     )
 
 
+def demand_full_capacity_condition():
+    """满额排除条件（D-31 第 1/4 款）：N>0 且 R>=N 的需求单不再进入录入候选。
+
+    与 :func:`summarize_demand_returns` 同口径：N=活跃需发明细 qty 合计，
+    R=活跃收货按来源单合计。仅作候选展示过滤，不替代写入路径的事务内
+    容量守卫（见 maintenance_return_receipts._enforce_demand_capacity）。
+    N 无依据（无活跃明细/负数）的需求单不视为满额，由其他校验层把关。
+    """
+    demand_n = (
+        select(func.coalesce(func.sum(FMaintenanceLine.qty), _ZERO))
+        .where(FMaintenanceLine.order_id == FMaintenanceOrder.id,
+               FMaintenanceLine.is_active.is_(True))
+        .correlate(FMaintenanceOrder).scalar_subquery()
+    )
+    received_r = (
+        select(func.coalesce(func.sum(MaintenanceRkdReturnLine.qty), _ZERO))
+        .where(MaintenanceRkdReturnLine.source_order_id == FMaintenanceOrder.raw_order_id,
+               MaintenanceRkdReturnLine.line_status == "active")
+        .scalar_subquery()
+    )
+    return and_(demand_n > 0, received_r >= demand_n)
+
+
 def summarize_demand_returns(
     db: Session, *, source_order_ids: Collection[str],
     allowed_project_ids: Collection[str] | None, as_of: date | None = None,

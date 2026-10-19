@@ -453,7 +453,7 @@ def test_demand_candidates_part_id_hits_and_excludes(db):
     assert [row["order_no"] for row in body["rows"]] == [hit.order_no]
     assert body["total"] == 1
     # 响应行结构不变（与既有候选口径一致）
-    assert set(body["rows"][0]) == {"source_order_id", "order_no", "order_date"}
+    assert set(body["rows"][0]) == {"source_order_id", "order_no", "order_date", "demand_qty", "received_qty", "remaining_qty"}  # D-31(4): enrich remaining capacity
     assert body["rows"][0]["source_order_id"] == hit.raw_order_id
 
 
@@ -508,7 +508,8 @@ def test_demand_candidates_without_part_id_keeps_legacy_behavior(db):
         second.order_no, first.order_no, only_first.order_no,
     ]
     assert plain["total"] == 3
-    assert all(set(row) == {"source_order_id", "order_no", "order_date"}
+    assert all(set(row) == {"source_order_id", "order_no", "order_date",
+                            "demand_qty", "received_qty", "remaining_qty"}  # D-31(4)
                for row in plain["rows"])
     # part_id 只是叠加过滤，不改变其余行的形状
     filtered = _demands(client, project.project_id, part_id=part.id)
