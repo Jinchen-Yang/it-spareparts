@@ -1,0 +1,24 @@
+{
+  "pn": "DEMO-PN",
+  "prices": [
+    {"kind": "sale", "amount": "150.67", "currency": "CNY", "occurred_at": "2026-10-19T00:00:00+08:00", "source": "itsp销售均价",
+     "tax_basis": "inc_tax", "sample_count": 2, "order_count": 2, "window": {"start": "2026-09-20", "end": "2026-10-19"},
+     "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12", "nominal_sample_count": 0},
+    {"kind": "sale", "amount": "133.33", "currency": "CNY", "occurred_at": "2026-10-19T00:00:00+08:00", "source": "itsp销售均价",
+     "tax_basis": "ex_tax", "sample_count": 2, "order_count": 2, "window": {"start": "2026-09-20", "end": "2026-10-19"},
+     "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12", "nominal_sample_count": 0}
+  ],
+  "reference_only": true,
+  "calculation": {
+    "method": "time_decay_qty_weighted", "decay": "exponential_half_life", "window_days": 30, "half_life_days": "7",
+    "date_basis": "order_date", "timezone": "Asia/Shanghai",
+    "window": {"start": "2026-09-20", "end": "2026-10-19"},
+    "order_statuses": ["已生效"], "counts_revenue_only": true,
+    "positive_qty_only": true, "include_zero_prices": false,
+    "exclude_confirmed_source_error": true,
+    "sales_unit_price_basis": "inc_tax",
+    "tax_policy": "order_rate_or_13pct", "fallback_tax_rate": "0.13",
+    "currency": "CNY", "sample_count": 2, "order_count": 2,
+    "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12"
+  }
+}
