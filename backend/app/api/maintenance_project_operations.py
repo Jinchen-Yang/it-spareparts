@@ -195,6 +195,16 @@ class SiteIssuePreview(BaseModel):
     version: int = Field(ge=1)
 
 
+
+
+class SiteIssueBatchNoReturn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_ids: list[str] = Field(min_length=1, max_length=500)
+    no_return: bool | None = None
+    reason: str = Field(min_length=1, max_length=256)
+
+
 class SiteIssueCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -982,6 +992,56 @@ def patch_project_site_issue_v2(
     except Exception:
         db.rollback()
         raise
+
+
+@stable_site_issue_router.post("/projects/stable/{project_id}/site-issues/batch-no-return")
+def batch_set_site_issue_no_return(
+    body: SiteIssueBatchNoReturn,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """领用行批量应返/免返（ITSP-2，D-31 第 5 款）。
+
+    按领用单逐单独立事务：单内失败回滚该单并逐单上报，不阻塞其余行。
+    no_return=true/false/null 分别为免返/应返/恢复按规则判断。
+    """
+    # 延迟导入：services 层反向引用本模块的锁助手，避免环
+    from app.services.maintenance_no_return_batch import (
+        BatchNoReturnError,
+        apply_batch_no_return,
+    )
+
+    operator = _real_operator(db, ident)
+    # 逐单访问鉴权（进入任何事务之前）
+    issue_ids = list(dict.fromkeys(
+        row.issue_id for row in db.scalars(
+            select(MaintenanceSiteIssueLine).where(
+                MaintenanceSiteIssueLine.issue_line_id.in_(body.line_ids))
+        ).all()
+    ))
+    for issue_id in issue_ids:
+        _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    try:
+        result = apply_batch_no_return(
+            db, project_id=project_id, line_ids=body.line_ids,
+            no_return=body.no_return, reason=body.reason, operator=operator,
+        )
+    except BatchNoReturnError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return result
 
 
 @stable_site_issue_router.post("/{issue_id}/void")
