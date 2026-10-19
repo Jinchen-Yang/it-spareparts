@@ -4,8 +4,10 @@
 ENABLE_RBAC=False 时 data_scope/field_visibility 原样返回；ENABLE_ACCESS_LOG=False 时审计 no-op。
 field_visibility 的真实递归实现已写好（供将来 + 验收用 ENABLE_RBAC=True 通路验证）。
 """
+import json
 import logging
 from dataclasses import dataclass
+from datetime import date, time
 from typing import Any
 
 from fastapi import Depends, HTTPException, status
@@ -314,6 +316,18 @@ def apply_profit_recompute_visibility(
     return visible
 
 
+def _json_log_detail(detail: dict | None) -> dict | None:
+    """生成独立的 JSONB 可写快照；调用方无需转换日期、Decimal、UUID 等值。"""
+    def encode(value: Any) -> Any:
+        if isinstance(value, (date, time)):  # datetime 是 date 的子类
+            return value.isoformat()
+        if isinstance(value, (set, frozenset)):
+            return sorted(value, key=lambda item: (type(item).__name__, str(item)))
+        return str(value)  # Decimal 保留精度，其他非 JSON 标量保留文本表示
+
+    return json.loads(json.dumps(detail, default=encode))
+
+
 def record_access_log(user_ctx: UserContext, action: str, resource: str,
                       filters: dict | None = None) -> None:
     """访问审计：记到 sys_access_log（账号管理页看子账号活动）。
@@ -335,7 +349,7 @@ def record_access_log(user_ctx: UserContext, action: str, resource: str,
                                 role=user_ctx.role,
                                 action=action[:64],
                                 resource=(str(resource)[:500] if resource else None),
-                                detail=filters))
+                                detail=_json_log_detail(filters)))
             db.commit()
         finally:
             db.close()
@@ -364,7 +378,8 @@ def record_security_event(username: str | None, role: str | None, action: str,
             db.add(SysAccessLog(
                 username=(username[:64] if username else None), role=role,
                 action=action[:64],
-                resource=(str(resource)[:500] if resource else None), detail=detail,
+                resource=(str(resource)[:500] if resource else None),
+                detail=_json_log_detail(detail),
                 ip_address=(ip[:64] if ip else None),
                 user_agent=(user_agent[:300] if user_agent else None)))
             db.commit()
