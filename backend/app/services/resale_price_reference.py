@@ -41,7 +41,9 @@ from app.tax_policy import round_money
 
 _log = logging.getLogger(__name__)
 
-_MAX_AMOUNT = Decimal("1e16")  # 商城 amount 为 max_digits=18/decimal_places=4 内的金额
+# 商城 ReferencePrice.amount 为 max_digits=18/decimal_places=4：
+# 整数位最多 14 位，即绝对值必须小于 1e14。
+_MAX_AMOUNT = Decimal("1e14")
 _CALCULATION_PRECISION = 50
 _DECAY = "exponential_half_life"
 

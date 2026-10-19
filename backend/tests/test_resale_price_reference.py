@@ -1036,13 +1036,14 @@ def test_non_finite_and_oversized_amounts_are_rejected():
         Decimal("NaN"),
         Decimal("Infinity"),
         Decimal("-Infinity"),
-        Decimal("1e16"),
-        Decimal("-1e16"),
+        Decimal("1e14"),
+        Decimal("-1e14"),
     ):
         with pytest.raises(PriceReferenceUnavailable):
             _validated_amount(value)
-    assert _validated_amount(Decimal("999999999999999.99")) == Decimal(
-        "999999999999999.99"
+    # 商城 amount 为 max_digits=18/decimal_places=4，整数位最多 14 位。
+    assert _validated_amount(Decimal("99999999999999.99")) == Decimal(
+        "99999999999999.99"
     )
 
 
