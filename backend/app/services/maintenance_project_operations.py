@@ -1323,6 +1323,7 @@ def _site_issue_return_payload(
                 "quantity": _qty(line.quantity),
             }
             for line in lines
+            if line.delivery_line_id is not None
         ],
     }
 

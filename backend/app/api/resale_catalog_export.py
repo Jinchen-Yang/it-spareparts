@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import SQLAlchemyError
@@ -23,16 +23,22 @@ from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
 from app.db import get_db
-from app.etl.cleaner import standardize_pn
-from app.models.dimensions import DimPart, PartAlias
+from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.schemas.resale_price_reference import ResalePriceReferenceResponse
+from app.services.resale_pn_lookup import canonical_part as _canonical
+from app.services.resale_pn_lookup import find_pn_candidates
+from app.services.resale_price_reference import (
+    PriceReferenceAmbiguous,
+    PriceReferenceUnavailable,
+    build_price_reference,
+)
 
 router = APIRouter(
     prefix="/integrations/resale/parts", tags=["resale-catalog-readonly"]
 )
-_MAX_MERGE_HOPS = 10
 _SALES_TYPES = frozenset({"备件销售", "整机销售", "销售换货"})
 _PURCHASE_TYPES = frozenset({"销售订单", "指定采购", "维保需求"})
 _ORDER_STATES = frozenset({"已生效", "已取消", "草稿", "进行中"})
@@ -84,23 +90,6 @@ class ListRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cursor: str | None = Field(default=None, max_length=512)
     limit: int = Field(default=200, ge=1, le=500)
-
-
-def _canonical(db: Session, requested: DimPart | None) -> tuple[DimPart | None, bool]:
-    part = requested
-    seen: set[int] = set()
-    merged = False
-    while part is not None and part.status == "merged":
-        if (
-            part.id in seen
-            or len(seen) >= _MAX_MERGE_HOPS
-            or part.merged_into_id is None
-        ):
-            return None, True
-        seen.add(part.id)
-        part = db.get(DimPart, part.merged_into_id)
-        merged = True
-    return part, merged
 
 
 def _safe_specs(db: Session, part_ids: list[int]) -> dict[int, list[dict]]:
@@ -159,26 +148,7 @@ def resolve_parts(
     for candidate in body.items:
         raw = candidate.pnRaw.strip()
         if raw not in cache:
-            pn_std, _, _ = standardize_pn(raw)
-            matches: dict[int, tuple[DimPart, str]] = {}
-            if pn_std:
-                exact = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
-                if exact is not None:
-                    matches[exact.id] = (exact, "exact")
-            aliases = db.scalars(
-                select(PartAlias).where(
-                    func.upper(PartAlias.pn_raw) == raw.upper(),
-                    PartAlias.status.in_(("active", "pending")),
-                )
-            )
-            pending = False
-            for alias in aliases:
-                if alias.status == "pending":
-                    pending = True
-                    continue
-                part = db.get(DimPart, alias.part_id) if alias.part_id else None
-                if part is not None:
-                    matches.setdefault(part.id, (part, "alias"))
+            matches, pending = find_pn_candidates(db, raw)
             bound = list(matches.values())
             if pending or len(bound) > 1:
                 result = {
@@ -415,6 +385,40 @@ def price_evidence(
         "hasMore": has_more,
         "nextCursor": fetched[body.limit - 1][0].id if has_more else None,
     }
+
+
+@router.get(
+    "/price-reference",
+    response_model=ResalePriceReferenceResponse,
+    response_model_exclude_none=False,
+)
+def price_reference(
+    pn: Annotated[str, Query(min_length=1, max_length=256)],
+    response: Response,
+    _key: CatalogKey,
+    db: DbSession,
+) -> ResalePriceReferenceResponse:
+    """商城详情页按 PN 点击查询销售参考均价；只读，不写任何业务状态。"""
+    if not pn.strip():
+        raise HTTPException(422, "PN 不能为空白")
+    try:
+        payload = build_price_reference(db, pn, get_settings())
+    except PriceReferenceAmbiguous:
+        raise HTTPException(
+            409,
+            "PN 身份无法唯一确定",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    except PriceReferenceUnavailable:
+        db.rollback()
+        _logger.warning("Resale price reference unavailable")
+        raise HTTPException(
+            503,
+            "参考价暂不可用",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    response.headers["Cache-Control"] = "no-store"
+    return payload
 
 
 from app.api.resale_catalog_search import register_search

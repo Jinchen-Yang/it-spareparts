@@ -194,6 +194,7 @@ def _fail(exc: ec.WorkbookError):
         "stale_workbook",
         "row_conflicts",
         "stale_project_note",
+        "stale_site_issue_merge",
     }
     detail = {"code": exc.code, "message": exc.message, "issues": exc.issues}
     for key in ("rows", "total_count", "fix_hint"):
@@ -808,8 +809,8 @@ async def validate_project_master(
             if plan.contract_amount_change is not None:
                 _require_contract_amount_manage(
                     ctx, ident, db=db, project_id=project_id)
-            if plan.project_note_change is not None:
-                _project_note_operator(db, ident, ctx)
+            operator = (_project_note_operator(db, ident, ctx)
+                        if plan.project_note_change is not None else _operator(ident))
             record_access_log(
                 ctx, "workbook_validate", "maintenance_project_master_workbook",
                 {"project_id": project_id, "conflicts": len(plan.conflicts),
@@ -821,6 +822,13 @@ async def validate_project_master(
                 "project_id": project_id,
                 "sheets": list(plan.sheets),
                 **plan.summary,
+                "summary": plan.summary,
+                "site_issue_merge_count": len(plan.site_issue_merges),
+                "site_issue_merges": [dict(item) for item in plan.site_issue_merges],
+                "site_issue_merge_token": (
+                    master.site_issue_merge_token(plan, operator)
+                    if plan.site_issue_merges else None
+                ),
                 # 2.7.0：字段级改动预览 + 行级冲突预览（前端据此提供接管入口）
                 "changes": [dict(item) for item in plan.field_changes],
                 "conflicts": [dict(item) for item in plan.conflicts],
@@ -933,6 +941,8 @@ async def apply_project_master(
                     ctx, ident, db=db, project_id=project_id)
             operator = (_project_note_operator(db, ident, ctx)
                         if plan.project_note_change is not None else _operator(ident))
+            merge_token = str((await request.form()).get("site_issue_merge_token") or "")
+            master.verify_site_issue_merge_token(plan, operator, merge_token)
             if plan.conflicts and not force_takeover:
                 record_access_log(
                     ctx, "workbook_apply_conflict",
