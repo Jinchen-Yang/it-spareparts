@@ -3,14 +3,15 @@ import asyncio
 import io
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from openpyxl.worksheet._write_only import WriteOnlyWorksheet
 from openpyxl.worksheet._writer import ALL_TEMP_FILES
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
+from sqlalchemy.orm import Session
 from starlette.requests import ClientDisconnect
 
 from app import config, permissions
@@ -28,6 +29,33 @@ from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_cost_quality, maintenance_export
 from tests import factories as f
+
+
+@pytest.fixture(autouse=True)
+def verify_export_resources_are_closed(monkeypatch, tmp_path):
+    """新 writer 的常量内存 XML、失败 ZIP 和句柄均不能遗留。"""
+    directories = []
+    workbooks = []
+    original_directory = maintenance_export.TemporaryDirectory
+    original_workbook = maintenance_export.Workbook
+
+    def temporary_directory(*args, **kwargs):
+        directory = original_directory(*args, dir=tmp_path, **kwargs)
+        directories.append(Path(directory.name))
+        return directory
+
+    def workbook(*args, **kwargs):
+        result = original_workbook(*args, **kwargs)
+        workbooks.append(result)
+        return result
+
+    monkeypatch.setattr(maintenance_export, "TemporaryDirectory", temporary_directory)
+    monkeypatch.setattr(maintenance_export, "Workbook", workbook)
+    yield
+    assert all(not directory.exists() for directory in directories)
+    for workbook in workbooks:
+        for sheet in workbook.worksheets():
+            assert sheet.row_data_fh is None or sheet.row_data_fh.closed
 
 
 def _admin_client(db) -> TestClient:
@@ -302,6 +330,39 @@ def test_build_workbook_cleans_writer_temp_files_when_database_stream_fails(db, 
     assert set(ALL_TEMP_FILES) == before
 
 
+def test_export_query_timeout_after_writing_rows_returns_504_and_cleans_resources(db, monkeypatch):
+    _seed_orders(db, [("STREAM-TIMEOUT", date(2026, 7, 1), "已生效", None, 2)])
+    client = _admin_client(db)
+    original_execute = Session.execute
+    original_append = maintenance_export._SheetWriter.append
+    appended_rows = []
+
+    def append(sheet, values):
+        appended_rows.append(values)
+        return original_append(sheet, values)
+
+    def execute(session, statement, *args, **kwargs):
+        result = original_execute(session, statement, *args, **kwargs)
+        if statement.get_execution_options().get("yield_per") == 1000:
+            def timed_out_stream():
+                yield next(iter(result))
+                original_execute(session, text("SET LOCAL statement_timeout = '10ms'"))
+                original_execute(session, text("SELECT pg_sleep(0.1)"))
+            return timed_out_stream()
+        return result
+
+    monkeypatch.setattr(Session, "execute", execute)
+    monkeypatch.setattr(maintenance_export._SheetWriter, "append", append)
+    response = client.get("/api/maintenance/orders/export")
+
+    assert response.status_code == 504, response.text
+    assert "超时" in response.json()["detail"]
+    assert len(appended_rows) == 4  # 两个表头、一个单头和一条明细已写入临时文件。
+    with SessionLocal() as reused:
+        assert reused.scalar(text("SELECT 1")) == 1
+        assert reused.scalar(text("SHOW statement_timeout")) == "0"
+
+
 def test_build_workbook_closes_output_and_cleans_temp_files_when_save_fails(db, monkeypatch):
     _seed_orders(db, [("SAVE-FAIL", date(2026, 7, 1), "已生效", None, 1)])
     before = set(ALL_TEMP_FILES)
@@ -354,7 +415,7 @@ def test_xlsx_size_guard_never_writes_beyond_hard_limit():
 def test_build_workbook_cleans_temp_files_when_row_append_fails(db, monkeypatch):
     _seed_orders(db, [("APPEND", date(2026, 7, 15), "已生效", None, 1)])
     before = set(ALL_TEMP_FILES)
-    original_append = WriteOnlyWorksheet.append
+    original_append = maintenance_export._SheetWriter.append
     calls = 0
 
     def fail_data_append(worksheet, row):
@@ -364,7 +425,7 @@ def test_build_workbook_cleans_temp_files_when_row_append_fails(db, monkeypatch)
             raise RuntimeError("append failed")
         return original_append(worksheet, row)
 
-    monkeypatch.setattr(WriteOnlyWorksheet, "append", fail_data_append)
+    monkeypatch.setattr(maintenance_export._SheetWriter, "append", fail_data_append)
 
     with pytest.raises(RuntimeError, match="append failed"):
         maintenance_export.build_workbook(db, UserContext(user_id="admin", role="admin"))
@@ -399,6 +460,66 @@ def test_export_rejects_reversed_date_range(db):
     assert response.status_code == 422
 
 
+def test_explicit_wide_export_range_does_not_apply_an_implicit_window(db):
+    _seed_orders(db, [
+        ("WIDE-OLD", date(2010, 1, 1), "已生效", None, 1),
+        ("WIDE-NEW", date(2026, 10, 18), "已生效", None, 1),
+        ("WIDE-NULL", None, "已生效", None, 1),
+    ])
+    response = _admin_client(db).get("/api/maintenance/orders/export", params={
+        "date_from": "2000-01-01", "date_to": "2035-12-31",
+    })
+    assert response.status_code == 200, response.text
+    workbook = _workbook(response)
+    assert {row[1] for row in list(workbook["维保订单"].values)[1:]} == {
+        "WIDE-OLD", "WIDE-NEW",
+    }
+    assert sum(1 for _ in workbook["订单明细"].values) == 3
+    workbook.close()
+
+
+@pytest.mark.parametrize("writer_result, message", [(-1, "1048575"), (-2, "32767")])
+def test_writer_limit_errors_are_not_silently_ignored(db, monkeypatch, writer_result, message):
+    from xlsxwriter.worksheet import Worksheet
+
+    _seed_orders(db, [("WRITER-LIMIT", date(2026, 7, 1), "已生效", None, 1)])
+    monkeypatch.setattr(Worksheet, "write_string", lambda *args, **kwargs: writer_result)
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
+
+
+def test_export_keeps_urls_as_plain_text_without_automatic_hyperlinks(db):
+    _seed_orders(db, [("URL-TEXT", date(2026, 7, 1), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.description = "https://example.com/" + "x" * 3000
+    description = line.description
+    db.commit()
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content))
+    cell = workbook["订单明细"]["J2"]
+    assert cell.value == description
+    assert cell.hyperlink is None
+    workbook.close()
+
+
+@pytest.mark.parametrize("description", [
+    "字面_x0000_与_x000D_", "前\r中\n后\t尾", "#N/A", "<r><t>普通描述 & 文本</t></r>",
+])
+def test_writer_preserves_plain_text_instead_of_interpreting_excel_or_xml_escapes(description):
+    output = io.BytesIO()
+    workbook = maintenance_export.Workbook(output, {"constant_memory": True})
+    sheet = maintenance_export._SheetWriter(workbook, "普通文本", {})
+    sheet.append(("产品描述",))
+    sheet.append((description,))
+    workbook.close()
+    output.seek(0)
+    result = load_workbook(output).active["A2"]
+    assert result.value == description
+    assert result.data_type == "s"
+
+
 def test_export_rejects_detail_rows_over_excel_sheet_limit_and_cleans_temp_files(db, monkeypatch):
     _seed_orders(db, [("ROW-LIMIT", date(2026, 7, 15), "已生效", None, 2)])
     before = set(ALL_TEMP_FILES)
@@ -418,7 +539,7 @@ def test_export_preflight_rejects_order_rows_over_limit_before_writing(db, monke
     ])
     monkeypatch.setattr(maintenance_export, "MAX_DATA_ROWS_PER_SHEET", 1)
     append = Mock()
-    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+    monkeypatch.setattr(maintenance_export._SheetWriter, "append", append)
 
     response = _admin_client(db).get("/api/maintenance/orders/export")
 
@@ -431,7 +552,7 @@ def test_export_preflight_rejects_detail_rows_over_limit_before_writing(db, monk
     _seed_orders(db, [("DETAIL-LIMIT", date(2026, 7, 15), "已生效", None, 2)])
     monkeypatch.setattr(maintenance_export, "MAX_DATA_ROWS_PER_SHEET", 1)
     append = Mock()
-    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+    monkeypatch.setattr(maintenance_export._SheetWriter, "append", append)
 
     response = _admin_client(db).get("/api/maintenance/orders/export")
 
@@ -447,7 +568,7 @@ def test_export_preflight_rejects_dynamic_text_budget_before_writing(db, monkeyp
     db.commit()
     monkeypatch.setattr(maintenance_export, "MAX_DYNAMIC_TEXT_BYTES", 1, raising=False)
     append = Mock()
-    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+    monkeypatch.setattr(maintenance_export._SheetWriter, "append", append)
 
     response = _admin_client(db).get("/api/maintenance/orders/export")
 
@@ -565,6 +686,44 @@ def test_all_export_contains_every_active_order_and_all_its_lines(db):
         "LINE-OLD-1", "LINE-OLD-2", "LINE-NULL-DATE-1", "LINE-CURRENT-1", "LINE-CURRENT-2",
     }
     assert len(line_rows) == 5
+
+
+def test_export_reads_only_projected_columns_without_materializing_orm_entities(db):
+    """宽表的附件/地址和 ORM 实例不应随每条导出明细反复加载。"""
+    _seed_orders(db, [("PROJECTION", date(2026, 7, 15), "已生效", None, 2)])
+    loaded = []
+    statements = []
+
+    def track_load(instance, _context):
+        loaded.append(type(instance).__name__)
+
+    def track_statement(_connection, _cursor, statement, _params, _context, _many):
+        statements.append(statement)
+
+    models = (FMaintenanceOrder, FMaintenanceLine, MaintenanceManualCostOverride)
+    for model in models:
+        event.listen(model, "load", track_load)
+    event.listen(db.bind, "before_cursor_execute", track_statement)
+    try:
+        output = maintenance_export.build_workbook(
+            db, UserContext(user_id="admin", role="admin"),
+        )
+        try:
+            workbook = load_workbook(output, read_only=True, data_only=True)
+            assert sum(1 for _ in workbook["维保订单"].values) == 2
+            assert sum(1 for _ in workbook["订单明细"].values) == 3
+            workbook.close()
+        finally:
+            output.close()
+    finally:
+        event.remove(db.bind, "before_cursor_execute", track_statement)
+        for model in models:
+            event.remove(model, "load", track_load)
+
+    assert loaded == []
+    assert len(statements) == 5  # 两把锁、两次预检、一次流式关联查询。
+    assert not any("receiver_address" in statement or "image_urls" in statement
+                   for statement in statements)
 
 
 def test_date_range_export_is_inclusive_and_excludes_null_dates(db):
@@ -846,6 +1005,84 @@ def test_export_rejects_formula_escaped_text_over_excel_cell_limit(db):
 
     assert response.status_code == 422
     assert "32767" in response.json()["detail"]
+
+
+def test_cached_export_formats_preserve_rows_empty_columns_and_value_types():
+    output = io.BytesIO()
+    workbook = maintenance_export.Workbook(output, {"constant_memory": True})
+    sheet = maintenance_export._SheetWriter(workbook, "格式复用", {
+        1: "yyyy-mm-dd", 2: "0.00", 3: "#,##0.00",
+    })
+    sheet.append(("序号", "日期", "数量", "金额", "文本"))
+    rows = (
+        (1, date(2023, 1, 1), Decimal("1.5"), Decimal("12.34"), "=文本"),
+        (2, None, None, None, "中间空列"),
+        (3, date(2026, 10, 18), Decimal("0"), Decimal("-1.25"), "后行"),
+    )
+    for row in rows:
+        sheet.append(row)
+    workbook.close()
+    output.seek(0)
+    loaded = load_workbook(output)
+    result = loaded["格式复用"]
+
+    assert [result.cell(row, 1).value for row in (2, 3, 4)] == [1, 2, 3]
+    assert result["B2"].value.date() == date(2023, 1, 1)
+    assert result["B4"].value.date() == date(2026, 10, 18)
+    assert [result.cell(3, col).value for col in (2, 3, 4)] == [None, None, None]
+    assert [result["C2"].value, result["C4"].value] == [1.5, 0]
+    assert [result["D2"].value, result["D4"].value] == [12.34, -1.25]
+    assert result["E2"].value == "'=文本"
+    assert result["E3"].value == "中间空列"
+    for row in (2, 3, 4):
+        assert result.cell(row, 2).number_format == "yyyy-mm-dd"
+        assert result.cell(row, 3).number_format == "0.00"
+        assert result.cell(row, 4).number_format == "#,##0.00"
+    loaded.close()
+
+
+def test_typed_writer_keeps_boolean_numeric_and_empty_cell_types():
+    output = io.BytesIO()
+    workbook = maintenance_export.Workbook(output, {"constant_memory": True})
+    sheet = maintenance_export._SheetWriter(workbook, "字段类型", {6: "0.00", 7: "0.00"})
+    sheet.append(tuple(f"列{column}" for column in range(8)))
+    sheet.append((True, False, 0, Decimal("12.34"), 1.5, "文本", None, ""))
+    workbook.close()
+    output.seek(0)
+    result = load_workbook(output).active
+
+    assert [cell.value for cell in result[2]] == [True, False, 0, 12.34, 1.5, "文本", None, None]
+    assert [cell.data_type for cell in result[2]][:6] == ["b", "b", "n", "n", "n", "s"]
+    assert result["G2"].number_format == "0.00"
+    assert result["H2"].number_format == "0.00"
+
+
+@pytest.mark.parametrize("value", [
+    date(1800, 1, 1), date(1899, 12, 30), date(1899, 12, 31),
+    date(1900, 1, 1), date(1900, 2, 28), date(1900, 3, 1), date(2026, 10, 18),
+])
+def test_writer_preserves_legacy_excel_date_serials(value):
+    from openpyxl import Workbook as LegacyWorkbook
+
+    legacy_output = io.BytesIO()
+    legacy = LegacyWorkbook()
+    legacy.active["A1"] = value
+    legacy.active["A1"].number_format = "yyyy-mm-dd"
+    legacy.save(legacy_output)
+    legacy.close()
+    legacy_output.seek(0)
+    expected = load_workbook(legacy_output).active["A1"].value
+
+    output = io.BytesIO()
+    workbook = maintenance_export.Workbook(output, {"constant_memory": True})
+    sheet = maintenance_export._SheetWriter(workbook, "日期", {0: "yyyy-mm-dd"})
+    sheet.append(("日期",))
+    sheet.append((value,))
+    workbook.close()
+    output.seek(0)
+    actual = load_workbook(output).active["A2"]
+    assert actual.value == expected
+    assert actual.number_format == "yyyy-mm-dd"
 
 
 def test_export_uses_excel_date_quantity_and_money_formats(db):

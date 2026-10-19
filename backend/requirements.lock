@@ -1363,3 +1363,7 @@ xlrd==2.0.2 \
     --hash=sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9 \
     --hash=sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9
     # via spareparts-backend
+xlsxwriter==3.2.9 \
+    --hash=sha256:254b1c37a368c444eac6e2f867405cc9e461b0ed97a3233b2ac1e574efb4140c \
+    --hash=sha256:9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3
+    # via spareparts-backend

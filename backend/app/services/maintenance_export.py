@@ -1,16 +1,15 @@
 """维保订单 XLSX 导出。"""
 from contextlib import suppress
-from datetime import date, datetime, timezone
+from datetime import date
 import re
 import threading
-from tempfile import SpooledTemporaryFile
-from zipfile import ZIP_DEFLATED, ZipFile
+from tempfile import SpooledTemporaryFile, TemporaryDirectory
 
-from openpyxl import Workbook
-from openpyxl.cell import WriteOnlyCell
-from openpyxl.writer.excel import ExcelWriter
+from openpyxl.utils.datetime import to_excel
+from xlsxwriter import Workbook
+from xlsxwriter.worksheet import Worksheet
 from sqlalchemy import and_, func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Bundle, Session
 
 from app import config
 from app.models.maintenance import (
@@ -18,7 +17,7 @@ from app.models.maintenance import (
     FMaintenanceOrder,
     MaintenanceManualCostOverride,
 )
-from app.security import UserContext, apply_field_visibility, is_field_hidden
+from app.security import UserContext, is_field_hidden, prepare_field_visibility
 from app.services import maintenance_cost_quality, maintenance_demands
 from app.services.maintenance_export_ordering import wbdd_export_order_by
 
@@ -67,14 +66,22 @@ class ExcelExportBusy(RuntimeError):
 
 
 class _SizeLimitedFile:
-    """给 openpyxl/ZipFile 提供可 seek 的硬上限，禁止先写爆临时盘再拒绝。"""
+    """给 XLSX/ZipFile 提供可 seek 的硬上限，禁止先写爆临时盘再拒绝。"""
 
     def __init__(self, raw, max_size: int):
         self._raw = raw
         self._max_size = max_size
         self._extent = raw.tell()
+        self._aborted = False
+
+    def abort(self):
+        # XlsxWriter 的异常回溯可能暂时持有 ZipFile；其延后析构不得继续写入
+        # 已失败/关闭的下载文件，也不得再次抛异常掩盖原始限额错误。
+        self._aborted = True
 
     def write(self, data):
+        if self._aborted:
+            return len(data)
         end = self._raw.tell() + len(data)
         if max(self._extent, end) > self._max_size:
             raise ExcelExportTooLarge("维保订单 XLSX 超过 256 MiB 上限")
@@ -83,29 +90,28 @@ class _SizeLimitedFile:
         return written
 
     def seek(self, *args):
+        if self._aborted:
+            return 0
         return self._raw.seek(*args)
 
     def tell(self):
+        if self._aborted:
+            return 0
         return self._raw.tell()
 
     def flush(self):
+        if self._aborted:
+            return None
         return self._raw.flush()
 
 
 def _save_workbook(workbook: Workbook, output) -> None:
-    """显式持有 ZipFile，确保超限异常时也关闭 archive，不遗留析构期写入。"""
-    archive = ZipFile(
-        _SizeLimitedFile(output, MAX_WORKBOOK_BYTES),
-        mode="w",
-        compression=ZIP_DEFLATED,
-        allowZip64=True,
-    )
-    workbook.properties.modified = datetime.now(timezone.utc).replace(tzinfo=None)
+    """XLSX 压缩输出仍经硬上限文件；失败后隔离 ZIP 的延后析构写入。"""
     try:
-        ExcelWriter(workbook, archive).save()
-    finally:
-        if archive.fp is not None:
-            archive.close()
+        workbook.close()
+    except BaseException:
+        workbook.filename.abort()
+        raise
 
 
 def _safe_row(values: tuple) -> tuple:
@@ -121,28 +127,72 @@ def _safe_row(values: tuple) -> tuple:
     return tuple(safe)
 
 
-def _formatted_row(worksheet, values: tuple, formats: dict[int, str]) -> tuple:
-    cells = []
-    for index, value in enumerate(_safe_row(values)):
-        cell = WriteOnlyCell(worksheet, value=value)
-        if index in formats:
-            cell.number_format = formats[index]
-        cells.append(cell)
-    return tuple(cells)
+class _ExportWorksheet(Worksheet):
+    """保持旧 XLSX 的普通文本语义；本出口不写富文本或 XML 转义占位符。"""
+
+    @staticmethod
+    def _escape_control_characters(data):
+        # _safe_row 已移除 XML 非法字符。保留合法 CR 和字面 _xHHHH_，
+        # 避免 inlineStr 被常用读取器读成 Excel 专有转义字符串。
+        return data
+
+    def _escape_data(self, data):
+        escaped = super()._escape_data(data)
+        return escaped.replace("\r", "&#13;") if isinstance(escaped, str) else escaped
+
+    def _xml_rich_inline_string(self, string, attributes=()):
+        # XlsxWriter 会把形如 <r>...</r> 的字符串识别为富文本；源数据仍须按
+        # 普通文本转义，不能把看起来像 XML 的描述当成工作簿结构。
+        self._xml_inline_string(string, False, attributes)
+
+
+class _SheetWriter:
+    """逐行写入常量内存 worksheet，格式对象只创建一次。"""
+
+    def __init__(self, workbook: Workbook, title: str, formats: dict[int, str]):
+        self._sheet = workbook.add_worksheet(title, worksheet_class=_ExportWorksheet)
+        self._formats = {
+            index: workbook.add_format({"num_format": number_format})
+            for index, number_format in formats.items()
+        }
+        self._row = 0
+
+    def append(self, values: tuple) -> None:
+        for column, value in enumerate(_safe_row(values)):
+            cell_format = self._formats.get(column) if self._row else None
+            # 明确写出带格式的空数值/日期格，保留既有下载件的格式契约。
+            # 字段类型已知，直接使用公开类型 API，避免逐格通用分派。
+            if value is None or value == "":
+                if cell_format is None:
+                    continue
+                result = self._sheet.write_blank(self._row, column, value, cell_format)
+            elif isinstance(value, date):
+                # 沿用旧下载件的 Excel 日期序号，含 1900 年闰日兼容边界。
+                result = self._sheet.write_number(
+                    self._row, column, to_excel(value), cell_format,
+                )
+            elif isinstance(value, str):
+                result = self._sheet.write_string(self._row, column, value, cell_format)
+            elif isinstance(value, bool):
+                result = self._sheet.write_boolean(self._row, column, value, cell_format)
+            else:
+                result = self._sheet.write_number(self._row, column, value, cell_format)
+            if result == -2:
+                raise ExcelCellTooLong("文本超过 Excel 单元格上限 32767 个字符")
+            if result == -1:
+                raise ExcelRowLimitExceeded("订单明细超过 Excel 单 Sheet 数据行上限 1048575")
+        self._row += 1
 
 
 def _cleanup_workbook(workbook: Workbook) -> None:
-    for worksheet in workbook.worksheets:
-        with suppress(Exception):
-            if not worksheet.closed:
-                worksheet.close()
-        writer = getattr(worksheet, "_writer", None)
-        if writer is None or getattr(writer, "out", None) is None:
-            continue
-        with suppress(Exception):
-            writer.close()
-        with suppress(Exception):
-            writer.cleanup()
+    # 成功 close 会关这些句柄；行写入/ZIP 压缩中途失败也必须关闭。
+    # 所有 XML 文件均在本次独享 TemporaryDirectory，随后统一删除。
+    for worksheet in workbook.worksheets():
+        for attribute in ("row_data_fh", "fh"):
+            handle = getattr(worksheet, attribute, None)
+            if handle is not None:
+                with suppress(Exception):
+                    handle.close()
 
 
 def _date_filters(date_from: date | None, date_to: date | None) -> tuple:
@@ -232,6 +282,49 @@ def _preflight_row_limits(
         raise ExcelExportTooLarge("维保订单 XLSX 动态文本超过 64 MiB 上限")
 
 
+def _export_statement(date_from: date | None, date_to: date | None):
+    """只传输工作簿需要的列；Bundle 返回轻量 Row，不建立宽表 ORM 实体。"""
+    order = Bundle("order", *(
+        getattr(FMaintenanceOrder, field) for field in (
+            "id", "raw_order_id", "order_no", "order_date", "linked_sales_order_no",
+            "project_raw", "project_std", "end_customer", "demand_type", "business_type",
+            "salesperson", "warehouse", "maint_start", "maint_end", "data_status",
+        )
+    ))
+    line = Bundle("line", *(
+        getattr(FMaintenanceLine, field) for field in (
+            "id", "raw_line_id", "line_no", "pn_std", "pn_raw", "description",
+            "qty", "return_qty", "serial_numbers", "unit_cost", "cost_amount",
+            "unit_cost_inc_tax", "unit_cost_ex_tax", "cost_amount_inc_tax",
+            "cost_amount_ex_tax", "cost_source", "cost_tax_basis", "price_month",
+            "trace_months", "linked_purchase_order_no", "price_distance_days",
+            "confidence", "reference_side", "reference_pool_group_id",
+            "reference_pool_version", "reference_sample_count", "reference_from_date",
+            "reference_to_date", "reference_latest_date", "anomaly_flags",
+        )
+    ))
+    override = Bundle(
+        "override", MaintenanceManualCostOverride.active,
+        MaintenanceManualCostOverride.unit_cost_inc_tax,
+        MaintenanceManualCostOverride.unit_cost_ex_tax,
+    )
+    return (
+        select(order, line, override)
+        .select_from(FMaintenanceOrder)
+        .outerjoin(FMaintenanceLine, FMaintenanceLine.order_id == FMaintenanceOrder.id)
+        .outerjoin(
+            MaintenanceManualCostOverride,
+            and_(
+                MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
+                MaintenanceManualCostOverride.active.is_(True),
+            ),
+        )
+        .where(*_date_filters(date_from, date_to))
+        .order_by(*wbdd_export_order_by())
+        .execution_options(stream_results=True, yield_per=1000)
+    )
+
+
 def _build_workbook(
     db: Session,
     user_ctx: UserContext,
@@ -239,33 +332,36 @@ def _build_workbook(
     date_to: date | None = None,
 ) -> SpooledTemporaryFile:
     _preflight_row_limits(db, date_from, date_to)
-    workbook = Workbook(write_only=True)
+    mask_fields = prepare_field_visibility(user_ctx)
+    hide_cost_anomalies = is_field_hidden(user_ctx, "unit_cost")
+    workbook = None
     output = None
+    temporary = None
     completed = False
     try:
-        orders = workbook.create_sheet("维保订单")
-        lines = workbook.create_sheet("订单明细")
+        temporary = TemporaryDirectory(prefix="itsp-order-export-")
+        output = SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
+        workbook = Workbook(_SizeLimitedFile(output, MAX_WORKBOOK_BYTES), {
+            "constant_memory": True,
+            "tmpdir": temporary.name,
+            "strings_to_formulas": False,
+            "strings_to_urls": False,
+            "use_zip64": True,
+        })
+        orders = _SheetWriter(workbook, "维保订单", {
+            3: "yyyy-mm-dd", 11: "yyyy-mm-dd", 12: "yyyy-mm-dd",
+        })
+        lines = _SheetWriter(workbook, "订单明细", {
+            5: "yyyy-mm-dd", 10: "0.00", 11: "0.00",
+            13: "#,##0.00", 14: "#,##0.00",
+            15: "#,##0.00", 16: "#,##0.00",
+            17: "#,##0.00", 18: "#,##0.00",
+            31: "yyyy-mm-dd", 32: "yyyy-mm-dd", 33: "yyyy-mm-dd",
+        })
         orders.append(ORDER_HEADERS)
         lines.append(LINE_HEADERS)
 
-        statement = (
-            select(
-                FMaintenanceOrder,
-                FMaintenanceLine,
-                MaintenanceManualCostOverride,
-            )
-            .outerjoin(FMaintenanceLine, FMaintenanceLine.order_id == FMaintenanceOrder.id)
-            .outerjoin(
-                MaintenanceManualCostOverride,
-                and_(
-                    MaintenanceManualCostOverride.line_id == FMaintenanceLine.id,
-                    MaintenanceManualCostOverride.active.is_(True),
-                ),
-            )
-            .where(*_date_filters(date_from, date_to))
-            .order_by(*wbdd_export_order_by())
-            .execution_options(stream_results=True, yield_per=1000)
-        )
+        statement = _export_statement(date_from, date_to)
         previous_order_id = None
         order_count = 0
         line_count = 0
@@ -274,17 +370,17 @@ def _build_workbook(
                 order_count += 1
                 if order_count > MAX_DATA_ROWS_PER_SHEET:
                     raise ExcelRowLimitExceeded("维保订单超过 Excel 单 Sheet 数据行上限 1048575")
-                visible_order = apply_field_visibility({
+                visible_order = mask_fields({
                     "end_customer": order.end_customer,
-                }, user_ctx)
-                orders.append(_formatted_row(orders, (
+                })
+                orders.append((
                     order.id, order.raw_order_id, order.order_no, order.order_date,
                     order.linked_sales_order_no, order.project_raw or order.project_std,
                     visible_order["end_customer"], order.demand_type, order.business_type, order.salesperson,
                     order.warehouse, order.maint_start, order.maint_end, order.data_status,
-                ), {3: "yyyy-mm-dd", 11: "yyyy-mm-dd", 12: "yyyy-mm-dd"}))
+                ))
                 previous_order_id = order.id
-            if line is not None:
+            if line.id is not None:
                 line_count += 1
                 if line_count > MAX_DATA_ROWS_PER_SHEET:
                     raise ExcelRowLimitExceeded("订单明细超过 Excel 单 Sheet 数据行上限 1048575")
@@ -301,18 +397,14 @@ def _build_workbook(
                     confidence=line.confidence,
                     qty=line.qty,
                     return_qty=line.return_qty,
-                    manual_unit_cost_inc_tax=(
-                        override.unit_cost_inc_tax if override is not None else None
-                    ),
-                    manual_unit_cost_ex_tax=(
-                        override.unit_cost_ex_tax if override is not None else None
-                    ),
-                    manual_active=override is not None and override.active is True,
+                    manual_unit_cost_inc_tax=override.unit_cost_inc_tax,
+                    manual_unit_cost_ex_tax=override.unit_cost_ex_tax,
+                    manual_active=override.active is True,
                 )
                 cost_tier = cost_fact["tier"]
                 has_known_cost = cost_tier != "missing"
                 manual_fallback = cost_fact["manual_fallback"]
-                cost = apply_field_visibility({
+                cost = mask_fields({
                     "unit_cost": cost_fact["unit_cost"] if has_known_cost else None,
                     "cost_amount": cost_fact["cost_amount"] if has_known_cost else None,
                     "unit_cost_inc_tax": (
@@ -358,11 +450,11 @@ def _build_workbook(
                     "reference_latest_date": (
                         None if manual_fallback else line.reference_latest_date
                     ),
-                }, user_ctx)
+                })
                 anomaly_flags = cost_fact["anomaly_flags"]
-                if is_field_hidden(user_ctx, "unit_cost"):
+                if hide_cost_anomalies:
                     anomaly_flags = [flag for flag in anomaly_flags if flag not in _COST_ANOMALY_FLAGS]
-                lines.append(_formatted_row(lines, (
+                lines.append((
                     line.id, line.raw_line_id, order.id, order.raw_order_id, order.order_no,
                     order.order_date, line.line_no, line.pn_std, line.pn_raw, line.description,
                     line.qty, line.return_qty, line.serial_numbers, cost["unit_cost"], cost["cost_amount"],
@@ -377,25 +469,19 @@ def _build_workbook(
                     cost["reference_from_date"], cost["reference_to_date"],
                     cost["reference_latest_date"],
                     "、".join(anomaly_flags),
-                ), {
-                    5: "yyyy-mm-dd", 10: "0.00", 11: "0.00",
-                    13: "#,##0.00", 14: "#,##0.00",
-                    15: "#,##0.00", 16: "#,##0.00",
-                    17: "#,##0.00", 18: "#,##0.00",
-                    31: "yyyy-mm-dd", 32: "yyyy-mm-dd", 33: "yyyy-mm-dd",
-                }))
+                ))
 
-        output = SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
         _save_workbook(workbook, output)
         output.seek(0)
         completed = True
         return output
     finally:
-        if not completed:
-            if output is not None:
-                output.close()
+        if workbook is not None:
             _cleanup_workbook(workbook)
-        workbook.close()
+        if temporary is not None:
+            temporary.cleanup()
+        if not completed and output is not None:
+            output.close()
 
 
 def _acquire_shared_source_lock(db: Session) -> None:

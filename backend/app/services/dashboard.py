@@ -158,10 +158,13 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
     }
 
 
-def _purchase_price_stats(db: Session, date_from: date | None, upper: date) -> dict[int, dict]:
+def _purchase_price_stats(db: Session, date_from: date | None, upper: date,
+                          *, part_ids: list[int] | None = None) -> dict[int, dict]:
     """每 part_id 的采购价统计（未税）：加权均价/中位价/最低/最高/样本数/最近采购日。
     口径：已生效 + 计入成本的采购类型(COST_PURCHASE_TYPES) + 单价>0。
     最低/最高仅作参考（可能异常低/小量/脏数据），标杆看加权均价/中位价（甲方评审）。"""
+    if part_ids is not None and not part_ids:
+        return {}
     ex = _purchase_ex_unit()
     stmt = (
         select(
@@ -177,6 +180,8 @@ def _purchase_price_stats(db: Session, date_from: date | None, upper: date) -> d
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
     stmt = active_orders(stmt, FPurchaseOrder)
+    if part_ids is not None:
+        stmt = stmt.where(FPurchaseLine.part_id.in_(part_ids))
     if date_from:
         stmt = stmt.where(FPurchaseOrder.order_date >= date_from)
     stmt = stmt.where(FPurchaseOrder.order_date <= upper).group_by(FPurchaseLine.part_id)
@@ -188,9 +193,12 @@ def _purchase_price_stats(db: Session, date_from: date | None, upper: date) -> d
     return out
 
 
-def _sale_price_stats(db: Session, date_from: date | None, upper: date) -> dict[int, dict]:
+def _sale_price_stats(db: Session, date_from: date | None, upper: date,
+                      *, part_ids: list[int] | None = None) -> dict[int, dict]:
     """每 part_id 的销售价统计（未税）：加权均价/中位价/最低/最高/样本数/最近成交日。
     口径：已生效 + 计营收 + 单价>0（¥0 赠送/换货不计价）。"""
+    if part_ids is not None and not part_ids:
+        return {}
     ex = _sale_ex_unit()
     stmt = (
         select(
@@ -207,6 +215,8 @@ def _sale_price_stats(db: Session, date_from: date | None, upper: date) -> dict[
                FSalesLine.qty.is_not(None), FSalesLine.qty > 0)
     )
     stmt = active_orders(stmt, FSalesOrder)
+    if part_ids is not None:
+        stmt = stmt.where(FSalesLine.part_id.in_(part_ids))
     if date_from:
         stmt = stmt.where(FSalesOrder.order_date >= date_from)
     stmt = stmt.where(FSalesOrder.order_date <= upper).group_by(FSalesLine.part_id)
@@ -279,14 +289,11 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
         stmt = security.apply_data_scope(stmt, user_ctx)
     stmt = stmt.group_by(sl.part_id, DimPart.pn_std, DimPart.description, DimPart.brand)
 
-    pstats = _purchase_price_stats(db, date_from, upper)
-    sstats = _sale_price_stats(db, date_from, upper)
-
     def _margin(rev, cost):
         return round((float(rev) - float(cost)) / float(rev), 4) if rev and cost is not None and float(rev) else None
 
-    rows = []
-    for r in db.execute(stmt):
+    def _display_row(r):
+        """完整展示含税换算只处理实际返回行；不参与全集排序。"""
         revenue_ex = tax_policy.round_money(r.revenue) if r.revenue is not None else None
         revenue_costed_ex = (
             tax_policy.round_money(r.rev_costed)
@@ -302,7 +309,7 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
         )
         gp_mov = _money_difference(revenue_costed_ex, cost_moving_ex)
         gp_ff = _money_difference(revenue_costed_ex, cost_fifo_ex)
-        rows.append({
+        return {
             "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
             "revenue": _f(revenue_ex),
             "revenue_ex": _f(revenue_ex),
@@ -327,16 +334,21 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
             "gross_profit_fifo_inc": _f(
                 _inc_difference_from_ex(revenue_costed_ex, cost_fifo_ex),
             ),
-            "purchase_price": pstats.get(r.part_id), "sale_price": sstats.get(r.part_id),
-            "_sort": (gp_ff if use_fifo else gp_mov),
-        })
+        }
 
-    # 池归属（批量一条，防 N+1）
-    pool_map = pool_metrics.active_pool_map(db, [x["part_id"] for x in rows])
-    for x in rows:
-        pm = pool_map.get(x["part_id"])
-        x["pool_group_id"] = pm["group_id"] if pm else None
-        x["pool_name"] = pm["pool_name"] if pm else None
+    rows = []
+    for r in db.execute(stmt):
+        # 排名继续按原有的金额先舍入、再相减口径；未返回 PN 无需计算
+        # 双税展示、覆盖率或另一成本法的展示值。保存聚合行供有界渲染。
+        revenue_ex = tax_policy.round_money(r.revenue) if r.revenue is not None else None
+        rows.append({
+            "part_id": r.part_id,
+            "revenue": _f(revenue_ex),
+            "qty_sold": _f(r.qty_sold),
+            "order_count": r.order_count,
+            "_sort": _money_difference(r.rev_costed, r.cost_ff if use_fifo else r.cost_ma),
+            "_aggregate": r,
+        })
 
     # 确定性地基：GROUP BY 输出无序（HashAggregate 不保证顺序），先按 part_id 定序，
     # 后续所有 sorted() 均稳定 → 指标并列时以 part_id 破并列，分页不丢行/重行（审计 P1）。
@@ -375,8 +387,24 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
              "sort": sort, "effective_sort": effective_sort, "order": order,
              "ranking_restricted": ranking_restricted, "items": items_page}
 
-    for x in rows:
-        x.pop("_sort", None)
+    # 价格中位数/池归属不参与排名，仅为实际返回的页与两个 Top 榜补充。
+    # 全集仍决定排名和计数；不能把返回页当全集，也不应为未返回的数万 PN
+    # 排序全部采购/销售价格。part_id 索引支持有界批量查询，无逐行 N+1。
+    visible_rows = {x["part_id"]: x for x in items_page}
+    if not profit_restricted:
+        visible_rows.update((x["part_id"], x) for x in profitable + loss)
+    visible_ids = list(visible_rows)
+    pstats = _purchase_price_stats(db, date_from, upper, part_ids=visible_ids)
+    sstats = _sale_price_stats(db, date_from, upper, part_ids=visible_ids)
+    pool_map = pool_metrics.active_pool_map(db, visible_ids)
+    for part_id, row in visible_rows.items():
+        row.update(_display_row(row.pop("_aggregate")))
+        row.pop("_sort")
+        row["purchase_price"] = pstats.get(part_id)
+        row["sale_price"] = sstats.get(part_id)
+        pm = pool_map.get(part_id)
+        row["pool_group_id"] = pm["group_id"] if pm else None
+        row["pool_name"] = pm["pool_name"] if pm else None
 
     # 结构性收敛（复审三轮 P0-1）：data_profit=false 时，连"哪些型号赚/亏、各几个"都不能给——
     # 字段 mask 只置空金额，型号落在哪个榜 + 榜内计数本身泄漏利润结论。整块归属一律撤下。

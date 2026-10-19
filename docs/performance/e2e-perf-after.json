@@ -1,0 +1,457 @@
+{
+  "started_at": "2026-10-19T03:29:49.936028+00:00",
+  "base": "http://127.0.0.1:18601",
+  "parallel": 12,
+  "rounds": 4,
+  "read_timeout_seconds": 60.0,
+  "paths": {
+    "parts_search": "/api/parts/search?q=SSD",
+    "data_quality_issues": "/api/data-quality/issues",
+    "sales_analytics_orders": "/api/sales/analytics/orders",
+    "dashboard_sales": "/api/dashboard/sales",
+    "dashboard_purchase_orders": "/api/dashboard/purchase-orders",
+    "dashboard_part_ranking": "/api/dashboard/part-ranking"
+  },
+  "isolated": {
+    "parts_search": {
+      "count": 3,
+      "p50": 0.7449,
+      "p95": 0.9921,
+      "max": 0.9921,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "data_quality_issues": {
+      "count": 3,
+      "p50": 0.058,
+      "p95": 0.0879,
+      "max": 0.0879,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "sales_analytics_orders": {
+      "count": 3,
+      "p50": 1.3788,
+      "p95": 1.483,
+      "max": 1.483,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_sales": {
+      "count": 3,
+      "p50": 1.9421,
+      "p95": 2.083,
+      "max": 2.083,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_purchase_orders": {
+      "count": 3,
+      "p50": 1.1199,
+      "p95": 1.1947,
+      "max": 1.1947,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_part_ranking": {
+      "count": 3,
+      "p50": 1.9065,
+      "p95": 2.3622,
+      "max": 2.3622,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    }
+  },
+  "mixed": {
+    "overall": {
+      "count": 24,
+      "p50": 1.8733,
+      "p95": 4.3545,
+      "max": 4.3671,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "parts_search": {
+      "count": 4,
+      "p50": 1.0112,
+      "p95": 1.7801,
+      "max": 1.7801,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "data_quality_issues": {
+      "count": 4,
+      "p50": 0.2104,
+      "p95": 0.6695,
+      "max": 0.6695,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "sales_analytics_orders": {
+      "count": 4,
+      "p50": 1.9074,
+      "p95": 2.008,
+      "max": 2.008,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_sales": {
+      "count": 4,
+      "p50": 2.6269,
+      "p95": 3.1947,
+      "max": 3.1947,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_purchase_orders": {
+      "count": 4,
+      "p50": 1.7563,
+      "p95": 1.9367,
+      "max": 1.9367,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    },
+    "dashboard_part_ranking": {
+      "count": 4,
+      "p50": 4.0386,
+      "p95": 4.3671,
+      "max": 4.3671,
+      "http_504": 0,
+      "http_503": 0,
+      "client_timeouts": 0,
+      "errors": 0
+    }
+  },
+  "samples": {
+    "isolated": [
+      {
+        "endpoint": "parts_search",
+        "seconds": 0.9921,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.0879,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.483,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 2.083,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.1947,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 2.3622,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      },
+      {
+        "endpoint": "parts_search",
+        "seconds": 0.7236,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.058,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.2243,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 1.9421,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.101,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 1.9065,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      },
+      {
+        "endpoint": "parts_search",
+        "seconds": 0.7449,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.0576,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.3788,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 1.9298,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.1199,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 1.856,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      }
+    ],
+    "mixed": [
+      {
+        "endpoint": "parts_search",
+        "seconds": 0.9783,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.1488,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.8416,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 2.5455,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.905,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 3.7227,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      },
+      {
+        "endpoint": "parts_search",
+        "seconds": 1.0441,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.272,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.9733,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 2.7084,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.9367,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 4.3545,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      },
+      {
+        "endpoint": "parts_search",
+        "seconds": 0.9194,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.1126,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 1.5026,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 2.5221,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.4144,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 4.3671,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      },
+      {
+        "endpoint": "parts_search",
+        "seconds": 1.7801,
+        "status": 200,
+        "error": null,
+        "bytes": 7580
+      },
+      {
+        "endpoint": "data_quality_issues",
+        "seconds": 0.6695,
+        "status": 200,
+        "error": null,
+        "bytes": 16618
+      },
+      {
+        "endpoint": "sales_analytics_orders",
+        "seconds": 2.008,
+        "status": 200,
+        "error": null,
+        "bytes": 24724
+      },
+      {
+        "endpoint": "dashboard_sales",
+        "seconds": 3.1947,
+        "status": 200,
+        "error": null,
+        "bytes": 65724
+      },
+      {
+        "endpoint": "dashboard_purchase_orders",
+        "seconds": 1.6075,
+        "status": 200,
+        "error": null,
+        "bytes": 51692
+      },
+      {
+        "endpoint": "dashboard_part_ranking",
+        "seconds": 3.5667,
+        "status": 200,
+        "error": null,
+        "bytes": 74556
+      }
+    ]
+  },
+  "export_read_timeout_seconds": 180,
+  "export": {
+    "endpoint": "orders_export_nofilter",
+    "seconds": 41.7492,
+    "status": 200,
+    "error": null,
+    "bytes": 12575849
+  }
+}

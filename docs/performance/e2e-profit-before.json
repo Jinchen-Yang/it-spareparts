@@ -1,0 +1,38 @@
+[
+  {
+    "dimension": "salesperson",
+    "status": 200,
+    "seconds": 0.5202,
+    "bytes": 44559
+  },
+  {
+    "dimension": "salesperson",
+    "status": 200,
+    "seconds": 1.2202,
+    "bytes": 44559
+  },
+  {
+    "dimension": "salesperson",
+    "status": 200,
+    "seconds": 0.3385,
+    "bytes": 44559
+  },
+  {
+    "dimension": "customer",
+    "status": 200,
+    "seconds": 0.7872,
+    "bytes": 1560362
+  },
+  {
+    "dimension": "customer",
+    "status": 200,
+    "seconds": 0.7704,
+    "bytes": 1560362
+  },
+  {
+    "dimension": "customer",
+    "status": 200,
+    "seconds": 0.6903,
+    "bytes": 1560362
+  }
+]

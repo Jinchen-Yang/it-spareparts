@@ -6,6 +6,7 @@ field_visibility 的真实递归实现已写好（供将来 + 验收用 ENABLE_R
 """
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, time
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from app import config
@@ -90,6 +92,10 @@ def get_current_user_context(
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
                                salesperson_name=data.get("name"),
                                permissions=data.get("perms"), is_authenticated=True)
+        except (DBAPIError, PoolTimeoutError):
+            # 数据库不可用不是无效身份；交给 get_db 回滚并返回 504/503，
+            # 不能把鉴权查询超时降级成 guest 后误报页面权限不足。
+            raise
         except Exception:  # noqa: BLE001
             pass
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)
@@ -284,6 +290,20 @@ def apply_field_visibility(payload: Any, user_ctx: UserContext) -> Any:
     if not hidden:
         return payload
     return _mask(payload, hidden)
+
+
+def prepare_field_visibility(user_ctx: UserContext) -> Callable[[Any], Any]:
+    """为一次批量读取准备脱敏函数，复用当前请求的权限快照。
+
+    只计算一次既有隐藏字段规则；每次调用仍走同一个递归 _mask。
+    closure 只属于本次调用，不按账号、角色或权限对象做全局缓存。
+    """
+    hidden = _hidden_fields(user_ctx) if config.ENABLE_RBAC else set()
+
+    def apply(payload: Any) -> Any:
+        return _mask(payload, hidden) if hidden else payload
+
+    return apply
 
 
 def _mask(node: Any, hidden: set[str]) -> Any:
