@@ -123,23 +123,30 @@ export default function AppShell({
     window.scrollTo(0, 0);
   }, [location.pathname]);
 
-  // 空闲预取全部可见页面 chunk：点菜单即秒开，弱网下也不再"点了没反应"
-  // （react-router v7 的导航在 transition 里，chunk 未就绪时不会显示 fallback）
+  // 当前路由代码与金额口径请求并行下载；业务内容仍由 TaxPolicyBoundary 把关。
+  // 不在 idle 时预取整站，避免图表/导入等无关代码与首屏争抢带宽和主线程。
+  const allowedActive = allowed.find((item) => item.key === active?.key);
+  const currentLoad = allowedActive
+    ? (detail?.load ?? allowedActive.load)
+    : undefined;
   useEffect(() => {
-    const idle: (cb: () => void) => number =
-      window.requestIdleCallback || ((cb) => window.setTimeout(cb, 2000));
-    const id = idle(() => allowed.forEach((it) => { it.load().catch(() => {}); }));
-    return () => (window.cancelIdleCallback || window.clearTimeout)(id);
-  }, [allowed]);
+    void currentLoad?.().catch(() => {});
+  }, [currentLoad]);
 
   // 分组菜单：group 自动变为可折叠 SubMenu；空组整组隐藏
-  const allowedKeys = useMemo(() => new Set(allowed.map((it) => it.key)), [allowed]);
+  const allowedByKey = useMemo(() => new Map(allowed.map((it) => [it.key, it])), [allowed]);
   const menuItems: MenuProps["items"] = useMemo(() => {
     const out: NonNullable<MenuProps["items"]> = [];
     for (const g of NAV_GROUPS) {
       const items = g.items
-        .filter((it) => allowedKeys.has(it.key))
-        .map((it) => ({ key: it.key, icon: it.icon, label: it.label }));
+        .map((it) => allowedByKey.get(it.key))
+        .filter((it): it is NavItem => it !== undefined)
+        .map((it) => ({
+          key: it.key, icon: it.icon, label: it.label,
+          // 只预取鼠标/键盘正在指向的目标，失败交给实际导航的错误边界处理。
+          onMouseEnter: () => { void it.load().catch(() => {}); },
+          onFocus: () => { void it.load().catch(() => {}); },
+        }));
       if (!items.length) continue;
       if (g.label === null) out.push(...items);
       else out.push({
@@ -150,7 +157,7 @@ export default function AppShell({
       });
     }
     return out;
-  }, [allowedKeys]);
+  }, [allowedByKey]);
 
   // 当前路由所属组自动展开；手动展开/折叠写入 localStorage
   const activeGroupKeys = useMemo(() => {
@@ -349,9 +356,11 @@ export default function AppShell({
           )}
           <TaxPolicyBoundary>
             <Suspense
+              key={location.pathname}
               fallback={
-                <div style={{ display: "flex", justifyContent: "center", paddingTop: 120 }}>
+                <div role="status" style={{ display: "flex", justifyContent: "center", gap: 12, paddingTop: 120 }}>
                   <Spin size="large" />
+                  <span>正在加载页面…</span>
                 </div>
               }
             >

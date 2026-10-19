@@ -49,17 +49,17 @@ export default function InventoryPage() {
   const [page, setPage] = useState(1);
   const [matchTerms, setMatchTerms] = useState<number | null>(null);  // >0 时显示匹配度列
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; page: number; query: string } | null>(null);
   const [editing, setEditing] = useState<(WhRow & { pn_std: string }) | null>(null);
   const [form] = Form.useForm();
   const basis = useTaxBasis("purchase");
 
-  const load = async (p = page) => {
+  const load = async (p = page, query = q) => {
     setLoading(true);
     setError(null);
     try {
       const { data } = await api.get("/inventory/dynamic", {
-        params: { q: q || undefined, page: p, page_size: 20 },
+        params: { q: query || undefined, page: p, page_size: 20 },
       });
       setRows(data.items);
       setTotal(data.total);
@@ -69,7 +69,7 @@ export default function InventoryPage() {
       const msg = !e?.response ? "无法连接服务器，请检查网络后重试"
         : e?.response?.data?.detail || "库存加载失败，请稍后重试";
       setRows([]);
-      setError(msg);
+      setError({ message: msg, page: p, query });
       message.error(msg);
     } finally {
       setLoading(false);
@@ -187,8 +187,8 @@ export default function InventoryPage() {
       </Space>
       {error && (
         <Alert
-          type="error" showIcon message="加载失败" description={error} style={{ marginBottom: 12 }}
-          action={<Button size="small" onClick={() => load(page)}>重试</Button>}
+          type="error" showIcon message="加载失败" description={error.message} style={{ marginBottom: 12 }}
+          action={<Button size="small" onClick={() => load(error.page, error.query)}>重试</Button>}
         />
       )}
       <ResizableTable<DynRow>

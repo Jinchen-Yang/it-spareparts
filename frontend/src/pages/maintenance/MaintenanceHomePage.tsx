@@ -159,7 +159,11 @@ export function MaintenanceHomePage() {
   const [page, setPage] = useState(1);
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{
+    message: string;
+    page: number;
+    replace: boolean;
+  } | null>(null);
   const [rangePreset, setRangePreset] = useState<RangePreset>("this_month");
   const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
   const sentinel = useRef<HTMLDivElement | null>(null);
@@ -195,7 +199,8 @@ export function MaintenanceHomePage() {
       } catch (err) {
         if (seq !== requestSeq.current) return false;
         if (replace) setRows([]);
-        setError(readError(err));
+        // 续页失败保留已有卡片；重试仍请求失败页，不跳页或重加第一页。
+        setError({ message: readError(err), page: nextPage, replace });
         setDone(true);
         return false;
       } finally {
@@ -446,7 +451,16 @@ export function MaintenanceHomePage() {
         />
       ) : null}
 
-      {error ? <Alert type="error" showIcon message={error} /> : null}
+      {error ? (
+        <Alert
+          type="error"
+          showIcon
+          message={error.message}
+          action={
+            <Button size="small" onClick={() => void load(error.page, error.replace)}>重试</Button>
+          }
+        />
+      ) : null}
 
       <Row gutter={[12, 12]}>
         {rows.map((row) => (
@@ -458,7 +472,7 @@ export function MaintenanceHomePage() {
         ))}
       </Row>
 
-      {!rows.length && !loading ? (
+      {!rows.length && !loading && !error ? (
         <Empty
           description={
             businessTypes.length > 0
@@ -473,7 +487,7 @@ export function MaintenanceHomePage() {
 
       <div ref={sentinel} style={{ textAlign: "center", padding: 12 }}>
         {loading ? <Spin /> : null}
-        {done && rows.length ? (
+        {done && rows.length && !loading && !error ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
             已到底
           </Text>
