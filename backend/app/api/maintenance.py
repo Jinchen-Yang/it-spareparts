@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from app.api.date_validation import validate_date_query
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role, require_admin
 from app.business_time import business_today
@@ -189,7 +190,7 @@ def projects(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/lines")
+@router.get("/lines", dependencies=[Depends(validate_date_query)])
 def lines(
     project: str = Query(..., max_length=256),
     month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),

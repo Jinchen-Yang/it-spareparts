@@ -1,9 +1,11 @@
 """Shared server-side row-scope guard for stable maintenance projects."""
 
 from fastapi import Depends, HTTPException, Path, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models.maintenance_project import MaintenanceProject
 from app.security import FULL_SCOPE_ROLES, UserContext, get_current_user_context
 from app.services import maintenance_project_assignments as assignments
 
@@ -14,7 +16,12 @@ def enforce_maintenance_project_access(
     project_id: str,
     ctx: UserContext,
 ) -> None:
-    """Fail closed for every direct project read/write, not only directories."""
+    """Require an existing parent and row access for direct project reads/writes."""
+
+    if db.scalar(select(MaintenanceProject.project_id).where(
+        MaintenanceProject.project_id == project_id,
+    )) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
 
     if not assignments.can_access_project(
         db,
