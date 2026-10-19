@@ -8,6 +8,7 @@
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,18 @@ class Settings(BaseSettings):
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
 
+    # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
+    # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。
+    resale_price_reference_window_days: int = 30
+    resale_price_reference_half_life_days: Decimal = Decimal("7")
+    resale_price_reference_order_statuses: list[str] = ["已生效"]
+    resale_price_reference_counts_revenue_only: bool = True
+    resale_price_reference_include_zero_prices: bool = False
+    resale_price_reference_weighting: Literal["qty_weighted", "line_mean"] = (
+        "qty_weighted"
+    )
+    resale_price_reference_exclude_confirmed_source_error: bool = True
+
     @field_validator("resale_export_token_sha256", "resale_catalog_token_sha256")
     @classmethod
     def validate_resale_export_hash(
@@ -60,6 +73,39 @@ class Settings(BaseSettings):
                 f"{info.field_name.upper()} 必须是 64 位小写十六进制 SHA256 摘要"
             )
         return SecretStr(digest)
+
+    @field_validator("resale_price_reference_window_days")
+    @classmethod
+    def validate_price_reference_window_days(cls, value: int) -> int:
+        if not 1 <= value <= 366:
+            raise ValueError("RESALE_PRICE_REFERENCE_WINDOW_DAYS 必须是 1..366 的整数")
+        return value
+
+    @field_validator("resale_price_reference_half_life_days")
+    @classmethod
+    def validate_price_reference_half_life_days(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value <= 0 or value > 3650:
+            raise ValueError(
+                "RESALE_PRICE_REFERENCE_HALF_LIFE_DAYS 必须是 (0, 3650] 内的有限数值"
+            )
+        return value
+
+    @field_validator("resale_price_reference_order_statuses")
+    @classmethod
+    def validate_price_reference_order_statuses(cls, value: list[str]) -> list[str]:
+        allowed = ("已生效", "已取消", "草稿", "进行中")
+        deduped: list[str] = []
+        for status in value:
+            if status not in allowed:
+                raise ValueError(
+                    "RESALE_PRICE_REFERENCE_ORDER_STATUSES 含未知订单状态: "
+                    f"{status!r}"
+                )
+            if status not in deduped:
+                deduped.append(status)
+        if not deduped:
+            raise ValueError("RESALE_PRICE_REFERENCE_ORDER_STATUSES 不能为空")
+        return deduped
 
     # ---- 二期 AI 定价助手（LLM）----
     # provider 抽象：openai_compatible 可对接 DeepSeek/Qwen/Kimi/GLM 等一切 OpenAI 兼容端点，
