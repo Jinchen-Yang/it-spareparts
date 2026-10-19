@@ -994,7 +994,7 @@ def patch_project_site_issue_v2(
         raise
 
 
-@stable_site_issue_router.post("/projects/stable/{project_id}/site-issues/batch-no-return")
+@site_issue_beta_router.post("/projects/stable/{project_id}/site-issues/batch-no-return")
 def batch_set_site_issue_no_return(
     body: SiteIssueBatchNoReturn,
     project_id: str = Path(..., min_length=1, max_length=36),
