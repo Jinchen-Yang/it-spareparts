@@ -136,6 +136,99 @@ describe("WorkbookRoundTrip", () => {
     await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
   });
 
+  it("合并预览列明保留单、来源明细及单头取舍，取消后只提交新预检的凭据", async () => {
+    const merge = {
+      target_issue_no: "ISS-FINAL",
+      survivor_issue_id: "issue-older",
+      sources: [
+        { issue_id: "issue-older", issue_no: "ISS-A", line_count: 2, rows: [12] },
+        { issue_id: "issue-newer", issue_no: "ISS-B", line_count: 3, rows: [30, 31] },
+      ],
+      total_line_count: 5,
+      rows: [12, 30, 31],
+      header_conflicts: [{
+        field: "issue_date", survivor_value: "2026-08-01",
+        discarded: [{ issue_id: "issue-newer", issue_no: "ISS-B", value: "2026-08-02" }],
+        final_value: "2026-08-03",
+      }],
+    };
+    const onValidate = vi.fn()
+      .mockResolvedValueOnce({ site_issue_merges: [merge], site_issue_merge_token: "first-preview" })
+      .mockResolvedValueOnce({ site_issue_merges: [merge], site_issue_merge_token: "second-preview" });
+    const onApply = vi.fn().mockResolvedValue({ site_issue_merge_count: 1 });
+    const { container } = render(
+      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+        onValidate={onValidate} onApply={onApply} />,
+    );
+    const file = makeFile();
+    const initialInput = uploadFile(container, file);
+    const dialog = within(await screen.findByRole("dialog"));
+    await waitFor(() => expect(dialog.getByText("领用单合并 1 组")).toBeVisible());
+    expect(dialog.getByText("合并目标：ISS-FINAL")).toBeVisible();
+    expect(dialog.getByText("保留单：ISS-A（issue-older）")).toBeVisible();
+    expect(dialog.getByText("来源单：ISS-A（issue-older）· 明细 2 行 · Excel 第 12 行")).toBeVisible();
+    expect(dialog.getByText("来源单：ISS-B（issue-newer）· 明细 3 行 · Excel 第 30、31 行")).toBeVisible();
+    expect(dialog.getByText("合并后现有明细共 5 行 · Excel 第 12、30、31 行")).toBeVisible();
+    expect(dialog.getByText("领用日期：保留单原值 2026-08-01；最终值 2026-08-03")).toBeVisible();
+    expect(dialog.getByText("舍弃来源值：ISS-B（issue-newer）· 2026-08-02")).toBeVisible();
+    expect(onApply).not.toHaveBeenCalled();
+    fireEvent.click(dialog.getByRole("button", { name: /取\s*消/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(container.querySelector('input[type="file"]')).not.toBe(initialInput));
+    uploadFile(container, file);
+    fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledWith(file, { siteIssueMergeToken: "second-preview" }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("已覆盖：领用单合并 1 组")).toBeVisible();
+  });
+
+  it("合并计划过期时保留草稿并重新预检，不提供强制接管", async () => {
+    const onValidate = vi.fn()
+      .mockResolvedValueOnce({ site_issue_merge_count: 1, site_issue_merge_token: "stale-preview" })
+      .mockResolvedValueOnce({ site_issue_merge_count: 1, site_issue_merge_token: "fresh-preview" });
+    const onApply = vi.fn()
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: {
+        code: "stale_site_issue_merge", message: "领用单合并计划已变化，请重新校验后确认",
+      } } } })
+      .mockResolvedValueOnce({ site_issue_merge_count: 1 });
+    const { container } = render(
+      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+        onValidate={onValidate} onApply={onApply} />,
+    );
+    const file = makeFile();
+    uploadFile(container, file);
+    fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+    expect(await screen.findByText("领用单合并计划已变化，请重新校验后确认")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /强制接管/ })).toBeNull();
+    const retry = await screen.findByRole("button", { name: "重试原文件" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+    await waitFor(() => expect(onApply).toHaveBeenLastCalledWith(file, { siteIssueMergeToken: "fresh-preview" }));
+    expect(onValidate).toHaveBeenCalledTimes(2);
+  });
+
+  it("已确认合并后强制接管仍携带同一次预览凭据", async () => {
+    const onValidate = vi.fn().mockResolvedValue({ site_issue_merge_token: "merge-preview" });
+    const onApply = vi.fn()
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: {
+        code: "row_conflicts", message: "部分行已被更新",
+        conflicts: [{ sheet: "06_领用返还", row: "ISS-A", entity_id: "line-a", field: "领用数量", base: "1", old: "2", new: "3" }],
+      } } } })
+      .mockResolvedValueOnce({ site_issue_merge_count: 1 });
+    const { container } = render(
+      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+        onValidate={onValidate} onApply={onApply} />,
+    );
+    const file = makeFile();
+    uploadFile(container, file);
+    fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "强制接管并上传" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+    expect(onApply).toHaveBeenNthCalledWith(1, file, { siteIssueMergeToken: "merge-preview" });
+    expect(onApply).toHaveBeenLastCalledWith(file, { forceTakeover: true, siteIssueMergeToken: "merge-preview" });
+  });
+
   it("two-phase: cancel leaves the file unapplied", async () => {
     const onValidate = vi.fn().mockResolvedValue({ will_void_rows: [] });
     const onApply = vi.fn();

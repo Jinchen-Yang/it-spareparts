@@ -1,66 +1,95 @@
-# 项目总表领用单号批内冲突修复
+# 项目总表同号领用单合并与安全改名
 
 - 基线：`origin/main` / `ae32737cb6b5e4a7c125a3192688cc63fc229117`。
-- 分支：`fix/workbook-intra-batch-issue-no`；PR 指向 main，不合并、不部署。
-- 决策: 无。修复现有项目内单号唯一性与整本原子应用契约，不新增业务口径。
-- 无 schema 变更、无迁移、无前端变更；只操作指定独立 worktree 和合成测试库。
+- 分支：`fix/workbook-intra-batch-issue-no`；继续 PR #417，指向 main，不合并、不部署。
+- 决策: D-0042。金臣 2026-10-19 11:01Z 批准同号既有单自动合并，取代本 PR 初版 `3c72466` 的同号拒绝规则；详见 `docs/decisions/0020-项目总表同号领用单合并.md`。
+- 无 schema 变更、无迁移、未改 secrets/env；仅指定 worktree、本任务合成测试库。前端补合单预览与确认凭据透传。
 
 ## 复现与根因
 
-基线代码的 HTTP 契约测试使用两张不同的既有领用单，将两条签名行的单号同时改为数据库中不存在的 `WBDD-20261013-0005`。validate 返回 200，apply 在服务原第 6851 行 `db.flush()` 抛出真实 PostgreSQL `UniqueViolation / uq_maintenance_site_issue_project_no`，测试失败。它与用户提供的生产错误形状一致；本任务未读取生产数据库或原文件，不能断言已还原生产文件的全部内容。
+基线 HTTP 契约测试将两张不同既有领用单的签名行同时改成数据库不存在的 `WBDD-20261013-0005`：validate 200，apply 的单头 flush 抛真实 PostgreSQL `UniqueViolation / uq_maintenance_site_issue_project_no`。parse 的 `chosen_headers` 仅逐单查询数据库原号，没有比较批内其他单的最终号；apply 只检查同一 ID 的重复行，批量 UPDATE 最终撞唯一键。失败回滚后目标号仍不存在，与用户给出的故障形状一致；未读取生产原文件或数据库。
 
-parse 的 `chosen_headers` 逐张查询数据库原有单号，没有比较本批其他单据的最终单号；两个查询都查不到新号，因而同时通过。apply 的 `requested_headers` 只校验同一 ID 的重复行，随后批量 UPDATE 撞唯一键。失败事务回滚后数据库也不会保留这个目标号。
+核查路径：旧 parse 会拒绝普通互换/链式改名，不能称其为正常 validate 200 的本次根因；绕过校验的计划可在 UPDATE 排序中碰撞。地址补丁的 `setdefault` 只补原单头，本身不绕过旧检查。普通无 ID 手填单号表示同头新明细；签名改名 A→B 加新 B 明细必须按最终归属追加。空号/WBDD 输入则逐行生成独立 LY-AUTO 头。`apply_locked_site_issue_edits` 的 legacy 单头更新不自行 flush/bump，外层负责；稍后的行更正会 flush，故防护覆盖整个 V2 apply（含新建、回执与 commit）。
 
-已核查的相邻路径：
+## 合单契约
 
-1. 普通互换 A↔B、链式 A→B/B→C 在旧 parse 中会被数据库占号检查拒绝，不能据此认定为本次正常 validate 200 后 500 的根因。绕过 validate 的旧计划则可能在 UPDATE 顺序中撞仍被另一单持有的号。
-2. 地址补丁的 `requested_headers.setdefault` 只补该单原号，不能独立让普通互换通过旧 parse。但启用合法互换后，按数据库旧号寻找新增明细的地址归属会写到错误的单头，必须同步修复。
-3. 无实体 ID 的普通自填非 WBDD 单号按既有规则表示同头新增明细；“签名 A→B + 新增 B 明细”合法，不能一律按重号拒绝。空单号/WBDD 新行则自动生成独立 LY-AUTO 身份；若另一签名单改成该生成号，旧实现会静默合到同一头，此次按独立身份冲突拒绝。WBDD 原文输入本身不直接占用那个 WBDD 领用单号。
-4. 当前只传单头改动的 `apply_locked_site_issue_edits` V2 legacy 调用不自行执行单头 flush、审计或版本推进；本路径由外层写审计、推进版本、统一 flush。稍后带 `requirement_before` 的原语调用仍会进入 corrections 的 flush、审计及版本逻辑。风险还包括新头 INSERT、回执 flush 与最终 commit，故在整个 V2 apply 事务边界转换 `IntegrityError`。
+- 预检按全项目最终单号归组，只合并既有 issue_id。保留当前持有目标号且未改走的头，否则按 `created_at, issue_id` 升序。目标号当前持有者即使没有编辑行也进入计划。
+- 单头默认保留单值；工作簿显式日期/地址覆盖。读取签名基线区分“原导出值”和“用户修改”，也收集普通新增明细的显式值及地址别名操作，避免旧地址警告吞掉合单冲突。被 D-02 忽略的作废明细不能间接改头。预检列出全部不同值及来源，显式意图矛盾时中文 422 拒绝。
+- 作废来源/目标、未知/不兼容状态、跨项目、重复发货明细身份等拒绝。confirmed/corrected 可共存；纯 draft 可合并，但不得存在确认返还义务。原生 site_issue_v2 保留单不能接收非原生来源明细，以免破坏后续发货身份编辑协议。
+- 自动 LY-AUTO 新头始终独立；若与既有改名目标冲突仍 `duplicate_issue_no` / 422。普通手填目标号的新增明细追加到合并后的保留单，行号接在全部移动明细之后。
+- apply 在既有项目→需求→领用头/明细锁序内锁项目全部单头与全部明细，再锁引用并重算计划。校验提供 HMAC 凭据，绑定文件 hash、项目、操作者及完整计划；merge apply 必须带 `site_issue_merge_token`。集合、单头、明细或引用快照变化，或缺少/篡改凭据，返回 `stale_site_issue_merge` / 409，提示重新校验；强制接管不跳过此保护。非合单请求保持原协议。
+- 改名仍两阶段：所有改号头先用 Core SQL 移至 UUID 暂号，再设置最终号；ORM 强引用保留原头，审计不读取暂号。被吸收头改为 `WB-MERGED-<uuid>`（42 字符），软作废；display_no 终身保留。所有明细（含 inactive）保持 ID，按来源 issue_id、原行号、明细 ID 稳定追加到保留单最大 line_no 后。
+- 每条移动行和各参与头写 MERGE 审计，包含原号/来源 IDs/保留单/移动行 IDs 与数量/冲突/引用迁移证据。推进明细和单头版本、返还水位，沿用成本重算和工作簿 revision 协议。同文件重放返回首次完整回执；重新导出的文件可无变更回传。
+- 整个 V2 apply 的 IntegrityError rollback 后 warning 记录原异常：项目内单号唯一约束→`duplicate_issue_no`，其他约束→`apply_conflict`，中文 HTTP 422，失败 session 可继续查询。
 
-## 实现契约
+## 引用清单与历史处理
 
-- parse 与锁内 apply 共用最终占用检查：以稳定 issue_id 区分既有单，以新单身份区分独立 CREATE；未改名的头及作废头继续占号，批内已改走的号可以复用。拒绝信息带单号、Excel 行号以及 `details.rows`。
-- 新明细在 parse 收齐最终单号后绑定所属 issue_id，再分配明细序号；新增明细的日期不是改头意图。互换后的地址与明细都按最终归属处理；释放旧号再建新头从第 1 行开始。
-- 改号先通过 Core UPDATE 将所有待改号头移至 40 字符 UUID 暂号，再 flush，随后沿用既有原语设置最终号并 flush。强引用保留 ORM 原始头，临时 SQL 不同步 identity map，原语快照、审计及版本推进均保持一次真实改名的语义；事务成功不留暂号。
-- 整个 V2 apply 的 `IntegrityError` 先 rollback，再 warning 记录原异常。项目内单号唯一键转 `duplicate_issue_no`，其他约束转 `apply_conflict`；复用 API 既有 WorkbookError 映射，均为 HTTP 422，失败会话可继续查询。
+检索 models 和全部 alembic migration 的外键/通用引用并核对数据库触发器：
 
-HTTP 错误形状示例（行号和 ID 为示例）：
+| 引用 | 处理 |
+| --- | --- |
+| maintenance_site_issue_line.issue_id | 全部改挂保留单，ID 不变，追加 line_no、版本和审计 |
+| maintenance_return_obligation.issue_id | 改挂保留单，obligation_id 不变；坏件返还行指向 obligation 的 FK 因而保持有效 |
+| 返还事件 | 先消费未消费旧事件；追加保留单纠正事件、吸收单空作废事件并消费，水位超过全部旧事件/义务；旧事件身份/payload 不改，迟到旧事件不会复活义务 |
+| maintenance_site_issue_command / 历史事件 | append-only 历史保留原 ID 和 payload，软作废单及 MERGE 审计维持可追溯性 |
+| warehouse document links | 原 active→superseded（版本+1），追加指向保留单的新 active 链接，保留 supersedes 关系与仓库审计 |
+| warehouse open ambiguities | DB 禁止改 candidates/evidence；旧 open→resolved，追加指向保留单的新 open 候选，记录双向接替关系；已 resolved 历史不改 |
+| display_no | 保留各头原展示号，不回收不重分配 |
+| 行级 return requirements / return links / 成本及人工价证据 | 稳定行 ID 不变；归属随行迁移，沿用更正、定价与查询投影 |
+| 其他 facts / derived 展示 | 经稳定明细→单头 join 读取新归属；历史审计/冻结 manifest/回执 JSON 不改写 |
+| 附件 | 当前 BusinessFileLink 仅关联验收交付物，无领用单附件 FK；没有需要迁移的领用附件表 |
+
+纯工作簿无发货明细的单不凭空生成 legacy 返还事件；混合明细的 legacy payload 仅包含真实 delivery_line_id 行。库存和真实收货事实未修改。
+
+## Validate 形状与前端
+
+向后兼容新增 `summary.site_issue_merges` 数量、顶层 `site_issue_merge_count`、结构化 `site_issue_merges` 数组及确认 token；generic changes 同时提供中文说明。例（ID、行号为示例，省略快照及其他单头字段）：
 
 ```json
 {
-  "detail": {
-    "code": "duplicate_issue_no",
-    "message": "06_领用返还 第 12、30 行的领用单号 WBDD-20261013-0005 与本项目其他领用单重复，同一项目内两张不同领用单的单号不能重复，请修改其中一张后重试",
-    "issues": [],
-    "rows": [
-      {"row_no": 12, "issue_id": "example-a", "issue_no": "WBDD-20261013-0005"},
-      {"row_no": 30, "issue_id": "example-b", "issue_no": "WBDD-20261013-0005"}
-    ]
-  }
+  "valid": true,
+  "summary": {"site_issue_merges": 1},
+  "site_issue_merge_count": 1,
+  "site_issue_merges": [{
+    "target_issue_no": "WBDD-20261013-0005",
+    "survivor_issue_id": "issue-a",
+    "sources": [
+      {"issue_id": "issue-a", "issue_no": "A", "line_count": 1, "rows": [12]},
+      {"issue_id": "issue-b", "issue_no": "B", "line_count": 1, "rows": [30]}
+    ],
+    "total_line_count": 2,
+    "rows": [12, 30],
+    "header_conflicts": [{"field": "site_location", "survivor_value": "甲地址",
+      "discarded": [{"issue_id": "issue-b", "issue_no": "B", "value": "乙地址"}],
+      "final_value": "甲地址"}],
+    "message": "领用单 A、B 将合并为 WBDD-20261013-0005（共 2 行）"
+  }],
+  "site_issue_merge_token": "<signed-preview-token>"
 }
 ```
 
+页面显示目标号、保留单、各来源 ID/原号/明细数/行号和冲突决议；只在应用已预览合单时透传 token。4xx 示例：`{"detail":{"code":"site_issue_merge_conflict","message":"06_领用返还 第 12、30 行领用单号 T 无法合并：多行显式填写了不同领用日期；请修改后重新校验","issues":[],"rows":[{"row_no":12,"issue_no":"T"},{"row_no":30,"issue_no":"T"}]}}`。
+
 ## 验证与交付
 
-- 新契约文件 `backend/tests/test_master_workbook_issue_no_batch.py`：24 项通过；覆盖真实 HTTP、伪造/重放计划、独立自动新头冲突、互换/链式改名及事实更正、审计/版本/revision、地址/日期/明细序号、校验后占号，以及真实 PostgreSQL 唯一键和其他约束故障。
-- flush 故障注入在同一测试事务中用 Core 插入竞争行，证明真实数据库异常转换及整本回滚；不冒充两个并发事务压力测试。
-- 完整相关回归：**822 passed、0 failed、0 skipped**。选择所有文件名包含 `master`、`workbook` 或 `site_issue` 的后端测试，共 47 个文件；按排序列表 `[0::3]`、`[1::3]`、`[2::3]` 分组运行。三组分别为 197 passed / 186.20s、347 passed / 351.78s、278 passed / 217.65s，退出码均为 0。仅有既有 openpyxl / TestClient 弃用告警。
-- 使用本任务专用 `postgres:15` 容器，随机 localhost 端口；pytest 再为每个进程创建独占数据库，未使用共享 `:5433`。测试结束已移除本任务容器，并核对其不再存在；未更改其他容器。
-- 独立代码与需求复核均为同模型不同代理，不宣称异构审查。开发验证不代表用户验收、main 人工审批或生产部署。
-- 回退为撤回本次代码提交，无数据库结构回退；已成功的人工改号和业务审计不自动逆向更改。
+- 后端 **935 passed、0 failed、0 skipped**：47 个 master/workbook/site_issue 文件 + 8 个 bad_return/warehouse 文件，共 55 个文件。除新契约文件外的排序列表按 `[0::2]`、`[1::2]` 分组，分别 **394 passed / 339.26s**、**489 passed / 418.33s**；最终新契约文件 **52 passed / 81.65s**，三个进程退出码均为 0。仅既有 TestClient/openpyxl 弃用告警。
+- 新合单预期先在旧拒绝行为上得到两项红灯（validate 422），再实现并验证。52 个契约覆盖二/三单、持号者优先、显式/默认冲突、软作废、全部引用、旧事件防复活、互换/链式、token 漂移/非 ASCII、真实 IntegrityError 回滚及重导出 0 changes 的干净回传。flush 故障注入是同事务 Core 竞争行，证明真实约束异常和整本回滚，不宣称并发压力测试。
+- 使用本任务专用 `postgres:15` 容器 `itsp-wbmerge-pytest-1792407853`，随机 localhost 端口 32866；pytest 再为每进程创建独立数据库，未使用共享 5433。测试后仅移除本任务容器，未更改其他容器。
+- 前端相关 Vitest **114 passed**（WorkbookRoundTrip/API/Blob 33 + 项目面板 81），`npm run build`（tsc + vite）退出 0，仅已有大 chunk 提示。合成数据实浏览器验证 320/390 宽度无横向溢出、预览可滚动、Enter 确认正确带 token。
+- 独立后端边界复核 **3 passed**，发现的无 ID 地址意图、inactive 签名行及合单+链式+新增明细组合已收编到52项契约。非 ASCII token 使用 bytes 恒时比较，validate/apply 的操作者选路一致。
 
-复跑方式：在独立 PostgreSQL 15 容器就绪后，命令级设置 `PYTEST_DATABASE_BASE_URL` 指向该容器，进入 `backend/` 运行；不要使用其他代理的共享端口。
+复跑选集（先启动自己的临时 PostgreSQL 15，仅命令级设置 `PYTEST_DATABASE_BASE_URL`，不要改 env 文件或使用共享端口）：
 
 ```bash
-uv run --extra dev pytest -q tests/test_master_workbook_issue_no_batch.py
-uv run --extra dev python - <<'PY'
+cd backend
+uv run --extra dev python - <<'PYTEST'
 from pathlib import Path
-import subprocess
-import sys
-
+import subprocess, sys
 files = sorted(str(p) for p in Path('tests').glob('test_*.py')
-               if any(term in p.name for term in ('master', 'workbook', 'site_issue')))
+               if any(term in p.name for term in ('master', 'workbook', 'site_issue',
+                                                  'bad_return', 'return_obligation', 'warehouse')))
 subprocess.run([sys.executable, '-m', 'pytest', '-q', '--tb=short', *files], check=True)
-PY
+PYTEST
 ```
+
+独立复核为同模型不同代理，不宣称异构审查。开发验证不代表用户点按验收、main 人工审批或生产部署。回退可撤回代码；已成功的业务合单不通过代码回退自动拆单，应依据 MERGE 审计另行处理，不伪改历史。

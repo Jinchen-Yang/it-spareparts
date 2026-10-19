@@ -68,6 +68,31 @@ export interface WorkbookVoidedRow extends WorkbookFieldChange {
   message: string;
 }
 
+export interface WorkbookSiteIssueMerge {
+  target_issue_no: string;
+  survivor_issue_id: string;
+  sources: {
+    issue_id: string;
+    issue_no: string;
+    line_count: number;
+    rows: number[];
+  }[];
+  total_line_count: number;
+  rows: number[];
+  header_conflicts: {
+    field: string;
+    field_label?: string;
+    survivor_value: string | null;
+    discarded: { issue_id: string; issue_no: string; value: string | null }[];
+    final_value: string | null;
+  }[];
+}
+
+export interface WorkbookApplyOptions {
+  forceTakeover?: boolean;
+  siteIssueMergeToken?: string;
+}
+
 export interface WorkbookApplyResult {
   project_id?: string;
   changes?: WorkbookFieldChange[];
@@ -87,6 +112,8 @@ export interface WorkbookApplyResult {
   site_creates?: number;
   site_voids?: number;
   site_updates?: number;
+  site_issue_merges?: WorkbookSiteIssueMerge[];
+  site_issue_merge_count?: number;
   cost_overrides?: number;
   line_creates?: number;
   line_updates?: number;
@@ -121,6 +148,7 @@ export interface WillReassignOrder {
 }
 
 export interface WorkbookValidateResult extends Partial<WorkbookApplyResult> {
+  site_issue_merge_token?: string | null;
   will_void_rows?: WillVoidRow[];
   will_reassign_orders?: WillReassignOrder[];
   [key: string]: unknown;
@@ -136,11 +164,12 @@ async function download(path: string, params?: Record<string, unknown>): Promise
 async function upload(
   path: string,
   file: File,
-  opts?: { forceTakeover?: boolean },
+  opts?: WorkbookApplyOptions,
 ): Promise<WorkbookApplyResult> {
   const body = new FormData();
   body.append("file", file);
   if (opts?.forceTakeover) body.append("force_takeover", "true");
+  if (opts?.siteIssueMergeToken) body.append("site_issue_merge_token", opts.siteIssueMergeToken);
   const resp = await api.post<WorkbookApplyResult>(path, body);
   return resp.data;
 }
@@ -183,7 +212,7 @@ export const validateProjectMaster = async (projectId: string, file: File) => {
 export const applyProjectMaster = (
   projectId: string,
   file: File,
-  opts?: { forceTakeover?: boolean },
+  opts?: WorkbookApplyOptions,
 ) =>
   upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/apply`,
     file, opts);
