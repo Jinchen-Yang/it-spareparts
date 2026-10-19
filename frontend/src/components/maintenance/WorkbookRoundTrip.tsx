@@ -4,8 +4,10 @@ import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type {
   WillReassignOrder,
   WillVoidRow,
+  WorkbookApplyOptions,
   WorkbookApplyResult,
   WorkbookFieldChange,
+  WorkbookSiteIssueMerge,
   WorkbookSiteReplayErrorDetail,
   WorkbookSiteReplayRow,
   WorkbookValidateResult,
@@ -13,6 +15,15 @@ import type {
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 
 const { Text } = Typography;
+const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
+  issue_no: "领用单号",
+  issue_date: "领用日期",
+  receiver: "领用人",
+  issued_by: "发放人",
+  site_location: "领用地址",
+  raw_status: "原始状态",
+  normalized_status: "领用状态",
+};
 
 /**
  * 「下载 → 改 → 上传覆盖」这一组动作的唯一复用件（REQUIREMENTS #38/#40）。
@@ -30,7 +41,7 @@ export interface WorkbookRoundTripProps {
   filename: string;
   onDownload: () => Promise<Blob>;
   /** opts.forceTakeover：2.7.0 行级冲突强制接管（覆盖他人改动并留审计）。 */
-  onApply: (file: File, opts?: { forceTakeover?: boolean }) => Promise<WorkbookApplyResult>;
+  onApply: (file: File, opts?: WorkbookApplyOptions) => Promise<WorkbookApplyResult>;
   /**
    * 落库成功后的读回校验。返回 false/抛错都只表示“刷新失败”，不能把已经
    * commit 的上传误报成上传失败；调用方应同时失效页面里的旧快照。
@@ -79,6 +90,8 @@ function describe(result: Partial<WorkbookApplyResult>): string {
   if (result.site_creates) parts.push(`领用新增 ${result.site_creates} 行`);
   if (result.site_voids) parts.push(`领用作废 ${result.site_voids} 行`);
   if (result.site_updates) parts.push(`领用更新 ${result.site_updates} 行`);
+  const mergeCount = result.site_issue_merge_count ?? result.site_issue_merges?.length ?? 0;
+  if (mergeCount) parts.push(`领用单合并 ${mergeCount} 组`);
   return parts.length ? parts.join("、") : "文件没有改动";
 }
 
@@ -152,7 +165,7 @@ export function WorkbookRoundTrip({
   const applyDirectly = async (
     file: File,
     isCurrent: () => boolean,
-    opts?: { forceTakeover?: boolean },
+    opts?: WorkbookApplyOptions,
   ) => {
     if (!isCurrent()) return;
     const result = await onApply(file, opts);
@@ -178,9 +191,16 @@ export function WorkbookRoundTrip({
   };
 
   /** 两阶段：预检 → 摆变更摘要和作废预览 → 用户确认才落库。 */
-  const validateThenApply = async (file: File, isCurrent: () => boolean) => {
+  const validateThenApply = async (
+    file: File,
+    isCurrent: () => boolean,
+    rememberMergeToken: (token: string | undefined) => void,
+  ) => {
     const preview = await onValidate!(file);
     if (!isCurrent()) return;
+    const mergeToken = preview.site_issue_merge_token || undefined;
+    rememberMergeToken(mergeToken);
+    const mergeRows = preview.site_issue_merges ?? [];
     const voidRows = preview.will_void_rows ?? [];
     const reassignRows = preview.will_reassign_orders ?? [];
     const voidedRows = preview.voided_rows ?? [];
@@ -194,8 +214,9 @@ export function WorkbookRoundTrip({
         title: `确认回传${title}？`,
         width: 560,
         content: (
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Space direction="vertical" size={12} style={{ width: "100%", maxHeight: "65vh", overflowY: "auto", overflowWrap: "anywhere" }}>
           <Text>{describe(preview)}</Text>
+          {mergeRows.length ? <SiteIssueMerges merges={mergeRows} /> : null}
           {voidedRows.length ? (
             // D-02 作废优先：这些行的改动不会写入，其余行照常回传
             <Alert
@@ -259,7 +280,7 @@ export function WorkbookRoundTrip({
         onCancel: finish,
         onOk: async () => {
           try {
-            await applyDirectly(file, isCurrent);
+            await applyDirectly(file, isCurrent, mergeToken ? { siteIssueMergeToken: mergeToken } : undefined);
             finish();
           } catch (error) {
             modal.destroy();
@@ -300,9 +321,10 @@ export function WorkbookRoundTrip({
       && uploadEpoch.current === requestEpoch && localStorage.getItem("token") === requestSession;
     setRetainedDraft(null);
     setApplying(true);
+    let siteIssueMergeToken: string | undefined;
     try {
       if (onValidate) {
-        await validateThenApply(file, isCurrent);
+        await validateThenApply(file, isCurrent, (token) => { siteIssueMergeToken = token; });
       } else {
         await applyDirectly(file, isCurrent);
       }
@@ -358,6 +380,7 @@ export function WorkbookRoundTrip({
               try {
                 await applyDirectly(file, isCurrent, {
                   forceTakeover: true,
+                  ...(siteIssueMergeToken ? { siteIssueMergeToken } : {}),
                 });
               } catch (takeoverError) {
                 if (isCurrent()) {
@@ -443,6 +466,56 @@ export function WorkbookRoundTrip({
         </Text>
       ) : null}
     </Space>
+  );
+}
+
+function SiteIssueMerges({ merges }: { merges: WorkbookSiteIssueMerge[] }) {
+  return (
+    <Alert
+      type="warning"
+      style={{ padding: 12 }}
+      message={`以下 ${merges.length} 组合并为同号领用单，请核对明细归属及单头取值`}
+      description={(
+        <List
+          size="small"
+          dataSource={merges}
+          rowKey={(merge) => `${merge.target_issue_no}-${merge.survivor_issue_id}`}
+          renderItem={(merge) => {
+            const survivor = merge.sources.find((source) => source.issue_id === merge.survivor_issue_id);
+            return (
+              <List.Item style={{ padding: "8px 0" }}>
+                <Space direction="vertical" size={4} style={{ minWidth: 0, width: "100%" }}>
+                  <Text strong>合并目标：{merge.target_issue_no}</Text>
+                  <Text>保留单：{survivor?.issue_no || merge.target_issue_no}（{merge.survivor_issue_id}）</Text>
+                  {merge.sources.map((source) => (
+                    <Text key={source.issue_id}>
+                      来源单：{source.issue_no}（{source.issue_id}）· 明细 {source.line_count} 行
+                      {source.rows.length ? ` · Excel 第 ${source.rows.join("、")} 行` : " · 当前项目内已有单据"}
+                    </Text>
+                  ))}
+                  <Text>
+                    合并后现有明细共 {merge.total_line_count} 行
+                    {merge.rows.length ? ` · Excel 第 ${merge.rows.join("、")} 行` : ""}
+                  </Text>
+                  {merge.header_conflicts.map((conflict) => (
+                    <Space key={conflict.field} direction="vertical" size={2} style={{ minWidth: 0, width: "100%" }}>
+                      <Text>
+                        {conflict.field_label || SITE_ISSUE_HEADER_LABELS[conflict.field] || conflict.field}：保留单原值 {conflict.survivor_value || "（空）"}；最终值 {conflict.final_value || "（空）"}
+                      </Text>
+                      {conflict.discarded.map((discarded) => (
+                        <Text key={discarded.issue_id} type="secondary">
+                          舍弃来源值：{discarded.issue_no}（{discarded.issue_id}）· {discarded.value || "（空）"}
+                        </Text>
+                      ))}
+                    </Space>
+                  ))}
+                </Space>
+              </List.Item>
+            );
+          }}
+        />
+      )}
+    />
   );
 }
 

@@ -23,6 +23,7 @@ import io
 import hashlib
 import hmac
 import json
+import logging
 import re
 from collections import defaultdict
 from copy import deepcopy
@@ -37,6 +38,7 @@ from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import config
@@ -70,6 +72,7 @@ from app.models.sales import FSalesOrder
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_cost_quality, maintenance_project_identity
 from app.services import maintenance_periods
+from app.services import maintenance_site_issue_merge as site_merges
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_collection_milestones import write_collection_milestone
@@ -89,6 +92,7 @@ V2_PROTOCOL_ID = "ITDATA_MAINT_PROJECT_MASTER/2.0"
 # 提示重新下载。
 V2_TEMPLATE_VERSION = "2.7.1"
 V2_META_SIGNATURE_ALGORITHM = "HMAC-SHA256"
+logger = logging.getLogger(__name__)
 _V2_META_SIGNATURE_DOMAIN = b"ITDATA_MAINT_PROJECT_MASTER_META_V1\x00"
 
 SHEET_BASICS = "01_项目基础信息"
@@ -251,6 +255,8 @@ class SiteReturnFlag:
     remark: str | None = None
     site_location_action: str = "keep"
     site_location: str | None = None
+    # Excel 来源行；新增明细若附加到既有单头，issue_id 也须明确绑定。
+    row_no: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1849,6 +1855,9 @@ class MasterV2Plan:
     expected_workbook_data_version: str = ""
     cost_refills: tuple[CostRefill, ...] = ()
     site_flags: tuple[SiteReturnFlag, ...] = ()
+    site_issue_merges: tuple[dict, ...] = ()
+    site_header_intents: tuple[dict, ...] = ()
+    site_issue_rows: dict[str, list[int]] = field(default_factory=dict)
     expense_updates: tuple[ec.ExpenseUpdate, ...] = ()
     receipt_ops: tuple[ec.CollectionOp, ...] = ()
     milestone_changes: tuple[V2MilestoneChange, ...] = ()
@@ -1898,6 +1907,7 @@ class MasterV2Plan:
             "site_voids": sum(x.is_void for x in self.site_flags),
             "site_updates": sum(not x.is_create and not x.is_void
                                 for x in self.site_flags),
+            "site_issue_merges": len(self.site_issue_merges),
         }
 
 
@@ -2032,6 +2042,8 @@ class _V2MergeContext:
         # D-02 唯一保留的拒绝：作废优先。用户改到的行/身份在服务端已作废，
         # 该行不进写集合、也不整本拒绝——记一条行级回执，其余行照常应用。
         self.voided_rows: list[dict] = []
+        self.site_header_intents: list[dict] = []
+        self.site_issue_rows: dict[str, list[int]] = {}
 
     def note_unresolved_pn(self, pn: str, row_no: int) -> None:
         self.unresolved_pns.setdefault(pn, []).append(row_no)
@@ -4052,10 +4064,12 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
         requested_no = str(_cell(row, index, "领用单号") or "").strip()
         if requested_no and requested_no != baseline.get("领用单号", issue.issue_no):
             rename_candidates[requested_no][issue.issue_id] = issue
-    renamed_issues = {name: next(iter(candidates.values()))
-                      for name, candidates in rename_candidates.items() if len(candidates) == 1}
+    renamed_away_ids = {
+        issue.issue_id for name, candidates in rename_candidates.items()
+        for issue in candidates.values() if name != issue.issue_no
+    }
     if not address_columns and not operation_columns:
-        return {}, renamed_issues
+        return {}
     groups = {}
     patches = {}
     for row_no, row in rows:
@@ -4083,6 +4097,8 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
                      db.scalar(select(MaintenanceSiteIssue).where(
                          MaintenanceSiteIssue.project_id == project_id,
                          MaintenanceSiteIssue.issue_no == issue_no)))
+            if not candidates and issue is not None and issue.issue_id in renamed_away_ids:
+                issue = None
             blocked = issue is not None and issue.normalized_status == "void"
         # 空单号/WBDD 输入按现有规则逐行自动编号，不是同一个领用单头。
         new_key = (row_no if not issue_no or re.fullmatch(r"WBDD-\d{8}-\d+", issue_no)
@@ -4146,7 +4162,108 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
                 fields=("领用地址",), entity_type="site_issue"))
         # 单头只写一次；其他同行依旧走原来的未触碰/三路合并规则。
         patches[rows[0]] = _SiteAddressPatch(action, value)
-    return patches, renamed_issues
+    return patches
+
+
+def _v2_duplicate_issue_no(issue_no: str, flags: list[SiteReturnFlag]) -> WorkbookError:
+    rows = sorted({flag.row_no for flag in flags if flag.row_no is not None})
+    location = f"第 {'、'.join(map(str, rows))} 行" if rows else "本次上传"
+    return WorkbookError(
+        "duplicate_issue_no",
+        f"06_领用返还 {location}的领用单号 {issue_no} 与本项目其他领用单重复，"
+        "同一项目内两张不同领用单的单号不能重复，请修改其中一张后重试",
+        details={"rows": [
+            {"row_no": flag.row_no, "issue_id": flag.issue_id, "issue_no": issue_no}
+            for flag in sorted(flags, key=lambda item: item.row_no or 0)
+            if flag.row_no is not None
+        ]},
+    )
+
+
+def _v2_check_site_issue_numbers(
+    db: Session, project_id: str, flags: list[SiteReturnFlag] | tuple[SiteReturnFlag, ...],
+) -> dict[str, tuple[str, date]]:
+    """收齐最终单头；既有同号交给合单计划，新建身份仍不能隐式合并。"""
+    issues = {issue.issue_id: issue for issue in db.scalars(
+        select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.project_id == project_id)
+    )}
+    headers: dict[str, tuple[str, date]] = {}
+    for flag in flags:
+        if flag.is_void or flag.issue_id is None:
+            continue
+        if flag.issue_id not in issues:
+            raise WorkbookError("project_mismatch", "领用单归属已变化，请重新下载")
+        # 新明细的日期不是改头意图，附加到本单的最终单头即可。
+        if flag.is_create or flag.issue_no is None or flag.issue_date is None:
+            continue
+        requested = (flag.issue_no, flag.issue_date)
+        if headers.setdefault(flag.issue_id, requested) != requested:
+            raise WorkbookError(
+                "conflicting_issue_header", "同一领用单的多行包含不同单号或日期，本次未写入",
+            )
+    owners: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for issue_id, issue in issues.items():
+        final_no = headers.get(issue_id, (issue.issue_no, issue.issue_date))[0]
+        owners[final_no].add(("existing", issue_id))
+    flags_by_no: dict[str, list[SiteReturnFlag]] = defaultdict(list)
+    for flag in flags:
+        if flag.is_void or not flag.issue_no:
+            continue
+        flags_by_no[flag.issue_no].append(flag)
+        if flag.is_create:
+            if flag.issue_id is None:
+                # 同号新明细是一张新单；自动生成的新头不能隐式并入既有单。
+                owners[flag.issue_no].add(("new", flag.issue_no))
+            else:
+                issue = issues[flag.issue_id]
+                final_no = headers.get(flag.issue_id, (issue.issue_no, issue.issue_date))[0]
+                if flag.issue_no != final_no:
+                    raise _v2_duplicate_issue_no(flag.issue_no, flags_by_no[flag.issue_no])
+    for issue_no, identities in owners.items():
+        if len(identities) > 1 and any(kind == "new" for kind, _identity in identities):
+            raise _v2_duplicate_issue_no(issue_no, flags_by_no[issue_no])
+    return headers
+
+
+def _v2_collect_site_header_intents(db, project_id, ws, index, merge):
+    """保存显式用户意图及所有签名行号，不能用合并后的值冒充用户改过单头。"""
+    for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        raw_id = str(_cell(row, index, "实体ID") or "")
+        if _is_example_row(row):
+            continue
+        number = str(_cell(row, index, "领用单号") or "").strip()
+        if not raw_id and (not number or re.fullmatch(r"WBDD-\d{8}-\d+", number)):
+            continue  # 自动编号新增行独立成单，不向既有目标投票。
+        line = db.get(MaintenanceSiteIssueLine, raw_id) if raw_id else None
+        issue = db.get(MaintenanceSiteIssue, line.issue_id) if line else None
+        if raw_id and (issue is None or issue.project_id != project_id):
+            continue
+        baseline = (_parse_v2_row_base_token(_cell(row, index, V2_BASE_COLUMN),
+            sheet=V2_SHEET_SITE, entity_id=raw_id, row_no=row_no) if raw_id else {})
+        if issue:
+            merge.site_issue_rows.setdefault(issue.issue_id, []).append(row_no)
+        def add(name, value):
+            merge.site_header_intents.append({"issue_id": issue.issue_id if issue else None,
+                "target_issue_no": number,
+                "row_no": row_no, "field": name, "value": value})
+        if issue and number and number != baseline.get("领用单号", ""):
+            add("issue_no", issue.issue_no if number == issue.display_no else number)
+        if line and (not line.is_active or issue.normalized_status == "void"):
+            continue  # D-02：被忽略的作废明细不能通过合单间接改日期/地址。
+        raw_date = _cell(row, index, "领用日期")
+        if raw_date not in (None, ""):
+            value = _v2_date(raw_date, row_no=row_no, label="领用", epoch=ws.parent.epoch)
+            if _v2_hash_value(value) != baseline.get("领用日期", ""):
+                add("issue_date", value.isoformat())
+        operations = {str(_cell(row, index, name) or "").strip()
+                      for name in ("地址操作", "领用地址操作")} - {""}
+        if "清空" in operations:
+            add("site_location", None)
+        if operations != {"保留"} and operations != {"清空"}:
+            for name in ("领用地址", "地址", "现场位置"):
+                value = str(_cell(row, index, name) or "").strip()
+                if value and ("设置" in operations or value != baseline.get("领用地址", "")):
+                    add("site_location", value)
 
 
 def _v2_parse_site(
@@ -4158,7 +4275,8 @@ def _v2_parse_site(
         raise WorkbookError("template_version_mismatch",
                             "06_领用返还列定义不是当前 V2.7 版本，请重新下载当前项目总表")
     _v2_site_preflight(db, ws, index, merge)
-    address_patches, renamed_issues = _v2_site_address_patches(db, project_id, ws, index, merge)
+    _v2_collect_site_header_intents(db, project_id, ws, index, merge)
+    address_patches = _v2_site_address_patches(db, project_id, ws, index, merge)
     auto_scope_used = bool(export_id and db.scalar(select(MaintenanceSiteIssue.issue_id).where(
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.issue_no.startswith(_v2_auto_site_prefix(project_id, export_id)),
@@ -4167,12 +4285,12 @@ def _v2_parse_site(
     out: list[SiteReturnFlag] = []
     present_ids: set[str] = set()
     manual_ids: dict[str, int] = {}
-    new_counts: dict[str, int] = {}
     # One issue header is repeated on every line in Excel.  Track changes
     # relative to the stored header so changing a single row propagates once;
     # two different new values fail closed instead of "last row wins".
     header_changes: dict[str, dict[str, object]] = {}
     new_issue_dates: dict[str, date] = {}
+    generated_line_ids: set[str] = set()
     replay_conflicts: list[dict] = []
     replay_conflict_count = 0
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
@@ -4235,6 +4353,8 @@ def _v2_parse_site(
                                           + (f"，关联需求单 {demand_no}" if demand_no else ""))
             identity = "|".join([project_id, issue_no, pn, serial_number or ""])
             raw_id = f"manual-site:{hashlib.sha1(identity.encode('utf-8')).hexdigest()}"
+            if generated:
+                generated_line_ids.add(raw_id)
             # 同文件内重复的手工行（同单号/PN/SN）会推导出相同确定性主键，
             # apply 期双 INSERT 撞主键变 500（本地 E2E 实测）。解析期拒绝。
             prior_row = manual_ids.get(raw_id)
@@ -4323,28 +4443,17 @@ def _v2_parse_site(
                         issue=void_header, issue_no=issue_no, entity_id=raw_id,
                     )
                     continue
-                renamed_issue = renamed_issues.get(issue_no)
-                if renamed_issue is not None:
-                    # 新号还未写库，按签名行定位的稳定单头分配后续明细序号。
-                    base = db.scalar(select(func.max(MaintenanceSiteIssueLine.line_no)).where(
-                        MaintenanceSiteIssueLine.issue_id == renamed_issue.issue_id)) or 0
-                else:
-                    base = db.scalar(
-                        select(func.max(MaintenanceSiteIssueLine.line_no))
-                        .join(MaintenanceSiteIssue,
-                              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-                        .where(
-                            MaintenanceSiteIssue.project_id == project_id,
-                            MaintenanceSiteIssue.issue_no == issue_no,
-                        )
-                    ) or 0
-                new_counts[issue_no] = new_counts.get(issue_no, 0) + 1
-                line_no = int(base) + new_counts[issue_no]
+                # 单头归属与明细序号在收齐最终改号意图后统一分配。
                 previous_date = new_issue_dates.setdefault(issue_no, issue_date)
                 if previous_date != issue_date:
+                    conflicting_rows = sorted({row_no} | {
+                        flag.row_no for flag in out
+                        if flag.is_create and flag.issue_no == issue_no and flag.row_no is not None
+                    })
                     raise WorkbookError(
                         "conflicting_issue_header",
-                        f"06_领用返还中同一新增领用单 {issue_no!r} 填了不同日期",
+                        f"06_领用返还 第 {'、'.join(map(str, conflicting_rows))} 行的领用单号 {issue_no} 填了不同日期，请统一后重试",
+                        details={"rows": [{"row_no": value, "issue_no": issue_no} for value in conflicting_rows]},
                     )
         else:
             demand_no = None
@@ -4468,6 +4577,7 @@ def _v2_parse_site(
                 header["new_dates"].add(requested_date)
         out.append(SiteReturnFlag(
             issue_line_id=str(raw_id), is_create=is_create,
+            row_no=row_no,
             issue_id=issue_id, line_no=line_no, part_id=part_id,
             no_return=(flag == "否") if flag else None,
             issue_no=issue_no,
@@ -4497,24 +4607,15 @@ def _v2_parse_site(
         new_nos = header["new_nos"]
         new_dates = header["new_dates"]
         if len(new_nos) > 1 or len(new_dates) > 1:
+            rows = sorted(merge.site_issue_rows.get(issue_id, []))
+            numbers = '、'.join(sorted(new_nos)) if new_nos else header["original_no"]
             raise WorkbookError(
                 "conflicting_issue_header",
-                "06_领用返还同一领用单的多行填写了不同单号或日期，请统一后重试",
+                f"06_领用返还 第 {'、'.join(map(str, rows))} 行的领用单号 {numbers} 填写了不同单号或日期，请统一后重试",
+                details={"rows": [{"row_no": value, "issue_id": issue_id, "issue_no": numbers} for value in rows]},
             )
         chosen_no = next(iter(new_nos), header["original_no"])
         chosen_date = next(iter(new_dates), header["original_date"])
-        duplicate_issue = db.scalar(
-            select(MaintenanceSiteIssue.issue_id).where(
-                MaintenanceSiteIssue.project_id == project_id,
-                MaintenanceSiteIssue.issue_no == chosen_no,
-                MaintenanceSiteIssue.issue_id != issue_id,
-            )
-        )
-        if duplicate_issue is not None:
-            raise WorkbookError(
-                "duplicate_issue_no",
-                f"领用单号 {chosen_no!r} 已被本项目另一张领用单使用",
-            )
         chosen_headers[issue_id] = (chosen_no, chosen_date)
     merged_out = [
         replace(
@@ -4526,6 +4627,33 @@ def _v2_parse_site(
         else flag
         for flag in out
     ]
+    # 非自动新明细按最终单号附加到稳定单头；自动逐行建单保持独立身份。
+    # A→B 后的新 B 归 A，新增 A 则建新单，不能再按数据库旧号归属。
+    final_owners: dict[str, list[MaintenanceSiteIssue]] = defaultdict(list)
+    for issue in db.scalars(select(MaintenanceSiteIssue).where(
+        MaintenanceSiteIssue.project_id == project_id,
+    )):
+        final_no = chosen_headers.get(issue.issue_id, (issue.issue_no, issue.issue_date))[0]
+        final_owners[final_no].append(issue)
+    new_counts: dict[str, int] = {}
+    line_bases: dict[str, int] = {}
+    for position, flag in enumerate(merged_out):
+        if not flag.is_create:
+            continue
+        candidates = final_owners.get(flag.issue_no, [])
+        candidates.sort(key=lambda issue: (issue.issue_no != flag.issue_no, issue.created_at, issue.issue_id))
+        owner = (candidates[0].issue_id if candidates
+                 and flag.issue_line_id not in generated_line_ids else None)
+        if owner and owner not in line_bases:
+            line_bases[owner] = db.scalar(select(func.max(MaintenanceSiteIssueLine.line_no)).where(
+                MaintenanceSiteIssueLine.issue_id == owner,
+            )) or 0
+        base = line_bases.get(owner, 0)
+        new_counts[flag.issue_no] = new_counts.get(flag.issue_no, 0) + 1
+        merged_out[position] = replace(
+            flag, issue_id=owner, line_no=int(base) + new_counts[flag.issue_no],
+        )
+    _v2_check_site_issue_numbers(db, project_id, merged_out)
     return merged_out, present_ids
 
 
@@ -5184,6 +5312,7 @@ def _v2_assert_entity_scope(
     expense_ids: set[str] | None = None,
     linked_sales_order_nos: set[str] | None = None,
     lock_rows: bool = False,
+    lock_site_merge_scope: bool = False,
 ) -> set[str]:
     """Fail the complete workbook before a foreign fact can be mutated.
 
@@ -5272,7 +5401,7 @@ def _v2_assert_entity_scope(
             "line_not_in_project",
             "工作簿包含已不存在、已作废或不属于本项目的备件事实，请重新下载",
         )
-    if lock_rows and requested_sites:
+    if lock_rows and (requested_sites or lock_site_merge_scope):
         # Site writers use parent issue -> child line.  Resolve the edge first,
         # lock parents in stable order, then lock children and re-read the live
         # join; reversing that order deadlocks with an issue-level writer.
@@ -5290,6 +5419,10 @@ def _v2_assert_entity_scope(
                 "工作簿包含已不存在、已作废或不属于本项目的领用事实，请重新下载",
             )
         parent_issue_ids = sorted({issue_id for _line_id, issue_id in site_edges})
+        if lock_site_merge_scope:
+            parent_issue_ids = sorted(db.scalars(select(MaintenanceSiteIssue.issue_id).where(
+                MaintenanceSiteIssue.project_id == project_id,
+            )))
         list(db.scalars(
             select(MaintenanceSiteIssue)
             .where(MaintenanceSiteIssue.issue_id.in_(parent_issue_ids))
@@ -5299,14 +5432,15 @@ def _v2_assert_entity_scope(
         ).all())
         locked_site_lines = list(db.scalars(
             select(MaintenanceSiteIssueLine)
-            .where(MaintenanceSiteIssueLine.issue_line_id.in_(requested_sites))
+            .where(MaintenanceSiteIssueLine.issue_id.in_(parent_issue_ids)
+                   if lock_site_merge_scope else MaintenanceSiteIssueLine.issue_line_id.in_(requested_sites))
             .order_by(MaintenanceSiteIssueLine.issue_line_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         ).all())
         if (
-            {line.issue_line_id for line in locked_site_lines} != requested_sites
-            or {line.issue_id for line in locked_site_lines} != set(parent_issue_ids)
+            not requested_sites.issubset({line.issue_line_id for line in locked_site_lines})
+            or any(line.issue_id not in parent_issue_ids for line in locked_site_lines)
         ):
             raise WorkbookError(
                 "site_line_not_in_project",
@@ -6030,6 +6164,14 @@ def validate_project_master_v2(
         ),
     )
 
+    merges = site_merges.plan_merges(
+        db, project_id, _v2_check_site_issue_numbers(db, project_id, site_flags), site_flags,
+        intents=merge.site_header_intents, issue_rows=merge.site_issue_rows,
+    )
+    for item in merges:
+        merge.changes.append({"sheet": V2_SHEET_SITE, "row": item["target_issue_no"],
+            "entity_id": item["survivor_issue_id"], "field": "领用单合并", "old": "",
+            "new": item["message"]})
     return MasterV2Plan(
         project_id=project_id,
         sheets=included,
@@ -6040,6 +6182,9 @@ def validate_project_master_v2(
         row_guards=tuple(merge.guards),
         cost_refills=cost_refills,
         site_flags=site_flags,
+        site_issue_merges=merges,
+        site_header_intents=tuple(merge.site_header_intents),
+        site_issue_rows=merge.site_issue_rows,
         expense_updates=tuple(expense_updates),
         receipt_ops=receipt_ops,
         milestone_changes=milestone_changes,
@@ -6066,6 +6211,23 @@ def _v2_apply_operation_key(plan: MasterV2Plan, operated_by: str) -> str | None:
     return "master-v2:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def site_issue_merge_token(plan: MasterV2Plan, operated_by: str) -> str:
+    """绑定可见预检，不能用 apply 再解析的新计划替代用户确认过的计划。"""
+    key_id, key = get_settings().maintenance_manifest_signing_material()
+    payload = site_merges.digest({"project_id": plan.project_id, "file_sha256": plan.file_sha256,
+                                 "operated_by": operated_by, "merges": plan.site_issue_merges})
+    signature = hmac.new(key, b"ITDATA_SITE_MERGE_PREVIEW_V1\0" + payload.encode(), hashlib.sha256).hexdigest()
+    return f"{key_id}.{signature}"
+
+
+def verify_site_issue_merge_token(plan: MasterV2Plan, operated_by: str, token: str | None):
+    if not plan.site_issue_merges and not token:
+        return
+    if not token or not hmac.compare_digest(token.encode("utf-8"), site_issue_merge_token(plan, operated_by).encode("ascii")):
+        raise WorkbookError("stale_site_issue_merge",
+            "领用单合并计划已变化或缺少预检确认，本次未写入；请重新校验并核对合并明细后再应用")
+
+
 def _v2_apply_result(
     plan: MasterV2Plan,
     *,
@@ -6082,6 +6244,9 @@ def _v2_apply_result(
         "project_id": plan.project_id,
         "sheets": list(plan.sheets),
         **plan.summary,
+        "summary": plan.summary,
+        "site_issue_merge_count": len(plan.site_issue_merges),
+        "site_issue_merges": [dict(item) for item in plan.site_issue_merges],
         "will_void_rows": [dict(row) for row in plan.will_void_rows],
         "changes": [dict(item) for item in plan.field_changes],
         "conflicts": [dict(item) for item in plan.conflicts],
@@ -6156,6 +6321,44 @@ def get_project_master_v2_replay(
 
 
 def apply_project_master_v2(
+    db: Session,
+    plan: MasterV2Plan,
+    *,
+    operated_by: str,
+    import_batch_id: str,
+    user_ctx: UserContext | None = None,
+) -> dict:
+    # 本服务拥有整本事务及 commit；所有写入/flush（含下游原语与回执）
+    # 的约束失败都必须回滚，不能把 failed Session 或数据库 500 留给调用方。
+    try:
+        return _apply_project_master_v2(
+            db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
+            user_ctx=user_ctx,
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning("项目总表应用发生数据库约束冲突，整本已回滚", exc_info=True)
+        diag = getattr(exc.orig, "diag", None)
+        constraint = getattr(diag, "constraint_name", None)
+        if constraint == "uq_maintenance_site_issue_project_no":
+            # 只把本计划已有的单号带给用户，不透出数据库 SQL/参数。
+            detail = getattr(diag, "message_detail", "") or ""
+            matching = [flag for flag in plan.site_flags
+                        if flag.issue_no and f", {flag.issue_no})" in detail]
+            if matching:
+                raise _v2_duplicate_issue_no(matching[0].issue_no, matching) from exc
+            raise WorkbookError(
+                "duplicate_issue_no",
+                "领用单号与本项目其他领用单重复，本次上传未写入任何数据；"
+                "请核对单号或重新下载总表后重试",
+            ) from exc
+        raise WorkbookError(
+            "apply_conflict",
+            "应用项目总表时数据发生冲突，本次上传未写入任何数据；请重新下载总表后重试",
+        ) from exc
+
+
+def _apply_project_master_v2(
     db: Session,
     plan: MasterV2Plan,
     *,
@@ -6398,10 +6601,19 @@ def apply_project_master_v2(
         ),
         linked_sales_order_nos=prelock_contract_nos,
         lock_rows=True,
+        lock_site_merge_scope=bool(plan.site_flags or plan.site_issue_merges),
     )
     # 行锁已在手且读的是新鲜值：此刻复核 validate 时刻的行指纹。必须在任何写
     # 之前 —— 冲突时整本零写入，由调用方 rollback。
     _v2_recheck_row_guards(db, plan)
+    requested_headers = _v2_check_site_issue_numbers(db, plan.project_id, plan.site_flags)
+    participant_ids = {source["issue_id"] for item in plan.site_issue_merges for source in item["sources"]}
+    site_merges.references.snapshot_references(db, participant_ids, lock=True)
+    current_merges = site_merges.plan_merges(db, plan.project_id, requested_headers, plan.site_flags,
+        intents=plan.site_header_intents, issue_rows=plan.site_issue_rows)
+    if current_merges != plan.site_issue_merges:
+        raise WorkbookError("stale_site_issue_merge",
+            "领用单合并对象、明细或单头已变化，本次未写入；请重新校验并核对合并计划后再应用")
     if plan.project_note_change is not None:
         from app.services import maintenance_project_catalog as catalog
 
@@ -6762,7 +6974,6 @@ def apply_project_master_v2(
     # Apply each repeated issue header once.  Parser normalization guarantees
     # all rows of the same issue carry one chosen value, but recheck the plan so
     # a forged in-process plan cannot restore row-order-dependent behavior.
-    requested_headers: dict[str, tuple[str, date]] = {}
     requested_addresses: dict[str, str | None] = {}
     new_addresses: dict[str, str | None] = {}
     for flag in plan.site_flags:
@@ -6772,40 +6983,69 @@ def apply_project_master_v2(
                     (not flag.site_location or len(flag.site_location) > 256)):
                 raise WorkbookError("invalid_site_address", "领用地址更新无效，本次未写入")
             address = flag.site_location if flag.site_location_action == "set" else None
-            address_issue = (db.get(MaintenanceSiteIssue, flag.issue_id)
-                             if flag.issue_id else db.scalar(select(MaintenanceSiteIssue).where(
-                                 MaintenanceSiteIssue.project_id == plan.project_id,
-                                 MaintenanceSiteIssue.issue_no == flag.issue_no)))
+            address_issue = db.get(MaintenanceSiteIssue, flag.issue_id) if flag.issue_id else None
             address_map = requested_addresses if address_issue else new_addresses
             address_key = address_issue.issue_id if address_issue else flag.issue_no
             if address_key in address_map and address_map[address_key] != address:
                 raise WorkbookError("conflicting_issue_address", "同一领用单包含不同地址，本次未写入")
             address_map[address_key] = address
-        if flag.is_void or flag.issue_id is None:
-            continue
-        requested = (flag.issue_no, flag.issue_date)
-        if requested[0] is None or requested[1] is None:
-            continue
-        previous = requested_headers.setdefault(flag.issue_id, requested)
-        if previous != requested:
-            raise WorkbookError(
-                "conflicting_issue_header",
-                "同一领用单的多行包含不同单号或日期，本次未写入",
-            )
-    # 签名行改名 A→B 与同文件新增 B 明细属于同一单头；地址预汇总
-    # 已用 A 的签名基线校验，在实际改名前把 B 的地址接回稳定身份。
-    for issue_id, (requested_no, _requested_date) in requested_headers.items():
-        if requested_no in new_addresses:
-            address = new_addresses.pop(requested_no)
-            if issue_id in requested_addresses and requested_addresses[issue_id] != address:
-                raise WorkbookError("conflicting_issue_address", "同一领用单包含不同地址，本次未写入")
-            requested_addresses[issue_id] = address
+    merged_into = {}
+    occupied_numbers = set(db.scalars(select(MaintenanceSiteIssue.issue_no).where(
+        MaintenanceSiteIssue.project_id == plan.project_id,
+    ))) | {number for number, _date in requested_headers.values()}
+    for item in plan.site_issue_merges:
+        source_ids = [source["issue_id"] for source in item["sources"]]
+        try:
+            site_merges.references.prepare_references(db, source_ids)
+        except WorkbookError as exc:
+            raise site_merges.conflict(item["target_issue_no"], item["rows"], exc.message) from exc
+        survivor_id = item["survivor_issue_id"]
+        for issue_id in source_ids:
+            merged_into[issue_id] = survivor_id
+            requested_addresses.pop(issue_id, None)
+            if issue_id != survivor_id:
+                tombstone_no = "WB-MERGED-" + uuid4().hex
+                while tombstone_no in occupied_numbers:
+                    tombstone_no = "WB-MERGED-" + uuid4().hex
+                occupied_numbers.add(tombstone_no)
+                requested_headers[issue_id] = (tombstone_no, db.get(MaintenanceSiteIssue, issue_id).issue_date)
+        requested_headers[survivor_id] = (
+            item["target_issue_no"], date.fromisoformat(item["final_header"]["issue_date"]),
+        )
+        requested_addresses[survivor_id] = item["final_header"]["site_location"]
     for issue_id in requested_addresses:
         address_issue = db.get(MaintenanceSiteIssue, issue_id)
         requested_headers.setdefault(issue_id, (address_issue.issue_no, address_issue.issue_date))
+    # 强引用保留原始 ORM 头；Session identity map 为弱引用，不能在临时改号后
+    # 重新加载头，否则审计与原语快照会读到数据库中的暂号。
+    header_issues = {issue_id: db.get(MaintenanceSiteIssue, issue_id)
+                     for issue_id in requested_headers}
+    # 两阶段改名：先在数据库内腾空所有待改号，再由既有原语一次完成原号→终号。
+    # Core UPDATE 不同步 identity map，原语的 before 快照与外层审计仍看到原号；
+    # 不额外 bump、不记临时号审计，也不让中途的逐单 flush 撞互换/链式改名。
+    renames = {
+        issue_id: issue_no for issue_id, (issue_no, _date) in requested_headers.items()
+        if header_issues[issue_id].issue_no != issue_no
+    }
+    if renames:
+        occupied = set(db.scalars(select(MaintenanceSiteIssue.issue_no).where(
+            MaintenanceSiteIssue.project_id == plan.project_id,
+        ))) | set(renames.values())
+        with db.no_autoflush:
+            for issue_id in sorted(renames):
+                temporary_no = "WB-TEMP-" + uuid4().hex  # 40 字符，列上限 64。
+                while temporary_no in occupied:
+                    temporary_no = "WB-TEMP-" + uuid4().hex
+                occupied.add(temporary_no)
+                db.execute(
+                    MaintenanceSiteIssue.__table__.update()
+                    .where(MaintenanceSiteIssue.issue_id == issue_id)
+                    .values(issue_no=temporary_no)
+                )
+        db.flush()
     header_changed_issue_ids: set[str] = set()
     for issue_id, (issue_no, issue_date) in requested_headers.items():
-        issue = db.get(MaintenanceSiteIssue, issue_id)
+        issue = header_issues[issue_id]
         if issue is None or issue.project_id != plan.project_id:
             raise WorkbookError("project_mismatch", "领用单归属已变化，请重新下载")
         header_changed = issue.issue_no != issue_no or issue.issue_date != issue_date
@@ -6850,10 +7090,32 @@ def apply_project_master_v2(
         # 刷出本次合法改名，否则会误建同号新单并撞唯一键。
         db.flush()
 
+    for item in plan.site_issue_merges:
+        try:
+            site_merges.move_lines(db, item, project_id=plan.project_id,
+                                  operated_by=operated_by, reason=audit_reason)
+        except WorkbookError as exc:
+            raise site_merges.conflict(item["target_issue_no"], item["rows"], exc.message) from exc
+        header_changed_issue_ids.add(item["survivor_issue_id"])
+        operating_fact_changed = True
+    # 合单后新增明细追加到最终头的最大行号后，不能复用合单前的序号。
+    site_flags = []
+    next_line_numbers = {}
+    for flag in plan.site_flags:
+        if flag.is_create and flag.issue_id in merged_into:
+            owner = merged_into[flag.issue_id]
+            if owner not in next_line_numbers:
+                next_line_numbers[owner] = db.scalar(select(func.max(MaintenanceSiteIssueLine.line_no)).where(
+                    MaintenanceSiteIssueLine.issue_id == owner,
+                )) or 0
+            next_line_numbers[owner] += 1
+            flag = replace(flag, issue_id=owner, line_no=next_line_numbers[owner])
+        site_flags.append(flag)
+
     # Recheck generated scopes under the apply locks. A second validation of
     # an edited original file must not add a second copy after the first wins.
     auto_prefix = _v2_auto_site_prefix(plan.project_id, plan.export_id)
-    if any(f.is_create and (f.issue_no or "").startswith(auto_prefix) for f in plan.site_flags):
+    if any(f.is_create and (f.issue_no or "").startswith(auto_prefix) for f in site_flags):
         if db.scalar(select(MaintenanceSiteIssue.issue_id).where(
             MaintenanceSiteIssue.project_id == plan.project_id,
             MaintenanceSiteIssue.issue_no.startswith(auto_prefix),
@@ -6863,10 +7125,11 @@ def apply_project_master_v2(
     from app.services import maintenance_site_return_requirements as requirements
     requirement_before = {
         flag.issue_line_id: requirements.snapshot(line)
-        for flag in plan.site_flags
+        for flag in site_flags
         if (line := db.get(MaintenanceSiteIssueLine, flag.issue_line_id)) is not None
     }
-    for flag in plan.site_flags:
+    created_issues: dict[str, MaintenanceSiteIssue] = {}
+    for flag in site_flags:
         line = db.get(MaintenanceSiteIssueLine, flag.issue_line_id)
         # 2026-08-23：缺行=作废——领用行软作废，退出成本与返还义务计算；
         # 一张单全部行都作废时，单据状态同步置 void（与系统内作废同观感）
@@ -6900,10 +7163,9 @@ def apply_project_master_v2(
                 "本次上传未写入任何数据；请重新下载后再传",
             )
         if line is None and flag.is_create:
-            issue = db.scalar(select(MaintenanceSiteIssue).where(
-                MaintenanceSiteIssue.project_id == plan.project_id,
-                MaintenanceSiteIssue.issue_no == flag.issue_no,
-            ))
+            # 附加明细已在 parse 明确绑定、锁内复核，不能被并发出现的同号头接走。
+            issue = (db.get(MaintenanceSiteIssue, flag.issue_id) if flag.issue_id
+                     else created_issues.get(flag.issue_no))
             if issue is not None and issue.normalized_status == "void":
                 # 解析期已按 D-02 把落在 void 单头下的新增行挡下；这里只剩
                 # validate→apply 窗口内被面板作废的单头。活行不得挂到 void 单头。
@@ -6936,6 +7198,7 @@ def apply_project_master_v2(
                 )
                 db.add(issue)
                 db.flush()
+                created_issues[flag.issue_no] = issue
             line = MaintenanceSiteIssueLine(
                 issue_line_id=flag.issue_line_id,
                 issue_id=issue.issue_id,
