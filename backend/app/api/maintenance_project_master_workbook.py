@@ -12,6 +12,7 @@
 `action_maintenance_expense_collection_upload`（AB-3 已建，不再新增动作键）。
 """
 import hashlib
+import logging
 import re
 import uuid
 from datetime import date
@@ -57,6 +58,7 @@ from app.services.maintenance_site_issue_facts import SiteIssueEditError
 from app.services.maintenance_expense_integrity import normalize_contract_no
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
+_log = logging.getLogger(__name__)
 
 _MASTER = "/projects/stable/{project_id}/master-workbook"
 _GLOBAL = "/spare-part-lines"
@@ -193,6 +195,9 @@ def _fail(exc: ec.WorkbookError):
         "stale_project_note",
     }
     detail = {"code": exc.code, "message": exc.message, "issues": exc.issues}
+    for key in ("rows", "total_count", "fix_hint"):
+        if key in exc.details:
+            detail[key] = exc.details[key]
     if exc.code == "row_conflicts":
         # 前端 WorkbookRoundTrip.extractConflicts 只认 detail.conflicts；端点自己
         # 拼的前置 409 用的就是这个键。服务层抛的 row_conflicts 必须给同一个键，
@@ -840,6 +845,18 @@ async def validate_project_master(
             }
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:
+        try:
+            # 失败请求也留访问记录；只传 JSON 原始量，不把含日期的计划或
+            # 业务差异送入审计，兼容尚无通用 JSON 归一化的主线。
+            record_access_log(
+                ctx, "workbook_validate", "maintenance_project_master_workbook",
+                {"project_id": project_id, "error_code": exc.code,
+                 "conflict_count": exc.details.get(
+                     "total_count", len(exc.issues) if exc.code == "row_conflicts" else 0)},
+            )
+        except Exception as audit_exc:  # noqa: BLE001 — 审计不能覆盖原始校验错误
+            _log.warning("workbook validation access log failed (%s)",
+                         type(audit_exc).__name__)
         _fail(exc)
     return {"project_id": project_id, "valid": True,
             "sheets": list(plan.sheets), **plan.summary}

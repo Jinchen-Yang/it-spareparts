@@ -6,6 +6,8 @@ import type {
   WillVoidRow,
   WorkbookApplyResult,
   WorkbookFieldChange,
+  WorkbookSiteReplayErrorDetail,
+  WorkbookSiteReplayRow,
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
@@ -270,6 +272,26 @@ export function WorkbookRoundTrip({
     });
   };
 
+  const showSiteReplayError = (detail: WorkbookSiteReplayErrorDetail) => {
+    setRetainedDraft(null);
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        modal.destroy();
+        if (closeConfirmation.current === finish) closeConfirmation.current = null;
+        resolve();
+      };
+      const modal = Modal.error({
+        title: "领用记录冲突，请修改文件后重新上传",
+        width: 720,
+        content: <SiteReplayConflicts detail={detail} />,
+        okText: "返回修改文件",
+        onOk: finish,
+        onCancel: finish,
+      });
+      closeConfirmation.current = finish;
+    });
+  };
+
   const handleUpload = async (file: File) => {
     if (!uploadAllowed.current) return false;
     const requestSession = localStorage.getItem("token");
@@ -291,7 +313,10 @@ export function WorkbookRoundTrip({
       }
       // 2.7.0 行级冲突：展示三值对照，用户确认后可强制接管重传。
       const conflicts = extractConflicts(error);
-      if (conflicts?.length) {
+      const siteReplay = extractSiteReplayError(error);
+      if (siteReplay) {
+        await showSiteReplayError(siteReplay);
+      } else if (conflicts?.length) {
         await new Promise<void>((resolve) => {
           const finish = () => {
             modal.destroy();
@@ -335,7 +360,17 @@ export function WorkbookRoundTrip({
                   forceTakeover: true,
                 });
               } catch (takeoverError) {
-                if (isCurrent()) message.error(readError(takeoverError, "上传失败"));
+                if (isCurrent()) {
+                  const replayError = extractSiteReplayError(takeoverError);
+                  if (replayError) {
+                    // 接管后重校验也可能发现身份碰撞；销毁旧弹窗，让只读
+                    // 明细接续同一次上传的生命周期，不能继续提供强制接管。
+                    modal.destroy();
+                    await showSiteReplayError(replayError);
+                  } else {
+                    message.error(readError(takeoverError, "上传失败"));
+                  }
+                }
               } finally {
                 finish();
               }
@@ -409,6 +444,62 @@ export function WorkbookRoundTrip({
       ) : null}
     </Space>
   );
+}
+
+function SiteReplayConflicts({ detail }: { detail: WorkbookSiteReplayErrorDetail }) {
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%", maxHeight: "65vh", overflowY: "auto", overflowWrap: "anywhere" }}>
+      <Alert type="error" showIcon message={detail.message} description={detail.fix_hint} />
+      <Text type="secondary">字段对照：原值 → 上传值；本次上传未写入任何数据。</Text>
+      {detail.total_count > detail.rows.length ? (
+        <Text type="warning">
+          共 {detail.total_count} 行冲突，当前展示前 {detail.rows.length} 行；其余 {detail.total_count - detail.rows.length} 行请在处理后重新上传查看。
+        </Text>
+      ) : null}
+      <List
+        size="small"
+        dataSource={detail.rows}
+        rowKey={(row) => `${row.row_no}-${row.entity_id}`}
+        renderItem={(row) => (
+          <List.Item>
+            <Space direction="vertical" size={4} style={{ minWidth: 0, width: "100%" }}>
+              <Text strong>行号：{row.row_no}</Text>
+              <Text>实体ID：{row.entity_id}</Text>
+              <Text>领用单号：{row.issue_no} · PN：{row.pn} · SN：{row.sn || "（空）"}</Text>
+              {row.differences.map((difference) => (
+                <Text key={difference.field}>
+                  {difference.field}：{difference.old || "（空）"} → {difference.new || "（空）"}
+                </Text>
+              ))}
+            </Space>
+          </List.Item>
+        )}
+      />
+    </Space>
+  );
+}
+
+function isSiteReplayRow(value: unknown): value is WorkbookSiteReplayRow {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Partial<WorkbookSiteReplayRow>;
+  return typeof row.row_no === "number" && Number.isInteger(row.row_no)
+    && typeof row.entity_id === "string" && typeof row.issue_no === "string"
+    && typeof row.pn === "string" && typeof row.sn === "string"
+    && Array.isArray(row.differences) && row.differences.every((difference) => (
+      difference && typeof difference.field === "string"
+      && typeof difference.old === "string" && typeof difference.new === "string"
+    ));
+}
+
+function extractSiteReplayError(error: unknown): WorkbookSiteReplayErrorDetail | null {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (!detail || typeof detail !== "object") return null;
+  const candidate = detail as Partial<WorkbookSiteReplayErrorDetail>;
+  if (candidate.code !== "stale_site_replay" || typeof candidate.message !== "string"
+    || typeof candidate.fix_hint !== "string" || !Number.isInteger(candidate.total_count)
+    || !Array.isArray(candidate.rows) || !candidate.rows.length
+    || !candidate.rows.every(isSiteReplayRow)) return null;
+  return candidate as WorkbookSiteReplayErrorDetail;
 }
 
 /** 从 409 响应里提取行级冲突三值明细（2.7.0）。 */
