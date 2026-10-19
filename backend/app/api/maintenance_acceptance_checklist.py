@@ -59,6 +59,8 @@ def get_project_checklist(
     project_id: str = Path(..., min_length=1, max_length=36),
     response: Response = None,
     db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -70,6 +72,8 @@ def get_project_checklist(
 def download_checklist_template(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> Response:
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)

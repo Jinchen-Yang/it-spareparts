@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from fastapi import HTTPException
 
+from app.api.date_validation import validate_date_query
 from app.auth import current_role, require_admin
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
@@ -20,7 +21,7 @@ from app.services import dashboard, pool, pool_price_analysis, price_discipline
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
-@router.get("/price-discipline-summary")
+@router.get("/price-discipline-summary", dependencies=[Depends(validate_date_query)])
 def price_discipline_summary(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -62,7 +63,7 @@ def order_detail(
     return pool_price_analysis.apply_visibility(data, ctx)
 
 
-@router.get("/kpi")
+@router.get("/kpi", dependencies=[Depends(validate_date_query)])
 def kpi(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -76,7 +77,7 @@ def kpi(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/sales")
+@router.get("/sales", dependencies=[Depends(validate_date_query)])
 def sales(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -113,7 +114,7 @@ def sales(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/purchase-orders")
+@router.get("/purchase-orders", dependencies=[Depends(validate_date_query)])
 def purchase_orders(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -146,7 +147,7 @@ def purchase_orders(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/trend")
+@router.get("/trend", dependencies=[Depends(validate_date_query)])
 def trend(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -161,7 +162,7 @@ def trend(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/part-ranking")
+@router.get("/part-ranking", dependencies=[Depends(validate_date_query)])
 def part_ranking(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -204,7 +205,7 @@ def pool_rebuild(
     )
 
 
-@router.get("/pools")
+@router.get("/pools", dependencies=[Depends(validate_date_query)])
 def pools(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -225,7 +226,7 @@ def pools(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/pool/{group_id}")
+@router.get("/pool/{group_id}", dependencies=[Depends(validate_date_query)])
 def pool_detail(
     group_id: int,
     date_from: date | None = Query(None),

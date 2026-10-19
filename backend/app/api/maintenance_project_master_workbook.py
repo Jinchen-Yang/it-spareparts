@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.date_validation import validate_from_to_query
 from app.api.maintenance_expense_collection_workbook import (
     _ACTION_KEY,
     _XLSX_MEDIA,
@@ -234,11 +235,11 @@ def _workbook_filename(
 
 # ---------------------------------------------------------- 主页全局备件行级表
 
-@router.get(_GLOBAL + ".xlsx")
+@router.get(_GLOBAL + ".xlsx", dependencies=[Depends(validate_from_to_query)])
 def download_global_lines(
     range_preset: str = Query("this_month", alias="range"),
-    date_from: str | None = Query(None, alias="from"),
-    date_to: str | None = Query(None, alias="to"),
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -246,17 +247,13 @@ def download_global_lines(
     ctx: UserContext = Depends(get_current_user_context),
 ):
     """全项目备件行级表（系统自动回填价之后）。时间预设见 #38。"""
-    from datetime import date as _date
-
-    parsed_from = _date.fromisoformat(date_from) if date_from else None
-    parsed_to = _date.fromisoformat(date_to) if date_to else None
     visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
         content = master.build_global_lines(
             db,
             preset=range_preset,
-            date_from=parsed_from,
-            date_to=parsed_to,
+            date_from=date_from,
+            date_to=date_to,
             allowed_project_ids=visible_project_ids,
         )
     except ec.WorkbookError as exc:

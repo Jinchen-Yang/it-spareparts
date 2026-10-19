@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import current_identity, current_role
+from app.api.query_bounds import PG_INT_MAX
 from app.db import get_db
+from app.models.dimensions import DimPart
 from app.models.system import SysUser
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context,
@@ -331,14 +333,25 @@ def master_edit_state(
 
 @router.get("/master/{part_id}/edit-history")
 def master_edit_history(
-    part_id: int,
+    part_id: str,
     limit: int = Query(20, ge=1, le=100),
     before_id: int | None = Query(None, gt=0),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
-    return master_edit.list_part_edit_history(db, part_id, limit=limit, before_id=before_id)
+    # 历史是型号的子资源：非法/不存在的身份不能冒充「尚无人工历史」。
+    try:
+        resolved_id = int(part_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "型号不存在") from exc
+    if not 1 <= resolved_id <= PG_INT_MAX or db.scalar(
+        select(DimPart.id).where(DimPart.id == resolved_id)
+    ) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "型号不存在")
+    return master_edit.list_part_edit_history(
+        db, resolved_id, limit=limit, before_id=before_id,
+    )
 
 
 @router.get("/master/categories")
