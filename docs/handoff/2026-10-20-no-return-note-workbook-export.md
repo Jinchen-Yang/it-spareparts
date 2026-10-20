@@ -4,7 +4,7 @@
 
 - 分支：`feat/no-return-note-workbook-export`；原功能提交 `51ee6c7`，本次审查修复提交 `7adff98`。
 - 基线：本轮再次 `git fetch origin`，正常合并 `origin/main` `1a743c1ca9aa51ad44e222b165654718bfbe326a`，合并提交 `e20a0af`，无冲突。保留 lane B ITSP-6a 字段保护、数量归一化及审计，也包含 main 已有 #426 前端改动；本 PR 相对 main 无前端差异。
-- PR：[#424](https://github.com/Jinchen-Yang/it-spareparts/pull/424) 已存在、OPEN、base 为 main；本轮只读核对的远端 head 仍为 `51ee6c7`。本次修复及合并仅本地提交，未推送；CI 在推送后运行，不能用原 head 的 CI 代表本次修复。
+- PR：[#424](https://github.com/Jinchen-Yang/it-spareparts/pull/424) 已存在、OPEN、base 为 main；本轮修复（`7adff98`）与 main 合并（`e20a0af`）已推送到该分支；CI 状态以 PR 当前 head 为准，原 head `51ee6c7` 的 CI 不代表本次修复。
 - 范围：补齐 D-32 第 5 款；免返标注仍只作提醒，不新增默认免返开关、不改计算或返还状态。
 
 ## 实施与兼容方案
