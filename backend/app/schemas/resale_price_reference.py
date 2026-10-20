@@ -1,6 +1,6 @@
-"""商城销售参考价响应 DTO（GET /integrations/resale/parts/price-reference）。
+"""商城销售/采购参考价响应 DTO（GET /integrations/resale/parts/price-reference）。
 
-字段与商城消费契约同构；不包含客户、单号、人员、销售行／订单 ID、原始证据或
+字段与商城消费契约同构；不包含客户、供应商、单号、人员、行／订单 ID、原始证据或
 税率明细，响应只经本白名单序列化。
 """
 
@@ -21,11 +21,11 @@ class ReferenceWindow(BaseModel):
 class ReferencePrice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["sale"]
+    kind: Literal["sale", "purchase"]
     amount: Decimal
     currency: Literal["CNY"]
     occurred_at: datetime
-    source: Literal["itsp销售均价"]
+    source: Literal["itsp销售均价", "itsp采购均价"]
     tax_basis: Literal["inc_tax", "ex_tax"]
     sample_count: int = Field(ge=0)
     order_count: int = Field(ge=0)
@@ -36,7 +36,7 @@ class ReferencePrice(BaseModel):
 
 
 class SalesAverageCalculation(BaseModel):
-    """本次实际执行口径；全部字段由生效 Settings 与聚合结果构建。"""
+    """仅销售样本的实际执行口径；采购通过价格条目与 D-43 表达。"""
 
     model_config = ConfigDict(extra="forbid")
 
