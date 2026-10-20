@@ -524,8 +524,9 @@ def run_import(session: Session, file_path: str, original_name: str,
         # validation can discard source rows. This private set belongs to the
         # import event, not the mutable facts' latest import_batch_id.
         wbdd_source_snapshot = None
+        wbdd_status_snapshot = None
         if loaded.primary is not None and loaded.primary.file_type == mapping.MAINTENANCE:
-            from app.services import maintenance_wbdd_source_snapshot
+            from app.services import maintenance_source_status_snapshot, maintenance_wbdd_source_snapshot
 
             wbdd_source_snapshot = maintenance_wbdd_source_snapshot.capture_source_snapshot(
                 loaded.primary.df,
@@ -534,6 +535,9 @@ def run_import(session: Session, file_path: str, original_name: str,
                     sheet.sheet_name for sheet in selection.ignored_recognized
                     if sheet.file_type == mapping.MAINTENANCE
                 ],
+            )
+            wbdd_status_snapshot = maintenance_source_status_snapshot.capture_source_status_snapshot(
+                loaded.primary.df,
             )
 
         transformed = transform_workbook(loaded)
@@ -695,6 +699,13 @@ def run_import(session: Session, file_path: str, original_name: str,
                 result.orders, result.maintenance_address_patches, mode=mode)
         if wbdd_source_snapshot is not None:
             report["_wbdd_source_snapshot"] = wbdd_source_snapshot
+        if wbdd_status_snapshot is not None:
+            report[maintenance_source_status_snapshot.SNAPSHOT_KEY] = (
+                maintenance_source_status_snapshot.finalize_source_status_snapshot(
+                    session, wbdd_status_snapshot, batch_id=batch.id, mode=mode,
+                    file_hash=file_hash,
+                )
+            )
         if auto_assignment is not None:
             report["auto_assignment"] = auto_assignment
         if sales_project_sync is not None:
