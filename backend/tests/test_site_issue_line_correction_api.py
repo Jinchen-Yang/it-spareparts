@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
+from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.models.master_data import ProductCategory
 from app.models.system import SysUser
@@ -40,6 +41,40 @@ def _body(*, issue_version=1, line_version=1, changes=None, key=None):
         "reason": "依据合同逐行核对返还要求",
         "idempotency_key": key or f"row-correction-{uuid4()}",
     }
+
+
+@pytest.mark.parametrize("beta_enabled", [False, True])
+def test_production_line_correction_uses_stable_panel_gate(db, monkeypatch, beta_enabled):
+    _, issue, (line, _), _ = _facts(db)
+    client = _client(db, production_routes=True)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "maintenance_beta_enabled", beta_enabled)
+    monkeypatch.setattr(settings, "maintenance_boss_dashboard_enabled", False)
+    body = _body()
+    url = _url(issue, line)
+
+    # 面板关闸时，有效身份与不存在的身份都在业务查询前被隐藏。
+    for path in (url, "/api/maintenance/site-issues/not-real/lines/not-real"):
+        closed = client.patch(path, json=body)
+        assert closed.status_code == 404, closed.text
+        assert closed.json()["detail"] == "页面不存在"
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).no_return is None
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).version == 1
+    assert db.get(MaintenanceSiteIssue, issue.issue_id).version == 1
+    assert db.query(MaintenanceSiteIssueCommand).count() == 0
+    assert db.query(MaintenanceProjectOperationAudit).count() == 0
+
+    # 稳定入口只随面板总闸，Beta 关闭时也允许实名用户更正。
+    monkeypatch.setattr(settings, "maintenance_boss_dashboard_enabled", True)
+    opened = client.patch(url, json=body)
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["no_return"] is True
+    assert opened.json()["idempotent_replay"] is False
+    monkeypatch.setattr(settings, "maintenance_boss_dashboard_enabled", False)
+    replay_closed = client.patch(url, json=body)
+    assert replay_closed.status_code == 404, replay_closed.text
+    assert replay_closed.json()["detail"] == "页面不存在"
 
 
 @pytest.mark.parametrize("source,mapping", [
