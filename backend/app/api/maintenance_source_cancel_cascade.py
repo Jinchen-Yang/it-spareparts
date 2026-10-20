@@ -22,12 +22,15 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_source_cancel_cascade as service
+from app.services import maintenance_source_cancel_restore as restore_service
 
 router = APIRouter(
     prefix="/maintenance/projects/{project_id}/source-cancellations", tags=["maintenance"],
     dependencies=[Depends(require_maintenance_boss), Depends(current_role),
                   Depends(require_page("page_maintenance")), Depends(require_maintenance_project_access)],
 )
+
+_bearer = HTTPBearer(auto_error=False)
 
 
 @router.get("")
@@ -36,6 +39,89 @@ def list_impacts(project_id: str, response: Response,
                  db: Session = Depends(get_db)):
     response.headers["Cache-Control"] = "no-store"
     return service.list_candidates(db, project_id=project_id, page=page, page_size=page_size)
+
+
+# D-0022 恢复入口。带字面量 "restorations" 的路由必须先于 /{batch_id}/{source_order_id}
+# 注册，否则两段路径会被 batch_id 的 int 转换吞掉并返回 422。
+@router.get("/restorations")
+def list_restorations(project_id: str, response: Response,
+                      db: Session = Depends(get_db),
+                      _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+    response.headers["Cache-Control"] = "no-store"
+    return restore_service.list_restorations(db, project_id=project_id)
+
+
+@router.get("/restorations/{source_order_id}")
+def restoration_preview(project_id: str, source_order_id: str, response: Response,
+                        db: Session = Depends(get_db),
+                        _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return restore_service.restoration_preview(db, project_id=project_id,
+                                                   source_order_id=source_order_id)
+    except restore_service.RestorationConflict as exc:
+        raise HTTPException(409, {
+            "code": "source_cancellation_restore_unavailable" if exc.unavailable
+            else "source_cancellation_restore_conflict",
+            "message": str(exc), "conflicts": exc.conflicts}) from exc
+
+
+class RestoreCancellationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reason: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+@router.post("/restorations/{source_order_id}/restore")
+def restore_cancellation(project_id: str, source_order_id: str,
+                         body: RestoreCancellationRequest, response: Response,
+                         db: Session = Depends(get_db), identity: dict = Depends(current_identity),
+                         creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+                         _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+    response.headers["Cache-Control"] = "no-store"
+    operator = _real_operator(db, identity)
+    audit_ctx = None
+
+    def reauthorize():
+        nonlocal audit_ctx
+        fresh_identity = current_identity(creds, db)
+        if _real_operator(db, fresh_identity) != operator:
+            raise HTTPException(403, "实名身份已变化，请重新登录")
+        user = db.scalar(select(SysUser).where(SysUser.username == operator)
+                         .execution_options(populate_existing=True))
+        ctx = get_current_user_context(creds, db)
+        ctx.role, ctx.salesperson_name = user.role, user.salesperson_name
+        ctx.permissions = permissions.runtime_safe(permissions.effective_for_user(user))
+        require_page("page_maintenance")(ctx)
+        require_action("action_maintenance_demand_delete")(ctx)
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+        audit_ctx = ctx
+        return ctx
+
+    try:
+        result = restore_service.restore_cancellation(
+            db, project_id=project_id, source_order_id=source_order_id,
+            expected_digest=body.expected_digest, reason=body.reason,
+            operated_by=operator, idempotency_key=body.idempotency_key,
+            reauthorize=reauthorize)
+        db.commit()
+        record_access_log(audit_ctx, "restore", "maintenance_source_cancel",
+                          {"source_order_id": source_order_id, "status": result.get("status"),
+                           "replayed": result.get("replayed", False)})
+        return result
+    except restore_service.RestorationConflict as exc:
+        db.rollback()
+        raise HTTPException(409, {
+            "code": "source_cancellation_restore_unavailable" if exc.unavailable
+            else "source_cancellation_restore_conflict",
+            "message": str(exc), "conflicts": exc.conflicts}) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.get("/{batch_id}/{source_order_id}")
@@ -47,9 +133,6 @@ def detail(project_id: str, batch_id: int, source_order_id: str, response: Respo
                                         source_order_id=source_order_id)
     except service.CancellationConflict as exc:
         raise HTTPException(409, {"code": "source_cancellation_changed", "message": str(exc)}) from exc
-
-
-_bearer = HTTPBearer(auto_error=False)
 
 
 class ConfirmCancellationRequest(BaseModel):
