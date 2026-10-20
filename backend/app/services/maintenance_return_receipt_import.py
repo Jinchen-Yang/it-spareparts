@@ -396,7 +396,7 @@ def _check_plan_capacity(db: Session, rows: list[dict], *, locked: bool) -> None
             # Historical NaN is neither zero occupancy nor releasable capacity.
             # Voiding/unlinking is safe, but cannot credit another planned row.
             if new_id:
-                message = "既有返件数量非法，无法核对关联收货容量，请先核对或作废"
+                message = ledger.INVALID_HISTORICAL_RECEIPT_QTY_MESSAGE
                 row.update(action="invalid", reason=message, error={
                     "code": "return_capacity_unknown", "message": message,
                     "details": {"demand_order_id": new_id, "order_no": row["wbdd_no"],

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import Text, and_, case, cast, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -155,20 +155,13 @@ def _summary(row) -> DemandReturnSummary:
     )
 
 
-def summarize_demand_returns(
-    db: Session, *, source_order_ids: Collection[str],
-    allowed_project_ids: Collection[str] | None, as_of: date | None = None,
-) -> dict[str, DemandReturnSummary]:
-    """One aggregate SELECT per <=500 unique IDs; never flush, lock or commit."""
-    if as_of is not None:
-        raise ReturnSummaryError("historical_as_of_not_supported")
-    ids = _ids(source_order_ids, max_length=64)
-    allowed = _ids(allowed_project_ids, max_length=36, nullable=True)
-    if len(ids) > MAX_BATCH_SIZE:
-        raise ReturnSummaryError("summary_batch_too_large")
-    if not ids or allowed == []:
-        return {}
+def demand_return_summary_query(*, source_order_ids, allowed_project_ids):
+    """Shared raw aggregates for summaries and SQL-paged capacity selectors.
 
+    source_order_ids accepts either IDs or an SQL SELECT. This builder does not
+    execute, validate request bounds, flush, or acquire locks; public summary
+    validation and its <=500-ID contract remain in summarize_demand_returns.
+    """
     # Apply the Beta tombstone boundary to each selected order, rather than
     # building a separate set of every effective order in the database.
     tombstoned = select(1).where(
@@ -187,9 +180,9 @@ def summarize_demand_returns(
         MaintenanceSourceOrderAssignment.is_active.is_(True),
     )).outerjoin(MaintenanceProject,
                  MaintenanceProject.project_id == MaintenanceSourceOrderAssignment.project_id,
-    ).where(FMaintenanceOrder.raw_order_id.in_(ids))
-    if allowed is not None:
-        orders = orders.where(MaintenanceSourceOrderAssignment.project_id.in_(allowed))
+    ).where(FMaintenanceOrder.raw_order_id.in_(source_order_ids))
+    if allowed_project_ids is not None:
+        orders = orders.where(MaintenanceSourceOrderAssignment.project_id.in_(allowed_project_ids))
     orders = orders.cte("return_summary_orders")
     demand = select(
         FMaintenanceLine.order_id,
@@ -210,12 +203,50 @@ def summarize_demand_returns(
     ).join(orders, MaintenanceRkdReturnLine.source_order_id == orders.c.source_order_id).where(
         MaintenanceRkdReturnLine.line_status == "active",
     ).group_by(MaintenanceRkdReturnLine.source_order_id).cte("return_summary_receipts")
-    stmt = select(
+    return select(
         orders, demand.c.line_count, demand.c.negative_count, demand.c.demand_qty,
         receipts.c.received_qty, receipts.c.undated_qty, receipts.c.ownership_conflict,
     ).outerjoin(demand, demand.c.order_id == orders.c.order_id).outerjoin(
         receipts, receipts.c.source_order_id == orders.c.source_order_id,
     ).order_by(orders.c.source_order_id)
+
+
+def complete_demand_return_basis(columns):
+    """SQL equivalent of _summary's complete basis, before remaining filtering.
+
+    PostgreSQL numeric NaN sorts above finite numbers and poisons SUM. Explicit
+    finite checks are required in addition to comparisons; NULL receipts mean 0.
+    Keep this predicate paired with the frozen-selector equivalence tests.
+    """
+    received = func.coalesce(columns.received_qty, _ZERO)
+    return and_(
+        columns.line_count > 0,
+        columns.negative_count == 0,
+        cast(columns.demand_qty, Text).not_in(("NaN", "Infinity", "-Infinity")),
+        columns.demand_qty > _ZERO,
+        columns.header_effective,
+        columns.project_id.is_not(None), columns.project_id != "",
+        columns.project_active,
+        ~func.coalesce(columns.ownership_conflict, False),
+        cast(received, Text).not_in(("NaN", "Infinity", "-Infinity")),
+    )
+
+
+def summarize_demand_returns(
+    db: Session, *, source_order_ids: Collection[str],
+    allowed_project_ids: Collection[str] | None, as_of: date | None = None,
+) -> dict[str, DemandReturnSummary]:
+    """One aggregate SELECT per <=500 unique IDs; never flush, lock or commit."""
+    if as_of is not None:
+        raise ReturnSummaryError("historical_as_of_not_supported")
+    ids = _ids(source_order_ids, max_length=64)
+    allowed = _ids(allowed_project_ids, max_length=36, nullable=True)
+    if len(ids) > MAX_BATCH_SIZE:
+        raise ReturnSummaryError("summary_batch_too_large")
+    if not ids or allowed == []:
+        return {}
+
+    stmt = demand_return_summary_query(source_order_ids=ids, allowed_project_ids=allowed)
     try:
         with db.no_autoflush:
             return {row["source_order_id"]: _summary(row) for row in db.execute(stmt).mappings()}
