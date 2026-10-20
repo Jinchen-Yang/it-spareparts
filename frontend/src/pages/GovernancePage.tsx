@@ -1,9 +1,6 @@
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useState } from "react";
-import {
-  Card, Row, Col, Statistic, Segmented, Tag, Button, Modal, Input, message, Space,
-  Tooltip, Tabs, Select, Popconfirm, Descriptions,
-} from "antd";
+import { App, Card, Row, Col, Statistic, Segmented, Tag, Button, Modal, Input, Space, Tooltip, Tabs, Select, Popconfirm, Descriptions } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import api from "../api";
@@ -68,6 +65,7 @@ const ISSUE_LABELS: Record<string, string> = {
 
 /** 型号治理（原有页签：非标/待复核/已排除 + 排除操作） */
 function PartsTab() {
+  const { message } = App.useApp();
   const basis = useTaxBasis("sales");
   const [kind, setKind] = useState("nonstd");
   const [rows, setRows] = useState<PartRow[]>([]);
@@ -117,8 +115,8 @@ function PartsTab() {
       render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span> },
     { title: "操作", width: 90, fixed: "right",
       render: (_, r) => r.is_excluded
-        ? <a onClick={() => unExclude(r.pn_std)}>恢复</a>
-        : <a style={{ color: "var(--mb-danger)" }} onClick={() => { setExcluding(r); setReason(""); }}>排除</a> },
+        ? <Button type="link" size="small" onClick={() => unExclude(r.pn_std)}>恢复</Button>
+        : <Button type="link" size="small" danger onClick={() => { setExcluding(r); setReason(""); }}>排除</Button> },
   ];
 
   return (
@@ -152,6 +150,7 @@ function PartsTab() {
 
 /** 合并候选审核 */
 function CandidatesTab({ onChanged }: { onChanged: () => void }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<CandidateRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -196,7 +195,7 @@ function CandidatesTab({ onChanged }: { onChanged: () => void }) {
             onConfirm={() => review(r.id, "merge")}>
             <Button size="small" type="primary" loading={acting === r.id}>合并</Button>
           </Popconfirm>
-          <Button size="small" onClick={() => review(r.id, "reject")}>否决</Button>
+          <Button size="small" danger onClick={() => review(r.id, "reject")}>否决</Button>
           <Tooltip title="源型号是独立型号，不是任何型号的重复">
             <Button size="small" onClick={() => review(r.id, "independent")}>独立型号</Button>
           </Tooltip>
@@ -224,6 +223,7 @@ function CandidatesTab({ onChanged }: { onChanged: () => void }) {
 
 /** 质量问题队列 */
 function IssuesTab() {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<IssueRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -255,9 +255,9 @@ function IssuesTab() {
     { title: "操作", width: 160, fixed: "right",
       render: (_, r) => (
         <Space>
-          <a onClick={() => resolve(r.id, "resolved")}>已处理</a>
+          <Button type="link" size="small" onClick={() => resolve(r.id, "resolved")}>已处理</Button>
           <Tooltip title="确认这不是问题，扫描不再重开">
-            <a onClick={() => resolve(r.id, "dismissed")}>不是问题</a>
+            <Button type="link" size="small" onClick={() => resolve(r.id, "dismissed")}>不是问题</Button>
           </Tooltip>
         </Space>
       ) },
@@ -278,6 +278,7 @@ function IssuesTab() {
 
 /** 别名审核 */
 function AliasesTab() {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<AliasRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -313,9 +314,9 @@ function AliasesTab() {
     { title: "操作", width: 200, fixed: "right",
       render: (_, r) => (
         <Space>
-          <a onClick={() => review(r.id, "approve")}>确认</a>
-          <a onClick={() => review(r.id, "reject")}>否决</a>
-          <a onClick={() => { setReassigning(r); setTargetPn(""); }}>改指</a>
+          <Button type="link" size="small" onClick={() => review(r.id, "approve")}>确认</Button>
+          <Button type="link" size="small" danger onClick={() => review(r.id, "reject")}>否决</Button>
+          <Button type="link" size="small" onClick={() => { setReassigning(r); setTargetPn(""); }}>改指</Button>
         </Space>
       ) },
   ];
@@ -338,6 +339,7 @@ function AliasesTab() {
 
 /** 合并历史 + 回滚 */
 function MergesTab({ onChanged }: { onChanged: () => void }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<MergeRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -439,6 +441,7 @@ function MetricsTab({ metrics }: { metrics: any }) {
 }
 
 export default function GovernancePage() {
+  const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
   const [sum, setSum] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);

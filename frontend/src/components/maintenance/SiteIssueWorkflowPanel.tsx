@@ -1,20 +1,4 @@
-import {
-  Alert,
-  Button,
-  Card,
-  Checkbox,
-  Empty,
-  Input,
-  InputNumber,
-  List,
-  Modal,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Checkbox, Empty, Input, InputNumber, List, Modal, Space, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -90,6 +74,7 @@ export default function SiteIssueWorkflowPanel({
   onChanged: () => void | Promise<boolean | void>;
   registerRefresh?: RegisterPanelRefresh;
 }) {
+  const { message } = App.useApp();
   const [issues, setIssues] = useState<SiteIssueDocument[]>([]);
   const [candidates, setCandidates] = useState<SiteIssueCandidate[]>([]);
   const [issueTotal, setIssueTotal] = useState(0);

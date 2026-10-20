@@ -1,6 +1,6 @@
 import { formatBusinessDateTime } from "../../../utils/date";
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Checkbox, Descriptions, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Checkbox, Descriptions, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import {
   type ReturnImportAction, type ReturnImportJob, type ReturnImportRow,
   applyReturnReceiptImport, cancelReturnReceiptImport, getReturnReceiptImport,
@@ -51,12 +51,14 @@ function comparisonValue(row: ReturnImportRow, field: string, side: "before" | "
 
 /** 专用后台解析任务；原件重试、业务更正和重新预览分别保留明确入口。 */
 export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Promise<void | boolean> }) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [job, setJob] = useState<ReturnImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [duplicatesConfirmed, setDuplicatesConfirmed] = useState(false);
   const [reason, setReason] = useState("");
@@ -97,7 +99,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     if (!attempt.current || operationLock.current) return;
     operationLock.current = true;
     const seq = ++generation.current;
-    setBusy(true); setError(null); setRefreshWarning(null); setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1); setAction(null);
+    setBusy(true); setError(null); setRefreshWarning(null); setDownloadError(null); setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1); setAction(null);
     try {
       const response = await uploadReturnReceiptImport(attempt.current.file, attempt.current.key);
       if (seq !== generation.current) return;
@@ -126,7 +128,6 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     } else {
       const warning = "导入已成功，但台账刷新失败；请刷新页面查看，不要重复导入。";
       setRefreshWarning(warning);
-      message.warning(warning);
     }
   };
 
@@ -180,11 +181,12 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     downloadLock.current = true;
     const seq = downloadGeneration.current;
     setDownloading(true);
+    setDownloadError(null);
     try {
       const response = await downloadReturnReceiptOriginal(job.batch_id);
       if (seq === downloadGeneration.current) saveBlob(response.data, job.filename ?? attempt.current?.file.name ?? "维保返件入库原件.xlsx");
     } catch (err) {
-      if (seq === downloadGeneration.current) message.error(readError(err, "原件下载失败，请稍后重试"));
+      if (seq === downloadGeneration.current) setDownloadError(readError(err, "原件下载失败，请稍后重试"));
     } finally {
       downloadLock.current = false;
       if (seq === downloadGeneration.current) setDownloading(false);
@@ -222,6 +224,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
         {error || job?.error ? <Alert type="error" showIcon message={error ?? job?.error?.message}
           action={job ? <Button disabled={busy} onClick={() => { void refresh(job.batch_id); }}>重新查询状态</Button> : undefined} /> : null}
         {refreshWarning ? <Alert type="warning" showIcon message={refreshWarning} /> : null}
+        {downloadError ? <Alert type="error" showIcon message={downloadError} /> : null}
         {job?.excluded_reasons && Object.keys(job.excluded_reasons).length ? <Alert type="info" showIcon message="不纳入返还的源单据" description={Object.entries(job.excluded_reasons).map(([category, count]) => `${category} ${count} 单`).join("；")} /> : null}
         {counts ? <>
           <Space wrap>

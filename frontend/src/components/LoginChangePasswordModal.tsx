@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Modal, Form, Input, Alert, message } from "antd";
+import { App, Modal, Form, Input, Alert } from "antd";
 import api from "../api";
 
 /**
@@ -13,6 +13,7 @@ export default function LoginChangePasswordModal({
   onClose: () => void;
   onDone: (username: string) => void;
 }) {
+  const { message } = App.useApp();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);

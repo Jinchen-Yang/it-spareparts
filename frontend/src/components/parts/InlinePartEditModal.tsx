@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Alert, Button, Input, Modal, Select, Space, message } from "antd";
+import { App, Alert, Button, Input, Modal, Select, Space } from "antd";
 import { type CategoryNode, type MasterFields } from "../../api";
 import {
   fetchMasterEditCategories, fetchMasterEditState, fetchOverview, masterEditConflictLines, masterEditErrorMessage, rebaseMasterEditDraft, saveMasterEdit,
@@ -32,6 +32,7 @@ const normalized = (value: string | null | undefined) => {
 export default function InlinePartEditModal({
   open, canEdit, contextKey, partId, pn, onClose, onSaved,
 }: Props) {
+  const { message } = App.useApp();
   const [form, setForm] = useState<EditablePart | null>(null);
   const [initial, setInitial] = useState<EditablePart | null>(null);
   const [baseline, setBaseline] = useState<MasterEditSnapshot | null>(null);
@@ -254,7 +255,7 @@ export default function InlinePartEditModal({
             type="error"
             showIcon
             message={loadError}
-            action={<a onClick={load}>重试</a>}
+            action={<Button type="link" size="small" onClick={load}>重试</Button>}
           />
         ) : (
           <>

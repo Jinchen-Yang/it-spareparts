@@ -1,9 +1,6 @@
 import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert, Button, Card, Col, Descriptions, Empty, Grid, Input, List, Row, Select,
-  Space, Spin, Statistic, Table, Tag, Typography, message,
-} from "antd";
+import { App, Alert, Button, Card, Col, Descriptions, Empty, Grid, Input, List, Row, Select, Space, Spin, Statistic, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   getPurchasePriceCalibration,
@@ -55,6 +52,7 @@ function taxBasisLabel(value: string) {
 }
 
 export default function DataQualityCalibrationPanel() {
+  const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const permission = permissionState();

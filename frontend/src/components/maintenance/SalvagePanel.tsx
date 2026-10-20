@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Card, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Card, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   listMaintenanceSalvages,
@@ -54,6 +54,7 @@ const columns: ColumnsType<MaintenanceSalvageRow> = [
 ];
 
 export default function SalvagePanel({ projectId }: { projectId: string }) {
+  const { message } = App.useApp();
   const [data, setData] = useState<MaintenanceSalvageDirectory | null>(null);
   const [loading, setLoading] = useState(true);
   const [permissionDenied, setPermissionDenied] = useState(false);
