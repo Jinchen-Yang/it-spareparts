@@ -199,6 +199,13 @@ class SysImportBatch(Base):
             unique=True,
             postgresql_where=text("status = 'success' AND file_type = 'maint_bulk'"),
         ),
+        # D-34 回执跨批次、无过期窗口；默认 jsonb_ops 支持 ? 键存在查询。
+        # 与服务查询固定使用 ->，避免 SQLAlchemy [] 渲染差异造成索引失配。
+        Index(
+            "ix_batch_source_cancel_receipts",
+            text("(report_json -> '_source_cancel_confirmations')"),
+            postgresql_using="gin",
+        ),
     )
 
 
