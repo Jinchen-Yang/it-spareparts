@@ -38,7 +38,7 @@
   .maintenance-row-filter-condition {
     grid-template-columns: minmax(0, 1fr);
     padding: 12px;
-    border: 1px solid #d9d9d9;
+    border: 1px solid var(--mb-border);
     border-radius: 8px;
   }
 
