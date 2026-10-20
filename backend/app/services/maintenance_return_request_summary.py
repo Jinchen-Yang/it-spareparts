@@ -136,10 +136,13 @@ def _summary(row) -> DemandReturnSummary:
     if conflict:
         reasons.append("ownership_conflict")
         received = undated = None
+    elif not received.is_finite():
+        reasons.append("invalid_receipt_qty")
+        received = undated = None
     elif undated:
         reasons.append("undated_receipts")
     basis = ("ownership_conflict" if conflict else "inactive" if not effective
-             else "incomplete" if demand is None or demand <= _ZERO else "complete")
+             else "incomplete" if demand is None or demand <= _ZERO or received is None else "complete")
     complete = basis == "complete"
     pending = max(demand - received, _ZERO) if complete else None
     return DemandReturnSummary(

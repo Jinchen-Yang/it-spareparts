@@ -18,6 +18,7 @@ import ReturnReceiptImport from "./ReturnReceiptImport";
 import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
 import ReturnReceiptBatchMaintenance from "./ReturnReceiptBatchMaintenance";
 import PanelActionBar from "./PanelActionBar";
+import { availableReceiptDemand, capacityQty, receiptCapacityError, receiptDemandOption } from "./returnReceiptCapacity";
 
 const { Text } = Typography;
 
@@ -47,6 +48,7 @@ const AUDIT_ACTION_LABEL: Record<string, string> = {
 interface DemandOption {
   value: string; // order_no（后端按 order_no 解析归属）
   label: string;
+  capacity: import("../../../api/maintenanceOperations").ReturnReceiptDemandCandidate;
 }
 
 interface ReceiptFormValues {
@@ -119,6 +121,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const requestSeq = useRef(0);
   const contextSeq = useRef(0);
   const demandSeq = useRef(0);
+  const candidateCache = useRef(new Map<string, DemandOption>());
+  const editingContext = useRef<ReturnReceipt | null>(null);
   // 需求单下拉服务端搜索的防抖定时器（2026-10-13：q 匹配单号或单内 PN）
   const demandSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // PN 建议请求序号：选/换/清 PN 与换项目都会发新请求，晚到的旧响应不得覆盖新结果
@@ -133,6 +137,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const targetProjectRef = useRef(projectId);
   const switchTargetProject = (next: string) => {
     if (demandSearchTimer.current) clearTimeout(demandSearchTimer.current);
+    candidateCache.current.clear();
     targetProjectRef.current = next;
     setTargetProject(next);
   };
@@ -160,16 +165,20 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     setDemandError(null);
     setDemands([]);
     const options: DemandOption[] = [];
+    let loaded = 0;
     try {
       for (let p = 1; ; p += 1) {
         const response = await getReturnReceiptDemands(id, {
           page: p, page_size: 100, ...(q ? { q } : {}),
+          ...(editingContext.current?.project_id === id ? { receipt_id: editingContext.current.receipt_id } : {}),
         });
         if (seq !== demandSeq.current) return;
         const rows = response.data.rows ?? [];
-        options.push(...rows.map((row) => ({ value: row.order_no,
-          label: row.order_date ? `${row.order_no}（${row.order_date}）` : row.order_no })));
-        if (options.length >= (response.data.total ?? 0)) break;
+        loaded += rows.length;
+        const candidates = rows.filter(availableReceiptDemand).map(receiptDemandOption);
+        candidates.forEach((option) => candidateCache.current.set(option.value, option));
+        options.push(...candidates);
+        if (loaded >= (response.data.total ?? 0)) break;
         if (!rows.length) throw new Error("需求单分页不完整，请重新加载");
       }
       setDemands(options);
@@ -260,6 +269,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     setIncludeVoided(false);
     setModalOpen(false);
     setEditing(null);
+    editingContext.current = null;
     setAuditTarget(null);
     setVoidTarget(null);
     setSubmitting(false);
@@ -285,6 +295,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const evidenceLength = evidenceValue?.length ?? 0;
   const serialsValue = Form.useWatch("serials_text", form);
   const qtyValue = Form.useWatch("qty", form);
+  const demandValue = Form.useWatch("wbdd_no", form);
+  const selectedCapacity = candidateCache.current.get(demandValue ?? "")?.capacity;
   const snPendingQty = qtyValue ?? 0;
   const snStats = useMemo(() => {
     const lines = (serialsValue ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -315,10 +327,13 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       return;
     }
     try {
-      const response = await getReturnReceiptDemands(project, { part_id: partId, page_size: 50 });
+      const response = await getReturnReceiptDemands(project, {
+        part_id: partId, page_size: 50,
+        ...(editingContext.current?.project_id === project ? { receipt_id: editingContext.current.receipt_id } : {}),
+      });
       if (seq !== pnDemandSeq.current) return;
-      const options = (response.data.rows ?? []).map((row) => ({ value: row.order_no,
-        label: row.order_date ? `${row.order_no}（${row.order_date}）` : row.order_no }));
+      const options = (response.data.rows ?? []).filter(availableReceiptDemand).map(receiptDemandOption);
+      options.forEach((option) => candidateCache.current.set(option.value, option));
       setPnMatchedDemands(options);
       // 恰好一张且用户尚未选择时预填建议；已有选择（含此刻正选的别的单）绝不覆盖
       if (options.length === 1) {
@@ -355,6 +370,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const openCreate = () => {
     setSubmitError(null);
     setEditing(null);
+    editingContext.current = null;
     setPickedPart(null);
     resetPnSuggestion();
     form.resetFields();
@@ -368,6 +384,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const openEdit = (receipt: ReturnReceipt) => {
     setSubmitError(null);
     setEditing(receipt);
+    editingContext.current = receipt;
     setPickedPart({
       part_id: receipt.part_id ?? null,
       pn: receipt.pn,
@@ -411,6 +428,12 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     // SN 凭证（v1.36）：非空时逐行 trim/去重，且数量必须等于 SN 行数（与后端一致）
     const serialsRaw = (values.serials_text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const finalQty = editing ? (values.qty ?? Number(editing.qty)) : values.qty!;
+    const keepsOccupancy = editing && values.project_id === editing.project_id
+      && values.wbdd_no === editing.order_no && finalQty <= Number(editing.qty);
+    if (values.wbdd_no && !keepsOccupancy) {
+      const capacityError = receiptCapacityError(candidateCache.current.get(values.wbdd_no)?.capacity, finalQty);
+      if (capacityError) { setSubmitError(capacityError); return; }
+    }
     if (serialsRaw.length && serialsRaw.length !== finalQty) {
       setSubmitError(`带 SN 时数量必须等于 SN 个数（当前数量 ${finalQty}，SN ${serialsRaw.length} 个）`);
       return;
@@ -829,6 +852,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           {demandError ? <Alert type="warning" message={demandError} action={<Button size="small" onClick={() => { void loadDemands(targetProject); }}>重试加载需求单</Button>} /> : null}
           <Form.Item
             name="wbdd_no"
+            extra={selectedCapacity ? `已收 ${capacityQty(selectedCapacity.received_qty)} / 下单 ${capacityQty(selectedCapacity.demand_qty)}；剩余可录 ${capacityQty(selectedCapacity.remaining_qty)}${editing ? `；本行最多可填 ${capacityQty(selectedCapacity.max_qty)}` : ""}` : undefined}
             label="维保需求单（可选——不选则计入项目「未关联需求单」）"
           >
             <Select

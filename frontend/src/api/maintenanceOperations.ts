@@ -2014,13 +2014,26 @@ export interface ReturnReceiptAuditEntry {
 const returnReceiptBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipts`;
 
+export interface ReturnReceiptDemandCandidate {
+  source_order_id: string;
+  order_no: string;
+  order_date: string | null;
+  demand_qty: string | null;
+  received_qty: string | null;
+  remaining_qty: string | null;
+  /** 编辑时排除自身，可保留历史超量原数；只是预检快照，服务端仍锁后复验。 */
+  max_qty: string | null;
+  is_current: boolean;
+  basis_state: "complete" | "incomplete" | "inactive" | "ownership_conflict";
+}
+
 export const getReturnReceiptDemands = (
   projectId: string,
-  input: { page?: number; page_size?: number; q?: string; part_id?: number } = {},
+  input: { page?: number; page_size?: number; q?: string; part_id?: number; receipt_id?: string } = {},
 ) =>
-  api.get<{ rows: { source_order_id: string; order_no: string; order_date: string | null }[]; total: number; page: number; page_size: number }>(
+  api.get<{ rows: ReturnReceiptDemandCandidate[]; total: number; page: number; page_size: number }>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-demands`,
-    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}) } },
+    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}), ...(input.receipt_id ? { receipt_id: input.receipt_id } : {}) } },
   );
 
 export const getReturnReceiptSummary = (projectId: string) =>
