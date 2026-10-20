@@ -7,7 +7,7 @@
  * 响应式：网格 auto-fill minmax，1440px 三列 / 390px 单列。
  */
 import { useMemo, useState } from "react";
-import { Alert, Checkbox, Empty, Input, Popover, Space, Switch, Tag, Typography } from "antd";
+import { Button, Alert, Checkbox, Empty, Input, Popover, Space, Switch, Tag, Typography } from "antd";
 import { InfoCircleOutlined, SearchOutlined } from "@ant-design/icons";
 import type { AccountsMeta, Perms } from "../../api/accounts";
 import { comboErrors, dependentActions, missingDeps } from "../../api/accounts";
@@ -160,12 +160,12 @@ export default function PermissionMatrix({
               </Space>
               {!readonly && g.key !== "admin" && (
                 <Space size={8}>
-                  <a style={{ fontSize: 12 }} onClick={() => {
+                  <Button type="link" size="small" style={{ fontSize: 12 }} onClick={() => {
                     if (!onChange) return;
                     const next = { ...value };
                     g.keys.forEach((k) => { if (!whyDisabled(k)) next[k] = !allOn; });
                     onChange(next);
-                  }}>{allOn ? "全部关闭" : "全部开启"}</a>
+                  }}>{allOn ? "全部关闭" : "全部开启"}</Button>
                 </Space>
               )}
             </div>

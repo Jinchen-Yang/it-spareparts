@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Checkbox, Modal, Space, Table, Tag, Tooltip, message } from "antd";
+import { App, Button, Checkbox, Modal, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   batchApply, batchPreview, SPEC_SOURCE_LABEL,
@@ -33,7 +33,7 @@ function EvidenceRows({ r }: { r: BatchPreviewItem }) {
       {keys.length > 0 && (
         <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 720 }}>
           <thead>
-            <tr style={{ color: "#9c968b", textAlign: "left" }}>
+            <tr style={{ color: "var(--mb-text-3)", textAlign: "left" }}>
               <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>字段</th>
               <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>值</th>
               <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>来源</th>
@@ -53,7 +53,7 @@ function EvidenceRows({ r }: { r: BatchPreviewItem }) {
                       {SPEC_SOURCE_LABEL[f.source] || f.source}
                     </Tag>
                   </td>
-                  <td style={{ padding: "2px 0", color: "#9c968b" }}>{f.evidence}</td>
+                  <td style={{ padding: "2px 0", color: "var(--mb-text-3)" }}>{f.evidence}</td>
                 </tr>
               );
             })}
@@ -71,6 +71,7 @@ function EvidenceRows({ r }: { r: BatchPreviewItem }) {
 export default function BatchNormalizeModal({ open, onClose, onApplied }: {
   open: boolean; onClose: () => void; onApplied: () => void;
 }) {
+  const { message } = App.useApp();
   const [items, setItems] = useState<BatchPreviewItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
@@ -116,7 +117,7 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
       title: "现描述 → 标准描述",
       render: (_, r) => (
         <div style={{ fontSize: 12.5 }}>
-          <div style={{ color: "#9c968b", textDecoration: r.changes.includes("description") ? "line-through" : "none" }}>
+          <div style={{ color: "var(--mb-text-3)", textDecoration: r.changes.includes("description") ? "line-through" : "none" }}>
             {r.description || "—"}
           </div>
           {r.changes.includes("description") && (

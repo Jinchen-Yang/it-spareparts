@@ -1,21 +1,4 @@
-import {
-  Alert,
-  Button,
-  Card,
-  Checkbox,
-  Empty,
-  Input,
-  InputNumber,
-  List,
-  Modal,
-  Progress,
-  Select,
-  Space,
-  Spin,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Checkbox, Empty, Input, InputNumber, List, Modal, Progress, Select, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -68,6 +51,7 @@ export default function BadReturnPanel({
   canManage: boolean;
   onChanged: () => void;
 }) {
+  const { message } = App.useApp();
   const [obligations, setObligations] = useState<MaintenanceReturnObligation[]>([]);
   const [returns, setReturns] = useState<MaintenanceBadReturn[]>([]);
   const [obligationPage, setObligationPage] = useState(1);

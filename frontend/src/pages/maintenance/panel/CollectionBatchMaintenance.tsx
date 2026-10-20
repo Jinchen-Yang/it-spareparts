@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type {
   MaintenanceCollectionSnapshotRow,
@@ -212,6 +212,7 @@ const toEditDraft = (row: MaintenanceCollectionSnapshotRow): EditDraft => ({
  * PATCH 永不自动升级 version；项目切换或卸载会让旧循环停止续发且不能清掉新会话的锁。
  */
 export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefresh }: BatchHookArgs) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<BatchMode>("create");
   const [phase, setPhase] = useState<Phase>("input");

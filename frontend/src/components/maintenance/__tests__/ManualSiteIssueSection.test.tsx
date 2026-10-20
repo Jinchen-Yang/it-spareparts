@@ -1,7 +1,7 @@
 /** 人工登记领用（page_manual）组件：入口可用、预览冻结、幂等键、epoch、锁、
  * 按 PN 的需求单候选与领用地址建议预填。 */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({

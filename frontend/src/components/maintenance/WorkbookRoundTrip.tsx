@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, List, Modal, Space, Typography, Upload, message } from "antd";
+import { App, Alert, Button, List, Modal, Space, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type {
   WillReassignOrder,
@@ -121,8 +121,10 @@ export function WorkbookRoundTrip({
   canUpload,
   size = "middle",
 }: WorkbookRoundTripProps) {
+  const { message } = App.useApp();
   const [downloading, setDownloading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "error" | "warning"; text: string } | null>(null);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
   const uploadSession = localStorage.getItem("token");
@@ -139,6 +141,7 @@ export function WorkbookRoundTrip({
     closeConfirmation.current?.();
     setRetainedDraft(null);
     setApplying(false);
+    setFeedback(null);
   }, [canUpload, uploadSession]);
 
   useEffect(() => {
@@ -153,10 +156,11 @@ export function WorkbookRoundTrip({
 
   const handleDownload = async () => {
     setDownloading(true);
+    setFeedback(null);
     try {
       saveBlob(await onDownload(), filename);
     } catch (error) {
-      message.error(readError(error, "下载失败"));
+      setFeedback({ type: "error", text: readError(error, "下载失败") });
     } finally {
       setDownloading(false);
     }
@@ -176,12 +180,12 @@ export function WorkbookRoundTrip({
         const refreshed = await onAfterApply();
         if (!isCurrent()) return;
         if (refreshed === false) {
-          message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
+          setFeedback({ type: "warning", text: "数据已写入，但页面刷新失败；旧数据已失效，请点击重试。" });
           return;
         }
       } catch {
         if (!isCurrent()) return;
-        message.warning("数据已写入，但页面刷新失败；旧数据已失效，请点击重试。");
+        setFeedback({ type: "warning", text: "数据已写入，但页面刷新失败；旧数据已失效，请点击重试。" });
         return;
       }
     }
@@ -321,6 +325,7 @@ export function WorkbookRoundTrip({
       && uploadEpoch.current === requestEpoch && localStorage.getItem("token") === requestSession;
     setRetainedDraft(null);
     setApplying(true);
+    setFeedback(null);
     let siteIssueMergeToken: string | undefined;
     try {
       if (onValidate) {
@@ -391,7 +396,7 @@ export function WorkbookRoundTrip({
                     modal.destroy();
                     await showSiteReplayError(replayError);
                   } else {
-                    message.error(readError(takeoverError, "上传失败"));
+                    setFeedback({ type: "error", text: readError(takeoverError, "上传失败") });
                   }
                 }
               } finally {
@@ -405,7 +410,7 @@ export function WorkbookRoundTrip({
       } else {
         // 后端整份拒绝时把原文 message 显示出来：告诉用户**哪一行**不合法，
         // 而不是一句「上传失败」——这份表是人工编辑的，定位靠这句话。
-        message.error(readError(error, "上传失败"));
+        setFeedback({ type: "error", text: readError(error, "上传失败") });
       }
     } finally {
       if (mounted.current && uploadEpoch.current === requestEpoch) {
@@ -444,6 +449,7 @@ export function WorkbookRoundTrip({
           </Upload>
         ) : null}
       </Space>
+      {feedback ? <Alert type={feedback.type} showIcon message={feedback.text} /> : null}
       {canUpload && retainedFile ? (
         <Alert
           type="warning"

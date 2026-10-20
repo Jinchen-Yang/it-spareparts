@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Modal, message } from "antd";
+import { Modal } from "antd";
 
 const { saveBlob } = vi.hoisted(() => ({ saveBlob: vi.fn() }));
 
@@ -29,7 +29,7 @@ describe("WorkbookRoundTrip", () => {
   afterEach(async () => {
     cleanup();
     Modal.destroyAll();
-    message.destroy();
+
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
@@ -275,6 +275,7 @@ describe("WorkbookRoundTrip", () => {
     const file = makeFile();
     const firstInput = uploadFile(container, file);
     expect(await screen.findByText(/第 12 行：上传行数不足/)).toBeInTheDocument();
+    expect(screen.getByText(/第 12 行：上传行数不足/).closest('[role="alert"]')).not.toBeNull();
     expect(onApply).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));

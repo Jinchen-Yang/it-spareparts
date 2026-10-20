@@ -1,5 +1,12 @@
 import type { ThemeConfig } from "antd";
 
+// 壳层与铺满内容区的页面共用尺寸，避免主题顶栏和页面抵消间距各自硬编码。
+export const SHELL_LAYOUT = {
+  headerHeight: 60,
+  contentPadding: 24,
+  mobileContentPadding: 12,
+};
+
 // 暖白 · 极简蓝点缀主题。
 // 取向：白为主、底色一点点暖（米白）、用白的不同灰度分层（画布<卡面）、蓝只作少量提醒色。
 export const COLORS = {
@@ -13,7 +20,7 @@ export const COLORS = {
   accentSoftBorder: "#DBE6F8",
   text: "#2A2722",        // 主文字（暖近黑，非纯黑）
   text2: "#6B665E",       // 次级（暖灰）
-  text3: "#787264",       // 提示 / 弱（暖灰，4.78:1 过 WCAG AA；原 #9C968B 仅 2.94:1）
+  text3: "#787264",       // 提示 / 弱（暖灰，4.78:1 过 WCAG AA）
   border: "#E9E5DE",      // 发丝边（暖）
   borderSoft: "#F0EDE7",
   danger: "#BE564B",      // 暖红（负毛利 / 错误）
@@ -51,7 +58,7 @@ export const themeConfig: ThemeConfig = {
     Layout: {
       headerBg: COLORS.header,
       headerColor: COLORS.text,
-      headerHeight: 60,
+      headerHeight: SHELL_LAYOUT.headerHeight,
       bodyBg: COLORS.page,
     },
     Menu: {

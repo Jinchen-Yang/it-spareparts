@@ -4,7 +4,7 @@
 // 权限：page_purchase_analytics（模板仅 boss；admin 恒放行）——路由/菜单由 nav.tsx 统一登记。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Alert, Card, message } from "antd";
+import { Button, App, Alert, Card } from "antd";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
 import {
@@ -47,6 +47,7 @@ function apiErrorMessage(err: unknown): string {
 }
 
 export default function PurchaseAnalyticsPage() {
+  const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const state = parseAnalyticsUrl(sp);
   const patch = useAnalyticsPatch(sp, setSp);
@@ -207,7 +208,7 @@ export default function PurchaseAnalyticsPage() {
             style={{ marginBottom: 12 }}
             message="汇总加载失败"
             description={summaryError}
-            action={<a onClick={() => setRetryTick((t) => t + 1)}>重试</a>}
+            action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
           />
         )}
         {lineMode && (
@@ -241,7 +242,7 @@ export default function PurchaseAnalyticsPage() {
             showIcon
             message="订单列表加载失败"
             description={ordersError}
-            action={<a onClick={() => setRetryTick((t) => t + 1)}>重试</a>}
+            action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
           />
         ) : (
           <DrillTable

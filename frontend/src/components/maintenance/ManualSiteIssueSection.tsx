@@ -1,20 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert,
-  AutoComplete,
-  Button,
-  Card,
-  Empty,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, AutoComplete, Button, Card, Empty, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PartPicker from "../PartPicker";
 import SiteIssueAddress from "./SiteIssueAddress";
@@ -332,6 +317,7 @@ export default function ManualSiteIssueSection({
   onChanged: () => void | Promise<void>;
   reloadIssues: () => Promise<void>;
 }) {
+  const { message } = App.useApp();
   // epoch：任何项目变化 / 卸载 / 弹窗重开都自增；await 之后必须复核。
   const epochRef = useRef(0);
   const mountedRef = useRef(true);

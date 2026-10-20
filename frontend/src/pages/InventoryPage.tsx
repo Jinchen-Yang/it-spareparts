@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Card, Input, Space, Button, Modal, InputNumber, Form, message, Tag, Alert, Table, Tooltip,
-} from "antd";
+import { App, Card, Input, Space, Button, Modal, InputNumber, Form, Tag, Alert, Table, Tooltip } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -42,6 +40,7 @@ interface DynRow {
 }
 
 export default function InventoryPage() {
+  const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<DynRow[]>([]);
@@ -127,7 +126,7 @@ export default function InventoryPage() {
       render: (v) => v || "-" },
     ...(isAdmin ? [{
       title: "操作", width: 70,
-      render: (_: unknown, r: WhRow) => <a onClick={() => openEdit(r, pn)}>修正</a>,
+      render: (_: unknown, r: WhRow) => <Button type="link" size="small" onClick={() => openEdit(r, pn)}>修正</Button>,
     }] as ColumnsType<WhRow> : []),
   ];
 

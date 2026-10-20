@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "../../test/antdRender";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account, AccountsMeta } from "../../api/accounts";
 
