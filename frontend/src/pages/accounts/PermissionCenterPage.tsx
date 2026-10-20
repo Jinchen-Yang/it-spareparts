@@ -1,3 +1,4 @@
+import PageHeader from "../../components/PageHeader";
 /** 账号与权限中心（v2 壳）：账号 | 职位模板 两页签，共享一次加载的 meta。 */
 import { useCallback, useEffect, useState } from "react";
 import { App, Empty, Spin, Tabs } from "antd";
@@ -29,9 +30,7 @@ export default function PermissionCenterPage() {
 
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h2 style={{ margin: 0 }}>账号与权限中心</h2>
-      </div>
+      <PageHeader title="账号与权限中心" />
       {!meta ? (
         loading ? <Spin style={{ display: "block", margin: "80px auto" }} />
           : <Empty description="加载失败，请刷新重试" />

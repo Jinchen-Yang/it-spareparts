@@ -1,8 +1,9 @@
+import PageHeader from "../../components/PageHeader";
 import { formatMoney } from "../../utils/format";
 import { COLORS } from "../../theme";
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { App, Alert, Button, Card, Col, DatePicker, Flex, Form, Input, Modal, Row, Select, Space, Spin, Statistic, Tabs, Tag, Tooltip, Typography } from "antd";
+import { App, Alert, Button, Card, Col, DatePicker, Form, Input, Modal, Row, Select, Space, Spin, Statistic, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { BoardProjectRow } from "../../api/maintenanceBossBoard";
@@ -38,7 +39,7 @@ import {
   statText,
 } from "./panel/panelUtils";
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const OverviewTab = lazy(() => import("./panel/OverviewTab"));
 const PartsOrdersTab = lazy(() => import("./panel/PartsOrdersTab"));
 const ExpenseTab = lazy(() => import("./panel/ExpenseTab"));
@@ -414,7 +415,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Flex justify="space-between" align="flex-start" wrap gap={12}>
+      <PageHeader title={row?.display_name ?? project?.display_name ?? projectId}
+        subtitle={
         <Space align="center" wrap>
           {/* 返回保持（v1.35 #N3）：有来路（含筛选后的项目墙）就原路返回；直达面板
               无历史时退化为默认墙。href 兜底给中键/新标签一个可用的落点。 */}
@@ -433,9 +435,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               else navigate("/maintenance");
             }}
           >{analyticsReturn ? "← 返回分析 · 保留筛选" : "← 返回项目墙"}</a>
-          <Title level={4} style={{ margin: 0 }}>
-            {row?.display_name ?? project?.display_name ?? projectId}
-          </Title>
           {row?.is_archived ? <Tag>已归档</Tag> : null}
           {lifecycle ? <Tag>{LIFECYCLE_LABEL[lifecycle] ?? lifecycle}</Tag> : null}
           <EditBasicsButton
@@ -452,8 +451,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               onChanged={refreshProject}
             />
           ) : null}
-        </Space>
-        <WorkbookRoundTrip
+        </Space>}
+        extra={<WorkbookRoundTrip
           size="small"
           title="本项目总表"
           filename={`${exportBase}-总表.xlsx`}
@@ -463,8 +462,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           onValidate={(file) => validateProjectMaster(projectId, file)}
           onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
           onAfterApply={refreshProject}
-        />
-      </Flex>
+        />} />
 
       {error ? (
         <Alert type="error" showIcon message={error}

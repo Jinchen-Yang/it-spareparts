@@ -1,3 +1,4 @@
+import PageHeader from "../../components/PageHeader";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
 import { App, Alert, Button, Card, Input, Modal, Space, Switch, Table, Tag, Typography, Upload } from "antd";
@@ -22,7 +23,7 @@ import DemandLineBatchCreate from "./DemandLineBatchCreate";
 import DemandLineCreate from "./DemandLineCreate";
 import DemandLinesEditor from "./DemandLinesEditor";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 const DEMAND_PAGE_SIZE = 20;
 
@@ -341,14 +342,8 @@ export function MaintenanceDemandsPage() {
       {/* 已作废行整行灰显（沿用默认主题的中性禁用色，不引入新色板） */}
       <style>{".demand-row-voided > td { color: rgba(0, 0, 0, 0.25); }"}</style>
 
-      <div>
-        <Title level={4} style={{ marginBottom: 4 }}>
-          需求单与数据同步
-        </Title>
-        <Text type="secondary">
-          上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。
-        </Text>
-      </div>
+      <PageHeader title="需求单与数据同步"
+        subtitle="上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。" />
 
       <Card title="氚云快照同步">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>

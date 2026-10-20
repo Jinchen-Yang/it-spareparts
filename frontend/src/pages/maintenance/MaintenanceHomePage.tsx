@@ -1,3 +1,4 @@
+import PageHeader from "../../components/PageHeader";
 import { COLORS, TAG_STYLES } from "../../theme";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -41,7 +42,7 @@ import {
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 const { RangePicker } = DatePicker;
 
 const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
@@ -241,17 +242,9 @@ export function MaintenanceHomePage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      {/* 页头行：左标题副标，右全局操作；窄屏自动换行 */}
-      <Row justify="space-between" align="middle" gutter={[16, 12]} wrap>
-        <Col flex="auto">
-          <Title level={4} style={{ marginBottom: 4 }}>
-            维保项目
-          </Title>
-          <Text type="secondary">
-            超预算的项目会变黄、变红；点卡片进项目看明细
-          </Text>
-        </Col>
-        <Col flex="none">
+      <PageHeader title="维保项目"
+        subtitle="超预算的项目会变黄、变红；点卡片进项目看明细"
+        extra={
           <Space size={8} align="start" wrap>
             <Link to="/maintenance/demands">
               <Button>需求单与同步</Button>
@@ -302,8 +295,7 @@ export function MaintenanceHomePage() {
               onAfterApply={() => latestLoad.current(1, true)}
             />
           </Space>
-        </Col>
-      </Row>
+        } />
 
       {/* 期限常驻；折叠只改变控件可见性，不改变筛选与导出参数。 */}
       <Card size="small">

@@ -1,3 +1,4 @@
+import PageHeader from "../components/PageHeader";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Drawer, Grid, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload } from "antd";
 import {
@@ -729,11 +730,11 @@ export default function ChatPage() {
 
       {/* 主区 */}
       <main aria-label="AI 助手对话区" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
-        {isMobile && (
-          <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--mb-border-soft)" }}>
-            <Button aria-label="会话" onClick={() => setSessionsOpen(true)} aria-expanded={sessionsOpen}>会话</Button>
-          </div>
-        )}
+        <div className="chat-page-header">
+          <PageHeader title="AI 定价助手" extra={isMobile
+            ? <Button aria-label="会话" onClick={() => setSessionsOpen(true)} aria-expanded={sessionsOpen}>会话</Button>
+            : undefined} />
+        </div>
         <div ref={scrollBoxRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px var(--mb-shell-content-padding) 8px" }}>
             {loadingTurns && (
@@ -748,7 +749,6 @@ export default function ChatPage() {
                 }}>
                   <RobotOutlined style={{ fontSize: 28, color: COLORS.surface }} />
                 </div>
-                <h2 style={{ marginBottom: 4 }}>AI 定价助手</h2>
                 <div style={{ color: "var(--mb-text-3)", marginBottom: 28 }}>
                   基于公司真实采购 / 销售 / 库存数据回答 · 对话记录云端保存，换设备也能接着聊
                 </div>

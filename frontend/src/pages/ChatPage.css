@@ -14,3 +14,10 @@
 .turn-assistant:hover .copy-btn { opacity: 1; }
 @keyframes chat-blink { 50% { opacity: 0; } }
 .cursor { display: inline-block; width: 7px; height: 16px; background: var(--mb-status-ai); vertical-align: -2px; animation: chat-blink 1s step-start infinite; }
+
+.chat-page-header {
+  padding: var(--mb-space-sm) var(--mb-shell-content-padding);
+  border-bottom: 1px solid var(--mb-border-soft);
+}
+.chat-page-header .page-header { margin-bottom: 0; align-items: center; }
+.chat-page-header .page-header__context, .chat-page-header .page-header__actions { width: auto; }
