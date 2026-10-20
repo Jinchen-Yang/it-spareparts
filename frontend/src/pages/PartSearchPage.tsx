@@ -243,9 +243,10 @@ export default function PartSearchPage() {
       return;
     }
     setQueryError(false);
-    // 一次提交产生一条历史；同条件重查也可刷新，且不重复发请求。
-    patchUrl({ ...nextFilters, q: query, part_id: undefined, pn: undefined });
-    if (query === urlQ && JSON.stringify(filters) === filterQuery) runSearch(query, filters, true);
+    // 新条件产生一条历史；同条件重查用 replace 刷新，不堆历史，也不重复发请求。
+    const unchanged = query === urlQ && JSON.stringify(filters) === filterQuery;
+    patchUrl({ ...nextFilters, q: query, part_id: undefined, pn: undefined }, unchanged && !urlPartId && !urlPn);
+    if (unchanged) runSearch(query, filters, true);
   };
 
   /** 点击结果行：part_id 深链（push 进历史，后退回到列表） */
@@ -462,7 +463,7 @@ export default function PartSearchPage() {
             </div>
             <div aria-label="动态可用库存" className="part-summary-metric">
               <span>动态可用库存</span>
-              <strong style={{ color: (ov.stock_dynamic?.dynamic_qty ?? 0) < 0 ? "var(--mb-danger)" : undefined }}>
+              <strong className={(ov.stock_dynamic?.dynamic_qty ?? 0) < 0 ? "is-negative" : undefined}>
                 {ov.stock_dynamic?.dynamic_qty ?? "—"}
               </strong>
               <small>期初 + 入库 − 出库</small>
@@ -534,19 +535,19 @@ export default function PartSearchPage() {
             <div className="part-price-stats">
               {canCost && <div>
                 <Statistic title="FIFO · 单位成本"
-                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} />; }} />
+                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} stack />; }} />
                 {canProfit && <span>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
               </div>}
               <div>
                 <Statistic title="平均销售价"
-                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} />; }} />
+                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} stack />; }} />
                 <span>累计售 {ov.profit_summary.total_qty_sold}</span>
               </div>
               <Statistic title="询价区间" valueRender={() => {
                 if (!ov.inquiry_ref.count) return <>无</>;
                 const lo = splitFixed(ov.inquiry_ref.min_money, "inc");
                 const hi = splitFixed(ov.inquiry_ref.max_money, "inc");
-                return <><TaxMoney scope="sales" inc={lo.inc} ex={lo.ex} /> ~ <TaxMoney scope="sales" inc={hi.inc} ex={hi.ex} /></>;
+                return <><TaxMoney scope="sales" inc={lo.inc} ex={lo.ex} stack /> ~ <TaxMoney scope="sales" inc={hi.inc} ex={hi.ex} stack /></>;
               }} />
             </div>
           </section>

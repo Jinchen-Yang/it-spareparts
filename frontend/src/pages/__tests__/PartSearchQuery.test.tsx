@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
 import { cleanupAntd, render } from "../../test/antdRender";
 
@@ -19,9 +19,11 @@ import PartSearchPage from "../PartSearchPage";
 
 let location: Location;
 let navigate: NavigateFunction;
+let navigationType: string;
 function Probe() {
   location = useLocation();
   navigate = useNavigate();
+  navigationType = useNavigationType();
   return null;
 }
 function renderAt(url = "/parts") {
@@ -120,11 +122,40 @@ describe("统一查询", () => {
     renderAt();
     const input = screen.getByRole("textbox", { name: "型号或关键词" });
     fireEvent.change(input, { target: { value: "硬盘" } });
-    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: true });
+    fireEvent.compositionStart(input);
+    // 组合输入中的回车必须被拦下（fireEvent 返回 false = preventDefault 生效）；去掉守卫即失败。
+    expect(fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true })).toBe(false);
+    expect(fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 229 })).toBe(false);
+    fireEvent.compositionEnd(input);
+    expect(fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 })).toBe(true);
     expect(unifiedSearch).not.toHaveBeenCalled();
     await user.click(input);
     await user.keyboard("{Enter}");
     expect(unifiedSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("URL 中负数或非数字容量被丢弃，其余规格照常查询", async () => {
+    renderAt("/parts?capacity_min=-1&capacity_max=abc&part_type=HDD");
+    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("", {
+      pageSize: 20, filters: { part_type: "HDD" },
+    }));
+    expect(screen.getByRole("spinbutton", { name: "最小容量" })).toHaveValue("");
+    expect(screen.getByRole("spinbutton", { name: "最大容量" })).toHaveValue("");
+  });
+
+  it("同条件重查用 replace，不新增历史；条件变化才 push", async () => {
+    const user = userEvent.setup();
+    renderAt("/parts?q=disk&capacity_min=8000");
+    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledTimes(1));
+    const before = location.key;
+    await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
+    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledTimes(2));
+    expect(location.key).not.toBe(before);
+    expect(navigationType).toBe("REPLACE");
+    fireEvent.change(screen.getByRole("textbox", { name: "型号或关键词" }), { target: { value: "ssd" } });
+    await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
+    await waitFor(() => expect(unifiedSearch).toHaveBeenLastCalledWith("ssd", expect.anything()));
+    expect(navigationType).toBe("PUSH");
   });
 
   it("搜索失败后重试保留已提交的组合条件", async () => {
