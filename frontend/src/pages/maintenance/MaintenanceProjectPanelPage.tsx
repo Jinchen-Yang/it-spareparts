@@ -1,6 +1,9 @@
+import PageHeader from "../../components/PageHeader";
+import { formatMoney } from "../../utils/format";
+import { COLORS } from "../../theme";
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { App, Alert, Button, Card, Col, DatePicker, Flex, Form, Input, Modal, Row, Select, Space, Spin, Statistic, Tabs, Tag, Tooltip, Typography } from "antd";
+import { App, Alert, Button, Card, Col, DatePicker, Form, Input, Modal, Row, Select, Space, Spin, Statistic, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { BoardProjectRow } from "../../api/maintenanceBossBoard";
@@ -36,7 +39,7 @@ import {
   statText,
 } from "./panel/panelUtils";
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const OverviewTab = lazy(() => import("./panel/OverviewTab"));
 const PartsOrdersTab = lazy(() => import("./panel/PartsOrdersTab"));
 const ExpenseTab = lazy(() => import("./panel/ExpenseTab"));
@@ -100,14 +103,14 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
     hint?: string;
     lowerBound?: boolean;
   }[] = [
-    { label: "备件成本", value: metrics.costs.parts, color: "#1677ff",
+    { label: "备件成本", value: metrics.costs.parts, color: COLORS.accent,
       lowerBound: partsIsLowerBound,
       hint: "本项目挂靠需求单明细的已知备件成本（含税）" },
-    { label: "报销成本", value: metrics.costs.expense, color: "#fa8c16",
+    { label: "报销成本", value: metrics.costs.expense, color: COLORS.warning,
       hint: "已批准报销（含税）" },
-    { label: "已领用成本", value: metrics.costs.issued, color: "#722ed1",
+    { label: "已领用成本", value: metrics.costs.issued, color: COLORS.text2,
       hint: "现场领用（已确认/已更正）的已知成本（含税）" },
-    { label: "返还成本", value: metrics.costs.returned, color: "#13c2c2",
+    { label: "返还成本", value: metrics.costs.returned, color: COLORS.success,
       hint: "返还成本口径建设中，当前不提供猜测值" },
   ];
 
@@ -120,7 +123,7 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
         <Col xs={12} sm={6}>
           <Statistic
             title="累计已回款"
-            value={metrics.received == null ? "数据不足" : `¥${metrics.received.toFixed(2)}`}
+            value={formatMoney(metrics.received, { mode: "fixed", prefix: "¥", empty: "数据不足" })}
             valueStyle={HEALTH_VALUE_STYLE}
           />
         </Col>
@@ -150,7 +153,7 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
                 <Text strong style={{ color: line.color, fontSize: 16 }}>
                   {line.value == null
                     ? "数据不足"
-                    : `¥${line.value.toFixed(2)}${line.lowerBound ? "（已知下限）" : ""}`}
+                    : formatMoney(line.value, { mode: "fixed", prefix: "¥", suffix: line.lowerBound ? "（已知下限）" : "" })}
                 </Text>
               </Tooltip>
             </Col>
@@ -412,7 +415,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Flex justify="space-between" align="flex-start" wrap gap={12}>
+      <PageHeader title={row?.display_name ?? project?.display_name ?? projectId}
+        subtitle={
         <Space align="center" wrap>
           {/* 返回保持（v1.35 #N3）：有来路（含筛选后的项目墙）就原路返回；直达面板
               无历史时退化为默认墙。href 兜底给中键/新标签一个可用的落点。 */}
@@ -431,9 +435,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               else navigate("/maintenance");
             }}
           >{analyticsReturn ? "← 返回分析 · 保留筛选" : "← 返回项目墙"}</a>
-          <Title level={4} style={{ margin: 0 }}>
-            {row?.display_name ?? project?.display_name ?? projectId}
-          </Title>
           {row?.is_archived ? <Tag>已归档</Tag> : null}
           {lifecycle ? <Tag>{LIFECYCLE_LABEL[lifecycle] ?? lifecycle}</Tag> : null}
           <EditBasicsButton
@@ -450,8 +451,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               onChanged={refreshProject}
             />
           ) : null}
-        </Space>
-        <WorkbookRoundTrip
+        </Space>}
+        extra={<WorkbookRoundTrip
           size="small"
           title="本项目总表"
           filename={`${exportBase}-总表.xlsx`}
@@ -461,8 +462,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           onValidate={(file) => validateProjectMaster(projectId, file)}
           onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
           onAfterApply={refreshProject}
-        />
-      </Flex>
+        />} />
 
       {error ? (
         <Alert type="error" showIcon message={error}

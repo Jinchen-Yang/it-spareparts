@@ -10,7 +10,7 @@ import { cleanupAntd, renderWithoutMotion as render } from "../../test/antdRende
  * - 点击结果行 → part_id push 进历史；浏览器后退/前进保持/恢复选中型号。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
@@ -207,6 +207,7 @@ describe("稳定深链", () => {
     expect(screen.getByText("¥99")).toBeInTheDocument();
     expect(screen.getByText("¥113")).toBeInTheDocument();
     expect(screen.getByText("¥100")).toBeInTheDocument();
+    await clickAndFlush(screen.getByRole("tab", { name: "销售历史(近20)" }));
     expect(screen.getByText("¥200")).toBeInTheDocument();
     expect(screen.queryByText("¥88.5")).toBeNull();
     expect(screen.queryByText("¥226")).toBeNull();
@@ -267,37 +268,28 @@ describe("精确即唯一", () => {
 
     await waitFor(() => expect(fetchPoolReference).toHaveBeenCalledWith(42, { range: "90d" }));
     expect(await screen.findByRole("region", { name: "02311DYQ 的池价格参考" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("池价格参考"));
     expect(screen.getByLabelText("采购参考"))
       .toHaveTextContent("池均价 含 ¥565 · 不含 ¥500");
     expect(screen.getByLabelText("销售参考")).toHaveTextContent("池均价 ¥800");
   });
 
-  it("订单历史按采购、销售顺序置顶，分别占满一整行，其他全景信息后置", async () => {
+  it("摘要、基本信息、库存先于订单历史，采购和销售通过页签切换", async () => {
     renderAt("/parts?part_id=42");
 
-    const purchaseHistory = await screen.findByRole("region", { name: "采购订单历史" });
-    const salesHistory = screen.getByRole("region", { name: "销售订单历史" });
+    const summary = await screen.findByRole("region", { name: "型号摘要" });
     const orderHistory = screen.getByRole("group", { name: "型号订单历史" });
     const basicInfo = screen.getByRole("region", { name: "型号基本信息" });
     const inventory = screen.getByRole("region", { name: "型号库存" });
-    const poolReference = await screen.findByRole("region", { name: "02311DYQ 的池价格参考" });
-
-    expect(purchaseHistory.compareDocumentPosition(salesHistory) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
-    expect(salesHistory.compareDocumentPosition(basicInfo) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
-    expect(salesHistory.compareDocumentPosition(poolReference) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
-    expect(salesHistory.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
-
-    expect(orderHistory).toHaveStyle({
-      display: "flex",
-      flexDirection: "column",
-      width: "100%",
-    });
-    expect(purchaseHistory).toHaveStyle({ width: "100%" });
-    expect(salesHistory).toHaveStyle({ width: "100%" });
+    expect(summary.compareDocumentPosition(basicInfo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(basicInfo.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(inventory.compareDocumentPosition(orderHistory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(summary).getByText("动态可用库存")).toBeVisible();
+    expect(screen.getByRole("tab", { name: "采购历史(近20)" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("region", { name: "销售订单历史" })).toBeNull();
+    await clickAndFlush(screen.getByRole("tab", { name: "销售历史(近20)" }));
+    expect(screen.getByRole("region", { name: "销售订单历史" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "采购订单历史" })).toBeNull();
   });
 
   it("精确命中：唯一主结果自动开全景；相似候选只在'相似型号'区，不混排", async () => {
@@ -324,6 +316,11 @@ describe("精确即唯一", () => {
     await screen.findByText("型号全景：");
     // 池身份展示
     expect(screen.getAllByText(/华为互通池/).length).toBeGreaterThan(0);
+    const similarRegion = screen.getByLabelText("相似型号候选");
+    const summary = screen.getByRole("region", { name: "型号摘要" });
+    expect(similarRegion.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await clickAndFlush(within(similarRegion).getByRole("button", { name: "02311DYA" }));
+    expect(fetchOverview).toHaveBeenLastCalledWith({ part_id: 43 });
   });
 
   it("歧义（同写法多个型号）：明确警示，不自动打开", async () => {
@@ -337,6 +334,67 @@ describe("精确即唯一", () => {
     await screen.findByText("该写法命中多个型号（歧义）");
     expect(curLoc.search).not.toContain("part_id");
     expect(fetchOverview).not.toHaveBeenCalled();
+  });
+});
+
+describe("摘要权限与空态", () => {
+  it.each([
+    { cost: false, profit: false },
+    { cost: false, profit: true },
+    { cost: true, profit: false },
+    { cost: true, profit: true },
+  ])("成本 $cost / 利润 $profit：保持原权限组合，销售明细继续遮蔽", async ({ cost, profit }) => {
+    localStorage.setItem("role", "sales");
+    localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: cost, data_profit: profit }));
+    fetchOverview.mockResolvedValue({
+      ...ovFix(),
+      profit_summary: { ...ovFix().profit_summary, avg_cost_moving: 123, avg_margin_moving: 0.45 },
+      sale_price_ref: { ref_sale_price: 226, ref_sale_samples: 5, ref_window_days: 30 },
+      stock_dynamic: { dynamic_qty: 7 },
+      sales_recent_restricted: true,
+      sales_recent: [{ order_no: "SHOULD-NOT-SHOW", customer: "不可见客户", qty: 1, unit_price: 999 }],
+    });
+    renderAt("/parts?part_id=42");
+    const summary = await screen.findByRole("region", { name: "型号摘要" });
+    expect(within(summary).getByLabelText("近期成交参考价")).toHaveTextContent("¥200");
+    expect(within(summary).getByLabelText("动态可用库存")).toHaveTextContent("7");
+    expect(!!within(summary).queryByLabelText("移动加权单位成本")).toBe(cost);
+    expect(!!within(summary).queryByLabelText("移动加权毛利率")).toBe(cost && profit);
+    if (!cost) expect(summary).not.toHaveTextContent("¥123");
+    if (!cost || !profit) expect(summary).not.toHaveTextContent("45%");
+    await clickAndFlush(screen.getByRole("tab", { name: "销售历史(近20)" }));
+    expect(screen.getByText(/按权限，销售逐单成交明细不可见/)).toBeVisible();
+    expect(screen.queryByText("SHOULD-NOT-SHOW")).toBeNull();
+    expect(screen.queryByText("不可见客户")).toBeNull();
+    expect(within(summary).queryByText("销售单号")).toBeNull();
+  });
+
+  it("更多价格统计里的双口径金额分两行堆叠，长金额可换行不横溢", async () => {
+    fetchOverview.mockResolvedValue({ ...ovFix(), profit_summary: {
+      ...ovFix().profit_summary, avg_cost_fifo: 1234567.89 } });
+    renderAt("/parts?part_id=42");
+    const stats = await screen.findByRole("region", { name: "更多价格统计" });
+    const label = within(stats).getByText((_, el) => el?.textContent === "不含 ");
+    const pair = label.parentElement!.parentElement!;
+    expect(pair).toHaveStyle({ flexDirection: "column" });
+    expect(stats.querySelector("[style*='nowrap']")).toBeNull();
+  });
+
+  it("负动态库存用深色危险色类名，不用 accent-soft 底上不足 4.5 的 danger", async () => {
+    fetchOverview.mockResolvedValue({ ...ovFix(), stock_dynamic: {
+      dynamic_qty: -3, anchor_qty: 0, anchor_date: null, in_qty: 0, out_sales: 3, out_maint: 0 } });
+    renderAt("/parts?part_id=42");
+    const summary = await screen.findByRole("region", { name: "型号摘要" });
+    const value = within(within(summary).getByLabelText("动态可用库存")).getByText("-3");
+    expect(value).toHaveClass("is-negative");
+    expect(value.getAttribute("style") ?? "").not.toContain("--mb-danger");
+  });
+
+  it("缺参考价和动态库存时不把未知显示成零", async () => {
+    renderAt("/parts?part_id=42");
+    const summary = await screen.findByRole("region", { name: "型号摘要" });
+    expect(within(summary).getByText("暂无成交参考价")).toBeVisible();
+    expect(within(summary).getByLabelText("动态可用库存")).toHaveTextContent("—");
   });
 });
 
@@ -463,8 +521,8 @@ describe("通用号 PN 查看与详情编辑", () => {
     renderAt("/parts?part_id=42");
     const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
     expect(viewButton.closest(".ant-table")).toHaveClass("ant-table-scroll-horizontal");
-    expect(screen.getByText("平均销售价").closest(".ant-col"))
-      .toHaveClass("ant-col-xs-24", "ant-col-sm-12", "ant-col-lg-6");
+    expect(within(screen.getByRole("region", { name: "更多价格统计" })).getByText("平均销售价"))
+      .toBeVisible();
     expect(viewButton).toHaveAttribute("type", "button");
     viewButton.focus();
     expect(viewButton).toHaveFocus();
@@ -481,12 +539,12 @@ describe("通用号 PN 查看与详情编辑", () => {
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "新描述：2TB SAS 企业盘" } });
 
-    fireEvent.mouseDown(screen.getByLabelText("一级品类"));
+    fireEvent.mouseDown(within(screen.getByRole("dialog")).getByLabelText("一级品类"));
     await screen.findByRole("option", { name: "存储设备" });
     const majorOption = screen.getAllByText("存储设备")
       .find((node) => node.closest(".ant-select-item-option"));
     fireEvent.click(majorOption!.closest(".ant-select-item-option")!);
-    fireEvent.mouseDown(screen.getByLabelText("二级品类"));
+    fireEvent.mouseDown(within(screen.getByRole("dialog")).getByLabelText("二级品类"));
     await screen.findByRole("option", { name: "硬盘" });
     const minorOption = screen.getAllByText("硬盘")
       .find((node) => node.closest(".ant-select-item-option"));

@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanupAntd, renderWithoutMotion } from "../../test/antdRender";
@@ -27,7 +28,7 @@ it("库存加载失败可直接重试并恢复列表", async () => {
       total: 1,
     },
   });
-  renderWithoutMotion(<InventoryPage />);
+  renderWithoutMotion(<MemoryRouter><InventoryPage /></MemoryRouter>);
 
   const retry = await screen.findByRole("button", { name: /重\s*试/ });
   expect(screen.getByText("加载失败，请点上方重试")).toBeInTheDocument();
@@ -45,7 +46,7 @@ it("翻页失败重试原页与原搜索条件，不使用未提交的搜索草�
   get.mockResolvedValueOnce({ data: { items: [row(1, "PN-FIRST")], total: 40 } });
   get.mockRejectedValueOnce({ response: { status: 503, data: { detail: "库存查询暂不可用" } } });
   get.mockResolvedValueOnce({ data: { items: [row(2, "PN-SECOND")], total: 40 } });
-  renderWithoutMotion(<InventoryPage />);
+  renderWithoutMotion(<MemoryRouter><InventoryPage /></MemoryRouter>);
   expect(await screen.findByText("PN-FIRST")).toBeInTheDocument();
   fireEvent.click(screen.getByTitle("2"));
 

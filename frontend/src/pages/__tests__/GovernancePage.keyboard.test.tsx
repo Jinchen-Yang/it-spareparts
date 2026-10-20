@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { App, ConfigProvider } from "antd";
 import { cleanup, render, screen, waitFor, within } from "../../test/antdRender";
 import userEvent from "@testing-library/user-event";
@@ -30,7 +31,7 @@ afterEach(cleanup);
 
 it("治理排除可用 Tab 和 Enter 打开原因确认，恢复可用空格触发原接口", async () => {
   const user = userEvent.setup();
-  render(<ConfigProvider theme={{ token: { motion: false } }}><App><GovernancePage /></App></ConfigProvider>);
+  render(<ConfigProvider theme={{ token: { motion: false } }}><App><MemoryRouter><GovernancePage /></MemoryRouter></App></ConfigProvider>);
   await screen.findByText("KEYBOARD-PN");
   await tabTo(user, screen.getByRole("button", { name: "排除" }));
   await user.keyboard("{Enter}");

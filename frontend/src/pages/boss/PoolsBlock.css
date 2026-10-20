@@ -1,0 +1,28 @@
+.pool-metric-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--mb-space-xs);
+  min-width: 0;
+}
+.pool-metric-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mb-space-xs);
+  max-width: 100%;
+  border: 1px solid currentColor;
+  border-radius: var(--mb-radius-sm);
+  background: transparent;
+  color: var(--mb-accent-strong);
+  font: inherit;
+  font-size: var(--mb-font-size-xs);
+  padding: var(--mb-space-xs);
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: start;
+  cursor: pointer;
+}
+.pool-metric-toggle > .anticon { flex-shrink: 0; }
+.pool-metric-toggle--average { color: var(--mb-tag-warning-text); }
+.pool-metric-toggle:focus-visible { outline: 2px solid var(--mb-accent); outline-offset: 2px; }
