@@ -1,3 +1,4 @@
+import { COLORS } from "../../theme";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App, ConfigProvider } from "antd";
@@ -46,6 +47,20 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("AI 助手的响应式会话入口", () => {
+  it("助手图标沿用本仓蓝色，样式不再由页面内联 style 注入", async () => {
+    viewport(1024);
+    const { container } = setup();
+    const main = await screen.findByRole("main", { name: "AI 助手对话区" });
+    const icon = within(main).getByRole("img", { name: "robot" });
+    expect(icon.parentElement).toHaveStyle({
+      background: `linear-gradient(135deg,${COLORS.status.ai},${COLORS.accentStrong})`,
+    });
+    expect(container.querySelector("style")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "上次报价" }));
+    expect(await screen.findByText("上次报价记录")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上次报价" })).toHaveStyle({ color: COLORS.status.ai });
+  });
+
   it("手机会话藏在抽屉中，选择后关闭抽屉并保留可输入的对话区", async () => {
     setup();
     const trigger = await screen.findByRole("button", { name: "会话" });

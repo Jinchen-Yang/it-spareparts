@@ -1,3 +1,4 @@
+import { COLORS } from "../../../theme";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,6 +58,16 @@ function renderCard(row: BoardProjectRow) {
 }
 
 describe("项目卡（#34/#35/#43）", () => {
+  it("成本、回款和状态使用本仓语义色，金额文本保持原样", () => {
+    const { container } = renderCard(makeRow());
+    expect(screen.getByText("备件成本 79100.00 元")).toHaveStyle({ color: COLORS.accent });
+    expect(screen.getByText("报销成本 113.00 元")).toHaveStyle({ color: COLORS.warning });
+    expect(screen.getByText("已领用成本 260.00 元")).toHaveStyle({ color: COLORS.accentStrong });
+    expect(screen.getByText("维保备件发货数 12 个")).toHaveStyle({ color: COLORS.success });
+    expect(screen.getByText("正常")).toHaveStyle({ backgroundColor: COLORS.success });
+    expect(container.querySelector(".ant-progress-bg")).toHaveStyle({ backgroundColor: COLORS.accent });
+  });
+
   it("展示标题、XSDD 合同号、销售与合同总额（2026-08-21：卡片不再显示项目经理）", () => {
     renderCard(makeRow());
     expect(screen.getByText("合成项目A")).toBeInTheDocument();
@@ -95,8 +106,8 @@ describe("项目卡（#34/#35/#43）", () => {
     expect(text).toContain("79100.00 元");
     expect(text).toContain("2 行无参照价");
     expect(text).toContain("报销成本 113.00 元"); // 橙色
-    expect(text).toContain("已领用成本 260.00 元"); // 紫色
-    expect(text).toContain("维保备件发货数 12 个"); // 青色（千分位+个，不显示 .000）
+    expect(text).toContain("已领用成本 260.00 元"); // 强调蓝
+    expect(text).toContain("维保备件发货数 12 个"); // 柔绿（千分位+个，不显示 .000）
     expect(text).not.toContain("12.000");
     // 回款进度条：已回款 / 合同额（千分位）+ 百分比
     expect(text).toContain("¥30,000 / ¥100,000（30%）");

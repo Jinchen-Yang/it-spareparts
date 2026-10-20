@@ -14,7 +14,10 @@ import type {
   AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
 } from "../api";
 import { clearSessionScopedPreferences } from "../sessionPreferences";
-import { COLORS } from "../theme";
+import { COLORS, TAG_STYLES } from "../theme";
+
+import { tokens } from "../tokens";
+import "./ChatPage.css";
 
 const TOOL_LABEL: Record<string, string> = {
   search_parts: "型号搜索",
@@ -123,7 +126,7 @@ function FileCard({ href, label }: { href: string; label?: string }) {
       }}>
         <span style={{
           width: 28, height: 28, borderRadius: 8, flexShrink: 0, display: "inline-flex",
-          alignItems: "center", justifyContent: "center", background: "#E9F2EB", color: "#41704F",
+          alignItems: "center", justifyContent: "center", background: COLORS.tag.success.background, color: COLORS.tag.success.text,
         }}><FileExcelOutlined /></span>
         <span style={{ fontSize: 13, color: COLORS.text, overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{name}</span>
@@ -224,8 +227,8 @@ function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) 
         <span>💭 {streaming ? "思考中…" : "已思考"}</span>
       </Button>
       {open && (
-        <div style={{ marginTop: 4, padding: "8px 12px", background: "#F6F3EE", borderRadius: 8,
-                      borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "var(--mb-text-3)",
+        <div style={{ marginTop: 4, padding: "8px 12px", background: COLORS.inset, borderRadius: 8,
+                      borderLeft: "2px solid var(--mb-border)", fontSize: 12.5, color: "var(--mb-text-3)",
                       whiteSpace: "pre-wrap", lineHeight: 1.7, maxHeight: 320, overflow: "auto" }}>
           {text}
         </div>
@@ -251,7 +254,7 @@ function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
         {!open && <span style={{ color: "var(--mb-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {summary}</span>}
       </Button>
       {open && (
-        <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
+        <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid var(--mb-border)" }}>
           {tools.map((t, i) => {
             const a = argOf(t.args);
             return (
@@ -279,7 +282,7 @@ function LiveTrace({ runs }: { runs: ToolRun[] }) {
         </div>
       )}
       {active && (
-        <div style={{ color: "#3E6FD1", display: "flex", alignItems: "center", gap: 6 }}>
+        <div style={{ color: COLORS.accent, display: "flex", alignItems: "center", gap: 6 }}>
           <Spin size="small" /> 正在{label(active.name)}…
         </div>
       )}
@@ -294,7 +297,7 @@ function UserContent({ text }: { text: string }) {
   return (
     <>
       <div style={{ marginBottom: m[2] ? 6 : 0 }}>
-        <Tag color="rgba(255,255,255,0.25)" style={{ color: "#fff", border: "1px solid rgba(255,255,255,0.4)" }}>
+        <Tag color={COLORS.onAccentSoft} style={{ color: COLORS.surface, border: `1px solid ${COLORS.onAccentSoftBorder}` }}>
           📎 {m[1]}
         </Tag>
       </div>
@@ -672,24 +675,23 @@ export default function ChatPage() {
       </div>
       <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "0 8px 12px" }}>
         {sessions.map((s) => (
-          <div key={s.id} className="sess-item" style={{
+          <div key={s.id} className="sess-item" data-active={s.id === activeId} style={{
             padding: "2px 6px", borderRadius: 8, marginBottom: 2,
             display: "flex", alignItems: "center", gap: 6,
-            background: s.id === activeId ? "#eef2ff" : "transparent",
           }}>
             <Button type="text" onClick={() => {
               if (s.id !== activeId) void openSession(s.id);
               setSessionsOpen(false);
             }} style={{
               flex: 1, minWidth: 0, paddingInline: 4, justifyContent: "flex-start",
-              color: s.id === activeId ? "#4f46e5" : "#374151", fontSize: 13,
+              color: s.id === activeId ? COLORS.status.ai : COLORS.text, fontSize: 13,
             }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
             </Button>
             {generatingIds.has(s.id) && (
               <span title="生成中（后台）" style={{
-                width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: "#10b981",
-                animation: "blink 1.2s step-start infinite",
+                width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: COLORS.status.confirmed,
+                animation: "chat-blink 1.2s step-start infinite",
               }} />
             )}
             <Popconfirm title="删除该对话？" onConfirm={() => removeSession(s.id)}>
@@ -706,30 +708,13 @@ export default function ChatPage() {
   return (
     <div style={{
       display: "flex", margin: "calc(-1 * var(--mb-shell-content-padding))",
-      height: "calc(100dvh - var(--mb-shell-header-height))", background: "#fff", minWidth: 0,
+      height: "calc(100dvh - var(--mb-shell-header-height))", background: COLORS.surface, minWidth: 0,
     }}>
-      <style>{`
-        .chat-md table { border-collapse: collapse; margin: 10px 0; background: #fff; font-size: 13px; }
-        .chat-md th, .chat-md td { border: 1px solid #e5e7eb; padding: 5px 12px; }
-        .chat-md th { background: #f9fafb; font-weight: 600; }
-        .chat-md p { margin: 6px 0; line-height: 1.75; }
-        .chat-md h2, .chat-md h3 { margin: 14px 0 6px; font-size: 15px; }
-        .chat-md hr { border: none; border-top: 1px solid #f0f0f0; margin: 12px 0; }
-        .chat-md ul, .chat-md ol { padding-left: 20px; margin: 6px 0; }
-        .chat-md li { margin: 3px 0; }
-        .chat-md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid #c7d2fe; background: #f8faff; color: #4b5563; }
-        .chat-md code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
-        .sess-item:hover { background: #eef2ff !important; }
-        .sess-del { opacity: 0; }
-        .sess-item:hover .sess-del, .sess-item:focus-within .sess-del { opacity: 1; }
-        .turn-assistant:hover .copy-btn { opacity: 1; }
-        @keyframes blink { 50% { opacity: 0; } }
-        .cursor { display: inline-block; width: 7px; height: 16px; background: #4f46e5; vertical-align: -2px; animation: blink 1s step-start infinite; }
-      `}</style>
+
 
       {/* 会话栏 */}
       {!isMobile && (
-        <aside aria-label="会话列表" style={{ width: 230, borderRight: "1px solid #f0f0f0", background: "#fafafa",
+        <aside aria-label="会话列表" style={{ width: 230, borderRight: "1px solid var(--mb-border-soft)", background: COLORS.inset,
                         display: "flex", flexDirection: "column", flexShrink: 0 }}>
           {sessionList}
         </aside>
@@ -745,7 +730,7 @@ export default function ChatPage() {
       {/* 主区 */}
       <main aria-label="AI 助手对话区" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         {isMobile && (
-          <div style={{ padding: "8px 12px", borderBottom: "1px solid #f0f0f0" }}>
+          <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--mb-border-soft)" }}>
             <Button aria-label="会话" onClick={() => setSessionsOpen(true)} aria-expanded={sessionsOpen}>会话</Button>
           </div>
         )}
@@ -758,10 +743,10 @@ export default function ChatPage() {
               <div style={{ textAlign: "center", paddingTop: 48 }}>
                 <div style={{
                   width: 56, height: 56, borderRadius: 16, margin: "0 auto 16px",
-                  background: "linear-gradient(135deg,#4f46e5,#9333ea)", display: "flex",
+                  background: `linear-gradient(135deg,${COLORS.status.ai},${COLORS.accentStrong})`, display: "flex",
                   alignItems: "center", justifyContent: "center",
                 }}>
-                  <RobotOutlined style={{ fontSize: 28, color: "#fff" }} />
+                  <RobotOutlined style={{ fontSize: 28, color: COLORS.surface }} />
                 </div>
                 <h2 style={{ marginBottom: 4 }}>AI 定价助手</h2>
                 <div style={{ color: "var(--mb-text-3)", marginBottom: 28 }}>
@@ -776,13 +761,13 @@ export default function ChatPage() {
                       onClick={() => clickable && send(ex.q)}
                       onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); send(ex.q); } }}
                       style={{
-                        border: "1px solid #e5e7eb", borderRadius: 12, padding: "12px 14px",
-                        cursor: clickable ? "pointer" : "default", background: "#fff",
+                        border: "1px solid var(--mb-border)", borderRadius: 12, padding: "12px 14px",
+                        cursor: clickable ? "pointer" : "default", background: COLORS.surface,
                       }}
-                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#c7d2fe")}
-                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#e5e7eb")}>
+                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = COLORS.accentSoftBorder)}
+                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = COLORS.border)}>
                       <div style={{ fontWeight: 600, marginBottom: 2 }}>{ex.icon} {ex.title}</div>
-                      <div style={{ color: "#6b7280", fontSize: 12.5 }}>{ex.q}</div>
+                      <div style={{ color: COLORS.text2, fontSize: 12.5 }}>{ex.q}</div>
                     </div>
                     );
                   })}
@@ -795,7 +780,7 @@ export default function ChatPage() {
                 <div key={i} style={{ display: "flex", justifyContent: "flex-end", margin: "16px 0" }}>
                   <div style={{
                     maxWidth: "78%", padding: "10px 16px", borderRadius: "16px 16px 4px 16px",
-                    background: "#4f46e5", color: "#fff", fontSize: 14, lineHeight: 1.7,
+                    background: COLORS.status.ai, color: COLORS.surface, fontSize: 14, lineHeight: 1.7,
                     whiteSpace: "pre-wrap", wordBreak: "break-word",
                   }}>
                     <UserContent text={t.content} />
@@ -805,10 +790,10 @@ export default function ChatPage() {
                 <div key={i} className="turn-assistant" style={{ display: "flex", gap: 12, margin: "16px 0" }}>
                   <div style={{
                     width: 30, height: 30, borderRadius: 10, flexShrink: 0, marginTop: 2,
-                    background: "linear-gradient(135deg,#4f46e5,#9333ea)", display: "flex",
+                    background: `linear-gradient(135deg,${COLORS.status.ai},${COLORS.accentStrong})`, display: "flex",
                     alignItems: "center", justifyContent: "center",
                   }}>
-                    <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
+                    <RobotOutlined style={{ color: COLORS.surface, fontSize: 15 }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {t.reasoning && <ThinkBlock text={t.reasoning} />}
@@ -816,7 +801,7 @@ export default function ChatPage() {
                       <Md text={t.content} />
                     </div>
                     <ToolTrace tools={t.tools} />
-                    {t.stopped && <Tag style={{ marginTop: 6 }} color="orange">已中断</Tag>}
+                    {t.stopped && <Tag style={{ ...TAG_STYLES.warning, marginTop: 6 }}>已中断</Tag>}
                     <Tooltip title="复制全文">
                       <Button className="copy-btn" size="small" type="text" icon={<CopyOutlined />}
                         style={{ opacity: 0, color: "var(--mb-text-3)", marginTop: 4 }}
@@ -832,10 +817,10 @@ export default function ChatPage() {
               <div style={{ display: "flex", gap: 12, margin: "16px 0" }}>
                 <div style={{
                   width: 30, height: 30, borderRadius: 10, flexShrink: 0, marginTop: 2,
-                  background: "linear-gradient(135deg,#4f46e5,#9333ea)", display: "flex",
+                  background: `linear-gradient(135deg,${COLORS.status.ai},${COLORS.accentStrong})`, display: "flex",
                   alignItems: "center", justifyContent: "center",
                 }}>
-                  <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
+                  <RobotOutlined style={{ color: COLORS.surface, fontSize: 15 }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {thinkText && <ThinkBlock text={thinkText} streaming />}
@@ -853,26 +838,26 @@ export default function ChatPage() {
         </div>
 
         {/* 输入区 */}
-        <div style={{ borderTop: "1px solid #f5f5f5", background: "#fff", flexShrink: 0 }}>
+        <div style={{ borderTop: "1px solid var(--mb-border-soft)", background: COLORS.surface, flexShrink: 0 }}>
           <div style={{ maxWidth: 860, margin: "0 auto", padding: "12px var(--mb-shell-content-padding) 8px" }}>
             {pendingFile && (
-              <Tag closable color="purple" onClose={() => setPendingFile(null)}
-                style={{ marginBottom: 8, padding: "3px 10px" }}>
+              <Tag closable onClose={() => setPendingFile(null)}
+                style={{ ...TAG_STYLES.info, marginBottom: 8, padding: "3px 10px" }}>
                 📎 {pendingFile.filename}（{pendingFile.sheets
                   ? pendingFile.sheets.map((s) => `${s.name} ${s.n_rows}行`).join("、")
                   : pendingFile.file_kind}）
               </Tag>
             )}
             <div style={{
-              display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid #e5e7eb",
-              borderRadius: 14, padding: "8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
+              display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid var(--mb-border)",
+              borderRadius: 14, padding: "8px 10px", boxShadow: tokens.shadow.input,
             }}>
               <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
                 showUploadList={false} disabled={uploading}
                 beforeUpload={(f) => doUpload(f as unknown as File)}>
                 <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）；图片可直接 Ctrl+V 粘贴">
                   <Button type="text" icon={<PaperClipOutlined />} loading={uploading}
-                    style={{ color: "#6b7280" }} />
+                    style={{ color: COLORS.text2 }} />
                 </Tooltip>
               </Upload>
               <Input.TextArea

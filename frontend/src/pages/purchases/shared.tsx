@@ -1,3 +1,4 @@
+import { formatMoney } from "../../utils/format";
 import { useCallback, type KeyboardEvent, type ReactNode } from "react";
 import { Tag, Tooltip } from "antd";
 import type { SetURLSearchParams } from "react-router-dom";
@@ -41,8 +42,7 @@ export const ADVICE_COLOR: Record<string, string> = {
 export const fmt = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 // 金额场景固定两位小数（含¥0.00 对齐）；数量/比值用 fmt
-export const fmtMoney = (v: number | null | undefined) =>
-  v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const fmtMoney = (v: number | null | undefined) => formatMoney(v);
 // 单价/金额按订单税口径解释原值，再按统一 13% 税率补齐另一侧；未标注统一按未税。
 export const byTax = splitByFlag;
 

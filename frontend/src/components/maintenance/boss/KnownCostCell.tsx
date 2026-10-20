@@ -1,3 +1,5 @@
+import { formatMoney } from "../../../utils/format";
+import { COLORS } from "../../../theme";
 import { Progress, Space, Tooltip, Typography } from "antd";
 import { LockOutlined } from "@ant-design/icons";
 import type { KnownCostStat } from "../../../api/maintenanceBossBoard";
@@ -17,15 +19,6 @@ const QUALITY_TEXT: Record<string, string> = {
   incomplete: "不完整 · 已知下限",
 };
 
-function money(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  const num = typeof value === "string" ? Number(value) : value;
-  if (Number.isNaN(num)) return String(value);
-  return num.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
 
 export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; compact?: boolean }) {
   if (!stat || stat.state === "restricted") {
@@ -39,7 +32,7 @@ export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; 
   }
   if (stat.state === "not_imported" || stat.state === "error" || !stat.value) {
     return (
-      <Text style={{ color: "#4b3fbb" }} data-testid="cost-blocked">
+      <Text style={{ color: COLORS.status.pending }} data-testid="cost-blocked">
         ● 尚未导入
       </Text>
     );
@@ -52,7 +45,7 @@ export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; 
   return (
     <Space direction="vertical" size={0} data-testid="cost-ready">
       <Text strong style={{ fontSize: compact ? 14 : 19 }}>
-        {allMissing || noLines ? "暂无可计算成本" : money(value.known_amount)}
+        {allMissing || noLines ? "暂无可计算成本" : formatMoney(value.known_amount, { invalid: "preserve" })}
         {incomplete && !allMissing && !noLines ? " ≥" : ""}
       </Text>
       <Text type={incomplete ? "warning" : "secondary"} style={{ fontSize: 11.5 }}>
@@ -65,13 +58,13 @@ export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; 
       </Text>
       {!compact && value.coverage_pct !== null ? (
         <Tooltip
-          title={`实际价 ${money(value.actual_amount)} · 参照价 ${money(value.estimated_amount)}`}
+          title={`实际价 ${formatMoney(value.actual_amount, { invalid: "preserve" })} · 参照价 ${formatMoney(value.estimated_amount, { invalid: "preserve" })}`}
         >
           <Progress
             percent={value.coverage_pct}
             size="small"
             showInfo={false}
-            strokeColor={incomplete ? "#faad14" : "#52c41a"}
+            strokeColor={incomplete ? COLORS.warning : COLORS.success}
             style={{ width: 120 }}
           />
         </Tooltip>

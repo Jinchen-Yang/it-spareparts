@@ -1,3 +1,4 @@
+import { COLORS } from "../../../theme";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../test/antdRender";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -672,6 +673,8 @@ describe("项目面板", () => {
     expect(bandText()).toContain("10%");
     expect(bandText()).toContain("成本率");
     expect(bandText()).toContain("50.0%");
+    expect(within(band).getByText("50.0%").closest(".ant-statistic-content"))
+      .toHaveStyle({ color: COLORS.success });
   });
 
   it("健康带把 partial 合同额明确标为已知小计而非完整总额", async () => {

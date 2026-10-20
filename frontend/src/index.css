@@ -2,17 +2,72 @@
   --mb-page: #F4F1EC;
   --mb-surface: #FFFFFF;
   --mb-inset: #F6F3EE;
+  --mb-header: #FFFFFF;
   --mb-accent: #3E6FD1;
   --mb-accent-strong: #2C56AE;
   --mb-accent-soft: #EEF3FC;
+  --mb-accent-soft-border: #DBE6F8;
   --mb-text: #2A2722;
   --mb-text-2: #6B665E;
-  --mb-text-3: #787264;   /* 弱提示灰：对比度 4.78:1，过 WCAG AA 正文 4.5:1 */
+  --mb-text-3: #787264;
   --mb-border: #E9E5DE;
+  --mb-border-soft: #F0EDE7;
   --mb-danger: #BE564B;
   --mb-warning: #B07C33;
   --mb-success: #4F875C;
-  --mb-shadow: 0 1px 2px rgba(40, 33, 24, .05), 0 4px 14px rgba(40, 33, 24, .05);
+  --mb-shadow: 0 1px 2px rgba(40,33,24,.05), 0 4px 14px rgba(40,33,24,.05);
+  --mb-text-4: #B6B0A6;
+  --mb-hover: #F7F5F1;
+  --mb-scrollbar: #DAD4CA;
+  --mb-scrollbar-hover: #C7C0B4;
+  --mb-on-accent-soft: rgba(255,255,255,0.25);
+  --mb-on-accent-soft-border: rgba(255,255,255,0.4);
+  --mb-tag-danger-text: #A24A40;
+  --mb-tag-danger-background: #FBEDEB;
+  --mb-tag-danger-border: #F2D8D3;
+  --mb-tag-warning-text: #8A6526;
+  --mb-tag-warning-background: #FAF1DF;
+  --mb-tag-warning-border: #EFE0C4;
+  --mb-tag-success-text: #41704F;
+  --mb-tag-success-background: #E9F2EB;
+  --mb-tag-success-border: #D2E4D6;
+  --mb-tag-info-text: #2C56AE;
+  --mb-tag-info-background: #EEF3FC;
+  --mb-tag-info-border: #D8E4F7;
+  --mb-status-pending: #B07C33;
+  --mb-status-ai: #3E6FD1;
+  --mb-status-confirmed: #4F875C;
+  --mb-status-manual: #B07C33;
+  --mb-status-failed: #BE564B;
+  --mb-space-xs: 4px;
+  --mb-space-sm: 8px;
+  --mb-space-md: 12px;
+  --mb-space-lg: 16px;
+  --mb-space-xl: 24px;
+  --mb-space-xxl: 32px;
+  --mb-font-size-xs: 12px;
+  --mb-font-size-sm: 13px;
+  --mb-font-size-md: 14px;
+  --mb-font-size-lg: 16px;
+  --mb-font-size-xl: 20px;
+  --mb-font-size-xxl: 24px;
+  --mb-radius-sm: 4px;
+  --mb-radius-md: 8px;
+  --mb-radius-lg: 12px;
+  --mb-shadow-card: 0 1px 2px rgba(40,33,24,.05), 0 4px 14px rgba(40,33,24,.05);
+  --mb-shadow-input: 0 2px 10px rgba(0,0,0,0.04);
+  --mb-shadow-none: none;
+  --mb-breakpoint-xs: 480px;
+  --mb-breakpoint-sm: 576px;
+  --mb-breakpoint-md: 768px;
+  --mb-breakpoint-lg: 992px;
+  --mb-breakpoint-xl: 1200px;
+  --mb-breakpoint-xxl: 1600px;
+  --mb-layout-header-height: 60px;
+  --mb-layout-content-padding: 24px;
+  --mb-layout-mobile-content-padding: 12px;
+  --mb-shell-header-height: 60px;
+  --mb-shell-content-padding: 24px;
 }
 
 body {
@@ -24,7 +79,9 @@ body {
 /* 卡片：纯白 + 极轻暖阴影 + 发丝边；嵌套卡片改凹陷内嵌（去阴影、压暖灰底），形成画布<卡面<内嵌三级 */
 .ant-card {
   box-shadow: var(--mb-shadow);
-  border-color: var(--mb-border) !important;
+}
+.ant-card.ant-card-bordered {
+  border-color: var(--mb-border);
 }
 .ant-card .ant-card {
   box-shadow: none;
@@ -67,16 +124,16 @@ body {
 
 /* 预设标签：白底上的低饱和语义色（蓝=主提醒色） */
 .ant-tag-red, .ant-tag-error {
-  color: #A24A40; background: #FBEDEB; border-color: #F2D8D3;
+  color: var(--mb-tag-danger-text); background: var(--mb-tag-danger-background); border-color: var(--mb-tag-danger-border);
 }
 .ant-tag-orange, .ant-tag-gold, .ant-tag-warning {
-  color: #8A6526; background: #FAF1DF; border-color: #EFE0C4;
+  color: var(--mb-tag-warning-text); background: var(--mb-tag-warning-background); border-color: var(--mb-tag-warning-border);
 }
 .ant-tag-green, .ant-tag-success {
-  color: #41704F; background: #E9F2EB; border-color: #D2E4D6;
+  color: var(--mb-tag-success-text); background: var(--mb-tag-success-background); border-color: var(--mb-tag-success-border);
 }
 .ant-tag-blue, .ant-tag-geekblue, .ant-tag-cyan, .ant-tag-processing {
-  color: #2C56AE; background: #EEF3FC; border-color: #D8E4F7;
+  color: var(--mb-tag-info-text); background: var(--mb-tag-info-background); border-color: var(--mb-tag-info-border);
 }
 
 /* 可拖拽列宽：表头右侧抓取条（ResizableTable）。
@@ -97,8 +154,8 @@ body {
 
 /* 滚动条：低存在感、暖灰 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #DAD4CA; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: #C7C0B4; background-clip: content-box; }
+::-webkit-scrollbar-thumb { background: var(--mb-scrollbar); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--mb-scrollbar-hover); background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------- 全面美化 v1：在暖白主题上的全局精修 ---------- */
@@ -106,7 +163,7 @@ body {
 .ant-card > .ant-card-head {
   min-height: 52px;
   padding-inline: 20px;
-  border-bottom: 1px solid var(--mb-border-soft, #F0EDE7);
+  border-bottom: 1px solid var(--mb-border-soft);
 }
 .ant-card > .ant-card-head .ant-card-head-title {
   font-weight: 600;
@@ -124,7 +181,7 @@ body {
 }
 .ant-table-thead > tr > th { letter-spacing: .1px; }
 /* 行悬停整行轻提亮，定位更稳 */
-.ant-table-tbody > tr.ant-table-row:hover > td { background: #F7F5F1; }
+.ant-table-tbody > tr.ant-table-row:hover > td { background: var(--mb-hover); }
 
 /* 统计数字：标题更克制、数值更突出 */
 .ant-statistic-title { color: var(--mb-text-2); margin-bottom: 6px; }
