@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { App, Alert, Button, Input, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
+import { App, Alert, Button, Form, Input, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
 import BatchNormalizeModal from "../components/BatchNormalizeModal";
@@ -34,6 +34,7 @@ export default function MasterDataPage() {
   const [cats, setCats] = useState<CategoryNode[]>([]);
 
   const [mode, setMode] = useState<null | "create" | "edit">(null);
+  const [pnTouched, setPnTouched] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY);
   const [init, setInit] = useState<FormState>(EMPTY);
   const [near, setNear] = useState<NearDup[]>([]);
@@ -105,6 +106,7 @@ export default function MasterDataPage() {
     setBaseline(null); setEditLoading(false); setLoadError(null); setSaveError(null); setSaving(false);
     setConflictLines([]);
     setCanRebase(false); setRebasing(false);
+    setPnTouched(false);
     setForm(EMPTY); setInit(EMPTY); setNear([]); setSuggest(null); setMode("create");
   };
   const closeEditor = () => {
@@ -285,11 +287,16 @@ export default function MasterDataPage() {
   const fields = (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       {mode === "create" ? (
-        <div>
-          <label htmlFor="master-edit-pn" style={{ display: "block", marginBottom: 4 }}>PN（产品唯一标识）<span style={{ color: "#cf1322" }}>*</span></label>
-          <Input id="master-edit-pn" value={form.pn_std} placeholder="如 ST8000NM000A" disabled={saving || rebasing}
-            onChange={(e) => set({ pn_std: e.target.value })} onBlur={onCheckDup} />
-        </div>
+        <Form component={false} layout="vertical" fields={[{
+          name: "master-edit-pn", value: form.pn_std,
+          errors: pnTouched && !form.pn_std.trim() ? ["请输入 PN"] : [],
+        }]}>
+          <Form.Item name="master-edit-pn" label="PN（产品唯一标识）" required>
+            <Input placeholder="如 ST8000NM000A" disabled={saving || rebasing}
+              onChange={(e) => set({ pn_std: e.target.value })}
+              onBlur={() => { setPnTouched(true); void onCheckDup(); }} />
+          </Form.Item>
+        </Form>
       ) : (
         <div><label htmlFor="master-edit-pn" style={{ display: "block", marginBottom: 4 }}>PN</label>
           <Input id="master-edit-pn" value={form.pn_std} disabled /></div>

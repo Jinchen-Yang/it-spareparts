@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, ConfigProvider, Input, Modal } from "antd";
+import { Alert, ConfigProvider, Form, Input, Modal } from "antd";
 import type { RefObject } from "react";
 
 import {
@@ -163,13 +163,16 @@ export default function CollectionMilestoneFollowUpModal({
         {title}
       </h3>
       {submitError && <Alert type="error" showIcon message={submitError} />}
+      <Form component={false} layout="vertical" fields={[
+        { name: "collection-follow-up-note", value: note },
+        { name: "collection-follow-up-month", value: plannedMonth, errors: monthError ? [monthError] : [] },
+        { name: "collection-follow-up-reason", value: reason, errors: reasonError ? [reasonError] : [] },
+      ]}>
       {action === "handle" && (
-        <div style={{ marginTop: 12 }}>
-          <label htmlFor="collection-follow-up-note">{COLLECTION_FOLLOW_UP.noteLabel}</label>
+        <Form.Item name="collection-follow-up-note" label={COLLECTION_FOLLOW_UP.noteLabel}>
           <Input.TextArea
             id="collection-follow-up-note"
             aria-label={COLLECTION_FOLLOW_UP.noteLabel}
-            value={note}
             maxLength={1000}
             rows={2}
             placeholder={COLLECTION_FOLLOW_UP.notePlaceholder}
@@ -178,15 +181,13 @@ export default function CollectionMilestoneFollowUpModal({
               invalidateIdempotencyKey();
             }}
           />
-        </div>
+        </Form.Item>
       )}
       {action === "reschedule" && (
-        <div style={{ marginTop: 12 }}>
-          <label htmlFor="collection-follow-up-month">{COLLECTION_FOLLOW_UP.plannedMonthLabel}</label>
+        <Form.Item name="collection-follow-up-month" label={COLLECTION_FOLLOW_UP.plannedMonthLabel} required>
           <Input
             id="collection-follow-up-month"
             aria-label={COLLECTION_FOLLOW_UP.plannedMonthLabel}
-            value={plannedMonth}
             maxLength={7}
             placeholder={COLLECTION_FOLLOW_UP.plannedMonthPlaceholder}
             onChange={(event) => {
@@ -195,16 +196,13 @@ export default function CollectionMilestoneFollowUpModal({
               invalidateIdempotencyKey();
             }}
           />
-          {monthError && <div style={{ color: "#cf1322", fontSize: 13, marginTop: 4 }}>{monthError}</div>}
-        </div>
+        </Form.Item>
       )}
       {action !== "handle" && (
-        <div style={{ marginTop: 12 }}>
-          <label htmlFor="collection-follow-up-reason">{COLLECTION_FOLLOW_UP.reasonLabel}</label>
+        <Form.Item name="collection-follow-up-reason" label={COLLECTION_FOLLOW_UP.reasonLabel} required>
           <Input.TextArea
             id="collection-follow-up-reason"
             aria-label={COLLECTION_FOLLOW_UP.reasonLabel}
-            value={reason}
             maxLength={1000}
             rows={2}
             onChange={(event) => {
@@ -213,9 +211,9 @@ export default function CollectionMilestoneFollowUpModal({
               invalidateIdempotencyKey();
             }}
           />
-          {reasonError && <div style={{ color: "#cf1322", fontSize: 13, marginTop: 4 }}>{reasonError}</div>}
-        </div>
+        </Form.Item>
       )}
+      </Form>
       </Modal>
     </ConfigProvider>
   );

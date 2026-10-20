@@ -383,3 +383,20 @@ it.each(["账号", "型号"])("主数据库冲突基线慢加载期间切换%s�
   expect(screen.getByLabelText("描述")).toHaveValue(change === "账号" ? "原账号草稿" : "第二型号描述");
   expect(localStorage.getItem("token")).toBe(change === "账号" ? "new-account" : "editor-token");
 });
+
+it("新建 PN 标准必填标记及空白错误关联输入，保存启用条件不变", async () => {
+  api.defaults.adapter = async (config) => response(config, { categories: [], items: [], total: 0 });
+  render(<MasterDataPage />);
+  fireEvent.click(screen.getByRole("button", { name: "新建 PN" }));
+  const dialog = await screen.findByRole("dialog", { name: "新建 PN" });
+  const input = within(dialog).getByLabelText("PN（产品唯一标识）");
+  expect(input).toHaveAttribute("aria-required", "true");
+  fireEvent.change(input, { target: { value: "   " } });
+  fireEvent.blur(input);
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  await waitFor(() => expect(document.getElementById(input.getAttribute("aria-describedby")!)).toHaveTextContent("请输入 PN"));
+  expect(within(dialog).getByRole("button", { name: /保\s*存/ })).toBeDisabled();
+  fireEvent.change(input, { target: { value: "SYNTH-PN" } });
+  expect(input).not.toHaveAttribute("aria-invalid");
+  expect(within(dialog).getByRole("button", { name: /保\s*存/ })).toBeEnabled();
+});
