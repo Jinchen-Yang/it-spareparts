@@ -26,8 +26,8 @@ def test_main_stable_receipts_issue_void_and_candidates_with_beta_closed(db, mon
     project = _project(db, project_id=str(uuid4()))
     other = _project(db, project_id=str(uuid4()))
     issue, _ = _workbook_issue(db, project=project, issue_no="STABLE-RELEASE-ISSUE")
-    first = _wbdd(db, project=project, order_no="WBDD-STABLE-1")
-    _wbdd(db, project=project, order_no="WBDD-STABLE-2")
+    first = _wbdd(db, project=project, order_no="WBDD-STABLE-1", demand_qty=100)
+    _wbdd(db, project=project, order_no="WBDD-STABLE-2", demand_qty=100)
     invalid = _wbdd(db, project=project, order_no="WBDD-INACTIVE")
     invalid.data_status = "已作废"
     db.commit()
