@@ -83,8 +83,8 @@ D-03 项目金额资格和全局利润资格不可混同。
 
 ## 待金臣确认
 
-暂无新增业务口径问题。若实现中发现 D-33 未覆盖的事实语义，记录选项与推荐，
-仅暂停该点，其余继续。
+暂无新增业务口径问题。成本投影及销售直达范围均按既有实现与 D-33 保留，
+不需要另定口径。候选仍待金臣安排实际点按验收；网页编辑留给 ITSP-5b。
 
 ## 执行证据
 
@@ -145,3 +145,90 @@ line_identity、export_headers、download_object_semantics、cost_quality。
 前端新增组件、PartsOrdersTab、三个主页测试及项目面板共 7 文件 140 项通过
 （`rowfilter-frontend-premerge.log`，134.60s）；项目面板测试补齐字段目录 mock，
 避免新增请求访问本机 API。类型检查通过；生产构建先前通过，合并主线后再次验证。
+
+实现提交 `7f0f4bb`；随后普通合并 `origin/main=1a743c1`，生成合并提交 `78b08f7`
+（双亲 `7f0f4bb`、`1a743c1`）。仅 PartsOrdersTab 的 AntD 导入冲突，合并保留
+App 与 Alert、主线 App.useApp()/按钮语义和本任务筛选接线；未 rebase/force。
+后端 master 查询提取与 #425 字段保护自动合并，保持 01 及原编辑链原样。
+合并后按锁文件重新 npm ci，tsc 通过；独立复审确认前端接线和新测试夹具完整。
+
+## 最终定向验证（合并后源代码 `78b08f7`）
+
+新增后端用例 103 项（含参数化，3 个新文件），新增前端行为用例 7 项
+（2 个新组件测试文件 + PartsOrdersTab 1 项）；另更新面板测试夹具以模拟新字段目录。
+所有测试串行调度，未运行后端全量。
+
+后端 11 文件 **258 项通过**，606.04s，退出 0：
+`rowfilter-backend-postmerge.log`。覆盖新增 103 项及原总表、全部 WBDD 明细排序出口、
+身份、CSV 安全/资源边界、下载对象语义、成本分层、D-03 金额资格与 #425 工作簿字段保护。
+命令（`PYTEST_DATABASE_BASE_URL` 指向任务专用 PostgreSQL 15）：
+
+```bash
+cd backend
+uv run --extra dev pytest \
+  tests/test_maintenance_row_filters.py \
+  tests/test_maintenance_row_filter_operators.py \
+  tests/test_maintenance_legacy_row_filters.py \
+  tests/test_maintenance_project_master_workbook.py \
+  tests/test_maintenance_demand_export_ordering.py \
+  tests/test_maintenance_line_identity.py \
+  tests/test_maintenance_export_headers.py \
+  tests/test_maintenance_download_object_semantics.py \
+  tests/test_maintenance_cost_quality.py \
+  tests/test_maintenance_master_v2_editor_permissions.py \
+  tests/test_maintenance_field_protection_workbook.py -q
+```
+
+本 PR 相对合并后的 main 无迁移、依赖或框架变更；未提交 egg-info 或临时日志。
+上述日志与浏览器证据统一位于 `~/workspaces/reviews/lanes-20261020/laneB/`。
+
+前端 **8 文件 142 项通过**，118.06s（`rowfilter-frontend-postmerge.log`）。
+`npm ci`、`npx tsc`、`npx vite build` 均退出 0，构建 19.73s；日志分别为
+`rowfilter-npm-ci-postmerge.log`、`rowfilter-tsc-postmerge.log`、
+`rowfilter-build-postmerge.log`。Vitest 命令：
+
+```bash
+cd frontend
+npx vitest run --maxWorkers=2 \
+  tests/sourceGuards.test.ts \
+  src/components/maintenance/__tests__/MaintenanceRowFilterBuilder.test.tsx \
+  src/components/maintenance/__tests__/GlobalMaintenanceRowWorkbench.test.tsx \
+  src/pages/maintenance/panel/__tests__/PartsOrdersTab.test.tsx \
+  src/pages/maintenance/__tests__/MaintenanceHomePage.test.tsx \
+  src/pages/maintenance/__tests__/MaintenanceHomePageBusinessType.test.tsx \
+  src/pages/maintenance/__tests__/MaintenanceHomePageUrlState.test.tsx \
+  src/pages/maintenance/__tests__/MaintenanceProjectPanelPage.test.tsx
+```
+
+合并后再次完成本机 Playwright 合成 API 场景复验：全局/项目页面各在 320px、390px
+检查，文档及 App 宽度均等于视口，无页面横向溢出；添加中文条件后 count 从 45 变为 21，
+CSV/XLSX 携带相同 filters 且无分页参数，全局第二页导出仍保留条件，清空回到第一页。
+项目需求单按钮支持聚焦后 Enter 选单，列表/两种导出及清空筛选后均保留原 order_no。
+无运行异常，仅既有 AntD destroyOnClose 弃用提示。记录为
+`rowfilter-postmerge-browser.log`，截图为 `rowfilter-postmerge-{global,project}-{320,390}.png`。
+这些检查使用合成响应，不代替候选构建的用户实际点按验收。
+
+交付前已核对并停止 Vite PID `4008051`（cwd 为本工作树 frontend），停止并删除
+唯一任务容器 `itsp-laneB-rowfilter-20261020`；再次确认该 PID 与容器均不存在。
+未停止其他 lane 的资源，未推送、未创建 PR、未访问生产。最终验证后的改动仅补充本文档。
+
+## 建议 PR
+
+标题：`feat: 实现 ITSP-5a 行级多字段范围筛选与完整筛选集导出`
+
+正文：
+
+> 决策: D-33
+>
+> 全局行级表和项目 03 页面增加按权限返回的字段筛选构建器，支持多字段 AND、
+> 文本/枚举/数值/日期及空值、闭区间与单边范围。网页 count 与 CSV/XLSX 共用
+> 数据库筛选，导出完整命中集；超限明确拒绝。
+>
+> 保留各出口的项目范围、系统/有效/人工成本投影、网页默认顺序与 WBDD 完整升序键。
+> 无权金额条件在 count 前拒绝，混合项目须先显式限定有权项目；普通核对文件不可回传，
+> 原签名补价/总表往返协议及全集范围不变。旧明细列表/CSV 同步支持筛选。
+>
+> 已普通合并 main（含 #425、#426）。本 PR 无迁移、依赖或框架变更，不含 ITSP-5b 网页编辑。
+>
+> 验证：后端相关 258 项、前端相关 142 项、tsc、vite build 通过；新增后端 103 项、
+> 前端 7 项。Playwright 合成场景检查 320/390px。全量交 CI，候选待用户实际点按验收。
