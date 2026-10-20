@@ -397,6 +397,11 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
     fireEvent.click(th);
     await waitFor(() => expect(dashboardPools).toHaveBeenCalledWith(
       expect.objectContaining({ sort: "purchase_total" })));
+    // 聚焦与键盘事件不能冒泡成列排序；随后点击仍只切换口径。
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    fireEvent.keyDown(toggle, { key: "Enter" });
+    expect(dashboardPools).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "purchase_total" }));
     // 表头循环切换 → 显示口径与排序字段一起变
     fireEvent.click(toggle);
     await screen.findByRole("button",
