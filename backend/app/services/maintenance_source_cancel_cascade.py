@@ -35,6 +35,9 @@ from app.services.maintenance_wbdd_reconciliation import _digest, _entity, _json
 
 SNAPSHOT_KEY = "_wbdd_source_status_snapshot"
 RESULTS_KEY = "_source_cancel_confirmations"
+# D-0022: 确认回执内恢复前置快照的版本号；缺该字段的旧回执不可自动恢复。
+RESTORATION_KEY = "restoration"
+RESTORATION_SCHEMA = 1
 KNOWN_STATES = {"已生效", "草稿", "进行中", ""}
 
 
@@ -280,8 +283,10 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
 
     now = datetime.now(UTC)
     active_lines = [line for line in lines if line.is_active]
+    demand_before = {}
     for line in active_lines:
         old = _entity(line)
+        demand_before[line.id] = old
         line.is_active, line.voided_at = False, now
         line.voided_by, line.void_reason = operated_by, reason
         _audit(db, project_id=project_id, entity_type="maintenance_line", entity_id=line.id,
@@ -317,13 +322,37 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     tombstone = demands.void_fast(db, source_order_ids=[source_order_id], reason=reason,
                                  operated_by=operated_by, allowed_project_ids={project_id})
     operations.bump_locked_workbook_revision(db, state=states[project_id])
+    # D-0022 恢复前置快照：只随回执存档，不进 API 返回值；恢复以它为唯一依据，
+    # 缺快照的旧回执一律不可自动恢复。
+    tombstone_row = db.get(T, source_order_id)
+    assignments = list(db.scalars(select(A).where(A.source_order_id == source_order_id)
+                                  .order_by(A.assignment_id)))
+    restoration = {
+        "schema": RESTORATION_SCHEMA,
+        "order": _entity(order),
+        "demand_lines": [
+            {"id": line.id, "raw_line_id": line.raw_line_id,
+             "before": demand_before[line.id], "after": _entity(line)}
+            for line in active_lines],
+        "site_lines": [
+            {"issue_line_id": line.issue_line_id, "issue_id": line.issue_id,
+             "before": line_before[line.issue_line_id], "after": _entity(line)}
+            for line, _ in exact],
+        "site_issues": [
+            {"issue_id": issue.issue_id, "voided": issue.normalized_status == "void",
+             "before": header_before[issue.issue_id], "after": _entity(issue)}
+            for issue in changed_issues.values()],
+        "tombstone": _entity(tombstone_row) if tombstone_row is not None else None,
+        "assignments": [_entity(row) for row in assignments],
+    }
     result = {"batch_id": batch_id, "source_order_id": source_order_id,
               "voided_orders": tombstone["voided"], "voided_lines": len(active_lines),
               "voided_site_lines": len(exact), "voided_site_issues": voided_issues,
               "replayed": False, "confirmed_at": now.isoformat(), "warnings": checked["warnings"]}
     saved = dict((batch.report_json or {}).get(RESULTS_KEY) or {})
     saved[replay_key] = {"request_digest": request_digest, "result": result,
-                         "operated_by": operated_by, "reason": reason, "project_id": project_id}
+                         "operated_by": operated_by, "reason": reason, "project_id": project_id,
+                         RESTORATION_KEY: restoration}
     batch.report_json = {**(batch.report_json or {}), RESULTS_KEY: saved}
     db.flush()
     return result
