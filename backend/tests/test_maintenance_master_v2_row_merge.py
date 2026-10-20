@@ -15,7 +15,7 @@ import pytest
 from openpyxl import load_workbook
 from sqlalchemy import func, select
 
-from app.models.maintenance import FMaintenanceLine
+from app.models.maintenance import FMaintenanceLine, MaintenanceManualCostOverride
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
 )
@@ -129,25 +129,48 @@ def test_disjoint_rows_concurrent_edits_both_succeed(db):
     assert second.qty == Decimal("8.00")
 
 
+def _active_override_amount(db, line) -> Decimal | None:
+    override = db.scalar(select(MaintenanceManualCostOverride).where(
+        MaintenanceManualCostOverride.line_id == line.id,
+        MaintenanceManualCostOverride.active.is_(True)))
+    return override.unit_cost_ex_tax if override else None
+
+
+def _seed_manual_cost_baseline(db, project_id, line, amount=101) -> None:
+    """建立人工成本导出基线。需求事实字段的人工写入会建字段保护，Q3-A
+    （2026-10-21）下旧基线上的二次编辑被 protection_baseline_drift 阻断；
+    行值三路冲突/接管语义改用不进保护域的人工成本列覆盖。"""
+    content = master.build_project_master_v2(
+        db, project_id=project_id, sheets=(master.V2_SHEET_PARTS,))
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {c.value: c.column for c in ws[1]}
+    ws.cell(_row_of(ws, line.id), headers["人工未税单位成本"], amount)
+    _apply(db, project_id, wb)
+
+
 def test_row_conflict_lists_three_values_and_zero_write(db):
     project, _part, _order, line = _make_project_with_line(db)
+    _seed_manual_cost_baseline(db, project.project_id, line)
     content, _ = _download_parts(db, project.project_id)
     ws_row = load_workbook(io.BytesIO(content))[master.V2_SHEET_PARTS]
     headers = {cell.value: cell.column for cell in ws_row[1]}
-    ws_row.cell(_row_of(ws_row, line.id), headers["需求数量"], 4)
+    ws_row.cell(_row_of(ws_row, line.id), headers["人工未税单位成本"], 103)
     wb = load_workbook(io.BytesIO(content))
     ws = wb[master.V2_SHEET_PARTS]
-    ws.cell(_row_of(ws, line.id), headers["需求数量"], 6)
+    ws.cell(_row_of(ws, line.id), headers["人工未税单位成本"], 104)
 
-    # 他人先把 qty 改成 4（即 ws_row 的值）并提交
+    # 他人先把人工成本改成 103（即 ws_row 的值）并提交
     _, _ = _apply(db, project.project_id, ws_row.parent, operated_by="other")
 
     plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(wb))
     assert plan.conflicts
     conflict = plan.conflicts[0]
-    assert conflict["field"] == "需求数量"
+    assert conflict["field"] == "人工未税单位成本"
     assert conflict["entity_id"] == str(line.id)
+    assert Decimal(conflict["base"]) == Decimal(101)
+    assert Decimal(conflict["old"]) == Decimal(103)
     audits_before = int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0)
     with pytest.raises(master.WorkbookError) as raised:
@@ -155,32 +178,33 @@ def test_row_conflict_lists_three_values_and_zero_write(db):
             db, plan, operated_by="loser", import_batch_id=str(uuid.uuid4()))
     assert raised.value.code == "row_conflicts"
     db.rollback()
-    db.refresh(line)
-    assert line.qty == Decimal("4.00")
+    assert _active_override_amount(db, line) == Decimal("103.00")
     assert int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id)))) == audits_before
 
 
 def test_force_takeover_overrides_and_records(db):
     project, _part, _order, line = _make_project_with_line(db)
+    _seed_manual_cost_baseline(db, project.project_id, line)
     content = master.build_project_master_v2(
         db, project_id=project.project_id, sheets=(master.V2_SHEET_PARTS,))
     other_wb = load_workbook(io.BytesIO(content))
     my_wb = load_workbook(io.BytesIO(content))
     headers = {c.value: c.column for c in other_wb[master.V2_SHEET_PARTS][1]}
     other_wb[master.V2_SHEET_PARTS].cell(
-        _row_of(other_wb[master.V2_SHEET_PARTS], line.id), headers["需求数量"], 4)
+        _row_of(other_wb[master.V2_SHEET_PARTS], line.id),
+        headers["人工未税单位成本"], 103)
     my_wb[master.V2_SHEET_PARTS].cell(
-        _row_of(my_wb[master.V2_SHEET_PARTS], line.id), headers["需求数量"], 6)
+        _row_of(my_wb[master.V2_SHEET_PARTS], line.id),
+        headers["人工未税单位成本"], 104)
     _, _ = _apply(db, project.project_id, other_wb, operated_by="other")
 
     plan, result = _apply(db, project.project_id, my_wb, force=True,
                           operated_by="taker")
     assert not plan.conflicts
     assert result["force_takeover"] is True
-    assert result["overridden"] and result["overridden"][0]["field"] == "需求数量"
-    db.refresh(line)
-    assert line.qty == Decimal("6.00")
+    assert result["overridden"] and result["overridden"][0]["field"] == "人工未税单位成本"
+    assert _active_override_amount(db, line) == Decimal(104)
 
 
 def test_deleted_row_conflicts_when_server_changed(db):

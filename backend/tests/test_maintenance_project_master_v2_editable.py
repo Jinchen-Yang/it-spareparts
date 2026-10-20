@@ -234,8 +234,12 @@ def test_v27_same_row_double_write_conflicts_then_takeover(
     first_ws = first_wb[master.V2_SHEET_PARTS]
     second_ws = second_wb[master.V2_SHEET_PARTS]
     headers = {cell.value: cell.column for cell in first_ws[1]}
-    first_ws.cell(2, headers["需求数量"], 3)
-    second_ws.cell(2, headers["需求数量"], 4)
+    # Q3=A（2026-10-21）：需求数量等需求事实字段的人工写入会建立字段保护，
+    # 旧基线上的第二次编辑会被 protection_baseline_drift 阻断（见
+    # test_maintenance_field_protection_workbook_drift）。行值冲突/接管语义
+    # 用不进保护域的人工成本列保持覆盖。
+    first_ws.cell(2, headers["人工未税单位成本"], 103)
+    second_ws.cell(2, headers["人工未税单位成本"], 104)
     first_plan = master.validate_project_master_v2(
         db, project_id=project.project_id, data=_save(first_wb))
 
@@ -275,8 +279,7 @@ def test_v27_same_row_double_write_conflicts_then_takeover(
         )
     assert raised.value.code == "row_conflicts"
     db.rollback()
-    db.refresh(line)
-    assert line.qty == Decimal("3.00")
+    assert _active_override_amount(db, line) == Decimal("103.00")
     assert int(db.scalar(
         select(func.count(MaintenanceProjectOperationAudit.id))) or 0) == audits_before
 
@@ -292,10 +295,16 @@ def test_v27_same_row_double_write_conflicts_then_takeover(
         operated_by="occ-writer",
         import_batch_id=str(uuid.uuid4()),
     )
-    db.refresh(line)
-    assert line.qty == Decimal("4.00")
+    assert _active_override_amount(db, line) == Decimal("104.00")
     assert taken["overridden"], taken
-    assert taken["overridden"][0]["field"] == "需求数量"
+    assert taken["overridden"][0]["field"] == "人工未税单位成本"
+
+
+def _active_override_amount(db, line) -> Decimal | None:
+    override = db.scalar(select(MaintenanceManualCostOverride).where(
+        MaintenanceManualCostOverride.line_id == line.id,
+        MaintenanceManualCostOverride.active.is_(True)))
+    return override.unit_cost_ex_tax if override else None
 
 
 def test_v1_apply_rejects_foreign_part_and_site_hidden_ids(db):
