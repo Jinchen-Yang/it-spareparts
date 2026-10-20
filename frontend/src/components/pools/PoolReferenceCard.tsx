@@ -17,6 +17,7 @@ export interface PoolReferenceCardProps {
   reference: PoolReference;
   side?: "both" | PoolAnalysisSide;
   compact?: boolean;
+  summary?: boolean;
   forceRestricted?: boolean;
 }
 
@@ -108,6 +109,7 @@ export default function PoolReferenceCard({
   reference,
   side = "both",
   compact = false,
+  summary = false,
   forceRestricted = false,
 }: PoolReferenceCardProps) {
   const purchaseBasis = useTaxBasis("purchase");
@@ -116,7 +118,8 @@ export default function PoolReferenceCard({
   if (!reference.pool) {
     return (
       <section role="region" aria-label={label}>
-        <Card size="small"><span style={mutedStyle}>该型号尚未加入互通池</span></Card>
+        {summary ? <span>该型号尚未加入互通池</span>
+          : <Card size="small"><span style={mutedStyle}>该型号尚未加入互通池</span></Card>}
       </section>
     );
   }
@@ -145,6 +148,27 @@ export default function PoolReferenceCard({
     "约束/差额为未税规则值",
     reference.window.range === "90d" ? "近 90 天" : reference.window.range,
   ].join(" · ");
+
+  if (summary) {
+    return (
+      <section aria-label={label}>
+        <Link to={`/pool-analysis/${reference.pool.group_id}?${qs.toString()}`} aria-label="查看互通池详情">
+          {reference.pool.name}
+        </Link>
+        <div style={mutedStyle}>{reference.pool.member_count} 个 PN</div>
+        <details>
+          <summary style={{ cursor: "pointer" }}>池价格参考</summary>
+          {sides.map((kind) => (
+            <PriceSide key={kind} kind={kind}
+              value={kind === "purchase" ? reference.purchase_reference : reference.sales_reference}
+              basis={kind === "purchase" ? purchaseBasis : salesBasis}
+              forceRestricted={forceRestricted} />
+          ))}
+          <div style={mutedStyle}>{sampleText}</div>
+        </details>
+      </section>
+    );
+  }
 
   return (
     <section role="region" aria-label={label}>
