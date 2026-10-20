@@ -89,6 +89,12 @@ describe("maintenance operations API", () => {
     getReturnReceiptDemands("p/id", { page: 12, page_size: 100, q: " WBDD-1 " });
     expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/p%2Fid/return-receipt-demands", { params: { page: 12, page_size: 100, q: "WBDD-1" } });
   });
+  it("编辑返还候选透传当前 receipt_id 保留满额关联", () => {
+    getReturnReceiptDemands("p1", { receipt_id: "r1", part_id: 12 });
+    expect(get).toHaveBeenLastCalledWith("/maintenance/projects/stable/p1/return-receipt-demands", {
+      params: { page: 1, page_size: 100, receipt_id: "r1", part_id: 12 },
+    });
+  });
   it("台账清空与转移透传字段；未关联筛选独立编码", () => {
     updateReturnReceipt("receipt/id", { version: 3, reason: "转移", project_id: "p2", wbdd_no: null, condition: null, note: null, evidence_ref: null });
     expect(patch).toHaveBeenCalledWith("/maintenance/return-receipts/receipt%2Fid", { version: 3, reason: "转移", project_id: "p2", wbdd_no: null, condition: null, note: null, evidence_ref: null });

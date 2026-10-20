@@ -51,12 +51,12 @@ def get_return_requests_outstanding_summary(
 | `remaining_qty` | 与 P 完全相同的纯数量兼容别名；不表示当前可操作，不是录入授权或并发容量令牌 |
 | `over_received_qty` | 仅 `basis_state=complete`（有效且基数完整、N>0、无归属冲突）时为 `max(R-N,0)`，否则 `null`；不得截断 R |
 | `basis_state` | `complete / incomplete / inactive / ownership_conflict`，是读取结果的有效性与完整性，不是返还状态或持久业务状态 |
-| `reason_codes` | 去重原因数组：`no_active_lines`、`negative_demand_qty`、`invalid_demand_qty`、`zero_demand_qty`、`inactive_order`、`tombstoned_order`、`unassigned_order`、`inactive_project`、`ownership_conflict`、`undated_receipts` |
+| `reason_codes` | 去重原因数组：`no_active_lines`、`negative_demand_qty`、`invalid_demand_qty`、`zero_demand_qty`、`inactive_order`、`tombstoned_order`、`unassigned_order`、`inactive_project`、`ownership_conflict`、`invalid_receipt_qty`、`undated_receipts` |
 | `undated_receipt_qty` | 当前累计中业务日期缺失的收货数量；计入 R 并提示，缺日期本身不使当前累计失真 |
 
-不存在归属冲突且没有收货时 R=`0.000`。**需求数量 NULL 的明细按 0 计入 N**，不再因此置 N=`null`；任何有效明细有负量、合计为非有限数或无有效明细时 N=`null`，分别给出 `negative_demand_qty`、`invalid_demand_qty` 或 `no_active_lines`，不以头自报值或已知部分补齐。有有效明细且全部 NULL 时 N=`0.000`，原因是 `zero_demand_qty`。N=0 仍为不完整基数。数量为 `Decimal | None`，JSON 一律十进制三位字符串或 `null`，不输出浮点数；该接口不提供金额。
+不存在归属冲突且没有收货时 R=`0.000`。**需求数量 NULL 的明细按 0 计入 N**，不再因此置 N=`null`；任何有效明细有负量、合计为非有限数或无有效明细时 N=`null`，分别给出 `negative_demand_qty`、`invalid_demand_qty` 或 `no_active_lines`，不以头自报值或已知部分补齐。有有效明细且全部 NULL 时 N=`0.000`，原因是 `zero_demand_qty`。N=0 仍为不完整基数。历史收货累计为非有限数时使用 `invalid_receipt_qty`，R/无日期量/差额/超额均为 null，基数为 incomplete，不把非法数量当作零。数量为 `Decimal | None`，JSON 一律十进制三位字符串或 `null`，不输出浮点数；该接口不提供金额。
 
-`basis_state` 判定顺序为：存在关联实收但需求单无当前有效项目归属，或实收项目与当前归属不一致时为 `ownership_conflict`；否则 `effective=false` 为 `inactive`；否则 N 未知或 N≤0 为 `incomplete`；其余为 `complete`。失效单仍可保留可读的 N/R，但不计算差额或超收；单头未生效、无当前有效归属、项目失效分别用 `inactive_order`、`unassigned_order`、`inactive_project` 提示。
+`basis_state` 判定顺序为：存在关联实收但需求单无当前有效项目归属，或实收项目与当前归属不一致时为 `ownership_conflict`；否则 `effective=false` 为 `inactive`；否则 N 未知、N≤0 或非有限实收导致 R 未知时为 `incomplete`；其余为 `complete`。失效单仍可保留可读的 N/R，但不计算差额或超收；单头未生效、无当前有效归属、项目失效分别用 `inactive_order`、`unassigned_order`、`inactive_project` 提示。
 
 **本轮方案 A：** 需求单只交付品类筛选、原始下单量 N、实收 R 与差额 `max(N-R,0)`；**免返件不从 N/R 剔除**（预购未用件必须返还并可追溯，按金臣原话），**本轮不发布任何返还状态**（不显示已返／未返、收齐／未收齐、无需核对或按免返调整的状态），也不发布依赖状态的 P4 待返结论。免返的完整优化（区分已用旧件与未用新件等）留待后续需求另定。免返文本和免返要求仅独立提醒，不抵扣 N/R/P。P 是“按下单数量核对的差额”，不称为免返后的催收义务。卡墙与 PN 分析返还率仍为同期实际返还÷同期实际领用，与本契约的 N/P 分开，不能用 N 替代返还率分母。
 
@@ -206,3 +206,33 @@ P4 本轮不接待返结论，不能据 `pending_qty/remaining_qty`、零差额�
 | v2.0-draft（2026-10-16） | 对齐 #370 `7175e1c`：彻底删除 `return_status` 字段（不以 `null` 占位），`summary.known_pending_qty` 改为 `known_difference_qty`；新增 `inactive_order_count`，未知计数排除 `inactive`；仅完整有效单输出超收，补齐原因码与项目内列表降级约定 |
 
 删除字段、快照字段改名及计数语义收窄属于不兼容变更，按本契约兼容条款提升主版本；旧消费者须联测后适配，不提供旧状态字段或旧汇总键作为兼容别名。`pending_qty/remaining_qty` 继续保留为纯数量差额别名。文件名保留 `-v1.md` 以维持已有决策与文档链接，当前唯一契约版本为 `v2.0-draft`。
+
+## D-31 §1–4 写入容量协议（ITSP-1，2026-10-20）
+
+本节给出候选实现的写侧约束；本轮不发布返还状态。每次新增、增量、补关联和改关联均消费上述唯一 `summarize_demand_returns`，整张稳定需求单跨 PN、来源、件况累计，免返不扣 N/R。无关联实收仍独立保存，不自动把超额改成未关联。
+
+写入锁顺序为 `lock_receipt_context` → 排序项目共享锁 → 本命令既有收货行锁 → 按稳定需求单 ID 排序的 `return-capacity:` 事务级 advisory 排他锁。获取容量锁后重新查询 N/R；其后不再锁其他既有收货行。来源/需求量/归属写者持有数据变更 context 排他锁；标准导入持有 context 共享锁、排序工作簿状态锁和项目排他锁。服务不提交，命令外层成功后统一提交，失败整条回滚；不新增收货或业务变更审计，既有 `return_receipt_attempt` 独立失败尝试审计保留。
+
+修改目标单的校验 R 排除本行原先在该目标单占用的数量。A→B 同时排序锁 A、B，只检查 B 新占用；失败两端保持。相同项目和相同需求单下，数量未增加时不因历史超额或未知基数拒绝；数量增加、补关联或改关联必须满足完整有效基数及目标容量。N=0、无有效明细、负量/非法值、归属异常均失败关闭。历史超额不裁减，R/N/超额与百分比超过100%如实保留；同一幂等命令回放先于容量检查，不重复占用。
+
+原 PATCH 对备注维护也强制重新解析有效归属，本候选按 D-31 §3 改为仅在增加占用或新增/更改关联时强制复验。原单失效、归属消失或数量未知时，相同项目和稳定关联下的备注、同量编辑和减量保留历史身份；增加经锁后汇总返回 `return_capacity_unknown`，补/改关联仍先执行现有需求单有效性/归属解析再检查容量，不能借备注维护建立新关联。标准导入有效来源行继续沿用归属不明则 pending 的整批阻断；来源识别和既有作废优先规则不变。
+
+`GET /projects/stable/{project_id}/return-receipt-demands` 先过滤后分页，新增只返回完整且 `remaining_qty>0` 的单据；其他需求查询与领用候选不作容量过滤。可选 `receipt_id` 必须是当前项目的有效收货。编辑返回当前单（含满额/超额/失效），字段 `is_current=true`。新增字段均不构成并发授权：
+
+| 字段 | 含义 |
+|---|---|
+| `demand_qty / received_qty / remaining_qty` | 真实 N/R/max(N-R,0)，十进制三位字符串；未知为 null |
+| `max_qty` | 本行可提交的总数量：编辑排除自身占用；历史超额允许保留原量，未知基数只允许保持或减少原量 |
+| `basis_state / is_current` | 摘要基数状态/是否当前关联，均不是返还状态 |
+
+409 错误示例（编辑时 R 是排除本行后的占用）：
+
+```json
+{"detail":{"code":"return_capacity_exceeded","message":"需求单 WBDD-EXAMPLE 下单量 10，已收 9，本次最多还能录入 1，当前提交 2","details":{"demand_order_id":"stable-example","order_no":"WBDD-EXAMPLE","N":"10.000","R":"9.000","requested":"2.000","remaining":"1.000"}}}
+```
+
+未知基数使用 `return_capacity_unknown`，中文提示先核对；未知数量保留 null，归属异常不泄露其他项目的 R。客户端显示服务端中文消息，不把所有 409 解释为版本冲突。
+
+标准导入 `build_plan` 先计入全部确定减量，再按源行顺序分配增加的占用，共用容量检查，超额行写入既有 invalid/reason 格式并附稳定错误码和 details。apply 在锁后重新生成并核验计划；任一 pending/invalid 阻断整批，所有收货/更正/审计同事务提交。整批降量/解绑/作废可以释放同批新增容量，不因源行顺序拒绝合法最终占用。网页批量仍逐行命令，成功行保留、失败行展示中文错误并可重试，不承诺跨行事务。
+
+写路径核查：`register_receipt/update_receipt` 覆盖网页单条及批量；标准 `maintenance_return_receipt_import.build_plan/apply` 覆盖导入；`maintenance_project_master_workbook` 的返还表/快照及 `maintenance_recovery` 只读；旧 `maintenance_doc_import.apply_batch(rkd_inbound)` 未赋 `source_order_id`，仅创建未关联实收，后续关联仍走收货命令。本候选不修改高危工作簿模块，不增加迁移、历史回填、免返规则或生产发布。
