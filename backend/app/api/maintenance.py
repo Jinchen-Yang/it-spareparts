@@ -273,7 +273,10 @@ _CSV_EXPR_TOKEN = re.compile(
     r'|(?P<str>"(?:[^"]|"")*")'
     r"|(?P<op><=|>=|<>|[-+*/^&=<>%()])"
 )
-_CSV_NUMERIC_WITH_PARENS = re.compile(r"[\d\s.+\-*/^%&<>=()]*\([\d\s.+\-*/^%&<>=()]*")
+# 白名单先行：整段仅数字/空白/运算符/括号且含 "(" 才视为括号数字启发式。
+# 旧写法 [chars]*\([chars]* 在两侧字符类都含 "(" 时，fullmatch 失败会按位置二次回溯（ReDoS）；
+# 先对同一字符类做一次线性 fullmatch，再查 "("，32k 对抗输入从数秒降到毫秒级。
+_CSV_NUMERIC_CHARS = re.compile(r"[\d\s.+\-*/^%&<>=()]*")
 _CSV_BINARY_OPS = frozenset({"+", "-", "*", "/", "^", "&", "=", "<", ">", "<=", ">=", "<>"})
 
 
@@ -344,7 +347,10 @@ def _signed_value_is_formula(rest):
         or _CSV_CELL_REFERENCE.search(rest)
         or _CSV_BARE_NAME.match(rest)
         or _is_constant_formula(rest)
-        or _CSV_NUMERIC_WITH_PARENS.fullmatch(rest)
+        or (
+            _CSV_NUMERIC_CHARS.fullmatch(rest) is not None
+            and "(" in rest
+        )
     )
 
 
@@ -353,6 +359,13 @@ def _safe_formula_only(v):
     if not isinstance(v, str):
         return v
     value = _INVALID_CSV_CONTROLS.sub("", v)
+    # 长度闸门必须在公式启发式之前：备注/描述无上限，Excel 单元格最大 32767；
+    # 超长对抗串若先跑括号数字正则会卡住 GIL（见 _CSV_NUMERIC_CHARS 注释）。
+    if len(value) > _MAX_CSV_CELL_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 单元格超过 {_MAX_CSV_CELL_CHARS} 字符安全上限",
+        )
     probe = value.lstrip()
     head = probe[:1]
     if value[:1] in ("\t", "\r", "\n"):
@@ -361,6 +374,7 @@ def _safe_formula_only(v):
         head in ("+", "-") and _signed_value_is_formula(probe[1:])
     ):
         value = "'" + value
+    # 加撇号后仍不得超过 Excel 单元格上限。
     if len(value) > _MAX_CSV_CELL_CHARS:
         raise HTTPException(
             status_code=413,

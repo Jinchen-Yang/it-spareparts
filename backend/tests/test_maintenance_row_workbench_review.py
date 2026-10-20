@@ -292,3 +292,34 @@ def test_csv_formula_guard_ignores_non_text():
     from app.api.maintenance import _safe_formula_only
     assert _safe_formula_only(Decimal("-1.500")) == Decimal("-1.500")
     assert _safe_formula_only(None) is None
+
+def test_csv_formula_guard_parens_heuristic_is_linear_time():
+    """白名单先行：32k 对抗串（+ + n*( + x）须在 100ms 内拒绝，旧正则会二次回溯数秒。"""
+    import time
+
+    from app.api.maintenance import _safe_formula_only
+
+    adversarial = "+" + "(" * 32_000 + "x"
+    assert len(adversarial) <= 32_767
+    t0 = time.perf_counter()
+    assert _safe_formula_only(adversarial) == adversarial
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.1, f"ReDoS regression: {elapsed:.3f}s on 32k paren input"
+
+
+def test_csv_formula_guard_rejects_oversize_before_heuristics():
+    """超 32767 须在启发式之前 413；对抗超长串不得先跑括号正则再拒绝。"""
+    import time
+
+    from app.api.maintenance import _MAX_CSV_CELL_CHARS, _safe_formula_only
+    from fastapi import HTTPException
+
+    adversarial = "+" + "(" * _MAX_CSV_CELL_CHARS + "x"
+    assert len(adversarial) > _MAX_CSV_CELL_CHARS
+    t0 = time.perf_counter()
+    with pytest.raises(HTTPException) as raised:
+        _safe_formula_only(adversarial)
+    elapsed = time.perf_counter() - t0
+    assert raised.value.status_code == 413
+    assert elapsed < 0.1, f"oversize path too slow: {elapsed:.3f}s"
+
