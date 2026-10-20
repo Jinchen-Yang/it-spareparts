@@ -83,7 +83,7 @@ def test_failed_validation_does_not_dirty_or_flush_receipt(db, changes):
 
 def test_explicit_null_clears_all_optional_fields_and_unassigned_filter(db):
     project = _project(db, project_id=str(uuid4()))
-    order = _wbdd(db, project=project)
+    order = _wbdd(db, project=project, demand_qty=100)
     db.add(DimPart(pn_std="PN-TEST", description="part"))
     db.commit()
     client = _client(db, username="clear-user")
@@ -190,7 +190,7 @@ def test_real_concurrent_cas_refreshes_preloaded_orm_identity(db, second_action)
 
 def test_order_change_lock_blocks_receipt_until_committed_then_revalidates(db):
     project = _project(db, project_id=str(uuid4()))
-    order = _wbdd(db, project=project)
+    order = _wbdd(db, project=project, demand_qty=100)
     project_id, order_id, order_no = project.project_id, order.id, order.order_no
     db.commit()
     started = Event()
@@ -336,7 +336,7 @@ def test_stable_panel_gate_closes_receipt_routes_and_audits_rejection(db, monkey
 def test_project_inactive_and_tombstoned_order_rejected(db):
     from app.models.maintenance import MaintenanceDemandDeleteIntent, MaintenanceDemandTombstone
     project = _project(db, project_id=str(uuid4()))
-    order = _wbdd(db, project=project)
+    order = _wbdd(db, project=project, demand_qty=100)
     project.is_active = False
     db.commit()
     with pytest.raises(receipts.ReturnReceiptValidation, match="停用"):

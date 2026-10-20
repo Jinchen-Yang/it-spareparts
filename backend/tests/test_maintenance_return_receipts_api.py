@@ -60,7 +60,7 @@ def _client(
     return client
 
 
-def _wbdd(db, *, project: MaintenanceProject, order_no: str = "WBDD-20260911-0001") -> FMaintenanceOrder:
+def _wbdd(db, *, project: MaintenanceProject, order_no: str = "WBDD-20260911-0001", demand_qty=None) -> FMaintenanceOrder:
     batch = SysImportBatch(
         filename="t.xlsx", file_type="maintenance",
         file_hash=uuid4().hex, status="success",
@@ -86,6 +86,13 @@ def _wbdd(db, *, project: MaintenanceProject, order_no: str = "WBDD-20260911-000
             created_by="t",
         )
     )
+    if demand_qty is not None:
+        part = DimPart(pn_std=f"CAPACITY-{uuid4().hex}")
+        db.add(part)
+        db.flush()
+        db.add(FMaintenanceLine(raw_line_id=str(uuid4()), order_id=order.id,
+                                part_id=part.id, qty=demand_qty,
+                                import_batch_id=order.import_batch_id, is_active=True))
     db.commit()
     return order
 
@@ -100,6 +107,7 @@ def _line(
         part_id=part.id,
         import_batch_id=order.import_batch_id,
         is_active=is_active,
+        qty=100,
     )
     db.add(row)
     db.commit()
@@ -148,7 +156,7 @@ def test_register_project_only_and_unassigned(db):
 
 def test_register_with_wbdd_and_reassign_keeps_project_total(db):
     project = _project(db, project_id=str(uuid4()))
-    order = _wbdd(db, project=project)
+    order = _wbdd(db, project=project, demand_qty=100)
     client = _client(db, username="rcp-user-2")
     resp = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/return-receipts",
@@ -453,7 +461,7 @@ def test_demand_candidates_part_id_hits_and_excludes(db):
     assert [row["order_no"] for row in body["rows"]] == [hit.order_no]
     assert body["total"] == 1
     # 响应行结构不变（与既有候选口径一致）
-    assert set(body["rows"][0]) == {"source_order_id", "order_no", "order_date"}
+    assert {"source_order_id", "order_no", "order_date", "remaining_qty"} <= set(body["rows"][0])
     assert body["rows"][0]["source_order_id"] == hit.raw_order_id
 
 
@@ -485,20 +493,20 @@ def test_demand_candidates_inactive_line_not_matched(db):
     filtered = _demands(client, project.project_id, part_id=part.id)
     assert filtered["rows"] == []
     assert filtered["total"] == 0
-    # 回归对照：不传 part_id 时该单照常可见（行作废不影响单级候选）
+    # D-31：没有有效明细时，未过滤 PN 也不能作为新增返还候选。
     plain = _demands(client, project.project_id)
-    assert [row["order_no"] for row in plain["rows"]] == [order.order_no]
-    assert plain["total"] == 1
+    assert plain["rows"] == []
+    assert plain["total"] == 0
 
 
-def test_demand_candidates_without_part_id_keeps_legacy_behavior(db):
-    """回归：不传 part_id 返回全量活跃需求单，排序与行结构与现状一致。"""
+def test_demand_candidates_without_part_id_exposes_capacity_and_preserves_sorting(db):
+    """回归：不传 part_id 返回有容量的活跃需求单，并保留排序。"""
     project = _project(db, project_id=str(uuid4()))
     part = DimPart(pn_std="PN-SUGGEST-REG", description="回归备件")
     db.add(part)
     db.commit()
-    first = _wbdd(db, project=project, order_no="WBDD-PN-REG-0006")
-    second = _wbdd(db, project=project, order_no="WBDD-PN-REG-0005")
+    first = _wbdd(db, project=project, order_no="WBDD-PN-REG-0006", demand_qty=100)
+    second = _wbdd(db, project=project, order_no="WBDD-PN-REG-0005", demand_qty=100)
     only_first = _wbdd(db, project=project, order_no="WBDD-PN-REG-0007")
     _line(db, only_first, part)
     client = _client(db, username="rcp-user-15")
@@ -508,7 +516,7 @@ def test_demand_candidates_without_part_id_keeps_legacy_behavior(db):
         second.order_no, first.order_no, only_first.order_no,
     ]
     assert plain["total"] == 3
-    assert all(set(row) == {"source_order_id", "order_no", "order_date"}
+    assert all({"source_order_id", "order_no", "order_date", "remaining_qty"} <= set(row)
                for row in plain["rows"])
     # part_id 只是叠加过滤，不改变其余行的形状
     filtered = _demands(client, project.project_id, part_id=part.id)

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Alert, Button, Input, Modal, Space, Table, Tag, Typography } from "antd";
+import { App, Alert, Button, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { createReturnReceipt } from "../../../api/maintenanceOperations";
+import { createReturnReceipt, getReturnReceiptDemands, type ReturnReceiptDemandCandidate } from "../../../api/maintenanceOperations";
 import { raw, readError } from "./panelUtils";
+import { availableReceiptDemand, receiptCapacityError, receiptDemandOption } from "./returnReceiptCapacity";
 
 const { Text } = Typography;
 
@@ -26,13 +27,15 @@ function uuid(): string {
 
 /** 行冻结 payload：首次提交时快照，重试原样复用；成功行的身份永不重算、永不复用到新内容 */
 interface LineFingerprint {
+  wbddNo: string | null;
   pn: string;
   serials: string[];
   qty: number;
 }
 
-function fingerprintOf(line: BatchLine): LineFingerprint {
+function fingerprintOf(line: BatchLine, wbddNo: string | null): LineFingerprint {
   return {
+    wbddNo,
     pn: line.pn,
     serials: line.serials,
     qty: line.serials.length || line.qty || 0,
@@ -189,6 +192,37 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
   const [phase, setPhase] = useState<"input" | "preview" | "results">("input");
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [demands, setDemands] = useState<ReturnReceiptDemandCandidate[]>([]);
+  const [wbddNo, setWbddNo] = useState<string | null>(null);
+  const [demandLoading, setDemandLoading] = useState(false);
+  const [demandError, setDemandError] = useState<string | null>(null);
+  const demandSeq = useRef(0);
+  const loadDemands = async () => {
+    const seq = ++demandSeq.current;
+    setDemandLoading(true);
+    setDemandError(null);
+    try {
+      const candidates: ReturnReceiptDemandCandidate[] = [];
+      let loaded = 0;
+      for (let page = 1; ; page += 1) {
+        const response = await getReturnReceiptDemands(projectId, { page, page_size: 100 });
+        if (seq !== demandSeq.current) return;
+        const next = response.data.rows ?? [];
+        loaded += next.length;
+        candidates.push(...next.filter(availableReceiptDemand));
+        if (loaded >= response.data.total) break;
+        if (!next.length) throw new Error("需求单分页不完整");
+      }
+      setDemands(candidates);
+    } catch (error) {
+      if (seq === demandSeq.current) {
+        setDemands([]);
+        setDemandError(readError(error, "需求单候选加载失败，请重试"));
+      }
+    } finally {
+      if (seq === demandSeq.current) setDemandLoading(false);
+    }
+  };
   /** 当前有效提交会话；projectId 切换 / unmount / close / 新批次将其置 null */
   const sessionRef = useRef<SubmitSession | null>(null);
   /**
@@ -207,8 +241,10 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     0,
   );
 
+  const capacityError = wbddNo ? receiptCapacityError(demands.find((row) => row.order_no === wbddNo), totalQty) : null;
+
   // unmount：立即失效在途会话——旧 Promise 迟到时循环直接退出，不再发后续行、不写状态
-  useEffect(() => () => { sessionRef.current = null; }, []);
+  useEffect(() => () => { sessionRef.current = null; demandSeq.current += 1; }, []);
 
   // projectId 变化 = 组件被复用于新项目：立即失效旧会话（在途回调作废、锁由这里清）、
   // 清空并关闭界面。旧项目保留的结果/幂等键一并丢弃，防跨项目污染。
@@ -216,6 +252,11 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     sessionRef.current = null;
     busyRef.current = false;
     setSubmitting(false);
+    demandSeq.current += 1;
+    setWbddNo(null);
+    setDemands([]);
+    setDemandError(null);
+    setDemandLoading(false);
     setText("");
     setResults([]);
     setPhase("input");
@@ -243,6 +284,8 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     sessionRef.current = null;
     setResults([]);
     setText("");
+    setWbddNo(null);
+    void loadDemands();
     setPhase("input");
   };
 
@@ -264,11 +307,12 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
       ordered = results.map((r) =>
         failedKeys.has(r.idempotencyKey) ? { ...r, status: "pending" as const, detail: "" } : r);
     } else {
+      if (capacityError) return;
       const targets = lines.filter((line) => !lineError(line));
       if (!targets.length) return;
       const batchId = uuid();
       pendingRows = targets.map((line, i) => {
-        const fingerprint = fingerprintOf(line);
+        const fingerprint = fingerprintOf(line, wbddNo);
         return {
           idempotencyKey: `br-${batchId}-${i}`,
           fingerprint,
@@ -299,6 +343,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
       try {
         const response = await createReturnReceipt(mySession.projectId, {
           pn: row.fingerprint.pn,
+          wbdd_no: row.fingerprint.wbddNo,
           qty: row.fingerprint.qty,
           serial_numbers: row.fingerprint.serials.length ? row.fingerprint.serials : null,
           idempotency_key: row.idempotencyKey,
@@ -397,7 +442,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     : phase === "preview" ? [
       <Button key="back" onClick={() => setPhase("input")}>返回修改</Button>,
       <Button key="submit" type="primary"
-        disabled={validCount === 0}
+        disabled={validCount === 0 || !!capacityError}
         onClick={() => { void submitAll(false); }}>
         {`登记 ${validCount} 条`}
       </Button>,
@@ -417,7 +462,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     <>
       <Button
         size="small"
-        onClick={() => { setOpen(true); }}
+        onClick={() => { setOpen(true); if (phase !== "results") void loadDemands(); }}
       >
         批量录入
       </Button>
@@ -431,6 +476,25 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
         footer={footer}
         onCancel={() => { close(); }}
       >
+        {phase !== "results" ? <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
+          <Text>本批需求单（可选；全部行使用同一关联）</Text>
+          <Select
+            aria-label="本批需求单（可选）"
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            style={{ width: "100%" }}
+            value={wbddNo ?? undefined}
+            onChange={(value) => setWbddNo(value ?? null)}
+            loading={demandLoading}
+            disabled={phase !== "input"}
+            placeholder="不选则独立保留为项目未关联实收"
+            options={demands.map(receiptDemandOption)}
+          />
+          {demandError ? <Alert type="warning" showIcon message={demandError} action={<Button size="small" onClick={() => { void loadDemands(); }}>重新加载需求单</Button>} /> : null}
+          {capacityError ? <Alert type="error" showIcon message={capacityError} /> : null}
+          <Text type="secondary">所选需求单按本批合计数量检查可录额度；每行独立保存，失败后可重试。</Text>
+        </Space> : null}
         {phase === "input" ? (
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>

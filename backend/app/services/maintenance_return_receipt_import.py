@@ -370,6 +370,72 @@ def _canonical(row: Receipt) -> dict:
     }
 
 
+def _check_plan_capacity(db: Session, rows: list[dict], *, locked: bool) -> None:
+    """Validate the atomic plan with the ledger's shared N/R capacity guard.
+
+    Release every planned decrease before allocating increases, so workbook row
+    order cannot reject a valid final total. This credit is safe only because
+    any invalid row blocks the entire apply; no subset of this plan is written.
+    """
+    changes = []
+    adjustments: dict[str, Decimal] = {}
+    demand_ids: set[str] = set()
+    for row in rows:
+        if row["action"] not in ("create", "change"):
+            continue
+        before, after = row.get("before") or {}, row["after"]
+        old_id = before.get("source_order_id") if before.get("line_status") == "active" else None
+        new_id = after["source_order_id"] if after["line_status"] == "active" else None
+        old_qty = Decimal(before["qty"]) if before.get("line_status") == "active" else Decimal(0)
+        new_qty = Decimal(after["qty"]) if new_id else Decimal(0)
+        if old_id:
+            demand_ids.add(old_id)
+        if new_id:
+            demand_ids.add(new_id)
+        if not old_qty.is_finite():
+            # Historical NaN is neither zero occupancy nor releasable capacity.
+            # Voiding/unlinking is safe, but cannot credit another planned row.
+            if new_id:
+                message = "既有返件数量非法，无法核对关联收货容量，请先核对或作废"
+                row.update(action="invalid", reason=message, error={
+                    "code": "return_capacity_unknown", "message": message,
+                    "details": {"demand_order_id": new_id, "order_no": row["wbdd_no"],
+                                "N": None, "R": None, "requested": format(new_qty, ".3f"),
+                                "remaining": None},
+                })
+            continue
+        same_order = old_id == new_id
+        increase = new_qty - old_qty if same_order else new_qty
+        if old_id:
+            reduction = min(increase, Decimal(0)) if same_order else -old_qty
+            adjustments[old_id] = adjustments.get(old_id, Decimal(0)) + reduction
+        changes.append((row, old_id, new_id, old_qty, new_qty, increase))
+
+    if locked:
+        # build_plan has already locked all existing/source/duplicate receipt
+        # rows. Keep context -> project -> receipt -> sorted demand lock order;
+        # the shared guard re-reads the authoritative summary after this lock.
+        ledger.lock_receipt_demands(db, demand_ids)
+    for row, old_id, new_id, old_qty, new_qty, increase in changes:
+        before, after = row.get("before") or {}, row["after"]
+        same_owner = old_id == new_id and before.get("project_id") == after["project_id"]
+        if new_id is None or (same_owner and increase <= 0):
+            continue
+        try:
+            ledger.check_receipt_capacity(
+                db, project_id=after["project_id"], source_order_id=new_id,
+                requested=new_qty, old_source_order_id=old_id, old_qty=old_qty,
+                old_project_id=before.get("project_id"),
+                additional_qty=adjustments.get(new_id, Decimal(0)),
+            )
+        except ledger.ReturnReceiptCapacityConflict as exc:
+            row.update(action="invalid", reason=str(exc), error={
+                "code": exc.code, "message": str(exc), "details": exc.details,
+            })
+        else:
+            adjustments[new_id] = adjustments.get(new_id, Decimal(0)) + increase
+
+
 def build_plan(
     db: Session, batch: Batch, *, locked=False, allowed_project_ids=None
 ) -> dict:
@@ -760,6 +826,7 @@ def build_plan(
                 row["reason"] = (
                     "可能与手工登记重复，请核对后明确确认新增；不会合并手工记录"
                 )
+    _check_plan_capacity(db, rows, locked=locked)
     summary = {
         name: 0
         for name in ("create", "unchanged", "change", "pending", "excluded", "invalid")

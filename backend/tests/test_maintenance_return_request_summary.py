@@ -435,6 +435,7 @@ def test_snapshot_requires_real_readonly_repeatable_read_and_separates_unassigne
         raw_line_id=f"snapshot-{uuid4()}", order_id=order.id, part_id=part.id,
         qty=Decimal("5"), import_batch_id=order.import_batch_id, is_active=True,
     ))
+    db.flush()  # 容量汇总只读，不隐式 flush 尚未落库的需求夹具。
     register_receipt(db, project_id=project.project_id, pn="SNAPSHOT-PN", qty=2,
                      wbdd_no=order.order_no, operated_by="summary-fixture")
     register_receipt(db, project_id=project.project_id, pn="UNASSIGNED", qty=3,
