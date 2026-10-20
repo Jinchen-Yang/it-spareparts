@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message,
-} from "antd";
+import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   type DemandLineRow,
@@ -82,6 +80,7 @@ export default function DemandLinesEditor({
   readOnly?: boolean;
   onChanged?: () => Promise<boolean>;
 }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<DemandLineRow[]>([]);
   const [returnSummary, setReturnSummary] = useState<DemandReturnSummary | null>(null);
   const [returnSummaryError, setReturnSummaryError] = useState<DemandReturnSummaryError>();

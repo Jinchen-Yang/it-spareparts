@@ -11,6 +11,7 @@ import { cleanupAntd, renderWithoutMotion as render } from "../../test/antdRende
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
 import type { Overview } from "../../api";
@@ -149,6 +150,27 @@ afterEach(async () => {
 });
 
 describe("稳定深链", () => {
+  it("替代料折叠可用 Tab 到达并用空格和 Enter 切换，保留记忆与编辑权限遮蔽", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("ps_subs_open", "0");
+    const user = userEvent.setup();
+    renderAt("/parts?part_id=42");
+    await screen.findByText("型号全景：");
+    const toggle = screen.getByRole("button", { name: /替代料 · 通用号/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    for (let i = 0; i < 36 && document.activeElement !== toggle; i++) await user.tab();
+    expect(toggle).toHaveFocus();
+    await user.keyboard(" ");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("暂无替代料")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "添加替代料" })).not.toBeInTheDocument();
+    expect(localStorage.getItem("ps_subs_open")).toBe("1");
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("暂无替代料")).not.toBeInTheDocument();
+    expect(localStorage.getItem("ps_subs_open")).toBe("0");
+  });
+
   it("/parts?part_id=42 打开即自动加载并展示该型号全景（无需再点搜索）", async () => {
     renderAt("/parts?part_id=42");
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 42 }));

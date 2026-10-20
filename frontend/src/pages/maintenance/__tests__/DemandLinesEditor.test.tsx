@@ -6,8 +6,8 @@
  * - 双击只一写（同步锁）；旧 A 请求 finally 不解锁新 B 请求（换 source 场景）；
  * - 换 sourceOrderId / unmount：旧响应不污染新对象。
  */
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -90,7 +90,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 describe("DemandLinesEditor 编辑（OCC digest）", () => {

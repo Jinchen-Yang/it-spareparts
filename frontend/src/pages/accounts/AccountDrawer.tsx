@@ -2,7 +2,7 @@
  * 保存语义：PUT {template_code?, overrides}——overrides = 矩阵最终图相对模板快照的稀疏 diff。
  * 换模板 = 立即以新模板快照为底座重画矩阵（个别调整清零，由管理员重新按需勾选）。 */
 import { useMemo, useState } from "react";
-import { Alert, Button, Drawer, Select, Space, Tag, message } from "antd";
+import { App, Alert, Button, Drawer, Select, Space, Tag } from "antd";
 import type { Account, AccountsMeta, Perms } from "../../api/accounts";
 import { diffOverrides, explainApiError, updateAccount } from "../../api/accounts";
 import PermissionMatrix from "./PermissionMatrix";
@@ -13,6 +13,7 @@ export default function AccountDrawer({ meta, account, onClose, onSaved }: {
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { message } = App.useApp();
   const [tplCode, setTplCode] = useState<string | null>(null);
   const [perms, setPerms] = useState<Perms | null>(null);
   const [compareOn, setCompareOn] = useState(false);
@@ -88,9 +89,9 @@ export default function AccountDrawer({ meta, account, onClose, onSaved }: {
               }))}
             />
             <Space size={4}>
-              <a style={{ fontSize: 13 }} onClick={() => setCompareOn(!compareOn)}>
+              <Button type="link" size="small" style={{ fontSize: 13 }} onClick={() => setCompareOn(!compareOn)}>
                 {compareOn ? "关闭模板对比" : "与模板现值对比"}
-              </a>
+              </Button>
             </Space>
           </Space>
           {cur.template_stale && !tplCode && (

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
@@ -6,7 +6,7 @@ import {
 } from "antd";
 import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
-import { COLORS } from "./theme";
+import { COLORS, SHELL_LAYOUT } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
 import { NAV_GROUPS, matchDetailRoute, matchNavItem } from "./nav";
 import type { NavItem } from "./nav";
@@ -33,7 +33,7 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
   return (
     <div
       style={{
-        height: 60, display: "flex", alignItems: "center",
+        height: `var(--mb-shell-header-height, ${SHELL_LAYOUT.headerHeight}px)`, flexShrink: 0, display: "flex", alignItems: "center",
         justifyContent: collapsed ? "center" : "flex-start",
         gap: 8, padding: collapsed ? 0 : "0 20px",
         borderBottom: `1px solid ${COLORS.borderSoft}`,
@@ -235,7 +235,11 @@ export default function AppShell({
   };
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
+    <Layout style={{
+      minHeight: "100vh",
+      "--mb-shell-header-height": `${SHELL_LAYOUT.headerHeight}px`,
+      "--mb-shell-content-padding": `${isMobile ? SHELL_LAYOUT.mobileContentPadding : SHELL_LAYOUT.contentPadding}px`,
+    } as CSSProperties}>
       {!isMobile && (
         <Sider
           theme="light"
@@ -244,7 +248,10 @@ export default function AppShell({
           collapsible
           collapsed={collapsed}
           trigger={null}
-          style={{ borderRight: `1px solid ${COLORS.border}`, background: COLORS.surface }}
+          style={{
+            position: "sticky", top: 0, height: "100vh",
+            borderRight: `1px solid ${COLORS.border}`, background: COLORS.surface,
+          }}
         >
           <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
             <Brand collapsed={collapsed} />
@@ -276,7 +283,9 @@ export default function AppShell({
           data-shell-header-mode={headerMode}
           style={{
             display: "flex", alignItems: "center", gap: 8,
-            paddingInline: isMobile ? 12 : 24,
+            paddingInline: "var(--mb-shell-content-padding)",
+            height: "var(--mb-shell-header-height)",
+            lineHeight: "var(--mb-shell-header-height)",
             minWidth: 0,
           }}
         >
@@ -306,13 +315,14 @@ export default function AppShell({
             <>
               <Breadcrumb items={breadcrumbItems} />
               <span style={{ flex: 1 }} />
-              <span
+              <Button
+                type="text"
                 onClick={() => setChangelogOpen(true)}
                 title="查看更新日志"
-                style={{ color: COLORS.text2, fontSize: 12.5, marginRight: 16, cursor: "pointer", whiteSpace: "nowrap" }}
+                style={{ color: COLORS.text2, fontSize: 12.5, marginRight: 16, paddingInline: 0, whiteSpace: "nowrap" }}
               >
                 v{APP_VERSION}
-              </span>
+              </Button>
               <a
                 href="/manual.html" target="_blank" rel="noopener"
                 style={{ color: COLORS.text2, fontSize: 13, marginRight: 16, whiteSpace: "nowrap" }}
@@ -333,7 +343,7 @@ export default function AppShell({
           )}
         </Header>
 
-        <Content style={{ padding: isMobile ? 12 : 24, background: COLORS.page }}>
+        <Content style={{ padding: "var(--mb-shell-content-padding)", background: COLORS.page }}>
           {showWhatsNew && (
             <Alert
               type="success"
