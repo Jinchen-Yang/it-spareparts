@@ -26,6 +26,12 @@ const searchMaintenanceReturnObligations = vi.fn();
 const searchMaintenanceBadReturns = vi.fn();
 const getProjectProcurement = vi.fn();
 
+vi.mock("../../../api/maintenanceSourceCancelCascade", () => ({
+  listSourceCancellations: async () => ({ data: { items: [], total: 0, page: 1, page_size: 10 } }),
+  getSourceCancellation: vi.fn(),
+  confirmSourceCancellation: vi.fn(),
+}));
+
 vi.mock("../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
     "../../../api/maintenanceBossBoard",

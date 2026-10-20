@@ -10,6 +10,12 @@ const mocks = vi.hoisted(() => ({
   createDemandLine: vi.fn(),
 }));
 
+vi.mock("../../../../api/maintenanceSourceCancelCascade", () => ({
+  listSourceCancellations: async () => ({ data: { items: [], total: 0, page: 1, page_size: 10 } }),
+  getSourceCancellation: vi.fn(),
+  confirmSourceCancellation: vi.fn(),
+}));
+
 vi.mock("../../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<
     typeof import("../../../../api/maintenanceBossBoard")
