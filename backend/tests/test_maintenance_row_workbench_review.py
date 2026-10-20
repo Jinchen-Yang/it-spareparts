@@ -83,6 +83,8 @@ def test_xlsx_writes_numbers_as_numeric_cells_and_text_as_text(db, export_data):
         assert (cell["备注"].data_type, cell["备注"].value) == ("s", "=1+1")
         assert (cell["描述"].data_type, cell["描述"].value) == ("s", "-1")
         assert cell["制单日期"].value == "2026-07-01"
+        # NULL 必须是空单元格，不能写成文本 'None'。
+        assert cell["已返数量"].value is None, (path, cell["已返数量"].value)
 
 
 def test_csv_keeps_ordinary_signed_values_and_escapes_only_formulas(db, export_data):
@@ -232,3 +234,41 @@ def test_direct_project_query_enforces_project_scope(db, export_data):
     admin = UserContext(user_id="scope-admin", role="admin", is_authenticated=True)
     stmt = workbench.query(db, admin, project_id=project.project_id, direct_project=True)
     assert workbench.count(db, stmt) == 30
+
+
+# 复审：符号开头的业务值原样；真正的公式（含符号后空白、函数、引用、DDE）转义。
+CSV_UNCHANGED = [
+    "-48V", "+5V", "-1.500", "-1e3", "+86 138 0000 0000", "-", "-文本",
+    "-48V/-60V", "-48V(DC)", "-48V DC, 1100W", "+12V/5A", "+5V/-12V", "+/-0.5mm",
+    "--", "--N/A--", "+DC48V",
+    # 选择原样：Excel 读成数值 100000，不执行任何引用/函数。
+    "+1E+5",
+    "SN-1", "-B2B", "普通文本",
+]
+CSV_ESCAPED = [
+    "=1+1", "=HYPERLINK(\"http://x\")", "  =A1+1", "@SUM(A1)",
+    "\tplain", "\t-48V", "\r1", "\nx",
+    "-2+3+cmd|' /C calc'!A0", "+cmd|' /C calc'!A0",
+    "+ A1", "- A1", "-\tA1", "-A1", "+$B$2", "-A1:B3", " + A1",
+    "+SUM(A1:A2)", "-sum (1)", "+TRUE", "-PI", "+false",
+    # 选择转义：纯数字四则，Excel 会算成 -52 而非保留号码。
+    "+86-138-0000-0000", "-1+1",
+]
+
+
+@pytest.mark.parametrize("value", CSV_UNCHANGED)
+def test_csv_formula_guard_keeps_business_values(value):
+    from app.api.maintenance import _safe_formula_only
+    assert _safe_formula_only(value) == value
+
+
+@pytest.mark.parametrize("value", CSV_ESCAPED)
+def test_csv_formula_guard_escapes_real_formulas(value):
+    from app.api.maintenance import _safe_formula_only
+    assert _safe_formula_only(value) == "'" + value
+
+
+def test_csv_formula_guard_ignores_non_text():
+    from app.api.maintenance import _safe_formula_only
+    assert _safe_formula_only(Decimal("-1.500")) == Decimal("-1.500")
+    assert _safe_formula_only(None) is None

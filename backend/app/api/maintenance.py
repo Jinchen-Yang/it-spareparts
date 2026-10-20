@@ -243,11 +243,34 @@ def _safe(v):
 
 
 # D-33 核对导出专用（金臣规则：只转义真正像公式的值；思路同 #424 不给普通文本加撇号）。
-# = @ 开头（忽略前导空白）及 Tab/CR/LF 开头一律转义；+/- 开头只有后续含运算、函数、
-# 引用字符或形如单元格引用（-A1）时才转义，-48V、+5V、-1.500 等普通值保持原样。
+# 一律转义：= @ 开头（忽略前导空白）、Tab/CR/LF 开头。
+# +/- 开头（可有前导空白）：去掉符号后的空白再判断，只有出现函数调用（SUM(、cmd(）、
+# | 或 !、独立单元格引用词（A1、$B$2、A1:B3）、裸 TRUE/FALSE/PI 等名称，或整段是纯数字
+# 四则（+86-138-0000-0000，Excel 会算成数）才转义。-48V/-60V、-48V(DC)、+5V/-12V、
+# +/-0.5mm、--N/A--、+DC48V、+86 138 0000 0000 原样；+1E+5 原样（Excel 读成数值 100000）。
 # 旧 _safe 调用方不变。
-_CSV_FORMULA_CHARS = re.compile(r"[=+\-*/^&()!|\"'<>@$:;,\[\]{}]")
-_CSV_CELL_REFERENCE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d+")
+_CSV_FUNCTION_CALL = re.compile(r"(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_.]*\s*\(")
+_CSV_DDE_CHARS = re.compile(r"[|!]")
+_CSV_CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
+_CSV_CELL_REFERENCE = re.compile(
+    rf"(?<![A-Za-z0-9_.$]){_CSV_CELL_REF}(?::{_CSV_CELL_REF})?(?![A-Za-z0-9_.(])"
+)
+_CSV_BARE_NAME = re.compile(
+    r"(?i)(?:TRUE|FALSE|PI|NA|RAND|NOW|TODAY)(?![A-Za-z0-9_.])"
+)
+_CSV_ARITHMETIC = re.compile(r"[\d.]+(?:\s*[-+*/^]\s*[\d.]+)+\s*")
+
+
+def _signed_value_is_formula(rest):
+    """rest：+/- 之后的文本；先去掉符号后的空白（+ A1、-\\tA1 也是公式）。"""
+    rest = rest.lstrip()
+    return bool(
+        _CSV_FUNCTION_CALL.search(rest)
+        or _CSV_DDE_CHARS.search(rest)
+        or _CSV_CELL_REFERENCE.search(rest)
+        or _CSV_BARE_NAME.match(rest)
+        or _CSV_ARITHMETIC.fullmatch(rest)
+    )
 
 
 def _safe_formula_only(v):
@@ -256,12 +279,12 @@ def _safe_formula_only(v):
         return v
     value = _INVALID_CSV_CONTROLS.sub("", v)
     probe = value.lstrip()
-    head, rest = probe[:1], probe[1:]
-    if (value[:1] in ("\t", "\r", "\n") or head in ("=", "@") or (
-        head in ("+", "-") and (
-            _CSV_FORMULA_CHARS.search(rest) or _CSV_CELL_REFERENCE.match(rest)
-        )
-    )):
+    head = probe[:1]
+    if value[:1] in ("\t", "\r", "\n"):
+        value = "'" + value
+    elif head in ("=", "@") or (
+        head in ("+", "-") and _signed_value_is_formula(probe[1:])
+    ):
         value = "'" + value
     if len(value) > _MAX_CSV_CELL_CHARS:
         raise HTTPException(
