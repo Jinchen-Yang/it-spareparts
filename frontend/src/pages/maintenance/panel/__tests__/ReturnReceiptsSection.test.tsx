@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), audit: vi.fn(), categories: vi.fn() }));
 vi.mock("../../../../api/maintenanceOperations", async () => ({
@@ -215,7 +215,6 @@ describe("返还台账的登记、更正和加载恢复", () => {
     for (const name of ["登记返还", "修改", "作废", "导入入库单"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
   });
 });
-
 
 describe("返还台账姓名与 SN 展示", () => {
   it("显示账号姓名并优先展示逐件 SN，保留原凭据和备注", async () => {

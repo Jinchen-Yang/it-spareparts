@@ -1,7 +1,7 @@
 /** 维保数据分析页：URL 状态、金额千分位、表头排序联动（2026-08-21 视觉升级）。 */
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import { message } from "antd";
+
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { MAINTENANCE_CHANGED_STORAGE_KEY, publishMaintenanceChange } from "../../../utils/maintenanceRefresh";
 import type { PnRanking, PnRankingRow } from "../../../api/maintenanceAnalytics";
@@ -322,7 +322,7 @@ describe("维保数据分析页", () => {
   });
 
   it("背景刷新失败会失效旧表格并显示错误，但重复轮询不重复弹toast", async () => {
-    const errorToast = vi.spyOn(message, "error").mockImplementation(() => (() => {}) as ReturnType<typeof message.error>);
+
     renderPage();
     await screen.findByText("ST1800MM0129");
     fetchPnRanking.mockRejectedValue({ response: { data: { detail: "暂时离线" } } });
@@ -331,7 +331,7 @@ describe("维保数据分析页", () => {
     expect(screen.queryByText("ST1800MM0129")).not.toBeInTheDocument();
     publishMaintenanceChange();
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(3));
-    expect(errorToast).not.toHaveBeenCalled();
+    expect(document.querySelector(".ant-message-error")).toBeNull();
   });
 
   it("手动请求进行中收到多个变更信号，只在请求完成后补一次背景读回", async () => {
@@ -376,12 +376,12 @@ describe("维保数据分析页", () => {
   it("卸载后迟到的请求失败不更新页面或弹全局错误", async () => {
     let rejectRequest!: (reason: unknown) => void;
     fetchPnRanking.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectRequest = reject; }));
-    const errorMessage = vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+
     const view = renderPage();
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
     view.unmount();
     await act(async () => { rejectRequest(new Error("late network failure")); });
-    expect(errorMessage).not.toHaveBeenCalled();
+    expect(document.querySelector(".ant-message-error")).toBeNull();
   });
 
   it("默认参数：ytd + cost_inc + 20/页", async () => {
@@ -498,7 +498,7 @@ describe("维保数据分析页", () => {
   });
 
   it("类型请求失败时清空旧表格、汇总和图表数据，刷新可恢复", async () => {
-    vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+
     renderPage("/maintenance/analytics?business_type=overall");
     await screen.findByText("¥2,586,637.81");
     fetchPnRanking.mockRejectedValueOnce(new Error("network"));
@@ -516,7 +516,7 @@ describe("维保数据分析页", () => {
   it("旧类型请求迟到成功不能覆盖新类型的失败空态", async () => {
     let resolveOld!: (value: unknown) => void;
     fetchPnRanking.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }));
-    vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+
     renderPage("/maintenance/analytics?business_type=overall");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(1));
     fetchPnRanking.mockRejectedValueOnce(new Error("network"));
@@ -625,11 +625,10 @@ describe("维保数据分析页", () => {
   });
 
   it("filter-options 失败提示错误但页面仍可用", async () => {
-    const errorMessage = vi.spyOn(message, "error")
-      .mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+
     fetchAnalyticsFilterOptions.mockRejectedValueOnce(new Error("boom"));
     renderPage();
-    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith("仓库选项加载失败"));
+    expect(await screen.findByText("仓库选项加载失败")).toBeInTheDocument();
     expect(await screen.findByText("ST1800MM0129")).toBeInTheDocument();
     expect(fetchPnRanking).toHaveBeenCalledTimes(1);
   });
@@ -770,7 +769,7 @@ describe("维保数据分析页", () => {
   it("旧粒度请求迟到成功不能覆盖新粒度的失败空态", async () => {
     let resolveOld!: (value: unknown) => void;
     fetchSpendTrend.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }));
-    vi.spyOn(message, "error").mockImplementation(() => (() => undefined) as ReturnType<typeof message.error>);
+
     renderPage("/maintenance/analytics?view=spend");
     await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
     fetchSpendTrend.mockRejectedValueOnce(new Error("network"));

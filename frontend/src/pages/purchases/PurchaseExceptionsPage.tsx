@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Alert, Card, Grid, List, Segmented, Table, message } from "antd";
+import { App, Alert, Card, Grid, List, Segmented, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import MobileDetailDrawer from "../../components/MobileDetailDrawer";
@@ -18,6 +18,7 @@ import { GRAN_OPTIONS, activatableProps } from "./shared";
 // 采购异常页：集中展示取消/作废/未成功。当前唯一有可靠数据的口径 = 取消单统计。
 // 其它异常（长期未完成等）后端暂无对应字段，不在前端伪造/推算——见页内说明。
 export default function PurchaseExceptionsPage() {
+  const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const basis = useTaxBasis("purchase");

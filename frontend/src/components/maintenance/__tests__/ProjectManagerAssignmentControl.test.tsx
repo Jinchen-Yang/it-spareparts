@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Modal, message } from "antd";
+import { Modal } from "antd";
 
 const assignMaintenanceProjectManager = vi.fn();
 const archiveMaintenanceProjectManager = vi.fn();
@@ -62,7 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   Modal.destroyAll();
-  message.destroy();
+
 });
 
 async function openAndFillAssignment() {

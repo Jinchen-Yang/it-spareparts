@@ -1,12 +1,13 @@
 /** 账号与权限中心（v2 壳）：账号 | 职位模板 两页签，共享一次加载的 meta。 */
 import { useCallback, useEffect, useState } from "react";
-import { Empty, Spin, Tabs, message } from "antd";
+import { App, Empty, Spin, Tabs } from "antd";
 import type { Account, AccountsMeta } from "../../api/accounts";
 import { getAccountsMeta, listAccounts } from "../../api/accounts";
 import AccountsTab from "./AccountsTab";
 import TemplatesTab from "./TemplatesTab";
 
 export default function PermissionCenterPage() {
+  const { message } = App.useApp();
   const [meta, setMeta] = useState<AccountsMeta | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(false);

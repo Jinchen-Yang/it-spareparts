@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Card, Segmented, DatePicker, Switch, Button, Space, Tag, message, Statistic, Row, Col,
-} from "antd";
+import { App, Card, Segmented, DatePicker, Switch, Button, Space, Tag, Statistic, Row, Col } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
@@ -59,6 +57,7 @@ function profitMoneyPair(row: ProfitRow, field: ProfitMoneyField): TaxSplit {
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
 export default function ProfitPage() {
+  const { message } = App.useApp();
   const basis = useTaxBasis("sales");
   const role = localStorage.getItem("role") || "";
   const isAdmin = role === "admin";

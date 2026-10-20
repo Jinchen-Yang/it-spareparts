@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message,
-} from "antd";
+import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   type ReturnReceipt, type ReturnReceiptUpdateInput, type ReturnReceiptDemandCandidate,
@@ -196,6 +194,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
   receipts: ReturnReceipt[];
   onDone: () => Promise<void>;
 }) {
+  const { message } = App.useApp();
   const isVoid = mode === "void";
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<"edit" | "results">("edit");

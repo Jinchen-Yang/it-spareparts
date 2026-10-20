@@ -1,20 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert,
-  Button,
-  Card,
-  DatePicker,
-  Input,
-  Row,
-  Segmented,
-  Select,
-  Skeleton,
-  Space,
-  Table,
-  Tabs,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, DatePicker, Input, Row, Segmented, Select, Skeleton, Space, Table, Tabs, Typography } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { useSearchParams, Link } from "react-router-dom";
 import dayjs from "dayjs";
@@ -191,6 +176,7 @@ function KpiCard({ label, value, sub, loading }: {
  * 刷新/分享不丢上下文。
  */
 export function MaintenanceAnalyticsPage() {
+  const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const rangeKey = sp.get("range") ?? "ytd";
   const sortSpec = sp.get("sort") ?? "cost_inc";
