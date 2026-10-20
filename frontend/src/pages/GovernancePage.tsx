@@ -1,3 +1,4 @@
+import PageHeader from "../components/PageHeader";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useState } from "react";
 import { App, Card, Row, Col, Statistic, Segmented, Tag, Button, Modal, Input, Space, Tooltip, Tabs, Select, Popconfirm, Descriptions } from "antd";
@@ -489,18 +490,25 @@ export default function GovernancePage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card title="数据治理"
-        extra={<Space>
+      <PageHeader title="数据治理"
+        extra={<>
           <Tooltip title="回填品牌/品类字典、别名、规格，扫描质量问题，生成合并候选（幂等，可随时重跑）">
-            <Button loading={refreshing} onClick={refresh}>刷新主数据</Button>
+            <Popconfirm title="刷新主数据？" description="将回填字典、别名与规格，并扫描质量问题和合并候选。" okText="确认" cancelText="取消" onConfirm={refresh}>
+              <Button loading={refreshing}>刷新主数据</Button>
+            </Popconfirm>
           </Tooltip>
           <Tooltip title="按标准描述给型号自动打上标准品类（人工设过/锁定的分类不动，幂等可重跑）——型号查询「按品类筛选」的数据来源">
-            <Button loading={classifying} onClick={autoClassify}>自动分类</Button>
+            <Popconfirm title="自动分类？" description="将按标准描述更新型号品类，人工设置或锁定的分类保留。" okText="确认" cancelText="取消" onConfirm={autoClassify}>
+              <Button loading={classifying}>自动分类</Button>
+            </Popconfirm>
           </Tooltip>
           {isAdmin && (
-            <Button type="primary" loading={recomputing} onClick={recompute}>重算利润</Button>
+            <Popconfirm title="重算利润？" description="将按当前数据重新计算利润结果。" okText="确认" cancelText="取消" onConfirm={recompute}>
+              <Button type="primary" loading={recomputing}>重算利润</Button>
+            </Popconfirm>
           )}
-        </Space>}>
+        </>} />
+      <Card>
         {sum && (
           <Row gutter={[16, 16]}>
             <Col xs={12} sm={8} md={4}><Statistic title="非标候选型号" value={sum.nonstd_candidates} valueStyle={{ color: "var(--mb-warning)" }} /></Col>

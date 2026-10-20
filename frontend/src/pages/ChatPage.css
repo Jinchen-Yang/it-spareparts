@@ -18,3 +18,10 @@
   height: calc(100vh - var(--mb-shell-header-height));
   height: calc(100dvh - var(--mb-shell-header-height));
 }
+
+.chat-page-header {
+  padding: var(--mb-space-sm) var(--mb-shell-content-padding);
+  border-bottom: 1px solid var(--mb-border-soft);
+}
+.chat-page-header .page-header { margin-bottom: 0; align-items: center; }
+.chat-page-header .page-header__context, .chat-page-header .page-header__actions { width: auto; }

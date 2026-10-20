@@ -167,3 +167,14 @@ describe("统一查询", () => {
     expect(unifiedSearch).toHaveBeenLastCalledWith("disk", { pageSize: 20, filters: { capacity_min: 8000 } });
   });
 });
+
+it("查询未完成时显示正规加载状态，完成后恢复空结果提示", async () => {
+  let resolve!: (value: { total: number; page: number; page_size: number; items: [] }) => void;
+  unifiedSearch.mockReturnValue(new Promise((done) => { resolve = done; }));
+  renderAt("/parts?q=waiting");
+  expect(await screen.findByRole("status", { name: "加载中…" })).toBeVisible();
+  expect(screen.queryByText("搜索并点击型号查看全景")).toBeNull();
+  await act(async () => resolve({ total: 0, page: 1, page_size: 20, items: [] }));
+  expect(screen.queryByRole("status", { name: "加载中…" })).toBeNull();
+  expect(screen.getByText("搜索并点击型号查看全景")).toBeVisible();
+});

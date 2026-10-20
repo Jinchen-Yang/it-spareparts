@@ -1,7 +1,7 @@
 import { formatMoney } from "../utils/format";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { App, Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table, Tag } from "antd";
+import { App, Alert, Button, Drawer, Form, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
@@ -168,6 +168,7 @@ export default function PoolManagementPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const drawerContext = useRef<DrawerRequestContext>({ generation: 0, mode: null, groupId: null });
 
+  const [nameError, setNameError] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [memberIds, setMemberIds] = useState<number[]>([]);
@@ -227,6 +228,7 @@ export default function PoolManagementPage() {
   // 表单填充：edit 打开 / 409 后重拉详情时同步 version 与字段
   const hydrate = (d: PnPoolDetail) => {
     setDetail(d);
+    setNameError(false);
     setName(d.name);
     setDescription(d.description ?? "");
     const opts = (d.members || []).map((m) => ({
@@ -246,6 +248,7 @@ export default function PoolManagementPage() {
   const openCreate = () => {
     beginDrawerContext("create", null);
     setDetail(null);
+    setNameError(false);
     setName(""); setDescription(""); setMemberIds([]); setMemberOptions([]); setSearchOptions([]);
     setPurchaseValue(null); setPurchaseBasis("ex_tax");
     setSalesValue(null); setSalesBasis("ex_tax");
@@ -411,7 +414,7 @@ export default function PoolManagementPage() {
     const ctx = currentEditContext(detail.group_id);
     if (!ctx) return;
     const expectedVersion = detail.version;
-    if (!name.trim()) { message.warning("请输入池名称"); return; }
+    if (!name.trim()) { setNameError(true); message.warning("请输入池名称"); return; }
     setSavingInfo(true);
     try {
       const nameChanged = name.trim() !== detail.name;
@@ -492,7 +495,7 @@ export default function PoolManagementPage() {
   const create = async () => {
     const ctx = { ...drawerContext.current };
     if (ctx.mode !== "create") return;
-    if (!name.trim()) { message.warning("请输入池名称"); return; }
+    if (!name.trim()) { setNameError(true); message.warning("请输入池名称"); return; }
     if (memberIds.length < MIN_MEMBERS) {
       message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
       return;
@@ -644,14 +647,15 @@ export default function PoolManagementPage() {
     <div style={sectionBox}>
       {sectionTitle("基本信息")}
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <div>
-          <label style={{ display: "block", marginBottom: 4 }}>
-            池名称<span style={{ color: "#cf1322" }}> *</span>
-          </label>
-          <Input value={name} maxLength={128} placeholder="如 8TB 7.2K SATA 企业盘互通池"
-            disabled={!canManage}
-            onChange={(e) => setName(e.target.value)} />
-        </div>
+        <Form component={false} layout="vertical" fields={[{
+          name: "pool-name", value: name, errors: nameError ? ["请输入池名称"] : [],
+        }]}>
+          <Form.Item name="pool-name" label="池名称" required>
+            <Input maxLength={128} placeholder="如 8TB 7.2K SATA 企业盘互通池"
+              disabled={!canManage}
+              onChange={(e) => { setName(e.target.value); setNameError(false); }} />
+          </Form.Item>
+        </Form>
         <div>
           <label style={{ display: "block", marginBottom: 4 }}>用途 / 说明</label>
           <Input.TextArea value={description} rows={2}
