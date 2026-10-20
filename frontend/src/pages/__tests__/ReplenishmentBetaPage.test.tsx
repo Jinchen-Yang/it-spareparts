@@ -1,3 +1,4 @@
+import { TAG_STYLES } from "../../theme";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -869,7 +870,9 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
 
     // 编辑态：标题变为编辑被打回申请，打回行标红 + 推荐替换按钮
     expect(await screen.findByText("编辑被打回申请：BLK-20260818-REJECT001")).toBeInTheDocument();
-    expect(screen.getByText(/被打回：no_purchase_or_sales_in_182_days/)).toBeInTheDocument();
+    const rejectedTag = screen.getByText(/被打回：no_purchase_or_sales_in_182_days/);
+    expect(rejectedTag).toHaveStyle(TAG_STYLES.danger);
+    expect(rejectedTag).toHaveClass("replenishment-rejection-tag");
     expect(screen.getByRole("button", { name: /替换为 POOL-PN-001/ })).toBeInTheDocument();
 
     // 用推荐替换打回行，然后重新提交 → applyRevision 带完整 lines

@@ -1,0 +1,69 @@
+.part-search-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.part-search-form-card > .ant-card-body { padding: 16px; }
+.part-search-keyword { display: flex; gap: 8px; }
+.part-search-keyword > .ant-input-affix-wrapper { min-width: 0; }
+.part-query-error { margin-top: 6px; color: var(--mb-danger); }
+.part-search-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.part-search-filters > * { min-width: 0; width: 100%; }
+.part-search-filters .ant-input-number { width: 100%; }
+
+.part-match-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.part-match-results > :only-child { grid-column: 1 / -1; }
+.part-match-description { color: var(--mb-text-2); overflow-wrap: anywhere; }
+.part-similar-list { max-height: 68px; overflow: auto; }
+.part-similar-list small { color: var(--mb-text-3); }
+.part-match-results .ant-btn-link { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; }
+
+.part-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px;
+  padding: 12px;
+  background: var(--mb-accent-soft);
+  border: 1px solid var(--mb-border);
+  border-radius: 8px;
+  /* accent-soft 底上 text-3 仅 4.30:1；区内弱提示（含 TaxMoney「含/不含」、池成员数等内联 text-3）改用 text-2（5.12:1）。 */
+  --mb-text-3: var(--mb-text-2);
+}
+
+.part-summary-metric { min-width: 0; overflow-wrap: anywhere; }
+.part-summary-metric > span { display: block; color: var(--mb-text-2); font-size: 13px; }
+.part-summary-metric > strong { display: block; margin-block: 4px; font-size: 20px; color: var(--mb-accent-strong); }
+/* danger 在 accent-soft 底上 4.08:1；改用标签危险文字 token（5.25:1）。 */
+.part-summary-metric > strong.is-negative { color: var(--mb-tag-danger-text); }
+.part-summary-metric small { display: block; color: var(--mb-text-2); font-size: 12px; }
+.part-summary-metric .ant-tag { white-space: normal; margin-inline-end: 0; }
+.part-summary-metric details { margin-top: 6px; font-size: 12px; }
+.part-summary-metric details[open] { min-width: 0; }
+.part-summary:has(details[open]) > .part-summary-metric:last-child { grid-column: 1 / -1; }
+.part-section { margin-top: 20px; min-width: 0; }
+.part-section h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+.part-stock-note { margin-bottom: 10px; }
+.part-price-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.part-price-stats .ant-statistic-content { font-size: 18px; overflow-wrap: anywhere; }
+.part-overview > .ant-card-head .ant-card-head-title { white-space: normal; overflow-wrap: anywhere; }
+
+@media (max-width: 767px) {
+  .part-search-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .part-match-results { grid-template-columns: minmax(0, 1fr); }
+  .part-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .part-summary-metric:last-child { grid-column: 1 / -1; }
+  .part-price-stats { grid-template-columns: minmax(0, 1fr); }
+  .part-overview > .ant-card-body { padding: 12px; }
+}

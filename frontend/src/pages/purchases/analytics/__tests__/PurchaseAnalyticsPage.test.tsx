@@ -467,7 +467,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/未标税率/)).toBeInTheDocument());
-    const badges = within(dialog).getAllByText(/名义（按 13% 推算）/);
+    const badges = within(within(dialog).getByText("不含税金额")).getAllByText(/名义（按 13% 推算）/);
     expect(badges).toHaveLength(1);
     // 标注挂在不含税金额那一项上（「不含税金额」串含「含税金额」子串，用前缀断言）
     expect(badges[0].parentElement?.textContent).toMatch(/^不含税金额/);
@@ -485,7 +485,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/未标税率/)).toBeInTheDocument());
-    const badges = within(dialog).getAllByText(/名义（按 13% 推算）/);
+    const badges = within(within(dialog).getByText("含税金额")).getAllByText(/名义（按 13% 推算）/);
     expect(badges).toHaveLength(1);
     expect(badges[0].parentElement?.textContent).toMatch(/^含税金额/);
   });

@@ -14,6 +14,7 @@ export default function PoolReferencePanel({
   dateTo,
   purchaseType,
   compact = false,
+  summary = false,
 }: {
   partId: number;
   side?: "both" | PoolAnalysisSide;
@@ -22,6 +23,7 @@ export default function PoolReferencePanel({
   dateTo?: string;
   purchaseType?: string;
   compact?: boolean;
+  summary?: boolean;
 }) {
   const local = useLocalRestrictions();
   const [reference, setReference] = useState<PoolReference | null>(null);
@@ -45,9 +47,9 @@ export default function PoolReferencePanel({
       .finally(() => { if (request === seq.current) setLoading(false); });
   }, [partId, range, dateFrom, dateTo, purchaseType]);
 
-  if (loading) return <Card size="small" loading aria-label="池价格参考加载中" />;
+  if (loading) return summary ? <span>互通池加载中…</span> : <Card size="small" loading aria-label="池价格参考加载中" />;
   if (failed) return <Alert type="warning" showIcon message="池价格参考加载失败，请稍后重试" />;
   if (!reference) return null;
-  return <PoolReferenceCard reference={reference} side={side} compact={compact}
+  return <PoolReferenceCard reference={reference} side={side} compact={compact} summary={summary}
     forceRestricted={local.governance} />;
 }

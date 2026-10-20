@@ -78,6 +78,8 @@ describe("路由按访问意图加载", () => {
     setup(new Promise((done) => { resolve = done; }));
     fireEvent.click(screen.getByRole("menuitem", { name: /库存查询/ }));
     expect(await screen.findByRole("status")).toHaveTextContent("正在加载页面");
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("status").querySelector(".ant-skeleton")).not.toBeNull();
     expect(screen.getByRole("menuitem", { name: /库存查询/ })).toBeInTheDocument();
     await act(async () => { resolve({ default: () => <div>库存数据</div> }); });
     expect(await screen.findByText("库存数据")).toBeInTheDocument();

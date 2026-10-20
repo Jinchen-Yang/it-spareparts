@@ -10,7 +10,7 @@
  * - 归档池：只读档案 + "先恢复"提示，不渲染任何保存按钮。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
@@ -636,4 +636,21 @@ describe("归档池只读（复审非阻塞 3）", () => {
     const drawer = document.querySelector(".ant-drawer")! as HTMLElement;
     expect(within(drawer).getByText(/PN-A/)).toBeInTheDocument();
   });
+});
+
+it("池名称必填错误关联输入，补齐后清除且不改变建池成员校验", async () => {
+  login("admin", {});
+  mockList([]);
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "新建池" }));
+  const input = screen.getByRole("textbox", { name: "池名称" });
+  expect(input).toHaveAttribute("aria-required", "true");
+  fireEvent.click(screen.getByRole("button", { name: "创建池" }));
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  await waitFor(() => expect(document.getElementById(input.getAttribute("aria-describedby")!)).toHaveTextContent("请输入池名称"));
+  expect(createPnPool).not.toHaveBeenCalled();
+  fireEvent.change(input, { target: { value: "合成池" } });
+  expect(input).not.toHaveAttribute("aria-invalid");
+  fireEvent.click(screen.getByRole("button", { name: "创建池" }));
+  expect(createPnPool).not.toHaveBeenCalled();
 });

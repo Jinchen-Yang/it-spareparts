@@ -373,13 +373,19 @@ describe("ManualSiteIssueSection", () => {
   });
 
   it("更正已有单：行显式携带 issue_line_id 并带 version CAS", async () => {
+    // 请求发出不等于预览已渲染；受控响应复现慢请求下的按钮等待竞态。
+    let resolvePreview!: (value: { data: typeof previewPayload }) => void;
+    api.previewManualSiteIssue.mockImplementationOnce(() => new Promise((resolve) => {
+      resolvePreview = resolve;
+    }));
     renderSection();
     fireEvent.click(screen.getByRole("button", { name: "更正 LYR-20260920-ABC" }));
     const dialog = await screen.findByRole("dialog", { name: "更正人工领用 LYR-20260920-ABC" });
     fireEvent.change(within(dialog).getByLabelText("第 1 行数量"), { target: { value: "3" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "预览实际消耗" }));
     await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledTimes(1));
-    fireEvent.click(within(dialog).getByRole("button", { name: "提交更正" }));
+    resolvePreview({ data: previewPayload });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "提交更正" }));
     await waitFor(() => expect(api.patchManualSiteIssue).toHaveBeenCalledTimes(1));
     const patchArg = api.patchManualSiteIssue.mock.calls[0][1];
     expect(patchArg.project_id).toBe("project-1");

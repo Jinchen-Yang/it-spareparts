@@ -299,6 +299,8 @@ export interface ProjectPartsRowsQuery {
   order_no?: string;
   /** 按挂靠销售订单号归一化相等过滤（与需求单列表同一把尺子，#259）。 */
   contract_no?: string;
+  /** D-33：服务端字段注册表允许的 AND 条件；网页/count/核对导出共用。 */
+  filters?: string;
 }
 
 export interface ProjectPartsRows {
