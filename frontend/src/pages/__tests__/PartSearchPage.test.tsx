@@ -369,6 +369,27 @@ describe("摘要权限与空态", () => {
     expect(within(summary).queryByText("销售单号")).toBeNull();
   });
 
+  it("更多价格统计里的双口径金额分两行堆叠，长金额可换行不横溢", async () => {
+    fetchOverview.mockResolvedValue({ ...ovFix(), profit_summary: {
+      ...ovFix().profit_summary, avg_cost_fifo: 1234567.89 } });
+    renderAt("/parts?part_id=42");
+    const stats = await screen.findByRole("region", { name: "更多价格统计" });
+    const label = within(stats).getByText((_, el) => el?.textContent === "不含 ");
+    const pair = label.parentElement!.parentElement!;
+    expect(pair).toHaveStyle({ flexDirection: "column" });
+    expect(stats.querySelector("[style*='nowrap']")).toBeNull();
+  });
+
+  it("负动态库存用深色危险色类名，不用 accent-soft 底上不足 4.5 的 danger", async () => {
+    fetchOverview.mockResolvedValue({ ...ovFix(), stock_dynamic: {
+      dynamic_qty: -3, anchor_qty: 0, anchor_date: null, in_qty: 0, out_sales: 3, out_maint: 0 } });
+    renderAt("/parts?part_id=42");
+    const summary = await screen.findByRole("region", { name: "型号摘要" });
+    const value = within(within(summary).getByLabelText("动态可用库存")).getByText("-3");
+    expect(value).toHaveClass("is-negative");
+    expect(value.getAttribute("style") ?? "").not.toContain("--mb-danger");
+  });
+
   it("缺参考价和动态库存时不把未知显示成零", async () => {
     renderAt("/parts?part_id=42");
     const summary = await screen.findByRole("region", { name: "型号摘要" });
