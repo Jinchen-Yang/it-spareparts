@@ -71,6 +71,17 @@ it("受限销售 URL 不能打开隐藏维度或财务异常筛选", async () =>
   expect(screen.queryByRole("switch")).toBeNull();
 });
 
+it("受限销售 URL 带 dimension=salesperson 时回退按型号，且不显示销售员选项", async () => {
+  localStorage.setItem("role", "sales");
+  localStorage.setItem("permissions", JSON.stringify({ own_customers_only: true }));
+  renderUrlPage(<ProfitPage />, "/profit?dimension=salesperson");
+  await screen.findByText("合成结果");
+  expect(requests[0].params).toEqual({ dimension: "part", only_anomaly: false,
+    date_from: undefined, date_to: undefined });
+  expect(screen.getByRole("radio", { name: "按型号" })).toBeChecked();
+  expect(screen.queryByRole("radio", { name: "按销售员" })).toBeNull();
+});
+
 it("同页导航和后退同步日期控件与请求", async () => {
   const { router } = renderUrlPage(<ProfitPage />, "/profit?dimension=part&date_from=2024-02-29&date_to=2024-02-29");
   await screen.findByText("合成结果");

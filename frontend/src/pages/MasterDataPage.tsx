@@ -104,7 +104,10 @@ export default function MasterDataPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, page]);
 
-  const search = (query: string) => {
+  const search = (raw: string) => {
+    // URL 只保存规范化后的关键词，避免首尾空白产生不同链接。
+    const query = raw.trim();
+    setSearchInput(query);
     if (query === q && page === 1) void doSearch(q, page);
     else patchUrl({ q: query, page: "1" });
   };

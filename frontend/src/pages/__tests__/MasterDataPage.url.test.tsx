@@ -57,3 +57,16 @@ it.each(["-1", "0", "1.5", "abc", "9007199254740992"])("主数据非法页码 %s
   await screen.findByText("合成 全部 1");
   expect(requests[0]).toEqual({ q: "", page: 1, page_size: 20, browse: true });
 });
+
+it("主数据提交关键词去掉首尾空白后再写入 URL 与请求，纯空白等同清空", async () => {
+  const { router } = renderUrlPage(<MasterDataPage />, "/master?q=硬盘&origin=review");
+  await screen.findByText("合成 硬盘 1");
+  submit("  服务器  ");
+  await screen.findByText("合成 服务器 1");
+  expect(new URLSearchParams(router.state.location.search).get("q")).toBe("服务器");
+  expect(requests[requests.length - 1]).toEqual({ q: "服务器", page: 1, page_size: 20, browse: true });
+  expect(screen.getByPlaceholderText("搜 PN / 描述 / 品牌（留空浏览全部）")).toHaveValue("服务器");
+  submit("   ");
+  await screen.findByText("合成 全部 1");
+  expect(router.state.location.search).toBe("?origin=review");
+});

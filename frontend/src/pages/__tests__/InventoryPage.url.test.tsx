@@ -71,3 +71,16 @@ it("URL 查询改变后，旧请求迟到不覆盖当前结果", async () => {
   expect(screen.queryByText("旧结果")).toBeNull();
   expect(screen.getByText("新结果")).toBeInTheDocument();
 });
+
+it("提交关键词去掉首尾空白后再写入 URL 与请求，纯空白等同清空", async () => {
+  const { router } = renderUrlPage(<InventoryPage />, "/inventory?q=硬盘&origin=review");
+  await screen.findByText("结果 硬盘 1");
+  submit("  合成 C  ");
+  expect(await screen.findByText("结果 合成 C 1")).toBeInTheDocument();
+  expect(new URLSearchParams(router.state.location.search).get("q")).toBe("合成 C");
+  expect(requests[requests.length - 1]).toEqual({ q: "合成 C", page: 1, page_size: 20 });
+  expect(screen.getByPlaceholderText("型号 / 描述 / 品牌")).toHaveValue("合成 C");
+  submit("   ");
+  expect(await screen.findByText("结果 全部 1")).toBeInTheDocument();
+  expect(router.state.location.search).toBe("?origin=review");
+});
