@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import and_, case, delete, func, or_, select, true, tuple_
+from sqlalchemy import and_, case, delete, func, or_, select, true, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -463,6 +463,33 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         session.execute(stmt.on_conflict_do_update(
             index_elements=[conflict_col], set_=set_))
 
+    # 被挡的最新合法来源仍是下一次人工“改回来源值”的比较基准。
+    # 同键跨 chunk 时只保存最终来源；不把账本更新计作业务字段已覆盖。
+    source_snapshot_changed_keys = set()
+    for key, source in {r[key_name]: r for r in rows}.items():
+        previous = before_by_key.get(key)
+        if previous is None:
+            continue
+        eid, before, override, edited_source = previous
+        refreshed = protection.refresh_source_values(
+            raw_line_id=key, edited_source=edited_source,
+            manual_override=override, before=before, source=source,
+        )
+        if refreshed == override:
+            continue
+        session.execute(update(FMaintenanceLine).where(
+            FMaintenanceLine.id == eid,
+        ).values(manual_override=refreshed))
+        source_snapshot_changed_keys.add(key)
+        session.add(SysAuditLog(
+            entity_type="maintenance_field_protection", entity_id=eid,
+            action="source_snapshot_refresh",
+            operated_by=operated_by or "system:source-import",
+            reason=f"合法原件刷新受保护字段来源快照，人工值及保护保留（batch {batch_id}）",
+            before_json={"manual_override": override},
+            after_json={"manual_override": refreshed, "batch_id": batch_id},
+        ))
+
     # 原件的真实 PN 换绑与网页/工作簿同义：旧身份的人工价不得通过 line_id
     # 沿用到新身份。先读最终数据库身份，避免跨 chunk 重复行先换后还原时误退役；
     # 被保护挡住的 PN 不会产生有效身份变化。成本瀑布及历史账本内容保持。
@@ -568,7 +595,8 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         legacy_review=len(legacy_review_keys),
     )
     return {"inserted": unique_rows - existing, "updated": existing, "skipped": 0,
-            "changed_keys": changed_keys, **feedback}
+            "changed_keys": changed_keys,
+            "source_snapshot_changed_keys": source_snapshot_changed_keys, **feedback}
 
 
 def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
@@ -1152,7 +1180,9 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         .where(FMaintenanceLine.raw_line_id.in_(incoming_line_raw_ids))
     ).all()) if incoming_line_raw_ids else {}
     changed_orders = set(order_stats["changed_keys"])
-    for raw_line_id in line_stats["changed_keys"]:
+    for raw_line_id in (
+        line_stats["changed_keys"] | line_stats.get("source_snapshot_changed_keys", set())
+    ):
         if current := current_line_order_raw.get(raw_line_id):
             changed_orders.add(current)
         if previous := previous_line_order_raw.get(raw_line_id):

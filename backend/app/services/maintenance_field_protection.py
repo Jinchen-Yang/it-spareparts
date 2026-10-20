@@ -11,7 +11,6 @@ from sqlalchemy import and_, or_
 
 from app.models.maintenance import FMaintenanceLine
 
-
 PN_IDENTITY_FIELDS = frozenset({"pn_raw", "pn_std", "part_id"})
 DEMAND_FACT_FIELDS = frozenset({
     "qty", "return_qty", "serial_numbers", "description", "line_note",
@@ -47,7 +46,7 @@ def _json_value(value):
 
 def record_manual_changes(line, *, before: dict, operated_by: str,
                           source: str) -> set[str]:
-    """Append actual changes, preserving the earliest source snapshot per field.
+    """Record actual changes; returning to the source releases field protection.
 
     PN is recorded as one group even when only one member changes. The return
     value lists actual changes; the ledger also contains the protected peers.
@@ -58,30 +57,114 @@ def record_manual_changes(line, *, before: dict, operated_by: str,
         return set()
     fields = changed | (PN_IDENTITY_FIELDS if changed & PN_IDENTITY_FIELDS else set())
     ledger = dict(line.manual_override or {})
-    original_part_id = before.get("part_id")
+    had_pn_protection = bool(ledger.keys() & PN_IDENTITY_FIELDS)
+    part_source_known = not had_pn_protection
+    source_part_id = before.get("part_id")
     for name in ("pn_std", "pn_raw"):
         entry = ledger.get(name) or {}
         if "source_value_part_id" in entry:
-            original_part_id = entry["source_value_part_id"]
+            part_source_known = True
+            source_part_id = entry["source_value_part_id"]
             break
-    original_part_id = (ledger.get("part_id") or {}).get("source_value", original_part_id)
+    if "source_value" in (ledger.get("part_id") or {}):
+        part_source_known = True
+        source_part_id = ledger["part_id"]["source_value"]
+    can_release = line.edited_source == "wbdd" and not is_manual_created(line.raw_line_id)
     now = datetime.now(UTC).isoformat()
     for field in sorted(fields):
+        was_recorded = field in ledger
         old_entry = ledger.get(field) or {}
+        if (
+            can_release
+            and field not in PN_IDENTITY_FIELDS and "source_value" in old_entry
+            and normalized_value(field, after[field])
+            == normalized_value(field, old_entry["source_value"])
+        ):
+            ledger.pop(field)
+            continue
         ledger[field] = {
+            **old_entry,
             "value": _json_value(after[field]),
-            "source_value": old_entry.get("source_value", _json_value(before.get(field))),
             "updated_by": operated_by,
             "updated_at": now,
             "source": source,
         }
-        if field in PN_IDENTITY_FIELDS:
+        if not was_recorded and (
+            field not in PN_IDENTITY_FIELDS or not had_pn_protection
+        ):
+            ledger[field]["source_value"] = _json_value(before.get(field))
+        if field in PN_IDENTITY_FIELDS and part_source_known:
             if field == "part_id":
-                ledger[field]["source_value"] = original_part_id
+                ledger[field]["source_value"] = source_part_id
             else:
-                ledger[field]["source_value_part_id"] = original_part_id
+                ledger[field]["source_value_part_id"] = source_part_id
+    # An old partial PN ledger cannot prove that an unrecorded peer is original.
+    if can_release and changed & PN_IDENTITY_FIELDS and all(
+        "source_value" in ledger[field]
+        and normalized_value(field, after[field])
+        == normalized_value(field, ledger[field]["source_value"])
+        for field in PN_IDENTITY_FIELDS
+    ):
+        for field in PN_IDENTITY_FIELDS:
+            ledger.pop(field)
     line.manual_override = ledger
     return changed
+
+
+def manual_change_reason(reason: str, before: dict, after: dict) -> str:
+    released = (before.keys() - after.keys()) & DEMAND_FACT_FIELDS
+    if released:
+        return f"{reason}；改回来源值，保护解除：{', '.join(sorted(released))}"
+    return reason
+
+
+def original_source_snapshot(entry: dict) -> tuple[bool, object]:
+    """Explicit clear keeps its first-snapshot contract, including unknown peers."""
+    if entry.get("original_source_value_known") is False:
+        return False, None
+    if "original_source_value" in entry:
+        return True, entry["original_source_value"]
+    return "source_value" in entry, entry.get("source_value")
+
+
+def refresh_source_values(*, raw_line_id: str, edited_source: str,
+                          manual_override: dict, before: dict, source: dict) -> dict:
+    """Refresh protected source snapshots without applying or releasing them.
+
+    The caller supplies the final legal upsert row and owns persistence/audit.
+    Missing historical PN peers become known only from this source evidence.
+    """
+    if edited_source != "wbdd" or is_manual_created(raw_line_id):
+        return manual_override
+    fields = set(manual_override) & DEMAND_FACT_FIELDS
+    if fields & PN_IDENTITY_FIELDS:
+        fields |= PN_IDENTITY_FIELDS
+    ledger = dict(manual_override)
+    for field in sorted(fields & source.keys()):
+        old = manual_override.get(field) or {}
+        value = _json_value(normalized_value(field, source[field]))
+        if (
+            "source_value" in old
+            and normalized_value(field, old["source_value"]) == normalized_value(field, value)
+        ):
+            continue
+        entry = {**old}
+        if "original_source_value" not in entry and "original_source_value_known" not in entry:
+            known, original = original_source_snapshot(old)
+            if not known and field == "part_id":
+                for name in ("pn_std", "pn_raw"):
+                    peer = manual_override.get(name) or {}
+                    if "source_value_part_id" in peer:
+                        known, original = True, peer["source_value_part_id"]
+                        break
+            if known:
+                entry["original_source_value"] = original
+            else:
+                entry["original_source_value_known"] = False
+        entry.setdefault("value", _json_value(before.get(field)))
+        entry["source_value"] = value
+        ledger[field] = entry
+    return ledger
 
 
 def is_manual_created(raw_line_id: str) -> bool:

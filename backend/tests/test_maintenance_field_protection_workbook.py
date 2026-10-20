@@ -6,14 +6,18 @@ import pytest
 from sqlalchemy import select
 
 from app.etl import loader
-from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.dimensions import DimPart
+from app.models.maintenance import MaintenanceManualCostOverride
+from app.models.maintenance_project_operations import MaintenanceProjectOperationAudit
 from app.services import maintenance_demand_manual as manual
-from app.services import maintenance_project_operations as operations
 from app.services import maintenance_project_master_workbook as master
+from app.services import maintenance_project_operations as operations
 from tests import factories as f
 from tests.test_maintenance_project_master_v2_editable import (
-    _batch, _make_project_with_line, _parts_sheet, _reupload,
+    _batch,
+    _make_project_with_line,
+    _parts_sheet,
+    _reupload,
 )
 
 
@@ -36,6 +40,48 @@ def edit_workbook(db, project, values):
     for label, value in values.items():
         ws.cell(2, headers[label], value)
     return _reupload(db, project.project_id, wb)
+
+
+def test_workbook_return_to_source_releases_quantity_with_audit(db):
+    project, part, order, line = _make_project_with_line(db)
+    edit_workbook(db, project, {"需求数量": 5})
+    edit_workbook(db, project, {"需求数量": "2.000"})
+    db.refresh(line)
+    assert line.manual_override == {}
+    audits = list(db.scalars(select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.entity_type == "maintenance_line",
+        MaintenanceProjectOperationAudit.entity_id == str(line.id),
+        MaintenanceProjectOperationAudit.action == "UPDATE",
+    ).order_by(MaintenanceProjectOperationAudit.id)))
+    assert len(audits) == 2
+    assert "改回来源值，保护解除" in audits[-1].reason
+    assert audits[-1].before_json["manual_override"]["qty"]["value"] == "5.000"
+    assert audits[-1].after_json["manual_override"] == {}
+    reimport(db, order, line, pn=part.pn_std, qty="9")
+    assert line.qty == Decimal("9.000")
+
+
+@pytest.mark.parametrize("final_qty", [5, 3])
+def test_workbook_different_manual_quantity_stays_protected(db, final_qty):
+    project, part, order, line = _make_project_with_line(db)
+    edit_workbook(db, project, {"需求数量": 5})
+    edit_workbook(db, project, {"需求数量": final_qty})
+    reimport(db, order, line, pn=part.pn_std, qty="9")
+    assert line.qty == Decimal(final_qty)
+    assert set(line.manual_override) == {"qty"}
+
+
+@pytest.mark.parametrize("source_note", [None, "来源备注"])
+def test_workbook_explicit_blank_releases_only_when_source_is_empty(db, source_note):
+    project, part, order, line = _make_project_with_line(db)
+    reimport(db, order, line, pn=part.pn_std, qty="2", note=source_note)
+    edit_workbook(db, project, {"备注": "人工备注"})
+    edit_workbook(db, project, {"备注": " "})
+    db.refresh(line)
+    assert line.line_note is None
+    assert set(line.manual_override) == ({"line_note"} if source_note else set())
+    reimport(db, order, line, pn=part.pn_std, note="之后来源备注")
+    assert line.line_note == (None if source_note else "之后来源备注")
 
 
 def test_workbook_note_keeps_source_quantity_live(db):

@@ -1302,17 +1302,26 @@ def apply(
                 before_fields = field_protection.snapshot_fields(line)
                 note = field_protection.normalized_value("line_note", refill.note)
                 if field_protection.changed_fields(before_fields, {"line_note": note}):
+                    project_id = plan.project_id or (_line_project_ids or {}).get(line.id)
+                    if project_id is None:
+                        raise WorkbookError(
+                            "project_scope_denied",
+                            "工作簿包含归属已变化的备件行，请重新下载",
+                        )
+                    before_override = dict(line.manual_override or {})
                     line.line_note = note
                     field_protection.record_manual_changes(
                         line, before=before_fields, operated_by=operated_by,
                         source="workbook_manual",
                     )
                     _write_audit(
-                        db, project_id=plan.project_id or _line_project_ids[line.id],
+                        db, project_id=project_id,
                         entity_type="maintenance_line", entity_id=line.id,
                         action="UPDATE", operated_by=operated_by,
-                        reason="工作簿备注修改",
-                        before={"line_note": before_fields["line_note"]},
+                        reason=field_protection.manual_change_reason(
+                            "工作簿备注修改", before_override, line.manual_override),
+                        before={"line_note": before_fields["line_note"],
+                                "manual_override": before_override},
                         after={"line_note": line.line_note,
                                "manual_override": line.manual_override},
                     )
@@ -3332,6 +3341,10 @@ def _v2_decimal(
         parsed = Decimal(str(value).replace(",", "").strip())
     except (InvalidOperation, ValueError):
         raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
+    # Reject excessive magnitudes/non-finite input before Decimal.quantize can
+    # raise InvalidOperation. Keep the post-rounding bound below as well.
+    if not parsed.is_finite() or parsed.copy_abs() >= Decimal(1000000000000):
+        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}超出允许范围")
     normalized = (
         field_protection.normalized_value("qty", parsed) if demand_quantity
         else parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -6877,6 +6890,7 @@ def _apply_project_master_v2(
 
         # UPDATE：先归一化再计算真实差异，成本与保护使用同一组最终值。
         protection_before = field_protection.snapshot_fields(line)
+        before_override = dict(line.manual_override or {})
         proposed = {
             key: field_protection.normalized_value(key, value)
             for key, value in {
@@ -6929,10 +6943,13 @@ def _apply_project_master_v2(
                 after["cost"] = str(refill.unit_cost_ex_tax)
             if refill.reason is not None:
                 after["cost_reason"] = refill.reason
+            before["manual_override"] = before_override
             _write_audit(db, project_id=plan.project_id,
                          entity_type="maintenance_line", entity_id=line.id,
-                         action="UPDATE", operated_by=operated_by, reason=audit_reason,
-                         before=before or None, after=after)
+                         action="UPDATE", operated_by=operated_by,
+                         reason=field_protection.manual_change_reason(
+                             audit_reason, before_override, line.manual_override),
+                         before=before, after=after)
             operating_fact_changed = True
     # 行级作废的整单级联：被 VOID 的行所属需求单若活动行归零 → 整单墓碑
     # （需求单搜索消失、氚云重传不复活；恢复走 demands 页面既有入口）。
