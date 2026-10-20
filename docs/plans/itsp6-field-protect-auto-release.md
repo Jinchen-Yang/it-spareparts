@@ -33,11 +33,20 @@ fetch 后 origin/main 与基线一致。仅本工作树开发、本地提交，�
 
 覆盖：双入口 2→5→2→来源9、持续保护/改第三值、NULL 和空来源、PN 部分/全部还原、等值/原样回传、解除审计、最新来源/skip、显式撤销首次兼容、手工/legacy 保护、工作簿项目缺项及大数回执。保留原有相关契约，最终跑相关子集与 ruff，全量交 CI。
 
-## 待金臣确认
+## 待金臣确认（已裁定）
 
-首次与最新来源存在差异：来源2→人工5→合法来源9→人工2。当前按任务要求选**最新一次合法来源值**，因此人工2仍受保护，人工9才解除。另一选项是始终以首次来源2为比较基准，则人工2解除而人工9仍保护。本候选暂按最新值实现，不把这一暂行选择写成已获额外裁定。
+首次与最新来源存在差异：来源2→人工5→合法来源9→人工2。金臣 2026-10-20 裁定 **Q1=A**：解除基准始终取本轮第一次人工修改之前的快照值（首次快照，与显式撤销同源），人工2解除而人工9仍保护；受保护期间合法来源上传只刷新观察证据，不改变基准。Q2（是否切换为最新来源值比较）随之不需要。Q3 按设计稿（`~/workspaces/reviews/lanes-20261020/laneB/protect-release-design.md`）推荐 A 于 2026-10-21 需求单执行：旧工作簿编辑字段的解除基准或保护周期自导出后已变化即整次应用阻断，字段级提示重新下载核对，不可强制接管。首个候选按最新来源值实现的差异由 PR #430 返工消除；无迁移或历史回填，`original_source_value`/`source_value` 复用为首次快照证据，`cycle_started_at` 仅在新周期建账时写入、供漂移校验识别周期重建。
 
-旧账本没有保存被挡过的历次来源值，不能从现值猜最新值；下一次合法 upsert 后才获得最新来源证据。无迁移或历史回填。
+## 2026-10-21 返工（PR #430）
+
+按上述裁定返工并扩展（分支 `fix/field-protect-auto-release`）：
+
+- `backend/app/services/maintenance_field_protection.py`：解除判定统一走 `original_source_snapshot`（Q1=A）；新增 `protection_baseline`/`protection_baseline_changed`/`protection_baseline_digest` 供旧簿漂移校验；审计文案改为「改回本轮首次快照（原值），保护解除」。
+- `backend/app/services/maintenance_project_master_workbook.py`：03 表行基线令牌签入 `protect` 指纹；validate 对触碰行比对漂移（`protection_baseline_drift`，不可 force_takeover，字段级 issues）；apply 锁内经 `V2RowGuard.protection_digest` 复核（`protection_changed_since_validate`）。
+- `backend/app/etl/loader.py`：注释口径更新（被挡来源只刷新观察证据）。
+- `backend/app/api/maintenance_project_master_workbook.py`：`protection_baseline_drift` 映射 409。
+- 前端 `WorkbookRoundTrip.tsx`/`maintenanceWorkbooks.ts`：漂移 409 的字段级提示分支（无接管按钮）。
+- 测试：`test_maintenance_field_protection_release_cycle.py`（循环解除/重快照/审计）、`test_maintenance_field_protection_workbook_drift.py`（Q3 场景 1–7 及对照）新建；`source_refresh`/`api`/`workbook`/`editable`/`row_merge` 按新契约修正。
 
 ## 验证与交付记录
 
