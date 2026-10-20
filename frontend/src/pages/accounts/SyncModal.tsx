@@ -1,6 +1,6 @@
 /** 模板同步预览确认：dry-run 逐账号 diff → 指纹执行。全成或全败。 */
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, Modal, Space, Table, Tag, message } from "antd";
+import { App, Alert, Button, Checkbox, Modal, Space, Table, Tag } from "antd";
 import type { BulkPreview, BulkPreviewItem, TemplateInfo } from "../../api/accounts";
 import { explainApiError, syncTemplate } from "../../api/accounts";
 
@@ -9,6 +9,7 @@ export default function SyncModal({ template, onClose, onDone }: {
   onClose: () => void;
   onDone: () => void;
 }) {
+  const { message } = App.useApp();
   const [preview, setPreview] = useState<BulkPreview | null>(null);
   const [clearOverrides, setClearOverrides] = useState(false);
   const [error, setError] = useState<string | null>(null);

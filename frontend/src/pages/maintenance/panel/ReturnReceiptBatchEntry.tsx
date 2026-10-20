@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { createReturnReceipt } from "../../../api/maintenanceOperations";
 import { raw, readError } from "./panelUtils";
@@ -183,6 +183,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
   projectId: string;
   onDone: () => Promise<void>;
 }) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [phase, setPhase] = useState<"input" | "preview" | "results">("input");

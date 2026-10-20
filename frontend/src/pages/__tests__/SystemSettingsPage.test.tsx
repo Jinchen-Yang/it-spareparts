@@ -6,8 +6,7 @@ import {
   screen,
   waitFor,
   within,
-} from "@testing-library/react";
-import { message } from "antd";
+} from "../../test/antdRender";
 
 const getSystemSettings = vi.fn();
 const updateSystemSettings = vi.fn();
@@ -37,7 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 describe("管理员统一税口径展示策略", () => {

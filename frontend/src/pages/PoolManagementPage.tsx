@@ -1,9 +1,6 @@
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import {
-  Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin,
-  Table, Tag, message,
-} from "antd";
+import { App, Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
@@ -63,6 +60,7 @@ const memberLabel = (pn: string | null, desc: string | null) =>
  * HTTP 请求 = 后端一个事务——不存在"一个保存按钮伪装原子操作、前半成功后半 403"。
  * 归档池只读（显示档案与"先恢复"提示，不渲染必然 400 的可保存表单）。 */
 export default function PoolManagementPage() {
+  const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -567,7 +565,7 @@ export default function PoolManagementPage() {
     { title: "更新时间", dataIndex: "updated_at", width: 160, render: fmtTime },
     {
       // 操作全部用真实 Button（可 Tab 聚焦、Enter/Space 触发、有焦点环）——
-      // 无 href 的 <a onClick> 键盘不可达（复审非阻塞 2）
+      // 操作使用原生按钮语义，支持键盘聚焦与触发（复审非阻塞 2）
       title: "操作", key: "op", width: 120, fixed: isMobile ? undefined : "right",
       render: (_, r) => (
         <Space size={0}>

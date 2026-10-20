@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, Descriptions, Drawer, Spin, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { message } from "antd";
+import { App } from "antd";
 import { fmt, fmtMoney } from "../shared";
 import {
   fetchPurchaseAnalyticsOrderDetail,
@@ -61,6 +61,7 @@ function NominalAmountNote({ side, kind }: { side: string | null; kind: "inc" | 
 }
 
 export default function OrderDetailDrawer({ orderId, category, basis, onClose }: OrderDetailDrawerProps) {
+  const { message } = App.useApp();
   const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const seqRef = useRef(0);

@@ -4,7 +4,7 @@
  * - 「保存并同步账号」：保存后弹同步预览（逐账号 diff）确认再批量刷快照。
  * 乐观锁：PUT 携带打开时的 version，409 = 他人已改，提示刷新重做。 */
 import { useState } from "react";
-import { Alert, Button, Drawer, Form, Input, Select, Space, message } from "antd";
+import { App, Alert, Button, Drawer, Form, Input, Select, Space } from "antd";
 import type { AccountsMeta, Perms, TemplateInfo } from "../../api/accounts";
 import { createTemplate, explainApiError, updateTemplate } from "../../api/accounts";
 import PermissionMatrix from "./PermissionMatrix";
@@ -30,6 +30,7 @@ export default function TemplateDrawer({ meta, draft, onClose, onSaved, onSavedW
   /** 「保存并同步账号」：保存成功后回调（带最新模板），由父层打开同步预览 */
   onSavedWantSync: (tpl: TemplateInfo) => void;
 }) {
+  const { message } = App.useApp();
   const [form] = Form.useForm();
   const [perms, setPerms] = useState<Perms | null>(null);
   const [saving, setSaving] = useState(false);

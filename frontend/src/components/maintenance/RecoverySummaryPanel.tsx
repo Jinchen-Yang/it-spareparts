@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Card, Tag, Typography, message } from "antd";
+import { App, Alert, Card, Tag, Typography } from "antd";
 import {
   getMaintenanceProjectRecoverySummary,
   type MaintenanceRecoverySummary,
@@ -20,6 +20,7 @@ function errorText(error: unknown): string {
 }
 
 export default function RecoverySummaryPanel({ projectId }: { projectId: string }) {
+  const { message } = App.useApp();
   const [data, setData] = useState<MaintenanceRecoverySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const generation = useRef(0);
