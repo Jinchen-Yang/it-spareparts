@@ -58,7 +58,7 @@ describe("AI 助手的响应式会话入口", () => {
     expect(container.querySelector("style")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: "上次报价" }));
     expect(await screen.findByText("上次报价记录")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "上次报价" })).toHaveStyle({ color: COLORS.status.ai });
+    expect(screen.getByRole("button", { name: "上次报价" })).toHaveStyle({ color: COLORS.accentStrong });
   });
 
   it("手机会话藏在抽屉中，选择后关闭抽屉并保留可输入的对话区", async () => {

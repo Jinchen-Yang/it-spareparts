@@ -108,7 +108,7 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
       hint: "本项目挂靠需求单明细的已知备件成本（含税）" },
     { label: "报销成本", value: metrics.costs.expense, color: COLORS.warning,
       hint: "已批准报销（含税）" },
-    { label: "已领用成本", value: metrics.costs.issued, color: COLORS.accentStrong,
+    { label: "已领用成本", value: metrics.costs.issued, color: COLORS.text2,
       hint: "现场领用（已确认/已更正）的已知成本（含税）" },
     { label: "返还成本", value: metrics.costs.returned, color: COLORS.success,
       hint: "返还成本口径建设中，当前不提供猜测值" },

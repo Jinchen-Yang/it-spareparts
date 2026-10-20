@@ -34,4 +34,11 @@ describe("设计 token 的公共契约 (#408 / I18)", () => {
     }
     expect(css).not.toContain("!important");
   });
+
+  it("排名探索器局部卡片边框沿用暖边 token，避免覆盖全局卡片规则", () => {
+    const explorerCss = readFileSync(join(dirname(fileURLToPath(import.meta.url)),
+      "../src/pages/maintenance/maintenanceRankingsExplorer.css"), "utf8");
+    const cardRule = explorerCss.match(/\.maintenance-explorer \.ant-card\s*\{([^}]+)\}/)?.[1];
+    expect(cardRule).toMatch(/border-color:\s*var\(--mb-border\)/);
+  });
 });

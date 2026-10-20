@@ -19,12 +19,12 @@ from app.models.maintenance_project_operations import MaintenanceSiteIssue as I,
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment as A
 from app.models.system import SysImportBatch
 from app.services import maintenance_wbdd_source_snapshot as source_snapshot
+from app.services.maintenance_field_protection import is_manual_created
 
 SNAPSHOT_KEY = "_wbdd_source_snapshot"
 MAX_CANDIDATES = 1000
 _ORDER_NO = re.compile(r"^WBDD-(\d{8})-(\d{4})$")
 _MANUAL_ORDER_PREFIXES = ("page-manual-", "workbook-create-")
-_MANUAL_LINE_PREFIXES = ("manual-line:", "page-manual-", "workbook-create-")
 
 
 def _json(value):
@@ -63,7 +63,7 @@ def _time(value):
 
 def is_manual_line(line):
     """An edited imported line keeps its raw identity; a created line does not."""
-    return line.raw_line_id.startswith(_MANUAL_LINE_PREFIXES)
+    return is_manual_created(line.raw_line_id)
 
 
 def related_site_lines(db, *, orders, lines, include_order_references=False):
