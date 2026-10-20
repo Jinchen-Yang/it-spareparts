@@ -59,6 +59,25 @@ class ConfirmCancellationRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
+@router.get("/{batch_id}/{source_order_id}/confirmation-status")
+def confirmation_status(project_id: str, batch_id: int, source_order_id: str,
+                        response: Response,
+                        idempotency_key: str = Query(
+                            min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+                        db: Session = Depends(get_db),
+                        identity: dict = Depends(current_identity),
+                        _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+    response.headers["Cache-Control"] = "no-store"
+    operator = _real_operator(db, identity)
+    try:
+        return service.confirmation_status(
+            db, project_id=project_id, batch_id=batch_id, source_order_id=source_order_id,
+            operated_by=operator, idempotency_key=idempotency_key,
+        )
+    except service.CancellationConflict as exc:
+        raise HTTPException(409, {"code": "source_cancellation_changed", "message": str(exc)}) from exc
+
+
 @router.post("/{batch_id}/{source_order_id}/confirm")
 def confirm(project_id: str, batch_id: int, source_order_id: str,
             body: ConfirmCancellationRequest, response: Response,
