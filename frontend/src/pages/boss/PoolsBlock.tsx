@@ -31,7 +31,10 @@ const MODE_NAME: Record<MetricMode, string> = { total: "金额合计", average: 
 const metricLabel = (mode: MetricMode, basis: TaxBasis) =>
   `${MODE_NAME[mode]}(${taxBasisCaption(basis)})`;
 // 颜色辅助区分口径；文字标签始终在场，色觉障碍不丢信息。
-const MODE_COLOR: Record<MetricMode, string> = { total: tokens.color.accent, average: tokens.color.warning };
+// 取深色 token：表头底 inset 上 accentStrong 6.22、tag.warning.text 4.78，白底 6.89 / 5.29（均 ≥ 4.5）。
+const MODE_COLOR: Record<MetricMode, string> = {
+  total: tokens.color.accentStrong, average: tokens.color.tag.warning.text,
+};
 
 function metricSort(side: "purchase" | "sales", mode: MetricMode): PoolSort {
   return `${side}_${mode}` as PoolSort;
@@ -177,7 +180,7 @@ export default function PoolsBlock({
       ...sortProps("savings"),
       render: (v) => v == null
         ? (localCostRestricted ? <span style={MUTED}>无成本权限</span> : <span style={MUTED}>{EMPTY}</span>)
-        : <span style={{ color: tokens.color.warning }}>{(() => {
+        : <span style={{ color: tokens.color.tag.warning.text }}>{(() => {
             const pair = splitFixed(v, "ex");
             return (
               <TaxMoneyByBasis
