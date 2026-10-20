@@ -1,6 +1,6 @@
 import PageHeader from "../../components/PageHeader";
 import { COLORS, TAG_STYLES } from "../../theme";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -41,6 +41,8 @@ import {
 } from "../../api/maintenanceBossBoard";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
+
+const GlobalMaintenanceRowWorkbench = lazy(() => import("../../components/maintenance/GlobalMaintenanceRowWorkbench"));
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -168,6 +170,7 @@ export function MaintenanceHomePage() {
   } | null>(null);
   const [rangePreset, setRangePreset] = useState<RangePreset>("this_month");
   const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const [rowWorkbenchOpen, setRowWorkbenchOpen] = useState(false);
   const sentinel = useRef<HTMLDivElement | null>(null);
   // 并发保护：筛选一变就作废在途请求的结果，避免旧响应盖掉新筛选
   const requestSeq = useRef(0);
@@ -294,8 +297,20 @@ export function MaintenanceHomePage() {
               onApply={applySparePartLines}
               onAfterApply={() => latestLoad.current(1, true)}
             />
+            <Button aria-expanded={rowWorkbenchOpen} aria-controls="maintenance-global-row-workbench"
+              onClick={() => setRowWorkbenchOpen((opened) => !opened)}>
+              {rowWorkbenchOpen ? "收起备件行筛选" : "筛选备件行"}
+            </Button>
           </Space>
         } />
+      {rowWorkbenchOpen ? <div id="maintenance-global-row-workbench">
+        {rangePreset === "custom" && !customRange
+          ? <Alert type="info" showIcon message="请选择自定义日期区间后查询备件行。" />
+          : <Suspense fallback={<Spin tip="正在加载备件行级表"><div style={{ height: 80 }} /></Spin>}>
+            <GlobalMaintenanceRowWorkbench rangeParams={rangeParams()} />
+          </Suspense>}
+      </div> : null}
+
 
       {/* 期限常驻；折叠只改变控件可见性，不改变筛选与导出参数。 */}
       <Card size="small">
