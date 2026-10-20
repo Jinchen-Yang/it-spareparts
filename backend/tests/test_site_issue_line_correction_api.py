@@ -196,7 +196,7 @@ def test_same_target_is_audited_noop_receipt_without_revision_change(db):
     assert db.query(MaintenanceProjectOperationAudit).count() == 0
 
 
-@pytest.mark.parametrize("changes", [{"no_return": value} for value in [1, 0, "true", "false", [], {}]] + [{"quantity": "3"}, {"source": "workbook"}])
+@pytest.mark.parametrize("changes", [{"no_return": value} for value in [1, 0, "true", "false", [], {}]] + [{"manual_unit_cost": "3"}, {"source": "workbook"}])
 def test_invalid_or_out_of_scope_fields_fail_without_writes(db, changes):
     project, issue, (line, _), _ = _facts(db)
     client = _client(db)

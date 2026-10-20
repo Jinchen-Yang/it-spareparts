@@ -209,13 +209,40 @@ class SiteIssueLineCorrection(BaseModel):
 
     expected_issue_version: StrictInt = Field(ge=1)
     expected_line_version: StrictInt = Field(ge=1)
-    # Preserve explicit null and omitted no_return as distinct field intents.
+    # Preserve omission vs explicit null/empty string; service + primitive
+    # validate all field intents before assignment.
     changes: dict[str, object] = Field(json_schema_extra={
         "additionalProperties": False,
-        "properties": {"no_return": {
-            "anyOf": [{"type": "boolean"}, {"type": "null"}],
-            "description": "true 免返，false 应返，null 恢复按规则判断；省略不修改",
-        }},
+        "properties": {
+            "no_return": {
+                "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                "description": "true 免返，false 应返，null 恢复按规则判断；省略不修改",
+            },
+            "quantity": {"anyOf": [{"type": "number"}, {"type": "string"}]},
+            "serial_number": {"type": ["string", "null"]},
+            "remark": {"type": ["string", "null"]},
+            "demand_order_no": {"type": ["string", "null"], "description": "显式空串清空，省略保留"},
+            "pn": {"type": "string"},
+            "part_id": {"type": "integer"},
+        },
+    })
+    reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class SiteIssueHeaderCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_issue_version: StrictInt = Field(ge=1)
+    changes: dict[str, object] = Field(json_schema_extra={
+        "additionalProperties": False,
+        "properties": {
+            "issue_no": {"type": "string", "maxLength": 64},
+            "issue_date": {"type": "string", "format": "date"},
+            "receiver": {"type": ["string", "null"], "maxLength": 128},
+            "issued_by": {"type": ["string", "null"], "maxLength": 128},
+            "site_location": {"type": ["string", "null"], "maxLength": 256},
+        },
     })
     reason: str = Field(min_length=1, max_length=1000)
     idempotency_key: str = Field(min_length=8, max_length=128)
@@ -314,6 +341,7 @@ class SiteIssueSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
+    issue_id: str | None = Field(default=None, min_length=1, max_length=36)
     q: str | None = None
     workflow_statuses: list[str] = Field(
         default_factory=lambda: ["draft", "confirmed", "corrected", "void"],
@@ -1067,6 +1095,7 @@ def search_project_site_issues(
         payload = operations.search_site_issues(
             db,
             project_id=body.project_id,
+            issue_id=body.issue_id,
             q_text=body.q,
             workflow_statuses=body.workflow_statuses,
             page=body.page,
@@ -1862,6 +1891,38 @@ def correct_site_issue_line(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
 ) -> dict:
+    from app.services import maintenance_site_issue_line_correction as correction
+
+    return _site_issue_correction_result(
+        db=db, ident=ident, body=body, schema=SiteIssueLineCorrection,
+        command_fn=correction.correct_site_issue_line,
+        issue_id=issue_id, issue_line_id=issue_line_id,
+    )
+
+
+@stable_site_issue_router.patch(
+    "/{issue_id}/header",
+    openapi_extra={"requestBody": {
+        "required": True,
+        "content": {"application/json": {"schema": SiteIssueHeaderCorrection.model_json_schema()}},
+    }},
+)
+def correct_site_issue_header(
+    body: object = Body(None),
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+) -> dict:
+    from app.services import maintenance_site_issue_line_correction as correction
+
+    return _site_issue_correction_result(
+        db=db, ident=ident, body=body, schema=SiteIssueHeaderCorrection,
+        command_fn=correction.correct_site_issue_header, issue_id=issue_id,
+    )
+
+
+def _site_issue_correction_result(*, db, ident, body, schema, command_fn, **target) -> dict:
+    """Both stable commands use the same current-account guard and transaction."""
     from app import permissions
     from app.services import maintenance_site_issue_line_correction as correction
     from app.services.maintenance_site_issue_facts import SiteIssueEditError
@@ -1889,14 +1950,13 @@ def correct_site_issue_line(
     try:
         authorize(None)
         try:
-            command = SiteIssueLineCorrection.model_validate(body)
+            command = schema.model_validate(body)
         except ValidationError as exc:
             raise SiteIssueEditError(
                 "site_issue_edit_invalid_fields", "领用更正参数无效，请核对版本、字段意图、原因和幂等键",
             ) from exc
-        result = correction.correct_site_issue_line(
-            db, issue_id=issue_id, issue_line_id=issue_line_id,
-            **command.model_dump(), authorize=authorize,
+        result = command_fn(
+            db, **target, **command.model_dump(), authorize=authorize,
         )
         db.commit()
         return result
