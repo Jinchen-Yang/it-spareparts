@@ -72,6 +72,43 @@ def test_project_note_is_optional_and_exported_as_independent_plain_text(db):
         workbook.close()
 
 
+@pytest.mark.parametrize(("note", "expected"), [
+    (None, None),
+    ("硬盘免返\n其他备件按合同核对", "硬盘免返\n其他备件按合同核对"),
+    ("旧\x0b标注\ufffe\uffff\n联系甲方", "旧标注\n联系甲方"),
+    ("=提醒内容", "'=提醒内容"),
+])
+def test_no_return_note_is_optional_and_exports_safe_independent_text(db, note, expected):
+    project = make_project(db, code="免返标注导出", lifecycle="ongoing")
+    project.project_note = "独立项目备注"
+    project.no_return_note = note
+    db.commit()
+    client = boss_client(db, username="project-export-no-return-note")
+
+    response = client.get("/api/maintenance/boss-board/projects/export/options")
+    assert response.status_code == 200, response.text
+    options = response.json()
+    fields = {field["key"]: field for field in options["fields"]}
+    assert fields["no_return_note"] == {
+        "key": "no_return_note", "label": "免返标注", "group": "项目基础",
+        "default_selected": False,
+    }
+    assert "no_return_note" not in options["default_fields"]
+
+    response = client.post("/api/maintenance/boss-board/projects/export", json={
+        "fields": ["project_name", "project_note", "no_return_note"],
+        "lifecycle": "ongoing",
+    })
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=False)
+    try:
+        rows = list(workbook["维保项目清单"].iter_rows(max_col=3, values_only=True))
+        assert rows[0] == ("项目名称", "项目备注", "免返标注")
+        assert rows[1] == ("免返标注导出", "独立项目备注", expected)
+    finally:
+        workbook.close()
+
+
 def test_export_options_and_post_filter_profit_fields_by_server_permission(db):
     client = boss_client(
         db,
