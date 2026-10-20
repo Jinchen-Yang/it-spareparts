@@ -232,7 +232,8 @@ describe("ManualSiteIssueSection", () => {
         reloadIssues={reloadIssues}
       />,
     );
-    expect(container).toBeEmptyDOMElement();
+    // 测试渲染器外层包了 antd <App> 容器（I12），断言其内部为空。
+    expect(container.querySelector(".ant-app")).toBeEmptyDOMElement();
   });
 
   it("展示人工登记单并提供更正与作废入口", () => {
