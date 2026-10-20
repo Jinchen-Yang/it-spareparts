@@ -58,7 +58,7 @@
 
 .replenishment-part-card {
   height: 100%;
-  border-color: #e4e8ef;
+  border-color: var(--mb-border);
   border-radius: 12px;
 }
 
@@ -73,7 +73,7 @@
 
 .replenishment-part-desc {
   margin-top: 3px;
-  color: rgba(0, 0, 0, 0.58);
+  color: var(--mb-text-2);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -84,7 +84,7 @@
   padding: 9px 10px;
   margin: 9px 0 12px;
   border-radius: 8px;
-  background: #f6f8fb;
+  background: var(--mb-inset);
 }
 
 .replenishment-price-facts > div {
@@ -119,7 +119,7 @@
   width: 6px;
 }
 .replenishment-cart-lines::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--mb-scrollbar);
   border-radius: 3px;
 }
 .replenishment-cart-lines::-webkit-scrollbar-track {
@@ -128,9 +128,9 @@
 
 .replenishment-cart-line {
   padding: 12px;
-  border: 1px solid #e5e8ee;
+  border: 1px solid var(--mb-border);
   border-radius: 10px;
-  background: #fff;
+  background: var(--mb-surface);
 }
 
 .replenishment-draft-line-row {
@@ -150,12 +150,12 @@
 }
 
 .replenishment-cart-line.is-revision {
-  border: 1px solid #ffa39e;
-  background: #fff1f0;
-  box-shadow: inset 3px 0 0 #ff4d4f;
+  border: 1px solid var(--mb-tag-danger-border);
+  background: var(--mb-tag-danger-background);
+  box-shadow: inset 3px 0 0 var(--mb-danger);
 }
 
-.replenishment-cart-line.is-revision .ant-tag.ant-tag-red {
+.replenishment-cart-line.is-revision .ant-tag.replenishment-rejection-tag {
   font-weight: 600;
 }
 
@@ -180,20 +180,20 @@
 .replenishment-version-history {
   margin-top: 8px;
   padding-top: 12px;
-  border-top: 1px solid #edf0f4;
+  border-top: 1px solid var(--mb-border-soft);
 }
 
 .replenishment-history-line {
   padding: 10px;
-  border: 1px solid #edf0f4;
+  border: 1px solid var(--mb-border-soft);
   border-radius: 8px;
-  background: #fafbfc;
+  background: var(--mb-inset);
 }
 
 .is-current-application {
   padding-inline: 10px !important;
   border-radius: 8px;
-  background: #f0f5ff;
+  background: var(--mb-accent-soft);
 }
 
 .is-current-application,

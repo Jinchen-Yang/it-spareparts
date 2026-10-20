@@ -1,3 +1,4 @@
+import { formatMoney } from "../utils/format";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { App, Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table, Tag } from "antd";
@@ -34,7 +35,7 @@ const POLICY_MISSING_VALUES: PoolPolicyMissing[] = ["purchase", "sales", "either
 const fmtMoney = (v: number | null | undefined, restricted: boolean) =>
   restricted ? <span style={MUTED}>无价格权限</span>
     : v == null ? <span style={MUTED}>未设置</span>
-      : Number(v).toFixed(2);
+      : formatMoney(v, { mode: "fixed" });
 const fmtTime = formatBusinessDateTime;
 
 /** 本地权限快照（登录时整份写入 localStorage；写坏时回退空对象，与 App.tsx 同口径）。 */
@@ -627,9 +628,9 @@ export default function PoolManagementPage() {
         ) : (
           <div style={{ lineHeight: 1.9 }}>
             <div>采购上限（未税）：{policy?.purchase_ceiling_ex_tax != null
-              ? Number(policy.purchase_ceiling_ex_tax).toFixed(2) : "未设置"}</div>
+              ? formatMoney(policy.purchase_ceiling_ex_tax, { mode: "fixed" }) : "未设置"}</div>
             <div>销售下限（未税）：{policy?.sales_floor_ex_tax != null
-              ? Number(policy.sales_floor_ex_tax).toFixed(2) : "未设置"}</div>
+              ? formatMoney(policy.sales_floor_ex_tax, { mode: "fixed" }) : "未设置"}</div>
           </div>
         )}
       </div>
@@ -744,9 +745,9 @@ export default function PoolManagementPage() {
       ) : (
         <>
           <div>采购上限（未税）：{policy?.purchase_ceiling_ex_tax != null
-            ? Number(policy.purchase_ceiling_ex_tax).toFixed(2) : "未设置"}</div>
+            ? formatMoney(policy.purchase_ceiling_ex_tax, { mode: "fixed" }) : "未设置"}</div>
           <div>销售下限（未税）：{policy?.sales_floor_ex_tax != null
-            ? Number(policy.sales_floor_ex_tax).toFixed(2) : "未设置"}</div>
+            ? formatMoney(policy.sales_floor_ex_tax, { mode: "fixed" }) : "未设置"}</div>
         </>
       )}
     </div>
@@ -770,9 +771,9 @@ export default function PoolManagementPage() {
       {policy && !priceRestricted && (
         <div style={{ marginTop: 8, fontSize: 12.5, ...MUTED }}>
           当前约束（原始录入）：采购上限 {policy.purchase_input_value != null
-            ? `${Number(policy.purchase_input_value).toFixed(2)}（${basisLabel(policy.purchase_input_basis)}）`
+            ? `${formatMoney(policy.purchase_input_value, { mode: "fixed" })}（${basisLabel(policy.purchase_input_basis)}）`
             : "未设置"} · 销售下限 {policy.sales_input_value != null
-            ? `${Number(policy.sales_input_value).toFixed(2)}（${basisLabel(policy.sales_input_basis)}）`
+            ? `${formatMoney(policy.sales_input_value, { mode: "fixed" })}（${basisLabel(policy.sales_input_basis)}）`
             : "未设置"}
           <div>约束设置人：{policy.changed_by || "—"} · {fmtTime(policy.valid_from)}</div>
         </div>

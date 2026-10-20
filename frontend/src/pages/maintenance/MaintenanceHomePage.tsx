@@ -1,3 +1,4 @@
+import { COLORS, TAG_STYLES } from "../../theme";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -93,7 +94,7 @@ function readSortParam(spec: string | null, canViewCost: boolean): ProjectSort {
  * 顶部筛选（进行中默认 / 已结束、正常/提醒/报警、模糊搜索）＋ 一行 5 卡下滑无限加载
  * ＋ 全局下载全项目备件行级表（改价补价上传覆盖＝真实源）。
  *
- * 布局（#267）：页头行＝标题副标（左）＋全局操作（右：需求单与同步入口 /
+ * 布局（issue 267）：页头行＝标题副标（左）＋全局操作（右：需求单与同步入口 /
  * 日期区间 / 全项目备件行级表）；筛选行独立一行，只放筛项目的四个控件。
  * 全局操作从筛选行解放出来，轻重分开。
  *
@@ -322,7 +323,7 @@ export function MaintenanceHomePage() {
           />
           </Col>
           <Col>
-            <Badge count={activeFilterCount} size="small" color="#1677ff" data-testid="active-filter-count">
+            <Badge count={activeFilterCount} size="small" color={COLORS.accent} data-testid="active-filter-count">
               <Button
                 icon={<FilterOutlined />}
                 aria-label="筛选"
@@ -411,7 +412,6 @@ export function MaintenanceHomePage() {
             {activeBusinessTypes.map((code) => (
               <Tag
                 key={code}
-                color="blue"
                 closable
                 closeIcon={<button type="button" aria-label={`移除业务类型：${BOARD_BUSINESS_TYPE_LABELS[code]}`}
                   style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
@@ -419,16 +419,16 @@ export function MaintenanceHomePage() {
                   business_type: boardBusinessTypeParam(
                     businessTypes.filter((value) => value !== code)),
                 })}
-                style={{ borderRadius: 16 }}
+                style={{ ...TAG_STYLES.info, borderRadius: 16 }}
               >业务类型：{BOARD_BUSINESS_TYPE_LABELS[code]}</Tag>
             ))}
-            {status ? <Tag color="blue" closable
+            {status ? <Tag closable
               closeIcon={<button type="button" aria-label="移除状态筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
-              onClose={() => patchParams({ status: null })} style={{ borderRadius: 16 }}>状态：{STATUS_LABELS[status]}</Tag> : null}
-            {keyword.trim() ? <Tag color="blue" closable
+              onClose={() => patchParams({ status: null })} style={{ ...TAG_STYLES.info, borderRadius: 16 }}>状态：{STATUS_LABELS[status]}</Tag> : null}
+            {keyword.trim() ? <Tag closable
               closeIcon={<button type="button" aria-label="移除关键词筛选" style={{ border: 0, background: "none", color: "inherit", padding: 0 }}>×</button>}
               onClose={() => patchParams({ q: null })}
-              style={{ borderRadius: 16, maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }}
+              style={{ ...TAG_STYLES.info, borderRadius: 16, maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }}
             >关键词：{keyword.trim()}</Tag> : null}
           </Space>
         ) : null}

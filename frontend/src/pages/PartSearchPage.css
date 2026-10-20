@@ -45,8 +45,8 @@
 .part-summary-metric { min-width: 0; overflow-wrap: anywhere; }
 .part-summary-metric > span { display: block; color: var(--mb-text-2); font-size: 13px; }
 .part-summary-metric > strong { display: block; margin-block: 4px; font-size: 20px; color: var(--mb-accent-strong); }
-/* danger 在 accent-soft 底上 4.08:1；取标签危险文字色（index.css .ant-tag-error 同值，5.25:1）。 */
-.part-summary-metric > strong.is-negative { color: #A24A40; }
+/* danger 在 accent-soft 底上 4.08:1；改用标签危险文字 token（5.25:1）。 */
+.part-summary-metric > strong.is-negative { color: var(--mb-tag-danger-text); }
 .part-summary-metric small { display: block; color: var(--mb-text-2); font-size: 12px; }
 .part-summary-metric .ant-tag { white-space: normal; margin-inline-end: 0; }
 .part-summary-metric details { margin-top: 6px; font-size: 12px; }
