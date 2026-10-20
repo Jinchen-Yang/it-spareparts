@@ -410,6 +410,22 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
       expect.objectContaining({ sort: "purchase_average" })));
   });
 
+  it("采购/销售指标列宽固定 200，表格横滚宽度 1180（换行后的口径按钮不挤压金额）", async () => {
+    renderAt("/boss");
+    const toggle = await screen.findByRole("button",
+      { name: "采购指标：当前显示金额合计(不含税)，点击切换为平均单价" });
+    const table = toggle.closest("table")!;
+    const headers = [...toggle.closest("tr")!.children];
+    const cols = [...table.querySelectorAll("colgroup col")] as HTMLElement[];
+    const widthOf = (name: RegExp) => {
+      const th = within(table).getByRole("button", { name }).closest("th")!;
+      return cols[headers.indexOf(th)]?.style.width;
+    };
+    expect(widthOf(/^采购指标：/)).toBe("200px");
+    expect(widthOf(/^销售指标：/)).toBe("200px");
+    expect(table.style.width).toBe("1180px");
+  });
+
   it("越线计数 null 双语义：无约束显示「未设约束」，非 0 数字红标", async () => {
     renderAt("/boss");
     const table = (await screen.findAllByRole("table")).find((t) => within(t).queryByText("内存池"))!;
