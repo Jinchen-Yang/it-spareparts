@@ -33,6 +33,29 @@ describe("WorkbookRoundTrip", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("下载失败时在当前会话显示错误", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const onDownload = vi.fn().mockRejectedValue(new Error("network"));
+    render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+    expect(await screen.findByText("下载失败")).toBeInTheDocument();
+  });
+
+  it("下载请求返回前切换账号，失败不再显示到新会话", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    let reject!: (error: unknown) => void;
+    const onDownload = vi.fn(() => new Promise<Blob>((_, rej) => { reject = rej; }));
+    const props = { title: "总表", filename: "a.xlsx", canUpload: false, onDownload, onApply: vi.fn() };
+    const { rerender } = render(<WorkbookRoundTrip {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+    await waitFor(() => expect(onDownload).toHaveBeenCalledTimes(1));
+    localStorage.setItem("token", "synthetic-session-b");
+    rerender(<WorkbookRoundTrip {...props} />);
+    await act(async () => { reject(new Error("network")); });
+    expect(screen.queryByText("下载失败")).toBeNull();
+    expect(saveBlob).not.toHaveBeenCalled();
+  });
+
   it("hides the upload button without the upload permission", () => {
     render(
       <WorkbookRoundTrip

@@ -155,14 +155,20 @@ export function WorkbookRoundTrip({
   }, []);
 
   const handleDownload = async () => {
+    // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
+    const requestSession = localStorage.getItem("token");
+    const isCurrent = () => mounted.current && localStorage.getItem("token") === requestSession;
     setDownloading(true);
     setFeedback(null);
     try {
-      saveBlob(await onDownload(), filename);
+      const blob = await onDownload();
+      if (!isCurrent()) return;
+      saveBlob(blob, filename);
     } catch (error) {
+      if (!isCurrent()) return;
       setFeedback({ type: "error", text: readError(error, "下载失败") });
     } finally {
-      setDownloading(false);
+      if (mounted.current) setDownloading(false);
     }
   };
 
