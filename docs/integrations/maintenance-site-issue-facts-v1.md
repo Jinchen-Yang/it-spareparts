@@ -1,10 +1,10 @@
 # 领用事实编辑原语契约 v1
 
-- 版本：`v1.0`。
-- 日期：2026-10-16。
-- 状态：#379 已实现公共原语并接入既有 V1／V2 工作簿、page_manual 完整命令；本候选加固审计数量、需求单归属、稳定错误码及相关契约测试。默认局部补丁协议尚无 HTTP 调用方，后续 P1 接入仍须履行本文的调用者职责。
+- 版本：`v1.1`（新增 HTTP 调用方，原语接口不变）。
+- 日期：2026-10-20。
+- 状态：#379 已实现公共原语并接入既有 V1／V2 工作簿、page_manual 完整命令；默认局部补丁协议现由 ITSP-2 的单行网页更正命令接入，履行本文的权限、CAS、幂等及事务职责。开发验证与用户验收状态见候选交接。
 - 决策：D-31、D-32；提取工作簿共用写链遵循既有 D-01、D-02、D-26、D-28；V2 首次完整回执遵循 [D-38](../decisions/0016-工作簿首次应用回执.md)。
-- 唯一提供方：P2／S-B，`backend/app/services/maintenance_site_issue_facts.py`。现有消费方：V1／V2 的 06 工作簿 Adapter、page_manual 完整命令；默认协议的后续消费方：P1／S-A 网页更正命令。
+- 唯一提供方：P2／S-B，`backend/app/services/maintenance_site_issue_facts.py`。现有消费方：V1／V2 的 06 工作簿 Adapter、page_manual 完整命令；默认协议消费方：P1／S-A 单行网页更正命令。
 
 ## 来源与范围
 
@@ -52,7 +52,7 @@ def apply_locked_site_issue_edits(
 
 单头可编辑字段限现有 `issue_no/issue_date/site_location` 等已获入口批准字段。行 PATCH 必须令 `header_changes=None`，改单头走独立 issue CAS 命令；地址“未提供／设置／显式清空”意图沿用现有 D-26，包括其 2026-10-13 修订，不能把缺字段解释为清空。人工改 issue_no 仍走既有改号唯一性校验；`issue_id/issue_line_id/project_id/source/import_batch_id/display_no` 不可由此修改，展示号分配后不变。
 
-page_manual 保持既有完整预览冻结协议；workbook／legacy 由 P1 的稳定受控 Adapter 接入，不能假设旧 page_manual 专属 PATCH 已覆盖它们。`site_issue_v2` 仍保留发货来源、冻结义务及生产失败关闭守卫；抽取共用原语不授权打开 Beta、重启原生确认或伪造 delivery_line_id。
+page_manual 保持既有完整预览冻结协议；workbook／legacy 由 P1 的稳定受控 Adapter 接入，不能假设旧 page_manual 专属 PATCH 已覆盖它们。默认局部协议只允许 `page_manual/workbook/legacy` 且 confirmed/corrected 的有效行；`site_issue_v2` 和带 `delivery_line_id` 的行继续拒绝。原生发货来源、冻结义务及生产失败关闭守卫不变；抽取共用原语不授权打开 Beta、重启原生确认或伪造 delivery_line_id。
 
 ## 调用者与原语职责
 
@@ -142,9 +142,9 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 }
 ```
 
-工作簿 detail 另外保留 `issues: []`。其他既有校验、冲突及权限异常仍沿用原入口的状态码和响应，不在本次统一改形；旧完整命令可能在进入原语前已由原校验拒绝输入。默认局部协议尚无 HTTP 入口，本候选不新增路由；后续 Adapter 应使用同一错误属性和响应结构。
+工作簿 detail 另外保留 `issues: []`。其他既有校验、冲突及权限异常仍沿用原入口的状态码和响应，不在本次统一改形；旧完整命令可能在进入原语前已由原校验拒绝输入。新增单行 HTTP Adapter 使用相同的结构化错误形状，见下节。
 
-以下四码保留为后续外层命令的拟定职责，当前原语不检测调用者是否实际持锁、不执行 CAS 或幂等回执，也不把任意数据库异常转换成这些码：
+以下错误属于外层命令职责；单行网页命令已实现 version/idempotency conflict，lock_context/audit_unavailable 仍为保留码。原语不检测调用者是否实际持锁、不执行 CAS 或幂等回执，也不把任意数据库异常转换成这些码：
 
 | code | 建议 HTTP | 外层职责／恢复 |
 |---|---|---|
@@ -154,6 +154,60 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 | `site_issue_edit_idempotency_conflict` | 409 | 外层同键不同载荷/基线；不能换键盲重试 |
 
 原语本身不承诺幂等重放；外层先检查既有回执，不重复调用原语，所有业务审计和事件条数保持不变。手工整单命令持久化完整响应，同键重放返回原回执（仅重放标志变化）；V2 完整回执及历史兼容限制见下节。网络结果未知时沿同一请求/键核对或回读，不能擅自判定首次未写；成功但刷新失败应保留成功结果，不再次更正。
+
+## 网页单行更正调用方（ITSP-2）
+
+稳定路由：`PATCH /api/maintenance/site-issues/{issue_id}/lines/{issue_line_id}`，HTTP Adapter 位于 `api/maintenance_project_operations.py`，事务编排位于 `services/maintenance_site_issue_line_correction.py`。请求不接收操作人，实名来自当前登录账号。
+
+```json
+{
+  "expected_issue_version": 7,
+  "expected_line_version": 3,
+  "changes": {"no_return": null},
+  "reason": "按合同核对后恢复规则判断",
+  "idempotency_key": "site-return-example-command-001"
+}
+```
+
+本轮采用窄字段白名单，只允许 `no_return` 为严格布尔或 null；`changes={}` 表示不修改，未提供 `changes` 为非法请求。未知字段、改单头、整个 lines 数组均拒绝。`False/True/None` 分别为应返／免返／按规则判断，与 UI “是否应返还”的是／否方向相反。数量、PN、SN、备注及需求单等后续扩展须补相应 HTTP 契约测试，继续调用同一原语；本轮不提前开放 ITSP-8 编辑能力。
+
+权限复用既有 `page_maintenance`、`action_maintenance_site_issue_manage`、`data_purchase_cost` 及项目范围，不新增角色。首次与锁后均检查当前实名账号和权限，幂等回放也不绕过当前授权。只使用默认局部协议，HTTP 不能选择 `legacy_context`。
+
+命令使用全表唯一 `maintenance_site_issue_command.idempotency_key`、`action=correct`；指纹包含入口名 `site_issue_line_correction_v1`、project/issue/line、两个 expected versions、完整 changes、原因及实名操作者，区分省略和 null。首次执行先拿幂等事务锁，再 state→project→issue→目标行，锁后新鲜重读和授权，须同时通过单头与明细版本 CAS。已有同指纹回执在 issue 锁及新鲜授权之后、目标行锁/CAS 之前返回，因此成功后合法合单迁移明细也不丢失原回执。
+
+成功响应示例：
+
+```json
+{
+  "issue_id": "example-issue",
+  "issue_line_id": "example-line-a",
+  "issue_version": 8,
+  "line_version": 4,
+  "no_return": null,
+  "changed": true,
+  "idempotent_replay": false,
+  "workbook_revision": 12
+}
+```
+
+只投影身份、版本、三态、变化/回放标记及 revision，不下发原语完整 before/after。实际变化经原语记录每行返还要求审计和事实审计，并产生相应 correction outbox；外层沿根事务按项目去重 helper bump 一次 revision，再保存原响应并提交。无变化不推进版本/revision、不增加业务审计，但保存首次命令回执。重放只将 `idempotent_replay` 改为 true，其余返回首次保存值。
+
+版本冲突为 HTTP 409：
+
+```json
+{
+  "detail": {
+    "code": "site_issue_edit_version_conflict",
+    "message": "领用单或明细版本已变化，请刷新核对后重试",
+    "current_issue_version": 8,
+    "current_line_version": 4
+  }
+}
+```
+
+同键不同意图/原因/基线/入口为 `site_issue_edit_idempotency_conflict`（409）；数据库完整性冲突为 `site_issue_edit_write_conflict`（409），回滚后提示刷新核对；项目范围或动作权限失败为 403，字段输入非法为 422；原语来源/有效性/归属错误沿上表，不转成成功或复活行。任意失败回滚，审计/回执失败不得遗留事实或 revision。
+
+页面批量是一组独立单行命令。同单下一行只能接续上次成功回执中的 `issue_version`，目标行仍使用读取时的 `line_version`；409 不能自动取错误详情中的版本覆盖重试。原始 no_return 已等于目标的行在 UI 报告“未变化”且不发请求；不能将规则派生的相同显示当作相同三态。结果未知只用原请求/原键核对，成功行不重发，结束刷新读模型。工作簿继续原有签名/三路合并冲突规则，revision 推进不意味着所有旧文件一律拒绝。
 
 ### V2 工作簿首次完整回执
 
@@ -177,7 +231,7 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 | 提供方／消费者 | 兼容要求 |
 |---|---|
 | #379／既有 06 与人工完整命令 | 已接入同一公共原语，通过 `LegacySiteIssueEditContext` 保留旧入口的版本、批量重价、审计及完整单语义 |
-| 本候选／默认局部补丁协议 | 补齐审计数量、需求单归属及稳定错误契约；尚无 HTTP 消费方，不新增路由或放开 Beta |
+| ITSP-2／默认局部补丁协议 | 单行网页命令只开放 no_return 三态，保留原语审计、来源和稳定错误契约；不放开 Beta |
 | P2 提取／既有 06 | 保留往返/冲突/作废/审计/版本/revision 契约；未选行、七字段基线和旧文件身份保持 |
 | P2 v1／P1 新网页命令 | 同一事实原语，局部补丁；P1 负责权限、CAS、幂等、锁和提交 |
 | P2 v1／旧 page_manual 完整命令 | 保留预览冻结、完整单语义和旧版本兼容，不以局部补丁替代整单协议 |
@@ -199,4 +253,4 @@ PN 变更使旧成本证据失效，quantity 变化按现有规则重新计算�
 | 错误和锁；默认协议、旧入口与历史 P3 事件夹具 | 覆盖六个原语错误码及 HTTP 映射，记录执行 SQL | 返回 code/message；失败零写；常规原语路径无 FOR UPDATE，历史下游锁按原协议保留 |
 | V2 原回执；真实 validate/apply 与 HTTP 夹具 | 首次包含单头／多行／接管或作废提示，再原文件重上传；撤销权限或注入快照保存失败 | 成功重放除 replayed 外完整相等且业务审计不增；当前无权拒绝；快照失败业务整体回滚；历史缺快照保留原兼容分支 |
 
-上述同时列出实现契约与后续用户点按场景。候选实际测试结果见 `R/logs/S-B-379fu.report.md`（R 为本次调研目录），自动化验证不代表用户点按、main 审批或部署已完成。
+上述同时列出原语契约与后续用户点按场景；quantity/remark/单头编辑属于原语已有能力，不是 ITSP-2 的 HTTP/UI 范围，本轮网页只开放 no_return。`R/logs/S-B-379fu.report.md` 仅记录旧 #379 原语候选的测试，不能代替 ITSP-2 当前验证；本轮证据见 [候选验收与回退](../releases/2026-10-20-itsp2-batch-no-return.md)。自动化验证不代表用户点按、main 审批或部署已完成。

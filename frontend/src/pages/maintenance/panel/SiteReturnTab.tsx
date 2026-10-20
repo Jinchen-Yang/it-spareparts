@@ -22,6 +22,7 @@ import MaintenanceCategoryFilter from "../../../components/maintenance/Maintenan
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
+import SiteIssueReturnBatch from "./SiteIssueReturnBatch";
 import { readPermissionMap } from "../../../nav";
 import {
   ISSUE_STATUS,
@@ -102,6 +103,7 @@ export function SiteReturnTab({
   const [linesPage, setLinesPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedLineIds, setSelectedLineIds] = useState<React.Key[]>([]);
   const requestSeq = useRef(0);
   const [categoryFilter, setCategoryFilter] = useState<MaintenanceCategoryFilterInput>({});
   const categoryFilterRef = useRef<MaintenanceCategoryFilterInput>({});
@@ -116,6 +118,7 @@ export function SiteReturnTab({
         project_id: projectId, page, page_size: 100, ...appliedFilter,
       }), () => seq === requestSeq.current);
       if (seq !== requestSeq.current) return false;
+      setSelectedLineIds([]);
       setRows(issues.flatMap((issue): SiteReturnRow[] => {
         if (issue.workflow_status === "void" && !issue.lines.length) {
           // 整单作废后没有活行：给一行摘要（单号/日期/作废时间），不参与任何合计
@@ -149,6 +152,7 @@ export function SiteReturnTab({
     categoryFilterRef.current = {};
     setCategoryFilter({});
     setLinesPage(1);
+    setSelectedLineIds([]);
     registerRefresh("site", load);
     void load();
     return () => {
@@ -163,6 +167,18 @@ export function SiteReturnTab({
   const canManageIssues = !!perms.action_maintenance_site_issue_manage
     && !!perms.data_purchase_cost;
   const canVoidIssues = canManageIssues;
+  const canCorrectLine = (row: SiteReturnRow) => !!row.line
+    && row.issue.project_id === projectId
+    && ["legacy", "workbook", "page_manual"].includes(row.issue.source ?? "")
+    && ["confirmed", "corrected"].includes(row.issue.workflow_status)
+    && !row.line.delivery_line_id;
+  const selectedLines = rows.filter((row) => selectedLineIds.includes(row.issueLineId) && canCorrectLine(row))
+    .map((row) => ({
+      issueId: row.issue.issue_id, issueNo: row.issue.display_no || row.issue.issue_no,
+      issueVersion: row.issue.version, lineId: row.line!.issue_line_id,
+      lineNo: row.line!.line_no, lineVersion: row.line!.version,
+      pn: row.line!.pn, noReturn: row.line!.no_return,
+    }));
   const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
@@ -259,6 +275,7 @@ export function SiteReturnTab({
             hint="Excel 批量维护：下载后回填领用事实、领用地址和是否应返还，再在此上传；地址留空保留原值，清空请在地址操作列填写“清空”"
           />
           <MaintenanceCategoryFilter labelPrefix="领用" value={categoryFilter} onChange={(next) => {
+            setSelectedLineIds([]);
             categoryFilterRef.current = next;
             setCategoryFilter(next);
             setLinesPage(1);
@@ -267,12 +284,23 @@ export function SiteReturnTab({
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             按当前主数据库品类筛选领用明细；作废操作仍影响整张领用单。
           </Typography.Text>
+          {canManageIssues ? <SiteIssueReturnBatch key={`return-requirement-${projectId}`}
+            selection={selectedLines} disabled={loading || !!loadError}
+            onChanged={async () => { setSelectedLineIds([]); return onChanged(); }} /> : null}
           {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
           <Table<SiteReturnRow>
         rowKey="issueLineId"
         size="small"
         loading={loading}
         dataSource={rows}
+        rowSelection={canManageIssues ? {
+          selectedRowKeys: selectedLineIds,
+          onChange: setSelectedLineIds,
+          getCheckboxProps: (row) => ({
+            disabled: loading || !canCorrectLine(row),
+            title: canCorrectLine(row) ? "选择领用行" : "此来源或状态不支持页面更正返还要求",
+          }),
+        } : undefined}
         scroll={{ x: 1320 }}
         expandable={{
           rowExpandable: (row) => !!row.line,
