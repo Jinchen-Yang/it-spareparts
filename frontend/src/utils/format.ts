@@ -3,8 +3,49 @@
 
 export const EMPTY = "-";
 
-export const money = (v: number | null | undefined): string =>
-  v == null ? EMPTY : `¥${v.toLocaleString()}`;
+/** 展示格式，不做税额计算。三种模式保留旧页面各自的舍入/原始字符串契约。 */
+export interface MoneyFormatOptions {
+  mode?: "locale" | "fixed" | "raw";
+  prefix?: string;
+  suffix?: string;
+  empty?: string;
+  emptyStringAsEmpty?: boolean;
+  locale?: string; // "default" 沿用浏览器默认语言（旧 money）。
+  minimumFractionDigits?: number;
+  maximumFractionDigits?: number;
+  useGrouping?: boolean;
+  signPosition?: "after-prefix" | "before-prefix";
+  invalid?: "format" | "preserve";
+}
+
+export function formatMoney(
+  value: string | number | null | undefined,
+  options: MoneyFormatOptions = {},
+): string {
+  const { mode = "locale", prefix = "", suffix = "", empty = "—" } = options;
+  if (value == null || (options.emptyStringAsEmpty && value === "")) return empty;
+  if (mode === "raw") return `${prefix}${value}${suffix}`;
+  const number = Number(value);
+  if (Number.isNaN(number) && options.invalid === "preserve") return String(value);
+  const beforePrefix = options.signPosition === "before-prefix";
+  const magnitude = beforePrefix ? Math.abs(number) : number;
+  const digits = options.maximumFractionDigits ?? 2;
+  const formatted = mode === "fixed"
+    ? magnitude.toFixed(digits)
+    : magnitude.toLocaleString(options.locale === "default" ? undefined : options.locale ?? "zh-CN", {
+      minimumFractionDigits: options.minimumFractionDigits ?? Math.min(2, digits),
+      maximumFractionDigits: digits,
+      useGrouping: options.useGrouping,
+    });
+  return `${beforePrefix && number < 0 ? "-" : ""}${prefix}${formatted}${suffix}`;
+}
+
+// 旧 money 直接调用 value.toLocaleString；Decimal 字符串原样保留，不能强制 Number 化。
+export const money = (v: string | number | null | undefined): string =>
+  formatMoney(v, {
+    mode: typeof v === "string" ? "raw" : "locale",
+    prefix: "¥", empty: EMPTY, locale: "default", minimumFractionDigits: 0, maximumFractionDigits: 3,
+  });
 
 export const pct = (v: number | null | undefined, digits = 1): string =>
   v == null ? EMPTY : `${(v * 100).toFixed(digits)}%`;
@@ -19,11 +60,11 @@ export const qty = (v: number | null | undefined): string =>
 
 /** 精确金额（tooltip/明细用）：千分位、最多 2 位小数。负数沿用全站 "¥-1,234.5" 形态。 */
 export const moneyExact = (v: number | null | undefined): string =>
-  v == null ? EMPTY : `¥${Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
+  formatMoney(v, { prefix: "¥", empty: EMPTY, minimumFractionDigits: 0 });
 
 /** 含税金额：固定保留 2 位小数（金额口径统一标注「含税」时用，如前置库估值/变卖收入）。 */
 export const moneyIncTax = (v: number | null | undefined): string =>
-  v == null ? EMPTY : `¥${Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  formatMoney(v, { prefix: "¥", empty: EMPTY });
 
 /** 轴刻度金额：压缩成 万/亿，去尾零（轴上寸土寸金，精确值交给 tooltip）。 */
 export const moneyAxis = (v: number | null | undefined): string => {

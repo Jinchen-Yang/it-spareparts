@@ -50,6 +50,7 @@ from app.services import (
     maintenance_project_operations,
 )
 from app.services.maintenance_match_keys import exact_match_key
+from app.services.maintenance_row_filter_registry import RowFilter, apply_row_filters
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 
 _log = logging.getLogger("maintenance_cost")
@@ -1399,6 +1400,7 @@ def _project_lines_query(
     date_from: date | None = None,
     date_to: date | None = None,
     user_ctx: security.UserContext | None = None,
+    row_filters: tuple[RowFilter, ...] = (),
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = (
@@ -1424,7 +1426,12 @@ def _project_lines_query(
     base = _scoped_filters(base, date_from, date_to)
     if month:
         base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
-    return base
+    return apply_row_filters(
+        base,
+        row_filters,
+        can_filter_amounts=not security.is_field_hidden(user_ctx, "cost_total"),
+        projection="legacy",
+    )
 
 
 def project_line_count(
@@ -1434,6 +1441,7 @@ def project_line_count(
     date_from: date | None = None,
     date_to: date | None = None,
     user_ctx: security.UserContext | None = None,
+    row_filters: tuple[RowFilter, ...] = (),
 ) -> int:
     """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
     base = _project_lines_query(
@@ -1442,6 +1450,7 @@ def project_line_count(
         date_from,
         date_to,
         user_ctx=user_ctx,
+        row_filters=row_filters,
     )
     return db.scalar(select(func.count()).select_from(base.subquery())) or 0
 
@@ -1581,6 +1590,7 @@ def iter_project_lines(
     date_to: date | None = None,
     user_ctx: security.UserContext | None = None,
     yield_per: int = 1000,
+    row_filters: tuple[RowFilter, ...] = (),
 ):
     """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
     from app.services.maintenance_export_ordering import wbdd_export_order_by
@@ -1590,6 +1600,7 @@ def iter_project_lines(
         date_from,
         date_to,
         user_ctx=user_ctx,
+        row_filters=row_filters,
     ).order_by(*wbdd_export_order_by()).execution_options(
         stream_results=True, yield_per=yield_per,
     )
@@ -1612,7 +1623,8 @@ def iter_project_lines(
 def project_lines(db: Session, project: str, month: str | None = None,
                   date_from: date | None = None, date_to: date | None = None,
                   page: int = 1, page_size: int = 50,
-                  user_ctx: security.UserContext | None = None) -> dict:
+                  user_ctx: security.UserContext | None = None,
+                  row_filters: tuple[RowFilter, ...] = ()) -> dict:
     """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = _project_lines_query(
@@ -1621,6 +1633,7 @@ def project_lines(db: Session, project: str, month: str | None = None,
         date_from,
         date_to,
         user_ctx=user_ctx,
+        row_filters=row_filters,
     )
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)

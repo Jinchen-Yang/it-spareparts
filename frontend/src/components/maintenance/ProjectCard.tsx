@@ -1,3 +1,4 @@
+import { COLORS, TAG_STYLES } from "../../theme";
 import { Link } from "react-router-dom";
 import { Button, Card, Progress, Space, Tag, Typography } from "antd";
 import type {
@@ -7,15 +8,15 @@ import type {
   Stat,
 } from "../../api/maintenanceBossBoard";
 import { UNASSIGNED_BUCKET } from "../../api/maintenanceBossBoard";
-import { qty } from "../../utils/format";
+import { formatMoney, qty } from "../../utils/format";
 
 const { Text, Title } = Typography;
 
 /** 三态语义（#35/#43）：正常=绿、提醒=黄（成本≥80% 合同额）、报警=红（>100%）。 */
 const STATUS_META: Record<CardStatus, { color: string; label: string }> = {
-  normal: { color: "#52c41a", label: "正常" },
-  warning: { color: "#faad14", label: "提醒" },
-  alert: { color: "#ff4d4f", label: "报警" },
+  normal: { color: COLORS.success, label: "正常" },
+  warning: { color: COLORS.warning, label: "提醒" },
+  alert: { color: COLORS.danger, label: "报警" },
 };
 
 /**
@@ -38,8 +39,10 @@ function statText(stat: Stat<string | number> | undefined, unit = ""): string {
   }
 }
 
-function money(stat: Stat<string | number> | undefined): string {
-  return statText(stat, " 元");
+// 状态文案仍由本组件解释；可见金额的字符串格式交给公共工具。
+function statMoney(stat: Stat<string | number> | undefined): string {
+  if (!stat || !["ready", "partial", "stale"].includes(stat.state)) return statText(stat);
+  return formatMoney(stat.value, { mode: "raw", suffix: " 元", emptyStringAsEmpty: true });
 }
 
 /** 金额 Stat → 数字（ready/partial/state 且有值时）；其余状态返回 null。 */
@@ -89,7 +92,7 @@ const costAmount = (stat: KnownCostStat | undefined) =>
         && Number(value.coverage_pct ?? 0) === 0)) {
       return "暂无可计算成本";
     }
-    return `${value.known_amount} 元${value.quality === "incomplete" ? "（已知下限）" : ""}`;
+    return formatMoney(value.known_amount, { mode: "raw", suffix: ` 元${value.quality === "incomplete" ? "（已知下限）" : ""}` });
   });
 
 const missingLines = (stat: KnownCostStat | undefined) =>
@@ -117,7 +120,7 @@ function CollectionBar({
     : null;
   if (collectedNum === null) {
     return (
-      <div style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
+      <div style={{ color: COLORS.text3, fontSize: 11.5 }}>
         回款：{statText(collected)}
       </div>
     );
@@ -130,30 +133,30 @@ function CollectionBar({
     const knownSubtotal = statNumber(contract);
     contractDetail = knownSubtotal === null
       ? "合同事实不完整（暂无已知小计）"
-      : `已知小计 ¥${knownSubtotal.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（合同事实不完整）`;
+      : `已知小计 ${formatMoney(knownSubtotal, { prefix: "¥", maximumFractionDigits: 0 })}（合同事实不完整）`;
   } else if (contract?.state === "stale") {
     contractDetail = "合同额数据已过期";
   } else if (contractNum !== null) {
     contractDetail = contractNum > 0
-      ? `¥${contractNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}（${pct}%）`
+      ? `${formatMoney(contractNum, { prefix: "¥", maximumFractionDigits: 0 })}（${pct}%）`
       : "合同额 ¥0（真实零，无法计算比例）";
   } else {
     contractDetail = `合同额${statText(contract)}`;
   }
   return (
     <div style={{ marginTop: 2 }}>
-      <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.55)", marginBottom: 2 }}>
+      <div style={{ fontSize: 11.5, color: COLORS.text2, marginBottom: 2 }}>
         回款：
-        <span style={{ color: "#52c41a", fontWeight: 600 }}>
-          ¥{collectedNum.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}
+        <span style={{ color: COLORS.success, fontWeight: 600 }}>
+          {formatMoney(collectedNum, { prefix: "¥", maximumFractionDigits: 0 })}
         </span>
         <span>{" / "}{contractDetail}</span>
       </div>
       {receivableNum !== null ? (
-        <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.55)", marginBottom: 2 }}>
+        <div style={{ fontSize: 11.5, color: COLORS.text2, marginBottom: 2 }}>
           应收：
-          <span style={{ color: receivableNum < 0 ? "#fa8c16" : "#1677ff", fontWeight: 600 }}>
-            {receivableNum < 0 ? "-" : ""}¥{Math.abs(receivableNum).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}
+          <span style={{ color: receivableNum < 0 ? COLORS.warning : COLORS.accent, fontWeight: 600 }}>
+            {formatMoney(receivableNum, { prefix: "¥", minimumFractionDigits: 0, signPosition: "before-prefix" })}
           </span>
           {receivableNum < 0 ? "（超额回款）" : ""}
         </div>
@@ -163,7 +166,7 @@ function CollectionBar({
           percent={Math.min(pct, 100)}
           showInfo={false}
           size="small"
-          strokeColor={pct >= 100 ? "#52c41a" : "#1677ff"}
+          strokeColor={pct >= 100 ? COLORS.success : COLORS.accent}
         />
       )}
     </div>
@@ -195,7 +198,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
       size="small"
       data-testid={`project-card-${row.project_id}`}
       styles={{ body: { padding: 14 } }}
-      style={{ height: "100%", borderTop: `3px solid ${status?.color ?? "#d9d9d9"}` }}
+      style={{ height: "100%", borderTop: "3px solid var(--mb-border)" }}
     >
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
         <div data-testid="maintenance-project-names">
@@ -219,7 +222,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
           {/* R5：台账没给项目周期时以明确状态示人，不让卡片看起来「什么都没说」 */}
           {!isBucket && row.lifecycle === "missing" ? <Tag>期限缺失</Tag> : null}
           {row.lifecycle === "payment_complete" ? (
-            <Tag color="green">回款已完成</Tag>
+            <Tag style={TAG_STYLES.success}>回款已完成</Tag>
           ) : null}
           {row.is_archived ? <Tag>已归档</Tag> : null}
           {/* 业务类型（2026-09-08）：用户要能自证「这张卡为什么在 / 为什么不在筛选里」。
@@ -228,13 +231,13 @@ export function ProjectCard({ row }: ProjectCardProps) {
             <Tag>未标注业务类型</Tag>
           ) : null}
           {!isBucket && row.business_type_code === "other" ? (
-            <Tag color="orange">{row.business_type}</Tag>
+            <Tag style={TAG_STYLES.warning}>{row.business_type}</Tag>
           ) : null}
           {!isBucket
             && row.business_type
             && row.business_type_code !== "unlabeled"
             && row.business_type_code !== "other" ? (
-              <Tag color="blue">{row.business_type}</Tag>
+              <Tag style={TAG_STYLES.info}>{row.business_type}</Tag>
             ) : null}
         </Space>
 
@@ -245,7 +248,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
           {/* 2026-08-21 客户反馈：卡片显示销售名称，不再显示项目经理 */}
           <Text>销售：{row.salesperson || "—"}</Text>
           <Text>
-            合同总额（含税）：{money(row.contract_amount_inc_tax)}
+            合同总额（含税）：{statMoney(row.contract_amount_inc_tax)}
             {/* #51 诚实标注：XSDD 回退层的共用单/缺单，金额仅参考 */}
             {row.contract_shared ? "（共用单）" : ""}
             {row.contract_incomplete ? "（不完整）" : ""}
@@ -260,25 +263,25 @@ export function ProjectCard({ row }: ProjectCardProps) {
         {/* 2026-08-22 客户反馈：成本/回款要上卡且用彩色，不再灰字小号 */}
         <div style={{ fontSize: 12.5, lineHeight: 2 }}>
           <div>
-            <span style={{ color: "#1677ff" }}>
+            <span style={{ color: COLORS.accent }}>
               备件成本 {costAmount(row.known_apply_cost_inc_tax)}
             </span>
-            <span style={{ color: "rgba(0,0,0,.45)", fontSize: 11.5 }}>
+            <span style={{ color: COLORS.text3, fontSize: 11.5 }}>
               {" "}（缺失 {missingLines(row.known_apply_cost_inc_tax)}）
             </span>
           </div>
           <div>
-            <span style={{ color: "#fa8c16" }}>
-              报销成本 {money(row.expense_cost_inc_tax)}
+            <span style={{ color: COLORS.warning }}>
+              报销成本 {statMoney(row.expense_cost_inc_tax)}
             </span>
           </div>
           <div>
-            <span style={{ color: "#722ed1" }}>
-              已领用成本 {money(row.requisition_cost_inc_tax)}
+            <span style={{ color: COLORS.accentStrong }}>
+              已领用成本 {statMoney(row.requisition_cost_inc_tax)}
             </span>
           </div>
           <div>
-            <span style={{ color: "#13c2c2" }}>
+            <span style={{ color: COLORS.success }}>
               维保备件发货数 {statQty(row.procured_qty)}
             </span>
           </div>
@@ -291,7 +294,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
               <Text>返还率：{row.receipt_return_rate?.rate_pct == null
                 ? "暂不可计算"
                 : `${row.receipt_return_rate.rate_pct}%`}</Text>
-              <div style={{ fontSize: 11.5, color: "rgba(0,0,0,.45)" }}>
+              <div style={{ fontSize: 11.5, color: COLORS.text3 }}>
                 已返还 {row.receipt_return_rate ? qty(Number(row.receipt_return_rate.returned_qty)) : "—"}
                 {" / 实际领用 "}{row.receipt_return_rate?.issued_qty == null
                   ? "—" : qty(Number(row.receipt_return_rate.issued_qty))}
@@ -299,7 +302,7 @@ export function ProjectCard({ row }: ProjectCardProps) {
               </div>
               {row.receipt_return_rate?.rate_pct != null ? (
                 <Progress percent={Math.min(row.receipt_return_rate.rate_pct, 100)}
-                  showInfo={false} size="small" strokeColor="#13c2c2" status="normal" />
+                  showInfo={false} size="small" strokeColor={COLORS.success} status="normal" />
               ) : null}
             </div>
           ) : null}

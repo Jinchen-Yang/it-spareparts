@@ -513,10 +513,10 @@ export default function SiteIssueWorkflowPanel({
                           ? <Tag color="orange">{missing} 行暂无价格成本，数量仍完整展示</Tag>
                           : <Tag color="green">价格成本已完整</Tag>}
                         <Space wrap>
-                          {issue.workflow_status === "draft" && (
+                          {issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
                             <Button aria-label="编辑草稿" size="small" onClick={() => openEditor(issue)}>编辑草稿</Button>
                           )}
-                          {issue.workflow_status === "draft" && (
+                          {issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
                             <Button
                               size="small"
                               type="primary"
@@ -527,7 +527,7 @@ export default function SiteIssueWorkflowPanel({
                               预览并确认
                             </Button>
                           )}
-                          {["confirmed", "corrected"].includes(issue.workflow_status) && (
+                          {issue.source === "site_issue_v2" && ["confirmed", "corrected"].includes(issue.workflow_status) && (
                             <Button aria-label="更正" size="small" onClick={() => openEditor(issue)}>更正</Button>
                           )}
                           {issue.workflow_status !== "void" && (

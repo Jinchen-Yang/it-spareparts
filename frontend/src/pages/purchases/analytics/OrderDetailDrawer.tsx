@@ -21,8 +21,7 @@ export interface OrderDetailDrawerProps {
 
 function TaxTag({ detail }: { detail: PurchaseAnalyticsOrderDetail }) {
   const marked = detail.is_tax_inclusive == null ? "未标注" : detail.is_tax_inclusive ? "含税单" : "不含税单";
-  // 未标/0 税率：按 13% 推算的那一侧是名义值（D-39 名义侧裁定）——含税单推算不含税侧、
-  // 非含税单推算含税侧；标注过税率的单据两侧都按票面税率换算，不附加说明
+  // 此处只说明有效税率；单头缺列会翻转推算方向，各金额的名义标签分别处理。
   const nominal = detail.tax_rate == null || detail.tax_rate === 0;
   const rate = nominal
     ? "未标税率"
@@ -42,8 +41,12 @@ function TaxTag({ detail }: { detail: PurchaseAnalyticsOrderDetail }) {
 }
 
 /** 名义侧金额标注：只标在 nominal_side 指向的那一笔金额后面（D-39 名义侧裁定）。 */
-function NominalAmountNote({ side, kind }: { side: string | null; kind: "inc" | "ex" }) {
-  if (side !== kind) return null;
+function NominalAmountNote({ side, kind, amount }: {
+  side: "inc" | "ex" | null;
+  kind: "inc" | "ex";
+  amount: number | null;
+}) {
+  if (amount == null || side !== kind) return null;
   const tip =
     kind === "inc"
       ? "未标税率（或税率为 0）：此含税金额按 13% 从不含税额推算，不是票面金额。"
@@ -92,6 +95,11 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
       });
   }, [orderId, categoryKey]);
 
+  // 行金额只有一列，按含税标记解释；不能复用可能已因单头缺列翻转的 nominal_side。
+  // 金额为 null 时不显示标签（包含权限遮蔽），0 则仍是可展示的金额。
+  const lineNominalSide = detail && (detail.tax_rate == null || detail.tax_rate === 0)
+    ? (detail.is_tax_inclusive === true ? "ex" : "inc") : null;
+
   const lineColumns: ColumnsType<PurchaseAnalyticsOrderDetail["lines"][number]> = [
     { title: "#", dataIndex: "line_no", width: 46, render: (v: number | null) => fmt(v) },
     { title: "型号", dataIndex: "pn_std", width: 130, render: (v: string | null) => (
@@ -105,11 +113,15 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
     { title: "行金额（实付）", dataIndex: "line_amount", width: 110, align: "right", render: (v: number | null) => fmtMoney(v) },
     ...(basis.includes("inc")
       ? [{ title: "行含税", key: "line_amount_inc", width: 100, align: "right" as const,
-          render: (_: unknown, r: PurchaseAnalyticsOrderDetail["lines"][number]) => fmtMoney(r.line_amount_inc) }]
+          render: (_: unknown, r: PurchaseAnalyticsOrderDetail["lines"][number]) => (
+            <>{fmtMoney(r.line_amount_inc)}<NominalAmountNote side={lineNominalSide} kind="inc" amount={r.line_amount_inc} /></>
+          ) }]
       : []),
     ...(basis.includes("ex")
       ? [{ title: "行不含税", key: "line_amount_ex", width: 100, align: "right" as const,
-          render: (_: unknown, r: PurchaseAnalyticsOrderDetail["lines"][number]) => fmtMoney(r.line_amount_ex) }]
+          render: (_: unknown, r: PurchaseAnalyticsOrderDetail["lines"][number]) => (
+            <>{fmtMoney(r.line_amount_ex)}<NominalAmountNote side={lineNominalSide} kind="ex" amount={r.line_amount_ex} /></>
+          ) }]
       : []),
   ];
 
@@ -142,10 +154,10 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
           />
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {basis.includes("inc") && (
-              <span>含税金额 <b>{fmtMoney(detail.amount_inc)}</b><NominalAmountNote side={detail.nominal_side} kind="inc" /></span>
+              <span>含税金额 <b>{fmtMoney(detail.amount_inc)}</b><NominalAmountNote side={detail.nominal_side} kind="inc" amount={detail.amount_inc} /></span>
             )}
             {basis.includes("ex") && (
-              <span>不含税金额 <b>{fmtMoney(detail.amount_ex)}</b><NominalAmountNote side={detail.nominal_side} kind="ex" /></span>
+              <span>不含税金额 <b>{fmtMoney(detail.amount_ex)}</b><NominalAmountNote side={detail.nominal_side} kind="ex" amount={detail.amount_ex} /></span>
             )}
             {basis.includes("paid") && (
               <span>实付金额 <b>{fmtMoney(detail.amount_paid)}</b></span>
@@ -155,7 +167,14 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
             <Alert
               type="info"
               showIcon
-              message={`匹配分类行合计（${category.join("、")}）：${matched.lines} 行 · 实付 ${fmtMoney(matched.amount_paid)} · 含税 ${fmtMoney(matched.amount_inc)} · 不含税 ${fmtMoney(matched.amount_ex)}`}
+              message={<>
+                匹配分类行合计（{category.join("、")}）：{matched.lines} 行
+                {" · "}实付 {fmtMoney(matched.amount_paid)}
+                {" · "}含税 {fmtMoney(matched.amount_inc)}
+                <NominalAmountNote side={lineNominalSide} kind="inc" amount={matched.amount_inc} />
+                {" · "}不含税 {fmtMoney(matched.amount_ex)}
+                <NominalAmountNote side={lineNominalSide} kind="ex" amount={matched.amount_ex} />
+              </>}
               description="分类口径下实付 = 匹配明细行行金额之和；明细只计单头所属批次的行。"
             />
           )}
