@@ -704,11 +704,12 @@ export default function ChatPage() {
   );
 
   return (
-    <div style={{
+    <div className="chat-page-shell" style={{
       display: "flex", margin: "calc(-1 * var(--mb-shell-content-padding))",
-      height: "calc(100dvh - var(--mb-shell-header-height))", background: "#fff", minWidth: 0,
+      background: "#fff", minWidth: 0,
     }}>
       <style>{`
+        .chat-page-shell { height: calc(100vh - var(--mb-shell-header-height)); height: calc(100dvh - var(--mb-shell-header-height)); }
         .chat-md table { border-collapse: collapse; margin: 10px 0; background: #fff; font-size: 13px; }
         .chat-md th, .chat-md td { border: 1px solid #e5e7eb; padding: 5px 12px; }
         .chat-md th { background: #f9fafb; font-weight: 600; }
