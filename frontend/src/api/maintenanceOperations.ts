@@ -1514,6 +1514,7 @@ function categoryFilterParams(input: MaintenanceCategoryFilterInput): Maintenanc
 export const searchSiteIssues = (
   input: {
     project_id: string;
+    issue_id?: string;
     q?: string;
     workflow_statuses?: SiteIssueWorkflowStatus[];
     page?: number;
@@ -1521,6 +1522,7 @@ export const searchSiteIssues = (
   } & MaintenanceCategoryFilterInput,
 ) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
   project_id: input.project_id,
+  ...(input.issue_id ? { issue_id: input.issue_id } : {}),
   ...categoryFilterParams(input),
   ...(input.q?.trim() ? { q: input.q.trim() } : {}),
   workflow_statuses: input.workflow_statuses
@@ -1544,7 +1546,15 @@ export interface SiteIssueLineCorrectionInput {
   expected_issue_version: number;
   expected_line_version: number;
   /** 未提供字段保留原值，显式 null 恢复按规则判断。 */
-  changes: { no_return?: boolean | null };
+  changes: {
+    no_return?: boolean | null;
+    quantity?: string;
+    serial_number?: string;
+    remark?: string;
+    demand_order_no?: string;
+    pn?: string;
+    part_id?: number;
+  };
   reason: string;
   idempotency_key: string;
 }
@@ -1569,6 +1579,37 @@ export const correctSiteIssueLine = (
   `${siteIssueBase(issueId)}/lines/${encodeURIComponent(issueLineId)}`,
   input,
 );
+
+export interface SiteIssueHeaderCorrectionInput {
+  expected_issue_version: number;
+  changes: {
+    issue_no?: string;
+    issue_date?: string;
+    receiver?: string;
+    issued_by?: string;
+    site_location?: string;
+  };
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface SiteIssueHeaderCorrectionReceipt {
+  issue_id: string;
+  issue_version: number;
+  line_versions: Record<string, number>;
+  changed: boolean;
+  idempotent_replay: boolean;
+  workbook_revision: number;
+  affected_line_count: number;
+  scope: "whole_issue";
+  message: string;
+}
+
+/** 单头独立命令：地址影响整单；日期、内部单号修改按既有规则重算全单成本。 */
+export const correctSiteIssueHeader = (
+  issueId: string,
+  input: SiteIssueHeaderCorrectionInput,
+) => api.patch<SiteIssueHeaderCorrectionReceipt>(`${siteIssueBase(issueId)}/header`, input);
 
 export const patchSiteIssue = (
   issueId: string,

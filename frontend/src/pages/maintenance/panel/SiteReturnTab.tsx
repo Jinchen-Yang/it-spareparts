@@ -23,6 +23,7 @@ import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip
 import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
 import SiteIssueReturnBatch from "./SiteIssueReturnBatch";
+import SiteIssueEditDrawer from "./SiteIssueEditDrawer";
 import { readPermissionMap } from "../../../nav";
 import {
   ISSUE_STATUS,
@@ -105,6 +106,9 @@ export function SiteReturnTab({
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedLineIds, setSelectedLineIds] = useState<React.Key[]>([]);
+  const [editTarget, setEditTarget] = useState<SiteReturnRow | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingPending, setEditingPending] = useState(false);
   const requestSeq = useRef(0);
   const [categoryFilter, setCategoryFilter] = useState<MaintenanceCategoryFilterInput>({});
   const categoryFilterRef = useRef<MaintenanceCategoryFilterInput>({});
@@ -154,6 +158,9 @@ export function SiteReturnTab({
     setCategoryFilter({});
     setLinesPage(1);
     setSelectedLineIds([]);
+    setEditTarget(null);
+    setEditOpen(false);
+    setEditingPending(false);
     registerRefresh("site", load);
     void load();
     return () => {
@@ -286,8 +293,9 @@ export function SiteReturnTab({
             按当前主数据库品类筛选领用明细；作废操作仍影响整张领用单。
           </Typography.Text>
           {canManageIssues ? <SiteIssueReturnBatch key={`return-requirement-${projectId}`}
-            selection={selectedLines} disabled={loading || !!loadError}
+            selection={selectedLines} disabled={loading || !!loadError || editingPending}
             onChanged={async () => { setSelectedLineIds([]); return onChanged(); }} /> : null}
+          {canManageIssues && editTarget && !editOpen ? <Button onClick={() => setEditOpen(true)}>继续编辑或核对领用</Button> : null}
           {loadError ? <Alert type="error" showIcon message={loadError} action={<Button onClick={() => { void load(); }}>重新加载领用</Button>} /> : null}
           <Table<SiteReturnRow>
         rowKey="issueLineId"
@@ -358,18 +366,24 @@ export function SiteReturnTab({
             ? [{
                 title: "操作",
                 key: "ops",
-                width: 90,
+                width: 150,
                 render: (_value: unknown, item: SiteReturnRow) =>
                   item.issue.workflow_status === "void" ? (
                     <Tag>已作废</Tag>
                   ) : (
+                    <Space>
+                    {canCorrectLine(item) ? <Button size="small" aria-label="编辑领用行"
+                      disabled={loading || editingPending}
+                      onClick={() => { setEditTarget(item); setEditOpen(true); }}>编辑</Button> : null}
                     <Button
                       size="small"
                       danger
+                      disabled={editingPending}
                       onClick={() => { setVoidTarget(item.issue); setVoidReason(""); }}
                     >
                       作废
                     </Button>
+                    </Space>
                   ),
               }]
             : []),
@@ -377,6 +391,9 @@ export function SiteReturnTab({
           />
         </Space>
       </section>
+      {canManageIssues && editTarget?.line ? <SiteIssueEditDrawer key={`${projectId}-${editTarget.issueLineId}`}
+        issue={editTarget.issue} line={editTarget.line} open={editOpen}
+        onClose={() => setEditOpen(false)} onChanged={onChanged} onPendingChange={setEditingPending} /> : null}
       <Modal
         open={voidTarget !== null}
         title={voidTarget

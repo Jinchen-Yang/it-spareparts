@@ -2245,6 +2245,7 @@ def search_site_issues(
     workflow_statuses: list[str],
     page: int,
     page_size: int,
+    issue_id: str | None = None,
     category_major: str | None = None,
     category_minor: str | None = None,
     category_state: str | None = None,
@@ -2274,6 +2275,8 @@ def search_site_issues(
         ),
         MaintenanceSiteIssue.normalized_status.in_(workflow_statuses),
     ]
+    if issue_id is not None:
+        filters.append(MaintenanceSiteIssue.issue_id == issue_id)
     if part_match is not None:
         filters.append(select(1).where(
             MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
