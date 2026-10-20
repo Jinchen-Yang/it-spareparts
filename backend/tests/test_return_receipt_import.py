@@ -179,7 +179,7 @@ def test_machine_component_correction_updates_evidence_without_extra_count(db, p
 
 
 def test_wbdd_assignment_and_conflicting_source_project(db, project):
-    order = _wbdd(db, project=project)
+    order = _wbdd(db, project=project, demand_qty=100)
     batch = preview(db, workbook(project="", wbdd=order.order_no))
     apply(db, batch)
     assert db.scalar(select(Receipt)).source_order_id == order.raw_order_id

@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  type ReturnReceipt, type ReturnReceiptUpdateInput,
+  type ReturnReceipt, type ReturnReceiptUpdateInput, type ReturnReceiptDemandCandidate,
+  getReturnReceiptDemands,
   updateReturnReceipt, voidReturnReceipt,
 } from "../../../api/maintenanceOperations";
 import { readError } from "./panelUtils";
+import { capacityQty, receiptCapacityError } from "./returnReceiptCapacity";
 
 const { Text } = Typography;
 
@@ -17,6 +19,11 @@ const QTY_MAX = 99999999999;
 
 /** 行内编辑快照：touched 区分「未改（不发该字段）」与「清空（显式发 null）」。 */
 interface EditRow {
+  sourceOrderId?: string | null;
+  orderNo?: string | null;
+  capacity?: ReturnReceiptDemandCandidate;
+  capacityLoading?: boolean;
+  capacityLoadError?: string;
   receiptId: string;
   pn: string;
   version: number;
@@ -64,6 +71,9 @@ const parseSerials = (text: string): string[] =>
   text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 
 const toEditRow = (receipt: ReturnReceipt): EditRow => ({
+  sourceOrderId: receipt.source_order_id,
+  orderNo: receipt.order_no,
+  capacityLoading: !!receipt.source_order_id,
   receiptId: receipt.receipt_id,
   pn: receipt.pn,
   version: receipt.version,
@@ -94,6 +104,12 @@ export function editRowError(row: EditRow): string | null {
     if (value == null || !Number.isInteger(value) || value <= 0 || value > QTY_MAX) {
       return "数量须为正整数，且不超过 99999999999";
     }
+  }
+  if (row.qtyTouched && row.qty != null && row.qty > row.qtyOriginal && row.sourceOrderId) {
+    if (row.capacityLoading) return "需求单容量加载中，请稍候再增加数量";
+    if (row.capacityLoadError) return row.capacityLoadError;
+    const capacityError = receiptCapacityError(row.capacity, row.qty);
+    if (capacityError) return capacityError;
   }
   if (row.evidenceTouched && row.evidence.length > EVIDENCE_MAX) {
     return `凭据超过 ${EVIDENCE_MAX} 字符上限（当前 ${row.evidence.length}），请删减后再保存`;
@@ -145,6 +161,8 @@ export function buildEditDiff(row: EditRow): Partial<ReturnReceiptUpdateInput> {
 /** 网络层无响应或 5xx 归为「结果未知」：首次可能已落库，绝不能伪称失败或成功。 */
 const errorStatus = (error: unknown): RowStatus => {
   const status = (error as { response?: { status?: number } })?.response?.status;
+  const detail = (error as { response?: { data?: { detail?: { code?: string } } } })?.response?.data?.detail;
+  if (status === 409 && (detail?.code === "return_capacity_exceeded" || detail?.code === "return_capacity_unknown")) return "failed";
   if (status === 409) return "conflict";
   // 401/403/422 等 4xx 是确定拒绝，说明那次请求未落库；无响应/5xx 仍未知
   if (status != null && status >= 400 && status < 500) return "failed";
@@ -342,13 +360,29 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     }
   };
 
+  const loadCapacity = async (receipt: ReturnReceipt, seq: number) => {
+    try {
+      const response = await getReturnReceiptDemands(receipt.project_id, {
+        receipt_id: receipt.receipt_id, page: 1, page_size: 100,
+      });
+      if (seq !== seqRef.current) return;
+      const capacity = response.data.rows.find((candidate) => candidate.source_order_id === receipt.source_order_id);
+      patchRow(receipt.receipt_id, { capacity, capacityLoading: false, capacityLoadError: undefined });
+    } catch (error) {
+      if (seq !== seqRef.current) return;
+      patchRow(receipt.receipt_id, { capacityLoading: false, capacityLoadError: readError(error, "需求单容量加载失败，请重试后再增加数量") });
+    }
+  };
+
   const openModal = () => {
+    const seq = ++seqRef.current;
     setRows(receipts.map(toEditRow));
     setReason("");
     setResults([]);
     setPhase("edit");
     frozenRef.current = [];
     setOpen(true);
+    if (!isVoid) receipts.filter((receipt) => receipt.source_order_id).forEach((receipt) => { void loadCapacity(receipt, seq); });
   };
 
   const close = () => {
@@ -379,6 +413,20 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
           </Space>
         </Space>
       ),
+    },
+    {
+      title: "需求单容量", width: 210,
+      render: (_v, row) => row.sourceOrderId ? <Space direction="vertical" size={0}>
+        <Text>{row.orderNo ?? "当前关联需求单"}</Text>
+        {row.capacityLoading ? <Text type="secondary">容量加载中</Text> : row.capacity ? <>
+          <Text>已收 {capacityQty(row.capacity.received_qty)} / 下单 {capacityQty(row.capacity.demand_qty)}</Text>
+          <Text>剩余可录 {capacityQty(row.capacity.remaining_qty)}；本行最多可填 {capacityQty(row.capacity.max_qty)}</Text>
+        </> : <Text type="warning">{row.capacityLoadError ?? "需求单容量暂不可核对"}</Text>}
+        {!row.capacityLoading && !row.capacity ? <Button size="small" onClick={() => {
+          const receipt = receipts.find((item) => item.receipt_id === row.receiptId);
+          if (receipt) { patchRow(row.receiptId, { capacityLoading: true }); void loadCapacity(receipt, seqRef.current); }
+        }}>重试容量</Button> : null}
+      </Space> : <Text type="secondary">未关联需求单</Text>,
     },
     { title: "原数量", dataIndex: "qtyText", width: 70 },
     {
@@ -541,7 +589,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
                   pagination={false}
                   dataSource={rows}
                   columns={editColumns}
-                  scroll={{ x: 1040, y: 380 }}
+                  scroll={{ x: 1250, y: 380 }}
                 />
               )}
               <Alert

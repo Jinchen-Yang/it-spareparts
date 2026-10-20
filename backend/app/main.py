@@ -53,6 +53,7 @@ from app.api import (
     maintenance_row_workbench,
     maintenance_project_batch_transfer,
     maintenance_wbdd_import,
+    maintenance_source_cancel_cascade,
     parts,
     pool_analysis,
     pools,
@@ -120,6 +121,7 @@ app.include_router(maintenance.router, prefix=settings.api_prefix)
 # 维保展示板（plan v1.3）：独立 flag 闸（router 自带 require_maintenance_boss），
 # 不挂 Beta 依赖——回滚=关 maintenance_boss_dashboard_enabled。
 app.include_router(maintenance_wbdd_import.router, prefix=settings.api_prefix)
+app.include_router(maintenance_source_cancel_cascade.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_expense_collection_workbook.router, prefix=settings.api_prefix
 )

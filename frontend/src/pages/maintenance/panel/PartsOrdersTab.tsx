@@ -18,6 +18,7 @@ import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip
 import ProjectMaintenanceRowFilters from "../../../components/maintenance/ProjectMaintenanceRowFilters";
 import { serializeRowFilters } from "../../../api/maintenanceRowFilters";
 import type { MaintenanceRowFilter } from "../../../api/maintenanceRowFilters";
+import SourceCancelImpactPanel from "../../../components/maintenance/SourceCancelImpactPanel";
 import { readPermissionMap } from "../../../nav";
 import DemandLineBatchCreate from "../DemandLineBatchCreate";
 import DemandLineCreate from "../DemandLineCreate";
@@ -338,6 +339,12 @@ export function PartsOrdersTab({
           </Space>
         ) : undefined}
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
+      />
+      <SourceCancelImpactPanel
+        projectId={projectId}
+        canConfirm={!!readPermissionMap().action_maintenance_demand_delete}
+        onChanged={onChanged}
+        registerRefresh={registerRefresh}
       />
       {creatingLine ? (
         <DemandLineCreate
