@@ -1,9 +1,6 @@
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
-import {
-  Card, Upload, Descriptions, Tag, message, Space, Button, Modal, Progress,
-  Switch, Tooltip, List, Alert, Checkbox,
-} from "antd";
+import { App, Card, Upload, Descriptions, Tag, Space, Button, Modal, Progress, Switch, Tooltip, List, Alert, Checkbox } from "antd";
 import { InboxOutlined, DeleteOutlined } from "@ant-design/icons";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
@@ -122,6 +119,7 @@ interface PrecheckSnapshot {
 }
 
 export default function ImportPage() {
+  const { message } = App.useApp();
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [staged, setStaged] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -133,6 +131,8 @@ export default function ImportPage() {
   const [job, setJob] = useState<Job | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
+  const [detailError, setDetailError] = useState<{ batchId: number; text: string } | null>(null);
+  const [downloadError, setDownloadError] = useState<{ batchId: number; text: string } | null>(null);
   const [downloadingErrors, setDownloadingErrors] = useState(false);
   const pollRef = useRef<number | null>(null);
   const pollDeadlineTimerRef = useRef<number | null>(null);
@@ -145,6 +145,7 @@ export default function ImportPage() {
   const uploadActionLockRef = useRef(false);
   const resumePollingLockRef = useRef(false);
   const downloadErrorsLockRef = useRef(false);
+  const detailViewRef = useRef(0);
   const detailRequestRef = useRef<{
     key: string; fromPrecheck: boolean; controller: AbortController;
   } | null>(null);
@@ -180,6 +181,7 @@ export default function ImportPage() {
     setSnapshot(null);
     setWarningConfirmed(false);
     setImportError(null);
+    setDetailError(null);
     setPhase("dirty");
   };
 
@@ -225,8 +227,6 @@ export default function ImportPage() {
         await loadBatches();
         if (!mountedRef.current || generation !== pollGenerationRef.current) return;
         if (data.status === "done") message.success("批量导入完成");
-        else if (data.status === "partial") message.warning("部分文件未导入，见作业明细");
-        else message.error("导入失败，见作业明细");
       }
     } catch {
       if (!mountedRef.current || generation !== pollGenerationRef.current) return;
@@ -365,6 +365,9 @@ export default function ImportPage() {
     detailRequestRef.current?.controller.abort();
     const request = { key, fromPrecheck, controller: new AbortController() };
     detailRequestRef.current = request;
+    detailViewRef.current += 1;
+    setDetailError(null);
+    setDownloadError(null);
     try {
       const { data } = await api.get(`/import/batches/${id}`, {
         timeout: 30_000,
@@ -378,42 +381,57 @@ export default function ImportPage() {
         || request.controller.signal.aborted
         || (fromPrecheck && revision !== inputRevisionRef.current)) return;
       const timedOut = error?.code === "ECONNABORTED" || /timeout/i.test(error?.message || "");
+      const showError = (text: string) => setDetailError({ batchId: id, text });
       if (fromPrecheck && timedOut) {
-        message.error("原批次详情加载超时，请重试");
+        showError("原批次详情加载超时，请重试");
       } else if (timedOut) {
-        message.error("批次详情加载超时，请重试");
+        showError("批次详情加载超时，请重试");
       } else if (fromPrecheck && error?.response?.status === 403) {
-        message.error("无权查看原批次详情，请联系管理员开通数据导入权限");
+        showError("无权查看原批次详情，请联系管理员开通数据导入权限");
       } else if (fromPrecheck && error?.response?.status === 404) {
-        message.error("原批次不存在或已无法访问");
+        showError("原批次不存在或已无法访问");
       } else if (fromPrecheck && !error?.response) {
-        message.error("网络连接失败，请检查网络后重试查看原批次");
+        showError("网络连接失败，请检查网络后重试查看原批次");
       } else if (fromPrecheck) {
-        message.error("原批次详情加载失败，请稍后重试");
+        showError("原批次详情加载失败，请稍后重试");
       } else {
-        message.error("批次详情加载失败，请稍后重试");
+        showError("批次详情加载失败，请稍后重试");
       }
     } finally {
       if (detailRequestRef.current === request) detailRequestRef.current = null;
     }
   };
 
+  const closeDetail = () => {
+    detailViewRef.current += 1;
+    detailRequestRef.current?.controller.abort();
+    detailRequestRef.current = null;
+    setDetail(null);
+    setDetailError(null);
+    setDownloadError(null);
+  };
+
   const downloadErrors = async () => {
     if (downloadErrorsLockRef.current || !detail) return;
+    const batchId = detail.id as number;
+    const view = detailViewRef.current;
     downloadErrorsLockRef.current = true;
     setDownloadingErrors(true);
+    setDownloadError(null);
     try {
-      await downloadImportErrors(detail.id);
+      await downloadImportErrors(batchId);
     } catch (error: any) {
-      if (!mountedRef.current) return;
+      // 关闭后重开同一批次也属于新视图，旧下载的错误不能写入新 Alert。
+      if (!mountedRef.current || view !== detailViewRef.current) return;
+      const showError = (text: string) => setDownloadError({ batchId, text });
       if (error?.response?.status === 403) {
-        message.error("无权下载问题明细，请联系管理员开通数据导入权限");
+        showError("无权下载问题明细，请联系管理员开通数据导入权限");
       } else if (error?.response?.status === 404) {
-        message.error("未找到批次，无法下载问题明细");
+        showError("未找到批次，无法下载问题明细");
       } else if (!error?.response) {
-        message.error("网络连接失败，请检查网络后重试下载");
+        showError("网络连接失败，请检查网络后重试下载");
       } else {
-        message.error("问题明细下载失败，请稍后重试");
+        showError("问题明细下载失败，请稍后重试");
       }
     } finally {
       downloadErrorsLockRef.current = false;
@@ -463,7 +481,7 @@ export default function ImportPage() {
       render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>-</span> },
     { title: "时间", dataIndex: "uploaded_at", width: 180,
       render: (t) => formatBusinessDateTime(t) },
-    { title: "", width: 70, render: (_, r) => <a onClick={() => openDetail(r.id)}>详情</a> },
+    { title: "", width: 70, render: (_, r) => <Button type="link" onClick={() => openDetail(r.id)}>详情</Button> },
   ];
 
   const jobPct = job && job.total_files
@@ -475,6 +493,7 @@ export default function ImportPage() {
         title="数据导入"
         subtitle="上传氚云导出的 Excel（采购 / 销售 / 库存 / 维保出库）或项目追踪工作簿（报销明细页），自动清洗入库并留痕"
       />
+      {detailError && <Alert type="error" showIcon message={detailError.text} description={`批次 #${detailError.batchId}`} />}
       <Card title="上传文件"
         extra={
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
@@ -583,6 +602,11 @@ export default function ImportPage() {
       {job && (
         <Card title={`导入作业 #${job.id}`}
           extra={<Tag color={JOB_STATUS[job.status]?.color}>{JOB_STATUS[job.status]?.label || job.status}</Tag>}>
+          {(job.status === "partial" || job.status === "failed") && (
+            <Alert type={job.status === "partial" ? "warning" : "error"} showIcon
+              message={job.status === "partial" ? "部分文件未导入，见作业明细" : "导入失败，见作业明细"}
+              style={{ marginBottom: 12 }} />
+          )}
           {pollingInterrupted && (
             <Alert
               type="warning"
@@ -612,11 +636,12 @@ export default function ImportPage() {
       </Card>
 
       <Modal
-        open={!!detail} width={760} footer={null} onCancel={() => setDetail(null)}
+        open={!!detail} width={760} footer={null} onCancel={closeDetail}
         title={detail ? `批次 #${detail.id} · ${detail.filename}` : ""}
       >
         {detail && (
           <>
+            {downloadError?.batchId === detail.id && <Alert type="error" showIcon message={downloadError?.text} style={{ marginBottom: 12 }} />}
             {detail.file_type === "maintenance" && detail.report ? (
               <>
                 {detail.report.import_mode === "skip" || detail.report.import_mode === "upsert"

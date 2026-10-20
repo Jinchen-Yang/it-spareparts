@@ -72,6 +72,7 @@ from app.models.sales import FSalesOrder
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_cost_quality, maintenance_project_identity
 from app.services import maintenance_periods
+from app.services import maintenance_field_protection as field_protection
 from app.services import maintenance_site_issue_merge as site_merges
 from app.services import maintenance_expense_collection_workbook as ec
 from app.services.maintenance_boss_board import _card_contracts
@@ -1301,10 +1302,26 @@ def apply(
             operating_fact_changed = refill_changed or operating_fact_changed
         if refill.note is not None:
             line = db.get(FMaintenanceLine, refill.line_id)
-            if line is not None and line.line_note != refill.note:
-                line.line_note = refill.note
-                refill_changed = True
-                operating_fact_changed = True
+            if line is not None:
+                before_fields = field_protection.snapshot_fields(line)
+                note = field_protection.normalized_value("line_note", refill.note)
+                if field_protection.changed_fields(before_fields, {"line_note": note}):
+                    line.line_note = note
+                    field_protection.record_manual_changes(
+                        line, before=before_fields, operated_by=operated_by,
+                        source="workbook_manual",
+                    )
+                    _write_audit(
+                        db, project_id=plan.project_id or _line_project_ids[line.id],
+                        entity_type="maintenance_line", entity_id=line.id,
+                        action="UPDATE", operated_by=operated_by,
+                        reason="工作簿备注修改",
+                        before={"line_note": before_fields["line_note"]},
+                        after={"line_note": line.line_note,
+                               "manual_override": line.manual_override},
+                    )
+                    refill_changed = True
+                    operating_fact_changed = True
         if refill_changed and _line_project_ids is not None:
             project_id = _line_project_ids.get(int(refill.line_id))
             if project_id is None:
@@ -3309,6 +3326,7 @@ def _v2_decimal(
     label: str,
     required: bool = False,
     allow_negative: bool = False,
+    demand_quantity: bool = False,
 ) -> Decimal | None:
     if value in (None, ""):
         if required:
@@ -3318,7 +3336,10 @@ def _v2_decimal(
         parsed = Decimal(str(value).replace(",", "").strip())
     except (InvalidOperation, ValueError):
         raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
-    normalized = parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    normalized = (
+        field_protection.normalized_value("qty", parsed) if demand_quantity
+        else parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
     if (
         not normalized.is_finite()
         or abs(normalized) >= Decimal("1000000000000")
@@ -3601,13 +3622,17 @@ def _v2_refill_for_existing_line(
         if part is None:
             raise WorkbookError("part_not_found",
                                 f"第 {row_no} 行 PN {pn_cell!r} 未匹配备件主数据")
-        pn = part.pn_std
-        part_id = part.id
+        # 别名/大小写解析到当前身份时是原样回传，不能停用旧人工价。
+        if (field_protection.normalized_value("pn_std", part.pn_std)
+                != field_protection.normalized_value("pn_std", line.pn_std)
+                or part.id != line.part_id):
+            pn = part.pn_std
+            part_id = part.id
     desc_cell = str(_cell(row, index, "描述") or "").strip()
     description = desc_cell if desc_cell != (line.description or "") else None
     qty_cell = _cell(row, index, "需求数量")
     qty_parsed = (
-        _v2_decimal(qty_cell, row_no=row_no, label="需求数量")
+        _v2_decimal(qty_cell, row_no=row_no, label="需求数量", demand_quantity=True)
         if qty_cell not in (None, "") else None
     )
     if qty_parsed is not None and qty_parsed <= 0:
@@ -3619,7 +3644,7 @@ def _v2_refill_for_existing_line(
     )
     raw_return = _cell(row, index, "退货数量")
     return_parsed = (
-        _v2_decimal(raw_return, row_no=row_no, label="退货数量")
+        _v2_decimal(raw_return, row_no=row_no, label="退货数量", demand_quantity=True)
         if raw_return not in (None, "") else None
     )
     return_qty = (
@@ -3750,12 +3775,14 @@ def _v2_parse_parts(
                 db, pn_raw, row_no=row_no, sheet="03_备件明细", merge=merge)
             if part is None:
                 continue
-            qty = _v2_decimal(qty_raw, row_no=row_no, label="需求数量", required=True)
+            qty = _v2_decimal(qty_raw, row_no=row_no, label="需求数量", required=True,
+                              demand_quantity=True)
             if qty is None or qty <= 0:
                 raise WorkbookError("invalid_amount",
                                     f"第 {row_no} 行需求数量必须大于 0")
             return_qty = _v2_decimal(_cell(row, index, "退货数量"),
-                                     row_no=row_no, label="退货数量") or Decimal(0)
+                                     row_no=row_no, label="退货数量",
+                                     demand_quantity=True) or Decimal(0)
             if return_qty > qty:
                 raise WorkbookError("invalid_amount",
                                     f"第 {row_no} 行退货数量不能大于需求数量")
@@ -6852,19 +6879,26 @@ def _apply_project_master_v2(
                 operating_fact_changed = True
             continue
 
-        # UPDATE：行级数据字段
-        before: dict[str, object] = {}
-        if refill.pn is not None:
-            before["pn"] = line.pn_std or line.pn_raw
-            line.pn_std = refill.pn
-            line.pn_raw = refill.pn
-            # 跨表身份同步换 part_id（P1，Codex review #272）：库存/成本/池
-            # 等 join 都走 part_id，只改文本不改主键会腐化下游聚合。
-            if refill.part_id is not None:
-                before["part_id"] = line.part_id
-                line.part_id = refill.part_id
-            # 旧 PN 的人工证据不能跟着 line_id 偷渡到新 PN。若用户本行同时填了
-            # 新人工价，下面 _merge_manual_cost_to_line 会以新证据重新激活。
+        # UPDATE：先归一化再计算真实差异，成本与保护使用同一组最终值。
+        protection_before = field_protection.snapshot_fields(line)
+        proposed = {
+            key: field_protection.normalized_value(key, value)
+            for key, value in {
+                "pn_std": refill.pn, "pn_raw": refill.pn,
+                "part_id": refill.part_id, "description": refill.description,
+                "qty": refill.qty, "return_qty": refill.return_qty,
+                "serial_numbers": refill.serial_numbers, "line_note": refill.note,
+            }.items() if value is not None
+        }
+        actual_fields = field_protection.changed_fields(protection_before, proposed)
+        before = {
+            key: str(protection_before[key]) if isinstance(protection_before[key], Decimal)
+            else protection_before[key] for key in sorted(actual_fields)
+        }
+        for key in sorted(actual_fields):
+            setattr(line, key, proposed[key])
+        if "part_id" in actual_fields:
+            # 真正换绑才停用旧身份价格；等值 PN 回传不能丢失人工证据。
             stale_override = db.scalar(
                 select(MaintenanceManualCostOverride).where(
                     MaintenanceManualCostOverride.line_id == line.id,
@@ -6875,34 +6909,26 @@ def _apply_project_master_v2(
                 stale_override.active = False
                 stale_override.version += 1
                 stale_override.updated_by = operated_by
+        if actual_fields & field_protection.PN_IDENTITY_FIELDS:
             demand_reprice_line_ids.add(line.id)
-        if refill.description is not None:
-            before["description"] = line.description
-            line.description = refill.description
-        if refill.qty is not None:
-            before["qty"] = str(line.qty) if line.qty is not None else None
-            line.qty = refill.qty
-        if refill.return_qty is not None:
-            before["return_qty"] = str(line.return_qty) if line.return_qty is not None else None
-            line.return_qty = refill.return_qty
-        if refill.serial_numbers is not None:
-            before["sn"] = line.serial_numbers
-            line.serial_numbers = refill.serial_numbers
-        if refill.note is not None:
-            before["note"] = line.line_note
-            line.line_note = refill.note
-        # 数量类字段有变化 → 重算金额（无成本行保持 NULL）
-        if "qty" in before or "return_qty" in before:
+        if actual_fields & {"qty", "return_qty"}:
             _recompute_line_amounts(line)
         # 人工成本（写 override + 合并主表，沿用既有语义）
         cost_changed = False
         if refill.unit_cost_ex_tax is not None or refill.reason is not None:
             cost_changed = _merge_manual_cost_to_line(
                 db, refill, operated_by=operated_by)
-        line.edited_source = "workbook_manual"
+        # 来源身份保持原值；旧整行保护也不因新增字段证据而自动解除。
+        field_protection.record_manual_changes(
+            line, before=protection_before, operated_by=operated_by,
+            source="workbook_manual",
+        )
         if before or cost_changed:
-            after = {"pn": line.pn_std, "qty": str(line.qty),
-                     "return_qty": str(line.return_qty)}
+            after = {
+                key: str(getattr(line, key)) if isinstance(getattr(line, key), Decimal)
+                else getattr(line, key) for key in sorted(actual_fields)
+            }
+            after["manual_override"] = dict(line.manual_override or {})
             if refill.unit_cost_ex_tax is not None:
                 after["cost"] = str(refill.unit_cost_ex_tax)
             if refill.reason is not None:

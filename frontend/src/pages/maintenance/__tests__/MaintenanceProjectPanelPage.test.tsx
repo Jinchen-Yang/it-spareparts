@@ -2,7 +2,7 @@ import { cleanupAntd, renderWithoutMotion as render } from "../../../test/antdRe
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { message } from "antd";
+
 import { MAINTENANCE_CHANGED_STORAGE_KEY } from "../../../utils/maintenanceRefresh";
 
 const getBoardProject = vi.fn();
@@ -306,7 +306,7 @@ describe("免返标注", () => {
     allowEdit();
     getMaintenanceProject.mockResolvedValue(noteProject());
     updateMaintenanceProject.mockRejectedValue({ response: { status, data: { detail: "请刷新权限或版本后重试" } } });
-    const success = vi.spyOn(message, "success");
+
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "编辑免返标注" }));
     const dialog = await screen.findByRole("dialog");
@@ -314,7 +314,7 @@ describe("免返标注", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
     expect(await screen.findByText("请刷新权限或版本后重试")).toBeVisible();
     expect(within(dialog).getByRole("textbox", { name: "免返标注" })).toHaveValue("冲突草稿");
-    expect(success).not.toHaveBeenCalled();
+    expect(document.querySelector(".ant-message-success")).toBeNull();
   });
 
   it("保存已写入但回读失败时提示刷新失败并失效旧标注", async () => {
@@ -452,7 +452,7 @@ describe("项目备注", () => {
     allowEdit();
     getMaintenanceProject.mockResolvedValue(noteProject());
     updateMaintenanceProject.mockRejectedValue({ response: { status, data: { detail: "项目备注未保存，请核对权限或版本" } } });
-    const success = vi.spyOn(message, "success");
+
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "编辑项目备注" }));
     const dialog = await screen.findByRole("dialog");
@@ -460,7 +460,7 @@ describe("项目备注", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
     expect(await screen.findByText("项目备注未保存，请核对权限或版本")).toBeVisible();
     expect(within(dialog).getByRole("textbox", { name: "项目备注" })).toHaveValue("冲突后保留的备注");
-    expect(success).not.toHaveBeenCalled();
+    expect(document.querySelector(".ant-message-success")).toBeNull();
   });
 
   it.each(["page_maintenance", "data_profit", "action_maintenance_project_manage"])(

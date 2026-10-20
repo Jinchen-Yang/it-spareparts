@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import {
-  Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber, Alert, Table, Popconfirm, Tooltip,
-} from "antd";
+import { App, Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip } from "antd";
 import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -55,6 +52,7 @@ function salesPricePair(row: SalesRow): TaxSplit {
  * 精确命中（exact）唯一主结果自动打开全景，相似候选降级到"相似型号"独立区域。
  */
 export default function PartSearchPage() {
+  const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const urlQ = sp.get("q") || "";
   const urlPartId = sp.get("part_id");
@@ -249,10 +247,10 @@ export default function PartSearchPage() {
     {
       title: "型号 (PN)", dataIndex: "pn_std", width: 220,
       render: (v, r) => (
-        <a onClick={() => openPart(r)}>
+        <Button type="link" size="small" onClick={() => openPart(r)}>
           {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
           {r.is_excluded && <Tag color="red">已排除</Tag>}
-        </a>
+        </Button>
       ),
     },
     {
@@ -378,9 +376,9 @@ export default function PartSearchPage() {
       {exactItem ? (
         <Card title="精确匹配" size="small">
           <Space wrap size={12} style={{ fontSize: 14 }}>
-            <a onClick={() => openPart(exactItem)} style={{ fontFamily: "monospace", fontWeight: 600 }}>
+            <Button type="link" size="small" onClick={() => openPart(exactItem)} style={{ fontFamily: "monospace", fontWeight: 600 }}>
               {exactItem.pn_std}
-            </a>
+            </Button>
             <Tag color="green">{exactItem.match_type === "exact_alias"
               ? `别名精确：${exactItem.matched_text}` : "PN 精确匹配"}</Tag>
             {exactItem.pool_name && <Tag color="geekblue">互通池：{exactItem.pool_name}</Tag>}
@@ -526,8 +524,9 @@ export default function PartSearchPage() {
           <Card size="small" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                           gap: 12, flexWrap: "wrap", marginBottom: subsOpen ? 12 : 0 }}>
-              <span onClick={toggleSubs}
-                    style={{ fontWeight: 500, cursor: "pointer", userSelect: "none",
+              <button type="button" aria-expanded={subsOpen} onClick={toggleSubs}
+                    style={{ border: 0, background: "none", padding: 0, font: "inherit", color: "inherit",
+                             fontWeight: 500, cursor: "pointer", userSelect: "none",
                              display: "flex", alignItems: "center", gap: 8 }}>
                 <RightOutlined style={{ fontSize: 12, color: "var(--mb-text-3)", transition: "transform .15s",
                                         transform: subsOpen ? "rotate(90deg)" : "none" }} />
@@ -539,7 +538,7 @@ export default function PartSearchPage() {
                       : "暂无"}
                   </span>
                 )}
-              </span>
+              </button>
               {subsOpen && canEditSubstitutes && (
                 <Space wrap>
                   <Input
@@ -591,7 +590,7 @@ export default function PartSearchPage() {
                           okText="解除" cancelText="取消" okButtonProps={{ danger: true }}
                           onConfirm={() => removeSubstitute(s.pn_std)}
                         >
-                          <a style={{ color: "var(--mb-danger)", fontSize: 12.5 }}>解除</a>
+                          <Button type="link" size="small" danger style={{ fontSize: 12.5 }}>解除</Button>
                         </Popconfirm>
                       ) },
                   ]}

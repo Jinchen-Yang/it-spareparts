@@ -10,8 +10,8 @@
  * - 归档池：只读档案 + "先恢复"提示，不渲染任何保存按钮。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, within } from "../../test/antdRender";
+
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
 
@@ -113,11 +113,11 @@ function renderPage(url = "/pool-management") {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  message.destroy();   // antd message 渲染在 body 挂载点，cleanup 不会清，需显式销毁
+
 });
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 describe("约束价覆盖率与 URL 缺失筛选", () => {

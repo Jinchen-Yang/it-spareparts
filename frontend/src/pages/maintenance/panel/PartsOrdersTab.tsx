@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../../components/maintenance/ReturnStatusColumn";
-import { Alert, Button, Card, Select, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Card, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
 import { getBoardProjectOrders } from "../../../api/maintenanceBossBoard";
@@ -72,6 +72,7 @@ export function PartsOrdersTab({
   /** 项目全部 XSDD 合同号（聚合行供给）；多于一个时给出合同筛选（#39）。 */
   contractNos: string[];
 }) {
+  const { message } = App.useApp();
   const [orders, setOrders] = useState<BoardOrderRow[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersPage, setOrdersPage] = useState(1);
@@ -229,9 +230,9 @@ export function PartsOrdersTab({
       title: "需求单号",
       dataIndex: "order_no",
       render: (value: string, order) => (
-        <a onClick={() => toggleOrder(order)}>
+        <Button type="link" size="small" onClick={() => toggleOrder(order)}>
           {value}
-        </a>
+        </Button>
       ),
     },
     { title: "销售订单", dataIndex: "linked_sales_order_no", render: raw },

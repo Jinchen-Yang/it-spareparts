@@ -5,8 +5,8 @@
  * - 在途 close / 切项目（epoch）隔离：旧 finally 不解锁新请求；
  * - 权限无入口（由父页面控制，这里测组件本身在无权限页面不被渲染的行为交给页面测试）。
  */
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -120,7 +120,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 describe("DemandLineCreate 面板模式（固定项目）", () => {

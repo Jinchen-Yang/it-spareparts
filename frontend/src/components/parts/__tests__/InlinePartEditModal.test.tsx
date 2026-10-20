@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
 import { api } from "../../../api";
 import InlinePartEditModal from "../InlinePartEditModal";
 

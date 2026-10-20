@@ -1,10 +1,7 @@
 import { formatBusinessDateTime } from "../../utils/date";
 /** 账号列表页签：筛选（模板/角色/状态/关键词）+ 多选批量 + 单账号操作。 */
 import { useMemo, useState } from "react";
-import {
-  Alert, Button, Descriptions, Drawer, Empty, Form, Input, List, Modal,
-  Popconfirm, Select, Space, Tag, message,
-} from "antd";
+import { App, Alert, Button, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Select, Space, Tag } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import ResizableTable from "../../components/ResizableTable";
 import type { Account, AccountsMeta, BulkOperation } from "../../api/accounts";
@@ -25,6 +22,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   loading: boolean;
   onChanged: () => void;
 }) {
+  const { message } = App.useApp();
   const [fTpl, setFTpl] = useState<string>();
   const [fRole, setFRole] = useState<string>();
   const [fActive, setFActive] = useState<string>();
@@ -134,11 +132,11 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
       ? <span style={{ color: "#999" }}>系统账号</span>
       : (
         <Space size="small">
-          <a onClick={() => setPermT(u)}>权限</a>
-          <a onClick={() => setPwT(u)}>改密</a>
-          <a onClick={() => openActivity(u)}>活动</a>
+          <Button type="link" size="small" onClick={() => setPermT(u)}>权限</Button>
+          <Button type="link" size="small" onClick={() => setPwT(u)}>改密</Button>
+          <Button type="link" size="small" onClick={() => openActivity(u)}>活动</Button>
           <Popconfirm title={u.is_active ? "停用该账号？" : "启用该账号？"} onConfirm={() => toggleActive(u)}>
-            <a style={{ color: u.is_active ? "#cf1322" : "#389e0d" }}>{u.is_active ? "停用" : "启用"}</a>
+            <Button type="link" size="small" danger={u.is_active}>{u.is_active ? "停用" : "启用"}</Button>
           </Popconfirm>
           {isAdmin && u.username !== "admin" && u.role !== "admin" && (
             <Popconfirm
@@ -148,7 +146,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
               okButtonProps={{ danger: true }}
               onConfirm={() => removeAccount(u)}
             >
-              <a style={{ color: "#cf1322" }}>删除</a>
+              <Button type="link" size="small" danger>删除</Button>
             </Popconfirm>
           )}
         </Space>
@@ -195,7 +193,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
               <Button size="small" onClick={() => setBulkOp("grant")}>批量增加权限</Button>
               <Button size="small" onClick={() => setBulkOp("revoke")}>批量取消权限</Button>
               <Button size="small" onClick={() => setBulkOp("reset_to_template")}>恢复模板默认</Button>
-              <a onClick={() => setSelected([])}>清除选择</a>
+              <Button type="link" size="small" onClick={() => setSelected([])}>清除选择</Button>
             </Space>
           }
         />

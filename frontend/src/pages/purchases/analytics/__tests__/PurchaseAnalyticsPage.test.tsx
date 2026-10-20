@@ -1,7 +1,7 @@
 // 采购分析页集成（D-39 PR-4a）：URL 单一真值 —— 默认今天零参数、直开链接恢复筛选与
 // 下钻层、切换口径不重新请求、脱敏账号（金额/客户）控件门控与「—」占位、
 // 排序保护回显（ranking_restricted 禁用金额排序）、错误与空态。
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -592,7 +592,6 @@ describe("采购分析页：健壮性", () => {
     expect(kpiCards.some((card) => card.textContent?.includes("—"))).toBe(true);
   });
 });
-
 
 describe("URL 导航与每页条数", () => {
   it("打开抽屉创建历史，浏览器后退恢复原筛选与每页条数", async () => {

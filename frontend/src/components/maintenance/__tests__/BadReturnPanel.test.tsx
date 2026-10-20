@@ -1,5 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -204,7 +204,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
-  message.destroy();
+
   await waitFor(() => {
     expect(document.querySelectorAll(".ant-message-notice")).toHaveLength(0);
   });

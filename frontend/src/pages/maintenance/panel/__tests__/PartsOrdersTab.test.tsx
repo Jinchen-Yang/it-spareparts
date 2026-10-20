@@ -1,5 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BoardOrderRow } from "../../../../api/maintenanceBossBoard";
 
@@ -142,9 +142,9 @@ function renderTab(contractNos = ["XSDD-1", "XSDD-2"], registerRefresh = vi.fn()
   );
 }
 
-/** 需求单表里的单号是可点的 <a>；PN 明细表「维保单号」列是纯文本。找不到时返回 undefined 而不是抛。 */
+/** 需求单表里的单号是操作按钮；PN 明细表「维保单号」列是纯文本。 */
 const orderLink = (no: string) =>
-  screen.queryAllByText(no).find((el) => el.tagName === "A");
+  screen.queryByRole("button", { name: no });
 
 /** 页面向父级最后一次登记的本 tab 读回函数（落库后的读回屏障）。 */
 const lastRegistered = (registerRefresh: ReturnType<typeof vi.fn>) => {
@@ -193,7 +193,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
@@ -332,7 +332,7 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     expect(screen.queryByText(/当前过滤：/)).toBeNull();
     // 服务端按 XSDD 相等返回的 WBDD-2：单号里没有合同号，也必须原样展示（旧包含匹配会把它滤掉）
     await waitFor(() => expect(orderLink("WBDD-2")).toBeTruthy());
-    await waitFor(() => expect(orderLink("WBDD-1")).toBeUndefined());
+    await waitFor(() => expect(orderLink("WBDD-1")).not.toBeInTheDocument());
     // PN 明细同样只剩 XSDD-2 的行；上面的断言不再靠 PN 表里残留的 WBDD-1 文本撑着
     expect(await screen.findByText("PN-2")).toBeInTheDocument();
     expect(screen.queryByText("PN-1")).toBeNull();
@@ -528,7 +528,7 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
       expect(await lastRegistered(registerRefresh)()).toBe(false);
     });
     expect(await screen.findByText("需求单暂不可用")).toBeInTheDocument();
-    expect(orderLink("WBDD-1")).toBeUndefined();   // 需求单列表已清空
+    expect(orderLink("WBDD-1")).not.toBeInTheDocument();   // 需求单列表已清空
     // 但选中的范围是点击时拍的快照，不随列表消失而漂移成「全部」
     expect(screen.getByText(/当前过滤：WBDD-1/)).toBeInTheDocument();
     expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {

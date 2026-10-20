@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload, message } from "antd";
+import { App, Button, Drawer, Grid, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload } from "antd";
 import {
   CopyOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, FileExcelOutlined,
   PaperClipOutlined, PlusOutlined, RobotOutlined, SendOutlined, StopOutlined,
@@ -77,6 +77,7 @@ function nodeText(n: React.ReactNode): string {
 /** 生成/上传的文件卡片：在线预览（Excel 表格 / 图片）+ 下载。
  * 替代裸下载按钮；预览/下载都走带鉴权 fetch，绝不整页刷新打断对话。 */
 function FileCard({ href, label }: { href: string; label?: string }) {
+  const { message } = App.useApp();
   const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
   const [open, setOpen] = useState(false);
   const [pv, setPv] = useState<FilePreview | null>(null);
@@ -215,12 +216,13 @@ function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) 
   if (!text) return null;
   return (
     <div style={{ marginBottom: 8 }}>
-      <div onClick={() => setOpen((o) => !o)}
+      <Button type="text" aria-expanded={open} onClick={() => setOpen((o) => !o)}
         style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                 height: "auto", padding: 0,
                  fontSize: 12.5, color: "var(--mb-text-3)", userSelect: "none" }}>
         <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
         <span>💭 {streaming ? "思考中…" : "已思考"}</span>
-      </div>
+      </Button>
       {open && (
         <div style={{ marginTop: 4, padding: "8px 12px", background: "#F6F3EE", borderRadius: 8,
                       borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "var(--mb-text-3)",
@@ -240,13 +242,14 @@ function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
   const summary = groups.map((g) => `${label(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`).join(" · ");
   return (
     <div style={{ marginTop: 8 }}>
-      <div onClick={() => setOpen((o) => !o)}
+      <Button type="text" aria-expanded={open} onClick={() => setOpen((o) => !o)}
         style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                 height: "auto", padding: 0,
                  fontSize: 12, color: "var(--mb-text-3)", userSelect: "none", maxWidth: "100%" }}>
         <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
         <span>🔧 用了 {tools.length} 次工具</span>
         {!open && <span style={{ color: "var(--mb-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {summary}</span>}
-      </div>
+      </Button>
       {open && (
         <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
           {tools.map((t, i) => {
@@ -301,6 +304,12 @@ function UserContent({ text }: { text: string }) {
 }
 
 export default function ChatPage() {
+  const { message } = App.useApp();
+  const screens = Grid.useBreakpoint();
+  // 与 AppShell 共用 AntD md 断点（768px），首帧未测量时保留桌面布局。
+  const isMobile = screens.md === false;
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  useEffect(() => { if (!isMobile) setSessionsOpen(false); }, [isMobile]);
   // 会话与消息都在服务端（平台化 P1）：刷新/换设备记录不丢。
   // activeId=null 表示"未落库的新对话"，首次发送时才真正建会话。
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([]);
@@ -654,8 +663,51 @@ export default function ChatPage() {
 
   const runningTool = toolRuns.find((t) => !t.done);
 
+  const sessionList = (
+    <>
+      <div style={{ padding: 12 }}>
+        <Button block icon={<PlusOutlined />} onClick={() => { newChat(); setSessionsOpen(false); }}>
+          新对话
+        </Button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "0 8px 12px" }}>
+        {sessions.map((s) => (
+          <div key={s.id} className="sess-item" style={{
+            padding: "2px 6px", borderRadius: 8, marginBottom: 2,
+            display: "flex", alignItems: "center", gap: 6,
+            background: s.id === activeId ? "#eef2ff" : "transparent",
+          }}>
+            <Button type="text" onClick={() => {
+              if (s.id !== activeId) void openSession(s.id);
+              setSessionsOpen(false);
+            }} style={{
+              flex: 1, minWidth: 0, paddingInline: 4, justifyContent: "flex-start",
+              color: s.id === activeId ? "#4f46e5" : "#374151", fontSize: 13,
+            }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
+            </Button>
+            {generatingIds.has(s.id) && (
+              <span title="生成中（后台）" style={{
+                width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: "#10b981",
+                animation: "blink 1.2s step-start infinite",
+              }} />
+            )}
+            <Popconfirm title="删除该对话？" onConfirm={() => removeSession(s.id)}>
+              <Button className="sess-del" type="text" size="small" danger
+                aria-label={`删除对话：${s.title}`} icon={<DeleteOutlined />}
+                style={{ opacity: isMobile ? 1 : undefined, flexShrink: 0 }} />
+            </Popconfirm>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+
   return (
-    <div style={{ display: "flex", margin: -24, height: "calc(100vh - 64px)", background: "#fff" }}>
+    <div style={{
+      display: "flex", margin: "calc(-1 * var(--mb-shell-content-padding))",
+      height: "calc(100dvh - var(--mb-shell-header-height))", background: "#fff", minWidth: 0,
+    }}>
       <style>{`
         .chat-md table { border-collapse: collapse; margin: 10px 0; background: #fff; font-size: 13px; }
         .chat-md th, .chat-md td { border: 1px solid #e5e7eb; padding: 5px 12px; }
@@ -668,55 +720,37 @@ export default function ChatPage() {
         .chat-md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid #c7d2fe; background: #f8faff; color: #4b5563; }
         .chat-md code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
         .sess-item:hover { background: #eef2ff !important; }
-        .sess-item:hover .sess-del { opacity: 1; }
+        .sess-del { opacity: 0; }
+        .sess-item:hover .sess-del, .sess-item:focus-within .sess-del { opacity: 1; }
         .turn-assistant:hover .copy-btn { opacity: 1; }
         @keyframes blink { 50% { opacity: 0; } }
         .cursor { display: inline-block; width: 7px; height: 16px; background: #4f46e5; vertical-align: -2px; animation: blink 1s step-start infinite; }
       `}</style>
 
       {/* 会话栏 */}
-      <aside style={{ width: 230, borderRight: "1px solid #f0f0f0", background: "#fafafa",
-                      display: "flex", flexDirection: "column", flexShrink: 0 }}>
-        <div style={{ padding: 12 }}>
-          <Button block icon={<PlusOutlined />} onClick={newChat}>
-            新对话
-          </Button>
-        </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
-          {sessions.map((s) => (
-            <div key={s.id} className="sess-item" role="button" tabIndex={0}
-              onClick={() => s.id !== activeId && openSession(s.id)}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); s.id !== activeId && openSession(s.id); } }}
-              style={{
-                padding: "8px 10px", borderRadius: 8, cursor: "pointer", marginBottom: 2,
-                display: "flex", alignItems: "center", gap: 6,
-                background: s.id === activeId ? "#eef2ff" : "transparent",
-                color: s.id === activeId ? "#4f46e5" : "#374151",
-              }}>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis",
-                             whiteSpace: "nowrap", fontSize: 13 }}>{s.title}</span>
-              {generatingIds.has(s.id) && (
-                <span title="生成中（后台）" style={{
-                  width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: "#10b981",
-                  animation: "blink 1.2s step-start infinite",
-                }} />
-              )}
-              <Popconfirm title="删除该对话？" onConfirm={(e) => {
-                e?.stopPropagation();
-                removeSession(s.id);
-              }}>
-                <DeleteOutlined className="sess-del" onClick={(e) => e.stopPropagation()}
-                  style={{ opacity: 0, fontSize: 12, color: "var(--mb-text-3)" }} />
-              </Popconfirm>
-            </div>
-          ))}
-        </div>
-      </aside>
+      {!isMobile && (
+        <aside aria-label="会话列表" style={{ width: 230, borderRight: "1px solid #f0f0f0", background: "#fafafa",
+                        display: "flex", flexDirection: "column", flexShrink: 0 }}>
+          {sessionList}
+        </aside>
+      )}
+      {isMobile && (
+        <Drawer title="会话" placement="left" open={sessionsOpen}
+          onClose={() => setSessionsOpen(false)} width="min(320px, 100vw)"
+          styles={{ body: { padding: 0, display: "flex", flexDirection: "column" } }}>
+          {sessionList}
+        </Drawer>
+      )}
 
       {/* 主区 */}
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <div ref={scrollBoxRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto" }}>
-          <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 24px 8px" }}>
+      <main aria-label="AI 助手对话区" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+        {isMobile && (
+          <div style={{ padding: "8px 12px", borderBottom: "1px solid #f0f0f0" }}>
+            <Button aria-label="会话" onClick={() => setSessionsOpen(true)} aria-expanded={sessionsOpen}>会话</Button>
+          </div>
+        )}
+        <div ref={scrollBoxRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+          <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px var(--mb-shell-content-padding) 8px" }}>
             {loadingTurns && (
               <div style={{ textAlign: "center", padding: 48 }}><Spin /></div>
             )}
@@ -733,7 +767,7 @@ export default function ChatPage() {
                 <div style={{ color: "var(--mb-text-3)", marginBottom: 28 }}>
                   基于公司真实采购 / 销售 / 库存数据回答 · 对话记录云端保存，换设备也能接着聊
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12,
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))", gap: 12,
                               maxWidth: 640, margin: "0 auto", textAlign: "left" }}>
                   {EXAMPLES.map((ex) => {
                     const clickable = !ex.q.startsWith("点左下角");
@@ -819,8 +853,8 @@ export default function ChatPage() {
         </div>
 
         {/* 输入区 */}
-        <div style={{ borderTop: "1px solid #f5f5f5", background: "#fff" }}>
-          <div style={{ maxWidth: 860, margin: "0 auto", padding: "12px 24px 8px" }}>
+        <div style={{ borderTop: "1px solid #f5f5f5", background: "#fff", flexShrink: 0 }}>
+          <div style={{ maxWidth: 860, margin: "0 auto", padding: "12px var(--mb-shell-content-padding) 8px" }}>
             {pendingFile && (
               <Tag closable color="purple" onClose={() => setPendingFile(null)}
                 style={{ marginBottom: 8, padding: "3px 10px" }}>
@@ -872,7 +906,7 @@ export default function ChatPage() {
                     send(input);
                   }
                 }}
-                style={{ flex: 1, fontSize: 14 }}
+                style={{ flex: 1, minWidth: 0, fontSize: 14 }}
               />
               {busy && !input.trim() && !pendingFile ? (
                 <Tooltip title="停止生成">
