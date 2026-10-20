@@ -3,8 +3,8 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response, status
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -204,6 +204,50 @@ class SiteIssueCommand(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class SiteIssueLineCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_issue_version: StrictInt = Field(ge=1)
+    expected_line_version: StrictInt = Field(ge=1)
+    # Preserve omission vs explicit null/empty string; service + primitive
+    # validate all field intents before assignment.
+    changes: dict[str, object] = Field(json_schema_extra={
+        "additionalProperties": False,
+        "properties": {
+            "no_return": {
+                "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                "description": "true 免返，false 应返，null 恢复按规则判断；省略不修改",
+            },
+            "quantity": {"anyOf": [{"type": "number"}, {"type": "string"}]},
+            "serial_number": {"type": ["string", "null"]},
+            "remark": {"type": ["string", "null"]},
+            "demand_order_no": {"type": ["string", "null"], "description": "显式空串清空，省略保留"},
+            "pn": {"type": "string"},
+            "part_id": {"type": "integer"},
+        },
+    })
+    reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class SiteIssueHeaderCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_issue_version: StrictInt = Field(ge=1)
+    changes: dict[str, object] = Field(json_schema_extra={
+        "additionalProperties": False,
+        "properties": {
+            "issue_no": {"type": "string", "maxLength": 64},
+            "issue_date": {"type": "string", "format": "date"},
+            "receiver": {"type": ["string", "null"], "maxLength": 128},
+            "issued_by": {"type": ["string", "null"], "maxLength": 128},
+            "site_location": {"type": ["string", "null"], "maxLength": 256},
+        },
+    })
+    reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
 class ManualSiteIssueLineInput(BaseModel):
     """页面人工登记领用行：PN 身份用 part_id，绝不拿展示文本回传后端猜。
 
@@ -297,6 +341,7 @@ class SiteIssueSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
+    issue_id: str | None = Field(default=None, min_length=1, max_length=36)
     q: str | None = None
     workflow_statuses: list[str] = Field(
         default_factory=lambda: ["draft", "confirmed", "corrected", "void"],
@@ -1050,6 +1095,7 @@ def search_project_site_issues(
         payload = operations.search_site_issues(
             db,
             project_id=body.project_id,
+            issue_id=body.issue_id,
             q_text=body.q,
             workflow_statuses=body.workflow_statuses,
             page=body.page,
@@ -1829,6 +1875,112 @@ def patch_manual_site_issue(
         ),
         reason=body.reason,
     )
+
+
+@stable_site_issue_router.patch(
+    "/{issue_id}/lines/{issue_line_id}",
+    openapi_extra={"requestBody": {
+        "required": True,
+        "content": {"application/json": {"schema": SiteIssueLineCorrection.model_json_schema()}},
+    }},
+)
+def correct_site_issue_line(
+    body: object = Body(None),
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    issue_line_id: str = Path(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+) -> dict:
+    from app.services import maintenance_site_issue_line_correction as correction
+
+    return _site_issue_correction_result(
+        db=db, ident=ident, body=body, schema=SiteIssueLineCorrection,
+        command_fn=correction.correct_site_issue_line,
+        issue_id=issue_id, issue_line_id=issue_line_id,
+    )
+
+
+@stable_site_issue_router.patch(
+    "/{issue_id}/header",
+    openapi_extra={"requestBody": {
+        "required": True,
+        "content": {"application/json": {"schema": SiteIssueHeaderCorrection.model_json_schema()}},
+    }},
+)
+def correct_site_issue_header(
+    body: object = Body(None),
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+) -> dict:
+    from app.services import maintenance_site_issue_line_correction as correction
+
+    return _site_issue_correction_result(
+        db=db, ident=ident, body=body, schema=SiteIssueHeaderCorrection,
+        command_fn=correction.correct_site_issue_header, issue_id=issue_id,
+    )
+
+
+def _site_issue_correction_result(*, db, ident, body, schema, command_fn, **target) -> dict:
+    """Both stable commands use the same current-account guard and transaction."""
+    from app import permissions
+    from app.services import maintenance_site_issue_line_correction as correction
+    from app.services.maintenance_site_issue_facts import SiteIssueEditError
+
+    def authorize(project_id: str | None) -> str:
+        # Repeat all guards after locks, with a fresh account snapshot. A replay
+        # also requires today's permissions and scope, never the old receipt's.
+        user = db.scalar(select(SysUser).where(
+            SysUser.username == ident.get("sub"),
+        ).execution_options(populate_existing=True))
+        operator = _real_operator(db, ident)
+        if user is None or int(user.token_version or 0) != int(ident.get("tv", 0)):
+            raise HTTPException(403, "账号权限已变化，请重新登录")
+        current = UserContext(
+            user_id=operator, role=user.role, salesperson_name=user.salesperson_name,
+            permissions=permissions.runtime_safe(permissions.effective_for_user(user)),
+            is_authenticated=True,
+        )
+        require_page("page_maintenance")(current)
+        require_action("action_maintenance_site_issue_manage", require_data="data_purchase_cost")(current)
+        if project_id is not None:
+            enforce_maintenance_project_access(db, project_id=project_id, ctx=current)
+        return operator
+
+    try:
+        authorize(None)
+        try:
+            command = schema.model_validate(body)
+        except ValidationError as exc:
+            raise SiteIssueEditError(
+                "site_issue_edit_invalid_fields", "领用更正参数无效，请核对版本、字段意图、原因和幂等键",
+            ) from exc
+        result = command_fn(
+            db, **target, **command.model_dump(), authorize=authorize,
+        )
+        db.commit()
+        return result
+    except SiteIssueEditError as exc:
+        db.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    except correction.SiteIssueLineCorrectionConflict as exc:
+        db.rollback()
+        raise HTTPException(409, exc.detail) from exc
+    except HTTPException as exc:
+        db.rollback()
+        if exc.status_code == 403:
+            raise HTTPException(403, {
+                "code": "site_issue_edit_permission_denied", "message": str(exc.detail),
+            }) from exc
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, {
+            "code": "site_issue_edit_write_conflict", "message": "领用更正发生并发冲突，请刷新核对后重试",
+        }) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 # Compatibility composition for isolated API tests/embedders. Production mounts

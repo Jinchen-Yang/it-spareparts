@@ -15,6 +15,8 @@ export interface SourceCancellationDemand {
   pn: string | null;
   qty: string | null;
   is_active: boolean;
+  manual_created: boolean;
+  protected_fields: string[];
 }
 
 export interface SourceCancellationSiteLine {
@@ -26,6 +28,10 @@ export interface SourceCancellationSiteLine {
   pn: string | null;
   quantity: string;
   is_active: boolean;
+  /** Reliable source-demand lineage only; these flags describe the demand. */
+  source_demand_line_id: number | null;
+  manual_created: boolean;
+  protected_fields: string[];
 }
 
 export interface SourceCancellationDetail extends SourceCancellationCandidate {
@@ -70,6 +76,13 @@ export const listSourceCancellations = (projectId: string, params: {
 
 export const getSourceCancellation = (projectId: string, batchId: number, sourceOrderId: string) =>
   api.get<SourceCancellationDetail>(candidatePath(projectId, batchId, sourceOrderId));
+
+export const getSourceCancellationStatus = (
+  projectId: string, batchId: number, sourceOrderId: string, idempotencyKey: string, sessionToken: string,
+) => api.get<{ result: SourceCancellationResult | null }>(
+  `${candidatePath(projectId, batchId, sourceOrderId)}/confirmation-status`,
+  { params: { idempotency_key: idempotencyKey }, headers: { Authorization: `Bearer ${sessionToken}` } },
+);
 
 export const confirmSourceCancellation = (
   projectId: string, batchId: number, sourceOrderId: string, body: SourceCancellationConfirmation,
