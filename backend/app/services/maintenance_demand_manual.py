@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import exists, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -42,6 +41,14 @@ from app.services.maintenance_cost import (
     MaintenanceCostRecomputeBusy,
     recompute as recompute_cost,
 )
+from app.services.maintenance_field_protection import (
+    DEMAND_FACT_FIELDS,
+    legacy_review_condition,
+    normalized_value,
+    protected_fields,
+    record_manual_changes,
+    snapshot_fields,
+)
 
 
 class DemandManualError(Exception):
@@ -55,16 +62,10 @@ class DemandManualConflict(Exception):
 # 字段白名单（失败关闭）：只开放需求事实行上可安全页面编辑的列。
 # 头字段在 f_maintenance_order、无 loader 保护 —— 显式排除（见模块 docstring）。
 # 成本列 recompute 独占；异常标记是导入/重算混合所有权 —— 双双排除。
-DEMAND_LINE_EDITABLE_FIELDS: frozenset[str] = frozenset({
-    "qty", "return_qty", "serial_numbers", "description", "pn_raw", "pn_std",
-})
+DEMAND_LINE_EDITABLE_FIELDS = DEMAND_FACT_FIELDS - {"part_id"}
 
 _QTY_COLUMNS = frozenset({"qty", "return_qty"})
 _REPRICE_COLUMNS = _QTY_COLUMNS | {"pn_raw", "pn_std"}
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _digest(snapshot: dict) -> str:
@@ -90,11 +91,20 @@ def _lock_data_change(db: Session) -> None:
                {"k": DATA_CHANGE_ADVISORY_LOCK_KEY})
 
 
+def _lock_workbook_states(db: Session, *, project_ids):
+    states = _project_ops.lock_workbook_states(db, project_ids=project_ids)
+    # FOR UPDATE 不会自动替换身份映射里已存在的 ORM 值；取锁后、赋值前重读。
+    for state in states.values():
+        db.refresh(state)
+    return states
+
+
 def _line_for_update(db: Session, raw_line_id: str) -> FMaintenanceLine:
     line = db.execute(
         select(FMaintenanceLine)
         .where(FMaintenanceLine.raw_line_id == raw_line_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if line is None:
         raise DemandManualError("需求单明细行不存在")
@@ -111,18 +121,21 @@ def _check_scope(projects: set[str], allowed: set[str] | None, *, action: str) -
         raise DemandManualError(f"该需求单不在你的项目可见范围内，不能{action}")
 
 
-def _assigned_project_ids(db: Session, source_order_ids: set[str]) -> set[str]:
+def _assigned_project_ids(
+    db: Session, source_order_ids: set[str], *, lock: bool = False,
+) -> set[str]:
     from app.models.maintenance_source_assignment import (
         MaintenanceSourceOrderAssignment,
     )
     out: set[str] = set()
-    for sid in source_order_ids:
-        out.update(db.scalars(
-            select(MaintenanceSourceOrderAssignment.project_id).where(
-                MaintenanceSourceOrderAssignment.source_order_id == sid,
-                MaintenanceSourceOrderAssignment.is_active.is_(True),
-            )
-        ))
+    for sid in sorted(source_order_ids):
+        statement = select(MaintenanceSourceOrderAssignment.project_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id == sid,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        ).order_by(MaintenanceSourceOrderAssignment.assignment_id)
+        if lock:
+            statement = statement.with_for_update()
+        out.update(db.scalars(statement))
     return out
 
 
@@ -199,10 +212,54 @@ def _line_snapshot(line: FMaintenanceLine) -> dict:
         "return_qty": str(line.return_qty) if line.return_qty is not None else None,
         "serial_numbers": line.serial_numbers,
         "description": line.description,
+        "line_note": line.line_note,
         "pn_raw": line.pn_raw,
         "pn_std": line.pn_std,
         "edited_source": line.edited_source,
         "manual_override": dict(line.manual_override or {}),
+        "protected_fields": sorted(protected_fields(
+            raw_line_id=line.raw_line_id,
+            edited_source=line.edited_source,
+            manual_override=line.manual_override,
+        )),
+    }
+
+
+def list_manual_protection_review(
+    db: Session, *, allowed_project_ids: set[str] | None,
+    page: int = 1, page_size: int = 50,
+) -> dict:
+    """只读列出历史整行保护来源行；不根据新账本推断或转换旧保护。"""
+    from app.services.maintenance_demands import beta_active_demand_condition
+
+    line, order = FMaintenanceLine, FMaintenanceOrder
+    statement = select(
+        line.raw_line_id, order.raw_order_id.label("source_order_id"),
+        order.order_no, line.line_no, line.pn_std, line.pn_raw, line.edited_source,
+    ).join(order, order.id == line.order_id).where(
+        line.is_active.is_(True), legacy_review_condition(line),
+        beta_active_demand_condition(order),
+    )
+    if allowed_project_ids is not None:
+        assignment = MaintenanceSourceOrderAssignment
+        assigned = select(1).where(
+            assignment.source_order_id == order.raw_order_id,
+            assignment.is_active.is_(True),
+        )
+        # 与需求明细读入口相同：至少一个可见归属，且不能有范围外活跃归属。
+        statement = statement.where(
+            exists(assigned.where(assignment.project_id.in_(allowed_project_ids))),
+            ~exists(assigned.where(~assignment.project_id.in_(allowed_project_ids))),
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    rows = db.execute(statement.order_by(order.raw_order_id, line.raw_line_id)
+                      .offset((page - 1) * page_size).limit(page_size)).mappings()
+    return {
+        "items": [
+            {**dict(row), "reason": "历史整行人工保护，改动字段证据不足，待核对"}
+            for row in rows
+        ],
+        "total": total, "page": page, "page_size": page_size,
     }
 
 
@@ -266,11 +323,14 @@ def patch_demand_line(
     )
     projects = _assigned_project_ids(db, {order_raw_id})
     _check_scope(projects, allowed_project_ids, action="修改")
-    prelocked = _project_ops.lock_workbook_states(db, project_ids=projects)
+    prelocked = _lock_workbook_states(db, project_ids=projects)
 
     order = db.execute(
         select(_FO).where(_FO.id == order_id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
+    if _assigned_project_ids(db, {order.raw_order_id}, lock=True) != projects:
+        raise DemandManualConflict("该需求单项目归属已变化，请刷新后重试")
     line = _line_for_update(db, raw_line_id)
 
     before = _line_snapshot(line)
@@ -279,59 +339,20 @@ def patch_demand_line(
         raise DemandManualConflict(
             "该明细行已被他人修改（版本不一致），请刷新行数据后重试"
         )
-    override: dict = dict(line.manual_override or {})
+    field_before = snapshot_fields(line)
     changed_columns: dict = {}
     for field in DEMAND_LINE_EDITABLE_FIELDS & set(updates):
         value = updates[field]
         if field in _QTY_COLUMNS:
             value = _validate_qty(value, field)
-            current = getattr(line, field)
-            current = current.quantize(Decimal("0.001")) if current is not None else None
-            if value == current:
-                continue
-        elif field == "serial_numbers":
-            if value is not None and not isinstance(value, str):
-                raise DemandManualError("SN 必须是文本")
-            value = (value or "").strip() or None
-            if value == (line.serial_numbers or None):
-                continue
         else:
             if value is not None and not isinstance(value, str):
                 raise DemandManualError(f"{field} 必须是文本")
             if field in ("pn_raw", "pn_std") and not (value or "").strip():
                 raise DemandManualError(f"{field} 不能为空")
-            value = (value or "").strip() or None if field == "description" else (value or "").strip()
-            if value == getattr(line, field):
-                continue
-        # override 账本：source_value 只记首次改前的原值（后续覆盖保留最早原值，
-        # clear_override 才能一路还原到氚云原始事实）。判"首次"用 key 存在性
-        # 而非值是否 None——原值本来就是 null 时，第二次编辑不能把 null 误当
-        # 首次快照覆盖成第一次的手工值（review #9）。
-        entry = override.get(field) or {}
-        # P1#3：**先**从旧 entry/组内取首次身份快照，再重建 entry——顺序反了
-        # 会把组快照丢进刚被覆盖的新 dict（A→B→C 只改同一字段时第二次快照
-        # 就从 A 变成 B，clear 回不到最初身份）。
-        group_pid = None
-        if field in ("pn_std", "pn_raw"):
-            for k in ("pn_std", "pn_raw"):
-                e = override.get(k) or {}
-                if "source_value_part_id" in e:
-                    group_pid = e["source_value_part_id"]
-                    break
-        override[field] = {
-            "value": str(value) if isinstance(value, Decimal) else value,
-            "source_value": entry.get("source_value"),
-            "updated_by": operated_by,
-            "updated_at": _now().isoformat(),
-        }
-        if "source_value" not in entry:
-            old = getattr(line, field)
-            override[field]["source_value"] = (
-                str(old) if isinstance(old, Decimal) else old
-            )
-        if field in ("pn_std", "pn_raw"):
-            override[field]["source_value_part_id"] = (
-                group_pid if group_pid is not None else line.part_id)
+        value = normalized_value(field, value)
+        if value == normalized_value(field, getattr(line, field)):
+            continue
         changed_columns[field] = value
 
     if not changed_columns:
@@ -353,6 +374,8 @@ def patch_demand_line(
             raise DemandManualError(
                 f"新 PN 未匹配到型号主数据：{effective_std}（拒绝修改，先在主数据治理建档）"
             )
+        if "pn_std" in changed_columns:
+            changed_columns["pn_std"] = db.get(DimPart, resolved).pn_std
         new_raw = changed_columns.get("pn_raw")
         if new_raw is not None:
             raw_resolved = _resolve_part_id(db, part_id=None, pn_std=str(new_raw))
@@ -369,7 +392,12 @@ def patch_demand_line(
 
     for field, value in changed_columns.items():
         setattr(line, field, value)
-    line.manual_override = override
+    actual_fields = record_manual_changes(
+        line, before=field_before, operated_by=operated_by, source="page_manual",
+    )
+    if not actual_fields:
+        return {"changed": False, "digest": _digest(_line_snapshot(line)),
+                **_line_snapshot(line)}
     # P1#4：真实 WBDD 行的字段覆盖不升格 edited_source——行来源仍是 wbdd，
     # snapshot_diff 的删单对账照常工作；保护完全由 manual_override 字段级承担。
     # 纯手工行（create 建的 page_manual）不变。
@@ -492,7 +520,7 @@ def create_manual_demand_line(
                     "order_no": existing.order_no,
                     "digest": _digest(_line_snapshot(line)),
                     **_line_snapshot(line)}
-    prelocked = _project_ops.lock_workbook_states(db, project_ids=[project_id])
+    prelocked = _lock_workbook_states(db, project_ids=[project_id])
 
     project = db.scalar(
         select(_Project).where(_Project.project_id == project_id)
@@ -595,7 +623,7 @@ def clear_override(
     allowed_project_ids: set[str] | None = None,
     expected_digest: str | None = None,
 ) -> dict:
-    """撤销一个字段的 override，恢复到账本里的 source_value（氚云原始值）。"""
+    """撤销字段账本并恢复首次修改前快照；采用新原件值必须重新上传。"""
     if field not in DEMAND_LINE_EDITABLE_FIELDS:
         raise DemandManualError(f"不支持撤销的字段：{field}")
     if not isinstance(reason, str) or not reason.strip():
@@ -614,10 +642,13 @@ def clear_override(
     )
     projects = _assigned_project_ids(db, {order_raw_pre})
     _check_scope(projects, allowed_project_ids, action="撤销")
-    prelocked = _project_ops.lock_workbook_states(db, project_ids=projects)
+    prelocked = _lock_workbook_states(db, project_ids=projects)
     order = db.execute(
         select(_FO).where(_FO.id == order_id_pre).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
+    if _assigned_project_ids(db, {order.raw_order_id}, lock=True) != projects:
+        raise DemandManualConflict("该需求单项目归属已变化，请刷新后重试")
     line = _line_for_update(db, raw_line_id)
 
     before = _line_snapshot(line)
@@ -630,7 +661,8 @@ def clear_override(
     entry = override.get(field)
     # PN 是身份组：clear 组内任一控件都合法（哪怕只 override 了另一个字符串）
     if entry is None and not (
-        field in ("pn_std", "pn_raw") and ("pn_std" in override or "pn_raw" in override)
+        field in ("pn_std", "pn_raw")
+        and {"pn_std", "pn_raw", "part_id"} & override.keys()
     ):
         raise DemandManualError(f"该行没有 {field} 的 override 记录")
 
@@ -661,6 +693,9 @@ def clear_override(
                 part_id_snapshot = e["source_value_part_id"]
                 has_pid_snapshot = True
                 break
+        if "source_value" in (override.get("part_id") or {}):
+            part_id_snapshot = override["part_id"]["source_value"]
+            has_pid_snapshot = True
         if has_pid_snapshot and part_id_snapshot != line.part_id:
             # clear 回到原身份也是换绑：B 期间的人工价不得留给 A
             _retire_manual_cost_override(db, line.id, operated_by=operated_by)
@@ -669,6 +704,7 @@ def clear_override(
         # 无条件 pop 会误删 PN 人工保护，让下次 WBDD 重导覆盖手工 PN。
         override.pop("pn_std", None)
         override.pop("pn_raw", None)
+        override.pop("part_id", None)
     else:
         setattr(line, field, source_value)
     override.pop(field, None)
@@ -692,5 +728,10 @@ def clear_override(
         except MaintenanceCostRecomputeBusy as exc:
             raise DemandManualConflict("成本重算忙，请稍后重试") from exc
     db.flush()
+    message = "已撤销字段保护并恢复首次人工修改前的快照；如需采用新原件值，请重新上传原件。"
+    if restored_fields & set(after["protected_fields"]):
+        message = ("已撤销字段账本并恢复首次人工修改前的快照；该行的整行人工保护仍保留，"
+                   "需先核对。采用新原件值仍需重新上传原件。")
     return {"changed": True, "digest": _digest(_line_snapshot(line)),
+            "source_reupload_required": True, "message": message,
             **_line_snapshot(line)}

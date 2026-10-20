@@ -3,8 +3,8 @@
 覆盖四条命脉：
 1. override 账本：PATCH 写保护字段后，WBDD upsert 重导不覆盖手工值（loader CASE 保护），
    但未保护字段照常更新；
-2. edited_source 保护：wbdd 行被页面改过后升为 page_manual，此后整行可保护字段
-   均不被重导覆盖（含既有总表 workbook_manual 语义的统一）；
+2. edited_source 保护：页面修改来源行保持 wbdd，仅实际改动字段受保护；
+   历史 workbook_manual 行和真正人工新建行继续保留整行保护；
 3. 原件缺项候选排除手工建单，但不排除人工改过字段的真实 WBDD；
 4. 白名单失败关闭：成本列/未知字段/头字段全拒；无项目挂靠拒绝（审计落点要求）。
 附：clear_override 恢复 source_value；手工建行合成头/批次身份。
