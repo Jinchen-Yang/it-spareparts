@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
 import GovernancePage from "../GovernancePage";
@@ -15,7 +16,7 @@ it.each([
   ["自动分类", "/governance/classify-backfill"],
   ["重算利润", "/profit/recompute"],
 ])("%s 取消不发请求，确认一次调用原接口", async (label, endpoint) => {
-  render(<GovernancePage />);
+  render(<MemoryRouter><GovernancePage /></MemoryRouter>);
   expect(screen.getByRole("heading", { level: 1, name: "数据治理" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: label }));
   expect(api.post).not.toHaveBeenCalled();
