@@ -1,13 +1,13 @@
-"""商城销售参考均价 GET：认证、PN 身份、窗口、时间衰减、税率、过滤与隐私。
+"""商城销售/采购参考均价 GET：认证、PN、窗口、衰减、税率、过滤与隐私。
 
-口径见 docs/decisions/0020-商城参考价销售均价.md 与
+口径见 docs/decisions/0020-商城参考价销售均价.md、0021-商城参考价采购均价.md 与
 docs/integrations/resale-catalog-v1.md 的参考价一节。
 """
 
 import hashlib
 import json
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,11 +22,18 @@ from app.db import engine, get_db
 from app.main import app
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimPart, PartAlias
+from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysImportBatch
 from app.services import resale_price_reference as price_service
 from app.services.resale_pn_lookup import canonical_part
-from app.services.resale_price_reference import PriceReferenceUnavailable, _validated_amount
+from app.services.resale_price_reference import (
+    PriceReferenceUnavailable,
+    _validated_amount,
+)
+from tests.resale_price_reference_shop_contract import (
+    PriceReferenceResult as ShopPriceReferenceResult,
+)
 
 URL = "/api/integrations/resale/parts/price-reference"
 RESOLVE_URL = "/api/integrations/resale/parts/resolve"
@@ -140,9 +147,40 @@ def _sale(
     return order, created
 
 
-def _issue(db, line, status, rule_code="zero_price"):
+def _purchase(
+    db, batch, part, key, *, order_date=TODAY, status="已生效",
+    tax_rate=Decimal("0.13"), is_tax_inclusive=True,
+    lines=((Decimal(1), Decimal("113.00")),), line_batch=None,
+    **order_values,
+):
+    order = FPurchaseOrder(
+        raw_order_id=key, order_no=f"PRIVATE-PURCHASE-{key}",
+        purchaser="PRIVATE-PURCHASER", linked_sales_order_no="PRIVATE-SALES-LINK",
+        data_status=status, order_date=order_date, tax_rate=tax_rate,
+        is_tax_inclusive=is_tax_inclusive, import_batch_id=batch.id,
+        **order_values,
+    )
+    db.add(order)
+    db.flush()
+    created = []
+    for index, (qty, price) in enumerate(lines):
+        line = FPurchaseLine(
+            raw_line_id=f"{key}-{index}", order_id=order.id, line_no=index + 1,
+            part_id=part.id, pn_std=part.pn_std, pn_raw="PRIVATE-PURCHASE-PN",
+            description="PRIVATE-PURCHASE-DESCRIPTION", qty=qty, unit_price=price,
+            # 均价必须来自单价，不能误用实付/行金额。
+            line_amount=Decimal("98765.43"),
+            import_batch_id=(line_batch or batch).id,
+        )
+        db.add(line)
+        created.append(line)
+    db.flush()
+    return order, created
+
+
+def _issue(db, line, status, rule_code="zero_price", *, side="sales"):
     issue = FactDataQualityIssue(
-        side="sales",
+        side=side,
         line_id=line.id,
         part_id=line.part_id,
         rule_code=rule_code,
@@ -181,6 +219,17 @@ def test_contract_fixture_matches_exactly(db, catalog_client):
         db, batch, part, "contract-week-ago",
         order_date=date(2026, 10, 12),
         lines=((Decimal(1), Decimal("226.00"), True),),
+    )
+    _purchase(
+        db, batch, part, "contract-purchase-recent",
+        order_date=date(2026, 10, 18), tax_rate=Decimal(0),
+        is_tax_inclusive=False,
+        lines=((Decimal(2), Decimal("100.00")), (Decimal(1), Decimal("200.00"))),
+    )
+    _purchase(
+        db, batch, part, "contract-purchase-older",
+        order_date=date(2026, 10, 11), tax_rate=None,
+        lines=((Decimal(1), Decimal("113.00")),),
     )
     db.commit()
 
@@ -333,7 +382,7 @@ def test_pending_alias_is_ambiguous(db, catalog_client):
 
 
 def test_two_distinct_canonical_targets_are_ambiguous(db, catalog_client):
-    first = _part(db, "DUP-PN")
+    _part(db, "DUP-PN")
     second = _part(db, "OTHER-PN")
     _alias(db, "DUP-PN", second)
     db.commit()
@@ -529,7 +578,7 @@ def test_nominal_sample_count_counts_lines_not_quantity(db, catalog_client):
     )
     _sale(
         db, batch, part, "nominal-zero-qty2",
-        tax_rate=Decimal("0"),
+        tax_rate=Decimal(0),
         lines=((Decimal(2), Decimal("113.00"), True),),
     )
     db.commit()
@@ -619,7 +668,7 @@ def test_filtered_sample_counts_and_dates(db, catalog_client, monkeypatch):
     part = _part(db, "FILTER-PN")
     batch = _batch(db)
     included_date = TODAY - timedelta(days=2)
-    _, lines = _sale(
+    _, _lines = _sale(
         db, batch, part, "filter-same-order",
         order_date=included_date,
         lines=(
@@ -795,7 +844,7 @@ def test_window_and_half_life_overrides(db, catalog_client, monkeypatch):
         "ex_tax": "88.50",
     }
 
-    _configure(monkeypatch, window_days=30, half_life_days=Decimal("1"))
+    _configure(monkeypatch, window_days=30, half_life_days=Decimal(1))
     decayed = _get(catalog_client, part.pn_std).json()
     # (100 + 0.5*200) / 1.5 = 133.33
     assert decayed["calculation"]["window_days"] == 30
@@ -847,7 +896,7 @@ def test_settings_reject_invalid_values(field, value):
 def test_settings_defaults_and_overrides(monkeypatch):
     defaults = Settings(_env_file=None)
     assert defaults.resale_price_reference_window_days == 30
-    assert defaults.resale_price_reference_half_life_days == Decimal("7")
+    assert defaults.resale_price_reference_half_life_days == Decimal(7)
     assert defaults.resale_price_reference_order_statuses == ["已生效"]
     assert defaults.resale_price_reference_counts_revenue_only is True
     assert defaults.resale_price_reference_include_zero_prices is False
@@ -922,7 +971,7 @@ def test_calculation_metadata_reflects_effective_settings(
 def test_source_error_exclusion(db, catalog_client, monkeypatch):
     part = _part(db, "DQ-PN")
     batch = _batch(db)
-    _, keep = _sale(
+    _, _keep = _sale(
         db, batch, part, "dq-keep",
         lines=((Decimal(1), Decimal("100.00"), True),),
     )
@@ -1101,6 +1150,7 @@ def test_query_count_is_constant_and_get_is_read_only(db, catalog_client):
     part = _part(db, "QUERY-COUNT-PN")
     batch = _batch(db)
     _sale(db, batch, part, "query-count-one")
+    _purchase(db, batch, part, "query-count-purchase-one")
     db.commit()
 
     statements = []
@@ -1131,6 +1181,12 @@ def test_query_count_is_constant_and_get_is_read_only(db, catalog_client):
                 ),
                 lines=((Decimal(1), Decimal(index + 1), True),),
             )
+            _purchase(
+                db, batch, part, f"query-count-purchase-{index}",
+                order_date=TODAY - timedelta(days=index % 10),
+                tax_rate=Decimal("0.13") if index % 2 == 0 else Decimal("0.06"),
+                is_tax_inclusive=index % 3 == 0,
+            )
         db.commit()
         statements.clear()
         assert _get(catalog_client, part.pn_std).status_code == 200
@@ -1146,3 +1202,412 @@ def test_query_count_is_constant_and_get_is_read_only(db, catalog_client):
     # GET 只读：请求期间除 SELECT/WITH 外不得出现任何业务写入语句。
     for statement in first_request + second_request:
         assert statement.upper().startswith(("SELECT", "WITH")), statement
+
+
+# ---------------------------------------------------------------- 采购参考均价（D-43）
+
+
+def _purchase_prices(payload):
+    return [row for row in payload["prices"] if row["kind"] == "purchase"]
+
+
+def _purchase_amounts(payload):
+    return {row["tax_basis"]: row["amount"] for row in _purchase_prices(payload)}
+
+
+def test_purchase_window_boundaries_and_order_dates(db, catalog_client):
+    part = _part(db, "PURCHASE-WINDOW")
+    batch = _batch(db)
+    for key, day in (
+        ("first", WINDOW_START), ("last", TODAY),
+        ("old", WINDOW_START - timedelta(days=1)),
+        ("future", TODAY + timedelta(days=1)), ("null", None),
+    ):
+        _purchase(db, batch, part, f"purchase-window-{key}", order_date=day)
+    db.commit()
+
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert _purchase_amounts(payload) == {"inc_tax": "113.00", "ex_tax": "100.00"}
+    for row in _purchase_prices(payload):
+        assert row["sample_count"] == row["order_count"] == 2
+        assert row["window"] == {"start": "2026-09-20", "end": "2026-10-19"}
+        assert row["latest_sale_date"] == TODAY.isoformat()
+        assert row["oldest_sale_date"] == WINDOW_START.isoformat()
+        assert row["occurred_at"] == "2026-10-19T00:00:00+08:00"
+    assert payload["calculation"]["sample_count"] == 0
+    assert payload["calculation"]["latest_sale_date"] is None
+
+
+@pytest.mark.parametrize(
+    ("weighting", "expected"),
+    [
+        ("qty_weighted", {"inc_tax": "135.60", "ex_tax": "120.00"}),
+        ("line_mean", {"inc_tax": "150.67", "ex_tax": "133.33"}),
+    ],
+)
+def test_purchase_decay_and_both_weighting_methods(
+    db, catalog_client, monkeypatch, weighting, expected,
+):
+    _configure(monkeypatch, weighting=weighting)
+    part = _part(db, "PURCHASE-WEIGHTS")
+    batch = _batch(db)
+    _purchase(
+        db, batch, part, "purchase-weight-today", is_tax_inclusive=False,
+        lines=((Decimal(2), Decimal("100.00")),),
+    )
+    _purchase(
+        db, batch, part, "purchase-weight-week", order_date=TODAY - timedelta(days=7),
+        lines=((Decimal(1), Decimal("226.00")),),
+    )
+    db.commit()
+    # d(today)=1, d(7天前)=0.5；数量加权(2*113 + .5*226)/2.5，
+    # 行均值(113 + .5*226)/1.5。两行原始税基不同，先正确换算。
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    assert _purchase_amounts(response.json()) == expected
+
+
+def test_purchase_reuses_window_and_half_life_settings(db, catalog_client, monkeypatch):
+    part = _part(db, "PURCHASE-SETTINGS")
+    batch = _batch(db)
+    _purchase(db, batch, part, "purchase-settings-today")
+    _purchase(
+        db, batch, part, "purchase-settings-yesterday",
+        order_date=TODAY - timedelta(days=1),
+        lines=((Decimal(1), Decimal("226.00")),),
+    )
+    db.commit()
+    _configure(monkeypatch, window_days=1)
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "113.00", "ex_tax": "100.00"}
+    assert _purchase_prices(payload)[0]["sample_count"] == 1
+    assert _purchase_prices(payload)[0]["window"] == {
+        "start": TODAY.isoformat(), "end": TODAY.isoformat(),
+    }
+    _configure(monkeypatch, window_days=30, half_life_days=Decimal(1))
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "150.67", "ex_tax": "133.33"}
+
+
+def test_purchase_mixed_rates_and_structural_nominal_sides(db, catalog_client):
+    part = _part(db, "PURCHASE-TAX-SIDES")
+    batch = _batch(db)
+    for side_index, inclusive in enumerate((True, False, None)):
+        for rate_index, (rate, inc) in enumerate((
+            (None, "113.00"), (Decimal(0), "113.00"),
+            (Decimal("0.13"), "113.00"), (Decimal("0.06"), "106.00"),
+            (Decimal("0.006"), "100.60"),
+        )):
+            _purchase(
+                db, batch, part, f"purchase-tax-{side_index}-{rate_index}",
+                tax_rate=rate, is_tax_inclusive=inclusive,
+                lines=((Decimal(2), Decimal(inc if inclusive is True else "100.00")),),
+                # 刻意构造单头缺口：行级名义方向不能跟单头回退规则翻转。
+                amount_inc_tax=None if inclusive is True else Decimal("999.00"),
+                amount_ex_tax=Decimal("999.00") if inclusive is True else None,
+            )
+    db.commit()
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert _purchase_amounts(payload) == {"inc_tax": "109.12", "ex_tax": "100.00"}
+    inc, ex = _purchase_prices(payload)
+    assert inc["nominal_sample_count"] == 4  # False/NULL 各 NULL、0 税率两行
+    assert ex["nominal_sample_count"] == 2  # True 的 NULL、0 税率两行
+    assert inc["sample_count"] == ex["sample_count"] == 15
+    assert inc["order_count"] == ex["order_count"] == 15
+
+
+@pytest.mark.parametrize("weighting", ["qty_weighted", "line_mean"])
+@pytest.mark.parametrize(
+    ("inclusive", "first", "second", "expected"),
+    [
+        (True, "0.01", "0.02", {"inc_tax": "0.02", "ex_tax": "0.01"}),
+        (False, "0.02", "0.04", {"inc_tax": "0.03", "ex_tax": "0.03"}),
+    ],
+)
+def test_purchase_tax_conversion_rounds_only_final_average(
+    db, catalog_client, monkeypatch, weighting, inclusive, first, second, expected,
+):
+    _configure(monkeypatch, weighting=weighting)
+    part = _part(db, "PURCHASE-ROUNDING")
+    batch = _batch(db)
+    _purchase(
+        db, batch, part, "purchase-rounding", tax_rate=Decimal("0.13"),
+        is_tax_inclusive=inclusive,
+        lines=((Decimal(1), Decimal(first)), (Decimal(1), Decimal(second))),
+    )
+    db.commit()
+    payload = _get(catalog_client, part.pn_std).json()
+    # 含税原价：(.01+.02)/2/1.13=.01327...→.01；逐行 round 误变 .02。
+    # 未税原价：(.02+.04)*1.13/2=.0339→.03；逐行 round 误变 .04。
+    assert _purchase_amounts(payload) == expected
+
+
+def test_purchase_only_current_order_batch_lines_count(db, catalog_client):
+    part = _part(db, "PURCHASE-CURRENT-BATCH")
+    current, old = _batch(db), _batch(db)
+    order, _ = _purchase(
+        db, current, part, "purchase-current-lines",
+        lines=((Decimal(1), Decimal("113.00")), (Decimal(1), Decimal("226.00"))),
+    )
+    for line_no in (1, 3):  # 旧批次重复行号，以及新批次已删的行号。
+        db.add(FPurchaseLine(
+            raw_line_id=f"purchase-old-line-{line_no}", order_id=order.id,
+            line_no=line_no, part_id=part.id, qty=100, unit_price=999,
+            import_batch_id=old.id,
+        ))
+    # 整张订单只剩旧批次目标 PN 行：不能污染最新/最旧日期或订单数。
+    _purchase(
+        db, current, part, "purchase-stale-only", order_date=WINDOW_START,
+        line_batch=old,
+    )
+    db.commit()
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "169.50", "ex_tax": "150.00"}
+    for row in _purchase_prices(payload):
+        assert row["sample_count"] == 2
+        assert row["order_count"] == 1
+        assert row["oldest_sale_date"] == TODAY.isoformat()
+
+
+def test_purchase_status_price_qty_filters_and_revenue_independence(
+    db, catalog_client, monkeypatch,
+):
+    part = _part(db, "PURCHASE-FILTERS")
+    batch = _batch(db)
+    _purchase(
+        db, batch, part, "purchase-filter-keep", order_date=TODAY - timedelta(days=2),
+        lines=((Decimal(1), Decimal("113.00")), (Decimal(1), Decimal("339.00"))),
+    )
+    for key, status, qty, price in (
+        ("draft", "草稿", 1, 999), ("cancelled", "已取消", 1, 999),
+        ("pending", "进行中", 1, 999), ("zero-price", "已生效", 1, 0),
+        ("negative-price", "已生效", 1, -1), ("null-price", "已生效", 1, None),
+        ("zero-qty", "已生效", 0, 999), ("negative-qty", "已生效", -1, 999),
+        ("null-qty", "已生效", None, 999),
+    ):
+        _purchase(db, batch, part, f"purchase-filter-{key}", status=status, lines=((qty, price),))
+    db.commit()
+    default = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(default) == {"inc_tax": "226.00", "ex_tax": "200.00"}
+    row = _purchase_prices(default)[0]
+    assert row["sample_count"] == 2
+    assert row["order_count"] == 1
+    assert row["latest_sale_date"] == (TODAY - timedelta(days=2)).isoformat()
+    _configure(monkeypatch, counts_revenue_only=False)
+    assert _purchase_prices(_get(catalog_client, part.pn_std).json()) == _purchase_prices(default)
+    _configure(monkeypatch, order_statuses=["已生效", "已取消", "草稿", "进行中"])
+    widened = _get(catalog_client, part.pn_std).json()
+    assert _purchase_prices(widened)[0]["sample_count"] == 5
+    assert _purchase_prices(widened)[0]["order_count"] == 4
+    assert _purchase_prices(widened)[0]["latest_sale_date"] == TODAY.isoformat()
+
+
+def test_purchase_zero_price_switch_keeps_zero_in_denominator(db, catalog_client, monkeypatch):
+    part = _part(db, "PURCHASE-ZERO")
+    batch = _batch(db)
+    _purchase(db, batch, part, "purchase-zero", lines=((Decimal(1), Decimal(0)),))
+    _purchase(db, batch, part, "purchase-negative", lines=((Decimal(1), Decimal(-1)),))
+    _purchase(db, batch, part, "purchase-null", lines=((Decimal(1), None),))
+    db.commit()
+    assert _get(catalog_client, part.pn_std).json()["prices"] == []
+    _configure(monkeypatch, include_zero_prices=True)
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "0.00", "ex_tax": "0.00"}
+    assert _purchase_prices(payload)[0]["sample_count"] == 1
+    _purchase(db, batch, part, "purchase-positive")
+    db.commit()
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "56.50", "ex_tax": "50.00"}
+    assert _purchase_prices(payload)[0]["sample_count"] == 2
+
+
+def test_purchase_source_errors_are_domain_scoped_without_join_duplicates(
+    db, catalog_client, monkeypatch,
+):
+    part = _part(db, "PURCHASE-DQ")
+    batch = _batch(db)
+    for key, price, issue_status in (
+        ("keep", "113.00", None), ("bad", "226.00", "confirmed_source_error"),
+        ("open", "339.00", "open"), ("valid", "452.00", "confirmed_valid"),
+        ("changed", "565.00", "source_changed"),
+    ):
+        _, lines = _purchase(
+            db, batch, part, f"purchase-dq-{key}", lines=((Decimal(1), Decimal(price)),),
+        )
+        if issue_status is not None:
+            _issue(db, lines[0], issue_status, side="purchase")
+        if key == "bad":
+            _issue(db, lines[0], "open", rule_code="another-rule", side="purchase")
+        if key == "keep":
+            # 相同 line_id 的销售域疑点不能排除采购行。
+            _issue(db, lines[0], "confirmed_source_error", side="sales")
+    db.commit()
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "367.25", "ex_tax": "325.00"}
+    assert _purchase_prices(payload)[0]["sample_count"] == 4
+    _configure(monkeypatch, exclude_confirmed_source_error=False)
+    payload = _get(catalog_client, part.pn_std).json()
+    assert _purchase_amounts(payload) == {"inc_tax": "339.00", "ex_tax": "300.00"}
+    assert _purchase_prices(payload)[0]["sample_count"] == 5
+
+
+@pytest.mark.parametrize("bad_rate", [Decimal(-1), Decimal("-0.01"), Decimal(1), Decimal("1.01")])
+def test_bad_purchase_tax_rate_fails_whole_response(db, catalog_client, bad_rate):
+    part = _part(db, "PURCHASE-BAD-RATE")
+    batch = _batch(db)
+    _sale(db, batch, part, "purchase-rate-valid-sale")
+    _purchase(db, batch, part, "purchase-rate-good")
+    _purchase(db, batch, part, "purchase-rate-bad", tax_rate=bad_rate)
+    db.commit()
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "参考价暂不可用"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "PRIVATE-" not in response.text
+
+
+def test_filtered_bad_purchase_rates_do_not_fail_request(db, catalog_client):
+    part = _part(db, "PURCHASE-FILTERED-BAD-RATE")
+    batch, old = _batch(db), _batch(db)
+    _purchase(db, batch, part, "purchase-bad-filter-keep")
+    for key, overrides in (
+        ("draft", {"status": "草稿"}),
+        ("old-date", {"order_date": WINDOW_START - timedelta(days=1)}),
+        ("zero-qty", {"lines": ((Decimal(0), Decimal(113)),)}),
+        ("negative-price", {"lines": ((Decimal(1), Decimal(-1)),)}),
+        ("old-batch", {"line_batch": old}),
+    ):
+        _purchase(db, batch, part, f"purchase-bad-filter-{key}", tax_rate=Decimal(-1), **overrides)
+    _, bad = _purchase(db, batch, part, "purchase-bad-filter-dq", tax_rate=Decimal(-1))
+    _issue(db, bad[0], "confirmed_source_error", side="purchase")
+    db.commit()
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    assert _purchase_amounts(response.json()) == {"inc_tax": "113.00", "ex_tax": "100.00"}
+    assert _purchase_prices(response.json())[0]["sample_count"] == 1
+
+
+def test_purchase_addition_preserves_sale_values_order_and_calculation(db, catalog_client):
+    part = _part(db, "SALE-REGRESSION")
+    batch = _batch(db)
+    _sale(db, batch, part, "sale-regression", tax_rate=None, order_date=TODAY - timedelta(days=7))
+    db.commit()
+    before = _get(catalog_client, part.pn_std).json()
+    _purchase(db, batch, part, "sale-regression-purchase", lines=((Decimal(20), Decimal("999.00")),))
+    db.commit()
+    after = _get(catalog_client, part.pn_std).json()
+    assert after["prices"][:2] == before["prices"]
+    assert after["calculation"] == before["calculation"]
+    assert [(p["kind"], p["tax_basis"]) for p in after["prices"]] == [
+        ("sale", "inc_tax"), ("sale", "ex_tax"),
+        ("purchase", "inc_tax"), ("purchase", "ex_tax"),
+    ]
+
+
+@pytest.mark.parametrize("kinds", [(), ("sale",), ("purchase",), ("sale", "purchase")])
+def test_responses_parse_with_frozen_deployed_shop_dto(db, catalog_client, kinds):
+    part = _part(db, "SHOP-COMPATIBLE")
+    batch = _batch(db)
+    if "sale" in kinds:
+        _sale(db, batch, part, "shop-compatible-sale", order_date=TODAY - timedelta(days=7))
+    if "purchase" in kinds:
+        _purchase(
+            db, batch, part, "shop-compatible-purchase", is_tax_inclusive=False,
+            tax_rate=None, lines=((Decimal(2), Decimal("100.00")), (Decimal(1), Decimal("200.00"))),
+        )
+    db.commit()
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    parsed = ShopPriceReferenceResult.model_validate_json(response.content)
+    assert [p.kind for p in parsed.prices] == [kind for kind in kinds for _ in range(2)]
+    if "sale" not in kinds:
+        assert parsed.calculation.sample_count == parsed.calculation.order_count == 0
+        assert parsed.calculation.latest_sale_date is parsed.calculation.oldest_sale_date is None
+
+
+def test_cross_repo_fixture_parses_with_frozen_shop_dto():
+    parsed = ShopPriceReferenceResult.model_validate_json(CONTRACT.read_text(encoding="utf-8"))
+    assert [p.kind for p in parsed.prices] == ["sale", "sale", "purchase", "purchase"]
+    assert parsed.calculation.sample_count == 2
+    assert parsed.prices[2].sample_count == 3
+
+
+@pytest.mark.parametrize("scope", ["top", "price", "calculation", "window"])
+def test_frozen_shop_contract_rejects_new_fields(scope):
+    payload = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    target = {
+        "top": payload, "price": payload["prices"][2],
+        "calculation": payload["calculation"], "window": payload["prices"][2]["window"],
+    }[scope]
+    target["purchase_extra_metadata"] = "must stay out of deployed contract"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ShopPriceReferenceResult.model_validate(payload)
+
+
+def test_purchase_metadata_and_privacy_whitelist(db, catalog_client):
+    part = _part(db, "PURCHASE-PRIVACY")
+    batch = _batch(db)
+    _purchase(db, batch, part, "privacy-purchase", tax_rate=None, is_tax_inclusive=False)
+    db.commit()
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    expected_keys = {
+        "kind", "amount", "currency", "occurred_at", "source", "tax_basis",
+        "sample_count", "order_count", "window", "latest_sale_date",
+        "oldest_sale_date", "nominal_sample_count",
+    }
+    for row in payload["prices"]:
+        assert set(row) == expected_keys
+        assert row["source"] == "itsp采购均价"
+    assert "PRIVATE-" not in response.text
+    for field in ("supplier", "purchaser", "order_no", "line_id", "order_id", "raw_line", "evidence"):
+        assert field not in response.text
+    ShopPriceReferenceResult.model_validate(payload)
+
+
+@pytest.mark.parametrize("weighting", ["qty_weighted", "line_mean"])
+def test_purchase_tax_conversion_over_shop_amount_limit_is_503(
+    db, catalog_client, monkeypatch, weighting,
+):
+    _configure(monkeypatch, weighting=weighting)
+    part = _part(db, "PURCHASE-AMOUNT-LIMIT")
+    batch = _batch(db)
+    _sale(db, batch, part, "purchase-amount-valid-sale")
+    db.commit()
+    # 当前源 Money(14,2) 无法存到商城上限；注入聚合边界验证转换后的
+    # 金额仍走相同 1e14 校验，不能把合法销售部分单独发给商城。
+    group = price_service._Group(
+        order_date=TODAY, rate=Decimal("0.13"), amount_raw=Decimal("9e13"),
+        qty=Decimal(1), price_sum=Decimal("9e13"), line_count=1, order_count=1,
+        nominal_ex_count=0, bad_rate_count=0, is_tax_inclusive=False,
+    )
+    monkeypatch.setattr(price_service, "_purchase_grouped_samples", lambda *_a, **_k: [group])
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "参考价暂不可用"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_purchase_database_failure_is_fixed_503_without_partial_sale(
+    db, catalog_client, monkeypatch,
+):
+    part = _part(db, "PURCHASE-DB-ERROR")
+    batch = _batch(db)
+    _sale(db, batch, part, "purchase-db-error-sale")
+    db.commit()
+
+    def explode(*_args, **_kwargs):
+        raise SQLAlchemyError("SELECT PRIVATE-SUPPLIER FROM PRIVATE-PURCHASE")
+
+    monkeypatch.setattr(price_service, "_purchase_grouped_samples", explode)
+    response = _get(catalog_client, part.pn_std)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "参考价暂不可用"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "PRIVATE-" not in response.text
