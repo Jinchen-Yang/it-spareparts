@@ -90,6 +90,17 @@ def test_historical_overage_retained_and_nonincreasing_edits_allowed(db):
                                       allowed_project_ids=[project.project_id])[order.raw_order_id]
     assert (summary.demand_qty, summary.received_qty, summary.over_received_qty) == (10, 12, 2)
     db.commit()
+    response = _create(client, project, order, 1)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail']['code'] == 'return_capacity_exceeded'
+    totals = client.get(f'{_base(project)}/return-receipt-summary').json()
+    assert totals['project_total_qty'] == '12.000'
+    assert totals['by_demand'][0]['qty'] == '12.000'
+    records = client.get(f'{_base(project)}/return-receipts').json()['items']
+    assert len(records) == 1
+    assert records[0]['receipt_id'] == row.rkd_line_id
+    assert records[0]['qty'] == '12.000' and records[0]['version'] == 1
+    assert client.get(f'/api/maintenance/return-receipts/{row.rkd_line_id}/audit').json()['items'] == []
     assert _edit(client, row, qty=13).status_code == 409
     response = _edit(client, row, note='保留历史', condition='成品',
                      occurred_at='2026-10-19T02:00:00Z', serial_numbers=[f'SN-{i}' for i in range(12)])
@@ -120,6 +131,39 @@ def test_edit_preserves_current_order_and_excludes_self(db):
     assert _edit(client, row, qty=6, wbdd_no=order.order_no).status_code == 200
     db.refresh(row)
     assert _edit(client, row, qty=5).status_code == 200
+
+
+def test_linked_increase_to_capacity_after_rejection_keeps_original_version(db):
+    project, order, client = _setup(db)
+    created = _create(client, project, order, 9)
+    assert created.status_code == 201, created.text
+    receipt = created.json()
+    path = f"/api/maintenance/return-receipts/{receipt['receipt_id']}"
+    command = {'version': receipt['version'], 'reason': '核对实收后补足'}
+
+    rejected = client.patch(path, json={**command, 'qty': 11})
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()['detail']['code'] == 'return_capacity_exceeded'
+    records = client.get(f'{_base(project)}/return-receipts').json()['items']
+    assert len(records) == 1
+    assert records[0]['qty'] == '9.000'
+    assert records[0]['version'] == receipt['version']
+    assert records[0]['source_order_id'] == order.raw_order_id
+    assert [item['action'] for item in client.get(f'{path}/audit').json()['items']] == ['create']
+
+    accepted = client.patch(path, json={**command, 'qty': 10})
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()['qty'] == '10.000'
+    assert accepted.json()['version'] == receipt['version'] + 1
+    assert accepted.json()['source_order_id'] == order.raw_order_id
+    totals = client.get(f'{_base(project)}/return-receipt-summary').json()
+    assert totals['project_total_qty'] == '10.000'
+    assert totals['by_demand'][0]['qty'] == '10.000'
+    assert client.get(f'{_base(project)}/return-receipt-demands').json()['total'] == 0
+    audits = client.get(f'{path}/audit').json()['items']
+    assert [item['action'] for item in audits] == ['create', 'update']
+    assert audits[1]['before_json']['qty'] == '9.000'
+    assert audits[1]['after_json']['qty'] == '10.000'
 
 
 def test_change_link_checks_target_and_rolls_back_both_sides(db):

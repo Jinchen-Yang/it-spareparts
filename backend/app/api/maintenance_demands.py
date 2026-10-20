@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -406,6 +406,31 @@ def restore_demand(
 # ---------- v1.36 Phase E：页面直改/直建需求行 ----------
 
 
+@router.get("/manual-protection-review")
+def list_manual_protection_review(
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """历史整行人工保护待核对清单；只读，不含成本或人工账本原值。"""
+    from app.services import maintenance_demand_manual
+
+    response.headers["Cache-Control"] = "no-store"
+    visible = scope_resolve(db, ctx)
+    record_access_log(ctx, "demand_protection_review", "maintenance_demands", {
+        "page": page, "page_size": page_size,
+        "scope": "full" if visible is None else "owned",
+    })
+    return maintenance_demand_manual.list_manual_protection_review(
+        db, allowed_project_ids=visible, page=page, page_size=page_size,
+    )
+
+
 class DemandLinePatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -550,7 +575,7 @@ def clear_override(
     _action: None = Depends(require_action("action_maintenance_demand_manage")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """撤销一个字段的 override，恢复氚云原始值（source_value 快照）。"""
+    """恢复首次修改前的 source_value 快照；采用新原件值需要重新上传。"""
     from app.services import maintenance_demand_manual
 
     operated_by = _real_operator(db, ident)
@@ -589,11 +614,13 @@ class DemandLineOut(BaseModel):
     pn_std: str | None
     pn_raw: str | None
     description: str | None
+    line_note: str | None
     qty: str | None
     return_qty: str | None
     serial_numbers: str | None
     edited_source: str
     manual_override: dict
+    protected_fields: list[str]
     is_active: bool
 
 
@@ -650,11 +677,13 @@ def list_demand_lines(
             "pn_std": r.pn_std,
             "pn_raw": r.pn_raw,
             "description": r.description,
+            "line_note": r.line_note,
             "qty": str(r.qty) if r.qty is not None else None,
             "return_qty": str(r.return_qty) if r.return_qty is not None else None,
             "serial_numbers": r.serial_numbers,
             "edited_source": r.edited_source,
             "manual_override": dict(r.manual_override or {}),
+            "protected_fields": _line_snapshot(r)["protected_fields"],
             "is_active": r.is_active,
         }
 
