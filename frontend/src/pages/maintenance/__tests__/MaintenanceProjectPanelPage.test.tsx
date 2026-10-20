@@ -677,6 +677,20 @@ describe("项目面板", () => {
       .toHaveStyle({ color: COLORS.success });
   });
 
+  it("健康带成本使用蓝、琥珀、中性灰、绿区分四种金额", async () => {
+    renderPanel();
+    const band = await screen.findByTestId("panel-health-band");
+    for (const [label, color] of [
+      ["备件成本", COLORS.accent],
+      ["报销成本", COLORS.warning],
+      ["已领用成本", COLORS.text2],
+      ["返还成本", COLORS.success],
+    ]) {
+      const row = within(band).getByText(label).closest(".ant-row")!;
+      expect(row.querySelector(".ant-col-18 .ant-typography")).toHaveStyle({ color });
+    }
+  });
+
   it("健康带把 partial 合同额明确标为已知小计而非完整总额", async () => {
     getBoardProject.mockResolvedValue({
       data: {

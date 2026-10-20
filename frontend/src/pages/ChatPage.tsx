@@ -676,7 +676,7 @@ export default function ChatPage() {
       </div>
       <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "0 8px 12px" }}>
         {sessions.map((s) => (
-          <div key={s.id} className="sess-item" data-active={s.id === activeId} style={{
+          <div key={s.id} className="chat-sess-item" data-active={s.id === activeId} style={{
             padding: "2px 6px", borderRadius: 8, marginBottom: 2,
             display: "flex", alignItems: "center", gap: 6,
           }}>
@@ -685,7 +685,7 @@ export default function ChatPage() {
               setSessionsOpen(false);
             }} style={{
               flex: 1, minWidth: 0, paddingInline: 4, justifyContent: "flex-start",
-              color: s.id === activeId ? COLORS.status.ai : COLORS.text, fontSize: 13,
+              color: s.id === activeId ? COLORS.accentStrong : COLORS.text, fontSize: 13,
             }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
             </Button>
@@ -696,7 +696,7 @@ export default function ChatPage() {
               }} />
             )}
             <Popconfirm title="删除该对话？" onConfirm={() => removeSession(s.id)}>
-              <Button className="sess-del" type="text" size="small" danger
+              <Button className="chat-sess-del" type="text" size="small" danger
                 aria-label={`删除对话：${s.title}`} icon={<DeleteOutlined />}
                 style={{ opacity: isMobile ? 1 : undefined, flexShrink: 0 }} />
             </Popconfirm>
@@ -707,9 +707,9 @@ export default function ChatPage() {
   );
 
   return (
-    <div style={{
+    <div className="chat-page-shell" style={{
       display: "flex", margin: "calc(-1 * var(--mb-shell-content-padding))",
-      height: "calc(100dvh - var(--mb-shell-header-height))", background: COLORS.surface, minWidth: 0,
+      background: COLORS.surface, minWidth: 0,
     }}>
 
 
@@ -787,7 +787,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               ) : (
-                <div key={i} className="turn-assistant" style={{ display: "flex", gap: 12, margin: "16px 0" }}>
+                <div key={i} className="chat-turn-assistant" style={{ display: "flex", gap: 12, margin: "16px 0" }}>
                   <div style={{
                     width: 30, height: 30, borderRadius: 10, flexShrink: 0, marginTop: 2,
                     background: `linear-gradient(135deg,${COLORS.status.ai},${COLORS.accentStrong})`, display: "flex",
@@ -803,7 +803,7 @@ export default function ChatPage() {
                     <ToolTrace tools={t.tools} />
                     {t.stopped && <Tag style={{ ...TAG_STYLES.warning, marginTop: 6 }}>已中断</Tag>}
                     <Tooltip title="复制全文">
-                      <Button className="copy-btn" size="small" type="text" icon={<CopyOutlined />}
+                      <Button className="chat-copy-btn" size="small" type="text" icon={<CopyOutlined />}
                         style={{ opacity: 0, color: "var(--mb-text-3)", marginTop: 4 }}
                         onClick={() => copyText(t.content)} />
                     </Tooltip>
@@ -828,7 +828,7 @@ export default function ChatPage() {
                   <div className="chat-md" style={{ fontSize: 14 }}>
                     {streamText ? <Md text={streamText} />
                       : (!runningTool && !thinkText) && <span style={{ color: "var(--mb-text-3)" }}>思考中…</span>}
-                    <span className="cursor" />
+                    <span className="chat-cursor" />
                   </div>
                 </div>
               </div>
