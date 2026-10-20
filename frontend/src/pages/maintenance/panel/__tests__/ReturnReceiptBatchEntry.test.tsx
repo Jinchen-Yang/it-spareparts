@@ -8,14 +8,17 @@ afterEach(async () => {
 
 const mocks = vi.hoisted(() => ({
   createReturnReceipt: vi.fn(),
+  demands: vi.fn(),
 }));
 
 vi.mock("../../../../api/maintenanceOperations", async () => {
   const actual = await vi.importActual<
     typeof import("../../../../api/maintenanceOperations")
   >("../../../../api/maintenanceOperations");
-  return { ...actual, createReturnReceipt: mocks.createReturnReceipt };
+  return { ...actual, createReturnReceipt: mocks.createReturnReceipt, getReturnReceiptDemands: mocks.demands };
 });
+
+beforeEach(() => { mocks.demands.mockResolvedValue({ data: { rows: [], total: 0 } }); });
 
 import ReturnReceiptBatchEntry, {
   parseBatchText,
@@ -606,4 +609,46 @@ describe("ReturnReceiptBatchEntry 项目切换与卸载", () => {
     expect(mocks.createReturnReceipt.mock.calls[1][1].idempotency_key).not.toBe(oldKey);
     await waitFor(() => expect(screen.getByText("已登记")).toBeTruthy());
   });
+});
+
+
+describe("D-31 批量录入容量", () => {
+  beforeEach(() => { mocks.createReturnReceipt.mockReset(); });
+  it("本批关联下拉显示剩余、过滤满额，并按批内累计预检", async () => {
+    mocks.demands.mockResolvedValue({ data: { rows: [
+      { source_order_id: "d1", order_no: "WBDD-OPEN", order_date: null, demand_qty: "10.000", received_qty: "9.000", remaining_qty: "1.000", max_qty: "1.000", basis_state: "complete", is_current: false },
+      { source_order_id: "d2", order_no: "WBDD-FULL", order_date: null, demand_qty: "10.000", received_qty: "10.000", remaining_qty: "0.000", max_qty: "0.000", basis_state: "complete", is_current: false },
+    ], total: 2 } });
+    render(<ReturnReceiptBatchEntry projectId="p-1" onDone={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*录\s*入/ }));
+    fireEvent.mouseDown(await screen.findByRole("combobox", { name: "本批需求单（可选）" }));
+    fireEvent.click(await screen.findByText("WBDD-OPEN · 剩余可录 1", { selector: ".ant-select-item-option-content" }));
+    expect(screen.queryByText(/WBDD-FULL/, { selector: ".ant-select-item-option-content" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "PN-A,qty:1\nPN-B,qty:1" } });
+    fireEvent.click(screen.getByRole("button", { name: /解\s*析\s*预\s*览/ }));
+    expect(await screen.findByText(/本次最多可录入 1，当前提交 2/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "登记 2 条" })).toBeDisabled();
+    expect(mocks.createReturnReceipt).not.toHaveBeenCalled();
+  });
+  it("关联随幂等 payload 冻结，容量 409 展示中文并保留所选单据", async () => {
+    mocks.createReturnReceipt.mockReset();
+    const message = "需求单 WBDD-OPEN 下单量 10，已收 10，本次最多还能录入 0，当前提交 1";
+    mocks.demands.mockResolvedValue({ data: { rows: [{ source_order_id: "d1", order_no: "WBDD-OPEN", order_date: null, demand_qty: "10.000", received_qty: "9.000", remaining_qty: "1.000", max_qty: "1.000", basis_state: "complete", is_current: false }], total: 1 } });
+    mocks.createReturnReceipt.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "return_capacity_exceeded", message } } } })
+      .mockResolvedValueOnce({ data: { replayed: false, receipt_id: "r1" } });
+    render(<ReturnReceiptBatchEntry projectId="p-1" onDone={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*录\s*入/ }));
+    fireEvent.mouseDown(await screen.findByRole("combobox", { name: "本批需求单（可选）" }));
+    fireEvent.click(await screen.findByText("WBDD-OPEN · 剩余可录 1", { selector: ".ant-select-item-option-content" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "PN-A,qty:1" } });
+    fireEvent.click(screen.getByRole("button", { name: /解\s*析\s*预\s*览/ }));
+    fireEvent.click(screen.getByRole("button", { name: "登记 1 条" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    const original = mocks.createReturnReceipt.mock.calls[0][1];
+    expect(original.wbdd_no).toBe("WBDD-OPEN");
+    fireEvent.click(screen.getByRole("button", { name: "重试 1 条" }));
+    await waitFor(() => expect(mocks.createReturnReceipt).toHaveBeenCalledTimes(2));
+    expect(mocks.createReturnReceipt.mock.calls[1][1]).toEqual(original);
+  });
+
 });

@@ -33,6 +33,9 @@ from app.models.maintenance_source_assignment import (
 )
 from app.models.system import SysUser
 from app.services.query_filters import active_beta_maintenance_orders
+from app.services.maintenance_return_request_summary import (
+    MAX_BATCH_SIZE, ReturnSummaryError, summarize_demand_returns,
+)
 
 MANUAL_CONDITIONS = ("成品", "坏品", "废品")
 
@@ -91,6 +94,74 @@ class ReturnReceiptConflict(ReturnReceiptError):
 
 class ReturnReceiptValidation(ReturnReceiptError):
     """入参不合法。"""
+
+
+class ReturnReceiptCapacityConflict(ReturnReceiptConflict):
+    """Stable business conflict, shared by HTTP commands and import plans."""
+
+    def __init__(self, code: str, message: str, details: dict):
+        self.code = code
+        self.details = details
+        super().__init__(message)
+
+
+def lock_receipt_demands(db: Session, source_order_ids: set[str]) -> None:
+    """After context/project/existing receipt locks; never lock more receipts after this.
+
+    Distinct namespace and sorted stable IDs serialize even an empty ledger.
+    Demand/ownership writers already hold the exclusive data-change context.
+    """
+    for source_order_id in sorted(source_order_ids):
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                   {"key": f"return-capacity:{source_order_id}"})
+
+
+def check_receipt_capacity(
+    db: Session, *, project_id: str, source_order_id: str | None,
+    requested: Decimal, old_source_order_id: str | None = None,
+    old_qty: Decimal = Decimal(0), old_project_id: str | None = None,
+    additional_qty: Decimal = Decimal(0),
+) -> None:
+    """Check a proposed row without mutation. Caller owns locks and transaction.
+
+    additional_qty combines planned reductions and preceding accepted increases
+    for this target, not a second N/R computation. Same-owner non-increases remain legal
+    even for a historically overfull or unknown basis.
+    """
+    if source_order_id is None:
+        return
+    same_owner = (source_order_id == old_source_order_id
+                  and project_id == old_project_id)
+    if same_owner and old_qty.is_finite() and requested <= old_qty:
+        return
+    summary = summarize_demand_returns(
+        db, source_order_ids=[source_order_id], allowed_project_ids=[project_id],
+    ).get(source_order_id)
+    details = {
+        "demand_order_id": source_order_id,
+        "order_no": summary.order_no if summary else None,
+        "N": _qty(summary.demand_qty) if summary and summary.demand_qty is not None else None,
+        "R": _qty(summary.received_qty) if summary and summary.received_qty is not None else None,
+        "requested": _qty(requested), "remaining": None,
+    }
+    if summary is None or summary.basis_state != "complete":
+        raise ReturnReceiptCapacityConflict(
+            "return_capacity_unknown", "需求单数量基数不完整、已失效或归属异常，不能增加关联收货，请先核对",
+            details,
+        )
+    received = summary.received_qty + additional_qty - (old_qty if same_owner else Decimal(0))
+    remaining = max(summary.demand_qty - received, Decimal(0))
+    details["R"] = _qty(received)
+    details["remaining"] = _qty(remaining)
+    if requested > remaining:
+        def display(value):
+            return format(value, "f").rstrip("0").rstrip(".") if "." in format(value, "f") else str(value)
+        raise ReturnReceiptCapacityConflict(
+            "return_capacity_exceeded",
+            f"需求单 {summary.order_no or source_order_id} 下单量 {display(summary.demand_qty)}，"
+            f"已收 {display(received)}，本次最多还能录入 {display(remaining)}，当前提交 {display(requested)}",
+            details,
+        )
 
 
 def _now() -> datetime:
@@ -392,6 +463,10 @@ def register_receipt(
             return {"replayed": True, **_receipt_dict(existing)}
     else:
         source_ref = f"manual:{uuid4().hex}"
+    if source_order_id:
+        lock_receipt_demands(db, {source_order_id})
+        check_receipt_capacity(db, project_id=project_id, source_order_id=source_order_id,
+                               requested=qty_clean)
     row = MaintenanceRkdReturnLine(
         rkd_line_id=str(uuid4()),
         batch_id=None,
@@ -462,7 +537,8 @@ def _order_no(db: Session, source_order_id: str | None) -> str | None:
 
 def demand_candidates(
     db: Session, *, project_id: str, page: int, page_size: int, q: str | None = None,
-    part_id: int | None = None,
+    part_id: int | None = None, capacity_only: bool = False,
+    receipt_id: str | None = None,
 ) -> dict:
     """Receipt selectors expose only effective WBDD identities in this project."""
     _get_project(db, project_id)
@@ -508,13 +584,70 @@ def demand_candidates(
                 FMaintenanceLine.part_id == part_id,
             ).exists()
         )
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.execute(stmt.order_by(FMaintenanceOrder.order_no, FMaintenanceOrder.raw_order_id)
-                      .offset((page - 1) * page_size).limit(page_size)).all()
-    return {"rows": [{"source_order_id": row.raw_order_id, "order_no": row.order_no,
-                       "order_date": row.order_date.isoformat() if row.order_date else None}
-                      for row in rows],
-            "total": total, "page": page, "page_size": page_size}
+    ordering = (FMaintenanceOrder.order_no, FMaintenanceOrder.raw_order_id)
+    if not capacity_only:
+        total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        rows = db.execute(stmt.order_by(*ordering)
+                          .offset((page - 1) * page_size).limit(page_size)).all()
+        return {"rows": [{"source_order_id": row.raw_order_id, "order_no": row.order_no,
+                           "order_date": row.order_date.isoformat() if row.order_date else None}
+                          for row in rows],
+                "total": total, "page": page, "page_size": page_size}
+
+    current = None
+    if receipt_id:
+        current = db.scalar(select(MaintenanceRkdReturnLine).where(
+            MaintenanceRkdReturnLine.rkd_line_id == receipt_id,
+            MaintenanceRkdReturnLine.project_id == project_id,
+            MaintenanceRkdReturnLine.line_status == "active",
+        ))
+        if current is None:
+            raise ReturnReceiptNotFound("返还记录不存在")
+    rows = db.execute(stmt.order_by(*ordering)).all()
+    # Keep the historical identity even when inactive, reassigned or outside
+    # the search/PN filter. Only the receipt's authorized identity is exposed;
+    # the scoped summary below still withholds another project's quantities.
+    if current and current.source_order_id not in {row.raw_order_id for row in rows}:
+        own_order = db.execute(select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.order_no,
+                                      FMaintenanceOrder.order_date)
+            .where(FMaintenanceOrder.raw_order_id == current.source_order_id)).first()
+        if own_order:
+            rows.append(own_order)
+    summaries = {}
+    ids = [row.raw_order_id for row in rows]
+    for start in range(0, len(ids), MAX_BATCH_SIZE):
+        summaries.update(summarize_demand_returns(
+            db, source_order_ids=ids[start:start + MAX_BATCH_SIZE],
+            allowed_project_ids=[project_id],
+        ))
+    candidates = []
+    for row in rows:
+        summary = summaries.get(row.raw_order_id)
+        is_current = bool(current and current.source_order_id == row.raw_order_id)
+        if not is_current and (summary is None or summary.basis_state != "complete"
+                               or summary.remaining_qty <= 0):
+            continue
+        maximum = None
+        if summary and summary.basis_state == "complete":
+            maximum = max(summary.demand_qty - summary.received_qty
+                          + (current.qty if is_current else Decimal(0)), Decimal(0))
+        if is_current:
+            maximum = max(maximum or Decimal(0), current.qty) if current.qty.is_finite() else None
+        candidates.append({
+            "source_order_id": row.raw_order_id, "order_no": row.order_no,
+            "order_date": row.order_date.isoformat() if row.order_date else None,
+            "demand_qty": _qty(summary.demand_qty) if summary and summary.demand_qty is not None else None,
+            "received_qty": _qty(summary.received_qty) if summary and summary.received_qty is not None else None,
+            "remaining_qty": _qty(summary.remaining_qty) if summary and summary.remaining_qty is not None else None,
+            "max_qty": _qty(maximum) if maximum is not None else None,
+            "basis_state": summary.basis_state if summary else "incomplete",
+            "is_current": is_current,
+        })
+    # The edit selector must see its current order on the first page, even if
+    # its display number would otherwise sort after hundreds of alternatives.
+    candidates.sort(key=lambda item: not item["is_current"])
+    return {"rows": candidates[(page - 1) * page_size:page * page_size],
+            "total": len(candidates), "page": page, "page_size": page_size}
 
 
 def update_receipt(
@@ -576,18 +709,18 @@ def update_receipt(
         values["test_result"] = condition
     if "wbdd_no" in updates:
         wbdd_no = _optional_text(updates["wbdd_no"], "需求单", 64)
-        values["source_order_id"] = (
-            _resolve_source_order_id(db, wbdd_no, new_project_id) if wbdd_no else None
-        )
+        # D-31 §3 retains historical links for non-increasing maintenance.
+        # An unchanged displayed link is not a new association; any increase
+        # still validates its stable identity/ownership in the locked summary.
+        if (wbdd_no and new_project_id == old_project_id
+                and wbdd_no == _order_no(db, row.source_order_id)):
+            values["source_order_id"] = row.source_order_id
+        else:
+            values["source_order_id"] = (
+                _resolve_source_order_id(db, wbdd_no, new_project_id) if wbdd_no else None
+            )
     elif new_project_id != old_project_id and row.source_order_id is not None:
         raise ReturnReceiptValidation("转移项目时请重新选择或明确清空维保需求单")
-    elif row.source_order_id is not None:
-        # Even a note-only edit must not silently retain a now-invalid link.
-        current_order_no = _order_no(db, row.source_order_id)
-        if not current_order_no or _resolve_source_order_id(
-            db, current_order_no, new_project_id
-        ) != row.source_order_id:
-            raise ReturnReceiptValidation("维保需求单归属已变化，请重新选择或明确清空")
     for key, limit in (("description", 256), ("note", 512),
                        ("evidence_ref", _EVIDENCE_REF_MAX)):
         if key in updates:
@@ -609,6 +742,14 @@ def update_receipt(
         )
         values["serial_numbers"] = _validate_serial_numbers(
             proposed_serials, qty=final_qty
+        )
+    final_order_id = values.get("source_order_id", row.source_order_id)
+    lock_receipt_demands(db, {item for item in (row.source_order_id, final_order_id) if item})
+    if "qty" in values or final_order_id != row.source_order_id or new_project_id != old_project_id:
+        check_receipt_capacity(
+            db, project_id=new_project_id, source_order_id=final_order_id,
+            requested=values.get("qty", row.qty), old_source_order_id=row.source_order_id,
+            old_qty=row.qty, old_project_id=old_project_id,
         )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     after_order_no = _order_no(db, values.get("source_order_id", row.source_order_id))
@@ -662,6 +803,7 @@ def void_receipt(
             "版本冲突：该记录已被他人修改，请刷新后重试"
         )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
+    lock_receipt_demands(db, {row.source_order_id} if row.source_order_id else set())
     row.line_status = "voided"
     row.version += 1
     row.updated_by = operated_by

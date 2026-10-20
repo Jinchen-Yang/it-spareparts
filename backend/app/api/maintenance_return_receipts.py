@@ -143,6 +143,12 @@ class ReceiptVoid(BaseModel):
 
 
 def _raise_service_error(exc: Exception) -> None:
+    if isinstance(exc, receipts.ReturnReceiptCapacityConflict):
+        raise HTTPException(status.HTTP_409_CONFLICT, {
+            "code": exc.code, "message": str(exc), "details": exc.details,
+        }) from exc
+    if isinstance(exc, receipts.ReturnSummaryError):
+        raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)}) from exc
     if isinstance(exc, receipts.ReturnReceiptNotFound):
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     if isinstance(exc, receipts.ReturnReceiptConflict):
@@ -178,18 +184,19 @@ def receipt_demand_candidates(
     page_size: int = Query(default=100, ge=1, le=200),
     q: str | None = Query(default=None, max_length=128),
     part_id: int | None = Query(default=None, ge=1),
+    receipt_id: str | None = Query(default=None, max_length=36),
     db: Session = Depends(get_db),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
-        # part_id 是可选的 PN 建议过滤（2026-10-12）：不传时行为与旧版逐字节一致。
+        # 容量过滤仅限返还录入；领用候选保持原查询口径。
         return receipts.demand_candidates(
             db, project_id=project_id, page=page, page_size=page_size, q=q,
-            part_id=part_id,
+            part_id=part_id, capacity_only=True, receipt_id=receipt_id,
         )
-    except receipts.ReturnReceiptError as exc:
+    except (receipts.ReturnReceiptError, receipts.ReturnSummaryError) as exc:
         _raise_service_error(exc)
         raise
 
