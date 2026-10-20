@@ -313,7 +313,7 @@ export interface SiteIssueLine {
     pending_quantity: string;
     basis: Record<string, unknown>;
   };
-  /** 行级返还规则：true=免返，false=必须返还，null=继承项目默认。 */
+  /** 行级返还规则：true=免返，false=明确应返，null=按现行规则判断。 */
   no_return: boolean | null;
   cost_source: string | null;
   cost_source_label: string | null;
@@ -1539,6 +1539,36 @@ export const createSiteIssueDraft = (
 
 const siteIssueBase = (issueId: string) =>
   `/maintenance/site-issues/${encodeURIComponent(issueId)}`;
+
+export interface SiteIssueLineCorrectionInput {
+  expected_issue_version: number;
+  expected_line_version: number;
+  /** 未提供字段保留原值，显式 null 恢复按规则判断。 */
+  changes: { no_return?: boolean | null };
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface SiteIssueLineCorrectionReceipt {
+  issue_id: string;
+  issue_line_id: string;
+  issue_version: number;
+  line_version: number;
+  no_return: boolean | null;
+  changed: boolean;
+  idempotent_replay: boolean;
+  workbook_revision: number;
+}
+
+/** 局部行更正：未提交的行和字段保持原值，不使用整单 lines 替换接口。 */
+export const correctSiteIssueLine = (
+  issueId: string,
+  issueLineId: string,
+  input: SiteIssueLineCorrectionInput,
+) => api.patch<SiteIssueLineCorrectionReceipt>(
+  `${siteIssueBase(issueId)}/lines/${encodeURIComponent(issueLineId)}`,
+  input,
+);
 
 export const patchSiteIssue = (
   issueId: string,
