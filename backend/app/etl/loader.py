@@ -29,6 +29,7 @@ from app.models.maintenance import (
     FMaintenanceOrder,
     FProjectExpense,
     MaintenanceContractWorkbookState,
+    MaintenanceManualCostOverride,
 )
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
@@ -381,18 +382,20 @@ def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: lis
 def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
                               update_cols: list[str] | None = None,
                               audit: tuple | None = None,
-                              *, batch_id: int | None = None) -> dict:
-    """f_maintenance_line 专用 upsert（v1.36）：与 _upsert_facts 的差异——
+                              *, batch_id: int | None = None,
+                              operated_by: str | None = None) -> dict:
+    """f_maintenance_line 专用 upsert：与 _upsert_facts 的差异——
 
-    1. override 保护：manual_override 有记录的字段（页面直改）与
-       edited_source != 'wbdd' 的行（总表/页面手工）在 SET 时保留现值
-       （CASE WHEN），不被重导覆盖；
+    1. D-34 字段保护：页面/工作簿共用的人工账本保护实际改过的字段，
+       历史整行保护不转换；人工新建身份的所有列保留，不被原件挪单；
     2. 审计/changed_keys 用「override 屏蔽后的有效值」比对，不会记下
        从未发生的覆盖（审查 #4）；
     3. 仅 maintenance 链路使用；其他四条事实链路继续走通用 _upsert_facts。
 
     compare_subset（anomaly_flags 导入自有子集）语义原样保留。
     """
+    from app.services import maintenance_field_protection as protection
+
     import_flags = maintenance_cost_invalidation.IMPORT_ANOMALY_FLAGS
 
     def _cmp_value(col: str, value):
@@ -427,12 +430,9 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
 
     key_name = conflict_col.name
     keys = [r[key_name] for r in rows]
-    # 既有行的 override 账本 + edited_source（一次查询带回）。
-    # manually_created 由原始 ID 前缀判断，不等于 edited_source 非 wbdd：
-    # legacy_review 仅指保留源 ID、沿用整行人工保护且本次挡住不同源值的行；
-    # 真正人工新增的行不属于这种历史保护待核对。
+    # 既有行的 override 账本 + edited_source（一次查询带回）。新字段保护、
+    # 历史整行保护和人工新建身份均由公共模块判定，SQL/回执/审计同源。
     before_by_key: dict = {}
-    from app.services.maintenance_wbdd_reconciliation import is_manual_line
 
     for chunk in _chunks(keys):
         sel_cols = [conflict_col, FMaintenanceLine.id,
@@ -448,49 +448,66 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
                 {c: m[c] for c in update_cols},
                 m["manual_override"] or {},
                 m["edited_source"],
-                is_manual_line(row),
             )
     existing = len(before_by_key)
 
-    # SET 子句：白名单列中可能被保护的列（editable 白名单 ∩ update_cols）
-    from app.services.maintenance_demand_manual import DEMAND_LINE_EDITABLE_FIELDS
-    # part_id 是 PN 身份三元组的一环：PN 被 override 时 part_id 必须一并保护，
-    # 否则重导旧 PN 会把身份拽回（显示 B 成本按 A 的错位）。
-    protectable = [c for c in update_cols
-                   if c in DEMAND_LINE_EDITABLE_FIELDS or c == "part_id"]
     for chunk in _chunks(rows):
         stmt = pg_insert(FMaintenanceLine).values(chunk)
         set_ = {}
-        from sqlalchemy import case as _sa_case, or_ as _sa_or
-
-        def _protected_cond(col_name: str):
-            """SQL 级保护条件：override 命中该字段，或（part_id 且 PN 任一被
-            override——身份三元组联动），或行本身是手工行。"""
-            direct = FMaintenanceLine.manual_override.op('?')(col_name)
-            if col_name == "part_id":
-                pn_guard = _sa_or(
-                    FMaintenanceLine.manual_override.op('?')("pn_std"),
-                    FMaintenanceLine.manual_override.op('?')("pn_raw"),
-                )
-                return _sa_or(direct, pn_guard)
-            return direct
-
         for c in update_cols:
             col = getattr(FMaintenanceLine, c)
-            if c in protectable:
-                # 三态保护（读库时逐行判定，SQL 级表达为：
-                #   override 有该字段（part_id 联动 PN 键）→ 保留现值
-                #   edited_source != 'wbdd' → 保留现值（总表/页面手工值）
-                #   否则 → 取 excluded 新值
-                set_[c] = _sa_case(
-                    (_protected_cond(c), col),
-                    (FMaintenanceLine.edited_source != 'wbdd', col),
-                    else_=stmt.excluded[c],
-                )
-            else:
-                set_[c] = stmt.excluded[c]
+            set_[c] = case(
+                (protection.protection_condition(c, model=FMaintenanceLine), col),
+                else_=stmt.excluded[c],
+            )
         session.execute(stmt.on_conflict_do_update(
             index_elements=[conflict_col], set_=set_))
+
+    # 原件的真实 PN 换绑与网页/工作簿同义：旧身份的人工价不得通过 line_id
+    # 沿用到新身份。先读最终数据库身份，避免跨 chunk 重复行先换后还原时误退役；
+    # 被保护挡住的 PN 不会产生有效身份变化。成本瀑布及历史账本内容保持。
+    possible_rebindings = {
+        before_by_key[r[key_name]][0]: before_by_key[r[key_name]][1]["part_id"]
+        for r in rows
+        if r[key_name] in before_by_key and "part_id" in update_cols
+        and before_by_key[r[key_name]][1]["part_id"] != r.get("part_id")
+    }
+    rebindings: dict[int, tuple[int, int]] = {}
+    for chunk in _chunks(sorted(possible_rebindings)):
+        for line_id, part_id in session.execute(select(
+            FMaintenanceLine.id, FMaintenanceLine.part_id,
+        ).where(FMaintenanceLine.id.in_(chunk))):
+            if possible_rebindings[line_id] != part_id:
+                rebindings[line_id] = (possible_rebindings[line_id], part_id)
+    for chunk in _chunks(sorted(rebindings)):
+        # 全部需求明细已由上面的 upsert 持锁，此处只拿下游价账本锁。
+        overrides = session.scalars(select(MaintenanceManualCostOverride).where(
+            MaintenanceManualCostOverride.line_id.in_(chunk),
+            MaintenanceManualCostOverride.active.is_(True),
+        ).order_by(MaintenanceManualCostOverride.line_id).with_for_update()
+          .execution_options(populate_existing=True))
+        actor = operated_by or "system:source-import"
+        for override in overrides:
+            old_part_id, new_part_id = rebindings[override.line_id]
+            before_price = {
+                "line_id": override.line_id, "part_id": old_part_id,
+                "unit_cost_ex_tax": str(override.unit_cost_ex_tax),
+                "unit_cost_inc_tax": str(override.unit_cost_inc_tax),
+                "reason": override.reason, "active": override.active,
+                "version": override.version, "updated_by": override.updated_by,
+            }
+            override.active = False
+            override.version += 1
+            override.updated_by = actor
+            session.add(SysAuditLog(
+                entity_type="maintenance_manual_cost_override", entity_id=override.id,
+                action="retire_for_identity_change", operated_by=actor,
+                reason=f"原件 PN 身份变化，停用旧身份人工成本（batch {batch_id}）",
+                before_json=before_price,
+                after_json={**before_price, "part_id": new_part_id, "active": False,
+                            "version": override.version, "updated_by": actor,
+                            "batch_id": batch_id},
+            ))
 
     changed_keys = set()
     # transform 保留原件行，重复 raw_line_id 可能跨 SQL chunk 出现。
@@ -505,33 +522,29 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         if prev is None:
             changed_keys.add(r[key_name])
             continue
-        eid, before, override, edited_source, manually_created = prev
-        manual_protected = edited_source != "wbdd"
+        eid, before, override, edited_source = prev
+        protection_state = {
+            "raw_line_id": r[key_name], "edited_source": edited_source,
+            "manual_override": override,
+        }
         after = {c: r.get(c) for c in update_cols}
-        # 有效值 = override/手工行保护下的「导入视角」值（受保护列取库上现值）。
-        # 保护判定必须与 SQL _protected_cond 完全一致：part_id 除自身 override
-        # 外还受 PN 联动（pn_std/pn_raw 任一被 override 即保护）——否则人工
-        # PN=B 重导 A 时 DB part_id 保持 B、audit after_json 却伪记 A，
-        # changed_keys 误报（交叉审查 ②）。
-        def _python_protected(col_name: str) -> bool:
-            ov = override or {}
-            if col_name == "part_id":
-                return ("part_id" in ov or "pn_std" in ov or "pn_raw" in ov)
-            return col_name in ov
-
+        # 有效值与 SQL SET 使用同一公共保护规则，审计不能伪记被保护拦下的值。
         effective_before = dict(before)
         effective_after = dict(after)
         blocked_fields = []
-        for c in protectable:
-            if _python_protected(c) or manual_protected:
+        for c in update_cols:
+            if protection.is_field_protected(c, **protection_state):
                 effective_after[c] = before.get(c)
-                if _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c)):
+                if (c not in _AUDIT_IGNORE
+                        and _cmp_value(c, before.get(c)) != _cmp_value(c, after.get(c))):
                     blocked_fields.append(c)
         if blocked_fields:
             protected_keys.add(r[key_name])
             for c in blocked_fields:
                 protected_field_keys.setdefault(c, set()).add(r[key_name])
-            if manual_protected and not manually_created:
+            if protection.is_legacy_review(
+                raw_line_id=r[key_name], edited_source=edited_source,
+            ):
                 legacy_review_keys.add(r[key_name])
         changed = any(
             _cmp_value(c, effective_before.get(c)) != _cmp_value(c, effective_after.get(c))
@@ -1128,7 +1141,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         session, line_rows,
         FMaintenanceLine.raw_line_id,
         _MAINT_LINE_UPD if upsert else None, audit=audit,
-        batch_id=batch_id,
+        batch_id=batch_id, operated_by=operated_by,
     )
 
     # 5) 工作簿 revision 失效：写后复核（probe 外项目 → fail closed 整批回滚），
