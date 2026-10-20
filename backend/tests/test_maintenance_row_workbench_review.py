@@ -243,17 +243,37 @@ CSV_UNCHANGED = [
     "--", "--N/A--", "+DC48V",
     # 选择原样：Excel 读成数值 100000，不执行任何引用/函数。
     "+1E+5",
+    "+/-5%", "-48V~-60V", "+3.3V", "-40~85℃", "-2U", "-1.5m", "+12V 500W",
+    "-48V DC 2000W 冗余", "AC220V", "+",
     "SN-1", "-B2B", "普通文本",
 ]
 CSV_ESCAPED = [
     "=1+1", "=HYPERLINK(\"http://x\")", "  =A1+1", "@SUM(A1)",
     "\tplain", "\t-48V", "\r1", "\nx",
     "-2+3+cmd|' /C calc'!A0", "+cmd|' /C calc'!A0",
+    # 无引用、无函数调用：只靠 | 判定（守护 [|!] 检查）。
+    "+cmd|x",
     "+ A1", "- A1", "-\tA1", "-A1", "+$B$2", "-A1:B3", " + A1",
-    "+SUM(A1:A2)", "-sum (1)", "+TRUE", "-PI", "+false",
-    # 选择转义：纯数字四则，Excel 会算成 -52 而非保留号码。
-    "+86-138-0000-0000", "-1+1",
+    "+SUM(A1:A2)", "-sum (1)", "+TRUE", "-PI", "+false", "+ TRUE",
+    # 整列/整行引用（LibreOffice 对 +A:A 求值）。+12:30 与整行引用同形，接受转义。
+    "+A:A", "-$A:$A", "+A:B", "-XFD:XFD", "+1:1", "-1:3", "+$1:$1", "+A:A*1", "+ A:A",
+    "+\"x\"&A:A", "+\"a\"&1:1", "+12:30",
+    # 常量公式；+ 1+1 守护符号后去空白。
+    "+(1)", "-(1+2)", "+--1", "+\"a\"&\"b\"", "-1<2", "+1%", "+ 1+1",
+    pytest.param("+" + "(" * 5000 + "1" + ")" * 5000, id="deep-parens"),
+    # 选择转义：纯数字四则，Excel 会算成 -52 而非保留号码；括号电话 Excel 报错。
+    "+86-138-0000-0000", "-1+1", "+1 (800) 555-1234",
+    # 已知过度转义（含独立引用词，Excel 同样按公式解析；放宽会削弱引用检测，保留）。
+    "-Dell R740", "-IBM X3650", "-A1-型号", "+A2版", "-48V(A1)",
 ]
+# 全角 ＝＋－ 不是 Excel 公式前缀：记录现状为原样。
+CSV_FULLWIDTH_UNCHANGED = ["＝1+1", "＋A1", "－1", "＋SUM(A1)", "－A:A"]
+
+
+@pytest.mark.parametrize("value", CSV_FULLWIDTH_UNCHANGED)
+def test_csv_formula_guard_leaves_fullwidth_prefixes(value):
+    from app.api.maintenance import _safe_formula_only
+    assert _safe_formula_only(value) == value
 
 
 @pytest.mark.parametrize("value", CSV_UNCHANGED)

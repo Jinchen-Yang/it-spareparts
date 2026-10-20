@@ -244,32 +244,107 @@ def _safe(v):
 
 # D-33 核对导出专用（金臣规则：只转义真正像公式的值；思路同 #424 不给普通文本加撇号）。
 # 一律转义：= @ 开头（忽略前导空白）、Tab/CR/LF 开头。
-# +/- 开头（可有前导空白）：去掉符号后的空白再判断，只有出现函数调用（SUM(、cmd(）、
-# | 或 !、独立单元格引用词（A1、$B$2、A1:B3）、裸 TRUE/FALSE/PI 等名称，或整段是纯数字
-# 四则（+86-138-0000-0000，Excel 会算成数）才转义。-48V/-60V、-48V(DC)、+5V/-12V、
-# +/-0.5mm、--N/A--、+DC48V、+86 138 0000 0000 原样；+1E+5 原样（Excel 读成数值 100000）。
-# 旧 _safe 调用方不变。
+# +/- 开头（可有前导空白）：去掉符号后的空白再判断，以下任一成立才转义：
+#   函数调用（SUM(、cmd(）；| 或 !；独立引用词——单元格 A1/$B$2/A1:B3、整列 A:A/$A:$B、
+#   整行 1:1/$1:$3；裸 TRUE/FALSE/PI 等名称；整段可解析为常量表达式（数字/字符串/括号/
+#   一元正负/百分号/算术、& 与比较运算，单个数字除外），如 +(1)、+--1、+"a"&"b"、-1<2、
+#   +1%、+86-138-0000-0000；或整段仅由数字/空白/运算符组成且含括号（+1 (800) 555-1234）。
+# 原样：-48V/-60V、-48V(DC)、+5V/-12V、+/-0.5mm、+/-5%、--、--N/A--、+DC48V、
+#   +86 138 0000 0000、-1.500、-1e3、+1E+5（Excel 读成数值）。
+# 可接受的过度转义：+12:30（与整行引用 12:30 同形）；-Dell R740、-IBM X3650、+A2版、
+#   -48V(A1) 等含独立引用词的值（Excel 也会按公式解析，放宽会削弱引用检测，故保留）。
+# 全角 ＝＋－ 开头不是 Excel 公式前缀，原样。旧 _safe 调用方不变。
 _CSV_FUNCTION_CALL = re.compile(r"(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_.]*\s*\(")
 _CSV_DDE_CHARS = re.compile(r"[|!]")
 _CSV_CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
+_CSV_REFERENCE_TOKEN = (
+    rf"{_CSV_CELL_REF}(?::{_CSV_CELL_REF})?"   # A1、$B$2、A1:B3
+    r"|\$?[A-Za-z]{1,3}:\$?[A-Za-z]{1,3}"      # 整列 A:A、$A:$B、XFD:XFD
+    r"|\$?\d+:\$?\d+"                          # 整行 1:1、$1:$3（+12:30 同形，可接受）
+)
 _CSV_CELL_REFERENCE = re.compile(
-    rf"(?<![A-Za-z0-9_.$]){_CSV_CELL_REF}(?::{_CSV_CELL_REF})?(?![A-Za-z0-9_.(])"
+    rf"(?<![A-Za-z0-9_.$])(?:{_CSV_REFERENCE_TOKEN})(?![A-Za-z0-9_.(])"
 )
 _CSV_BARE_NAME = re.compile(
     r"(?i)(?:TRUE|FALSE|PI|NA|RAND|NOW|TODAY)(?![A-Za-z0-9_.])"
 )
-_CSV_ARITHMETIC = re.compile(r"[\d.]+(?:\s*[-+*/^]\s*[\d.]+)+\s*")
+_CSV_EXPR_TOKEN = re.compile(
+    r"(?P<num>(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r'|(?P<str>"(?:[^"]|"")*")'
+    r"|(?P<op><=|>=|<>|[-+*/^&=<>%()])"
+)
+_CSV_NUMERIC_WITH_PARENS = re.compile(r"[\d\s.+\-*/^%&<>=()]*\([\d\s.+\-*/^%&<>=()]*")
+_CSV_BINARY_OPS = frozenset({"+", "-", "*", "/", "^", "&", "=", "<", ">", "<=", ">=", "<>"})
+
+
+def _csv_expression_tokens(text):
+    """符号后整段切成常量表达式记号；首记号前不得有空白（由调用方 lstrip 负责）。"""
+    tokens, pos, text = [], 0, text.rstrip()
+    while pos < len(text):
+        if pos and text[pos].isspace():
+            pos += 1
+            continue
+        match = _CSV_EXPR_TOKEN.match(text, pos)
+        if match is None:
+            return None
+        tokens.append((match.lastgroup, match.group()))
+        pos = match.end()
+    return tokens
+
+
+def _is_constant_formula(text):
+    """整段是否为 Excel 可求值的常量表达式（单个数字不算，-1.500/+1E+5 原样）。"""
+    tokens = _csv_expression_tokens(text)
+    if not tokens or (len(tokens) == 1 and tokens[0][0] == "num"):
+        return False
+    index = 0
+
+    def operand():
+        nonlocal index
+        while index < len(tokens) and tokens[index][1] in ("+", "-"):
+            index += 1
+        if index >= len(tokens):
+            return False
+        kind, token = tokens[index]
+        if kind in ("num", "str"):
+            index += 1
+        elif token == "(":
+            index += 1
+            if not expression() or index >= len(tokens) or tokens[index][1] != ")":
+                return False
+            index += 1
+        else:
+            return False
+        while index < len(tokens) and tokens[index][1] == "%":
+            index += 1
+        return True
+
+    def expression():
+        nonlocal index
+        if not operand():
+            return False
+        while index < len(tokens) and tokens[index][1] in _CSV_BINARY_OPS:
+            index += 1
+            if not operand():
+                return False
+        return True
+
+    try:
+        return expression() and index == len(tokens)
+    except RecursionError:
+        return True  # 超深括号嵌套：按公式转义，绝不 500
 
 
 def _signed_value_is_formula(rest):
-    """rest：+/- 之后的文本；先去掉符号后的空白（+ A1、-\\tA1 也是公式）。"""
+    """rest：+/- 之后的文本；先去掉符号后的空白（+ A1、+ 1+1、-\\tA1 也是公式）。"""
     rest = rest.lstrip()
     return bool(
         _CSV_FUNCTION_CALL.search(rest)
         or _CSV_DDE_CHARS.search(rest)
         or _CSV_CELL_REFERENCE.search(rest)
         or _CSV_BARE_NAME.match(rest)
-        or _CSV_ARITHMETIC.fullmatch(rest)
+        or _is_constant_formula(rest)
+        or _CSV_NUMERIC_WITH_PARENS.fullmatch(rest)
     )
 
 
