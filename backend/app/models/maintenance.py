@@ -226,11 +226,12 @@ class FMaintenanceLine(Base):
     voided_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     voided_by: Mapped[str | None] = mapped_column(String(64))
     void_reason: Mapped[str | None] = mapped_column(Text)
-    # wbdd=氚云原始事实；workbook_manual=总表手工新增/改动；page_manual=页面直改/直建（v1.36）
+    # wbdd=来源事实（新人工修改仍保留来源）；其他值为人工新建或历史整行保护。
+    # D-34 不自动转换历史 workbook_manual/page_manual 行。
     edited_source: Mapped[str] = mapped_column(String(16), nullable=False, server_default="wbdd")
-    # v1.36 Phase E：页面直改的字段级保护账本 {field: {value, source_value,
-    # updated_by, updated_at}}。loader upsert 命中已保护字段时保留现值；
-    # source_value 快照让 clear_override 可恢复到改前氚云原值。空 {} = 无保护。
+    # 页面/工作簿共用字段保护账本 {field: {value, source_value,
+    # updated_by, updated_at, source}}；PN 身份三字段同组保护。
+    # source_value 是首次修改前快照，不是最新原件。空账本不解除历史整行保护。
     manual_override: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
