@@ -46,9 +46,9 @@ export interface PurchaseAnalyticsKpi {
   amount_inc: number | null;
   amount_ex: number | null;
   amount_paid: number | null;
-  /** 名义含税占比 = 未标税率非含税单的推算含税 ÷ 含税合计；无金额权限或分母为 0 时 null。 */
+  /** 名义含税占比 = 未标税率时实际按 13% 推算的含税额之和 ÷ 含税合计；无金额权限或分母为 0 时 null。 */
   nominal_inc_share: number | null;
-  /** 名义不含税占比 = 未标税率含税单的推算不含税 ÷ 不含税合计；同上（D-39 名义侧裁定）。 */
+  /** 名义不含税占比 = 未标税率时实际按 13% 推算的不含税额之和 ÷ 不含税合计；单头缺列可翻转方向，行级按标记。 */
   nominal_ex_share: number | null;
 }
 
