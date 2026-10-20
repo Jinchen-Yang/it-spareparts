@@ -1,7 +1,7 @@
 import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { message } from "antd";
+
 const mocks = vi.hoisted(() => ({
   plan: vi.fn(),
   workspace: vi.fn(),
@@ -273,7 +273,7 @@ describe("快速切项目与在途提交隔离", () => {
     mocks.workspace.mockResolvedValue(contractsWorkspace([contract]));
     mocks.create.mockReturnValue(pending.promise);
     const onRefresh = vi.fn().mockResolvedValue(true);
-    const success = vi.spyOn(message, "success");
+
     const { unmount } = render(<CollectionTab {...props({ onRefresh })} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialog = await screen.findByRole("dialog");
@@ -284,7 +284,7 @@ describe("快速切项目与在途提交隔离", () => {
     const planReads = mocks.plan.mock.calls.length;
     unmount();
     await act(async () => { pending.resolve({ data: snapshot() }); });
-    expect(success).not.toHaveBeenCalled();
+    expect(document.querySelector(".ant-message-success")).toBeNull();
     expect(mocks.plan).toHaveBeenCalledTimes(planReads);
     expect(onRefresh).not.toHaveBeenCalled();
   });

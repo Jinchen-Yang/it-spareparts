@@ -1,6 +1,6 @@
 import { lazy, type ComponentType } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "../test/antdRender";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import AppShell from "../AppShell";
 import { NAV_ITEMS, type NavItem } from "../nav";

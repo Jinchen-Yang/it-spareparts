@@ -1,9 +1,9 @@
 // 销售分析页集成（D-41 / D-40 PR-4b）：URL 单一真值 —— 默认今天零参数、直开链接恢复
 // 筛选与含退货、切换金额口径不重新请求、金额/客户/对账脱敏账号的控件门控与「—」/
 // 「无对账数据」占位、排序回退如实提示（sort 回显 ≠ 请求值）、错误与空态、详情抽屉。
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
-import { message } from "antd";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fetchSalesAnalyticsOptions = vi.fn();
@@ -150,7 +150,7 @@ beforeEach(() => {
 afterEach(() => {
   // antd message 渲染在 React 树之外的 body 上，cleanup 卸不掉；假时钟下自动关闭
   // 定时器也不会走——不主动 destroy 会把上一用例的 toast 漏给下一用例的缺席断言
-  message.destroy();
+
   vi.useRealTimers();
   cleanup();
 });
@@ -649,7 +649,6 @@ describe("销售分析页：健壮性", () => {
     expect(row.textContent).not.toContain("无对账数据");
   });
 });
-
 
 describe("URL 导航与每页条数", () => {
   it("打开抽屉创建历史，浏览器后退恢复原筛选与每页条数", async () => {

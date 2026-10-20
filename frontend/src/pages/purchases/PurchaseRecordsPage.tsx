@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Card, Grid, Input, List, Segmented, Tag, message } from "antd";
+import { App, Card, Grid, Input, List, Segmented, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import ResizableTable from "../../components/ResizableTable";
@@ -20,6 +20,7 @@ import {
 
 // 逐笔采购明细页：按时间/型号/供应商/状态筛选、分页浏览。数据源 listRecentPurchases 原样复用。
 export default function PurchaseRecordsPage() {
+  const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const basis = useTaxBasis("purchase");

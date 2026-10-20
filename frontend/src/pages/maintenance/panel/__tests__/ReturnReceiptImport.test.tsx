@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { message } from "antd";
+
 const mocks = vi.hoisted(() => ({ upload: vi.fn(), get: vi.fn(), apply: vi.fn(), cancel: vi.fn(), retry: vi.fn(), download: vi.fn(), saveBlob: vi.fn() }));
 vi.mock("../../../../api/maintenanceReturnReceiptImports", () => ({
   uploadReturnReceiptImport: mocks.upload, getReturnReceiptImport: mocks.get, applyReturnReceiptImport: mocks.apply,
@@ -17,11 +17,7 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.download.mockResolvedValue({ data: new Blob(["archive"]) }); mocks.upload.mockResolvedValue({ data: ready }); mocks.get.mockResolvedValue({ data: ready });
   mocks.apply.mockResolvedValue({ data: { ...ready, status: "applied" } }); mocks.cancel.mockResolvedValue({ data: { ...ready, status: "cancelled" } });
   mocks.retry.mockResolvedValue({ data: { batch_id: "job-1", status: "queued" } });
-  // 静态 message 使用独立 React root，不受 RTL cleanup 管理。这里只验证反馈调用，
-  // 避免通知的异步渲染或关闭动画在 jsdom 拆除后继续提交。
-  vi.spyOn(message, "success").mockImplementation(() => (() => {}) as ReturnType<typeof message.success>);
-  vi.spyOn(message, "warning").mockImplementation(() => (() => {}) as ReturnType<typeof message.warning>);
-  vi.spyOn(message, "error").mockImplementation(() => (() => {}) as ReturnType<typeof message.error>);
+
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe("返件 Excel 异步预览和明确更正", () => {
@@ -34,7 +30,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     fireEvent.change(screen.getByPlaceholderText(/更正原因/), { target: { value: "核实原件" } }); fireEvent.click(apply);
     await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", { plan_hash: "hash-1", preview_token: "token-1", confirm_changes: true, confirm_possible_duplicates: false, reason: "核实原件" }));
     await waitFor(() => expect(applied).toHaveBeenCalledOnce());
-    await waitFor(() => expect(message.success).toHaveBeenCalledWith("入库返件已写入台账"));
+    expect(await screen.findByText("入库返件已写入台账")).toBeInTheDocument();
   });
   it("更正展开为中文当前与拟导入对照，保留必要来源追溯", async () => {
     mocks.upload.mockResolvedValue({ data: { ...ready, rows: [{ ...row,
@@ -173,8 +169,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     { lost: false, rejected: false }, { lost: false, rejected: true },
     { lost: true, rejected: false }, { lost: true, rejected: true },
   ])("导入成功后刷新失败不误报已刷新或允许重复应用（响应丢失=$lost，刷新抛错=$rejected）", async ({ lost, rejected }) => {
-    const success = vi.spyOn(message, "success").mockImplementation(() => (() => {}) as ReturnType<typeof message.success>);
-    const warning = vi.spyOn(message, "warning").mockImplementation(() => (() => {}) as ReturnType<typeof message.warning>);
+
     const applied = rejected ? vi.fn().mockRejectedValue(new Error("refresh offline")) : vi.fn().mockResolvedValue(false);
     if (lost) mocks.apply.mockRejectedValueOnce(new Error("apply response lost"));
     mocks.get.mockResolvedValue({ data: { ...ready, status: "applied" } });
@@ -191,7 +186,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     expect(mocks.apply).toHaveBeenCalledTimes(1);
     expect(mocks.get).toHaveBeenCalledTimes(lost ? 1 : 0);
     expect(applied).toHaveBeenCalledTimes(1);
-    expect(success).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("不要重复导入"));
+    expect(document.querySelector(".ant-message-success")).toBeNull();
+    expect(screen.getByText("导入已成功，但台账刷新失败；请刷新页面查看，不要重复导入。").closest('[role="alert"]')).not.toBeNull();
   });
 });

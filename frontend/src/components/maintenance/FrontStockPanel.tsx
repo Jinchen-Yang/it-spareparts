@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Card, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Card, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   getMaintenanceProjectFrontStock,
@@ -56,6 +56,7 @@ const columns: ColumnsType<MaintenanceFrontStockRow> = [
 ];
 
 export default function FrontStockPanel({ projectId }: { projectId: string }) {
+  const { message } = App.useApp();
   const [data, setData] = useState<MaintenanceFrontStockSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const generation = useRef(0);

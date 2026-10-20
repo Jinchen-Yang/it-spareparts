@@ -1,9 +1,6 @@
 import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert, Button, Descriptions, Drawer, Empty, Grid, Input, List, Modal, Pagination,
-  Select, Space, Spin, Table, Tag, Typography, message,
-} from "antd";
+import { App, Alert, Button, Descriptions, Drawer, Empty, Grid, Input, List, Modal, Pagination, Select, Space, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   decideDataQualityIssue, getDataQualityIssue, listDataQualityIssues, reopenDataQualityIssue,
@@ -81,6 +78,7 @@ function evidenceValue(key: string, value: DataQualityEvidenceValue, priceRestri
 }
 
 export default function DataQualityIssuesPanel() {
+  const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const reviewPermission = reviewPermissionState();

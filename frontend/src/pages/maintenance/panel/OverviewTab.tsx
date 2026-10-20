@@ -1,15 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Button,
-  Card,
-  Descriptions,
-  Space,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from "antd";
+import { App, Button, Card, Descriptions, Space, Table, Tag, Tooltip, Typography } from "antd";
 import type { BoardProjectRow } from "../../../api/maintenanceBossBoard";
 import type { MaintenanceProject } from "../../../api/maintenanceProjects";
 import type { MaintenanceProjectOperationsSummary } from "../../../api/maintenanceOperations";
@@ -54,6 +44,7 @@ export function OverviewTab({
   registerRefresh: RegisterPanelRefresh;
   onEditBasics?: () => void;
 }) {
+  const { message } = App.useApp();
   const [candidates, setCandidates] = useState<MaintenanceSourceOrderRow[]>([]);
   const [busy, setBusy] = useState(false);
   const requestSeq = useRef(0);

@@ -6,7 +6,13 @@
      "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12", "nominal_sample_count": 0},
     {"kind": "sale", "amount": "133.33", "currency": "CNY", "occurred_at": "2026-10-19T00:00:00+08:00", "source": "itsp销售均价",
      "tax_basis": "ex_tax", "sample_count": 2, "order_count": 2, "window": {"start": "2026-09-20", "end": "2026-10-19"},
-     "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12", "nominal_sample_count": 0}
+     "latest_sale_date": "2026-10-19", "oldest_sale_date": "2026-10-12", "nominal_sample_count": 0},
+    {"kind": "purchase", "amount": "145.29", "currency": "CNY", "occurred_at": "2026-10-18T00:00:00+08:00", "source": "itsp采购均价",
+     "tax_basis": "inc_tax", "sample_count": 3, "order_count": 2, "window": {"start": "2026-09-20", "end": "2026-10-19"},
+     "latest_sale_date": "2026-10-18", "oldest_sale_date": "2026-10-11", "nominal_sample_count": 2},
+    {"kind": "purchase", "amount": "128.57", "currency": "CNY", "occurred_at": "2026-10-18T00:00:00+08:00", "source": "itsp采购均价",
+     "tax_basis": "ex_tax", "sample_count": 3, "order_count": 2, "window": {"start": "2026-09-20", "end": "2026-10-19"},
+     "latest_sale_date": "2026-10-18", "oldest_sale_date": "2026-10-11", "nominal_sample_count": 1}
   ],
   "reference_only": true,
   "calculation": {

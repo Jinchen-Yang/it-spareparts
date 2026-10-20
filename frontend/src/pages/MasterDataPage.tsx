@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Alert, Button, Input, Modal, Select, Space, Table, Tag, Tooltip, message } from "antd";
+import { App, Alert, Button, Input, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
 import BatchNormalizeModal from "../components/BatchNormalizeModal";
@@ -25,6 +25,7 @@ const normalized = (value: string | null | undefined) => value?.trim() || null;
 /** 备件主数据：采购可搜全部型号 → 编辑描述/品类/品牌，或新建 PN。
  * 人工改过的字段后端 locked_fields 标记，重导（氚云）不覆盖。 */
 export default function MasterDataPage() {
+  const { message } = App.useApp();
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<PartHit[]>([]);
   const [total, setTotal] = useState(0);
@@ -328,7 +329,7 @@ export default function MasterDataPage() {
             </div>
             {suggest.structured_specs && Object.keys(suggest.structured_specs).length > 0 && (
               <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-                <span style={{ color: "#9c968b", fontSize: 12 }}>字段依据</span>
+                <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>字段依据</span>
                 {Object.entries(suggest.structured_specs).map(([k, f]) => {
                   const safe = f.source === "DESCRIPTION_EXPLICIT" || f.source === "MODEL_DICTIONARY";
                   return (

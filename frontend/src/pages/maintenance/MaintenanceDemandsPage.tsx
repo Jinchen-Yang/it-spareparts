@@ -1,19 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
-import {
-  Alert,
-  Button,
-  Card,
-  Input,
-  Modal,
-  Space,
-  Switch,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Input, Modal, Space, Switch, Table, Tag, Typography, Upload } from "antd";
 import { UploadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type {
@@ -55,6 +42,7 @@ function idempotencyKey(prefix: string): string {
  * 确认同步同时需要上传与作废动作权限；页面可见性由 page_maintenance 控制。
  */
 export function MaintenanceDemandsPage() {
+  const { message } = App.useApp();
   const permissions = readPermissionMap();
   const canVoid = !!permissions.action_maintenance_demand_delete;
   const canImport = !!permissions.action_maintenance_wbdd_import;
@@ -73,6 +61,7 @@ export function MaintenanceDemandsPage() {
   const [missingLoading, setMissingLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadReport, setUploadReport] = useState<WbddImportReport | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<{ type: "error" | "warning"; text: string } | null>(null);
   const addressReport = uploadReport?.address_report ?? null;
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -184,6 +173,7 @@ export function MaintenanceDemandsPage() {
   const handleWbddUpload = async (file: File) => {
     setUploading(true);
     setUploadReport(null);
+    setUploadFeedback(null);
     const fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
     if (uploadAttempt.current?.fingerprint !== fingerprint) {
       uploadAttempt.current = {
@@ -207,10 +197,10 @@ export function MaintenanceDemandsPage() {
       if (await refreshAfterCommit(true, true)) {
         message.success(`${summary}，页面已刷新`);
       } else {
-        message.warning(`${summary}，但页面刷新失败；旧列表已失效，请重试。`);
+        setUploadFeedback({ type: "warning", text: `${summary}，但页面刷新失败；旧列表已失效，请重试。` });
       }
     } catch (error) {
-      message.error(readError(error, "快照上传失败"));
+      setUploadFeedback({ type: "error", text: readError(error, "快照上传失败") });
     } finally {
       setUploading(false);
       // antd Upload 会保留原生 input 的 value；失败后若用户重选同一文件，浏览器
@@ -404,6 +394,7 @@ export function MaintenanceDemandsPage() {
             </Text>
           ) : null}
           {canImport && uploadReport ? <WbddUploadFeedback report={uploadReport} /> : null}
+          {canImport && uploadFeedback ? <Alert type={uploadFeedback.type} showIcon message={uploadFeedback.text} /> : null}
           {canImport && addressReport ? (
             <Alert
               type={addressReport.conflict ? "warning" : "info"}
