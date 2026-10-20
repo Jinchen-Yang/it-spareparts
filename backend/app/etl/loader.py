@@ -463,8 +463,9 @@ def _upsert_maintenance_lines(session: Session, rows: list[dict], conflict_col,
         session.execute(stmt.on_conflict_do_update(
             index_elements=[conflict_col], set_=set_))
 
-    # 被挡的最新合法来源仍是下一次人工“改回来源值”的比较基准。
-    # 同键跨 chunk 时只保存最终来源；不把账本更新计作业务字段已覆盖。
+    # 被挡的合法来源只刷新观察证据（source_value）；自动解除的比较基准仍是
+    # 本轮首次快照（original_source_value，Q1=A 金臣 2026-10-20）。同键跨
+    # chunk 时只保存最终来源；不把账本更新计作业务字段已覆盖。
     source_snapshot_changed_keys = set()
     for key, source in {r[key_name]: r for r in rows}.items():
         previous = before_by_key.get(key)

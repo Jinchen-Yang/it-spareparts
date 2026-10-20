@@ -54,7 +54,7 @@ def test_workbook_return_to_source_releases_quantity_with_audit(db):
         MaintenanceProjectOperationAudit.action == "UPDATE",
     ).order_by(MaintenanceProjectOperationAudit.id)))
     assert len(audits) == 2
-    assert "改回来源值，保护解除" in audits[-1].reason
+    assert "改回本轮首次快照（原值），保护解除" in audits[-1].reason
     assert audits[-1].before_json["manual_override"]["qty"]["value"] == "5.000"
     assert audits[-1].after_json["manual_override"] == {}
     reimport(db, order, line, pn=part.pn_std, qty="9")

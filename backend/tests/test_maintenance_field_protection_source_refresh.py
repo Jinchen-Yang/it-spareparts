@@ -1,4 +1,4 @@
-"""D-34：自动解除采用最新合法原件值，保留人工覆盖与首次撤销快照。"""
+"""D-34 Q1=A：自动解除比较本轮首次快照；来源刷新只更新观察证据不移动基准。"""
 
 from datetime import date
 from decimal import Decimal
@@ -61,9 +61,9 @@ def _clear(client, order, line, field):
     return response.json()
 
 
-def test_auto_release_compares_latest_legal_source_after_protected_upload(db):
+def test_auto_release_compares_first_snapshot_after_protected_upload(db):
     order, line = _seed_line(db)
-    _make_project(db, tag="LATEST-SOURCE", source_order_id=order.raw_order_id)
+    _make_project(db, tag="Q1A-FIRST-SOURCE", source_order_id=order.raw_order_id)
     client = _admin_client(db)
 
     _patch(client, order, line.raw_line_id, {"qty": 5})
@@ -71,16 +71,20 @@ def test_auto_release_compares_latest_legal_source_after_protected_upload(db):
     protected = _read_line(client, order)
     assert protected["qty"] == "5.000"
     assert protected["protected_fields"] == ["qty"]
-    assert Decimal(protected["manual_override"]["qty"]["source_value"]) == Decimal(9)
+    entry = protected["manual_override"]["qty"]
+    assert Decimal(entry["source_value"]) == Decimal(9)
+    assert Decimal(entry["original_source_value"]) == Decimal(2)
 
-    former_source = _patch(client, order, line.raw_line_id, {"qty": 2})
-    assert former_source["qty"] == "2.000"
-    assert former_source["protected_fields"] == ["qty"]
-
+    # Q1=A：改成最新来源 9 不是撤回本轮修改，仍保护。
     latest_source = _patch(client, order, line.raw_line_id, {"qty": 9})
     assert latest_source["qty"] == "9.000"
-    assert latest_source["protected_fields"] == []
-    assert latest_source["manual_override"] == {}
+    assert latest_source["protected_fields"] == ["qty"]
+
+    # 改回本轮首次快照 2 才解除；随后来源上传恢复生效。
+    former_source = _patch(client, order, line.raw_line_id, {"qty": 2})
+    assert former_source["qty"] == "2.000"
+    assert former_source["protected_fields"] == []
+    assert former_source["manual_override"] == {}
 
     _upload(db, order, line, qty="11")
     assert _read_line(client, order)["qty"] == "11.000"
@@ -199,9 +203,9 @@ def test_metadata_only_refresh_invalidates_page_digest_and_marks_workbook_revisi
     assert _read_line(client, order)["manual_override"] == current["manual_override"]
 
 
-def test_pn_latest_source_releases_only_after_every_member_returns(db):
+def test_pn_first_snapshot_releases_only_after_every_member_returns(db):
     order, line = _seed_line(db)
-    _make_project(db, tag="LATEST-PN", source_order_id=order.raw_order_id)
+    _make_project(db, tag="Q1A-FIRST-PN", source_order_id=order.raw_order_id)
     db.add_all([DimPart(pn_std="PN-MANUAL"), DimPart(pn_std="PN-LATEST")])
     db.commit()
     client = _admin_client(db)
@@ -214,12 +218,21 @@ def test_pn_latest_source_releases_only_after_every_member_returns(db):
     assert refreshed["manual_override"]["pn_raw"]["source_value"] == "PN-LATEST"
     latest_id = db.scalar(select(DimPart.id).where(DimPart.pn_std == "PN-LATEST"))
     assert refreshed["manual_override"]["part_id"]["source_value"] == latest_id
+    # 首次快照仍是原身份组 PN-E1。
+    assert refreshed["manual_override"]["pn_std"]["original_source_value"] == "PN-E1"
 
-    partial = _patch(client, order, line.raw_line_id, {"pn_std": "PN-LATEST"})
-    assert partial["pn_raw"] == "PN-MANUAL"
-    assert partial["part_id"] == latest_id
+    # Q1=A：整组改回最新来源 PN-LATEST 不解除（不是本轮首次快照）。
+    to_latest = _patch(client, order, line.raw_line_id, {
+        "pn_std": "PN-LATEST", "pn_raw": "PN-LATEST",
+    })
+    assert to_latest["part_id"] == latest_id
+    assert to_latest["protected_fields"] == ["part_id", "pn_raw", "pn_std"]
+
+    # 整组改回首次快照 PN-E1：先只回 pn_std 仍保护，再回 pn_raw 整组解除。
+    partial = _patch(client, order, line.raw_line_id, {"pn_std": "pn-e1  "})
+    assert partial["pn_raw"] == "PN-LATEST"
     assert partial["protected_fields"] == ["part_id", "pn_raw", "pn_std"]
-    complete = _patch(client, order, line.raw_line_id, {"pn_raw": "PN-LATEST"})
+    complete = _patch(client, order, line.raw_line_id, {"pn_raw": "PN-E1"})
     assert complete["protected_fields"] == []
     assert complete["manual_override"] == {}
     _upload(db, order, line, pn_raw="PN-AFTER-RELEASE", pn_std="PN-AFTER-RELEASE")
@@ -307,16 +320,19 @@ def test_source_upload_completes_historical_pn_group_without_fabricating_first_s
     assert refreshed["manual_override"]["pn_raw"]["original_source_value_known"] is False
 
     if action == "return_to_latest":
+        # Q1=A：pn_raw 首次未知、pn_std 首次是 PN-E1——改回最新来源不解除，
+        # 历史缺成员的组不能自动放开（需显式撤销或来源补证）。
         restored = _patch(client, order, line.raw_line_id, {
             "pn_raw": "PN-LATEST", "pn_std": "PN-LATEST",
         })
         assert restored["pn_raw"] == restored["pn_std"] == "PN-LATEST"
+        assert restored["protected_fields"] == ["part_id", "pn_raw", "pn_std"]
     else:
         restored = _clear(client, order, line, "pn_std")
         assert restored["pn_std"] == "PN-E1"
         assert restored["pn_raw"] == "PN-MANUAL"
         assert restored["part_id"] == original_part_id
-    assert restored["protected_fields"] == []
+        assert restored["protected_fields"] == []
 
 
 def test_source_becoming_equal_to_manual_value_does_not_release_without_manual_change(db):

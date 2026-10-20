@@ -3,7 +3,13 @@
 Callers own validation, locks, CAS, audit and transactions. This module neither
 commits nor acquires locks. Cost evidence remains in its independent ledger.
 Legacy non-wbdd rows are never converted by recording another manual edit.
+
+Release baseline (Q1=A, 金臣 2026-10-20): returning to the round's first
+snapshot — the effective value before this protection cycle's first manual
+edit — releases the field; matching the latest source value alone does not.
 """
+import hashlib
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -46,10 +52,12 @@ def _json_value(value):
 
 def record_manual_changes(line, *, before: dict, operated_by: str,
                           source: str) -> set[str]:
-    """Record actual changes; returning to the source releases field protection.
+    """Record actual changes; returning to the first snapshot releases protection.
 
-    PN is recorded as one group even when only one member changes. The return
-    value lists actual changes; the ledger also contains the protected peers.
+    Q1=A: the release baseline is this cycle's first snapshot (the value before
+    its first manual edit), never the latest refreshed source value. PN is
+    recorded as one group even when only one member changes. The return value
+    lists actual changes; the ledger also contains the protected peers.
     """
     after = snapshot_fields(line)
     changed = changed_fields(before, after)
@@ -74,15 +82,16 @@ def record_manual_changes(line, *, before: dict, operated_by: str,
     for field in sorted(fields):
         was_recorded = field in ledger
         old_entry = ledger.get(field) or {}
+        first_known, first_value = original_source_snapshot(old_entry)
         if (
             can_release
-            and field not in PN_IDENTITY_FIELDS and "source_value" in old_entry
+            and field not in PN_IDENTITY_FIELDS and first_known
             and normalized_value(field, after[field])
-            == normalized_value(field, old_entry["source_value"])
+            == normalized_value(field, first_value)
         ):
             ledger.pop(field)
             continue
-        ledger[field] = {
+        entry = {
             **old_entry,
             "value": _json_value(after[field]),
             "updated_by": operated_by,
@@ -92,17 +101,22 @@ def record_manual_changes(line, *, before: dict, operated_by: str,
         if not was_recorded and (
             field not in PN_IDENTITY_FIELDS or not had_pn_protection
         ):
-            ledger[field]["source_value"] = _json_value(before.get(field))
+            # 新一轮保护周期建账：source_value 即本轮首次快照（解除比较基准），
+            # cycle_started_at 标记周期起点，供旧工作簿漂移校验识别重建。
+            entry["source_value"] = _json_value(before.get(field))
+            entry["cycle_started_at"] = now
+        ledger[field] = entry
         if field in PN_IDENTITY_FIELDS and part_source_known:
             if field == "part_id":
-                ledger[field]["source_value"] = source_part_id
+                entry["source_value"] = source_part_id
             else:
-                ledger[field]["source_value_part_id"] = source_part_id
+                entry["source_value_part_id"] = source_part_id
     # An old partial PN ledger cannot prove that an unrecorded peer is original.
     if can_release and changed & PN_IDENTITY_FIELDS and all(
-        "source_value" in ledger[field]
+        field in ledger
+        and original_source_snapshot(ledger[field])[0]
         and normalized_value(field, after[field])
-        == normalized_value(field, ledger[field]["source_value"])
+        == normalized_value(field, original_source_snapshot(ledger[field])[1])
         for field in PN_IDENTITY_FIELDS
     ):
         for field in PN_IDENTITY_FIELDS:
@@ -114,7 +128,8 @@ def record_manual_changes(line, *, before: dict, operated_by: str,
 def manual_change_reason(reason: str, before: dict, after: dict) -> str:
     released = (before.keys() - after.keys()) & DEMAND_FACT_FIELDS
     if released:
-        return f"{reason}；改回来源值，保护解除：{', '.join(sorted(released))}"
+        return (f"{reason}；改回本轮首次快照（原值），保护解除："
+                f"{', '.join(sorted(released))}")
     return reason
 
 
@@ -125,6 +140,66 @@ def original_source_snapshot(entry: dict) -> tuple[bool, object]:
     if "original_source_value" in entry:
         return True, entry["original_source_value"]
     return "source_value" in entry, entry.get("source_value")
+
+
+def protection_baseline(*, raw_line_id: str, edited_source: str,
+                        manual_override: dict | None) -> dict[str, dict]:
+    """Q3=A：字段级解除基准指纹，签入 03 行基线令牌供旧工作簿漂移校验。
+
+    只记录受保护的需求事实字段；value 是归一化后的本轮首次快照（解除比
+    较基准），cycle 是保护周期起点标记——期间解除又重新保护、即使显示值
+    与首次快照都恰好相同，cycle 也会变，漂移仍可检出。latest source 刷新
+    只动 source_value，不进指纹：同一周期内仅来源变化不算漂移。
+    """
+    out: dict[str, dict] = {}
+    for field in sorted(protected_fields(
+        raw_line_id=raw_line_id, edited_source=edited_source,
+        manual_override=manual_override,
+    )):
+        entry = (manual_override or {}).get(field) or {}
+        known, value = original_source_snapshot(entry)
+        out[field] = {
+            "known": known,
+            "value": (
+                None if not known or value is None
+                else _json_value(normalized_value(field, value))
+            ),
+            "cycle": entry.get("cycle_started_at"),
+        }
+    return out
+
+
+def protection_baseline_changed(
+    exported: dict | None, current: dict, fields,
+) -> tuple[bool, str]:
+    """用户编辑字段的漂移判定；返回 (是否漂移, 原因码)。
+
+    exported 为 None 表示旧格式令牌（无保护证据）：当前受保护即阻断，要
+    求重新下载；两边都无记录（都未保护）则放行。
+    """
+    for field in sorted(fields):
+        was = (exported or {}).get(field)
+        now = current.get(field)
+        if was is None and now is None:
+            continue
+        if was is None:
+            if exported is None:
+                # 旧格式令牌（2.7.0，无 protect 证据）：无从校验基准，只能
+                # 要求重新下载；与「导出后新建保护」分开提示。
+                return True, "protection_evidence_missing"
+            return True, "protection_started_since_export"
+        if now is None:
+            return True, "protection_released_since_export"
+        if was != now:
+            return True, "protection_cycle_changed"
+    return False, ""
+
+
+def protection_baseline_digest(baseline: dict[str, dict]) -> str:
+    """锁内复核用的稳定摘要：validate 时刻与 apply 时刻各算一次比对。"""
+    payload = json.dumps(
+        baseline, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def refresh_source_values(*, raw_line_id: str, edited_source: str,
