@@ -6,6 +6,7 @@ afterEach(cleanupAntd);
 
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
+  demands: vi.fn(),
   voidReceipt: vi.fn(),
 }));
 
@@ -16,9 +17,12 @@ vi.mock("../../../../api/maintenanceOperations", async () => {
   return {
     ...actual,
     updateReturnReceipt: mocks.update,
+    getReturnReceiptDemands: mocks.demands,
     voidReturnReceipt: mocks.voidReceipt,
   };
 });
+
+beforeEach(() => { mocks.demands.mockResolvedValue({ data: { rows: [{ source_order_id: "d1", order_no: "WBDD-1", demand_qty: "20.000", received_qty: "7.000", remaining_qty: "13.000", max_qty: "20.000", basis_state: "complete", is_current: true }], total: 1 } }); });
 
 import ReturnReceiptBatchMaintenance, {
   buildEditDiff, editRowError,
@@ -357,5 +361,37 @@ describe("ReturnReceiptBatchMaintenance 批量作废", () => {
     await waitFor(() => expect(mocks.voidReceipt).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "关 闭" }));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+  });
+});
+
+
+describe("D-31 批量维护容量", () => {
+  it("当前满额关联展示剩余，数量增加被预检拒绝，备注仍可提交", async () => {
+    mocks.update.mockReset();
+    mocks.update.mockResolvedValue({ data: {} });
+    mocks.demands.mockResolvedValue({ data: { rows: [{ source_order_id: "d1", order_no: "WBDD-1", demand_qty: "10.000", received_qty: "12.000", remaining_qty: "0.000", max_qty: "2.000", basis_state: "complete", is_current: true }], total: 1 } });
+    const dialog = await openUpdate([r1]);
+    expect(await within(dialog).findByText(/剩余可录 0/)).toBeInTheDocument();
+    expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" }));
+    setText(qtyInput(dialog, "2"), "3");
+    setText(reasonArea(dialog), "清点核实");
+    expect(await within(dialog).findByText(/本次最多可录入 2，当前提交 3/)).toBeInTheDocument();
+    expect(mocks.update).not.toHaveBeenCalled();
+    setText(qtyInput(dialog, "3"), "2");
+    setText(noteArea(dialog), "仅修改备注");
+    fireEvent.click(within(dialog).getByRole("button", { name: "修改 1 条" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ note: "仅修改备注" })));
+  });
+
+  it("容量 409 原文显示且不冒充版本冲突", async () => {
+    mocks.update.mockReset();
+    const message = "需求单 WBDD-1 下单量 10，已收 9，本次最多还能录入 1，当前提交 3";
+    mocks.update.mockRejectedValue({ response: { status: 409, data: { detail: { code: "return_capacity_exceeded", message } } } });
+    const dialog = await openUpdate([r1]);
+    setText(noteArea(dialog), "触发服务器校验");
+    setText(reasonArea(dialog), "清点");
+    fireEvent.click(within(dialog).getByRole("button", { name: "修改 1 条" }));
+    expect(await within(dialog).findByText(message)).toBeInTheDocument();
+    expect(within(dialog).queryByText("版本冲突")).not.toBeInTheDocument();
   });
 });

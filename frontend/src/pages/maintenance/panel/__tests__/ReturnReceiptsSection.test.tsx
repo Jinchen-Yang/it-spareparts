@@ -26,7 +26,7 @@ beforeEach(() => {
   mocks.demands.mockImplementation((_id: string, input: { part_id?: number } = {}) =>
     input.part_id
       ? Promise.resolve({ data: { rows: [], total: 0, page: 1, page_size: 50 } })
-      : Promise.resolve({ data: { rows: [{ order_no: "WBDD-1" }], total: 1, page: 1, page_size: 100 } }));
+      : Promise.resolve({ data: { rows: [{ order_no: "WBDD-1", demand_qty: "20.000", received_qty: "2.000", remaining_qty: "18.000", max_qty: "18.000", basis_state: "complete", is_current: false }], total: 1, page: 1, page_size: 100 } }));
   mocks.projects.mockResolvedValue({ data: { rows: [{ project_id: "p1", display_name: "原项目", project_code: "P1" }, { project_id: "p2", display_name: "目标项目", project_code: "P2" }], total: 2 } });
   mocks.create.mockResolvedValue({ data: { ...receipt, replayed: false } }); mocks.update.mockResolvedValue({ data: receipt }); mocks.audit.mockResolvedValue({ data: { items: [] } });
 });
@@ -255,7 +255,7 @@ describe("登记返还按 PN 建议需求单", () => {
     { source_order_id: "d1", order_no: "WBDD-1", order_date: null },
     { source_order_id: "d2", order_no: "WBDD-2", order_date: "2026-08-01" },
     { source_order_id: "dm1", order_no: "WBDD-MATCH", order_date: "2026-09-01" },
-  ];
+  ].map((row) => ({ ...row, demand_qty: "20.000", received_qty: "2.000", remaining_qty: "18.000", max_qty: "18.000", basis_state: "complete", is_current: false }));
   const stubDemands = (matched: typeof fullList) => {
     mocks.demands.mockImplementation((_id: string, input: { part_id?: number } = {}) =>
       input.part_id
@@ -273,9 +273,9 @@ describe("登记返还按 PN 建议需求单", () => {
     openDemandSelect(screen.getByRole("dialog"));
     expect(await screen.findByText("含此 PN", { selector: ".ant-select-item-group" })).toBeInTheDocument();
     expect(screen.getByText("其他需求单", { selector: ".ant-select-item-group" })).toBeInTheDocument();
-    expect(screen.getByText("WBDD-MATCH（2026-09-01）", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
-    expect(screen.getByText("WBDD-1", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
-    expect(screen.getByText("WBDD-2（2026-08-01）", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    expect(screen.getByText("WBDD-MATCH（2026-09-01） · 剩余可录 18", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    expect(screen.getByText("WBDD-1 · 剩余可录 18", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    expect(screen.getByText("WBDD-2（2026-08-01） · 剩余可录 18", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
   });
 
   it("唯一匹配且需求单为空时预选该单，提交值即建议单", async () => {
@@ -284,7 +284,7 @@ describe("登记返还按 PN 建议需求单", () => {
     fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
     fireEvent.click(screen.getByText("选择测试返件"));
     const dialog = screen.getByRole("dialog");
-    await waitFor(() => expect(within(dialog).getByText("WBDD-MATCH（2026-09-01）", { selector: ".ant-select-selection-item" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByText("WBDD-MATCH（2026-09-01） · 剩余可录 18", { selector: ".ant-select-selection-item" })).toBeInTheDocument());
     fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "2" } });
     fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
@@ -297,11 +297,11 @@ describe("登记返还按 PN 建议需求单", () => {
     fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
     const dialog = screen.getByRole("dialog");
     openDemandSelect(dialog);
-    fireEvent.click(await screen.findByText("WBDD-2（2026-08-01）", { selector: ".ant-select-item-option-content" }));
-    await waitFor(() => expect(within(dialog).getByText("WBDD-2（2026-08-01）", { selector: ".ant-select-selection-item" })).toBeInTheDocument());
+    fireEvent.click(await screen.findByText("WBDD-2（2026-08-01） · 剩余可录 18", { selector: ".ant-select-item-option-content" }));
+    await waitFor(() => expect(within(dialog).getByText("WBDD-2（2026-08-01） · 剩余可录 18", { selector: ".ant-select-selection-item" })).toBeInTheDocument());
     fireEvent.click(screen.getByText("选择测试返件"));
     await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }));
-    expect(within(dialog).queryByText("WBDD-MATCH（2026-09-01）", { selector: ".ant-select-selection-item" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("WBDD-MATCH（2026-09-01） · 剩余可录 18", { selector: ".ant-select-selection-item" })).not.toBeInTheDocument();
     fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "1" } });
     fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
@@ -328,8 +328,67 @@ describe("登记返还按 PN 建议需求单", () => {
     await waitFor(() => expect(mocks.demands).toHaveBeenCalled());
     for (const call of mocks.demands.mock.calls) expect(call[1] ?? {}).not.toHaveProperty("part_id");
     openDemandSelect(screen.getByRole("dialog"));
-    expect(await screen.findByText("WBDD-MATCH（2026-09-01）", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    expect(await screen.findByText("WBDD-MATCH（2026-09-01） · 剩余可录 18", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
     expect(screen.queryByText("含此 PN", { selector: ".ant-select-item-group" })).not.toBeInTheDocument();
     expect(screen.queryByText("其他需求单", { selector: ".ant-select-item-group" })).not.toBeInTheDocument();
   });
+});
+
+
+describe("D-31 需求单容量候选", () => {
+  const candidate = (order_no: string, received_qty: string, remaining_qty: string) => ({
+    source_order_id: order_no, order_no, order_date: null, demand_qty: "10.000",
+    received_qty, remaining_qty, max_qty: remaining_qty, basis_state: "complete", is_current: false,
+  });
+
+  it("新增下拉过滤满额与超额，展示剩余且超量不会发送登记", async () => {
+    const rows = [candidate("WBDD-AVAILABLE", "9.000", "1.000"), candidate("WBDD-FULL", "10.000", "0.000"), candidate("WBDD-OVER", "12.000", "0.000")];
+    mocks.demands.mockResolvedValue({ data: { rows, total: rows.length } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.mouseDown(within(dialog).getByLabelText(/维保需求单（可选/));
+    const available = await screen.findByText(/WBDD-AVAILABLE.*剩余可录 1/, { selector: ".ant-select-item-option-content" });
+    expect(screen.queryByText(/WBDD-FULL/, { selector: ".ant-select-item-option-content" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/WBDD-OVER/, { selector: ".ant-select-item-option-content" })).not.toBeInTheDocument();
+    fireEvent.click(available);
+    fireEvent.click(within(dialog).getByText("选择测试返件"));
+    fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
+    expect(await within(dialog).findByText(/本次最多可录入 1，当前提交 2/)).toBeInTheDocument();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+  it("编辑保留当前满额单并传 receipt_id，排除自身后超量被拦，减量可提交", async () => {
+    mocks.demands.mockImplementation((_project: string, input: { receipt_id?: string }) => Promise.resolve({ data: {
+      rows: input.receipt_id ? [{ ...candidate("WBDD-1", "12.000", "0.000"), source_order_id: "d1", is_current: true, max_qty: "2.000" }] : [], total: input.receipt_id ? 1 : 0,
+    } }));
+    render(<ReturnReceiptsSection projectId="p1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改" }));
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" })));
+    fireEvent.mouseDown(within(dialog).getByLabelText(/维保需求单（可选/));
+    expect(await screen.findByText(/WBDD-1.*剩余可录 0.*当前关联/, { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("修改原因（必填，留痕审计）"), { target: { value: "清点" } });
+    fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "3" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    expect(await within(dialog).findByText(/本次最多可录入 2，当前提交 3/)).toBeInTheDocument();
+    expect(mocks.update).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ qty: 1, wbdd_no: "WBDD-1" })));
+  });
+
+  it("服务端容量 409 中文原文在表单中明确显示", async () => {
+    const message = "需求单 WBDD-1 下单量 10，已收 9，本次最多还能录入 1，当前提交 2";
+    mocks.demands.mockResolvedValue({ data: { rows: [candidate("WBDD-1", "5.000", "5.000")], total: 1 } });
+    mocks.create.mockRejectedValue({ response: { status: 409, data: { detail: { code: "return_capacity_exceeded", message } } } });
+    render(<ReturnReceiptsSection projectId="p1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByText("选择测试返件"));
+    fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
+    expect(await within(dialog).findByText(message)).toBeInTheDocument();
+  });
+
 });
