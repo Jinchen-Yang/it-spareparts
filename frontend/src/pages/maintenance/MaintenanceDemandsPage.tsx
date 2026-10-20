@@ -338,10 +338,11 @@ export function MaintenanceDemandsPage() {
   ];
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+    <>
       {/* 已作废行整行灰显（沿用默认主题的中性禁用色，不引入新色板） */}
       <style>{".demand-row-voided > td { color: rgba(0, 0, 0, 0.25); }"}</style>
 
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <PageHeader title="需求单与数据同步"
         subtitle="上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。" />
 
@@ -541,6 +542,7 @@ export function MaintenanceDemandsPage() {
         />
       ) : null}
     </Space>
+    </>
   );
 }
 
