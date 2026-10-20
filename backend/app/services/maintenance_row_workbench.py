@@ -127,7 +127,14 @@ def _scalar(value):
     return value
 
 
-def read_rows(db, stmt, fields, *, projection="workbook"):
+def _export_scalar(value):
+    # 导出保留 Decimal：XLSX 写数值单元格，CSV 按数值原样输出、不进公式转义。
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def read_rows(db, stmt, fields, *, projection="workbook", raw=False):
     selected = stmt.with_only_columns(
         FMaintenanceLine.id.label("line_id"),
         *(field_expression(field, projection=projection).label(field.field) for field in fields),
@@ -136,7 +143,8 @@ def read_rows(db, stmt, fields, *, projection="workbook"):
     result = db.execute(selected)
     try:
         for row in result.mappings():
-            yield {key: _scalar(value) for key, value in row.items()}
+            convert = _export_scalar if raw else _scalar
+            yield {key: convert(value) for key, value in row.items()}
     finally:
         result.close()
 
@@ -148,7 +156,8 @@ def check_export_size(db, stmt):
 
 
 def export_rows(db, stmt, fields, *, projection="workbook"):
-    for index, row in enumerate(read_rows(db, stmt, fields, projection=projection), 1):
+    rows = read_rows(db, stmt, fields, projection=projection, raw=True)
+    for index, row in enumerate(rows, 1):
         if index > MAX_EXPORT_ROWS:
             raise HTTPException(413, f"筛选集超过 {MAX_EXPORT_ROWS} 行，请缩小范围后导出")
         yield [row[field.field] for field in fields]
@@ -165,19 +174,28 @@ def xlsx_file(db, stmt, fields, *, projection="workbook"):
         }) as workbook:
             sheet = workbook.add_worksheet("筛选结果（不可回传）")
             sheet.write_row(0, 0, [field.label for field in fields])
+            # 数值写数值单元格；文本一律显式写字符串（=1+1 仍为文本，不加撇号）。
             sheet.freeze_panes(1, 0)
             for row_index, values in enumerate(rows, 1):
-                safe_values = []
-                for value in values:
+                for column, value in enumerate(values):
                     value = excel_safe(value)
-                    if isinstance(value, str):
-                        text_bytes += len(value.encode("utf-8"))
+                    if value is None:
+                        continue
+                    if isinstance(value, Decimal):
+                        if not value.is_finite():
+                            raise HTTPException(422, "导出数值无效")
+                        sheet.write_number(row_index, column, float(value))
+                        continue
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        sheet.write_number(row_index, column, value)
+                        continue
+                    value = str(value)
+                    text_bytes += len(value.encode("utf-8"))
                     if text_bytes > MAX_DYNAMIC_TEXT_BYTES:
                         raise HTTPException(413, "XLSX 动态文本超过 64 MiB 上限，请缩小筛选范围")
-                    if isinstance(value, str) and len(value) > 32767:
+                    if len(value) > 32767:
                         raise HTTPException(413, "单元格超过 Excel 字符上限")
-                    safe_values.append(value)
-                sheet.write_row(row_index, 0, safe_values)
+                    sheet.write_string(row_index, column, value)
         if output.tell() > MAX_WORKBOOK_BYTES:
             raise HTTPException(413, "XLSX 文件超过 256 MiB 上限，请缩小筛选范围")
         output.seek(0)

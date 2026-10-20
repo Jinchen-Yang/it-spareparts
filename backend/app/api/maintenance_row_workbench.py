@@ -125,6 +125,7 @@ def _download(db, stmt, fields, format, *, projection="workbook"):
     # 复用已覆盖断连/异常清理的下载出口；不在慢客户端下载期间占用数据库连接。
     from app.api.maintenance import (
         _ClosingStreamingResponse, _csv_stream, _iter_download_chunks, _release_db_before_stream,
+        _safe_formula_only,
     )
     workbench.check_export_size(db, stmt)
     if format == "csv":
@@ -132,6 +133,7 @@ def _download(db, stmt, fields, format, *, projection="workbook"):
             [field.label for field in fields],
             workbench.export_rows(db, stmt, fields, projection=projection),
             "maintenance-filtered-readonly.csv", db=db,
+            sanitize=_safe_formula_only,
         )
     output = workbench.xlsx_file(db, stmt, fields, projection=projection)
     _release_db_before_stream(db, output)

@@ -242,6 +242,35 @@ def _safe(v):
     return value
 
 
+# D-33 核对导出专用（金臣规则：只转义真正像公式的值；思路同 #424 不给普通文本加撇号）。
+# = @ 开头（忽略前导空白）及 Tab/CR/LF 开头一律转义；+/- 开头只有后续含运算、函数、
+# 引用字符或形如单元格引用（-A1）时才转义，-48V、+5V、-1.500 等普通值保持原样。
+# 旧 _safe 调用方不变。
+_CSV_FORMULA_CHARS = re.compile(r"[=+\-*/^&()!|\"'<>@$:;,\[\]{}]")
+_CSV_CELL_REFERENCE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d+")
+
+
+def _safe_formula_only(v):
+    """同 _safe 清理控制字符与长度上限，但只对真正像公式的文本加撇号。"""
+    if not isinstance(v, str):
+        return v
+    value = _INVALID_CSV_CONTROLS.sub("", v)
+    probe = value.lstrip()
+    head, rest = probe[:1], probe[1:]
+    if (value[:1] in ("\t", "\r", "\n") or head in ("=", "@") or (
+        head in ("+", "-") and (
+            _CSV_FORMULA_CHARS.search(rest) or _CSV_CELL_REFERENCE.match(rest)
+        )
+    )):
+        value = "'" + value
+    if len(value) > _MAX_CSV_CELL_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 单元格超过 {_MAX_CSV_CELL_CHARS} 字符安全上限",
+        )
+    return value
+
+
 _INVALID_DOWNLOAD_NAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
 _INVALID_ASCII_FALLBACK = re.compile(r"[^A-Za-z0-9._-]+")
 _RFC5987_SAFE = "!#$&+-.^_`|~"
@@ -308,8 +337,10 @@ def _csv_stream(
     filename: str,
     ascii_fallback: str | None = None,
     db: Session | None = None,
+    sanitize=None,
 ) -> StreamingResponse:
     """增量写入有界内存 spool；完整校验成功后才开始响应。"""
+    sanitize = sanitize or _safe
     output = SpooledTemporaryFile(max_size=_CSV_SPOOL_MEMORY_BYTES, mode="w+b")
     row_buffer = io.StringIO(newline="")
     writer = csv.writer(row_buffer)
@@ -319,7 +350,7 @@ def _csv_stream(
         nonlocal dynamic_text_bytes
         safe_values = []
         for value in values:
-            safe_value = _safe(value)
+            safe_value = sanitize(value)
             safe_values.append(safe_value)
             if isinstance(safe_value, str):
                 dynamic_text_bytes += len(safe_value.encode("utf-8"))

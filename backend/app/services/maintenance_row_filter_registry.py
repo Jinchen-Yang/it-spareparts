@@ -287,6 +287,10 @@ for name, label, type in (
               amount=True, options=("purchase", "sales") if name == "reference_side" else ())
 
 
+# 金臣 10-15：「需求数量为空按 0 算」。相等/范围按 0 比较；「为空」仍只匹配 NULL。
+NULL_AS_ZERO_FIELDS = frozenset({"qty"})
+
+
 @dataclass(frozen=True)
 class RowFilter:
     field: str
@@ -409,6 +413,8 @@ def apply_row_filters(stmt, filters, *, can_filter_amounts: bool, projection="wo
                 "message": "此范围不可按金额或成本证据筛选；请先明确选择有金额资格的项目",
             })
         expr = field_expression(field, projection=projection)
+        if field.field in NULL_AS_ZERO_FIELDS and item.op in {"eq", "range"}:
+            expr = func.coalesce(expr, 0)
         if item.op == "is_empty":
             predicate = or_(expr.is_(None), expr == "") if field.type in {"text", "enum"} else expr.is_(None)
         elif item.op == "contains":
