@@ -41,6 +41,25 @@ export interface WorkbookFieldChange {
   overridden?: boolean;
 }
 
+/**
+ * D-34 Q3=A（2026-10-21 需求单）：旧工作簿里编辑过的需求事实字段，其保护
+ * 比较基准（本轮首次快照）或保护周期自导出后已变化——整本拒绝、零写入，
+ * 不可强制接管，只能重新下载核对后重传。
+ */
+export interface WorkbookProtectionDriftIssue {
+  sheet: string;
+  row: string;
+  entity_id: string;
+  field: string;
+  reason: string;
+}
+
+export interface WorkbookProtectionDriftDetail {
+  code: "protection_baseline_drift";
+  message: string;
+  issues: WorkbookProtectionDriftIssue[];
+}
+
 /** 无实体 ID 的领用行命中已有身份；只能修改文件，不能强制接管。 */
 export interface WorkbookSiteReplayRow {
   row_no: number;

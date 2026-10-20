@@ -545,6 +545,75 @@ describe("WorkbookRoundTrip", () => {
   });
 });
 
+describe("WorkbookRoundTrip · Q3=A 保护基准漂移（不可接管）", () => {
+  const driftDetail = {
+    code: "protection_baseline_drift",
+    message: "以下编辑字段的保护比较基准或保护周期在你下载后已变化，本次上传未写入任何数据；请重新下载项目总表并核对这些字段。",
+    issues: [
+      {
+        sheet: "03_备件明细", row: "WBDD-1", entity_id: "7",
+        field: "需求数量", reason: "protection_released_since_export",
+      },
+      {
+        sheet: "03_备件明细", row: "WBDD-2", entity_id: "8",
+        field: "PN", reason: "protection_cycle_changed",
+      },
+    ],
+  };
+
+  it("409 漂移逐字段提示重下核对，且不出现强制接管按钮", async () => {
+    const onApply = vi.fn().mockRejectedValue({
+      response: { status: 409, data: { detail: driftDetail } },
+    });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    await waitFor(() => expect(
+      dialog.getByText(/以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化/),
+    ).toBeVisible());
+    expect(dialog.getByText("03_备件明细 · 行 WBDD-1 · 字段「需求数量」 · 该字段的人工保护在你下载后已被解除")).toBeVisible();
+    expect(dialog.getByText("03_备件明细 · 行 WBDD-2 · 字段「PN」 · 该字段的保护周期在你下载后已变化（期间被解除又重新保护）")).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /强制接管/ })).toBeNull());
+    expect(onApply).toHaveBeenCalledTimes(1);
+    fireEvent.click(dialog.getByRole("button", { name: "知道了，重新下载" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("强制接管重传撞上漂移时切换为重下核对明细，不能再次接管", async () => {
+    const onApply = vi.fn()
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: {
+        code: "row_conflicts", message: "部分行已被他人更新",
+        conflicts: [{ sheet: "03_备件明细", row: "WBDD-1", entity_id: "7", field: "备注", base: "b", old: "o", new: "n" }],
+      } } } })
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: driftDetail } } });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+    fireEvent.click(await screen.findByRole("button", { name: /强制接管并上传/ }));
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    await waitFor(() => expect(
+      dialog.getByText(/不能用强制接管跳过/),
+    ).toBeVisible());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /强制接管/ })).toBeNull());
+    expect(onApply).toHaveBeenLastCalledWith(expect.any(File), { forceTakeover: true });
+  });
+});
+
 describe("WorkbookRoundTrip · 2.7.0 行级冲突与强制接管", () => {
   it("409 冲突展示三值对照，确认后带 force_takeover 重传", async () => {
     const conflicts = [
