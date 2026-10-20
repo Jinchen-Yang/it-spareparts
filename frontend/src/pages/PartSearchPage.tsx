@@ -1,6 +1,7 @@
+import PageSkeleton from "../components/PageSkeleton";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { App, Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip } from "antd";
+import { App, Input, Card, Descriptions, Tag, Statistic, Tabs, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip } from "antd";
 import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -10,8 +11,8 @@ import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
-import type { UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
-import { COLORS } from "../theme";
+import type { SearchFilters, UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
+import "./PartSearchPage.css";
 import { completeTaxPair, money, pct, splitByFlag, splitFixed } from "../utils/format";
 import type { TaxSplit } from "../utils/format";
 import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
@@ -44,6 +45,20 @@ function salesPricePair(row: SalesRow): TaxSplit {
     : splitFixed(row.unit_price, "inc");
 }
 
+const filterKeys = ["part_type", "interface", "capacity_min", "capacity_max", "category_major", "category_minor"] as const;
+function readFilters(params: URLSearchParams): SearchFilters {
+  const filters: SearchFilters = {};
+  for (const key of filterKeys) {
+    const value = params.get(key);
+    if (!value) continue;
+    if (key === "capacity_min" || key === "capacity_max") {
+      const number = Number(value);
+      if (Number.isFinite(number) && number >= 0) filters[key] = number;
+    } else filters[key] = value;
+  }
+  return filters;
+}
+
 /**
  * 型号查询：URL 驱动（与采购三页同范式）——
  *   /parts?q=<查询>            搜索
@@ -55,6 +70,8 @@ export default function PartSearchPage() {
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const urlQ = sp.get("q") || "";
+  const urlFilters = readFilters(sp);
+  const filterQuery = JSON.stringify(urlFilters);
   const urlPartId = sp.get("part_id");
   const urlPn = sp.get("pn");
   const returnToPool = poolAnalysisReturnPath(sp);
@@ -70,6 +87,7 @@ export default function PartSearchPage() {
   });
 
   const [qInput, setQInput] = useState(urlQ);
+  const [queryError, setQueryError] = useState(false);
   const [resp, setResp] = useState<UnifiedSearchResp | null>(null);
   const [searching, setSearching] = useState(false);
   const [ov, setOv] = useState<Overview | null>(null);
@@ -84,15 +102,15 @@ export default function PartSearchPage() {
   // 代次守卫：慢响应不得覆盖新请求的结果（与采购页 loadSeqRef 同范式）
   const searchSeq = useRef(0);
   const ovSeq = useRef(0);
-  // 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）——本地态，属"筛选浏览"不属深链
-  const [partType, setPartType] = useState<string | undefined>(undefined);
-  const [iface, setIface] = useState<string | undefined>(undefined);
-  const [capMin, setCapMin] = useState<number | null>(null);
-  const [capMax, setCapMax] = useState<number | null>(null);
+  // 编辑中的条件只在提交时写入 URL；刷新和前进/后退可完整重放组合查询
+  const [partType, setPartType] = useState<string | undefined>(urlFilters.part_type);
+  const [iface, setIface] = useState<string | undefined>(urlFilters.interface);
+  const [capMin, setCapMin] = useState<number | null>(urlFilters.capacity_min ?? null);
+  const [capMax, setCapMax] = useState<number | null>(urlFilters.capacity_max ?? null);
   // 品类筛选（宋总 2026-07-05：全品类按分类查，不只硬盘）—— 一级 → 二级级联
   const [cats, setCats] = useState<{ major: string; minors: string[] }[]>([]);
-  const [catMajor, setCatMajor] = useState<string | undefined>(undefined);
-  const [catMinor, setCatMinor] = useState<string | undefined>(undefined);
+  const [catMajor, setCatMajor] = useState<string | undefined>(urlFilters.category_major);
+  const [catMinor, setCatMinor] = useState<string | undefined>(urlFilters.category_minor);
   useEffect(() => {
     api.get("/parts/categories").then(({ data }) => setCats(data.categories || [])).catch(() => {});
   }, []);
@@ -115,17 +133,17 @@ export default function PartSearchPage() {
     }, { replace });
   };
 
-  const runSearch = async (q: string, filters?: Record<string, unknown>) => {
+  const runSearch = async (q: string, filters?: SearchFilters, selectExact = !sp.get("part_id")) => {
     const seq = ++searchSeq.current;
     setSearching(true);
     setError(null);
     try {
-      const data = await unifiedSearch(q, { pageSize: 20, filters: filters as any });
+      const data = await unifiedSearch(q, { pageSize: 20, filters });
       if (seq !== searchSeq.current) return;   // 已有更新的搜索在跑
       setResp(data);
       if (data.items.length === 0) message.info("没有匹配的型号");
       // 精确即唯一：自动打开唯一主结果的全景（replace 不额外堆历史，后退直接回搜索前）
-      if (data.exact && data.items[0]?.part_id && !sp.get("part_id")) {
+      if (data.exact && data.items[0]?.part_id && selectExact) {
         patchUrl({ part_id: String(data.items[0].part_id), pn: undefined }, true);
       }
     } catch (e) {
@@ -139,13 +157,25 @@ export default function PartSearchPage() {
     }
   };
 
-  // URL q → 搜索（刷新/前进/后退都从这里重放）
+  // 只订阅查询条件；精确命中补写 part_id 不会再发一次搜索。
   useEffect(() => {
+    const filters: SearchFilters = JSON.parse(filterQuery);
     setQInput(urlQ);
-    if (urlQ.trim()) runSearch(urlQ);
-    else setResp(null);
+    setQueryError(false);
+    setPartType(filters.part_type);
+    setIface(filters.interface);
+    setCapMin(filters.capacity_min ?? null);
+    setCapMax(filters.capacity_max ?? null);
+    setCatMajor(filters.category_major);
+    setCatMinor(filters.category_minor);
+    if (urlQ.trim() || Object.keys(filters).length) runSearch(urlQ, filters);
+    else {
+      setResp(null);
+      setSearching(false);
+    }
+    return () => { searchSeq.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlQ]);
+  }, [urlQ, filterQuery]);
 
   const loadOverview = async (key: { part_id: number } | { pn_std: string }) => {
     const seq = ++ovSeq.current;
@@ -197,19 +227,26 @@ export default function PartSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlPartId, urlPn]);
 
-  const onSearch = (q: string) => {
-    if (!q.trim()) return;
-    // 新搜索：q 入 URL（push，一次搜索一条历史），清掉旧选中
-    patchUrl({ q: q.trim(), part_id: undefined, pn: undefined });
-  };
-
-  // 按品类/规格筛选：结构化浏览（后端 structured 分支），结果进同一张结果表
-  const doFilterSearch = () => {
-    runSearch(qInput, {
+  const onSearch = () => {
+    const nextFilters = {
       part_type: partType, interface: iface,
-      capacity_min: capMin ?? undefined, capacity_max: capMax ?? undefined,
+      capacity_min: capMin == null ? undefined : String(capMin),
+      capacity_max: capMax == null ? undefined : String(capMax),
       category_major: catMajor, category_minor: catMinor,
-    });
+    };
+    const filters = readFilters(new URLSearchParams(
+      Object.entries(nextFilters).filter((entry): entry is [string, string] => entry[1] !== undefined),
+    ));
+    const query = qInput.trim();
+    if (!query && !Object.keys(filters).length) {
+      setQueryError(true);
+      return;
+    }
+    setQueryError(false);
+    // 新条件产生一条历史；同条件重查用 replace 刷新，不堆历史，也不重复发请求。
+    const unchanged = query === urlQ && JSON.stringify(filters) === filterQuery;
+    patchUrl({ ...nextFilters, q: query, part_id: undefined, pn: undefined }, unchanged && !urlPartId && !urlPn);
+    if (unchanged) runSearch(query, filters, true);
   };
 
   /** 点击结果行：part_id 深链（push 进历史，后退回到列表） */
@@ -332,38 +369,44 @@ export default function PartSearchPage() {
   const similar = resp?.similar_items || [];
 
   return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+    <div className="part-search-page">
       <PageHeader
         title="型号查询"
         subtitle="按型号 / 品牌 / 描述近似搜索，点击型号查看完整全景（采购 · 销售 · 库存 · 成本 · 毛利）"
         extra={returnToPool ? <Link to={returnToPool}>返回互通池分析</Link> : undefined}
       />
-      <Card>
-        <Input.Search
-          placeholder="输入型号 (PN) 或描述关键词，如 ST8000NM000A；规格条件可单独使用"
-          enterButton="搜索"
-          size="large"
-          loading={searching}
-          value={qInput}
-          onChange={(e) => setQInput(e.target.value)}
-          onSearch={onSearch}
-          allowClear
-        />
-        <Space style={{ marginTop: 12 }} wrap>
-          <Select allowClear showSearch placeholder="一级品类（全品类）" value={catMajor} style={{ width: 160 }}
-            onChange={(v) => { setCatMajor(v); setCatMinor(undefined); }}
-            options={cats.map((c) => ({ value: c.major }))} />
-          <Select allowClear showSearch placeholder="二级品类" value={catMinor} onChange={setCatMinor}
-            style={{ width: 160 }} disabled={!catMajor}
-            options={minorOpts.map((m) => ({ value: m }))} />
-          <Select allowClear placeholder="部件类型" value={partType} onChange={setPartType} style={{ width: 110 }}
-            options={[{ value: "HDD" }, { value: "SSD" }, { value: "RAM", label: "内存" }]} />
-          <Select allowClear placeholder="接口" value={iface} onChange={setIface} style={{ width: 100 }}
-            options={["SAS", "SATA", "NVME", "FC", "SCSI"].map((v) => ({ value: v }))} />
-          <InputNumber placeholder="容量≥(GB)" value={capMin} onChange={setCapMin} style={{ width: 120 }} min={0} />
-          <InputNumber placeholder="容量≤(GB)" value={capMax} onChange={setCapMax} style={{ width: 120 }} min={0} />
-          <Button type="primary" ghost onClick={doFilterSearch} loading={searching}>按品类/规格筛选</Button>
-        </Space>
+      <Card className="part-search-form-card">
+        <form aria-label="型号查询条件" onSubmit={(event) => { event.preventDefault(); onSearch(); }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+          }}>
+          <div className="part-search-keyword">
+            <Input
+              aria-label="型号或关键词"
+              aria-invalid={queryError || undefined}
+              aria-describedby={queryError ? "part-query-error" : undefined}
+              status={queryError ? "error" : undefined}
+              placeholder="输入型号 (PN) 或描述关键词；规格条件可单独使用"
+              size="large" value={qInput}
+              onChange={(e) => { setQInput(e.target.value); setQueryError(false); }} allowClear
+            />
+            <Button type="primary" htmlType="submit" size="large" loading={searching}>搜索</Button>
+          </div>
+          {queryError && <div id="part-query-error" role="alert" className="part-query-error">请输入型号或关键词</div>}
+          <div className="part-search-filters">
+            <Select aria-label="一级品类" allowClear showSearch placeholder="一级品类（全品类）" value={catMajor}
+              onChange={(v) => { setCatMajor(v); setCatMinor(undefined); }}
+              options={cats.map((c) => ({ value: c.major }))} />
+            <Select aria-label="二级品类" allowClear showSearch placeholder="二级品类" value={catMinor} onChange={setCatMinor}
+              disabled={!catMajor} options={minorOpts.map((m) => ({ value: m }))} />
+            <Select aria-label="部件类型" allowClear placeholder="部件类型" value={partType} onChange={setPartType}
+              options={[{ value: "HDD" }, { value: "SSD" }, { value: "RAM", label: "内存" }]} />
+            <Select aria-label="接口" allowClear placeholder="接口" value={iface} onChange={setIface}
+              options={["SAS", "SATA", "NVME", "FC", "SCSI"].map((v) => ({ value: v }))} />
+            <InputNumber aria-label="最小容量" placeholder="容量≥" suffix="GB" value={capMin} onChange={setCapMin} min={0} />
+            <InputNumber aria-label="最大容量" placeholder="容量≤" suffix="GB" value={capMax} onChange={setCapMax} min={0} />
+          </div>
+        </form>
       </Card>
 
       {resp?.ambiguous && (
@@ -374,17 +417,29 @@ export default function PartSearchPage() {
       )}
 
       {exactItem ? (
-        <Card title="精确匹配" size="small">
-          <Space wrap size={12} style={{ fontSize: 14 }}>
+        <div className="part-match-results">
+          <Card title="精确匹配" size="small">
             <Button type="link" size="small" onClick={() => openPart(exactItem)} style={{ fontFamily: "monospace", fontWeight: 600 }}>
               {exactItem.pn_std}
             </Button>
             <Tag color="green">{exactItem.match_type === "exact_alias"
               ? `别名精确：${exactItem.matched_text}` : "PN 精确匹配"}</Tag>
             {exactItem.pool_name && <Tag color="geekblue">互通池：{exactItem.pool_name}</Tag>}
-            <span style={{ color: "var(--mb-text-3)" }}>{exactItem.description || ""}</span>
-          </Space>
-        </Card>
+            <div className="part-match-description">{exactItem.description || ""}</div>
+          </Card>
+          {similar.length > 0 && <Card title="相似型号" size="small">
+            <div className="part-similar-list" aria-label="相似型号候选">
+              {similar.map((it) => <div key={it.part_id}>
+                <Button type="link" size="small" onClick={() => openPart(it)} title={it.description || undefined}>
+                  {it.pn_std}
+                </Button>
+                <small>{it.match_reason || "非精确命中，仅供参考"}</small>
+                {it.needs_review && <Tag color="orange">待复核</Tag>}
+                {it.is_excluded && <Tag color="red">已排除</Tag>}
+              </div>)}
+            </div>
+          </Card>}
+        </div>
       ) : (resp && resp.items.length > 0 && (
         <Card title="搜索结果" size="small">
           <ResizableTable storageKey="search-hits" rowKey="pn_std" size="small" columns={hitCols}
@@ -393,36 +448,46 @@ export default function PartSearchPage() {
       ))}
 
       {ov ? (
-        <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
+        <Card className="part-overview" loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
-          <div
-            role="group"
-            aria-label="型号订单历史"
-            style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%", marginBottom: 16 }}
-          >
-            <section aria-label="采购订单历史" style={{ width: "100%" }}>
-              <Card title="采购历史(近20)" size="small">
-                <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-              </Card>
-            </section>
-            <section aria-label="销售订单历史" style={{ width: "100%" }}>
-              <Card title="销售历史(近20)" size="small">
-                {ov.sales_recent_restricted ? (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="按权限，销售逐单成交明细不可见；可参考下方平均售价与近期成交参考价"
-                  />
-                ) : (
-                  <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-                )}
-              </Card>
-            </section>
-          </div>
+          <section aria-label="型号摘要" className="part-summary">
+            <div aria-label="近期成交参考价" className="part-summary-metric">
+              <span>近期成交参考价</span>
+              <strong>{(() => { const s = splitFixed(ov.sale_price_ref?.ref_sale_price, "inc");
+                return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} stack />; })()}</strong>
+              {ov.sale_price_ref?.ref_sale_price != null ? <>
+                <small>近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权</small>
+                {ov.sale_price_ref.ref_sale_samples < 3 && <Tag color="orange">成交少，仅供参考</Tag>}
+              </> : <small>暂无成交参考价</small>}
+            </div>
+            <div aria-label="动态可用库存" className="part-summary-metric">
+              <span>动态可用库存</span>
+              <strong className={(ov.stock_dynamic?.dynamic_qty ?? 0) < 0 ? "is-negative" : undefined}>
+                {ov.stock_dynamic?.dynamic_qty ?? "—"}
+              </strong>
+              <small>期初 + 入库 − 出库</small>
+            </div>
+            {canCost && <div aria-label="移动加权单位成本" className="part-summary-metric">
+              <span>移动加权 · 单位成本</span>
+              <strong>{(() => { const s = splitFixed(ov.profit_summary.avg_cost_moving, "ex");
+                return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} stack />; })()}</strong>
+            </div>}
+            {canCost && canProfit && <div aria-label="移动加权毛利率" className="part-summary-metric">
+              <span>毛利率</span>
+              <strong>{pct(ov.profit_summary.avg_margin_moving)}</strong>
+              <small>移动加权</small>
+            </div>}
+            <div className="part-summary-metric">
+              <span>互通池</span>
+              <PoolReferencePanel key={ov.part.id} partId={ov.part.id} summary />
+            </div>
+          </section>
 
-          <section aria-label="型号基本信息">
-            <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="描述" span={3}>
+          <section aria-label="型号基本信息" className="part-section">
+            <h3>基本信息</h3>
+            <Descriptions bordered size="small" column={{ xs: 1, sm: 3 }} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="描述" span="filled">
                 <Space size={8} wrap>
                   <span>{ov.part.description || "-"}</span>
                   {canEditPartDetails && (
@@ -447,64 +512,9 @@ export default function PartSearchPage() {
             </Descriptions>
           </section>
 
-          <div style={{ marginBottom: 16 }}>
-            <PoolReferencePanel partId={ov.part.id} />
-          </div>
-
-          {ov.sale_price_ref?.ref_sale_price != null && (
-            <div style={{
-              display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
-              background: COLORS.accentSoft, border: `1px solid ${COLORS.accentSoftBorder}`, borderRadius: 10,
-              padding: "12px 16px", marginBottom: 16,
-            }}>
-              <span style={{ color: COLORS.text2, fontSize: 13 }}>近期成交参考价（销售出价用）</span>
-              <span style={{ fontSize: 22, fontWeight: 500, color: COLORS.accentStrong }}>
-                {(() => { const s = splitFixed(ov.sale_price_ref.ref_sale_price, "inc"); return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} />; })()}
-              </span>
-              <span style={{ color: COLORS.text3, fontSize: 13 }}>
-                近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权
-              </span>
-              {ov.sale_price_ref.ref_sale_samples < 3 && (
-                <Tag color="orange">成交少，仅供参考</Tag>
-              )}
-            </div>
-          )}
-
-          <Row gutter={16} style={{ marginBottom: 16 }}>
-            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
-              {/* 移动加权单位成本：原值为未税，含税侧按 13% 换算。 */}
-              <Statistic title="移动加权 · 单位成本" valueStyle={{ color: COLORS.accentStrong }}
-                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_moving, "ex"); return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} />; }} />
-              {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>}
-            </Card></Col>}
-            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
-              {/* FIFO 单位成本：不含税口径 */}
-              <Statistic title="FIFO · 单位成本"
-                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} />; }} />
-              {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
-            </Card></Col>}
-            <Col xs={24} sm={12} lg={6}><Card size="small">
-              {/* 平均销售价：原值为含税，未税侧按 13% 换算。 */}
-              <Statistic title="平均销售价"
-                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} />; }} />
-              <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
-            </Card></Col>
-            <Col xs={24} sm={12} lg={6}><Card size="small">
-              {/* 询价区间：含税口径，min~max 各自双值 */}
-              <Statistic title="询价区间" valueRender={() => {
-                if (!ov.inquiry_ref.count) return <>无</>;
-                const lo = splitFixed(ov.inquiry_ref.min_money, "inc");
-                const hi = splitFixed(ov.inquiry_ref.max_money, "inc");
-                return (<span style={{ whiteSpace: "nowrap" }}>
-                  <TaxMoney scope="sales" inc={lo.inc} ex={lo.ex} /> ~ <TaxMoney scope="sales" inc={hi.inc} ex={hi.ex} />
-                </span>);
-              }} />
-            </Card></Col>
-          </Row>
-
-          <section aria-label="型号库存">
-            <Card size="small" style={{ marginBottom: 16 }}
-                  title={<Space size={10}>库存
+          <section aria-label="型号库存" className="part-section">
+            <h3>库存</h3>
+            <div className="part-stock-note">
                     {ov.stock_dynamic && (
                       <span style={{ fontWeight: 400, fontSize: 13 }}>
                         动态可用 <b style={{ color: (ov.stock_dynamic.dynamic_qty ?? 0) < 0 ? "var(--mb-danger)" : "var(--mb-accent, #2f5b7c)" }}>
@@ -514,14 +524,56 @@ export default function PartSearchPage() {
                         </span>
                       </span>
                     )}
-                  </Space>}>
+            </div>
               {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
               <ResizableTable storageKey="search-ov-inv" rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
-                locale={{ emptyText: "无库存" }} />
-            </Card>
+                locale={{ emptyText: "无库存" }} scroll={{ x: 650 }} />
           </section>
 
-          <Card size="small" style={{ marginBottom: 16 }}>
+          <section aria-label="更多价格统计" className="part-section">
+            <h3>更多价格统计</h3>
+            <div className="part-price-stats">
+              {canCost && <div>
+                <Statistic title="FIFO · 单位成本"
+                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney scope="purchase" inc={s.inc} ex={s.ex} stack />; }} />
+                {canProfit && <span>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
+              </div>}
+              <div>
+                <Statistic title="平均销售价"
+                  valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} stack />; }} />
+                <span>累计售 {ov.profit_summary.total_qty_sold}</span>
+              </div>
+              <Statistic title="询价区间" valueRender={() => {
+                if (!ov.inquiry_ref.count) return <>无</>;
+                const lo = splitFixed(ov.inquiry_ref.min_money, "inc");
+                const hi = splitFixed(ov.inquiry_ref.max_money, "inc");
+                return <><TaxMoney scope="sales" inc={lo.inc} ex={lo.ex} stack /> ~ <TaxMoney scope="sales" inc={hi.inc} ex={hi.ex} stack /></>;
+              }} />
+            </div>
+          </section>
+
+          <div role="group" aria-label="型号订单历史" className="part-section">
+            <h3>订单历史</h3>
+            <Tabs items={[
+              { key: "purchase", label: "采购历史(近20)", children: (
+                <section aria-label="采购订单历史">
+                  <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                </section>
+              ) },
+              { key: "sales", label: "销售历史(近20)", children: (
+                <section aria-label="销售订单历史">
+                  {ov.sales_recent_restricted ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="按权限，销售逐单成交明细不可见；可参考上方平均售价与近期成交参考价" />
+                  ) : (
+                    <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                  )}
+                </section>
+              ) },
+            ]} />
+          </div>
+
+          <section aria-label="替代料" className="part-section">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                           gap: 12, flexWrap: "wrap", marginBottom: subsOpen ? 12 : 0 }}>
               <button type="button" aria-expanded={subsOpen} onClick={toggleSubs}
@@ -597,7 +649,7 @@ export default function PartSearchPage() {
                 />
               )
             )}
-          </Card>
+          </section>
 
         </Card>
       ) : error ? (
@@ -607,22 +659,14 @@ export default function PartSearchPage() {
             <Button size="small" onClick={() => {
               if (urlPartId) loadOverview({ part_id: Number(urlPartId) });
               else if (urlPn) loadOverview({ pn_std: urlPn });
-              else if (urlQ) runSearch(urlQ);
+              else if (urlQ || Object.keys(urlFilters).length) runSearch(urlQ, urlFilters);
             }}>
               重试
             </Button>
           }
         />
       ) : (
-        <Empty description={searching || loadingOv ? "加载中…" : "搜索并点击型号查看全景"} />
-      )}
-
-      {exactItem && similar.length > 0 && (
-        <Card size="small" title={<span>相似型号 <span style={{ fontWeight: 400, fontSize: 12.5, color: "var(--mb-text-3)" }}>
-          非精确命中，仅供参考（如要找的不是 {exactItem.pn_std}）</span></span>}>
-          <ResizableTable storageKey="search-similar" rowKey="pn_std" size="small" columns={hitCols}
-            dataSource={similar} pagination={false} scroll={{ x: 900 }} />
-        </Card>
+        searching || loadingOv ? <PageSkeleton label="加载中…" /> : <Empty description="搜索并点击型号查看全景" />
       )}
 
       <InlinePartEditModal
@@ -634,6 +678,6 @@ export default function PartSearchPage() {
         onClose={() => setInlineEditPn(null)}
         onSaved={() => ov ? loadOverview({ part_id: ov.part.id }) : undefined}
       />
-    </Space>
+    </div>
   );
 }

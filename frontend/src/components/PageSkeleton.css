@@ -1,0 +1,17 @@
+.page-skeleton { min-height: 280px; position: relative; }
+.page-skeleton > .ant-skeleton .ant-skeleton-title { margin-top: 0; }
+.page-skeleton__body {
+  margin-top: var(--mb-space-lg);
+  padding: var(--mb-space-xl);
+  border: 1px solid var(--mb-border);
+  border-radius: var(--mb-radius-md);
+  background: var(--mb-surface);
+}
+.page-skeleton__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

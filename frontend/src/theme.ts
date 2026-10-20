@@ -1,33 +1,10 @@
 import type { ThemeConfig } from "antd";
 
-// 壳层与铺满内容区的页面共用尺寸，避免主题顶栏和页面抵消间距各自硬编码。
-export const SHELL_LAYOUT = {
-  headerHeight: 60,
-  contentPadding: 24,
-  mobileContentPadding: 12,
-};
+import { tokens } from "./tokens";
 
-// 暖白 · 极简蓝点缀主题。
-// 取向：白为主、底色一点点暖（米白）、用白的不同灰度分层（画布<卡面）、蓝只作少量提醒色。
-export const COLORS = {
-  page: "#F4F1EC",        // 画布底（暖浅灰，把白卡片衬出来）
-  surface: "#FFFFFF",     // 卡片/面板（纯白，浮在画布上）
-  inset: "#F6F3EE",       // 卡内嵌套 / 表头 / 悬浮（暖灰中间调）
-  header: "#FFFFFF",      // 顶栏（白 + 发丝底线）
-  accent: "#3E6FD1",      // 强调蓝（主按钮 / 选中 / 链接）——克制使用
-  accentStrong: "#2C56AE",// 关键数字 / 链接强调
-  accentSoft: "#EEF3FC",  // 蓝色提醒底（成交参考价条等）
-  accentSoftBorder: "#DBE6F8",
-  text: "#2A2722",        // 主文字（暖近黑，非纯黑）
-  text2: "#6B665E",       // 次级（暖灰）
-  text3: "#787264",       // 提示 / 弱（暖灰，4.78:1 过 WCAG AA）
-  border: "#E9E5DE",      // 发丝边（暖）
-  borderSoft: "#F0EDE7",
-  danger: "#BE564B",      // 暖红（负毛利 / 错误）
-  warning: "#B07C33",     // 暖琥珀（待复核 / 警告）
-  success: "#4F875C",     // 柔绿
-  shadow: "0 1px 2px rgba(40,33,24,.05), 0 4px 14px rgba(40,33,24,.05)",
-};
+// 兼容 PR1/PR2 与既有消费方，取值只在 tokens.ts 维护。
+export const SHELL_LAYOUT = tokens.layout;
+export const COLORS = tokens.color;
 
 export const themeConfig: ThemeConfig = {
   token: {
@@ -42,15 +19,21 @@ export const themeConfig: ThemeConfig = {
     colorText: COLORS.text,
     colorTextSecondary: COLORS.text2,
     colorTextTertiary: COLORS.text3,
-    colorTextQuaternary: "#B6B0A6",
+    colorTextQuaternary: COLORS.text4,
     colorBorder: COLORS.border,
     colorBorderSecondary: COLORS.borderSoft,
     colorLink: COLORS.accentStrong,
     colorLinkHover: COLORS.accent,
-    borderRadius: 8,
-    borderRadiusLG: 12,
-    controlHeight: 36,
-    fontSize: 14,
+    borderRadius: tokens.radius.md,
+    borderRadiusLG: tokens.radius.lg,
+    controlHeight: tokens.space.xxl + tokens.space.xs,
+    fontSize: tokens.fontSize.md,
+    screenXS: tokens.breakpoint.xs,
+    screenSM: tokens.breakpoint.sm,
+    screenMD: tokens.breakpoint.md,
+    screenLG: tokens.breakpoint.lg,
+    screenXL: tokens.breakpoint.xl,
+    screenXXL: tokens.breakpoint.xxl,
     fontFamily:
       "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', 'Segoe UI', sans-serif",
   },
@@ -70,12 +53,12 @@ export const themeConfig: ThemeConfig = {
       itemSelectedBg: COLORS.accentSoft,
       itemHoverBg: COLORS.inset,
       groupTitleColor: COLORS.text3,
-      itemMarginInline: 8,
+      itemMarginInline: tokens.space.sm,
     },
     Table: {
       headerBg: COLORS.inset,
       headerColor: COLORS.text2,
-      rowHoverBg: "#F7F5F1",
+      rowHoverBg: COLORS.hover,
       borderColor: COLORS.borderSoft,
       headerSplitColor: COLORS.borderSoft,
     },
@@ -85,8 +68,19 @@ export const themeConfig: ThemeConfig = {
       itemSelectedColor: COLORS.accentStrong,
     },
     Card: { colorBorderSecondary: COLORS.border },
-    Statistic: { titleFontSize: 13 },
+    Statistic: { titleFontSize: tokens.fontSize.sm },
     Tabs: { inkBarColor: COLORS.accent, itemSelectedColor: COLORS.accentStrong },
-    Button: { primaryShadow: "none" },
+    Button: { primaryShadow: tokens.shadow.none },
   },
+};
+
+// 自定义 Tag 保持原先浅底/细边外观；Badge / Progress 使用 COLORS 的实色。
+const tagStyle = (tone: { text: string; background: string; border: string }) => ({
+  color: tone.text, background: tone.background, borderColor: tone.border,
+});
+export const TAG_STYLES = {
+  info: tagStyle(COLORS.tag.info),
+  warning: tagStyle(COLORS.tag.warning),
+  success: tagStyle(COLORS.tag.success),
+  danger: tagStyle(COLORS.tag.danger),
 };

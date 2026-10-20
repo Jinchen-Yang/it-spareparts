@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../../components/maintenance/ReturnStatusColumn";
-import { App, Button, Card, Select, Space, Table, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { BoardOrderRow } from "../../../api/maintenanceBossBoard";
 import { getBoardProjectOrders } from "../../../api/maintenanceBossBoard";
@@ -15,6 +15,10 @@ import {
 import ProjectProcurementPanel from "../../../components/maintenance/ProjectProcurementPanel";
 import OrderContactInfo from "../../../components/maintenance/OrderContactInfo";
 import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import ProjectMaintenanceRowFilters from "../../../components/maintenance/ProjectMaintenanceRowFilters";
+import { serializeRowFilters } from "../../../api/maintenanceRowFilters";
+import type { MaintenanceRowFilter } from "../../../api/maintenanceRowFilters";
+import SourceCancelImpactPanel from "../../../components/maintenance/SourceCancelImpactPanel";
 import { readPermissionMap } from "../../../nav";
 import DemandLineBatchCreate from "../DemandLineBatchCreate";
 import DemandLineCreate from "../DemandLineCreate";
@@ -82,9 +86,12 @@ export function PartsOrdersTab({
   const [selectedOrder, setSelectedOrder] = useState<SelectedOrder | null>(null);
   const selectedRef = useRef<SelectedOrder | null>(null);
   const [lines, setLines] = useState<ProjectPartsRow[]>([]);
-  const [linesTotal, setLinesTotal] = useState(0);
+  const [linesTotal, setLinesTotal] = useState<number | null>(null);
   const [linesPage, setLinesPage] = useState(1);
   const [linesLoading, setLinesLoading] = useState(false);
+  const [lineFilters, setLineFilters] = useState<MaintenanceRowFilter[]>([]);
+  const [linesError, setLinesError] = useState<string | null>(null);
+  const filtersParam = serializeRowFilters(lineFilters);
   const readOrders = useLatestRead();
   const readLines = useLatestRead();
   /** 采购段自己的读回函数（由 ProjectProcurementPanel 登记），一起进落库后的读回屏障。 */
@@ -141,11 +148,14 @@ export function PartsOrdersTab({
 
   const loadLines = useCallback(() => readLines(async (isCurrent) => {
     setLinesLoading(true);
+    setLinesTotal(null);
+    setLinesError(null);
     try {
       const params = {
         page_size: LINES_PAGE_SIZE,
         order_no: selectedOrder?.order_no,
         contract_no: contractFilter,
+        ...(filtersParam ? { filters: filtersParam } : {}),
       };
       let page = linesPage;
       let resp = await listProjectPartsRows(projectId, { page, ...params });
@@ -165,14 +175,14 @@ export function PartsOrdersTab({
     } catch (err) {
       if (isCurrent()) {
         setLines([]);
-        setLinesTotal(0);
-        message.error(readError(err, "备件明细加载失败"));
+        setLinesTotal(null);
+        setLinesError(readError(err, "备件明细加载失败"));
       }
       return false;
     } finally {
       if (isCurrent()) setLinesLoading(false);
     }
-  }), [projectId, contractFilter, selectedOrder, linesPage, readLines]);
+  }), [projectId, contractFilter, selectedOrder, linesPage, readLines, filtersParam]);
 
   useEffect(() => { void loadOrders(); }, [loadOrders]);
   useEffect(() => { void loadLines(); }, [loadLines]);
@@ -182,6 +192,8 @@ export function PartsOrdersTab({
   useEffect(() => {
     setCreatingLine(false);
     setCreatingBatch(false);
+    setLineFilters([]);
+    setLinesPage(1);
   }, [projectId]);
 
   // 落库后的读回屏障：三段各自读回，任一没完成都算没完成。采购段也在屏障里——
@@ -328,6 +340,12 @@ export function PartsOrdersTab({
         ) : undefined}
         hint="成本只读展示；缺成本请使用下载→修改黄色覆盖列→上传"
       />
+      <SourceCancelImpactPanel
+        projectId={projectId}
+        canConfirm={!!readPermissionMap().action_maintenance_demand_delete}
+        onChanged={onChanged}
+        registerRefresh={registerRefresh}
+      />
       {creatingLine ? (
         <DemandLineCreate
           key={projectId}
@@ -405,6 +423,21 @@ export function PartsOrdersTab({
         <Text type="secondary" style={{ display: "block", fontSize: 11.5 }}>
           已返数量、待返数量是 WBDD 源表流转状态，仅作展示；净量和成本仍只按需求数量减退货数量。
         </Text>
+        <ProjectMaintenanceRowFilters
+          key={projectId}
+          projectId={projectId}
+          query={{
+            ...(filtersParam ? { filters: filtersParam } : {}),
+            ...(selectedOrder?.order_no ? { order_no: selectedOrder.order_no } : {}),
+            ...(contractFilter ? { contract_no: contractFilter } : {}),
+          }}
+          total={linesTotal}
+          loading={linesLoading}
+          onApply={(filters) => { setLineFilters(filters); setLinesPage(1); }}
+        />
+        {linesError ? <Alert type="error" showIcon message={linesError}
+          style={{ marginBottom: 12 }}
+          action={<Button onClick={() => void loadLines()}>重试备件明细</Button>} /> : null}
         <Table<ProjectPartsRow>
           rowKey="line_id"
           size="small"
@@ -415,10 +448,11 @@ export function PartsOrdersTab({
           pagination={{
             current: linesPage,
             pageSize: LINES_PAGE_SIZE,
-            total: linesTotal,
+            total: linesTotal ?? 0,
             showSizeChanger: false,
             onChange: (page) => setLinesPage(page),
           }}
+          locale={{ emptyText: linesError ? "查询失败，请重试" : "当前筛选没有备件行" }}
         />
       </Card>
       <ProjectProcurementPanel

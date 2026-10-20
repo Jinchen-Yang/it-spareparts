@@ -44,6 +44,7 @@ from app.services import (
     maintenance_workbook_export,
     maintenance_workbook_renderer,
 )
+from app.services.maintenance_row_filter_registry import parse_filters
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -115,6 +116,12 @@ def _validate_date_pair(date_from: date | None, date_to: date | None) -> None:
             status_code=422,
             detail="date_from 不能晚于 date_to",
         )
+
+
+def _reject_row_sort(request: Request) -> None:
+    """行表保留既有顺序，不能让未知排序参数冒充已应用的金额条件。"""
+    if {"sort", "sort_by", "order_by", "sort_order"} & request.query_params.keys():
+        raise HTTPException(status_code=422, detail="行级表不支持自定义排序")
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -192,20 +199,25 @@ def projects(
 
 @router.get("/lines", dependencies=[Depends(validate_date_query)])
 def lines(
+    request: Request,
     project: str = Query(..., max_length=256),
     month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    filters: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    _reject_row_sort(request)
+    row_filters = parse_filters(filters)
     record_access_log(ctx, "lines", "maintenance", {"project": project})
     data = maintenance_cost.project_lines(
         db, project, month, date_from, date_to, page, page_size, user_ctx=ctx,
+        row_filters=row_filters,
     )
     return apply_field_visibility(data, ctx)
 
@@ -222,6 +234,147 @@ def _safe(v):
     probe = value.lstrip()
     if probe[:1] in ("=", "+", "-", "@"):
         value = "'" + value
+    if len(value) > _MAX_CSV_CELL_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 单元格超过 {_MAX_CSV_CELL_CHARS} 字符安全上限",
+        )
+    return value
+
+
+# D-33 核对导出专用（金臣规则：只转义真正像公式的值；思路同 #424 不给普通文本加撇号）。
+# 一律转义：= @ 开头（忽略前导空白）、Tab/CR/LF 开头。
+# +/- 开头（可有前导空白）：去掉符号后的空白再判断，以下任一成立才转义：
+#   函数调用（SUM(、cmd(）；| 或 !；独立引用词——单元格 A1/$B$2/A1:B3、整列 A:A/$A:$B、
+#   整行 1:1/$1:$3；裸 TRUE/FALSE/PI 等名称；整段可解析为常量表达式（数字/字符串/括号/
+#   一元正负/百分号/算术、& 与比较运算，单个数字除外），如 +(1)、+--1、+"a"&"b"、-1<2、
+#   +1%、+86-138-0000-0000；或整段仅由数字/空白/运算符组成且含括号（+1 (800) 555-1234）。
+# 原样：-48V/-60V、-48V(DC)、+5V/-12V、+/-0.5mm、+/-5%、--、--N/A--、+DC48V、
+#   +86 138 0000 0000、-1.500、-1e3、+1E+5（Excel 读成数值）。
+# 可接受的过度转义：+12:30（与整行引用 12:30 同形）；-Dell R740、-IBM X3650、+A2版、
+#   -48V(A1) 等含独立引用词的值（Excel 也会按公式解析，放宽会削弱引用检测，故保留）。
+# 全角 ＝＋－ 开头不是 Excel 公式前缀，原样。旧 _safe 调用方不变。
+_CSV_FUNCTION_CALL = re.compile(r"(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_.]*\s*\(")
+_CSV_DDE_CHARS = re.compile(r"[|!]")
+_CSV_CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
+_CSV_REFERENCE_TOKEN = (
+    rf"{_CSV_CELL_REF}(?::{_CSV_CELL_REF})?"   # A1、$B$2、A1:B3
+    r"|\$?[A-Za-z]{1,3}:\$?[A-Za-z]{1,3}"      # 整列 A:A、$A:$B、XFD:XFD
+    r"|\$?\d+:\$?\d+"                          # 整行 1:1、$1:$3（+12:30 同形，可接受）
+)
+_CSV_CELL_REFERENCE = re.compile(
+    rf"(?<![A-Za-z0-9_.$])(?:{_CSV_REFERENCE_TOKEN})(?![A-Za-z0-9_.(])"
+)
+_CSV_BARE_NAME = re.compile(
+    r"(?i)(?:TRUE|FALSE|PI|NA|RAND|NOW|TODAY)(?![A-Za-z0-9_.])"
+)
+_CSV_EXPR_TOKEN = re.compile(
+    r"(?P<num>(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r'|(?P<str>"(?:[^"]|"")*")'
+    r"|(?P<op><=|>=|<>|[-+*/^&=<>%()])"
+)
+# 白名单先行：整段仅数字/空白/运算符/括号且含 "(" 才视为括号数字启发式。
+# 旧写法 [chars]*\([chars]* 在两侧字符类都含 "(" 时，fullmatch 失败会按位置二次回溯（ReDoS）；
+# 先对同一字符类做一次线性 fullmatch，再查 "("，32k 对抗输入从数秒降到毫秒级。
+_CSV_NUMERIC_CHARS = re.compile(r"[\d\s.+\-*/^%&<>=()]*")
+_CSV_BINARY_OPS = frozenset({"+", "-", "*", "/", "^", "&", "=", "<", ">", "<=", ">=", "<>"})
+
+
+def _csv_expression_tokens(text):
+    """符号后整段切成常量表达式记号；首记号前不得有空白（由调用方 lstrip 负责）。"""
+    tokens, pos, text = [], 0, text.rstrip()
+    while pos < len(text):
+        if pos and text[pos].isspace():
+            pos += 1
+            continue
+        match = _CSV_EXPR_TOKEN.match(text, pos)
+        if match is None:
+            return None
+        tokens.append((match.lastgroup, match.group()))
+        pos = match.end()
+    return tokens
+
+
+def _is_constant_formula(text):
+    """整段是否为 Excel 可求值的常量表达式（单个数字不算，-1.500/+1E+5 原样）。"""
+    tokens = _csv_expression_tokens(text)
+    if not tokens or (len(tokens) == 1 and tokens[0][0] == "num"):
+        return False
+    index = 0
+
+    def operand():
+        nonlocal index
+        while index < len(tokens) and tokens[index][1] in ("+", "-"):
+            index += 1
+        if index >= len(tokens):
+            return False
+        kind, token = tokens[index]
+        if kind in ("num", "str"):
+            index += 1
+        elif token == "(":
+            index += 1
+            if not expression() or index >= len(tokens) or tokens[index][1] != ")":
+                return False
+            index += 1
+        else:
+            return False
+        while index < len(tokens) and tokens[index][1] == "%":
+            index += 1
+        return True
+
+    def expression():
+        nonlocal index
+        if not operand():
+            return False
+        while index < len(tokens) and tokens[index][1] in _CSV_BINARY_OPS:
+            index += 1
+            if not operand():
+                return False
+        return True
+
+    try:
+        return expression() and index == len(tokens)
+    except RecursionError:
+        return True  # 超深括号嵌套：按公式转义，绝不 500
+
+
+def _signed_value_is_formula(rest):
+    """rest：+/- 之后的文本；先去掉符号后的空白（+ A1、+ 1+1、-\\tA1 也是公式）。"""
+    rest = rest.lstrip()
+    return bool(
+        _CSV_FUNCTION_CALL.search(rest)
+        or _CSV_DDE_CHARS.search(rest)
+        or _CSV_CELL_REFERENCE.search(rest)
+        or _CSV_BARE_NAME.match(rest)
+        or _is_constant_formula(rest)
+        or (
+            _CSV_NUMERIC_CHARS.fullmatch(rest) is not None
+            and "(" in rest
+        )
+    )
+
+
+def _safe_formula_only(v):
+    """同 _safe 清理控制字符与长度上限，但只对真正像公式的文本加撇号。"""
+    if not isinstance(v, str):
+        return v
+    value = _INVALID_CSV_CONTROLS.sub("", v)
+    # 长度闸门必须在公式启发式之前：备注/描述无上限，Excel 单元格最大 32767；
+    # 超长对抗串若先跑括号数字正则会卡住 GIL（见 _CSV_NUMERIC_CHARS 注释）。
+    if len(value) > _MAX_CSV_CELL_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 单元格超过 {_MAX_CSV_CELL_CHARS} 字符安全上限",
+        )
+    probe = value.lstrip()
+    head = probe[:1]
+    if value[:1] in ("\t", "\r", "\n"):
+        value = "'" + value
+    elif head in ("=", "@") or (
+        head in ("+", "-") and _signed_value_is_formula(probe[1:])
+    ):
+        value = "'" + value
+    # 加撇号后仍不得超过 Excel 单元格上限。
     if len(value) > _MAX_CSV_CELL_CHARS:
         raise HTTPException(
             status_code=413,
@@ -296,8 +449,10 @@ def _csv_stream(
     filename: str,
     ascii_fallback: str | None = None,
     db: Session | None = None,
+    sanitize=None,
 ) -> StreamingResponse:
     """增量写入有界内存 spool；完整校验成功后才开始响应。"""
+    sanitize = sanitize or _safe
     output = SpooledTemporaryFile(max_size=_CSV_SPOOL_MEMORY_BYTES, mode="w+b")
     row_buffer = io.StringIO(newline="")
     writer = csv.writer(row_buffer)
@@ -307,7 +462,7 @@ def _csv_stream(
         nonlocal dynamic_text_bytes
         safe_values = []
         for value in values:
-            safe_value = _safe(value)
+            safe_value = sanitize(value)
             safe_values.append(safe_value)
             if isinstance(safe_value, str):
                 dynamic_text_bytes += len(safe_value.encode("utf-8"))
@@ -584,16 +739,20 @@ def export_workbooks(
 
 @router.get("/lines/export")
 def lines_export(
+    request: Request,
     project: str = Query(..., max_length=256),
     month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
+    filters: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
+    _reject_row_sort(request)
+    row_filters = parse_filters(filters)
     if (date_from is None) != (date_to is None):
         raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
@@ -603,6 +762,7 @@ def lines_export(
         raise HTTPException(status_code=404, detail=f"项目不存在：{project}")
     line_count = maintenance_cost.project_line_count(
         db, project, month, date_from, date_to, user_ctx=ctx,
+        row_filters=row_filters,
     )
     if line_count == 0:
         raise HTTPException(
@@ -630,6 +790,7 @@ def lines_export(
             date_from,
             date_to,
             user_ctx=ctx,
+            row_filters=row_filters,
         )
         try:
             for raw_row in source_rows:

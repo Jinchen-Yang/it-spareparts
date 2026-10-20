@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 /** 页面可读不等于管理员写操作可用：前端不能向普通用户展示必然 403 的按钮。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
@@ -44,19 +45,19 @@ const adminActions: Array<[string, ComponentType, string | RegExp]> = [
 
 describe("管理员专属重算动作", () => {
   it.each(adminActions)("%s 对普通用户隐藏管理员动作", (_label, Page, buttonName) => {
-    render(<Page />);
+    render(<MemoryRouter><Page /></MemoryRouter>);
     expect(screen.queryByRole("button", { name: buttonName })).toBeNull();
   });
 
   it.each(adminActions)("%s 对管理员保留重算动作", (_label, Page, buttonName) => {
     localStorage.setItem("role", "admin");
-    render(<Page />);
+    render(<MemoryRouter><Page /></MemoryRouter>);
     expect(screen.getByRole("button", { name: buttonName })).toBeInTheDocument();
   });
 
   it("治理专员仍能看到治理动作，只隐藏跨页面的管理员重算", () => {
     localStorage.setItem("role", "readonly");
-    render(<GovernancePage />);
+    render(<MemoryRouter><GovernancePage /></MemoryRouter>);
     expect(screen.getByRole("button", { name: "刷新主数据" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "自动分类" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "价格与数量疑点" })).toBeInTheDocument();
@@ -73,7 +74,7 @@ describe("利润维度与数据范围一致", () => {
       own_customers_only: true,
       data_customer: true,
     }));
-    render(<ProfitPage />);
+    render(<MemoryRouter><ProfitPage /></MemoryRouter>);
     await waitFor(() => expect(get).toHaveBeenCalledWith(
       "/profit", expect.objectContaining({
         params: expect.objectContaining({ dimension: "part" }),
@@ -94,7 +95,7 @@ describe("利润维度与数据范围一致", () => {
       data_customer: true,
       ...permissions,
     }));
-    render(<ProfitPage />);
+    render(<MemoryRouter><ProfitPage /></MemoryRouter>);
     expect(screen.queryByText("仅看异常")).toBeNull();
   });
 
@@ -106,7 +107,7 @@ describe("利润维度与数据范围一致", () => {
       data_purchase_cost: true,
       data_profit: true,
     }));
-    render(<ProfitPage />);
+    render(<MemoryRouter><ProfitPage /></MemoryRouter>);
     expect(screen.getByText("仅看异常")).toBeInTheDocument();
   });
 
@@ -132,7 +133,7 @@ describe("利润维度与数据范围一致", () => {
       no_cost: null,
       excluded_revenue: 0,
     }] } });
-    render(<ProfitPage />);
+    render(<MemoryRouter><ProfitPage /></MemoryRouter>);
     await screen.findByText("SECURE-PN");
 
     for (const title of ["移动加权 · 毛利", "先进先出 FIFO · 毛利"]) {
@@ -179,7 +180,7 @@ describe("利润维度与数据范围一致", () => {
       excluded_revenue: 0,
     }] } });
 
-    render(<ProfitPage />);
+    render(<MemoryRouter><ProfitPage /></MemoryRouter>);
     await screen.findByText("DUAL-PN");
 
     expect(screen.getAllByText("¥91").length).toBeGreaterThan(0);
@@ -231,7 +232,7 @@ async function expandInventoryRow() {
 describe("库存人工修正", () => {
   it("普通用户能看分仓库存，但看不到修正入口", async () => {
     get.mockResolvedValue(inventoryResponse);
-    render(<InventoryPage />);
+    render(<MemoryRouter><InventoryPage /></MemoryRouter>);
     await expandInventoryRow();
     expect(screen.queryByText("修正")).toBeNull();
     expect(put).not.toHaveBeenCalled();
@@ -240,7 +241,7 @@ describe("库存人工修正", () => {
   it("管理员仍可打开修正弹窗", async () => {
     localStorage.setItem("role", "admin");
     get.mockResolvedValue(inventoryResponse);
-    render(<InventoryPage />);
+    render(<MemoryRouter><InventoryPage /></MemoryRouter>);
     await expandInventoryRow();
     fireEvent.click(screen.getByText("修正"));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());

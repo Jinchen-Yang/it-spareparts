@@ -481,8 +481,7 @@ def resolve_range(preset: str, date_from: date | None,
     return date_from, date_to
 
 
-def _assigned_lines(
-    db: Session,
+def assigned_lines_query(
     *,
     project_id: str | None,
     window: tuple[date, date] | None,
@@ -534,7 +533,12 @@ def _assigned_lines(
     if window is not None:
         stmt = stmt.where(FMaintenanceOrder.order_date >= window[0],
                           FMaintenanceOrder.order_date <= window[1])
-    return db.execute(stmt).all()
+    return stmt
+
+
+def _assigned_lines(db: Session, **kwargs):
+    """保留工作簿调用契约；网页/核对导出可在同一 SQL 上筛选、分页或迭代。"""
+    return db.execute(assigned_lines_query(**kwargs)).all()
 
 
 def _style(ws, headers: list[str], fills: list[PatternFill]) -> None:

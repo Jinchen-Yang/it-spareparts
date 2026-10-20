@@ -1,3 +1,5 @@
+import { tokens } from "../../tokens";
+import "./PoolsBlock.css";
 /**
  * 互通池列表：池名/成员数/采购指标/销售指标/越线计数/最近业务日期。
  * 采购、销售指标表头带循环切换按钮（金额合计 ↔ 平均单价）：
@@ -28,8 +30,11 @@ type MetricMode = "total" | "average";
 const MODE_NAME: Record<MetricMode, string> = { total: "金额合计", average: "平均单价" };
 const metricLabel = (mode: MetricMode, basis: TaxBasis) =>
   `${MODE_NAME[mode]}(${taxBasisCaption(basis)})`;
-// 双编码之三：颜色（合计=蓝、均价=紫），文字标签始终在场，色觉障碍不丢信息
-const MODE_COLOR: Record<MetricMode, string> = { total: "#3E6FD1", average: "#7A5AC8" };
+// 颜色辅助区分口径；文字标签始终在场，色觉障碍不丢信息。
+// 取深色 token：表头底 inset 上 accentStrong 6.22、tag.warning.text 4.78，白底 6.89 / 5.29（均 ≥ 4.5）。
+const MODE_COLOR: Record<MetricMode, string> = {
+  total: tokens.color.accentStrong, average: tokens.color.tag.warning.text,
+};
 
 function metricSort(side: "purchase" | "sales", mode: MetricMode): PoolSort {
   return `${side}_${mode}` as PoolSort;
@@ -41,7 +46,7 @@ function MetricHeaderToggle({ side, mode, basis, onToggle }: {
   const sideLabel = side === "purchase" ? "采购" : "销售";
   const next = mode === "total" ? "平均单价" : "金额合计";
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+    <span className="pool-metric-header">
       {sideLabel}
       <button
         type="button"
@@ -49,13 +54,9 @@ function MetricHeaderToggle({ side, mode, basis, onToggle }: {
         onKeyDown={(e) => e.stopPropagation()}
         aria-label={`${sideLabel}指标：当前显示${metricLabel(mode, basis)}，点击切换为${next}`}
         title={`点击切换为${next}`}
-        style={{
-          display: "inline-flex", alignItems: "center", gap: 3, cursor: "pointer",
-          border: `1px solid ${MODE_COLOR[mode]}`, borderRadius: 4, background: "transparent",
-          color: MODE_COLOR[mode], fontSize: 12, padding: "0 6px", lineHeight: "18px",
-        }}>
+        className={`pool-metric-toggle pool-metric-toggle--${mode}`}>
         <SwapOutlined aria-hidden />
-        {metricLabel(mode, basis)}
+        <span>{metricLabel(mode, basis)}</span>
       </button>
     </span>
   );
@@ -143,7 +144,7 @@ export default function PoolsBlock({
       ...sortProps("member_count") },
     { title: <MetricHeaderToggle side="purchase" mode={pMode} basis={purchaseBasis}
         onToggle={togglePMode} />,
-      key: metricSort("purchase", pMode), width: 150, align: "right",
+      key: metricSort("purchase", pMode), width: 200, align: "right",
       ...sortProps(metricSort("purchase", pMode)),
       render: (_, r) => {
         const v = metricValue(r.purchase_metrics, pMode);
@@ -155,7 +156,7 @@ export default function PoolsBlock({
       } },
     { title: <MetricHeaderToggle side="sales" mode={sMode} basis={salesBasis}
         onToggle={toggleSMode} />,
-      key: metricSort("sales", sMode), width: 150, align: "right",
+      key: metricSort("sales", sMode), width: 200, align: "right",
       ...sortProps(metricSort("sales", sMode)),
       render: (_, r) => {
         const v = metricValue(r.sales_metrics, sMode);
@@ -179,7 +180,7 @@ export default function PoolsBlock({
       ...sortProps("savings"),
       render: (v) => v == null
         ? (localCostRestricted ? <span style={MUTED}>无成本权限</span> : <span style={MUTED}>{EMPTY}</span>)
-        : <span style={{ color: "#9a7b43" }}>{(() => {
+        : <span style={{ color: tokens.color.tag.warning.text }}>{(() => {
             const pair = splitFixed(v, "ex");
             return (
               <TaxMoneyByBasis
@@ -238,7 +239,7 @@ export default function PoolsBlock({
       ) : (
         <Table<PoolListItem>
           size="small" rowKey="group_id" loading={loading}
-          dataSource={data?.items || []} columns={cols} scroll={{ x: 1100 }}
+          dataSource={data?.items || []} columns={cols} scroll={{ x: 1180 }}
           locale={{ emptyText: "当前时间范围内暂无有效池" }}
           onChange={onChange}
           pagination={{

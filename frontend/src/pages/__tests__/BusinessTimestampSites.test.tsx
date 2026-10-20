@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen } from "../../test/antdRender";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account, AccountsMeta } from "../../api/accounts";
@@ -17,7 +18,7 @@ afterEach(cleanup);
 
 describe("补充扫描站点的北京时间展示", () => {
   it("治理合并历史按北京时间跨午夜换日", async () => {
-    render(<GovernancePage />);
+    render(<MemoryRouter><GovernancePage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("tab", { name: "合并历史" }));
     expect(await screen.findByText("2026-10-02 00:05")).toBeInTheDocument();
   });

@@ -128,7 +128,8 @@ ORDER_EXPECTED = {
 
 
 def _approx_or_none(value, expected):
-    return (value == pytest.approx(float(expected))
+    # 金额精确到分，禁用随合计金额放大的相对容差，不能放过一分钱的差异。
+    return (value == pytest.approx(float(expected), rel=0, abs=0.005)
             if expected is not None else value is None)
 
 
@@ -243,3 +244,227 @@ def test_handcalc_share_denominator_zero_or_missing(handcalc_ds):
     assert empty["kpi"]["orders"] == 0
     assert empty["kpi"]["nominal_inc_share"] is None
     assert empty["kpi"]["nominal_ex_share"] is None
+
+
+# ------------------------------------------------------------- 完整税率 / 缺列矩阵
+
+# 每个税率 × 标记分别列出「双列都有 / 仅不含税列 / 仅含税列 / 行级」的独立期望：
+# (不含税, 含税, 实付, nominal_side, nominal_inc_share, nominal_ex_share)。
+# 单头源列固定 ex=1000 / inc=1130，行金额固定 1130；6% 与 0.6% 的两列故意
+# 不相容，确保实现尊重权威侧，而不是碰巧拿到正确的另一列。除法手算到分：
+# 1130/1.06=1066.04；1130/1.006=1123.26。此处不调用服务或税率函数推导期望。
+COMPLETE_MATRIX = [
+    ("13-inc", "0.13", True,
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1130", None, None, 0.0, 0.0),
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1130", "1130", None, 0.0, 0.0)),
+    ("13-ex", "0.13", False,
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1130", None, None, 0.0, 0.0),
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1276.90", "1130", None, 0.0, 0.0)),
+    ("13-null", "0.13", None,
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1130", None, None, 0.0, 0.0),
+     ("1000", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1276.90", "1130", None, 0.0, 0.0)),
+    ("6-inc", "0.06", True,
+     ("1066.04", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1060", None, None, 0.0, 0.0),
+     ("1066.04", "1130", "1130", None, 0.0, 0.0),
+     ("1066.04", "1130", "1130", None, 0.0, 0.0)),
+    ("6-ex", "0.06", False,
+     ("1000", "1060", "1130", None, 0.0, 0.0),
+     ("1000", "1060", None, None, 0.0, 0.0),
+     ("1066.04", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1197.80", "1130", None, 0.0, 0.0)),
+    ("6-null", "0.06", None,
+     ("1000", "1060", "1130", None, 0.0, 0.0),
+     ("1000", "1060", None, None, 0.0, 0.0),
+     ("1066.04", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1197.80", "1130", None, 0.0, 0.0)),
+    ("point6-inc", "0.006", True,
+     ("1123.26", "1130", "1130", None, 0.0, 0.0),
+     ("1000", "1006", None, None, 0.0, 0.0),
+     ("1123.26", "1130", "1130", None, 0.0, 0.0),
+     ("1123.26", "1130", "1130", None, 0.0, 0.0)),
+    ("point6-ex", "0.006", False,
+     ("1000", "1006", "1130", None, 0.0, 0.0),
+     ("1000", "1006", None, None, 0.0, 0.0),
+     ("1123.26", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1136.78", "1130", None, 0.0, 0.0)),
+    ("point6-null", "0.006", None,
+     ("1000", "1006", "1130", None, 0.0, 0.0),
+     ("1000", "1006", None, None, 0.0, 0.0),
+     ("1123.26", "1130", "1130", None, 0.0, 0.0),
+     ("1130", "1136.78", "1130", None, 0.0, 0.0)),
+    ("zero-inc", "0", True,
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0)),
+    ("zero-ex", "0", False,
+     ("1000", "1130", "1130", "inc", 1.0, 0.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1130", "1276.90", "1130", "inc", 1.0, 0.0)),
+    ("zero-null", "0", None,
+     ("1000", "1130", "1130", "inc", 1.0, 0.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1130", "1276.90", "1130", "inc", 1.0, 0.0)),
+    ("null-inc", None, True,
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0)),
+    ("null-ex", None, False,
+     ("1000", "1130", "1130", "inc", 1.0, 0.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1130", "1276.90", "1130", "inc", 1.0, 0.0)),
+    ("null-null", None, None,
+     ("1000", "1130", "1130", "inc", 1.0, 0.0),
+     ("1000", "1130", None, "inc", 1.0, 0.0),
+     ("1000", "1130", "1130", "ex", 0.0, 1.0),
+     ("1130", "1276.90", "1130", "inc", 1.0, 0.0)),
+]
+NO_HEADER_AMOUNTS = (None, None, None, None, None, None)
+
+
+def _matrix_order(db, batch, part, key, *, rate, is_inc, ex, inc, line_amount):
+    po = FPurchaseOrder(
+        raw_order_id=key, order_no=f"CG-{key}", order_date=date(2026, 7, 2),
+        purchaser=key, source_type="销售订单", source_type_raw="销售订单",
+        is_tax_inclusive=is_inc, tax_rate=D(rate) if rate is not None else None,
+        amount_ex_tax=D(ex) if ex is not None else None,
+        amount_inc_tax=D(inc) if inc is not None else None,
+        data_status="已生效", import_batch_id=batch.id)
+    db.add(po)
+    db.flush()
+    db.add(FPurchaseLine(
+        raw_line_id=f"{key}-L1", order_id=po.id, line_no=1, part_id=part.id,
+        pn_std=part.pn_std, qty=D("1"), unit_price=D(line_amount),
+        line_amount=D(line_amount), import_batch_id=batch.id))
+    return po.id
+
+
+@pytest.fixture()
+def complete_matrix_ds(db: Session):
+    """一次建 60 单；每单独立采购员分组，保留逐格占比断言，避免 60 次建库/清表。"""
+    batch = _batch(db, "complete-matrix")
+    part = DimPart(pn_std="PN-MATRIX", category_major="矩阵类别")
+    db.add(part)
+    db.flush()
+    expected = {}
+    for label, rate, is_inc, both, only_ex, only_inc, line in COMPLETE_MATRIX:
+        for state, ex, inc, header in (
+            ("both", "1000", "1130", both),
+            ("only-ex", "1000", None, only_ex),
+            ("only-inc", None, "1130", only_inc),
+            ("neither", None, None, NO_HEADER_AMOUNTS),
+        ):
+            key = f"M-{label}-{state}"
+            order_id = _matrix_order(
+                db, batch, part, key, rate=rate, is_inc=is_inc,
+                ex=ex, inc=inc, line_amount="1130")
+            expected[key] = (order_id, header, line)
+    db.commit()
+    return client_for(db, username="complete-matrix-boss", role="boss"), expected
+
+
+def _assert_matrix_amounts(actual, expected, case):
+    for field, value in zip(("amount_ex", "amount_inc", "amount_paid"), expected[:3]):
+        assert _approx_or_none(actual[field], value), (case, field, actual[field], value)
+
+
+def _assert_matrix_group(actual, expected, case):
+    _assert_matrix_amounts(actual, expected, case)
+    assert actual["orders"] == 1 and actual["lines"] == 1, case
+    assert actual["nominal_inc_share"] == expected[4], case
+    assert actual["nominal_ex_share"] == expected[5], case
+
+
+def test_handcalc_complete_rate_flag_and_missing_column_matrix(complete_matrix_ds):
+    """SQL 列表/分组和 Python 明细均经公开 API，对独立字面量核对完整 60 格。"""
+    client, expected = complete_matrix_ds
+    order_response = client.get("/api/purchases/analytics/orders", params={"page_size": 200})
+    line_response = client.get(
+        "/api/purchases/analytics/orders", params={"page_size": 200, "category": ["矩阵类别"]})
+    assert order_response.status_code == line_response.status_code == 200
+    orders = {row["purchaser"]: row for row in order_response.json()["items"]}
+    lines = {row["purchaser"]: row for row in line_response.json()["items"]}
+    order_summary = _summary(client, group_by="purchaser")
+    line_summary = _summary(client, group_by="purchaser", category=["矩阵类别"])
+    order_groups = {row["key"]: row for row in order_summary["groups"]}
+    line_groups = {row["key"]: row for row in line_summary["groups"]}
+    assert set(orders) == set(lines) == set(order_groups) == set(line_groups) == set(expected)
+    assert len(expected) == 60
+    for key, (order_id, header, line) in expected.items():
+        _assert_matrix_amounts(orders[key], header, (key, "单头列表"))
+        assert orders[key]["nominal_side"] == header[3], key
+        _assert_matrix_amounts(lines[key], line, (key, "行级列表"))
+        assert lines[key]["nominal_side"] == line[3], key
+        _assert_matrix_group(order_groups[key], header, (key, "单头分组"))
+        _assert_matrix_group(line_groups[key], line, (key, "行级分组"))
+        response = client.get(
+            f"/api/purchases/analytics/orders/{order_id}", params={"category": ["矩阵类别"]})
+        assert response.status_code == 200, (key, response.text)
+        detail = response.json()
+        _assert_matrix_amounts(detail, header, (key, "单头明细"))
+        assert detail["nominal_side"] == header[3], key
+        _assert_matrix_amounts(detail["category_matched"], line, (key, "匹配行合计"))
+        assert len(detail["lines"]) == 1
+        assert _approx_or_none(detail["lines"][0]["line_amount_ex"], line[0]), key
+        assert _approx_or_none(detail["lines"][0]["line_amount_inc"], line[1]), key
+
+    # 五档全矩阵手算：两档未标税率的单头名义分子 inc=11300、ex=8000；
+    # 行级分子 inc=20430.40、ex=8000。单头双空不能稀释名义值，行金额仍计入。
+    assert order_summary["kpi"]["orders"] == line_summary["kpi"]["orders"] == 60
+    _assert_matrix_amounts(order_summary["kpi"], ("45757.20", "49880", "33900"), "单头 KPI")
+    assert order_summary["kpi"]["nominal_inc_share"] == pytest.approx(0.2265)
+    assert order_summary["kpi"]["nominal_ex_share"] == pytest.approx(0.1748)
+    _assert_matrix_amounts(line_summary["kpi"], ("65957.20", "71922.24", "67800"), "行级 KPI")
+    assert line_summary["kpi"]["nominal_inc_share"] == pytest.approx(0.2841)
+    assert line_summary["kpi"]["nominal_ex_share"] == pytest.approx(0.1213)
+
+
+def test_handcalc_zero_authoritative_amount_never_falls_back(db):
+    """权威列 0 是真实录入，不因 falsy 回退另一列；名义侧保留而零分母占比为空。"""
+    batch = _batch(db, "zero-authoritative")
+    part = DimPart(pn_std="PN-ZERO-AUTHORITY", category_major="零值类别")
+    db.add(part)
+    db.flush()
+    expected = {}
+    for key, rate, is_inc, ex, inc, result in (
+        ("Z-inc-zero", "0", True, "1000", "0", ("0", "0", "0", "ex", None, None)),
+        ("Z-inc-null", None, True, "1000", "0", ("0", "0", "0", "ex", None, None)),
+        ("Z-ex-zero", "0", False, "0", "1130", ("0", "0", "1130", "inc", None, None)),
+        ("Z-ex-null", None, False, "0", "1130", ("0", "0", "1130", "inc", None, None)),
+        ("Z-null-zero", "0", None, "0", "1130", ("0", "0", "1130", "inc", None, None)),
+        ("Z-null-null", None, None, "0", "1130", ("0", "0", "1130", "inc", None, None)),
+    ):
+        order_id = _matrix_order(
+            db, batch, part, key, rate=rate, is_inc=is_inc,
+            ex=ex, inc=inc, line_amount="0")
+        expected[key] = (order_id, result)
+    db.commit()
+    client = client_for(db, username="zero-authoritative-boss", role="boss")
+    response = client.get("/api/purchases/analytics/orders")
+    assert response.status_code == 200, response.text
+    orders = {row["purchaser"]: row for row in response.json()["items"]}
+    summary = _summary(client, group_by="purchaser")
+    groups = {row["key"]: row for row in summary["groups"]}
+    assert set(orders) == set(groups) == set(expected)
+    for key, (order_id, result) in expected.items():
+        _assert_matrix_amounts(orders[key], result, key)
+        assert orders[key]["nominal_side"] == result[3], key
+        detail = _detail(client, order_id)
+        _assert_matrix_amounts(detail, result, key)
+        assert detail["nominal_side"] == result[3], key
+        _assert_matrix_group(groups[key], result, key)
+    line_summary = _summary(client, group_by="purchaser", category=["零值类别"])
+    assert len(line_summary["groups"]) == 6
+    for group in line_summary["groups"]:
+        _assert_matrix_group(group, ("0", "0", "0", None, None, None), group["key"])

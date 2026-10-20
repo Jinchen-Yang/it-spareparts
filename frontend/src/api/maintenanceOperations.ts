@@ -313,7 +313,7 @@ export interface SiteIssueLine {
     pending_quantity: string;
     basis: Record<string, unknown>;
   };
-  /** 行级返还规则：true=免返，false=必须返还，null=继承项目默认。 */
+  /** 行级返还规则：true=免返，false=明确应返，null=按现行规则判断。 */
   no_return: boolean | null;
   cost_source: string | null;
   cost_source_label: string | null;
@@ -1514,6 +1514,7 @@ function categoryFilterParams(input: MaintenanceCategoryFilterInput): Maintenanc
 export const searchSiteIssues = (
   input: {
     project_id: string;
+    issue_id?: string;
     q?: string;
     workflow_statuses?: SiteIssueWorkflowStatus[];
     page?: number;
@@ -1521,6 +1522,7 @@ export const searchSiteIssues = (
   } & MaintenanceCategoryFilterInput,
 ) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
   project_id: input.project_id,
+  ...(input.issue_id ? { issue_id: input.issue_id } : {}),
   ...categoryFilterParams(input),
   ...(input.q?.trim() ? { q: input.q.trim() } : {}),
   workflow_statuses: input.workflow_statuses
@@ -1539,6 +1541,75 @@ export const createSiteIssueDraft = (
 
 const siteIssueBase = (issueId: string) =>
   `/maintenance/site-issues/${encodeURIComponent(issueId)}`;
+
+export interface SiteIssueLineCorrectionInput {
+  expected_issue_version: number;
+  expected_line_version: number;
+  /** 未提供字段保留原值，显式 null 恢复按规则判断。 */
+  changes: {
+    no_return?: boolean | null;
+    quantity?: string;
+    serial_number?: string;
+    remark?: string;
+    demand_order_no?: string;
+    pn?: string;
+    part_id?: number;
+  };
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface SiteIssueLineCorrectionReceipt {
+  issue_id: string;
+  issue_line_id: string;
+  issue_version: number;
+  line_version: number;
+  no_return: boolean | null;
+  changed: boolean;
+  idempotent_replay: boolean;
+  workbook_revision: number;
+}
+
+/** 局部行更正：未提交的行和字段保持原值，不使用整单 lines 替换接口。 */
+export const correctSiteIssueLine = (
+  issueId: string,
+  issueLineId: string,
+  input: SiteIssueLineCorrectionInput,
+) => api.patch<SiteIssueLineCorrectionReceipt>(
+  `${siteIssueBase(issueId)}/lines/${encodeURIComponent(issueLineId)}`,
+  input,
+);
+
+export interface SiteIssueHeaderCorrectionInput {
+  expected_issue_version: number;
+  changes: {
+    issue_no?: string;
+    issue_date?: string;
+    receiver?: string;
+    issued_by?: string;
+    site_location?: string;
+  };
+  reason: string;
+  idempotency_key: string;
+}
+
+export interface SiteIssueHeaderCorrectionReceipt {
+  issue_id: string;
+  issue_version: number;
+  line_versions: Record<string, number>;
+  changed: boolean;
+  idempotent_replay: boolean;
+  workbook_revision: number;
+  affected_line_count: number;
+  scope: "whole_issue";
+  message: string;
+}
+
+/** 单头独立命令：地址影响整单；日期、内部单号修改按既有规则重算全单成本。 */
+export const correctSiteIssueHeader = (
+  issueId: string,
+  input: SiteIssueHeaderCorrectionInput,
+) => api.patch<SiteIssueHeaderCorrectionReceipt>(`${siteIssueBase(issueId)}/header`, input);
 
 export const patchSiteIssue = (
   issueId: string,
@@ -1984,13 +2055,26 @@ export interface ReturnReceiptAuditEntry {
 const returnReceiptBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipts`;
 
+export interface ReturnReceiptDemandCandidate {
+  source_order_id: string;
+  order_no: string;
+  order_date: string | null;
+  demand_qty: string | null;
+  received_qty: string | null;
+  remaining_qty: string | null;
+  /** 编辑时排除自身，可保留历史超量原数；只是预检快照，服务端仍锁后复验。 */
+  max_qty: string | null;
+  is_current: boolean;
+  basis_state: "complete" | "incomplete" | "inactive" | "ownership_conflict";
+}
+
 export const getReturnReceiptDemands = (
   projectId: string,
-  input: { page?: number; page_size?: number; q?: string; part_id?: number } = {},
+  input: { page?: number; page_size?: number; q?: string; part_id?: number; receipt_id?: string } = {},
 ) =>
-  api.get<{ rows: { source_order_id: string; order_no: string; order_date: string | null }[]; total: number; page: number; page_size: number }>(
+  api.get<{ rows: ReturnReceiptDemandCandidate[]; total: number; page: number; page_size: number }>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-demands`,
-    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}) } },
+    { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}), ...(input.receipt_id ? { receipt_id: input.receipt_id } : {}) } },
   );
 
 export const getReturnReceiptSummary = (projectId: string) =>
