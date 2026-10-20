@@ -75,6 +75,9 @@ it("URL 查询改变后，旧请求迟到不覆盖当前结果", async () => {
 it("提交关键词去掉首尾空白后再写入 URL 与请求，纯空白等同清空", async () => {
   const { router } = renderUrlPage(<InventoryPage />, "/inventory?q=硬盘&origin=review");
   await screen.findByText("结果 硬盘 1");
+  submit("  硬盘  ");   // 去空白后与当前 q 相同：URL 不变，输入框也显示去空白后的文字
+  await waitFor(() => expect(screen.getByPlaceholderText("型号 / 描述 / 品牌")).toHaveValue("硬盘"));
+  expect(router.state.location.search).toBe("?q=硬盘&origin=review");
   submit("  合成 C  ");
   expect(await screen.findByText("结果 合成 C 1")).toBeInTheDocument();
   expect(new URLSearchParams(router.state.location.search).get("q")).toBe("合成 C");

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { act, cleanup, fireEvent, screen } from "../../test/antdRender";
+import { act, cleanup, fireEvent, screen, waitFor } from "../../test/antdRender";
 import { renderUrlPage } from "../../test/urlStateRender";
 import api from "../../api";
 import MasterDataPage from "../MasterDataPage";
@@ -61,6 +61,9 @@ it.each(["-1", "0", "1.5", "abc", "9007199254740992"])("主数据非法页码 %s
 it("主数据提交关键词去掉首尾空白后再写入 URL 与请求，纯空白等同清空", async () => {
   const { router } = renderUrlPage(<MasterDataPage />, "/master?q=硬盘&origin=review");
   await screen.findByText("合成 硬盘 1");
+  submit("  硬盘  ");   // 去空白后与当前 q 相同：URL 不变，输入框也显示去空白后的文字
+  await waitFor(() => expect(screen.getByPlaceholderText("搜 PN / 描述 / 品牌（留空浏览全部）")).toHaveValue("硬盘"));
+  expect(router.state.location.search).toBe("?q=硬盘&origin=review");
   submit("  服务器  ");
   await screen.findByText("合成 服务器 1");
   expect(new URLSearchParams(router.state.location.search).get("q")).toBe("服务器");
