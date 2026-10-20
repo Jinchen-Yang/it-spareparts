@@ -143,12 +143,10 @@ def test_project_viewer_never_sees_real_costs_in_rows_or_exports(db, export_data
     for pn, ex, inc in (("PN-early-one-a", "12.34", "13.94"), ("PN-early-one-b", "56.78", "64.16")):
         assert Decimal(str(by_pn[pn]["unit_cost_ex_tax"])) == Decimal(ex)
         assert Decimal(str(by_pn[pn]["cost_amount_inc_tax"])) == Decimal(inc)
-    masked = viewer.get(_project_path(project) + "/rows", params=rows_params)
-    assert masked.status_code == 200, masked.text
-    assert {row["pn_std"] for row in masked.json()["rows"]} == set(by_pn)
-    for row in masked.json()["rows"]:
-        for key in ("unit_cost_ex_tax", "unit_cost_inc_tax", "cost_amount_inc_tax"):
-            assert row[key] is None, (row["pn_std"], key)
+    # 项目 03 /rows 维持 _require_profit_visibility：无利润键直接 403（金臣 2026-10-20）。
+    gated = viewer.get(_project_path(project) + "/rows", params=rows_params)
+    assert gated.status_code == 403, gated.text
+    assert gated.json()["detail"]["code"] == "permission_denied"
     secrets = ("12.34", "13.94", "56.78", "64.16")
     admin_csv = admin.get(_project_path(project) + "/rows/export", params={
         "filters": rows_params["filters"], "format": "csv",

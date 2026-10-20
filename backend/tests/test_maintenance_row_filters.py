@@ -142,13 +142,20 @@ def test_amount_filters_require_explicit_authorized_project_before_count(db, exp
     registry = client.get(BASE + "/fields").json()
     assert not registry["amount_filter_allowed"]
     assert "system_unit_cost_ex_tax" not in {f["field"] for f in registry["fields"]}
-    for path, params in [
-        (BASE + "/rows", {**WINDOW, "project_id": project.project_id}),
-        (_project_path(project) + "/rows", {"sheet": "03_备件订单"}),
-    ]:
-        allowed = client.get(path, params={**params, "filters": money})
-        assert allowed.status_code == 200, allowed.text
-        assert allowed.json()["total"] in (25, 30)
+    # 全局带 project_id：无 data_profit 的本人负责人仍可按金额资格看金额条件。
+    allowed = client.get(
+        BASE + "/rows",
+        params={**WINDOW, "project_id": project.project_id, "filters": money},
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["total"] in (25, 30)
+    # 项目 03 /rows：维持原样，仍挂 _require_profit_visibility（金臣 2026-10-20）。
+    gated = client.get(
+        _project_path(project) + "/rows",
+        params={"sheet": "03_备件订单", "filters": money},
+    )
+    assert gated.status_code == 403, gated.text
+    assert gated.json()["detail"]["code"] == "permission_denied"
     viewer = client_for(db, username="row-viewer", overrides={
         "page_maintenance": True, "data_profit": False, "data_purchase_cost": False,
     })
@@ -159,9 +166,8 @@ def test_amount_filters_require_explicit_authorized_project_before_count(db, exp
         assert denied.status_code == 403, denied.text
         assert "total" not in denied.json()
     facts = viewer.get(_project_path(project) + "/rows", params={"sheet": "03_备件订单"})
-    assert facts.status_code == 200, facts.text
-    assert facts.json()["total"] == 30
-    assert all(row.get("unit_cost_ex_tax") is None for row in facts.json()["rows"])
+    assert facts.status_code == 403, facts.text
+    assert facts.json()["detail"]["code"] == "permission_denied"
 
 
 def test_legacy_effective_filter_matches_its_existing_manual_projection(db, export_data):

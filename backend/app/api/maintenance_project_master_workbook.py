@@ -593,6 +593,7 @@ def list_master_rows(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _data: None = Depends(_require_profit_visibility),
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
