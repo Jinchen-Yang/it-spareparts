@@ -5,6 +5,12 @@ export interface UrlStateField {
   isValid?: (value: string) => boolean;
 }
 
+/** 服务端页码：正安全整数；拒绝小数、指数、负数及溢出。 */
+export const urlPageField: UrlStateField = {
+  defaultValue: "1",
+  isValid: (value) => /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)),
+};
+
 type UrlState<Fields> = { [Key in keyof Fields]: string };
 type UrlPatch<Fields> = Partial<{ [Key in keyof Fields]: string | null | undefined }>;
 
