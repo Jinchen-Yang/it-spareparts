@@ -328,8 +328,6 @@ def _safe_excel_value(value: object) -> object:
     text = _INVALID_XML_CONTROL.sub("", str(value))
     if len(text) > 32_767:
         raise ProjectExportTooLarge("导出内容超过 Excel 单元格长度上限")
-    if text[:1] in ("=", "+", "-", "@", "\t", "\r", "\n"):
-        text = "'" + text
     return text
 
 
@@ -365,6 +363,9 @@ def _build_xlsx(rows: list[dict], fields: list[ExportField]) -> bytes:
                             "维保项目导出文本超过 16 MiB 上限"
                         )
                 cell = WriteOnlyCell(worksheet, value=value)
+                if isinstance(value, str):
+                    # 保留文本原值；公式样式文本也不能交给 Excel 执行。
+                    cell.data_type = "s"
                 if field.number_format:
                     cell.number_format = field.number_format
                 cells.append(cell)

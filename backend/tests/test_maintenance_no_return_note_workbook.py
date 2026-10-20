@@ -13,7 +13,8 @@ from tests.test_maintenance_project_master_v2_editable import _make_project_with
 from tests.test_maintenance_project_note_workbook import _patch, _send
 
 
-NOTE_LABEL = "免返标注（仅网页维护，此处只读）"
+NOTE_LABEL = "免返标注（仅网页维护，此处只读；仅作提醒，返还要求以明细标记和规则为准）"
+OLD_NOTE_LABEL = "免返标注（仅网页维护，此处只读）"
 
 
 def _book(client, pid, *, v2):
@@ -23,7 +24,7 @@ def _book(client, pid, *, v2):
         params={"sheets": sheet},
     )
     assert response.status_code == 200, response.text
-    return load_workbook(io.BytesIO(response.content)), sheet
+    return load_workbook(io.BytesIO(response.content), data_only=False), sheet
 
 
 def _note_cell(wb, sheet):
@@ -38,6 +39,17 @@ def _note_cell(wb, sheet):
     ("硬盘免返\n其他按合同", "硬盘免返\n其他按合同"),
     ("旧\x0b标注\ufffe\uffff\n第二行", "旧标注\n第二行"),
     ("=仅作提醒", "=仅作提醒"),
+    ("-48V", "-48V"),
+    ("+5V", "+5V"),
+    ("- 硬盘免返", "- 硬盘免返"),
+    ("-1", "-1"),
+    ("\n第二行开头", "\n第二行开头"),
+    ("\t制表开头", "\t制表开头"),
+    ("\r回车开头", "\r回车开头"),
+    ("@备注", "@备注"),
+    ("=SUM(A1)", "=SUM(A1)"),
+    ('=HYPERLINK("https://example.invalid","提醒")', '=HYPERLINK("https://example.invalid","提醒")'),
+    ("#N/A", "#N/A"),
 ])
 def test_download_displays_no_return_note_as_readonly_plain_text(
     db, monkeypatch, v2, value, expected,
@@ -47,6 +59,7 @@ def test_download_displays_no_return_note_as_readonly_plain_text(
     project, *_ = _make_project_with_line(db)
     # 合成历史脏数据；正常网页入口拒绝不可表示的控制字符。
     project.no_return_note = value
+    project.project_note = value
     db.commit()
 
     wb, sheet = _book(client, project.project_id, v2=v2)
@@ -54,6 +67,8 @@ def test_download_displays_no_return_note_as_readonly_plain_text(
         cell = _note_cell(wb, sheet)
         assert cell.value == expected
         assert cell.data_type != "f"
+        if expected is not None:
+            assert cell.data_type == "s"
         assert cell.alignment.wrap_text is True
         assert wb[sheet].cell(cell.row, 1).alignment.wrap_text is True
         assert cell.fill.patternType == "solid"
@@ -62,6 +77,9 @@ def test_download_displays_no_return_note_as_readonly_plain_text(
             project_note = next(row[1] for row in wb[sheet] if row[0].value == "项目备注")
             assert cell.row == project_note.row + 1
             assert cell.fill != project_note.fill
+            assert project_note.value == expected
+            if expected is not None:
+                assert project_note.data_type == "s"
     finally:
         wb.close()
 
@@ -71,6 +89,10 @@ def _edit_readonly_row(wb, sheet, mutation):
     if mutation == "missing":
         # 上一版本没有此行；签名元数据保持原样，不重签。
         wb[sheet].delete_rows(cell.row)
+    elif mutation == "old_label":
+        # 模拟已下载的旧标签，保留原签名；改值仍不能开启免返标注回写。
+        wb[sheet].cell(cell.row, 1).value = OLD_NOTE_LABEL
+        cell.value = "旧标签下也不应保存"
     elif mutation != "unchanged":
         cell.value = {
             "modified": "Excel 不应保存的标注",
@@ -88,7 +110,7 @@ def _audits(db, pid):
 
 @pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
 @pytest.mark.parametrize("mutation", [
-    "modified", "blank", "missing", "unchanged", "formula", "escaped_control",
+    "modified", "blank", "missing", "unchanged", "formula", "escaped_control", "old_label",
 ])
 def test_validate_and_apply_ignore_no_return_note_without_master_audit(
     db, monkeypatch, v2, mutation,
@@ -122,7 +144,7 @@ def test_validate_and_apply_ignore_no_return_note_without_master_audit(
         assert _audits(db, pid) == []
 
 
-@pytest.mark.parametrize("mutation", ["modified", "missing", "unchanged"])
+@pytest.mark.parametrize("mutation", ["modified", "missing", "unchanged", "old_label"])
 def test_readonly_no_return_note_does_not_block_project_note_writeback(db, monkeypatch, mutation):
     monkeypatch.setattr(get_settings(), "maintenance_project_master_v2_enabled", True)
     client = _admin_client(db)

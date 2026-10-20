@@ -10,7 +10,10 @@ from openpyxl import load_workbook
 
 from app.config import get_settings
 from app.models.maintenance_project import MaintenanceProjectContract
-from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+)
 from app.services import maintenance_project_export
 from tests.boss_board_helpers import boss_client, make_project
 
@@ -67,7 +70,8 @@ def test_project_note_is_optional_and_exported_as_independent_plain_text(db):
     try:
         rows = list(workbook["维保项目清单"].iter_rows(values_only=True))
         assert rows[0] == ("项目名称", "项目备注")
-        assert rows[1][1] == "'=现场改造\n联系甲方"
+        assert rows[1][1] == "=现场改造\n联系甲方"
+        assert workbook["维保项目清单"]["B2"].data_type == "s"
     finally:
         workbook.close()
 
@@ -76,7 +80,7 @@ def test_project_note_is_optional_and_exported_as_independent_plain_text(db):
     (None, None),
     ("硬盘免返\n其他备件按合同核对", "硬盘免返\n其他备件按合同核对"),
     ("旧\x0b标注\ufffe\uffff\n联系甲方", "旧标注\n联系甲方"),
-    ("=提醒内容", "'=提醒内容"),
+    ("=提醒内容", "=提醒内容"),
 ])
 def test_no_return_note_is_optional_and_exports_safe_independent_text(db, note, expected):
     project = make_project(db, code="免返标注导出", lifecycle="ongoing")
@@ -105,6 +109,80 @@ def test_no_return_note_is_optional_and_exports_safe_independent_text(db, note, 
         rows = list(workbook["维保项目清单"].iter_rows(max_col=3, values_only=True))
         assert rows[0] == ("项目名称", "项目备注", "免返标注")
         assert rows[1] == ("免返标注导出", "独立项目备注", expected)
+        if expected is not None:
+            assert workbook["维保项目清单"]["C2"].data_type == "s"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("value", [
+    "-48V",
+    "-48V 电源免返",
+    "+5V",
+    "+5V 板卡免返",
+    "- 硬盘免返",
+    "-1",
+    "\n第二行开头",
+    "\t制表开头",
+    "\r回车开头",
+    "@备注",
+    "=SUM(A1)",
+    '=HYPERLINK("https://example.invalid","提醒")',
+    "#N/A",
+])
+def test_export_preserves_text_verbatim_without_formulas(db, value):
+    project = make_project(db, code="导出文本往返", lifecycle="ongoing")
+    project.display_name = value
+    project.project_note = value
+    project.no_return_note = value
+    db.commit()
+
+    response = boss_client(db, username="project-export-verbatim").post(
+        "/api/maintenance/boss-board/projects/export",
+        json={
+            "fields": ["project_name", "project_note", "no_return_note"],
+            "lifecycle": "ongoing",
+        },
+    )
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=False)
+    try:
+        worksheet = workbook["维保项目清单"]
+        assert worksheet.max_row == 2
+        assert [cell.value for cell in worksheet[1]] == ["项目名称", "项目备注", "免返标注"]
+        for cell in worksheet[2]:
+            assert cell.value == value
+            assert cell.data_type == "s"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(("value", "expected_status"), [
+    ("=" + "汉" * 32_766, 200),
+    ("\x0b=" + "汉" * 32_766, 200),
+    ("=" + "汉" * 32_767, 422),
+], ids=["at-limit", "strip-control-before-limit", "over-limit"])
+def test_export_enforces_cell_length_after_control_character_cleanup(db, value, expected_status):
+    project = make_project(db, code="历史长文本", lifecycle="ongoing")
+    # 历史数据可超过网页输入上限，导出仍须拒绝 Excel 会静默截断的内容。
+    project.no_return_note = value
+    db.commit()
+    response = boss_client(db, username="project-export-length").post(
+        "/api/maintenance/boss-board/projects/export",
+        json={"fields": ["no_return_note"], "lifecycle": "ongoing"},
+    )
+    assert response.status_code == expected_status, response.text
+    if expected_status == 422:
+        assert response.json()["detail"] == {
+            "code": "project_export_too_large",
+            "message": "导出内容超过 Excel 单元格长度上限",
+        }
+        return
+    workbook = load_workbook(BytesIO(response.content), data_only=False)
+    try:
+        cell = workbook["维保项目清单"]["A2"]
+        assert cell.value == "=" + "汉" * 32_766
+        assert cell.data_type == "s"
     finally:
         workbook.close()
 
@@ -177,6 +255,7 @@ def test_financial_state_fields_do_not_call_missing_values_complete():
 
 def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
     project = make_project(db, code="=公式项目", lifecycle="ongoing")
+    project.project_note = "-1"
     make_project(db, code="已结束项目", lifecycle="ended")
     relation = MaintenanceProjectContract(
         project_contract_id=str(uuid.uuid4()),
@@ -194,6 +273,23 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
         version=1,
     )
     db.add(relation)
+    db.flush()
+    db.add(MaintenanceProjectExpenseAttribution(
+        expense_id="export-negative-expense",
+        project_id=project.project_id,
+        project_contract_id=relation.project_contract_id,
+        expense_ref="合成冲销报销",
+        expense_date=date(2026, 1, 1),
+        tax_basis="inc",
+        amount_inc_tax=Decimal("-48.00"),
+        amount_ex_tax=Decimal("-42.48"),
+        raw_status="已生效",
+        status_mapping_state="mapped",
+        normalized_status="approved",
+        status_mapping_version="synthetic_test",
+        ownership_mapping_state="mapped",
+        version=1,
+    ))
     db.add_all([
         MaintenanceCollectionSnapshot(
             collection_id=str(uuid.uuid4()),
@@ -218,7 +314,10 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
     ])
     db.commit()
 
-    fields = list(maintenance_project_export.DEFAULT_FIELDS)
+    fields = [
+        *maintenance_project_export.DEFAULT_FIELDS,
+        "expense_cost_inc_tax", "project_note", "version",
+    ]
     response = boss_client(db, username="project-export-xlsx").post(
         "/api/maintenance/boss-board/projects/export",
         json={"fields": fields, "lifecycle": "ongoing", "sort": "name"},
@@ -233,7 +332,8 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
 
     workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=False)
     worksheet = workbook["维保项目清单"]
-    table = list(worksheet.iter_rows(values_only=True))
+    rows = list(worksheet.iter_rows())
+    table = [tuple(cell.value for cell in row) for row in rows]
     workbook.close()
     assert table[0] == (
         "项目名称",
@@ -242,8 +342,14 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
         "销售单号（合同号）",
         "合同总额（含税）",
         "累计已回款（含税）",
+        "报销成本（含税）",
+        "项目备注",
+        "主档版本",
     )
-    assert table[1][0] == "'=公式项目"  # 防 Excel 公式注入
+    assert table[1][0] == "=公式项目"  # 显式文本单元格防 Excel 公式注入。
     assert table[1][1].date() == date(2020, 1, 1)
     assert table[1][2].date() == date(2099, 12, 31)
-    assert table[1][3:] == ("XSDD-EXPORT-001", 1130, 450)
+    assert table[1][3:] == ("XSDD-EXPORT-001", 1130, 450, -48, "-1", 1)
+    assert [cell.data_type for cell in rows[1]] == [
+        "s", "d", "d", "s", "n", "n", "n", "s", "n",
+    ]
