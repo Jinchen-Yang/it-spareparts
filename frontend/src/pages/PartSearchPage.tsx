@@ -1,3 +1,4 @@
+import PageSkeleton from "../components/PageSkeleton";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { App, Input, Card, Descriptions, Tag, Statistic, Tabs, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip } from "antd";
@@ -664,7 +665,7 @@ export default function PartSearchPage() {
           }
         />
       ) : (
-        <Empty description={searching || loadingOv ? "加载中…" : "搜索并点击型号查看全景"} />
+        searching || loadingOv ? <PageSkeleton label="加载中…" /> : <Empty description="搜索并点击型号查看全景" />
       )}
 
       <InlinePartEditModal

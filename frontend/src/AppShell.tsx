@@ -1,8 +1,9 @@
+import PageSkeleton from "./components/PageSkeleton";
 import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
-  Spin, Tag,
+  Tag,
 } from "antd";
 import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
@@ -367,12 +368,7 @@ export default function AppShell({
           <TaxPolicyBoundary>
             <Suspense
               key={location.pathname}
-              fallback={
-                <div role="status" style={{ display: "flex", justifyContent: "center", gap: 12, paddingTop: 120 }}>
-                  <Spin size="large" />
-                  <span>正在加载页面…</span>
-                </div>
-              }
+              fallback={<PageSkeleton />}
             >
               <Outlet />
             </Suspense>
