@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { api } from "../../api";
@@ -80,7 +81,7 @@ it("主数据库编辑冲突后保留品牌清空草稿，以当前基线重提�
     }
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   fireEvent.change(within(dialog).getByDisplayValue("Old Brand"), { target: { value: "" } });
@@ -115,7 +116,7 @@ it("原始类型未填时可主动选择备件，提交类型差异并保留 nul
     if (config.url === "/parts/master/42/edit-state") return response(config, baseline);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -143,7 +144,7 @@ it("取消慢加载后打开另一型号，旧加载不会覆盖新表单", asyn
     if (config.url === "/parts/master/43/edit-state") return response(config, second);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const loadingDialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   expect(within(loadingDialog).getByRole("button", { name: /保\s*存/ })).toBeDisabled();
@@ -171,7 +172,7 @@ it("旧型号保存迟到时不会关闭后来打开的编辑会话或触发旧�
     if (config.url === "/parts/master/43/edit-state") return response(config, second);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const firstDialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(firstDialog).findByDisplayValue("Old Brand");
@@ -201,7 +202,7 @@ it("没有实际修改时，空值展示和默认类型不会写入", async () =
     if (config.url === "/parts/master/42/edit-state") return response(config, baseline);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -220,7 +221,7 @@ it("旧账号保存的迟到 401 不会退出新账号或覆盖当前草稿", as
     if (config.url === "/parts/master/42/edit-state") return response(config, baseline);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -248,7 +249,7 @@ it("搜索 A 慢、B 快时，A 的迟到列表不会覆盖 B", async () => {
     }
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   const input = screen.getByPlaceholderText("搜 PN / 描述 / 品牌（留空浏览全部）");
   fireEvent.change(input, { target: { value: "A" } });
   fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, charCode: 13 });
@@ -273,7 +274,7 @@ it("初始类别和列表 GET 绑定原账号，换 token 后迟到结果不填�
     if (config.url === "/parts/search") return response(config, searchResult);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   localStorage.setItem("token", "new-account");
   await act(async () => {});
   expect(requests).toEqual([
@@ -296,7 +297,7 @@ it("保存期间不能用一键规范化修改待保存的草稿", async () => {
     });
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -331,7 +332,7 @@ it.each(["改名", "合并"])("主数据库冲突后重取基线遇到%s时不�
     if (config.url === "/parts/master/42/edit-state") return response(config, ++loads === 1 ? baseline : latest);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -359,7 +360,7 @@ it.each(["账号", "型号"])("主数据库冲突基线慢加载期间切换%s�
     if (config.url === "/parts/master/43/edit-state") return response(config, second);
     return response(config, { categories: [] });
   };
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
   const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
   await within(dialog).findByDisplayValue("Old Brand");
@@ -386,7 +387,7 @@ it.each(["账号", "型号"])("主数据库冲突基线慢加载期间切换%s�
 
 it("新建 PN 标准必填标记及空白错误关联输入，保存启用条件不变", async () => {
   api.defaults.adapter = async (config) => response(config, { categories: [], items: [], total: 0 });
-  render(<MasterDataPage />);
+  render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   fireEvent.click(screen.getByRole("button", { name: "新建 PN" }));
   const dialog = await screen.findByRole("dialog", { name: "新建 PN" });
   const input = within(dialog).getByLabelText("PN（产品唯一标识）");

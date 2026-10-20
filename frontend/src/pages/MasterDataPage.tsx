@@ -1,3 +1,4 @@
+import { urlPageField, useUrlState } from "../hooks/useUrlState";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { App, Alert, Button, Form, Input, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -26,10 +27,12 @@ const normalized = (value: string | null | undefined) => value?.trim() || null;
  * 人工改过的字段后端 locked_fields 标记，重导（氚云）不覆盖。 */
 export default function MasterDataPage() {
   const { message } = App.useApp();
-  const [q, setQ] = useState("");
+  const [{ q, page: pageParam }, patchUrl] = useUrlState({ q: { defaultValue: "" }, page: urlPageField });
+  const page = Number(pageParam);
+  const [searchInput, setSearchInput] = useState(q);
+  useEffect(() => { setSearchInput(q); }, [q]);
   const [rows, setRows] = useState<PartHit[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [cats, setCats] = useState<CategoryNode[]>([]);
 
@@ -71,7 +74,6 @@ export default function MasterDataPage() {
     if (!sessionIsCurrent()) return;
     api.get<{ categories: CategoryNode[] }>("/parts/master/categories", sessionConfig())
       .then((r) => { if (sessionIsCurrent()) setCats(r.data.categories); }).catch(() => undefined);
-    doSearch("");
   }, []);
 
   // 服务端分页浏览：browse=true 走 search_parts（跨 PN+描述分词模糊 + 真实 total + 可翻到底），
@@ -88,12 +90,26 @@ export default function MasterDataPage() {
       if (!isCurrent()) return;
       setRows(data.items || []);
       setTotal(data.total || 0);
-      setPage(p);
     } catch (e: any) {
       if (isCurrent()) message.error(masterEditErrorMessage(e, "搜索失败"));
     } finally {
       if (isCurrent()) setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    void doSearch(q, page);
+    return () => { ++searchSeq.current; };
+    // 已提交状态来自 URL；账号与请求代次保护仍由 doSearch 负责。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, page]);
+
+  const search = (raw: string) => {
+    // URL 只保存规范化后的关键词，避免首尾空白产生不同链接。
+    const query = raw.trim();
+    setSearchInput(query);
+    if (query === q && page === 1) void doSearch(q, page);
+    else patchUrl({ q: query, page: "1" });
   };
 
   const l2opts = (l1?: string | null) =>
@@ -406,7 +422,7 @@ export default function MasterDataPage() {
       <Input.Search
         placeholder="搜 PN / 描述 / 品牌（留空浏览全部）" allowClear enterButton
         style={{ maxWidth: 460, marginBottom: 16 }}
-        value={q} onChange={(e) => setQ(e.target.value)} onSearch={(v) => doSearch(v, 1)}
+        value={searchInput} onChange={(e) => setSearchInput(e.target.value)} onSearch={search}
       />
       <Table
         rowKey="pn_std" size="small" columns={columns} dataSource={rows} loading={loading}
@@ -414,7 +430,7 @@ export default function MasterDataPage() {
         pagination={{
           current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个匹配`,
-          onChange: (p) => doSearch(q, p),
+          onChange: (p) => patchUrl({ page: String(p) }),
         }}
       />
 

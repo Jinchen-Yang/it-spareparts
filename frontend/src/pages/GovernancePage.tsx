@@ -1,3 +1,4 @@
+import { useUrlState } from "../hooks/useUrlState";
 import PageHeader from "../components/PageHeader";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useState } from "react";
@@ -444,6 +445,13 @@ function MetricsTab({ metrics }: { metrics: any }) {
 export default function GovernancePage() {
   const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
+  const [{ tab }, patchUrl] = useUrlState({
+    tab: {
+      defaultValue: "parts",
+      isValid: (value) => ["parts", "fact-data-quality", "data-quality-calibration",
+        "candidates", "merges", "issues", "aliases", "metrics"].includes(value),
+    },
+  });
   const [sum, setSum] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
   const [recomputing, setRecomputing] = useState(false);
@@ -523,7 +531,8 @@ export default function GovernancePage() {
 
       <Card>
         <Tabs
-          defaultActiveKey="parts"
+          activeKey={tab}
+          onChange={(value) => patchUrl({ tab: value })}
           items={[
             { key: "parts", label: "型号治理", children: <PartsTab /> },
             { key: "fact-data-quality", label: "价格与数量疑点", children: <DataQualityIssuesPanel /> },
