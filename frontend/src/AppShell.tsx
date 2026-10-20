@@ -5,7 +5,7 @@ import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
   Tag,
 } from "antd";
-import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { COLORS, SHELL_LAYOUT } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
@@ -299,6 +299,16 @@ export default function AppShell({
                   aria-label="打开菜单"
                   onClick={() => setDrawerOpen(true)}
                 />
+              )}
+              {isMobile && detail && active && (
+                <Button type="text" icon={<ArrowLeftOutlined />} aria-label="返回"
+                  onClick={() => {
+                    const index = (window.history.state as { idx?: number } | null)?.idx;
+                    if (typeof index === "number" && index > 0) navigate(-1);
+                    else navigate(active.path);
+                  }}>
+                  返回
+                </Button>
               )}
               <span
                 style={{
