@@ -2,7 +2,7 @@
 // 旧→新排序，末条与最新块一致）。include_returns 随层透传，reconciled_display 与
 // 列表同口径；对账权限受限或无快照时按「无对账数据」展示，不显示 0。
 import { useEffect, useRef, useState } from "react";
-import { Alert, Descriptions, Drawer, Spin, Table, Tag, message } from "antd";
+import { App, Alert, Descriptions, Drawer, Spin, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { fmtDateTime, fmtMoney, isReconBlockEmpty } from "../shared";
 import {
@@ -33,6 +33,7 @@ export default function DetailDrawer({
   reconRestricted,
   onClose,
 }: DetailDrawerProps) {
+  const { message } = App.useApp();
   const [detail, setDetail] = useState<SalesAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const seqRef = useRef(0);

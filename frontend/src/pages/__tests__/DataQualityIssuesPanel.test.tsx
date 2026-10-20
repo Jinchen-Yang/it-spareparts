@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { Grid, message } from "antd";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
+import { Grid } from "antd";
 import type { DataQualityIssueDetail, DataQualityIssueListItem } from "../../api/dataQuality";
 
 const listDataQualityIssues = vi.fn();
@@ -102,7 +102,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  message.destroy();
+
   breakpoint.mockReturnValue({ xs: false, sm: true, md: true, lg: true, xl: true, xxl: true });
   mockList();
   getDataQualityIssue.mockResolvedValue(DETAIL);
@@ -112,7 +112,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
   vi.restoreAllMocks();
 });
 

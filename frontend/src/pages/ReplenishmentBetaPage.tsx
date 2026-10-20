@@ -1,28 +1,6 @@
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
-import {
-  Alert,
-  Badge,
-  Button,
-  Card,
-  Col,
-  Collapse,
-  Drawer,
-  Empty,
-  Input,
-  InputNumber,
-  List,
-  Modal,
-  Pagination,
-  Result,
-  Row,
-  Select,
-  Space,
-  Spin,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Badge, Button, Card, Col, Collapse, Drawer, Empty, Input, InputNumber, List, Modal, Pagination, Result, Row, Select, Space, Spin, Tag, Typography } from "antd";
 import {
   ArrowLeftOutlined,
   DeleteOutlined,
@@ -285,6 +263,7 @@ function RevisionPanel({
   application: ReplenishmentApplication;
   onUpdated: (next: ReplenishmentApplication) => void;
 }) {
+  const { message } = App.useApp();
   const version = application.versions[0];
   const rejected = version?.lines.filter((line) => line.review?.decision === "rejected") || [];
   const [choices, setChoices] = useState<Record<string, {
@@ -388,6 +367,7 @@ function RevisionPanel({
 }
 
 export default function ReplenishmentBetaPage() {
+  const { message } = App.useApp();
   const navigate = useNavigate();
   const [capabilities, setCapabilities] = useState<ReplenishmentCapabilities | null>(null);
   const [loading, setLoading] = useState(true);

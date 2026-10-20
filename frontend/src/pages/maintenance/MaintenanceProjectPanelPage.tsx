@@ -1,26 +1,6 @@
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import {
-  Alert,
-  Button,
-  Card,
-  Col,
-  DatePicker,
-  Flex,
-  Form,
-  Input,
-  Modal,
-  Row,
-  Select,
-  Space,
-  Spin,
-  Statistic,
-  Tabs,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Col, DatePicker, Flex, Form, Input, Modal, Row, Select, Space, Spin, Statistic, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { BoardProjectRow } from "../../api/maintenanceBossBoard";
@@ -622,6 +602,7 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
   disabled,
   onSaved,
 }, ref) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);

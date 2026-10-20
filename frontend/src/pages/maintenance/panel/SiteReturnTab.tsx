@@ -1,6 +1,6 @@
 import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import type {
   SiteIssueDocument,
   SiteIssueLine,
@@ -98,6 +98,7 @@ export function SiteReturnTab({
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
 }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<SiteReturnRow[]>([]);
   const [linesPage, setLinesPage] = useState(1);
   const [loading, setLoading] = useState(false);
