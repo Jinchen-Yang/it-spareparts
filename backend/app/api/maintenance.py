@@ -44,6 +44,7 @@ from app.services import (
     maintenance_workbook_export,
     maintenance_workbook_renderer,
 )
+from app.services.maintenance_row_filter_registry import parse_filters
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -115,6 +116,12 @@ def _validate_date_pair(date_from: date | None, date_to: date | None) -> None:
             status_code=422,
             detail="date_from 不能晚于 date_to",
         )
+
+
+def _reject_row_sort(request: Request) -> None:
+    """行表保留既有顺序，不能让未知排序参数冒充已应用的金额条件。"""
+    if {"sort", "sort_by", "order_by", "sort_order"} & request.query_params.keys():
+        raise HTTPException(status_code=422, detail="行级表不支持自定义排序")
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -192,20 +199,25 @@ def projects(
 
 @router.get("/lines", dependencies=[Depends(validate_date_query)])
 def lines(
+    request: Request,
     project: str = Query(..., max_length=256),
     month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    filters: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    _reject_row_sort(request)
+    row_filters = parse_filters(filters)
     record_access_log(ctx, "lines", "maintenance", {"project": project})
     data = maintenance_cost.project_lines(
         db, project, month, date_from, date_to, page, page_size, user_ctx=ctx,
+        row_filters=row_filters,
     )
     return apply_field_visibility(data, ctx)
 
@@ -584,16 +596,20 @@ def export_workbooks(
 
 @router.get("/lines/export")
 def lines_export(
+    request: Request,
     project: str = Query(..., max_length=256),
     month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
+    filters: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
+    _reject_row_sort(request)
+    row_filters = parse_filters(filters)
     if (date_from is None) != (date_to is None):
         raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
@@ -603,6 +619,7 @@ def lines_export(
         raise HTTPException(status_code=404, detail=f"项目不存在：{project}")
     line_count = maintenance_cost.project_line_count(
         db, project, month, date_from, date_to, user_ctx=ctx,
+        row_filters=row_filters,
     )
     if line_count == 0:
         raise HTTPException(
@@ -630,6 +647,7 @@ def lines_export(
             date_from,
             date_to,
             user_ctx=ctx,
+            row_filters=row_filters,
         )
         try:
             for raw_row in source_rows:

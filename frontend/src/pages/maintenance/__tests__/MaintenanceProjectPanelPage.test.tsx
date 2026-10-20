@@ -42,6 +42,12 @@ vi.mock("../../../api/maintenanceProjects", () => ({
   getMaintenanceProject: (...a: unknown[]) => getMaintenanceProject(...a),
   updateMaintenanceProject: (...a: unknown[]) => updateMaintenanceProject(...a),
 }));
+vi.mock("../../../api/maintenanceRowFilters", async () => ({
+  ...await vi.importActual<Record<string, unknown>>("../../../api/maintenanceRowFilters"),
+  getMaintenanceRowFields: vi.fn().mockResolvedValue({
+    fields: [], amount_filter_allowed: false,
+  }),
+}));
 vi.mock("../../../api/maintenanceSourceAssignments", () => ({
   listMaintenanceSourceOrders: (...a: unknown[]) => listMaintenanceSourceOrders(...a),
   assignMaintenanceSourceOrders: (...a: unknown[]) => assignMaintenanceSourceOrders(...a),

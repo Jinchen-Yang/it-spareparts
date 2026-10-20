@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -42,6 +42,7 @@ import { readPermissionMap } from "../../nav";
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
+const GlobalMaintenanceRowWorkbench = lazy(() => import("../../components/maintenance/GlobalMaintenanceRowWorkbench"));
 
 const PAGE_SIZE = 20;   // 一行 5 张 → 一屏 4 行；下滑续拉（#37）
 const FILTERS_EXPANDED_KEY = "maintenance.home.filters-expanded";
@@ -166,6 +167,7 @@ export function MaintenanceHomePage() {
   } | null>(null);
   const [rangePreset, setRangePreset] = useState<RangePreset>("this_month");
   const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const [rowWorkbenchOpen, setRowWorkbenchOpen] = useState(false);
   const sentinel = useRef<HTMLDivElement | null>(null);
   // 并发保护：筛选一变就作废在途请求的结果，避免旧响应盖掉新筛选
   const requestSeq = useRef(0);
@@ -300,9 +302,20 @@ export function MaintenanceHomePage() {
               onApply={applySparePartLines}
               onAfterApply={() => latestLoad.current(1, true)}
             />
+            <Button aria-expanded={rowWorkbenchOpen} aria-controls="maintenance-global-row-workbench"
+              onClick={() => setRowWorkbenchOpen((opened) => !opened)}>
+              {rowWorkbenchOpen ? "收起备件行筛选" : "筛选备件行"}
+            </Button>
           </Space>
         </Col>
       </Row>
+      {rowWorkbenchOpen ? <div id="maintenance-global-row-workbench">
+        {rangePreset === "custom" && !customRange
+          ? <Alert type="info" showIcon message="请选择自定义日期区间后查询备件行。" />
+          : <Suspense fallback={<Spin tip="正在加载备件行级表"><div style={{ height: 80 }} /></Spin>}>
+            <GlobalMaintenanceRowWorkbench rangeParams={rangeParams()} />
+          </Suspense>}
+      </div> : null}
 
       {/* 期限常驻；折叠只改变控件可见性，不改变筛选与导出参数。 */}
       <Card size="small">

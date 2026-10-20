@@ -50,6 +50,7 @@ from app.api import (
     maintenance_expense_collection_workbook,
     maintenance_analytics,
     maintenance_project_master_workbook,
+    maintenance_row_workbench,
     maintenance_project_batch_transfer,
     maintenance_wbdd_import,
     parts,
@@ -126,6 +127,7 @@ app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_master_workbook.router, prefix=settings.api_prefix
 )
+app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)

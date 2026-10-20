@@ -8,7 +8,16 @@ const mocks = vi.hoisted(() => ({
   listProjectPartsRows: vi.fn(),
   getProjectProcurement: vi.fn(),
   createDemandLine: vi.fn(),
+  getMaintenanceRowFields: vi.fn(),
+  exportProjectRows: vi.fn(),
 }));
+
+vi.mock("../../../../api/maintenanceRowFilters", async () => {
+  const actual = await vi.importActual<typeof import("../../../../api/maintenanceRowFilters")>(
+    "../../../../api/maintenanceRowFilters",
+  );
+  return { ...actual, getMaintenanceRowFields: mocks.getMaintenanceRowFields, exportProjectRows: mocks.exportProjectRows };
+});
 
 vi.mock("../../../../api/maintenanceBossBoard", async () => {
   const actual = await vi.importActual<
@@ -175,6 +184,11 @@ beforeEach(() => {
     },
   );
   mocks.getProjectProcurement.mockResolvedValue(emptyProcurement);
+  mocks.getMaintenanceRowFields.mockResolvedValue({
+    fields: [{ field: "pn_std", label: "PN", type: "text", operators: ["contains", "eq", "is_empty"] }],
+    amount_filter_allowed: false,
+  });
+  mocks.exportProjectRows.mockResolvedValue(new Blob(["csv"]));
 });
 
 afterEach(() => {
@@ -183,6 +197,25 @@ afterEach(() => {
 });
 
 describe("备件与需求单 tab（#259 三处修正）", () => {
+  it("行筛选、网页总数和普通完整导出共用条件，保留已选合同和需求单", async () => {
+    renderTab();
+    await waitFor(() => expect(orderLink("WBDD-2")).toBeTruthy());
+    await chooseContract("XSDD-2");
+    fireEvent.click(orderLink("WBDD-2")!);
+    fireEvent.click(await screen.findByRole("button", { name: "添加筛选条件" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "条件 1 的值" }), { target: { value: "PN-2" } });
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    const filters = '[{"field":"pn_std","op":"contains","value":"PN-2"}]';
+    await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith(
+      "p1", expect.objectContaining({ filters, order_no: "WBDD-2", contract_no: "XSDD-2", page: 1 }),
+    ));
+    expect(await screen.findByText("共 1 行")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "导出完整筛选集 CSV" }));
+    await waitFor(() => expect(mocks.exportProjectRows).toHaveBeenCalledWith(
+      "p1", { filters, order_no: "WBDD-2", contract_no: "XSDD-2" }, "csv",
+    ));
+  });
+
   it("项目需求单摘要失败时明确提示，单号、成本和联系信息仍可查看", async () => {
     const row: BoardOrderRow = {
       ...orderRow("WBDD-1", "XSDD-1"),
