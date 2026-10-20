@@ -1,6 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { message } from "antd";
 
 const searchMaintenanceDemands = vi.fn();
 const voidFastMaintenanceDemands = vi.fn();
@@ -148,7 +147,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
-  message.destroy();
+
 });
 
 describe("需求单与数据同步页", () => {
@@ -473,7 +472,7 @@ describe("需求单与数据同步页", () => {
   });
 
   it("只有缺失明细也在上传提示中告知，不要求同时存在缺失整单", async () => {
-    const successMessage = vi.spyOn(message, "success");
+
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     uploadWbdd.mockResolvedValueOnce({ data: {
       batch_id: 8, import_mode: "upsert",
@@ -485,14 +484,12 @@ describe("需求单与数据同步页", () => {
       target: { files: [new File(["xlsx"], "missing-lines.xlsx")] },
     });
 
-    await waitFor(() => expect(successMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/快照已同步（批次 #8）.*2 行缺失明细.*请核对/),
-    ));
+    expect(await screen.findByText(/快照已同步（批次 #8）.*2 行缺失明细.*请核对/)).toBeInTheDocument();
     expect(screen.getByText("缺失明细 2 行")).toBeInTheDocument();
   });
 
   it("区分匹配、实际变更、无变化和保护；刷新失败仍保留本批回执", async () => {
-    const warningMessage = vi.spyOn(message, "warning");
+
     localStorage.setItem("permissions", JSON.stringify(BOTH_PERMS));
     uploadWbdd.mockResolvedValueOnce({ data: {
       batch_id: 8, import_mode: "upsert", fact_rows_inserted: 1,
@@ -511,9 +508,7 @@ describe("需求单与数据同步页", () => {
       target: { files: [new File(["xlsx"], "feedback.xlsx")] },
     });
 
-    await waitFor(() => expect(warningMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/快照已同步（批次 #8）.*但页面刷新失败/),
-    ));
+    expect(await screen.findByText(/快照已同步（批次 #8）.*但页面刷新失败/)).toBeInTheDocument();
     for (const text of ["新增 1 行", "匹配已有 5 行", "实际变更 2 行", "无变化 3 行",
       "人工保护 2 行", "历史保护待核对 1 行", "需求数量 2 行"]) {
       expect(screen.getByText(text)).toBeInTheDocument();
@@ -565,6 +560,7 @@ describe("需求单与数据同步页", () => {
       target: { files: [new File(["xlsx2"], "second.xlsx")] },
     });
     await screen.findByText("快照上传失败");
+    expect(screen.getByText("快照上传失败").closest('[role="alert"]')).not.toBeNull();
     expect(screen.queryByText(/地址处理：填写 1 张/)).toBeNull();
   });
 

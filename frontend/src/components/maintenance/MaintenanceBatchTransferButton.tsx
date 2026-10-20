@@ -5,28 +5,7 @@ import {
   InboxOutlined,
   SwapOutlined,
 } from "@ant-design/icons";
-import {
-  Alert,
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Collapse,
-  Descriptions,
-  Divider,
-  Input,
-  Modal,
-  Row,
-  Segmented,
-  Space,
-  Spin,
-  Table,
-  Tabs,
-  Tag,
-  Typography,
-  Upload,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Checkbox, Col, Collapse, Descriptions, Divider, Input, Modal, Row, Segmented, Space, Spin, Table, Tabs, Tag, Typography, Upload } from "antd";
 import type { UploadFile, UploadProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -504,6 +483,7 @@ interface ImportPanelProps {
 }
 
 function ImportPanel({ options, onApplied }: ImportPanelProps) {
+  const { message } = App.useApp();
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [preview, setPreview] = useState<MaintenanceBatchPreviewResponse | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -551,7 +531,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     beforeUpload(file) {
       const isXlsx = /\.xlsx$/i.test(file.name);
       if (!isXlsx) {
-        message.error(`${file.name} 不是 .xlsx 文件`);
+        setError(`${file.name} 不是 .xlsx 文件`);
         return Upload.LIST_IGNORE;
       }
       return false;
@@ -560,7 +540,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       invalidatePreview();
       setFiles(info.fileList.slice(0, maxFiles));
       if (info.fileList.length > maxFiles) {
-        message.warning(`一次最多选择 ${maxFiles} 个文件`);
+        setError(`一次最多选择 ${maxFiles} 个文件`);
       }
     },
     onRemove() {
@@ -1077,6 +1057,7 @@ function fieldAvailable(field: MaintenanceBatchDownloadField, forms: string[]): 
 }
 
 function DownloadPanel({ options, filters }: DownloadPanelProps) {
+  const { message } = App.useApp();
   const availableFormKeys = options.download_forms.map((form) => form.key);
   const initialForms = options.default_forms.filter((key) => availableFormKeys.includes(key));
   const [forms, setForms] = useState<string[]>(

@@ -1,6 +1,6 @@
 /** 职位模板管理页签：列表（使用数/版本/状态）+ 新建/复制/编辑/停用/恢复/查看账号/同步。 */
 import { useState } from "react";
-import { Button, Drawer, List, Popconfirm, Space, Table, Tag, message } from "antd";
+import { App, Button, Drawer, List, Popconfirm, Space, Table, Tag } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import type { AccountsMeta, TemplateInfo } from "../../api/accounts";
 import { archiveTemplate, explainApiError, restoreTemplate, templateAccounts } from "../../api/accounts";
@@ -15,6 +15,7 @@ export default function TemplatesTab({ meta, onChanged }: {
   meta: AccountsMeta;
   onChanged: () => void;
 }) {
+  const { message } = App.useApp();
   const [draft, setDraft] = useState<TemplateDraft | null>(null);
   const [syncTpl, setSyncTpl] = useState<TemplateInfo | null>(null);
   const [usersOf, setUsersOf] = useState<{ tpl: TemplateInfo; rows: {
@@ -64,7 +65,7 @@ export default function TemplatesTab({ meta, onChanged }: {
       render: (_: unknown, t: TemplateInfo) => `${enabledCount(t)} / ${meta.all_keys.length} 项` },
     { title: "使用账号", dataIndex: "usage_count",
       render: (v: number, t: TemplateInfo) => v > 0
-        ? <a onClick={() => showAccounts(t)}>{v} 个</a>
+        ? <Button type="link" size="small" onClick={() => showAccounts(t)}>{v} 个</Button>
         : <span style={{ color: "#999" }}>0 个</span> },
     { title: "版本", dataIndex: "version", render: (v: number) => `v${v}` },
     { title: "操作", key: "op",
@@ -72,19 +73,19 @@ export default function TemplatesTab({ meta, onChanged }: {
         ? <span style={{ color: "#999" }}>系统锁定</span>
         : (
           <Space size="small" wrap>
-            <a onClick={() => setDraft({ mode: "edit", source: t })}>编辑</a>
-            <a onClick={() => setDraft({ mode: "copy", source: t })}>复制</a>
+            <Button type="link" size="small" onClick={() => setDraft({ mode: "edit", source: t })}>编辑</Button>
+            <Button type="link" size="small" onClick={() => setDraft({ mode: "copy", source: t })}>复制</Button>
             {t.usage_count > 0 && t.is_active && (
-              <a onClick={() => setSyncTpl(t)}>同步账号</a>
+              <Button type="link" size="small" onClick={() => setSyncTpl(t)}>同步账号</Button>
             )}
             {!t.is_system && (
               <Popconfirm
                 title={t.is_active ? "停用该模板？之后不能再套用，已套用账号不受影响。" : "恢复该模板？"}
                 onConfirm={() => toggleActive(t)}
               >
-                <a style={{ color: t.is_active ? "#cf1322" : "#389e0d" }}>
+                <Button type="link" size="small" danger={t.is_active}>
                   {t.is_active ? "停用" : "恢复"}
-                </a>
+                </Button>
               </Popconfirm>
             )}
           </Space>

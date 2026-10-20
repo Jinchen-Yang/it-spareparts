@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { message } from "antd";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -651,7 +651,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
   localStorage.removeItem("role");
 });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { message } from "antd";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
+
 import { StrictMode } from "react";
 import type { ImportPrecheckResult } from "../../api/imports";
 
@@ -109,7 +109,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   cleanup();
-  message.destroy();
+
 });
 
 describe("批量文件数量提示", () => {
@@ -345,6 +345,58 @@ describe("完整导入问题明细下载", () => {
     expect(screen.getByText("批次 #9 · 错误.xlsx")).toBeInTheDocument();
   });
 
+  it.each([11, 12])("批次 A 下载失败晚到时不在新打开的批次 #%i 显示错误", async (reopenedId) => {
+    const download = deferred<void>();
+    downloadImportErrors.mockReturnValueOnce(download.promise);
+    const batches = [11, 12].map((id) => ({
+      id, filename: `批次${id}.xlsx`, file_type: "purchase", status: "failed",
+      uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+      rows_total: 1, rows_inserted: 0, rows_skipped: 0, rows_error: 1, rows_inactive: 0,
+    }));
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: batches });
+      const batch = batches.find((item) => url === `/import/batches/${item.id}`);
+      return Promise.resolve({ data: { ...batch, report: {}, errors: [], issue_count: 1 } });
+    });
+    render(<ImportPage />);
+    const details = await screen.findAllByRole("button", { name: "详情" });
+    fireEvent.click(details[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "下载完整导入问题明细（1 条）" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(details[reopenedId === 11 ? 0 : 1]);
+    await screen.findByText(`批次 #${reopenedId} · 批次${reopenedId}.xlsx`);
+    await act(async () => { download.reject({ response: { status: 403 } }); });
+    expect(screen.queryByText("无权下载问题明细，请联系管理员开通数据导入权限")).not.toBeInTheDocument();
+  });
+
+  it.each(["失败", "成功"])("批次 A 详情%s晚到时保留已经打开的批次 B", async (outcome) => {
+    const first = deferred<{ data: unknown }>();
+    const batches = [11, 12].map((id) => ({
+      id, filename: `批次${id}.xlsx`, file_type: "purchase", status: "failed",
+      uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+      rows_total: 1, rows_inserted: 0, rows_skipped: 0, rows_error: 1, rows_inactive: 0,
+      report: {}, errors: [], issue_count: 1,
+    }));
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: batches });
+      if (url === "/import/batches/11") return first.promise;
+      return Promise.resolve({ data: batches[1] });
+    });
+    render(<ImportPage />);
+    const details = await screen.findAllByRole("button", { name: "详情" });
+    fireEvent.click(details[0]);
+    fireEvent.click(details[1]);
+    await screen.findByText("批次 #12 · 批次12.xlsx");
+    await act(async () => {
+      if (outcome === "失败") first.reject({ code: "ECONNABORTED" });
+      else first.resolve({ data: batches[0] });
+    });
+    expect(screen.getByText("批次 #12 · 批次12.xlsx")).toBeInTheDocument();
+    expect(screen.queryByText("批次详情加载超时，请重试")).not.toBeInTheDocument();
+    expect(screen.queryByText("批次 #11 · 批次11.xlsx")).not.toBeInTheDocument();
+  });
+
   it.each([
     ["403", { response: { status: 403 } }, "无权下载问题明细，请联系管理员开通数据导入权限"],
     ["404", { response: { status: 404 } }, "未找到批次，无法下载问题明细"],
@@ -469,7 +521,7 @@ describe("导入预检状态机", () => {
     expect(await screen.findByText("批次 #42 · 原采购.xlsx")).toBeInTheDocument();
   });
 
-  it("原批次详情超时后提示重试并允许再次请求同一批次", async () => {
+  it("原批次详情超时后页内错误常驻，重试时清除并允许再次请求同一批次", async () => {
     const firstDetailRequest = deferred<{ data: unknown }>();
     precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
     let detailCallCount = 0;
@@ -494,7 +546,13 @@ describe("导入预检状态机", () => {
 
     firstDetailRequest.reject({ code: "ECONNABORTED", message: "timeout of 30000ms exceeded" });
     expect(await screen.findByText("原批次详情加载超时，请重试")).toBeInTheDocument();
+    expect(screen.getByText("原批次详情加载超时，请重试").closest('[role="alert"]')).not.toBeNull();
+    vi.useFakeTimers();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(screen.getByText("原批次详情加载超时，请重试")).toBeInTheDocument();
+    vi.useRealTimers();
     fireEvent.click(link);
+    expect(screen.queryByText("原批次详情加载超时，请重试")).not.toBeInTheDocument();
 
     expect(get.mock.calls.filter(([url]) => url === "/import/batches/42")).toHaveLength(2);
   });
@@ -1240,8 +1298,6 @@ describe("作废预演（修复模式）", () => {
     expect(screen.queryByText(/导入作业 #/)).toBeNull();
   });
 });
-
-
 
 describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上限）", () => {
   const skippedResult: ImportPrecheckResult = {

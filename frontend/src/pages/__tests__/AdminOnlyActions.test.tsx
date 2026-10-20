@@ -1,7 +1,7 @@
 /** 页面可读不等于管理员写操作可用：前端不能向普通用户展示必然 403 的按钮。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { message } from "antd";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
+
 import type { ComponentType } from "react";
 
 const get = vi.fn();
@@ -32,7 +32,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  message.destroy();
+
 });
 
 // 项目成本页随 2026-08-16 维保页面重设计删除（22 页 → 2 页），本表随之去掉该行；

@@ -1,16 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Alert,
-  Button,
-  Card,
-  Modal,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Modal, Space, Table, Tag, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 
@@ -72,22 +61,29 @@ export function AcceptanceTab({
   canImport: boolean;
   onChanged?: () => Promise<boolean>;
 }) {
+  const { message } = App.useApp();
   const [data, setData] = useState<MaintenanceAcceptanceChecklist | null>(null);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "error" | "warning"; text: string } | null>(null);
+  const [issues, setIssues] = useState<string[]>([]);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const generation = useRef(0);
 
   const load = async () => {
     const seq = ++generation.current;
     setLoading(true);
+    setFeedback(null);
+    setIssues([]);
     try {
       const resp = await getMaintenanceAcceptanceChecklist(projectId);
       if (seq === generation.current) setData(resp.data);
       return seq === generation.current;
     } catch (err) {
-      if (seq === generation.current) setData(null);
-      message.error(readError(err, "验收清单加载失败"));
+      if (seq === generation.current) {
+        setData(null);
+        setFeedback({ type: "error", text: readError(err, "验收清单加载失败") });
+      }
       return false;
     } finally {
       if (seq === generation.current) setLoading(false);
@@ -100,11 +96,13 @@ export function AcceptanceTab({
   }, [projectId]);
 
   const downloadTemplate = async () => {
+    setFeedback(null);
+    setIssues([]);
     try {
       const resp = await downloadAcceptanceChecklistTemplate(projectId);
       saveBlob(resp.data, "验收需求清单模板.xlsx");
     } catch (err) {
-      message.error(readError(err, "模板下载失败"));
+      setFeedback({ type: "error", text: readError(err, "模板下载失败") });
     }
   };
 
@@ -150,16 +148,16 @@ export function AcceptanceTab({
           if (localReady && parentReady) {
             message.success(`验收清单已生效并刷新（${preview.item_rows} 条）`);
           } else {
-            message.warning("验收清单已生效，但页面刷新失败；旧数据已失效，请重试。");
+            setFeedback({ type: "warning", text: "验收清单已生效，但页面刷新失败；旧数据已失效，请重试。" });
           }
           resolve();
         } catch (err) {
           if (committed) {
-            message.warning("验收清单已生效，但页面刷新失败；旧数据已失效，请重试。");
+            setFeedback({ type: "warning", text: "验收清单已生效，但页面刷新失败；旧数据已失效，请重试。" });
             resolve();
             return;
           }
-          message.error(readError(err, "应用失败，系统未写入"));
+          setFeedback({ type: "error", text: readError(err, "应用失败，系统未写入") });
           resolve();
         } finally {
           setImporting(false);
@@ -170,6 +168,8 @@ export function AcceptanceTab({
 
   const beforeUpload = async (file: File) => {
     setImporting(true);
+    setFeedback(null);
+    setIssues([]);
     try {
       const resp = await previewMaintenanceAcceptanceChecklist(projectId, {
         file,
@@ -177,22 +177,13 @@ export function AcceptanceTab({
       });
       const preview = resp.data;
       if (preview.issue_rows > 0) {
-        Modal.error({
-          title: `清单有 ${preview.issue_rows} 个问题行，未导入`,
-          width: 560,
-          content: (
-            <ul style={{ paddingLeft: 18, margin: 0 }}>
-              {preview.issues.map((issue) => (
-                <li key={issue}><Text type="danger">{issue}</Text></li>
-              ))}
-            </ul>
-          ),
-        });
+        setFeedback({ type: "error", text: `清单有 ${preview.issue_rows} 个问题行，未导入` });
+        setIssues(preview.issues);
       } else {
         await confirmApply(preview);
       }
     } catch (err) {
-      message.error(readError(err, "清单解析失败"));
+      setFeedback({ type: "error", text: readError(err, "清单解析失败") });
     } finally {
       setImporting(false);
       // 浏览器不会为同一个 file input 连续触发同文件的 change；预检失败或
@@ -206,6 +197,8 @@ export function AcceptanceTab({
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {feedback ? <Alert type={feedback.type} showIcon message={feedback.text}
+        description={issues.length ? <ul style={{ paddingLeft: 18, margin: 0 }}>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul> : undefined} /> : null}
       <Card
         size="small"
         title="验收需求清单"

@@ -1,5 +1,5 @@
 import { DownloadOutlined } from "@ant-design/icons";
-import { Alert, Button, Checkbox, Col, Modal, Row, Space, Spin, Typography, message } from "antd";
+import { App, Alert, Button, Checkbox, Col, Modal, Row, Space, Spin, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -71,6 +71,7 @@ async function readError(error: unknown): Promise<string> {
 export default function MaintenanceProjectExportButton({
   filters,
 }: MaintenanceProjectExportButtonProps) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [fields, setFields] = useState<BoardProjectExportField[]>([]);
   const [defaultFields, setDefaultFields] = useState<string[]>([]);

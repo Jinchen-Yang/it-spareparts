@@ -2,10 +2,7 @@ import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
 import type { MaintenanceCategoryFilterInput } from "../../../api/maintenanceOperations";
-import {
-  Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Modal,
-  Row, Select, Space, Table, Tag, Timeline, Tooltip, Typography, message,
-} from "antd";
+import { App, Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Timeline, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { DefaultOptionType } from "antd/es/select";
 import PartPicker from "../../../components/PartPicker";
@@ -110,6 +107,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   projectId: string; canImport?: boolean; onChanged?: () => Promise<boolean>;
   registerRefresh?: RegisterPanelRefresh;
 }) {
+  const { message } = App.useApp();
   const [summary, setSummary] = useState<ReturnReceiptSummary | null>(null);
   const [receipts, setReceipts] = useState<ReturnReceipt[]>([]);
   const [total, setTotal] = useState(0);

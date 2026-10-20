@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Alert,
-  Button,
-  Card,
-  Radio,
-  Space,
-  Spin,
-  Typography,
-  message,
-} from "antd";
+import { App, Alert, Button, Card, Radio, Space, Spin, Typography } from "antd";
 import PageHeader from "../components/PageHeader";
 import {
   getSystemSettings,
@@ -66,6 +57,7 @@ function isConflict(error: unknown): boolean {
 }
 
 export default function SystemSettingsPage() {
+  const { message } = App.useApp();
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [loading, setLoading] = useState(true);

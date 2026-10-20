@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
+import { App, Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type {
   MaintenanceCollectionSnapshotRow,
@@ -93,6 +93,7 @@ export function CollectionTab({
   onRefresh: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
 }) {
+  const { message } = App.useApp();
   const [planRows, setPlanRows] = useState<CollectionPlanRow[]>([]);
   const [selectedCollectionIds, setSelectedCollectionIds] = useState<string[]>([]);
   const requestSeq = useRef(0);

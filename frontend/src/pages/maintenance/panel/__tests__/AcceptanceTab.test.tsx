@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -76,6 +76,21 @@ const loaded = {
 };
 
 describe("验收 tab（2026-08-21 客户反馈）", () => {
+  it("清单解析错误保留在页内，重试同一文件时清除旧错误", async () => {
+    mocks.getMaintenanceAcceptanceChecklist.mockResolvedValue({ data: { current: null, history: [] } });
+    mocks.previewMaintenanceAcceptanceChecklist.mockRejectedValueOnce({ response: { data: { detail: "第 3 行缺少验收需求" } } })
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { container } = render(<AcceptanceTab projectId="p1" canImport />);
+    await screen.findByText(/尚未导入验收清单/);
+    const file = new File(["xlsx"], "验收.xlsx");
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    expect(await screen.findByText("第 3 行缺少验收需求")).toBeInTheDocument();
+    expect(screen.getByText("第 3 行缺少验收需求").closest('[role="alert"]')).not.toBeNull();
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    await waitFor(() => expect(mocks.previewMaintenanceAcceptanceChecklist).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("第 3 行缺少验收需求")).not.toBeInTheDocument();
+  });
+
   it("展示清单条目与完成状态", async () => {
     mocks.getMaintenanceAcceptanceChecklist.mockResolvedValue({
       data: loaded,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Checkbox, Input, Modal, Select, Space, Tag, Typography, message } from "antd";
+import { App, Button, Checkbox, Input, Modal, Select, Space, Tag, Typography } from "antd";
 
 import {
   archiveMaintenanceProjectManager,
@@ -23,6 +23,7 @@ export default function ProjectManagerAssignmentControl({
   canManage: boolean;
   onChanged: () => Promise<boolean> | boolean | void;
 }) {
+  const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<number>();
