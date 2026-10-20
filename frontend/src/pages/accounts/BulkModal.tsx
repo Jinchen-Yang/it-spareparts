@@ -1,7 +1,7 @@
 /** 批量权限操作向导：配置 → dry-run 预览（影响账号数+逐键差异）→ 指纹执行 → 结果。
  * 全成或全败：400 逐账号原因整体拒绝；409 = 预览后被人改过，提示重新预览。 */
 import { useMemo, useState } from "react";
-import { Alert, Button, Modal, Select, Space, Steps, Table, Tag, message } from "antd";
+import { Alert, Button, Modal, Select, Space, Steps, Table, Tag } from "antd";
 import type { Account, AccountsMeta, BulkOperation, BulkPreview, BulkPreviewItem } from "../../api/accounts";
 import { bulkAccounts, explainApiError } from "../../api/accounts";
 

@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Alert, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Typography, message,
-} from "antd";
+import { App, Alert, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Typography } from "antd";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import type { MaintenanceProject } from "../../api/maintenanceProjects";
@@ -88,6 +86,7 @@ export default function DemandLineCreate({
   /** 创建成功后的回读钩子（父级刷新列表/指标）。只在同代（未过期）时调用。 */
   onCreated: () => void;
 }) {
+  const { message } = App.useApp();
   const [form] = Form.useForm<CreateFormValues>();
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);

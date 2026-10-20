@@ -1,4 +1,4 @@
-import { Space, Table, Tag, Typography } from "antd";
+import { Button, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type {
   BoardLineRow,
@@ -48,7 +48,7 @@ export function OrderEvidenceTable({
       width: 190,
       render: (value: string, row) => (
         <Space direction="vertical" size={0}>
-          <a onClick={() => onSelect(row.source_order_id)}>{value}</a>
+          <Button type="link" size="small" onClick={() => onSelect(row.source_order_id)}>{value}</Button>
           <Space size={4}>
             {row.is_pre_delivery ? <Tag>预交付</Tag> : null}
             {row.data_status ? <Tag color="default">{row.data_status}</Tag> : null}

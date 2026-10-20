@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Card, Checkbox, Grid, List, Segmented, Spin, Table, Tag, Tooltip, theme, message } from "antd";
+import { App, Card, Checkbox, Grid, List, Segmented, Spin, Table, Tag, Tooltip, theme } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import MobileDetailDrawer from "../../components/MobileDetailDrawer";
@@ -164,6 +164,7 @@ function SourceComposition({ comp, accent }: {
 }
 
 export default function PurchaseAnalysisPage() {
+  const { message } = App.useApp();
   const { token } = theme.useToken();
   const accent = token.colorPrimary;
   const screens = Grid.useBreakpoint();

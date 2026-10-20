@@ -5,7 +5,7 @@
 // data_* 受限只影响控件门控与「—」展示，数据面真值永远是后端脱敏 + sort 回显。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Alert, Card, message } from "antd";
+import { Button, App, Alert, Card } from "antd";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
 import {
@@ -51,6 +51,7 @@ function apiErrorMessage(err: unknown): string {
 }
 
 export default function SalesAnalyticsPage() {
+  const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const state = parseSalesAnalyticsUrl(sp);
   const patch = useSalesAnalyticsPatch(sp, setSp);
@@ -206,7 +207,7 @@ export default function SalesAnalyticsPage() {
             style={{ marginBottom: 12 }}
             message="汇总加载失败"
             description={summaryError}
-            action={<a onClick={() => setRetryTick((t) => t + 1)}>重试</a>}
+            action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
           />
         ) : (
           <SummaryView summary={summaryLoading ? null : summary} amounts={state.amounts} />
@@ -218,7 +219,7 @@ export default function SalesAnalyticsPage() {
             showIcon
             message="销售单列表加载失败"
             description={ordersError}
-            action={<a onClick={() => setRetryTick((t) => t + 1)}>重试</a>}
+            action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
           />
         ) : (
           <DrillTable

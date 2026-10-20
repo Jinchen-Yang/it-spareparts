@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), categories: vi.fn() }));
 vi.mock("../../../../api/maintenanceOperations", async () => ({

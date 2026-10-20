@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Space, Table, message } from "antd";
+import { App, Space, Table } from "antd";
 import type { ProjectExpenseRow } from "../../../api/maintenanceWorkbooks";
 import {
   SHEETS,
@@ -26,6 +26,7 @@ export function ExpenseTab({
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
 }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<ProjectExpenseRow[]>([]);
   const [loading, setLoading] = useState(false);
   const requestSeq = useRef(0);
