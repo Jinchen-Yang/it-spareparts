@@ -1,5 +1,6 @@
 import { formatMoney } from "../../../utils/format";
 import { COLORS } from "../../../theme";
+import { tokens } from "../../../tokens";
 import { Progress, Space, Tooltip, Typography } from "antd";
 import { LockOutlined } from "@ant-design/icons";
 import type { KnownCostStat } from "../../../api/maintenanceBossBoard";
@@ -32,7 +33,7 @@ export function KnownCostCell({ stat, compact }: { stat?: KnownCostStat | null; 
   }
   if (stat.state === "not_imported" || stat.state === "error" || !stat.value) {
     return (
-      <Text style={{ color: COLORS.status.pending }} data-testid="cost-blocked">
+      <Text style={{ color: tokens.color.text2 }} data-testid="cost-blocked">
         ● 尚未导入
       </Text>
     );

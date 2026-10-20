@@ -4,6 +4,7 @@ import { formatMoney, money, moneyExact, moneyIncTax } from "../src/utils/format
 import { fmtMoney as purchaseMoney } from "../src/pages/purchases/shared";
 import { fmtMoney as salesMoney } from "../src/pages/sales/shared";
 import { COLORS } from "../src/theme";
+import { tokens } from "../src/tokens";
 import KnownCostCell from "../src/components/maintenance/boss/KnownCostCell";
 import type { KnownCostStat } from "../src/api/maintenanceBossBoard";
 
@@ -61,9 +62,11 @@ describe("金额格式兼容（I17，预期取自各处旧输出）", () => {
 
 
 describe("已知成本的语义色", () => {
-  it("未导入仍如实标注，缺价进度使用主题提醒色", () => {
+  it("未导入用中性文字而非待复核色，缺价进度保留提醒色", () => {
     const { rerender, container } = render(<KnownCostCell stat={{ state: "not_imported", value: null, as_of: null }} />);
-    expect(screen.getByTestId("cost-blocked")).toHaveStyle({ color: COLORS.status.pending });
+    expect(screen.getByTestId("cost-blocked")).toHaveTextContent("● 尚未导入");
+    expect(screen.getByTestId("cost-blocked")).toHaveStyle({ color: tokens.color.text2 });
+    expect(screen.getByTestId("cost-blocked")).not.toHaveStyle({ color: COLORS.status.pending });
     const stat: KnownCostStat = { state: "partial", as_of: null, value: {
       known_amount: "100.00", actual_amount: "50.00", estimated_amount: "50.00",
       missing_lines: 1, coverage_pct: 50, quality: "incomplete",
