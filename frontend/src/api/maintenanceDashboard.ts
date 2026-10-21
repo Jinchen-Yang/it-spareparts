@@ -74,6 +74,25 @@ export interface UnitQtyEntry extends UnitBucketEntry {
   rate_denominator?: string | null;
 }
 
+/** 总览数量卡使用 total；项目/趋势行继续使用各自的数量字段。 */
+export interface SummaryQuantityBucket extends UnitBucketEntry {
+  total: string | null;
+}
+export interface ReceiptQuantityBucket extends SummaryQuantityBucket {
+  part: string | null;
+  machine: string | null;
+}
+export interface BadReceiptQuantityBucket extends SummaryQuantityBucket {
+  scrap: string | null;
+}
+/** 核对卡只汇总完整基数，字段名与需求单行不同。 */
+export interface QuantityCheckCardBucket extends UnitBucketEntry {
+  checked_demand_qty: string | null;
+  received_qty: string | null;
+  known_difference_qty: string | null;
+  over_received_qty: string | null;
+}
+
 /** 消耗单位分桶条目（契约 v2 §4）：成本键仅金额可见账号（B-F11——桶内
  * 全部未计成本时金额键不存在，不是 0.00）。 */
 export interface UnitCoverageEntry extends UnitQtyEntry {
@@ -150,14 +169,14 @@ export interface CostReferencePayload {
 export interface SummaryCards {
   receipt_qty: {
     total: string | null; part: string | null; machine: string | null;
-    unit_breakdown?: UnitQtyEntry[];
+    unit_breakdown?: ReceiptQuantityBucket[];
   };
   bad_receipt_qty: {
     total: string | null; scrap: string | null;
-    unit_breakdown?: UnitQtyEntry[];
+    unit_breakdown?: BadReceiptQuantityBucket[];
   };
   /** 好件领用 = 实际领用量（未采集件况）。 */
-  issued_qty: { total: string | null; note: string; unit_breakdown?: UnitQtyEntry[] };
+  issued_qty: { total: string | null; note: string; unit_breakdown?: SummaryQuantityBucket[] };
   /** 同期返还率 = 实收÷实际领用；分母≤0 为 null（无率，不是 0）；混合 → null。 */
   return_rate_pct: number | null;
   rate_numerator: string | null;
@@ -407,7 +426,7 @@ export interface QuantityChecksResponse {
     /** 契约 v3 §3：混合单位 → null（不是 0）+ unassigned_receipt_unit_breakdown。 */
     unassigned_receipt_qty: string | null;
     note: string;
-    unit_breakdown?: UnitQtyEntry[];
+    unit_breakdown?: QuantityCheckCardBucket[];
     /** 契约 v3 §3：跨项目按单位合计的未关联桶（恒给；排序同 §0）。 */
     unassigned_receipt_unit_breakdown?: UnitQtyEntry[];
   };

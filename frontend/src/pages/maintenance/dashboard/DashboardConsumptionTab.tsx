@@ -296,7 +296,7 @@ export default function DashboardConsumptionTab({
         />
       ) : null}
 
-      <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）">
+      <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）" style={{ minWidth: 0, maxWidth: "100%" }}>
         <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="orders-cards">
           <KpiCard label="期间下单数量" loading={loading} testId="kpi-order-qty"
             value={orderCards
@@ -338,6 +338,7 @@ export default function DashboardConsumptionTab({
             loading={loading}
             dataSource={orders?.rows ?? []}
             pagination={false}
+            scroll={{ x: 900 }}
             columns={[
               {
                 title: "项目", dataIndex: "display_name", ellipsis: true,
