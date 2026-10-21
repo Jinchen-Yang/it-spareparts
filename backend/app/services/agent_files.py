@@ -348,6 +348,24 @@ def write_excel(base_file_id: str | None, sheet: str | None,
 
     name = output_name or (f"回填_{base_name}" if base_name else "结果.xlsx")
     file_id, meta = _new_file({"base_file_id": base_file_id}, operated_by, name)
+    # Pillow 13 不再支持 I 模式直接存 PNG，整数/浮点灰度图先裁剪为 16 位。
+    from PIL import Image, ImageMath
+
+    for worksheet in wb.worksheets:
+        for image in worksheet._images:
+            if image.format in {"gif", "jpeg", "png"}:
+                continue
+            with Image.open(BytesIO(image.ref.getvalue())) as source:
+                if source.mode not in {"I", "F"}:
+                    continue
+                if source.mode == "F":
+                    source = ImageMath.lambda_eval(
+                        lambda args: args["min"](args["max"](args["image"], 0), 65535), image=source)
+                converted = BytesIO()
+                source.convert("I").convert("I;16").save(converted, format="PNG")
+            converted.seek(0)
+            image.ref = converted
+            image.format = "png"
     wb.save(_data_path(file_id, "xlsx"))
     wb.close()
     _save_meta(file_id, meta)
