@@ -852,10 +852,20 @@ def export(
                             domain_entry = by_unit.get(unit) or {
                                 "coverage_pct": None,
                             }
-                            unit_domains[domain] = {
+                            merged = {
                                 **valuation["domains"][domain],
                                 "coverage_pct": domain_entry.get("coverage_pct"),
                             }
+                            # 三域值用本单位已估金额（B3 05:12）：无已估本桶
+                            # → 键移除（空格，B-F06 口径），不摊/复制父域总额。
+                            for value_key in (
+                                "value_inc_tax", "value_ex_tax"
+                            ):
+                                if value_key in domain_entry:
+                                    merged[value_key] = domain_entry[value_key]
+                                else:
+                                    merged.pop(value_key, None)
+                            unit_domains[domain] = merged
                         unit_valuation["domains"] = unit_domains
                     item["valuation"] = unit_valuation
                 data.append(item)
@@ -1070,6 +1080,13 @@ def _project_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
             ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
             ("销售域覆盖率%", "valuation.domains.sales.coverage_pct", True),
             ("成本域覆盖率%", "valuation.domains.cost.coverage_pct", True),
+            # 三域各双税（B3 05:12/M10/R34-06）：双税分别计算，缺估域空格。
+            ("三域-采购-坏件价值-含税", "valuation.domains.purchase.value_inc_tax", True),
+            ("三域-采购-坏件价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
+            ("三域-销售-坏件价值-含税", "valuation.domains.sales.value_inc_tax", True),
+            ("三域-销售-坏件价值-不含税", "valuation.domains.sales.value_ex_tax", True),
+            ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
+            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
             ("价值保留比例", "_retention_ratio", False),
             ("估价政策版本", None, False),
         ]
@@ -1098,8 +1115,11 @@ def _part_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
             ("待试算坏件量（缺比例）", "valuation.awaiting_ratio_bad_qty", True),
             ("覆盖率%", "valuation.coverage_pct", True),
             ("三域-采购-坏件价值-含税", "valuation.domains.purchase.value_inc_tax", True),
+            ("三域-采购-坏件价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
             ("三域-销售-坏件价值-含税", "valuation.domains.sales.value_inc_tax", True),
+            ("三域-销售-坏件价值-不含税", "valuation.domains.sales.value_ex_tax", True),
             ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
+            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
             ("采购域已估坏件量", "valuation.domains.purchase.estimated_bad_qty", True),
             ("采购域待估坏件量", "valuation.domains.purchase.pending_bad_qty", True),
             ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
@@ -1140,8 +1160,11 @@ def _receipt_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
             ("行价值-含税", "valuation.value_inc_tax", True),
             ("行价值-不含税", "valuation.value_ex_tax", True),
             ("三域-采购-行价值-含税", "valuation.domains.purchase.value_inc_tax", True),
+            ("三域-采购-行价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
             ("三域-销售-行价值-含税", "valuation.domains.sales.value_inc_tax", True),
+            ("三域-销售-行价值-不含税", "valuation.domains.sales.value_ex_tax", True),
             ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
+            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
             ("待估原因", "valuation.reason", False),
             ("价值保留比例", "_retention_ratio", False),
             ("估价政策版本", None, False),

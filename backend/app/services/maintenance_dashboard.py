@@ -1286,12 +1286,15 @@ def build_summary_payload(
 
     receipt_total = receipt_units.flat("total")
     issue_total = issue_units.flat("total")
+    # 率平面可比性按**单位并集**：只收件+只领台时两侧各自单桶、flat 均
+    # 非 None，但分子分母跨单位 → 平面率三字段必须 null（B3 05:10 独立
+    # 验收 66.7 反例）；数量卡各自身真实值不受影响。
+    rate_unit_set = set(receipt_units.units()) | set(issue_units.units())
+    rate_comparable = len(rate_unit_set) <= 1
     # v3：每单位率/分子/分母容器（混合单位平面 null 时 UI 的可消费来源；
     # 同单位内部计算，不跨单位，不猜未知物理单位）。
     rate_breakdown = []
-    for unit in sorted_unit_keys(
-        set(receipt_units.units()) | set(issue_units.units())
-    ):
+    for unit in sorted_unit_keys(rate_unit_set):
         numerator = receipt_units.items().get(unit, {}).get("total", _ZERO)
         denominator = issue_units.items().get(unit, {}).get("total", _ZERO)
         rate_breakdown.append({
@@ -1325,10 +1328,11 @@ def build_summary_payload(
         },
         "return_rate_pct": (
             rate_pct(receipt_total, issue_total)
-            if receipt_total is not None and issue_total is not None else None
+            if rate_comparable and receipt_total is not None
+            and issue_total is not None else None
         ),
-        "rate_numerator": _flat(receipt_total),
-        "rate_denominator": _flat(issue_total),
+        "rate_numerator": _flat(receipt_total) if rate_comparable else None,
+        "rate_denominator": _flat(issue_total) if rate_comparable else None,
         "return_rate_breakdown": rate_breakdown,
         "project_count": len(projects_with_facts),
     }
