@@ -20,9 +20,13 @@ from app.models.maintenance import (
     MaintenanceDemandTombstone as T,
 )
 from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project import MaintenanceProjectAuditLog
 from app.models.maintenance_project_operations import MaintenanceSiteIssue as I
 from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine as IL,
+)
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectOperationAudit,
 )
 from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
@@ -36,9 +40,9 @@ from app.services import maintenance_project_operations as operations
 from app.services import maintenance_site_return_requirements as requirements
 from app.services.maintenance_source_cancel_cascade import (
     RESTORATION_KEY,
-    RESTORATION_SCHEMA,
     RESULTS_KEY,
 )
+from app.services.maintenance_source_cancel_restore_schema import snapshot_problem
 from app.services.maintenance_wbdd_reconciliation import _digest, _entity
 from app.services.maintenance_wbdd_sync import _audit
 
@@ -147,168 +151,69 @@ def _entity_state(conflicts, *, kind, label, ident, current, after, before,
     return "drift"
 
 
-_BEFORE_KEYS = {
-    "demand_line": ("is_active", "voided_at", "voided_by", "void_reason"),
-    "site_line": ("is_active",),
-    "site_issue": ("normalized_status", "raw_status", "status_mapping_state",
-                   "status_mapping_version", "voided_at"),
-}
+_MEMBER_ENTITY_TYPES = ("maintenance_line", "site_issue_line", "site_issue")
+_MEMBER_ACTIONS = ("VOID", "UPDATE")
 
 
-def _valid_time(value):
-    """Snapshot timestamps must be null or ISO-8601 text; _time must not raise later."""
-    if value is None:
-        return True
-    if not isinstance(value, str):
-        return False
-    try:
-        _time(value)
-        return True
-    except ValueError:
-        return False
+def _membership_problem(db: Session, *, restoration, entry, project_id):
+    """快照成员必须是「这一次确认作废」的行；对不上即快照损坏（astra B1）。
 
-
-def _optional_text(value):
-    return value is None or isinstance(value, str)
-
-
-def _snapshot_problem(restoration, confirm_result, project_id):
-    """Return a reason when the embedded snapshot cannot drive an exact restore.
-
-    Returns ``None`` only when every member recorded at confirmation time is
-    present, typed, uniquely identified, owned by the receipt's source order and
-    matches the counts recorded on the confirmation result. A structurally
-    incomplete snapshot must never be mistaken for a smaller restore set.
+    对账锚点是同一确认事务的审计：确认在停用挂靠时写 ``void_out`` 项目审计
+    （entity_id 为快照 assignments 里的挂靠号），其 operated_at 即事务时间
+    T（PostgreSQL 的 now() 事务级稳定）；T 时刻本项目、同成员类型的作废
+    审计（VOID/UPDATE）成员集合必须恰好等于快照成员集合，且每笔
+    before/after 与快照逐字相等。历史作废行替换、删成员改数量、伪造史实
+    都对不出这样一组审计，只能整次拒绝、零写入。
     """
-    if not isinstance(restoration, dict):
-        return "回执恢复快照不是对象"
-    if restoration.get("schema") != RESTORATION_SCHEMA:
-        return "回执恢复快照版本不受支持"
-    required = {"order": dict, "demand_lines": list, "site_lines": list,
-                "site_issues": list, "assignments": list}
-    for key, kind in required.items():
-        if key not in restoration:
-            return f"回执恢复快照缺少 {key}"
-        if not isinstance(restoration[key], kind):
-            return f"回执恢复快照的 {key} 类型不正确"
-    if "tombstone" not in restoration:
-        return "回执恢复快照缺少 tombstone"
-    if restoration["tombstone"] is not None and not isinstance(restoration["tombstone"], dict):
-        return "回执恢复快照的 tombstone 类型不正确"
-    for row in restoration["assignments"]:
-        if not isinstance(row, dict) or not isinstance(row.get("assignment_id"), str):
-            return "回执恢复快照的挂靠成员缺少 assignment_id"
+    members = {
+        "demand_lines": restoration.get("demand_lines") or [],
+        "site_lines": restoration.get("site_lines") or [],
+        "site_issues": restoration.get("site_issues") or [],
+    }
+    if not any(members.values()):
+        # 单头单（零成员确认）没有可对账的行；墓碑/挂靠/摘要一致性由其余校验兜住。
+        return None
+    operated_by, reason = entry.get("operated_by"), entry.get("reason")
+    if not isinstance(operated_by, str) or not operated_by \
+            or not isinstance(reason, str) or not reason:
+        return "回执恢复快照无法定位确认作废审计（缺少操作人或原因）"
+    expected = {}
+    for row in members["demand_lines"]:
+        expected[("maintenance_line", str(row["id"]))] = ("VOID", row["before"], row["after"])
+    for row in members["site_lines"]:
+        expected[("site_issue_line", row["issue_line_id"])] = ("VOID", row["before"], row["after"])
+    for row in members["site_issues"]:
+        expected[("site_issue", row["issue_id"])] = (
+            "VOID" if row["voided"] else "UPDATE", row["before"], row["after"])
 
-    order_id = restoration["order"].get("id")
-    if not isinstance(order_id, int) or isinstance(order_id, bool):
-        return "回执恢复快照的来源单头缺少 id"
-    confirmed_at = confirm_result.get("confirmed_at")
-    confirm_time = (_time(confirmed_at)
-                    if confirmed_at is not None and _valid_time(confirmed_at) else None)
-
-    demand_ids = set()
-    for row in restoration["demand_lines"]:
-        if not isinstance(row, dict) or not isinstance(row.get("id"), int):
-            return "回执恢复快照的需求行缺少 id"
-        if row["id"] in demand_ids:
-            return "回执恢复快照的需求行重复"
-        demand_ids.add(row["id"])
-        before, after = row.get("before"), row.get("after")
-        if not isinstance(before, dict) or not isinstance(after, dict):
-            return "回执恢复快照的需求行缺少 before/after"
-        if any(key not in before for key in _BEFORE_KEYS["demand_line"]):
-            return "回执恢复快照的需求行 before 字段不完整"
-        if not isinstance(before["is_active"], bool) \
-                or not _valid_time(before["voided_at"]) \
-                or not _optional_text(before["voided_by"]) \
-                or not _optional_text(before["void_reason"]):
-            return "回执恢复快照的需求行 before 取值不合法"
-        # 确认只快照活跃行，随后统一置为作废；before/after 必须证明是这一代作废，
-        # 否则「条数不变、成员换成别的行」会伪装成可恢复。
-        if before.get("id") != row["id"] or after.get("id") != row["id"]:
-            return "回执恢复快照的需求行 id 与快照不一致"
-        if before["is_active"] is not True or after.get("is_active") is not False:
-            return "回执恢复快照的需求行 before/after 活跃状态不合法"
-        if any(before[key] is not None for key in ("voided_at", "voided_by", "void_reason")):
-            return "回执恢复快照的需求行 before 带有作废痕迹"
-        if before.get("order_id") != order_id or after.get("order_id") != order_id:
-            return "回执恢复快照的需求行不属于来源单头"
-        if row.get("raw_line_id") != after.get("raw_line_id"):
-            return "回执恢复快照的需求行与来源明细不一致"
-        if confirm_time is None or not _valid_time(after.get("voided_at")) \
-                or _time(after["voided_at"]) != confirm_time:
-            return "回执恢复快照的需求行作废时间与确认回执不一致"
-
-    issue_ids = set()
-    for row in restoration["site_issues"]:
-        if not isinstance(row, dict) or not isinstance(row.get("issue_id"), str):
-            return "回执恢复快照的领用单头缺少 issue_id"
-        if not isinstance(row.get("voided"), bool):
-            return "回执恢复快照的领用单头缺少 voided 标记"
-        if row["issue_id"] in issue_ids:
-            return "回执恢复快照的领用单头重复"
-        issue_ids.add(row["issue_id"])
-        before, after = row.get("before"), row.get("after")
-        if not isinstance(before, dict) or not isinstance(after, dict):
-            return "回执恢复快照的领用单头缺少 before/after"
-        if any(key not in before for key in _BEFORE_KEYS["site_issue"]):
-            return "回执恢复快照的领用单头 before 字段不完整"
-        if not all(_optional_text(before[key]) for key in _BEFORE_KEYS["site_issue"]
-                   if key != "voided_at") or not _valid_time(before["voided_at"]):
-            return "回执恢复快照的领用单头 before 取值不合法"
-        if before.get("issue_id") != row["issue_id"] or after.get("issue_id") != row["issue_id"]:
-            return "回执恢复快照的领用单头 id 与快照不一致"
-        if before.get("project_id") != project_id or after.get("project_id") != project_id:
-            return "回执恢复快照的领用单头不属于本项目"
-        if row["voided"]:
-            if before.get("normalized_status") == "void":
-                return "回执恢复快照的领用单头 before 已是作废状态"
-            if after.get("normalized_status") != "void" or after.get("raw_status") != "void" \
-                    or after.get("status_mapping_state") != "mapped" \
-                    or after.get("status_mapping_version") != "site-issue-v2-workflow-v1":
-                return "回执恢复快照的领用单头 after 不是确认作废状态"
-            if confirm_time is None or not _valid_time(after.get("voided_at")) \
-                    or _time(after["voided_at"]) != confirm_time:
-                return "回执恢复快照的领用单头作废时间与确认回执不一致"
-        elif any(after.get(key) != before.get(key) for key in _BEFORE_KEYS["site_issue"]):
-            return "回执恢复快照的未作废领用单头 before/after 不一致"
-
-    site_line_ids = set()
-    for row in restoration["site_lines"]:
-        if not isinstance(row, dict) or not isinstance(row.get("issue_line_id"), str):
-            return "回执恢复快照的领用行缺少 issue_line_id"
-        if row["issue_line_id"] in site_line_ids:
-            return "回执恢复快照的领用行重复"
-        site_line_ids.add(row["issue_line_id"])
-        before, after = row.get("before"), row.get("after")
-        if not isinstance(before, dict) or not isinstance(after, dict):
-            return "回执恢复快照的领用行缺少 before/after"
-        if any(key not in before for key in _BEFORE_KEYS["site_line"]):
-            return "回执恢复快照的领用行 before 字段不完整"
-        if not isinstance(before["is_active"], bool):
-            return "回执恢复快照的领用行 before 取值不合法"
-        if not isinstance(row.get("issue_id"), str) or row["issue_id"] not in issue_ids:
-            return "回执恢复快照的领用行不属于任何记录的领用单头"
-        if before.get("issue_line_id") != row["issue_line_id"] \
-                or after.get("issue_line_id") != row["issue_line_id"] \
-                or before.get("issue_id") != row["issue_id"] \
-                or after.get("issue_id") != row["issue_id"]:
-            return "回执恢复快照的领用行 id 与快照不一致"
-        if before["is_active"] is not True or after.get("is_active") is not False:
-            return "回执恢复快照的领用行 before/after 活跃状态不合法"
-
-    count_pairs = (
-        ("需求行", len(restoration["demand_lines"]), confirm_result.get("voided_lines")),
-        ("领用行", len(restoration["site_lines"]), confirm_result.get("voided_site_lines")),
-        ("领用单头", sum(1 for row in restoration["site_issues"] if row["voided"]),
-         confirm_result.get("voided_site_issues")),
-    )
-    for label, actual, recorded in count_pairs:
-        if not isinstance(recorded, int) or isinstance(recorded, bool):
-            return "确认回执缺少作废数量，无法核对快照完整性"
-        if actual != recorded:
-            return f"回执恢复快照的{label}数量（{actual}）与确认回执（{recorded}）不一致"
-    return None
+    assignment_ids = sorted({row.get("assignment_id")
+                             for row in restoration.get("assignments") or []
+                             if isinstance(row, dict) and isinstance(row.get("assignment_id"), str)})
+    if not assignment_ids:
+        return "回执恢复快照缺少挂靠成员，无法锚定确认作废代际"
+    anchors = list(db.scalars(select(MaintenanceProjectAuditLog).where(
+        MaintenanceProjectAuditLog.project_id == project_id,
+        MaintenanceProjectAuditLog.action == "void_out",
+        MaintenanceProjectAuditLog.entity_type == "source_order_assignment",
+        MaintenanceProjectAuditLog.reason == reason,
+        MaintenanceProjectAuditLog.operated_by == operated_by,
+        MaintenanceProjectAuditLog.entity_id.in_(assignment_ids),
+    ).order_by(MaintenanceProjectAuditLog.operated_at)))
+    for anchor in anchors:
+        audits = {(row.entity_type, row.entity_id): row
+                  for row in db.scalars(select(MaintenanceProjectOperationAudit).where(
+                      MaintenanceProjectOperationAudit.project_id == project_id,
+                      MaintenanceProjectOperationAudit.operated_at == anchor.operated_at,
+                      MaintenanceProjectOperationAudit.entity_type.in_(_MEMBER_ENTITY_TYPES),
+                      MaintenanceProjectOperationAudit.action.in_(_MEMBER_ACTIONS),
+                  ))}
+        if set(audits) != set(expected):
+            continue
+        if all(audits[key].action == want[0] and audits[key].before_json == want[1]
+               and audits[key].after_json == want[2] for key, want in expected.items()):
+            return None
+    return ("回执恢复快照的成员与确认作废审计对不上（可能被替换、删改或伪造史实），"
+            "不可自动恢复；需人工按实名更正流程处理")
 
 
 def _evaluate(db: Session, *, project_id, receipt):
@@ -350,7 +255,12 @@ def _evaluate(db: Session, *, project_id, receipt):
             "reason": "回执缺少恢复前置快照（本功能上线前的历史确认），不可自动恢复；"
                       "需人工按实名更正流程处理并列入待决策项"}]
         return info, None, False
-    problem = _snapshot_problem(restoration, confirm_result, project_id)
+    problem = snapshot_problem(restoration, confirm_result=confirm_result,
+                               project_id=project_id)
+    if problem is None:
+        # 结构/取值都过了，再证明每个成员确实是这一次确认作废的行（审计对账）。
+        problem = _membership_problem(db, restoration=restoration, entry=entry,
+                                      project_id=project_id)
     if problem is not None:
         info["state"] = "unavailable"
         info["conflicts"] = [{

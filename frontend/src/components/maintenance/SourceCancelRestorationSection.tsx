@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Alert, Button, Input, List, Modal, Space, Spin, Table, Tag, Typography } from "antd";
 import {
   getSourceRestoration,
@@ -11,6 +11,7 @@ import {
   type SourceRestorationDemand,
 } from "../../api/maintenanceSourceCancelCascade";
 import { ISSUE_STATUS, readError } from "../../pages/maintenance/panel/panelUtils";
+import { TAG_STYLES } from "../../theme";
 
 const wrapText = { overflowWrap: "anywhere" as const };
 
@@ -22,10 +23,12 @@ interface Props {
   onChanged: () => Promise<boolean>;
 }
 
-const STATE_TAGS: Record<string, { label: string; color: string }> = {
-  restorable: { label: "可恢复", color: "orange" },
-  conflict: { label: "冲突", color: "red" },
-  restored: { label: "已恢复", color: "green" },
+/** 状态标签只用主题 token（TAG_STYLES，对比度 ≥ 4.5:1）或 antd default 预设，
+ * 不得回退 orange/green/red 等预设（实测对比度不足 4.5:1）。 */
+const STATE_TAGS: Record<string, { label: string; color?: string; style?: CSSProperties }> = {
+  restorable: { label: "可恢复", style: TAG_STYLES.warning },
+  conflict: { label: "冲突", style: TAG_STYLES.danger },
+  restored: { label: "已恢复", style: TAG_STYLES.success },
   unavailable: { label: "不可自动恢复", color: "default" },
 };
 
@@ -63,6 +66,20 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
     return () => { mounted.current = false; detailSeq.current += 1; };
   }, []);
 
+  // 弹窗打开期间账号可能被切换：与确认作废入口同口径，按 localStorage token
+  // 比对打开时的会话标识；不一致就关弹窗、清旧预览与 attempt，不向新账号提交。
+  const sessionIsCurrent = useCallback(
+    () => mounted.current && (localStorage.getItem("token") ?? "") === sessionToken,
+    [sessionToken]);
+
+  const abandonForSessionSwitch = useCallback(() => {
+    detailSeq.current += 1;
+    attempt.current = null;
+    setSelected(null); setDetail(null); setDetailError(null); setDetailConflicts([]);
+    setDoubleConfirm(false); setRetryUnknown(false); setReason("");
+    setListError("账号已切换，本次恢复已取消；请用当前账号重新打开核对。");
+  }, []);
+
   const loadList = useCallback(async () => {
     if (!canConfirm || !mounted.current) return;
     setLoading(true);
@@ -85,7 +102,7 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
   if (!canConfirm) return null;
 
   const openPreview = async (info: SourceRestorationInfo) => {
-    if (inFlight.current || !mounted.current) return;
+    if (inFlight.current || !mounted.current || !sessionIsCurrent()) return;
     const seq = ++detailSeq.current;
     setSelected(info); setDetail(null); setDetailError(null); setDetailConflicts([]);
     setReason(""); setRetryUnknown(false); setReceipt(null);
@@ -93,9 +110,11 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
     try {
       const response = await getSourceRestoration(projectId, info.source_order_id);
       if (!mounted.current || seq !== detailSeq.current) return;
+      if (!sessionIsCurrent()) { abandonForSessionSwitch(); return; }
       setDetail(response.data);
     } catch (failure) {
       if (!mounted.current || seq !== detailSeq.current) return;
+      if (!sessionIsCurrent()) { abandonForSessionSwitch(); return; }
       setDetailError(readError(failure, "恢复预览加载失败，请重试。"));
     } finally {
       if (mounted.current && seq === detailSeq.current) setDetailLoading(false);
@@ -119,6 +138,8 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
   const performRestore = async () => {
     const current = detail;
     if (inFlight.current || !current || !mounted.current) return;
+    // 首次提交与未知结果重试都先比对会话：换过账号的旧弹窗不得再提交。
+    if (!sessionIsCurrent()) { abandonForSessionSwitch(); return; }
     if (!attempt.current) {
       if (current.state !== "restorable" || !current.expected_digest
           || !reason.trim() || reason.trim().length > 1000) return;
@@ -133,6 +154,7 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
       const response = await restoreSourceCancellation(
         projectId, attempt.current.sourceOrderId, attempt.current.body, sessionToken);
       if (!mounted.current) return;
+      if (!sessionIsCurrent()) { abandonForSessionSwitch(); return; }
       attempt.current = null;
       setRetryUnknown(false);
       detailSeq.current += 1;
@@ -147,6 +169,7 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
       })().catch(() => undefined);
     } catch (failure) {
       if (!mounted.current) return;
+      if (!sessionIsCurrent()) { abandonForSessionSwitch(); return; }
       const status = (failure as { response?: { status?: number } })?.response?.status;
       if (status != null && status >= 400 && status < 500) {
         attempt.current = null;
@@ -186,7 +209,7 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
         <Space direction="vertical" size={4} style={{ width: "100%", minWidth: 0 }}>
           <Space wrap>
             <Typography.Text strong style={wrapText}>{info.order_no ?? info.source_order_id}</Typography.Text>
-            <Tag color={STATE_TAGS[info.state]?.color ?? "default"}>
+            <Tag color={STATE_TAGS[info.state]?.color ?? "default"} style={STATE_TAGS[info.state]?.style}>
               {STATE_TAGS[info.state]?.label ?? info.state}
             </Tag>
             <Button disabled={busy} onClick={() => void openPreview(info)}>查看恢复预览</Button>

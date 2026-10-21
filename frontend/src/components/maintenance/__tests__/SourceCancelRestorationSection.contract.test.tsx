@@ -40,6 +40,8 @@ const props = () => ({ projectId: "project-1", canConfirm: true, sessionToken: "
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
+  // 会话守卫按 localStorage token 比对 sessionToken prop：契约测试保持当前账号。
+  localStorage.setItem("token", "token-1");
   api.list.mockResolvedValue({ data: { items: [item], total: 1 } });
   api.preview.mockResolvedValue({ data: previewInfo });
 });
