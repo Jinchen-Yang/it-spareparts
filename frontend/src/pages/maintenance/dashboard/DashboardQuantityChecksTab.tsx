@@ -17,11 +17,15 @@ import {
   DashboardExportButtons,
   KpiCard,
   SORT_LABELS,
+  UNIT_MIXED_TEXT,
+  QtyBreakdownCell,
+  UnitBreakdown,
   apiErrorMessage,
   qtyText,
   reasonText,
   sessionToken,
   sessionUnchanged,
+  unitColumnText,
   type DashboardTabProps,
 } from "./dashboardShared";
 
@@ -96,14 +100,26 @@ export default function DashboardQuantityChecksTab({
       render: (v: string | null) => v || "—" },
     { title: "仓库", dataIndex: "warehouse", width: 110,
       render: (v: string | null) => v || "—" },
+    // B2-F04：单位列全角色（唯一单位 → 单位名；混合 → 混合单位；缺 → 待核）
+    { title: "单位", key: "unit", width: 90,
+      render: (_: unknown, row) => unitColumnText(row.unit, row.unit_breakdown) },
     { title: "需求量 N", dataIndex: "demand_qty", width: 100, align: "right",
-      render: (v: string | null) => qtyText(v) },
+      render: (v: string | null, row) => (
+        // B2-F04：混合单位 → 平面 null + 每单位分桶（N/R/差额/超收都不跨单位并）
+        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.demand_qty} />
+      ) },
     { title: "实收 R", dataIndex: "received_qty", width: 100, align: "right",
-      render: (v: string | null) => qtyText(v) },
+      render: (v: string | null, row) => (
+        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.received_qty} />
+      ) },
     { title: "差额 max(N−R,0)", dataIndex: "difference_qty", width: 130, align: "right",
-      render: (v: string | null) => qtyText(v) },
+      render: (v: string | null, row) => (
+        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.difference_qty} />
+      ) },
     { title: "超收 max(R−N,0)", dataIndex: "over_received_qty", width: 130, align: "right",
-      render: (v: string | null) => qtyText(v) },
+      render: (v: string | null, row) => (
+        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.over_received_qty} />
+      ) },
     { title: "基数状态", dataIndex: "basis_state", width: 100,
       render: (v: string) => <BasisStateTag state={v} /> },
     {
@@ -113,7 +129,14 @@ export default function DashboardQuantityChecksTab({
         : "—"),
     },
     { title: "无业务日实收", dataIndex: "undated_receipt_qty", width: 110, align: "right",
-      render: (v: string | null) => qtyText(v) },
+      render: (v: string | null, row) => (
+        // 契约 v3 §5.1：无业务日实收按单位分桶在 unit_breakdown 条目的
+        // undated_receipt_qty 内（混合 → 平面 null，分桶呈现，不猜单位）
+        <QtyBreakdownCell
+          flat={v}
+          breakdown={row.unit_breakdown}
+          pick={(e) => e.undated_receipt_qty} />
+      ) },
     { title: "无返还备注", dataIndex: "no_return_note", width: 140, ellipsis: true,
       render: (v: string | null) => v || "—" },
   ], []);
@@ -136,24 +159,70 @@ export default function DashboardQuantityChecksTab({
       </Text>
 
       <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="checks-cards">
+        {/* B2-F04：混合单位 → 平面 null + 分桶小字（每单位 N/R/差额/超收，
+            不把 3件+7台 并成 10）；单单位 → 平面值照旧 */}
         <KpiCard label="需求量 N 合计" loading={loading}
-          value={qtyText(cards?.checked_demand_qty)} />
+          value={cards
+            ? (cards.checked_demand_qty != null
+              ? qtyText(cards.checked_demand_qty)
+              : cards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={cards?.unit_breakdown?.length ? (
+            <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.demand_qty)} />
+          ) : undefined} />
         <KpiCard label="实收 R 合计" loading={loading}
-          value={qtyText(cards?.received_qty)} />
+          value={cards
+            ? (cards.received_qty != null
+              ? qtyText(cards.received_qty)
+              : cards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={cards?.unit_breakdown?.length ? (
+            <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.received_qty)} />
+          ) : undefined} />
         <KpiCard label="差额合计" loading={loading}
-          value={qtyText(cards?.known_difference_qty)}
-          sub="max(N−R,0) 逐单加总" />
+          value={cards
+            ? (cards.known_difference_qty != null
+              ? qtyText(cards.known_difference_qty)
+              : cards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={cards?.unit_breakdown?.length ? (
+            <Space direction="vertical" size={0}>
+              <span>max(N−R,0) 逐单加总</span>
+              <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.difference_qty)} />
+            </Space>
+          ) : "max(N−R,0) 逐单加总"} />
         <KpiCard label="超收合计" loading={loading}
-          value={qtyText(cards?.over_received_qty)}
-          sub="max(R−N,0) 逐单加总" />
+          value={cards
+            ? (cards.over_received_qty != null
+              ? qtyText(cards.over_received_qty)
+              : cards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={cards?.unit_breakdown?.length ? (
+            <Space direction="vertical" size={0}>
+              <span>max(R−N,0) 逐单加总</span>
+              <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.over_received_qty)} />
+            </Space>
+          ) : "max(R−N,0) 逐单加总"} />
         <KpiCard label="待核对单数" loading={loading}
           value={cards ? qtyText(String(cards.pending_check_order_count)) : undefined}
           sub="基数不完整或归属冲突" />
         <KpiCard label="失效单数" loading={loading}
           value={cards ? qtyText(String(cards.inactive_order_count)) : undefined} />
         <KpiCard label="未关联需求单实收" loading={loading}
-          value={qtyText(cards?.unassigned_receipt_qty)}
-          sub="当前授权范围内未关联需求单的实收（不摊入需求单行）" />
+          value={cards
+            ? (cards.unassigned_receipt_qty != null
+              ? qtyText(cards.unassigned_receipt_qty)
+              : cards.unassigned_receipt_unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={cards ? (
+            <Space direction="vertical" size={0}>
+              <span>当前授权范围内未关联需求单的实收（不摊入需求单行）</span>
+              {/* 契约 v3 §3：混合 → 平面 null，跨项目按单位合计的桶恒给 */}
+              <UnitBreakdown
+                entries={cards.unassigned_receipt_unit_breakdown}
+                render={(e) => qtyText(e.received_qty)} />
+            </Space>
+          ) : "当前授权范围内未关联需求单的实收（不摊入需求单行）"} />
       </Row>
 
       <Space wrap size={12}>
@@ -181,7 +250,7 @@ export default function DashboardQuantityChecksTab({
           dataSource={data?.rows ?? []}
           columns={columns}
           onChange={onTableChange}
-          scroll={{ x: 1660 }}
+          scroll={{ x: 1750 }}
           pagination={{
             current: page,
             pageSize,
@@ -206,7 +275,13 @@ export default function DashboardQuantityChecksTab({
               { title: "项目", dataIndex: "display_name",
                 render: (v: string, row) => `${v}（${row.project_code ?? "—"}）` },
               { title: "实收数量", dataIndex: "received_qty", width: 140, align: "right",
-                render: (v: string) => qtyText(v) },
+                // B2-F04/契约 v3 §3：未关联实收混合单位 → 平面 null + 分桶行
+                render: (v: string | null, row) => (
+                  <QtyBreakdownCell
+                    flat={v}
+                    breakdown={row.unit_breakdown}
+                    pick={(e) => e.received_qty} />
+                ) },
             ]}
             locale={{ emptyText: "无" }}
           />

@@ -32,6 +32,7 @@ import {
   UnitBreakdown,
   apiErrorMessage,
   drillByPn,
+  dualTaxText,
   moneyText,
   qtyText,
   rateText,
@@ -56,8 +57,9 @@ function policySummary(plc: ValuationPolicy): string {
   );
 }
 
-/** 成本参考域一行：可用 → 单位成本 + 样本行 + 领用已计覆盖（issued_lines
- * 口径，契约 v2 §2）；不可用 → 原因。与三域估值列的返件估值覆盖分母不同，
+/** 成本参考域一行：可用 → 单位成本双税并列（B2-F01：直接用持久化两侧，
+ * 绝不拿含税÷1.13 重建未税）+ 样本行 + 领用已计覆盖（issued_lines 口径，
+ * 契约 v2 §2）；不可用 → 原因。与三域估值列的返件估值覆盖分母不同，
  * 命名上显式区分，绝不混用。 */
 function CostReferenceLine({ reference }: { reference: CostReferencePayload }) {
   if (!reference.available) {
@@ -67,9 +69,10 @@ function CostReferenceLine({ reference }: { reference: CostReferencePayload }) {
       </Text>
     );
   }
+  const money = dualTaxText(reference.unit_cost_inc_tax, reference.unit_cost_ex_tax);
   return (
     <Text style={{ fontSize: 12 }}>
-      {DOMAIN_LABELS.cost} ¥{reference.unit_cost_inc_tax ?? "—"}
+      {DOMAIN_LABELS.cost} {money ?? "¥—"}
       {reference.sample_line_count !== undefined ? `（${reference.sample_line_count} 行领用）` : null}
       {reference.coverage_pct !== null && reference.coverage_pct !== undefined
         ? ` · 领用已计覆盖 ${reference.coverage_pct}%`
@@ -116,9 +119,14 @@ function DomainValuesCell({ row }: { row: PartRow }) {
   return (
     <Space direction="vertical" size={0} align="start">
       <DomainCoverageLines domains={domains} />
-      {valuation.finished_estimated_value_inc_tax !== undefined ? (
+      {valuation.finished_estimated_value_inc_tax !== undefined
+        || valuation.finished_estimated_value_ex_tax !== undefined ? (
         <Text style={{ fontSize: 12 }}>
-          成品（参考全值） {moneyText(valuation.finished_estimated_value_inc_tax)}（含税）
+          成品（参考全值）{" "}
+          {dualTaxText(
+            valuation.finished_estimated_value_inc_tax,
+            valuation.finished_estimated_value_ex_tax,
+          ) ?? "¥—"}
         </Text>
       ) : null}
       <Text type="secondary" style={{ fontSize: 12 }}>三域并列，不相加</Text>
@@ -242,7 +250,9 @@ export default function DashboardPartsTab({
               return (
                 <TaxMoney scope="maintenance" exact stack
                   inc={Number(v.bad_estimated_value_inc_tax)}
-                  ex={Number(v.bad_estimated_value_ex_tax ?? "0")} />
+                  ex={v.bad_estimated_value_ex_tax !== undefined
+                    ? Number(v.bad_estimated_value_ex_tax)
+                    : null} />
               );
             }
             if (v.state === "pending") {
@@ -268,10 +278,10 @@ export default function DashboardPartsTab({
           render: (_: unknown, row) => rateText(row.valuation?.coverage_pct ?? null),
         },
         {
-          title: "三域试算价值（含税，并列不相加）", key: "domains", width: 220,
+          title: "三域试算价值（含税／不含税，并列不相加）", key: "domains", width: 220,
           render: (_: unknown, row) => <DomainValuesCell row={row} />,
         },
-        { title: "三域参考（含税）", key: "references", width: 240,
+        { title: "三域参考（含税／不含税）", key: "references", width: 240,
           render: (_: unknown, row) => <ReferencesCell row={row} /> },
       );
     }

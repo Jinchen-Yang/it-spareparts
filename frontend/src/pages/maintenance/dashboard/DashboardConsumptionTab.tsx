@@ -41,6 +41,7 @@ import {
   qtyText,
   rateText,
   qtyNumber,
+  UndatedOrdersNote,
   sessionToken,
   sessionUnchanged,
   unitBucketText,
@@ -192,12 +193,15 @@ export default function DashboardConsumptionTab({
       base.splice(4, 0,
         {
           title: "已计消耗成本（只读）", key: "cost", width: 190, align: "right",
-          // B-F11：桶内全部未计成本 → 金额键不存在（未知金额），绝不 ?? 0
+          // B-F11：桶内全部未计成本 → 金额键不存在（未知金额），绝不 ?? 0；
+          // B2-F01：未税侧缺失 → "-"（缺失），不拿含税冒充
           render: (_: unknown, row) => (row.cost_amount_inc_tax !== undefined
             ? (
               <TaxMoney scope="maintenance" stack exact
                 inc={Number(row.cost_amount_inc_tax)}
-                ex={Number(row.cost_amount_ex_tax ?? row.cost_amount_inc_tax)} />
+                ex={row.cost_amount_ex_tax !== undefined
+                  ? Number(row.cost_amount_ex_tax)
+                  : null} />
             )
             : "未计成本"),
         },
@@ -304,12 +308,8 @@ export default function DashboardConsumptionTab({
               <Space direction="vertical" size={0}>
                 <span>有效需求单有效行 Σ原qty；按制单日期入期</span>
                 {orderCards.undated_orders ? (
-                  // B-F12：无制单日期有效单单独成桶（未计入期间，不猜日期）
-                  <span>
-                    无制单日期下单量 {qtyText(orderCards.undated_orders.order_qty)}
-                    ／单数 {qtyText(String(orderCards.undated_orders.order_count))}
-                    （未计入期间，不猜日期）
-                  </span>
+                  // B-F12/B2-F05：无制单日期有效单单独成桶，混合单位分桶呈现
+                  <UndatedOrdersNote undated={orderCards.undated_orders} />
                 ) : null}
                 <UnitBreakdown
                   entries={orderCards.unit_breakdown}
@@ -359,7 +359,13 @@ export default function DashboardConsumptionTab({
               { title: "期间下单单数", dataIndex: "order_count", width: 130, align: "right",
                 render: (v: number) => qtyText(String(v)) },
               { title: "无制单日期下单量（未计入期间）", key: "undated_qty", width: 200, align: "right",
-                render: (_: unknown, row) => qtyText(row.undated_order_qty ?? null) },
+                render: (_: unknown, row) => (
+                  // B2-F05：混合单位 → 平面 null + undated_unit_breakdown 分桶
+                  <QtyBreakdownCell
+                    flat={row.undated_order_qty ?? null}
+                    breakdown={row.undated_unit_breakdown}
+                    pick={(e) => e.order_qty} />
+                ) },
               { title: "无制单日期单数", key: "undated_count", width: 120, align: "right",
                 render: (_: unknown, row) => qtyText(String(row.undated_order_count ?? 0)) },
             ]}
@@ -391,10 +397,12 @@ export default function DashboardConsumptionTab({
             <>
               <KpiCard label="已计消耗成本（已知小计）" loading={loading} testId="kpi-consumption-cost"
                 value={consumptionCards?.cost_amount_inc_tax !== undefined ? (
+                  // B2-F01：未税侧缺失 → "-"（缺失），不拿含税冒充
                   <TaxMoney scope="maintenance" stack exact
                     inc={Number(consumptionCards.cost_amount_inc_tax)}
-                    ex={Number(consumptionCards.cost_amount_ex_tax
-                      ?? consumptionCards.cost_amount_inc_tax)} />
+                    ex={consumptionCards.cost_amount_ex_tax !== undefined
+                      ? Number(consumptionCards.cost_amount_ex_tax)
+                      : null} />
                 ) : "—"}
                 sub={(
                   <Space direction="vertical" size={0}>
