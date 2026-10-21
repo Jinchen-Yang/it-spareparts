@@ -164,7 +164,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toEqual({
       date_from: TODAY, date_to: TODAY,
-      sort: "amount_ex_tax", page: 1, page_size: 50, include_returns: false,
+      sort: "amount_ex_tax", order: "desc", page: 1, page_size: 50, include_returns: false,
     });
     expect(locationSearch).toBe("");
     // KPI：销售单数 + 三金额合计并排（默认全选）
@@ -269,7 +269,7 @@ describe("销售分析页：URL 单一真值", () => {
 
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     // 回退提示以响应回显为准（请求 amount_ex_tax ≠ 回显 revenue）
-    expect(screen.getByText(/已按营收（公开口径）倒序/)).toBeInTheDocument();
+    expect(screen.getByText(/所选排序字段不可见：已改按公开口径排序/)).toBeInTheDocument();
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).toContain("—");
     expect(row.textContent).not.toContain("200.00");
@@ -294,8 +294,9 @@ describe("销售分析页：URL 单一真值", () => {
     renderPage("/sales/analytics?customer=%E5%AE%A2%E6%88%B7%E7%94%B2");
 
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("客户信息不可见");
-    expect(input).toBeDisabled();
+    // 客户与客户类型两个多选都禁用（后端对客户类属条件 fail-closed 403）
+    expect(screen.getByRole("combobox", { name: "客户" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "客户类型" })).toBeDisabled();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).not.toHaveProperty("customer");
   });
@@ -355,9 +356,10 @@ describe("销售分析页：URL 单一真值", () => {
     expect(within(dialog).queryByText("对账快照（最新）")).toBeNull();
   });
 
-  it("列头点「含税订单金额」：切换排序键并回第 1 页，状态落 URL；只倒序不升序", async () => {
+  it("列头点「含税订单金额」：切换排序键并回第 1 页，状态落 URL；再点切升序（D-44 §4）", async () => {
     // 页码 2 合法（120 单/50 每页）：本例验排序切换回第 1 页，越界收敛另有专测
-    fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({ total: 120 }) });
+    fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) =>
+      Promise.resolve({ data: ordersResp({ total: 120, sort: q.sort, order: q.order ?? "desc" }) }));
     renderPage("/sales/analytics?page=2");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
@@ -371,6 +373,12 @@ describe("销售分析页：URL 单一真值", () => {
     expect(locationSearch).toContain("sort=amount_inc_tax");
     expect(navigationType).toBe("REPLACE");
     expect(locationSearch).not.toContain("page=");
+    // 再点同一列：升序
+    fireEvent.click(screen.getByRole("columnheader", { name: "含税订单金额" }));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      sort: "amount_inc_tax", order: "asc",
+    }));
+    expect(locationSearch).toContain("order=asc");
   });
 
   it("订单行点击打开详情抽屉：三金额 + 最新对账块 + 对账历史（每批次一条，旧→新）", async () => {
@@ -424,26 +432,14 @@ describe("销售分析页：URL 单一真值", () => {
     expect(locationSearch).toContain("business_type=");
   });
 
-  it("客户模糊搜索：回车提交 trim 后进请求，写 URL；重置后输入框与 URL 同步清空", async () => {
-    renderPage();
+  it("旧链接客户模糊条件：以可关闭标签展示并进请求；关闭标签即移除（D-44 改为多选，不再提供输入）", async () => {
+    renderPage("/sales/analytics?customer=%E5%AE%A2%E6%88%B7%E7%94%B2");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-
-    const input = screen.getByPlaceholderText("客户（模糊搜索，回车生效）");
-    fireEvent.change(input, { target: { value: "  客户甲  " } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
-    expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ customer: "客户甲" });
-    expect(locationSearch).toContain("customer=");
-    // 提交后输入框归一到 trim 后的已提交值
-    expect((input as HTMLInputElement).value).toBe("客户甲");
-
-    // 重置：URL 清零，输入框不能残留旧文本（否则显示态与请求态自相矛盾）
-    // antd 对两字中文按钮自动插空格（「重 置」），用正则容错
-    fireEvent.click(screen.getByRole("button", { name: /重\s*置/ }));
-    await waitFor(() => expect(locationSearch).toBe(""));
-    expect((input as HTMLInputElement).value).toBe("");
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(3));
-    expect(fetchSalesAnalyticsOrders.mock.calls[2][0]).not.toHaveProperty("customer");
+    expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({ customer: "客户甲" });
+    const tag = screen.getByText("客户含「客户甲」");
+    fireEvent.click(within(tag.closest(".ant-tag") as HTMLElement).getByRole("img", { name: /close/i }));
+    await waitFor(() => expect(locationSearch).not.toContain("customer="));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).not.toHaveProperty("customer"));
   });
 
   it("未来单打标：订单日期晚于今天显示「未来」标签（本页不排除未来单）", async () => {
@@ -503,21 +499,24 @@ describe("销售分析页：URL 单一真值", () => {
     expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ sort: "amount_inc_tax" });
   });
 
-  it("销售人员模糊搜索：回车提交进请求与 URL；重置同步清空", async () => {
+  it("销售人员多选（D-44）：候选来自 options，选中后精确匹配进请求与 URL；重置清空", async () => {
+    fetchSalesAnalyticsOptions.mockResolvedValue({ data: {
+      ...OPTIONS, salespeople: [{ value: "王五", orders: 3 }, { value: null, orders: 1 }],
+    } });
     renderPage();
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("销售人员（模糊搜索，回车生效）");
-    fireEvent.change(input, { target: { value: "  王五  " } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
-    expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ salesperson: "王五" });
+    const select = screen.getByRole("combobox", { name: "销售人员" });
+    fireEvent.mouseDown(select);
+    fireEvent.click(await screen.findByText("王五（3）"));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      salesperson_name: ["王五"],
+    }));
     expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith(
-      expect.objectContaining({ salesperson: "王五", date_from: TODAY, date_to: TODAY }),
+      expect.objectContaining({ salesperson_name: ["王五"], date_from: TODAY, date_to: TODAY }),
     );
-    expect(locationSearch).toContain("salesperson=");
+    expect(locationSearch).toContain("salesperson_name=");
     fireEvent.click(screen.getByRole("button", { name: /重\s*置/ }));
     await waitFor(() => expect(locationSearch).toBe(""));
-    expect((input as HTMLInputElement).value).toBe("");
   });
 
   it("深链直开抽屉 + 金额口径子集：未选口径的金额行不渲染", async () => {
