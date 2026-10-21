@@ -4,10 +4,12 @@
 // 客户权限（data_customer）受限时禁用客户与客户类型（后端对带客户条件的请求
 // fail-closed 403）；对账权限受限时含退货开关无意义，不渲染。旧链接里的客户 / 销售
 // 模糊条件（customer / salesperson）只作为可关闭标签展示，不再提供输入。
+// 控件主题（A3/DL-025 返工）由页面根的 ConfigProvider 统一提供，本组件不再自带。
 import { useEffect, useRef, useState } from "react";
 import { Button, Select, Switch, Tag, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
+import { readSessionToken, sessionStale } from "../../../utils/session";
 import {
   EMPTY_FILTER_VALUE,
   fetchSalesAnalyticsOptions,
@@ -38,6 +40,11 @@ export interface FilterBarProps {
   isBasisHidden: (basis: SalesAmountBasis) => boolean;
   /** data_purchase_cost=false：金额区间整组不可用（含营收口径，A-AC03 无例外）。 */
   amountRangeHidden: boolean;
+  /** 所属会话 owner（页级下传，DL-010 补证 owner-search/owner-debounce-switch）：
+   * 客户搜索的 debounce / 请求 / 落地三处守卫都用它。 */
+  ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：客户搜索检测到 owner 失效时回调。 */
+  onOwnerStale: () => void;
   onReset: () => void;
 }
 
@@ -62,30 +69,59 @@ export function valueOptions(list: SalesAnalyticsValueOption[] | undefined, empt
   }));
 }
 
-/** 客户多选：候选随输入向后端补全（规范名子串，最多 50 条）；已选值始终保留在候选中。 */
+/**
+ * 客户多选：候选随输入向后端补全（规范名子串，最多 50 条）；已选值始终保留在候选中。
+ * 所属会话守卫（DL-010 补证）：本组件自有 300ms debounce timer 与 found 状态，
+ * 不走页内统一 effect——守卫要单独接 owner，三处都覆盖：
+ * 1) timer 到期请求前比对（debounce 窗口内静默换 token，旧 timer 不再以新身份发请求）；
+ * 2) 落地前比对捕获 token（迟到的旧响应不进候选）；
+ * 3) 任一处检测到失效即清旧 found，并通知页级清旧上下文。
+ */
 function CustomerSelect({
   value,
   initial,
   disabled,
   onChange,
+  ownerToken,
+  onOwnerStale,
 }: {
   value: string[];
   initial: SalesAnalyticsValueOption[] | undefined;
   disabled: boolean;
   onChange: (v: string[]) => void;
+  ownerToken: string | null;
+  onOwnerStale: () => void;
 }) {
   const [found, setFound] = useState<SalesAnalyticsValueOption[] | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seq = useRef(0);
+  // onOwnerStale 存 ref：父页每次渲染换新引用，timer 回调里经 ref 取最新
+  const onOwnerStaleRef = useRef(onOwnerStale);
+  onOwnerStaleRef.current = onOwnerStale;
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const onSearch = (q: string) => {
     if (timer.current) clearTimeout(timer.current);
     if (!q.trim()) { setFound(null); return; }
     timer.current = setTimeout(() => {
       const mine = ++seq.current;
+      // 请求前 owner 守卫：失效即拒发 + 清旧候选 + 通知页级清理
+      if (sessionStale(ownerToken)) {
+        setFound(null);
+        onOwnerStaleRef.current?.();
+        return;
+      }
+      const token = readSessionToken();
       fetchSalesAnalyticsOptions({}, q.trim())
-        .then(({ data }) => { if (mine === seq.current) setFound(data.customers ?? []); })
-        .catch(() => { if (mine === seq.current) setFound([]); });
+        .then(({ data }) => {
+          if (mine !== seq.current) return;
+          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
+          setFound(data.customers ?? []);
+        })
+        .catch(() => {
+          if (mine !== seq.current) return;
+          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
+          setFound([]);
+        });
     }, 300);
   };
   const base = found ?? initial ?? [];
@@ -124,6 +160,8 @@ export default function FilterBar({
   reconRestricted,
   isBasisHidden,
   amountRangeHidden,
+  ownerToken,
+  onOwnerStale,
   onReset,
 }: FilterBarProps) {
   const change = (next: Partial<SalesAnalyticsUrlState>) => patch(next, { resetPage: true });
@@ -159,6 +197,8 @@ export default function FilterBar({
           initial={options?.customers}
           disabled={customerRestricted}
           onChange={(v) => change({ customers: v })}
+          ownerToken={ownerToken}
+          onOwnerStale={onOwnerStale}
         />
         <Select
           {...multiSelectProps}

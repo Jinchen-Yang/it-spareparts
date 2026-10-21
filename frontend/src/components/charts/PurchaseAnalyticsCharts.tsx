@@ -76,14 +76,14 @@ export function buildPurchaseTrendOption(
     xAxis: {
       type: "category",
       data: labels,
-      axisLabel: { fontSize: 11, color: CHART_COLORS.axisLabel, hideOverlap: true },
+      axisLabel: { fontSize: 11, color: CHART_COLORS.text2, hideOverlap: true },
       axisTick: { alignWithLabel: true },
       axisLine: { lineStyle: { color: CHART_COLORS.axisLine } },
     },
     yAxis: {
       type: "value",
       axisLabel: {
-        fontSize: 11, color: CHART_COLORS.axisLabel,
+        fontSize: 11, color: CHART_COLORS.text2,
         formatter: (v: number) => (isMoney(metric) ? moneyAxis(v) : String(v)),
       },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
@@ -120,7 +120,7 @@ export function buildPurchaseRankOption(
     xAxis: {
       type: "value",
       axisLabel: {
-        fontSize: 11, color: CHART_COLORS.axisLabel,
+        fontSize: 11, color: CHART_COLORS.text2,
         formatter: (v: number) => (isMoney(metric) ? moneyAxis(v) : String(v)),
       },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
@@ -243,7 +243,7 @@ export function PurchaseRankBar({
         }}
       />
       {missing > 0 && (
-        <div style={{ fontSize: 12, color: CHART_COLORS.axisLabel }}>
+        <div style={{ fontSize: 12, color: CHART_COLORS.text2 }}>
           另有 {missing} 组该指标无数据，未画出（见下表）
         </div>
       )}

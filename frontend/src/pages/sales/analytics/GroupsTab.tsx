@@ -110,10 +110,12 @@ export interface GroupsTabProps {
   toMessage: (err: unknown) => string;
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发并清旧数据。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：检测到 owner 失效的迟到响应通知页级清旧上下文。 */
+  onOwnerStale: () => void;
 }
 
 export default function GroupsTab({
-  state, apiFilters, filterKey, patch, costRestricted, profitRestricted, customerRestricted, toMessage, ownerToken,
+  state, apiFilters, filterKey, patch, costRestricted, profitRestricted, customerRestricted, toMessage, ownerToken, onOwnerStale,
 }: GroupsTabProps) {
   const dim = customerRestricted && SALES_CUSTOMER_DIMS.includes(state.groupBy) ? "salesperson" : state.groupBy;
   // lines 仅行级维度合法（契约 §6）：维度切到单头（或受限替换）时归一，防 422
@@ -127,6 +129,7 @@ export default function GroupsTab({
     toMessage,
     true,
     ownerToken,
+    onOwnerStale,
   );
   const effectiveSort = data?.sort ?? requestSort;
   const effectiveOrder = data?.order ?? state.groupOrder;
@@ -229,6 +232,8 @@ export default function GroupsTab({
   const conc = data?.concentration;
 
   return (
+    // 控件主题（A3/DL-025 返工）由页面根 ConfigProvider 提供：受限账号「分组维度」
+    // 弹层里的禁用客户类选项（portal，与触发控件同 token 集 / hashId）同享覆盖。
     <div style={{ display: "grid", gap: 12 }}>
       <Space wrap>
         <span>分组维度</span>

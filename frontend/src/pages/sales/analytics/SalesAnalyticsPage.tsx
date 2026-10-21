@@ -7,7 +7,7 @@
 // data_* 受限只影响控件门控与「—」展示，数据面真值永远是后端脱敏 + sort 回显。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, App, Alert, Card, Space, Switch, Tabs, Tooltip } from "antd";
+import { Button, App, Alert, Card, ConfigProvider, Space, Switch, Tabs, Tooltip } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
@@ -29,6 +29,7 @@ import GroupsTab from "./GroupsTab";
 import OverviewTab from "./OverviewTab";
 import TrendTab from "./TrendTab";
 import AmountHistogram from "./AmountHistogram";
+import { analyticsControlTheme } from "./dashboardColors";
 import FilterBar from "./FilterBar";
 import SummaryView from "./SummaryView";
 import DrillTable from "./DrillTable";
@@ -79,6 +80,16 @@ export default function SalesAnalyticsPage() {
    * 排序回显 / 导出中状态）。幂等；置死后面板换专用提示，重试不再发请求。 */
   const sessionExpired = () => {
     if (!sessionStale(ownerToken)) return false;
+    notifyOwnerStale();
+    return true;
+  };
+  /** 页级过期清理（DL-010 落地矩阵）：任何异步入口（页内 effect / useAsyncData /
+   * 直方图 / 抽屉 / 客户搜索 debounce / 行点击下钻）检测到 owner 失效时都回调
+   * 这里——检测到过期只 return 丢弃迟到响应还不够，旧会话数据必须从数据面清掉。
+   * 幂等：仅在所属会话真失效（localStorage 已换 token）时动作，合法新会话的
+   * 重新挂载不受影响。 */
+  const notifyOwnerStale = () => {
+    if (!sessionStale(ownerToken)) return;
     setSessionDead(true);
     setBusinessTypeOptions([]);
     setOptions(null);
@@ -89,7 +100,6 @@ export default function SalesAnalyticsPage() {
     setOrdersLoading(false);
     setOrdersError(null);
     setExporting(false);
-    return true;
   };
 
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
@@ -159,19 +169,23 @@ export default function SalesAnalyticsPage() {
 
   // 筛选候选：业务类型等计数为全时间口径（与筛选无关）；金额拖动条右端（amount_range）
   // 随其他筛选变化，故按筛选键重拉（后端忽略金额区间本身，拖动不会改变右端）。
-  // 落地前比对 localStorage token（DL-010）：换账号后的迟到候选不进当前 UI；
-  // 所属会话失效时请求前拒发（DL-010 返工）。
+  // 落地前比对 localStorage token（DL-010）：换账号后的迟到候选不进当前 UI，且
+  // 检测到失效要通知页级清旧上下文（DL-010 落地矩阵）；所属会话失效时请求前拒发。
   useEffect(() => {
     if (sessionExpired()) return;
     let alive = true;
     const token = readSessionToken();
     fetchSalesAnalyticsOptions(apiFilters)
       .then(({ data }) => {
-        if (!alive || sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (!alive) return;
         setBusinessTypeOptions(data.business_types ?? []);
         setOptions(data);
       })
-      .catch((err) => { if (alive && !sessionStale(token)) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); });
+      .catch((err) => {
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (alive) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`);
+      });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey]);
@@ -184,16 +198,19 @@ export default function SalesAnalyticsPage() {
     setSummaryError(null);
     fetchSalesAnalyticsSummary(apiFilters)
       .then(({ data }) => {
-        if (seq !== summarySeq.current || sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq !== summarySeq.current) return;
         setSummary(data);
       })
       .catch((err) => {
-        if (seq !== summarySeq.current || sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq !== summarySeq.current) return;
         setSummary(null);
         setSummaryError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === summarySeq.current && !sessionStale(token)) setSummaryLoading(false);
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq === summarySeq.current) setSummaryLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, retryTick]);
@@ -218,7 +235,8 @@ export default function SalesAnalyticsPage() {
       include_returns: state.includeReturns,
     })
       .then(({ data }) => {
-        if (seq !== ordersSeq.current || sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq !== ordersSeq.current) return;
         setOrders(data);
         // 过期分享链的页码可能超出总页数（后端只校验 page≥1，不按 total 钳制）：
         // 空态文案与分页高亮都会失真。按 total 收敛回末页；updater 形式取最新
@@ -238,12 +256,14 @@ export default function SalesAnalyticsPage() {
         }
       })
       .catch((err) => {
-        if (seq !== ordersSeq.current || sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq !== ordersSeq.current) return;
         setOrders(null);
         setOrdersError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === ordersSeq.current && !sessionStale(token)) setOrdersLoading(false);
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        if (seq === ordersSeq.current) setOrdersLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, requestSort, state.order, state.page, state.includeReturns, pageSize, retryTick, state.tab]);
@@ -256,8 +276,9 @@ export default function SalesAnalyticsPage() {
     const token = readSessionToken();
     downloadSalesOrdersCsv(apiFilters, requestSort, state.order)
       .then(({ data }) => {
-        // 下载触发前再校验会话（DL-010）：换账号后的迟到 blob 不落在当前会话
-        if (sessionStale(token)) return;
+        // 下载触发前再校验会话（DL-010）：换账号后的迟到 blob 不落在当前会话，
+        // 并通知页级清旧上下文（落地矩阵）
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         const url = URL.createObjectURL(data);
         const a = document.createElement("a");
         a.href = url;
@@ -266,13 +287,14 @@ export default function SalesAnalyticsPage() {
         URL.revokeObjectURL(url);
       })
       .catch((err) => {
-        if (sessionStale(token)) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         const status = (err as { response?: { status?: number } })?.response?.status;
         message.error(status === 413 ? "超过导出上限 10,000 单，请收窄区间或筛选" : `导出失败：${apiErrorMessage(err)}`);
       })
       .finally(() => {
-        // finally 也守卫：失效会话的收尾不再触碰当前 UI 状态
-        if (!sessionStale(token)) setExporting(false);
+        // finally 也守卫：失效会话的收尾不再触碰当前 UI 状态；失效即通知页级清理
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setExporting(false);
       });
   };
 
@@ -304,7 +326,12 @@ export default function SalesAnalyticsPage() {
             onPageChange={(page, size) => {
               patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => patch({ orderId }, { history: "push" })}
+            onOpenOrder={(orderId) => {
+              // 页级下钻入口（DL-010 旧行点击路径）：静默换 token 后点旧行，抽屉
+              // 自身守卫会拒发并提示，但主页面旧数据也要一并清掉——不能只靠抽屉
+              notifyOwnerStale();
+              patch({ orderId }, { history: "push" });
+            }}
           />
         )
   );
@@ -312,7 +339,10 @@ export default function SalesAnalyticsPage() {
   const tabPatch = (next: Partial<typeof state>, opts?: { history?: "push" | "replace" }) => patch(next, opts);
 
   return (
-    <>
+    // A3/DL-025 返工：整页套看板控件局部主题（placeholder / disabled / 主色与
+    // 链接 hover 文字），页内控件与弹层（portal 同 token 集）同享；详见
+    // dashboardColors.analyticsControlTheme 注释。行为与权限语义不变。
+    <ConfigProvider theme={analyticsControlTheme}>
       <PageHeader
         title="销售分析"
         subtitle={
@@ -333,11 +363,14 @@ export default function SalesAnalyticsPage() {
           reconRestricted={reconRestricted}
           isBasisHidden={isBasisHidden}
           amountRangeHidden={amountRangeHidden}
+          ownerToken={ownerToken}
+          onOwnerStale={notifyOwnerStale}
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
         />
 
         {!amountRangeHidden && !sessionDead && (
-          <AmountHistogram apiFilters={apiFilters} filterKey={filterKey} toMessage={apiErrorMessage} ownerToken={ownerToken} />
+          <AmountHistogram apiFilters={apiFilters} filterKey={filterKey} toMessage={apiErrorMessage}
+            ownerToken={ownerToken} onOwnerStale={notifyOwnerStale} />
         )}
 
         {sessionDead ? (
@@ -394,7 +427,7 @@ export default function SalesAnalyticsPage() {
               children: state.tab === "overview" && (
                 <OverviewTab state={state} apiFilters={apiFilters} filterKey={filterKey} patch={tabPatch}
                   costRestricted={costRestricted} customerRestricted={customerRestricted} toMessage={apiErrorMessage}
-                  ownerToken={ownerToken} />
+                  ownerToken={ownerToken} onOwnerStale={notifyOwnerStale} />
               ),
             },
             {
@@ -402,7 +435,8 @@ export default function SalesAnalyticsPage() {
               children: state.tab === "groups" && (
                 <GroupsTab state={state} apiFilters={apiFilters} filterKey={filterKey} patch={tabPatch}
                   costRestricted={costRestricted} profitRestricted={profitRestricted}
-                  customerRestricted={customerRestricted} toMessage={apiErrorMessage} ownerToken={ownerToken} />
+                  customerRestricted={customerRestricted} toMessage={apiErrorMessage} ownerToken={ownerToken}
+                  onOwnerStale={notifyOwnerStale} />
               ),
             },
             {
@@ -411,7 +445,7 @@ export default function SalesAnalyticsPage() {
                 <TrendTab state={state} apiFilters={apiFilters} filterKey={filterKey} patch={tabPatch}
                   costRestricted={costRestricted} profitRestricted={profitRestricted}
                   toMessage={apiErrorMessage} metric={trendMetric} onMetricChange={setTrendMetric}
-                  ownerToken={ownerToken} />
+                  ownerToken={ownerToken} onOwnerStale={notifyOwnerStale} />
               ),
             },
             { key: "orders", label: "订单明细", children: state.tab === "orders" && ordersPane },
@@ -427,8 +461,9 @@ export default function SalesAnalyticsPage() {
         reconRestricted={reconRestricted}
         costRestricted={costRestricted}
         ownerToken={ownerToken}
+        onOwnerStale={notifyOwnerStale}
         onClose={() => patch({ orderId: null })}
       />
-    </>
+    </ConfigProvider>
   );
 }

@@ -7,7 +7,7 @@
 // （403 由本页错误态承接）——路由/菜单由 nav.tsx 统一登记。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, App, Alert, Card, Radio, Space } from "antd";
+import { Button, App, Alert, Card, ConfigProvider, Radio, Space } from "antd";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
 import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale, useSessionOwner } from "../../../utils/session";
@@ -24,6 +24,7 @@ import {
   PurchaseTrendChart,
   type PurchaseChartMetric,
 } from "../../../components/charts/PurchaseAnalyticsCharts";
+import { analyticsControlTheme } from "../../sales/analytics/dashboardColors";
 import FilterBar from "./FilterBar";
 import SummaryView, { groupByTitle, groupLabelOf } from "./SummaryView";
 import DrillTable from "./DrillTable";
@@ -87,10 +88,10 @@ export default function PurchaseAnalyticsPage() {
   // （sessionExpired 清旧上下文），迟到响应仍由各处落地守卫作废。
   const ownerToken = useSessionOwner();
   const [sessionDead, setSessionDead] = useState(false);
-  /** 所属会话失效：拒发请求并清旧会话上下文（筛选候选 / 汇总与图表 / 订单列表）。
-   * 幂等；置死后数据面换专用提示，重试不再发请求。 */
-  const sessionExpired = () => {
-    if (!sessionStale(ownerToken)) return false;
+  /** 页级过期通知（DL-010 落地清理）：子组件 / 迟到响应检测到 owner 失效时调用，
+   * 幂等清空旧会话上下文（筛选候选 / 汇总与图表 / 订单列表）并置会话死亡标记。 */
+  const notifyOwnerStale = () => {
+    if (!sessionStale(ownerToken)) return;
     setSessionDead(true);
     setOptions(null);
     setCustomerOptionsLoading(false);
@@ -103,6 +104,12 @@ export default function PurchaseAnalyticsPage() {
     setTrendSummary(null);
     setTrendLoading(false);
     setTrendError(null);
+  };
+  /** 所属会话失效：拒发请求并清旧会话上下文（筛选候选 / 汇总与图表 / 订单列表）。
+   * 幂等；置死后数据面换专用提示，重试不再发请求。 */
+  const sessionExpired = () => {
+    if (!sessionStale(ownerToken)) return false;
+    notifyOwnerStale();
     return true;
   };
 
@@ -170,10 +177,22 @@ export default function PurchaseAnalyticsPage() {
     setCustomerOptionsLoading(true);
     fetchPurchaseAnalyticsOptions(customerRestricted ? "" : customerQuery,
       selectedCustomerKey ? selectedCustomerKey.split(",").map(Number) : [])
-      .then(({ data }) => { if (alive && !sessionStale(token)) setOptions(data); })
-      .catch((err) => { if (alive && !sessionStale(token)) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); })
-      // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态
-      .finally(() => { if (alive && !sessionStale(token)) setCustomerOptionsLoading(false); });
+      .then(({ data }) => {
+        if (!alive) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setOptions(data);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        message.error(`筛选取值加载失败：${apiErrorMessage(err)}`);
+      })
+      // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态，并通知页级清旧上下文
+      .finally(() => {
+        if (!alive) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setCustomerOptionsLoading(false);
+      });
     return () => { alive = false; };
   }, [customerQuery, customerRestricted, selectedCustomerKey]);
   const customerOptions = customerRestricted ? [] : [...new Map(
@@ -199,16 +218,20 @@ export default function PurchaseAnalyticsPage() {
     setSummaryError(null);
     fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: effectiveGroupBy })
       .then(({ data }) => {
-        if (seq !== summarySeq.current || sessionStale(token)) return;
+        if (seq !== summarySeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setSummary(data);
       })
       .catch((err) => {
-        if (seq !== summarySeq.current || sessionStale(token)) return;
+        if (seq !== summarySeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setSummary(null);
         setSummaryError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === summarySeq.current && !sessionStale(token)) setSummaryLoading(false);
+        if (seq !== summarySeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setSummaryLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, effectiveGroupBy, retryTick]);
@@ -223,16 +246,20 @@ export default function PurchaseAnalyticsPage() {
     setTrendError(null);
     fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: trendGran })
       .then(({ data }) => {
-        if (seq !== trendSeq.current || sessionStale(token)) return;
+        if (seq !== trendSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setTrendSummary(data);
       })
       .catch((err) => {
-        if (seq !== trendSeq.current || sessionStale(token)) return;
+        if (seq !== trendSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setTrendSummary(null);
         setTrendError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === trendSeq.current && !sessionStale(token)) setTrendLoading(false);
+        if (seq !== trendSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setTrendLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, trendGran, retryTick]);
@@ -259,16 +286,20 @@ export default function PurchaseAnalyticsPage() {
       page_size: pageSize,
     })
       .then(({ data }) => {
-        if (seq !== ordersSeq.current || sessionStale(token)) return;
+        if (seq !== ordersSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setOrders(data);
       })
       .catch((err) => {
-        if (seq !== ordersSeq.current || sessionStale(token)) return;
+        if (seq !== ordersSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
         setOrders(null);
         setOrdersError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === ordersSeq.current && !sessionStale(token)) setOrdersLoading(false);
+        if (seq !== ordersSeq.current) return;
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        setOrdersLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, effectiveGroupBy, effectiveState.groupKey, effectiveState.sort, effectiveState.dir, effectiveState.page, pageSize, retryTick]);
@@ -285,8 +316,10 @@ export default function PurchaseAnalyticsPage() {
   ];
   const activeMetric = metricOptions.includes(chartMetric) ? chartMetric : metricOptions[0];
 
+  // DL-025 局部控件主题（销售/采购分析共用常量）：不碰全站 theme.ts，只在本页树内
+  // 覆盖 disabled/placeholder/hover 文字色；portal 下拉与触发器同 hashId 一并生效
   return (
-    <>
+    <ConfigProvider theme={analyticsControlTheme}>
       <PageHeader
         title="采购分析"
         subtitle={summary ? `三口径采购金额（含税 / 不含税 / 实付），数据截至 ${summary.as_of}` : "三口径采购金额（含税 / 不含税 / 实付）"}
@@ -354,7 +387,8 @@ export default function PurchaseAnalyticsPage() {
               <Card
                 size="small"
                 title="采购趋势"
-                style={{ flex: "1 1 420px", minWidth: 300 }}
+                style={{ flex: "1 1 420px", minWidth: 0, maxWidth: "100%" }}
+                styles={{ header: { flexWrap: "wrap", rowGap: 4 } }}
                 extra={(
                   <Space size={12} wrap>
                     <Radio.Group
@@ -399,7 +433,7 @@ export default function PurchaseAnalyticsPage() {
                 <Card
                   size="small"
                   title={`分组排行（${groupByTitle(effectiveGroupBy)}）`}
-                  style={{ flex: "1 1 360px", minWidth: 300 }}
+                  style={{ flex: "1 1 360px", minWidth: 0, maxWidth: "100%" }}
                 >
                   <PurchaseRankBar
                     groups={summary?.groups ?? []}
@@ -443,7 +477,7 @@ export default function PurchaseAnalyticsPage() {
             onPageChange={(page, size) => {
               patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => patch({ orderId }, { history: "push" })}
+            onOpenOrder={(orderId) => { notifyOwnerStale(); patch({ orderId }, { history: "push" }); }}
             onBack={() => patch({ groupKey: null, orderId: null, page: 1 }, { history: "push" })}
           />
         )}
@@ -456,8 +490,9 @@ export default function PurchaseAnalyticsPage() {
         category={drawerCategory}
         basis={basis}
         ownerToken={ownerToken}
+        onOwnerStale={notifyOwnerStale}
         onClose={() => patch({ orderId: null })}
       />
-    </>
+    </ConfigProvider>
   );
 }

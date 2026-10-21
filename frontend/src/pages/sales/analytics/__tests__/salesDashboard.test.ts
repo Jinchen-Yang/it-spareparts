@@ -20,6 +20,7 @@ import {
   buildTrendOption,
   buildWeekdayOption,
 } from "../../../../components/charts/SalesDashboardCharts";
+import * as chartColorsModule from "../../../../components/charts/chartTheme";
 import { toSalesAnalyticsParams } from "../../../../api/salesAnalytics";
 import { businessToday } from "../../../../utils/date";
 
@@ -198,6 +199,40 @@ describe("图表 option（charts/README 约定）", () => {
     // tooltip 文案明确「含右端点」（8000 恰落段界归右段）
     const fmt = (opt as unknown as { tooltip: { formatter: (p: unknown) => string } }).tooltip.formatter;
     expect(fmt({ dataIndex: 1 })).toContain("含右端点");
+  });
+
+  it("轴标签文字色统一 text2（DL-025：嵌套卡 inset 底上 text3 实测 4.32:1 不达标）", () => {
+    // 颜色只从 CHART_COLORS 取（charts/README 约定）；断言用同一真值源
+    const CHART_COLORS = chartColorsModule.CHART_COLORS;
+    // 深度遍历收集所有 axisLabel.color：四个 builder 的全部数值/类目轴一并断言
+    const axisLabelColors = (opt: unknown): string[] => {
+      const out: string[] = [];
+      const visit = (node: unknown) => {
+        if (Array.isArray(node)) { node.forEach(visit); return; }
+        if (node && typeof node === "object") {
+          for (const [k, v] of Object.entries(node)) {
+            if (k === "axisLabel" && v && typeof v === "object" && "color" in v) {
+              out.push((v as { color: string }).color);
+            } else visit(v);
+          }
+        }
+      };
+      visit(opt);
+      return out;
+    };
+    const opts = [
+      buildGroupBarOption([{ key: "甲", revenue: 100 }], "revenue"),
+      buildTrendOption([{ bucket: "2026-10-01", orders: 2 }], null, "orders", "day"),
+      buildWeekdayOption([{ isodow: 1, orders: 2 }], "orders"),
+      buildHistogramOption([{ lo: 0, hi: 2000, orders: 1 }]),
+    ];
+    for (const opt of opts) {
+      const colors = axisLabelColors(opt);
+      expect(colors.length, "每个图至少有数值/类目轴标签").toBeGreaterThan(0);
+      for (const c of colors) expect(c).toBe(CHART_COLORS.text2);
+      // 回归锚点：不得再回到旧用的 text3（axisLabel token）
+      for (const c of colors) expect(c).not.toBe(CHART_COLORS.axisLabel);
+    }
   });
 });
 

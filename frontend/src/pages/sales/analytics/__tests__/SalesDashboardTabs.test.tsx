@@ -328,6 +328,13 @@ describe("概览页签", () => {
     expect(dims).toEqual(["business_type", "customer", "salesperson"]);
     expect(fetchSalesAnalyticsGroups.mock.calls.every((c) => (c[0] as { top: number }).top === 5)).toBe(true);
     expect(fetchSalesAnalyticsTrend).toHaveBeenCalled();
+    // DL-025 稳态返工回归：TopList 序号与占比原 text-3 在嵌套卡 inset 底
+    // （rgb(246,243,238)）实测 4.32:1，改 --mb-text-2（inset 5.15 / 白 5.69）；
+    // jsdom 不解析 var()，断言内联样式真的携带该 token（删样式即红）
+    const styled = [...document.querySelectorAll('.ant-list span[style*="--mb-text-2"]')];
+    const texts = styled.map((s) => s.textContent ?? "");
+    expect(texts).toContain("1");          // 序号（A公司 Top1）
+    expect(texts).toContain("70.0%");      // 占比（share 0.7 → pct 一位小数）
   });
 });
 
