@@ -388,28 +388,25 @@ export default function PurchaseAnalyticsPage() {
                 size="small"
                 title="采购趋势"
                 style={{ flex: "1 1 420px", minWidth: 0, maxWidth: "100%" }}
-                styles={{ header: { flexWrap: "wrap", rowGap: 4 } }}
-                extra={(
-                  <Space size={12} wrap>
-                    <Radio.Group
-                      aria-label="趋势粒度"
-                      optionType="button"
-                      size="small"
-                      value={trendGran}
-                      options={[{ value: "month", label: "按月" }, { value: "day", label: "按日" }]}
-                      onChange={(e) => setTrendGran(e.target.value)}
-                    />
-                    <Radio.Group
-                      aria-label="图表指标"
-                      optionType="button"
-                      size="small"
-                      value={activeMetric}
-                      options={metricOptions.map((m) => ({ value: m, label: METRIC_RADIO_LABELS[m] }))}
-                      onChange={(e) => setChartMetric(e.target.value)}
-                    />
-                  </Space>
-                )}
               >
+                <Space size={12} wrap style={{ marginBottom: 12 }}>
+                  <Radio.Group
+                    aria-label="趋势粒度"
+                    optionType="button"
+                    size="small"
+                    value={trendGran}
+                    options={[{ value: "month", label: "按月" }, { value: "day", label: "按日" }]}
+                    onChange={(e) => setTrendGran(e.target.value)}
+                  />
+                  <Radio.Group
+                    aria-label="图表指标"
+                    optionType="button"
+                    size="small"
+                    value={activeMetric}
+                    options={metricOptions.map((m) => ({ value: m, label: METRIC_RADIO_LABELS[m] }))}
+                    onChange={(e) => setChartMetric(e.target.value)}
+                  />
+                </Space>
                 {/* 汇总失败时顶部已有权威错误 + 重试（同一端点同权限，重试会一并重发趋势），
                     避免同文案双 Alert 叠加 */}
                 {trendError && !summaryError ? (
