@@ -109,7 +109,7 @@ export default function DrillTable({
   };
 
   return (
-    <div>
+    <div style={{ minWidth: 0, maxWidth: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <Button onClick={onBack}>← 返回分组</Button>
         <span style={{ fontWeight: 500 }}>
@@ -131,6 +131,7 @@ export default function DrillTable({
         loading={loading}
         dataSource={data?.items ?? []}
         columns={columns}
+        scroll={{ x: 1200 }}
         pagination={pagination}
         onChange={onTableChange}
         locale={{ emptyText: "该分组下没有符合条件的采购单" }}
