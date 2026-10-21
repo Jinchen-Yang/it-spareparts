@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Card, Segmented, DatePicker, Switch, Button, Space, Tag, Statistic, Row, Col } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
-import type { Dayjs } from "dayjs";
+import dayjs, { type Dayjs } from "dayjs";
+import { useUrlState } from "../hooks/useUrlState";
+import { isStrictIsoDate, strictIsoDateRange } from "../utils/date";
 import api from "../api";
 import { completeTaxPair, pct, splitFixed, money } from "../utils/format";
 import type { TaxSplit } from "../utils/format";
@@ -71,37 +73,59 @@ export default function ProfitPage() {
   const canCustomerDimension = !scopedSales && (isAdmin || localPerms.data_customer !== false);
   const canUseFinancialAnomalies = isAdmin
     || (localPerms.data_purchase_cost !== false && localPerms.data_profit !== false);
-  const [dimension, setDimension] = useState(() => scopedSales ? "part" : "salesperson");
-  const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
-  const [onlyAnomaly, setOnlyAnomaly] = useState(false);
+  const [urlState, patchUrl] = useUrlState({
+    dimension: {
+      defaultValue: scopedSales ? "part" : "salesperson",
+      isValid: (value) => value === "part" || (value === "salesperson" && !scopedSales)
+        || (value === "customer" && canCustomerDimension),
+    },
+    only_anomaly: {
+      defaultValue: "false",
+      isValid: (value) => value === "false" || (value === "true" && canUseFinancialAnomalies),
+    },
+    date_from: { defaultValue: "", isValid: isStrictIsoDate },
+    date_to: { defaultValue: "", isValid: isStrictIsoDate },
+  });
+  const dimension = urlState.dimension;
+  const onlyAnomaly = urlState.only_anomaly === "true";
+  // 完整且有序的日期对才应用；不允许 URL 制造 UI 无法表达的单边范围。
+  const dates = strictIsoDateRange(urlState.date_from, urlState.date_to);
+  const dateFrom = dates?.from;
+  const dateTo = dates?.to;
+  const range = useMemo<[Dayjs, Dayjs] | null>(() => (
+    dateFrom && dateTo ? [dayjs(dateFrom), dayjs(dateTo)] : null
+  ), [dateFrom, dateTo]);
+  const requestSeq = useRef(0);
   const [rows, setRows] = useState<ProfitRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
 
-  const params = () => ({
+  const params = useMemo(() => ({
     dimension,
     only_anomaly: onlyAnomaly,
-    date_from: range?.[0]?.format("YYYY-MM-DD"),
-    date_to: range?.[1]?.format("YYYY-MM-DD"),
-  });
+    date_from: dateFrom,
+    date_to: dateTo,
+  }), [dimension, onlyAnomaly, dateFrom, dateTo]);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const { data } = await api.get("/profit", { params: params() });
-      setRows(data.rows);
+      const { data } = await api.get("/profit", { params });
+      if (seq === requestSeq.current) setRows(data.rows);
     } catch {
+      if (seq !== requestSeq.current) return;
       // 不再静默吞错：失败时明确提示，避免决策层把陈旧/空数据当真实利润（审计 U-2）
       message.error("利润数据加载失败，请稍后重试或检查网络/权限");
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
+  }, [params, message]);
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dimension, onlyAnomaly, range]);
+    void load();
+    return () => { ++requestSeq.current; };
+  }, [load]);
 
   const recompute = async () => {
     setRecomputing(true);
@@ -117,7 +141,7 @@ export default function ProfitPage() {
   };
 
   const exportCsv = async () => {
-    const res = await api.get("/profit/export", { params: params(), responseType: "blob" });
+    const res = await api.get("/profit/export", { params, responseType: "blob" });
     const url = URL.createObjectURL(res.data);
     const a = document.createElement("a");
     a.href = url;
@@ -212,18 +236,21 @@ export default function ProfitPage() {
         <Space wrap size="large">
           <Segmented
             value={dimension}
-            onChange={(v) => setDimension(v as string)}
+            onChange={(v) => patchUrl({ dimension: String(v) })}
             options={[
               { label: "按型号", value: "part" },
               ...(!scopedSales ? [{ label: "按销售员", value: "salesperson" }] : []),
               ...(canCustomerDimension ? [{ label: "按客户", value: "customer" }] : []),
             ]}
           />
-          <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
+          <DatePicker.RangePicker value={range} onChange={(value) => patchUrl({
+            date_from: value?.[0]?.format("YYYY-MM-DD"),
+            date_to: value?.[1]?.format("YYYY-MM-DD"),
+          })} />
           {canUseFinancialAnomalies && (
             <Space>
               仅看异常
-              <Switch checked={onlyAnomaly} onChange={setOnlyAnomaly} />
+              <Switch checked={onlyAnomaly} onChange={(value) => patchUrl({ only_anomaly: String(value) })} />
             </Space>
           )}
           <Tag color="blue">移动加权 + FIFO 并排</Tag>

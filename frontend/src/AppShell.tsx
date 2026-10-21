@@ -1,10 +1,11 @@
+import PageSkeleton from "./components/PageSkeleton";
 import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
-  Spin, Tag,
+  Tag,
 } from "antd";
-import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { COLORS, SHELL_LAYOUT } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
@@ -299,6 +300,16 @@ export default function AppShell({
                   onClick={() => setDrawerOpen(true)}
                 />
               )}
+              {isMobile && detail && active && (
+                <Button type="text" icon={<ArrowLeftOutlined />} aria-label="返回"
+                  onClick={() => {
+                    const index = (window.history.state as { idx?: number } | null)?.idx;
+                    if (typeof index === "number" && index > 0) navigate(-1);
+                    else navigate(active.path);
+                  }}>
+                  返回
+                </Button>
+              )}
               <span
                 style={{
                   flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
@@ -367,12 +378,7 @@ export default function AppShell({
           <TaxPolicyBoundary>
             <Suspense
               key={location.pathname}
-              fallback={
-                <div role="status" style={{ display: "flex", justifyContent: "center", gap: 12, paddingTop: 120 }}>
-                  <Spin size="large" />
-                  <span>正在加载页面…</span>
-                </div>
-              }
+              fallback={<PageSkeleton />}
             >
               <Outlet />
             </Suspense>

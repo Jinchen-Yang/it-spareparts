@@ -1,11 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const api = vi.hoisted(() => ({ list: vi.fn(), detail: vi.fn(), confirm: vi.fn() }));
+const api = vi.hoisted(() => ({ list: vi.fn(), detail: vi.fn(), confirm: vi.fn(), status: vi.fn() }));
 vi.mock("../../../api/maintenanceSourceCancelCascade", () => ({
   listSourceCancellations: api.list,
   getSourceCancellation: api.detail,
   confirmSourceCancellation: api.confirm,
+  getSourceCancellationStatus: api.status,
 }));
 import SourceCancelImpactPanel from "../SourceCancelImpactPanel";
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   api.list.mockResolvedValue({ data: { items: [candidate], total: 1, page: 1, page_size: 10 } });
   api.detail.mockResolvedValue({ data: detail });
   api.confirm.mockResolvedValue({ data: result });
+  api.status.mockResolvedValue({ data: { result: null } });
 });
 afterEach(cleanup);
 
@@ -59,6 +61,42 @@ describe("已取消影响人工确认", () => {
     }, ""));
     expect(await screen.findByText(/已确认作废：1 张需求单、1 条需求明细、1 条精确关联领用/)).toBeInTheDocument();
     expect(p.onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("显示人工新建和人工保护标记，确认区只汇总有效需求及精确关联领用", async () => {
+    api.detail.mockResolvedValueOnce({ data: {
+      ...detail,
+      demands: [
+        { ...detail.demands[0], manual_created: false, protected_fields: [] },
+        { ...detail.demands[0], line_id: 13, pn: "PN-人工新建", manual_created: true, protected_fields: ["qty", "line_note"] },
+        { ...detail.demands[0], line_id: 14, pn: "PN-字段保护", manual_created: false, protected_fields: ["line_note"] },
+        { ...detail.demands[0], line_id: 15, pn: "PN-已作废人工", is_active: false, manual_created: true, protected_fields: ["qty"] },
+      ],
+      exact_site_lines: [
+        { ...detail.exact_site_lines[0], manual_created: true, protected_fields: ["qty", "line_note"], source_demand_line_id: 13 },
+      ],
+      unlinked_site_lines: [
+        { ...detail.unlinked_site_lines[0], manual_created: false, protected_fields: [], source_demand_line_id: null },
+      ],
+    } });
+    render(<SourceCancelImpactPanel {...props()} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    const manualRow = (await within(dialog).findByText("PN-人工新建")).closest("tr")!;
+    expect(within(manualRow).getByText("人工新建")).toBeInTheDocument();
+    expect(within(manualRow).getByText("人工保护：需求数量、备注")).toBeInTheDocument();
+    const protectedRow = within(dialog).getByText("PN-字段保护").closest("tr")!;
+    expect(within(protectedRow).getByText("人工保护：备注")).toBeInTheDocument();
+    expect(within(protectedRow).queryByText("人工新建")).toBeNull();
+    const linkedRow = within(dialog).getByText("PN-精确关联").closest("tr")!;
+    expect(within(linkedRow).getByText("关联需求人工新建")).toBeInTheDocument();
+    expect(within(linkedRow).getByText("关联需求人工保护：需求数量、备注")).toBeInTheDocument();
+    const unlinkedRow = within(dialog).getByText("PN-无法关联").closest("tr")!;
+    expect(within(unlinkedRow).queryByText(/人工新建|人工保护/)).toBeNull();
+    expect(within(dialog).getByText(
+      "本次将作废的有效需求中：人工新建 1 条，含人工保护字段 2 条；精确关联领用中：关联人工新建需求 1 条，关联含人工保护字段需求 1 条。两类标记可能重叠。",
+    )).toBeInTheDocument();
   });
 
   it("409 整次未执行后关闭确认并要求刷新，旧摘要不能继续提交", async () => {
@@ -97,6 +135,187 @@ describe("已取消影响人工确认", () => {
     await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(2));
     expect(api.confirm.mock.calls[1]).toEqual(original);
     expect(await screen.findByText(/已返回原确认结果.*不代表当前状态/)).toBeInTheDocument();
+  });
+
+  it("反复 503 后可返回关闭，重新打开只读查询并沿用同一次确认", async () => {
+    localStorage.setItem("token", "original-account");
+    api.confirm.mockRejectedValue({ response: { status: 503 } });
+    render(<SourceCancelImpactPanel {...props()} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    const original = api.confirm.mock.calls[0];
+    fireEvent.click(within(dialog).getByRole("button", { name: "重试同一次确认" }));
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(2));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    const back = within(dialog).getByRole("button", { name: "返回核对" });
+    expect(back).toBeEnabled();
+    fireEvent.click(back);
+    // rc-util 在 test 环境为两个 Modal 复用 aria id；按可见标题定位所属对话框。
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    expect(within(leave).getByText("结果未知，重新打开将重新查询状态；重试使用同一次确认")).toBeInTheDocument();
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.status).not.toHaveBeenCalled();
+    api.detail.mockResolvedValueOnce({ data: { ...detail, expected_digest: "newer-detail-digest" } });
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    const reopened = await screen.findByRole("dialog");
+    await within(reopened).findByText("PN-需求");
+    expect(api.status).toHaveBeenCalledWith("project-1", 8, candidate.source_order_id, original[3].idempotency_key, "original-account");
+    expect(api.detail).toHaveBeenCalledTimes(2);
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.confirm).toHaveBeenCalledTimes(2);
+    expect(within(reopened).getByRole("textbox", { name: "作废原因" })).toHaveValue("核对取消");
+    expect(within(reopened).getByRole("textbox", { name: "作废原因" })).toBeDisabled();
+    fireEvent.click(within(reopened).getByRole("button", { name: "重试同一次确认" }));
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(3));
+    expect(api.confirm.mock.calls[1]).toEqual(original);
+    expect(api.confirm.mock.calls[2]).toEqual(original);
+  });
+
+  it("候选已消失且详情 409 时重新打开仍可读取历史回执，不自动提交确认", async () => {
+    api.confirm.mockRejectedValueOnce(new Error("response lost"));
+    const p = props();
+    render(<SourceCancelImpactPanel {...p} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeEnabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    api.list.mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 10 } });
+    api.detail.mockRejectedValueOnce({ response: { status: 409 } });
+    api.status.mockResolvedValueOnce({ data: { result: { ...result, replayed: true } } });
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    expect(await screen.findByText(/已返回原确认结果.*不代表当前状态/)).toBeInTheDocument();
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(api.detail).toHaveBeenCalledTimes(2);
+    expect(api.status).toHaveBeenCalledTimes(1);
+    expect(p.onChanged).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "重新查询确认状态" })).toBeNull();
+  });
+
+  it("重新查询持续失败仍可关闭，保留同键重试入口", async () => {
+    api.confirm.mockRejectedValue({ response: { status: 500 } });
+    render(<SourceCancelImpactPanel {...props()} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "返回核对" }));
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    api.status.mockRejectedValueOnce({ response: { status: 500 } });
+    api.detail.mockRejectedValueOnce({ response: { status: 500 } });
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    const reopened = await screen.findByRole("dialog");
+    await within(reopened).findByText(/仍未查明确认结果/);
+    expect(within(reopened).getByRole("button", { name: "重试同一次确认" })).toBeEnabled();
+    fireEvent.click(within(reopened).getByRole("button", { name: "Close" }));
+    const leaveAgain = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leaveAgain).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "重新查询确认状态" })).toBeEnabled();
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("回执已返回时不等待仍在途的候选详情、清单和项目刷新", async () => {
+    api.confirm.mockRejectedValueOnce(new Error("response lost"));
+    const p = props();
+    p.onChanged.mockReturnValueOnce(new Promise(() => {}));
+    render(<SourceCancelImpactPanel {...p} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "返回核对" }));
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    api.detail.mockReturnValueOnce(new Promise(() => {}));
+    api.list.mockReturnValueOnce(new Promise(() => {}));
+    api.status.mockResolvedValueOnce({ data: { result: { ...result, replayed: true } } });
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    expect(await screen.findByText(/已返回原确认结果.*不代表当前状态/)).toBeInTheDocument();
+    expect(api.detail).toHaveBeenCalledTimes(2);
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(p.onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("较早回执的项目刷新迟到不能覆盖下一次确认结果", async () => {
+    api.confirm.mockRejectedValueOnce(new Error("response lost"));
+    const p = props();
+    let finishOldRefresh!: (value: boolean) => void;
+    p.onChanged.mockReturnValueOnce(new Promise(resolve => { finishOldRefresh = resolve; }));
+    render(<SourceCancelImpactPanel {...p} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "返回核对" }));
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const nextCandidate = { ...candidate, source_order_id: "another-order", order_no: "WBDD-下一张" };
+    api.list.mockResolvedValue({ data: { items: [nextCandidate], total: 1, page: 1, page_size: 10 } });
+    api.status.mockResolvedValueOnce({ data: { result: { ...result, replayed: true } } });
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    await screen.findByText(/已返回原确认结果.*不代表当前状态/);
+    await screen.findByText(nextCandidate.order_no);
+    api.detail.mockResolvedValueOnce({ data: { ...detail, ...nextCandidate, expected_digest: "next-digest" } });
+    api.confirm.mockResolvedValueOnce({ data: { ...result, source_order_id: nextCandidate.source_order_id, voided_lines: 2 } });
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const nextDialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(nextDialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对另一张取消" } });
+    fireEvent.click(within(nextDialog).getByRole("button", { name: "确认连带作废" }));
+    await screen.findByText(/已确认作废：1 张需求单、2 条需求明细/);
+    await act(async () => finishOldRefresh(false));
+    expect(screen.getByText(/已确认作废：1 张需求单、2 条需求明细/)).toBeInTheDocument();
+    expect(screen.queryByText(/已返回原确认结果/)).toBeNull();
+  });
+
+  it.each(["尚无回执", "查询失败"])("回执%s时附属读取未返回也能同键重试", async (status) => {
+    api.confirm.mockRejectedValue({ response: { status: 503 } });
+    render(<SourceCancelImpactPanel {...props()} />);
+    await screen.findByText(candidate.order_no);
+    fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
+    await within(dialog).findByText(/本次结果尚未确认/);
+    const original = api.confirm.mock.calls[0];
+    fireEvent.click(within(dialog).getByRole("button", { name: "返回核对" }));
+    const leave = (await screen.findByText("离开结果未知的确认")).closest("[role=dialog]")! as HTMLElement;
+    fireEvent.click(within(leave).getByRole("button", { name: "关闭并保留确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    api.detail.mockReturnValueOnce(new Promise(() => {}));
+    api.list.mockReturnValueOnce(new Promise(() => {}));
+    if (status === "查询失败") api.status.mockRejectedValueOnce(new Error("status unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
+    const reopened = await screen.findByRole("dialog");
+    await within(reopened).findByText(/暂未查询到确认回执|仍未查明确认结果/);
+    expect(within(reopened).getByLabelText("加载影响详情")).toBeInTheDocument();
+    const retry = within(reopened).getByRole("button", { name: "重试同一次确认" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(2));
+    expect(api.confirm.mock.calls[1]).toEqual(original);
   });
 
   it("双击只发一次，写入成功但刷新失败时保留成功及警告，不重发确认", async () => {

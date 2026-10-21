@@ -114,6 +114,10 @@ describe("CollectionMilestoneFollowUpModal", () => {
     const { onSubmitted } = renderModal({ action: "reschedule", row: milestone() });
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
     expect(await screen.findByText(COLLECTION_FOLLOW_UP.monthRequired)).toBeInTheDocument();
+    const month = screen.getByLabelText(COLLECTION_FOLLOW_UP.plannedMonthLabel);
+    expect(month).toHaveAttribute("aria-required", "true");
+    expect(month).toHaveAttribute("aria-invalid", "true");
+    expect(document.getElementById(month.getAttribute("aria-describedby")!)).toHaveTextContent(COLLECTION_FOLLOW_UP.monthRequired);
     expect(followUpCollectionMilestone).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText(COLLECTION_FOLLOW_UP.plannedMonthLabel), {
@@ -121,6 +125,9 @@ describe("CollectionMilestoneFollowUpModal", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
     expect(await screen.findByText(COLLECTION_FOLLOW_UP.reasonRequired)).toBeInTheDocument();
+    const reason = screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel);
+    expect(reason).toHaveAttribute("aria-invalid", "true");
+    expect(document.getElementById(reason.getAttribute("aria-describedby")!)).toHaveTextContent(COLLECTION_FOLLOW_UP.reasonRequired);
     expect(followUpCollectionMilestone).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel), {
@@ -129,6 +136,7 @@ describe("CollectionMilestoneFollowUpModal", () => {
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
     await waitFor(() => expect(followUpCollectionMilestone).toHaveBeenCalledTimes(1));
     const body = followUpCollectionMilestone.mock.calls[0][1];
+    expect(screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel)).not.toHaveAttribute("aria-invalid");
     expect(body).toMatchObject({
       expected_version: 2,
       action: "reschedule",
@@ -143,6 +151,9 @@ describe("CollectionMilestoneFollowUpModal", () => {
     renderModal({ action: "reopen", row: milestone({ follow_up_status: "handled", reminder_state: "handled" }) });
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
     expect(await screen.findByText(COLLECTION_FOLLOW_UP.reasonRequired)).toBeInTheDocument();
+    const reason = screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel);
+    expect(reason).toHaveAttribute("aria-invalid", "true");
+    expect(document.getElementById(reason.getAttribute("aria-describedby")!)).toHaveTextContent(COLLECTION_FOLLOW_UP.reasonRequired);
     expect(followUpCollectionMilestone).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel), {
@@ -151,6 +162,7 @@ describe("CollectionMilestoneFollowUpModal", () => {
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
     await waitFor(() => expect(followUpCollectionMilestone).toHaveBeenCalledTimes(1));
     const body = followUpCollectionMilestone.mock.calls[0][1];
+    expect(screen.getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel)).not.toHaveAttribute("aria-invalid");
     expect(body).toMatchObject({
       expected_version: 2,
       action: "reopen",

@@ -13,9 +13,11 @@
 - 名义侧（金臣 2026-10-18 裁定，D-39 补充）：未标税率（NULL/0）时只有**按 13% 推算出来
   的那一侧**是名义值，录入侧是真实值——不含税单 → ``nominal_side="inc"``（含税额为名义
   推算），含税单 → ``nominal_side="ex"``（不含税额为名义推算），``is_tax_inclusive`` 非
-  true（False/NULL）一律按不含税单处理；税率已标 → ``nominal_side=None``，两侧都真实。
-  ``nominal_inc_share`` = 未标税率不含税单的推算含税额 ÷ 含税合计；
-  ``nominal_ex_share`` = 未标税率含税单的推算不含税额 ÷ 不含税合计（分母 0/NULL → null）。
+  true（False/NULL）一律按不含税单处理。单头权威侧金额列缺失时回退另一录入列，
+  名义侧随实际推算方向翻转；两列皆空 → None。行金额只有一列，始终按标记解释，
+  不受单头缺列影响。税率已标 → ``nominal_side=None``，两侧均非名义。
+  ``nominal_inc_share`` = 实际按 13% 推算的含税额之和 ÷ 含税合计；
+  ``nominal_ex_share`` = 实际按 13% 推算的不含税额之和 ÷ 不含税合计（分母 0/NULL → null）。
 - **单头批次行**：所有行级统计（行数、分类分组、行级三口径、订单明细行）只计
   ``f_purchase_line.import_batch_id = f_purchase_order.import_batch_id`` 的行——库里 11 张
   已生效单残留旧批次明细行（D-39 补充决策 2026-10-17），全行求和会比单头多算。
@@ -783,7 +785,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             "source_type": r.source_type_raw, "purchaser": r.purchaser,
             "salesperson": sp, "customer_id": cid,
             "customer": cname, "lines": r.lines,
-            # 名义侧跟随单头税率标记（金臣 2026-10-18 裁定），与金额同组遮蔽
+            # 名义侧随当前单头/行级金额口径取实际推算侧，与金额同组遮蔽
             "nominal_side": r.nominal_side,
             "amount_inc": _f(_round2(r.amount_inc)),
             "amount_ex": _f(_round2(r.amount_ex)),

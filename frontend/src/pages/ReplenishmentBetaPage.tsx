@@ -1,3 +1,4 @@
+import { COLORS, TAG_STYLES } from "../theme";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Badge, Button, Card, Col, Collapse, Drawer, Empty, Input, InputNumber, List, Modal, Pagination, Result, Row, Select, Space, Spin, Tag, Typography } from "antd";
@@ -53,11 +54,11 @@ function saveBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string }> = {
-  draft: { label: "草稿", color: "blue" },
-  submitted: { label: "已提交", color: "gold" },
-  needs_revision: { label: "需补充信息", color: "red" },
-  approved: { label: "已通过", color: "green" },
+const STATUS: Record<ReplenishmentApplication["status"], { label: string; color: string; tagStyle: typeof TAG_STYLES.info }> = {
+  draft: { label: "草稿", color: COLORS.accent, tagStyle: TAG_STYLES.info },
+  submitted: { label: "已提交", color: COLORS.status.pending, tagStyle: TAG_STYLES.warning },
+  needs_revision: { label: "需补充信息", color: COLORS.danger, tagStyle: TAG_STYLES.danger },
+  approved: { label: "已通过", color: COLORS.status.confirmed, tagStyle: TAG_STYLES.success },
 };
 
 /** 待提交行：明细事实在云端草稿保存，价格事实不重复塞进购物车。 */
@@ -118,7 +119,7 @@ function ScreeningSummary({ line }: { line: Pick<ReplenishmentLine, "screening" 
   return (
     <div className="replenishment-screening-summary">
       <Space wrap size={4}>
-        <Tag color={anomaly_count > 0 ? "orange" : "green"}>
+        <Tag style={anomaly_count > 0 ? TAG_STYLES.warning : TAG_STYLES.success}>
           三查{anomaly_count > 0 ? ` ${anomaly_count} 项提示` : "通过"}
         </Tag>
         {floor != null && Number.isFinite(floor) && (
@@ -158,10 +159,10 @@ function CatalogCard({
           <div className="replenishment-part-desc">{part.description || "暂无产品描述"}</div>
         </div>
         <Space size={4} wrap>
-          <Tag color={part.pool.group_id ? "geekblue" : "default"}>
+          <Tag style={part.pool.group_id ? TAG_STYLES.info : undefined}>
             {part.pool.name || "未加入互通池"}
           </Tag>
-          {part.needs_review && <Tag color="orange">主数据待复核</Tag>}
+          {part.needs_review && <Tag style={TAG_STYLES.warning}>主数据待复核</Tag>}
         </Space>
       </div>
       <PriceFacts part={part} />
@@ -227,7 +228,7 @@ function VersionHistory({ versions }: { versions: ReplenishmentVersion[] }) {
           label: (
             <Space wrap>
               <Text strong>v{version.version_no}</Text>
-              <Tag color={version.status === "draft" ? "blue" : "default"}>
+              <Tag style={version.status === "draft" ? TAG_STYLES.info : undefined}>
                 {version.status === "draft" ? "草稿" : "已提交"}
               </Tag>
             </Space>
@@ -352,7 +353,7 @@ function RevisionPanel({
                   />
                 </Space>
               )}
-              {choice && <Tag color="green" style={{ marginTop: 8 }}>
+              {choice && <Tag style={{ ...TAG_STYLES.success, marginTop: 8 }}>
                 {choice.action === "remove" ? "将移除" : `将替换为 ${choice.part_id ? candidates.find((c) => c.part_id === choice.part_id)?.pn_std ?? "已选 PN" : ""}`}
               </Tag>}
             </div>
@@ -883,7 +884,7 @@ export default function ReplenishmentBetaPage() {
             >
               申请记录
               {applicationTotal > 0 && (
-                <Badge count={applicationTotal} color="#1677ff" style={{ marginLeft: 4 }} />
+                <Badge count={applicationTotal} color={COLORS.accent} style={{ marginLeft: 4 }} />
               )}
             </Button>
           </Space>
@@ -933,7 +934,7 @@ export default function ReplenishmentBetaPage() {
                         </div>
                         <Space size={4} wrap>
                           {line.rejected && (
-                            <Tag color="red">被打回：{line.rejectedReason || "无近182天采购/销售记录"}</Tag>
+                            <Tag className="replenishment-rejection-tag" style={TAG_STYLES.danger}>被打回：{line.rejectedReason || "无近182天采购/销售记录"}</Tag>
                           )}
                           <Text type="secondary">数量 {line.quantity} {line.unit || "件"}</Text>
                         </Space>
@@ -1039,13 +1040,13 @@ export default function ReplenishmentBetaPage() {
             <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => setHistoryDetail(null)} />
             <HistoryOutlined />
             {historyDetail.application_no}
-            <Tag color={STATUS[historyDetail.status].color}>{STATUS[historyDetail.status].label}</Tag>
+            <Tag style={STATUS[historyDetail.status].tagStyle}>{STATUS[historyDetail.status].label}</Tag>
           </Space>
         ) : (
           <Space>
             <HistoryOutlined />
             申请记录
-            <Badge count={applicationTotal} color="#1677ff" />
+            <Badge count={applicationTotal} color={COLORS.accent} />
           </Space>
         )}
         placement="right"
@@ -1073,7 +1074,7 @@ export default function ReplenishmentBetaPage() {
           <div className="replenishment-current-application">
             <Space wrap>
               {historyDetail.project && (
-                <Tag color="geekblue">{historyDetail.project.project_code} · {historyDetail.project.display_name}</Tag>
+                <Tag style={TAG_STYLES.info}>{historyDetail.project.project_code} · {historyDetail.project.display_name}</Tag>
               )}
               <Text type="secondary">v{historyDetail.latest_version_no} · {historyDetail.owner_display_name}</Text>
             </Space>

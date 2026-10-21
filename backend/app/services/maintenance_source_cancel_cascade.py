@@ -5,7 +5,7 @@ Archived files and the D-27 missing-member algorithm are not execution evidence.
 """
 from datetime import UTC
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.maintenance import (
@@ -27,6 +27,10 @@ from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment as A,
 )
 from app.models.system import SysImportBatch
+from app.services.maintenance_field_protection import (
+    is_manual_created,
+    protected_fields,
+)
 from app.services.maintenance_wbdd_reconciliation import _digest, _entity, _json
 
 SNAPSHOT_KEY = "_wbdd_source_status_snapshot"
@@ -139,8 +143,21 @@ def _impact(db, *, project_id, batch_id, source_order_id):
         "site_siblings": [_entity(line) for line in siblings],
         "tombstone": _entity(tombstone) if tombstone else None,
     })
+    # These labels are derived from fields already covered by the entity digest.
+    # Keep display metadata out of the hash to preserve existing confirmations.
+    manual_labels = {
+        line.raw_line_id: {
+            "manual_created": is_manual_created(line.raw_line_id),
+            "protected_fields": sorted(protected_fields(
+                raw_line_id=line.raw_line_id, edited_source=line.edited_source,
+                manual_override=line.manual_override,
+            )),
+        } for line in lines
+    }
+    source_lines = {line.raw_line_id: line for line in lines}
     result["demands"] = [{"line_id": line.id, "raw_line_id": line.raw_line_id,
-        "pn": line.pn_std or line.pn_raw, "qty": _json(line.qty), "is_active": line.is_active} for line in lines]
+        "pn": line.pn_std or line.pn_raw, "qty": _json(line.qty), "is_active": line.is_active,
+        **manual_labels[line.raw_line_id]} for line in lines]
 
     def site_dto(pair):
         line, issue = pair
@@ -149,10 +166,16 @@ def _impact(db, *, project_id, batch_id, source_order_id):
             reason = ("仓库来源身份" if line.delivery_line_id or issue.source == "site_issue_v2"
                       else "来源身份冲突" if line.source_line_id in raw_ids
                       else "仅需求单头或单号关联")
+        # Never infer manual provenance for an ambiguous warehouse/header match.
+        source = source_lines.get(line.source_line_id) if pair in exact else None
+        labels = manual_labels[source.raw_line_id] if source else {
+            "manual_created": False, "protected_fields": [],
+        }
         return {"issue_line_id": line.issue_line_id, "issue_id": issue.issue_id,
                 "issue_no": issue.display_no_effective, "issue_date": _json(issue.issue_date),
                 "link_reason": reason, "pn": line.pn, "quantity": _json(line.quantity),
-                "is_active": line.is_active}
+                "is_active": line.is_active,
+                "source_demand_line_id": source.id if source else None, **labels}
 
     result["exact_site_lines"] = [site_dto(pair) for pair in exact]
     result["unlinked_site_lines"] = [site_dto(pair) for pair in unlinked]
@@ -161,6 +184,35 @@ def _impact(db, *, project_id, batch_id, source_order_id):
 
 def candidate_detail(db: Session, *, project_id, batch_id, source_order_id):
     return _impact(db, project_id=project_id, batch_id=batch_id, source_order_id=source_order_id)[0]
+
+
+def receipt_batch_query(replay_key):
+    # Keep the expression identical to the GIN index (including prepared plans).
+    # A batch/time filter would miss historical cross-batch reuse of a key.
+    return select(SysImportBatch).where(
+        SysImportBatch.report_json.op("->")(
+            literal_column("'_source_cancel_confirmations'")
+        ).op("?")(replay_key)
+    )
+
+
+def confirmation_status(db: Session, *, project_id, batch_id, source_order_id,
+                        operated_by, idempotency_key):
+    """Read a historical receipt, including after its candidate disappears.
+
+    A missing receipt is only an observation, never proof that an in-flight
+    confirmation failed. Callers must retain the same request for any retry.
+    """
+    batch = db.get(SysImportBatch, batch_id)
+    replay_key = _digest([operated_by, idempotency_key])
+    prior = ((batch.report_json or {}).get(RESULTS_KEY) or {}).get(replay_key) if batch else None
+    if prior is None:
+        return {"result": None}
+    result = prior["result"]
+    if (prior["project_id"] != project_id or result["batch_id"] != batch_id
+            or result["source_order_id"] != source_order_id):
+        raise CancellationConflict("同一幂等键已用于其他确认请求，请刷新核对")
+    return {"result": {**result, "replayed": True}}
 
 
 def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
@@ -189,8 +241,7 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
     db.expire_all()
     reauthorize()
-    prior_batch = db.scalar(select(SysImportBatch).where(
-        SysImportBatch.report_json[RESULTS_KEY].op("?")(replay_key)))
+    prior_batch = db.scalar(receipt_batch_query(replay_key))
     if prior_batch is not None:
         prior = prior_batch.report_json[RESULTS_KEY][replay_key]
         if prior["request_digest"] != request_digest:

@@ -49,6 +49,7 @@ const draft = {
   issue_no: "LYD-20260809-ABC",
   issue_date: "2026-08-09",
   workflow_status: "draft" as const,
+  source: "site_issue_v2",
   receiver: "张三",
   issued_by: "李四",
   site_location: "现场 A",
@@ -116,6 +117,17 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SiteIssueWorkflowPanel", () => {
+  it("非原生来源的已确认单不显示会被原生服务拒绝的更正按钮", async () => {
+    api.searchSiteIssues.mockResolvedValue({ data: { project_id: "project-1", adapter,
+      rows: [{ ...draft, source: "workbook", workflow_status: "confirmed" }],
+      total: 1, page: 1, page_size: 20,
+    } });
+    render(<SiteIssueWorkflowPanel projectId="project-1" canManage onChanged={vi.fn()} />);
+    const panel = await screen.findByTestId("site-issue-workflow");
+    await within(panel).findByText("已确认");
+    expect(within(panel).queryByRole("button", { name: "更正" })).not.toBeInTheDocument();
+  });
+
   it("更正时显示并完整保存多行领用地址，不从其他地址字段代填", async () => {
     render(<SiteIssueWorkflowPanel projectId="project-1" canManage onChanged={vi.fn()} />);
     const panel = await screen.findByTestId("site-issue-workflow");

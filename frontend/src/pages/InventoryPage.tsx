@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { urlPageField, useUrlState } from "../hooks/useUrlState";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { App, Card, Input, Space, Button, Modal, InputNumber, Form, Tag, Alert, Table, Tooltip } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -42,10 +43,13 @@ interface DynRow {
 export default function InventoryPage() {
   const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
-  const [q, setQ] = useState("");
+  const [{ q, page: pageParam }, patchUrl] = useUrlState({ q: { defaultValue: "" }, page: urlPageField });
+  const page = Number(pageParam);
+  const [searchInput, setSearchInput] = useState(q);
+  useEffect(() => { setSearchInput(q); }, [q]);
+  const requestSeq = useRef(0);
   const [rows, setRows] = useState<DynRow[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
   const [matchTerms, setMatchTerms] = useState<number | null>(null);  // >0 时显示匹配度列
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ message: string; page: number; query: string } | null>(null);
@@ -53,32 +57,42 @@ export default function InventoryPage() {
   const [form] = Form.useForm();
   const basis = useTaxBasis("purchase");
 
-  const load = async (p = page, query = q) => {
+  const load = useCallback(async (p = page, query = q) => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
       const { data } = await api.get("/inventory/dynamic", {
         params: { q: query || undefined, page: p, page_size: 20 },
       });
+      if (seq !== requestSeq.current) return;
       setRows(data.items);
       setTotal(data.total);
       setMatchTerms(data.match_terms ?? null);
-      setPage(p);
     } catch (e: any) {
+      if (seq !== requestSeq.current) return;
       const msg = !e?.response ? "无法连接服务器，请检查网络后重试"
         : e?.response?.data?.detail || "库存加载失败，请稍后重试";
       setRows([]);
       setError({ message: msg, page: p, query });
       message.error(msg);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
+  }, [page, q, message]);
 
   useEffect(() => {
-    load(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void load();
+    return () => { ++requestSeq.current; };
+  }, [load]);
+
+  const search = (raw: string) => {
+    // URL 只保存规范化后的关键词，避免首尾空白产生不同链接。
+    const query = raw.trim();
+    setSearchInput(query);
+    if (query === q && page === 1) void load();
+    else patchUrl({ q: query, page: "1" });
+  };
 
   const openEdit = (r: WhRow, pn: string) => {
     setEditing({ ...r, pn_std: pn });
@@ -181,7 +195,7 @@ export default function InventoryPage() {
       <Space style={{ marginBottom: 16 }} wrap>
         <Input.Search
           placeholder="型号 / 描述 / 品牌" style={{ width: 300 }}
-          value={q} onChange={(e) => setQ(e.target.value)} onSearch={() => load(1)} allowClear
+          value={searchInput} onChange={(e) => setSearchInput(e.target.value)} onSearch={search} allowClear
         />
       </Space>
       {error && (
@@ -207,7 +221,7 @@ export default function InventoryPage() {
         pagination={{
           current: page, pageSize: 20, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个型号`,
-          onChange: (p) => load(p),
+          onChange: (p) => patchUrl({ page: String(p) }),
         }}
       />
 

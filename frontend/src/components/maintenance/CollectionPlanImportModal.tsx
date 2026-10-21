@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, ConfigProvider, Input, Modal, Select, Space, Steps } from "antd";
+import { Alert, Button, Card, ConfigProvider, Form, Input, Modal, Select, Space, Steps } from "antd";
 
 import {
   applyCollectionPlan,
@@ -390,20 +390,18 @@ export default function CollectionPlanImportModal({
             </div>
           ))}
           {hasReassignment && (
-            <div>
-              <Input
-                aria-label={COLLECTION_IMPORT.bindingReasonLabel}
-                value={reassignmentReason}
-                maxLength={1000}
-                placeholder={COLLECTION_IMPORT.bindingReasonLabel}
-                onChange={(event) => setReassignmentReason(event.target.value)}
-              />
-              {!reassignmentReasonOk && (
-                <div style={{ color: "#cf1322", fontSize: 13, marginTop: 4 }}>
-                  {COLLECTION_IMPORT.bindingReasonRequired}
-                </div>
-              )}
-            </div>
+            <Form component={false} layout="vertical" fields={[{
+              name: "collection-binding-reason", value: reassignmentReason,
+              errors: reassignmentReasonOk ? [] : [COLLECTION_IMPORT.bindingReasonRequired],
+            }]}>
+              <Form.Item name="collection-binding-reason" label={COLLECTION_IMPORT.bindingReasonLabel} required>
+                <Input
+                  maxLength={1000}
+                  placeholder={COLLECTION_IMPORT.bindingReasonLabel}
+                  onChange={(event) => setReassignmentReason(event.target.value)}
+                />
+              </Form.Item>
+            </Form>
           )}
           <Space>
             <Button onClick={() => setCurrentStep(1)}>{COLLECTION_IMPORT.prevStep}</Button>

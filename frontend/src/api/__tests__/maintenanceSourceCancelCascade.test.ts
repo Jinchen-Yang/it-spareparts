@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock("../../api", () => ({ api }));
-import { confirmSourceCancellation, getSourceCancellation, listSourceCancellations } from "../maintenanceSourceCancelCascade";
+import { confirmSourceCancellation, getSourceCancellation, getSourceCancellationStatus, listSourceCancellations } from "../maintenanceSourceCancelCascade";
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -29,5 +29,14 @@ describe("源单头已取消影响 API", () => {
     expect(api.post).toHaveBeenCalledWith("/maintenance/projects/project-1/source-cancellations/8/order-1/confirm", body, {
       headers: { Authorization: "Bearer account-at-confirm" },
     });
+  });
+
+  it("重新查询回执只读并固定原账号和幂等键，不传作废原因", () => {
+    getSourceCancellationStatus("project/a", 8, "raw/order", "source-cancel-key", "original-account");
+    expect(api.get).toHaveBeenCalledWith(
+      "/maintenance/projects/project%2Fa/source-cancellations/8/raw%2Forder/confirmation-status",
+      { params: { idempotency_key: "source-cancel-key" }, headers: { Authorization: "Bearer original-account" } },
+    );
+    expect(api.post).not.toHaveBeenCalled();
   });
 });

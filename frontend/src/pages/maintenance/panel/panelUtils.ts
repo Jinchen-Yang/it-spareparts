@@ -1,3 +1,4 @@
+import { COLORS } from "../../../theme";
 import { createElement, useCallback, useEffect, useRef } from "react";
 import { Tag } from "antd";
 
@@ -103,9 +104,9 @@ export const LIFECYCLE_LABEL: Record<string, string> = {
 
 /** 三态色与卡墙一致（#35/#43）：<80% 绿、80–100% 黄、>100% 红。 */
 export const STATUS_COLOR: Record<string, string> = {
-  normal: "#52c41a",
-  warning: "#faad14",
-  alert: "#ff4d4f",
+  normal: COLORS.success,
+  warning: COLORS.warning,
+  alert: COLORS.danger,
 };
 
 export const COLLECTION_STATUS: Record<string, { label: string; color: string }> = {
@@ -140,7 +141,7 @@ export function readError(error: unknown, fallback: string): string {
 }
 
 /**
- * 一段读回的「只认最后一发」守卫（#259 屏障修正）：范围一换（选中单被清、合同一换），
+ * 一段读回的「只认最后一发」守卫（issue 259 屏障修正）：范围一换（选中单被清、合同一换），
  * 效应会再发一次请求把在途的旧请求盖掉。被盖掉的旧请求不报 false，而是把结果交给
  * 最新那一发——落库后的读回屏障要等的是这一段最终展示的那次读回，不是被丢弃的那次；
  * 否则「读回把选中单清掉 → 两段按新范围重读」这条正常路径会被误报成刷新失败。
