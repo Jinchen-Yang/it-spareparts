@@ -168,7 +168,7 @@ export default function DashboardQuantityChecksTab({
               : cards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
             : undefined}
           sub={cards?.unit_breakdown?.length ? (
-            <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.demand_qty)} />
+            <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.checked_demand_qty)} />
           ) : undefined} />
         <KpiCard label="实收 R 合计" loading={loading}
           value={cards
@@ -188,7 +188,7 @@ export default function DashboardQuantityChecksTab({
           sub={cards?.unit_breakdown?.length ? (
             <Space direction="vertical" size={0}>
               <span>max(N−R,0) 逐单加总</span>
-              <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.difference_qty)} />
+              <UnitBreakdown entries={cards.unit_breakdown} render={(e) => qtyText(e.known_difference_qty)} />
             </Space>
           ) : "max(N−R,0) 逐单加总"} />
         <KpiCard label="超收合计" loading={loading}

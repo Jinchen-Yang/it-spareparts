@@ -320,7 +320,7 @@ export default function DashboardOverviewTab({
               <span>备件 {qtyText(cards.receipt_qty.part)} · 整机 {qtyText(cards.receipt_qty.machine)}</span>
               <UnitBreakdown
                 entries={cards.receipt_qty.unit_breakdown}
-                render={(e) => qtyText(e.receipt_qty)} />
+                render={(e) => <>{qtyText(e.total)}（备件 {qtyText(e.part)} · 整机 {qtyText(e.machine)}）</>} />
             </Space>
           ) : undefined} />
         <KpiCard label="坏件实收合计" loading={loading} testId="kpi-bad"
@@ -334,7 +334,7 @@ export default function DashboardOverviewTab({
               <span>其中废品 {qtyText(cards.bad_receipt_qty.scrap)}</span>
               <UnitBreakdown
                 entries={cards.bad_receipt_qty.unit_breakdown}
-                render={(e) => qtyText(e.bad_receipt_qty)} />
+                render={(e) => <>{qtyText(e.total)}（其中废品 {qtyText(e.scrap)}）</>} />
             </Space>
           ) : undefined} />
         <KpiCard label="好件领用（实际领用量）" loading={loading} testId="kpi-issued"
@@ -348,7 +348,7 @@ export default function DashboardOverviewTab({
               <span>实际领用量（未采集件况）</span>
               <UnitBreakdown
                 entries={cards.issued_qty.unit_breakdown}
-                render={(e) => qtyText(e.issued_qty)} />
+                render={(e) => qtyText(e.total)} />
             </Space>
           ) : undefined} />
         <KpiCard label="同期返还率" loading={loading} testId="kpi-rate"
@@ -469,13 +469,14 @@ export default function DashboardOverviewTab({
         />
       </Card>
 
-      <Card size="small" title="返件实收 Top 项目（前 10）">
+      <Card size="small" title="返件实收 Top 项目（前 10）" style={{ minWidth: 0, maxWidth: "100%" }}>
         <Table<Summary["top_projects"][number]>
           rowKey="project_id"
           size="small"
           loading={loading}
           dataSource={summary?.top_projects ?? []}
           columns={topProjectColumns}
+          scroll={{ x: 600 }}
           pagination={false}
           locale={{ emptyText: "当前窗口没有返件数据" }}
         />

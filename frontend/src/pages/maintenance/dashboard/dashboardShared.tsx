@@ -353,7 +353,7 @@ export function ReferenceLine({ domain, reference }: {
       {DOMAIN_LABELS[domain] ?? domain} {money ?? "¥—"}
       {reference.order_count !== undefined ? `（${reference.order_count} 单）` : null}
       {reference.low_confidence ? (
-        <Text type="warning" style={{ fontSize: 12 }}> 低样本</Text>
+        <Text type="warning" style={{ fontSize: 12, color: "var(--mb-text-2)" }}> 低样本</Text>
       ) : null}
     </Text>
   );

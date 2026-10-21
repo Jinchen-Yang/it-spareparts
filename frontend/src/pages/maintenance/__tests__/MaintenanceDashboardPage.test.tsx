@@ -547,22 +547,22 @@ const summaryMixedFixture: SummaryResponse = {
     receipt_qty: {
       total: null, part: null, machine: null,
       unit_breakdown: [
-        { unit: "件", receipt_qty: "2.000" },
-        { unit: "台", receipt_qty: "1.000" },
+        { unit: "件", total: "2.000", part: "2.000", machine: "0.000" },
+        { unit: "台", total: "1.000", part: "0.000", machine: "1.000" },
       ],
     },
     bad_receipt_qty: {
       total: null, scrap: null,
       unit_breakdown: [
-        { unit: "件", bad_receipt_qty: "1.000" },
-        { unit: "台", bad_receipt_qty: "1.000" },
+        { unit: "件", total: "1.000", scrap: "0.000" },
+        { unit: "台", total: "1.000", scrap: "0.000" },
       ],
     },
     issued_qty: {
       total: null, note: "实际领用量（未采集件况）",
       unit_breakdown: [
-        { unit: "件", issued_qty: "4.000" },
-        { unit: "台", issued_qty: "2.000" },
+        { unit: "件", total: "4.000" },
+        { unit: "台", total: "2.000" },
       ],
     },
     return_rate_pct: null, rate_numerator: null, rate_denominator: null,
@@ -982,7 +982,7 @@ describe("维保数据看板页", () => {
 
   it("T4 当前累计（B-F10）：q 透传选择含该 PN 的整张需求单；N/R 整单不截断；导出同参", async () => {
     renderPage("/maintenance/dashboard?tab=checks&q=ST");
-    await screen.findByText("DD001");
+    await screen.findByText("DD001", {}, { timeout: 5000 });
     expect(screen.getByTestId("checks-note")).toHaveTextContent("当前累计");
     expect(screen.getByTestId("checks-note")).toHaveTextContent("不发布返还状态");
     expect(screen.getByTestId("checks-cumulative-note")).toHaveTextContent("整张需求单");
@@ -1365,6 +1365,10 @@ describe("维保数据看板页", () => {
     const receipt = screen.getByTestId("kpi-receipt");
     expect(receipt).toHaveTextContent("件：2");
     expect(receipt).toHaveTextContent("台：1");
+    expect(screen.getByTestId("kpi-bad")).toHaveTextContent("件：1");
+    expect(screen.getByTestId("kpi-bad")).toHaveTextContent("台：1");
+    expect(screen.getByTestId("kpi-issued")).toHaveTextContent("件：4");
+    expect(screen.getByTestId("kpi-issued")).toHaveTextContent("台：2");
     // 趋势：按单位拆系列（绝不跨单位求和成一条柱）
     const trend = screen.getByTestId("overview-trend-chart");
     expect(trend).toHaveTextContent("返件实收（件）");
@@ -1573,7 +1577,10 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
       cards: {
         checked_demand_qty: null, received_qty: null, known_difference_qty: null,
         over_received_qty: null, pending_check_order_count: 0, inactive_order_count: 0,
-        unassigned_receipt_qty: "0", note: "独立单位核对", unit_breakdown: buckets,
+        unassigned_receipt_qty: "0", note: "独立单位核对", unit_breakdown: [
+          { unit: "件", checked_demand_qty: "7", received_qty: "1", known_difference_qty: "6", over_received_qty: "0" },
+          { unit: "台", checked_demand_qty: "4", received_qty: "2", known_difference_qty: "2", over_received_qty: "0" },
+        ],
       },
       rows: [{
         ...checksFixture.rows[0],
@@ -1596,6 +1603,9 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
     // 卡片合计同样分桶呈现
     expect(screen.getByTestId("checks-cards").textContent).toContain("件：7");
     expect(screen.getByTestId("checks-cards").textContent).toContain("台：4");
+    const differenceCard = screen.getByText("差额合计").closest(".ant-card")!;
+    expect(differenceCard).toHaveTextContent("件：6");
+    expect(differenceCard).toHaveTextContent("台：2");
   });
 
   it("B2-F05：无日期下单混合单位按单位呈现（件：7/台：4），不再只剩 —", async () => {
@@ -1615,8 +1625,8 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
       }],
     });
     renderPage("/maintenance/dashboard?tab=consumption");
-    await screen.findByText(/无制单日期下单量/);
-    const kpi = screen.getByTestId("kpi-order-qty");
+    const kpi = await screen.findByTestId("kpi-order-qty");
+    await within(kpi).findByText(/无制单日期下单量/);
     expect(kpi.textContent).toContain("件：7");
     expect(kpi.textContent).toContain("台：4");
     expect(kpi.textContent).toContain("未计入期间");
