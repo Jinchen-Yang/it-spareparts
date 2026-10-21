@@ -173,10 +173,11 @@ export default function SourceCancelRestorationSection({ projectId, canConfirm, 
     </Typography.Paragraph>
     {receipt ? <Alert type="success" showIcon closable onClose={() => setReceipt(null)}
       message={receipt.status === "already_restored"
-        ? `该确认此前已恢复（${receipt.restored_by ?? "未知操作人"} 于 ${receipt.restored_at}），本次未重复写入。`
+        ? `该确认此前已恢复（${receipt.restored_by ?? "未知操作人"} 于 ${receipt.restored_at ?? "未知时间"}），本次未重复写入。`
         : `已恢复：${receipt.restored_lines} 条需求明细、${receipt.restored_site_lines} 条领用行、`
           + `${receipt.restored_site_issues} 张领用单头（${receipt.restored_at}）。`} /> : null}
-    {receipt?.warnings.map((warning, index) => <Alert key={index} type="warning" showIcon message={warning} />)}
+    {(receipt?.warnings ?? []).map((warning, index) =>
+      <Alert key={index} type="warning" showIcon message={warning} />)}
     {listError ? <Alert type="error" showIcon message={listError} /> : null}
     <Button loading={loading} disabled={busy} onClick={() => void loadList()}>刷新恢复清单</Button>
     <List loading={loading} dataSource={items}

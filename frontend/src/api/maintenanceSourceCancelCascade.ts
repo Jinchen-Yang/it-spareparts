@@ -117,10 +117,11 @@ export interface SourceRestorationInfo {
   context?: { revision: number | null };
 }
 
-export interface SourceRestorationResult {
+/** 本次执行了恢复的回执。 */
+export interface SourceRestorationExecuted {
   batch_id: number;
   source_order_id: string;
-  status: "restored" | "already_restored";
+  status: "restored";
   restored_at: string;
   restored_lines: number;
   restored_site_lines: number;
@@ -128,9 +129,25 @@ export interface SourceRestorationResult {
   tombstone_version: number;
   replayed: boolean;
   warnings: string[];
-  restored_via?: string;
-  restored_by?: string;
 }
+
+/** 该确认此前已被恢复（异键/并发/实名更正），本次未重复写入。 */
+export interface SourceRestorationAlreadyRestored {
+  status: "already_restored";
+  source_order_id: string;
+  restored_via: "cancel_restore" | "other";
+  restored_by: string | null;
+  /** 实名更正等路径可能没有恢复时间。 */
+  restored_at: string | null;
+  /** 实名更正等路径可能没有恢复回执。 */
+  result: SourceRestorationExecuted | null;
+  replayed: boolean;
+  warnings?: string[];
+}
+
+export type SourceRestorationResult =
+  | SourceRestorationExecuted
+  | SourceRestorationAlreadyRestored;
 
 const projectPath = (projectId: string) =>
   `/maintenance/projects/${encodeURIComponent(projectId)}/source-cancellations`;
