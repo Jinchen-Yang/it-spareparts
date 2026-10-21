@@ -1474,11 +1474,11 @@
       "version": "3.0.2"
     },
     {
-      "bom-ref": "pkg:npm/follow-redirects@1.16.0?path=node_modules%2Ffollow-redirects",
+      "bom-ref": "pkg:npm/follow-redirects@1.16.1?path=node_modules%2Ffollow-redirects",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cb9acdfee3ac69d153fc97d8c21c514b947b41c7be837cc6f7bf89aed159942f64957fd6e610fb8a22f349c2389d9a944bb0cd51d84f830e3123c5b62ee5e553"
+          "content": "14dbc51b3a0c2d6984e988fdb296ffce377bca23421e2016f7f4e0f425eb43cc2ebb7d87b6524ec163b5d4e25a7e5e457d8dc3c53750d2f8f8db353592fbf98e"
         }
       ],
       "name": "follow-redirects",
@@ -1492,9 +1492,9 @@
           "value": "false"
         }
       ],
-      "purl": "pkg:npm/follow-redirects@1.16.0",
+      "purl": "pkg:npm/follow-redirects@1.16.1",
       "type": "library",
-      "version": "1.16.0"
+      "version": "1.16.1"
     },
     {
       "bom-ref": "pkg:npm/form-data@4.0.6?path=node_modules%2Fform-data",
