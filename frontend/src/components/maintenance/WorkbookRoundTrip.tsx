@@ -131,9 +131,16 @@ export function WorkbookRoundTrip({
   const uploadAllowed = useRef(canUpload);
   uploadAllowed.current = canUpload;
   const mounted = useRef(false);
+  const downloadEpoch = useRef(0);
   const uploadEpoch = useRef(0);
   const closeConfirmation = useRef<(() => void) | null>(null);
   const retainedFile = retainedDraft?.session === uploadSession ? retainedDraft.file : null;
+
+  useEffect(() => {
+    // 新账号可立即下载；即使 token 切回原值，也不能接收旧会话的响应。
+    downloadEpoch.current += 1;
+    setDownloading(false);
+  }, [uploadSession]);
 
   useEffect(() => {
     // 文件仅留在当前页面内存；账号或权限变化后不能复用上个操作上下文的草稿。
@@ -148,6 +155,7 @@ export function WorkbookRoundTrip({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      downloadEpoch.current += 1;
       uploadEpoch.current += 1;
       // Modal.confirm 渲染在门户中，需要随页面显式销毁。
       closeConfirmation.current?.();
@@ -155,14 +163,23 @@ export function WorkbookRoundTrip({
   }, []);
 
   const handleDownload = async () => {
+    // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
+    const requestSession = localStorage.getItem("token");
+    const requestEpoch = ++downloadEpoch.current;
+    const isCurrent = () => mounted.current
+      && downloadEpoch.current === requestEpoch
+      && localStorage.getItem("token") === requestSession;
     setDownloading(true);
     setFeedback(null);
     try {
-      saveBlob(await onDownload(), filename);
+      const blob = await onDownload();
+      if (!isCurrent()) return;
+      saveBlob(blob, filename);
     } catch (error) {
+      if (!isCurrent()) return;
       setFeedback({ type: "error", text: readError(error, "下载失败") });
     } finally {
-      setDownloading(false);
+      if (isCurrent()) setDownloading(false);
     }
   };
 
