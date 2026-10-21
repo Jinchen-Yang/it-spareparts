@@ -483,6 +483,52 @@ def test_operator_current_permissions_and_scope_are_required(db, tmp_path, capsy
     assert _snapshot(db) == before
 
 
+@pytest.mark.parametrize("permission_key", [
+    "page_maintenance", "action_maintenance_site_issue_manage", "data_purchase_cost",
+], ids=["page", "action", "data"])
+def test_full_scope_operator_missing_single_permission_is_denied(
+    db, tmp_path, capsys, permission_key,
+):
+    project, issue, (line, _), _ = _facts(db)
+    operator_permissions = {
+        "page_maintenance": True, "action_maintenance_site_issue_manage": True,
+        "data_purchase_cost": True,
+    }
+    # boss has full project scope, so scope denial cannot mask a missing guard.
+    db.add(SysUser(
+        username="approved_operator", display_name="合成执行人",
+        password_hash="test-only", role="boss",
+        permissions={**operator_permissions, permission_key: False},
+    ))
+    db.commit()
+    path, sha = _manifest(tmp_path, [_entry(project, issue, line)])
+    before = _snapshot(db)
+    code, result = _apply(capsys, path, sha)
+    assert code == 2
+    assert result["status"] == "rejected"
+    assert result["code"] == "permission_denied"
+    assert _snapshot(db) == before
+
+
+def test_full_scope_operator_with_all_permissions_can_apply_one(db, tmp_path, capsys):
+    project, issue, (line, _), _ = _facts(db)
+    db.add(SysUser(
+        username="approved_operator", display_name="合成执行人",
+        password_hash="test-only", role="boss", permissions={
+            "page_maintenance": True, "action_maintenance_site_issue_manage": True,
+            "data_purchase_cost": True,
+        },
+    ))
+    db.commit()
+    path, sha = _manifest(tmp_path, [_entry(project, issue, line)])
+    code, result = _apply(capsys, path, sha)
+    assert code == 0
+    assert result["status"] == "success"
+    assert result["receipt"]["no_return"] is True
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssueLine, line.issue_line_id).no_return is True
+
+
 def test_noop_is_receipted_and_replay_rechecks_revoked_permission(db, tmp_path, capsys):
     project, issue, (line, _), _ = _facts(db)
     _operator(db)
