@@ -334,8 +334,8 @@ export function WorkbookRoundTrip({
         content: (
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             {/* 静态 Modal.error 不消费 ConfigProvider 主题，type="danger" 会退回
-                antd 默认红 #FF4D4F（白底仅 3.27:1）。12px 属 WCAG 普通正文，
-                显式用项目语义色 COLORS.danger（#BE564B，白底 4.54:1 ≥ 4.5:1）。 */}
+                antd 默认 danger 红（白底仅 3.27:1）。12px 属 WCAG 普通正文，
+                显式用项目语义色 COLORS.danger（白底 4.54:1 ≥ 4.5:1）。 */}
             <Text type="danger" style={{ fontSize: 12, color: COLORS.danger }}>
               以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化；
               本次上传未写入任何数据，也不能用强制接管跳过。请重新下载最新
