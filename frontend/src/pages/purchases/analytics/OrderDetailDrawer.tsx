@@ -10,12 +10,16 @@ import {
   fetchPurchaseAnalyticsOrderDetail,
   type PurchaseAnalyticsOrderDetail,
 } from "../../../api/purchaseAnalytics";
+import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale } from "../../../utils/session";
 import type { AmountBasis } from "./urlState";
 
 export interface OrderDetailDrawerProps {
   orderId: number | null;
   category: string[];
   basis: AmountBasis[];
+  /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发；迟到响应落地 /
+   * finally 前比对 localStorage token，换账号后不作废不作数。 */
+  ownerToken: string | null;
   onClose: () => void;
 }
 
@@ -63,7 +67,7 @@ function NominalAmountNote({ side, kind, amount }: {
   );
 }
 
-export default function OrderDetailDrawer({ orderId, category, basis, onClose }: OrderDetailDrawerProps) {
+export default function OrderDetailDrawer({ orderId, category, basis, ownerToken, onClose }: OrderDetailDrawerProps) {
   const { message } = App.useApp();
   const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -79,21 +83,30 @@ export default function OrderDetailDrawer({ orderId, category, basis, onClose }:
       return;
     }
     const seq = ++seqRef.current;
+    // 所属会话失效（DL-010 返工）：拒发并清旧详情——旧会话的抽屉不以当前账号取数
+    if (sessionStale(ownerToken)) {
+      setLoading(false);
+      setDetail(null);
+      message.error(SESSION_EXPIRED_MESSAGE);
+      return;
+    }
+    const token = readSessionToken();
     setLoading(true);
     setDetail(null);
     fetchPurchaseAnalyticsOrderDetail(orderId, categoryKey ? categoryKey.split(",") : [])
       .then(({ data }) => {
-        if (seq === seqRef.current) setDetail(data);
+        if (seq === seqRef.current && !sessionStale(token)) setDetail(data);
       })
       .catch(() => {
-        if (seq !== seqRef.current) return;
+        if (seq !== seqRef.current || sessionStale(token)) return;
         message.error("订单明细加载失败");
         onCloseRef.current();
       })
       .finally(() => {
-        if (seq === seqRef.current) setLoading(false);
+        // finally 也守卫：失效会话的收尾不触碰当前 UI 状态
+        if (seq === seqRef.current && !sessionStale(token)) setLoading(false);
       });
-  }, [orderId, categoryKey]);
+  }, [orderId, categoryKey, ownerToken]);
 
   // 行金额只有一列，按含税标记解释；不能复用可能已因单头缺列翻转的 nominal_side。
   // 金额为 null 时不显示标签（包含权限遮蔽），0 则仍是可展示的金额。

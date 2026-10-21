@@ -38,6 +38,31 @@ vi.mock("../../../../api/purchaseAnalytics", async () => {
     fetchPurchaseAnalyticsOrderDetail: (...a: unknown[]) => fetchPurchaseAnalyticsOrderDetail(...a),
   };
 });
+// jsdom 无 canvas：mock 图表壳，只保留空态文案；带 onEvents.click 的图渲染一个
+// 「模拟点击」按钮（点击第 0 个类目），趋势柱 / 排行横条的下钻可在页面级测试触发。
+vi.mock("../../../../components/charts/EChartContainer", () => ({
+  default: ({ empty, emptyText, ariaLabel, onEvents, option }: {
+    empty?: boolean; emptyText?: string; ariaLabel?: string;
+    onEvents?: { click?: (p: unknown) => void };
+    option?: { xAxis?: { data?: unknown[] }; yAxis?: { data?: unknown[] } };
+  }) =>
+    empty ? <div>{emptyText ?? "空"}</div> : (
+      <div data-testid="chart" aria-label={ariaLabel}>
+        {onEvents?.click && (
+          <button
+            type="button"
+            aria-label={`模拟点击${ariaLabel ?? ""}`}
+            onClick={() => onEvents.click?.({
+              dataIndex: 0,
+              name: option?.yAxis?.data?.[0] ?? option?.xAxis?.data?.[0],
+            })}
+          >
+            模拟点击
+          </button>
+        )}
+      </div>
+    ),
+}));
 
 import PurchaseAnalyticsPage from "../PurchaseAnalyticsPage";
 
@@ -163,11 +188,12 @@ function renderPage(initial = "/purchases/analytics") {
   );
 }
 
-/** 视口汇总调用（排除客户取值反查的 group_by=customer 探针）。 */
+/** 视口汇总调用（排除客户取值反查的 group_by=customer 探针与趋势图的
+ * group_by=day/month 二次请求——Q-A-01 图表与表格同端点不同分组）。 */
 const viewSummaryCalls = () =>
   fetchPurchaseAnalyticsSummary.mock.calls
     .map(([q]) => q as Record<string, unknown>)
-    .filter((q) => q.group_by !== "customer");
+    .filter((q) => !["customer", "day", "month"].includes(q.group_by as string));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -614,5 +640,122 @@ describe("URL 导航与每页条数", () => {
     fireEvent.click(screen.getByRole("button", { name: "浏览器后退" }));
     await waitFor(() => expect(new URLSearchParams(locationSearch).has("group_key")).toBe(false));
     expect(navigationType).toBe("POP");
+  });
+});
+
+describe("图表层（Q-A-01 / D-39 补图表）", () => {
+  /** 按日分组的趋势响应：日期键 + 「(空)」无日期桶（恒排末端）。 */
+  const DAY_SUMMARY = {
+    ...SUMMARY,
+    filters_echo: echo({ group_by: "day" }),
+    groups: [
+      { key: "(空)", label: null, orders: 1, lines: 1, amount_inc: 100, amount_ex: 90, amount_paid: 95 },
+      { key: TODAY, label: null, orders: 4, lines: 11, amount_inc: 1030, amount_ex: 910, amount_paid: 955 },
+    ],
+  };
+
+  it("默认今天（1 天）趋势按日：同端点第二次请求 group_by=day；切按月再请求 group_by=month", async () => {
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.calls.some(
+      ([q]) => (q as Record<string, unknown>).group_by === "day"
+        && (q as Record<string, unknown>).date_from === TODAY
+        && (q as Record<string, unknown>).date_to === TODAY,
+    )).toBe(true));
+    // 手动切按月：趋势层按月再拉（表格主请求不受影响）
+    fireEvent.click(await screen.findByRole("radio", { name: "按月" }));
+    await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.calls.some(
+      ([q]) => (q as Record<string, unknown>).group_by === "month",
+    )).toBe(true));
+    expect(viewSummaryCalls()).toHaveLength(1);
+  });
+
+  it("趋势柱点击下钻：group_by=day + group_key 进 URL（可分享可后退），订单列表带同一 drill", async () => {
+    fetchPurchaseAnalyticsSummary.mockImplementation((q: Record<string, unknown>) =>
+      Promise.resolve({ data: q.group_by === "customer" ? SUMMARY_BY_CUSTOMER
+        : q.group_by === "day" ? DAY_SUMMARY : SUMMARY }));
+    renderPage();
+    // (空) 恒排末端：首桶是今天
+    const trigger = await screen.findByRole("button", { name: /模拟点击采购趋势/ });
+    fireEvent.click(trigger);
+    await waitFor(() => {
+      expect(new URLSearchParams(locationSearch).get("group_by")).toBe("day");
+      expect(new URLSearchParams(locationSearch).get("group_key")).toBe(TODAY);
+    });
+    expect(navigationType).toBe("PUSH");
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      group_by: "day", group_key: TODAY,
+    }));
+  });
+
+  it("排行横条点击下钻：与表格行点击同一语义（group_key=分组键）", async () => {
+    renderPage();
+    const trigger = await screen.findByRole("button", { name: /模拟点击采购分组排行/ });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(new URLSearchParams(locationSearch).get("group_key")).toBe("备件采购"));
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      group_by: "source_type", group_key: "备件采购",
+    }));
+  });
+
+  it("金额不可见账号：图表指标只剩单数，三金额选项不出现（后端金额全 null）", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: false, data_customer: true,
+    }));
+    fetchPurchaseAnalyticsSummary.mockImplementation((q: Record<string, unknown>) =>
+      Promise.resolve({ data: q.group_by === "customer" ? SUMMARY_BY_CUSTOMER : SUMMARY_MASKED }));
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    // AntD 按钮式 Radio 的文案在包裹 label 上（input 的 textContent 恒空）
+    const radios = screen.getAllByRole("radio").map((r) => r.closest("label")?.textContent ?? "");
+    expect(radios).toContain("单数");
+    expect(radios).not.toContain("含税");
+    expect(radios).not.toContain("实付");
+  });
+});
+
+describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒发）", () => {
+  // 与销售页同款返工：owner 是挂载时 token；静默换 token（无重渲染、无 storage 事件）
+  // 后，旧会话的趋势粒度切换 / 抽屉取数一律拒发并清旧上下文。每个用例先走同会话
+  // 正向路径，证明守卫不是「全部禁用」的伪通过。
+  const SESSION_DEAD_TEXT = "登录会话已变更（已切换账号或登出），请刷新页面后继续";
+
+  it("同会话切趋势粒度即重拉；静默换 token 后再切粒度拒发、旧上下文让位", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    // 首帧趋势已按日拉过；正向：同会话切按月 → 趋势层按月再拉
+    fireEvent.click(await screen.findByRole("radio", { name: "按月" }));
+    await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.calls.some(
+      ([q]) => (q as Record<string, unknown>).group_by === "month",
+    )).toBe(true));
+    const total = fetchPurchaseAnalyticsSummary.mock.calls.length;
+
+    // 静默换 token：切回按日 → 拒发（请求数不增），旧汇总/列表让位给会话失效提示
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(screen.getByRole("radio", { name: "按日" }));
+    expect(fetchPurchaseAnalyticsSummary.mock.calls.length).toBe(total);
+    expect(screen.getByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /备件采购/ })).toBeNull();
+  });
+
+  it("同会话可开采购单明细抽屉；静默换 token 后重开抽屉拒发", async () => {
+    localStorage.setItem("token", "account-a");
+    // 分组下钻层才有订单行（默认层是分组表）
+    renderPage("/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD");
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    // 正向：同会话点行 → 明细请求发出、抽屉渲染旧会话可见的详情
+    fireEvent.click(row);
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("采购单 CG-2026-101")).toBeInTheDocument();
+
+    // 关抽屉 → 静默换 token → 重开：旧会话的抽屉不以当前账号取数
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(screen.getByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
+    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
   });
 });
