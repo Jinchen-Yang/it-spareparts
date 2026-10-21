@@ -15,6 +15,16 @@ import WorkbookRoundTrip from "../WorkbookRoundTrip";
 
 const makeFile = () => new File(["xlsx"], "回填.xlsx", { type: "application/vnd.ms-excel" });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function uploadFile(container: HTMLElement, file: File) {
   const input = container.querySelector('input[type="file"]') as HTMLInputElement;
   fireEvent.change(input, { target: { files: [file] } });
@@ -31,6 +41,110 @@ describe("WorkbookRoundTrip", () => {
     Modal.destroyAll();
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("下载失败时在当前会话显示错误", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const onDownload = vi.fn().mockRejectedValue(new Error("network"));
+    render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+    expect(await screen.findByText("下载失败")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /下载/ })).not.toHaveClass("ant-btn-loading");
+    expect(saveBlob).not.toHaveBeenCalled();
+  });
+
+  describe.each(["切换账号", "账号 A→B→A", "卸载后重新进入"])("下载期间%s", (transition) => {
+    it.each(["成功", "失败"])("旧请求%s晚到，不落文件、不提示、不清除新请求的下载中状态", async (outcome) => {
+      localStorage.setItem("token", "synthetic-session-a");
+      const oldRequest = deferred<Blob>();
+      const currentRequest = deferred<Blob>();
+      const onDownload = vi.fn()
+        .mockReturnValueOnce(oldRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise);
+      const props = { title: "总表", filename: "a.xlsx", canUpload: false, onDownload, onApply: vi.fn() };
+      const { rerender, unmount } = render(<WorkbookRoundTrip {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+      expect(onDownload).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("button", { name: /下载/ })).toHaveClass("ant-btn-loading");
+
+      if (transition === "卸载后重新进入") {
+        unmount();
+        render(<WorkbookRoundTrip {...props} />);
+      } else {
+        localStorage.setItem("token", "synthetic-session-b");
+        rerender(<WorkbookRoundTrip {...props} />);
+        if (transition === "账号 A→B→A") {
+          localStorage.setItem("token", "synthetic-session-a");
+          rerender(<WorkbookRoundTrip {...props} />);
+        }
+      }
+      const currentButton = screen.getByRole("button", { name: /下载/ });
+      expect(currentButton).not.toHaveClass("ant-btn-loading");
+      fireEvent.click(currentButton);
+      expect(onDownload).toHaveBeenCalledTimes(2);
+      expect(currentButton).toHaveClass("ant-btn-loading");
+
+      await act(async () => {
+        if (outcome === "成功") oldRequest.resolve(new Blob(["old workbook"]));
+        else oldRequest.reject(new Error("old request failed"));
+      });
+      expect(saveBlob).not.toHaveBeenCalled();
+      expect(screen.queryByText("下载失败")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(currentButton).toHaveClass("ant-btn-loading");
+
+      // 新请求自己的返回仍可落文件并结束 loading，不能靠吞掉所有响应让测试通过。
+      const currentBlob = new Blob(["current workbook"]);
+      await act(async () => currentRequest.resolve(currentBlob));
+      expect(saveBlob).toHaveBeenCalledTimes(1);
+      expect(saveBlob).toHaveBeenCalledWith(currentBlob, "a.xlsx");
+      expect(currentButton).not.toHaveClass("ant-btn-loading");
+      expect(screen.queryByText("下载失败")).toBeNull();
+    });
+  });
+
+  it.each(["成功", "失败"])("账号 A→B→A 且未重新下载时，旧下载%s也不能复活", async (outcome) => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const request = deferred<Blob>();
+    const onDownload = vi.fn(() => request.promise);
+    const props = { title: "总表", filename: "a.xlsx", canUpload: false, onDownload, onApply: vi.fn() };
+    const { rerender } = render(<WorkbookRoundTrip {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    localStorage.setItem("token", "synthetic-session-b");
+    rerender(<WorkbookRoundTrip {...props} />);
+    localStorage.setItem("token", "synthetic-session-a");
+    rerender(<WorkbookRoundTrip {...props} />);
+
+    await act(async () => {
+      if (outcome === "成功") request.resolve(new Blob(["old workbook"]));
+      else request.reject(new Error("old request failed"));
+    });
+    expect(saveBlob).not.toHaveBeenCalled();
+    expect(screen.queryByText("下载失败")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: /下载/ })).not.toHaveClass("ant-btn-loading");
+  });
+
+  it.each(["成功", "失败"])("token 已变化但尚未重渲染，旧下载%s也不得更新状态或产生副作用", async (outcome) => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const request = deferred<Blob>();
+    const onDownload = vi.fn(() => request.promise);
+    render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
+    const button = screen.getByRole("button", { name: /下载/ });
+    fireEvent.click(button);
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    expect(button).toHaveClass("ant-btn-loading");
+
+    localStorage.setItem("token", "synthetic-session-b");
+    await act(async () => {
+      if (outcome === "成功") request.resolve(new Blob(["old workbook"]));
+      else request.reject(new Error("old request failed"));
+    });
+    expect(saveBlob).not.toHaveBeenCalled();
+    expect(screen.queryByText("下载失败")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(button).toHaveClass("ant-btn-loading");
   });
 
   it("hides the upload button without the upload permission", () => {
