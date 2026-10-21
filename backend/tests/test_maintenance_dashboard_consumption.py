@@ -232,6 +232,78 @@ def test_daily_consumption_scope_and_multi_project(db):
     assert empty["rows"] == []
 
 
+def test_empty_window_daily_consumption_200_both_roles(db):
+    """B3 独立验收反例：窗口内无领用（范围非空）必须 200 空 shape，不 500。
+
+    根因：daily_consumption cards["unit"] 的 next(iter(window_units)) 在
+    空 dict 上 StopIteration（空范围走早退分支，故仅"非空范围×空窗口"触发）。
+    语义保持：空窗口合法 unit=None/空桶；F11 金额键不出现（未知≠0）；
+    同窗口有记录时原正常输出不变（下方 10-17 断言）。
+    """
+    project = _project(db, "M03-EW")
+    part = _part(db, "M03-PN-EW")
+    part.unit = "件"  # 本文件 _part 无单位默认；给单一单位正向断言用
+    db.flush()
+    # 有数据的日子（10-17）与被查询的空日（10-16）分离。
+    _costed_issue(db, project, part, 3, issue_date=date(2026, 10, 17),
+                  unit_cost_ex=Decimal("25.00"))
+    db.commit()
+
+    from tests.test_maintenance_dashboard_api import (
+        BASE,
+        _assign_manager,
+        client_for,
+    )
+
+    empty_day = {"range": "custom",
+                 "date_from": "2026-10-16", "date_to": "2026-10-16"}
+
+    # 金额账号（B3 冻结证据原例：有权 admin 500 → 应 200）。
+    admin = client_for(db, username="mdd-admin-ew", role="admin")
+    response = admin.get(f"{BASE}/consumption", params=empty_day)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cards"] == {
+        "issued_qty": "0.000", "unit": None, "unit_breakdown": [],
+        "uncosted_qty": "0.000", "coverage_pct": None,
+        "sources": [], "note": body["cards"]["note"],
+    }
+    assert "只读" in body["cards"]["note"]
+    # F11：空窗口无已计行 → 金额键整个不存在（不是 0.00）。
+    assert "cost_amount_ex_tax" not in body["cards"]
+    assert "cost_amount_inc_tax" not in body["cards"]
+    assert body["rows"] == []
+
+    # 数量账号（非空授权范围同样命中空窗口路径）。
+    username = "mdd-manager-ew"
+    manager = client_for(db, username=username, role="maintenance_manager")
+    _assign_manager(db, username, project)
+    manager_response = manager.get(f"{BASE}/consumption", params=empty_day)
+    assert manager_response.status_code == 200
+    assert manager_response.json()["cards"] == {
+        "issued_qty": "0.000", "unit": None, "unit_breakdown": [],
+    }
+    assert manager_response.json()["rows"] == []
+
+    # 同项目同筛选集、有记录的窗口：原正常输出不变（单位/金额/覆盖）。
+    data_day = admin.get(f"{BASE}/consumption", params={
+        "range": "custom", "date_from": "2026-10-17", "date_to": "2026-10-17",
+    })
+    assert data_day.status_code == 200
+    data_cards = data_day.json()["cards"]
+    assert data_cards["issued_qty"] == "3.000"
+    assert data_cards["unit"] == "件"
+    assert data_cards["unit_breakdown"] == [
+        {"unit": "件", "issued_qty": "3.000", "costed_qty": "3.000",
+         "uncosted_qty": "0.000", "coverage_pct": 100.0}
+    ]
+    assert data_cards["cost_amount_ex_tax"] == "75.00"
+    assert data_cards["cost_amount_inc_tax"] == "84.75"
+    (data_row,) = data_day.json()["rows"]
+    assert data_row["issued_qty"] == "3.000"
+    assert data_row["unit"] == "件"
+
+
 # ---------- 领用明细（下钻可核对） ----------
 
 def test_consumption_issue_rows_line_level_evidence(db):

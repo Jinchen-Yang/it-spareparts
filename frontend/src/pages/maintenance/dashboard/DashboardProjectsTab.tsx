@@ -33,6 +33,7 @@ import {
   rateText,
   sessionToken,
   sessionUnchanged,
+  unitBucketText,
   unitColumnText,
   type DashboardTabProps,
 } from "./dashboardShared";
@@ -42,14 +43,29 @@ const { Text } = Typography;
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
 /** 率列统一渲染：值 + 分子/分母小字（分母≤0 显示「无率」而不是 0%；
- * 混合单位（分子分母平面 null）→ 率不可加总提示，不是 0%）。 */
+ * 混合单位（分子分母平面 null）→ 每单位真实分子/分母/率（B2-F03，单位
+ * 条目未带率字段就不臆造）+ 率不可加总提示，不是 0%）。 */
 function RateCell({ row }: { row: ProjectRow }) {
   const mixed = row.return_rate_pct === null
     && row.rate_numerator === null
     && row.rate_denominator === null;
+  const rateBuckets = mixed
+    ? (row.unit_breakdown ?? []).filter(
+      (e) => e.return_rate_pct !== undefined
+        || e.rate_numerator !== undefined
+        || e.rate_denominator !== undefined,
+    )
+    : [];
   return (
     <Space direction="vertical" size={0}>
       <span>{rateText(row.return_rate_pct)}</span>
+      {rateBuckets.map((e) => (
+        <Text key={e.unit ?? "__unresolved__"} type="secondary" style={{ fontSize: 12 }}>
+          {unitBucketText(e.unit)} {e.return_rate_pct != null
+            ? `${rateText(e.return_rate_pct)}（${qtyText(e.rate_numerator)} ÷ ${qtyText(e.rate_denominator)}）`
+            : `无率（${qtyText(e.rate_numerator)} ÷ ${qtyText(e.rate_denominator)}）`}
+        </Text>
+      ))}
       <Text type="secondary" style={{ fontSize: 12 }}>
         {row.return_rate_pct === null
           ? (mixed ? "混合单位，率不可加总" : "无率（领用≤0）")

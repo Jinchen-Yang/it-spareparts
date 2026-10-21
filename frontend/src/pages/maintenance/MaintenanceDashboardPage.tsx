@@ -15,8 +15,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert, Button, Card, DatePicker, Input, InputNumber, Select, Skeleton, Space, Tabs, Typography,
+  Alert, Button, Card, ConfigProvider, DatePicker, Input, InputNumber, Select, Skeleton, Space,
+  Tabs, Typography,
 } from "antd";
+import type { ThemeConfig } from "antd";
 import { FundOutlined, ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { useUrlState, urlPageField } from "../../hooks/useUrlState";
@@ -39,8 +41,36 @@ import DashboardConsumptionTab from "./dashboard/DashboardConsumptionTab";
 import DashboardQuantityChecksTab from "./dashboard/DashboardQuantityChecksTab";
 import ReceiptsDrillDrawer, { type ReceiptsDrill } from "./dashboard/ReceiptsDrillDrawer";
 import { apiErrorMessage, sessionToken, sessionUnchanged } from "./dashboard/dashboardShared";
+import { tokens } from "../../tokens";
 
 const { Text } = Typography;
+
+/** B2-F06（DL025）：本页局部对比度主题。AntD 默认把 placeholder
+ * （colorTextPlaceholder ← colorTextQuaternary）、禁用态文字
+ * （colorTextDisabled ← colorTextQuaternary）与 Typography secondary
+ * （colorTextDescription）派生为浅灰（实测 Chromium 2.15/1.97/4.25），
+ * 低于本任务 4.5:1。这里钉到 tokens.color.text2（#6B665E：白底 5.69 /
+ * 页底 5.06 / 禁用合成底 5.21，全部 ≥4.5）。
+ *
+ * 同类 hover/loading 亮色（真实 Chromium 实测一并修）：
+ * - 默认按钮 hover 文字/边框 ← colorPrimaryHover（种子派生 #6692DE，
+ *   白底 2.01）→ 钉到 accentStrong #2C56AE（白底 6.88；主按钮 hover
+ *   白字对 #2C56AE 也 6.88，双态同时达标）；
+ * - .ant-btn-loading 整体 opacity ← opacityLoading 0.65（文字被压到
+ *   <4.5）→ 1；spinner 照转、点击照旧被 loading 守卫拦截，语义不变。
+ * 只影响 .maintenance-dashboard-page 子树与关联 portal；保留禁用语义
+ * （背景/光标不变，不隐藏、不解禁）；嵌套 ConfigProvider 与全局主题合并，
+ * P14 既有 tokens 即有效 fallback。 */
+const PAGE_CONTRAST_THEME: ThemeConfig = {
+  token: {
+    colorTextQuaternary: tokens.color.text2,
+    colorTextPlaceholder: tokens.color.text2,
+    colorTextDisabled: tokens.color.text2,
+    colorTextDescription: tokens.color.text2,
+    colorPrimaryHover: tokens.color.accentStrong,
+    opacityLoading: 1,
+  },
+};
 
 const TAB_KEYS = ["overview", "projects", "parts", "consumption", "checks"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -339,7 +369,7 @@ export function MaintenanceDashboardPage() {
 
   const quickOptions = options.valuation_policy?.quick_options ?? ["0.5", "0.3", "0.2"];
 
-  return (
+  const dashboardPage = (
     <Space direction="vertical" size={16} className="maintenance-dashboard-page" style={{ width: "100%" }}>
       <PageHeader
         title={(
@@ -488,6 +518,10 @@ export function MaintenanceDashboardPage() {
       />
     </Space>
   );
+
+  // B2-F06：局部对比度主题只包住看板子树与关联 portal（Select 下拉/抽屉经
+  // React context 继承），不动全站 theme/index.css/tokens。
+  return <ConfigProvider theme={PAGE_CONTRAST_THEME}>{dashboardPage}</ConfigProvider>;
 }
 
 export default MaintenanceDashboardPage;

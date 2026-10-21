@@ -33,12 +33,14 @@ import {
   drillByDate,
   drillByProject,
   DomainCoverageLines,
+  dualTaxText,
   moneyText,
   qtyNumber,
   qtyText,
   qtyOnlyParams,
   QtyBreakdownCell,
   rateText,
+  UndatedOrdersNote,
   sessionToken,
   sessionUnchanged,
   unitBucketText,
@@ -301,12 +303,8 @@ export default function DashboardOverviewTab({
                 {qtyText(String(orderCards.order_count))} 张需求单（制单日期入期，不扣退货/免返）
               </span>
               {orderCards.undated_orders ? (
-                // B-F12：无制单日期有效单单独说明（未计入期间，不猜日期）
-                <span>
-                  无制单日期下单量 {qtyText(orderCards.undated_orders.order_qty)}
-                  ／单数 {qtyText(String(orderCards.undated_orders.order_count))}
-                  （未计入期间，不猜日期）
-                </span>
+                // B-F12/B2-F05：无制单日期有效单单独说明，混合单位分桶呈现
+                <UndatedOrdersNote undated={orderCards.undated_orders} />
               ) : null}
               <UnitBreakdown entries={orderCards.unit_breakdown} render={(e) => qtyText(e.order_qty)} />
             </Space>
@@ -361,8 +359,19 @@ export default function DashboardOverviewTab({
                 {qtyText(cards.rate_numerator)} ÷ {qtyText(cards.rate_denominator)}
                 （实收 ÷ 实际领用；免返不冲减）
               </span>
-              {cards.rate_numerator === null && cards.rate_denominator === null ? (
-                <span>混合单位：分子分母不可跨单位加总</span>
+              {cards.return_rate_pct === null
+                && cards.rate_numerator === null
+                && cards.rate_denominator === null ? (
+                <>
+                  {/* 契约 v3 §5.2：混合单位 → 平面 null，每单位率容器是
+                      UI 消费率的第一来源（分子分母同单位内可核对） */}
+                  <UnitBreakdown
+                    entries={cards.return_rate_breakdown}
+                    render={(e) => (e.return_rate_pct != null
+                      ? `${rateText(e.return_rate_pct)}（${qtyText(e.rate_numerator)} ÷ ${qtyText(e.rate_denominator)}）`
+                      : `无率（${qtyText(e.rate_numerator)} ÷ ${qtyText(e.rate_denominator)}）`)} />
+                  <span>混合单位：分子分母不可跨单位加总</span>
+                </>
               ) : null}
             </Space>
           ) : undefined} />
@@ -400,7 +409,10 @@ export default function DashboardOverviewTab({
                 ) : null}
                 {valuation.finished_estimated_value ? (
                   <span>
-                    成品试算（参考全值）：{moneyText(valuation.finished_estimated_value.inc_tax)}（含税）
+                    成品试算（参考全值）：{dualTaxText(
+                      valuation.finished_estimated_value.inc_tax,
+                      valuation.finished_estimated_value.ex_tax,
+                    ) ?? "¥—"}
                   </span>
                 ) : null}
                 <span>{valuation.policy_version}</span>

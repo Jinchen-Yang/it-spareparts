@@ -47,8 +47,9 @@ export interface UnitBucketEntry {
   unit: string | null;
 }
 
-/** 数量域单位分桶条目（契约 v2 §4/§5）：字段按上下文出现；数量与分母
- * 永不分单位混算，混合时平面字段为 null。 */
+/** 数量域单位分桶条目（契约 v3 §4/§5/§5.1/§5.2）：字段按上下文出现；
+ * 数量与分母永不分单位混算，混合时平面字段为 null。B2-F03：条目可带
+ * 该单位自己的返还率分子/分母/率（拼写与平面字段一致，v3 已核对）。 */
 export interface UnitQtyEntry extends UnitBucketEntry {
   receipt_qty?: string | null;
   bad_receipt_qty?: string | null;
@@ -59,6 +60,18 @@ export interface UnitQtyEntry extends UnitBucketEntry {
   exempt_issued_qty?: string | null;
   pending_requirement_qty?: string | null;
   unlinked_receipt_qty?: string | null;
+  /** B2-F04：quantity-checks 行/卡分桶数量（每单位 N/R/差额/超收）。 */
+  demand_qty?: string | null;
+  received_qty?: string | null;
+  difference_qty?: string | null;
+  over_received_qty?: string | null;
+  /** B2-F04（契约 v3 §5.1）：行分桶条目内的无业务日实收量（v3 定稿拼写；
+   * backend 未采纳独立 undated_receipt_unit_breakdown 行键）。 */
+  undated_receipt_qty?: string | null;
+  /** B2-F03：项目行每单位返还率（分母≤0 → null 无率）。 */
+  return_rate_pct?: number | null;
+  rate_numerator?: string | null;
+  rate_denominator?: string | null;
 }
 
 /** 消耗单位分桶条目（契约 v2 §4）：成本键仅金额可见账号（B-F11——桶内
@@ -149,6 +162,10 @@ export interface SummaryCards {
   return_rate_pct: number | null;
   rate_numerator: string | null;
   rate_denominator: string | null;
+  /** 契约 v3 §5.2：每单位率容器（恒给，空窗口 → []；UI 消费率的第一来源
+   * ——数量卡的 unit_breakdown 是数量条目，不含率）。混合单位 → 平面 null
+   * + 本容器逐单位分子/分母/率；单一单位恰 1 条且与平面相等。 */
+  return_rate_breakdown?: UnitQtyEntry[];
   project_count: number;
   /** 金额卡：仅对通过利润门的调用方出现（admin/data_profit）。
    * 无比例（awaiting_ratio）时 bad_estimated_value 键不出现（待试算，不是 0）。 */
@@ -372,25 +389,37 @@ export interface QuantityCheckRow {
   reason_codes: string[];
   undated_receipt_qty: string | null;
   no_return_note: string | null;
+  /** B2-F04（契约 v3 §5.1）：混合单位 → 平面 null + 每单位分桶；
+   * 无业务日实收量在 unit_breakdown 条目的 undated_receipt_qty 内。 */
+  unit?: string | null;
+  unit_breakdown?: UnitQtyEntry[];
 }
 
 export interface QuantityChecksResponse {
   cards: {
-    checked_demand_qty: string;
-    received_qty: string;
-    known_difference_qty: string;
-    over_received_qty: string;
+    /** B2-F04：混合单位 → null + unit_breakdown（不再必有平面 string）。 */
+    checked_demand_qty: string | null;
+    received_qty: string | null;
+    known_difference_qty: string | null;
+    over_received_qty: string | null;
     pending_check_order_count: number;
     inactive_order_count: number;
-    unassigned_receipt_qty: string;
+    /** 契约 v3 §3：混合单位 → null（不是 0）+ unassigned_receipt_unit_breakdown。 */
+    unassigned_receipt_qty: string | null;
     note: string;
+    unit_breakdown?: UnitQtyEntry[];
+    /** 契约 v3 §3：跨项目按单位合计的未关联桶（恒给；排序同 §0）。 */
+    unassigned_receipt_unit_breakdown?: UnitQtyEntry[];
   };
   rows: QuantityCheckRow[];
   unassigned_receipts: {
     project_id: string;
     project_code: string | null;
     display_name: string;
-    received_qty: string;
+    /** 契约 v3 §3：单一单位（含仅待核）合计；混合 → null + unit_breakdown。 */
+    received_qty: string | null;
+    /** B2-F04：未关联实收同样按单位分桶。 */
+    unit_breakdown?: UnitQtyEntry[];
   }[];
   pagination: DashboardPagination;
 }
@@ -407,9 +436,11 @@ export interface OrderRow {
   unit?: string | null;
   unit_breakdown?: UnitQtyEntry[];
   order_count: number;
-  /** 无制单日期下单量（未计入期间；单列，不猜日期）。 */
-  undated_order_qty?: string;
+  /** 无制单日期下单量（未计入期间；单列，不猜日期）。
+   * B2-F05：混合单位 → null + undated_unit_breakdown（同形 {unit, order_qty}）。 */
+  undated_order_qty?: string | null;
   undated_order_count?: number;
+  undated_unit_breakdown?: UnitQtyEntry[];
 }
 
 export interface OrdersResponse {
@@ -419,8 +450,14 @@ export interface OrdersResponse {
     unit?: string | null;
     unit_breakdown?: UnitQtyEntry[];
     order_count: number;
-    /** B-F12：无日期桶（恒给 note；range=all 时仍单列）。 */
-    undated_orders?: { order_qty: string; order_count: number; note: string };
+    /** B-F12：无日期桶（恒给 note；range=all 时仍单列）。
+     * B2-F05：混合单位 → order_qty null + unit_breakdown [{unit, order_qty}]。 */
+    undated_orders?: {
+      order_qty: string | null;
+      order_count: number;
+      note: string;
+      unit_breakdown?: UnitQtyEntry[];
+    };
   };
   rows: OrderRow[];
 }

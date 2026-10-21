@@ -56,8 +56,10 @@ vi.mock("../../../components/charts/EChartContainer", () => ({
 }));
 
 import MaintenanceDashboardPage from "../MaintenanceDashboardPage";
+import { DomainCoverageLines, ReferenceLine } from "../dashboard/dashboardShared";
 import type {
   DashboardOptions,
+  DomainValuationPayload,
   OrdersResponse,
   SummaryResponse,
 } from "../../../api/maintenanceDashboard";
@@ -788,8 +790,9 @@ describe("维保数据看板页", () => {
     // 默认比例下已出试算金额：不是待试算，也不是 ¥0
     expect(screen.queryByTestId("kpi-bad-value-awaiting")).not.toBeInTheDocument();
     expect(screen.queryByTestId("part-value-awaiting")).not.toBeInTheDocument();
-    // 参考价照常展示（三域：成本域即使销售无样本也独立展示）
-    expect(screen.getByText("采购 ¥113.00（1 单）")).toBeInTheDocument();
+    // 参考价照常展示（三域：成本域即使销售无样本也独立展示）；
+    // B2-F01：参考双税并列（两侧直接用后端原值，不互相推算）
+    expect(screen.getByText("采购 ¥113.00（含税）／¥100.00（不含税）（1 单）")).toBeInTheDocument();
     expect(screen.getByText(/领用已计成本 ¥22.60/)).toBeInTheDocument();
     expect(screen.queryByText(/市场两域均无样本/)).not.toBeInTheDocument();
   });
@@ -1397,5 +1400,311 @@ describe("维保数据看板页", () => {
     // 三域覆盖列（返件估值口径）
     expect(screen.getByRole("columnheader", { name: /三域覆盖/ })).toBeInTheDocument();
     expect(screen.getAllByText(/覆盖 75%（返件估值口径）/).length).toBeGreaterThan(0);
+  });
+});
+
+// ---- B2 独立反馈（b2fix）：双税并列 / 域分桶覆盖 / 每单位率 / 核对单位 / 无日期单位 ----
+
+/** 行内取列单元格（AntD Table：thead 列序 = tbody cell 序）。 */
+function headerCell(row: HTMLElement, header: string): HTMLElement {
+  const table = row.closest("table")!;
+  const headers = within(table).getAllByRole("columnheader");
+  const index = headers.findIndex((h) => h.textContent?.trim() === header);
+  if (index < 0) throw new Error(`missing header ${header}`);
+  return within(row).getAllByRole("cell")[index];
+}
+
+describe("B2 独立反馈（B2-F01~F05）", () => {
+  beforeEach(() => {
+    fetchDashboardOptions.mockReset();
+    fetchDashboardSummary.mockReset();
+    fetchDashboardProjects.mockReset();
+    fetchDashboardParts.mockReset();
+    fetchDashboardValuation.mockReset();
+    fetchDashboardQuantityChecks.mockReset();
+    fetchDashboardOrders.mockReset();
+    fetchDashboardConsumption.mockReset();
+    fetchDashboardConsumptionIssues.mockReset();
+    fetchDashboardReceipts.mockReset();
+    downloadDashboardExport.mockReset();
+    fetchDashboardOptions.mockResolvedValue(optionsWithAmounts);
+    fetchDashboardSummary.mockResolvedValue(summaryFixture(true, "0.5"));
+    fetchDashboardProjects.mockResolvedValue(projectsFixture);
+    fetchDashboardParts.mockResolvedValue(partsQtyFixture);
+    fetchDashboardValuation.mockResolvedValue(valuationFixture("0.5"));
+    fetchDashboardQuantityChecks.mockResolvedValue(checksFixture);
+    fetchDashboardOrders.mockResolvedValue(ordersFixture);
+    fetchDashboardConsumption.mockResolvedValue(consumptionFixture(true));
+    fetchDashboardConsumptionIssues.mockResolvedValue(consumptionIssuesFixture);
+    fetchDashboardReceipts.mockResolvedValue(receiptsFixture);
+  });
+
+  // B2-F01：三域值双税并列——已提供两侧就都显示，不得由含税÷1.13 推算或漏一侧
+  for (const [domain, ex, inc] of [
+    ["purchase", "100.01", "113.01"],
+    ["sales", "200.02", "226.02"],
+    ["cost", "37.43", "42.29"],
+  ] as const) {
+    it(`B2-F01：${domain} 域双税并列（¥${inc} 含税 + ¥${ex} 不含税），未知侧不补 0`, () => {
+      const domains: Record<string, DomainValuationPayload> = {
+        [domain]: {
+          value_ex_tax: ex, value_inc_tax: inc,
+          bad_qty: "4", estimated_bad_qty: "3", pending_bad_qty: "1",
+          awaiting_ratio_bad_qty: "0", coverage_pct: 75, pending_reasons: {},
+          unit: "件", unit_breakdown: [], coverage_basis: "bad_receipts",
+        },
+      };
+      render(<DomainCoverageLines domains={domains} />);
+      expect(document.body.textContent).toContain(inc);
+      expect(document.body.textContent).toContain(ex);
+      expect(document.body.textContent).toContain("含税");
+      expect(document.body.textContent).toContain("不含税");
+    });
+  }
+
+  it("B2-F01：采购/销售参考双税并列（¥81.03 含税 + ¥71.71 不含税），不互相推算", () => {
+    render(<ReferenceLine
+      domain="purchase"
+      reference={{ available: true, inc_tax: "81.03", ex_tax: "71.71", sample_count: 2, order_count: 1 }} />);
+    expect(document.body.textContent).toContain("81.03");
+    expect(document.body.textContent).toContain("71.71");
+    render(<ReferenceLine
+      domain="sales"
+      reference={{ available: true, inc_tax: "226.02", ex_tax: "200.02", sample_count: 2, order_count: 1 }} />);
+    expect(document.body.textContent).toContain("226.02");
+    expect(document.body.textContent).toContain("200.02");
+  });
+
+  it("B2-F01：PN 表成本参考双税（42.29/37.43）+ 三域列头不再单侧「含税」", async () => {
+    fetchDashboardValuation.mockResolvedValueOnce({
+      ...valuationFixture("0.5"),
+      rows: [{
+        ...PART_ROW_QTY,
+        pn: "INDEPENDENT-COST-PN",
+        valuation: {
+          state: "ready",
+          estimated_bad_qty: "1.000", pending_bad_qty: "1.000", awaiting_ratio_bad_qty: "0.000",
+          coverage_pct: 50,
+          bad_estimated_value_inc_tax: "42.29", bad_estimated_value_ex_tax: "37.43",
+          domains: DOMAIN_COVERAGE_FIXTURE,
+        },
+        references: {
+          purchase: { available: false, unavailable_reason: "no_samples" },
+          sales: { available: false, unavailable_reason: "no_samples" },
+          cost: {
+            available: true, unit_cost_inc_tax: "42.29", unit_cost_ex_tax: "37.43",
+            sample_line_count: 2, coverage_pct: 100,
+          },
+          chosen: null, chosen_reason: null,
+        },
+      }],
+    });
+    renderPage("/maintenance/dashboard?tab=parts");
+    await screen.findByText("INDEPENDENT-COST-PN");
+    const row = screen.getByText("INDEPENDENT-COST-PN").closest("tr")!;
+    // 成本参考：持久化双税值分别显示，不是 42.29÷1.13 重建
+    expect(row.textContent).toContain("42.29");
+    expect(row.textContent).toContain("37.43");
+    // 列头不得单侧误述「含税」
+    expect(screen.getByRole("columnheader", { name: /三域参考/ }).textContent).toContain("不含税");
+    expect(screen.getByRole("columnheader", { name: /三域试算价值/ }).textContent).toContain("不含税");
+  });
+
+  it("B2-F02：域覆盖混合单位消费 unit_breakdown（件 66.7% / 台 0%），不把分桶画成全 —", () => {
+    render(
+      <DomainCoverageLines
+        domains={{
+          cost: {
+            bad_qty: null, estimated_bad_qty: null, pending_bad_qty: null,
+            awaiting_ratio_bad_qty: null, coverage_pct: null, pending_reasons: {},
+            unit: null, coverage_basis: "bad_receipts",
+            unit_breakdown: [
+              { unit: "件", bad_qty: "3", estimated_bad_qty: "2", pending_bad_qty: "1", awaiting_ratio_bad_qty: "0", coverage_pct: 66.7 },
+              { unit: "台", bad_qty: "4", estimated_bad_qty: "0", pending_bad_qty: "4", awaiting_ratio_bad_qty: "0", coverage_pct: 0 },
+            ],
+          },
+        }}
+      />,
+    );
+    const content = document.body.textContent ?? "";
+    expect(content).toContain("件");
+    expect(content).toContain("66.7%");
+    expect(content).toContain("台");
+    expect(content).toContain("0%");
+    // 件 已估 2：不得误报「域内无已估金额」
+    expect(content).not.toContain("域内无已估金额");
+  });
+
+  it("B2-F03：项目混合单位返还率按单位呈现分子/分母/率（件 50%（1 ÷ 2）/ 台 33.3%（1 ÷ 3））", async () => {
+    fetchDashboardProjects.mockResolvedValueOnce({
+      rows: [{
+        ...PROJECT_ROW,
+        unit: null,
+        unit_breakdown: [
+          { unit: "件", receipt_qty: "1", bad_receipt_qty: "1", issued_qty: "2", return_rate_pct: 50, rate_numerator: "1", rate_denominator: "2" },
+          { unit: "台", receipt_qty: "1", bad_receipt_qty: "1", issued_qty: "3", return_rate_pct: 33.3, rate_numerator: "1", rate_denominator: "3" },
+        ],
+        receipt_qty: null, bad_receipt_qty: null, scrap_receipt_qty: null, issued_qty: null,
+        exempt_issued_qty: null, pending_requirement_qty: null, unlinked_receipt_qty: null,
+        return_rate_pct: null, rate_numerator: null, rate_denominator: null,
+      }],
+      pagination: { page: 1, page_size: 20, total: 1 },
+    });
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    const row = screen.getByRole("link", { name: "项目一" }).closest("tr")!;
+    const cell = headerCell(row, "同期返还率");
+    expect(cell.textContent).toContain("件");
+    expect(cell.textContent).toContain("50%");
+    expect(cell.textContent).toContain("1 ÷ 2");
+    expect(cell.textContent).toContain("台");
+    expect(cell.textContent).toContain("33.3%");
+    expect(cell.textContent).toContain("1 ÷ 3");
+    // 率仍不可跨单位加总：提示保留
+    expect(cell.textContent).toContain("率不可加总");
+  });
+
+  it("B2-F04：需求单核对消费单位分桶（件 N7/R1/差6、台 N4/R2/差2），不再整域 —", async () => {
+    const buckets = [
+      { unit: "件", demand_qty: "7", received_qty: "1", difference_qty: "6", over_received_qty: "0" },
+      { unit: "台", demand_qty: "4", received_qty: "2", difference_qty: "2", over_received_qty: "0" },
+    ];
+    fetchDashboardQuantityChecks.mockResolvedValueOnce({
+      cards: {
+        checked_demand_qty: null, received_qty: null, known_difference_qty: null,
+        over_received_qty: null, pending_check_order_count: 0, inactive_order_count: 0,
+        unassigned_receipt_qty: "0", note: "独立单位核对", unit_breakdown: buckets,
+      },
+      rows: [{
+        ...checksFixture.rows[0],
+        order_no: "混单位需求单",
+        demand_qty: null, received_qty: null, difference_qty: null, over_received_qty: null,
+        unit: null, unit_breakdown: buckets,
+      }],
+      unassigned_receipts: [],
+      pagination: { page: 1, page_size: 20, total: 1 },
+    });
+    renderPage("/maintenance/dashboard?tab=checks");
+    await screen.findByText("混单位需求单");
+    const row = screen.getByText("混单位需求单").closest("tr")!;
+    expect(row.textContent).toContain("件");
+    expect(row.textContent).toContain("台");
+    expect(headerCell(row, "需求量 N").textContent).toContain("7");
+    expect(headerCell(row, "需求量 N").textContent).toContain("4");
+    expect(headerCell(row, "实收 R").textContent).toContain("1");
+    expect(headerCell(row, "实收 R").textContent).toContain("2");
+    // 卡片合计同样分桶呈现
+    expect(screen.getByTestId("checks-cards").textContent).toContain("件：7");
+    expect(screen.getByTestId("checks-cards").textContent).toContain("台：4");
+  });
+
+  it("B2-F05：无日期下单混合单位按单位呈现（件：7/台：4），不再只剩 —", async () => {
+    fetchDashboardOrders.mockResolvedValueOnce({
+      cards: {
+        order_qty: "0", order_count: 0,
+        undated_orders: {
+          order_qty: null, order_count: 2, note: "不混单位",
+          unit_breakdown: [{ unit: "件", order_qty: "7" }, { unit: "台", order_qty: "4" }],
+        },
+      },
+      rows: [{
+        ...ordersFixture.rows[0],
+        order_qty: "0", order_count: 0,
+        undated_order_qty: null, undated_order_count: 2,
+        undated_unit_breakdown: [{ unit: "件", order_qty: "7" }, { unit: "台", order_qty: "4" }],
+      }],
+    });
+    renderPage("/maintenance/dashboard?tab=consumption");
+    await screen.findByText(/无制单日期下单量/);
+    const kpi = screen.getByTestId("kpi-order-qty");
+    expect(kpi.textContent).toContain("件：7");
+    expect(kpi.textContent).toContain("台：4");
+    expect(kpi.textContent).toContain("未计入期间");
+    // 行内无日期列同样分桶（表内 UnitBreakdown 行）
+    expect(screen.getAllByText(/件：7/).length).toBeGreaterThan(1);
+  });
+
+  // ---- v3 契约同步（lane-b-backend-coverage-contract version 3）----
+
+  it("v3 §5.1：需求单无业务日实收按单位分桶在 unit_breakdown 条目内（件：3/台：2），不再只剩 —", async () => {
+    // v3 定稿拼写：行内 undated 量是 unit_breakdown 条目的 undated_receipt_qty
+    // （backend 未采纳独立 undated_receipt_unit_breakdown 键，见 v3-sync 结果）
+    const buckets = [
+      { unit: "件", demand_qty: "7", received_qty: "1", difference_qty: "6", over_received_qty: "0", undated_receipt_qty: "3" },
+      { unit: "台", demand_qty: "4", received_qty: "2", difference_qty: "2", over_received_qty: "0", undated_receipt_qty: "2" },
+    ];
+    fetchDashboardQuantityChecks.mockResolvedValueOnce({
+      cards: { ...checksFixture.cards },
+      rows: [{
+        ...checksFixture.rows[0],
+        order_no: "无日期混合单",
+        undated_receipt_qty: null,
+        unit: null, unit_breakdown: buckets,
+      }],
+      unassigned_receipts: [],
+      pagination: { page: 1, page_size: 20, total: 1 },
+    });
+    renderPage("/maintenance/dashboard?tab=checks");
+    await screen.findByText("无日期混合单");
+    const row = screen.getByText("无日期混合单").closest("tr")!;
+    const cell = headerCell(row, "无业务日实收");
+    expect(cell.textContent).toContain("件：3");
+    expect(cell.textContent).toContain("台：2");
+  });
+
+  it("v3 §3：未关联需求单实收混合单位平面 null + 每单位桶（卡 件：7/台：2；行内同桶），不并成 9", async () => {
+    fetchDashboardQuantityChecks.mockResolvedValueOnce({
+      cards: {
+        ...checksFixture.cards,
+        unassigned_receipt_qty: null,
+        unassigned_receipt_unit_breakdown: [
+          { unit: "件", received_qty: "7" },
+          { unit: "台", received_qty: "2" },
+        ],
+      },
+      rows: [checksFixture.rows[0]],
+      unassigned_receipts: [{
+        project_id: "p2", project_code: "MDD-P2", display_name: "项目二",
+        received_qty: null,
+        unit_breakdown: [{ unit: "件", received_qty: "7" }, { unit: "台", received_qty: "2" }],
+      }],
+      pagination: { page: 1, page_size: 20, total: 1 },
+    });
+    renderPage("/maintenance/dashboard?tab=checks");
+    await screen.findByText("项目二（MDD-P2）");
+    // 卡：平面 null → 混合单位 + 分桶小字；说明文案保留
+    const card = screen.getByText("未关联需求单实收").closest(".ant-card")!;
+    expect(card.textContent).toContain("混合单位");
+    expect(card.textContent).toContain("件：7");
+    expect(card.textContent).toContain("台：2");
+    expect(card.textContent).toContain("不摊入需求单行");
+    // 行内：received_qty 平面 null → 分桶行
+    const row = screen.getByText("项目二（MDD-P2）").closest("tr")!;
+    expect(row.textContent).toContain("件：7");
+    expect(row.textContent).toContain("台：2");
+  });
+
+  it("v3 §5.2：总览返还率混合单位消费 return_rate_breakdown（件 50%（1 ÷ 2）/ 台 33.3%（1 ÷ 3））", async () => {
+    fetchDashboardSummary.mockResolvedValueOnce({
+      ...summaryMixedFixture,
+      cards: {
+        ...summaryMixedFixture.cards,
+        return_rate_breakdown: [
+          { unit: "件", rate_numerator: "1.000", rate_denominator: "2.000", return_rate_pct: 50 },
+          { unit: "台", rate_numerator: "1.000", rate_denominator: "3.000", return_rate_pct: 33.3 },
+        ],
+      },
+    });
+    fetchDashboardOrders.mockResolvedValueOnce(ordersMixedFixture);
+    renderPage();
+    await waitFor(
+      () => expect(screen.getByTestId("kpi-rate")).toHaveTextContent("件：50%"),
+      { timeout: 5000 },
+    );
+    const rate = screen.getByTestId("kpi-rate");
+    expect(rate).toHaveTextContent("件：50%（1 ÷ 2）");
+    expect(rate).toHaveTextContent("台：33.3%（1 ÷ 3）");
+    // 率不可跨单位加总提示保留
+    expect(rate).toHaveTextContent("混合单位：分子分母不可跨单位加总");
   });
 });

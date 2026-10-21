@@ -946,3 +946,175 @@ def test_bf_static_projects_orders_export_expand_units(db):
     assert row_jian[undated_count_col] == "1"
     assert row_tai[undated_col] == "0.000"
     assert row_tai[undated_count_col] == ""
+
+
+def test_b3_disjoint_known_rate_units_flat_null(db):
+    """B3 独立验收 05:10（disjoint_known_rate_units）：只收件 2、只领台 3。
+
+    两侧各自单桶、但单位并集跨 件+台 → 分子/分母跨单位不可比，
+    平面率三字段 null（不得 66.7 / "2.000" / "3.000"）；两张数量卡
+    保持各自真实单桶值；每单位率在 return_rate_breakdown 照实（M11/M12）。
+    """
+    project = _project(db, "MDCV-B3R")
+    part_jian = _part(db, "MDCV-B3R-J", unit="件")
+    part_tai = _part(db, "MDCV-B3R-T", unit="台")
+    _receipt(db, project, part_jian, 2, condition="坏品",
+             occurred_at=datetime(2026, 10, 17, 8, tzinfo=UTC))
+    _issue(db, project, part_tai, 3, issue_date=date(2026, 10, 17))
+    db.commit()
+
+    body = client_for(db, username="mdcu-b3r-admin", role="admin").get(
+        f"{BASE}/summary", params=RANGE).json()
+    cards = body["cards"]
+    # 数量卡：各自身单桶真实值（不互相污染、不因率不可比清零）。
+    assert cards["receipt_qty"]["total"] == "2.000"
+    assert cards["receipt_qty"]["unit_breakdown"] == [
+        {"unit": "件", "total": "2.000", "part": "2.000", "machine": "0.000"}
+    ]
+    assert cards["issued_qty"]["total"] == "3.000"
+    assert cards["issued_qty"]["unit_breakdown"] == [
+        {"unit": "台", "total": "3.000"}
+    ]
+    # 平面率三字段：单位并集（件+台）跨单位 → 全 null。
+    assert cards["return_rate_pct"] is None
+    assert cards["rate_numerator"] is None
+    assert cards["rate_denominator"] is None
+    # 每单位率容器照实：件 无分母 null；台 真实 0%。
+    assert cards["return_rate_breakdown"] == [
+        {"unit": "件", "rate_numerator": "2.000",
+         "rate_denominator": "0.000", "return_rate_pct": None},
+        {"unit": "台", "rate_numerator": "0.000",
+         "rate_denominator": "3.000", "return_rate_pct": 0.0},
+    ]
+
+
+def test_b3_export_three_domain_dual_tax_amounts(db):
+    """B3 05:12（independently_averaged_cost_tax）：金额导出三域各给
+    含税/不含税双列（M10/R34-06 双税分别计算，不从含税反推）；混合单位
+    项目展开用**本单位**域值，不复制父域总额；quantity 角色无金额列。"""
+    from decimal import Decimal as D
+
+    pm = _project(db, "MDCV-B3X")
+    part_all = _part(db, "MDCV-B3X-A", unit="件")   # 三域全有参考
+    _purchase_ref(db, part_all)                       # 113.00 / 100.00
+    _sale(db, part_all, "mdcu-b3x-xs", price=D("226.00"))  # 226.00 / 200.00
+    _costed(db, pm, part_all, 2, unit_cost_ex=D("175.00"))  # 197.75 / 175.00
+    part_tai = _part(db, "MDCV-B3X-T", unit="台")    # 无参考：三域全待估
+    _receipt(db, pm, part_all, 2, condition="坏品",
+             occurred_at=datetime(2026, 10, 18, 8, tzinfo=UTC))
+    _receipt(db, pm, part_tai, 3, condition="坏品",
+             occurred_at=datetime(2026, 10, 18, 9, tzinfo=UTC))
+    db.commit()
+
+    client = client_for(db, username="mdcu-b3x-admin", role="admin")
+    # 锚点（默认比例 0.5）：2×113×0.5、2×226×0.5、2×197.75×0.5，
+    # 不含税侧独立从各自未税价计算（不从含税反推）。
+    api_domains = next(
+        row for row in client.get(
+            f"{BASE}/parts", params=RANGE).json()["rows"]
+        if row["pn"] == "MDCV-B3X-A")["valuation"]["domains"]
+    assert api_domains["purchase"]["value_inc_tax"] == "113.00"
+    assert api_domains["purchase"]["value_ex_tax"] == "100.00"
+    assert api_domains["sales"]["value_inc_tax"] == "226.00"
+    assert api_domains["sales"]["value_ex_tax"] == "200.00"
+    assert api_domains["cost"]["value_inc_tax"] == "197.75"
+    assert api_domains["cost"]["value_ex_tax"] == "175.00"
+
+    # parts CSV：三域各双税列 ↔ API 同值。
+    export = client.get(
+        f"{BASE}/export", params={"kind": "parts", "format": "csv", **RANGE})
+    csv_rows = _csv_rows(export.content)
+    header = csv_rows[0]
+    pn_col = header.index("PN")
+    (part_row,) = [r for r in csv_rows[1:] if r[pn_col] == "MDCV-B3X-A"]
+    for label, expect in (
+        ("三域-采购-坏件价值-含税", "113.00"),
+        ("三域-采购-坏件价值-不含税", "100.00"),
+        ("三域-销售-坏件价值-含税", "226.00"),
+        ("三域-销售-坏件价值-不含税", "200.00"),
+        ("三域-领用已计成本-价值-含税", "197.75"),
+        ("三域-领用已计成本-价值-不含税", "175.00"),
+    ):
+        col = header.index(label)
+        assert part_row[col] == expect, label
+
+    # parts XLSX：同列同值（数值单元格）。
+    xlsx = load_workbook(io.BytesIO(client.get(
+        f"{BASE}/export",
+        params={"kind": "parts", "format": "xlsx", **RANGE}).content)).active
+    xheader = [cell.value for cell in xlsx[1]]
+    x_pn = xheader.index("PN")
+    (x_row,) = [r for r in xlsx.iter_rows(min_row=2)
+                if r[x_pn].value == "MDCV-B3X-A"]
+    for label, expect in (
+        ("三域-采购-坏件价值-不含税", "100.00"),
+        ("三域-销售-坏件价值-不含税", "200.00"),
+        ("三域-领用已计成本-价值-不含税", "175.00"),
+    ):
+        cell = x_row[xheader.index(label)].value
+        assert D(str(cell)) == D(expect), label
+
+    # receipts CSV：行级三域双税；无参考行（台）待估 → 空，不是 0.00。
+    r_export = client.get(
+        f"{BASE}/export", params={"kind": "receipts", "format": "csv", **RANGE})
+    r_rows = _csv_rows(r_export.content)
+    r_header = r_rows[0]
+    r_pn = r_header.index("PN")
+    r_a, = [r for r in r_rows[1:] if r[r_pn] == "MDCV-B3X-A"]
+    r_t, = [r for r in r_rows[1:] if r[r_pn] == "MDCV-B3X-T"]
+    for label, expect in (
+        ("三域-采购-行价值-含税", "113.00"),
+        ("三域-采购-行价值-不含税", "100.00"),
+        ("三域-销售-行价值-含税", "226.00"),
+        ("三域-销售-行价值-不含税", "200.00"),
+        ("三域-领用已计成本-价值-含税", "197.75"),
+        ("三域-领用已计成本-价值-不含税", "175.00"),
+    ):
+        col = r_header.index(label)
+        assert r_a[col] == expect, label
+        assert r_t[col] == "", label          # 待估 → 空格
+
+    # projects（混合单位 件+台 展开）：本单位域值；待估单位不得复制父总额。
+    p_export = client.get(
+        f"{BASE}/export", params={"kind": "projects", "format": "csv", **RANGE})
+    p_rows = _csv_rows(p_export.content)
+    p_header = p_rows[0]
+    p_code, p_unit = p_header.index("项目编码"), p_header.index("单位")
+    by_unit = {r[p_unit]: r for r in p_rows[1:] if r[p_code] == "MDCV-B3X"}
+    for label, jian_expect in (
+        ("三域-采购-坏件价值-含税", "113.00"),
+        ("三域-采购-坏件价值-不含税", "100.00"),
+        ("三域-销售-坏件价值-含税", "226.00"),
+        ("三域-销售-坏件价值-不含税", "200.00"),
+        ("三域-领用已计成本-价值-含税", "197.75"),
+        ("三域-领用已计成本-价值-不含税", "175.00"),
+    ):
+        col = p_header.index(label)
+        assert by_unit["件"][col] == jian_expect, label
+        assert by_unit["台"][col] == "", label   # 无已估本桶 → 空，非父值
+
+    # projects XLSX：同展开同值/同空。
+    p_xlsx = load_workbook(io.BytesIO(client.get(
+        f"{BASE}/export",
+        params={"kind": "projects", "format": "xlsx", **RANGE}).content)).active
+    px_header = [cell.value for cell in p_xlsx[1]]
+    px_code, px_unit = px_header.index("项目编码"), px_header.index("单位")
+    px_by_unit = {r[px_unit].value: r for r in p_xlsx.iter_rows(min_row=2)
+                  if r[px_code].value == "MDCV-B3X"}
+    for label, expect in (
+        ("三域-采购-坏件价值-不含税", "100.00"),
+        ("三域-销售-坏件价值-不含税", "200.00"),
+        ("三域-领用已计成本-价值-不含税", "175.00"),
+    ):
+        col = px_header.index(label)
+        assert D(str(px_by_unit["件"][col].value)) == D(expect), label
+        assert px_by_unit["台"][col].value is None, label
+
+    # quantity 角色：无任何金额/三域列（列头都没有）。
+    username = "mdcu-b3x-mgr"
+    manager = client_for(db, username=username, role="maintenance_manager")
+    _assign_manager(db, username, pm)
+    m_rows = _csv_rows(manager.get(
+        f"{BASE}/export", params={"kind": "parts", "format": "csv", **RANGE}
+    ).content)
+    assert not any("三域" in h or "价值" in h for h in m_rows[0])

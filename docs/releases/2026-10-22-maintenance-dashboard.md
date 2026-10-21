@@ -128,6 +128,28 @@ PN 兜底三处）。新增 `test_range_all_and_literal_keyword_five_entrypoints
   改动均为加键、经静态核对无精确卡字典断言）。证据见
   `reviews/three-features-20261022/lane-b-backend-v3-sync-result.md`。
 
+### B3 独立验收三例返工（590588d 后、本轮 wt-three-maint）
+
+- **空窗口 500 已修**：`/consumption?range=custom` 范围内项目有授权但
+  所选日无领用行时，`window_units` 为空 dict，裸 `next(iter())` 触发
+  `RuntimeError: coroutine raised StopIteration` → HTTP 500。现空窗口
+  返回合法空 shape（`cards.unit=null`、`unit_breakdown=[]`、行 `[]`），
+  与空范围早退分支同形；全模块 `next(iter(`) 审计仅此一处可达空集。
+- **/summary 平面率跨单位已修**：只收 2 件 + 只领 3 台（两侧各自单桶、
+  单位不相交）时平面 `return_rate_pct/rate_numerator/rate_denominator`
+  不得合成 66.7%——现按分子分母**单位并集**判定可比性（并集 >1 单位 →
+  三字段 null）；`return_rate_breakdown` 每单位率照实（件 2/0 → null、
+  台 0/3 → 0.0），两张数量卡保持各自真实单桶 2.000/3.000。
+- **导出三域双税已补**（金额账号）：projects/parts/receipts 三域价值列
+  补齐含税+不含税双列（`三域-采购/销售/领用已计成本-…-含税/不含税`；
+  双税分别计算，不从含税反推）；缺估域 → 空格、真实 0 系数 → "0.00"；
+  projects 混合单位展开行用**本单位**域值，无已估本桶 → 空，不复制父域
+  总额；quantity 角色导出仍无任何金额/三域列头。
+- 验证：三例各 红→最小修→绿→变异红→逐字还原→绿；定向回归
+  coverage_units 16 passed、api+export_text+valuation+qty 153 passed、
+  consumption+api 定向 13 passed（真实 rc 见
+  `reviews/three-features-20261022/lane-b-backend-b3-empty-window-fix-result.md`）。
+
 ## 部署与回退
 
 - 无 Alembic 迁移、无配置项、无定时任务；部署仅随应用发布路由生效。

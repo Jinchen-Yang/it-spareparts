@@ -17,6 +17,7 @@ import {
   type DashboardFilters,
   type DomainReferencePayload,
   type DomainValuationPayload,
+  type UnitQtyEntry,
 } from "../../../api/maintenanceDashboard";
 
 const { Text } = Typography;
@@ -206,6 +207,49 @@ export function QtyBreakdownCell<T extends { unit: string | null }>({ flat, brea
   return <>—</>;
 }
 
+/** B2-F05：无制单日期下单说明（M01 卡副行）。order_qty 非空 → 平面一行；
+ * null + unit_breakdown → 混合单位 + 每单位真实下单量（不猜日期、不入
+ * 期间、不跨单位求和）；null 且无分桶 → 数量缺失「—」（不是 0）。 */
+export function UndatedOrdersNote({ undated }: {
+  undated: {
+    order_qty: string | null;
+    order_count: number;
+    note: string;
+    unit_breakdown?: UnitQtyEntry[];
+  };
+}) {
+  if (undated.order_qty != null) {
+    return (
+      <span>
+        无制单日期下单量 {qtyText(undated.order_qty)}
+        ／单数 {qtyText(String(undated.order_count))}
+        （未计入期间，不猜日期）
+      </span>
+    );
+  }
+  if (undated.unit_breakdown?.length) {
+    return (
+      <Space direction="vertical" size={0}>
+        <span>
+          无制单日期下单量 {UNIT_MIXED_TEXT}
+          ／单数 {qtyText(String(undated.order_count))}
+          （未计入期间，不猜日期）
+        </span>
+        <UnitBreakdown
+          entries={undated.unit_breakdown}
+          render={(e) => qtyText(e.order_qty)}
+        />
+      </Space>
+    );
+  }
+  return (
+    <span>
+      无制单日期下单量 —／单数 {qtyText(String(undated.order_count))}
+      （未计入期间，不猜日期）
+    </span>
+  );
+}
+
 // ---- 三域返件估值覆盖（契约 v2 §2，B-F07）----
 
 /** 域估值视角标签：成本域在此是估值分域（与三域参考列的「领用已计成本」
@@ -216,8 +260,24 @@ const DOMAIN_VALUATION_LABELS: Record<string, string> = {
   cost: "成本域",
 };
 
-/** 三域返件估值覆盖行：分值 + 域内已估/待估 + 覆盖率（bad_receipts 返件
- * 估值口径）。域无金额键 → 待估（域内无已估金额）；覆盖 0% 是真实 0%。 */
+/** 双税并列（B2-F01）：后端 ".2f" 原串直接展示（¥113.00 不是 ¥113——收到的
+ * 原值即证据），两侧各自接收到的都显示；只有一侧就只显示那一侧（未知侧
+ * 缺失，绝不补 0、绝不用含税÷1.13 推算）。两侧都没有 → null（由调用方给
+ * 缺失语义）。 */
+export function dualTaxText(
+  incTax: string | null | undefined,
+  exTax: string | null | undefined,
+): string | null {
+  const sides: string[] = [];
+  if (incTax !== null && incTax !== undefined) sides.push(`¥${incTax}（含税）`);
+  if (exTax !== null && exTax !== undefined) sides.push(`¥${exTax}（不含税）`);
+  return sides.length ? sides.join("／") : null;
+}
+
+/** 三域返件估值覆盖行：分值双税并列 + 域内已估/待估 + 覆盖率（bad_receipts
+ * 返件估值口径）。域无金额键且域内确无已估量 → 待估（域内无已估金额）；
+ * 有已估量但金额键缺失 → 金额未提供（不误报域全无事实）。混合单位 →
+ * 平面已估/待估/覆盖 null + unit_breakdown 分单位行，不跨单位求和（B2-F02）。 */
 export function DomainCoverageLines({ domains, testId }: {
   domains: Record<string, DomainValuationPayload>;
   testId?: string;
@@ -226,22 +286,57 @@ export function DomainCoverageLines({ domains, testId }: {
   if (!entries.length) return null;
   return (
     <span data-testid={testId}>
-      {entries.map(([domain, payload]) => (
-        <Text key={domain} style={{ fontSize: 12, display: "block" }}>
-          {DOMAIN_VALUATION_LABELS[domain] ?? domain}{" "}
-          {payload.value_inc_tax !== undefined
-            ? `${moneyText(payload.value_inc_tax)}（含税）`
-            : "待估（域内无已估金额）"}
-          {" · 已估 "}{qtyText(payload.estimated_bad_qty)}
-          {" / 待估 "}{qtyText(payload.pending_bad_qty)}
-          {" · 覆盖 "}{rateText(payload.coverage_pct)}（返件估值口径）
-        </Text>
-      ))}
+      {entries.map(([domain, payload]) => {
+        const hasEstimatedFact =
+          Number(payload.estimated_bad_qty ?? 0) > 0 ||
+          (payload.unit_breakdown ?? []).some(
+            (bucket) => Number(bucket.estimated_bad_qty ?? 0) > 0,
+          );
+        const money = dualTaxText(payload.value_inc_tax, payload.value_ex_tax)
+          ?? (hasEstimatedFact ? "金额未提供" : "待估（域内无已估金额）");
+        const flatCoverageKnown =
+          payload.estimated_bad_qty !== null ||
+          payload.pending_bad_qty !== null ||
+          payload.coverage_pct !== null;
+        return (
+          <span key={domain} style={{ display: "block" }}>
+            <Text style={{ fontSize: 12 }}>
+              {DOMAIN_VALUATION_LABELS[domain] ?? domain} {money}
+              {flatCoverageKnown
+                ? ` · 已估 ${qtyText(payload.estimated_bad_qty)}`
+                  + ` / 待估 ${qtyText(payload.pending_bad_qty)}`
+                  + ` · 覆盖 ${rateText(payload.coverage_pct)}（返件估值口径）`
+                : null}
+            </Text>
+            {!flatCoverageKnown && payload.unit_breakdown?.length
+              ? payload.unit_breakdown.map((bucket) => (
+                <Text
+                  key={bucket.unit ?? "__unresolved__"}
+                  type="secondary"
+                  style={{ fontSize: 12, display: "block" }}
+                >
+                  {unitBucketText(bucket.unit)}：已估 {qtyText(bucket.estimated_bad_qty)}
+                  {" / 待估 "}{qtyText(bucket.pending_bad_qty)}
+                  {" · 覆盖 "}{rateText(bucket.coverage_pct)}（返件估值口径）
+                </Text>
+              ))
+              : null}
+            {!flatCoverageKnown && !payload.unit_breakdown?.length ? (
+              <Text style={{ fontSize: 12 }}>
+                {" "}· 已估 {qtyText(payload.estimated_bad_qty)}
+                {" / 待估 "}{qtyText(payload.pending_bad_qty)}
+                {" · 覆盖 "}{rateText(payload.coverage_pct)}（返件估值口径）
+              </Text>
+            ) : null}
+          </span>
+        );
+      })}
     </span>
   );
 }
 
-/** 单域市场参考一行：可用 → 金额 + 样本数；不可用 → 原因（不显示 ¥0）。 */
+/** 单域市场参考一行：可用 → 双税并列 + 样本数（B2-F01）；不可用 → 原因
+ * （不显示 ¥0；两侧都没收到 → ¥— 缺失，不互相推算）。 */
 export function ReferenceLine({ domain, reference }: {
   domain: string; reference: DomainReferencePayload;
 }) {
@@ -252,9 +347,10 @@ export function ReferenceLine({ domain, reference }: {
       </Text>
     );
   }
+  const money = dualTaxText(reference.inc_tax, reference.ex_tax);
   return (
     <Text style={{ fontSize: 12 }}>
-      {DOMAIN_LABELS[domain] ?? domain} ¥{reference.inc_tax ?? "—"}
+      {DOMAIN_LABELS[domain] ?? domain} {money ?? "¥—"}
       {reference.order_count !== undefined ? `（${reference.order_count} 单）` : null}
       {reference.low_confidence ? (
         <Text type="warning" style={{ fontSize: 12 }}> 低样本</Text>

@@ -503,7 +503,13 @@ def daily_consumption(
         sum((b["issued"] for b in window_units.values()), _ZERO)
         if not window_mixed else None
     )
-    cards["unit"] = next(iter(window_units)) if not window_mixed else None
+    # 空窗口（范围内无领用行）：window_units 为空 dict——next(iter({})) 会
+    # StopIteration→500（B3 独立验收反例）；合法空 shape=unit None/空桶，
+    # 与空范围早退分支同形（issued_qty 下面重算为 "0.000"）。
+    cards["unit"] = (
+        next(iter(window_units))
+        if window_units and not window_mixed else None
+    )
     if include_amounts:
         window_issued = sum((b["issued"] for b in window_units.values()), _ZERO)
         window_costed = sum((b["costed"] for b in window_units.values()), _ZERO)
