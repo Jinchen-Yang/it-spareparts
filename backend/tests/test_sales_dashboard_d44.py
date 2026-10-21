@@ -616,3 +616,62 @@ def test_options_categories_and_brands(db, lines_seeded):
     assert {c["value"]: c["orders"] for c in data["categories"]} == {
         "内存": 4, "硬盘": 1, "未分类": 1}
     assert {b["value"]: b["orders"] for b in data["brands"]} == {"B": 5, "C": 1}
+
+
+# ================= PR-3：金额直方图 / 订单导出 =================
+
+HIST = "/api/sales/analytics/amount-histogram"
+EXPORT = "/api/sales/analytics/orders/export"
+
+
+def test_amount_histogram_bins_align_to_1k(db, seeded):
+    client = _client(db, "d44-hist", role="boss")
+    data = client.get(HIST, params={"amount_max": "1"}).json()   # 金额区间本身不约束分布
+    assert data["max"] == 8000.0
+    assert [(b["lo"], b["hi"]) for b in data["bins"]][:2] == [(0.0, 1000.0), (1000.0, 2000.0)]
+    assert [b["orders"] for b in data["bins"]] == [0, 1, 1, 1, 0, 0, 0, 1]
+    assert data["negative_orders"] == 1 and data["empty_orders"] == 1
+    assert sum(b["orders"] for b in data["bins"]) + 2 == 6
+
+
+def test_amount_histogram_masked_basis_403(db, seeded):
+    client = _client(db, "d44-hist-mask", role="boss", overrides={"data_purchase_cost": False})
+    assert client.get(HIST).status_code == 403
+    rev = client.get(HIST, params={"amount_basis": "revenue"})
+    assert rev.status_code == 200 and rev.json()["max"] == 7000.0
+
+
+def _csv_rows(resp):
+    import csv
+    import io
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/csv")
+    return list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+
+
+def test_orders_export_matches_list_order(db, seeded):
+    client = _client(db, "d44-export", role="boss")
+    rows = _csv_rows(client.get(EXPORT, params={"sort": "order_date", "order": "asc"}))
+    assert rows[0] == ["订单号", "订单日期", "客户", "客户类型", "销售人员", "业务类型",
+                       "不含税金额", "含税订单金额", "营收", "毛利", "毛利率"]
+    assert [r[0] for r in rows[1:]] == [f"SO-A{i}" for i in range(1, 7)]
+    a4 = rows[4]
+    assert a4[6] == "-500.0"                       # 负数是数值，不被当公式加撇号
+    assert rows[5][2] == ""                        # A5 无客户
+
+
+def test_orders_export_drops_masked_columns(db, seeded):
+    client = _client(db, "d44-export-mask", role="boss", overrides={
+        "data_purchase_cost": False, "data_profit": False, "data_customer": False})
+    rows = _csv_rows(client.get(EXPORT))
+    assert rows[0] == ["订单号", "订单日期", "销售人员", "业务类型", "营收"]
+    # 默认按不含税排序被遮蔽 → 退回营收降序
+    assert rows[1][0] == "SO-A6"
+
+
+def test_orders_export_row_limit_413(db, seeded, monkeypatch):
+    from app.services import sales_dashboard
+    monkeypatch.setattr(sales_dashboard, "EXPORT_MAX_ROWS", 2)
+    client = _client(db, "d44-export-413", role="boss")
+    assert client.get(EXPORT).status_code == 413
+    assert client.get(EXPORT, params={"customer_type": "直客"}).status_code == 200

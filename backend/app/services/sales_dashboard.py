@@ -429,3 +429,74 @@ def summary_compare(db: Session, **filters) -> dict | None:
     data = _summary(db, **_shift_filters(filters, window))
     return {"date_from": window[0].isoformat(), "date_to": window[1].isoformat(),
             "kpi": data["kpi"]}
+
+
+HISTOGRAM_BINS = 20
+HISTOGRAM_STEP = Decimal(1000)   # 与拖动条 1k 步长对齐（D-44 §7）
+
+
+def amount_histogram(db: Session, *, bins: int = HISTOGRAM_BINS, **filters) -> dict:
+    """拖动条上方的订单数分布（D-44 方案 §3.5，参考用，不是固定档位）。
+
+    范围 = 当前其他筛选下（不含金额区间本身）口径金额的 0 至最大值；段宽取 1k 的
+    整数倍，使每段边界落在拖动条刻度上。负金额单与无金额单单独计数，不并入任何段。
+    """
+    basis = filters.get("amount_basis") or "amount_ex_tax"
+    for k in ("amount_min", "amount_max", "include_negative", "include_empty"):
+        filters.pop(k, None)
+    base, _ = _order_query(**filters)
+    sub = base.subquery()
+    col = sub.c[basis]
+    agg = db.execute(select(
+        func.max(col).label("mx"),
+        func.count().filter(col < 0).label("neg"),
+        func.count().filter(col.is_(None)).label("empty"),
+    ).select_from(sub)).one()
+    mx = agg.mx if agg.mx is not None and agg.mx > 0 else None
+    out_bins: list[dict] = []
+    if mx is not None:
+        step = HISTOGRAM_STEP
+        width = max(step, -(-Decimal(mx) / bins // step) * step)    # 向上取整到 1k
+        n = int(-(-Decimal(mx) // width)) or 1
+        idx = func.least(func.floor(col / width), n - 1).label("idx")
+        counts = {int(r.idx): r.orders for r in db.execute(
+            select(idx, func.count().label("orders")).select_from(sub)
+            .where(col >= 0).group_by(idx)).all()}
+        out_bins = [
+            {"lo": _f(width * i), "hi": _f(width * (i + 1)), "orders": counts.get(i, 0)}
+            for i in range(n)
+        ]
+    return {
+        "amount_basis": basis,
+        "max": _f(agg.mx),
+        "bins": out_bins,
+        "negative_orders": agg.neg,
+        "empty_orders": agg.empty,
+    }
+
+
+EXPORT_MAX_ROWS = 10000
+# (键, 表头)：导出列与订单列表同口径；被遮蔽的列整列不导出
+EXPORT_COLUMNS = (
+    ("order_no", "订单号"), ("order_date", "订单日期"), ("customer", "客户"),
+    ("customer_type", "客户类型"), ("salesperson", "销售人员"), ("business_type", "业务类型"),
+    ("amount_ex_tax", "不含税金额"), ("amount_inc_tax", "含税订单金额"), ("revenue", "营收"),
+    ("gross_profit", "毛利"), ("gross_margin", "毛利率"),
+)
+
+
+def export_orders(db: Session, *, sort: str, order: str, **filters) -> tuple[int, list[dict]]:
+    """订单导出取数：与 /orders 同筛选同排序（复用 orders()），返回 (总数, 行)。
+
+    总数超过 EXPORT_MAX_ROWS 时只返回总数，由 API 层拒绝（提示收窄区间）。
+    """
+    from app.services.sales_analytics import orders as _orders
+
+    probe = _orders(db, None, sort=sort, order=order, page=1, page_size=1, **filters)
+    total = probe["total"]
+    if total > EXPORT_MAX_ROWS or total == 0:
+        return total, []
+    data = _orders(db, None, sort=sort, order=order, page=1, page_size=total, **filters)
+    for item in data["items"]:
+        item.pop("reconciliation", None)
+    return total, data["items"]

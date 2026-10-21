@@ -294,6 +294,60 @@ def trend(
     return apply_field_visibility(data, ctx)
 
 
+@router.get("/amount-histogram")
+def amount_histogram(
+    f: SalesFilters = Depends(sales_filters),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_sales_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """金额拖动条上方的订单数分布（D-44 §7）。所选口径被遮蔽时 403：分布本身就是金额信息。"""
+    _guards(ctx, f)
+    if is_field_hidden(ctx, f.amount_basis):
+        raise HTTPException(status_code=403, detail="当前账号无该金额口径权限")
+    record_access_log(ctx, "sales_analytics_amount_histogram", "sales_analytics", f.log_echo())
+    return sales_dashboard.amount_histogram(db, **_service_filters(f))
+
+
+@router.get("/orders/export")
+def orders_export(
+    f: SalesFilters = Depends(sales_filters),
+    sort: str = Query(
+        "amount_ex_tax",
+        pattern="^(amount_ex_tax|amount_inc_tax|revenue|gross_profit|order_date|customer|salesperson)$",
+    ),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_sales_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    """订单 CSV 导出（D-44 方案 §3.6）：与列表同筛选、同排序、同脱敏；≤10,000 行。
+
+    被遮蔽字段整列不导出（而非导出空列），排序键同列表的防泄漏回退。
+    """
+    from app.api.maintenance import _csv_stream
+
+    _guards(ctx, f)
+    sort = effective_sort(ctx, sort)
+    record_access_log(ctx, "sales_analytics_orders_export", "sales_analytics", {
+        **f.log_echo(), "sort": sort, "order": order,
+    })
+    total, items = sales_dashboard.export_orders(
+        db, sort=sort, order=order, **_service_filters(f))
+    if total > sales_dashboard.EXPORT_MAX_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"共 {total} 单，超过导出上限 {sales_dashboard.EXPORT_MAX_ROWS}，请收窄区间或筛选",
+        )
+    columns = [(k, label) for k, label in sales_dashboard.EXPORT_COLUMNS
+               if not is_field_hidden(ctx, k)]
+    rows = ([item.get(k) for k, _label in columns] for item in items)
+    return _csv_stream([label for _k, label in columns], rows,
+                       "sales-orders.csv", db=db)
+
+
 @router.get("/orders/{order_id}")
 def order_detail(
     order_id: int = Path(..., ge=1, le=PG_INT_MAX),
