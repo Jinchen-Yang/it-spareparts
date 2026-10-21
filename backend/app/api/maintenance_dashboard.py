@@ -130,14 +130,16 @@ def _filters(
         ) from exc
 
 
-def _log(
-    ctx: UserContext, action: str, *, scoped: bool | None = None, **flags: bool
-) -> None:
-    """审计只记标志位，不落关键词/项目 ID 等自由文本（pn-ranking 同款）。"""
+def _audit_flags(scoped: bool | None = None, **flags: bool | str) -> dict:
+    """审计详情只记标志位，不落关键词/项目 ID 等自由文本（pn-ranking 同款）。
+
+    action 名由各端点以字面量直传 record_access_log——保持可静态扫描
+    （tests/test_access_log_action_width.py 的字面量列宽契约）。
+    """
     details = dict(flags)
     if scoped is not None:
         details["scope"] = "full" if not scoped else "scoped"
-    record_access_log(ctx, action, "maintenance_dashboard", details)
+    return details
 
 
 @router.get("/options")
@@ -179,8 +181,9 @@ def options(
     }
     if visible:
         payload["valuation_policy"] = policy.policy_payload()
-    _log(ctx, "maintenance_dashboard_options", amounts=visible,
-         scoped=scope is not None)
+    record_access_log(ctx, "maintenance_dashboard_options",
+                      "maintenance_dashboard",
+                      _audit_flags(amounts=visible, scoped=scope is not None))
     return payload
 
 
@@ -209,9 +212,11 @@ def summary(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(
-        ctx, "maintenance_dashboard_summary", scoped=filters.scope is not None,
-        amounts=_amounts_visible(ctx), keyword=bool(q and q.strip()),
+    record_access_log(
+        ctx, "maintenance_dashboard_summary", "maintenance_dashboard",
+        _audit_flags(scoped=filters.scope is not None,
+                     amounts=_amounts_visible(ctx),
+                     keyword=bool(q and q.strip())),
     )
     return dash.build_summary_payload(
         db, filters, include_amounts=_amounts_visible(ctx)
@@ -244,9 +249,9 @@ def projects(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(
-        ctx, "maintenance_dashboard_projects", scoped=filters.scope is not None,
-        keyword=bool(q),
+    record_access_log(
+        ctx, "maintenance_dashboard_projects", "maintenance_dashboard",
+        _audit_flags(scoped=filters.scope is not None, keyword=bool(q)),
     )
     rows = dash.sort_project_rows(
         dash.build_project_rows(
@@ -283,8 +288,10 @@ def parts(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(ctx, "maintenance_dashboard_parts", scoped=filters.scope is not None,
-         keyword=bool(q))
+    record_access_log(ctx, "maintenance_dashboard_parts",
+                      "maintenance_dashboard",
+                      _audit_flags(scoped=filters.scope is not None,
+                                   keyword=bool(q)))
     rows = dash.sort_part_rows(
         dash.build_part_rows(
             db, filters, include_amounts=_amounts_visible(ctx)
@@ -324,8 +331,10 @@ def valuation(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(ctx, "maintenance_dashboard_valuation",
-         scoped=filters.scope is not None, amounts=True)
+    record_access_log(ctx, "maintenance_dashboard_valuation",
+                      "maintenance_dashboard",
+                      _audit_flags(scoped=filters.scope is not None,
+                                   amounts=True))
     rows = dash.sort_part_rows(
         dash.build_part_rows(db, filters, include_amounts=True), sort
     )
@@ -391,9 +400,10 @@ def receipts(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(
-        ctx, "maintenance_dashboard_receipts", scoped=filters.scope is not None,
-        condition=bool(test_result), source=bool(source),
+    record_access_log(
+        ctx, "maintenance_dashboard_receipts", "maintenance_dashboard",
+        _audit_flags(scoped=filters.scope is not None,
+                     condition=bool(test_result), source=bool(source)),
     )
     rows, total = dash.build_receipt_detail_rows(
         db, filters,
@@ -448,8 +458,9 @@ def quantity_checks(
         ) from exc
     narrowed = _narrow_scope_by_business_type(db, scope, business_type)
     projects = dash._project_rows(db, narrowed)
-    _log(ctx, "maintenance_dashboard_quantity_checks",
-         scoped=narrowed is not None)
+    record_access_log(ctx, "maintenance_dashboard_quantity_checks",
+                      "maintenance_dashboard",
+                      _audit_flags(scoped=narrowed is not None))
     payload = dash.build_quantity_checks_payload(
         db, narrowed,
         projects=projects,
@@ -521,9 +532,10 @@ def export(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
         project=project, business_type=business_type, q=q,
     )
-    _log(
-        ctx, "maintenance_dashboard_export", scoped=filters.scope is not None,
-        amounts=visible, kind=kind,
+    record_access_log(
+        ctx, "maintenance_dashboard_export", "maintenance_dashboard",
+        _audit_flags(scoped=filters.scope is not None,
+                     amounts=visible, kind=kind),
     )
     if kind == "projects":
         rows = dash.build_project_rows(db, filters, include_amounts=visible)
