@@ -602,6 +602,8 @@ FIELD_GROUPS = {
         "customer_phone",
         "customer",
         "end_customer",
+        # 销售看板（D-44 §2/§11）：客户类型随客户信息遮蔽
+        "customer_type",
     ],
     # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
     # 逐行 unit_price 一并遮掉（个别成交价对销售也不外露）。销售要的是「聚合成交参考价」，
@@ -658,6 +660,11 @@ FIELD_GROUPS = {
         # 漏登记会绕过 data_purchase_cost 泄漏（#397 (4)）。
         "amount_inc_tax_total",
         "amount_ex_tax_total",
+        # 销售看板（D-44 §7）：拖动条金额上限——与三金额同组。已配成本营收
+        # revenue_costed 不登记：profit/part_ranking 同名键一直公开（与 dashboard.kpi
+        # 的 sales_costed_ex_tax 一致），登记会改变既有页面的可见性
+        "amount_ex_tax_max",
+        "amount_inc_tax_max",
         "price_ex",
         "price_inc",
         "price_ex_min",
