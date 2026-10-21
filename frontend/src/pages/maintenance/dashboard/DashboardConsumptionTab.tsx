@@ -12,13 +12,14 @@
  *   （有权时）成本证据，可核对；导出走完整筛选集（不下钻参数）。
  * - 该页签不吃关键词 q（orders/consumption 端点无此参数）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Alert, Button, Card, Drawer, Row, Space, Table, Tag, Typography,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { Link } from "react-router-dom";
 import { TaxMoney } from "../../../context/TaxBasis";
+import { COLORS } from "../../../theme";
 import {
   fetchDashboardConsumption,
   fetchDashboardConsumptionIssues,
@@ -503,6 +504,7 @@ export default function DashboardConsumptionTab({
       </Card>
 
       <Drawer
+        rootStyle={{ "--mb-text-3": COLORS.text2 } as CSSProperties}
         title={drillTarget
           ? `领用明细：${drillTarget.issue_date} · ${drillTarget.display_name}`
           : "领用明细"}

@@ -6,10 +6,11 @@
  * 数量列人人可见；导出走完整筛选集（CSV/XLSX，含本下钻维度）。
  * 只读：本组件不产生任何写操作。请求落地前做序号 + 会话双重守卫（DL-010）。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Alert, Button, Drawer, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { TaxMoney } from "../../../context/TaxBasis";
+import { COLORS } from "../../../theme";
 import {
   fetchDashboardReceipts,
   type DashboardFilters,
@@ -161,6 +162,7 @@ export default function ReceiptsDrillDrawer({
 
   return (
     <Drawer
+      rootStyle={{ "--mb-text-3": COLORS.text2 } as CSSProperties}
       title={drill ? `返件明细：${drill.title}` : "返件明细"}
       width={Math.min(900, typeof window === "undefined" ? 900 : window.innerWidth - 32)}
       open={drill !== null}
