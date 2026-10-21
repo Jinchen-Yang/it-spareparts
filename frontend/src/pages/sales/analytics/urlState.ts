@@ -12,8 +12,15 @@ import {
 import { businessToday } from "../../../utils/date";
 import {
   SALES_ANALYTICS_SORT_KEYS,
+  SALES_GROUP_DIMS,
+  SALES_GROUP_SORTS,
+  type SalesAmountBasis,
   type SalesAnalyticsFilters,
   type SalesAnalyticsSortKey,
+  type SalesGroupDim,
+  type SalesGroupSort,
+  type SalesTrendGranularity,
+  type SortOrder,
 } from "../../../api/salesAnalytics";
 
 import {
@@ -45,13 +52,50 @@ export const AMOUNT_SORT_KEY: Record<AmountKey, SalesAnalyticsSortKey> = {
 /** 默认按不含税金额倒序（与后端 sort 缺省一致；amount_ex_tax 100% 有值）。 */
 export const DEFAULT_SORT: SalesAnalyticsSortKey = "amount_ex_tax";
 
+/** 页签（D-44）：默认订单明细——沿用 D-41「打开即大单列表」与旧分享链。 */
+export const SALES_TABS = ["overview", "groups", "trend", "orders"] as const;
+export type SalesTab = (typeof SALES_TABS)[number];
+export const DEFAULT_TAB: SalesTab = "orders";
+export const DEFAULT_GROUP_BY: SalesGroupDim = "customer";
+export const DEFAULT_GROUP_TOP = 20;
+export const GROUP_TOP_OPTIONS = [10, 20, 50, 0] as const;
+const AMOUNT_BASES: SalesAmountBasis[] = ["amount_ex_tax", "amount_inc_tax", "revenue"];
+const GRANULARITIES: SalesTrendGranularity[] = ["day", "week", "month"];
+/** 金额拖动条步长（D-44 §7：1k）；URL 中的金额按此取整。 */
+export const AMOUNT_STEP = 1000;
+
 export interface SalesAnalyticsUrlState {
   preset: DatePreset;
   from: string | null;
   to: string | null;
   businessType: string[];
+  /** 旧版子串模糊（兼容旧链接，界面不再提供输入）。 */
   customer: string | null;
   salesperson: string | null;
+  /** D-44：客户规范名 / 客户类型 / 销售人员 / 商品大类 / 品牌多选精确匹配。 */
+  customers: string[];
+  customerTypes: string[];
+  salespeople: string[];
+  categories: string[];
+  brands: string[];
+  /** 金额区间（D-44 §7）：口径 + 闭区间两端（null = 不限）+ 负金额 / 无金额开关。 */
+  amountBasis: SalesAmountBasis;
+  amountMin: number | null;
+  amountMax: number | null;
+  includeNegative: boolean;
+  includeEmpty: boolean;
+  /** 订单列表排序方向（D-44 §4）。 */
+  order: SortOrder;
+  tab: SalesTab;
+  groupBy: SalesGroupDim;
+  groupSort: SalesGroupSort;
+  groupOrder: SortOrder;
+  /** 0 = 全部。 */
+  groupTop: number;
+  /** null = 按区间长度自动推荐。 */
+  granularity: SalesTrendGranularity | null;
+  /** 对比上月（D-44 §9），默认开。 */
+  compare: boolean;
   amounts: AmountKey[];
   sort: SalesAnalyticsSortKey;
   page: number;
@@ -74,6 +118,25 @@ export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlSt
     businessType: parseUrlList(sp, "business_type"),
     customer: sp.get("customer") || null,
     salesperson: sp.get("salesperson") || null,
+    customers: parseUrlList(sp, "customer_name"),
+    customerTypes: parseUrlList(sp, "customer_type"),
+    salespeople: parseUrlList(sp, "salesperson_name"),
+    categories: parseUrlList(sp, "category"),
+    brands: parseUrlList(sp, "brand"),
+    amountBasis: oneOf(sp.get("amount_basis"), AMOUNT_BASES, "amount_ex_tax"),
+    amountMin: parseAmount(sp.get("amin")),
+    amountMax: parseAmount(sp.get("amax")),
+    includeNegative: sp.get("neg") !== "0",
+    includeEmpty: sp.get("empty") !== "0",
+    order: sp.get("order") === "asc" ? "asc" : "desc",
+    tab: oneOf(sp.get("tab"), SALES_TABS, DEFAULT_TAB),
+    groupBy: oneOf(sp.get("group_by"), SALES_GROUP_DIMS, DEFAULT_GROUP_BY),
+    groupSort: oneOf(sp.get("gsort"), SALES_GROUP_SORTS, "amount_ex_tax"),
+    groupOrder: sp.get("gorder") === "asc" ? "asc" : "desc",
+    groupTop: oneOf(Number(sp.get("gtop") ?? DEFAULT_GROUP_TOP), GROUP_TOP_OPTIONS, DEFAULT_GROUP_TOP),
+    granularity: (GRANULARITIES as string[]).includes(sp.get("gran") ?? "")
+      ? (sp.get("gran") as SalesTrendGranularity) : null,
+    compare: sp.get("compare") !== "0",
     amounts: selected,
     sort: (SALES_ANALYTICS_SORT_KEYS as readonly string[]).includes(sortRaw ?? "")
       ? (sortRaw as SalesAnalyticsSortKey)
@@ -84,6 +147,18 @@ export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlSt
     includeReturns: sp.get("include_returns") === "1",
     orderId: parsePositiveId(sp.get("order_id")),
   };
+}
+
+function oneOf<T extends string | number>(raw: unknown, allowed: readonly T[], fallback: T): T {
+  return (allowed as readonly unknown[]).includes(raw) ? (raw as T) : fallback;
+}
+
+/** 金额 URL 值：有限数字，按 1k 步长取整（D-44 §7）；非法 → null（不限）。 */
+export function parseAmount(raw: string | null): number | null {
+  if (raw == null || raw.trim() === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n / AMOUNT_STEP) * AMOUNT_STEP;
 }
 
 // ---------------------------------------------------------------- 序列化（状态 → URL）
@@ -109,6 +184,38 @@ export function serializeSalesAnalyticsState(
   if (next.salesperson !== undefined) {
     out.salesperson = next.salesperson || undefined;
   }
+  if (next.customers !== undefined) out.customer_name = serializeUrlList(next.customers);
+  if (next.customerTypes !== undefined) out.customer_type = serializeUrlList(next.customerTypes);
+  if (next.salespeople !== undefined) out.salesperson_name = serializeUrlList(next.salespeople);
+  if (next.categories !== undefined) out.category = serializeUrlList(next.categories);
+  if (next.brands !== undefined) out.brand = serializeUrlList(next.brands);
+  if (next.amountBasis !== undefined) {
+    out.amount_basis = next.amountBasis === "amount_ex_tax" ? undefined : next.amountBasis;
+  }
+  if (next.amountMin !== undefined) {
+    out.amin = next.amountMin == null ? undefined : String(next.amountMin);
+  }
+  if (next.amountMax !== undefined) {
+    out.amax = next.amountMax == null ? undefined : String(next.amountMax);
+  }
+  if (next.includeNegative !== undefined) out.neg = next.includeNegative ? undefined : "0";
+  if (next.includeEmpty !== undefined) out.empty = next.includeEmpty ? undefined : "0";
+  if (next.order !== undefined) out.order = next.order === "desc" ? undefined : next.order;
+  if (next.tab !== undefined) out.tab = next.tab === DEFAULT_TAB ? undefined : next.tab;
+  if (next.groupBy !== undefined) {
+    out.group_by = next.groupBy === DEFAULT_GROUP_BY ? undefined : next.groupBy;
+  }
+  if (next.groupSort !== undefined) {
+    out.gsort = next.groupSort === "amount_ex_tax" ? undefined : next.groupSort;
+  }
+  if (next.groupOrder !== undefined) {
+    out.gorder = next.groupOrder === "desc" ? undefined : next.groupOrder;
+  }
+  if (next.groupTop !== undefined) {
+    out.gtop = next.groupTop === DEFAULT_GROUP_TOP ? undefined : String(next.groupTop);
+  }
+  if (next.granularity !== undefined) out.gran = next.granularity ?? undefined;
+  if (next.compare !== undefined) out.compare = next.compare ? undefined : "0";
   if (next.amounts !== undefined) {
     out.basis = amountsIsDefault(next.amounts) ? undefined : serializeUrlList(next.amounts);
   }
@@ -133,6 +240,11 @@ export function serializeSalesAnalyticsState(
   return out;
 }
 
+const SALES_LIST_KEYS = [
+  "business_type", "basis", "customer_name", "customer_type", "salesperson_name",
+  "category", "brand",
+];
+
 /** 筛选/分页默认 replace；下钻导航显式 push；resetPage 回到第 1 页。 */
 export function useSalesAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams) {
   return (
@@ -140,7 +252,7 @@ export function useSalesAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchP
     opts?: AnalyticsPatchOptions,
   ) => {
     const patch = serializeSalesAnalyticsState(opts?.resetPage ? { ...next, page: 1 } : next);
-    writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["business_type", "basis"]);
+    writeAnalyticsUrlPatch(sp, setSp, patch, opts, SALES_LIST_KEYS);
   };
 }
 
@@ -168,5 +280,15 @@ export function toSalesApiFilters(
     ...(state.businessType.length ? { business_type: state.businessType } : {}),
     ...(customer ? { customer } : {}),
     ...(salesperson ? { salesperson } : {}),
+    ...(state.customers.length ? { customer_name: state.customers } : {}),
+    ...(state.customerTypes.length ? { customer_type: state.customerTypes } : {}),
+    ...(state.salespeople.length ? { salesperson_name: state.salespeople } : {}),
+    ...(state.categories.length ? { category: state.categories } : {}),
+    ...(state.brands.length ? { brand: state.brands } : {}),
+    ...(state.amountBasis !== "amount_ex_tax" ? { amount_basis: state.amountBasis } : {}),
+    ...(state.amountMin != null ? { amount_min: state.amountMin } : {}),
+    ...(state.amountMax != null ? { amount_max: state.amountMax } : {}),
+    ...(!state.includeNegative ? { include_negative: false } : {}),
+    ...(!state.includeEmpty ? { include_empty: false } : {}),
   };
 }

@@ -86,6 +86,8 @@ const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage"
 // 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。
 const loadMaintenanceHome = () => import("./pages/maintenance/MaintenanceHomePage");
 const loadMaintenanceAnalytics = () => import("./pages/maintenance/MaintenanceAnalyticsPage");
+const loadMaintenanceDashboard = () =>
+  import("./pages/maintenance/MaintenanceDashboardPage");
 const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadMaintenanceDemands = () =>
@@ -108,10 +110,19 @@ const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const SalesAnalyticsPage = lazy(loadSalesAnalytics);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseAnalyticsPage = lazy(loadPurchaseAnalytics);
+
+/** 销售 / 采购分析角色硬界（后端契约 §0/§9/§10.8）：仅 admin / boss 可访问——
+ * 即便账号被显式授予页面键，后端也 403。菜单按角色过滤，不只按页面键，避免
+ * 无效入口；同时保留页面键判定（显式撤销页面键的 boss 也不给入口）。
+ * admin 在 App 层恒放行，visibleWhen 只对非 admin 生效。 */
+const analyticsRoleGate = (perm: string) => () =>
+  ["admin", "boss"].includes(localStorage.getItem("role") || "")
+  && !!readPermissionMap()[perm];
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
 const MaintenanceAnalyticsPage = lazy(loadMaintenanceAnalytics);
+const MaintenanceDashboardPage = lazy(loadMaintenanceDashboard);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
 const InventoryPage = lazy(loadInventory);
@@ -151,8 +162,9 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "销售管理",
     items: [
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
-      // 模板仅 admin/boss；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
-      { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", page: SalesAnalyticsPage, load: loadSalesAnalytics },
+      // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
+      // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
+      { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
     ],
@@ -162,8 +174,9 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "采购管理",
     items: [
       // 采购分析（D-39，客户需求 Round1）：仅老板/管理员（page_purchase_analytics 模板仅
-      // boss，admin 由 App 层恒放行）；日期/分类/三口径 + 分组下钻。
-      { key: "purchases-analytics", path: "/purchases/analytics", label: "采购分析", icon: <BarChartOutlined />, perm: "page_purchase_analytics", page: PurchaseAnalyticsPage, load: loadPurchaseAnalytics },
+      // boss，admin 由 App 层恒放行；后端本轮加角色硬门，菜单同口径按角色过滤 §9）；
+      // 日期/分类/三口径 + 分组下钻。
+      { key: "purchases-analytics", path: "/purchases/analytics", label: "采购分析", icon: <BarChartOutlined />, perm: "page_purchase_analytics", visibleWhen: analyticsRoleGate("page_purchase_analytics"), page: PurchaseAnalyticsPage, load: loadPurchaseAnalytics },
       // 原「采购分析」逐型号频次页（D-39 前已存在）更名「型号分析」，页面与口径不变。
       { key: "purchases-analysis", path: "/purchases/analysis", label: "型号分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
       { key: "purchases-exceptions", path: "/purchases/exceptions", label: "采购异常", icon: <WarningOutlined />, perm: "page_purchases", page: PurchaseExceptionsPage, load: loadPurchaseExceptions },
@@ -197,6 +210,16 @@ export const NAV_GROUPS: NavGroup[] = [
         perm: "page_maintenance",
         page: MaintenanceAnalyticsPage,
         load: loadMaintenanceAnalytics,
+      },
+      {
+        // 维保数据看板 MVP（D-0022/R33）：数量口径人人可见，金额随 data_profit。
+        key: "maintenance-dashboard",
+        path: "/maintenance/dashboard",
+        label: "数据看板",
+        icon: <FundOutlined />,
+        perm: "page_maintenance",
+        page: MaintenanceDashboardPage,
+        load: loadMaintenanceDashboard,
       },
       {
         key: "maintenance-demands",

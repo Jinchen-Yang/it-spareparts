@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { SalesReconciliationBlock } from "../../api/salesAnalytics";
 import { formatBusinessDateTime } from "../../utils/date";
+import { cssVar, HIGHLIGHT_BG, HIGHLIGHT_TEXT } from "./analytics/dashboardColors";
 
 // 销售分析页展示辅助。fmt / fmtMoney / KpiCard 从采购分析页（PR-4a，
 // pages/purchases/shared.tsx）逐字搬运，零逻辑改动——按仓库惯例展示件按模块就近
@@ -36,19 +37,23 @@ export function isReconBlockEmpty(b: SalesReconciliationBlock | null | undefined
 export function KpiCard({ label, value, sub, highlight }: {
   label: ReactNode; value: ReactNode; sub?: ReactNode; highlight?: boolean;
 }) {
+  // 高亮对走 dashboardColors 的 var(token, fallback)：M0 用主题 token，生产 P
+  // （缺 --mb-tag-*）落同值 fallback（DL-025 / P 投影）
+  const hlText = cssVar(HIGHLIGHT_TEXT);
+  const hlBg = cssVar(HIGHLIGHT_BG);
   return (
     <div style={{
       flex: "1 1 190px", minWidth: 160, padding: "12px 14px", borderRadius: 8,
       overflow: "hidden",
-      background: highlight ? "var(--ant-color-warning-bg, #fdf3e3)" : "rgba(0,0,0,0.025)",
+      background: highlight ? hlBg : "rgba(0,0,0,0.025)",
     }}>
-      <div style={{ fontSize: 12.5, color: highlight ? "#9a7b43" : "#6b665e" }}>{label}</div>
+      <div style={{ fontSize: 12.5, color: highlight ? hlText : "var(--mb-text-2)" }}>{label}</div>
       <div style={{
         fontSize: 20, fontWeight: 500, marginTop: 4, lineHeight: 1.25,
         whiteSpace: "normal", overflowWrap: "anywhere",
-        color: highlight ? "#9a7b43" : undefined,
+        color: highlight ? hlText : undefined,
       }}>{value}</div>
-      {sub && <div style={{ fontSize: 11.5, color: highlight ? "#9a7b43" : "var(--mb-text-3)", marginTop: 2 }}>{sub}</div>}
+      {sub && <div style={{ fontSize: 11.5, color: highlight ? hlText : "var(--mb-text-3)", marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
