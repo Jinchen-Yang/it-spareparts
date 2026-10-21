@@ -248,3 +248,80 @@ def test_unprotected_field_edit_in_old_workbook_still_applies(db):
     assert result["line_updates"] == 1
     assert line.qty == Decimal("3.000")
     assert set(line.manual_override) == {"qty"}
+
+
+# ---------------------------------------------------------------------------
+# 返工2（#430 第 2 轮独立验收必须改）：
+#   B1/MUST-2 锁内复核只针对本次实际编辑的事实字段；
+#   MUST-1 保护基准改定长指纹 + 隐藏令牌整体长度防护，长文本不再撑爆令牌。
+# ---------------------------------------------------------------------------
+
+
+def test_untouched_field_cycle_change_between_validate_and_apply_keeps_write(db):
+    """返工2 B1/MUST-2：未编辑字段的保护周期变化不得作废整本应用。
+
+    备注受保护后导出；工作簿只把需求数量 2→3 并 validate；窗口内网页把
+    备注 A→空→A（显示值不变、仅备注保护周期变化）；apply 必须照常写入
+    数量 3，备注及其保护保留（D-34/0012：不因未触碰字段作废整本）。
+    """
+    project, _part, _order, line = _make_project_with_line(db)
+    _page_patch(db, line, {"line_note": "A"})  # 备注保护：首次快照=空
+    wb = _export_parts(db, project.project_id)
+    _edit_cell(wb, 2, "需求数量", 3)             # 工作簿只改数量
+
+    buf = BytesIO()
+    wb.save(buf)
+    plan = master.validate_project_master_v2(
+        db, project_id=project.project_id, data=buf.getvalue())
+    # validate→apply 窗口内：备注解除（A→空）又重新保护（空→A，新周期）。
+    _page_patch(db, line, {"line_note": None})
+    _page_patch(db, line, {"line_note": "A"})
+
+    result = master.apply_project_master_v2(
+        db, plan, operated_by="drift-test", import_batch_id=str(uuid4()))
+    db.refresh(line)
+    assert result["line_updates"] == 1
+    assert line.qty == Decimal("3.000")          # 数量编辑照常写入
+    assert line.line_note == "A"                 # 备注显示值不变
+    ledger = line.manual_override or {}
+    assert "line_note" in ledger                 # 备注保护保留（新周期）
+    assert "qty" in ledger                       # 数量编辑建保护，快照 2
+
+
+def test_long_protected_description_roundtrip_fresh_workbook(db):
+    """返工2 MUST-1：长文本保护不能把基线令牌撑爆 Excel 单元格上限。
+
+    描述原值 17000 字、网页改成另一段 17000 字（建立保护）后导出的工作簿，
+    原样上传 validate 必须成功（旧实现把首次快照原文放进签名令牌 →
+    超 32767 被 openpyxl 静默截断 → invalid_concurrency_token），apply 零
+    写入、描述与保护保持不变。
+    """
+    project, _part, _order, line = _make_project_with_line(db)
+    original = "原" * 17000
+    replaced = "改" * 17000
+    line.description = original
+    db.commit()
+    _page_patch(db, line, {"description": replaced})
+
+    wb = _export_parts(db, project.project_id)
+    ws = wb[master.V2_SHEET_PARTS]
+    headers = {cell.value: cell.column for cell in ws[1]}
+    token = str(ws.cell(2, headers[master.V2_BASE_COLUMN]).value or "")
+    assert len(token) <= 32767, (
+        f"基线令牌长度 {len(token)} 超过 Excel 单元格上限，导出即损坏")
+
+    result = _apply_workbook(db, project.project_id, wb)
+    db.refresh(line)
+    assert result["line_updates"] == 0            # 原样上传零写入
+    assert line.description == replaced
+    assert "description" in (line.manual_override or {})
+
+
+def test_row_base_token_over_cell_limit_raises_instead_of_silent_truncation():
+    """返工2 MUST-1：令牌整体长度防护——超 32767 显式报错，绝不静默截断。"""
+    with pytest.raises(WorkbookError) as exc_info:
+        master._v2_row_base_token(
+            sheet="03_备件明细", entity_id="ent-long",
+            values={"描述": "长" * 40000})
+    assert exc_info.value.code == "concurrency_token_too_long"
+    assert "32767" in exc_info.value.message

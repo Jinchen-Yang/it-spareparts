@@ -173,6 +173,8 @@ V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "
 # 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
 _V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
 V2_BASE_COLUMN = "基线令牌"
+# Excel 单元格硬上限：行级令牌超长必须显式报错，不能被 openpyxl 静默截断。
+_V2_TOKEN_CELL_LIMIT = 32767
 V2_PART_BASE_FIELDS = ("PN", "描述", "需求数量", "SN", "退货数量",
                        "人工未税单位成本", "人工成本原因", "备注")
 V2_EXPENSE_BASE_FIELDS = ("报销日期", "报销人员", "报销类别", "费用分类", "支出事由",
@@ -1969,6 +1971,9 @@ def _v2_row_base_token(
     供上传侧三路合并区分「用户改的」与「文件里带出来的导出旧值」。
     03 备件明细另签 ``protect``（Q3=A，2026-10-21）：受保护字段的解除基准
     指纹（首次快照 + 保护周期标记），供上传侧识别旧工作簿的基准/周期漂移。
+
+    令牌写入隐藏单元格，超长会被 openpyxl 静默截断成必炸的损坏令牌
+    （2026-10-21 独立验收 MUST-1）：超上限显式报错，绝不静默截断。
     """
     payload = {
         "sheet": sheet,
@@ -1986,10 +1991,17 @@ def _v2_row_base_token(
     signature = hmac.new(
         signing_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
     ).hexdigest()
-    return json.dumps(
+    token = json.dumps(
         {"key_id": key_id, "payload": payload, "signature": signature},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
+    if len(token) > _V2_TOKEN_CELL_LIMIT:
+        raise WorkbookError(
+            "concurrency_token_too_long",
+            f"{sheet} 实体 {entity_id} 的基线令牌长度 {len(token)} 超出 Excel "
+            f"单元格上限 {_V2_TOKEN_CELL_LIMIT}，写入即被静默截断、回传必败；"
+            "请先缩短该行超长文本（如描述/SN/备注）后重新下载")
+    return token
 
 
 def _parse_v2_row_base_token(
@@ -2082,7 +2094,11 @@ class V2RowGuard:
     # Q3=A（2026-10-21）：03 触碰行另钉 validate 时刻的解除基准指纹；
     # apply 拿到行锁后重算一次，不等说明保护基准/周期在 validate→apply
     # 窗口内被人改过——整本 fail-closed。None = 该 sheet 不参与保护复核。
+    # 返工2（2026-10-21 独立验收 sol B1 / astra MUST-2）：摘要只覆盖
+    # protection_fields 里本次上传实际编辑的事实字段（PN 为完整身份组）；
+    # 未编辑字段（如备注）的保护周期变化不作废整本。
     protection_digest: str | None = None
+    protection_fields: frozenset[str] = frozenset()
 
 
 class _V2MergeContext:
@@ -2150,7 +2166,8 @@ class _V2MergeContext:
 
     def guard(self, *, sheet: str, entity_id, row_label: str,
               values: dict, fields: tuple[str, ...],
-              protection_digest: str | None = None) -> None:
+              protection_digest: str | None = None,
+              protection_fields: frozenset[str] = frozenset()) -> None:
         """记下这一行在 validate 时刻的服务端指纹。
 
         只给**结局已定且会进入写集合**的行发指纹（合并判定为触碰、显式作废、
@@ -2162,7 +2179,8 @@ class _V2MergeContext:
         self.guards.append(V2RowGuard(
             sheet=sheet, entity_id=str(entity_id), row_label=row_label,
             digest=_v2_row_base_hash(values, fields), fields=fields,
-            protection_digest=protection_digest))
+            protection_digest=protection_digest,
+            protection_fields=protection_fields))
 
     def record_row_conflict(
         self, *, sheet: str, row_label: str, entity_id, action: str,
@@ -4027,10 +4045,10 @@ def _v2_parse_parts(
             row=row, index=index, base_fields=V2_PART_BASE_FIELDS, baseline=baseline)
         touched_fact_headers = [
             name for name in touched if name in _V2_PART_PROTECT_FIELD_GROUPS]
-        if touched_fact_headers:
-            touched_fact_fields: set[str] = set()
-            for header in touched_fact_headers:
-                touched_fact_fields |= _V2_PART_PROTECT_FIELD_GROUPS[header]
+        touched_fact_fields: set[str] = set()
+        for header in touched_fact_headers:
+            touched_fact_fields |= _V2_PART_PROTECT_FIELD_GROUPS[header]
+        if touched_fact_fields:
             exported = _v2_row_base_protect(_cell(row, index, V2_BASE_COLUMN))
             drifted, reason = field_protection.protection_baseline_changed(
                 exported, current_baseline, touched_fact_fields)
@@ -4042,10 +4060,15 @@ def _v2_parse_parts(
                     "old": "", "new": "", "base": "",
                     "reason": reason,
                 })
+        # 返工2（sol B1 / astra MUST-2）：锁内复核只钉本次实际编辑的事实
+        # 字段（PN 完整身份组）的基准摘要；未编辑字段的保护周期变化不算。
         merge.guard(sheet=V2_SHEET_PARTS, entity_id=line.id, row_label=row_label,
                     values=server_values, fields=V2_PART_BASE_FIELDS,
-                    protection_digest=field_protection.protection_baseline_digest(
-                        current_baseline))
+                    protection_digest=(
+                        field_protection.protection_baseline_digest(
+                            current_baseline, fields=touched_fact_fields)
+                        if touched_fact_fields else None),
+                    protection_fields=frozenset(touched_fact_fields))
 
         # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
         # 导出时的旧值静默盖掉他人改动（D-02）。
@@ -5645,7 +5668,8 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
 
     fresh_by_key: dict[tuple[str, str], tuple[dict, tuple[str, ...]] | None] = {}
     # Q3=A：03 触碰行的当前解除基准指纹（锁内新鲜值），与 guard 里 validate
-    # 时刻的指纹比对——保护基准/周期在窗口内被人改过同样整本 fail-closed。
+    # 时刻的指纹比对——本次编辑字段的保护基准/周期在窗口内被人改过同样整本
+    # fail-closed（返工2：复核范围 = guard.protection_fields，不含未编辑字段）。
     protection_by_key: dict[tuple[str, str], str] = {}
 
     part_guards = by_sheet.get(V2_SHEET_PARTS, [])
@@ -5675,12 +5699,15 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
                 V2_PART_BASE_FIELDS,
             )
             if line is not None and guard.protection_digest is not None:
+                # 返工2（sol B1 / astra MUST-2）：与 validate 同口径，只对该行
+                # 本次实际编辑的事实字段复核（guard.protection_fields）。
                 protection_by_key[(guard.sheet, guard.entity_id)] = (
                     field_protection.protection_baseline_digest(
                         field_protection.protection_baseline(
                             raw_line_id=line.raw_line_id,
                             edited_source=line.edited_source,
-                            manual_override=line.manual_override)))
+                            manual_override=line.manual_override),
+                        fields=guard.protection_fields))
 
     expense_guards = by_sheet.get(V2_SHEET_EXPENSE, [])
     if expense_guards:

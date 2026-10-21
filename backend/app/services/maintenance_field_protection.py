@@ -142,14 +142,26 @@ def original_source_snapshot(entry: dict) -> tuple[bool, object]:
     return "source_value" in entry, entry.get("source_value")
 
 
+def _baseline_fingerprint(field: str, value) -> str:
+    """首次快照的定长指纹（sha256）：长文本原文不进签名令牌。
+
+    归一化后取摘要，等值判定语义与原文一致；指纹定长 64 字符，避免
+    17000 字描述把 03 行基线令牌撑爆 Excel 单元格 32767 上限、被
+    openpyxl 静默截断（2026-10-21 独立验收 MUST-1）。
+    """
+    payload = f"{field}\x00{_json_value(normalized_value(field, value))}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def protection_baseline(*, raw_line_id: str, edited_source: str,
                         manual_override: dict | None) -> dict[str, dict]:
     """Q3=A：字段级解除基准指纹，签入 03 行基线令牌供旧工作簿漂移校验。
 
-    只记录受保护的需求事实字段；value 是归一化后的本轮首次快照（解除比
-    较基准），cycle 是保护周期起点标记——期间解除又重新保护、即使显示值
-    与首次快照都恰好相同，cycle 也会变，漂移仍可检出。latest source 刷新
-    只动 source_value，不进指纹：同一周期内仅来源变化不算漂移。
+    只记录受保护的需求事实字段；value 是归一化后本轮首次快照（解除比较
+    基准）的 sha256 定长指纹（等值判定与原文一致），cycle 是保护周期起点
+    标记——期间解除又重新保护、即使显示值与首次快照都恰好相同，cycle 也会
+    变，漂移仍可检出。latest source 刷新只动 source_value，不进指纹：
+    同一周期内仅来源变化不算漂移。
     """
     out: dict[str, dict] = {}
     for field in sorted(protected_fields(
@@ -162,7 +174,7 @@ def protection_baseline(*, raw_line_id: str, edited_source: str,
             "known": known,
             "value": (
                 None if not known or value is None
-                else _json_value(normalized_value(field, value))
+                else _baseline_fingerprint(field, value)
             ),
             "cycle": entry.get("cycle_started_at"),
         }
@@ -195,10 +207,17 @@ def protection_baseline_changed(
     return False, ""
 
 
-def protection_baseline_digest(baseline: dict[str, dict]) -> str:
-    """锁内复核用的稳定摘要：validate 时刻与 apply 时刻各算一次比对。"""
+def protection_baseline_digest(baseline: dict[str, dict], fields=None) -> str:
+    """锁内复核用的稳定摘要：validate 时刻与 apply 时刻各算一次比对。
+
+    fields 限定只对本次上传实际编辑的事实字段（PN 仍为完整身份组）复核：
+    未编辑字段（如备注）的保护周期变化不得作废整本（2026-10-21 独立验收
+    sol B1 / astra MUST-2）；缺省对整本基线取摘要。
+    """
+    selected = baseline if fields is None else {
+        name: baseline[name] for name in sorted(fields) if name in baseline}
     payload = json.dumps(
-        baseline, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        selected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
