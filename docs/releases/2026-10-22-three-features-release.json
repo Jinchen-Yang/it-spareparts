@@ -30,15 +30,16 @@
     "integration_base_commit": "f95f93304af25021af1ef08af33ce9a32ddfa131",
     "reviewed_feature_commits": {
       "sales_purchase": "cd04e3b7bfb17f56d2b90d30eea96ab18ca13f3b",
-      "maintenance": "55b244a291f01a787bb6e19ac3edeef3379fdfe3"
+      "maintenance": "52d6e0c53c19aa85ff91bdb1a34cc15b629db200"
     },
-    "selected_release_commit": "adf839f9ba402b84a69afbba8fd899be39c29d28",
-    "selected_release_branch": "release/three-dashboards-20261022-r1",
-    "source_archive_sha256": "f28a66a276f8815e311e93747aed2ac4b1afda190a77a282b7d4aa1fc56694ca",
-    "source_review_manifest_sha256": "d9fbdb501327ea6779ecc73640bf160a706d52636a28484def1b679eb2b5b903",
-    "source_review_report_sha256": "dae8d4eab0fcdc3932b267a94a3aba8a145cffa9ff80292fcb275579dfd1b707",
+    "selected_release_commit": "35f3e05f3c722d2ffe05348ac4f7fa0762e65700",
+    "selected_release_branch": "release/three-dashboards-20261022-r2",
+    "source_archive_sha256": "e8def3d7d4bb4326e25769aea6c2084f2fb29af7534465133e4919b92eb92bf5",
+    "source_review_manifest_sha256": "11c30fa89a8fe8d375f84c8ec8bf799e68e96cc5e77408773eded71e11489cd8",
+    "source_review_report_sha256": "5c8399b7452f7a592431d7bb11b01d7030e146cb1bdf9a599f68c26beb0cb422",
     "selected_changed_files": 92,
-    "release_is_not_the_entire_integration_tree": true
+    "release_is_not_the_entire_integration_tree": true,
+    "source_committed_identity_receipt_sha256": "1fe6ec67d834986f111e20c30c6de5251c520ab741d55e968cedfad8e5e2dd85"
   },
   "schema": {
     "from": "c9d4f2a6b8e1",
@@ -74,11 +75,8 @@
       "gpt-6-astra"
     ],
     "independent_review_model": "Codex Sol",
-    "selected_release_local_frontend_test_files": 130,
-    "selected_release_local_frontend_tests": 1686,
-    "selected_release_local_frontend_result": "passed",
     "selected_release_local_build_result": "passed",
-    "selected_release_push_ci": "https://github.com/Jinchen-Yang/it-spareparts/actions/runs/39682465340",
+    "selected_release_push_ci": "https://github.com/Jinchen-Yang/it-spareparts/actions/runs/39686587805",
     "required_ci_jobs": [
       "后端测试（pytest + 迁移链验证）",
       "前端类型检查 + 构建"
@@ -90,7 +88,8 @@
       "normal main merge and selected-release ancestry proof",
       "fresh full production backup and successful isolated restore rehearsal",
       "blue-green health, public new-route and asset checks, business smoke and observation"
-    ]
+    ],
+    "portal_contrast_regression": "Both Drawer-local secondary text variables corrected; actual same-release browser acceptance remains a deployment gate"
   },
   "receipt_policy": "Final integration/main commits, CI conclusions, runtime image IDs, deployment time and smoke results are recorded separately after they actually exist; this manifest does not claim deployment completion."
 }
