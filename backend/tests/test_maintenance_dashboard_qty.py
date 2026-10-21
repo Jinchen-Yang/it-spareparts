@@ -184,8 +184,13 @@ def test_daily_trend_shanghai_day_bucketing_and_zero_fill(db):
     assert by_day["2026-10-15"]["receipt_qty"] == "1.000"
     assert by_day["2026-10-16"]["receipt_qty"] == "4.000"
     assert by_day["2026-10-18"]["issued_qty"] == "2.000"
-    assert by_day["2026-10-17"] == {"date": "2026-10-17",
-                                    "receipt_qty": "0.000", "issued_qty": "0.000"}
+    # B-F09：补零日也带 unit_breakdown（空数组）。
+    assert by_day["2026-10-17"] == {
+        "date": "2026-10-17",
+        "receipt_qty": "0.000",
+        "issued_qty": "0.000",
+        "unit_breakdown": [],
+    }
 
 
 def test_summary_condition_structure_and_top_projects(db):
@@ -341,27 +346,36 @@ def test_quantity_checks_scoped_and_order_date_filter(db):
     assert _order_of(db, kept_line).order_no == "WBDD-MDD-T4-KEEP"
 
 
-def test_quantity_checks_unassigned_receipts_full_scope_only(db):
+def test_quantity_checks_unassigned_receipts_scope_intersection(db):
     project = _project(db, "MDD-T4U")
+    other = _project(db, "MDD-T4U-OUT")
     part = _part(db, "MDD-T4U-PN")
     _demand(db, project, part, "WBDD-MDD-T4U", "2")
     _receipt(db, project, part, "3",
-             occurred_at=datetime(2026, 10, 16, 8, tzinfo=UTC))  # 未关联
+             occurred_at=datetime(2026, 10, 16, 8, tzinfo=UTC))  # 未关联（在权）
+    _receipt(db, other, part, "4",
+             occurred_at=datetime(2026, 10, 16, 9, tzinfo=UTC))  # 未关联（越权）
     db.commit()
     full = dash.build_quantity_checks_payload(
         db, None, projects=dash._project_rows(db, None),
         order_date_from=date(2026, 10, 1), order_date_to=date(2026, 10, 21),
     )
-    assert full["cards"]["unassigned_receipt_qty"] == "3.000"
-    assert full["unassigned_receipts"][0]["project_code"] == project.project_code
+    assert full["cards"]["unassigned_receipt_qty"] == "7.000"
+    # 行按 project_id 排序（UUID，不保证插入序）：按编码断言集合。
+    assert {row["project_code"] for row in full["unassigned_receipts"]} == {
+        project.project_code, other.project_code,
+    }
     scoped = dash.build_quantity_checks_payload(
         db, {project.project_id},
         projects=dash._project_rows(db, {project.project_id}),
         order_date_from=date(2026, 10, 1), order_date_to=date(2026, 10, 21),
     )
-    # 受限账号不展示跨项目未关联实收（信息可能越权）。
-    assert scoped["unassigned_receipts"] == []
-    assert scoped["cards"]["unassigned_receipt_qty"] == "0.000"
+    # B-F08：受限账号仍可见**在权项目**的未关联实收（3），
+    # 但与授权交集——不得扩到越权项目（4 不出现）。
+    assert scoped["cards"]["unassigned_receipt_qty"] == "3.000"
+    assert [item["project_code"] for item in scoped["unassigned_receipts"]] == [
+        project.project_code
+    ]
 
 
 # ---------- 排序与分页 ----------

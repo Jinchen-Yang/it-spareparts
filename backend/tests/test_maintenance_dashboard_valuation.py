@@ -458,7 +458,14 @@ def test_cost_only_market_missing_keeps_cost_domain_visible_everywhere(db):
     assert "bad_estimated_value_inc_tax" not in valuation
     assert valuation["domains"]["cost"]["value_inc_tax"] == "45.20"
     assert valuation["domains"]["cost"]["value_ex_tax"] == "40.00"
-    assert "purchase" not in valuation["domains"]
+    # B-F07：无采购/销售参考的域仍报覆盖（分母照给、覆盖率 0、金额键缺失）。
+    purchase = valuation["domains"]["purchase"]
+    assert "value_inc_tax" not in purchase
+    assert purchase["bad_qty"] == "2.000"
+    assert purchase["estimated_bad_qty"] == "0.000"
+    assert purchase["pending_bad_qty"] == "2.000"
+    assert purchase["coverage_pct"] == 0.0
+    assert purchase["coverage_basis"] == "bad_receipts"
 
     # 总览卡：市场待估，domains.cost 并列。
     summary = dash.build_summary_payload(db, filters, include_amounts=True,

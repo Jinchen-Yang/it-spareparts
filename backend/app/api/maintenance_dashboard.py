@@ -406,24 +406,52 @@ def valuation(
     rows = dash.sort_part_rows(
         dash.build_part_rows(db, filters, include_amounts=True, ratio=ratio), sort
     )
+    # 卡与 PN 行同源（KPI=分组）：主域覆盖按单位分桶（B-F09），
+    # 三域覆盖从行载荷合并（B-F07）；混合单位平面 null + unit_breakdown。
+    main_units = dash.aggregate_main_units_from_rows(rows)
+    mixed_units = len(main_units) > 1
     estimated_qty = sum(
         (Decimal(row["valuation"]["estimated_bad_qty"]) for row in rows), Decimal("0")
-    )
-    pending_qty = sum(
-        (Decimal(row["valuation"]["pending_bad_qty"]) for row in rows), Decimal("0")
-    )
-    awaiting_qty = sum(
-        (Decimal(row["valuation"]["awaiting_ratio_bad_qty"]) for row in rows),
-        Decimal("0"),
     )
     bad_receipt_qty = sum(
         (Decimal(row["bad_receipt_qty"]) for row in rows), Decimal("0")
     )
+
+    def _flat_total(field: str) -> str | None:
+        if mixed_units:
+            return None
+        return dash._qty(sum(
+            (bucket[field] for bucket in main_units.values()), Decimal("0")
+        ))
+
     cards: dict = {
-        "estimated_bad_qty": dash._qty(estimated_qty),
-        "pending_bad_qty": dash._qty(pending_qty),
-        "awaiting_ratio_bad_qty": dash._qty(awaiting_qty),
-        "coverage_pct": dash._coverage_pct(estimated_qty, bad_receipt_qty),
+        "estimated_bad_qty": _flat_total("estimated"),
+        "pending_bad_qty": _flat_total("pending"),
+        "awaiting_ratio_bad_qty": _flat_total("awaiting"),
+        "coverage_pct": (
+            None if mixed_units
+            else dash._coverage_pct(estimated_qty, bad_receipt_qty)
+        ),
+        "unit": next(iter(main_units)) if not mixed_units else None,
+        "unit_breakdown": [
+            {
+                "unit": unit,
+                "bad_qty": dash._qty(main_units[unit]["bad"]),
+                "estimated_bad_qty": dash._qty(main_units[unit]["estimated"]),
+                "pending_bad_qty": dash._qty(main_units[unit]["pending"]),
+                "awaiting_ratio_bad_qty": dash._qty(main_units[unit]["awaiting"]),
+                # 本单位已估金额（静态审查补充；仅已估单位给）。
+                **({
+                    "value_inc_tax": dash._amount(main_units[unit]["value_inc"]),
+                    "value_ex_tax": dash._amount(main_units[unit]["value_ex"]),
+                } if main_units[unit].get("has_value") else {}),
+                "coverage_pct": dash._coverage_pct(
+                    main_units[unit]["estimated"], main_units[unit]["bad"]
+                ),
+            }
+            for unit in dash.sorted_unit_keys(main_units.keys())
+        ],
+        "domains": dash.aggregate_domain_cards_from_rows(rows),
     }
     # 待估行（pending）不带 bad_estimated_value_* 键（不填 0）——用 .get 计 0，
     # 否则任一待估 PN 会让整个估价页 500。
@@ -514,6 +542,7 @@ def quantity_checks(
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
+    q: str | None = Query(None, max_length=128),
     sort: str = Query("difference_desc", pattern=_CHECK_SORT_PATTERN),
     page: int = Query(1, ge=1),
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
@@ -525,7 +554,8 @@ def quantity_checks(
     """T4 需求单数量核对（当前累计）：N/R/差额/超收 + 未关联实收。
 
     不提供历史截止日参数（summarize_demand_returns 拒绝 as_of）；
-    不发布「欠返/逾期/已返」状态。
+    不发布「欠返/逾期/已返」状态。q（B-F10）按有效需求行 PN 命中**选择
+    整张需求单**（选入单仍整单全 PN/全期累计 N/R，不裁局部、不忽略 q）。
     """
     response.headers["Cache-Control"] = "no-store"
     try:
@@ -542,14 +572,17 @@ def quantity_checks(
         ) from exc
     narrowed = _narrow_scope_by_business_type(db, scope, business_type)
     projects = dash._project_rows(db, narrowed)
+    part_ids, keyword = dash._part_keyword(db, q)
     record_access_log(ctx, "maintenance_dashboard_quantity_checks",
                       "maintenance_dashboard",
-                      _audit_flags(scoped=narrowed is not None))
+                      _audit_flags(scoped=narrowed is not None,
+                                   keyword=bool(q)))
     payload = dash.build_quantity_checks_payload(
         db, narrowed,
         projects=projects,
         order_date_from=start,
         order_date_to=end,
+        part_ids=part_ids, keyword=keyword,
     )
     rows = dash.sort_check_rows(payload["rows"], sort)
     return {
@@ -751,7 +784,81 @@ def export(
             ratio=ratio if visible else None,
         )
         header, columns = _project_export_columns(visible)
-        data = [dict(row) for row in rows]
+        # 静态审查补充（§106）：混合单位按 项目×单位 展开——数量/率用本桶
+        # 值，金额不重复父项总额（单位内已估金额；待估单位留空）。单一单位
+        # 行保持原样。
+        data = []
+        for row in rows:
+            buckets = row.get("unit_breakdown") or []
+            if len(buckets) <= 1:
+                item = dict(row)
+                item["_unit_label"] = _unit_label_of(row)
+                data.append(item)
+                continue
+            valuation = dict(row.get("valuation") or {})
+            main_by_unit = {
+                entry.get("unit"): entry
+                for entry in valuation.get("unit_breakdown", [])
+            }
+            domains_by_unit = {
+                domain: {
+                    entry.get("unit"): entry
+                    for entry in payload.get("unit_breakdown", [])
+                }
+                for domain, payload in valuation.get("domains", {}).items()
+            }
+            for entry in buckets:
+                unit = entry.get("unit")
+                item = dict(row)
+                item["_unit_label"] = unit or "待核"
+                for key in ("receipt_qty", "bad_receipt_qty",
+                            "scrap_receipt_qty", "issued_qty",
+                            "exempt_issued_qty", "pending_requirement_qty",
+                            "unlinked_receipt_qty", "return_rate_pct",
+                            "rate_numerator", "rate_denominator"):
+                    item[key] = entry.get(key)
+                if valuation:
+                    main = main_by_unit.get(unit) or {
+                        "estimated_bad_qty": "0.000",
+                        "pending_bad_qty": "0.000",
+                        "awaiting_ratio_bad_qty": "0.000",
+                        "coverage_pct": None,
+                    }
+                    unit_valuation = dict(valuation)
+                    unit_valuation["estimated_bad_qty"] = main.get(
+                        "estimated_bad_qty"
+                    )
+                    unit_valuation["pending_bad_qty"] = main.get(
+                        "pending_bad_qty"
+                    )
+                    unit_valuation["awaiting_ratio_bad_qty"] = main.get(
+                        "awaiting_ratio_bad_qty"
+                    )
+                    unit_valuation["coverage_pct"] = main.get("coverage_pct")
+                    # 值键用本单位已估金额（B-F06：全待估单位不写 0.00）。
+                    if "value_inc_tax" in main:
+                        unit_valuation["bad_estimated_value_inc_tax"] = (
+                            main["value_inc_tax"]
+                        )
+                        unit_valuation["bad_estimated_value_ex_tax"] = (
+                            main["value_ex_tax"]
+                        )
+                    else:
+                        unit_valuation.pop("bad_estimated_value_inc_tax", None)
+                        unit_valuation.pop("bad_estimated_value_ex_tax", None)
+                    if valuation.get("domains"):
+                        unit_domains = {}
+                        for domain, by_unit in domains_by_unit.items():
+                            domain_entry = by_unit.get(unit) or {
+                                "coverage_pct": None,
+                            }
+                            unit_domains[domain] = {
+                                **valuation["domains"][domain],
+                                "coverage_pct": domain_entry.get("coverage_pct"),
+                            }
+                        unit_valuation["domains"] = unit_domains
+                    item["valuation"] = unit_valuation
+                data.append(item)
     elif kind == "parts":
         rows = dash.build_part_rows(
             db, filters, include_amounts=visible,
@@ -769,34 +876,101 @@ def export(
         header, columns = _receipt_export_columns(visible)
         data = rows
     elif kind == "quantity_checks":
+        # q 整单选择与 API 同参同集（B-F10）。
+        part_ids, keyword = dash._part_keyword(db, q)
         payload = dash.build_quantity_checks_payload(
             db, filters.scope,
             projects=filters.projects,
             order_date_from=filters.start,
             order_date_to=filters.end,
+            part_ids=part_ids, keyword=keyword,
         )
         header, columns = _check_export_columns()
-        data = payload["rows"]
+        # 静态审查补充（§104）：导出按 单×单位 展开——件/台分母不并算，
+        # 待核量不丢；无单位事实的行保留原行。
+        data = []
+        for row in payload["rows"]:
+            entries = row.get("unit_breakdown") or []
+            if not entries:
+                item = dict(row)
+                item["_unit_label"] = _unit_label_of(row)
+                data.append(item)
+                continue
+            for entry in entries:
+                item = dict(row)
+                item["_unit_label"] = entry.get("unit") or "待核"
+                for key in ("demand_qty", "received_qty", "difference_qty",
+                            "over_received_qty", "undated_receipt_qty"):
+                    item[key] = entry.get(key)
+                data.append(item)
     elif kind == "orders":
         payload = consumption.period_orders(
             db, start=filters.start, end=filters.end, projects=filters.projects,
         )
         header, columns = _orders_export_columns()
-        data = payload["rows"]
+        # 静态审查补充（§106）：按 项目×单位 展开，数量不丢；去重单数是
+        # 不可相加元信息——只在首单位行出现一次。
+        data = []
+        for row in payload["rows"]:
+            dated = {
+                entry.get("unit"): entry
+                for entry in row.get("unit_breakdown", [])
+            }
+            undated = {
+                entry.get("unit"): entry
+                for entry in row.get("undated_unit_breakdown", [])
+            }
+            units = dash.sorted_unit_keys(set(dated) | set(undated))
+            if not units:
+                item = dict(row)
+                item["_unit_label"] = _unit_label_of(row)
+                data.append(item)
+                continue
+            for index, unit in enumerate(units):
+                item = dict(row)
+                item["_unit_label"] = unit or "待核"
+                item["order_qty"] = dated.get(unit, {}).get(
+                    "order_qty", "0.000"
+                )
+                item["undated_order_qty"] = undated.get(unit, {}).get(
+                    "order_qty", "0.000"
+                )
+                item["order_count"] = row["order_count"] if index == 0 else None
+                item["undated_order_count"] = (
+                    row["undated_order_count"] if index == 0 else None
+                )
+                data.append(item)
     elif kind == "consumption_daily":
         payload = consumption.daily_consumption(
             db, start=filters.start, end=filters.end, projects=filters.projects,
             include_amounts=visible,
         )
+        # B-F09：导出按 日×项目×单位 展开（不再输出跨单位合算行）。
+        data = []
+        for row in payload["rows"]:
+            for entry in row.get("unit_breakdown", []):
+                data.append({
+                    "issue_date": row["issue_date"],
+                    "project_code": row["project_code"],
+                    "display_name": row["display_name"],
+                    "unit": entry.get("unit") or "待核",
+                    "issued_qty": entry.get("issued_qty"),
+                    "cost_amount_ex_tax": entry.get("cost_amount_ex_tax"),
+                    "cost_amount_inc_tax": entry.get("cost_amount_inc_tax"),
+                    "uncosted_qty": entry.get("uncosted_qty"),
+                    "coverage_pct": entry.get("coverage_pct"),
+                    "sources": row.get("sources"),
+                })
         header, columns = _consumption_daily_export_columns(visible)
-        data = payload["rows"]
     else:
         rows = consumption.consumption_issue_rows(
             db, start=filters.start, end=filters.end, projects=filters.projects,
             include_amounts=visible,
         )
+        data = [dict(row) for row in rows]
+        for row in data:
+            row["_unit_label"] = row.get("unit") or "待核"
         header, columns = _consumption_issues_export_columns(visible)
-        data = rows
     if len(data) > dash.MAX_EXPORT_ROWS:
         raise HTTPException(
             status_code=413,
@@ -818,6 +992,19 @@ def export(
 
 
 ExportColumn = tuple[str, str | None, bool]  # (标签, 取值路径或常量列, 是否数值)
+
+
+def _unit_label_of(row: dict) -> str:
+    """单位列显示（B-F09/M12）：单一单位照写；仅待核写「待核」；混合「混合」。"""
+    unit = row.get("unit")
+    if unit is not None:
+        return unit
+    breakdown = row.get("unit_breakdown") or []
+    if not breakdown:
+        return ""
+    if len(breakdown) == 1 and breakdown[0].get("unit") is None:
+        return "待核"
+    return "混合"
 
 
 def _cell(row: dict, path: str):
@@ -859,6 +1046,7 @@ def _project_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
         ("项目编码", "project_code", False),
         ("项目名称", "display_name", False),
         ("业务类型", "business_type", False),
+        ("单位", "_unit_label", False),
         ("返件实收合计", "receipt_qty", True),
         ("其中坏件实收", "bad_receipt_qty", True),
         ("其中废品", "scrap_receipt_qty", True),
@@ -875,9 +1063,13 @@ def _project_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
         columns += [
             ("坏件试算价值-含税", "valuation.bad_estimated_value_inc_tax", True),
             ("坏件试算价值-不含税", "valuation.bad_estimated_value_ex_tax", True),
+            ("已估坏件量", "valuation.estimated_bad_qty", True),
             ("待估坏件量", "valuation.pending_bad_qty", True),
             ("待试算坏件量（缺比例）", "valuation.awaiting_ratio_bad_qty", True),
             ("覆盖率%", "valuation.coverage_pct", True),
+            ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
+            ("销售域覆盖率%", "valuation.domains.sales.coverage_pct", True),
+            ("成本域覆盖率%", "valuation.domains.cost.coverage_pct", True),
             ("价值保留比例", "_retention_ratio", False),
             ("估价政策版本", None, False),
         ]
@@ -908,6 +1100,15 @@ def _part_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
             ("三域-采购-坏件价值-含税", "valuation.domains.purchase.value_inc_tax", True),
             ("三域-销售-坏件价值-含税", "valuation.domains.sales.value_inc_tax", True),
             ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
+            ("采购域已估坏件量", "valuation.domains.purchase.estimated_bad_qty", True),
+            ("采购域待估坏件量", "valuation.domains.purchase.pending_bad_qty", True),
+            ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
+            ("销售域已估坏件量", "valuation.domains.sales.estimated_bad_qty", True),
+            ("销售域待估坏件量", "valuation.domains.sales.pending_bad_qty", True),
+            ("销售域覆盖率%", "valuation.domains.sales.coverage_pct", True),
+            ("成本域已估坏件量", "valuation.domains.cost.estimated_bad_qty", True),
+            ("成本域待估坏件量", "valuation.domains.cost.pending_bad_qty", True),
+            ("成本域覆盖率%", "valuation.domains.cost.coverage_pct", True),
             ("价值保留比例", "_retention_ratio", False),
             ("估价政策版本", None, False),
         ]
@@ -956,6 +1157,7 @@ def _check_export_columns() -> tuple[list[str], list[ExportColumn]]:
         ("制单日期", "order_date", False),
         ("需求类型", "demand_type", False),
         ("仓库", "warehouse", False),
+        ("单位", "_unit_label", False),
         ("需求量N", "demand_qty", True),
         ("实收R", "received_qty", True),
         ("差额max(N-R,0)", "difference_qty", True),
@@ -969,13 +1171,16 @@ def _check_export_columns() -> tuple[list[str], list[ExportColumn]]:
 
 
 def _orders_export_columns() -> tuple[list[str], list[ExportColumn]]:
-    """M01 导出：纯数量域，无金额列（任何角色）。"""
+    """M01 导出：纯数量域，无金额列（任何角色）；无日期单单列（B-F12）。"""
     columns: list[ExportColumn] = [
         ("项目编码", "project_code", False),
         ("项目名称", "display_name", False),
         ("业务类型", "business_type", False),
+        ("单位", "_unit_label", False),
         ("期间下单量（原qty，不扣退货/免返）", "order_qty", True),
         ("期间下单单数", "order_count", True),
+        ("无制单日期下单量（未计入期间）", "undated_order_qty", True),
+        ("无制单日期单数", "undated_order_count", True),
     ]
     return [label for label, _path, _numeric in columns], columns
 
@@ -983,13 +1188,13 @@ def _orders_export_columns() -> tuple[list[str], list[ExportColumn]]:
 def _consumption_daily_export_columns(
     visible: bool,
 ) -> tuple[list[str], list[ExportColumn]]:
-    """M03 日表导出：数量列全角色；成本/覆盖/来源列仅利润门。"""
+    """M03 日表导出：日×项目×单位展开（B-F09）；成本/覆盖/来源列仅利润门。"""
     columns: list[ExportColumn] = [
         ("业务日", "issue_date", False),
         ("项目编码", "project_code", False),
         ("项目名称", "display_name", False),
+        ("单位", "unit", False),
         ("领用量", "issued_qty", True),
-        ("行数", "line_count", True),
     ]
     if visible:
         columns += [
@@ -1012,6 +1217,7 @@ def _consumption_issues_export_columns(
         ("项目名称", "display_name", False),
         ("领用单号", "issue_no", False),
         ("PN", "pn", False),
+        ("单位", "_unit_label", False),
         ("数量", "qty", True),
     ]
     if visible:

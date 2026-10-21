@@ -222,12 +222,13 @@ def test_daily_consumption_scope_and_multi_project(db):
     )
     assert payload["cards"]["issued_qty"] == "4.000"
     assert payload["cards"]["cost_amount_ex_tax"] == "100.00"
-    # 空范围不扩全量。
+    # 空范围不扩全量；全未计成本窗口金额未知 → 金额键缺失（B-F11）。
     empty = consumption.daily_consumption(
         db, start=START, end=END, projects={}, include_amounts=True
     )
     assert empty["cards"]["issued_qty"] == "0.000"
-    assert empty["cards"]["cost_amount_ex_tax"] == "0.00"
+    assert "cost_amount_ex_tax" not in empty["cards"]
+    assert "cost_amount_inc_tax" not in empty["cards"]
     assert empty["rows"] == []
 
 

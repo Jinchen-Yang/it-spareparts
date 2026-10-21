@@ -222,10 +222,17 @@ def test_admin_sees_amounts_with_ratio_and_policy_version(db, seeded):
     assert valuation["retention_ratio"] == "0.5"
     assert valuation["policy_version"] == POLICY_VERSION
     assert valuation["coverage_pct"] == 100.0
-    # 三域并列：采购域同额；无销售/成本样本 → 该域键不出现（不填 0）。
+    # 三域并列（B-F07）：采购域同额；无销售/成本参考的域仍报覆盖
+    # （坏件分母照给、覆盖率 0、金额键缺失——未知不填 0）。
     assert valuation["domains"]["purchase"]["value_inc_tax"] == "339.00"
-    assert "sales" not in valuation["domains"]
-    assert "cost" not in valuation["domains"]
+    for domain_name in ("sales", "cost"):
+        domain = valuation["domains"][domain_name]
+        assert "value_inc_tax" not in domain
+        assert "value_ex_tax" not in domain
+        assert domain["bad_qty"] == "6.000"
+        assert domain["estimated_bad_qty"] == "0.000"
+        assert domain["coverage_pct"] == 0.0
+        assert domain["coverage_basis"] == "bad_receipts"
 
     valuation_page = client.get(
         f"{BASE}/valuation", params={"value_retention_ratio": "0.5"}
@@ -507,6 +514,89 @@ def test_projects_accepts_retention_ratio_like_other_views(db, seeded):
     assert _forbidden_keys(with_ratio) == set()
 
 
+def test_range_all_and_literal_keyword_five_entrypoints(db, seeded):
+    """B-F01/B-F02（独立首轮真实 HTTP 反例）：
+
+    - range=all 曾在五个金额入口 500（occurred_at >= None → ArgumentError）；
+    - 非空 q 曾 500（ilike(autoescape=True) 本 SQLAlchemy 不支持）。
+    修复后：all 期间完整可查、不吞数据；关键词按**字面**匹配——
+    %/_/反斜杠不得变成通配符（含未解析行原始 PN 兜底路径与导出）。
+    """
+    p1, _p2, _base = seeded
+    # 字面通配字符种子 + 各自“若未转义则会被误中”的诱饵行。
+    lit_pct = _part(db, "MDDA-LIT-%-PN", unit="件")
+    lit_us = _part(db, "MDDA-US_A", unit="件")
+    decoy_pct = _part(db, "MDDA-LIT-ABC-PN", unit="件")  # % 当通配会误中
+    decoy_us = _part(db, "MDDA-USXA", unit="件")         # _ 当通配会误中
+    at = datetime(2026, 10, 18, 10, tzinfo=UTC)
+    _receipt(db, p1, lit_pct, "2", occurred_at=at)
+    _receipt(db, p1, lit_us, "3", occurred_at=at)
+    _receipt(db, p1, decoy_pct, "5", occurred_at=at)
+    _receipt(db, p1, decoy_us, "7", occurred_at=at)
+    # 未解析行（part_id=None）走原始 PN 文本兜底 ilike；反斜杠按字面。
+    _receipt(db, p1, None, "11", pn="MDDA-RAW\\-LIT", occurred_at=at)
+    _receipt(db, p1, None, "13", pn="MDDA-RAW-LIT", occurred_at=at)
+    db.commit()
+    client = client_for(db, username="mdd-admin-allq", role="admin")
+
+    # B-F01：五入口 range=all 全部 200（不 500），且不吞数据：
+    # 47 = 默认夹具 6（坏4+废2）+ 2+3+5+7+11+13。
+    for endpoint in ("summary", "projects", "parts", "valuation", "receipts"):
+        response = client.get(f"{BASE}/{endpoint}", params={"range": "all"})
+        assert response.status_code == 200, (endpoint, response.text[:300])
+    summary = client.get(f"{BASE}/summary", params={"range": "all"}).json()
+    # B-F09：range=all 下「件」与未解析行（part_id=None → 待核桶）混单位，
+    # 平面 total = null，unit_breakdown 呈现真实分桶（23 + 24，不猜单位）。
+    receipt_card = summary["cards"]["receipt_qty"]
+    assert receipt_card["total"] is None
+    assert {
+        entry["unit"]: entry["total"]
+        for entry in receipt_card["unit_breakdown"]
+    } == {"件": "23.000", None: "24.000"}
+
+    # B-F02：非空 q 五入口 200；%/_ 按字面匹配，诱饵 PN 不得混入。
+    for endpoint in ("summary", "projects", "parts", "valuation", "receipts"):
+        response = client.get(
+            f"{BASE}/{endpoint}", params={"range": "all", "q": "MDDA-LIT-%-PN"}
+        )
+        assert response.status_code == 200, (endpoint, response.text[:300])
+    rows = {
+        row["pn"]: row
+        for row in client.get(
+            f"{BASE}/parts", params={"range": "all", "q": "MDDA-LIT-%-PN"}
+        ).json()["rows"]
+    }
+    assert set(rows) == {"MDDA-LIT-%-PN"}
+    assert rows["MDDA-LIT-%-PN"]["bad_receipt_qty"] == "2.000"
+    rows_us = {
+        row["pn"]: row
+        for row in client.get(
+            f"{BASE}/parts", params={"range": "all", "q": "MDDA-US_A"}
+        ).json()["rows"]
+    }
+    assert set(rows_us) == {"MDDA-US_A"}  # MDDA-USXA（_ 当单字通配）不得误中
+    assert rows_us["MDDA-US_A"]["bad_receipt_qty"] == "3.000"
+    # 反斜杠字面：原始未解析行命中带反斜杠者；无反斜杠诱饵不得命中。
+    rows_bs = {
+        row["pn"]: row
+        for row in client.get(
+            f"{BASE}/receipts", params={"range": "all", "q": "MDDA-RAW\\-LIT"}
+        ).json()["rows"]
+    }
+    assert set(rows_bs) == {"MDDA-RAW\\-LIT"}
+    assert rows_bs["MDDA-RAW\\-LIT"]["qty"] == "11.000"
+    # 导出同参路径（B-F01/B-F02 服务层共用 seam）。
+    export = client.get(
+        f"{BASE}/export",
+        params={"kind": "parts", "format": "csv", "range": "all",
+                "q": "MDDA-LIT-%-PN"},
+    )
+    assert export.status_code == 200, export.text[:200]
+    text = export.content.decode("utf-8-sig")
+    assert "MDDA-LIT-%-PN" in text
+    assert "MDDA-LIT-ABC-PN" not in text
+
+
 def test_quantity_checks_endpoint_and_unassigned(db, seeded):
     p1, _p2, part = seeded
     # 未关联需求单的实收（全范围账号可见汇总）。
@@ -648,17 +738,43 @@ def test_orders_endpoint_admin_and_scope(db, consumption_seeded):
     response = client.get(f"{BASE}/orders")
     assert response.status_code == 200
     body = response.json()
-    # 原 qty 不扣退货：10 + 5 = 15；单数 2。
-    assert body["cards"] == {"order_qty": "15.000", "order_count": 2}
+    # 原 qty 不扣退货：10 + 5 = 15；单数 2。单位分桶 + 无日期单独立报告
+    # （B-F09/B-F12：单一单位平面兼容；undated 单列不冒充入期）。
+    assert body["cards"] == {
+        "order_qty": "15.000",
+        "unit": "件",
+        "unit_breakdown": [{"unit": "件", "order_qty": "15.000"}],
+        "order_count": 2,
+        "undated_orders": {
+            "order_qty": "0.000",
+            "order_count": 0,
+            "unit_breakdown": [],
+            "note": "无制单日期下单未计入期间（不猜日期）",
+        },
+    }
     (row,) = body["rows"]
     assert row["project_id"] == p1.project_id
     assert row["order_qty"] == "15.000"
     assert row["order_count"] == 2
+    assert row["unit"] == "件"
+    assert row["undated_order_qty"] == "0.000"
+    assert row["undated_order_count"] == 0
     assert _forbidden_keys(body) == set()  # 数量域无金额键（任何角色）
 
     # 项目筛选与授权交集。
     only_p2 = client.get(f"{BASE}/orders", params={"project": p2.project_id})
-    assert only_p2.json()["cards"] == {"order_qty": "0.000", "order_count": 0}
+    assert only_p2.json()["cards"] == {
+        "order_qty": "0.000",
+        "unit": None,
+        "unit_breakdown": [],
+        "order_count": 0,
+        "undated_orders": {
+            "order_qty": "0.000",
+            "order_count": 0,
+            "unit_breakdown": [],
+            "note": "无制单日期下单未计入期间（不猜日期）",
+        },
+    }
     assert only_p2.json()["rows"] == []
 
 
@@ -732,11 +848,15 @@ def test_export_new_kinds_orders_and_consumption(db, consumption_seeded):
                         params={"kind": "orders", "format": "csv"})
     assert orders.status_code == 200
     rows = list(csv.reader(io.StringIO(orders.content.decode("utf-8-sig"))))
-    assert rows[0] == ["项目编码", "项目名称", "业务类型",
-                       "期间下单量（原qty，不扣退货/免返）", "期间下单单数"]
+    assert rows[0] == ["项目编码", "项目名称", "业务类型", "单位",
+                       "期间下单量（原qty，不扣退货/免返）", "期间下单单数",
+                       "无制单日期下单量（未计入期间）", "无制单日期单数"]
     assert rows[1][0] == "MDDA-CP1"
-    assert rows[1][3] == "15.000"  # 数值列 Decimal 原样，不丢精度口径
-    assert rows[1][4] == "2"
+    assert rows[1][3] == "件"  # B-F09：单一单位照给
+    assert rows[1][4] == "15.000"  # 数值列 Decimal 原样，不丢精度口径
+    assert rows[1][5] == "2"
+    assert rows[1][6] == "0.000"  # B-F12：无日期单单列，本夹具为 0
+    assert rows[1][7] == "0"
 
     daily = client.get(f"{BASE}/export",
                        params={"kind": "consumption_daily", "format": "csv"})
