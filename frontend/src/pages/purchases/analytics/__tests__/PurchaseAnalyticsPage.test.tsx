@@ -817,7 +817,7 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
   // ---------------- 图表卡几何（320/390 视口）：卡片可收缩不撑出横向滚动，
   // 趋势卡头部允许换行（标题不被 extra 单选组挤到 0 宽） ----------------
 
-  it("图表卡：趋势/排行卡可收缩（minWidth 0 + maxWidth 100%），趋势卡头允许换行", async () => {
+  it("图表卡：趋势/排行卡可收缩（minWidth 0 + maxWidth 100%），趋势筛选控件独立于标题行", async () => {
     renderPage();
     expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
     const trendCard = screen.getByText("采购趋势").closest(".ant-card") as HTMLElement;
@@ -825,6 +825,11 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     // jsdom 对无单位 0 的 computed minWidth 返回 "0"（非 "0px"）
     expect(trendCard).toHaveStyle({ minWidth: "0", maxWidth: "100%" });
     expect(rankCard).toHaveStyle({ minWidth: "0", maxWidth: "100%" });
-    expect(trendCard.querySelector(".ant-card-head")).toHaveStyle({ flexWrap: "wrap" });
+    const header = trendCard.querySelector(".ant-card-head")!;
+    const body = trendCard.querySelector(".ant-card-body")!;
+    expect(header).toHaveTextContent("采购趋势");
+    expect(header.querySelector(".ant-card-extra")).toBeNull();
+    expect(body.querySelector('[aria-label="趋势粒度"]')).not.toBeNull();
+    expect(body.querySelector('[aria-label="图表指标"]')).not.toBeNull();
   });
 });
