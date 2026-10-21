@@ -20,14 +20,21 @@ import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Date, cast, func, literal, select
+from sqlalchemy import Date, and_, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from app import tax_policy
 from app.models.dimensions import DimCustomer
-from app.models.sales import FSalesOrder
+from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
-from app.services.sales_analytics import AMOUNT_KEYS, _f, _order_query
+from app.services.sales_analytics import (
+    AMOUNT_KEYS,
+    UNCATEGORIZED_LABEL,
+    _category_match,
+    _clean_multi,
+    _f,
+    _order_query,
+)
 from app.services.sales_analytics import summary as _summary
 
 EMPTY_LABEL = "未填"
@@ -44,6 +51,9 @@ GROUP_DIMS = {
     "warehouse": "warehouse",
 }
 CUSTOMER_DIMS = ("customer", "customer_type", "customer_city", "customer_source")
+# 行级分组维度（D-44 §8）：订单拆成明细行，一张单可计入多个组
+LINE_DIMS = ("category", "brand", "pn")
+ALL_GROUP_DIMS = tuple(GROUP_DIMS) + LINE_DIMS
 GROUP_SORTS = AMOUNT_KEYS + ("orders", "gross_profit", "customers", "key")
 GRANULARITIES = ("day", "week", "month")
 MAX_TREND_BUCKETS = 1000
@@ -96,7 +106,9 @@ def _ratio(num, den) -> float | None:
 def _row_payload(r, basis: str) -> dict:
     gross = _gross(r.revenue_costed, r.cost_costed)
     basis_total = getattr(r, basis)
+    extra = {"lines": r.lines} if hasattr(r, "lines") else {}
     return {
+        **extra,
         "orders": r.orders,
         "customers": r.customers,
         "amount_ex_tax": _f(r.amount_ex_tax),
@@ -111,6 +123,50 @@ def _row_payload(r, basis: str) -> dict:
 
 def _shift_filters(filters: dict, window: tuple[date, date]) -> dict:
     return {**filters, "date_from": window[0], "date_to": window[1]}
+
+
+def _group_rows(db: Session, filters: dict, group_by: str):
+    """按维度聚合的行：单头维度在订单子查询上分组；行级维度拆明细行分组。
+
+    行级：订单范围取 ``_order_query`` 同一筛选结果（含金额区间），再连明细行；有大类 /
+    品牌筛选时只计匹配行。金额同 _order_query 行级口径：含税 = 行金额（空时 数量 ×
+    单价），不含税 = 含税 ÷ 1.13 名义；单数 = 去重订单数，另给明细行数。
+    """
+    base, _ = _order_query(**filters)
+    sub = base.subquery()
+    if group_by not in LINE_DIMS:
+        key = func.coalesce(sub.c[GROUP_DIMS[group_by]], literal(EMPTY_LABEL)).label("key")
+        return db.execute(select(key, *_measures(sub)).group_by(key)).all()
+
+    sl = FSalesLine
+    if group_by == "category":
+        dim = func.coalesce(sl.category_major, literal(UNCATEGORIZED_LABEL))
+    elif group_by == "brand":
+        dim = func.coalesce(sl.brand, literal(EMPTY_LABEL))
+    else:
+        dim = func.coalesce(sl.pn_std, sl.pn_raw, literal(EMPTY_LABEL))
+    key = dim.label("key")
+    counts = sl.counts_revenue.is_(True)
+    costed = and_(counts, sl.cost_moving_avg.is_not(None))
+    line_inc = func.sum(func.coalesce(sl.line_amount, sl.qty * sl.unit_price))
+    stmt = select(
+        key,
+        func.count(func.distinct(sl.order_id)).label("orders"),
+        func.count(sl.id).label("lines"),
+        func.round(line_inc / tax_policy.TAX_FACTOR, 2).label("amount_ex_tax"),
+        line_inc.label("amount_inc_tax"),
+        func.sum(sl.revenue_amount).filter(counts).label("revenue"),
+        func.sum(sl.revenue_amount).filter(costed).label("revenue_costed"),
+        func.sum(sl.cost_amount).filter(costed).label("cost_costed"),
+        func.count(func.distinct(sub.c.customer)).label("customers"),
+    ).select_from(sl).join(sub, sl.order_id == sub.c.id)
+    cats = _clean_multi(filters.get("categories"))
+    brs = _clean_multi(filters.get("brands"))
+    if cats:
+        stmt = stmt.where(_category_match(sl, cats))
+    if brs:
+        stmt = stmt.where(sl.brand.in_(brs))
+    return db.execute(stmt.group_by(key)).all()
 
 
 def groups(
@@ -129,16 +185,12 @@ def groups(
     排序 NULLS LAST，并列按分组键升序破并列；“其他”恒排最后且合计 = 总计 − TopN。
     ``top=0`` 表示全部。``compare=True`` 且对比期可用时，每组附上月同期同组的指标。
     """
-    if group_by not in GROUP_DIMS:
+    if group_by not in ALL_GROUP_DIMS:
         raise DashboardValidationError(f"不支持的分组维度：{group_by}")
     if sort not in GROUP_SORTS:
         raise DashboardValidationError(f"不支持的排序键：{sort}")
     basis = filters.get("amount_basis") or "amount_ex_tax"
-    base, _ = _order_query(**filters)
-    sub = base.subquery()
-    dim = sub.c[GROUP_DIMS[group_by]]
-    key = func.coalesce(dim, literal(EMPTY_LABEL)).label("key")
-    rows = db.execute(select(key, *_measures(sub)).group_by(key)).all()
+    rows = _group_rows(db, filters, group_by)
     total_basis = sum((getattr(r, basis) or 0) for r in rows) if rows else None
 
     items = [{"key": r.key, "is_empty": r.key == EMPTY_LABEL, **_row_payload(r, basis)}
@@ -201,11 +253,8 @@ def groups(
     window = compare_window(filters.get("date_from"), filters.get("date_to"))
     compare_payload = None
     if compare and window is not None:
-        cbase, _ = _order_query(**_shift_filters(filters, window))
-        csub = cbase.subquery()
-        ckey = func.coalesce(csub.c[GROUP_DIMS[group_by]], literal(EMPTY_LABEL)).label("key")
         crows = {r.key: _row_payload(r, basis)
-                 for r in db.execute(select(ckey, *_measures(csub)).group_by(ckey)).all()}
+                 for r in _group_rows(db, _shift_filters(filters, window), group_by)}
         for i in head:
             c = crows.get(i["key"])
             if c is not None:
@@ -217,6 +266,8 @@ def groups(
         i.pop("_basis", None)
     return {
         "group_by": group_by,
+        # 行级分组：各组单数之和可大于总单数（一单多组），前端表头注明
+        "line_level": group_by in LINE_DIMS,
         "sort": sort,
         "order": order,
         "amount_basis": basis,

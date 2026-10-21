@@ -60,6 +60,8 @@ class SalesFilters:
     amount_max: Decimal | None
     include_negative: bool
     include_empty: bool
+    categories: list[str] | None = None
+    brands: list[str] | None = None
 
     @property
     def uses_customer(self) -> bool:
@@ -93,6 +95,9 @@ def sales_filters(
     amount_max: Decimal | None = Query(None, ge=-AMOUNT_BOUND, le=AMOUNT_BOUND),
     include_negative: bool = Query(True, description="含负金额单（D-44 §10，默认含）"),
     include_empty: bool = Query(True, description="含无金额单（D-44 §10，默认含）"),
+    category: list[str] | None = Query(
+        None, description="商品大类多选（D-44 §8 行级口径；「未分类」匹配空值）"),
+    brand: list[str] | None = Query(None, description="品牌多选（D-44 §8 行级口径）"),
 ) -> SalesFilters:
     return SalesFilters(
         date_from=date_from, date_to=date_to, business_types=business_type,
@@ -100,6 +105,7 @@ def sales_filters(
         customer_types=customer_type, salespeople=salesperson_name,
         amount_basis=amount_basis, amount_min=amount_min, amount_max=amount_max,
         include_negative=include_negative, include_empty=include_empty,
+        categories=category, brands=brand,
     )
 
 
@@ -233,7 +239,7 @@ def _public_basis(ctx: UserContext, f: SalesFilters) -> SalesFilters:
 
 @router.get("/groups")
 def groups(
-    group_by: str = Query(..., pattern="^(" + "|".join(sales_dashboard.GROUP_DIMS) + ")$"),
+    group_by: str = Query(..., pattern="^(" + "|".join(sales_dashboard.ALL_GROUP_DIMS) + ")$"),
     sort: str = Query("amount_ex_tax", pattern="^(" + "|".join(sales_dashboard.GROUP_SORTS) + ")$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     top: int = Query(20, ge=0, le=500, description="Top N，0 = 全部"),
@@ -244,7 +250,8 @@ def groups(
     _page: None = Depends(require_page("page_sales_analysis")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """分组排行（D-44 方案 §3.3）：客户 / 客户类型 / 城市 / 来源 / 销售 / 业务类型 / 仓库。"""
+    """分组排行（D-44 方案 §3.3）：客户 / 客户类型 / 城市 / 来源 / 销售 / 业务类型 / 仓库，
+    以及行级的商品大类 / 品牌 / PN（D-44 §8）。"""
     _guards(ctx, f)
     # 客户类属分组：无客户权限 403（D-44 §11，组键本身就是客户信息）
     if group_by in sales_dashboard.CUSTOMER_DIMS and is_field_hidden(ctx, "customer"):

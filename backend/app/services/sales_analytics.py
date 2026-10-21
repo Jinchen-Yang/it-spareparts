@@ -69,6 +69,20 @@ def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+UNCATEGORIZED_LABEL = "未分类"
+
+
+def _category_match(sl, cats: list[str]):
+    """商品大类匹配：「未分类」匹配空值（与 D-39 采购分类同一显示约定）。"""
+    named = [c for c in cats if c != UNCATEGORIZED_LABEL]
+    conds = []
+    if named:
+        conds.append(sl.category_major.in_(named))
+    if UNCATEGORIZED_LABEL in cats:
+        conds.append(sl.category_major.is_(None))
+    return or_(*conds)
+
+
 def _order_query(
     *,
     date_from: date | None = None,
@@ -84,6 +98,8 @@ def _order_query(
     amount_max: Decimal | None = None,
     include_negative: bool = True,
     include_empty: bool = True,
+    categories: list[str] | None = None,
+    brands: list[str] | None = None,
 ):
     """销售分析订单基查询：一张销售订单一行（LEFT JOIN 明细聚营收/毛利，无明细行也保留）。
 
@@ -95,16 +111,32 @@ def _order_query(
     毛利（D-44 §5，与 dashboard.kpi 同口径）：已配成本 = 计营收且 cost_moving_avg
     非空的行；revenue_costed = 这些行营收之和，cost_costed = 其成本之和，
     gross_profit = 两者之差；单内无已配成本行 → 三者皆 NULL（不当 0）。
+
+    行级口径（D-44 §8）：传了商品大类 / 品牌筛选时，订单拆成明细行、只计匹配行——
+    明细内连接（无匹配行的单不出现），单头两金额改为匹配行合计：含税 = 行金额
+    （为空时 数量 × 含税单价），不含税 = 含税 ÷ 1.13（名义，按单四舍五入到分）；
+    营收 / 毛利同样只计匹配行。下游 summary / orders / groups / trend 自动沿用。
     """
     so, sl = FSalesOrder, FSalesLine
+    cats = _clean_multi(categories)
+    brs = _clean_multi(brands)
+    line_mode = bool(cats or brs)
     counts = sl.counts_revenue.is_(True)
     costed = and_(counts, sl.cost_moving_avg.is_not(None))
     revenue_costed = func.sum(sl.revenue_amount).filter(costed)
     cost_costed = func.sum(sl.cost_amount).filter(costed)
+    if line_mode:
+        line_inc = func.sum(func.coalesce(sl.line_amount, sl.qty * sl.unit_price))
+        amount_cols = (
+            func.round(line_inc / tax_policy.TAX_FACTOR, 2).label("amount_ex_tax"),
+            line_inc.label("amount_inc_tax"),
+        )
+    else:
+        amount_cols = (so.amount_ex_tax, so.amount_inc_tax)
     inner = (
         select(
             so.id, so.order_no, so.order_date, so.salesperson, so.business_type,
-            so.data_status, so.raw_order_id, so.amount_ex_tax, so.amount_inc_tax,
+            so.data_status, so.raw_order_id, *amount_cols,
             DimCustomer.name_normalized.label("customer"),
             DimCustomer.customer_type.label("customer_type"),
             DimCustomer.city.label("customer_city"),
@@ -115,9 +147,17 @@ def _order_query(
             cost_costed.label("cost_costed"),
             (revenue_costed - cost_costed).label("gross_profit"),
         )
-        .join(sl, sl.order_id == so.id, isouter=True)
         .join(DimCustomer, so.customer_id == DimCustomer.id, isouter=True)
     )
+    if line_mode:
+        match = [sl.order_id == so.id]
+        if cats:
+            match.append(_category_match(sl, cats))
+        if brs:
+            match.append(sl.brand.in_(brs))
+        inner = inner.join(sl, and_(*match))
+    else:
+        inner = inner.join(sl, sl.order_id == so.id, isouter=True)
     inner = active_orders(inner, so)
     if date_from is not None:
         inner = inner.where(so.order_date >= date_from)
@@ -244,6 +284,20 @@ def filter_options(
         ).limit(OPTION_LIST_LIMIT)
         customers = [{"value": r.value, "orders": r.orders} for r in db.execute(stmt)]
 
+    sl = FSalesLine
+
+    def _line_counts(col, empty_label=None):
+        stmt = active_orders(
+            select(col.label("value"), func.count(func.distinct(so.id)).label("orders"))
+            .select_from(sl).join(so, sl.order_id == so.id), so,
+        ).group_by(col).order_by(func.count(func.distinct(so.id)).desc(),
+                                 col.asc().nulls_last())
+        return [{"value": (r.value if r.value is not None else empty_label),
+                 "orders": r.orders} for r in db.execute(stmt)]
+
+    categories = _line_counts(sl.category_major, UNCATEGORIZED_LABEL)
+    brands = [b for b in _line_counts(sl.brand) if b["value"] is not None]
+
     for k in ("amount_min", "amount_max", "include_negative", "include_empty", "amount_basis"):
         filters.pop(k, None)
     base, _ = _order_query(**filters)
@@ -255,6 +309,8 @@ def filter_options(
     ).select_from(sub)).one()
     return {
         "salespeople": salespeople,
+        "categories": categories,
+        "brands": brands,
         "customer_types": customer_types,
         "customers": customers,
         "amount_range": {
@@ -324,7 +380,12 @@ def summary(
             "amount_basis": filters.get("amount_basis", "amount_ex_tax"),
             "include_negative": filters.get("include_negative", True),
             "include_empty": filters.get("include_empty", True),
+            "categories": _clean_multi(filters.get("categories")),
+            "brands": _clean_multi(filters.get("brands")),
         },
+        # 行级口径（D-44 §8）：不含税为按 13% 推算的名义值，前端据此标注
+        "line_mode": bool(_clean_multi(filters.get("categories"))
+                          or _clean_multi(filters.get("brands"))),
         "as_of": today.isoformat(),
         "kpi": {
             "orders": agg.orders,

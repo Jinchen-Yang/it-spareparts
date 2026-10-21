@@ -430,7 +430,7 @@ def test_groups_sort_orders_asc_ties_by_key(db, seeded):
 def test_groups_validation(db, seeded):
     client = _client(db, "d44-grp-422", role="boss")
     assert client.get(GROUPS).status_code == 422
-    assert client.get(GROUPS, params={"group_by": "pn"}).status_code == 422
+    assert client.get(GROUPS, params={"group_by": "supplier"}).status_code == 422
     assert client.get(GROUPS, params={"group_by": "customer", "sort": "cost"}).status_code == 422
 
 
@@ -535,3 +535,84 @@ def test_shift_month(d, months, expected):
 def test_compare_window(window, expected):
     from app.services.sales_dashboard import compare_window
     assert compare_window(*window) == expected
+
+
+# ================= PR-3：行级口径（商品大类 / 品牌，D-44 §8） =================
+
+@pytest.fixture()
+def lines_seeded(db, seeded):
+    """在 seeded 基础上：A6 原行改为 硬盘/C（含税 9040），A6 再加一行 内存/B
+    （数量 2 × 单价 100，行金额为空 → 含税 200；营收 177 成本 100）；A5 行大类置空。"""
+    from sqlalchemy import select as _select
+    a1, a2, a3, a4, a5, a6 = seeded["a"]
+    la6 = db.scalar(_select(FSalesLine).where(FSalesLine.raw_line_id == "LA6"))
+    la6.category_major, la6.brand = "硬盘", "C"
+    la6.unit_price = la6.line_amount = Decimal("9040")
+    la5 = db.scalar(_select(FSalesLine).where(FSalesLine.raw_line_id == "LA5"))
+    la5.category_major = None
+    db.add(FSalesLine(
+        raw_line_id="LA6b", order_id=a6.id, part_id=la6.part_id, line_no=2,
+        pn_std="PN-D44", category_major="内存", brand="B", qty=Decimal("2"),
+        unit_price=Decimal("100"), line_amount=None, revenue_amount=Decimal("177"),
+        counts_revenue=True, cost_moving_avg=Decimal("50"), cost_amount=Decimal("100"),
+        import_batch_id=la6.import_batch_id,
+    ))
+    db.commit()
+    return seeded
+
+
+def test_line_mode_category_filter_only_counts_matching_lines(db, lines_seeded):
+    client = _client(db, "d44-line-cat", role="boss")
+    data = client.get(SUMMARY, params={"category": "硬盘"}).json()
+    assert data["line_mode"] is True
+    kpi = data["kpi"]
+    assert kpi["orders"] == 1
+    assert kpi["amount_inc_tax_total"] == pytest.approx(9040.0)
+    assert kpi["amount_ex_tax_total"] == pytest.approx(8000.0)       # ÷1.13 名义
+    assert kpi["revenue_total"] == pytest.approx(7000.0)
+    assert kpi["gross_profit"] == pytest.approx(2000.0)
+    items = client.get(ORDERS, params={"category": "内存", "sort": "order_date",
+                                       "order": "asc"}).json()["items"]
+    assert [i["order_no"] for i in items] == ["SO-A1", "SO-A2", "SO-A4", "SO-A6"]
+    a6 = items[-1]                                                    # 只计 内存 那一行
+    assert a6["amount_inc_tax"] == pytest.approx(200.0)
+    assert a6["amount_ex_tax"] == pytest.approx(176.99)
+    assert a6["revenue"] == pytest.approx(177.0)
+    assert a6["gross_profit"] == pytest.approx(77.0)
+
+
+def test_line_mode_uncategorized_and_brand(db, lines_seeded):
+    client = _client(db, "d44-line-uncat", role="boss")
+    assert _nos(client.get(ORDERS, params={"category": "未分类"})) == ["SO-A5"]
+    assert _nos(client.get(ORDERS, params={"brand": "C"})) == ["SO-A6"]
+    # 未选大类 / 品牌时仍是单头口径
+    data = client.get(SUMMARY).json()
+    assert data["line_mode"] is False and data["kpi"]["orders"] == 6
+
+
+def test_group_by_category_line_level_sums(db, lines_seeded):
+    client = _client(db, "d44-grp-cat", role="boss")
+    data = client.get(GROUPS, params={"group_by": "category", "sort": "revenue",
+                                      "top": 0}).json()
+    assert data["line_level"] is True
+    got = {g["key"]: (g["orders"], g["lines"], g["revenue"]) for g in data["groups"]}
+    assert got == {"硬盘": (1, 1, 7000.0), "内存": (4, 5, 2677.0), "未分类": (1, 1, 100.0)}
+    assert [g["key"] for g in data["groups"]] == ["硬盘", "内存", "未分类"]
+    kpi = client.get(SUMMARY).json()["kpi"]
+    assert sum(g["revenue"] for g in data["groups"]) == pytest.approx(kpi["revenue_total"])
+
+
+def test_group_by_brand_with_category_filter_and_pn(db, lines_seeded):
+    client = _client(db, "d44-grp-brand", role="boss")
+    data = client.get(GROUPS, params={"group_by": "brand", "category": "内存", "top": 0}).json()
+    assert [(g["key"], g["lines"]) for g in data["groups"]] == [("B", 5)]
+    pn = client.get(GROUPS, params={"group_by": "pn", "top": 0}).json()
+    assert [(g["key"], g["orders"]) for g in pn["groups"]] == [("PN-D44", 5)]  # A3 无明细
+
+
+def test_options_categories_and_brands(db, lines_seeded):
+    client = _client(db, "d44-opt-cat", role="boss")
+    data = client.get(OPTIONS).json()
+    assert {c["value"]: c["orders"] for c in data["categories"]} == {
+        "内存": 4, "硬盘": 1, "未分类": 1}
+    assert {b["value"]: b["orders"] for b in data["brands"]} == {"B": 5, "C": 1}
