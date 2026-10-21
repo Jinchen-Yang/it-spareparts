@@ -1,6 +1,8 @@
 """FastAPI 入口。"""
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +62,7 @@ from app.api import (
     replenishment,
     resale_export,
     resale_catalog_export,
+    catalog_v2,
     role_templates,
     sales_analytics,
     substitutes,
@@ -84,7 +87,26 @@ if _sec_warns:
             "[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w
         )
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(_app):
+    # Catalog publication is opt-in; shutting it down never removes capture rows.
+    stop = asyncio.Event()
+    task = None
+    if settings.catalog_v2_publisher_enabled:
+        from app.services.catalog_v2.publisher import publisher_loop
+
+        task = asyncio.create_task(publisher_loop(
+            stop, engine, settings.catalog_v2_publisher_interval_seconds,
+        ))
+    try:
+        yield
+    finally:
+        if task is not None:
+            stop.set()
+            await task
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -129,6 +151,7 @@ app.include_router(
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
+app.include_router(catalog_v2.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_batch_transfer.router, prefix=settings.api_prefix

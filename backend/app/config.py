@@ -48,6 +48,37 @@ class Settings(BaseSettings):
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
 
+    # D-36 v2 owns independent credentials; an empty map leaves every read disabled.
+    catalog_v2_read_clients: dict[str, SecretStr] = {}
+    catalog_v2_cursor_hmac_key: SecretStr = SecretStr("")
+    catalog_v2_publisher_enabled: bool = False
+    catalog_v2_publisher_interval_seconds: int = 30
+    catalog_v2_response_max_bytes: int = 8 * 1024 * 1024
+    catalog_v2_fragment_max_bytes: int = 4 * 1024 * 1024
+
+    @field_validator("catalog_v2_read_clients")
+    @classmethod
+    def validate_catalog_v2_clients(cls, clients: dict[str, SecretStr]):
+        digests = []
+        for client_id, secret in clients.items():
+            digest = secret.get_secret_value()
+            if not client_id or len(client_id) > 128 or len(digest) != 64 or any(
+                char not in "0123456789abcdef" for char in digest
+            ):
+                raise ValueError("CATALOG_V2_READ_CLIENTS 必须映射 client_id 到 SHA256 小写摘要")
+            digests.append(digest)
+        if len(set(digests)) != len(digests):
+            raise ValueError("catalog v2 各客户端必须使用不同凭据")
+        return clients
+
+    @field_validator("catalog_v2_response_max_bytes", "catalog_v2_fragment_max_bytes",
+                     "catalog_v2_publisher_interval_seconds")
+    @classmethod
+    def validate_catalog_v2_positive_limit(cls, value: int):
+        if value < 1:
+            raise ValueError("catalog v2 容量与轮询间隔必须大于零")
+        return value
+
     # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
     # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。
     resale_price_reference_window_days: int = 30

@@ -1,4 +1,8 @@
 """导入所有模型，确保 Base.metadata 完整（供 Alembic autogenerate）。"""
+from app.models.catalog_v2 import (
+    CatalogV2Alarm, CatalogV2Batch, CatalogV2Change, CatalogV2Cursor,
+    CatalogV2Epoch, CatalogV2PayloadFragment, CatalogV2Projection, CatalogV2Snapshot,
+)
 from app.models.chat import ChatMessage, ChatSession
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
@@ -142,6 +146,8 @@ from app.models.replenishment import (
 )
 
 __all__ = [
+    "CatalogV2Alarm", "CatalogV2Batch", "CatalogV2Change", "CatalogV2Cursor",
+    "CatalogV2Epoch", "CatalogV2PayloadFragment", "CatalogV2Projection", "CatalogV2Snapshot",
     "ChatSession",
     "ChatMessage",
     "FactDataQualityIssue",
