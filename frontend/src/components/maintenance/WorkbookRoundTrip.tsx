@@ -15,6 +15,7 @@ import type {
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
+import { COLORS } from "../../theme";
 
 const { Text } = Typography;
 const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
@@ -332,7 +333,10 @@ export function WorkbookRoundTrip({
         width: 640,
         content: (
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
-            <Text type="danger" style={{ fontSize: 12 }}>
+            {/* 静态 Modal.error 不消费 ConfigProvider 主题，type="danger" 会退回
+                antd 默认红 #FF4D4F（白底仅 3.27:1）。12px 属 WCAG 普通正文，
+                显式用项目语义色 COLORS.danger（#BE564B，白底 4.54:1 ≥ 4.5:1）。 */}
+            <Text type="danger" style={{ fontSize: 12, color: COLORS.danger }}>
               以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化；
               本次上传未写入任何数据，也不能用强制接管跳过。请重新下载最新
               工作簿，逐项核对这些字段后再上传。
@@ -356,7 +360,12 @@ export function WorkbookRoundTrip({
           </Space>
         ),
         okText: "知道了，重新下载",
-        onOk: finish,
+        onOk: () => {
+          finish();
+          // 按钮承诺「重新下载」：关闭弹窗后真的触发当前项目总表下载，
+          // 不能只关弹窗让人自己找入口（返工2 顺手修，sol 建议改 2）。
+          void handleDownload();
+        },
         onCancel: finish,
       });
       closeConfirmation.current = finish;
