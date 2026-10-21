@@ -602,8 +602,9 @@ FIELD_GROUPS = {
         "customer_phone",
         "customer",
         "end_customer",
-        # 销售看板（D-44 §2/§11）：客户类型随客户信息遮蔽
+        # 销售看板（D-44 §2/§11）：客户类型 / 来源随客户信息遮蔽
         "customer_type",
+        "customer_source",
     ],
     # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
     # 逐行 unit_price 一并遮掉（个别成交价对销售也不外露）。销售要的是「聚合成交参考价」，

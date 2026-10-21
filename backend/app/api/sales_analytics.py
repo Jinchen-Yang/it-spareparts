@@ -35,7 +35,7 @@ from app.security import (
     record_access_log,
     require_page,
 )
-from app.services import sales_analytics
+from app.services import sales_analytics, sales_dashboard
 
 router = APIRouter(prefix="/sales/analytics", tags=["sales-analytics"])
 
@@ -162,15 +162,22 @@ def business_type_options(
 @router.get("/summary")
 def summary(
     f: SalesFilters = Depends(sales_filters),
+    compare: bool = Query(False, description="附上月同期 KPI（D-44 §9）"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_sales_analysis")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """区间 KPI：订单数 + 三金额合计（含 amount_inc_tax 缺失单数）+ 客户数 / 销售人数 + 毛利。"""
+    """区间 KPI：订单数 + 三金额合计（含 amount_inc_tax 缺失单数）+ 客户数 / 销售人数 + 毛利
+    + 新客 / 老客；compare=true 时附上月同期 KPI（区间长于一个月不提供）。"""
     _guards(ctx, f)
-    record_access_log(ctx, "sales_analytics_summary", "sales_analytics", f.log_echo())
-    data = sales_analytics.summary(db, **_service_filters(f))
+    record_access_log(ctx, "sales_analytics_summary", "sales_analytics", {
+        **f.log_echo(), "compare": compare})
+    filters = _service_filters(f)
+    data = sales_analytics.summary(db, **filters)
+    data["kpi"].update(sales_dashboard.customer_lifecycle(db, **filters))
+    data["compare"] = sales_dashboard.summary_compare(db, **filters) if compare else None
+    data["compare_available"] = sales_dashboard.compare_window(f.date_from, f.date_to) is not None
     return apply_field_visibility(data, ctx)
 
 
@@ -213,6 +220,70 @@ def orders(
         db, ctx, sort=sort, order=order, page=page, page_size=page_size,
         include_returns=include_returns, **_service_filters(f),
     )
+    return apply_field_visibility(data, ctx)
+
+
+def _public_basis(ctx: UserContext, f: SalesFilters) -> SalesFilters:
+    """占比 / 单均 / 集中度按 amount_basis 计算：该口径被遮蔽时强制退回公开口径
+    revenue（金额区间筛选在 _guards 已 403，强制改口径不改变筛选结果）。"""
+    if is_field_hidden(ctx, f.amount_basis):
+        f.amount_basis = "revenue"
+    return f
+
+
+@router.get("/groups")
+def groups(
+    group_by: str = Query(..., pattern="^(" + "|".join(sales_dashboard.GROUP_DIMS) + ")$"),
+    sort: str = Query("amount_ex_tax", pattern="^(" + "|".join(sales_dashboard.GROUP_SORTS) + ")$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    top: int = Query(20, ge=0, le=500, description="Top N，0 = 全部"),
+    compare: bool = Query(False, description="每组附上月同期指标（D-44 §9）"),
+    f: SalesFilters = Depends(sales_filters),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_sales_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """分组排行（D-44 方案 §3.3）：客户 / 客户类型 / 城市 / 来源 / 销售 / 业务类型 / 仓库。"""
+    _guards(ctx, f)
+    # 客户类属分组：无客户权限 403（D-44 §11，组键本身就是客户信息）
+    if group_by in sales_dashboard.CUSTOMER_DIMS and is_field_hidden(ctx, "customer"):
+        raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户类属分组")
+    # 组序防泄漏：被遮蔽的金额 / 毛利排序退回单数（D-39 组序保护同款）
+    if sort in ("amount_ex_tax", "amount_inc_tax", "gross_profit") and is_field_hidden(ctx, sort):
+        sort = "orders"
+    f = _public_basis(ctx, f)
+    record_access_log(ctx, "sales_analytics_groups", "sales_analytics", {
+        **f.log_echo(), "group_by": group_by, "sort": sort, "order": order,
+        "top": top, "compare": compare,
+    })
+    data = sales_dashboard.groups(
+        db, group_by=group_by, sort=sort, order=order, top=top, compare=compare,
+        **_service_filters(f))
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/trend")
+def trend(
+    granularity: str = Query("day", pattern="^(day|week|month)$"),
+    compare: bool = Query(False, description="附上月同期序列（D-44 §9）"),
+    f: SalesFilters = Depends(sales_filters),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_sales_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """时间趋势（D-44 方案 §3.4）：日 / 周 / 月完整桶序列、上月对比序列、星期分布。"""
+    _guards(ctx, f)
+    f = _public_basis(ctx, f)
+    record_access_log(ctx, "sales_analytics_trend", "sales_analytics", {
+        **f.log_echo(), "granularity": granularity, "compare": compare,
+    })
+    try:
+        data = sales_dashboard.trend(
+            db, granularity=granularity, compare=compare, **_service_filters(f))
+    except sales_dashboard.DashboardValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return apply_field_visibility(data, ctx)
 
 

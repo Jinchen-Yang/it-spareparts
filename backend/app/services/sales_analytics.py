@@ -107,6 +107,9 @@ def _order_query(
             so.data_status, so.raw_order_id, so.amount_ex_tax, so.amount_inc_tax,
             DimCustomer.name_normalized.label("customer"),
             DimCustomer.customer_type.label("customer_type"),
+            DimCustomer.city.label("customer_city"),
+            DimCustomer.customer_source.label("customer_source"),
+            so.warehouse,
             func.sum(sl.revenue_amount).filter(counts).label("revenue"),
             revenue_costed.label("revenue_costed"),
             cost_costed.label("cost_costed"),
@@ -139,7 +142,10 @@ def _order_query(
     people = _clean_multi(salespeople)
     if people:
         inner = inner.where(so.salesperson.in_(people))
-    inner = inner.group_by(so.id, DimCustomer.name_normalized, DimCustomer.customer_type)
+    inner = inner.group_by(
+        so.id, DimCustomer.name_normalized, DimCustomer.customer_type,
+        DimCustomer.city, DimCustomer.customer_source,
+    )
 
     sub = inner.subquery("sales_orders")
     stmt = select(sub)

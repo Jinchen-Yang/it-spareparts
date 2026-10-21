@@ -380,3 +380,158 @@ def test_new_keys_registered_in_field_groups():
         assert key in groups["purchase_cost"], key
     assert "gross_profit" in groups["profit_amount"]
     assert "gross_margin" in groups["profit_rate"]
+
+
+# ================= PR-2：分组排行 / 趋势 / 对比上月 / 新老客 =================
+
+GROUPS = "/api/sales/analytics/groups"
+TREND = "/api/sales/analytics/trend"
+
+
+def test_groups_customer_ranking_other_and_shares(db, seeded):
+    client = _client(db, "d44-grp", role="boss")
+    data = client.get(GROUPS, params={"group_by": "customer", "top": 2}).json()
+    assert [g["key"] for g in data["groups"]] == ["B公司", "A公司"]
+    b, a = data["groups"]
+    assert b["orders"] == 2 and b["amount_ex_tax"] == pytest.approx(10000.0)
+    assert a["revenue"] == pytest.approx(2900.0) and a["gross_profit"] == pytest.approx(800.0)
+    assert b["share"] == pytest.approx(round(10000 / 13500, 4))
+    assert a["cumulative_share"] == pytest.approx(round(14000 / 13500, 4))
+    other = data["other"]
+    assert other["groups"] == 2 and other["orders"] == 2      # C公司 + 未填
+    assert other["amount_ex_tax"] == pytest.approx(-500.0)
+    assert other["gross_profit"] == pytest.approx(-100.0)
+    assert data["total_groups"] == 4
+    assert data["concentration"]["top1_share"] == pytest.approx(round(10000 / 13500, 4))
+    # 分组合计（含“其他”）= KPI 合计
+    kpi = client.get(SUMMARY).json()["kpi"]
+    assert sum(g["orders"] for g in data["groups"]) + other["orders"] == kpi["orders"]
+    assert (sum(g["revenue"] for g in data["groups"]) + other["revenue"]
+            == pytest.approx(kpi["revenue_total"]))
+
+
+def test_groups_empty_key_and_null_sort_last(db, seeded):
+    client = _client(db, "d44-grp-null", role="boss")
+    data = client.get(GROUPS, params={"group_by": "customer", "top": 0, "order": "asc"}).json()
+    keys = [g["key"] for g in data["groups"]]
+    assert keys == ["C公司", "A公司", "B公司", "未填"]          # 未填 ex 为空 → 沉底
+    assert data["groups"][-1]["is_empty"] is True
+    assert data["other"] is None
+
+
+def test_groups_sort_orders_asc_ties_by_key(db, seeded):
+    client = _client(db, "d44-grp-sp", role="boss")
+    data = client.get(GROUPS, params={
+        "group_by": "salesperson", "sort": "orders", "order": "asc", "top": 0}).json()
+    assert [(g["key"], g["orders"]) for g in data["groups"]] == [
+        ("未填", 1), ("王五", 1), ("张三", 2), ("李四", 2)]
+
+
+def test_groups_validation(db, seeded):
+    client = _client(db, "d44-grp-422", role="boss")
+    assert client.get(GROUPS).status_code == 422
+    assert client.get(GROUPS, params={"group_by": "pn"}).status_code == 422
+    assert client.get(GROUPS, params={"group_by": "customer", "sort": "cost"}).status_code == 422
+
+
+@pytest.mark.parametrize("dim", ["customer", "customer_type", "customer_city", "customer_source"])
+def test_groups_customer_dims_403_without_customer_permission(db, seeded, dim):
+    client = _client(db, f"d44-grp-nocust-{dim}", role="boss", overrides={"data_customer": False})
+    assert client.get(GROUPS, params={"group_by": dim}).status_code == 403
+    assert client.get(GROUPS, params={"group_by": "salesperson"}).status_code == 200
+
+
+def test_groups_masked_sort_and_basis_fallback(db, seeded):
+    client = _client(db, "d44-grp-mask", role="boss",
+                     overrides={"data_purchase_cost": False, "data_profit": False})
+    data = client.get(GROUPS, params={"group_by": "salesperson", "top": 0}).json()
+    assert data["sort"] == "orders" and data["amount_basis"] == "revenue"
+    assert all(g["amount_ex_tax"] is None and g["gross_profit"] is None for g in data["groups"])
+    li = next(g for g in data["groups"] if g["key"] == "李四")
+    assert li["share"] == pytest.approx(round(9000 / 9600, 4))  # 按公开营收计占比
+    data = client.get(GROUPS, params={"group_by": "salesperson", "sort": "gross_profit"}).json()
+    assert data["sort"] == "orders"
+
+
+def test_trend_month_buckets_sum_to_kpi(db, seeded):
+    client = _client(db, "d44-trend-m", role="boss")
+    params = {"date_from": "2026-01-01", "date_to": "2026-03-31", "granularity": "month"}
+    data = client.get(TREND, params=params).json()
+    assert [(b["bucket"], b["orders"]) for b in data["buckets"]] == [
+        ("2026-01-01", 2), ("2026-02-01", 2), ("2026-03-01", 2)]
+    assert [b["amount_ex_tax"] for b in data["buckets"]] == [4000.0, 1500.0, 8000.0]
+    assert data["compare_available"] is False and data["compare"] is None
+
+
+def test_trend_day_fills_empty_buckets_with_zero(db, seeded):
+    client = _client(db, "d44-trend-d", role="boss")
+    data = client.get(TREND, params={"date_from": "2026-01-09", "date_to": "2026-01-12"}).json()
+    assert [(b["bucket"], b["orders"], b["amount_ex_tax"]) for b in data["buckets"]] == [
+        ("2026-01-09", 0, 0.0), ("2026-01-10", 1, 1000.0),
+        ("2026-01-11", 1, 3000.0), ("2026-01-12", 0, 0.0)]
+    # 有成交但含税全缺失的桶为 null，不当 0
+    assert data["buckets"][2]["amount_inc_tax"] is None
+
+
+def test_trend_week_starts_monday_and_all_range(db, seeded):
+    client = _client(db, "d44-trend-w", role="boss")
+    data = client.get(TREND, params={"granularity": "week"}).json()   # 全部：取最早/最晚单
+    assert data["buckets"][0]["bucket"] == "2026-01-05"               # 01-10 所在周的周一
+    assert sum(b["orders"] for b in data["buckets"]) == 6
+    assert [w["orders"] for w in data["weekday"]] == [1, 0, 0, 1, 1, 1, 2]
+
+
+def test_trend_compare_previous_month(db, seeded):
+    client = _client(db, "d44-trend-c", role="boss")
+    data = client.get(TREND, params={
+        "date_from": "2026-03-01", "date_to": "2026-03-05", "compare": "true"}).json()
+    assert data["compare_window"] == {"date_from": "2026-02-01", "date_to": "2026-02-05"}
+    assert [b["orders"] for b in data["compare"]] == [0, 0, 0, 0, 1]
+    assert [b["orders"] for b in data["buckets"]] == [1, 1, 0, 0, 0]
+
+
+def test_trend_too_many_buckets_422(db, seeded):
+    client = _client(db, "d44-trend-422", role="boss")
+    resp = client.get(TREND, params={"date_from": "2020-01-01", "date_to": "2026-01-01"})
+    assert resp.status_code == 422
+    assert client.get(TREND, params={"granularity": "year"}).status_code == 422
+
+
+def test_summary_compare_and_lifecycle(db, seeded):
+    client = _client(db, "d44-sum-cmp", role="boss")
+    data = client.get(SUMMARY, params={
+        "date_from": "2026-03-01", "date_to": "2026-03-05", "compare": "true"}).json()
+    assert data["compare_available"] is True
+    assert data["compare"]["date_from"] == "2026-02-01"
+    assert data["compare"]["kpi"]["orders"] == 1
+    assert data["compare"]["kpi"]["amount_ex_tax_total"] == pytest.approx(2000.0)
+    long = client.get(SUMMARY, params={
+        "date_from": "2026-01-01", "date_to": "2026-03-31", "compare": "true"}).json()
+    assert long["compare"] is None and long["compare_available"] is False
+
+    kpi = client.get(SUMMARY, params={"date_from": "2026-02-01", "date_to": "2026-03-31"}).json()["kpi"]
+    assert (kpi["new_customers"], kpi["returning_customers"]) == (2, 0)
+    kpi = client.get(SUMMARY, params={"date_from": "2026-01-11", "date_to": "2026-03-31"}).json()["kpi"]
+    assert (kpi["new_customers"], kpi["returning_customers"]) == (2, 1)   # A公司首单 01-10
+
+
+@pytest.mark.parametrize("d,months,expected", [
+    (date(2026, 3, 31), -1, date(2026, 2, 28)),
+    (date(2024, 3, 31), -1, date(2024, 2, 29)),
+    (date(2026, 1, 15), -1, date(2025, 12, 15)),
+    (date(2026, 12, 31), 1, date(2027, 1, 31)),
+])
+def test_shift_month(d, months, expected):
+    from app.services.sales_dashboard import shift_month
+    assert shift_month(d, months) == expected
+
+
+@pytest.mark.parametrize("window,expected", [
+    ((date(2026, 10, 21), date(2026, 10, 21)), (date(2026, 9, 21), date(2026, 9, 21))),
+    ((date(2026, 10, 1), date(2026, 10, 31)), (date(2026, 9, 1), date(2026, 9, 30))),
+    ((date(2026, 9, 30), date(2026, 10, 30)), None),          # 长于一个月（重叠）
+    ((None, date(2026, 10, 1)), None),
+])
+def test_compare_window(window, expected):
+    from app.services.sales_dashboard import compare_window
+    assert compare_window(*window) == expected
