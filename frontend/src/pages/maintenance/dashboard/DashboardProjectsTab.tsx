@@ -2,6 +2,9 @@
  *
  * R34：期间下单（M01）按 project_id 并入对比表（数量域，人人可见）；
  * 坏件试算价值列在未设比例时显示「待试算」（awaiting_ratio），不拿 0 冒充。
+ * 契约 v2：全待估项目 state=pending、无值键（B-F06，不是 ready+¥0.00）；
+ * 混合单位 → 平面 null + 单位分桶（单位列全角色；率不可加总，B-F09）；
+ * 三域返件估值覆盖列（B-F07，返件估值口径，利润门）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Select, Space, Table, Typography } from "antd";
@@ -19,15 +22,18 @@ import type { ReceiptsDrill } from "./ReceiptsDrillDrawer";
 import {
   AWAITING_RATIO_TEXT,
   DashboardExportButtons,
+  DomainCoverageLines,
   PENDING_ESTIMATE_TEXT,
   SORT_LABELS,
   apiErrorMessage,
   drillByProject,
   qtyOnlyParams,
+  QtyBreakdownCell,
   qtyText,
   rateText,
   sessionToken,
   sessionUnchanged,
+  unitColumnText,
   type DashboardTabProps,
 } from "./dashboardShared";
 
@@ -35,14 +41,18 @@ const { Text } = Typography;
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
-/** 率列统一渲染：值 + 分子/分母小字（分母≤0 显示「无率」而不是 0%）。 */
+/** 率列统一渲染：值 + 分子/分母小字（分母≤0 显示「无率」而不是 0%；
+ * 混合单位（分子分母平面 null）→ 率不可加总提示，不是 0%）。 */
 function RateCell({ row }: { row: ProjectRow }) {
+  const mixed = row.return_rate_pct === null
+    && row.rate_numerator === null
+    && row.rate_denominator === null;
   return (
     <Space direction="vertical" size={0}>
       <span>{rateText(row.return_rate_pct)}</span>
       <Text type="secondary" style={{ fontSize: 12 }}>
         {row.return_rate_pct === null
-          ? "无率（领用≤0）"
+          ? (mixed ? "混合单位，率不可加总" : "无率（领用≤0）")
           : `${qtyText(row.rate_numerator)} ÷ ${qtyText(row.rate_denominator)}`}
       </Text>
     </Space>
@@ -51,7 +61,7 @@ function RateCell({ row }: { row: ProjectRow }) {
 
 export default function DashboardProjectsTab({
   params, amountsVisible, sorts, sort, page, pageSize, refreshKey,
-  onSortChange, onPageChange, maxExportRows, onReceiptsDrill,
+  onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch, onReceiptsDrill,
 }: DashboardTabProps & {
   /** M-AC09：行内「返件明细」→ 壳层 Drawer（原筛选 ∩ 该项目，DL-022）。 */
   onReceiptsDrill?: (drill: ReceiptsDrill) => void;
@@ -63,6 +73,11 @@ export default function DashboardProjectsTab({
   const seqRef = useRef(0);
 
   const load = useCallback(async () => {
+    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     const token = sessionToken();
@@ -74,18 +89,20 @@ export default function DashboardProjectsTab({
         fetchDashboardProjects({ ...params, sort, page, page_size: pageSize }),
         fetchDashboardOrders(qtyOnlyParams(params)),
       ]);
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setData(resp);
       setOrdersByProject(new Map(ordersResp.rows.map((row) => [row.project_id, row])));
     } catch (err) {
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setData(null);
       setOrdersByProject(null);
       setError(apiErrorMessage(err));
     } finally {
       if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
     }
-  }, [params, sort, page, pageSize]);
+  }, [params, sort, page, pageSize, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     void load();
@@ -110,9 +127,19 @@ export default function DashboardProjectsTab({
       },
       { title: "业务类型", dataIndex: "business_type", width: 100,
         render: (v: string | null) => v || "—" },
+      { title: "单位", key: "unit", width: 90,
+        render: (_: unknown, row) => unitColumnText(row.unit, row.unit_breakdown) },
       {
         title: "期间下单量（原qty）", key: "order_qty", width: 140, align: "right",
-        render: (_: unknown, row) => qtyText(ordersByProject?.get(row.project_id)?.order_qty ?? null),
+        render: (_: unknown, row) => {
+          const order = ordersByProject?.get(row.project_id);
+          return (
+            <QtyBreakdownCell
+              flat={order?.order_qty ?? null}
+              breakdown={order?.unit_breakdown}
+              pick={(entry) => entry.order_qty} />
+          );
+        },
       },
       {
         title: "期间下单单数", key: "order_count", width: 110, align: "right",
@@ -122,19 +149,33 @@ export default function DashboardProjectsTab({
         },
       },
       { title: "返件实收", dataIndex: "receipt_qty", width: 100, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.receipt_qty} />
+        ) },
       { title: "坏件实收", dataIndex: "bad_receipt_qty", width: 100, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.bad_receipt_qty} />
+        ) },
       { title: "其中废品", dataIndex: "scrap_receipt_qty", width: 90, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.scrap_receipt_qty} />
+        ) },
       { title: "实际领用（未采集件况）", dataIndex: "issued_qty", width: 150, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.issued_qty} />
+        ) },
       { title: "免返领用量", dataIndex: "exempt_issued_qty", width: 100, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.exempt_issued_qty} />
+        ) },
       { title: "待判定返还要求量", dataIndex: "pending_requirement_qty", width: 130, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.pending_requirement_qty} />
+        ) },
       { title: "未关联需求单实收", dataIndex: "unlinked_receipt_qty", width: 130, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.unlinked_receipt_qty} />
+        ) },
       { title: "同期返还率", key: "return_rate_pct", width: 150,
         render: (_: unknown, row) => <RateCell row={row} /> },
       { title: "无返还备注", dataIndex: "no_return_note", width: 140, ellipsis: true,
@@ -187,7 +228,17 @@ export default function DashboardProjectsTab({
         },
         {
           title: "覆盖率", key: "coverage_pct", width: 90, align: "right",
-          render: (_: unknown, row) => rateText(row.valuation?.coverage_pct ?? null),
+          render: (_: unknown, row) => (
+            <span data-testid="project-coverage">{rateText(row.valuation?.coverage_pct ?? null)}</span>
+          ),
+        },
+        {
+          // B-F07：三域各自返件估值覆盖（bad_receipts 口径；与三域参考列的
+          // 领用已计覆盖 issued_lines 口径是两个事实）
+          title: "三域覆盖（返件估值）", key: "domains", width: 260,
+          render: (_: unknown, row) => (
+            row.valuation?.domains ? <DomainCoverageLines domains={row.valuation.domains} /> : "—"
+          ),
         },
       );
     }
@@ -215,19 +266,10 @@ export default function DashboardProjectsTab({
           params={params}
           kind="projects"
           maxExportRows={maxExportRows}
+          ownerToken={ownerToken}
+          onSessionMismatch={onSessionMismatch}
         />
       </Space>
-
-      {/* 已知后端缺口（needs #1，已提交后端作者）：/projects 暂未接入
-          value_retention_ratio，显式比例在该端点被忽略 → 金额列可能恒为
-          「待试算」。前端持续发送该参数并显式说明，不用默认 50% 掩盖缺口；
-          金额以总览 / PN 估价 / 导出为准。 */}
-      {amountsVisible ? (
-        <Alert
-          type="warning" showIcon data-testid="projects-ratio-gap-note"
-          message="后端缺口说明：项目对比端点暂未接入价值保留比例参数，本表坏件试算价值可能显示「待试算」；试算金额请以总览、PN 排名与估价页签及导出为准（前端已持续下发所选比例，待后端补齐即自动生效）"
-        />
-      ) : null}
 
       <Card size="small" title="项目对比（含零行项目）">
         <Table<ProjectRow>
@@ -237,7 +279,7 @@ export default function DashboardProjectsTab({
           dataSource={data?.rows ?? []}
           columns={columns}
           onChange={onTableChange}
-          scroll={{ x: amountsVisible ? 2080 : 1740 }}
+          scroll={{ x: amountsVisible ? 2420 : 1830 }}
           pagination={{
             current: page,
             pageSize,

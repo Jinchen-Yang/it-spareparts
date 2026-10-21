@@ -16,6 +16,7 @@ import {
   type DashboardExportKind,
   type DashboardFilters,
   type DomainReferencePayload,
+  type DomainValuationPayload,
 } from "../../../api/maintenanceDashboard";
 
 const { Text } = Typography;
@@ -33,6 +34,11 @@ export interface DashboardTabProps {
   maxExportRows: number;
   onSortChange: (sort: string) => void;
   onPageChange: (page: number, pageSize: number) => void;
+  /** 页面所属会话：options 落地时捕获的 localStorage token（null=未登录态）。
+   * 请求发出前与响应落地前都以它校验（不是点击时才读新 token 当所属，B-F03/04）；
+   * 失配时调用 onSessionMismatch，由壳层清除/停用旧会话已渲染的金额与项目上下文。 */
+  ownerToken: string | null;
+  onSessionMismatch: () => void;
 }
 
 /** 请求发出前的会话令牌（用于落地前比对）。 */
@@ -134,6 +140,107 @@ export function reasonText(code: string | null | undefined): string {
   return REASON_LABELS[code] ?? code;
 }
 
+// ---- 单位分桶展示（契约 v2 §0/§4/§5，B-F09）：数量与分母永不分单位混算 ----
+
+/** 待核桶文案（unit=null/空 = 主数据缺单位，不猜「件」）。 */
+export const UNIT_UNRESOLVED_TEXT = "待核";
+
+/** 混合单位文案（≥2 种单位：平面数量/覆盖率不可加总，分桶呈现）。 */
+export const UNIT_MIXED_TEXT = "混合单位";
+
+export function unitBucketText(unit: string | null | undefined): string {
+  return unit ? unit : UNIT_UNRESOLVED_TEXT;
+}
+
+/** 行级「单位」列：唯一单位 → 单位名；混合 → 混合单位；仅待核/缺 → 待核。 */
+export function unitColumnText(
+  unit: string | null | undefined,
+  breakdown?: readonly { unit: string | null }[] | null,
+): string {
+  if (unit) return unit;
+  if (breakdown && breakdown.length > 1) return UNIT_MIXED_TEXT;
+  return UNIT_UNRESOLVED_TEXT;
+}
+
+/** 单位分桶小字行（后端已按单位名升序、待核恒最后；前端原样呈现，不重排）。 */
+export function UnitBreakdown<T extends { unit: string | null }>({ entries, render, testId }: {
+  entries?: T[] | null;
+  render: (entry: T) => React.ReactNode;
+  testId?: string;
+}) {
+  if (!entries?.length) return null;
+  return (
+    <span data-testid={testId}>
+      {entries.map((entry) => (
+        <Text
+          key={entry.unit ?? "__unresolved__"}
+          type="secondary"
+          style={{ fontSize: 12, display: "block" }}
+        >
+          {unitBucketText(entry.unit)}：{render(entry)}
+        </Text>
+      ))}
+    </span>
+  );
+}
+
+/** 表格数量单元格：平面值 → 单一数量；null + 分桶 → 分单位行（不跨单位
+ * 求和）；皆缺 → "—"。 */
+export function QtyBreakdownCell<T extends { unit: string | null }>({ flat, breakdown, pick }: {
+  flat: string | null | undefined;
+  breakdown?: T[] | null;
+  pick: (entry: T) => string | null | undefined;
+}) {
+  if (flat !== null && flat !== undefined) return <>{qtyText(flat)}</>;
+  if (breakdown?.length) {
+    return (
+      <span>
+        {breakdown.map((entry) => (
+          <Text key={entry.unit ?? "__unresolved__"} style={{ fontSize: 12, display: "block" }}>
+            {unitBucketText(entry.unit)}：{qtyText(pick(entry))}
+          </Text>
+        ))}
+      </span>
+    );
+  }
+  return <>—</>;
+}
+
+// ---- 三域返件估值覆盖（契约 v2 §2，B-F07）----
+
+/** 域估值视角标签：成本域在此是估值分域（与三域参考列的「领用已计成本」
+ * 参考 issued_lines 口径是两个事实，命名上分开）。 */
+const DOMAIN_VALUATION_LABELS: Record<string, string> = {
+  purchase: DOMAIN_LABELS.purchase,
+  sales: DOMAIN_LABELS.sales,
+  cost: "成本域",
+};
+
+/** 三域返件估值覆盖行：分值 + 域内已估/待估 + 覆盖率（bad_receipts 返件
+ * 估值口径）。域无金额键 → 待估（域内无已估金额）；覆盖 0% 是真实 0%。 */
+export function DomainCoverageLines({ domains, testId }: {
+  domains: Record<string, DomainValuationPayload>;
+  testId?: string;
+}) {
+  const entries = Object.entries(domains);
+  if (!entries.length) return null;
+  return (
+    <span data-testid={testId}>
+      {entries.map(([domain, payload]) => (
+        <Text key={domain} style={{ fontSize: 12, display: "block" }}>
+          {DOMAIN_VALUATION_LABELS[domain] ?? domain}{" "}
+          {payload.value_inc_tax !== undefined
+            ? `${moneyText(payload.value_inc_tax)}（含税）`
+            : "待估（域内无已估金额）"}
+          {" · 已估 "}{qtyText(payload.estimated_bad_qty)}
+          {" / 待估 "}{qtyText(payload.pending_bad_qty)}
+          {" · 覆盖 "}{rateText(payload.coverage_pct)}（返件估值口径）
+        </Text>
+      ))}
+    </span>
+  );
+}
+
 /** 单域市场参考一行：可用 → 金额 + 样本数；不可用 → 原因（不显示 ¥0）。 */
 export function ReferenceLine({ domain, reference }: {
   domain: string; reference: DomainReferencePayload;
@@ -175,7 +282,8 @@ export const AWAITING_RATIO_TEXT = "待试算（未设比例）";
 export const PENDING_ESTIMATE_TEXT = "待估（无可用样本）";
 
 /** 数量域端点（orders/consumption/consumption-issues）契约上不收关键词 q 与
- * 试算比例 value_retention_ratio：发请求前显式剥离，不依赖服务端忽略。 */
+ * 试算比例 value_retention_ratio：发请求前显式剥离，不依赖服务端忽略。
+ * （quantity-checks 契约 v2 §6 起支持 q 整单选择——该端点不走此剥离。） */
 export function qtyOnlyParams(params: DashboardFilters): DashboardFilters {
   const { q: _q, value_retention_ratio: _ratio, ...rest } = params;
   return rest;
@@ -221,20 +329,33 @@ function saveBlob(blob: Blob, filename: string) {
 }
 
 /** 导出按钮对：CSV/XLSX 同一筛选集；无金额权的服务端不含金额列，前端不再裁剪。
- * 下载前同样校验会话（DL-010）：token 变了就不落盘旧会话的数据。 */
-export function DashboardExportButtons({ params, kind, maxExportRows }: {
+ * 会话所有权（B-F04/DL-010）：ownerToken 是按钮所属页面会话（数据落地时捕获），
+ * 请求发出前先校验它仍当前——换号后点击旧按钮直接拒绝，不发旧组件请求；
+ * 响应落地前再次校验，旧会话数据不落盘。 */
+export function DashboardExportButtons({
+  params, kind, maxExportRows, ownerToken, onSessionMismatch,
+}: {
   params: DashboardFilters;
   kind: DashboardExportKind;
   maxExportRows: number;
+  ownerToken: string | null;
+  onSessionMismatch?: () => void;
 }) {
   const { message } = App.useApp();
   const [busy, setBusy] = useState<string | null>(null);
   const download = async (format: "csv" | "xlsx") => {
+    // 请求前：绑定所属会话（不是点击时才读新 token 然后当作所属）
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch?.();
+      message.warning("登录会话已变更，已取消导出；请刷新页面后重试");
+      return;
+    }
     setBusy(format);
-    const token = sessionToken();
+    const token = ownerToken;
     try {
       const { blob, filename } = await downloadDashboardExport({ ...params, kind, format });
       if (!sessionUnchanged(token)) {
+        onSessionMismatch?.();
         message.warning("会话已变更，已取消下载；请重新登录后重试");
         return;
       }
@@ -242,6 +363,7 @@ export function DashboardExportButtons({ params, kind, maxExportRows }: {
       message.success(`已导出 ${filename}`);
     } catch (err) {
       if (sessionUnchanged(token)) message.error(apiErrorMessage(err));
+      else onSessionMismatch?.();
     } finally {
       if (sessionUnchanged(token)) setBusy(null);
     }

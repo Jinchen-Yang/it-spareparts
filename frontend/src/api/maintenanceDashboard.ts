@@ -28,7 +28,8 @@ export interface DashboardFilters {
   project?: string;
   /** 业务类型（单值：缺省=all，或单个业务类型码；与 boss-board 同枚举）。 */
   business_type?: string;
-  /** PN/描述关键词（orders/consumption/quantity-checks 端点无此参数）。 */
+  /** PN/描述关键词（契约 v2 §6：quantity-checks 与其导出支持 q——按命中 PN
+   * 选择整张需求单；orders/consumption 端点仍无此参数，发送前显式剥离）。 */
   q?: string;
   /** R34 价值保留比例（十进制串如 "0.5"；"0" 是合法显式值，缺省=待试算）。 */
   value_retention_ratio?: string;
@@ -40,10 +41,61 @@ export interface DashboardPagination {
   total: number;
 }
 
-/** 三域试算分值（R34-05：并列展示，缺域不出现、绝不求和）。 */
-export interface DomainValuePayload {
-  value_inc_tax: string;
-  value_ex_tax: string;
+/** 单位分桶条目基座（契约 v2 §0）：unit=null/空 = 待核桶（主数据缺单位，
+ * 不猜「件」）；条目按单位名升序、待核恒最后（后端排序，前端原样呈现）。 */
+export interface UnitBucketEntry {
+  unit: string | null;
+}
+
+/** 数量域单位分桶条目（契约 v2 §4/§5）：字段按上下文出现；数量与分母
+ * 永不分单位混算，混合时平面字段为 null。 */
+export interface UnitQtyEntry extends UnitBucketEntry {
+  receipt_qty?: string | null;
+  bad_receipt_qty?: string | null;
+  scrap_receipt_qty?: string | null;
+  issued_qty?: string | null;
+  order_qty?: string | null;
+  qty?: string | null;
+  exempt_issued_qty?: string | null;
+  pending_requirement_qty?: string | null;
+  unlinked_receipt_qty?: string | null;
+}
+
+/** 消耗单位分桶条目（契约 v2 §4）：成本键仅金额可见账号（B-F11——桶内
+ * 全部未计成本时金额键不存在，不是 0.00）。 */
+export interface UnitCoverageEntry extends UnitQtyEntry {
+  costed_qty?: string | null;
+  uncosted_qty?: string | null;
+  coverage_pct?: number | null;
+  cost_amount_ex_tax?: string;
+  cost_amount_inc_tax?: string;
+}
+
+/** 估值主覆盖单位分桶条目（契约 v2 §2）。 */
+export interface ValuationUnitEntry extends UnitBucketEntry {
+  bad_qty: string | null;
+  estimated_bad_qty: string | null;
+  pending_bad_qty: string | null;
+  awaiting_ratio_bad_qty: string | null;
+  coverage_pct: number | null;
+}
+
+/** 三域返件估值覆盖（契约 v2 §2，B-F07）：有坏件行即三域都出现；
+ * 域已估量=0 时金额键不存在（待估不是 0）；coverage_pct 是返件估值口径
+ * （coverage_basis=bad_receipts），与 references.cost 的领用已计覆盖
+ * （issued_lines）是两个事实。 */
+export interface DomainValuationPayload {
+  value_inc_tax?: string;
+  value_ex_tax?: string;
+  bad_qty: string | null;
+  estimated_bad_qty: string | null;
+  pending_bad_qty: string | null;
+  awaiting_ratio_bad_qty: string | null;
+  coverage_pct: number | null;
+  pending_reasons: Record<string, string>;
+  unit: string | null;
+  unit_breakdown: ValuationUnitEntry[];
+  coverage_basis: "bad_receipts";
 }
 
 /** 市场参考域（采购/销售）：可用 → 双税均价 + 样本元数据。 */
@@ -59,7 +111,9 @@ export interface DomainReferencePayload {
   unavailable_reason?: string;
 }
 
-/** 领用已计成本参考域（R34-02）：单位成本 + 数量覆盖 + 来源证据。 */
+/** 领用已计成本参考域（R34-02）：单位成本 + 数量覆盖 + 来源证据。
+ * coverage_basis="issued_lines"（领用已计覆盖，契约 v2 §2）——与三域
+ * 估值的返件估值覆盖（bad_receipts）分母口径不同，绝不混用。 */
 export interface CostReferencePayload {
   available: boolean;
   unit_cost_inc_tax?: string;
@@ -69,6 +123,7 @@ export interface CostReferencePayload {
   costed_qty?: string;
   uncosted_qty?: string;
   coverage_pct?: number | null;
+  coverage_basis?: "issued_lines";
   sources?: string[];
   latest_issue_date?: string | null;
   oldest_issue_date?: string | null;
@@ -76,27 +131,38 @@ export interface CostReferencePayload {
   unavailable_reason?: string;
 }
 
-/** 返件实收口径：maintenance_rkd_return_line line_status=active，按业务日入期。 */
+/** 返件实收口径：maintenance_rkd_return_line line_status=active，按业务日入期。
+ * 契约 v2 §5（B-F09）：各数量平面字段混合单位 → null + unit_breakdown 分桶；
+ * 单一单位完全兼容（平面值照给）。 */
 export interface SummaryCards {
-  receipt_qty: { total: string; part: string; machine: string };
-  bad_receipt_qty: { total: string; scrap: string };
+  receipt_qty: {
+    total: string | null; part: string | null; machine: string | null;
+    unit_breakdown?: UnitQtyEntry[];
+  };
+  bad_receipt_qty: {
+    total: string | null; scrap: string | null;
+    unit_breakdown?: UnitQtyEntry[];
+  };
   /** 好件领用 = 实际领用量（未采集件况）。 */
-  issued_qty: { total: string; note: string };
-  /** 同期返还率 = 实收÷实际领用；分母≤0 为 null（无率，不是 0）。 */
+  issued_qty: { total: string | null; note: string; unit_breakdown?: UnitQtyEntry[] };
+  /** 同期返还率 = 实收÷实际领用；分母≤0 为 null（无率，不是 0）；混合 → null。 */
   return_rate_pct: number | null;
-  rate_numerator: string;
-  rate_denominator: string;
+  rate_numerator: string | null;
+  rate_denominator: string | null;
   project_count: number;
   /** 金额卡：仅对通过利润门的调用方出现（admin/data_profit）。
    * 无比例（awaiting_ratio）时 bad_estimated_value 键不出现（待试算，不是 0）。 */
   valuation?: {
     state: "ready" | "awaiting_ratio" | "pending";
-    estimated_bad_qty: string;
-    pending_bad_qty: string;
-    awaiting_ratio_bad_qty: string;
+    estimated_bad_qty: string | null;
+    pending_bad_qty: string | null;
+    awaiting_ratio_bad_qty: string | null;
     coverage_pct: number | null;
     retention_ratio: string | null;
-    domains: Record<string, DomainValuePayload>;
+    /** 契约 v2 §2：三域都出现；域覆盖是返件估值口径（bad_receipts）。 */
+    domains: Record<string, DomainValuationPayload>;
+    /** 主覆盖单位分桶（混合单位平面 null 时呈现真实分桶）。 */
+    unit_breakdown?: ValuationUnitEntry[];
     policy_version: string;
     note: string;
     bad_estimated_value?: { inc_tax: string; ex_tax: string };
@@ -107,27 +173,43 @@ export interface SummaryCards {
 export interface SummaryResponse {
   range: { start: string | null; end: string };
   cards: SummaryCards;
-  trend: { date: string; receipt_qty: string; issued_qty: string }[];
-  condition_structure: { test_result: string; qty: string }[];
+  trend: {
+    date: string;
+    receipt_qty: string | null;
+    issued_qty: string | null;
+    unit_breakdown?: UnitQtyEntry[];
+  }[];
+  condition_structure: {
+    test_result: string;
+    qty: string | null;
+    unit_breakdown?: UnitQtyEntry[];
+  }[];
   top_projects: {
     project_id: string;
     project_code: string | null;
     display_name: string;
-    receipt_qty: string;
-    bad_receipt_qty: string;
-    issued_qty: string;
+    receipt_qty: string | null;
+    bad_receipt_qty: string | null;
+    issued_qty: string | null;
+    unit_breakdown?: UnitQtyEntry[];
   }[];
   notes: string[];
 }
 
+/** 契约 v2 §1（B-F06）：state 判定 estimated>0→ready（值键仅在 estimated>0
+ * 出现）；estimated=0 且 pending>0 → pending；显式 ratio=0 + 合格参考是
+ * estimated>0 的真实 "0.00"，保留。§2：新增三域返件估值覆盖键。 */
 export interface ProjectValuation {
   state: "ready" | "awaiting_ratio" | "pending";
-  pending_bad_qty: string;
-  awaiting_ratio_bad_qty: string;
+  estimated_bad_qty?: string | null;
+  pending_bad_qty: string | null;
+  awaiting_ratio_bad_qty: string | null;
   coverage_pct: number | null;
-  /** 仅设置了试算比例时出现（awaiting_ratio 时键不存在）。 */
+  /** 仅 estimated>0 时出现（键不存在 ≠ 0.00；awaiting_ratio 时同样不存在）。 */
   bad_estimated_value_inc_tax?: string;
   bad_estimated_value_ex_tax?: string;
+  /** 三域返件估值覆盖（契约 v2 §2：有坏件行即三域都出现）。 */
+  domains?: Record<string, DomainValuationPayload>;
 }
 
 export interface ProjectRow {
@@ -135,17 +217,21 @@ export interface ProjectRow {
   project_code: string | null;
   display_name: string;
   business_type: string | null;
-  receipt_qty: string;
-  bad_receipt_qty: string;
-  scrap_receipt_qty: string;
-  issued_qty: string;
+  /** 契约 v2 §0/§5：唯一单位 → 单位名；混合/仅待核 → null（看 unit_breakdown）。 */
+  unit?: string | null;
+  /** 混合单位 → 平面数量/率 null + 分桶（数量与分母不分单位混算）。 */
+  unit_breakdown?: UnitQtyEntry[];
+  receipt_qty: string | null;
+  bad_receipt_qty: string | null;
+  scrap_receipt_qty: string | null;
+  issued_qty: string | null;
   /** 免返领用量：单独一列，不冲减任何量（R33 第 3 条）。 */
-  exempt_issued_qty: string;
-  pending_requirement_qty: string;
-  unlinked_receipt_qty: string;
+  exempt_issued_qty: string | null;
+  pending_requirement_qty: string | null;
+  unlinked_receipt_qty: string | null;
   return_rate_pct: number | null;
-  rate_numerator: string;
-  rate_denominator: string;
+  rate_numerator: string | null;
+  rate_denominator: string | null;
   no_return_note: string | null;
   valuation?: ProjectValuation;
 }
@@ -163,7 +249,8 @@ export interface PartValuation {
   /** 成品按参考全值另列（不混入坏件主卡）；仅行级返回。 */
   finished_estimated_value_inc_tax?: string;
   finished_estimated_value_ex_tax?: string;
-  domains?: Record<string, DomainValuePayload>;
+  /** 契约 v2 §2：三域覆盖随分值并列（有坏件行即三域都出现）。 */
+  domains?: Record<string, DomainValuationPayload>;
 }
 
 export interface PartRow {
@@ -220,6 +307,10 @@ export interface ValuationResponse {
     coverage_pct: number | null;
     /** 仅设置了试算比例时出现（否则待试算，不是 0）。 */
     bad_estimated_value?: { inc_tax: string; ex_tax: string };
+    /** 契约 v2 §2：总卡三域覆盖（返件估值口径）。 */
+    domains?: Record<string, DomainValuationPayload>;
+    /** 契约 v2 §2：主覆盖单位分桶（混合单位平面 null 时呈现真实分桶）。 */
+    unit_breakdown?: ValuationUnitEntry[];
   };
   rows: PartRow[];
   pagination: DashboardPagination;
@@ -304,34 +395,53 @@ export interface QuantityChecksResponse {
   pagination: DashboardPagination;
 }
 
-/** M01 期间下单：制单日期入期的有效需求单原 qty + 去重单数（纯数量域）。 */
+/** M01 期间下单：制单日期入期的有效需求单原 qty + 去重单数（纯数量域）。
+ * 契约 v2 §4（B-F09/B-F12）：混合单位 → order_qty null + unit_breakdown；
+ * 无制单日期有效单单独成桶（undated_*），不冒充入期。 */
 export interface OrderRow {
   project_id: string;
   project_code: string | null;
   display_name: string;
   business_type: string | null;
-  order_qty: string;
+  order_qty: string | null;
+  unit?: string | null;
+  unit_breakdown?: UnitQtyEntry[];
   order_count: number;
+  /** 无制单日期下单量（未计入期间；单列，不猜日期）。 */
+  undated_order_qty?: string;
+  undated_order_count?: number;
 }
 
 export interface OrdersResponse {
   range?: { start: string | null; end: string };
-  cards: { order_qty: string; order_count: number };
+  cards: {
+    order_qty: string | null;
+    unit?: string | null;
+    unit_breakdown?: UnitQtyEntry[];
+    order_count: number;
+    /** B-F12：无日期桶（恒给 note；range=all 时仍单列）。 */
+    undated_orders?: { order_qty: string; order_count: number; note: string };
+  };
   rows: OrderRow[];
 }
 
-/** M03 每日每项目已计消耗：数量全计；金额/覆盖/来源键仅金额可见时出现。 */
+/** M03 每日每项目已计消耗：数量全计；金额/覆盖/来源键仅金额可见时出现。
+ * 契约 v2 §4（B-F09/B-F11）：unit_breakdown 恒给（数量域；条目成本键随
+ * 利润门）；混合单位 → 平面数量/覆盖率 null；金额是跨单位同币种小计，
+ * 桶内全部未计成本时金额键不存在（未知 ≠ ¥0.00）。 */
 export interface ConsumptionDailyRow {
   issue_date: string;
   project_id: string;
   project_code: string | null;
   display_name: string;
-  issued_qty: string;
+  issued_qty: string | null;
+  unit?: string | null;
+  unit_breakdown?: UnitCoverageEntry[];
   line_count: number;
   cost_amount_ex_tax?: string;
   cost_amount_inc_tax?: string;
-  costed_qty?: string;
-  uncosted_qty?: string;
+  costed_qty?: string | null;
+  uncosted_qty?: string | null;
   coverage_pct?: number | null;
   sources?: string[];
 }
@@ -339,10 +449,13 @@ export interface ConsumptionDailyRow {
 export interface ConsumptionResponse {
   range?: { start: string | null; end: string };
   cards: {
-    issued_qty: string;
+    issued_qty: string | null;
+    unit?: string | null;
+    unit_breakdown?: UnitCoverageEntry[];
     cost_amount_ex_tax?: string;
     cost_amount_inc_tax?: string;
-    uncosted_qty?: string;
+    costed_qty?: string | null;
+    uncosted_qty?: string | null;
     coverage_pct?: number | null;
     sources?: string[];
     note?: string;
@@ -351,7 +464,8 @@ export interface ConsumptionResponse {
   pagination: DashboardPagination;
 }
 
-/** M03 领用明细行（日×项目下钻）：成本证据键仅金额可见时出现。 */
+/** M03 领用明细行（日×项目下钻）：成本证据键仅金额可见时出现；
+ * unit 全角色返回（契约 v2 §4，null = 待核）。 */
 export interface ConsumptionIssueRow {
   issue_line_id: number;
   issue_id: number;
@@ -363,6 +477,7 @@ export interface ConsumptionIssueRow {
   part_id: number | null;
   pn: string;
   qty: string;
+  unit?: string | null;
   cost_source?: string | null;
   algorithm_version?: string | null;
   reference_side?: string | null;

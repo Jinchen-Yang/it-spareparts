@@ -13,7 +13,7 @@
  *   刷新 / 导出一律按 0.5 试算；显式 0 保留 0（不被默认覆盖）；清空或恢复
  *   默认回到 50%。URL 持有显式值，不写全局存储；数量账号不带任何参数痕迹。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Button, Card, DatePicker, Input, InputNumber, Select, Skeleton, Space, Tabs, Typography,
 } from "antd";
@@ -38,7 +38,7 @@ import DashboardPartsTab from "./dashboard/DashboardPartsTab";
 import DashboardConsumptionTab from "./dashboard/DashboardConsumptionTab";
 import DashboardQuantityChecksTab from "./dashboard/DashboardQuantityChecksTab";
 import ReceiptsDrillDrawer, { type ReceiptsDrill } from "./dashboard/ReceiptsDrillDrawer";
-import { apiErrorMessage } from "./dashboard/dashboardShared";
+import { apiErrorMessage, sessionToken, sessionUnchanged } from "./dashboard/dashboardShared";
 
 const { Text } = Typography;
 
@@ -185,6 +185,11 @@ export function MaintenanceDashboardPage() {
   const [optionsLoading, setOptionsLoading] = useState(true);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // 会话所有权（B-F03/B-F04，DL-010）：options 落地时捕获所属 token；任何守卫
+  // 点检测到换号即整页失活（卸载各页签 = 清除旧金额/项目上下文），可刷新恢复。
+  const [ownerToken, setOwnerToken] = useState<string | null>(null);
+  const [sessionMismatch, setSessionMismatch] = useState(false);
+  const markSessionMismatch = useCallback(() => setSessionMismatch(true), []);
   // M-AC09 返件明细下钻（R33 GET /receipts 的轻量入口）：Drawer 状态在壳层，
   // 各页签只上抛「求交后的筛选 + 标题」；关闭即回原视图，不写 URL。
   const [receiptsDrill, setReceiptsDrill] = useState<ReceiptsDrill | null>(null);
@@ -192,17 +197,35 @@ export function MaintenanceDashboardPage() {
     setReceiptsDrill(drill);
   }, []);
   const closeReceiptsDrill = useCallback(() => setReceiptsDrill(null), []);
+  const optionsSeqRef = useRef(0);
 
   const loadOptions = useCallback(async () => {
+    // 序号 + 原会话双保护：迟到 options 在换号后不得落地（金额控件/项目候选
+    // 属旧会话，不能因 options 先返回就绕过 DL-010）。
+    const seq = optionsSeqRef.current + 1;
+    optionsSeqRef.current = seq;
+    const token = sessionToken();
     setOptionsLoading(true);
     setOptionsError(null);
     try {
-      setOptions(await fetchDashboardOptions());
+      const resp = await fetchDashboardOptions();
+      if (optionsSeqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) {
+        setSessionMismatch(true);
+        return;
+      }
+      setOptions(resp);
+      setOwnerToken(token);
     } catch (err) {
+      if (optionsSeqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) {
+        setSessionMismatch(true);
+        return;
+      }
       setOptions(null);
       setOptionsError(apiErrorMessage(err));
     } finally {
-      setOptionsLoading(false);
+      if (optionsSeqRef.current === seq) setOptionsLoading(false);
     }
   }, []);
 
@@ -264,6 +287,8 @@ export function MaintenanceDashboardPage() {
     maxExportRows: options?.max_export_rows ?? 50000,
     onSortChange,
     onPageChange,
+    ownerToken,
+    onSessionMismatch: markSessionMismatch,
   };
 
   if (optionsLoading) {
@@ -272,6 +297,28 @@ export function MaintenanceDashboardPage() {
         <Skeleton.Button active size="small" style={{ width: 220 }} />
         <Card size="small"><Skeleton active paragraph={{ rows: 6 }} /></Card>
       </Space>
+    );
+  }
+
+  // 会话失活：任何守卫点（options 落地 / 各页签请求前后 / 导出 / 下钻）发现
+  // 页面所属 token 已不是当前会话时，卸载全部旧会话内容（金额控件、项目候选、
+  // 已渲染结果一并清除），提供按当前会话刷新恢复——不是禁用功能（B-F03/04）。
+  const sessionStale = sessionMismatch
+    || (ownerToken !== null && !sessionUnchanged(ownerToken));
+  if (sessionStale) {
+    return (
+      <Alert
+        type="warning" showIcon data-testid="session-stale-alert"
+        message="登录会话已变更"
+        description="页面仍停留在旧会话的数据上下文，为避免跨会话请求已停用；请刷新页面或重新登录后继续。"
+        action={(
+          <Button onClick={() => {
+            setSessionMismatch(false);
+            setOwnerToken(null);
+            void loadOptions();
+          }}>刷新</Button>
+        )}
+      />
     );
   }
 
@@ -376,7 +423,7 @@ export function MaintenanceDashboardPage() {
               page: null,
             })}
           />
-          {tab !== "checks" && tab !== "consumption" ? (
+          {tab !== "consumption" ? (
             <Input.Search
               allowClear
               value={searchDraft}
@@ -436,6 +483,8 @@ export function MaintenanceDashboardPage() {
         onClose={closeReceiptsDrill}
         amountsVisible={amountsVisible}
         maxExportRows={options.max_export_rows}
+        ownerToken={ownerToken}
+        onSessionMismatch={markSessionMismatch}
       />
     </Space>
   );

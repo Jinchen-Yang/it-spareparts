@@ -39,11 +39,16 @@ export interface ReceiptsDrill {
   params: DashboardFilters;
 }
 
-export default function ReceiptsDrillDrawer({ drill, onClose, amountsVisible, maxExportRows }: {
+export default function ReceiptsDrillDrawer({
+  drill, onClose, amountsVisible, maxExportRows, ownerToken, onSessionMismatch,
+}: {
   drill: ReceiptsDrill | null;
   onClose: () => void;
   amountsVisible: boolean;
   maxExportRows: number;
+  /** 页面所属会话（options 落地时的 token）：下钻请求/导出发出前绑定校验。 */
+  ownerToken: string | null;
+  onSessionMismatch: () => void;
 }) {
   const [page, setPage] = useState(1);
   const [rows, setRows] = useState<ReceiptLineRow[] | null>(null);
@@ -61,6 +66,11 @@ export default function ReceiptsDrillDrawer({ drill, onClose, amountsVisible, ma
 
   const load = useCallback(async () => {
     if (!drill) return;
+    // 下钻请求发出前绑定组件所属会话（B-F04）：旧会话组件不发新请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     const token = sessionToken();
@@ -70,18 +80,20 @@ export default function ReceiptsDrillDrawer({ drill, onClose, amountsVisible, ma
       const resp = await fetchDashboardReceipts({
         ...drill.params, sort: "occurred_desc", page, page_size: PAGE_SIZE,
       });
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setRows(resp.rows ?? []);
       setTotal(resp.pagination.total);
     } catch (err) {
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setRows(null);
       setTotal(0);
       setError(apiErrorMessage(err));
     } finally {
       if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
     }
-  }, [drill, page]);
+  }, [drill, page, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     if (drill) void load();
@@ -170,6 +182,8 @@ export default function ReceiptsDrillDrawer({ drill, onClose, amountsVisible, ma
           params={drill?.params ?? {}}
           kind="receipts"
           maxExportRows={maxExportRows}
+          ownerToken={ownerToken}
+          onSessionMismatch={onSessionMismatch}
         />
       </div>
       <Table<ReceiptLineRow>

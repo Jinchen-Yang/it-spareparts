@@ -1,7 +1,8 @@
 /** T4 需求单数量核对（当前累计）：N/R/差额/超收整单口径；不发布返还状态。
  *
- * 该页签不吃关键词 q（后端 quantity-checks 无此参数）；无金额列——数量核对
- * 本身就是纯数量域，导出列同样不含金额。
+ * 契约 v2 §6（B-F10）：该页签支持关键词 q——按命中 PN 选择**整张需求单**，
+ * 之后仍取整单全 PN/全期当前累计 N/R（不裁局部、不忽略 q）；同一 q 过滤
+ * 未关联实收桶；导出与 API 同参同集。无金额列——数量核对本身就是纯数量域。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Row, Select, Space, Table, Typography } from "antd";
@@ -30,20 +31,19 @@ const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
 export default function DashboardQuantityChecksTab({
   params, sorts, sort, page, pageSize, refreshKey,
-  onSortChange, onPageChange, maxExportRows,
+  onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch,
 }: DashboardTabProps) {
-  // T4 不支持关键词：显式剥离，避免把 q 发给无此参数的端点。
-  const checkParams = useMemo(() => {
-    const { q: _q, ...rest } = params;
-    return rest;
-  }, [params]);
-
   const [data, setData] = useState<QuantityChecksResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
 
   const load = useCallback(async () => {
+    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     const token = sessionToken();
@@ -51,18 +51,20 @@ export default function DashboardQuantityChecksTab({
     setError(null);
     try {
       const resp = await fetchDashboardQuantityChecks({
-        ...checkParams, sort, page, page_size: pageSize,
+        ...params, sort, page, page_size: pageSize,
       });
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setData(resp);
     } catch (err) {
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setData(null);
       setError(apiErrorMessage(err));
     } finally {
       if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
     }
-  }, [checkParams, sort, page, pageSize]);
+  }, [params, sort, page, pageSize, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     void load();
@@ -130,7 +132,7 @@ export default function DashboardQuantityChecksTab({
       <Alert type="info" showIcon data-testid="checks-note"
         message={cards?.note ?? "当前累计（整单跨全部 PN/来源/件况）；不发布返还状态"} />
       <Text type="secondary" style={{ fontSize: 12 }} data-testid="checks-cumulative-note">
-        全局日期仅按制单日期挑选需求单；N/R 为整单当前累计，不因期间或 PN 条件截断；逐单差额与超收分别合计，不互相抵消。
+        全局日期仅按制单日期挑选需求单；PN 关键词命中含该 PN 的整张需求单（整单跨全部 PN/来源/件况），N/R 为整单当前累计，不因期间或 PN 条件截断；逐单差额与超收分别合计，不互相抵消。
       </Text>
 
       <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="checks-cards">
@@ -151,7 +153,7 @@ export default function DashboardQuantityChecksTab({
           value={cards ? qtyText(String(cards.inactive_order_count)) : undefined} />
         <KpiCard label="未关联需求单实收" loading={loading}
           value={qtyText(cards?.unassigned_receipt_qty)}
-          sub="仅全范围视角汇总" />
+          sub="当前授权范围内未关联需求单的实收（不摊入需求单行）" />
       </Row>
 
       <Space wrap size={12}>
@@ -163,9 +165,11 @@ export default function DashboardQuantityChecksTab({
           onChange={onSortChange}
         />
         <DashboardExportButtons
-          params={checkParams}
+          params={params}
           kind="quantity_checks"
           maxExportRows={maxExportRows}
+          ownerToken={ownerToken}
+          onSessionMismatch={onSessionMismatch}
         />
       </Space>
 

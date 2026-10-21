@@ -1,10 +1,13 @@
 /** M01 期间下单 + M03 每日每项目已计消耗（R34 / D-0024）。
  *
  * - M01：制单日期入期的有效需求单原 qty + 去重单数（不扣退货/免返）；纯数量域，
- *   任何角色都无金额列。
+ *   任何角色都无金额列。契约 v2 §4：无制单日期有效单单独成桶（B-F12），
+ *   不冒充入期；混合单位平面 null + 分桶（B-F09）。
  * - M03：数量全计（实际领用，未采集件况；未扣退库）；金额只读既有已计成本
  *   （可能含估算），只报已知小计，另列未计成本量/覆盖率/来源，绝不把部分已知
- *   成本当完整总成本。金额键仅金额可见账号渲染。
+ *   成本当完整总成本。金额键仅金额可见账号渲染。契约 v2 §4：桶内全部未计
+ *   成本 → 金额键不存在（未知金额，不是 ¥0.00，B-F11）；金额是跨单位同币种
+ *   小计，数量/覆盖率绝不跨单位混算（B-F09）。
  * - 日表可下钻：每行「领用明细」按 issue_date × project_id 拉取行级领用与
  *   （有权时）成本证据，可核对；导出走完整筛选集（不下钻参数）。
  * - 该页签不吃关键词 q（orders/consumption 端点无此参数）。
@@ -28,15 +31,20 @@ import {
 import {
   DashboardExportButtons,
   KpiCard,
+  UNIT_MIXED_TEXT,
+  UnitBreakdown,
   apiErrorMessage,
   costSourceText,
   moneyText,
   qtyOnlyParams,
+  QtyBreakdownCell,
   qtyText,
   rateText,
   qtyNumber,
   sessionToken,
   sessionUnchanged,
+  unitBucketText,
+  unitColumnText,
   type DashboardTabProps,
 } from "./dashboardShared";
 
@@ -48,6 +56,7 @@ const DRAWER_PAGE_SIZE = 50;
 
 export default function DashboardConsumptionTab({
   params, amountsVisible, page, pageSize, refreshKey, onPageChange, maxExportRows,
+  ownerToken, onSessionMismatch,
 }: DashboardTabProps) {
   // orders/consumption/issues 都是数量域端点：契约不收关键词 q 与试算比例，显式剥离。
   const baseParams = useMemo(() => qtyOnlyParams(params), [params]);
@@ -59,6 +68,11 @@ export default function DashboardConsumptionTab({
   const seqRef = useRef(0);
 
   const load = useCallback(async () => {
+    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     const token = sessionToken();
@@ -69,18 +83,20 @@ export default function DashboardConsumptionTab({
         fetchDashboardOrders(baseParams),
         fetchDashboardConsumption({ ...baseParams, page, page_size: pageSize }),
       ]);
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setOrders(ordersResp);
       setConsumption(consumptionResp);
     } catch (err) {
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setOrders(null);
       setConsumption(null);
       setError(apiErrorMessage(err));
     } finally {
       if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
     }
-  }, [baseParams, page, pageSize]);
+  }, [baseParams, page, pageSize, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     void load();
@@ -109,6 +125,11 @@ export default function DashboardConsumptionTab({
 
   const loadDrill = useCallback(async () => {
     if (!drillTarget) return;
+    // 下钻同样绑定组件所属会话（B-F04）：旧会话组件不发新请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = drillSeqRef.current + 1;
     drillSeqRef.current = seq;
     const token = sessionToken();
@@ -122,16 +143,18 @@ export default function DashboardConsumptionTab({
         page: drillPage,
         page_size: DRAWER_PAGE_SIZE,
       });
-      if (drillSeqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (drillSeqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setDrillData({ rows: resp.rows ?? [], total: resp.pagination.total });
     } catch (err) {
-      if (drillSeqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (drillSeqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setDrillData(null);
       setDrillError(apiErrorMessage(err));
     } finally {
       if (drillSeqRef.current === seq && sessionUnchanged(token)) setDrillLoading(false);
     }
-  }, [baseParams, drillTarget, drillPage]);
+  }, [baseParams, drillTarget, drillPage, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     if (drillTarget) void loadDrill();
@@ -150,8 +173,12 @@ export default function DashboardConsumptionTab({
           </Space>
         ),
       },
+      { title: "单位", key: "unit", width: 90,
+        render: (_: unknown, row) => unitColumnText(row.unit, row.unit_breakdown) },
       { title: "实际领用量", dataIndex: "issued_qty", width: 110, align: "right",
-        render: (v: string) => qtyText(v) },
+        render: (v: string | null, row) => (
+          <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.issued_qty} />
+        ) },
       { title: "领用行数", dataIndex: "line_count", width: 90, align: "right",
         render: (v: number) => qtyText(String(v)) },
       {
@@ -162,24 +189,37 @@ export default function DashboardConsumptionTab({
       },
     ];
     if (amountsVisible) {
-      base.splice(3, 0,
+      base.splice(4, 0,
         {
           title: "已计消耗成本（只读）", key: "cost", width: 190, align: "right",
+          // B-F11：桶内全部未计成本 → 金额键不存在（未知金额），绝不 ?? 0
           render: (_: unknown, row) => (row.cost_amount_inc_tax !== undefined
             ? (
               <TaxMoney scope="maintenance" stack exact
                 inc={Number(row.cost_amount_inc_tax)}
                 ex={Number(row.cost_amount_ex_tax ?? row.cost_amount_inc_tax)} />
             )
-            : "—"),
+            : "未计成本"),
         },
         {
           title: "未计成本量", dataIndex: "uncosted_qty", width: 100, align: "right",
-          render: (v: string | undefined) => qtyText(v ?? null),
+          render: (v: string | null | undefined, row) => (
+            <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.uncosted_qty} />
+          ),
         },
         {
           title: "已计成本覆盖率", key: "coverage", width: 120, align: "right",
-          render: (_: unknown, row) => rateText(row.coverage_pct ?? null),
+          render: (_: unknown, row) => (row.coverage_pct != null ? rateText(row.coverage_pct) : (
+            row.unit_breakdown?.length ? (
+              <span>
+                {row.unit_breakdown.map((entry) => (
+                  <Text key={entry.unit ?? "__unresolved__"} style={{ fontSize: 12, display: "block" }}>
+                    {unitBucketText(entry.unit)}：{rateText(entry.coverage_pct ?? null)}
+                  </Text>
+                ))}
+              </span>
+            ) : "—"
+          )),
         },
         {
           title: "成本来源", key: "sources", width: 150,
@@ -203,6 +243,8 @@ export default function DashboardConsumptionTab({
       { title: "领用单号", dataIndex: "issue_no", width: 130,
         render: (v: string | null) => v || "—" },
       { title: "PN", dataIndex: "pn", width: 160, ellipsis: true },
+      { title: "单位", dataIndex: "unit", width: 80,
+        render: (v: string | null | undefined) => unitBucketText(v) },
       { title: "数量", dataIndex: "qty", width: 90, align: "right",
         render: (v: string) => qtyText(v) },
     ];
@@ -237,7 +279,8 @@ export default function DashboardConsumptionTab({
   const orderCards = orders?.cards;
   const consumptionCards = consumption?.cards;
   const dailyHasData = !!consumption?.rows.some(
-    (row) => (qtyNumber(row.issued_qty) ?? 0) !== 0,
+    (row) => (qtyNumber(row.issued_qty) ?? 0) !== 0
+      || (row.unit_breakdown ?? []).some((e) => (qtyNumber(e.issued_qty) ?? 0) !== 0),
   );
 
   return (
@@ -252,8 +295,27 @@ export default function DashboardConsumptionTab({
       <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）">
         <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="orders-cards">
           <KpiCard label="期间下单数量" loading={loading} testId="kpi-order-qty"
-            value={qtyText(orderCards?.order_qty)}
-            sub="有效需求单有效行 Σ原qty；按制单日期入期" />
+            value={orderCards
+              ? (orderCards.order_qty != null
+                ? qtyText(orderCards.order_qty)
+                : orderCards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+              : undefined}
+            sub={orderCards ? (
+              <Space direction="vertical" size={0}>
+                <span>有效需求单有效行 Σ原qty；按制单日期入期</span>
+                {orderCards.undated_orders ? (
+                  // B-F12：无制单日期有效单单独成桶（未计入期间，不猜日期）
+                  <span>
+                    无制单日期下单量 {qtyText(orderCards.undated_orders.order_qty)}
+                    ／单数 {qtyText(String(orderCards.undated_orders.order_count))}
+                    （未计入期间，不猜日期）
+                  </span>
+                ) : null}
+                <UnitBreakdown
+                  entries={orderCards.unit_breakdown}
+                  render={(e) => qtyText(e.order_qty)} />
+              </Space>
+            ) : undefined} />
           <KpiCard label="期间下单单数" loading={loading} testId="kpi-order-count"
             value={orderCards ? qtyText(String(orderCards.order_count)) : undefined}
             sub="需求单去重单数" />
@@ -264,6 +326,8 @@ export default function DashboardConsumptionTab({
               params={baseParams}
               kind="orders"
               maxExportRows={maxExportRows}
+              ownerToken={ownerToken}
+              onSessionMismatch={onSessionMismatch}
             />
           </Space>
         </div>
@@ -286,10 +350,18 @@ export default function DashboardConsumptionTab({
                   </Space>
                 ),
               },
+              { title: "单位", key: "unit", width: 90,
+                render: (_: unknown, row) => unitColumnText(row.unit, row.unit_breakdown) },
               { title: "期间下单量（原qty）", dataIndex: "order_qty", width: 160, align: "right",
-                render: (v: string) => qtyText(v) },
+                render: (v: string | null, row) => (
+                  <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.order_qty} />
+                ) },
               { title: "期间下单单数", dataIndex: "order_count", width: 130, align: "right",
                 render: (v: number) => qtyText(String(v)) },
+              { title: "无制单日期下单量（未计入期间）", key: "undated_qty", width: 200, align: "right",
+                render: (_: unknown, row) => qtyText(row.undated_order_qty ?? null) },
+              { title: "无制单日期单数", key: "undated_count", width: 120, align: "right",
+                render: (_: unknown, row) => qtyText(String(row.undated_order_count ?? 0)) },
             ]}
             locale={{ emptyText: "当前窗口没有下单记录" }}
           />
@@ -302,8 +374,19 @@ export default function DashboardConsumptionTab({
       >
         <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="consumption-cards">
           <KpiCard label="实际领用合计" loading={loading} testId="kpi-consumption-qty"
-            value={qtyText(consumptionCards?.issued_qty)}
-            sub="实际领用量（未采集件况）；未扣退库" />
+            value={consumptionCards
+              ? (consumptionCards.issued_qty != null
+                ? qtyText(consumptionCards.issued_qty)
+                : consumptionCards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+              : undefined}
+            sub={consumptionCards ? (
+              <Space direction="vertical" size={0}>
+                <span>实际领用量（未采集件况）；未扣退库</span>
+                <UnitBreakdown
+                  entries={consumptionCards.unit_breakdown}
+                  render={(e) => qtyText(e.issued_qty)} />
+              </Space>
+            ) : undefined} />
           {amountsVisible ? (
             <>
               <KpiCard label="已计消耗成本（已知小计）" loading={loading} testId="kpi-consumption-cost"
@@ -312,14 +395,42 @@ export default function DashboardConsumptionTab({
                     inc={Number(consumptionCards.cost_amount_inc_tax)}
                     ex={Number(consumptionCards.cost_amount_ex_tax
                       ?? consumptionCards.cost_amount_inc_tax)} />
-                ) : undefined}
-                sub="只读既有已计成本（可能含估算）；已知小计不含未知" />
+                ) : "—"}
+                sub={(
+                  <Space direction="vertical" size={0}>
+                    <span>只读既有已计成本（可能含估算）；已知小计不含未知</span>
+                    {/* B-F11：金额键不存在 = 全部未计成本（未知金额），不是 ¥0.00 */}
+                    {consumptionCards && consumptionCards.cost_amount_inc_tax === undefined ? (
+                      <span>本窗口全部未计成本，金额未知不猜价</span>
+                    ) : null}
+                  </Space>
+                )} />
               <KpiCard label="未计成本量" loading={loading} testId="kpi-consumption-uncosted"
-                value={qtyText(consumptionCards?.uncosted_qty ?? null)}
-                sub="数量照计，金额未知不猜价" />
+                value={consumptionCards
+                  ? (consumptionCards.uncosted_qty != null
+                    ? qtyText(consumptionCards.uncosted_qty)
+                    : consumptionCards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+                  : undefined}
+                sub={consumptionCards ? (
+                  <Space direction="vertical" size={0}>
+                    <span>数量照计，金额未知不猜价</span>
+                    <UnitBreakdown
+                      entries={consumptionCards.unit_breakdown}
+                      render={(e) => qtyText(e.uncosted_qty)} />
+                  </Space>
+                ) : undefined} />
               <KpiCard label="已计成本覆盖率" loading={loading} testId="kpi-consumption-coverage"
-                value={rateText(consumptionCards?.coverage_pct ?? null)}
-                sub="已计成本领用数量 ÷ 同单位有效领用数量" />
+                value={consumptionCards?.coverage_pct != null
+                  ? rateText(consumptionCards.coverage_pct)
+                  : consumptionCards?.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined}
+                sub={consumptionCards ? (
+                  <Space direction="vertical" size={0}>
+                    <span>已计成本领用数量 ÷ 同单位有效领用数量</span>
+                    <UnitBreakdown
+                      entries={consumptionCards.unit_breakdown}
+                      render={(e) => rateText(e.coverage_pct ?? null)} />
+                  </Space>
+                ) : undefined} />
               <KpiCard label="成本来源" loading={loading} testId="kpi-consumption-sources"
                 value={consumptionCards?.sources?.length
                   ? (
@@ -344,11 +455,15 @@ export default function DashboardConsumptionTab({
               params={baseParams}
               kind="consumption_daily"
               maxExportRows={maxExportRows}
+              ownerToken={ownerToken}
+              onSessionMismatch={onSessionMismatch}
             />
             <DashboardExportButtons
               params={baseParams}
               kind="consumption_issues"
               maxExportRows={maxExportRows}
+              ownerToken={ownerToken}
+              onSessionMismatch={onSessionMismatch}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
               领用明细导出为当前筛选集全量（不受下钻影响）
@@ -364,7 +479,7 @@ export default function DashboardConsumptionTab({
             dataSource={consumption?.rows ?? []}
             columns={consumptionColumns}
             onChange={onTableChange}
-            scroll={{ x: amountsVisible ? 1180 : 700 }}
+            scroll={{ x: amountsVisible ? 1290 : 800 }}
             pagination={{
               current: page,
               pageSize,

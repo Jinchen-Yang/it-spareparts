@@ -24,10 +24,12 @@ import {
   AWAITING_RATIO_TEXT,
   DashboardExportButtons,
   DOMAIN_LABELS,
+  DomainCoverageLines,
   KpiCard,
   PENDING_ESTIMATE_TEXT,
   ReferenceLine,
   SORT_LABELS,
+  UnitBreakdown,
   apiErrorMessage,
   drillByPn,
   moneyText,
@@ -54,7 +56,9 @@ function policySummary(plc: ValuationPolicy): string {
   );
 }
 
-/** 成本参考域一行：可用 → 单位成本 + 样本行 + 覆盖；不可用 → 原因。 */
+/** 成本参考域一行：可用 → 单位成本 + 样本行 + 领用已计覆盖（issued_lines
+ * 口径，契约 v2 §2）；不可用 → 原因。与三域估值列的返件估值覆盖分母不同，
+ * 命名上显式区分，绝不混用。 */
 function CostReferenceLine({ reference }: { reference: CostReferencePayload }) {
   if (!reference.available) {
     return (
@@ -68,7 +72,7 @@ function CostReferenceLine({ reference }: { reference: CostReferencePayload }) {
       {DOMAIN_LABELS.cost} ¥{reference.unit_cost_inc_tax ?? "—"}
       {reference.sample_line_count !== undefined ? `（${reference.sample_line_count} 行领用）` : null}
       {reference.coverage_pct !== null && reference.coverage_pct !== undefined
-        ? ` 覆盖 ${reference.coverage_pct}%`
+        ? ` · 领用已计覆盖 ${reference.coverage_pct}%`
         : null}
     </Text>
   );
@@ -95,26 +99,23 @@ function ReferencesCell({ row }: { row: PartRow }) {
   );
 }
 
-/** 三域试算价值列：分值并列，缺域不显示、绝不求和；成品按参考全值另列。
- * awaiting_ratio（缺比例）与 pending（无样本）分开呈现；pending 但成本域
- * 可用时 domains.cost 仍有并列值（契约 /parts pending 态）。 */
+/** 三域试算价值列：分值 + 各域返件估值覆盖（已估/待估/覆盖）并列、缺金额键
+ * 的域显示待估、绝不求和；成品按参考全值另列。awaiting_ratio（缺比例）与
+ * pending（无样本）分开呈现；契约 v2 §2：有坏件行即三域都出现（覆盖 0%
+ * 是真实 0%），pending 但成本域可用时 domains.cost 仍有并列值。 */
 function DomainValuesCell({ row }: { row: PartRow }) {
   const valuation = row.valuation;
   if (!valuation) return <>—</>;
   if (valuation.state === "awaiting_ratio") {
     return <span data-testid="part-domains-awaiting">{AWAITING_RATIO_TEXT}</span>;
   }
-  const domains = Object.entries(valuation.domains ?? {});
-  if (!domains.length) {
+  const domains = valuation.domains ?? {};
+  if (!Object.keys(domains).length) {
     return <span data-testid="part-domains-pending">{PENDING_ESTIMATE_TEXT}</span>;
   }
   return (
-    <Space direction="vertical" size={0}>
-      {domains.map(([domain, values]) => (
-        <Text key={domain} style={{ fontSize: 12 }}>
-          {DOMAIN_LABELS[domain] ?? domain} {moneyText(values.value_inc_tax)}（含税）
-        </Text>
-      ))}
+    <Space direction="vertical" size={0} align="start">
+      <DomainCoverageLines domains={domains} />
       {valuation.finished_estimated_value_inc_tax !== undefined ? (
         <Text style={{ fontSize: 12 }}>
           成品（参考全值） {moneyText(valuation.finished_estimated_value_inc_tax)}（含税）
@@ -127,7 +128,7 @@ function DomainValuesCell({ row }: { row: PartRow }) {
 
 export default function DashboardPartsTab({
   params, amountsVisible, sorts, sort, page, pageSize, refreshKey,
-  onSortChange, onPageChange, maxExportRows, onReceiptsDrill,
+  onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch, onReceiptsDrill,
 }: DashboardTabProps & {
   /** M-AC09：行内「返件明细」→ 壳层 Drawer（原筛选 ∩ 该 PN，DL-022）。 */
   onReceiptsDrill?: (drill: ReceiptsDrill) => void;
@@ -139,6 +140,11 @@ export default function DashboardPartsTab({
   const seqRef = useRef(0);
 
   const load = useCallback(async () => {
+    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
+    if (!sessionUnchanged(ownerToken)) {
+      onSessionMismatch();
+      return;
+    }
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     const token = sessionToken();
@@ -149,7 +155,8 @@ export default function DashboardPartsTab({
       const resp = amountsVisible
         ? await fetchDashboardValuation({ ...params, sort, page, page_size: pageSize })
         : await fetchDashboardParts({ ...params, sort, page, page_size: pageSize });
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       if (amountsVisible) {
         setValuation(resp as ValuationResponse);
         setQtyData(null);
@@ -158,14 +165,15 @@ export default function DashboardPartsTab({
         setValuation(null);
       }
     } catch (err) {
-      if (seqRef.current !== seq || !sessionUnchanged(token)) return;
+      if (seqRef.current !== seq) return;
+      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
       setValuation(null);
       setQtyData(null);
       setError(apiErrorMessage(err));
     } finally {
       if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
     }
-  }, [params, amountsVisible, sort, page, pageSize]);
+  }, [params, amountsVisible, sort, page, pageSize, ownerToken, onSessionMismatch]);
 
   useEffect(() => {
     void load();
@@ -312,7 +320,20 @@ export default function DashboardPartsTab({
             sub="设置价值保留比例后出金额" />
           <KpiCard label="覆盖率" loading={loading}
             value={rateText(cards.coverage_pct)}
-            sub="已估坏件数量 ÷ 坏件实收数量" />
+            sub={(
+              <Space direction="vertical" size={0} align="start">
+                <span>已估坏件数量 ÷ 坏件实收数量</span>
+                {/* 契约 v2 §2：总卡三域覆盖（返件估值口径），与主覆盖并列呈现 */}
+                {cards.domains ? <DomainCoverageLines domains={cards.domains} /> : null}
+                {cards.unit_breakdown?.length ? (
+                  <UnitBreakdown
+                    entries={cards.unit_breakdown}
+                    render={(e) => (
+                      <>已估 {qtyText(e.estimated_bad_qty)} / 待估 {qtyText(e.pending_bad_qty)} / 覆盖 {rateText(e.coverage_pct)}</>
+                    )} />
+                ) : null}
+              </Space>
+            )} />
         </Row>
       ) : null}
 
@@ -328,6 +349,8 @@ export default function DashboardPartsTab({
           params={params}
           kind="parts"
           maxExportRows={maxExportRows}
+          ownerToken={ownerToken}
+          onSessionMismatch={onSessionMismatch}
         />
       </Space>
 

@@ -1,7 +1,9 @@
 /** 维保数据看板页（R33/D-0022 + R34/D-0024）：五页签、金额遮蔽（不渲染而非 ¥0）、
  * 试算比例（默认 50% / 显式 0 / 自定义）、三域并列不相加、期间下单与每日消耗
  * （M01/M03）、返件明细下钻（M-AC09）、会话守卫（DL-010）、T4 当前累计口径、
- * 导出与失败重试。 */
+ * 导出与失败重试；coveragefix 轮（契约 v2）：三域返件估值覆盖（B-F07）、
+ * 单位分桶不混算（B-F09）、全待估≠¥0（B-F06）、未计成本金额未知（B-F11）、
+ * 无日期下单桶（B-F12）、quantity-checks q 透传整单选择（B-F10）。 */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,15 +32,20 @@ vi.mock("../../../api/maintenanceDashboard", () => ({
   fetchDashboardReceipts: (...a: unknown[]) => fetchDashboardReceipts(...a),
   downloadDashboardExport: (...a: unknown[]) => downloadDashboardExport(...a),
 }));
-// jsdom 无 canvas：mock 图表壳；暴露 onEvents.click 触发按钮（趋势图日期下钻）。
+// jsdom 无 canvas：mock 图表壳；暴露 onEvents.click 触发按钮（趋势图日期下钻）
+// 与系列名（B-F09 按单位拆系列断言）。
 vi.mock("../../../components/charts/EChartContainer", () => ({
-  default: ({ empty, emptyText, onEvents, testId }: {
+  default: ({ empty, emptyText, onEvents, testId, option }: {
     empty?: boolean; emptyText?: string; testId?: string;
     onEvents?: Record<string, (params: unknown) => void>;
+    option?: { series?: { name?: string }[] };
   }) => (empty
     ? <div>{emptyText ?? "空"}</div>
     : (
       <div data-testid={testId ?? "chart"}>
+        {(option?.series ?? []).map((series, index) => (
+          series.name ? <span key={index}>{series.name}</span> : null
+        ))}
         {onEvents?.click ? (
           <button type="button" onClick={() => onEvents.click({ dataIndex: 0 })}>
             触发图表点击
@@ -109,6 +116,46 @@ const optionsQtyOnly: DashboardOptions = {
 // valuation_policy 键在无金额权的 options 响应里不存在（而非空对象）。
 delete (optionsQtyOnly as { valuation_policy?: unknown }).valuation_policy;
 
+/** 契约 v2 §2（B-F07）三域返件估值覆盖锚点：采购/销售 已估 3/4=75%、
+ * 成本域 1/4=25%（coverage_basis=bad_receipts）；references.cost 的
+ * coverage_pct=10%（issued_lines 领用已计口径）是另一个事实，不得混用。 */
+const DOMAIN_COVERAGE_FIXTURE = {
+  purchase: {
+    value_inc_tax: "56.50", value_ex_tax: "50.00",
+    bad_qty: "4.000", estimated_bad_qty: "3.000", pending_bad_qty: "1.000",
+    awaiting_ratio_bad_qty: "0.000", coverage_pct: 75, pending_reasons: {},
+    unit: "件",
+    unit_breakdown: [{
+      unit: "件", bad_qty: "4.000", estimated_bad_qty: "3.000",
+      pending_bad_qty: "1.000", awaiting_ratio_bad_qty: "0.000", coverage_pct: 75,
+    }],
+    coverage_basis: "bad_receipts" as const,
+  },
+  sales: {
+    value_inc_tax: "28.25", value_ex_tax: "25.00",
+    bad_qty: "4.000", estimated_bad_qty: "3.000", pending_bad_qty: "1.000",
+    awaiting_ratio_bad_qty: "0.000", coverage_pct: 75, pending_reasons: {},
+    unit: "件",
+    unit_breakdown: [{
+      unit: "件", bad_qty: "4.000", estimated_bad_qty: "3.000",
+      pending_bad_qty: "1.000", awaiting_ratio_bad_qty: "0.000", coverage_pct: 75,
+    }],
+    coverage_basis: "bad_receipts" as const,
+  },
+  cost: {
+    value_inc_tax: "11.30", value_ex_tax: "10.00",
+    bad_qty: "4.000", estimated_bad_qty: "1.000", pending_bad_qty: "3.000",
+    awaiting_ratio_bad_qty: "0.000", coverage_pct: 25,
+    pending_reasons: { cost_not_recorded: "3.000" },
+    unit: "件",
+    unit_breakdown: [{
+      unit: "件", bad_qty: "4.000", estimated_bad_qty: "1.000",
+      pending_bad_qty: "3.000", awaiting_ratio_bad_qty: "0.000", coverage_pct: 25,
+    }],
+    coverage_basis: "bad_receipts" as const,
+  },
+};
+
 /** M-AC01 场景数字：期间下单 10 / 实际领用 6 / 实收 3（各自事实日期入期）。 */
 function summaryFixture(withAmounts: boolean, ratio: string | null): SummaryResponse {
   const cards = {
@@ -128,10 +175,7 @@ function summaryFixture(withAmounts: boolean, ratio: string | null): SummaryResp
       awaiting_ratio_bad_qty: ratio === null ? "1.000" : "0.000",
       coverage_pct: ratio === null ? null : 50,
       retention_ratio: ratio,
-      domains: {
-        purchase: { value_inc_tax: "56.50", value_ex_tax: "50.00" },
-        cost: { value_inc_tax: "45.20", value_ex_tax: "40.00" },
-      },
+      domains: DOMAIN_COVERAGE_FIXTURE,
       policy_version: POLICY.policy_version,
       note: POLICY.notes,
     } as SummaryResponse["cards"]["valuation"];
@@ -212,7 +256,10 @@ const referencesFixture = {
   cost: {
     available: true, unit_cost_inc_tax: "22.60", unit_cost_ex_tax: "20.00",
     sample_line_count: 3, issue_qty: "4.000", costed_qty: "4.000", uncosted_qty: "0.000",
-    coverage_pct: 100, sources: ["需求成本"], latest_issue_date: "2026-10-20",
+    // 契约 v2 §2：领用已计覆盖（issued_lines 口径，如 1/10 领用行）——
+    // 与 domains.cost 的返件估值覆盖（bad_receipts，1/4=25%）是两个事实。
+    coverage_pct: 10, coverage_basis: "issued_lines",
+    sources: ["需求成本"], latest_issue_date: "2026-10-20",
     oldest_issue_date: "2026-10-16",
     note: "领用已计成本参考（可能含估算）；原成本证据可能晚于锚点，不再税转换",
   },
@@ -232,10 +279,7 @@ function valuationFixture(ratio: string | null) {
   if (ratio !== null) {
     partValuation.bad_estimated_value_inc_tax = "56.50";
     partValuation.bad_estimated_value_ex_tax = "50.00";
-    partValuation.domains = {
-      purchase: { value_inc_tax: "56.50", value_ex_tax: "50.00" },
-      cost: { value_inc_tax: "45.20", value_ex_tax: "40.00" },
-    };
+    partValuation.domains = DOMAIN_COVERAGE_FIXTURE;
   }
   const cards: Record<string, unknown> = {
     estimated_bad_qty: ratio === null ? "0.000" : "1.000",
@@ -245,6 +289,8 @@ function valuationFixture(ratio: string | null) {
   };
   if (ratio !== null) {
     cards.bad_estimated_value = { inc_tax: "56.50", ex_tax: "50.00" };
+    // 契约 v2 §2：/valuation 总卡也带三域覆盖（不只行级）。
+    cards.domains = DOMAIN_COVERAGE_FIXTURE;
   }
   return {
     range: { start: "2026-10-15", end: "2026-10-21" },
@@ -320,7 +366,7 @@ const consumptionIssuesFixture = {
     {
       issue_line_id: 11, issue_id: 1, issue_no: "LY-001", issue_date: "2026-10-20",
       project_id: "p1", project_code: "MDD-P1", display_name: "项目一",
-      part_id: 1, pn: "MDDA-PN-1", qty: "4.000",
+      part_id: 1, pn: "MDDA-PN-1", qty: "4.000", unit: "件",
       cost_source: "direct", algorithm_version: "mc-v3", reference_side: "purchase",
       unit_cost_ex_tax: "20.00", unit_cost_inc_tax: "22.60",
       cost_amount_ex_tax: "80.00", cost_amount_inc_tax: "90.40",
@@ -328,7 +374,7 @@ const consumptionIssuesFixture = {
     {
       issue_line_id: 12, issue_id: 1, issue_no: "LY-001", issue_date: "2026-10-20",
       project_id: "p1", project_code: "MDD-P1", display_name: "项目一",
-      part_id: 2, pn: "MDDA-PN-2", qty: "2.000",
+      part_id: 2, pn: "MDDA-PN-2", qty: "2.000", unit: null,
     },
   ],
   pagination: { page: 1, page_size: 50, total: 2 },
@@ -353,6 +399,214 @@ const checksFixture = {
     project_id: "p2", project_code: "MDD-P2", display_name: "项目二", received_qty: "3.000",
   }],
   pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+// ---- coveragefix 轮新夹具（契约 lane-b-backend-coverage-contract v2）----
+
+/** B-F06：全待估项目行 state=pending、值键不存在（不是 ready + ¥0.00）。 */
+const projectsPendingFixture = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  rows: [{
+    ...PROJECT_ROW,
+    valuation: {
+      state: "pending",
+      estimated_bad_qty: "0.000",
+      pending_bad_qty: "2.000",
+      awaiting_ratio_bad_qty: "0.000",
+      coverage_pct: 0,
+    },
+  }],
+  pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+/** B-F09/B-F07：项目行混合单位（平面 null + unit_breakdown）+ 三域覆盖键。 */
+const projectsMixedFixture = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  rows: [{
+    ...PROJECT_ROW,
+    unit: null,
+    unit_breakdown: [
+      { unit: "件", receipt_qty: "3.000", bad_receipt_qty: "2.000",
+        scrap_receipt_qty: "1.000", issued_qty: "6.000", exempt_issued_qty: "1.000",
+        pending_requirement_qty: "0.000", unlinked_receipt_qty: "1.000" },
+      { unit: "台", receipt_qty: "2.000", bad_receipt_qty: "1.000",
+        scrap_receipt_qty: "0.000", issued_qty: "2.000", exempt_issued_qty: "0.000",
+        pending_requirement_qty: "0.000", unlinked_receipt_qty: "0.000" },
+    ],
+    receipt_qty: null, bad_receipt_qty: null, scrap_receipt_qty: null,
+    issued_qty: null, exempt_issued_qty: null, pending_requirement_qty: null,
+    unlinked_receipt_qty: null,
+    return_rate_pct: null, rate_numerator: null, rate_denominator: null,
+    valuation: {
+      state: "ready",
+      estimated_bad_qty: "3.000",
+      pending_bad_qty: "1.000",
+      awaiting_ratio_bad_qty: "0.000",
+      coverage_pct: 75,
+      bad_estimated_value_inc_tax: "56.50",
+      bad_estimated_value_ex_tax: "50.00",
+      domains: DOMAIN_COVERAGE_FIXTURE,
+    },
+  }],
+  pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+/** B-F09/B-F12：下单混合单位（平面 null + 分桶，不并成 17）+ 无日期桶单列。 */
+const ordersMixedFixture: OrdersResponse = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  cards: {
+    order_qty: null, order_count: 2, unit: null,
+    unit_breakdown: [
+      { unit: "件", order_qty: "15.000" },
+      { unit: "台", order_qty: "2.000" },
+    ],
+    undated_orders: {
+      order_qty: "7.000", order_count: 1,
+      note: "无制单日期下单未计入期间（不猜日期）",
+    },
+  },
+  rows: [{
+    project_id: "p1", project_code: "MDD-P1", display_name: "项目一",
+    business_type: "spare",
+    order_qty: null, unit: null,
+    unit_breakdown: [
+      { unit: "件", order_qty: "8.000" },
+      { unit: "台", order_qty: "2.000" },
+    ],
+    order_count: 1, undated_order_qty: "7.000", undated_order_count: 1,
+  }],
+};
+
+/** B-F09：消耗混合单位（件 2 已计 100% / 台 3 未计 0%）：平面 null，
+ * 金额 22.60 是跨单位同币种小计（金额例外），数量/覆盖率绝不合并。 */
+const consumptionMixedFixture = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  cards: {
+    issued_qty: null, unit: null,
+    unit_breakdown: [
+      { unit: "件", issued_qty: "2.000", costed_qty: "2.000", uncosted_qty: "0.000",
+        coverage_pct: 100, cost_amount_ex_tax: "20.00", cost_amount_inc_tax: "22.60" },
+      { unit: "台", issued_qty: "3.000", costed_qty: "0.000", uncosted_qty: "3.000",
+        coverage_pct: 0 },
+    ],
+    cost_amount_ex_tax: "20.00", cost_amount_inc_tax: "22.60",
+    costed_qty: null, uncosted_qty: null, coverage_pct: null,
+    sources: ["direct"],
+    note: "只读既有已计成本（可能含估算）；不回算、不减返件估值、不覆盖成本链",
+  },
+  rows: [{
+    issue_date: "2026-10-20", project_id: "p1", project_code: "MDD-P1",
+    display_name: "项目一", issued_qty: null, unit: null,
+    unit_breakdown: [
+      { unit: "件", issued_qty: "2.000", costed_qty: "2.000", uncosted_qty: "0.000",
+        coverage_pct: 100, cost_amount_ex_tax: "20.00", cost_amount_inc_tax: "22.60" },
+      { unit: "台", issued_qty: "3.000", costed_qty: "0.000", uncosted_qty: "3.000",
+        coverage_pct: 0 },
+    ],
+    line_count: 2,
+    cost_amount_ex_tax: "20.00", cost_amount_inc_tax: "22.60",
+    costed_qty: null, uncosted_qty: null, coverage_pct: null,
+    sources: ["direct"],
+  }],
+  pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+/** B-F11：全部未计成本 → 金额键不存在（未知金额，不是 ¥0.00）；
+ * 数量/未计成本量/覆盖 0%（真实 0）照给。 */
+const consumptionUncostedFixture = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  cards: {
+    issued_qty: "3.000", unit: "台",
+    unit_breakdown: [{
+      unit: "台", issued_qty: "3.000", costed_qty: "0.000",
+      uncosted_qty: "3.000", coverage_pct: 0,
+    }],
+    costed_qty: "0.000", uncosted_qty: "3.000", coverage_pct: 0,
+    sources: [],
+    note: "只读既有已计成本；不回算、不减返件估值、不覆盖成本链",
+  },
+  rows: [{
+    issue_date: "2026-10-21", project_id: "p1", project_code: "MDD-P1",
+    display_name: "项目一", issued_qty: "3.000", unit: "台",
+    unit_breakdown: [{
+      unit: "台", issued_qty: "3.000", costed_qty: "0.000",
+      uncosted_qty: "3.000", coverage_pct: 0,
+    }],
+    line_count: 1, costed_qty: "0.000", uncosted_qty: "3.000", coverage_pct: 0,
+    sources: [],
+  }],
+  pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+/** B-F09：总览混合单位——卡片平面 null + 分桶；趋势/件况按单位拆系列。 */
+const summaryMixedFixture: SummaryResponse = {
+  range: { start: "2026-10-15", end: "2026-10-21" },
+  cards: {
+    receipt_qty: {
+      total: null, part: null, machine: null,
+      unit_breakdown: [
+        { unit: "件", receipt_qty: "2.000" },
+        { unit: "台", receipt_qty: "1.000" },
+      ],
+    },
+    bad_receipt_qty: {
+      total: null, scrap: null,
+      unit_breakdown: [
+        { unit: "件", bad_receipt_qty: "1.000" },
+        { unit: "台", bad_receipt_qty: "1.000" },
+      ],
+    },
+    issued_qty: {
+      total: null, note: "实际领用量（未采集件况）",
+      unit_breakdown: [
+        { unit: "件", issued_qty: "4.000" },
+        { unit: "台", issued_qty: "2.000" },
+      ],
+    },
+    return_rate_pct: null, rate_numerator: null, rate_denominator: null,
+    project_count: 2,
+    valuation: {
+      state: "ready",
+      estimated_bad_qty: null, pending_bad_qty: null, awaiting_ratio_bad_qty: null,
+      coverage_pct: null,
+      unit_breakdown: [{
+        unit: "件", bad_qty: "4.000", estimated_bad_qty: "3.000",
+        pending_bad_qty: "1.000", awaiting_ratio_bad_qty: "0.000", coverage_pct: 75,
+      }, {
+        unit: "台", bad_qty: "2.000", estimated_bad_qty: "1.000",
+        pending_bad_qty: "1.000", awaiting_ratio_bad_qty: "0.000", coverage_pct: 50,
+      }],
+      retention_ratio: "0.5",
+      domains: DOMAIN_COVERAGE_FIXTURE,
+      policy_version: POLICY.policy_version,
+      note: POLICY.notes,
+      bad_estimated_value: { inc_tax: "56.50", ex_tax: "50.00" },
+      finished_estimated_value: { inc_tax: "0.00", ex_tax: "0.00" },
+    },
+  },
+  trend: [{
+    date: "2026-10-18", receipt_qty: null, issued_qty: null,
+    unit_breakdown: [
+      { unit: "件", receipt_qty: "2.000", issued_qty: "4.000" },
+      { unit: "台", receipt_qty: "1.000", issued_qty: "2.000" },
+    ],
+  }],
+  condition_structure: [{
+    test_result: "坏品", qty: null,
+    unit_breakdown: [
+      { unit: "件", qty: "1.000" },
+      { unit: "台", qty: "1.000" },
+    ],
+  }],
+  top_projects: [{
+    project_id: "p1", project_code: "MDD-P1", display_name: "项目一",
+    receipt_qty: null, bad_receipt_qty: null, issued_qty: null,
+    unit_breakdown: [
+      { unit: "件", receipt_qty: "2.000", bad_receipt_qty: "1.000", issued_qty: "4.000" },
+      { unit: "台", receipt_qty: "1.000", bad_receipt_qty: "1.000", issued_qty: "2.000" },
+    ],
+  }],
+  notes: [],
 };
 
 function LocationProbe() {
@@ -580,9 +834,10 @@ describe("维保数据看板页", () => {
     expect(screen.queryByText(/默认试算比例/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "30%" })).toHaveAttribute("aria-pressed", "true");
     // 主展示价值 + 三域分值并列；不出现任何求和口径
+    // （成本域估值标签按契约 v2 §2 独立命名，与三域参考列的领用已计成本区分）
     expect(screen.queryByTestId("kpi-bad-value-awaiting")).not.toBeInTheDocument();
     expect(screen.getAllByText(/采购 ¥56.5/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/领用已计成本 ¥45.2/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/成本域 ¥11.3/).length).toBeGreaterThan(0);
     expect(screen.getByText("三域并列，不相加")).toBeInTheDocument();
     // 导出参数随比例
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
@@ -699,7 +954,7 @@ describe("维保数据看板页", () => {
     ));
   });
 
-  it("会话令牌在响应落地前变更：迟到响应被丢弃，不渲染旧会话数据（DL-010）", async () => {
+  it("会话令牌在响应落地前变更：迟到响应被丢弃并整页失活，旧上下文清除（DL-010）", async () => {
     localStorage.setItem("token", "token-a");
     let resolveSummary!: (value: SummaryResponse) => void;
     fetchDashboardSummary.mockImplementation(
@@ -709,32 +964,46 @@ describe("维保数据看板页", () => {
     // 总览经 Promise.all 取数：summary 挂起期间两卡都还在骨架屏
     await screen.findByTestId("overview-cards");
     expect(screen.getByTestId("kpi-receipt").textContent).not.toContain("3");
-    // 落地前切换账号（token 变化）：旧会话响应不得应用（数量卡也不落地）
+    // 落地前切换账号（token 变化）：旧会话响应不得应用（数量卡也不落地），
+    // 且页面失活——旧会话已渲染的金额/项目上下文随页签一并清除。
     localStorage.setItem("token", "token-b");
     await act(async () => { resolveSummary(summaryFixture(true, "0.5")); });
-    expect(screen.getByTestId("kpi-receipt").textContent).not.toContain("3");
-    expect(screen.getByTestId("kpi-orders").textContent).not.toContain("10");
+    await waitFor(
+      () => expect(screen.getByTestId("session-stale-alert")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(screen.queryByTestId("kpi-receipt")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("kpi-orders")).not.toBeInTheDocument();
     expect(screen.queryByTestId("kpi-valuation")).not.toBeInTheDocument();
   });
 
-  it("T4 当前累计：N/R/差额/超收齐备，日期只选单不截断整单 R，q 不下发给该端点", async () => {
+  it("T4 当前累计（B-F10）：q 透传选择含该 PN 的整张需求单；N/R 整单不截断；导出同参", async () => {
     renderPage("/maintenance/dashboard?tab=checks&q=ST");
     await screen.findByText("DD001");
     expect(screen.getByTestId("checks-note")).toHaveTextContent("当前累计");
     expect(screen.getByTestId("checks-note")).toHaveTextContent("不发布返还状态");
+    expect(screen.getByTestId("checks-cumulative-note")).toHaveTextContent("整张需求单");
     expect(screen.getByTestId("checks-cumulative-note")).toHaveTextContent("不因期间或 PN 条件截断");
     expect(screen.getByTestId("checks-cumulative-note")).toHaveTextContent("不互相抵消");
     expect(screen.getByText("需求量 N 合计")).toBeInTheDocument();
     expect(screen.getByText("未关联需求单的实收（当前累计）")).toBeInTheDocument();
     expect(screen.getByText(/项目二（MDD-P2）/)).toBeInTheDocument();
+    // B-F08：未关联桶按当前授权范围返回（受限但非空范围也有），不摊入需求单行
+    expect(screen.getByText(/当前授权范围内未关联需求单的实收/)).toBeInTheDocument();
     for (const forbidden of ["欠返", "已返", "逾期", "返还状态："]) {
       expect(screen.queryByText(new RegExp(forbidden))).not.toBeInTheDocument();
     }
+    // B-F10：q 下发给 quantity-checks（选择整单，不是局部裁剪 N/R）；
+    // 搜索框在该页签可用（不再剥离 q）
     expect(fetchDashboardQuantityChecks).toHaveBeenCalledWith(
-      expect.not.objectContaining({ q: expect.anything() }),
+      expect.objectContaining({ q: "ST" }),
     );
-    // 需求单核对页签不渲染关键词输入框
-    expect(screen.queryByPlaceholderText("搜 PN / 描述")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("搜 PN / 描述")).toBeInTheDocument();
+    // 导出与 API 同一筛选集（含 q）
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "quantity_checks", format: "csv", q: "ST" }),
+    ));
   });
 
   it("切换时间范围写入 URL 并按新范围重新取数", async () => {
@@ -755,12 +1024,11 @@ describe("维保数据看板页", () => {
     expect(screen.getByRole("columnheader", { name: /期间下单量/ })).toBeInTheDocument();
     expect(screen.getAllByText("8").length).toBeGreaterThan(0);
     expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" });
-    // 已知后端缺口（needs #1）：/projects 暂未接入比例参数 → 显式说明 + 持续下发
+    // 比例参数照常下发（默认 0.5）：后端已接入该参数（独立复核实测
+    // 默认 .5 / 显式 0 / 自定义 0.2 在表与 CSV/XLSX 一致），无缺口可说明
     expect(fetchDashboardProjects).toHaveBeenCalledWith(
       expect.objectContaining({ value_retention_ratio: "0.5" }),
     );
-    expect(screen.getByTestId("projects-ratio-gap-note")).toHaveTextContent("后端缺口说明");
-    expect(screen.getByTestId("projects-ratio-gap-note")).toHaveTextContent("待试算");
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -882,5 +1150,252 @@ describe("维保数据看板页", () => {
     fireEvent.click(within(alert.closest(".ant-alert")!).getByRole("button", { name: /重\s*试/ }));
     await screen.findByTestId("kpi-receipt");
     expect(fetchDashboardSummary).toHaveBeenCalledTimes(2);
+  });
+
+  // ---- 会话所有权（独立 B 首轮 B-F03/B-F04）：请求前与落地前都绑定组件所属会话 ----
+  // 复现方式与独立探针一致：同 tab 静默改 localStorage（不触发 storage 事件/重渲染）。
+
+  it("B-F03：options 迟到且已换号 → 旧 amounts 控件不得落地，整页失活且可刷新恢复", async () => {
+    localStorage.setItem("token", "token-a");
+    let resolveOptions!: (value: DashboardOptions) => void;
+    fetchDashboardOptions.mockImplementationOnce(
+      () => new Promise<DashboardOptions>((resolve) => { resolveOptions = resolve; }),
+    );
+    renderPage();
+    // 静默换号后 A 的 options 才返回（迟到）
+    localStorage.setItem("token", "token-b");
+    await act(async () => { resolveOptions(optionsWithAmounts); });
+    // A 会话的金额控件 / 项目上下文不得渲染，也不得触发旧会话的业务请求
+    expect(screen.queryByTestId("retention-ratio-control")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("kpi-receipt")).not.toBeInTheDocument();
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+    expect(fetchDashboardProjects).not.toHaveBeenCalled();
+    // 检测到失配：整页转入会话失活（清除旧上下文），不是静默卡骨架屏
+    const stale = await waitFor(() => {
+      expect(screen.getByTestId("session-stale-alert")).toBeInTheDocument();
+      return screen.getByTestId("session-stale-alert");
+    }, { timeout: 5000 });
+    // 失活不是禁用功能：按当前会话刷新即恢复（正向对照）
+    fireEvent.click(within(stale).getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(
+      () => expect(screen.getByTestId("kpi-receipt").textContent).toContain("3"),
+      { timeout: 5000 },
+    );
+    expect(screen.getByTestId("retention-ratio-control")).toBeInTheDocument();
+    expect(screen.queryByTestId("session-stale-alert")).not.toBeInTheDocument();
+  });
+
+  it("B-F04：A 挂载的导出按钮换号后点击 → 请求前拒绝，不发旧组件请求", async () => {
+    localStorage.setItem("token", "token-a");
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一"); // options + projects 全部在 A 会话正常落地
+    localStorage.setItem("token", "token-b"); // 静默换号
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await waitFor(
+      () => expect(screen.getByTestId("session-stale-alert")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(downloadDashboardExport).not.toHaveBeenCalled();
+  });
+
+  it("B-F04：Drawer 内导出按钮换号后点击 → 同样不发旧组件请求", async () => {
+    localStorage.setItem("token", "token-a");
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    fireEvent.click(screen.getByRole("button", { name: "查看 项目一 返件明细" }));
+    expect(await screen.findByText("返件明细：项目一")).toBeInTheDocument();
+    localStorage.setItem("token", "token-b");
+    const drawer = document.querySelector(".ant-drawer") as HTMLElement;
+    fireEvent.click(within(drawer).getByRole("button", { name: "导出 CSV" }));
+    await waitFor(
+      () => expect(screen.getByTestId("session-stale-alert")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(downloadDashboardExport).not.toHaveBeenCalled();
+  });
+
+  it("B-F04：换号后新开返件明细 Drawer → 行级请求同样不发（下钻也绑定所属会话）", async () => {
+    localStorage.setItem("token", "token-a");
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    localStorage.setItem("token", "token-b");
+    fireEvent.click(screen.getByRole("button", { name: "查看 项目一 返件明细" }));
+    await waitFor(
+      () => expect(screen.getByTestId("session-stale-alert")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(fetchDashboardReceipts).not.toHaveBeenCalled();
+  });
+
+  it("下载落地再次校验：请求发出后换号 → blob 不落盘、无成功提示", async () => {
+    localStorage.setItem("token", "token-a");
+    let resolveExport!: (value: { blob: Blob; filename: string }) => void;
+    downloadDashboardExport.mockImplementationOnce(
+      () => new Promise<{ blob: Blob; filename: string }>((resolve) => {
+        resolveExport = resolve;
+      }),
+    );
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledTimes(1));
+    // 请求在途时换号：响应落地前再次校验，旧会话数据不落盘
+    localStorage.setItem("token", "token-b");
+    await act(async () => {
+      resolveExport({ blob: new Blob(["csv"], { type: "text/csv" }), filename: "x.csv" });
+    });
+    expect(screen.queryByText(/已导出/)).not.toBeInTheDocument();
+  });
+
+  // ---- coveragefix（契约 lane-b-backend-coverage-contract v2：B-F06~B-F12）----
+
+  it("B-F06：全待估项目 state=pending、无值键（待估，不是 ready + ¥0.00）", async () => {
+    fetchDashboardProjects.mockResolvedValueOnce(projectsPendingFixture);
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    // 值键不存在 → 待估占位（绝不是 TaxMoney 渲染的 ¥0.00）
+    expect(screen.getByTestId("project-valuation-pending")).toHaveTextContent("待估");
+    expect(screen.queryByTestId("project-valuation-awaiting")).not.toBeInTheDocument();
+    expect(screen.queryByText(/¥\s*0\.00/)).not.toBeInTheDocument();
+    // 全待估的覆盖率是真实 0%（分母 2、已估 0），不是「无率」隐藏
+    expect(screen.getByTestId("project-coverage")).toHaveTextContent("0%");
+  });
+
+  it("B-F07：三域返件估值覆盖按域显示（采购/销售 75%、成本域 25%），与领用已计覆盖 10% 两口径并存", async () => {
+    renderPage("/maintenance/dashboard?tab=parts");
+    await screen.findByText("MDDA-PN-1");
+    // 三域试算价值列：分值 + 已估/待估/覆盖（bad_receipts 返件估值口径）
+    expect(screen.getAllByText(/采购 ¥56\.5/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/已估 3 \/ 待估 1/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/覆盖 75%（返件估值口径）/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/成本域 ¥11\.3/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/已估 1 \/ 待估 3/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/覆盖 25%（返件估值口径）/).length).toBeGreaterThan(0);
+    // 三域参考列：领用已计覆盖是 issued_lines 口径（10%），不得冒充返件估值覆盖
+    expect(screen.getAllByText(/领用已计成本 ¥22\.60/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/领用已计覆盖 10%/).length).toBeGreaterThan(0);
+    // /valuation 总卡也呈现三域覆盖（cards.domains 不只写在类型里）
+    expect(screen.getAllByText(/覆盖 75%（返件估值口径）/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("B-F07：总览金额卡副行呈现三域覆盖（采购/销售/成本域各自已估/待估/覆盖）", async () => {
+    renderPage();
+    await waitFor(
+      () => expect(screen.getByTestId("kpi-valuation")).toHaveTextContent("比例 50%"),
+      { timeout: 5000 },
+    );
+    const card = screen.getByTestId("kpi-valuation");
+    expect(card).toHaveTextContent("覆盖 75%");
+    expect(card).toHaveTextContent("成本域");
+    expect(card).toHaveTextContent("覆盖 25%");
+    expect(card).toHaveTextContent("返件估值口径");
+  });
+
+  it("B-F09：消耗混合单位按物理单位分桶（件 2 已计 100% / 台 3 未计 0%），不并成 5 或 40%", async () => {
+    fetchDashboardConsumption.mockResolvedValueOnce(consumptionMixedFixture);
+    // q=ST 只应作用于支持关键词的端点：orders/consumption 仍剥离（B-F10 只放开 checks）
+    renderPage("/maintenance/dashboard?tab=consumption&q=ST");
+    await screen.findByTestId("consumption-cards");
+    expect(fetchDashboardOrders).toHaveBeenCalledWith(
+      expect.not.objectContaining({ q: expect.anything() }),
+    );
+    expect(fetchDashboardConsumption).toHaveBeenCalledWith(
+      expect.not.objectContaining({ q: expect.anything() }),
+    );
+    // 卡片：平面 issued null → 「混合单位」+ 分桶行；金额 22.60 是跨单位同币种小计
+    const qtyCard = screen.getByTestId("kpi-consumption-qty");
+    expect(qtyCard).toHaveTextContent("混合单位");
+    expect(qtyCard).toHaveTextContent("件：2");
+    expect(qtyCard).toHaveTextContent("台：3");
+    expect(screen.getByTestId("kpi-consumption-cost")).toHaveTextContent("22.6");
+    // 覆盖率平面 null：分桶各报（件 100% / 台 0%），绝不出现合并的 40%
+    const coverageCard = screen.getByTestId("kpi-consumption-coverage");
+    expect(coverageCard).toHaveTextContent("件：100%");
+    expect(coverageCard).toHaveTextContent("台：0%");
+    expect(screen.queryByText(/40%/)).not.toBeInTheDocument();
+    // 未计成本量同样分桶（台 3）
+    expect(screen.getByTestId("kpi-consumption-uncosted")).toHaveTextContent("台：3");
+    // 日表/下单表都有单位列（混合单位呈现）；数量单元格分桶行
+    expect(screen.getAllByRole("columnheader", { name: "单位" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/台：3/).length).toBeGreaterThan(1);
+  });
+
+  it("B-F11：全部未计成本的桶金额未知（—），不是 ¥0.00；数量与覆盖 0% 照给", async () => {
+    fetchDashboardConsumption.mockResolvedValueOnce(consumptionUncostedFixture);
+    renderPage("/maintenance/dashboard?tab=consumption");
+    await screen.findByTestId("consumption-cards");
+    const costCard = screen.getByTestId("kpi-consumption-cost");
+    expect(costCard).toHaveTextContent("—");
+    expect(costCard).toHaveTextContent("未知");
+    expect(costCard).not.toHaveTextContent("0.00");
+    expect(screen.queryByText(/¥\s*0\.00/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("kpi-consumption-uncosted")).toHaveTextContent("3");
+    expect(screen.getByTestId("kpi-consumption-coverage")).toHaveTextContent("0%");
+  });
+
+  it("B-F12：无制单日期下单单独成桶（7／1 张，未计入期间），不冒充入期；混合单位不并 17", async () => {
+    fetchDashboardOrders.mockResolvedValueOnce(ordersMixedFixture);
+    renderPage("/maintenance/dashboard?tab=consumption");
+    await screen.findByTestId("orders-cards");
+    const qtyCard = screen.getByTestId("kpi-order-qty");
+    expect(qtyCard).toHaveTextContent("混合单位");
+    expect(qtyCard).toHaveTextContent("件：15");
+    expect(qtyCard).toHaveTextContent("台：2");
+    expect(screen.queryByText("17")).not.toBeInTheDocument();
+    // 无日期桶：卡片副行（数量域全角色）+ 项目表行内列
+    expect(qtyCard).toHaveTextContent("无制单日期下单量 7");
+    expect(qtyCard).toHaveTextContent("单数 1");
+    expect(qtyCard).toHaveTextContent("未计入期间");
+    expect(screen.getByRole("columnheader", { name: /无制单日期下单量/ })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /无制单日期单数/ })).toBeInTheDocument();
+    expect(screen.getAllByText("7").length).toBeGreaterThan(0);
+  });
+
+  it("B-F09：总览混合单位——卡片分桶、趋势/件况按单位拆系列、Top 项目分单位", async () => {
+    fetchDashboardSummary.mockResolvedValueOnce(summaryMixedFixture);
+    fetchDashboardOrders.mockResolvedValueOnce(ordersMixedFixture);
+    renderPage();
+    await waitFor(
+      () => expect(screen.getByTestId("kpi-receipt")).toHaveTextContent("混合单位"),
+      { timeout: 5000 },
+    );
+    const receipt = screen.getByTestId("kpi-receipt");
+    expect(receipt).toHaveTextContent("件：2");
+    expect(receipt).toHaveTextContent("台：1");
+    // 趋势：按单位拆系列（绝不跨单位求和成一条柱）
+    const trend = screen.getByTestId("overview-trend-chart");
+    expect(trend).toHaveTextContent("返件实收（件）");
+    expect(trend).toHaveTextContent("返件实收（台）");
+    expect(trend).toHaveTextContent("实际领用（件）");
+    expect(trend).toHaveTextContent("实际领用（台）");
+    // 件况结构同样按单位拆系列
+    const condition = screen.getByTestId("overview-condition-chart");
+    expect(condition).toHaveTextContent("返件实收（件）");
+    expect(condition).toHaveTextContent("返件实收（台）");
+    // Top 项目行分单位呈现
+    expect(screen.getAllByText(/件：2/).length).toBeGreaterThan(0);
+    // 金额卡：估值平面 null → 单位分桶行（已估/待估/覆盖按单位）
+    const valuation = screen.getByTestId("kpi-valuation");
+    expect(valuation).toHaveTextContent("件：已估 3");
+    expect(valuation).toHaveTextContent("台：已估 1");
+    // M01 卡同一 orders 响应：无日期桶说明在总览同样可见
+    expect(screen.getByTestId("kpi-orders")).toHaveTextContent("无制单日期下单量 7");
+  });
+
+  it("B-F09：项目对比混合单位（单位列/分桶单元格/率不可加总）+ B-F07 三域覆盖列", async () => {
+    fetchDashboardProjects.mockResolvedValueOnce(projectsMixedFixture);
+    fetchDashboardOrders.mockResolvedValueOnce(ordersMixedFixture);
+    renderPage("/maintenance/dashboard?tab=projects");
+    await screen.findByText("项目一");
+    expect(screen.getByRole("columnheader", { name: "单位" })).toBeInTheDocument();
+    expect(screen.getAllByText(/混合单位/).length).toBeGreaterThan(0);
+    // 数量单元格分桶（返件实收：件 3 / 台 2），数量绝不跨单位合并
+    expect(screen.getAllByText(/件：3/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/台：2/).length).toBeGreaterThan(0);
+    // 返还率混合 → 率不可加总提示，不是 0%
+    expect(screen.getAllByText(/率不可加总/).length).toBeGreaterThan(0);
+    // 三域覆盖列（返件估值口径）
+    expect(screen.getByRole("columnheader", { name: /三域覆盖/ })).toBeInTheDocument();
+    expect(screen.getAllByText(/覆盖 75%（返件估值口径）/).length).toBeGreaterThan(0);
   });
 });
