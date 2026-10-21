@@ -195,6 +195,49 @@ def test_admin_sees_amounts_and_policy_version(db, seeded):
     assert bad["valuation"]["factor"] == "0.20"
 
 
+def test_boss_role_sees_amounts_by_role_template(db, seeded):
+    """R33 权限矩阵：老板（boss）与管理员同看金额，不依赖 page_maintenance_boss。
+
+    账号不带 overrides（按 ROLE_TEMPLATES 兜底）：boss 模板 page_maintenance=True、
+    data_profit=True，而维保展示板的 page_maintenance_boss 本就显式 False——
+    数据看板的门是 page_maintenance + 利润门，与展示板入口键无关。
+    """
+    base = permissions.effective("boss", None)
+    assert base["page_maintenance"] is True
+    assert base["data_profit"] is True
+    assert base["page_maintenance_boss"] is False
+
+    client = client_for(db, username="mdd-boss", role="boss")
+
+    summary = client.get(f"{BASE}/summary")
+    assert summary.status_code == 200
+    cards = summary.json()["cards"]
+    # FULL_SCOPE_ROLES 含 boss：两个项目的实收（4+2）都在。
+    assert cards["receipt_qty"]["total"] == "6.000"
+    valuation = cards["valuation"]
+    assert valuation["bad_estimated_value"]["inc_tax"] == "101.70"
+    assert valuation["bad_estimated_value"]["ex_tax"] == "90.00"
+    assert valuation["policy_version"] == POLICY_VERSION
+
+    valuation_page = client.get(f"{BASE}/valuation")
+    assert valuation_page.status_code == 200
+    assert valuation_page.json()["policy"]["policy_version"] == POLICY_VERSION
+
+    parts = client.get(f"{BASE}/parts")
+    assert parts.status_code == 200
+    row = next(item for item in parts.json()["rows"] if item["pn"] == "MDDA-PN-1")
+    assert row["valuation"]["bad_estimated_value_inc_tax"] == "101.70"
+    assert row["references"]["chosen"] == "purchase"
+    assert row["references"]["purchase"]["inc_tax"] == "113.00"
+
+    export = client.get(f"{BASE}/export",
+                        params={"kind": "parts", "format": "csv"})
+    assert export.status_code == 200
+    header = next(csv.reader(io.StringIO(export.content.decode("utf-8"))))
+    for amount_col in ("坏件估算价值-含税", "估价政策版本"):
+        assert amount_col in header
+
+
 def test_maintenance_manager_quantity_only_no_amount_leak(db, seeded):
     p1, _p2, _part = seeded
     username = "mdd-manager"
