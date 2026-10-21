@@ -20,7 +20,8 @@ dependencies = [
     "openai>=1.0",
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.9",
-    "pillow>=12.3.0",
+    # Security floor (DL031): lock already pins 13.0.0.
+    "pillow>=13.0.0",
     "xlrd==2.0.2",
     "xlsxwriter>=3.2.9,<4",
 ]
@@ -38,3 +39,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.uv]
+# Security floor (DL031) for transitive certifi, not a direct dependency;
+# lock already pins 2026.10.19.
+constraint-dependencies = ["certifi>=2026.10.19"]
