@@ -8,7 +8,9 @@ import { fmtDateTime, fmtMoney, isReconBlockEmpty } from "../shared";
 import {
   fetchSalesAnalyticsOrderDetail,
   type SalesAnalyticsOrderDetail,
+  type SalesOrderLine,
 } from "../../../api/salesAnalytics";
+import { pct, qty } from "../../../utils/format";
 import type { AmountKey } from "./urlState";
 
 export interface DetailDrawerProps {
@@ -72,6 +74,28 @@ export default function DetailDrawer({
   const recon = detail?.reconciliation;
   const reconNoData = !recon || reconRestricted || isReconBlockEmpty(recon);
 
+  // 明细行（D-44）：单价 / 行金额随成本权限、毛利随利润权限由后端置空，前端统一「—」
+  const lineColumns: ColumnsType<SalesOrderLine> = [
+    { title: "行号", dataIndex: "line_no", width: 56, align: "right", render: (v: number | null) => v ?? "—" },
+    { title: "PN", dataIndex: "pn", width: 140, ellipsis: true, render: (v: string | null) => v || "—" },
+    { title: "描述", dataIndex: "description", ellipsis: true, render: (v: string | null) => v || "—" },
+    { title: "大类", dataIndex: "category_major", width: 90, render: (v: string | null) => v || "未分类" },
+    { title: "品牌", dataIndex: "brand", width: 90, render: (v: string | null) => v || "—" },
+    { title: "数量", dataIndex: "qty", width: 70, align: "right", render: (v: number | null) => qty(v) },
+    { title: "含税单价", dataIndex: "unit_price", width: 100, align: "right", render: (v: number | null) => fmtMoney(v) },
+    { title: "行金额", dataIndex: "line_amount", width: 100, align: "right", render: (v: number | null) => fmtMoney(v) },
+    {
+      title: "营收", dataIndex: "revenue", width: 100, align: "right",
+      render: (v: number | null, r) => (r.counts_revenue ? fmtMoney(v) : <span title="该行不计营收">不计营收</span>),
+    },
+    {
+      title: "毛利", dataIndex: "gross_profit", width: 120, align: "right",
+      render: (v: number | null, r) => (
+        <span>{fmtMoney(v)}{r.gross_margin != null && <span style={{ marginLeft: 4, fontSize: 12 }}>{pct(r.gross_margin)}</span>}</span>
+      ),
+    },
+  ];
+
   const historyColumns: ColumnsType<SalesAnalyticsOrderDetail["reconciliation_history"][number]> = [
     { title: "导入批次", dataIndex: "import_batch_id", width: 84, align: "right" },
     { title: "来源", dataIndex: "source", width: 70, render: (v: string) => SOURCE_LABEL[v] ?? v },
@@ -85,7 +109,7 @@ export default function DetailDrawer({
   return (
     <Drawer
       open={orderId != null}
-      width={760}
+      width={900}
       title={detail ? `销售单 ${detail.order_no}` : "销售单详情"}
       onClose={onClose}
       destroyOnClose
@@ -121,7 +145,26 @@ export default function DetailDrawer({
             {amounts.includes("revenue") && (
               <span>营收 <b>{fmtMoney(detail.revenue)}</b></span>
             )}
+            {detail.gross_profit !== undefined && (
+              <span>
+                毛利 <b>{fmtMoney(detail.gross_profit)}</b>
+                {detail.gross_margin != null && <span style={{ marginLeft: 4 }}>（{pct(detail.gross_margin)}）</span>}
+              </span>
+            )}
           </div>
+
+          {detail.lines && (
+            <Table<SalesOrderLine>
+              size="small"
+              rowKey="line_id"
+              title={() => `明细行（${detail.lines?.length ?? 0}）`}
+              dataSource={detail.lines}
+              columns={lineColumns}
+              pagination={false}
+              scroll={{ x: 900 }}
+              locale={{ emptyText: "该单没有明细行" }}
+            />
+          )}
 
           {reconRestricted ? (
             <Alert type="info" showIcon message="无对账数据（当前账号无销售单对账数据权限）" />

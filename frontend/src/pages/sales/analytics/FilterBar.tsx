@@ -1,12 +1,21 @@
-// 销售分析筛选栏：日期预设（共用组件）+ 业务类型多选（候选取值带全时间计数）+
-// 客户/销售人员模糊搜索 + 三金额多选（共用组件）+ 含已退货开关（D-40 §5，默认不含）。
-// 客户权限（data_customer）受限时禁用客户搜索（后端对带 customer 的请求 fail-closed
-// 403，这里先不给入口）；对账权限（data_reconciliation）受限时开关无意义，不渲染。
-import { useEffect, useState } from "react";
-import { Button, Input, Select, Switch, Tooltip } from "antd";
+// 销售分析筛选栏（D-41 + D-44）：日期预设（共用组件）+ 业务类型 / 客户 / 客户类型 /
+// 销售人员 / 商品大类 / 品牌多选（精确匹配；客户按规范名，候选随输入向后端补全）+
+// 金额区间拖动条（D-44 §7）+ 三金额多选（共用组件）+ 含已退货开关（D-40 §5）。
+// 客户权限（data_customer）受限时禁用客户与客户类型（后端对带客户条件的请求
+// fail-closed 403）；对账权限受限时含退货开关无意义，不渲染。旧链接里的客户 / 销售
+// 模糊条件（customer / salesperson）只作为可关闭标签展示，不再提供输入。
+import { useEffect, useRef, useState } from "react";
+import { Button, Select, Switch, Tag, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
-import type { SalesAnalyticsBusinessTypeOption } from "../../../api/salesAnalytics";
+import {
+  fetchSalesAnalyticsOptions,
+  type SalesAmountBasis,
+  type SalesAnalyticsBusinessTypeOption,
+  type SalesAnalyticsOptions,
+  type SalesAnalyticsValueOption,
+} from "../../../api/salesAnalytics";
+import AmountRangeFilter from "./AmountRangeFilter";
 import {
   AMOUNT_OPTIONS,
   type AmountKey,
@@ -18,10 +27,14 @@ export interface FilterBarProps {
   patch: (next: Partial<SalesAnalyticsUrlState>, opts?: { resetPage?: boolean }) => void;
   /** /options 返回的业务类型取值（含全时间已生效计数；value=null 是「未填写」组）。 */
   businessTypeOptions: SalesAnalyticsBusinessTypeOption[];
-  /** data_customer=false：客户搜索不可用（后端 fail-closed 403）。 */
+  /** /options 的其余候选（D-44）；undefined = 尚未加载。 */
+  options?: SalesAnalyticsOptions | null;
+  /** data_customer=false：客户 / 客户类型不可用（后端 fail-closed 403）。 */
   customerRestricted: boolean;
   /** data_reconciliation=false：对账字段不可见，含退货开关不渲染。 */
   reconRestricted: boolean;
+  /** 金额口径是否被遮蔽（revenue 恒公开）。 */
+  isBasisHidden: (basis: SalesAmountBasis) => boolean;
   onReset: () => void;
 }
 
@@ -30,121 +43,198 @@ const multiSelectProps = {
   maxTagCount: "responsive" as const,
   showSearch: true,
   allowClear: true,
-  style: { minWidth: 180, maxWidth: 300 },
+  style: { minWidth: 160, maxWidth: 280 },
 };
 
-/** 模糊搜索框：输入是本地草稿，回车/清除才提交进 URL；URL 侧变化（重置、后退、
- * 深链更新）反向同步回输入框——非受控 defaultValue 在重置后会残留旧文本。 */
-function DelayedSearchInput({
+const NULL_VALUE = "__null__";
+
+/** 候选取值 → Select options：空值组保留计数展示但禁选（空串无法作为筛选值）。 */
+function valueOptions(list: SalesAnalyticsValueOption[] | undefined, emptyLabel = "（未填写）") {
+  return (list ?? []).map((o) => ({
+    value: o.value ?? NULL_VALUE,
+    label: o.value == null ? `${emptyLabel} ${o.orders}` : `${o.value}（${o.orders}）`,
+    disabled: o.value == null,
+  }));
+}
+
+const dropNull = (v: string[]) => v.filter((x) => x !== NULL_VALUE);
+
+/** 客户多选：候选随输入向后端补全（规范名子串，最多 50 条）；已选值始终保留在候选中。 */
+function CustomerSelect({
   value,
-  onCommit,
-  ariaLabel,
-  placeholder,
+  initial,
   disabled,
+  onChange,
 }: {
-  value: string | null;
-  onCommit: (v: string | null) => void;
-  ariaLabel: string;
-  placeholder: string;
-  disabled?: boolean;
+  value: string[];
+  initial: SalesAnalyticsValueOption[] | undefined;
+  disabled: boolean;
+  onChange: (v: string[]) => void;
 }) {
-  const [text, setText] = useState(value ?? "");
-  useEffect(() => { setText(value ?? ""); }, [value]);
-  return (
-    <Input.Search
-      aria-label={ariaLabel}
-      placeholder={placeholder}
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onSearch={(v) => onCommit(v.trim() || null)}
+  const [found, setFound] = useState<SalesAnalyticsValueOption[] | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const seq = useRef(0);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const onSearch = (q: string) => {
+    if (timer.current) clearTimeout(timer.current);
+    if (!q.trim()) { setFound(null); return; }
+    timer.current = setTimeout(() => {
+      const mine = ++seq.current;
+      fetchSalesAnalyticsOptions({}, q.trim())
+        .then(({ data }) => { if (mine === seq.current) setFound(data.customers ?? []); })
+        .catch(() => { if (mine === seq.current) setFound([]); });
+    }, 300);
+  };
+  const base = found ?? initial ?? [];
+  const known = new Set(base.map((o) => o.value));
+  const options = [
+    ...value.filter((v) => !known.has(v)).map((v) => ({ value: v, label: v })),
+    ...valueOptions(base).filter((o) => !o.disabled),
+  ];
+  const select = (
+    <Select
+      {...multiSelectProps}
+      aria-label="客户"
+      placeholder={disabled ? "客户信息不可见" : "客户（输入搜索，多选）"}
+      value={disabled ? [] : value}
       disabled={disabled}
-      allowClear
-      style={{ width: 180 }}
+      filterOption={false}
+      onSearch={onSearch}
+      options={options}
+      onChange={(v: string[]) => { setFound(null); onChange(v); }}
     />
   );
+  return disabled ? (
+    <Tooltip title="当前账号无客户信息权限（data_customer），客户筛选不可用">{select}</Tooltip>
+  ) : select;
 }
 
 export default function FilterBar({
   state,
   patch,
   businessTypeOptions,
+  options,
   customerRestricted,
   reconRestricted,
+  isBasisHidden,
   onReset,
 }: FilterBarProps) {
   const change = (next: Partial<SalesAnalyticsUrlState>) => patch(next, { resetPage: true });
-
-  const customerInput = customerRestricted ? (
-    <Tooltip title="当前账号无客户信息权限（data_customer），客户筛选不可用">
-      <DelayedSearchInput
-        value={null}
-        onCommit={() => undefined}
-        ariaLabel="客户"
-        placeholder="客户信息不可见"
-        disabled
-      />
-    </Tooltip>
-  ) : (
-    <DelayedSearchInput
-      value={state.customer}
-      onCommit={(v) => change({ customer: v })}
-      ariaLabel="客户"
-      placeholder="客户（模糊搜索，回车生效）"
-    />
-  );
+  const range = options?.amount_range;
+  const maxAmount = range ? range[`${state.amountBasis}_max` as keyof typeof range] : null;
 
   return (
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-      <DateRangePresets
-        preset={state.preset}
-        from={state.from}
-        to={state.to}
-        onChange={({ preset, from, to }) => change({ preset, from, to })}
-      />
-      <Tooltip title="候选取值与计数来自全部已生效销售单（不随日期区间变化）">
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <DateRangePresets
+          preset={state.preset}
+          from={state.from}
+          to={state.to}
+          onChange={({ preset, from, to }) => change({ preset, from, to })}
+        />
+        <Tooltip title="候选取值与计数来自全部已生效销售单（不随日期区间变化）">
+          <Select
+            {...multiSelectProps}
+            aria-label="业务类型"
+            placeholder="业务类型（多选）"
+            value={state.businessType}
+            optionFilterProp="label"
+            options={businessTypeOptions.map((o) => ({
+              // value=null 的「未填写」组无法作为筛选值传给后端（空串会被清洗丢弃），
+              // 保留计数展示但禁选，不丢弃取值面
+              value: o.value ?? NULL_VALUE,
+              label: o.value == null ? `（未填写） ${o.orders}` : `${o.value}（${o.orders}）`,
+              disabled: o.value == null,
+            }))}
+            onChange={(v: string[]) => change({ businessType: dropNull(v) })}
+          />
+        </Tooltip>
+        <CustomerSelect
+          value={state.customers}
+          initial={options?.customers}
+          disabled={customerRestricted}
+          onChange={(v) => change({ customers: v })}
+        />
         <Select
           {...multiSelectProps}
-          aria-label="业务类型"
-          placeholder="业务类型（多选）"
-          value={state.businessType}
+          aria-label="客户类型"
+          placeholder={customerRestricted ? "客户信息不可见" : "客户类型（多选）"}
+          disabled={customerRestricted}
+          value={customerRestricted ? [] : state.customerTypes}
           optionFilterProp="label"
-          options={businessTypeOptions.map((o) => ({
-            // value=null 的「未填写」组无法作为筛选值传给后端（空串会被清洗丢弃），
-            // 保留计数展示但禁选，不丢弃取值面
-            value: o.value ?? "__null__",
-            label: o.value == null ? `（未填写） ${o.orders}` : `${o.value}（${o.orders}）`,
-            disabled: o.value == null,
-          }))}
-          onChange={(v: string[]) => change({ businessType: v.filter((x) => x !== "__null__") })}
+          options={valueOptions(options?.customer_types)}
+          onChange={(v: string[]) => change({ customerTypes: dropNull(v) })}
         />
-      </Tooltip>
-      {customerInput}
-      <DelayedSearchInput
-        value={state.salesperson}
-        onCommit={(v) => change({ salesperson: v })}
-        ariaLabel="销售人员"
-        placeholder="销售人员（模糊搜索，回车生效）"
-      />
-      <AmountBasisSelect
-        options={AMOUNT_OPTIONS}
-        value={state.amounts}
-        onChange={(v: string[]) => patch({ amounts: v as AmountKey[] })}
-        label="金额口径"
-      />
-      {!reconRestricted && (
-        <Tooltip title="含已退货 = 已对账 + 退货已对账（相加，不扣减）；不含 = 只看已对账。默认不含（D-40）。">
-          <span style={{ display: "inline-flex", gap: 6, alignItems: "center", whiteSpace: "nowrap" }}>
-            含已退货
-            <Switch
-              aria-label="含已退货"
-              size="small"
-              checked={state.includeReturns}
-              onChange={(v) => patch({ includeReturns: v })}
-            />
-          </span>
+        <Select
+          {...multiSelectProps}
+          aria-label="销售人员"
+          placeholder="销售人员（多选）"
+          value={state.salespeople}
+          optionFilterProp="label"
+          options={valueOptions(options?.salespeople)}
+          onChange={(v: string[]) => change({ salespeople: dropNull(v) })}
+        />
+        <Tooltip title="选了商品大类或品牌即按明细行统计：只计匹配的明细行，不含税为按 13% 推算的名义值">
+          <Select
+            {...multiSelectProps}
+            aria-label="商品大类"
+            placeholder="商品大类（多选）"
+            value={state.categories}
+            optionFilterProp="label"
+            options={(options?.categories ?? []).map((o) => ({
+              value: o.value ?? "未分类", label: `${o.value ?? "未分类"}（${o.orders}）`,
+            }))}
+            onChange={(v: string[]) => change({ categories: v })}
+          />
         </Tooltip>
-      )}
-      <Button onClick={onReset}>重置</Button>
+        <Select
+          {...multiSelectProps}
+          aria-label="品牌"
+          placeholder="品牌（多选）"
+          value={state.brands}
+          optionFilterProp="label"
+          options={valueOptions(options?.brands)}
+          onChange={(v: string[]) => change({ brands: dropNull(v) })}
+        />
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <AmountRangeFilter
+          amountBasis={state.amountBasis}
+          amountMin={state.amountMin}
+          amountMax={state.amountMax}
+          includeNegative={state.includeNegative}
+          includeEmpty={state.includeEmpty}
+          maxAmount={maxAmount ?? null}
+          isBasisHidden={isBasisHidden}
+          onChange={(next) => change(next)}
+        />
+        <AmountBasisSelect
+          options={AMOUNT_OPTIONS}
+          value={state.amounts}
+          onChange={(v: string[]) => patch({ amounts: v as AmountKey[] })}
+          label="金额口径"
+        />
+        {!reconRestricted && (
+          <Tooltip title="含已退货 = 已对账 + 退货已对账（相加，不扣减）；不含 = 只看已对账。默认不含（D-40）。">
+            <span style={{ display: "inline-flex", gap: 6, alignItems: "center", whiteSpace: "nowrap" }}>
+              含已退货
+              <Switch
+                aria-label="含已退货"
+                size="small"
+                checked={state.includeReturns}
+                onChange={(v) => patch({ includeReturns: v })}
+              />
+            </span>
+          </Tooltip>
+        )}
+        {state.customer && !customerRestricted && (
+          <Tag closable onClose={() => change({ customer: null })}>客户含「{state.customer}」</Tag>
+        )}
+        {state.salesperson && (
+          <Tag closable onClose={() => change({ salesperson: null })}>销售含「{state.salesperson}」</Tag>
+        )}
+        <Button onClick={onReset}>重置</Button>
+      </div>
     </div>
   );
 }
