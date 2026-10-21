@@ -2,8 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main, test]
+    # 2026-10-22 追加 release/**：发布 runbook 要求按**确切 release 提交 SHA** 验证
+    # CI（README 徽章只反映 main 分支），P 派生 R 自身 push 到 release/** 时即可
+    # 触发精确 SHA 的 CI，无需再手动 workflow_dispatch。原有触发与全部 job/step 不动。
+    branches: [main, test, "release/**"]
   pull_request:
+  # 2026-10-22 销售/采购看板轮：允许手动触发——发布 runbook 要求按**确切 release
+  # 提交 SHA** 验证 CI（README 徽章只反映 main 分支），workflow_dispatch 提供该
+  # 入口。其余 CI 定义/分支保护不动。
+  workflow_dispatch:
 
 jobs:
   backend:

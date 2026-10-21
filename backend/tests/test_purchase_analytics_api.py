@@ -915,11 +915,16 @@ def test_anonymous_gets_401(ds):
         assert c.get(ep).status_code == 401, ep
 
 
-def test_explicit_grant_opens_readonly(db, ds):
-    c = client_for(db, username="analytics-granted", role="readonly",
+@pytest.mark.parametrize("role", ["readonly", "purchaser"])
+def test_explicit_grant_still_rejected_for_non_admin_boss(db, ds, role):
+    """角色硬界（2026-10-22 轮复审新增）：页面键控制菜单，角色硬界控制数据面——
+    readonly / purchaser 即便被显式授予 ``page_purchase_analytics`` 也 403，
+    本页 admin/boss 专属（PHASE1 旁路不受影响）。"""
+    c = client_for(db, username=f"analytics-granted-{role}", role=role,
                    overrides={"page_purchase_analytics": True})
-    r = c.get("/api/purchases/analytics/summary")
-    assert r.status_code == 200, r.text
+    for ep in ENDPOINTS:
+        r = c.get(ep)
+        assert r.status_code == 403, (role, ep, r.status_code, r.text)
 
 
 def test_scoped_account_fail_closed(db, ds):
