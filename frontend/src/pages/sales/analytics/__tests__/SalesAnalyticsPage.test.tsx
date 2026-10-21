@@ -666,9 +666,11 @@ describe("销售分析页：健壮性", () => {
     localStorage.setItem("token", "account-b");
     await act(async () => { resolveSummary({ data: SUMMARY }); });
 
-    // 迟到响应到达后仍不落地：不渲染另一会话的 KPI（5），也不误报错误
+    // 迟到响应到达后不落地（DL-010 落地矩阵）：另一会话的 KPI（5）不渲染，
+    // 且检测到过期的分支会通知页级清旧上下文——数据面让位给会话失效提示
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
-    expect(salesCard()).not.toContain("5");
+    expect(screen.queryByText("销售单数")).toBeNull();
+    expect(await screen.findByText("登录会话已变更（已切换账号或登出），请刷新页面后继续")).toBeInTheDocument();
     expect(screen.queryByText("汇总加载失败")).toBeNull();
   });
 
@@ -789,9 +791,11 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     const rowAgain = screen.getByRole("row", { name: /XS-2026-201/ });
     fireEvent.click(within(rowAgain).getByText("XS-2026-201"));
     expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
-    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情
-    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情；
+    // 行点击入口同时通知页级清旧上下文——主页面列表也让位给会话提示（两处文案并存）
+    expect((await screen.findAllByText(SESSION_DEAD_TEXT)).length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("采购单")).toBeNull();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
   });
 
   it("静默换 token 后切页签：四视图取数（useAsyncData）同样拒发", async () => {
@@ -803,6 +807,115 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
     expect(fetchSalesAnalyticsGroups).not.toHaveBeenCalled();
     expect(fetchSalesAnalyticsTrend).not.toHaveBeenCalled();
+  });
+
+  // ---------------- 落地矩阵（DL-010 本轮返工）：迟到响应不只「静默不落地」，
+  // 检测到过期的落地分支必须通知页级清旧上下文；全程不得发出新（B 会话）请求 ----------------
+
+  it("落地矩阵：候选/汇总/列表/直方图全在途换 token，迟到落地通知页级清空，无新请求", async () => {
+    localStorage.setItem("token", "account-a");
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    const defer = (k: string) => () => new Promise((res) => { resolvers[k] = res; });
+    fetchSalesAnalyticsOptions.mockImplementation(defer("options"));
+    fetchSalesAnalyticsSummary.mockImplementation(defer("summary"));
+    fetchSalesAnalyticsOrders.mockImplementation(defer("orders"));
+    fetchSalesAmountHistogram.mockImplementation(defer("histogram"));
+    renderPage();
+    await waitFor(() => expect(resolvers.summary).toBeDefined());
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolvers.options({ data: OPTIONS });
+      resolvers.summary({ data: SUMMARY });
+      resolvers.orders({ data: ordersResp() });
+      resolvers.histogram({ data: HISTOGRAM });
+      await Promise.resolve();
+    });
+
+    // 四路迟到响应全部不落地，且各自通知页级：数据面让位给会话失效提示
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
+    expect(screen.queryByText("销售单数")).toBeNull();
+    expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAmountHistogram).toHaveBeenCalledTimes(1);
+  });
+
+  it("落地矩阵：趋势/分组视图在途换 token，迟到落地只通知页级，不落地不重发", async () => {
+    localStorage.setItem("token", "account-a");
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    fetchSalesAnalyticsTrend.mockImplementation(() => new Promise((res) => { resolvers.trend = res; }));
+    fetchSalesAnalyticsGroups.mockImplementation(() => new Promise((res) => { resolvers.groups = res; }));
+    renderPage("/sales/analytics?tab=trend");
+    await waitFor(() => expect(fetchSalesAnalyticsTrend).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("tab", { name: "分组排行" }));
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(1));
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolvers.trend({ data: { granularity: "day", buckets: [], weekday: [], compare: null, compare_window: null, compare_available: true } });
+      resolvers.groups({ data: { group_by: "customer", groups: [], total_groups: 0, other: null } });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(fetchSalesAnalyticsTrend).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------- 客户搜索（owner-search/owner-debounce-switch）：本组件自有
+  // 300ms debounce timer 与 found 状态，守卫单独接 owner —— 三态各自可回归 ----------------
+
+  it("客户搜索：同会话 300ms 防抖后发请求，候选正常落地（正向路径）", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    fetchSalesAnalyticsOptions.mockResolvedValue({ data: { customers: [{ value: "客户乙", orders: 7 }] } });
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    // 防抖后精确以搜索词发起（挂载那次不带搜索词，不算）
+    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenLastCalledWith({}, "客"));
+    expect(await screen.findByText("客户乙（7）")).toBeInTheDocument();
+  });
+
+  it("客户搜索：防抖窗口内换 token → 旧 timer 到期拒发、清旧候选并通知页级", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    // 防抖窗口内静默换 token：timer 属于旧会话，到期时不得以新身份发请求
+    localStorage.setItem("token", "account-b");
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(1); // 仅挂载候选那一次
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+  });
+
+  it("客户搜索：请求在途换 token → 迟到候选不落地并通知页级", async () => {
+    localStorage.setItem("token", "account-a");
+    let resolveSearch!: (v: { data: { customers: { value: string; orders: number }[] } }) => void;
+    fetchSalesAnalyticsOptions.mockImplementationOnce(
+      () => new Promise((res) => { resolveSearch = res; }),
+    );
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(2));
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolveSearch({ data: { customers: [{ value: "客户乙", orders: 7 }] } });
+      await Promise.resolve();
+    });
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText("客户乙（7）")).toBeNull();
   });
 });
 

@@ -24,12 +24,15 @@ export default function AmountHistogram({
   filterKey,
   toMessage,
   ownerToken,
+  onOwnerStale,
 }: {
   apiFilters: SalesAnalyticsFilters;
   filterKey: string;
   toMessage: (err: unknown) => string;
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发并清旧数据。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：检测到 owner 失效的迟到响应通知页级清旧上下文。 */
+  onOwnerStale: () => void;
 }) {
   const basis = apiFilters.amount_basis ?? "amount_ex_tax";
   const { data, loading, error, retry } = useAsyncData<SalesAmountHistogram>(
@@ -38,6 +41,7 @@ export default function AmountHistogram({
     toMessage,
     true,
     ownerToken,
+    onOwnerStale,
   );
   const option = useMemo(() => buildHistogramOption(data?.bins ?? []), [data]);
 

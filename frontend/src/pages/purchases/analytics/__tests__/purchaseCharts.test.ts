@@ -103,3 +103,35 @@ describe("排行横条 option", () => {
     expect(opt.series[0].markLine.data).toEqual([{ xAxis: 0 }]);
   });
 });
+
+describe("轴标签文字色（DL-025：嵌套卡 inset 底上 text3 实测 4.32:1 不达标）", () => {
+  // 深度遍历收集所有 axisLabel.color：趋势 x/y 轴与排行数值轴一并断言
+  const axisLabelColors = (opt: unknown): string[] => {
+    const out: string[] = [];
+    const visit = (node: unknown) => {
+      if (Array.isArray(node)) { node.forEach(visit); return; }
+      if (node && typeof node === "object") {
+        for (const [k, v] of Object.entries(node)) {
+          if (k === "axisLabel" && v && typeof v === "object" && "color" in v) {
+            out.push((v as { color: string }).color);
+          } else visit(v);
+        }
+      }
+    };
+    visit(opt);
+    return out;
+  };
+
+  it("趋势图与排行图的全部轴标签用 text2，不再用 text3（axisLabel token）", () => {
+    const opts = [
+      buildPurchaseTrendOption([g({ key: "2026-10-01", amount_paid: 100 })], "amount_paid"),
+      buildPurchaseRankOption([{ label: "备件采购", group: g({ key: "备件采购", amount_paid: 300 }) }], "amount_paid"),
+    ];
+    for (const opt of opts) {
+      const colors = axisLabelColors(opt);
+      expect(colors.length, "每个图至少有数值/类目轴标签").toBeGreaterThan(0);
+      for (const c of colors) expect(c).toBe(CHART_COLORS.text2);
+      for (const c of colors) expect(c).not.toBe(CHART_COLORS.axisLabel);
+    }
+  });
+});

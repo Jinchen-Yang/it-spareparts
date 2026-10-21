@@ -29,9 +29,11 @@ interface OverviewTabProps {
   toMessage: (err: unknown) => string;
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发并清旧数据。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：检测到 owner 失效的迟到响应通知页级清旧上下文。 */
+  onOwnerStale: () => void;
 }
 
-function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ownerToken }: {
+function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ownerToken, onOwnerStale }: {
   dim: SalesGroupDim; sort: SalesGroupSort;
 } & Omit<OverviewTabProps, "costRestricted" | "customerRestricted">) {
   const { data, loading, error, retry } = useAsyncData<SalesGroupsResp>(
@@ -40,6 +42,7 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
     toMessage,
     true,
     ownerToken,
+    onOwnerStale,
   );
   const valueKey = (data?.sort ?? sort) as keyof SalesGroupsResp["groups"][number];
   return (
@@ -66,7 +69,9 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
             return (
               <List.Item style={{ paddingInline: 0 }}>
                 <span style={{ display: "flex", gap: 6, minWidth: 0, flex: "1 1 auto", overflow: "hidden" }}>
-                  <span style={{ color: "var(--mb-text-3)", width: 16, flexShrink: 0 }}>{i + 1}</span>
+                  {/* DL-025 稳态返工：序号原 text-3 在嵌套卡 inset 底（rgb(246,243,238)）
+                      实测 4.32:1，改 text-2（inset 5.15 / 白 5.69） */}
+                  <span style={{ color: "var(--mb-text-2)", width: 16, flexShrink: 0 }}>{i + 1}</span>
                   {drill ? (
                     <Button type="link" size="small" title={label}
                       style={{
@@ -81,7 +86,8 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
                 </span>
                 <span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
                   {valueKey === "orders" ? `${v ?? "—"} 单` : fmtMoney(v)}
-                  <span style={{ marginLeft: 6, fontSize: 12, color: "var(--mb-text-3)" }}>{pct(g.share)}</span>
+                  {/* 占比同序号：text-3 在 inset 底 4.32:1，改 text-2（DL-025 稳态） */}
+                  <span style={{ marginLeft: 6, fontSize: 12, color: "var(--mb-text-2)" }}>{pct(g.share)}</span>
                 </span>
               </List.Item>
             );
@@ -93,7 +99,7 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
 }
 
 export default function OverviewTab(props: OverviewTabProps) {
-  const { state, apiFilters, filterKey, patch, costRestricted, customerRestricted, toMessage, ownerToken } = props;
+  const { state, apiFilters, filterKey, patch, costRestricted, customerRestricted, toMessage, ownerToken, onOwnerStale } = props;
   const firstAmount = AMOUNT_SORT_KEY[state.amounts[0]];
   const sort: SalesGroupSort = costRestricted && firstAmount !== "revenue" ? "revenue" : firstAmount as SalesGroupSort;
   const granularity = recommendGranularity(apiFilters.date_from, apiFilters.date_to);
@@ -103,6 +109,7 @@ export default function OverviewTab(props: OverviewTabProps) {
     toMessage,
     true,
     ownerToken,
+    onOwnerStale,
   );
   const dims: SalesGroupDim[] = [
     ...(customerRestricted ? [] : ["customer" as const]), "salesperson", "business_type",
@@ -126,7 +133,7 @@ export default function OverviewTab(props: OverviewTabProps) {
       <Space style={{ display: "flex", flexWrap: "wrap" }} align="start" size={12}>
         {dims.map((dim) => (
           <TopList key={dim} dim={dim} sort={sort} state={state} apiFilters={apiFilters}
-            filterKey={filterKey} patch={patch} toMessage={toMessage} ownerToken={ownerToken} />
+            filterKey={filterKey} patch={patch} toMessage={toMessage} ownerToken={ownerToken} onOwnerStale={onOwnerStale} />
         ))}
       </Space>
     </div>

@@ -48,7 +48,8 @@ export function buildGroupBarOption(items: GroupBarItem[], metric: SalesChartMet
     xAxis: {
       type: "value",
       axisLabel: {
-        fontSize: 11, color: CHART_COLORS.axisLabel,
+        // DL-025：轴标签文字用 text2（嵌套卡 inset 底 rgb(246,243,238) 实测 text3 4.32:1）
+        fontSize: 11, color: CHART_COLORS.text2,
         formatter: (v: number) => (isMoney(metric) ? moneyAxis(v) : String(v)),
       },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
@@ -136,7 +137,7 @@ export function GroupRankBar({
         }}
       />
       {missing > 0 && (
-        <div style={{ fontSize: 12, color: CHART_COLORS.axisLabel }}>另有 {missing} 组该指标无数据，未画出（见下表）</div>
+        <div style={{ fontSize: 12, color: CHART_COLORS.text2 }}>另有 {missing} 组该指标无数据，未画出（见下表）</div>
       )}
     </div>
   );
@@ -179,14 +180,15 @@ export function buildTrendOption(
     xAxis: {
       type: "category",
       data: buckets.map((b) => formatTrendBucket(b.bucket, granularity)),
-      axisLabel: { fontSize: 11, color: CHART_COLORS.axisLabel, hideOverlap: true },
+      axisLabel: { fontSize: 11, color: CHART_COLORS.text2, hideOverlap: true },
       axisLine: { lineStyle: { color: CHART_COLORS.axisLine } },
       axisTick: { show: false },
     },
     yAxis: {
       type: "value",
       axisLabel: {
-        fontSize: 11, color: CHART_COLORS.axisLabel,
+        // DL-025：轴标签文字用 text2（嵌套卡 inset 底 rgb(246,243,238) 实测 text3 4.32:1）
+        fontSize: 11, color: CHART_COLORS.text2,
         formatter: (v: number) => (isMoney(metric) ? moneyAxis(v) : String(v)),
       },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
@@ -293,14 +295,15 @@ export function buildWeekdayOption(points: WeekdayPoint[], metric: SalesChartMet
     grid: { left: 8, right: 16, top: 12, bottom: 8, containLabel: true },
     xAxis: {
       type: "category", data: WEEKDAY_LABELS,
-      axisLabel: { fontSize: 11, color: CHART_COLORS.axisLabel },
+      axisLabel: { fontSize: 11, color: CHART_COLORS.text2 },
       axisTick: { show: false },
       axisLine: { lineStyle: { color: CHART_COLORS.axisLine } },
     },
     yAxis: {
       type: "value",
       axisLabel: {
-        fontSize: 11, color: CHART_COLORS.axisLabel,
+        // DL-025：轴标签文字用 text2（嵌套卡 inset 底 rgb(246,243,238) 实测 text3 4.32:1）
+        fontSize: 11, color: CHART_COLORS.text2,
         formatter: (v: number) => (isMoney(metric) ? moneyAxis(v) : String(v)),
       },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
@@ -364,14 +367,14 @@ export function buildHistogramOption(bins: HistogramBin[]): ECOption {
     xAxis: {
       type: "category",
       data: bins.map((b) => `${fmtK2(b.lo)}–${fmtK2(b.hi)}`),
-      axisLabel: { fontSize: 10, color: CHART_COLORS.axisLabel, hideOverlap: true },
+      axisLabel: { fontSize: 10, color: CHART_COLORS.text2, hideOverlap: true },
       axisLine: { lineStyle: { color: CHART_COLORS.axisLine } },
       axisTick: { show: false },
     },
     yAxis: {
       type: "value",
       minInterval: 1,
-      axisLabel: { fontSize: 10, color: CHART_COLORS.axisLabel },
+      axisLabel: { fontSize: 10, color: CHART_COLORS.text2 },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine, type: "dashed" } },
     },
     tooltip: {

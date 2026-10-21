@@ -20,6 +20,8 @@ export interface OrderDetailDrawerProps {
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发；迟到响应落地 /
    * finally 前比对 localStorage token，换账号后不作废不作数。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：检测到 owner 失效时通知页级清旧上下文。 */
+  onOwnerStale: () => void;
   onClose: () => void;
 }
 
@@ -67,7 +69,7 @@ function NominalAmountNote({ side, kind, amount }: {
   );
 }
 
-export default function OrderDetailDrawer({ orderId, category, basis, ownerToken, onClose }: OrderDetailDrawerProps) {
+export default function OrderDetailDrawer({ orderId, category, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
   const { message } = App.useApp();
   const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -75,6 +77,8 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
   // onClose 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onOwnerStaleRef = useRef(onOwnerStale);
+  onOwnerStaleRef.current = onOwnerStale;
   const categoryKey = category.join(",");
 
   useEffect(() => {
@@ -88,6 +92,7 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
       setLoading(false);
       setDetail(null);
       message.error(SESSION_EXPIRED_MESSAGE);
+      onOwnerStaleRef.current?.();
       return;
     }
     const token = readSessionToken();
@@ -95,16 +100,21 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
     setDetail(null);
     fetchPurchaseAnalyticsOrderDetail(orderId, categoryKey ? categoryKey.split(",") : [])
       .then(({ data }) => {
-        if (seq === seqRef.current && !sessionStale(token)) setDetail(data);
+        if (seq !== seqRef.current) return;
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
+        setDetail(data);
       })
       .catch(() => {
-        if (seq !== seqRef.current || sessionStale(token)) return;
+        if (seq !== seqRef.current) return;
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
         message.error("订单明细加载失败");
         onCloseRef.current();
       })
       .finally(() => {
-        // finally 也守卫：失效会话的收尾不触碰当前 UI 状态
-        if (seq === seqRef.current && !sessionStale(token)) setLoading(false);
+        // finally 也守卫：失效会话的收尾不触碰当前 UI 状态，并通知页级清旧上下文
+        if (seq !== seqRef.current) return;
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
+        setLoading(false);
       });
   }, [orderId, categoryKey, ownerToken]);
 

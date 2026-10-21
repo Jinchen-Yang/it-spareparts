@@ -1,7 +1,7 @@
 // 采购分析页集成（D-39 PR-4a）：URL 单一真值 —— 默认今天零参数、直开链接恢复筛选与
 // 下钻层、切换口径不重新请求、脱敏账号（金额/客户）控件门控与「—」占位、
 // 排序保护回显（ranking_restricted 禁用金额排序）、错误与空态。
-import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -754,8 +754,77 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     localStorage.setItem("token", "account-b");
     fireEvent.click(screen.getByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
     expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
-    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情
-    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情；
+    // 行点击入口同时通知页级清旧上下文——主页面订单列表也让位（两处文案并存）
+    expect((await screen.findAllByText(SESSION_DEAD_TEXT)).length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
+    expect(screen.queryByRole("row", { name: "查看采购单 CG-2026-101 明细" })).toBeNull();
+  });
+
+  // ---------------- 落地矩阵（DL-010 本轮返工）：迟到响应不只「静默不落地」，
+  // 检测到过期的落地分支必须通知页级清旧上下文；全程不得发出新（B 会话）请求 ----------------
+
+  it("落地矩阵：候选/汇总/趋势/订单全在途换 token，迟到落地通知页级清空，无新请求", async () => {
+    localStorage.setItem("token", "account-a");
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    const defer = (k: string) => () => new Promise((res) => { resolvers[k] = res; });
+    fetchPurchaseAnalyticsOptions.mockImplementation(defer("options"));
+    fetchPurchaseAnalyticsSummary.mockImplementation(defer("summary"));
+    fetchPurchaseAnalyticsOrders.mockImplementation(defer("orders"));
+    renderPage("/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD");
+    await waitFor(() => expect(resolvers.orders).toBeDefined());
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolvers.options({ data: OPTIONS });
+      resolvers.summary({ data: SUMMARY });
+      resolvers.orders({ data: ordersResp() });
+      await Promise.resolve();
+    });
+
+    // 迟到响应全部不落地，且各自通知页级：数据面让位给会话失效提示
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /备件采购/ })).toBeNull();
+    expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
+    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledTimes(1);
+    expect(fetchPurchaseAnalyticsOrders).toHaveBeenCalledTimes(1);
+    // 汇总端点：主汇总 + 趋势（day）各一次，之后不再重发
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("落地矩阵：明细抽屉在途换 token，迟到详情不落地并通知页级清主页面", async () => {
+    localStorage.setItem("token", "account-a");
+    let resolveDetail!: (v: { data: typeof ORDER_DETAIL }) => void;
+    fetchPurchaseAnalyticsOrderDetail.mockImplementationOnce(
+      () => new Promise((res) => { resolveDetail = res; }),
+    );
+    renderPage("/purchases/analytics?group_key=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD");
+    const row = await screen.findByRole("row", { name: "查看采购单 CG-2026-101 明细" });
+    fireEvent.click(row);
+    await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1));
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolveDetail({ data: ORDER_DETAIL });
+      await Promise.resolve();
+    });
+    // 迟到详情不进抽屉，并通知页级：主页面分组/列表同样让位
+    expect(await screen.findAllByText(SESSION_DEAD_TEXT)).not.toHaveLength(0);
+    expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------- 图表卡几何（320/390 视口）：卡片可收缩不撑出横向滚动，
+  // 趋势卡头部允许换行（标题不被 extra 单选组挤到 0 宽） ----------------
+
+  it("图表卡：趋势/排行卡可收缩（minWidth 0 + maxWidth 100%），趋势卡头允许换行", async () => {
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    const trendCard = screen.getByText("采购趋势").closest(".ant-card") as HTMLElement;
+    const rankCard = screen.getByText(/分组排行（采购类型）/).closest(".ant-card") as HTMLElement;
+    // jsdom 对无单位 0 的 computed minWidth 返回 "0"（非 "0px"）
+    expect(trendCard).toHaveStyle({ minWidth: "0", maxWidth: "100%" });
+    expect(rankCard).toHaveStyle({ minWidth: "0", maxWidth: "100%" });
+    expect(trendCard.querySelector(".ant-card-head")).toHaveStyle({ flexWrap: "wrap" });
   });
 });

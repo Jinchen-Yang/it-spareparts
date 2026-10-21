@@ -65,10 +65,12 @@ export interface TrendTabProps {
   onMetricChange: (m: SalesChartMetric) => void;
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发并清旧数据。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：检测到 owner 失效的迟到响应通知页级清旧上下文。 */
+  onOwnerStale: () => void;
 }
 
 export default function TrendTab({
-  state, apiFilters, filterKey, patch, costRestricted, profitRestricted, toMessage, metric, onMetricChange, ownerToken,
+  state, apiFilters, filterKey, patch, costRestricted, profitRestricted, toMessage, metric, onMetricChange, ownerToken, onOwnerStale,
 }: TrendTabProps) {
   const granularity = state.granularity ?? recommendGranularity(apiFilters.date_from, apiFilters.date_to);
   const { data, loading, error, retry } = useAsyncData<SalesTrendResp>(
@@ -77,6 +79,7 @@ export default function TrendTab({
     toMessage,
     true,
     ownerToken,
+    onOwnerStale,
   );
   const metricOptions: SalesChartMetric[] = [
     ...state.amounts.map((a) => AMOUNT_SORT_KEY[a] as SalesChartMetric)

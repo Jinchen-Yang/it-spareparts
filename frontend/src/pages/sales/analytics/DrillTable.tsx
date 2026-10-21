@@ -5,6 +5,9 @@ import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
 // 提示并预先禁用对应排序入口，不发注定被回退的新请求。所有实际可见数据列双向排序
 // （A-AC07：订单号 / 业务类型 / 客户类型 / 对账块四列在内——含按最新快照原值排序的
 // 退货已对账金额）。
+// 窄屏布局（A-AC 返工）：表格自身 scroll.x 承担横向滚动（外层不裁剪、body 不藏
+// overflow），外层容器 min-width:0 / max-width:100% 保证在 flex/grid 父级里可收缩，
+// 长客户名列固定宽 + ellipsis——14 个可见数据列在 320/390/1366 宽下都可达可点。
 import { Alert, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { FilterValue, SorterResult } from "antd/es/table/interface";
@@ -125,7 +128,9 @@ export default function DrillTable({
       ...sortableCol("salesperson", true),
     },
     {
-      title: "客户", dataIndex: "customer", ellipsis: true,
+      // 固定宽 + ellipsis：无宽列在 table-layout:fixed 下会被长客户名挤到 0 宽
+      //（A-AC 320/390 实测客户列不可见），长名省略 + title 提示全名
+      title: "客户", dataIndex: "customer", width: 160, ellipsis: true,
       render: (v: string | null) => v || "—",
       ...sortableCol("customer", !customerRestricted),
     },
@@ -234,7 +239,9 @@ export default function DrillTable({
   };
 
   return (
-    <div>
+    // 外层可收缩（A-AC 返工）：min-width:0 让 flex/grid 祖先链条不被迫撑开，
+    // max-width:100% 不越出卡片；横向滚动由 Table 自身的 scroll.x 容器承担
+    <div style={{ minWidth: 0, maxWidth: "100%" }}>
       {(sortFellBack || amountSortHidden) && (
         <Alert
           style={{ marginBottom: 8 }}
@@ -255,6 +262,7 @@ export default function DrillTable({
         columns={columns}
         pagination={pagination}
         onChange={onTableChange}
+        scroll={{ x: "max-content" }}
         locale={{ emptyText: "当前筛选下没有销售单" }}
         onRow={(r) => ({
           style: { cursor: "pointer" },

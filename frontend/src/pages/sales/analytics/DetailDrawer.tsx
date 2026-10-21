@@ -3,7 +3,8 @@
 // 列表同口径；对账权限受限或无快照时按「无对账数据」展示，不显示 0。
 // 404（不存在 / 非已生效）关抽屉；其余失败保留抽屉与所查单号，就地处显示错误与
 // 重试（失败 / 未知分开，不清掉用户的位置）。会话令牌在请求前捕获、落地前比对
-// （DL-010）：换账号后迟到的响应不写状态、不弹提示。
+// （DL-010）：换账号后迟到的响应不写状态、不弹提示，并经 onOwnerStale 通知页级
+// 清旧上下文（落地矩阵：检测到过期不能只拒绝抽屉取数，主页面旧数据也要清）。
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Button, Descriptions, Drawer, Spin, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -39,6 +40,9 @@ export interface DetailDrawerProps {
   costRestricted: boolean;
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发并清旧详情。 */
   ownerToken: string | null;
+  /** 页级过期通知（DL-010 落地清理）：抽屉任一处检测到 owner 失效时回调，
+   *  页级清主页面旧汇总 / 列表（旧行点击路径不只拒绝抽屉请求）。 */
+  onOwnerStale: () => void;
   onClose: () => void;
 }
 
@@ -54,6 +58,7 @@ export default function DetailDrawer({
   reconRestricted,
   costRestricted,
   ownerToken,
+  onOwnerStale,
   onClose,
 }: DetailDrawerProps) {
   const { message } = App.useApp();
@@ -63,9 +68,11 @@ export default function DetailDrawer({
   // 重试只针对非 404 失败：自增触发 effect 重发，不动 orderId
   const [retryTick, setRetryTick] = useState(0);
   const seqRef = useRef(0);
-  // onClose 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
+  // onClose / onOwnerStale 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onOwnerStaleRef = useRef(onOwnerStale);
+  onOwnerStaleRef.current = onOwnerStale;
 
   useEffect(() => {
     if (orderId == null) {
@@ -78,11 +85,13 @@ export default function DetailDrawer({
       return;
     }
     const seq = ++seqRef.current;
-    // 所属会话失效（DL-010 返工）：拒发并清旧详情——旧会话的抽屉不以当前账号取数
+    // 所属会话失效（DL-010 返工）：拒发并清旧详情——旧会话的抽屉不以当前账号取数；
+    // 同时通知页级清主页面旧上下文（落地矩阵：旧行点击路径主页面数据也要清）
     if (sessionStale(ownerToken)) {
       setLoading(false);
       setDetail(null);
       setLoadError(SESSION_EXPIRED_MESSAGE);
+      onOwnerStaleRef.current?.();
       return;
     }
     const token = readSessionToken();
@@ -91,11 +100,13 @@ export default function DetailDrawer({
     setLoadError(null);
     fetchSalesAnalyticsOrderDetail(orderId, includeReturns)
       .then(({ data }) => {
-        if (seq !== seqRef.current || sessionStale(token)) return;
+        if (seq !== seqRef.current) return;
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
         setDetail(data);
       })
       .catch((err) => {
-        if (seq !== seqRef.current || sessionStale(token)) return;
+        if (seq !== seqRef.current) return;
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
         const status = (err as { response?: { status?: number } })?.response?.status;
         if (status === 404) {
           // 404 = 不存在或非已生效（下钻口径）：关抽屉回列表
@@ -107,8 +118,9 @@ export default function DetailDrawer({
         setLoadError(apiErrorMessage(err));
       })
       .finally(() => {
-        // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态
-        if (seq === seqRef.current && !sessionStale(token)) setLoading(false);
+        // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态，并通知页级
+        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
+        if (seq === seqRef.current) setLoading(false);
       });
   }, [orderId, includeReturns, retryTick, ownerToken]);
 
