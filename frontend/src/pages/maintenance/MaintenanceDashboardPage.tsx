@@ -1,0 +1,332 @@
+/**
+ * 维保数据看板 MVP（R33 / D-0022，T1–T4）：回收与领用总览 / 项目对比 /
+ * PN 排名与估价 / 需求单数量核对。
+ *
+ * - URL 即筛选状态（useUrlState）：tab/range/from/to/project/business_type/q/
+ *   sort/page/ps 刷新/分享不丢上下文；默认近 7 天含今天（上海日历日）。
+ * - 数量与金额分离：amounts_visible 由 /options 下发（服务端事实，不用本地
+ *   权限快照猜测）；无金额权时金额卡/列/图整块不渲染。
+ * - 排序候选同样由 /options 下发：金额排序键已在无权时被服务端剔除，
+ *   前端不自行增删。
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Alert, Button, Card, DatePicker, Input, Select, Skeleton, Space, Tabs, Typography,
+} from "antd";
+import { FundOutlined, ReloadOutlined } from "@ant-design/icons";
+import dayjs from "dayjs";
+import { useUrlState, urlPageField } from "../../hooks/useUrlState";
+import {
+  fetchDashboardOptions,
+  type DashboardOptions,
+  type DashboardRangePreset,
+} from "../../api/maintenanceDashboard";
+import {
+  BOARD_BUSINESS_TYPE_CODES,
+  BOARD_BUSINESS_TYPE_LABELS,
+  type BoardBusinessTypeCode,
+} from "../../api/maintenanceBossBoard";
+import PageHeader from "../../components/PageHeader";
+import DashboardOverviewTab from "./dashboard/DashboardOverviewTab";
+import DashboardProjectsTab from "./dashboard/DashboardProjectsTab";
+import DashboardPartsTab from "./dashboard/DashboardPartsTab";
+import DashboardQuantityChecksTab from "./dashboard/DashboardQuantityChecksTab";
+import { apiErrorMessage } from "./dashboard/dashboardShared";
+
+const { Text } = Typography;
+
+const TAB_KEYS = ["overview", "projects", "parts", "checks"] as const;
+type TabKey = (typeof TAB_KEYS)[number];
+
+const TAB_LABELS: Record<TabKey, string> = {
+  overview: "回收与领用总览",
+  projects: "项目对比",
+  parts: "PN 排名与估价",
+  checks: "需求单核对",
+};
+
+const RANGE_PRESETS = ["7d", "15d", "30d", "half_year", "year", "all", "custom"] as const;
+
+const RANGE_LABELS: Record<DashboardRangePreset, string> = {
+  "7d": "近 7 天（含今天）",
+  "15d": "近 15 天",
+  "30d": "近 30 天",
+  half_year: "近半年",
+  year: "近一年",
+  all: "全部",
+  custom: "自定义",
+};
+
+/** 各页签默认排序（与后端 Query 默认一致）；金额键默认仅出现在有权账号）。 */
+const DEFAULT_SORTS: Record<TabKey, string> = {
+  overview: "",
+  projects: "bad_receipt_qty_desc",
+  parts: "bad_receipt_qty_desc",
+  checks: "difference_desc",
+};
+
+const PAGE_SIZE_CHOICES = ["20", "50", "100"];
+
+/** URL CSV → 去重非空值。 */
+function csvValues(spec: string): string[] {
+  if (!spec) return [];
+  return [...new Set(spec.split(",").map((value) => value.trim()).filter(Boolean))];
+}
+
+const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+export function MaintenanceDashboardPage() {
+  const [state, patch] = useUrlState({
+    tab: { defaultValue: "overview", isValid: (v) => (TAB_KEYS as readonly string[]).includes(v) },
+    range: {
+      defaultValue: "7d",
+      isValid: (v) => (RANGE_PRESETS as readonly string[]).includes(v),
+    },
+    from: { defaultValue: "", isValid: isDate },
+    to: { defaultValue: "", isValid: isDate },
+    project: { defaultValue: "" },
+    business_type: { defaultValue: "" },
+    q: { defaultValue: "" },
+    sort: { defaultValue: "" },
+    page: urlPageField,
+    ps: {
+      defaultValue: "20",
+      isValid: (v) => PAGE_SIZE_CHOICES.includes(v),
+    },
+  });
+
+  const tab = state.tab as TabKey;
+  const page = Number(state.page);
+  const pageSize = Number(state.ps);
+
+  const [options, setOptions] = useState<DashboardOptions | null>(null);
+  const [optionsLoading, setOptionsLoading] = useState(true);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadOptions = useCallback(async () => {
+    setOptionsLoading(true);
+    setOptionsError(null);
+    try {
+      setOptions(await fetchDashboardOptions());
+    } catch (err) {
+      setOptions(null);
+      setOptionsError(apiErrorMessage(err));
+    } finally {
+      setOptionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadOptions(); }, [loadOptions]);
+
+  const amountsVisible = options?.amounts_visible ?? false;
+
+  // 筛选集 → 请求参数（自定义区间补日期；空筛选项省略）。
+  const params = useMemo(() => ({
+    range: state.range as DashboardRangePreset,
+    ...(state.range === "custom" && state.from ? { date_from: state.from } : {}),
+    ...(state.range === "custom" && state.to ? { date_to: state.to } : {}),
+    ...(state.project ? { project: state.project } : {}),
+    ...(state.business_type ? { business_type: state.business_type } : {}),
+    ...(state.q.trim() ? { q: state.q.trim() } : {}),
+  }), [state.range, state.from, state.to, state.project, state.business_type, state.q]);
+
+  // 排序：候选来自 options（随权限收敛）；URL 里的非法/越权键回退页签默认。
+  const tabSorts = options?.sorts[tab] ?? [];
+  const sort = state.sort && tabSorts.includes(state.sort)
+    ? state.sort
+    : DEFAULT_SORTS[tab];
+
+  const onSortChange = useCallback((next: string) => {
+    patch({ sort: next === DEFAULT_SORTS[tab] ? null : next, page: null });
+  }, [patch, tab]);
+
+  const onPageChange = useCallback((nextPage: number, nextSize: number) => {
+    patch({
+      page: nextPage > 1 ? String(nextPage) : null,
+      ps: nextSize !== 20 ? String(nextSize) : null,
+    });
+  }, [patch]);
+
+  const onTabChange = useCallback((key: string) => {
+    // 切页签：排序回新页签默认、页码回 1，避免跨页签的非法排序残留。
+    patch({ tab: key === "overview" ? null : key, sort: null, page: null });
+  }, [patch]);
+
+  const [searchDraft, setSearchDraft] = useState(state.q);
+  useEffect(() => { setSearchDraft(state.q); }, [state.q]);
+
+  const projectIds = useMemo(() => csvValues(state.project), [state.project]);
+  const businessTypes = useMemo(
+    () => csvValues(state.business_type)
+      .filter((code) => (BOARD_BUSINESS_TYPE_CODES as string[]).includes(code)),
+    [state.business_type],
+  );
+
+  const tabProps = {
+    params,
+    amountsVisible,
+    sorts: tabSorts,
+    sort,
+    page,
+    pageSize,
+    refreshKey,
+    maxExportRows: options?.max_export_rows ?? 50000,
+    onSortChange,
+    onPageChange,
+  };
+
+  if (optionsLoading) {
+    return (
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <Skeleton.Button active size="small" style={{ width: 220 }} />
+        <Card size="small"><Skeleton active paragraph={{ rows: 6 }} /></Card>
+      </Space>
+    );
+  }
+
+  if (optionsError || !options) {
+    return (
+      <Alert
+        type="error" showIcon message="看板选项加载失败"
+        description={optionsError ?? "未知错误"}
+        action={(
+          <Button onClick={() => {
+            void loadOptions();
+            setRefreshKey((value) => value + 1);
+          }}>重试</Button>
+        )}
+      />
+    );
+  }
+
+  return (
+    <Space direction="vertical" size={16} className="maintenance-dashboard-page" style={{ width: "100%" }}>
+      <PageHeader
+        title={(
+          <Space>
+            <FundOutlined />
+            <span>维保数据看板</span>
+          </Space>
+        )}
+        subtitle="返件实收、实际领用、坏件估算与需求数量核对（数量口径人人可见，金额随权限）"
+        extra={(
+          <Space>
+            <Button onClick={() => {
+              setSearchDraft("");
+              patch({
+                range: null, from: null, to: null, project: null,
+                business_type: null, q: null, sort: null, page: null, ps: null,
+              });
+            }}>
+              重置筛选
+            </Button>
+            <Button aria-label="刷新" icon={<ReloadOutlined />}
+              onClick={() => setRefreshKey((value) => value + 1)}>
+              刷新
+            </Button>
+          </Space>
+        )}
+      />
+
+      <Card size="small">
+        <Space wrap size={12}>
+          <Select<DashboardRangePreset>
+            aria-label="时间范围"
+            value={state.range as DashboardRangePreset}
+            style={{ width: 180 }}
+            options={(RANGE_PRESETS as readonly DashboardRangePreset[]).map((value) => ({
+              label: RANGE_LABELS[value], value,
+            }))}
+            onChange={(value) => patch({ range: value, page: null })}
+          />
+          {state.range === "custom" ? (
+            <DatePicker.RangePicker
+              value={[state.from ? dayjs(state.from) : null, state.to ? dayjs(state.to) : null]}
+              onChange={(value) => patch({
+                from: value?.[0] ? value[0].format("YYYY-MM-DD") : null,
+                to: value?.[1] ? value[1].format("YYYY-MM-DD") : null,
+                page: null,
+              })}
+              allowEmpty={[true, true]}
+            />
+          ) : null}
+          <Select<string[]>
+            mode="multiple"
+            aria-label="业务类型筛选"
+            placeholder="业务类型（全部）"
+            allowClear
+            maxTagCount="responsive"
+            value={businessTypes}
+            style={{ width: 260, maxWidth: "calc(100vw - 96px)" }}
+            options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
+              label: BOARD_BUSINESS_TYPE_LABELS[code], value: code,
+            }))}
+            onChange={(values) => patch({
+              business_type: values.length ? values.join(",") : null,
+              page: null,
+            })}
+          />
+          <Select<string[]>
+            mode="multiple"
+            showSearch
+            optionFilterProp="label"
+            aria-label="项目筛选"
+            placeholder="项目（全部授权范围）"
+            allowClear
+            maxCount={50}
+            value={projectIds}
+            style={{ width: 300, maxWidth: "calc(100vw - 96px)" }}
+            loading={optionsLoading}
+            options={options.projects.map((project) => ({
+              value: project.project_id,
+              label: project.project_code
+                ? `${project.display_name}（${project.project_code}）`
+                : project.display_name,
+            }))}
+            onChange={(values) => patch({
+              project: values.length ? values.join(",") : null,
+              page: null,
+            })}
+          />
+          {tab !== "checks" ? (
+            <Input.Search
+              allowClear
+              value={searchDraft}
+              placeholder="搜 PN / 描述"
+              style={{ width: 200 }}
+              onChange={(event) => setSearchDraft(event.target.value)}
+              onSearch={(value) => patch({ q: value.trim() || null, page: null })}
+            />
+          ) : null}
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            默认近 7 天含今天（上海日历日）；返件实收按业务日入期，好件领用为实际领用量（未采集件况）。
+          </Text>
+        </Space>
+      </Card>
+
+      {!amountsVisible ? (
+        <Alert type="info" showIcon data-testid="amounts-restricted-banner"
+          message="当前账号无金额查看权限：本页仅展示数量口径，金额卡片/列/导出列不出现（需 data_profit 授权）" />
+      ) : null}
+
+      <Tabs
+        activeKey={tab}
+        onChange={onTabChange}
+        items={[
+          // 按需挂载：切到哪页签才请求哪份数据（同维保数据分析页范式）。
+          { key: "overview", label: TAB_LABELS.overview,
+            children: tab === "overview" ? <DashboardOverviewTab {...tabProps} /> : null },
+          { key: "projects", label: TAB_LABELS.projects,
+            children: tab === "projects" ? <DashboardProjectsTab {...tabProps} /> : null },
+          { key: "parts", label: TAB_LABELS.parts,
+            children: tab === "parts" ? <DashboardPartsTab {...tabProps} /> : null },
+          { key: "checks", label: TAB_LABELS.checks,
+            children: tab === "checks" ? <DashboardQuantityChecksTab {...tabProps} /> : null },
+        ]}
+      />
+    </Space>
+  );
+}
+
+export default MaintenanceDashboardPage;
