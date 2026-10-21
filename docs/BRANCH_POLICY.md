@@ -29,3 +29,9 @@
 这次分线不是后续绕过审批的先例，也不授权部署或修改生产数据。
 原 main 提交：`6dc7e7b1b33faebdd606c295fef3d26a0d31dec9`，完整保留在 test 历史中。
 生产源码证据见 `docs/releases/2026-10-10-production-baseline.md`（main）。
+
+## 2026-10-22 本轮授权与精选发布身份
+
+本轮执行依据为用户明确要求严格执行 `~/workspaces/docs/codex-impl-brief.md` 的架构、实现、独立验收、合并和生产发布授权，仅销售／采购分析、维保只读看板及其必要依赖；PN按PRD延期。该授权覆盖本轮文档中旧的“等待另一次人工批准”操作门，不修改仓库常规政策，也不代造 GitHub review。实际保护中的必需 CI、strict、管理员约束与禁止强推继续生效，正常 merge，不删除远端分支或PR。
+
+生产P与main存在未发布功能差异，本轮使用从P精选的R。A/B原始已审提交正常合成主线候选C；C通过保留功能树的ours历史合并记录R，双CI完成后normal merge进入main。R的push CI、来源补丁、恢复演练、release标签、镜像revision和运行证据均绑定R完整SHA。R与实际main合并SHA分别记录，祖先可达不能代替内容验收；不得以整main或PR合成树的CI冒称R已验证。

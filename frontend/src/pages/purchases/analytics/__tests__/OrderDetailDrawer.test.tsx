@@ -31,7 +31,17 @@ const GAP_DETAIL: PurchaseAnalyticsOrderDetail = {
 
 async function openDrawer(detail: PurchaseAnalyticsOrderDetail, basis: ("inc" | "ex" | "paid")[] = ["inc", "ex", "paid"]) {
   fetchDetail.mockResolvedValue({ data: detail });
-  render(<OrderDetailDrawer orderId={101} category={["硬盘"]} basis={basis} onClose={vi.fn()} />);
+  // ownerToken=null 与「localStorage 无 token」同侧：所属会话守卫不拦截（正向路径）
+  render(
+    <OrderDetailDrawer
+      orderId={101}
+      category={["硬盘"]}
+      basis={basis}
+      ownerToken={null}
+      onOwnerStale={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
   await screen.findByText("采购单 CG-GAP");
   return screen.getByRole("dialog");
 }

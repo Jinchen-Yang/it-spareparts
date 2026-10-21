@@ -1,0 +1,95 @@
+{
+  "manifest_version": 1,
+  "release_date": "2026-10-22",
+  "scope": {
+    "included": [
+      "sales_purchase_analytics",
+      "maintenance_dashboard"
+    ],
+    "deferred": [
+      {
+        "feature": "pn_inventory_synchronization",
+        "decision": "Q-PN-01: explicitly authorized to defer the entire feature"
+      }
+    ],
+    "excluded_feature_prs": {
+      "it_spareparts": [
+        430,
+        440,
+        444
+      ],
+      "spareparts_shop": [
+        78,
+        79
+      ]
+    },
+    "shop_deployment": false
+  },
+  "source": {
+    "production_parent_commit": "319e25f6cd2b2c0119a0e865893a38a6cf9ca362",
+    "integration_base_commit": "f95f93304af25021af1ef08af33ce9a32ddfa131",
+    "reviewed_feature_commits": {
+      "sales_purchase": "cd04e3b7bfb17f56d2b90d30eea96ab18ca13f3b",
+      "maintenance": "52d6e0c53c19aa85ff91bdb1a34cc15b629db200"
+    },
+    "selected_release_commit": "35f3e05f3c722d2ffe05348ac4f7fa0762e65700",
+    "selected_release_branch": "release/three-dashboards-20261022-r2",
+    "source_archive_sha256": "e8def3d7d4bb4326e25769aea6c2084f2fb29af7534465133e4919b92eb92bf5",
+    "source_review_manifest_sha256": "11c30fa89a8fe8d375f84c8ec8bf799e68e96cc5e77408773eded71e11489cd8",
+    "source_review_report_sha256": "5c8399b7452f7a592431d7bb11b01d7030e146cb1bdf9a599f68c26beb0cb422",
+    "selected_changed_files": 92,
+    "release_is_not_the_entire_integration_tree": true,
+    "source_committed_identity_receipt_sha256": "1fe6ec67d834986f111e20c30c6de5251c520ab741d55e968cedfad8e5e2dd85"
+  },
+  "schema": {
+    "from": "c9d4f2a6b8e1",
+    "target": "c9d4f2a6b8e1",
+    "new_business_migrations": false,
+    "excluded_index_head": "d8f6a2c4b9e7"
+  },
+  "behavior": {
+    "maintenance_default_bad_value_ratio": "0.5",
+    "explicit_zero_and_custom_ratio_supported": true,
+    "reference_domains": [
+      "purchase",
+      "sales",
+      "saved_issue_cost"
+    ],
+    "reference_window": "7 Asia/Shanghai calendar days ending at the valuation anchor",
+    "separate_tax_values_and_units": true,
+    "unknown_values_are_not_zero": true
+  },
+  "dependencies": {
+    "security_floors": [
+      "Pillow>=13.0.0",
+      "certifi>=2026.10.19",
+      "follow-redirects>=1.16.1,<2"
+    ],
+    "rebuild_both_images_from_selected_release": true,
+    "preserve_production_runtime_configuration": true,
+    "paused_feature_background_not_deployed": true
+  },
+  "validation": {
+    "implementation_models": [
+      "GLM/glm-5.3",
+      "gpt-6-astra"
+    ],
+    "independent_review_model": "Codex Sol",
+    "selected_release_local_build_result": "passed",
+    "selected_release_push_ci": "https://github.com/Jinchen-Yang/it-spareparts/actions/runs/39686587805",
+    "required_ci_jobs": [
+      "后端测试（pytest + 迁移链验证）",
+      "前端类型检查 + 构建"
+    ],
+    "deployment_requires": [
+      "both exact release-push and final integration-PR CI success",
+      "same selected-release normal-login API and real-browser acceptance",
+      "exact selected-release backend/frontend images",
+      "normal main merge and selected-release ancestry proof",
+      "fresh full production backup and successful isolated restore rehearsal",
+      "blue-green health, public new-route and asset checks, business smoke and observation"
+    ],
+    "portal_contrast_regression": "Both Drawer-local secondary text variables corrected; actual same-release browser acceptance remains a deployment gate"
+  },
+  "receipt_policy": "Final integration/main commits, CI conclusions, runtime image IDs, deployment time and smoke results are recorded separately after they actually exist; this manifest does not claim deployment completion."
+}

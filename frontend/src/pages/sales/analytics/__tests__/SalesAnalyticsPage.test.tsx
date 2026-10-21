@@ -1,7 +1,7 @@
 // 销售分析页集成（D-41 / D-40 PR-4b）：URL 单一真值 —— 默认今天零参数、直开链接恢复
 // 筛选与含退货、切换金额口径不重新请求、金额/客户/对账脱敏账号的控件门控与「—」/
 // 「无对账数据」占位、排序回退如实提示（sort 回显 ≠ 请求值）、错误与空态、详情抽屉。
-import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +10,12 @@ const fetchSalesAnalyticsOptions = vi.fn();
 const fetchSalesAnalyticsSummary = vi.fn();
 const fetchSalesAnalyticsOrders = vi.fn();
 const fetchSalesAnalyticsOrderDetail = vi.fn();
+const fetchSalesAmountHistogram = vi.fn();
+// DL-010 返工用例：导出 / 四视图取数也要可断言（默认无实现——被所属会话守卫拒发
+// 时不应被调用；守卫失效会让用例先在「未调用」断言上红，不会真发请求）
+const downloadSalesOrdersCsv = vi.fn();
+const fetchSalesAnalyticsGroups = vi.fn();
+const fetchSalesAnalyticsTrend = vi.fn();
 
 vi.mock("../../../../api/salesAnalytics", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -21,8 +27,17 @@ vi.mock("../../../../api/salesAnalytics", async () => {
     fetchSalesAnalyticsSummary: (...a: unknown[]) => fetchSalesAnalyticsSummary(...a),
     fetchSalesAnalyticsOrders: (...a: unknown[]) => fetchSalesAnalyticsOrders(...a),
     fetchSalesAnalyticsOrderDetail: (...a: unknown[]) => fetchSalesAnalyticsOrderDetail(...a),
+    fetchSalesAmountHistogram: (...a: unknown[]) => fetchSalesAmountHistogram(...a),
+    downloadSalesOrdersCsv: (...a: unknown[]) => downloadSalesOrdersCsv(...a),
+    fetchSalesAnalyticsGroups: (...a: unknown[]) => fetchSalesAnalyticsGroups(...a),
+    fetchSalesAnalyticsTrend: (...a: unknown[]) => fetchSalesAnalyticsTrend(...a),
   };
 });
+// jsdom 无 canvas：mock 图表壳（金额分布条 / 看板图表），只保留空态文案
+vi.mock("../../../../components/charts/EChartContainer", () => ({
+  default: ({ empty, emptyText, ariaLabel }: { empty?: boolean; emptyText?: string; ariaLabel?: string }) =>
+    empty ? <div>{emptyText ?? "空"}</div> : <div data-testid="chart" aria-label={ariaLabel} />,
+}));
 
 import SalesAnalyticsPage from "../SalesAnalyticsPage";
 
@@ -39,6 +54,20 @@ const OPTIONS = {
     { value: "服务", orders: 5 },
     { value: null, orders: 2 },
   ],
+};
+
+// 金额分布默认样本（A-AC09：bins 右端闭 + 负/空单列，sum 守恒）；边界行为
+// （8000/8001/8501）由直方图组件与 option 纯函数测试覆盖，这里只保证页面可挂载。
+const HISTOGRAM = {
+  amount_basis: "amount_ex_tax",
+  max: 8000,
+  bins: [
+    { lo: 0, hi: 2000, orders: 1 },
+    { lo: 2000, hi: 8000, orders: 1 },
+  ],
+  negative_orders: 0,
+  empty_orders: 0,
+  total: 2,
 };
 
 const SUMMARY = {
@@ -132,6 +161,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-10-17T02:00:00Z"));
   fetchSalesAnalyticsOptions.mockResolvedValue({ data: OPTIONS });
   fetchSalesAnalyticsSummary.mockResolvedValue({ data: SUMMARY });
+  // 金额分布在订单页签常驻挂载（有金额区间权限时），给默认样本防 vi.fn() 返回 undefined
+  fetchSalesAmountHistogram.mockResolvedValue({ data: HISTOGRAM });
   // 回显契约：sort / page / include_returns 原样回显请求值（金额被遮蔽的场景单独覆写）。
   // 数据集只有 1 单：越过末页的请求返回空 items + total=1（对齐后端不按 total
   // 钳制分页的真实行为——过期分享链的越界页码由页组件自行收敛）
@@ -164,7 +195,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toEqual({
       date_from: TODAY, date_to: TODAY,
-      sort: "amount_ex_tax", page: 1, page_size: 50, include_returns: false,
+      sort: "amount_ex_tax", order: "desc", page: 1, page_size: 50, include_returns: false,
     });
     expect(locationSearch).toBe("");
     // KPI：销售单数 + 三金额合计并排（默认全选）
@@ -260,16 +291,17 @@ describe("销售分析页：URL 单一真值", () => {
     localStorage.setItem("permissions", JSON.stringify({
       data_purchase_cost: false, data_reconciliation: true, data_customer: true,
     }));
-    // 后端真实形态：行级金额遮蔽为 null，sort 静默回退 revenue 并按生效值回显
+    // 后端真实形态（契约 §10.3 / Q-A-04）：行级金额遮蔽为 null，sort 静默回退
+    // order_date 并按生效值回显
     fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({
-      sort: "revenue",
+      sort: "order_date",
       items: [{ ...ORDER_ROW, amount_ex_tax: null, amount_inc_tax: null, revenue: 150 }],
     }) });
     renderPage();
 
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    // 回退提示以响应回显为准（请求 amount_ex_tax ≠ 回显 revenue）
-    expect(screen.getByText(/已按营收（公开口径）倒序/)).toBeInTheDocument();
+    // 回退提示以响应回显为准（请求 amount_ex_tax ≠ 回显 order_date）
+    expect(screen.getByText(/所选排序字段不可见：已改按订单日期排序/)).toBeInTheDocument();
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).toContain("—");
     expect(row.textContent).not.toContain("200.00");
@@ -284,6 +316,10 @@ describe("销售分析页：URL 单一真值", () => {
     expect(screen.getByRole("combobox", { name: "金额口径" })).toBeInTheDocument();
     expect(screen.getByText(/1,?130\.00/)).toBeInTheDocument();
     expect(screen.getByText(/800\.00/)).toBeInTheDocument();
+    // 金额分布（直方图）整体不挂载（A-AC03）：分布本身就是金额信息，三口径一视
+    // 同仁、营收口径也无例外；不发注定 403 的直方图请求
+    expect(screen.queryByLabelText("订单金额分布")).toBeNull();
+    expect(fetchSalesAmountHistogram).not.toHaveBeenCalled();
   });
 
   it("客户不可见账号（data_customer=false）：客户搜索禁用，URL 残值不进请求（不发 403 请求）", async () => {
@@ -294,8 +330,9 @@ describe("销售分析页：URL 单一真值", () => {
     renderPage("/sales/analytics?customer=%E5%AE%A2%E6%88%B7%E7%94%B2");
 
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("客户信息不可见");
-    expect(input).toBeDisabled();
+    // 客户与客户类型两个多选都禁用（后端对客户类属条件 fail-closed 403）
+    expect(screen.getByRole("combobox", { name: "客户" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "客户类型" })).toBeDisabled();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).not.toHaveProperty("customer");
   });
@@ -355,9 +392,10 @@ describe("销售分析页：URL 单一真值", () => {
     expect(within(dialog).queryByText("对账快照（最新）")).toBeNull();
   });
 
-  it("列头点「含税订单金额」：切换排序键并回第 1 页，状态落 URL；只倒序不升序", async () => {
+  it("列头点「含税订单金额」：切换排序键并回第 1 页，状态落 URL；再点切升序（D-44 §4）", async () => {
     // 页码 2 合法（120 单/50 每页）：本例验排序切换回第 1 页，越界收敛另有专测
-    fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({ total: 120 }) });
+    fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) =>
+      Promise.resolve({ data: ordersResp({ total: 120, sort: q.sort, order: q.order ?? "desc" }) }));
     renderPage("/sales/analytics?page=2");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
@@ -371,6 +409,29 @@ describe("销售分析页：URL 单一真值", () => {
     expect(locationSearch).toContain("sort=amount_inc_tax");
     expect(navigationType).toBe("REPLACE");
     expect(locationSearch).not.toContain("page=");
+    // 再点同一列：升序
+    fireEvent.click(screen.getByRole("columnheader", { name: "含税订单金额" }));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      sort: "amount_inc_tax", order: "asc",
+    }));
+    expect(locationSearch).toContain("order=asc");
+  });
+
+  it("退货已对账金额列双向排序（契约 §3 返工第四对账列）：sort=return_reconciled_amount 进请求与 URL", async () => {
+    fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) =>
+      Promise.resolve({ data: ordersResp({ sort: q.sort, order: q.order ?? "desc" }) }));
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("columnheader", { name: "退货已对账金额" }));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      sort: "return_reconciled_amount", order: "desc",
+    }));
+    expect(locationSearch).toContain("sort=return_reconciled_amount");
+    // 再点切升序（A-AC07 双向）
+    fireEvent.click(screen.getByRole("columnheader", { name: "退货已对账金额" }));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      sort: "return_reconciled_amount", order: "asc",
+    }));
   });
 
   it("订单行点击打开详情抽屉：三金额 + 最新对账块 + 对账历史（每批次一条，旧→新）", async () => {
@@ -403,47 +464,36 @@ describe("销售分析页：URL 单一真值", () => {
     expect(within(dialog).getByText("已对账金额（含退货）")).toBeInTheDocument();
   });
 
-  it("业务类型多选：选项带全时间计数、「未填写」组禁选、选中后筛选进请求", async () => {
+  it("业务类型多选：选项带全时间计数、「未填写」组走 __empty__ 哨兵可筛（契约 §0 / A-AC06）", async () => {
     renderPage();
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
 
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "业务类型" }));
-    // null 取值组保留计数展示但不可选（无法作为筛选值传给后端）
-    const nullOpt = (await screen.findByText(/（未填写） 2/, { selector: ".ant-select-item-option-content" }))
+    // null 取值组不再禁选：选中后按后端哨兵 __empty__ 下发（不与真实「未填」名称碰撞）
+    const nullOpt = (await screen.findByText(/（未填写）（2）/, { selector: ".ant-select-item-option-content" }))
       .closest(".ant-select-item-option");
-    expect(nullOpt).toHaveClass("ant-select-item-option-disabled");
-    fireEvent.click(await screen.findByText("备件销售（9）", { selector: ".ant-select-item-option-content" }));
+    expect(nullOpt).not.toHaveClass("ant-select-item-option-disabled");
+    fireEvent.click(await screen.findByText(/（未填写）（2）/, { selector: ".ant-select-item-option-content" }));
 
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
     expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({
-      business_type: ["备件销售"],
+      business_type: ["__empty__"],
     });
     expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith(
-      expect.objectContaining({ business_type: ["备件销售"], date_from: TODAY, date_to: TODAY }),
+      expect.objectContaining({ business_type: ["__empty__"], date_from: TODAY, date_to: TODAY }),
     );
-    expect(locationSearch).toContain("business_type=");
+    // URL 落哨兵值，刷新/分享后语义不变
+    expect(locationSearch).toContain("business_type=__empty__");
   });
 
-  it("客户模糊搜索：回车提交 trim 后进请求，写 URL；重置后输入框与 URL 同步清空", async () => {
-    renderPage();
+  it("旧链接客户模糊条件：以可关闭标签展示并进请求；关闭标签即移除（D-44 改为多选，不再提供输入）", async () => {
+    renderPage("/sales/analytics?customer=%E5%AE%A2%E6%88%B7%E7%94%B2");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-
-    const input = screen.getByPlaceholderText("客户（模糊搜索，回车生效）");
-    fireEvent.change(input, { target: { value: "  客户甲  " } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
-    expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ customer: "客户甲" });
-    expect(locationSearch).toContain("customer=");
-    // 提交后输入框归一到 trim 后的已提交值
-    expect((input as HTMLInputElement).value).toBe("客户甲");
-
-    // 重置：URL 清零，输入框不能残留旧文本（否则显示态与请求态自相矛盾）
-    // antd 对两字中文按钮自动插空格（「重 置」），用正则容错
-    fireEvent.click(screen.getByRole("button", { name: /重\s*置/ }));
-    await waitFor(() => expect(locationSearch).toBe(""));
-    expect((input as HTMLInputElement).value).toBe("");
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(3));
-    expect(fetchSalesAnalyticsOrders.mock.calls[2][0]).not.toHaveProperty("customer");
+    expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({ customer: "客户甲" });
+    const tag = screen.getByText("客户含「客户甲」");
+    fireEvent.click(within(tag.closest(".ant-tag") as HTMLElement).getByRole("img", { name: /close/i }));
+    await waitFor(() => expect(locationSearch).not.toContain("customer="));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).not.toHaveProperty("customer"));
   });
 
   it("未来单打标：订单日期晚于今天显示「未来」标签（本页不排除未来单）", async () => {
@@ -503,21 +553,24 @@ describe("销售分析页：URL 单一真值", () => {
     expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ sort: "amount_inc_tax" });
   });
 
-  it("销售人员模糊搜索：回车提交进请求与 URL；重置同步清空", async () => {
+  it("销售人员多选（D-44）：候选来自 options，选中后精确匹配进请求与 URL；重置清空", async () => {
+    fetchSalesAnalyticsOptions.mockResolvedValue({ data: {
+      ...OPTIONS, salespeople: [{ value: "王五", orders: 3 }, { value: null, orders: 1 }],
+    } });
     renderPage();
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("销售人员（模糊搜索，回车生效）");
-    fireEvent.change(input, { target: { value: "  王五  " } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
-    expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ salesperson: "王五" });
+    const select = screen.getByRole("combobox", { name: "销售人员" });
+    fireEvent.mouseDown(select);
+    fireEvent.click(await screen.findByText("王五（3）"));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
+      salesperson_name: ["王五"],
+    }));
     expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith(
-      expect.objectContaining({ salesperson: "王五", date_from: TODAY, date_to: TODAY }),
+      expect.objectContaining({ salesperson_name: ["王五"], date_from: TODAY, date_to: TODAY }),
     );
-    expect(locationSearch).toContain("salesperson=");
+    expect(locationSearch).toContain("salesperson_name=");
     fireEvent.click(screen.getByRole("button", { name: /重\s*置/ }));
     await waitFor(() => expect(locationSearch).toBe(""));
-    expect((input as HTMLInputElement).value).toBe("");
   });
 
   it("深链直开抽屉 + 金额口径子集：未选口径的金额行不渲染", async () => {
@@ -597,6 +650,30 @@ describe("销售分析页：健壮性", () => {
     expect(screen.queryByText("订单详情加载失败")).toBeNull();
   });
 
+  it("DL-010 会话守卫：汇总在途时 localStorage token 变更，迟到响应不落地", async () => {
+    localStorage.setItem("token", "account-a");
+    let resolveSummary!: (v: { data: typeof SUMMARY }) => void;
+    fetchSalesAnalyticsSummary.mockImplementationOnce(
+      () => new Promise((res) => { resolveSummary = res; }),
+    );
+    renderPage();
+    await waitFor(() => expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1));
+    // 在途：KPI 值为「—」（不是 0，也不是另一会话的数据）
+    const salesCard = () => (screen.getByText("销售单数").parentElement as HTMLElement).textContent ?? "";
+    expect(salesCard()).toContain("—");
+
+    // 账号切换 / 登出：会话真值已换（直接读 localStorage，不经 React 状态）
+    localStorage.setItem("token", "account-b");
+    await act(async () => { resolveSummary({ data: SUMMARY }); });
+
+    // 迟到响应到达后不落地（DL-010 落地矩阵）：另一会话的 KPI（5）不渲染，
+    // 且检测到过期的分支会通知页级清旧上下文——数据面让位给会话失效提示
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("销售单数")).toBeNull();
+    expect(await screen.findByText("登录会话已变更（已切换账号或登出），请刷新页面后继续")).toBeInTheDocument();
+    expect(screen.queryByText("汇总加载失败")).toBeNull();
+  });
+
   it("分页点击：第 2 页进请求并落 URL", async () => {
     fetchSalesAnalyticsOrders.mockResolvedValue({ data: ordersResp({ total: 120 }) });
     renderPage();
@@ -647,6 +724,198 @@ describe("销售分析页：健壮性", () => {
     expect(screen.getByRole("columnheader", { name: "已对账金额" })).toBeInTheDocument();
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).not.toContain("无对账数据");
+  });
+});
+
+describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒发）", () => {
+  // 返工要求：owner 是组件挂载时的 token；静默换 token（无重渲染、无 storage 事件）
+  // 后，旧会话的导出 / 下钻 / 取数一律拒发并清旧上下文。每个用例都先走同会话正向
+  // 路径，证明守卫不是「全部禁用」的伪通过。
+  const SESSION_DEAD_TEXT = "登录会话已变更（已切换账号或登出），请刷新页面后继续";
+
+  it("同会话导出正常发起并收尾；静默换 token 后点导出拒发、旧上下文让位", async () => {
+    localStorage.setItem("token", "account-a");
+    // jsdom 无 createObjectURL：补静态桩让正向路径完整走完（下载触发本身也有守卫）
+    Object.assign(URL, {
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+    downloadSalesOrdersCsv.mockResolvedValue({ data: new Blob(["csv"], { type: "text/csv" }) });
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+
+    // 正向：同会话点击导出 → 请求发出、finally 解除 loading（按钮可再次点击）
+    fireEvent.click(screen.getByRole("button", { name: /导出/ }));
+    await waitFor(() => expect(downloadSalesOrdersCsv).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: /导出/ })).toBeEnabled();
+
+    // 静默换 token 后旧会话的导出按钮不再发请求（A 换 B 再点 A 时代的按钮）
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(screen.getByRole("button", { name: /导出/ }));
+    expect(downloadSalesOrdersCsv).toHaveBeenCalledTimes(1);
+    // 旧会话上下文已清：汇总 / 列表让位给会话失效提示，不冒充当前会话结果
+    expect(screen.getByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
+  });
+
+  it("同会话点列排序即重拉；静默换 token 后排序 / 下钻拒发新订单请求", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    const baseline = fetchSalesAnalyticsOrders.mock.calls.length;
+
+    // 正向：同会话点「含税订单金额」列头 → 立即发出新排序请求
+    fireEvent.click(screen.getByRole("columnheader", { name: "含税订单金额" }));
+    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.calls.length).toBe(baseline + 1));
+    expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({ sort: "amount_inc_tax" });
+
+    // 静默换 token：再点「营收」列头 → 拒发（无新请求），旧列表清空并提示
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(screen.getByRole("columnheader", { name: "营收" }));
+    expect(fetchSalesAnalyticsOrders.mock.calls.length).toBe(baseline + 1);
+    expect(screen.getByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
+  });
+
+  it("同会话可开订单详情抽屉；静默换 token 后重开抽屉拒发", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    const row = await screen.findByRole("row", { name: /XS-2026-201/ });
+    // 正向：同会话点单号 → 详情请求发出
+    fireEvent.click(within(row).getByText("XS-2026-201"));
+    await waitFor(() => expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledTimes(1));
+
+    // 关抽屉 → 静默换 token → 重开：旧会话的抽屉不以当前账号取数
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    localStorage.setItem("token", "account-b");
+    const rowAgain = screen.getByRole("row", { name: /XS-2026-201/ });
+    fireEvent.click(within(rowAgain).getByText("XS-2026-201"));
+    expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
+    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情；
+    // 行点击入口同时通知页级清旧上下文——主页面列表也让位给会话提示（两处文案并存）
+    expect((await screen.findAllByText(SESSION_DEAD_TEXT)).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("采购单")).toBeNull();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
+  });
+
+  it("静默换 token 后切页签：四视图取数（useAsyncData）同样拒发", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(screen.getByRole("tab", { name: "概览" }));
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(fetchSalesAnalyticsGroups).not.toHaveBeenCalled();
+    expect(fetchSalesAnalyticsTrend).not.toHaveBeenCalled();
+  });
+
+  // ---------------- 落地矩阵（DL-010 本轮返工）：迟到响应不只「静默不落地」，
+  // 检测到过期的落地分支必须通知页级清旧上下文；全程不得发出新（B 会话）请求 ----------------
+
+  it("落地矩阵：候选/汇总/列表/直方图全在途换 token，迟到落地通知页级清空，无新请求", async () => {
+    localStorage.setItem("token", "account-a");
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    const defer = (k: string) => () => new Promise((res) => { resolvers[k] = res; });
+    fetchSalesAnalyticsOptions.mockImplementation(defer("options"));
+    fetchSalesAnalyticsSummary.mockImplementation(defer("summary"));
+    fetchSalesAnalyticsOrders.mockImplementation(defer("orders"));
+    fetchSalesAmountHistogram.mockImplementation(defer("histogram"));
+    renderPage();
+    await waitFor(() => expect(resolvers.summary).toBeDefined());
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolvers.options({ data: OPTIONS });
+      resolvers.summary({ data: SUMMARY });
+      resolvers.orders({ data: ordersResp() });
+      resolvers.histogram({ data: HISTOGRAM });
+      await Promise.resolve();
+    });
+
+    // 四路迟到响应全部不落地，且各自通知页级：数据面让位给会话失效提示
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
+    expect(screen.queryByText("销售单数")).toBeNull();
+    expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAmountHistogram).toHaveBeenCalledTimes(1);
+  });
+
+  it("落地矩阵：趋势/分组视图在途换 token，迟到落地只通知页级，不落地不重发", async () => {
+    localStorage.setItem("token", "account-a");
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    fetchSalesAnalyticsTrend.mockImplementation(() => new Promise((res) => { resolvers.trend = res; }));
+    fetchSalesAnalyticsGroups.mockImplementation(() => new Promise((res) => { resolvers.groups = res; }));
+    renderPage("/sales/analytics?tab=trend");
+    await waitFor(() => expect(fetchSalesAnalyticsTrend).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("tab", { name: "分组排行" }));
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(1));
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolvers.trend({ data: { granularity: "day", buckets: [], weekday: [], compare: null, compare_window: null, compare_available: true } });
+      resolvers.groups({ data: { group_by: "customer", groups: [], total_groups: 0, other: null } });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(fetchSalesAnalyticsTrend).toHaveBeenCalledTimes(1);
+    expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------- 客户搜索（owner-search/owner-debounce-switch）：本组件自有
+  // 300ms debounce timer 与 found 状态，守卫单独接 owner —— 三态各自可回归 ----------------
+
+  it("客户搜索：同会话 300ms 防抖后发请求，候选正常落地（正向路径）", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    fetchSalesAnalyticsOptions.mockResolvedValue({ data: { customers: [{ value: "客户乙", orders: 7 }] } });
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    // 防抖后精确以搜索词发起（挂载那次不带搜索词，不算）
+    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenLastCalledWith({}, "客"));
+    expect(await screen.findByText("客户乙（7）")).toBeInTheDocument();
+  });
+
+  it("客户搜索：防抖窗口内换 token → 旧 timer 到期拒发、清旧候选并通知页级", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    // 防抖窗口内静默换 token：timer 属于旧会话，到期时不得以新身份发请求
+    localStorage.setItem("token", "account-b");
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(1); // 仅挂载候选那一次
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+  });
+
+  it("客户搜索：请求在途换 token → 迟到候选不落地并通知页级", async () => {
+    localStorage.setItem("token", "account-a");
+    let resolveSearch!: (v: { data: { customers: { value: string; orders: number }[] } }) => void;
+    fetchSalesAnalyticsOptions.mockImplementationOnce(
+      () => new Promise((res) => { resolveSearch = res; }),
+    );
+    renderPage();
+    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
+    const box = screen.getByRole("combobox", { name: "客户" });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: "客" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenCalledTimes(2));
+
+    localStorage.setItem("token", "account-b");
+    await act(async () => {
+      resolveSearch({ data: { customers: [{ value: "客户乙", orders: 7 }] } });
+      await Promise.resolve();
+    });
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText("客户乙（7）")).toBeNull();
   });
 });
 

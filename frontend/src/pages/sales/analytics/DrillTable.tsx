@@ -1,8 +1,13 @@
 import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
-// 大单列表：按所选金额键倒序（后端固定 DESC NULLS LAST + id DESC，只倒序不切升序），
-// 每单挂最新对账快照块（D-40 §4-§5）。排序以响应 sort 回显为准——金额键被
-// data_purchase_cost 遮蔽时后端静默回退 revenue（行序防泄漏），前端如实提示并
-// 预先禁用金额排序入口，不发注定被回退的新请求。
+// 订单列表：任意列升序 / 降序（D-44 §4，后端 NULLS LAST + id 同向破并列），每单挂
+// 最新对账快照块（D-40 §4-§5）。排序以响应 sort 回显为准——被遮蔽的金额 / 毛利 /
+// 客户 / 对账键后端一律回退 order_date（Q-A-04 行序防泄漏，契约 §10.3），前端如实
+// 提示并预先禁用对应排序入口，不发注定被回退的新请求。所有实际可见数据列双向排序
+// （A-AC07：订单号 / 业务类型 / 客户类型 / 对账块四列在内——含按最新快照原值排序的
+// 退货已对账金额）。
+// 窄屏布局（A-AC 返工）：表格自身 scroll.x 承担横向滚动（外层不裁剪、body 不藏
+// overflow），外层容器 min-width:0 / max-width:100% 保证在 flex/grid 父级里可收缩，
+// 长客户名列固定宽 + ellipsis——14 个可见数据列在 320/390/1366 宽下都可达可点。
 import { Alert, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { FilterValue, SorterResult } from "antd/es/table/interface";
@@ -12,7 +17,9 @@ import type {
   SalesAnalyticsOrdersResp,
   SalesAnalyticsSortKey,
   SalesReconciliationBlock,
+  SortOrder,
 } from "../../../api/salesAnalytics";
+import { pct } from "../../../utils/format";
 import { AMOUNT_SORT_KEY, type AmountKey } from "./urlState";
 
 export interface DrillTableProps {
@@ -22,6 +29,13 @@ export interface DrillTableProps {
   amounts: AmountKey[];
   /** 请求发出的排序键（默认不含税金额，不落 URL）。 */
   sort: SalesAnalyticsSortKey;
+  order: SortOrder;
+  /** data_profit=false：毛利列显示「—」，毛利排序不可用。 */
+  profitRestricted?: boolean;
+  /** data_customer=false：客户排序不可用。 */
+  customerRestricted?: boolean;
+  /** 选了商品大类 / 品牌（行级口径）：金额是匹配行合计，不含税为名义值。 */
+  lineMode?: boolean;
   /** 与抽屉同一开关：开时 reconciled_display = 已对账 + 退货已对账，列头随之改标。 */
   includeReturns: boolean;
   /** data_purchase_cost=false：金额排序入口预先禁用（行序是隐藏金额排名的侧信道）。 */
@@ -30,7 +44,7 @@ export interface DrillTableProps {
   reconRestricted: boolean;
   page: number;
   pageSize: number;
-  onSortChange: (sort: SalesAnalyticsSortKey) => void;
+  onSortChange: (sort: SalesAnalyticsSortKey, order: SortOrder) => void;
   onPageChange: (page: number, pageSize: number) => void;
   onOpenOrder: (orderId: number) => void;
 }
@@ -40,6 +54,10 @@ export default function DrillTable({
   loading,
   amounts,
   sort,
+  order,
+  profitRestricted = false,
+  customerRestricted = false,
+  lineMode = false,
   includeReturns,
   costRestricted,
   reconRestricted,
@@ -49,11 +67,20 @@ export default function DrillTable({
   onPageChange,
   onOpenOrder,
 }: DrillTableProps) {
-  // 生效排序以响应回显为准（被遮蔽时后端已回退 revenue）；未返回前按请求键显示
+  // 生效排序以响应回显为准（被遮蔽时后端已回退 order_date）；未返回前按请求键显示
   const effectiveSort = data?.sort ?? sort;
+  const effectiveOrder: SortOrder = data?.order ?? order;
   const sortFellBack = data != null && data.sort !== sort;
+  const sortOrderOf = (key: SalesAnalyticsSortKey) =>
+    effectiveSort === key ? (effectiveOrder === "asc" ? "ascend" as const : "descend" as const) : null;
+  const sortableCol = (key: SalesAnalyticsSortKey, enabled: boolean) => ({
+    key,
+    sorter: enabled,
+    sortDirections: ["descend" as const, "ascend" as const],
+    sortOrder: sortOrderOf(key),
+  });
   // 本地预判：账号看不见金额却请求了金额键排序（权限快照与后端一致时后端必回退）
-  const amountSortHidden = costRestricted && sort !== "revenue";
+  const amountSortHidden = costRestricted && (sort === "amount_ex_tax" || sort === "amount_inc_tax");
   // 金额列可排 = 该口径正显示 + 账号看得见金额（revenue 恒公开）
   const sortable = (key: AmountKey) =>
     amounts.includes(key) && (key === "revenue" || !costRestricted);
@@ -64,19 +91,15 @@ export default function DrillTable({
     const sortKey = AMOUNT_SORT_KEY[key];
     return {
       title: (
-        <Tooltip title={sortable(key) ? "按此金额倒序（缺失值沉底，同额按单号先后破并列）" : "金额不可见，金额排序不可用"}>
-          {title}
+        <Tooltip title={sortable(key) ? "点击切换降序 / 升序（缺失值恒沉底，同额按单号先后破并列）" : "金额不可见，金额排序不可用"}>
+          {lineMode && key === "ex" ? `${title}（名义）` : title}
         </Tooltip>
       ),
-      key: sortKey,
       width: 120,
       align: "right" as const,
       dataIndex: sortKey,
       render: (v: number | null) => fmtMoney(v),
-      sorter: sortable(key),
-      // 后端只支持倒序：单一排序方向，点击=切换排序键，不提供升序/取消
-      sortDirections: ["descend" as const],
-      sortOrder: effectiveSort === sortKey ? ("descend" as const) : undefined,
+      ...sortableCol(sortKey, sortable(key)),
     };
   };
 
@@ -85,6 +108,7 @@ export default function DrillTable({
       title: "订单日期",
       dataIndex: "order_date",
       width: 122,
+      ...sortableCol("order_date", true),
       render: (v: string | null, r) => (
         <span style={{ whiteSpace: "nowrap" }}>
           {v || "—"}
@@ -96,13 +120,50 @@ export default function DrillTable({
         </span>
       ),
     },
-    { title: "订单号", dataIndex: "order_no", width: 120 },
-    { title: "业务类型", dataIndex: "business_type", width: 96, render: (v: string | null) => v || "—" },
-    { title: "销售人员", dataIndex: "salesperson", width: 88, render: (v: string | null) => v || "—" },
-    { title: "客户", dataIndex: "customer", ellipsis: true, render: (v: string | null) => v || "—" },
+    { title: "订单号", dataIndex: "order_no", width: 120, ...sortableCol("order_no", true) },
+    { title: "业务类型", dataIndex: "business_type", width: 96, render: (v: string | null) => v || "—", ...sortableCol("business_type", true) },
+    {
+      title: "销售人员", dataIndex: "salesperson", width: 96,
+      render: (v: string | null) => v || "—",
+      ...sortableCol("salesperson", true),
+    },
+    {
+      // 固定宽 + ellipsis：无宽列在 table-layout:fixed 下会被长客户名挤到 0 宽
+      //（A-AC 320/390 实测客户列不可见），长名省略 + title 提示全名
+      title: "客户", dataIndex: "customer", width: 160, ellipsis: true,
+      render: (v: string | null) => v || "—",
+      ...sortableCol("customer", !customerRestricted),
+    },
+    ...(customerRestricted ? [] : [{
+      // 客户类型列（A-AC07 可见即可排）：无 data_customer 时后端置 null，不渲染
+      title: "客户类型", dataIndex: "customer_type", width: 96,
+      render: (v: string | null) => v || "—",
+      ...sortableCol("customer_type", !customerRestricted),
+    }]),
     ...(amounts.includes("ex") ? [amountColumn("ex", "不含税金额")] : []),
     ...(amounts.includes("inc") ? [amountColumn("inc", "含税订单金额")] : []),
     ...(amounts.includes("revenue") ? [amountColumn("revenue", "营收")] : []),
+    {
+      title: (
+        <Tooltip title="毛利 = 已配成本营收 − 成本（与老板看板同口径）；未配成本的单为空，不当 0">
+          毛利
+        </Tooltip>
+      ),
+      dataIndex: "gross_profit",
+      width: 120,
+      align: "right" as const,
+      render: (v: number | null | undefined, r: SalesAnalyticsOrderRow) => (
+        profitRestricted ? "—" : (
+          <span>
+            {fmtMoney(v ?? null)}
+            {r.gross_margin != null && (
+              <span style={{ color: "var(--mb-text-3)", marginLeft: 4, fontSize: 12 }}>{pct(r.gross_margin)}</span>
+            )}
+          </span>
+        )
+      ),
+      ...sortableCol("gross_profit", !profitRestricted),
+    },
     {
       // 开「含已退货」时该列数值 = 已对账 + 退货已对账（D-40 §5），列头必须随之改标，
       // 否则一眼读数会把含退货合计误读为已对账金额本身（与抽屉内标注同一口径）
@@ -111,36 +172,40 @@ export default function DrillTable({
           {includeReturns ? "已对账金额（含退货）" : "已对账金额"}
         </Tooltip>
       ),
-      key: "reconciled_display",
       width: includeReturns ? 140 : 110,
       align: "right",
       render: (_v, r) =>
         reconNoData(r.reconciliation)
-          ? <span style={{ color: "var(--mb-text-3)" }}>无对账数据</span>
+          ? <span style={{ color: "var(--mb-text-2)" }}>无对账数据</span>
           : fmtMoney(r.reconciliation.reconciled_display),
+      // A-AC07：对账块可见数据列双向排序；无 data_reconciliation 时后端回退
+      // order_date，前端预先禁用排序入口
+      ...sortableCol("reconciled_display", !reconRestricted),
     },
     {
       title: "待对账金额",
-      key: "pending_amount",
       width: 104,
       align: "right",
       render: (_v, r) =>
         reconNoData(r.reconciliation) ? "—" : fmtMoney(r.reconciliation.pending_amount),
+      ...sortableCol("pending_amount", !reconRestricted),
     },
     {
       title: "退货已对账金额",
-      key: "return_reconciled_amount",
       width: 118,
       align: "right",
+      // 按最新快照的退货已对账原值排序，不随 include_returns（那只改 reconciled_display
+      // 的展示定义，契约 §3）；无对账权限同回退 order_date
+      ...sortableCol("return_reconciled_amount", !reconRestricted),
       render: (_v, r) =>
         reconNoData(r.reconciliation) ? "—" : fmtMoney(r.reconciliation.return_reconciled_amount),
     },
     {
       title: "数据截至时间",
-      key: "reconciled_as_of",
       width: 128,
       render: (_v, r) =>
         reconNoData(r.reconciliation) ? "—" : fmtDateTime(r.reconciliation.reconciled_as_of),
+      ...sortableCol("reconciled_as_of", !reconRestricted),
     },
   ];
 
@@ -158,8 +223,10 @@ export default function DrillTable({
     }
     if (extra.action !== "sort") return;
     const s = Array.isArray(sorter) ? sorter[0] : sorter;
-    if (!s || !s.column || s.order !== "descend") return; // 只认倒序（后端契约）
-    onSortChange(s.field as SalesAnalyticsSortKey);
+    if (!s || !s.column) return;
+    const key = (s.columnKey ?? s.field) as SalesAnalyticsSortKey;
+    // 取消排序（第三次点击）不提供：回到该列降序，后端永远有确定序
+    onSortChange(key, s.order === "ascend" ? "asc" : "desc");
   };
 
   const pagination: TablePaginationConfig = {
@@ -172,7 +239,9 @@ export default function DrillTable({
   };
 
   return (
-    <div>
+    // 外层可收缩（A-AC 返工）：min-width:0 让 flex/grid 祖先链条不被迫撑开，
+    // max-width:100% 不越出卡片；横向滚动由 Table 自身的 scroll.x 容器承担
+    <div style={{ minWidth: 0, maxWidth: "100%" }}>
       {(sortFellBack || amountSortHidden) && (
         <Alert
           style={{ marginBottom: 8 }}
@@ -180,8 +249,8 @@ export default function DrillTable({
           showIcon
           message={
             sortFellBack
-              ? "金额字段不可见：已按营收（公开口径）倒序，行序不反映隐藏金额的排名。"
-              : "金额字段不可见：行级金额列显示「—」，金额排序不可用；请求金额键排序时后端将按营收倒序。"
+              ? "所选排序字段不可见：已改按订单日期排序，行序不反映隐藏字段的排名。"
+              : "金额字段不可见：行级金额列显示「—」，金额排序不可用；请求金额键排序时后端将按订单日期排序。"
           }
         />
       )}
@@ -193,6 +262,7 @@ export default function DrillTable({
         columns={columns}
         pagination={pagination}
         onChange={onTableChange}
+        scroll={{ x: "max-content" }}
         locale={{ emptyText: "当前筛选下没有销售单" }}
         onRow={(r) => ({
           style: { cursor: "pointer" },

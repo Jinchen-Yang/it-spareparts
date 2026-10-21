@@ -50,6 +50,5 @@
   "pages/maintenance/panel/__tests__/PartsOrdersTab.test.tsx": 1,
   "pages/purchases/PurchaseAnalysisPage.tsx": 6,
   "pages/purchases/PurchaseExceptionsPage.tsx": 2,
-  "pages/purchases/shared.tsx": 9,
-  "pages/sales/shared.tsx": 5
+  "pages/purchases/shared.tsx": 9
 }

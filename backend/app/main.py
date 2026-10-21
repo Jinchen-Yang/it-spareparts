@@ -49,6 +49,7 @@ from app.api import (
     maintenance_warehouse,
     maintenance_expense_collection_workbook,
     maintenance_analytics,
+    maintenance_dashboard,
     maintenance_project_master_workbook,
     maintenance_row_workbench,
     maintenance_project_batch_transfer,
@@ -126,6 +127,8 @@ app.include_router(
     maintenance_expense_collection_workbook.router, prefix=settings.api_prefix
 )
 app.include_router(maintenance_analytics.router, prefix=settings.api_prefix)
+# 维保数据看板 MVP（T1–T4，R33 / D-0022）：数量/金额分离，金额域另挂利润门。
+app.include_router(maintenance_dashboard.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_master_workbook.router, prefix=settings.api_prefix
 )
