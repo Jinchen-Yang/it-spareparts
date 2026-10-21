@@ -602,6 +602,10 @@ FIELD_GROUPS = {
         "customer_phone",
         "customer",
         "end_customer",
+        # 客户类型 / 来源（DimCustomer 维度列，D-44 销售看板单头与分组用）：
+        # 属客户画像情报，缺 data_customer 时随组遮；仅 ETL 内部同名 dict 键不受影响。
+        "customer_type",
+        "customer_source",
     ],
     # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
     # 逐行 unit_price 一并遮掉（个别成交价对销售也不外露）。销售要的是「聚合成交参考价」，
@@ -658,6 +662,17 @@ FIELD_GROUPS = {
         # 漏登记会绕过 data_purchase_cost 泄漏（#397 (4)）。
         "amount_inc_tax_total",
         "amount_ex_tax_total",
+        # 金额区间拖动条上限（D-44 §7 / Q-A-03 修订）：三口径 max 全走成本权限——
+        # 营收口径的上限同样泄漏金额分布，无 data_purchase_cost 一并置 null
+        # （api/sales_analytics.filter_options 的 amounts_visible 是第一道，此处
+        # 登记是通用 apply_field_visibility 的双保险）。
+        # 注：revenue_costed / cost_coverage 不登记——老板看板 /dashboard/sales 同名
+        # 键对 boss 公开，全局登记会连带改变看板与 /api/profit 的既有契约；销售分析
+        # 模块在 data_profit 不可见时做结构化置 null（先例：/api/profit 的
+        # revenue_costed 模块级收敛，见 api/sales_analytics.py 模块 docstring）。
+        "amount_ex_tax_max",
+        "amount_inc_tax_max",
+        "revenue_max",
         "price_ex",
         "price_inc",
         "price_ex_min",

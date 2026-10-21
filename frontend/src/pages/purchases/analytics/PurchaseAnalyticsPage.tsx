@@ -1,12 +1,16 @@
 // 采购分析页（D-39 客户需求 Round1，PR-4a）：日期区间 + 类型/采购员/销售/客户/分类多选，
 // 三口径（含税/不含税/实付）并排显示（本地选择，不动管理员 TaxBasis），分组 → 订单下钻 → 明细抽屉。
+// Q-A-01 补图表：日 / 月趋势柱图（同端点 group_by=day/month 二次请求）+ 当前分组维度
+// 排行横条图（与表格同一次请求同源同下钻），复用三金额口径；不加新客 / 滑块 / 毛利。
 // 全部状态写 URL（preset/from/to/筛选/group_by/group_key/sort/dir/page/basis/order_id），可分享。
-// 权限：page_purchase_analytics（模板仅 boss；admin 恒放行）——路由/菜单由 nav.tsx 统一登记。
+// 权限：page_purchase_analytics（模板仅 boss；admin 恒放行）+ 本轮后端 admin/boss 角色硬门
+// （403 由本页错误态承接）——路由/菜单由 nav.tsx 统一登记。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, App, Alert, Card } from "antd";
+import { Button, App, Alert, Card, Radio, Space } from "antd";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
+import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale, useSessionOwner } from "../../../utils/session";
 import {
   fetchPurchaseAnalyticsOptions,
   fetchPurchaseAnalyticsOrders,
@@ -15,13 +19,20 @@ import {
   type PurchaseAnalyticsOrdersResp,
   type PurchaseAnalyticsSummary,
 } from "../../../api/purchaseAnalytics";
+import {
+  PurchaseRankBar,
+  PurchaseTrendChart,
+  type PurchaseChartMetric,
+} from "../../../components/charts/PurchaseAnalyticsCharts";
 import FilterBar from "./FilterBar";
-import SummaryView, { groupByTitle } from "./SummaryView";
+import SummaryView, { groupByTitle, groupLabelOf } from "./SummaryView";
 import DrillTable from "./DrillTable";
 import OrderDetailDrawer from "./OrderDetailDrawer";
 import {
   DEFAULT_GROUP_BY,
   parseAnalyticsUrl,
+  recommendTrendGranularity,
+  resolveAnalyticsRange,
   toAnalyticsApiFilters,
   useAnalyticsPatch,
   type AnalyticsSort,
@@ -46,12 +57,54 @@ function apiErrorMessage(err: unknown): string {
   return "加载失败，请稍后重试";
 }
 
+/** 排行图只画非时间维度（day / month 时表格本身就是趋势，不重复画）。 */
+const RANKING_GROUP_BYS = ["source_type", "purchaser", "salesperson", "customer", "category"];
+
+const BASIS_TO_CHART_METRIC: Record<string, PurchaseChartMetric> = {
+  inc: "amount_inc",
+  ex: "amount_ex",
+  paid: "amount_paid",
+};
+
+// 趋势图口径单选：用短标签（含税/不含税/实付/单数），避免与 KPI 卡及分组列的
+// 「XX金额」同名——页面测试与可读性都按文案区分元素。
+const METRIC_RADIO_LABELS: Record<PurchaseChartMetric, string> = {
+  amount_inc: "含税",
+  amount_ex: "不含税",
+  amount_paid: "实付",
+  orders: "单数",
+};
+
 export default function PurchaseAnalyticsPage() {
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const state = parseAnalyticsUrl(sp);
   const patch = useAnalyticsPatch(sp, setSp);
   const today = businessToday();
+
+  // 组件所属会话（DL-010 返工）：挂载时 token 是本页全部异步入口（候选 / 汇总 /
+  // 趋势 / 订单列表 / 抽屉）的 owner。静默换 token 后旧会话的任何新请求一律拒发
+  // （sessionExpired 清旧上下文），迟到响应仍由各处落地守卫作废。
+  const ownerToken = useSessionOwner();
+  const [sessionDead, setSessionDead] = useState(false);
+  /** 所属会话失效：拒发请求并清旧会话上下文（筛选候选 / 汇总与图表 / 订单列表）。
+   * 幂等；置死后数据面换专用提示，重试不再发请求。 */
+  const sessionExpired = () => {
+    if (!sessionStale(ownerToken)) return false;
+    setSessionDead(true);
+    setOptions(null);
+    setCustomerOptionsLoading(false);
+    setSummary(null);
+    setSummaryLoading(false);
+    setSummaryError(null);
+    setOrders(null);
+    setOrdersLoading(false);
+    setOrdersError(null);
+    setTrendSummary(null);
+    setTrendLoading(false);
+    setTrendError(null);
+    return true;
+  };
 
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
@@ -87,23 +140,40 @@ export default function PurchaseAnalyticsPage() {
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [customerQuery, setCustomerQuery] = useState("");
   const [customerOptionsLoading, setCustomerOptionsLoading] = useState(false);
+  // Q-A-01 趋势图状态：粒度与指标是图表视图开关（非筛选），不落 URL；初始粒度按区间
+  // 推荐——日期要用预设解析后的实际区间（state.from/to 仅 preset=custom 才有值，
+  // 「今天」等预设直接给 null 会错推成按月）
+  const [trendGran, setTrendGran] = useState<"day" | "month">(() => {
+    const range = resolveAnalyticsRange(state, today);
+    return recommendTrendGranularity(range?.from, range?.to);
+  });
+  const [chartMetric, setChartMetric] = useState<PurchaseChartMetric>(
+    () => BASIS_TO_CHART_METRIC[state.basis[0]] ?? "orders");
+  const [trendSummary, setTrendSummary] = useState<PurchaseAnalyticsSummary | null>(null);
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
   const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
   const summarySeq = useRef(0);
   const ordersSeq = useRef(0);
+  const trendSeq = useRef(0);
 
   // 客户已选ID额外补姓名最多200项；超出部分仍保留ID筛选，不扩大后端候选上限。
   const selectedCustomerKey = effectiveState.customerIds.slice(0, 200).join(",");
   // 客户候选直接来自 options 的有界只读查询；输入名称可搜索首批之外的客户。
-  // 旧请求清理 alive 标志，快速输入时不让迟到响应覆盖新搜索。
+  // 旧请求清理 alive 标志，快速输入时不让迟到响应覆盖新搜索；落地前比对
+  // localStorage token（DL-010）：换账号后的迟到响应不进当前 UI。
   useEffect(() => {
+    if (sessionExpired()) return;
     let alive = true;
+    const token = readSessionToken();
     setCustomerOptionsLoading(true);
     fetchPurchaseAnalyticsOptions(customerRestricted ? "" : customerQuery,
       selectedCustomerKey ? selectedCustomerKey.split(",").map(Number) : [])
-      .then(({ data }) => { if (alive) setOptions(data); })
-      .catch((err) => { if (alive) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); })
-      .finally(() => { if (alive) setCustomerOptionsLoading(false); });
+      .then(({ data }) => { if (alive && !sessionStale(token)) setOptions(data); })
+      .catch((err) => { if (alive && !sessionStale(token)) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`); })
+      // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态
+      .finally(() => { if (alive && !sessionStale(token)) setCustomerOptionsLoading(false); });
     return () => { alive = false; };
   }, [customerQuery, customerRestricted, selectedCustomerKey]);
   const customerOptions = customerRestricted ? [] : [...new Map(
@@ -122,33 +192,61 @@ export default function PurchaseAnalyticsPage() {
   const filterKey = JSON.stringify(apiFilters);
 
   useEffect(() => {
+    if (sessionExpired()) return;
     const seq = ++summarySeq.current;
+    const token = readSessionToken();
     setSummaryLoading(true);
     setSummaryError(null);
     fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: effectiveGroupBy })
       .then(({ data }) => {
-        if (seq !== summarySeq.current) return;
+        if (seq !== summarySeq.current || sessionStale(token)) return;
         setSummary(data);
       })
       .catch((err) => {
-        if (seq !== summarySeq.current) return;
+        if (seq !== summarySeq.current || sessionStale(token)) return;
         setSummary(null);
         setSummaryError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === summarySeq.current) setSummaryLoading(false);
+        if (seq === summarySeq.current && !sessionStale(token)) setSummaryLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, effectiveGroupBy, retryTick]);
 
+  // Q-A-01 趋势图数据：同一 summary 端点按 day / month 二次分组（不新增后端）；
+  // 与主汇总同一筛选键 + 粒度 + 重试驱动，令牌比对同 DL-010。
+  useEffect(() => {
+    if (sessionExpired()) return;
+    const seq = ++trendSeq.current;
+    const token = readSessionToken();
+    setTrendLoading(true);
+    setTrendError(null);
+    fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: trendGran })
+      .then(({ data }) => {
+        if (seq !== trendSeq.current || sessionStale(token)) return;
+        setTrendSummary(data);
+      })
+      .catch((err) => {
+        if (seq !== trendSeq.current || sessionStale(token)) return;
+        setTrendSummary(null);
+        setTrendError(apiErrorMessage(err));
+      })
+      .finally(() => {
+        if (seq === trendSeq.current && !sessionStale(token)) setTrendLoading(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
+  }, [filterKey, trendGran, retryTick]);
+
   // 分组下钻订单列表（筛选随层传递）
   useEffect(() => {
+    if (sessionExpired()) return;
     if (effectiveState.groupKey == null) {
       setOrders(null);
       setOrdersError(null);
       return;
     }
     const seq = ++ordersSeq.current;
+    const token = readSessionToken();
     setOrdersLoading(true);
     setOrdersError(null);
     fetchPurchaseAnalyticsOrders({
@@ -161,22 +259,31 @@ export default function PurchaseAnalyticsPage() {
       page_size: pageSize,
     })
       .then(({ data }) => {
-        if (seq !== ordersSeq.current) return;
+        if (seq !== ordersSeq.current || sessionStale(token)) return;
         setOrders(data);
       })
       .catch((err) => {
-        if (seq !== ordersSeq.current) return;
+        if (seq !== ordersSeq.current || sessionStale(token)) return;
         setOrders(null);
         setOrdersError(apiErrorMessage(err));
       })
       .finally(() => {
-        if (seq === ordersSeq.current) setOrdersLoading(false);
+        if (seq === ordersSeq.current && !sessionStale(token)) setOrdersLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
   }, [filterKey, effectiveGroupBy, effectiveState.groupKey, effectiveState.sort, effectiveState.dir, effectiveState.page, pageSize, retryTick]);
 
   const basis = state.basis;
   const lineMode = (effectiveState.groupKey == null ? summary?.basis_mode : orders?.basis_mode) === "line";
+
+  // 图表指标：三金额随成本权限（无成本时后端置 null，图表只剩单数口径）
+  const metricOptions: PurchaseChartMetric[] = [
+    ...(costRestricted ? [] : basis
+      .map((b) => BASIS_TO_CHART_METRIC[b])
+      .filter((m): m is PurchaseChartMetric => m != null)),
+    "orders",
+  ];
+  const activeMetric = metricOptions.includes(chartMetric) ? chartMetric : metricOptions[0];
 
   return (
     <>
@@ -201,6 +308,18 @@ export default function PurchaseAnalyticsPage() {
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
         />
 
+        {sessionDead ? (
+          // 所属会话失效（DL-010 返工）：旧会话的候选 / 汇总 / 图表 / 列表上下文已清，
+          // 数据面整体让位给会话提示——重试无济于事，刷新后以当前账号重新挂载
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={SESSION_EXPIRED_MESSAGE}
+            description="已停止本页所有请求并清空旧会话的筛选候选、汇总图表与订单列表；刷新页面后以当前账号继续（URL 中的筛选保持不变）。"
+          />
+        ) : (
+          <>
         {summaryError && (
           <Alert
             type="error"
@@ -229,13 +348,77 @@ export default function PurchaseAnalyticsPage() {
         )}
 
         {effectiveState.groupKey == null ? (
-          <SummaryView
-            summary={summary}
-            loading={summaryLoading}
-            basis={basis}
-            groupBy={effectiveGroupBy}
-            onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
-          />
+          <>
+            {/* Q-A-01：趋势（day/month）+ 排行（当前分组维度）图表，与表格同源同下钻 */}
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+              <Card
+                size="small"
+                title="采购趋势"
+                style={{ flex: "1 1 420px", minWidth: 300 }}
+                extra={(
+                  <Space size={12} wrap>
+                    <Radio.Group
+                      aria-label="趋势粒度"
+                      optionType="button"
+                      size="small"
+                      value={trendGran}
+                      options={[{ value: "month", label: "按月" }, { value: "day", label: "按日" }]}
+                      onChange={(e) => setTrendGran(e.target.value)}
+                    />
+                    <Radio.Group
+                      aria-label="图表指标"
+                      optionType="button"
+                      size="small"
+                      value={activeMetric}
+                      options={metricOptions.map((m) => ({ value: m, label: METRIC_RADIO_LABELS[m] }))}
+                      onChange={(e) => setChartMetric(e.target.value)}
+                    />
+                  </Space>
+                )}
+              >
+                {/* 汇总失败时顶部已有权威错误 + 重试（同一端点同权限，重试会一并重发趋势），
+                    避免同文案双 Alert 叠加 */}
+                {trendError && !summaryError ? (
+                  <Alert
+                    type="error" showIcon message="趋势加载失败" description={trendError}
+                    action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
+                  />
+                ) : (
+                  <PurchaseTrendChart
+                    groups={trendSummary?.groups ?? []}
+                    metric={activeMetric}
+                    loading={trendLoading}
+                    onBucketClick={(key) => {
+                      // 与表格行点击同一 drill 语义：分组键进 URL，可分享可后退
+                      patch({ groupBy: trendGran, groupKey: key, page: 1 }, { history: "push" });
+                    }}
+                  />
+                )}
+              </Card>
+              {RANKING_GROUP_BYS.includes(effectiveGroupBy) && (
+                <Card
+                  size="small"
+                  title={`分组排行（${groupByTitle(effectiveGroupBy)}）`}
+                  style={{ flex: "1 1 360px", minWidth: 300 }}
+                >
+                  <PurchaseRankBar
+                    groups={summary?.groups ?? []}
+                    metric={activeMetric}
+                    loading={summaryLoading}
+                    labelOf={groupLabelOf}
+                    onItemClick={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
+                  />
+                </Card>
+              )}
+            </div>
+            <SummaryView
+              summary={summary}
+              loading={summaryLoading}
+              basis={basis}
+              groupBy={effectiveGroupBy}
+              onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
+            />
+          </>
         ) : ordersError ? (
           <Alert
             type="error"
@@ -264,12 +447,15 @@ export default function PurchaseAnalyticsPage() {
             onBack={() => patch({ groupKey: null, orderId: null, page: 1 }, { history: "push" })}
           />
         )}
+          </>
+        )}
       </Card>
 
       <OrderDetailDrawer
         orderId={effectiveState.orderId}
         category={drawerCategory}
         basis={basis}
+        ownerToken={ownerToken}
         onClose={() => patch({ orderId: null })}
       />
     </>
