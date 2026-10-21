@@ -9,7 +9,7 @@
 .maintenance-explorer .me-caption { color: #758095; font-size: 12px; margin-top: 12px; }
 .maintenance-explorer .me-scope { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; color: #728095; font-size: 12px; }
 .maintenance-explorer .me-split { display: grid; grid-template-columns: minmax(0,1.1fr) minmax(0,.9fr); gap: 18px; align-items: start; }
-.maintenance-explorer .ant-card { min-width: 0; border-color: #e5eaf1; }
+.maintenance-explorer .ant-card { min-width: 0; border-color: var(--mb-border); }
 .maintenance-explorer .me-ranking { display: grid; gap: 6px; }
 .maintenance-explorer .me-rank-row { width: 100%; display: grid; grid-template-columns: 25px minmax(0,1fr) minmax(85px,auto); gap: 10px; align-items: center; border: 1px solid transparent; padding: 11px 10px; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
 .maintenance-explorer .me-rank-row:hover, .maintenance-explorer .me-rank-row.is-selected { border-color: #c5d5f1; background: #f3f7fe; }

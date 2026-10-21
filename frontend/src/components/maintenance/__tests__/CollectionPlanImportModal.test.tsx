@@ -293,6 +293,10 @@ describe("CollectionPlanImportModal", () => {
     await chooseBinding("ORDER-002", "XM-002");
     await chooseBinding("ORDER-003", "XM-002");
     expect(screen.getByText(COLLECTION_IMPORT.bindingReasonRequired)).toBeInTheDocument();
+    const reason = screen.getByLabelText(COLLECTION_IMPORT.bindingReasonLabel);
+    expect(reason).toHaveAttribute("aria-required", "true");
+    expect(reason).toHaveAttribute("aria-invalid", "true");
+    expect(document.getElementById(reason.getAttribute("aria-describedby")!)).toHaveTextContent(COLLECTION_IMPORT.bindingReasonRequired);
     expect(screen.getByRole("button", { name: COLLECTION_IMPORT.nextStep })).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText(COLLECTION_IMPORT.bindingReasonLabel), {

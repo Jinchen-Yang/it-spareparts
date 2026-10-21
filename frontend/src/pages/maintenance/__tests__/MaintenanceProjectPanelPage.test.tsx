@@ -1,3 +1,4 @@
+import { COLORS } from "../../../theme";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../test/antdRender";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -47,6 +48,12 @@ vi.mock("../../../api/maintenanceBossBoard", async () => {
 vi.mock("../../../api/maintenanceProjects", () => ({
   getMaintenanceProject: (...a: unknown[]) => getMaintenanceProject(...a),
   updateMaintenanceProject: (...a: unknown[]) => updateMaintenanceProject(...a),
+}));
+vi.mock("../../../api/maintenanceRowFilters", async () => ({
+  ...await vi.importActual<Record<string, unknown>>("../../../api/maintenanceRowFilters"),
+  getMaintenanceRowFields: vi.fn().mockResolvedValue({
+    fields: [], amount_filter_allowed: false,
+  }),
 }));
 vi.mock("../../../api/maintenanceSourceAssignments", () => ({
   listMaintenanceSourceOrders: (...a: unknown[]) => listMaintenanceSourceOrders(...a),
@@ -678,6 +685,22 @@ describe("项目面板", () => {
     expect(bandText()).toContain("10%");
     expect(bandText()).toContain("成本率");
     expect(bandText()).toContain("50.0%");
+    expect(within(band).getByText("50.0%").closest(".ant-statistic-content"))
+      .toHaveStyle({ color: COLORS.success });
+  });
+
+  it("健康带成本使用蓝、琥珀、中性灰、绿区分四种金额", async () => {
+    renderPanel();
+    const band = await screen.findByTestId("panel-health-band");
+    for (const [label, color] of [
+      ["备件成本", COLORS.accent],
+      ["报销成本", COLORS.warning],
+      ["已领用成本", COLORS.text2],
+      ["返还成本", COLORS.success],
+    ]) {
+      const row = within(band).getByText(label).closest(".ant-row")!;
+      expect(row.querySelector(".ant-col-18 .ant-typography")).toHaveStyle({ color });
+    }
   });
 
   it("健康带把 partial 合同额明确标为已知小计而非完整总额", async () => {

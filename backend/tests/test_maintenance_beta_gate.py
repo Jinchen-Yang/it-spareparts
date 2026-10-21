@@ -298,6 +298,9 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
         maintenance_project_operations.preview_manual_site_issue,
         maintenance_project_operations.create_manual_site_issue,
         maintenance_project_operations.patch_manual_site_issue,
+        # D-31 领用行更正与人工领用同属稳定面板，继续由下方 boss 依赖断言看守。
+        maintenance_project_operations.correct_site_issue_line,
+        maintenance_project_operations.correct_site_issue_header,
         # 领用「关联需求单」候选（PR #361）：与 manual 三端点同面板依赖，随 boss
         # 闸不随 beta 闸——beta 总闸生产恒 false，挂 beta 会建议功能整组 404。
         maintenance_project_operations.site_issue_demand_candidates,

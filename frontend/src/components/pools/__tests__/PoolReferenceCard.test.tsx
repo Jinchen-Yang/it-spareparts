@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import type { PoolReference, PoolReferenceSide } from "../../../api/poolAnalysis";
@@ -42,12 +42,26 @@ const reference = (over: Partial<PoolReference> = {}): PoolReference => ({
 afterEach(cleanup);
 
 function renderCard(value: PoolReference, props: {
-  side?: "both" | "purchase" | "sales"; forceRestricted?: boolean;
+  side?: "both" | "purchase" | "sales"; forceRestricted?: boolean; summary?: boolean;
 } = {}) {
   render(<MemoryRouter><PoolReferenceCard reference={value} {...props} /></MemoryRouter>);
 }
 
 describe("PoolReferenceCard", () => {
+  it("摘要先展示池身份，展开价格参考保持权限遮蔽与详情链接", () => {
+    renderCard(reference(), { summary: true, forceRestricted: true });
+    const link = screen.getByRole("link", { name: "查看互通池详情" });
+    expect(link).toHaveTextContent("4T SAS 3.5硬盘池");
+    expect(link).toHaveAttribute("href", "/pool-analysis/12?range=90d&pn=ST4000NM0035");
+    const toggle = screen.getByText("池价格参考");
+    expect(toggle.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText("采购参考（无池价格权限）")).toBeVisible();
+    expect(screen.getByLabelText("销售参考（无池价格权限）")).toBeVisible();
+    expect(screen.queryByText(/725.66/)).toBeNull();
+    expect(screen.queryByText(/698.2/)).toBeNull();
+  });
+
   it("展示同一池的采购/销售参考、管理员税务口径、规则值与窗口，并可进入池详情", () => {
     renderCard(reference());
 

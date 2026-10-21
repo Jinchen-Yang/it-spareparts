@@ -1,17 +1,15 @@
+import { formatMoney } from "../../utils/format";
 import type { ReactNode } from "react";
 import type { SalesReconciliationBlock } from "../../api/salesAnalytics";
 import { formatBusinessDateTime } from "../../utils/date";
 
-// 销售分析页展示辅助。fmt / fmtMoney / KpiCard 从采购分析页（PR-4a，
-// pages/purchases/shared.tsx）逐字搬运，零逻辑改动——按仓库惯例展示件按模块就近
-// 一份（维保分析页同款先例），不做跨模块 import。
+// 销售展示件按模块就近维护；金额格式与采购共用 utils/format。
 
 export const fmt = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 // 金额场景固定两位小数（含 ¥0.00 对齐）；数量/比值用 fmt。null 是「缺失/不可见」，
 // 一律显示「—」，绝不当 0（D-41 §3：不用推算值冒充）。
-export const fmtMoney = (v: number | null | undefined) =>
-  v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const fmtMoney = (v: number | null | undefined) => formatMoney(v);
 
 /**
  * 「数据截至时间」等 datetime 展示：后端存 UTC（cleaner.parse_datetime），isoformat
