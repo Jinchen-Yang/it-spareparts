@@ -42,6 +42,9 @@
    - 无 `data_customer` 的受限账号：`/groups?group_by=salesperson&sort=customers`
      回显 `sort: "orders"`（行序退公开单数，§4A 防侧信道）；同账号
      `group_by=customer` 仍 403。
+   - 行级归一：`/groups?group_by=category|brand|pn&top=1` 抽一窗含空白变体 /
+     同规范不同 raw PN 的数据——每窗缺失组唯一（不重复 null）、Top1 + 「其他」
+     三口径 = `top=0` 全组合计（A1 阻断返工点）。
    - purchaser/readonly 账号（即便显式授予页面键）访问销售/采购分析 → 403。
 
 ## 回滚

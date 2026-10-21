@@ -1523,3 +1523,158 @@ def test_groups_service_public_basis_direct(db, pubbasis_seeded):
         date_from=date(2027, 5, 1), date_to=date(2027, 5, 31))
     assert data["amount_basis"] == "revenue"
     assert [g["key"] for g in data["groups"]] == ["HI-R", "LO-R"]
+
+
+# ---------- 归一分组返工（A1 阻断：行级维度归一后重复 key / TopN+其他重复计额） ----------
+
+@pytest.fixture()
+def norm_seeded(db, seeded):
+    """归一分组反例（A1 冻结场景，2027-06 当期 / 2027-05 对比期）：行级维度取
+    NULL / 空串 / 半角双空格 / 全角空格 / 首尾空白变体，同一订单 3 行同组、
+    同规范 PN 配不同 raw 别名、真实名「未填」——归一后必须各自合并为唯一 key。
+
+    | 单 | 日期 | category | brand | pn_std / pn_raw | 行数 | 行金额 / 营收 |
+    |---|---|---|---|---|---|---|
+    | NA1 | 06-01 | NULL | NULL | NULL / NULL | 1 | 1130 / 900 |
+    | NA2 | 06-02 | '' | '' | '' / '' | 1 | 1130 / 900 |
+    | NA3 | 06-03 | '  ' | '　' | '  ' / '  ' | 1 | 1130 / 900 |
+    | NB1 | 06-10 | ' 内存 ' | ' B牌 ' | ' PN-A ' / NULL | 1 | 1130 / 900 |
+    | NB2 | 06-11 | 内存 | B牌 | PN-A / PN-RAW-X | 1 | 1130 / 900 |
+    | NB3 | 06-12 | 内存 | B牌 | PN-A / PN-RAW-Y | 3 | 1130 / 900 |
+    | NB4 | 06-13 | 内存 | B牌 | NULL / ' PN-B ' | 1 | 1130.55 / 900 |
+    | NC1 | 06-20 | 未填 | 未填 | 未填 / 未填 | 1 | 1130.55 / 900 |
+    | NM1 | 05-10 | ' 内存 ' | ' B牌 ' | ' PN-A ' / NULL | 1 | 1130 / 900 |
+
+    单头 ex 1000 / inc 1130；行含税 = 行金额（叶子舍入），不含税 = ÷1.13 名义。
+    """
+    a1 = seeded["a"][0]
+    part = db.scalar(select(DimPart).where(DimPart.pn_std == "PN-D44"))
+    rows = [
+        ("NA1", date(2027, 6, 1), None, None, None, None, 1, "1130"),
+        ("NA2", date(2027, 6, 2), "", "", "", "", 1, "1130"),
+        ("NA3", date(2027, 6, 3), "  ", "　", "  ", "  ", 1, "1130"),
+        ("NB1", date(2027, 6, 10), " 内存 ", " B牌 ", " PN-A ", None, 1, "1130"),
+        ("NB2", date(2027, 6, 11), "内存", "B牌", "PN-A", "PN-RAW-X", 1, "1130"),
+        ("NB3", date(2027, 6, 12), "内存", "B牌", "PN-A", "PN-RAW-Y", 3, "1130"),
+        ("NB4", date(2027, 6, 13), "内存", "B牌", None, " PN-B ", 1, "1130.55"),
+        ("NC1", date(2027, 6, 20), "未填", "未填", "未填", "未填", 1, "1130.55"),
+        ("NM1", date(2027, 5, 10), " 内存 ", " B牌 ", " PN-A ", None, 1, "1130"),
+    ]
+    for raw, on, cat, brand, pn_std, pn_raw, nlines, amt in rows:
+        o = FSalesOrder(
+            raw_order_id=raw, order_no=f"SO-{raw}", order_date=on,
+            salesperson="张三", business_type="备件销售",
+            amount_ex_tax=Decimal("1000"), amount_inc_tax=Decimal("1130"),
+            data_status="已生效", import_batch_id=a1.import_batch_id)
+        db.add(o)
+        db.flush()
+        for i in range(1, nlines + 1):
+            db.add(FSalesLine(
+                raw_line_id=f"L{raw}-{i}", order_id=o.id, line_no=i, part_id=part.id,
+                pn_std=pn_std, pn_raw=pn_raw, category_major=cat, brand=brand,
+                qty=Decimal("1"), line_amount=Decimal(amt),
+                revenue_amount=Decimal("900"), counts_revenue=True,
+                import_batch_id=a1.import_batch_id))
+    db.commit()
+    return seeded
+
+
+@pytest.mark.parametrize("dim", ["category", "brand", "pn"])
+def test_line_groups_missing_variants_merge_to_single_null_group(db, norm_seeded, dim):
+    """A1 反例①：NULL / 空串 / 半角双空格（brand 另有全角空格变体）归一后是
+    同一个缺失组——1 个 key=null 组（orders=3 / lines=3），不是 3 个重复 null 组
+    （旧实现 SELECT 归一、GROUP BY 原始列 → 同 key 多行）。"""
+    client = _client(db, f"d44-norm-miss-{dim}", role="boss")
+    data = client.get(GROUPS, params={
+        "group_by": dim, "top": 0, "sort": "orders",
+        "date_from": "2027-06-01", "date_to": "2027-06-05"}).json()
+    assert data["total_groups"] == 1
+    g = data["groups"][0]
+    assert g["key"] is None and g["is_empty"] is True
+    assert g["orders"] == 3 and g["lines"] == 3
+    assert g["amount_ex_tax"] == pytest.approx(3000.0)
+    assert g["amount_inc_tax"] == pytest.approx(3390.0)
+    assert g["revenue"] == pytest.approx(2700.0)
+
+
+@pytest.mark.parametrize("dim,other_shape", [
+    ("category", (2, 4)), ("brand", (2, 4)), ("pn", (3, 5))])
+def test_line_groups_topn_other_conserves_kpi_and_totals(db, norm_seeded, dim, other_shape):
+    """A1 反例②（KPI 3000/3390/2700 vs 旧合计 4000/4520/3600）：A 窗口
+    KPI = 分组（含其他）逐分守恒；全月 top=1 的 Top1 +「其他」= top=0 全组合
+    计（三口径）——重复 key 时「其他」按 rest_keys 匹配会把头部同 key 行再计
+    一遍（Top1 1000 + 其他 3000 = 4000 ≠ KPI 3000）。"""
+    client = _client(db, f"d44-norm-cons-{dim}", role="boss")
+    awin = {"date_from": "2027-06-01", "date_to": "2027-06-05"}
+    kpi = client.get(SUMMARY, params=awin).json()["kpi"]
+    assert kpi["amount_ex_tax_total"] == pytest.approx(3000.0)
+    assert kpi["amount_inc_tax_total"] == pytest.approx(3390.0)
+    assert kpi["revenue_total"] == pytest.approx(2700.0)
+    for top in (0, 1):
+        data = client.get(GROUPS, params={**awin, "group_by": dim, "top": top}).json()
+        assert data["other"] is None                     # 只有一个组，无「其他」
+        assert data["groups"][0]["amount_ex_tax"] == pytest.approx(3000.0)
+        assert data["groups"][0]["amount_inc_tax"] == pytest.approx(3390.0)
+        assert data["groups"][0]["revenue"] == pytest.approx(2700.0)
+    # 全月：Top1 +「其他」= 全组合计（叶子舍入含 1130.55 → 1000.49 名义不含税）
+    june = {"date_from": "2027-06-01", "date_to": "2027-06-30"}
+    full = client.get(GROUPS, params={**june, "group_by": dim, "top": 0}).json()
+    top1 = client.get(GROUPS, params={**june, "group_by": dim, "top": 1}).json()
+    other = top1["other"]
+    assert other is not None
+    assert (other["groups"], other["orders"]) == other_shape
+    for key in ("amount_ex_tax", "amount_inc_tax", "revenue"):
+        assert (sum(g[key] for g in top1["groups"]) + other[key]
+                == pytest.approx(sum(g[key] for g in full["groups"]))), key
+
+
+@pytest.mark.parametrize("dim,expect", [
+    ("category", [("内存", 4, 6, 6000.49, 6780.55, 5400.0),
+                  (None, 3, 3, 3000.0, 3390.0, 2700.0),
+                  ("未填", 1, 1, 1000.49, 1130.55, 900.0)]),
+    ("brand", [("B牌", 4, 6, 6000.49, 6780.55, 5400.0),
+               (None, 3, 3, 3000.0, 3390.0, 2700.0),
+               ("未填", 1, 1, 1000.49, 1130.55, 900.0)]),
+    ("pn", [("PN-A", 3, 5, 5000.0, 5650.0, 4500.0),
+            (None, 3, 3, 3000.0, 3390.0, 2700.0),
+            ("PN-B", 1, 1, 1000.49, 1130.55, 900.0),
+            ("未填", 1, 1, 1000.49, 1130.55, 900.0)]),
+])
+def test_line_groups_trim_alias_dedup_and_unfilled_no_collision(db, norm_seeded, dim, expect):
+    """A1 反例③：首尾空白（含全角）同名归同组；同规范 PN 配不同 raw 别名合并
+    （pn_std 优先、NULL 才落 pn_raw 并同样归一）；同一订单 3 行同组 orders 按
+    单去重（4 单非 6 单 / 3 单非 5 单）；真实名「未填」与缺失 null 不碰撞；
+    逐行名义舍入（1130.55 → 不含税 1000.49）；PN-B 与 未填 同值并列按组键升序。"""
+    client = _client(db, f"d44-norm-trim-{dim}", role="boss")
+    data = client.get(GROUPS, params={
+        "group_by": dim, "top": 0, "sort": "amount_ex_tax", "order": "desc",
+        "date_from": "2027-06-01", "date_to": "2027-06-30"}).json()
+    assert data["total_groups"] == len(expect)
+    got = [(g["key"], g["orders"], g["lines"], g["amount_ex_tax"],
+            g["amount_inc_tax"], g["revenue"]) for g in data["groups"]]
+    assert [g[0] for g in got] == [e[0] for e in expect]      # 唯一 key、排序稳定
+    for (k, o, l, ex, inc, rev), g in zip(expect, got):
+        assert (k, o, l) == (g[0], g[1], g[2]), k
+        assert ex == pytest.approx(g[3]) and inc == pytest.approx(g[4]), k
+        assert rev == pytest.approx(g[5]), k
+    assert data["groups"][1]["is_empty"] is True              # 缺失组标记
+
+
+def test_line_groups_compare_and_filter_same_normalization(db, norm_seeded):
+    """A1 反例④：对比期与行级筛选和分组同用一套归一——5 月 ' 内存 ' 订单归入
+    内存 组的 compare（旧实现对比行也按原始列分组，' 内存 ' ≠ '内存' 对不上）；
+    category=内存 精确筛选同样命中 ' 内存 ' 的行。"""
+    client = _client(db, "d44-norm-cmp", role="boss")
+    data = client.get(GROUPS, params={
+        "group_by": "category", "top": 0, "compare": "true",
+        "date_from": "2027-06-01", "date_to": "2027-06-30"}).json()
+    assert data["compare_window"] == {"date_from": "2027-05-01", "date_to": "2027-05-30"}
+    mem = next(g for g in data["groups"] if g["key"] == "内存")
+    assert mem["compare"]["orders"] == 1
+    assert mem["compare"]["amount_ex_tax"] == pytest.approx(1000.0)
+    miss = next(g for g in data["groups"] if g["key"] is None)
+    assert miss["compare"] is None                           # 对比期无缺失组行
+    filt = client.get(GROUPS, params={
+        "group_by": "brand", "category": "内存", "top": 0,
+        "date_from": "2027-06-01", "date_to": "2027-06-30"}).json()
+    assert [(g["key"], g["orders"], g["lines"]) for g in filt["groups"]] == [("B牌", 4, 6)]

@@ -33,7 +33,7 @@ import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Date, and_, cast, func, select
+from sqlalchemy import Date, and_, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from app import security, tax_policy
@@ -180,37 +180,52 @@ def _group_rows(db: Session, filters: dict, group_by: str):
         return db.execute(select(key, *_measures(sub)).group_by(key)).all()
 
     sl = FSalesLine
-    # GROUP BY 用原始列（SELECT 的归一表达式是分组列上的表达式，PG 合法；避免
-    # SELECT/GROUP BY 各自渲染 _norm_dim 产生不同绑定参数）。
+    # 归一分组（A1 阻断返工）：SELECT 与 GROUP BY 必须同一归一表达式。旧写法
+    # SELECT 归一 / GROUP BY 原始列，NULL / 空串 / 全空白等多个原始值归一成同一
+    # key 却各成一行——TopN+「其他」按 rest_keys 匹配会把头部同 key 行再计一遍
+    # （Top1 1000 + 其他 3000 = 4000 ≠ KPI 3000）。带绑定参数的归一表达式不能
+    # 直接放 GROUP BY，先在命名子查询里算好唯一 key（及每行叶子值 / 过滤聚合的
+    # CASE 预备列），外层对子查询列分组；SUM(CASE) 与 FILTER (WHERE) 语义等价
+    # （SUM 跳过 NULL，全空 → NULL）。
     if group_by == "category":
-        dim, group_cols = _norm_dim(sl.category_major), [sl.category_major]
+        dim = _norm_dim(sl.category_major)
     elif group_by == "brand":
-        dim, group_cols = _norm_dim(sl.brand), [sl.brand]
+        dim = _norm_dim(sl.brand)
     else:
         dim = _norm_dim(func.coalesce(sl.pn_std, sl.pn_raw))
-        group_cols = [sl.pn_std, sl.pn_raw]
-    key = dim.label("key")
     counts = sl.counts_revenue.is_(True)
     costed = and_(counts, sl.cost_moving_avg.is_not(None))
     leaf_inc = _leaf_line_amount(sl)
-    stmt = select(
-        key,
-        func.count(func.distinct(sl.order_id)).label("orders"),
-        func.count(sl.id).label("lines"),
-        func.sum(func.round(leaf_inc / tax_policy.TAX_FACTOR, 2)).label("amount_ex_tax"),
-        func.sum(leaf_inc).label("amount_inc_tax"),
-        func.sum(sl.revenue_amount).filter(counts).label("revenue"),
-        func.sum(sl.revenue_amount).filter(costed).label("revenue_costed"),
-        func.sum(sl.cost_amount).filter(costed).label("cost_costed"),
-        func.count(func.distinct(sub.c.customer)).label("customers"),
+    line_src = select(
+        dim.label("key"),
+        sl.id.label("line_id"),
+        sl.order_id.label("order_id"),
+        sub.c.customer.label("customer"),
+        leaf_inc.label("leaf_inc"),
+        func.round(leaf_inc / tax_policy.TAX_FACTOR, 2).label("leaf_ex"),
+        case((counts, sl.revenue_amount)).label("revenue"),
+        case((costed, sl.revenue_amount)).label("revenue_costed"),
+        case((costed, sl.cost_amount)).label("cost_costed"),
     ).select_from(sl).join(sub, sl.order_id == sub.c.id)
     cats = _clean_multi(filters.get("categories"))
     brs = _clean_multi(filters.get("brands"))
     if cats:
-        stmt = stmt.where(_category_match(sl, cats))
+        line_src = line_src.where(_category_match(sl, cats))
     if brs:
-        stmt = stmt.where(_norm_dim(sl.brand).in_(brs))
-    return db.execute(stmt.group_by(*group_cols)).all()
+        line_src = line_src.where(_norm_dim(sl.brand).in_(brs))
+    ls = line_src.subquery()
+    stmt = select(
+        ls.c.key.label("key"),
+        func.count(func.distinct(ls.c.order_id)).label("orders"),
+        func.count(ls.c.line_id).label("lines"),
+        func.sum(ls.c.leaf_ex).label("amount_ex_tax"),
+        func.sum(ls.c.leaf_inc).label("amount_inc_tax"),
+        func.sum(ls.c.revenue).label("revenue"),
+        func.sum(ls.c.revenue_costed).label("revenue_costed"),
+        func.sum(ls.c.cost_costed).label("cost_costed"),
+        func.count(func.distinct(ls.c.customer)).label("customers"),
+    ).group_by(ls.c.key)
+    return db.execute(stmt).all()
 
 
 def groups(
