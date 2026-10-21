@@ -86,6 +86,8 @@ const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage"
 // 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。
 const loadMaintenanceHome = () => import("./pages/maintenance/MaintenanceHomePage");
 const loadMaintenanceAnalytics = () => import("./pages/maintenance/MaintenanceAnalyticsPage");
+const loadMaintenanceDashboard = () =>
+  import("./pages/maintenance/MaintenanceDashboardPage");
 const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadMaintenanceDemands = () =>
@@ -120,6 +122,7 @@ const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
 const MaintenanceAnalyticsPage = lazy(loadMaintenanceAnalytics);
+const MaintenanceDashboardPage = lazy(loadMaintenanceDashboard);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
 const InventoryPage = lazy(loadInventory);
@@ -207,6 +210,16 @@ export const NAV_GROUPS: NavGroup[] = [
         perm: "page_maintenance",
         page: MaintenanceAnalyticsPage,
         load: loadMaintenanceAnalytics,
+      },
+      {
+        // 维保数据看板 MVP（D-0022/R33）：数量口径人人可见，金额随 data_profit。
+        key: "maintenance-dashboard",
+        path: "/maintenance/dashboard",
+        label: "数据看板",
+        icon: <FundOutlined />,
+        perm: "page_maintenance",
+        page: MaintenanceDashboardPage,
+        load: loadMaintenanceDashboard,
       },
       {
         key: "maintenance-demands",
