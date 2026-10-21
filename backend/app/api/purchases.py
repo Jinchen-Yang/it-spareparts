@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.api.query_bounds import ANALYTICS_PAGE_MAX, ANALYTICS_PAGE_SIZE_MAX, PG_INT_MAX, DbId
+from app import config
 from app.auth import current_role
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
@@ -133,7 +134,13 @@ def _guard_customer_filter(filters: dict, ctx: UserContext,
 
 def _guard_scoped(ctx: UserContext) -> None:
     """own_customers_only 收紧账号不进本页：分析查询是全公司聚合，没有按客户收紧的
-    数据面，fail-closed（比 dashboard 更严——那边明细本身按 scope 裁剪过）。"""
+    数据面，fail-closed（比 dashboard 更严——那边明细本身按 scope 裁剪过）。
+
+    角色硬校验（2026-10-22 轮复审新增）：仅 admin/boss 可访问——页面键控制菜单，
+    角色硬界控制数据面；purchaser / readonly 即使被显式授予 ``page_purchase_analytics``
+    也 403。ENABLE_RBAC=False（PHASE1 旁路）不受影响。"""
+    if config.ENABLE_RBAC and ctx.role not in ("admin", "boss"):
+        raise HTTPException(status_code=403, detail="采购分析仅限管理员与老板访问")
     if is_scoped_sales(ctx):
         raise HTTPException(status_code=403, detail="采购分析为全公司口径页面，收紧账号不可访问")
 

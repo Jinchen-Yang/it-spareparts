@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { ConfigProvider, Modal, message } from "antd";
-import { act, cleanup, render } from "@testing-library/react";
+import { App, ConfigProvider, Modal, message } from "antd";
+import { act, cleanup, render as rtlRender, type RenderOptions } from "@testing-library/react";
 
 const theme = { token: { motion: false } };
 
@@ -12,9 +12,20 @@ function WithoutMotion({ children }: { children: ReactNode }) {
 // CSS 动画；避免 leave deadline / 通知定时器随负载跨过 jsdom 环境的销毁边界。
 ConfigProvider.config({ holderRender: (children) => <WithoutMotion>{children}</WithoutMotion> });
 
-export function renderWithoutMotion(ui: ReactNode) {
-  return render(ui, { wrapper: WithoutMotion });
+export function renderWithoutMotion(ui: ReactNode, options: RenderOptions = {}) {
+  const Wrapper = options.wrapper;
+  function WithApp({ children }: { children: ReactNode }) {
+    return (
+      <WithoutMotion>
+        {Wrapper ? <Wrapper><App>{children}</App></Wrapper> : <App>{children}</App>}
+      </WithoutMotion>
+    );
+  }
+  return rtlRender(ui, { ...options, wrapper: WithApp });
 }
+
+export * from "@testing-library/react";
+export { renderWithoutMotion as render };
 
 export async function cleanupAntd() {
   cleanup();

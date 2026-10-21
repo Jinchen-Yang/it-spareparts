@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ConfigProvider, message } from "antd";
+import { App as AntdApp, ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -27,9 +27,11 @@ window.addEventListener("vite:preloadError", (e) => {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN} theme={themeConfig}>
-      <ErrorBoundary>
-        <App />
-      </ErrorBoundary>
+      <AntdApp message={{ top: 72 }}>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </AntdApp>
     </ConfigProvider>
   </React.StrictMode>
 );

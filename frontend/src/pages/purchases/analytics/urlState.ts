@@ -187,3 +187,11 @@ export function toAnalyticsApiFilters(
     ...(state.category.length ? { category: state.category } : {}),
   };
 }
+
+/** 趋势图粒度推荐（Q-A-01）：区间已知且 ≤31 天按日，否则按月（采购无周粒度）。
+ * 只作初始值，用户手动切换后不再随筛选漂移。 */
+export function recommendTrendGranularity(from?: string | null, to?: string | null): "day" | "month" {
+  if (!from || !to) return "month";
+  const days = Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86_400_000) + 1;
+  return days > 0 && days <= 31 ? "day" : "month";
+}

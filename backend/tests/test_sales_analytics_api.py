@@ -165,9 +165,12 @@ def test_scoped_sales_with_page_grant_still_403(db, seeded):
 
 
 def test_customer_filter_without_customer_permission_403(db, seeded):
-    # purchaser 模板 data_customer=False（readonly 反而保留全量数据组，不能当反例）
-    client = _client(db, "sa-nocust", role="purchaser",
-                     overrides={"page_sales_analysis": True})
+    """客户类筛选硬界：关客户数据组（boss 模板 overrides）按客户筛选 403；不筛选
+    可访问且客户字段被脱敏。角色硬界（非 admin/boss 一律 403）另见
+    test_permission_matrix 与 D-44 test_hard_role_check—— purchaser/readonly
+    即便显式授予页面键也进不了本页，不再作客户筛选反例。"""
+    client = _client(db, "sa-nocust", role="boss",
+                     overrides={"data_customer": False})
     assert client.get(SUMMARY, params={"customer": "客户甲"}).status_code == 403
     assert client.get(ORDERS, params={"customer": "客户甲"}).status_code == 403
     # 不按客户筛选可正常访问（客户字段本身被 data_customer 脱敏）
@@ -397,20 +400,22 @@ def test_orders_sort_revenue(db, seeded):
     # O1 计营收 900 在前；O3 无明细行、O4 行被 counts_revenue 排除 → NULL 沉底
 
 
-def test_orders_sort_degrades_to_revenue_when_amount_masked(db, seeded):
-    """data_purchase_cost=False 的账号按被遮金额键排序 → 行序泄漏金额排名，
-    须退回公开口径 revenue（dashboard ranking_restricted 同款先例）。
+def test_orders_sort_degrades_to_public_date_when_amount_masked(db, seeded):
+    """Q-A-04：data_purchase_cost=False 的账号按被遮金额键排序 → 行序泄漏金额
+    排名，退回公开口径 **order_date + id**（不退回 revenue——营收行序同样是
+    排名信息；dashboard ranking_restricted 同款先例）。默认排序与显式
+    amount_ex_tax/amount_inc_tax 都降级，响应回显实际排序键。
 
-    maintenance_manager 模板数据组全 False 且非受限销售：默认排序与显式
-    amount_ex_tax/amount_inc_tax 都必须降级，响应回显实际排序键。
+    旧用例走 maintenance_manager + 页面键授予；本轮角色硬界后非 admin/boss
+    一律 403，改用 boss 模板关成本组做同一反例。
     """
-    client = _client(db, "sa-s4", role="maintenance_manager",
-                     overrides={"page_sales_analysis": True})
+    client = _client(db, "sa-s4", role="boss",
+                     overrides={"data_purchase_cost": False})
     for params in ({}, {"sort": "amount_ex_tax"}, {"sort": "amount_inc_tax"}):
         data = client.get(ORDERS, params=params).json()
-        assert data["sort"] == "revenue", params
+        assert data["sort"] == "order_date", params
         assert [i["order_no"] for i in data["items"]] == [
-            "SO-1", "SO-5", "SO-4", "SO-3", "SO-2"]
+            "SO-5", "SO-4", "SO-3", "SO-2", "SO-1"]      # order_date desc + id desc
         assert data["items"][0]["amount_ex_tax"] is None  # 值本身仍被遮蔽
     # revenue 公开口径不受降级影响
     data = client.get(ORDERS, params={"sort": "revenue"}).json()
@@ -522,9 +527,10 @@ def test_data_reconciliation_hidden_masks_reconciliation_fields(db, seeded):
     """data_reconciliation 关闭 → 对账**整块**按「无快照」形态输出（#397 (2)）：
     has_data=False、块内全 null、history=[]——与真实无快照单（SO-2）完全一致，
     连 has_data / reconciled_as_of / import_batch_id 这类非金额字段也不泄漏
-    「该单有对账数据」。"""
-    client = _client(db, "sa-mask", role="readonly",
-                     overrides={"page_sales_analysis": True})
+    「该单有对账数据」。（角色硬界后 readonly 即便授予页面键也 403，反例改用
+    boss 模板关对账组。）"""
+    client = _client(db, "sa-mask", role="boss",
+                     overrides={"data_reconciliation": False})
     items = client.get(ORDERS).json()["items"]
     by_no = {i["order_no"]: i["reconciliation"] for i in items}
     empty = {"has_data": False, "reconciled_as_of": None,
