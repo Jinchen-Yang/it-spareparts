@@ -6,7 +6,6 @@ import { message } from "antd";
 import { MAINTENANCE_CHANGED_STORAGE_KEY } from "../../../utils/maintenanceRefresh";
 
 const getBoardProject = vi.fn();
-const searchBoardProjects = vi.fn();
 const getBoardProjectOrders = vi.fn();
 const getBoardOrderLines = vi.fn();
 const getMaintenanceProject = vi.fn();
@@ -33,7 +32,6 @@ vi.mock("../../../api/maintenanceBossBoard", async () => {
   return {
     ...actual,
     getBoardProject: (...a: unknown[]) => getBoardProject(...a),
-    searchBoardProjects: (...a: unknown[]) => searchBoardProjects(...a),
     getBoardProjectOrders: (...a: unknown[]) => getBoardProjectOrders(...a),
     getBoardOrderLines: (...a: unknown[]) => getBoardOrderLines(...a),
   };
@@ -148,7 +146,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   getBoardProject.mockResolvedValue({ data: projectRow });
-  searchBoardProjects.mockResolvedValue({ data: { rows: [], total: 0 } });
   // 与后端真实契约同形（MaintenanceProjectOverview = {project: {...}}）——旧 mock 的
   // 扁平形状曾掩盖「按 UUID 搜卡墙永远搜不到」的取数缺陷（2026-08-17 生产实发）。
   getMaintenanceProject.mockResolvedValue({
@@ -537,79 +534,6 @@ function renderPanel(withProjectSwitcher = false) {
 }
 
 describe("项目面板", () => {
-  it("未入展示板的停用稳定项目不盲调单卡接口，仍展示稳定详情", async () => {
-    getMaintenanceProject.mockResolvedValue({ data: { project: {
-      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
-      lifecycle_status: "ended", is_active: false, version: 1,
-    } } });
-    getBoardProject.mockRejectedValue({ response: { status: 404 } });
-    renderPanel();
-    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
-    expect(searchBoardProjects).toHaveBeenCalledWith({
-      q: "合成项目A", page: 1, page_size: 200, lifecycle: "all", business_type: "all",
-    });
-    expect(getBoardProject).not.toHaveBeenCalled();
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("停用且仍带单的项目遍历候选分页并严格匹配稳定 ID，保留聚合财务", async () => {
-    getMaintenanceProject.mockResolvedValue({ data: { project: {
-      project_id: "p1", project_code: "合成项目A", display_name: "合成项目A",
-      lifecycle_status: "ended", is_active: false, version: 1,
-    } } });
-    const other = { ...projectRow, project_id: "other", contract_amount_inc_tax: stat("999.00") };
-    searchBoardProjects
-      .mockResolvedValueOnce({ data: { rows: Array(200).fill(other), total: 201 } })
-      .mockResolvedValueOnce({ data: { rows: [{ ...projectRow, is_archived: true }], total: 201 } });
-    renderPanel();
-    await waitFor(() => expect(screen.getByTestId("panel-health-band").textContent?.replace(/,/g, ""))
-      .toContain("1000.00"));
-    expect(searchBoardProjects).toHaveBeenNthCalledWith(2, {
-      q: "合成项目A", page: 2, page_size: 200, lifecycle: "all", business_type: "all",
-    });
-    expect(getBoardProject).not.toHaveBeenCalled();
-    expect(screen.getByText("已归档")).toBeInTheDocument();
-    expect(screen.getByTestId("panel-health-band").textContent).not.toContain("999.00");
-  });
-
-  it("切换项目后停用项目的旧搜索响应不能继续翻页或回写", async () => {
-    let resolveSearch!: (value: unknown) => void;
-    searchBoardProjects.mockImplementationOnce(() => new Promise((resolve) => { resolveSearch = resolve; }));
-    getMaintenanceProject.mockImplementation((id: string) => Promise.resolve({ data: { project: {
-      project_id: id, project_code: id, display_name: id,
-      is_active: id !== "p1", version: 1,
-    } } }));
-    getBoardProject.mockResolvedValue({ data: { ...projectRow, project_id: "p2", display_name: "p2" } });
-    renderPanel(true);
-    await waitFor(() => expect(searchBoardProjects).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("link", { name: "切到项目B" }));
-    expect(await screen.findByRole("heading", { name: "p2" })).toBeInTheDocument();
-    await act(async () => resolveSearch({ data: { rows: [{ ...projectRow, project_id: "other" }], total: 201 } }));
-    expect(searchBoardProjects).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("heading", { name: "p2" })).toBeInTheDocument();
-  });
-
-  it("项目详情读取失败可原地重试，恢复后清除错误", async () => {
-    getMaintenanceProject.mockRejectedValueOnce(new Error("network failed"));
-    renderPanel();
-    const alert = await screen.findByRole("alert");
-    fireEvent.click(within(alert).getByRole("button", { name: /重\s*试/ }));
-    expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(getMaintenanceProject).toHaveBeenCalledTimes(2);
-  });
-
-  it("回款状态读取失败显示可重试错误，恢复后更新健康带", async () => {
-    getMaintenanceProjectWorkspace.mockRejectedValueOnce(new Error("network failed"));
-    renderPanel();
-    const alert = await screen.findByRole("alert");
-    fireEvent.click(within(alert).getByRole("button", { name: /重\s*试/ }));
-    await waitFor(() => expect(screen.getByTestId("panel-health-band").textContent)
-      .toContain("¥100.00"));
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(getMaintenanceProjectWorkspace).toHaveBeenCalledTimes(2);
-  });
-
   it("切换项目后旧项目的晚到响应不会回写新项目", async () => {
     let resolveOldSearch!: (value: unknown) => void;
     const oldSearch = new Promise((resolve) => { resolveOldSearch = resolve; });
@@ -718,18 +642,14 @@ describe("项目面板", () => {
     expect(band.textContent).toContain("85.0%（已知下限）");
   });
 
-  it("聚合读取失败保留基础信息与重试入口，恢复后补齐健康带", async () => {
-    getBoardProject.mockRejectedValueOnce(new Error("aggregate unavailable"));
+  it("聚合行缺失时健康带说「聚合数据暂缺」，页面不报错、基础信息走 stable 回退", async () => {
+    getBoardProject.mockRejectedValue(new Error("aggregate unavailable"));
     renderPanel();
     const band = await screen.findByTestId("panel-health-band");
     await waitFor(() =>
       expect(within(band).getAllByText("聚合数据暂缺").length).toBeGreaterThan(0));
     expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
-    const alert = await screen.findByRole("alert");
-    fireEvent.click(within(alert).getByRole("button", { name: /重\s*试/ }));
-    await waitFor(() => expect((band.textContent ?? "").replace(/,/g, "")).toContain("1000.00"));
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(getBoardProject).toHaveBeenCalledTimes(2);
   });
 
   it("五个同级 tab 重排：概览 / 备件与需求单 / 报销 / 回款 / 领用与返还", async () => {
@@ -742,8 +662,7 @@ describe("项目面板", () => {
   it("出库明细并入「备件与需求单」tab：需求单列表 + 点击单号钻取行级明细", async () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
-    // 首次 lazy chunk 还需转译，等待用户可见结果，不把模块加载计入默认 1 秒期限。
-    expect(await screen.findByText("WBDD-1", {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(await screen.findByText("WBDD-1")).toBeInTheDocument();
     // 首屏不再被出库明细大表占据：概览是默认 tab，需求单表不在这里
   });
 
@@ -899,8 +818,7 @@ describe("项目面板", () => {
     });
     renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
-    // 首次 lazy chunk 还需转译，等待真实领用行出现；单用例总超时仍为 20 秒。
-    expect(await screen.findByText("CKD-1", {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(await screen.findByText("CKD-1")).toBeInTheDocument();
     expect(screen.getByText("PN-001")).toBeInTheDocument();
     expect(screen.getByText("应返")).toBeInTheDocument();
     expect(screen.getByText("当前服务器描述")).toBeInTheDocument();
@@ -1693,7 +1611,7 @@ describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
     // A single history entry represents a refreshed URL or a newly opened tab.
     renderPanelWithWall([`/maintenance/projects/p1?${params}`]);
     expect(await screen.findByRole("tab", { name: "分析定位" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByTestId("project-analytics-context")).toHaveAttribute("data-project-id", "p1");
+    expect(screen.getByTestId("project-analytics-context")).toHaveAttribute("data-project-id", "p1");
     expect(screen.getByTestId("project-analytics-context")).toHaveTextContent(returnPath);
     await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("p1"));
     expect(searchSiteIssues).not.toHaveBeenCalled();

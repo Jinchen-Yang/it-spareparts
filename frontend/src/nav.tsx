@@ -59,7 +59,7 @@ export interface NavItem {
   /** 服务端总闸与实名白名单共同签发的 Beta 能力。 */
   betaFeature?: "maintenance" | "replenishment" | "maintenance_boss";
   page: LazyExoticComponent<ComponentType>;
-  /** 与 page 共用同一 import() 工厂：当前路由或菜单悬停/聚焦时预取。 */
+  /** 与 page 共用同一 import() 工厂：空闲时预取，点菜单即秒开 */
   load: () => Promise<{ default: ComponentType }>;
 }
 
@@ -71,7 +71,7 @@ export interface NavGroup {
 }
 
 // 路由级懒加载：每个页面独立 chunk，首包不再背 1.6MB。
-// import() 工厂单独存一份（load 字段）供按访问意图预取，lazy 与预取共用模块缓存。
+// import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
 const loadBossBoard = () => import("./pages/BossBoardPage");
 const loadPools = () => import("./pages/PoolsPage");
 const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");

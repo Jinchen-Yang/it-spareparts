@@ -41,24 +41,6 @@ export interface WorkbookFieldChange {
   overridden?: boolean;
 }
 
-/** 无实体 ID 的领用行命中已有身份；只能修改文件，不能强制接管。 */
-export interface WorkbookSiteReplayRow {
-  row_no: number;
-  entity_id: string;
-  issue_no: string;
-  pn: string;
-  sn: string;
-  differences: { field: string; old: string; new: string }[];
-}
-
-export interface WorkbookSiteReplayErrorDetail {
-  code: "stale_site_replay";
-  message: string;
-  rows: WorkbookSiteReplayRow[];
-  total_count: number;
-  fix_hint: string;
-}
-
 /** D-02 作废优先：落在已作废行/单上的改动——不生效、不整本拒绝，行级回执。 */
 export interface WorkbookVoidedRow extends WorkbookFieldChange {
   row_no?: number;

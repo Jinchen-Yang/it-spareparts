@@ -452,9 +452,9 @@ def test_unknown_sheet_name_is_422(db, project_with_lines):
     assert resp.json()["detail"]["code"] == "unknown_sheet"
 
 
-def test_unknown_project_returns_404_for_scoped_account(db):
+def test_unknown_project_fails_closed_for_scoped_account(db):
     assert uploader(db, "m-404").get(
-        f"{_BASE}/{uuid.uuid4()}/master-workbook.xlsx").status_code == 404
+        f"{_BASE}/{uuid.uuid4()}/master-workbook.xlsx").status_code == 403
 
 
 # ---------- 03 备件订单：缺价补录 ----------

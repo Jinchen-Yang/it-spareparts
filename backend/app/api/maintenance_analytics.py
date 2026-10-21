@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.api.date_validation import validate_date_query
 from app.auth import current_role
 from app.config import get_settings
 from app.db import get_db
@@ -66,7 +65,7 @@ def _annotate_project_links(db: Session, ctx: UserContext, payload: dict) -> Non
         row["can_open_project"] = row["project_id"] in openable
 
 
-@router.get("/pn-ranking", dependencies=[Depends(validate_date_query)])
+@router.get("/pn-ranking")
 def pn_ranking(
     response: Response,
     range_: str = Query("ytd", alias="range", pattern="^(ytd|12m|all|custom)$"),
@@ -196,7 +195,7 @@ def pn_ranking(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/spend-trend", dependencies=[Depends(validate_date_query)])
+@router.get("/spend-trend")
 def spend_trend(
     response: Response,
     range_: str = Query("ytd", alias="range", pattern="^(ytd|12m|all|custom)$"),
@@ -327,7 +326,7 @@ def filter_options(
     return maintenance_analytics.filter_options(db, allowed_project_ids=allowed)
 
 
-@router.get("/explorer", dependencies=[Depends(validate_date_query)])
+@router.get("/explorer")
 def explorer(
     response: Response,
     dimension: str = Query("pn", pattern="^(pn|project|customer|salesperson|business)$"),

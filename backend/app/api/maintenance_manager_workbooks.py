@@ -64,13 +64,7 @@ def _parse_report_month(value: str | None) -> date:
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "报告月份必须为 YYYY-MM",
         )
-    try:
-        parsed = date.fromisoformat(text + "-01")
-    except ValueError:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "报告月份必须为有效的 YYYY-MM",
-        ) from None
+    parsed = date.fromisoformat(text + "-01")
     if parsed > business_today().replace(day=1):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

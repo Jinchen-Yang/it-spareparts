@@ -5347,23 +5347,6 @@
       "purl": "pkg:pypi/xlrd@2.0.2",
       "type": "library",
       "version": "2.0.2"
-    },
-    {
-      "bom-ref": "pkg:pypi/xlsxwriter@3.2.9",
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "254b1c37a368c444eac6e2f867405cc9e461b0ed97a3233b2ac1e574efb4140c"
-        },
-        {
-          "alg": "SHA-256",
-          "content": "9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3"
-        }
-      ],
-      "name": "xlsxwriter",
-      "purl": "pkg:pypi/xlsxwriter@3.2.9",
-      "type": "library",
-      "version": "3.2.9"
     }
   ],
   "metadata": {

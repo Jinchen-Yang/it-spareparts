@@ -176,11 +176,6 @@ V2_RECEIPT_BASE_FIELDS = ("累计实收金额（含税）", "状态", "回款凭
 V2_SITE_BASE_FIELDS = ("领用单号", "领用日期", "PN", "SN", "领用数量", "是否应返还", "备注")
 # 保留旧七字段用于缺行哈希和自动编号重放；地址不改变删除或身份契约。
 V2_SITE_ADDRESS_GUARD_FIELDS = (*V2_SITE_BASE_FIELDS, "领用地址")
-_SITE_REPLAY_DETAIL_LIMIT = 200
-_SITE_REPLAY_FIX_HINT = (
-    "已入库记录请保留实体ID在原行修改；真正的新领用请将领用单号留空自动编号"
-    "（或使用尚未占用的单号）"
-)
 
 
 # ------------------------------------------------------------------ 计划
@@ -2978,7 +2973,7 @@ def _v2_build_site(wb, db, project_id: str) -> dict[str, str]:
         "SN": "SN-001",
         "领用数量": 1,
         "是否应返还": "是",
-        "备注": "【示例】真正的新领用：实体ID和领用单号留空自动编号，完整日期/PN/数量必填；已有相同 WBDD+PN+SN 请保留实体ID在原行修改，不要追加空实体ID副本",
+        "备注": "【示例】新增领用：实体ID留空，完整日期/PN/数量必填；单号留空自动编号，有关联 WBDD 可填入单号列",
     })
     _v2_finalize(ws, V2_SITE_HEADERS, hidden_from=11,
                  editable=editable, operation_col=(15 if len(V2_SITE_HEADERS) >= 15 else None),
@@ -3012,7 +3007,6 @@ def _v2_build_usage(wb) -> None:
         ("【02 回款计划】", "计划=打算什么时候收多少钱：一行一个合同期次。操作选 CREATE 新增，填合同号、期次（第几期）、计划回款日期、金额；改已有行选 UPDATE（带基础版本防冲突）；作废选 VOID。"),
         ("【05 实收回款】", "实收=每月实际收到的累计数：同一合同同一月份只保留一行，报告月份填 YYYY-MM，金额填「截至该月累计实收」（不是当月增量）。同月重复上传=覆盖更新，凭证号选填。"),
         ("【06 领用返还】", "新增领用填完整日期 YYYY-MM-DD、PN、正数量，实体ID留空；领用单号选填，留空时自动编号。WBDD 填在单号列时保留为关联需求单号，并另生成领用编号。"),
-        ("已有领用与真正的新领用", "若相同 WBDD+PN+SN 已存在，请保留实体ID在原行修改，切勿追加实体ID为空的副本；真正的新领用请将领用单号留空自动编号（或使用尚未占用的单号）。"),
         ("自动编号与重传", "同一本文件原样重传或排序不会重复新增；相同内容的多行仍分别保留。首次导入后请重新下载，后续修改保留实体ID；不要把已导入记录再次作为新行粘贴。关联需求单号只读。"),
         ("领用地址", "实际领用地址，同单只需改一行。缺列或留空保留已有地址；清空请在地址操作填‘清空’。同单填写不同新地址时保留原址并提示，其他合法内容继续处理。"),
         ("删除领用行", "2026-08-23 起：直接把该行整行删掉再上传 = 该领用行作废（退出成本与返还计算）；一张单的行全删 = 整单作废。"),
@@ -3048,9 +3042,6 @@ def _v2_build_dictionary(wb) -> None:
         ("计划回款金额", "合同期次计划金额", "maintenance_collection_milestone.planned_amount", "可编辑", "正数", "节点 incomplete", "更新计划节点并触发提醒复核"),
         ("最新累计实收", "已确认回款快照累计额", "maintenance_collection_snapshot.cumulative_amount", "只读", "金额", "未上报，不等于0", "仅影响展示和到款状态"),
         ("实体ID", "稳定写回身份", "各事实表主键", "只读", "UUID/字符串", "非法文件", "缺失或跨项目拒绝"),
-        ("领用实体ID与领用单号", "区分已入库领用与真正的新领用", "maintenance_site_issue / maintenance_site_issue_line",
-         "已有行保留实体ID", "相同 WBDD+PN+SN 已存在时保留实体ID在原行修改，切勿追加实体ID为空的副本",
-         "真正的新领用请将领用单号留空自动编号（或使用尚未占用的单号）", "身份相同但内容不一致会拒绝并列出冲突差异"),
         ("领用地址", "实际领用地址（现场位置）", "maintenance_site_issue.site_location", "可编辑", "最多256字符；兼容地址/现场位置表头", "保留原值", "同单共用；不同新地址提示并保留原值"),
         ("地址操作", "明确设置或清空领用地址", "地址更新意图", "可编辑", "保留/设置/清空", "有值设置，空白保留", "清空只作用于地址，不影响领用明细"),
     ]
@@ -4173,8 +4164,6 @@ def _v2_parse_site(
     # two different new values fail closed instead of "last row wins".
     header_changes: dict[str, dict[str, object]] = {}
     new_issue_dates: dict[str, date] = {}
-    replay_conflicts: list[dict] = []
-    replay_conflict_count = 0
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
         if not row or all(value in (None, "") for value in row):
             continue
@@ -4269,38 +4258,11 @@ def _v2_parse_site(
                         "SN": serial_number or "", "领用数量": quantity,
                         "是否应返还": flag, "备注": str(_cell(row, index, "备注") or "").strip(),
                     }
-                    stored_values = _v2_site_identity_values(existing_line, existing_issue)
                     if (_v2_row_base_hash(replay_values, V2_SITE_BASE_FIELDS)
-                            != _v2_row_base_hash(stored_values, V2_SITE_BASE_FIELDS)
+                            != _v2_row_base_hash(_v2_site_identity_values(existing_line, existing_issue), V2_SITE_BASE_FIELDS)
                             or (generated and existing_line.demand_order_no != demand_no)
                             or (address_patch.action != "keep" and (address_patch.value or "") != (existing_issue.site_location or ""))):
-                        replay_conflict_count += 1
-                        if len(replay_conflicts) < _SITE_REPLAY_DETAIL_LIMIT:
-                            # Use exactly the existing comparison normalization, including
-                            # ISO dates and Decimal strings; never expose whole ORM rows.
-                            differences = [
-                                {"field": name, "old": _v2_hash_value(stored_values.get(name)),
-                                 "new": _v2_hash_value(replay_values.get(name))}
-                                for name in V2_SITE_BASE_FIELDS
-                                if _v2_hash_value(stored_values.get(name)) != _v2_hash_value(replay_values.get(name))
-                            ]
-                            if generated and existing_line.demand_order_no != demand_no:
-                                differences.append({"field": "关联需求单号",
-                                                    "old": _v2_hash_value(existing_line.demand_order_no),
-                                                    "new": _v2_hash_value(demand_no)})
-                            if (address_patch.action != "keep"
-                                    and (address_patch.value or "") != (existing_issue.site_location or "")):
-                                differences.append({"field": "领用地址",
-                                                    "old": existing_issue.site_location or "",
-                                                    "new": address_patch.value or ""})
-                            replay_conflicts.append({
-                                "row_no": row_no, "entity_id": existing_line.issue_line_id,
-                                "issue_no": existing_issue.display_no_effective,
-                                "pn": pn, "sn": serial_number or "", "differences": differences,
-                            })
-                        # This row cannot become an update/create or a missing-row void.
-                        # Validation will fail after inspecting the remaining site rows.
-                        continue
+                        raise WorkbookError("stale_site_replay", f"第 {row_no} 行与已入库领用记录不同，请重新下载总表，保留实体ID后修改；新增领用请使用新行身份")
                     present_ids.add(str(raw_id))
                     continue
                 is_create = False
@@ -4480,17 +4442,6 @@ def _v2_parse_site(
             site_location_action=address_patch.action,
             site_location=address_patch.value,
         ))
-    if replay_conflict_count:
-        first = replay_conflicts[0]
-        changed_fields = "、".join(item["field"] for item in first["differences"])
-        raise WorkbookError(
-            "stale_site_replay",
-            f"共 {replay_conflict_count} 行与已入库领用记录冲突，首行：第 {first['row_no']} 行"
-            f"（领用单号 {first['issue_no']}，PN {first['pn']}，SN {first['sn'] or '空'}）"
-            f"的{changed_fields}不同。{_SITE_REPLAY_FIX_HINT}",
-            details={"rows": replay_conflicts, "total_count": replay_conflict_count,
-                     "fix_hint": _SITE_REPLAY_FIX_HINT},
-        )
     present_ids |= {f.issue_line_id for f in out if not f.is_create}
     chosen_headers: dict[str, tuple[str, date]] = {}
     for issue_id, header in header_changes.items():

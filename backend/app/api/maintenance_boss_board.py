@@ -12,7 +12,6 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, st
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.api.date_validation import validate_date_order
 from app.auth import current_role
 from app.business_time import business_today
 from app.db import get_db
@@ -75,25 +74,6 @@ def _project_card_scope(db: Session, ctx: UserContext) -> set[str] | None:
     return _allowed_scope(db, ctx)
 
 
-def _validate_board_window(
-    date_from: date | None = Query(None, alias="from"),
-    date_to: date | None = Query(None, alias="to"),
-) -> tuple[date, date]:
-    # 单边输入仍沿用服务层的当年年初 / 今天默认值。
-    start, end = board.resolve_window(date_from, date_to)
-    validate_date_order(start, end, from_name="from", to_name="to")
-    return start, end
-
-
-def _validate_summary_window(
-    window: tuple[date, date] = Depends(_validate_board_window),
-) -> None:
-    try:
-        board.previous_window(window)
-    except OverflowError as exc:
-        raise HTTPException(422, "日期范围过大或过早，无法计算环比期间") from exc
-
-
 class ProjectSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -134,7 +114,7 @@ def board_health(
     return board.health(db)
 
 
-@router.get("/summary", dependencies=[Depends(_validate_summary_window)])
+@router.get("/summary")
 def board_summary(
     response: Response,
     date_from: date | None = Query(None, alias="from"),
@@ -161,7 +141,7 @@ def board_attention(
                            allowed_project_ids=_allowed_scope(db, ctx))
 
 
-@router.get("/projects", dependencies=[Depends(_validate_board_window)])
+@router.get("/projects")
 def board_projects(
     response: Response,
     q: str | None = Query(None),

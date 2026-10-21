@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -113,86 +113,6 @@ describe("维保主页（项目卡墙）", () => {
     renderPage();
     expect(await screen.findByText("项目一")).toBeInTheDocument();
     expect(screen.getByText("项目二")).toBeInTheDocument();
-  });
-
-  it("首次加载失败显示重试，恢复后显示项目而非空态", async () => {
-    getBoardProjects.mockRejectedValueOnce(new Error("network unavailable"));
-    renderPage();
-
-    expect(await screen.findByText("项目列表加载失败")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
-
-    expect(await screen.findByText("项目一")).toBeInTheDocument();
-    expect(getBoardProjects).toHaveBeenCalledTimes(2);
-    expect(lastArg(getBoardProjects)).toMatchObject({ page: 1, lifecycle: "ongoing" });
-    expect(screen.queryByText("项目列表加载失败")).toBeNull();
-  });
-
-  it("失败时不把未取得的项目列表显示为没有项目", async () => {
-    getBoardProjects.mockRejectedValueOnce(new Error("network unavailable"));
-    renderPage();
-
-    expect(await screen.findByText("项目列表加载失败")).toBeInTheDocument();
-    expect(screen.queryByText(/没有符合条件的项目/)).toBeNull();
-  });
-
-  it("重试期间切换筛选后，旧请求失败不会覆盖新列表", async () => {
-    let rejectRetry!: (reason: unknown) => void;
-    getBoardProjects.mockRejectedValueOnce(new Error("network unavailable"));
-    getBoardProjects.mockImplementationOnce(() => new Promise((_resolve, reject) => {
-      rejectRetry = reject;
-    }));
-    getBoardProjects.mockResolvedValueOnce(page([row("ended", "已结束项目")]));
-    renderPage();
-
-    fireEvent.click(await screen.findByRole("button", { name: /重\s*试/ }));
-    fireEvent.click(screen.getByText("已结束"));
-    expect(await screen.findByText("已结束项目")).toBeInTheDocument();
-    await act(async () => { rejectRetry(new Error("late failure")); });
-
-    expect(screen.getByText("已结束项目")).toBeInTheDocument();
-    expect(screen.queryByText("项目列表加载失败")).toBeNull();
-    expect(screen.queryByRole("button", { name: /重\s*试/ })).toBeNull();
-    expect(lastArg(getBoardProjects)).toMatchObject({ page: 1, lifecycle: "ended" });
-  });
-
-  it("续页失败保留已加载卡片，重试同页后继续加载且不重复卡片", async () => {
-    type Callback = (entries: Array<{ isIntersecting: boolean }>) => void;
-    const observers = new Set<Callback>();
-    (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
-      class {
-        constructor(private callback: Callback) {}
-        observe() { observers.add(this.callback); }
-        disconnect() { observers.delete(this.callback); }
-      };
-    // Typography 也使用 IntersectionObserver；向当前仍在观察的目标统一派发。
-    const intersect = () => [...observers].forEach((callback) => callback([{ isIntersecting: true }]));
-    let failed = false;
-    getBoardProjects.mockImplementation((params: { page: number }) => {
-      if (params.page === 2 && !failed) {
-        failed = true;
-        return Promise.reject(new Error("network unavailable"));
-      }
-      return Promise.resolve({
-        data: { ...page([]).data, rows: [row(`p${params.page}`, `第${params.page}页项目`)], total: 60 },
-      });
-    });
-    renderPage();
-    expect(await screen.findByText("第1页项目")).toBeInTheDocument();
-    await act(async () => { intersect(); });
-    expect(getBoardProjects.mock.calls.map(([params]) => params.page)).toEqual([1, 2]);
-
-    expect(await screen.findByText("项目列表加载失败")).toBeInTheDocument();
-    expect(screen.getByText("第1页项目")).toBeInTheDocument();
-    expect(screen.queryByText("已到底")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
-
-    expect(await screen.findByText("第2页项目")).toBeInTheDocument();
-    expect(screen.getAllByText("第1页项目")).toHaveLength(1);
-    expect(getBoardProjects.mock.calls.map(([params]) => params.page)).toEqual([1, 2, 2]);
-    await act(async () => { intersect(); });
-    expect(await screen.findByText("第3页项目")).toBeInTheDocument();
-    expect(lastArg(getBoardProjects)).toMatchObject({ page: 3 });
   });
 
   it("页头有标题与副标（超预算变色、点卡进项目）", () => {

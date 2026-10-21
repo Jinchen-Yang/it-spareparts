@@ -192,10 +192,10 @@ def test_download_requires_profit_visibility_but_not_upload_action(db, project):
     ).status_code == 403
 
 
-def test_unknown_project_returns_404_for_scoped_account(db):
+def test_unknown_project_fails_closed_for_scoped_account(db):
     assert uploader(db, "wbk-404").get(
         f"{_BASE}/{uuid.uuid4()}/expense-collection-workbook.xlsx"
-    ).status_code == 404
+    ).status_code == 403
 
 
 @pytest.mark.parametrize("action", ["download", "validate", "apply"])

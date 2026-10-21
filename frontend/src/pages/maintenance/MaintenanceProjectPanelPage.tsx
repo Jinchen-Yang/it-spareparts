@@ -1,4 +1,4 @@
-import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -13,7 +13,6 @@ import {
   Row,
   Select,
   Space,
-  Spin,
   Statistic,
   Tabs,
   Tag,
@@ -24,7 +23,7 @@ import {
 import dayjs, { type Dayjs } from "dayjs";
 import { EditOutlined } from "@ant-design/icons";
 import type { BoardProjectRow } from "../../api/maintenanceBossBoard";
-import { getBoardProject, searchBoardProjects } from "../../api/maintenanceBossBoard";
+import { getBoardProject } from "../../api/maintenanceBossBoard";
 import {
   applyProjectMaster,
   downloadProjectMaster,
@@ -43,8 +42,15 @@ import type { MaintenanceManagerAccount } from "../../api/maintenanceOperations"
 import ProjectManagerAssignmentControl from "../../components/maintenance/ProjectManagerAssignmentControl";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
+import OverviewTab from "./panel/OverviewTab";
+import PartsOrdersTab from "./panel/PartsOrdersTab";
+import ExpenseTab from "./panel/ExpenseTab";
+import CollectionTab from "./panel/CollectionTab";
+import SiteReturnTab from "./panel/SiteReturnTab";
+import MaintenanceProjectAnalyticsContext from "./panel/MaintenanceProjectAnalyticsContext";
 import { maintenanceAnalyticsReturnPath, readProjectPanelTab } from "./analysisNavigation";
 import { publishMaintenanceChange } from "../../utils/maintenanceRefresh";
+import AcceptanceTab from "./panel/AcceptanceTab";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import {
   LIFECYCLE_LABEL,
@@ -57,13 +63,6 @@ import {
 } from "./panel/panelUtils";
 
 const { Text, Title } = Typography;
-const OverviewTab = lazy(() => import("./panel/OverviewTab"));
-const PartsOrdersTab = lazy(() => import("./panel/PartsOrdersTab"));
-const ExpenseTab = lazy(() => import("./panel/ExpenseTab"));
-const CollectionTab = lazy(() => import("./panel/CollectionTab"));
-const SiteReturnTab = lazy(() => import("./panel/SiteReturnTab"));
-const MaintenanceProjectAnalyticsContext = lazy(() => import("./panel/MaintenanceProjectAnalyticsContext"));
-const AcceptanceTab = lazy(() => import("./panel/AcceptanceTab"));
 
 interface HealthMetrics {
   received: number | null;
@@ -185,8 +184,8 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
  * 项目面板（2026-08-19 重设计）：自上而下 = 用户视线顺序——
  * 我是谁（页头：项目名 + 状态 Tag + 总表两阶段回传）→ 我健康吗（健康带四格）
  * → 细节（概览 / 备件与需求单 / 报销 / 回款 / 领用与返还）。
- * 取数：基础信息以 stable 目录为准，活跃项目按稳定 ID 取展示板聚合卡；停用项目
- * 先查询展示板中是否仍有该稳定 ID，空集时不请求必然 404 的单卡。回款指标走
+ * 取数：基础信息以 stable 目录为准；成本率/合同额用**项目名称**回查 boss-board
+ * 聚合行（按 UUID 搜永远搜不到，2026-08-17 取数缺陷的修复口径）；回款指标走
  * getMaintenanceProjectWorkspace。聚合行缺失时健康带「聚合数据暂缺」，不全页报错。
  */
 export function MaintenanceProjectPanelPage() {
@@ -206,9 +205,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const [operationsProject, setOperationsProject] =
     useState<MaintenanceProjectOperationsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [aggregateError, setAggregateError] = useState<string | null>(null);
-  const [projectLoading, setProjectLoading] = useState(false);
-  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [collectionRows, setCollectionRows] = useState<MaintenanceCollectionSnapshotRow[]>([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
   const projectRequestSeq = useRef(0);
@@ -247,8 +243,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const loadProject = useCallback(async () => {
     const seq = ++projectRequestSeq.current;
     setError(null);
-    setAggregateError(null);
-    setProjectLoading(true);
     try {
       const detail = await getMaintenanceProject(projectId);
       const stable = detail.data?.project ?? null;
@@ -258,31 +252,12 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       let aggregateReady = true;
       if (stable) {
         try {
-          if (stable.is_active === false) {
-            // 展示板只纳入仍带单的停用项目；搜索空集是正常状态。编号只缩小候选，
-            // 必须遍历分页并按稳定 ID 取行，不能把同名项目或第一页当成身份。
-            const pageSize = 200;
-            for (let page = 1; ; page += 1) {
-              const response = await searchBoardProjects({
-                q: stable.project_code,
-                page,
-                page_size: pageSize,
-                lifecycle: "all",
-                business_type: "all",
-              });
-              if (seq !== projectRequestSeq.current) return false;
-              hit = response.data.rows.find((item) => item.project_id === projectId) ?? null;
-              if (hit || !response.data.rows.length || page * pageSize >= response.data.total) break;
-            }
-          } else {
-            hit = (await getBoardProject(projectId)).data;
-          }
-        } catch (err) {
-          // 稳定详情仍可使用；真正的读取失败独立显示重试入口。
-          if (seq !== projectRequestSeq.current) return false;
+          hit = (await getBoardProject(projectId)).data;
+        } catch {
+          // stable 项目仍可展示基础信息；聚合卡可能因归档无活动或来源暂不可用
+          // 而不存在，不能让整个详情页随之白屏。
           hit = null;
           aggregateReady = false;
-          setAggregateError(readError(err, "项目经营汇总加载失败"));
         }
       }
       if (seq !== projectRequestSeq.current) return false;
@@ -321,8 +296,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
         setError(readError(err, "项目面板加载失败"));
       }
       return false;
-    } finally {
-      if (seq === projectRequestSeq.current) setProjectLoading(false);
     }
   }, [projectId]);
 
@@ -330,7 +303,6 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const loadWorkspace = useCallback(async () => {
     const seq = ++workspaceRequestSeq.current;
     setCollectionLoading(true);
-    setWorkspaceError(null);
     try {
       const pageSize = 100;
       const response = await getMaintenanceProjectWorkspace(projectId, {
@@ -389,7 +361,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
             returned: null,
           },
         }));
-        setWorkspaceError(readError(err, "回款状态加载失败"));
+        message.error(readError(err, "回款状态加载失败"));
       }
       return false;
     } finally {
@@ -484,18 +456,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
         />
       </Flex>
 
-      {error ? (
-        <Alert type="error" showIcon message={error}
-          action={<Button size="small" loading={projectLoading} onClick={() => void loadProject()}>重试</Button>} />
-      ) : null}
-      {aggregateError ? (
-        <Alert type="warning" showIcon message={aggregateError}
-          action={<Button size="small" loading={projectLoading} onClick={() => void loadProject()}>重试</Button>} />
-      ) : null}
-      {workspaceError ? (
-        <Alert type="error" showIcon message={workspaceError}
-          action={<Button size="small" loading={collectionLoading} onClick={() => void loadWorkspace()}>重试</Button>} />
-      ) : null}
+      {error ? <Alert type="error" showIcon message={error} /> : null}
 
       <HealthBand row={row} metrics={metrics} />
 
@@ -603,10 +564,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               />
             ),
           },
-        ].map((item) => ({
-          ...item,
-          children: <Suspense fallback={<Spin aria-label="正在加载项目明细" />}>{item.children}</Suspense>,
-        }))}
+        ]}
       />
     </Space>
   );
