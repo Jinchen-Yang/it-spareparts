@@ -109,6 +109,9 @@ ALL_SHEETS = (SHEET_BASICS, SHEET_OVERVIEW, SHEET_PARTS, SHEET_EXPENSE,
               SHEET_COLLECTION, SHEET_SITE)
 # 可回填的四张：01/02 是只读呈现（表 6 规格明写「全只读」）
 EDITABLE_SHEETS = (SHEET_PARTS, SHEET_EXPENSE, SHEET_COLLECTION, SHEET_SITE)
+NO_RETURN_NOTE_LABEL = (
+    "免返标注（仅网页维护，此处只读；仅作提醒，返还要求以明细标记和规则为准）"
+)
 
 _EDITABLE = PatternFill("solid", fgColor="FFF3C4")
 _READONLY = PatternFill("solid", fgColor="EFEFEF")
@@ -578,8 +581,15 @@ def _sheet_basics(wb, db: Session, project: MaintenanceProject,
         ("硬盘不返还默认值(项目级)", "是" if project.no_return_default else "否"),
         ("合同编号(XSDD)", "、".join(c.contract_no for c in contracts)),
         ("前置库种类数 / 件数 / 金额(含税)", "尚未接入"),
+        (NO_RETURN_NOTE_LABEL, project.no_return_note),
     ):
         ws.append([label, value])
+        if label == NO_RETURN_NOTE_LABEL:
+            cell = ws.cell(ws.max_row, 2)
+            cell.data_type = "s"
+            cell.fill = _READONLY
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True, vertical="top")
 
 
 def _sheet_overview(wb, db: Session, project: MaintenanceProject,
@@ -2608,15 +2618,17 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
         )),
         ("缺成本行数", missing_cost_lines),
         ("项目备注", project.project_note),
+        (NO_RETURN_NOTE_LABEL, project.no_return_note),
     ]
     for item in values:
         ws.append(list(item))
-        if item[0] == "项目备注":
+        if item[0] in {"项目备注", NO_RETURN_NOTE_LABEL}:
             cell = ws.cell(ws.max_row, 2)
             # A note beginning with '=' is still text, never an Excel formula.
             cell.data_type = "s"
-            cell.fill = V2_EDITABLE
+            cell.fill = V2_EDITABLE if item[0] == "项目备注" else V2_READONLY
             cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.cell(ws.max_row, 1).alignment = Alignment(wrap_text=True, vertical="top")
         if item[0] == "合同总额（含税）":
             # 只有“唯一生效且计入总额”的合同，项目总额才能无歧义地回写到一条
             # 合同事实。多合同不自动分摊；无合同不凭空创建身份。
