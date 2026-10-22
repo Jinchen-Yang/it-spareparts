@@ -197,6 +197,9 @@ def _fail(exc: ec.WorkbookError):
         "row_conflicts",
         "stale_project_note",
         "stale_site_issue_merge",
+        # Q3=A（2026-10-21）：保护基准/周期漂移是旧簿过期，不是格式错误，走 409
+        # 让前端进重下核对分支；不可 force_takeover。
+        "protection_baseline_drift",
     }
     detail = {"code": exc.code, "message": exc.message, "issues": exc.issues}
     for key in ("rows", "total_count", "fix_hint"):

@@ -231,7 +231,8 @@ class FMaintenanceLine(Base):
     edited_source: Mapped[str] = mapped_column(String(16), nullable=False, server_default="wbdd")
     # 页面/工作簿共用字段保护账本 {field: {value, source_value,
     # updated_by, updated_at, source}}；PN 身份三字段同组保护。
-    # source_value 是首次修改前快照，不是最新原件。空账本不解除历史整行保护。
+    # source_value 跟随最新合法原件；original_source_value 保留首次撤销快照。
+    # 首次未知成员标 original_source_value_known=False；空账本不解除历史整行保护。
     manual_override: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )

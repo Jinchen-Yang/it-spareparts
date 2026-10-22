@@ -172,6 +172,18 @@ def test_stale_workbook_maps_to_conflict():
     assert raised.value.status_code == 409
 
 
+def test_protection_baseline_drift_maps_to_conflict_with_issues():
+    # Q3=A（2026-10-21）：保护基准/周期漂移是旧簿过期（409），issues 带字段级
+    # 明细供前端展示哪些行哪些字段需重新核对；不可 force_takeover。
+    with pytest.raises(HTTPException) as raised:
+        master_api._fail(ec.WorkbookError(
+            "protection_baseline_drift", "保护基准已变化，请重新下载核对",
+            issues=[{"sheet": "03_备件明细", "row": 2, "field": "需求数量",
+                     "reason": "protection_released_since_export"}]))
+    assert raised.value.status_code == 409
+    assert raised.value.detail["issues"][0]["field"] == "需求数量"
+
+
 @pytest.fixture()
 def project_with_lines(db, tmp_path):
     from app.models.maintenance_project import MaintenanceProjectContract

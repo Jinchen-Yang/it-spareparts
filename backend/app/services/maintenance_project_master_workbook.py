@@ -173,6 +173,8 @@ V2_SITE_HEADERS = ["领用单号", "领用日期", "PN", "SN", "领用数量", "
 # 三路合并（用户值 vs 导出基线 vs 服务端现值），取代整本 revision 作废。
 _V2_ROW_BASE_DOMAIN = b"ITDATA_MAINT_MASTER_ROW_BASE_V1\x00"
 V2_BASE_COLUMN = "基线令牌"
+# Excel 单元格硬上限：行级令牌超长必须显式报错，不能被 openpyxl 静默截断。
+_V2_TOKEN_CELL_LIMIT = 32767
 V2_PART_BASE_FIELDS = ("PN", "描述", "需求数量", "SN", "退货数量",
                        "人工未税单位成本", "人工成本原因", "备注")
 V2_EXPENSE_BASE_FIELDS = ("报销日期", "报销人员", "报销类别", "费用分类", "支出事由",
@@ -1306,17 +1308,26 @@ def apply(
                 before_fields = field_protection.snapshot_fields(line)
                 note = field_protection.normalized_value("line_note", refill.note)
                 if field_protection.changed_fields(before_fields, {"line_note": note}):
+                    project_id = plan.project_id or (_line_project_ids or {}).get(line.id)
+                    if project_id is None:
+                        raise WorkbookError(
+                            "project_scope_denied",
+                            "工作簿包含归属已变化的备件行，请重新下载",
+                        )
+                    before_override = dict(line.manual_override or {})
                     line.line_note = note
                     field_protection.record_manual_changes(
                         line, before=before_fields, operated_by=operated_by,
                         source="workbook_manual",
                     )
                     _write_audit(
-                        db, project_id=plan.project_id or _line_project_ids[line.id],
+                        db, project_id=project_id,
                         entity_type="maintenance_line", entity_id=line.id,
                         action="UPDATE", operated_by=operated_by,
-                        reason="工作簿备注修改",
-                        before={"line_note": before_fields["line_note"]},
+                        reason=field_protection.manual_change_reason(
+                            "工作簿备注修改", before_override, line.manual_override),
+                        before={"line_note": before_fields["line_note"],
+                                "manual_override": before_override},
                         after={"line_note": line.line_note,
                                "manual_override": line.manual_override},
                     )
@@ -1955,12 +1966,18 @@ def _v2_hash(values: list[object]) -> str:
 
 
 def _v2_row_base_token(
-    *, sheet: str, entity_id, values: dict[str, object]
+    *, sheet: str, entity_id, values: dict[str, object],
+    protect: dict[str, dict] | None = None,
 ) -> str:
     """行级签名基线（2.7.0）：该行可编辑字段的导出值快照 + HMAC。
 
     与全局表 ``_global_cost_base_token`` 同一模式（域分隔 + 规范 JSON），
     供上传侧三路合并区分「用户改的」与「文件里带出来的导出旧值」。
+    03 备件明细另签 ``protect``（Q3=A，2026-10-21）：受保护字段的解除基准
+    指纹（首次快照 + 保护周期标记），供上传侧识别旧工作簿的基准/周期漂移。
+
+    令牌写入隐藏单元格，超长会被 openpyxl 静默截断成必炸的损坏令牌
+    （2026-10-21 独立验收 MUST-1）：超上限显式报错，绝不静默截断。
     """
     payload = {
         "sheet": sheet,
@@ -1969,6 +1986,8 @@ def _v2_row_base_token(
             str(name): _v2_hash_value(values.get(name)) for name in sorted(values)
         },
     }
+    if protect is not None:
+        payload["protect"] = protect
     payload_bytes = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -1976,10 +1995,17 @@ def _v2_row_base_token(
     signature = hmac.new(
         signing_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
     ).hexdigest()
-    return json.dumps(
+    token = json.dumps(
         {"key_id": key_id, "payload": payload, "signature": signature},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
+    if len(token) > _V2_TOKEN_CELL_LIMIT:
+        raise WorkbookError(
+            "concurrency_token_too_long",
+            f"{sheet} 实体 {entity_id} 的基线令牌长度 {len(token)} 超出 Excel "
+            f"单元格上限 {_V2_TOKEN_CELL_LIMIT}，写入即被静默截断、回传必败；"
+            "请先缩短该行超长文本（如描述/SN/备注）后重新下载")
+    return token
 
 
 def _parse_v2_row_base_token(
@@ -2020,6 +2046,30 @@ def _parse_v2_row_base_token(
         ) from exc
 
 
+# 03 可编辑列中属于需求事实保护的列（人工成本两列走独立成本账本，不在此列）。
+_V2_PART_PROTECT_FIELD_GROUPS = {
+    "PN": frozenset(field_protection.PN_IDENTITY_FIELDS),
+    "描述": frozenset({"description"}),
+    "需求数量": frozenset({"qty"}),
+    "SN": frozenset({"serial_numbers"}),
+    "退货数量": frozenset({"return_qty"}),
+    "备注": frozenset({"line_note"}),
+}
+
+
+def _v2_row_base_protect(value) -> dict | None:
+    """从已验签的行令牌提取保护基准指纹；旧格式令牌（无 protect 键）→ None。
+
+    protect 在签名覆盖的 payload 内，令牌整体已由 ``_parse_v2_row_base_token``
+    验签，这里只做提取，不重复验签。
+    """
+    try:
+        protect = json.loads(str(value))["payload"]["protect"]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return protect if isinstance(protect, dict) else None
+
+
 def _v2_row_base_hash(values: dict[str, object], fields: tuple[str, ...]) -> str:
     """行级基线哈希（进 99_元数据）：缺行=作废时判定「服务端该行是否已变」。"""
     return _v2_hash([_v2_hash_value(values.get(name)) for name in fields])
@@ -2045,6 +2095,14 @@ class V2RowGuard:
     digest: str
     fields: tuple[str, ...] = ()
     entity_type: str = "line"
+    # Q3=A（2026-10-21）：03 触碰行另钉 validate 时刻的解除基准指纹；
+    # apply 拿到行锁后重算一次，不等说明保护基准/周期在 validate→apply
+    # 窗口内被人改过——整本 fail-closed。None = 该 sheet 不参与保护复核。
+    # 返工2（2026-10-21 独立验收 sol B1 / astra MUST-2）：摘要只覆盖
+    # protection_fields 里本次上传实际编辑的事实字段（PN 为完整身份组）；
+    # 未编辑字段（如备注）的保护周期变化不作废整本。
+    protection_digest: str | None = None
+    protection_fields: frozenset[str] = frozenset()
 
 
 class _V2MergeContext:
@@ -2065,6 +2123,10 @@ class _V2MergeContext:
         self.voided_rows: list[dict] = []
         self.site_header_intents: list[dict] = []
         self.site_issue_rows: dict[str, list[int]] = {}
+        # Q3=A：旧工作簿编辑字段的解除基准/保护周期漂移。按字段级收集，
+        # validate 汇总后整次拒绝（原子性同 row_conflicts），但不可被
+        # force_takeover 接管——那是「看到的基准已失效」而非值的新旧之争。
+        self.protection_drifts: list[dict] = []
 
     def note_unresolved_pn(self, pn: str, row_no: int) -> None:
         self.unresolved_pns.setdefault(pn, []).append(row_no)
@@ -2107,7 +2169,9 @@ class _V2MergeContext:
             self.changes.append({**entry, "overridden": False})
 
     def guard(self, *, sheet: str, entity_id, row_label: str,
-              values: dict, fields: tuple[str, ...]) -> None:
+              values: dict, fields: tuple[str, ...],
+              protection_digest: str | None = None,
+              protection_fields: frozenset[str] = frozenset()) -> None:
         """记下这一行在 validate 时刻的服务端指纹。
 
         只给**结局已定且会进入写集合**的行发指纹（合并判定为触碰、显式作废、
@@ -2118,7 +2182,9 @@ class _V2MergeContext:
 
         self.guards.append(V2RowGuard(
             sheet=sheet, entity_id=str(entity_id), row_label=row_label,
-            digest=_v2_row_base_hash(values, fields), fields=fields))
+            digest=_v2_row_base_hash(values, fields), fields=fields,
+            protection_digest=protection_digest,
+            protection_fields=protection_fields))
 
     def record_row_conflict(
         self, *, sheet: str, row_label: str, entity_id, action: str,
@@ -2748,7 +2814,11 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
         values["只读哈希"] = digest
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="03_备件明细", entity_id=line.id,
-            values={name: values.get(name) for name in V2_PART_BASE_FIELDS})
+            values={name: values.get(name) for name in V2_PART_BASE_FIELDS},
+            protect=field_protection.protection_baseline(
+                raw_line_id=line.raw_line_id, edited_source=line.edited_source,
+                manual_override=line.manual_override),
+        )
         base_hashes[str(line.id)] = _v2_row_base_hash(values, V2_PART_BASE_FIELDS)
         ws.append([values[name] for name in V2_PART_HEADERS])
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
@@ -3336,6 +3406,10 @@ def _v2_decimal(
         parsed = Decimal(str(value).replace(",", "").strip())
     except (InvalidOperation, ValueError):
         raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
+    # Reject excessive magnitudes/non-finite input before Decimal.quantize can
+    # raise InvalidOperation. Keep the post-rounding bound below as well.
+    if not parsed.is_finite() or parsed.copy_abs() >= Decimal(1000000000000):
+        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}超出允许范围")
     normalized = (
         field_protection.normalized_value("qty", parsed) if demand_quantity
         else parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -3966,8 +4040,39 @@ def _v2_parse_parts(
             server_values=server_values, baseline=baseline, ctx=merge)
         if merged_row is None:
             continue
+        # Q3=A：旧工作簿编辑字段的解除基准/保护周期漂移校验（仅触碰行、
+        # 仅需求事实字段；无关行/未触碰字段的变化不作废整本）。
+        current_baseline = field_protection.protection_baseline(
+            raw_line_id=line.raw_line_id, edited_source=line.edited_source,
+            manual_override=line.manual_override)
+        touched = _v2_touched_fields(
+            row=row, index=index, base_fields=V2_PART_BASE_FIELDS, baseline=baseline)
+        touched_fact_headers = [
+            name for name in touched if name in _V2_PART_PROTECT_FIELD_GROUPS]
+        touched_fact_fields: set[str] = set()
+        for header in touched_fact_headers:
+            touched_fact_fields |= _V2_PART_PROTECT_FIELD_GROUPS[header]
+        if touched_fact_fields:
+            exported = _v2_row_base_protect(_cell(row, index, V2_BASE_COLUMN))
+            drifted, reason = field_protection.protection_baseline_changed(
+                exported, current_baseline, touched_fact_fields)
+            if drifted:
+                merge.protection_drifts.append({
+                    "sheet": V2_SHEET_PARTS, "row": row_label,
+                    "entity_id": str(line.id),
+                    "field": "、".join(sorted(touched_fact_headers)),
+                    "old": "", "new": "", "base": "",
+                    "reason": reason,
+                })
+        # 返工2（sol B1 / astra MUST-2）：锁内复核只钉本次实际编辑的事实
+        # 字段（PN 完整身份组）的基准摘要；未编辑字段的保护周期变化不算。
         merge.guard(sheet=V2_SHEET_PARTS, entity_id=line.id, row_label=row_label,
-                    values=server_values, fields=V2_PART_BASE_FIELDS)
+                    values=server_values, fields=V2_PART_BASE_FIELDS,
+                    protection_digest=(
+                        field_protection.protection_baseline_digest(
+                            current_baseline, fields=touched_fact_fields)
+                        if touched_fact_fields else None),
+                    protection_fields=frozenset(touched_fact_fields))
 
         # 必须用 rebase 后的行：未触碰字段已换成服务端现值，refill 才不会拿
         # 导出时的旧值静默盖掉他人改动（D-02）。
@@ -5566,6 +5671,10 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
         by_sheet[guard.sheet].append(guard)
 
     fresh_by_key: dict[tuple[str, str], tuple[dict, tuple[str, ...]] | None] = {}
+    # Q3=A：03 触碰行的当前解除基准指纹（锁内新鲜值），与 guard 里 validate
+    # 时刻的指纹比对——本次编辑字段的保护基准/周期在窗口内被人改过同样整本
+    # fail-closed（返工2：复核范围 = guard.protection_fields，不含未编辑字段）。
+    protection_by_key: dict[tuple[str, str], str] = {}
 
     part_guards = by_sheet.get(V2_SHEET_PARTS, [])
     if part_guards:
@@ -5593,6 +5702,16 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
                     line, orders.get(line.order_id), overrides.get(line.id)),
                 V2_PART_BASE_FIELDS,
             )
+            if line is not None and guard.protection_digest is not None:
+                # 返工2（sol B1 / astra MUST-2）：与 validate 同口径，只对该行
+                # 本次实际编辑的事实字段复核（guard.protection_fields）。
+                protection_by_key[(guard.sheet, guard.entity_id)] = (
+                    field_protection.protection_baseline_digest(
+                        field_protection.protection_baseline(
+                            raw_line_id=line.raw_line_id,
+                            edited_source=line.edited_source,
+                            manual_override=line.manual_override),
+                        fields=guard.protection_fields))
 
     expense_guards = by_sheet.get(V2_SHEET_EXPENSE, [])
     if expense_guards:
@@ -5681,6 +5800,17 @@ def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
                 "entity_id": guard.entity_id, "field": "（整行）",
                 "old": "", "new": "", "base": "",
                 "reason": "server_changed_since_validate",
+            })
+            continue
+        if (guard.protection_digest is not None
+                and guard.sheet == V2_SHEET_PARTS
+                and protection_by_key.get((guard.sheet, guard.entity_id))
+                != guard.protection_digest):
+            drifted.append({
+                "sheet": guard.sheet, "row": guard.row_label,
+                "entity_id": guard.entity_id, "field": "（保护基准）",
+                "old": "", "new": "", "base": "",
+                "reason": "protection_changed_since_validate",
             })
     if drifted:
         raise WorkbookError(
@@ -5879,6 +6009,15 @@ def validate_project_master_v2(
         (parsed_refills, uploaded_line_rows, uploaded_line_ids,
          assignment_changes) = _v2_parse_parts(
             db, project_id, wb[V2_SHEET_PARTS], merge)
+        if merge.protection_drifts:
+            # Q3-A：按整次应用原子性拒绝，且不可被 force_takeover 接管——
+            # 用户看到的解除基准已失效，必须重新下载核对，不存在值的新旧之争。
+            raise WorkbookError(
+                "protection_baseline_drift",
+                "以下编辑字段的保护比较基准或保护周期在你下载后已变化，"
+                "本次上传未写入任何数据；请重新下载项目总表并核对这些字段。",
+                issues=[dict(item) for item in merge.protection_drifts],
+            )
         cost_refills = tuple(parsed_refills)
         if (assignment_changes and user_ctx is not None
                 and user_ctx.role not in FULL_SCOPE_ROLES):
@@ -6881,6 +7020,7 @@ def _apply_project_master_v2(
 
         # UPDATE：先归一化再计算真实差异，成本与保护使用同一组最终值。
         protection_before = field_protection.snapshot_fields(line)
+        before_override = dict(line.manual_override or {})
         proposed = {
             key: field_protection.normalized_value(key, value)
             for key, value in {
@@ -6933,10 +7073,13 @@ def _apply_project_master_v2(
                 after["cost"] = str(refill.unit_cost_ex_tax)
             if refill.reason is not None:
                 after["cost_reason"] = refill.reason
+            before["manual_override"] = before_override
             _write_audit(db, project_id=plan.project_id,
                          entity_type="maintenance_line", entity_id=line.id,
-                         action="UPDATE", operated_by=operated_by, reason=audit_reason,
-                         before=before or None, after=after)
+                         action="UPDATE", operated_by=operated_by,
+                         reason=field_protection.manual_change_reason(
+                             audit_reason, before_override, line.manual_override),
+                         before=before, after=after)
             operating_fact_changed = True
     # 行级作废的整单级联：被 VOID 的行所属需求单若活动行归零 → 整单墓碑
     # （需求单搜索消失、氚云重传不复活；恢复走 demands 页面既有入口）。

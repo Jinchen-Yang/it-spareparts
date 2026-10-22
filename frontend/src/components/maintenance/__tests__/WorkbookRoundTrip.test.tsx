@@ -659,6 +659,160 @@ describe("WorkbookRoundTrip", () => {
   });
 });
 
+describe("WorkbookRoundTrip · Q3=A 保护基准漂移（不可接管）", () => {
+  const driftDetail = {
+    code: "protection_baseline_drift",
+    message: "以下编辑字段的保护比较基准或保护周期在你下载后已变化，本次上传未写入任何数据；请重新下载项目总表并核对这些字段。",
+    issues: [
+      {
+        sheet: "03_备件明细", row: "WBDD-1", entity_id: "7",
+        field: "需求数量", reason: "protection_released_since_export",
+      },
+      {
+        sheet: "03_备件明细", row: "WBDD-2", entity_id: "8",
+        field: "PN", reason: "protection_cycle_changed",
+      },
+    ],
+  };
+
+  // 本 describe 不挂在第一个 describe 的钩子下：静态 Modal.error 弹窗不归
+  // RTL cleanup 管，不逐例销毁会跨用例残留——后续用例 findByRole 会先命中
+  // 上一例的旧弹窗，点的是旧闭包（旧 onDownload），断言的全是错的实例。
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+  afterEach(async () => {
+    cleanup();
+    Modal.destroyAll();
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("409 漂移逐字段提示重下核对，且不出现强制接管按钮", async () => {
+    const onApply = vi.fn().mockRejectedValue({
+      response: { status: 409, data: { detail: driftDetail } },
+    });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    await waitFor(() => expect(
+      dialog.getByText(/以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化/),
+    ).toBeVisible());
+    expect(dialog.getByText("03_备件明细 · 行 WBDD-1 · 字段「需求数量」 · 该字段的人工保护在你下载后已被解除")).toBeVisible();
+    expect(dialog.getByText("03_备件明细 · 行 WBDD-2 · 字段「PN」 · 该字段的保护周期在你下载后已变化（期间被解除又重新保护）")).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /强制接管/ })).toBeNull());
+    expect(onApply).toHaveBeenCalledTimes(1);
+    fireEvent.click(dialog.getByRole("button", { name: "知道了，重新下载" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("强制接管重传撞上漂移时切换为重下核对明细，不能再次接管", async () => {
+    const onApply = vi.fn()
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: {
+        code: "row_conflicts", message: "部分行已被他人更新",
+        conflicts: [{ sheet: "03_备件明细", row: "WBDD-1", entity_id: "7", field: "备注", base: "b", old: "o", new: "n" }],
+      } } } })
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: driftDetail } } });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+    fireEvent.click(await screen.findByRole("button", { name: /强制接管并上传/ }));
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    await waitFor(() => expect(
+      dialog.getByText(/不能用强制接管跳过/),
+    ).toBeVisible());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /强制接管/ })).toBeNull());
+    expect(onApply).toHaveBeenLastCalledWith(expect.any(File), { forceTakeover: true });
+  });
+
+  // 返工2（sol B2 / astra MUST-3）：12px 说明文字属 WCAG 普通正文，
+  // 对弹窗白底实测对比度必须 ≥ 4.5:1，不能只信 type="danger" 的默认红。
+  function relativeLuminance(r: number, g: number, b: number): number {
+    const channel = (v: number) => (
+      v / 255 <= 0.03928 ? (v / 255) / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4
+    );
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  }
+
+  function contrastAgainstWhite(color: string): number {
+    const hex = color.match(/^#([0-9a-f]{6})$/i);
+    const rgb = color.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (!hex && !rgb) {
+      throw new Error(`无法从渲染结果解析出说明文字颜色：${JSON.stringify(color)}`);
+    }
+    const [r, g, b] = hex
+      ? [
+          parseInt(hex[1].slice(0, 2), 16),
+          parseInt(hex[1].slice(2, 4), 16),
+          parseInt(hex[1].slice(4, 6), 16),
+        ]
+      : [Number(rgb![1]), Number(rgb![2]), Number(rgb![3])];
+    return (relativeLuminance(255, 255, 255) + 0.05) / (relativeLuminance(r, g, b) + 0.05);
+  }
+
+  it("漂移弹窗 12px 说明文字对白底对比度 ≥ 4.5:1（WCAG AA 正文）", async () => {
+    const onApply = vi.fn().mockRejectedValue({
+      response: { status: 409, data: { detail: driftDetail } },
+    });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={vi.fn().mockResolvedValue(new Blob())}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    const instruction = dialog.getByText(
+      /以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化/,
+    );
+    // 实测实际渲染颜色：内联 style 优先，退回计算样式，不猜 token。
+    const color = instruction.style.color || getComputedStyle(instruction).color;
+    expect(color, `说明文字实际渲染颜色为 ${JSON.stringify(color)}`).toBeTruthy();
+    const ratio = contrastAgainstWhite(color);
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("「知道了，重新下载」点击后真的触发当前总表重新下载并关闭弹窗", async () => {
+    const onDownload = vi.fn().mockResolvedValue(new Blob());
+    const onApply = vi.fn().mockRejectedValue({
+      response: { status: 409, data: { detail: driftDetail } },
+    });
+    const { container } = render(
+      <WorkbookRoundTrip
+        title="总表" filename="t.xlsx"
+        onDownload={onDownload}
+        onApply={onApply}
+        canUpload
+      />,
+    );
+    uploadFile(container, makeFile());
+
+    const dialog = within(await screen.findByRole("dialog", { name: "保护基准已变化，请重新下载工作簿" }));
+    fireEvent.click(dialog.getByRole("button", { name: "知道了，重新下载" }));
+    await waitFor(() => expect(onDownload).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
 describe("WorkbookRoundTrip · 2.7.0 行级冲突与强制接管", () => {
   it("409 冲突展示三值对照，确认后带 force_takeover 重传", async () => {
     const conflicts = [

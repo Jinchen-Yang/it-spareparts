@@ -7,12 +7,15 @@ import type {
   WorkbookApplyOptions,
   WorkbookApplyResult,
   WorkbookFieldChange,
+  WorkbookProtectionDriftDetail,
+  WorkbookProtectionDriftIssue,
   WorkbookSiteIssueMerge,
   WorkbookSiteReplayErrorDetail,
   WorkbookSiteReplayRow,
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
+import { COLORS } from "../../theme";
 
 const { Text } = Typography;
 const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
@@ -334,6 +337,58 @@ export function WorkbookRoundTrip({
     });
   };
 
+  const showProtectionDriftError = (detail: WorkbookProtectionDriftDetail) => {
+    setRetainedDraft(null);
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        modal.destroy();
+        if (closeConfirmation.current === finish) closeConfirmation.current = null;
+        resolve();
+      };
+      const modal = Modal.error({
+        title: "保护基准已变化，请重新下载工作簿",
+        width: 640,
+        content: (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            {/* 静态 Modal.error 不消费 ConfigProvider 主题，type="danger" 会退回
+                antd 默认 danger 红（白底仅 3.27:1）。12px 属 WCAG 普通正文，
+                显式用项目语义色 COLORS.danger（白底 4.54:1 ≥ 4.5:1）。 */}
+            <Text type="danger" style={{ fontSize: 12, color: COLORS.danger }}>
+              以下你编辑的字段，其保护比较基准或保护周期在你下载后已变化；
+              本次上传未写入任何数据，也不能用强制接管跳过。请重新下载最新
+              工作簿，逐项核对这些字段后再上传。
+            </Text>
+            <List
+              size="small"
+              dataSource={detail.issues.slice(0, 30)}
+              renderItem={(issue) => (
+                <List.Item style={{ padding: "4px 0" }}>
+                  <Text style={{ fontSize: 12 }}>
+                    {describeProtectionDrift(issue)}
+                  </Text>
+                </List.Item>
+              )}
+            />
+            {detail.issues.length > 30 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                ……另有 {detail.issues.length - 30} 处，请重新下载后逐项核对
+              </Text>
+            ) : null}
+          </Space>
+        ),
+        okText: "知道了，重新下载",
+        onOk: () => {
+          finish();
+          // 按钮承诺「重新下载」：关闭弹窗后真的触发当前项目总表下载，
+          // 不能只关弹窗让人自己找入口（返工2 顺手修，sol 建议改 2）。
+          void handleDownload();
+        },
+        onCancel: finish,
+      });
+      closeConfirmation.current = finish;
+    });
+  };
+
   const handleUpload = async (file: File) => {
     if (!uploadAllowed.current) return false;
     const requestSession = localStorage.getItem("token");
@@ -358,8 +413,12 @@ export function WorkbookRoundTrip({
       // 2.7.0 行级冲突：展示三值对照，用户确认后可强制接管重传。
       const conflicts = extractConflicts(error);
       const siteReplay = extractSiteReplayError(error);
+      // Q3=A：保护基准/周期漂移——字段级提示重下核对，没有接管按钮。
+      const protectionDrift = extractProtectionDrift(error);
       if (siteReplay) {
         await showSiteReplayError(siteReplay);
+      } else if (protectionDrift) {
+        await showProtectionDriftError(protectionDrift);
       } else if (conflicts?.length) {
         await new Promise<void>((resolve) => {
           const finish = () => {
@@ -407,11 +466,16 @@ export function WorkbookRoundTrip({
               } catch (takeoverError) {
                 if (isCurrent()) {
                   const replayError = extractSiteReplayError(takeoverError);
+                  const driftError = extractProtectionDrift(takeoverError);
                   if (replayError) {
                     // 接管后重校验也可能发现身份碰撞；销毁旧弹窗，让只读
                     // 明细接续同一次上传的生命周期，不能继续提供强制接管。
                     modal.destroy();
                     await showSiteReplayError(replayError);
+                  } else if (driftError) {
+                    // 漂移同样不可接管：销毁接管弹窗，切到重下核对明细。
+                    modal.destroy();
+                    await showProtectionDriftError(driftError);
                   } else {
                     setFeedback({ type: "error", text: readError(takeoverError, "上传失败") });
                   }
@@ -607,6 +671,43 @@ function extractConflicts(error: unknown): WorkbookFieldChange[] | null {
     return (detail as { conflicts: WorkbookFieldChange[] }).conflicts;
   }
   return null;
+}
+
+const PROTECTION_DRIFT_REASONS: Record<string, string> = {
+  protection_released_since_export: "该字段的人工保护在你下载后已被解除",
+  protection_cycle_changed: "该字段的保护周期在你下载后已变化（期间被解除又重新保护）",
+  protection_started_since_export: "该字段在你下载后新建立了人工保护",
+  protection_evidence_missing: "工作簿缺少该字段的保护基准证据（旧版导出）",
+};
+
+function describeProtectionDrift(issue: WorkbookProtectionDriftIssue): string {
+  const reason = PROTECTION_DRIFT_REASONS[issue.reason] || issue.reason;
+  return [
+    issue.sheet ? String(issue.sheet) : null,
+    issue.row ? `行 ${issue.row}` : null,
+    issue.field ? `字段「${issue.field}」` : null,
+    reason,
+  ].filter(Boolean).join(" · ");
+}
+
+function isProtectionDriftIssue(value: unknown): value is WorkbookProtectionDriftIssue {
+  if (!value || typeof value !== "object") return false;
+  const issue = value as Partial<WorkbookProtectionDriftIssue>;
+  return typeof issue.sheet === "string" && typeof issue.row === "string"
+    && typeof issue.field === "string" && typeof issue.reason === "string";
+}
+
+/** 从 409 响应里提取保护基准/周期漂移明细（Q3=A，不可强制接管）。 */
+function extractProtectionDrift(error: unknown): WorkbookProtectionDriftDetail | null {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response
+    ?.data?.detail;
+  if (!detail || typeof detail !== "object") return null;
+  const candidate = detail as Partial<WorkbookProtectionDriftDetail>;
+  if (candidate.code !== "protection_baseline_drift"
+    || typeof candidate.message !== "string"
+    || !Array.isArray(candidate.issues) || !candidate.issues.length
+    || !candidate.issues.every(isProtectionDriftIssue)) return null;
+  return candidate as WorkbookProtectionDriftDetail;
 }
 
 function describeConflict(row: WorkbookFieldChange, index: number): string {

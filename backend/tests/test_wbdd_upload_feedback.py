@@ -44,7 +44,7 @@ def test_loader_counts_actual_changes_unchanged_and_blocked_fields(db):
     protected = db.scalar(select(FMaintenanceLine).where(
         FMaintenanceLine.raw_line_id == "protected",
     ))
-    protected.qty = Decimal("7")
+    protected.qty = Decimal(7)
     protected.manual_override = {"qty": {"value": "7", "source_value": "2"}}
     db.commit()
 
@@ -64,13 +64,13 @@ def test_loader_counts_actual_changes_unchanged_and_blocked_fields(db):
     assert report["protected_field_counts"] == {"qty": 1}
     assert report["fact_rows_legacy_review"] == 0
     db.refresh(protected)
-    assert protected.qty == Decimal("7")
+    assert protected.qty == Decimal(7)
 
 
 def test_protection_can_overlap_real_update_and_audit_records_effective_values(db):
     _load(db, [_line("protected-and-changed")])
     line = db.scalar(select(FMaintenanceLine))
-    line.qty = Decimal("7")
+    line.qty = Decimal(7)
     line.manual_override = {"qty": {"value": "7", "source_value": "2"}}
     project = MaintenanceProject(
         project_id="feedback-project", project_code="FEEDBACK",
@@ -96,36 +96,43 @@ def test_protection_can_overlap_real_update_and_audit_records_effective_values(d
     db.refresh(state)
     assert state.revision == base_revision + 1
     db.refresh(line)
-    assert line.qty == Decimal("7")
+    assert line.qty == Decimal(7)
     assert line.description == "源描述更新"
     audit = db.scalar(select(SysAuditLog).where(
         SysAuditLog.entity_type == "import_overwrite",
         SysAuditLog.entity_id == line.id,
     ).order_by(SysAuditLog.id.desc()))
-    assert Decimal(audit.after_json["qty"]) == Decimal("7")
+    assert Decimal(audit.after_json["qty"]) == Decimal(7)
     assert audit.after_json["description"] == "源描述更新"
 
-    # 已有保护标记但源值相同，没有实际挡住字段，也不产生新审计或 bump。
+    # 来源变成当前人工值：不产生业务覆盖审计，但最新来源快照变化需 bump。
     noop = _load(db, [_line("protected-and-changed", qty="7", description="源描述更新")])
     assert noop["fact_rows_updated"] == 1
     assert noop["fact_rows_semantic_updated"] == 0
     assert noop["fact_rows_unchanged"] == 1
     assert noop["fact_rows_protected"] == 0
     assert noop["protected_field_counts"] == {}
-    assert noop["workbook_projects_bumped"] == 0
+    assert noop["workbook_projects_bumped"] == 1
     db.refresh(state)
-    assert state.revision == base_revision + 1
+    assert state.revision == base_revision + 2
     assert db.scalars(select(SysAuditLog).where(
         SysAuditLog.entity_type == "import_overwrite",
         SysAuditLog.entity_id == line.id,
     )).all() == [audit]
+    refresh_audit = db.scalar(select(SysAuditLog).where(
+        SysAuditLog.entity_type == "maintenance_field_protection",
+        SysAuditLog.entity_id == line.id,
+    ).order_by(SysAuditLog.id.desc()))
+    assert refresh_audit.action == "source_snapshot_refresh"
+    assert Decimal(refresh_audit.before_json["manual_override"]["qty"]["source_value"]) == Decimal(5)
+    assert Decimal(refresh_audit.after_json["manual_override"]["qty"]["source_value"]) == Decimal(7)
 
 
 def test_legacy_review_excludes_manually_created_identity(db):
     _load(db, [_line("source-workbook")])
     imported = db.scalar(select(FMaintenanceLine))
     imported.edited_source = "workbook_manual"
-    imported.qty = Decimal("8")
+    imported.qty = Decimal(8)
     imported.description = "人工描述"
     # 与总表 CREATE 一致：新建人工身份、专属批次，挂在原需求单下；
     # 不能先把假人工行从 WBDD 导入，再仅凭改 edited_source 模拟 CREATE。
@@ -140,14 +147,14 @@ def test_legacy_review_excludes_manually_created_identity(db):
     manual = FMaintenanceLine(
         raw_line_id=manual_id, order_id=imported.order_id, line_no=2,
         part_id=imported.part_id, pn_std=imported.pn_std, pn_raw=imported.pn_raw,
-        qty=Decimal("8"), return_qty=Decimal("0"), description="人工描述",
+        qty=Decimal(8), return_qty=Decimal(0), description="人工描述",
         edited_source="workbook_manual",
         is_active=True, import_batch_id=manual_batch.id,
     )
     db.add(manual)
     db.commit()
 
-    manual_incoming = {**_line(manual_id), "line_no": 2, "return_qty": Decimal("0")}
+    manual_incoming = {**_line(manual_id), "line_no": 2, "return_qty": Decimal(0)}
     report = _load(db, [_line("source-workbook"), manual_incoming])
 
     assert report["fact_rows_updated"] == 2
@@ -161,7 +168,7 @@ def test_legacy_review_excludes_manually_created_identity(db):
 def test_skip_counts_existing_rows_without_claiming_updates_or_protection(db):
     _load(db, [_line("known")])
     line = db.scalar(select(FMaintenanceLine))
-    line.qty = Decimal("7")
+    line.qty = Decimal(7)
     line.manual_override = {"qty": {"value": "7", "source_value": "2"}}
     db.commit()
 
@@ -177,7 +184,7 @@ def test_skip_counts_existing_rows_without_claiming_updates_or_protection(db):
     assert report["protected_field_counts"] is None
     assert report["fact_rows_legacy_review"] is None
     db.refresh(line)
-    assert line.qty == Decimal("7")
+    assert line.qty == Decimal(7)
 
 
 def test_header_only_updates_are_reported_separately_from_unchanged_lines(db):
@@ -237,12 +244,12 @@ def test_feedback_counts_distinct_line_ids_across_upsert_chunks(db, monkeypatch)
     protected = db.scalar(select(FMaintenanceLine).where(
         FMaintenanceLine.raw_line_id == "protected",
     ))
-    protected.qty = Decimal("7")
+    protected.qty = Decimal(7)
     protected.manual_override = {"qty": {"value": "7", "source_value": "2"}}
     legacy = db.scalar(select(FMaintenanceLine).where(
         FMaintenanceLine.raw_line_id == "legacy",
     ))
-    legacy.qty = Decimal("8")
+    legacy.qty = Decimal(8)
     legacy.edited_source = "workbook_manual"
     db.commit()
 
@@ -299,7 +306,7 @@ def test_upload_response_and_replay_keep_feedback_and_missing_lines_separate(db,
     line = db.scalar(select(FMaintenanceLine).where(
         FMaintenanceLine.raw_line_id == "SYN-L001-1",
     ))
-    line.qty = Decimal("7")
+    line.qty = Decimal(7)
     line.manual_override = {"qty": {"value": "7", "source_value": "3"}}
     db.commit()
     rows[0]["需求明细.需求数量"] = "5"
@@ -324,8 +331,8 @@ def test_upload_response_and_replay_keep_feedback_and_missing_lines_separate(db,
 
 def test_pipeline_feedback_waits_for_concurrent_manual_edit(db, tmp_path):
     """两个真实 PG Session：源上传取全局锁后必须按已提交人工值算回执。"""
-    from concurrent.futures import ThreadPoolExecutor
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     from sqlalchemy import event, text
 
@@ -402,8 +409,15 @@ def test_pipeline_feedback_waits_for_concurrent_manual_edit(db, tmp_path):
     assert report["fact_rows_unchanged"] == 1
     assert report["fact_rows_protected"] == 1
     assert report["protected_field_counts"] == {"qty": 1}
-    assert report["workbook_projects_bumped"] == 0
+    assert report["workbook_projects_bumped"] == 1
     db.refresh(state)
-    assert state.revision == base_revision + 1  # 只由人工编辑推进，导入不重复 bump
+    # 人工编辑与后续合法来源快照变化各推进一次；来源没有覆盖人工事实。
+    assert state.revision == base_revision + 2
     line = db.scalar(select(FMaintenanceLine))
-    assert line.qty == Decimal("7")
+    assert line.qty == Decimal(7)
+    assert Decimal(line.manual_override["qty"]["source_value"]) == Decimal(5)
+    refresh_audit = db.scalar(select(SysAuditLog).where(
+        SysAuditLog.entity_type == "maintenance_field_protection",
+        SysAuditLog.entity_id == line.id,
+    ))
+    assert refresh_audit.action == "source_snapshot_refresh"

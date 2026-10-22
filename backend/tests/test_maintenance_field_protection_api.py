@@ -3,16 +3,19 @@
 from datetime import date
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine
 from app.models.maintenance_project import MaintenanceProjectUserAssignment
-from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectOperationAudit,
+    MaintenanceProjectWorkbookState,
+)
 from app.models.system import SysUser
 from app.services import maintenance_demand_manual as manual
-from sqlalchemy import select
 from tests import factories as f
 from tests.test_demand_manual_api_guards import _admin_client, _client
 from tests.test_demand_manual_edit import _batch, _make_project, _seed_line
@@ -22,6 +25,94 @@ def _read_line(client, order):
     response = client.get(f"/api/maintenance/demands/orders/{order.raw_order_id}/lines")
     assert response.status_code == 200, response.text
     return response.json()["items"][0]
+
+
+def _patch(client, order, raw_line_id, updates):
+    response = client.patch(f"/api/maintenance/demands/lines/{raw_line_id}", json={
+        "updates": updates, "reason": "核对来源值",
+        "expected_digest": _read_line(client, order)["digest"],
+    })
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _upload(db, order, line, **changes):
+    source = {
+        **f.maintenance_line(order.raw_order_id, line.raw_line_id, "PN-E1", qty="2"),
+        **changes,
+    }
+    report = loader.load(db, f.maintenance_result(
+        {order.raw_order_id: f.maintenance_head(order.raw_order_id, on=date(2026, 3, 1))},
+        [source],
+    ), _batch(db), date(2026, 10, 20), mode="upsert")
+    db.commit()
+    return report
+
+
+def test_page_return_to_source_releases_quantity_with_audit(db):
+    order, line = _seed_line(db)
+    _make_project(db, tag="AUTO-RELEASE", source_order_id=order.raw_order_id)
+    client = _admin_client(db)
+    assert _patch(client, order, line.raw_line_id, {"qty": 5})["protected_fields"] == ["qty"]
+    restored = _patch(client, order, line.raw_line_id, {"qty": "2.000"})
+    assert restored["protected_fields"] == []
+    assert restored["manual_override"] == {}
+    audits = list(db.scalars(select(MaintenanceProjectOperationAudit).where(
+        MaintenanceProjectOperationAudit.entity_id == line.raw_line_id,
+        MaintenanceProjectOperationAudit.action == "page_update",
+    ).order_by(MaintenanceProjectOperationAudit.id)))
+    assert len(audits) == 2
+    assert "改回本轮首次快照（原值），保护解除" in audits[-1].reason
+    assert audits[-1].before_json["manual_override"]["qty"]["value"] == "5.000"
+    assert audits[-1].after_json["manual_override"] == {}
+    _upload(db, order, line, qty="9")
+    assert _read_line(client, order)["qty"] == "9.000"
+
+
+def test_pn_group_releases_only_when_every_member_returns_to_source(db):
+    order, line = _seed_line(db)
+    _make_project(db, tag="PN-RELEASE", source_order_id=order.raw_order_id)
+    db.add(DimPart(pn_std="PN-OTHER", status="active"))
+    db.commit()
+    client = _admin_client(db)
+    _patch(client, order, line.raw_line_id, {
+        "pn_std": "PN-OTHER", "pn_raw": "人工追溯文字",
+    })
+    partial = _patch(client, order, line.raw_line_id, {"pn_std": "  pn-e1  "})
+    assert partial["protected_fields"] == ["part_id", "pn_raw", "pn_std"]
+    assert partial["pn_raw"] == "人工追溯文字"
+    restored = _patch(client, order, line.raw_line_id, {"pn_raw": "PN-E1"})
+    assert restored["protected_fields"] == []
+    assert restored["manual_override"] == {}
+    _upload(db, order, line, pn_std="PN-OTHER", pn_raw="PN-OTHER")
+    assert _read_line(client, order)["pn_std"] == "PN-OTHER"
+
+
+@pytest.mark.parametrize("final_qty", [5, 3])
+def test_page_different_manual_quantity_stays_protected(db, final_qty):
+    order, line = _seed_line(db)
+    _make_project(db, tag="KEEP-QTY", source_order_id=order.raw_order_id)
+    client = _admin_client(db)
+    _patch(client, order, line.raw_line_id, {"qty": 5})
+    _patch(client, order, line.raw_line_id, {"qty": final_qty})
+    _upload(db, order, line, qty="9")
+    current = _read_line(client, order)
+    assert current["qty"] == f"{final_qty}.000"
+    assert current["protected_fields"] == ["qty"]
+
+
+@pytest.mark.parametrize("source_note", [None, "来源备注"])
+def test_page_explicit_null_releases_only_when_source_is_empty(db, source_note):
+    order, line = _seed_line(db)
+    _make_project(db, tag="NULL-RELEASE", source_order_id=order.raw_order_id)
+    _upload(db, order, line, line_note=source_note)
+    client = _admin_client(db)
+    _patch(client, order, line.raw_line_id, {"line_note": "人工备注"})
+    cleared = _patch(client, order, line.raw_line_id, {"line_note": None})
+    assert cleared["line_note"] is None
+    assert cleared["protected_fields"] == (["line_note"] if source_note else [])
+    _upload(db, order, line, line_note="之后来源备注")
+    assert _read_line(client, order)["line_note"] == (None if source_note else "之后来源备注")
 
 
 def test_page_note_protects_only_note_and_source_upload_updates_quantity(db):

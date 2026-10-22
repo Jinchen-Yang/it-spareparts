@@ -44,7 +44,9 @@ from app.services.maintenance_cost import (
 from app.services.maintenance_field_protection import (
     DEMAND_FACT_FIELDS,
     legacy_review_condition,
+    manual_change_reason,
     normalized_value,
+    original_source_snapshot,
     protected_fields,
     record_manual_changes,
     snapshot_fields,
@@ -405,7 +407,9 @@ def patch_demand_line(
     after = _line_snapshot(line)
     _write_audit(
         db, source_order_id=order.raw_order_id, entity_id=line.raw_line_id,
-        action="page_update", operated_by=operated_by, reason=reason.strip(),
+        action="page_update", operated_by=operated_by,
+        reason=manual_change_reason(
+            reason.strip(), before["manual_override"], after["manual_override"]),
         before=before, after=after,
         project_id=(sorted(projects)[0] if len(projects) == 1 else None),
     )
@@ -669,7 +673,7 @@ def clear_override(
     before = _line_snapshot(line)
     restored_fields: set[str] = {field}
     # PN 组 clear 时 field 自身可能无独立 override（只 override 了另一字符串）
-    source_value = (entry or {}).get("source_value")
+    source_known, source_value = original_source_snapshot(entry or {})
     if field in _QTY_COLUMNS and source_value is not None:
         setattr(line, field, Decimal(str(source_value)).quantize(Decimal("0.001")))
     elif field in ("pn_std", "pn_raw"):
@@ -680,22 +684,26 @@ def clear_override(
         # "pn_std=B 但 part_id=A"的错位身份（review 批 3 #1）。
         std_entry = override.get("pn_std") or {}
         raw_entry = override.get("pn_raw") or {}
-        if "pn_std" in override:
-            line.pn_std = std_entry.get("source_value")
-        if "pn_raw" in override:
-            line.pn_raw = raw_entry.get("source_value")
+        for name, peer in (("pn_std", std_entry), ("pn_raw", raw_entry)):
+            known, original = original_source_snapshot(peer)
+            if known:
+                setattr(line, name, original)
         restored_fields |= {"pn_std", "pn_raw"}
         # part_id 非空（NOT NULL 约束）：快照 key 存在即恢复。
         part_id_snapshot = None
         has_pid_snapshot = False
-        for e in (std_entry, raw_entry):
-            if "source_value_part_id" in e:
-                part_id_snapshot = e["source_value_part_id"]
-                has_pid_snapshot = True
-                break
-        if "source_value" in (override.get("part_id") or {}):
-            part_id_snapshot = override["part_id"]["source_value"]
+        part_entry = override.get("part_id") or {}
+        known, original = original_source_snapshot(part_entry)
+        if known:
+            part_id_snapshot = original
             has_pid_snapshot = True
+        elif part_entry.get("original_source_value_known") is not False:
+            # 仅兼容旧账本的首次身份旁证；明确未知时不能用最新来源冒充首次。
+            for e in (std_entry, raw_entry):
+                if "source_value_part_id" in e:
+                    part_id_snapshot = e["source_value_part_id"]
+                    has_pid_snapshot = True
+                    break
         if has_pid_snapshot and part_id_snapshot != line.part_id:
             # clear 回到原身份也是换绑：B 期间的人工价不得留给 A
             _retire_manual_cost_override(db, line.id, operated_by=operated_by)
@@ -705,7 +713,7 @@ def clear_override(
         override.pop("pn_std", None)
         override.pop("pn_raw", None)
         override.pop("part_id", None)
-    else:
+    elif source_known:
         setattr(line, field, source_value)
     override.pop(field, None)
     line.manual_override = override
