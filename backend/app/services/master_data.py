@@ -505,6 +505,34 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
     a = db.get(PartAlias, alias_id)
     if a is None:
         raise AliasError(f"别名不存在: {alias_id}")
+
+    # catalog-v2 子表触发器会推进父 PN 版本。与导入、merge、rename 保持
+    # 父先子后的锁顺序，避免审核先持 alias tuple 再等父、改名持父再等 alias。
+    old_parent = a.part_id or db.scalar(select(DimPart.id).where(DimPart.pn_std == a.pn_std))
+    target = None
+    if action == "reassign":
+        if not target_pn:
+            raise AliasError("reassign 需要 target_pn")
+        target = db.scalar(select(DimPart).where(DimPart.pn_std == target_pn))
+        if target is None or target.status != "active":
+            raise AliasError(f"目标型号不存在或不可用: {target_pn}")
+    parent_ids = {pid for pid in (old_parent, target.id if target is not None else None)
+                  if pid is not None}
+    locked = {part.id: part for part in db.scalars(
+        select(DimPart).where(DimPart.id.in_(parent_ids)).order_by(DimPart.id)
+        .with_for_update().execution_options(populate_existing=True))}
+    a = db.scalar(select(PartAlias).where(PartAlias.id == alias_id)
+                  .execution_options(populate_existing=True))
+    if a is None:
+        raise AliasError(f"别名不存在: {alias_id}")
+    current_parent = a.part_id or db.scalar(select(DimPart.id).where(DimPart.pn_std == a.pn_std))
+    if current_parent != old_parent:
+        # 等父锁期间发生换属时不可持旧父锁再追新父；本次零写，让人刷新后重试。
+        raise AliasError("别名归属已变化，请刷新后重新操作")
+    if target is not None:
+        target = locked.get(target.id)
+        if target is None or target.status != "active" or target.pn_std != target_pn:
+            raise AliasError(f"目标型号不存在或不可用: {target_pn}")
     before = {"pn_std": a.pn_std, "part_id": a.part_id, "status": a.status}
     repointed = {}
 
@@ -513,13 +541,8 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
     elif action == "reject":
         a.status, a.needs_review = "rejected", False
     elif action == "reassign":
-        if not target_pn:
-            raise AliasError("reassign 需要 target_pn")
         if a.pn_raw == a.pn_std:
             raise AliasError("身份别名改指等价于合并型号，请使用合并功能")
-        target = db.scalar(select(DimPart).where(DimPart.pn_std == target_pn))
-        if target is None or target.status != "active":
-            raise AliasError(f"目标型号不存在或不可用: {target_pn}")
         a.part_id, a.pn_std = target.id, target.pn_std
         a.status, a.needs_review, a.source = "active", False, "manual"
         # 既有事实行按 pn_raw 重指（库存不存 pn_raw，新映射在下次导入生效）

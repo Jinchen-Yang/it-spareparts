@@ -125,6 +125,9 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "catalog_v2_cursor", "catalog_v2_payload_fragment", "catalog_v2_snapshot",
+    "catalog_v2_projection", "catalog_v2_batch", "catalog_v2_alarm",
+    "catalog_v2_epoch", "catalog_v2_change",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",

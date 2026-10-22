@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Computed,
@@ -72,6 +73,9 @@ class DimPart(Base):
         ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]"))
     # category_source：品类来源 AUTO(轻量分类引擎)/MANUAL(人工)/IMPORT(氚云)；空=未分类。
     category_source: Mapped[str | None] = mapped_column(String(16))
+    # D-36：数据库触发器覆盖 ORM、Core、upsert 和子表变化；调用方不可倒拨。
+    aggregate_revision: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    identity_revision: Mapped[int] = mapped_column(BigInteger, server_default="1")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime, server_default=func.now(), onupdate=func.now()
