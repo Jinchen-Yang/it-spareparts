@@ -37,6 +37,7 @@ from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
+from app.models.system import SysUser
 from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
@@ -80,6 +81,10 @@ _QUANT = Decimal("0.01")
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
 MAX_EXPORT_ROWS = 50_000
+# 总览返件实收排行条数（项目 / 登记人同一口径，2026-10-22 由前 10 扩为前 40）。
+TOP_N = 40
+# 登记人全量清单上限（前端按人名检索；登记人数远小于此值，超出即截断并标记）。
+REGISTRANT_LIMIT = 500
 
 
 class DashboardInputError(ValueError):
@@ -314,10 +319,10 @@ class ReceiptFact:
     unit: str | None = None  # 主数据主单位；未解析身份 → 待核（None，M12）
 
 
-def receipt_facts(db: Session, filters: _Filters) -> list[ReceiptFact]:
-    """期间内有效实收（有业务日），按项目×身份×件况聚合；退货不参与。"""
+def _receipt_conditions(filters: _Filters) -> list:
+    """期间内有效实收的公共条件（有业务日、授权范围、关键词）。"""
     lower, upper = _period_bounds(filters.start, filters.end)
-    conditions = [
+    return [
         MaintenanceRkdReturnLine.line_status == "active",
         *_occurred_period_conditions(lower, upper),
         *_scope_condition(MaintenanceRkdReturnLine.project_id, filters.scope),
@@ -327,6 +332,11 @@ def receipt_facts(db: Session, filters: _Filters) -> list[ReceiptFact]:
             part_ids=filters.part_ids, keyword=filters.keyword,
         ),
     ]
+
+
+def receipt_facts(db: Session, filters: _Filters) -> list[ReceiptFact]:
+    """期间内有效实收（有业务日），按项目×身份×件况聚合；退货不参与。"""
+    conditions = _receipt_conditions(filters)
     rows = db.execute(
         select(
             MaintenanceRkdReturnLine.project_id,
@@ -964,17 +974,7 @@ def build_valuation(
     """
     settings = settings or get_settings()
     bundle = ValuationBundle(ratio=ratio)
-    lower, upper = _period_bounds(filters.start, filters.end)
-    conditions = [
-        MaintenanceRkdReturnLine.line_status == "active",
-        *_occurred_period_conditions(lower, upper),
-        *_scope_condition(MaintenanceRkdReturnLine.project_id, filters.scope),
-        *_keyword_condition(
-            MaintenanceRkdReturnLine.part_id,
-            MaintenanceRkdReturnLine.pn,
-            part_ids=filters.part_ids, keyword=filters.keyword,
-        ),
-    ]
+    conditions = _receipt_conditions(filters)
     lines = db.execute(
         select(
             MaintenanceRkdReturnLine.rkd_line_id,
@@ -1238,6 +1238,98 @@ def _coverage_pct(estimated: Decimal, received: Decimal) -> float | None:
 
 # ---------- T1 总览 ----------
 
+def _user_display_names(db: Session, usernames: set[str]) -> dict[str, str]:
+    """登记人账号 → 显示名（停用账号照常解析；无显示名不臆造）。"""
+    if not usernames:
+        return {}
+    return {
+        username: name.strip()
+        for username, name in db.execute(
+            select(SysUser.username, SysUser.display_name)
+            .where(SysUser.username.in_(usernames))
+        ).all()
+        if name and name.strip()
+    }
+
+
+def registrant_rows(db: Session, filters: _Filters) -> tuple[list[dict], bool]:
+    """期间内返件实收按登记人（created_by）聚合，返件实收降序。
+
+    登记人 = 行的 created_by：手工登记为登记账号，RKD 导入为执行导入的账号。
+    数量按单位分桶（同项目排行，不跨单位求和）；坏件判定同总览卡片。
+    """
+    rows = db.execute(
+        select(
+            MaintenanceRkdReturnLine.created_by,
+            MaintenanceRkdReturnLine.project_id,
+            MaintenanceRkdReturnLine.part_id,
+            MaintenanceRkdReturnLine.test_result,
+            MaintenanceRkdReturnLine.source,
+            func.sum(MaintenanceRkdReturnLine.qty),
+            func.count(),
+            func.max(MaintenanceRkdReturnLine.occurred_at),
+        ).where(*_receipt_conditions(filters)).group_by(
+            MaintenanceRkdReturnLine.created_by,
+            MaintenanceRkdReturnLine.project_id,
+            MaintenanceRkdReturnLine.part_id,
+            MaintenanceRkdReturnLine.test_result,
+            MaintenanceRkdReturnLine.source,
+        )
+    ).all()
+    units = _part_units(
+        db, {part_id for _u, _p, part_id, *_rest in rows if part_id is not None}
+    )
+    per_user: dict[str, dict[str, Any]] = {}
+    for (username, project_id, part_id, test_result, source, qty, count,
+         last_at) in rows:
+        entry = per_user.setdefault(username, {
+            "buckets": QtyBuckets("receipt_qty", "bad_receipt_qty"),
+            "lines": 0, "projects": set(), "sources": set(), "last_at": None,
+        })
+        unit = units.get(part_id) if part_id is not None else None
+        qty = Decimal(qty)
+        entry["buckets"].add(
+            unit, receipt_qty=qty,
+            bad_receipt_qty=qty if policy.is_bad_condition(test_result) else _ZERO,
+        )
+        entry["lines"] += int(count)
+        entry["projects"].add(project_id)
+        entry["sources"].add(source)
+        if last_at is not None and (
+            entry["last_at"] is None or last_at > entry["last_at"]
+        ):
+            entry["last_at"] = last_at
+    ordered = sorted(
+        per_user.items(),
+        key=lambda item: (-item[1]["buckets"].total("receipt_qty"), item[0]),
+    )
+    truncated = len(ordered) > REGISTRANT_LIMIT
+    ordered = ordered[:REGISTRANT_LIMIT]
+    names = _user_display_names(db, {username for username, _ in ordered})
+
+    def _flat(value: Decimal | None) -> str | None:
+        return None if value is None else _qty(value)
+
+    return [
+        {
+            "created_by": username,
+            "created_by_name": names.get(username),
+            "receipt_qty": _flat(entry["buckets"].flat("receipt_qty")),
+            "bad_receipt_qty": _flat(entry["buckets"].flat("bad_receipt_qty")),
+            "line_count": entry["lines"],
+            "project_count": len(entry["projects"]),
+            "sources": sorted(entry["sources"]),
+            "last_occurred_at": (
+                entry["last_at"].isoformat() if entry["last_at"] else None
+            ),
+            "unit_breakdown": entry["buckets"].breakdown(
+                "receipt_qty", "bad_receipt_qty", formatter=_qty_formatter,
+            ),
+        }
+        for username, entry in ordered
+    ], truncated
+
+
 def build_summary_payload(
     db: Session,
     filters: _Filters,
@@ -1443,7 +1535,9 @@ def build_summary_payload(
     top_projects = sorted(
         project_units.items(),
         key=lambda item: (-item[1].total("receipt_qty"), item[0]),
-    )[:10]
+    )[:TOP_N]
+
+    registrants, registrants_truncated = registrant_rows(db, filters)
 
     notes = []
     # v3：无业务日期实收提示单位写实——单一单位给合计；混合不 asserting
@@ -1509,6 +1603,8 @@ def build_summary_payload(
             }
             for project_id, buckets in top_projects
         ],
+        "registrants": registrants,
+        "registrants_truncated": registrants_truncated,
         "notes": notes,
     }
 
@@ -1834,25 +1930,18 @@ def build_receipt_detail_rows(
     include_amounts: bool,
     test_result: str | None = None,
     source: str | None = None,
+    created_by: str | None = None,
     ratio: Decimal | None = None,
     settings: Settings | None = None,
 ) -> tuple[list[dict], int]:
     """行级实收明细（完整筛选集先取全量再分页；金额列仅 V）。"""
-    lower, upper = _period_bounds(filters.start, filters.end)
-    conditions = [
-        MaintenanceRkdReturnLine.line_status == "active",
-        *_occurred_period_conditions(lower, upper),
-        *_scope_condition(MaintenanceRkdReturnLine.project_id, filters.scope),
-        *_keyword_condition(
-            MaintenanceRkdReturnLine.part_id,
-            MaintenanceRkdReturnLine.pn,
-            part_ids=filters.part_ids, keyword=filters.keyword,
-        ),
-    ]
+    conditions = _receipt_conditions(filters)
     if test_result is not None:
         conditions.append(MaintenanceRkdReturnLine.test_result == test_result)
     if source is not None:
         conditions.append(MaintenanceRkdReturnLine.source == source)
+    if created_by is not None:
+        conditions.append(MaintenanceRkdReturnLine.created_by == created_by)
     lines = db.execute(
         select(
             MaintenanceRkdReturnLine.rkd_line_id,
@@ -1867,6 +1956,7 @@ def build_receipt_detail_rows(
             MaintenanceRkdReturnLine.qty,
             MaintenanceRkdReturnLine.source,
             MaintenanceRkdReturnLine.review_required,
+            MaintenanceRkdReturnLine.created_by,
         )
         .where(*conditions)
         .order_by(
@@ -1882,6 +1972,7 @@ def build_receipt_detail_rows(
             .where(FMaintenanceOrder.raw_order_id.in_(order_ids))
         ).all())
     units = _line_units(db, {row.part_id for row in lines if row.part_id is not None})
+    creator_names = _user_display_names(db, {row.created_by for row in lines})
     bundle = (
         build_valuation(db, filters, ratio=ratio, settings=settings)
         if include_amounts else None
@@ -1904,6 +1995,8 @@ def build_receipt_detail_rows(
             "qty": _qty(Decimal(line.qty)),
             "source": line.source,
             "review_required": bool(line.review_required),
+            "created_by": line.created_by,
+            "created_by_name": creator_names.get(line.created_by),
         }
         if include_amounts and bundle is not None:
             valuation = bundle.line_values.get(line.rkd_line_id, {

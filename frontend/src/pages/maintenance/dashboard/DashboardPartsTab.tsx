@@ -7,7 +7,7 @@
  * 价值列显示「待试算」（awaiting_ratio），参考价照常展示。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Row, Select, Space, Table, Typography } from "antd";
+import { Alert, Button, Card, Select, Space, Table, Typography } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { TaxMoney } from "../../../context/TaxBasis";
 import {
@@ -310,7 +310,7 @@ export default function DashboardPartsTab({
       )}
 
       {amountsVisible && cards ? (
-        <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="valuation-cards">
+        <div className="mdb-kpi-grid" data-testid="valuation-cards">
           <KpiCard label="坏件试算价值（主展示口径）" loading={loading} testId="kpi-bad-value"
             value={ratioReady ? (
               <TaxMoney scope="maintenance" stack exact
@@ -344,7 +344,7 @@ export default function DashboardPartsTab({
                 ) : null}
               </Space>
             )} />
-        </Row>
+        </div>
       ) : null}
 
       <Space wrap size={12}>

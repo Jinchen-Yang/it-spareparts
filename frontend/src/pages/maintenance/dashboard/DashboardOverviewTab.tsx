@@ -9,8 +9,7 @@
  * 无制单日期下单单独成桶说明（不冒充入期）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Row, Space, Table, Typography } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import { Alert, Button, Space, Typography } from "antd";
 import EChartContainer from "../../../components/charts/EChartContainer";
 import type { ECOption } from "../../../components/charts/echartsCore";
 import { CHART_COLORS } from "../../../components/charts/chartTheme";
@@ -20,9 +19,9 @@ import {
   fetchDashboardSummary,
   type OrdersResponse,
   type SummaryResponse,
-  type SummaryResponse as Summary,
 } from "../../../api/maintenanceDashboard";
 import type { ReceiptsDrill } from "./ReceiptsDrillDrawer";
+import ReceiptRankingPanel from "./ReceiptRankingPanel";
 import {
   AWAITING_RATIO_TEXT,
   KpiCard,
@@ -31,14 +30,12 @@ import {
   UnitBreakdown,
   apiErrorMessage,
   drillByDate,
-  drillByProject,
   DomainCoverageLines,
   dualTaxText,
   moneyText,
   qtyNumber,
   qtyText,
   qtyOnlyParams,
-  QtyBreakdownCell,
   rateText,
   UndatedOrdersNote,
   sessionToken,
@@ -86,7 +83,8 @@ function buildTrendOption(summary: SummaryResponse): ECOption {
         data: summary.trend.map((point) => qtyNumber(point[metric.key])),
       }));
   return {
-    grid: { left: 8, right: 16, top: 36, bottom: 8, containLabel: true },
+    // 分单位系列多时图例会折行：按系列数预留图例高度，避免压住纵轴刻度。
+    grid: { left: 8, right: 16, top: seriesDefs.length > 4 ? 64 : 36, bottom: 8, containLabel: true },
     legend: { top: 0, left: 0, icon: "roundRect", itemWidth: 14, itemHeight: 8 },
     tooltip: {
       trigger: "axis",
@@ -112,8 +110,9 @@ function buildTrendOption(summary: SummaryResponse): ECOption {
     series: seriesDefs.map((def) => ({
       name: def.name,
       type: "bar" as const,
-      barMaxWidth: 24,
-      itemStyle: { color: def.color },
+      barMaxWidth: 22,
+      barGap: "15%",
+      itemStyle: { color: def.color, borderRadius: [3, 3, 0, 0] },
       data: def.data,
     })),
   } as ECOption;
@@ -158,8 +157,8 @@ function buildConditionOption(summary: SummaryResponse): ECOption {
     series: seriesDefs.map((def) => ({
       name: def.name,
       type: "bar" as const,
-      barMaxWidth: 18,
-      itemStyle: { color: CHART_COLORS.emphasis },
+      barMaxWidth: 16,
+      itemStyle: { color: CHART_COLORS.emphasis, borderRadius: [0, 3, 3, 0] },
       label: { show: true, position: "right", color: CHART_COLORS.text2, fontSize: 11 },
       data: def.data,
     })),
@@ -250,36 +249,8 @@ export default function DashboardOverviewTab({
     });
   }, [onReceiptsDrill, params, summary]);
 
-  // M-AC09：Top 项目名点击 → 该项目返件明细（原筛选 ∩ 点击项目）。
-  const topProjectColumns: ColumnsType<Summary["top_projects"][number]> = useMemo(() => ([
-    {
-      title: "项目", dataIndex: "display_name", ellipsis: true,
-      render: (v: string, row) => (onReceiptsDrill ? (
-        <Button
-          type="link" size="small" style={{ padding: 0, height: "auto" }}
-          aria-label={`查看 ${v} 返件明细`}
-          onClick={() => onReceiptsDrill({
-            title: v,
-            params: drillByProject(params, row.project_id),
-          })}
-        >
-          {v}
-        </Button>
-      ) : v),
-    },
-    { title: "返件实收", dataIndex: "receipt_qty", align: "right", width: 100,
-      render: (v: string | null, row) => (
-        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.receipt_qty} />
-      ) },
-    { title: "坏件实收", dataIndex: "bad_receipt_qty", align: "right", width: 100,
-      render: (v: string | null, row) => (
-        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.bad_receipt_qty} />
-      ) },
-    { title: "实际领用", dataIndex: "issued_qty", align: "right", width: 100,
-      render: (v: string | null, row) => (
-        <QtyBreakdownCell flat={v} breakdown={row.unit_breakdown} pick={(e) => e.issued_qty} />
-      ) },
-  ]), [onReceiptsDrill, params]);
+  // 返还率进度条：平面率可用时画（>100% 截满，数值仍如实显示）。
+  const ratePct = cards?.return_rate_pct ?? null;
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -290,26 +261,8 @@ export default function DashboardOverviewTab({
         />
       ) : null}
 
-      <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="overview-cards">
-        <KpiCard label="期间下单数量" loading={loading} testId="kpi-orders"
-          value={orderCards
-            ? (orderCards.order_qty != null
-              ? qtyText(orderCards.order_qty)
-              : orderCards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
-            : undefined}
-          sub={orderCards ? (
-            <Space direction="vertical" size={0}>
-              <span>
-                {qtyText(String(orderCards.order_count))} 张需求单（制单日期入期，不扣退货/免返）
-              </span>
-              {orderCards.undated_orders ? (
-                // B-F12/B2-F05：无制单日期有效单单独说明，混合单位分桶呈现
-                <UndatedOrdersNote undated={orderCards.undated_orders} />
-              ) : null}
-              <UnitBreakdown entries={orderCards.unit_breakdown} render={(e) => qtyText(e.order_qty)} />
-            </Space>
-          ) : undefined} />
-        <KpiCard label="返件实收合计" loading={loading} testId="kpi-receipt"
+      <div className="mdb-kpi-grid" data-testid="overview-cards">
+        <KpiCard label="返件实收合计" loading={loading} testId="kpi-receipt" tone="accent"
           value={cards
             ? (cards.receipt_qty.total != null
               ? qtyText(cards.receipt_qty.total)
@@ -323,7 +276,7 @@ export default function DashboardOverviewTab({
                 render={(e) => <>{qtyText(e.total)}（备件 {qtyText(e.part)} · 整机 {qtyText(e.machine)}）</>} />
             </Space>
           ) : undefined} />
-        <KpiCard label="坏件实收合计" loading={loading} testId="kpi-bad"
+        <KpiCard label="坏件实收合计" loading={loading} testId="kpi-bad" tone="danger"
           value={cards
             ? (cards.bad_receipt_qty.total != null
               ? qtyText(cards.bad_receipt_qty.total)
@@ -337,7 +290,7 @@ export default function DashboardOverviewTab({
                 render={(e) => <>{qtyText(e.total)}（其中废品 {qtyText(e.scrap)}）</>} />
             </Space>
           ) : undefined} />
-        <KpiCard label="好件领用（实际领用量）" loading={loading} testId="kpi-issued"
+        <KpiCard label="好件领用（实际领用量）" loading={loading} testId="kpi-issued" tone="success"
           value={cards
             ? (cards.issued_qty.total != null
               ? qtyText(cards.issued_qty.total)
@@ -351,8 +304,13 @@ export default function DashboardOverviewTab({
                 render={(e) => qtyText(e.total)} />
             </Space>
           ) : undefined} />
-        <KpiCard label="同期返还率" loading={loading} testId="kpi-rate"
+        <KpiCard label="同期返还率" loading={loading} testId="kpi-rate" tone="accent"
           value={rateText(cards?.return_rate_pct)}
+          extra={ratePct !== null ? (
+            <div className="mdb-kpi-progress" role="presentation">
+              <span style={{ width: `${Math.max(0, Math.min(100, ratePct))}%` }} />
+            </div>
+          ) : undefined}
           sub={cards ? (
             <Space direction="vertical" size={0}>
               <span>
@@ -375,51 +333,75 @@ export default function DashboardOverviewTab({
               ) : null}
             </Space>
           ) : undefined} />
+        <KpiCard label="期间下单数量" loading={loading} testId="kpi-orders" tone="warning"
+          value={orderCards
+            ? (orderCards.order_qty != null
+              ? qtyText(orderCards.order_qty)
+              : orderCards.unit_breakdown?.length ? UNIT_MIXED_TEXT : undefined)
+            : undefined}
+          sub={orderCards ? (
+            <Space direction="vertical" size={0}>
+              <span>
+                {qtyText(String(orderCards.order_count))} 张需求单（制单日期入期，不扣退货/免返）
+              </span>
+              {orderCards.undated_orders ? (
+                // B-F12/B2-F05：无制单日期有效单单独说明，混合单位分桶呈现
+                <UndatedOrdersNote undated={orderCards.undated_orders} />
+              ) : null}
+              <UnitBreakdown entries={orderCards.unit_breakdown} render={(e) => qtyText(e.order_qty)} />
+            </Space>
+          ) : undefined} />
         <KpiCard label="涉及项目数" loading={loading} testId="kpi-projects"
-          value={cards ? qtyText(String(cards.project_count)) : undefined} />
+          value={cards ? qtyText(String(cards.project_count)) : undefined}
+          sub={summary ? `登记人 ${summary.registrants?.length ?? 0} 人` : undefined} />
         {amountsVisible && valuation ? (
           <KpiCard label="坏件试算价值（估算/试算）" loading={loading} testId="kpi-valuation"
-            value={ratioReady && valuation.bad_estimated_value ? (
-              <TaxMoney scope="maintenance" stack exact
-                inc={Number(valuation.bad_estimated_value.inc_tax)}
-                ex={Number(valuation.bad_estimated_value.ex_tax)} />
-            ) : valuation.state === "pending" ? (
-              <span data-testid="kpi-valuation-pending">{PENDING_ESTIMATE_TEXT}</span>
-            ) : (
-              <span data-testid="kpi-valuation-awaiting">{AWAITING_RATIO_TEXT}</span>
-            )}
-            sub={(
-              <Space direction="vertical" size={0}>
-                <span>
-                  {valuation.retention_ratio === null
-                    ? "未设比例：不出试算金额"
-                    : `比例 ${Math.round(Number(valuation.retention_ratio) * 10000) / 100}%`}
-                  {" · 覆盖率 "}{rateText(valuation.coverage_pct)}
-                  {" · 待估 "}{qtyText(valuation.pending_bad_qty)}
-                  {" · 待试算 "}{qtyText(valuation.awaiting_ratio_bad_qty)}
-                </span>
-                {/* B-F07：三域各带返件估值覆盖（已估/待估/覆盖，bad_receipts 口径） */}
-                <DomainCoverageLines domains={valuation.domains} />
-                {valuation.unit_breakdown?.length ? (
-                  <UnitBreakdown
-                    entries={valuation.unit_breakdown}
-                    render={(e) => (
-                      <>已估 {qtyText(e.estimated_bad_qty)} / 待估 {qtyText(e.pending_bad_qty)} / 覆盖 {rateText(e.coverage_pct)}</>
-                    )} />
-                ) : null}
-                {valuation.finished_estimated_value ? (
-                  <span>
-                    成品试算（参考全值）：{dualTaxText(
-                      valuation.finished_estimated_value.inc_tax,
-                      valuation.finished_estimated_value.ex_tax,
-                    ) ?? "¥—"}
-                  </span>
-                ) : null}
-                <span>{valuation.policy_version}</span>
-              </Space>
+            tone="warning" wide
+            value={(
+              <div className="mdb-valuation">
+                <div>
+                  {ratioReady && valuation.bad_estimated_value ? (
+                    <TaxMoney scope="maintenance" stack exact
+                      inc={Number(valuation.bad_estimated_value.inc_tax)}
+                      ex={Number(valuation.bad_estimated_value.ex_tax)} />
+                  ) : valuation.state === "pending" ? (
+                    <span data-testid="kpi-valuation-pending">{PENDING_ESTIMATE_TEXT}</span>
+                  ) : (
+                    <span data-testid="kpi-valuation-awaiting">{AWAITING_RATIO_TEXT}</span>
+                  )}
+                  <div className="mdb-kpi-sub" style={{ fontWeight: "normal" }}>
+                    {valuation.retention_ratio === null
+                      ? "未设比例：不出试算金额"
+                      : `比例 ${Math.round(Number(valuation.retention_ratio) * 10000) / 100}%`}
+                    {" · 覆盖率 "}{rateText(valuation.coverage_pct)}
+                    {" · 待估 "}{qtyText(valuation.pending_bad_qty)}
+                    {" · 待试算 "}{qtyText(valuation.awaiting_ratio_bad_qty)}
+                  </div>
+                </div>
+                <div className="mdb-valuation-detail" style={{ fontWeight: "normal" }}>
+                  {/* B-F07：三域各带返件估值覆盖（已估/待估/覆盖，bad_receipts 口径） */}
+                  <DomainCoverageLines domains={valuation.domains} />
+                  {valuation.unit_breakdown?.length ? (
+                    <UnitBreakdown
+                      entries={valuation.unit_breakdown}
+                      render={(e) => (
+                        <>已估 {qtyText(e.estimated_bad_qty)} / 待估 {qtyText(e.pending_bad_qty)} / 覆盖 {rateText(e.coverage_pct)}</>
+                      )} />
+                  ) : null}
+                  {valuation.finished_estimated_value ? (
+                    <div>
+                      成品试算（参考全值）：{dualTaxText(
+                        valuation.finished_estimated_value.inc_tax,
+                        valuation.finished_estimated_value.ex_tax,
+                      ) ?? "¥—"}
+                    </div>
+                  ) : null}
+                  <div>{valuation.policy_version}</div>
+                </div>
+              </div>
             )} />
         ) : null}
-      </Row>
+      </div>
 
       {!amountsVisible ? (
         <Text type="secondary" style={{ fontSize: 12 }} data-testid="amounts-hidden-note">
@@ -437,50 +419,53 @@ export default function DashboardOverviewTab({
         </Text>
       ) : null}
 
-      <Card size="small" title="每日返件实收与实际领用（上海日历日）">
-        <EChartContainer
-          option={trendOption ?? ({} as ECOption)}
-          loading={loading}
-          error={error}
-          empty={!trendHasData}
-          emptyText="当前窗口没有返件与领用数据"
-          height={280}
-          ariaLabel="每日返件实收与实际领用柱状图"
-          testId="overview-trend-chart"
-          onEvents={onReceiptsDrill ? { click: onTrendClick } : undefined}
-        />
-        {onReceiptsDrill ? (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            点击某一天的柱子可查看该日返件明细（与当前筛选求交）
-          </Text>
-        ) : null}
-      </Card>
+      <div className="mdb-panel-grid">
+        <section className="mdb-panel">
+          <div className="mdb-panel-head">
+            <h3 className="mdb-panel-title">
+              每日返件实收与实际领用<small>上海日历日</small>
+            </h3>
+          </div>
+          <EChartContainer
+            option={trendOption ?? ({} as ECOption)}
+            loading={loading}
+            error={error}
+            empty={!trendHasData}
+            emptyText="当前窗口没有返件与领用数据"
+            height={300}
+            ariaLabel="每日返件实收与实际领用柱状图"
+            testId="overview-trend-chart"
+            onEvents={onReceiptsDrill ? { click: onTrendClick } : undefined}
+          />
+          {onReceiptsDrill ? (
+            <div className="mdb-panel-foot">
+              点击某一天的柱子可查看该日返件明细（与当前筛选求交）
+            </div>
+          ) : null}
+        </section>
+        <section className="mdb-panel">
+          <div className="mdb-panel-head">
+            <h3 className="mdb-panel-title">返件件况结构</h3>
+          </div>
+          <EChartContainer
+            option={conditionOption ?? ({} as ECOption)}
+            loading={loading}
+            error={error}
+            empty={!conditionHasData}
+            emptyText="当前窗口没有返件数据"
+            height={300}
+            ariaLabel="返件件况结构条形图"
+            testId="overview-condition-chart"
+          />
+        </section>
+      </div>
 
-      <Card size="small" title="返件件况结构">
-        <EChartContainer
-          option={conditionOption ?? ({} as ECOption)}
-          loading={loading}
-          error={error}
-          empty={!conditionHasData}
-          emptyText="当前窗口没有返件数据"
-          height={240}
-          ariaLabel="返件件况结构条形图"
-          testId="overview-condition-chart"
-        />
-      </Card>
-
-      <Card size="small" title="返件实收 Top 项目（前 10）" style={{ minWidth: 0, maxWidth: "100%" }}>
-        <Table<Summary["top_projects"][number]>
-          rowKey="project_id"
-          size="small"
-          loading={loading}
-          dataSource={summary?.top_projects ?? []}
-          columns={topProjectColumns}
-          scroll={{ x: 600 }}
-          pagination={false}
-          locale={{ emptyText: "当前窗口没有返件数据" }}
-        />
-      </Card>
+      <ReceiptRankingPanel
+        summary={summary}
+        loading={loading}
+        params={params}
+        onReceiptsDrill={onReceiptsDrill}
+      />
     </Space>
   );
 }

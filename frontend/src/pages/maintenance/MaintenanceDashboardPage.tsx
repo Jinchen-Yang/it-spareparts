@@ -42,6 +42,7 @@ import DashboardQuantityChecksTab from "./dashboard/DashboardQuantityChecksTab";
 import ReceiptsDrillDrawer, { type ReceiptsDrill } from "./dashboard/ReceiptsDrillDrawer";
 import { apiErrorMessage, sessionToken, sessionUnchanged } from "./dashboard/dashboardShared";
 import { COLORS } from "../../theme";
+import "./dashboard/maintenanceDashboard.css";
 
 const { Text } = Typography;
 
@@ -369,7 +370,7 @@ export function MaintenanceDashboardPage() {
             <span>维保数据看板</span>
           </Space>
         )}
-        subtitle="期间下单、实际领用、已计消耗成本、返件实收与坏件试算（数量口径人人可见，金额随权限）"
+        subtitle="返件实收 · 实际领用 · 期间下单 · 坏件试算（数量人人可见，金额随权限）"
         extra={(
           <Space>
             <Button onClick={() => {
@@ -389,17 +390,20 @@ export function MaintenanceDashboardPage() {
         )}
       />
 
-      <Card size="small">
-        <Space wrap size={12}>
-          <Select<DashboardRangePreset>
-            aria-label="时间范围"
-            value={state.range as DashboardRangePreset}
-            style={{ width: 180 }}
-            options={(RANGE_PRESETS as readonly DashboardRangePreset[]).map((value) => ({
-              label: RANGE_LABELS[value], value,
-            }))}
-            onChange={(value) => patch({ range: value, page: null })}
-          />
+      <div className="mdb-filterbar">
+        <div className="mdb-filterbar-row">
+          <span className="mdb-filter-field">
+            <span className="mdb-filter-label">时间</span>
+            <Select<DashboardRangePreset>
+              aria-label="时间范围"
+              value={state.range as DashboardRangePreset}
+              style={{ width: 160 }}
+              options={(RANGE_PRESETS as readonly DashboardRangePreset[]).map((value) => ({
+                label: RANGE_LABELS[value], value,
+              }))}
+              onChange={(value) => patch({ range: value, page: null })}
+            />
+          </span>
           {state.range === "custom" ? (
             <DatePicker.RangePicker
               value={[state.from ? dayjs(state.from) : null, state.to ? dayjs(state.to) : null]}
@@ -411,55 +415,61 @@ export function MaintenanceDashboardPage() {
               allowEmpty={[true, true]}
             />
           ) : null}
-          <Select<string>
-            aria-label="业务类型筛选"
-            placeholder="业务类型（全部）"
-            allowClear
-            value={state.business_type || undefined}
-            style={{ width: 180, maxWidth: "calc(100vw - 96px)" }}
-            options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
-              label: BOARD_BUSINESS_TYPE_LABELS[code], value: code,
-            }))}
-            onChange={(value) => patch({ business_type: value ?? null, page: null })}
-          />
-          <Select<string[]>
-            mode="multiple"
-            showSearch
-            optionFilterProp="label"
-            aria-label="项目筛选"
-            placeholder="项目（全部授权范围）"
-            allowClear
-            maxCount={50}
-            value={projectIds}
-            style={{ width: 300, maxWidth: "calc(100vw - 96px)" }}
-            loading={optionsLoading}
-            options={options.projects.map((project) => ({
-              value: project.project_id,
-              label: project.project_code
-                ? `${project.display_name}（${project.project_code}）`
-                : project.display_name,
-            }))}
-            onChange={(values) => patch({
-              project: values.length ? values.join(",") : null,
-              page: null,
-            })}
-          />
-          {tab !== "consumption" ? (
-            <Input.Search
+          <span className="mdb-filter-field">
+            <span className="mdb-filter-label">业务类型</span>
+            <Select<string>
+              aria-label="业务类型筛选"
+              placeholder="全部"
               allowClear
-              value={searchDraft}
-              placeholder="搜 PN / 描述"
-              style={{ width: 200 }}
-              onChange={(event) => setSearchDraft(event.target.value)}
-              onSearch={(value) => patch({ q: value.trim() || null, page: null })}
+              value={state.business_type || undefined}
+              style={{ width: 160, maxWidth: "calc(100vw - 96px)" }}
+              options={BOARD_BUSINESS_TYPE_CODES.map((code) => ({
+                label: BOARD_BUSINESS_TYPE_LABELS[code], value: code,
+              }))}
+              onChange={(value) => patch({ business_type: value ?? null, page: null })}
             />
+          </span>
+          <span className="mdb-filter-field">
+            <span className="mdb-filter-label">项目</span>
+            <Select<string[]>
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              aria-label="项目筛选"
+              placeholder="全部授权范围"
+              allowClear
+              maxCount={50}
+              maxTagCount="responsive"
+              value={projectIds}
+              style={{ width: 280, maxWidth: "calc(100vw - 96px)" }}
+              loading={optionsLoading}
+              options={options.projects.map((project) => ({
+                value: project.project_id,
+                label: project.project_code
+                  ? `${project.display_name}（${project.project_code}）`
+                  : project.display_name,
+              }))}
+              onChange={(values) => patch({
+                project: values.length ? values.join(",") : null,
+                page: null,
+              })}
+            />
+          </span>
+          {tab !== "consumption" ? (
+            <span className="mdb-filter-field">
+              <Input.Search
+                allowClear
+                value={searchDraft}
+                placeholder="搜 PN / 描述"
+                style={{ width: 200 }}
+                onChange={(event) => setSearchDraft(event.target.value)}
+                onSearch={(value) => patch({ q: value.trim() || null, page: null })}
+              />
+            </span>
           ) : null}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            默认近 7 天含今天（上海日历日）；下单按制单日期、领用按领用日期、返件按业务发生时间各自入期。
-          </Text>
-        </Space>
+        </div>
         {amountsVisible ? (
-          <div style={{ marginTop: 8 }}>
+          <div className="mdb-ratio-strip">
             <RetentionRatioControl
               ratio={ratio}
               usingDefault={usingDefaultRatio}
@@ -468,7 +478,10 @@ export function MaintenanceDashboardPage() {
             />
           </div>
         ) : null}
-      </Card>
+        <div className="mdb-filterbar-hint">
+          默认近 7 天含今天（上海日历日）；下单按制单日期、领用按领用日期、返件按业务发生时间各自入期。
+        </div>
+      </div>
 
       {!amountsVisible ? (
         <Alert type="info" showIcon data-testid="amounts-restricted-banner"
@@ -476,6 +489,8 @@ export function MaintenanceDashboardPage() {
       ) : null}
 
       <Tabs
+        className="mdb-tabs"
+        size="large"
         activeKey={tab}
         onChange={onTabChange}
         items={[

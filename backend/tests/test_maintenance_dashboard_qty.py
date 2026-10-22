@@ -408,3 +408,75 @@ def test_sorts_and_pagination(db):
             dash.build_part_rows(db, _filters(db), include_amounts=False),
             "no_such_sort",
         )
+
+
+# ---------- 返件实收排行 Top 40 + 登记人（2026-10-22） ----------
+
+def test_summary_top_projects_up_to_forty(db):
+    part = _part(db, "MDD-TOP40-PN")
+    for index in range(45):
+        project = _project(db, f"MDD-TOP40-{index:02d}")
+        _receipt(db, project, part, str(index + 1), condition="坏品",
+                 occurred_at=datetime(2026, 10, 16, 8, tzinfo=UTC))
+    db.commit()
+    payload = dash.build_summary_payload(db, _filters(db), include_amounts=False)
+    top = payload["top_projects"]
+    assert len(top) == dash.TOP_N == 40
+    assert top[0]["receipt_qty"] == "45.000"
+    assert top[-1]["receipt_qty"] == "6.000"
+
+
+def test_summary_registrants_grouped_by_created_by(db):
+    from app.models.system import SysUser
+
+    db.add(SysUser(username="mdd-reg-alice", role="readonly",
+                   display_name=" 张三 ", password_hash="x", is_active=False))
+    db.flush()
+    p1 = _project(db, "MDD-REG-P1")
+    p2 = _project(db, "MDD-REG-P2")
+    part = _part(db, "MDD-REG-PN")
+    at = datetime(2026, 10, 16, 8, tzinfo=UTC)
+    _receipt(db, p1, part, "3", condition="坏品", occurred_at=at).created_by = "mdd-reg-alice"
+    _receipt(db, p2, part, "2", condition="好品",
+             occurred_at=datetime(2026, 10, 17, 8, tzinfo=UTC)).created_by = "mdd-reg-alice"
+    _receipt(db, p1, part, "4", condition="废品", occurred_at=at,
+             source="rkd_import").created_by = "mdd-reg-bob"
+    # 作废 / 期外不计入
+    _receipt(db, p1, part, "99", status="voided", occurred_at=at).created_by = "mdd-reg-bob"
+    _receipt(db, p1, part, "99",
+             occurred_at=datetime(2026, 9, 1, tzinfo=UTC)).created_by = "mdd-reg-bob"
+    db.commit()
+    payload = dash.build_summary_payload(db, _filters(db), include_amounts=False)
+    registrants = payload["registrants"]
+    assert payload["registrants_truncated"] is False
+    assert [row["created_by"] for row in registrants] == ["mdd-reg-alice", "mdd-reg-bob"]
+    alice, bob = registrants
+    # 停用账号照常解析显示名；无显示名不臆造。
+    assert alice["created_by_name"] == "张三"
+    assert bob["created_by_name"] is None
+    assert alice["receipt_qty"] == "5.000"
+    assert alice["bad_receipt_qty"] == "3.000"
+    assert alice["line_count"] == 2
+    assert alice["project_count"] == 2
+    assert alice["sources"] == ["manual"]
+    assert alice["last_occurred_at"].startswith("2026-10-17")
+    assert bob["receipt_qty"] == "4.000"
+    assert bob["bad_receipt_qty"] == "4.000"
+    assert bob["sources"] == ["rkd_import"]
+
+
+def test_receipt_detail_rows_registrant_filter_and_columns(db):
+    p1 = _project(db, "MDD-REGD-P1")
+    part = _part(db, "MDD-REGD-PN")
+    at = datetime(2026, 10, 16, 8, tzinfo=UTC)
+    _receipt(db, p1, part, "3", occurred_at=at).created_by = "mdd-regd-a"
+    _receipt(db, p1, part, "1", occurred_at=at).created_by = "mdd-regd-b"
+    db.commit()
+    rows, total = dash.build_receipt_detail_rows(
+        db, _filters(db), include_amounts=False, created_by="mdd-regd-a",
+    )
+    assert total == 1
+    assert rows[0]["created_by"] == "mdd-regd-a"
+    assert rows[0]["created_by_name"] is None
+    rows, total = dash.build_receipt_detail_rows(db, _filters(db), include_amounts=False)
+    assert {row["created_by"] for row in rows} == {"mdd-regd-a", "mdd-regd-b"}

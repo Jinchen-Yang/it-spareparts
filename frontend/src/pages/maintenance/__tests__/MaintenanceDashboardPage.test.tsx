@@ -200,6 +200,15 @@ function summaryFixture(withAmounts: boolean, ratio: string | null): SummaryResp
       project_id: "p1", project_code: "MDD-P1", display_name: "项目一",
       receipt_qty: "3.000", bad_receipt_qty: "2.000", issued_qty: "6.000",
     }],
+    registrants: [
+      { created_by: "zhangsan", created_by_name: "张三", receipt_qty: "2.000",
+        bad_receipt_qty: "2.000", line_count: 1, project_count: 1,
+        sources: ["manual"], last_occurred_at: "2026-10-18T10:00:00+08:00" },
+      { created_by: "importer", created_by_name: null, receipt_qty: "1.000",
+        bad_receipt_qty: "0.000", line_count: 1, project_count: 1,
+        sources: ["rkd_import"], last_occurred_at: "2026-10-19T09:00:00+08:00" },
+    ],
+    registrants_truncated: false,
     notes: ["另有 1.000 件无业务日期实收（当前累计，未计入期间）"],
   };
 }
@@ -343,7 +352,7 @@ const receiptsFixture = {
       project_code: "MDD-P1", source_order_id: "o1", source_order_no: "DD001",
       part_id: 1, pn: "MDDA-PN-1", description: "硬盘", receipt_kind: "备件",
       unit: "件", test_result: "坏品", qty: "2.000", source: "维修返还",
-      review_required: false,
+      review_required: false, created_by: "zhangsan", created_by_name: "张三",
       valuation: {
         state: "ready", classification: "bad", factor: "0.5",
         value_inc_tax: "56.50", value_ex_tax: "50.00",
@@ -1046,6 +1055,32 @@ describe("维保数据看板页", () => {
     ));
   });
 
+  it("返件实收排行：按登记人切换、按人名检索、点击下钻带 created_by 且明细显示登记人", async () => {
+    renderPage();
+    await waitFor(
+      () => expect(screen.getByTestId("kpi-receipt").textContent).toContain("3"),
+      { timeout: 5000 },
+    );
+    const ranking = screen.getByTestId("receipt-ranking");
+    expect(ranking).toHaveTextContent("Top 40 项目");
+    fireEvent.click(within(ranking).getByText("按登记人"));
+    expect(ranking).toHaveTextContent("共 2 人");
+    expect(within(ranking).getByText("张三")).toBeInTheDocument();
+    expect(within(ranking).getByText("importer")).toBeInTheDocument();
+    expect(within(ranking).getByText("手工登记")).toBeInTheDocument();
+    expect(within(ranking).getByText("RKD 导入")).toBeInTheDocument();
+    fireEvent.change(within(ranking).getByLabelText("按人名检索"), { target: { value: "张" } });
+    expect(within(ranking).queryByText("importer")).not.toBeInTheDocument();
+    fireEvent.click(within(ranking).getByRole("button", { name: "查看 张三 登记的返件明细" }));
+    await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
+      expect.objectContaining({ created_by: "zhangsan", sort: "occurred_desc", page: 1 }),
+    ));
+    expect(await screen.findByText("返件明细：登记人 张三（zhangsan）")).toBeInTheDocument();
+    const drawer = document.querySelector(".ant-drawer-content") as HTMLElement;
+    expect(within(drawer).getByRole("columnheader", { name: "登记人" })).toBeInTheDocument();
+    expect(await within(drawer).findByText("张三（zhangsan）")).toBeInTheDocument();
+  });
+
   it("M-AC09 总览下钻：Top 项目点击开返件明细 Drawer，导出 receipts 完整交集", async () => {
     renderPage();
     await waitFor(
@@ -1603,7 +1638,7 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
     // 卡片合计同样分桶呈现
     expect(screen.getByTestId("checks-cards").textContent).toContain("件：7");
     expect(screen.getByTestId("checks-cards").textContent).toContain("台：4");
-    const differenceCard = screen.getByText("差额合计").closest(".ant-card")!;
+    const differenceCard = screen.getByText("差额合计").closest(".mdb-kpi")!;
     expect(differenceCard).toHaveTextContent("件：6");
     expect(differenceCard).toHaveTextContent("台：2");
   });
@@ -1683,7 +1718,7 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
     renderPage("/maintenance/dashboard?tab=checks");
     await screen.findByText("项目二（MDD-P2）");
     // 卡：平面 null → 混合单位 + 分桶小字；说明文案保留
-    const card = screen.getByText("未关联需求单实收").closest(".ant-card")!;
+    const card = screen.getByText("未关联需求单实收").closest(".mdb-kpi")!;
     expect(card.textContent).toContain("混合单位");
     expect(card.textContent).toContain("件：7");
     expect(card.textContent).toContain("台：2");
