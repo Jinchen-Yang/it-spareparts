@@ -432,7 +432,7 @@ def valuation(
             None if mixed_units
             else dash._coverage_pct(estimated_qty, bad_receipt_qty)
         ),
-        "unit": next(iter(main_units)) if not mixed_units else None,
+        "unit": next(iter(main_units), None) if not mixed_units else None,
         "unit_breakdown": [
             {
                 "unit": unit,
