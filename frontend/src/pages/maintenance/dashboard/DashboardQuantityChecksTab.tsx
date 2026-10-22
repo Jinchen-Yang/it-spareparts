@@ -5,7 +5,7 @@
  * 未关联实收桶；导出与 API 同参同集。无金额列——数量核对本身就是纯数量域。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Row, Select, Space, Table, Typography } from "antd";
+import { Alert, Button, Card, Select, Space, Table, Typography } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import {
   fetchDashboardQuantityChecks,
@@ -158,7 +158,7 @@ export default function DashboardQuantityChecksTab({
         全局日期仅按制单日期挑选需求单；PN 关键词命中含该 PN 的整张需求单（整单跨全部 PN/来源/件况），N/R 为整单当前累计，不因期间或 PN 条件截断；逐单差额与超收分别合计，不互相抵消。
       </Text>
 
-      <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="checks-cards">
+      <div className="mdb-kpi-grid" data-testid="checks-cards">
         {/* B2-F04：混合单位 → 平面 null + 分桶小字（每单位 N/R/差额/超收，
             不把 3件+7台 并成 10）；单单位 → 平面值照旧 */}
         <KpiCard label="需求量 N 合计" loading={loading}
@@ -223,7 +223,7 @@ export default function DashboardQuantityChecksTab({
                 render={(e) => qtyText(e.received_qty)} />
             </Space>
           ) : "当前授权范围内未关联需求单的实收（不摊入需求单行）"} />
-      </Row>
+      </div>
 
       <Space wrap size={12}>
         <Select<string>

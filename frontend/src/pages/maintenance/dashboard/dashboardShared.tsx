@@ -7,10 +7,11 @@
  * 重新读取比对；不一致（切换账号/登出）就丢弃该响应，不依赖重渲染时序。
  * 迟到结果另由各页签的序号（seq）拒绝，两者缺一不可。
  */
-import { App, Button, Card, Skeleton, Space, Tag, Typography } from "antd";
+import { App, Button, Skeleton, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { moneyExact, qty as qtyFmt } from "../../../utils/format";
 import { COST_SOURCE_LABEL } from "../panel/panelUtils";
+import "./maintenanceDashboard.css";
 import {
   downloadDashboardExport,
   type DashboardExportKind,
@@ -63,18 +64,27 @@ export function apiErrorMessage(err: unknown): string {
   return detail?.message || detail?.code || "加载失败";
 }
 
-export function KpiCard({ label, value, sub, loading, testId }: {
-  label: string; value: React.ReactNode; sub?: React.ReactNode; loading?: boolean;
-  testId?: string;
+export type KpiTone = "accent" | "danger" | "success" | "warning" | "neutral";
+
+/** KPI 磁贴（2026-10-22 重设计）：左侧色条标语义，主值大字等宽数字，副行
+ * 原样承载口径说明与单位分桶（不藏进 Tooltip——数据事实必须直接可见）。
+ * extra 位于主值与副行之间（如返还率进度条）；wide 跨满整行。 */
+export function KpiCard({ label, value, sub, loading, testId, tone = "neutral", wide, extra }: {
+  label: React.ReactNode; value: React.ReactNode; sub?: React.ReactNode; loading?: boolean;
+  testId?: string; tone?: KpiTone; wide?: boolean; extra?: React.ReactNode;
 }) {
   return (
-    <Card size="small" style={{ flex: "1 1 180px" }} data-testid={testId}>
-      <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
-      <div style={{ fontSize: 20, fontWeight: 600, marginTop: 4, lineHeight: 1.4 }}>
-        {loading ? <Skeleton.Button active size="small" style={{ width: 140 }} /> : value}
+    <div
+      className={`mdb-kpi mdb-tone-${tone}${wide ? " is-wide" : ""}`}
+      data-testid={testId}
+    >
+      <div className="mdb-kpi-label">{label}</div>
+      <div className="mdb-kpi-value">
+        {loading ? <Skeleton.Button active size="small" style={{ width: 140 }} /> : value ?? "—"}
       </div>
-      {sub && !loading ? <Text type="secondary" style={{ fontSize: 12 }}>{sub}</Text> : null}
-    </Card>
+      {extra && !loading ? extra : null}
+      {sub && !loading ? <div className="mdb-kpi-sub">{sub}</div> : null}
+    </div>
   );
 }
 
@@ -406,6 +416,44 @@ export function drillByProject(
 /** PN 下钻：关键词收敛为被点击 PN（该 PN 已满足原关键词，不扩大）。 */
 export function drillByPn(params: DashboardFilters, pn: string): DashboardFilters {
   return { ...params, q: pn };
+}
+
+/** 登记人下钻：在原筛选上追加登记人条件（只收窄，不替换原范围）。 */
+export function drillByRegistrant(
+  params: DashboardFilters, createdBy: string,
+): DashboardFilters {
+  return { ...params, created_by: createdBy };
+}
+
+/** 返件来源码 → 中文（未收录码原样显示）。 */
+export const RECEIPT_SOURCE_LABELS: Record<string, string> = {
+  manual: "手工登记",
+  rkd_import: "RKD 导入",
+};
+
+export function receiptSourceText(code: string | null | undefined): string {
+  if (!code) return "—";
+  return RECEIPT_SOURCE_LABELS[code] ?? code;
+}
+
+/** 早期导入行未记录操作人时 created_by 落库默认值（模型 server_default）。 */
+export const UNRECORDED_IMPORTER = "rkd_import";
+
+/** 登记人显示名：有显示名用显示名；默认导入占位账号标明未记录操作人；否则账号。 */
+export function registrantLabel(
+  username: string, name?: string | null,
+): string {
+  if (name) return name;
+  return username === UNRECORDED_IMPORTER ? "导入（未记录操作人）" : username;
+}
+
+/** 登记人展示：有显示名 →「显示名（账号）」；否则账号原样（占位账号标注）。 */
+export function registrantText(
+  username: string | null | undefined, name?: string | null,
+): string {
+  if (!username) return "—";
+  if (name) return `${name}（${username}）`;
+  return registrantLabel(username, name);
 }
 
 /** 日期下钻：期间收敛为被点击的上海日历日（原窗口的子集）。 */

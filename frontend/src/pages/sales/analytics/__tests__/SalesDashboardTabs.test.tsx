@@ -1,6 +1,6 @@
 // 销售看板页签（D-44）：页签落 URL、分组排行升降序与下钻、无客户权限的维度门控、
 // 趋势粒度推荐与桶下钻、KPI 上月对比与新老客、订单导出、金额区间口径门控。
-import { cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -374,5 +374,59 @@ describe("订单明细：导出与金额区间", () => {
       amount_min: 2000,
     }));
     expect(locationSearch).toContain("amin=2000");
+  });
+});
+
+describe("多维紧凑图页签", () => {
+  it("九维并列各发一次 /groups（sort=指标、top=N），切指标写 URL，点击可下钻条目收窄筛选", async () => {
+    renderPage("/sales/analytics?tab=compact");
+    expect(await screen.findByTestId("sales-compact")).toBeInTheDocument();
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(9));
+    const dims = fetchSalesAnalyticsGroups.mock.calls.map(([q]) => (q as { group_by: string }).group_by);
+    expect(new Set(dims)).toEqual(new Set([
+      "customer", "salesperson", "category", "brand", "pn",
+      "business_type", "warehouse", "customer_type", "customer_city",
+    ]));
+    for (const [q] of fetchSalesAnalyticsGroups.mock.calls) {
+      expect(q).toMatchObject({ sort: "amount_ex_tax", order: "desc", top: 10 });
+    }
+    const customer = await screen.findByTestId("compact-customer");
+    // 指标 = 金额区间口径（默认不含税）→ 显示占比
+    await waitFor(() => expect(customer).toHaveTextContent("70.0%"));
+
+    const compact = screen.getByTestId("sales-compact");
+    fireEvent.click(within(compact).getByText("毛利"));
+    await waitFor(() => expect(locationSearch).toContain("cmetric=gross_profit"));
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledWith(
+      expect.objectContaining({ group_by: "customer", sort: "gross_profit" }),
+    ));
+    // 指标 ≠ 区间口径 → 不显示占比
+    await waitFor(() => expect(screen.getByTestId("compact-customer")).not.toHaveTextContent("70.0%"));
+
+    fireEvent.click(await within(screen.getByTestId("compact-customer")).findByRole("button", { name: "A公司" }));
+    // 订单明细是默认页签（不落 URL）：离开 tab=compact 即跳转成功
+    await waitFor(() => expect(locationSearch).not.toContain("tab=compact"));
+    expect(decodeURIComponent(locationSearch)).toContain("customer_name=A公司");
+  });
+
+  it("无客户 / 成本 / 毛利权限：客户类维度不出、受限指标不出", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: false, data_reconciliation: true, data_customer: false, data_profit: false,
+    }));
+    renderPage("/sales/analytics?tab=compact&cmetric=amount_ex_tax");
+    expect(await screen.findByTestId("sales-compact")).toBeInTheDocument();
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(6));
+    const dims = fetchSalesAnalyticsGroups.mock.calls.map(([q]) => (q as { group_by: string }).group_by);
+    expect(dims).not.toContain("customer");
+    expect(dims).not.toContain("customer_type");
+    expect(dims).not.toContain("customer_city");
+    // URL 残值不含税受限 → 回退首个可用指标（营收）
+    for (const [q] of fetchSalesAnalyticsGroups.mock.calls) {
+      expect(q).toMatchObject({ sort: "revenue" });
+    }
+    const compact = screen.getByTestId("sales-compact");
+    expect(within(compact).queryByText("不含税金额")).not.toBeInTheDocument();
+    expect(within(compact).queryByText("毛利")).not.toBeInTheDocument();
+    expect(within(compact).getByText("营收")).toBeInTheDocument();
   });
 });

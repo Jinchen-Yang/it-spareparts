@@ -20,6 +20,8 @@ import {
   DashboardExportButtons,
   apiErrorMessage,
   qtyText,
+  receiptSourceText,
+  registrantText,
   sessionToken,
   sessionUnchanged,
 } from "./dashboardShared";
@@ -132,7 +134,9 @@ export default function ReceiptsDrillDrawer({
     { title: "数量", dataIndex: "qty", width: 90, align: "right",
       render: (v: string) => qtyText(v) },
     { title: "来源", dataIndex: "source", width: 100,
-      render: (v: string) => v || "—" },
+      render: (v: string) => receiptSourceText(v) },
+    { title: "登记人", dataIndex: "created_by", width: 140, ellipsis: true,
+      render: (v: string | undefined, row) => registrantText(v, row.created_by_name) },
     { title: "需复核", dataIndex: "review_required", width: 80,
       render: (v: boolean) => (v ? <Tag color="warning">复核</Tag> : "—") },
   ];
@@ -164,7 +168,7 @@ export default function ReceiptsDrillDrawer({
     <Drawer
       rootStyle={{ "--mb-text-3": COLORS.text2 } as CSSProperties}
       title={drill ? `返件明细：${drill.title}` : "返件明细"}
-      width={Math.min(900, typeof window === "undefined" ? 900 : window.innerWidth - 32)}
+      width={Math.min(1040, typeof window === "undefined" ? 1040 : window.innerWidth - 32)}
       open={drill !== null}
       destroyOnClose
       onClose={onClose}
@@ -195,7 +199,7 @@ export default function ReceiptsDrillDrawer({
         dataSource={rows ?? []}
         columns={columns}
         onChange={onTableChange}
-        scroll={{ x: amountsVisible ? 1160 : 960 }}
+        scroll={{ x: amountsVisible ? 1300 : 1100 }}
         pagination={{
           current: page,
           pageSize: PAGE_SIZE,

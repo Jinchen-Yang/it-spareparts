@@ -37,6 +37,7 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
       amountBasis: "amount_ex_tax", amountMin: null, amountMax: null,
       includeNegative: true, includeEmpty: true, order: "desc", tab: "orders",
       groupBy: "customer", groupSort: "amount_ex_tax", groupOrder: "desc", groupTop: 20,
+      compactTop: 10, compactMetric: "amount_ex_tax",
       granularity: null, compare: true,
     });
   });

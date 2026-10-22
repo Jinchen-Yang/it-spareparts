@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
-  Alert, Button, Card, Drawer, Row, Space, Table, Tag, Typography,
+  Alert, Button, Card, Drawer, Space, Table, Tag, Typography,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { Link } from "react-router-dom";
@@ -298,7 +298,7 @@ export default function DashboardConsumptionTab({
       ) : null}
 
       <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）" style={{ minWidth: 0, maxWidth: "100%" }}>
-        <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="orders-cards">
+        <div className="mdb-kpi-grid" data-testid="orders-cards">
           <KpiCard label="期间下单数量" loading={loading} testId="kpi-order-qty"
             value={orderCards
               ? (orderCards.order_qty != null
@@ -320,7 +320,7 @@ export default function DashboardConsumptionTab({
           <KpiCard label="期间下单单数" loading={loading} testId="kpi-order-count"
             value={orderCards ? qtyText(String(orderCards.order_count)) : undefined}
             sub="需求单去重单数" />
-        </Row>
+        </div>
         <div style={{ marginTop: 12 }}>
           <Space wrap size={12}>
             <DashboardExportButtons
@@ -380,7 +380,7 @@ export default function DashboardConsumptionTab({
         size="small"
         title="每日每项目实际领用与已计消耗成本（M03：未扣退库；不回算成本）"
       >
-        <Row gutter={12} style={{ display: "flex", flexWrap: "wrap" }} data-testid="consumption-cards">
+        <div className="mdb-kpi-grid" data-testid="consumption-cards">
           <KpiCard label="实际领用合计" loading={loading} testId="kpi-consumption-qty"
             value={consumptionCards
               ? (consumptionCards.issued_qty != null
@@ -452,7 +452,7 @@ export default function DashboardConsumptionTab({
                 sub={consumptionCards?.note} />
             </>
           ) : null}
-        </Row>
+        </div>
         {!amountsVisible ? (
           <Text type="secondary" style={{ fontSize: 12 }} data-testid="consumption-qty-only-note">
             当前账号无金额查看权限：仅展示数量口径（已计成本/覆盖率/来源需 data_profit 授权）

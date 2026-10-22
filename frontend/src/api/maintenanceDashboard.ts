@@ -33,6 +33,8 @@ export interface DashboardFilters {
   q?: string;
   /** R34 价值保留比例（十进制串如 "0.5"；"0" 是合法显式值，缺省=待试算）。 */
   value_retention_ratio?: string;
+  /** 登记人账号（仅 /receipts 与 receipts 导出：按人下钻返件明细）。 */
+  created_by?: string;
 }
 
 export interface DashboardPagination {
@@ -229,7 +231,24 @@ export interface SummaryResponse {
     issued_qty: string | null;
     unit_breakdown?: UnitQtyEntry[];
   }[];
+  /** 返件实收按登记人（created_by）聚合，返件实收降序（全量，上限 500）。 */
+  registrants?: RegistrantRow[];
+  registrants_truncated?: boolean;
   notes: string[];
+}
+
+/** 登记人排行行：手工登记 = 登记账号；RKD 导入 = 执行导入的账号。
+ * created_by_name 为账号显示名（无则 null，不臆造）。数量按单位分桶。 */
+export interface RegistrantRow {
+  created_by: string;
+  created_by_name: string | null;
+  receipt_qty: string | null;
+  bad_receipt_qty: string | null;
+  line_count: number;
+  project_count: number;
+  sources: string[];
+  last_occurred_at: string | null;
+  unit_breakdown?: UnitQtyEntry[];
 }
 
 /** 契约 v2 §1（B-F06）：state 判定 estimated>0→ready（值键仅在 estimated>0
@@ -368,6 +387,9 @@ export interface ReceiptLineRow {
   qty: string;
   source: string;
   review_required: boolean;
+  /** 登记人账号与显示名（显示名缺失为 null）。 */
+  created_by?: string;
+  created_by_name?: string | null;
   valuation?: {
     state: "ready" | "pending" | "awaiting_ratio";
     classification?: string;

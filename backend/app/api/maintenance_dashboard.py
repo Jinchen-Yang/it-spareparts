@@ -493,6 +493,7 @@ def receipts(
     q: str | None = Query(None, max_length=128),
     test_result: str | None = Query(None, max_length=32),
     source: str | None = Query(None, max_length=32),
+    created_by: str | None = Query(None, max_length=64),
     sort: str = Query("occurred_desc", pattern=_RECEIPT_SORT_PATTERN),
     page: int = Query(1, ge=1),
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
@@ -514,6 +515,7 @@ def receipts(
         ctx, "maintenance_dashboard_receipts", "maintenance_dashboard",
         _audit_flags(scoped=filters.scope is not None,
                      condition=bool(test_result), source=bool(source),
+                     registrant=bool(created_by),
                      ratio_explicit=value_retention_ratio is not None),
     )
     rows, total = dash.build_receipt_detail_rows(
@@ -521,6 +523,7 @@ def receipts(
         include_amounts=visible,
         test_result=(test_result.strip() or None) if test_result else None,
         source=(source.strip() or None) if source else None,
+        created_by=(created_by.strip() or None) if created_by else None,
         ratio=ratio if visible else None,
     )
     rows = dash.sort_receipt_rows(rows, sort)
@@ -755,6 +758,7 @@ def export(
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     test_result: str | None = Query(None, max_length=32),
     source: str | None = Query(None, max_length=32),
+    created_by: str | None = Query(None, max_length=64),
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
@@ -881,9 +885,16 @@ def export(
             db, filters, include_amounts=visible,
             test_result=(test_result.strip() or None) if test_result else None,
             source=(source.strip() or None) if source else None,
+            created_by=(created_by.strip() or None) if created_by else None,
             ratio=ratio if visible else None,
         )
         header, columns = _receipt_export_columns(visible)
+        for row in rows:
+            # 登记人：有显示名给「显示名（账号）」，否则账号原样。
+            name = row.get("created_by_name")
+            row["_registrant"] = (
+                f"{name}（{row['created_by']}）" if name else row.get("created_by")
+            )
         data = rows
     elif kind == "quantity_checks":
         # q 整单选择与 API 同参同集（B-F10）。
@@ -1147,6 +1158,7 @@ def _receipt_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
         ("件况", "test_result", False),
         ("数量", "qty", True),
         ("来源", "source", False),
+        ("登记人", "_registrant", False),
         ("需复核", "review_required", False),
     ]
     if visible:

@@ -1,6 +1,7 @@
 // 销售分析页（D-41 客户需求 Round1，PR-4b；D-44 销售看板扩展）：常驻区间 KPI 条
-// （单数 / 三金额 / 毛利 / 客户与新老客 / 上月对比）+ 四个页签：概览（迷你趋势 +
-// Top 5）、分组排行、趋势、订单明细（任意列升降序 + 对账块 + 导出）+ 订单详情抽屉。
+// （单数 / 三金额 / 毛利 / 客户与新老客 / 上月对比）+ 五个页签：概览（迷你趋势 +
+// Top 5）、多维紧凑图（九维并列条形榜）、分组排行、趋势、订单明细（任意列升降序 +
+// 对账块 + 导出）+ 订单详情抽屉。
 // 筛选 / 日期预设 / 金额区间 / 金额口径 / 排序 / 分页 / 页签 / 含退货 / 抽屉全部写 URL，
 // 可分享可刷新；默认页签为订单明细（沿用 D-41 打开即大单列表）。
 // 权限：page_sales_analysis（模板仅 admin/boss）——路由/菜单由 nav.tsx 统一登记；
@@ -25,6 +26,7 @@ import {
   type SalesAnalyticsSummary,
 } from "../../../api/salesAnalytics";
 import type { SalesChartMetric } from "../../../components/charts/SalesDashboardCharts";
+import CompactTab from "./CompactTab";
 import GroupsTab from "./GroupsTab";
 import OverviewTab from "./OverviewTab";
 import TrendTab from "./TrendTab";
@@ -428,6 +430,15 @@ export default function SalesAnalyticsPage() {
                 <OverviewTab state={state} apiFilters={apiFilters} filterKey={filterKey} patch={tabPatch}
                   costRestricted={costRestricted} customerRestricted={customerRestricted} toMessage={apiErrorMessage}
                   ownerToken={ownerToken} onOwnerStale={notifyOwnerStale} />
+              ),
+            },
+            {
+              key: "compact", label: "多维紧凑图",
+              children: state.tab === "compact" && (
+                <CompactTab state={state} apiFilters={apiFilters} filterKey={filterKey} patch={tabPatch}
+                  costRestricted={costRestricted} profitRestricted={profitRestricted}
+                  customerRestricted={customerRestricted} toMessage={apiErrorMessage} ownerToken={ownerToken}
+                  onOwnerStale={notifyOwnerStale} />
               ),
             },
             {

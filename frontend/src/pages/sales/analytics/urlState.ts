@@ -53,12 +53,20 @@ export const AMOUNT_SORT_KEY: Record<AmountKey, SalesAnalyticsSortKey> = {
 export const DEFAULT_SORT: SalesAnalyticsSortKey = "amount_ex_tax";
 
 /** 页签（D-44）：默认订单明细——沿用 D-41「打开即大单列表」与旧分享链。 */
-export const SALES_TABS = ["overview", "groups", "trend", "orders"] as const;
+export const SALES_TABS = ["overview", "compact", "groups", "trend", "orders"] as const;
 export type SalesTab = (typeof SALES_TABS)[number];
 export const DEFAULT_TAB: SalesTab = "orders";
 export const DEFAULT_GROUP_BY: SalesGroupDim = "customer";
 export const DEFAULT_GROUP_TOP = 20;
 export const GROUP_TOP_OPTIONS = [10, 20, 50, 0] as const;
+/** 多维紧凑图（2026-10-22）：每维 Top N 与共用指标。 */
+export const COMPACT_TOP_OPTIONS = [10, 15, 20] as const;
+export const DEFAULT_COMPACT_TOP = 10;
+export const COMPACT_METRICS = [
+  "amount_ex_tax", "amount_inc_tax", "revenue", "gross_profit", "orders",
+] as const;
+export type CompactMetric = (typeof COMPACT_METRICS)[number];
+export const DEFAULT_COMPACT_METRIC: CompactMetric = "amount_ex_tax";
 const AMOUNT_BASES: SalesAmountBasis[] = ["amount_ex_tax", "amount_inc_tax", "revenue"];
 const GRANULARITIES: SalesTrendGranularity[] = ["day", "week", "month"];
 /** 金额拖动条步长（D-44 §7：1k）；URL 中的金额按此取整。 */
@@ -92,6 +100,9 @@ export interface SalesAnalyticsUrlState {
   groupOrder: SortOrder;
   /** 0 = 全部。 */
   groupTop: number;
+  /** 多维紧凑图：每维 Top N 与排名指标。 */
+  compactTop: number;
+  compactMetric: CompactMetric;
   /** null = 按区间长度自动推荐。 */
   granularity: SalesTrendGranularity | null;
   /** 对比上月（D-44 §9），默认开。 */
@@ -134,6 +145,8 @@ export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlSt
     groupSort: oneOf(sp.get("gsort"), SALES_GROUP_SORTS, "amount_ex_tax"),
     groupOrder: sp.get("gorder") === "asc" ? "asc" : "desc",
     groupTop: oneOf(Number(sp.get("gtop") ?? DEFAULT_GROUP_TOP), GROUP_TOP_OPTIONS, DEFAULT_GROUP_TOP),
+    compactTop: oneOf(Number(sp.get("ctop") ?? DEFAULT_COMPACT_TOP), COMPACT_TOP_OPTIONS, DEFAULT_COMPACT_TOP),
+    compactMetric: oneOf(sp.get("cmetric"), COMPACT_METRICS, DEFAULT_COMPACT_METRIC),
     granularity: (GRANULARITIES as string[]).includes(sp.get("gran") ?? "")
       ? (sp.get("gran") as SalesTrendGranularity) : null,
     compare: sp.get("compare") !== "0",
@@ -213,6 +226,12 @@ export function serializeSalesAnalyticsState(
   }
   if (next.groupTop !== undefined) {
     out.gtop = next.groupTop === DEFAULT_GROUP_TOP ? undefined : String(next.groupTop);
+  }
+  if (next.compactTop !== undefined) {
+    out.ctop = next.compactTop === DEFAULT_COMPACT_TOP ? undefined : String(next.compactTop);
+  }
+  if (next.compactMetric !== undefined) {
+    out.cmetric = next.compactMetric === DEFAULT_COMPACT_METRIC ? undefined : next.compactMetric;
   }
   if (next.granularity !== undefined) out.gran = next.granularity ?? undefined;
   if (next.compare !== undefined) out.compare = next.compare ? undefined : "0";

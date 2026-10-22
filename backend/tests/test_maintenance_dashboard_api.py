@@ -979,3 +979,22 @@ def test_api_module_does_not_import_giant_maintenance_api():
             for alias in node.names:
                 assert alias.name != "app.api.maintenance"
     assert "from app.services.maintenance_dashboard_export_text import" in source
+
+
+def test_receipts_registrant_filter_and_export_column(db, seeded):
+    client = client_for(db, username="mdd-admin-reg", role="admin")
+    all_rows = client.get(f"{BASE}/receipts").json()["rows"]
+    assert all(row["created_by"] for row in all_rows)
+    target = all_rows[0]["created_by"]
+    response = client.get(f"{BASE}/receipts", params={"created_by": target})
+    assert response.status_code == 200
+    assert {row["created_by"] for row in response.json()["rows"]} == {target}
+    summary = client.get(f"{BASE}/summary").json()
+    assert summary["registrants"][0]["created_by"] == target
+    export = client.get(f"{BASE}/export", params={
+        "kind": "receipts", "format": "csv", "created_by": target,
+    })
+    assert export.status_code == 200
+    text = export.content.decode("utf-8-sig")
+    assert "登记人" in text.splitlines()[0]
+    assert target in text
