@@ -4,14 +4,16 @@
 > 目标：任何代理可以无缝接替，**口径落在仓库文件里，不落在某个会话的脑子里**。
 > 本文件是唯一协议入口；`CLAUDE.md` 只是指向本文件的指针。
 
-## 0. 分支与管理员审批（最高优先级）
+## 0. 分支、合并与生产基线（最高优先级）
 
-**main 是生产发布线；test 仅用于远期实验，不是近期功能的必经集成线。**
+**main 是集成主线，不等于生产；生产以 `release-` 标签为准。test 仅用于远期实验，不是近期功能的必经集成线。**
 近期要进入正式系统的功能从最新 main 创建独立分支，PR 指向 main；
 不要携入 test 上的其他实验功能。该分工以杨金臣 2026-10-10 的后续更正为准。
-任何 main 合并必须先联系杨金臣（yangjinchen，GitHub **@Jinchen-Yang**），
-取得其对当前候选 SHA 的人工 GitHub APPROVED review；CI 通过或他人批准不能替代。
-禁止代理代批、管理员绕过、强推 main、关闭保护或自动将 test 发布到生产。
+**main 合并不再需要 GitHub APPROVED review**（杨金臣 2026-10-21 17:06 裁定）；保留的保护：
+两项必需 CI 全绿、分支与 main 同步（strict）、管理员同样受约束、禁止强推和删除 main、讨论须全部解决。
+代理合并前完成跨模型独立复审并在 PR 中记录结论，CI 全绿后正常合并。
+禁止管理员绕过、关闭或修改保护、强推 main、自动将 test 发布到生产。
+**判断是否已上线看发布标签，不看 main**；热修从当前生产标签开 `release/*` 或 `hotfix/*` 分支，上线后合回 main。
 详见 [`docs/BRANCH_POLICY.md`](docs/BRANCH_POLICY.md)，该文件覆盖所有历史冲突指引。
 
 ## 1. 项目是什么
@@ -39,8 +41,8 @@ Docker Compose 交付。当前主线是维保业务闭环（见 issue #128）与
 
 1. **不要从历史 PR/issue 反推口径。** 口径只在 `docs/decisions/`；PR 描述里必须写
    `决策: D-NNNN` 或 `决策: 无`（CI 校验该行存在）。
-2. **近期正式功能以 main 为基线；main 合并必须经管理员批准。** 两个必需 CI 检查全绿，
-   main 还须 @Jinchen-Yang 的 Code Owner 批准，遵循 `docs/BRANCH_POLICY.md`；禁止从功能分支直接部署生产。
+2. **近期正式功能以 main 为基线；合并 ≠ 上线。** 两个必需 CI 检查全绿、分支与 main 同步后正常合并，
+   遵循 `docs/BRANCH_POLICY.md`；禁止从功能分支直接部署生产，生产只部署打了 `release-` 标签的精确提交。
 3. **同一模块被多工具反复改，必带契约测试。** 高危区：`services/maintenance_project_master_workbook.py`、
    `etl/loader.py`、`services/maintenance_project_identity.py` —— 并发语义与 bump 调用点。
 4. **部署不是自动的。** 写生产前先备份、前后端同 commit、`alembic upgrade head` 跑完再启镜像、
@@ -56,7 +58,7 @@ cd frontend && npm ci && npx tsc && npx vitest run && npx vite build
 # 本地起完整栈 / API 冒烟 / UI 截图：用 .claude/skills/run-it-spareparts/ 技能
 ```
 
-分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可；近期正式功能的 PR base 为 `main`，仅明确安排的远期实验指向 `test`。main 的发布 PR 必须走管理员审批。
+分支命名沿用现状：`chore/*`、`fix/*`、`feat/*`、`claude/*`、`codex/*` 均可；近期正式功能的 PR base 为 `main`，仅明确安排的远期实验指向 `test`；热修分支 `release/*`、`hotfix/*` 从当前生产标签创建。生产部署须管理员单独授权。
 
 ## 5. 提交与文档约定
 
