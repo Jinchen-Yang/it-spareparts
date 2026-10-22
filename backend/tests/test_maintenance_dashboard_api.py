@@ -204,6 +204,33 @@ def test_admin_without_ratio_defaults_to_half(db, seeded):
     assert options["valuation_policy"]["retention_ratio_default"] == "0.5"
 
 
+@pytest.mark.parametrize("filters", [
+    {"q": "MDDA-NO-MATCH"},
+    {"project": "00000000-0000-0000-0000-000000000000"},
+    {"range": "custom", "date_from": "2020-01-01", "date_to": "2020-01-02"},
+])
+def test_valuation_empty_filter_returns_zero_quantities(db, seeded, filters):
+    client = client_for(db, username="mdd-admin-empty", role="admin")
+    response = client.get(f"{BASE}/valuation", params=filters)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    page = response.json()
+    assert page["rows"] == []
+    assert page["pagination"] == {"page": 1, "page_size": 20, "total": 0}
+    assert page["policy"]["retention_ratio"] == "0.5"
+    assert page["policy"]["retention_ratio_default"] == "0.5"
+    assert page["cards"] == {
+        "estimated_bad_qty": "0.000",
+        "pending_bad_qty": "0.000",
+        "awaiting_ratio_bad_qty": "0.000",
+        "coverage_pct": None,
+        "unit": None,
+        "unit_breakdown": [],
+        "domains": {},
+    }
+
+
 def test_admin_sees_amounts_with_ratio_and_policy_version(db, seeded):
     p1, _p2, part = seeded
     client = client_for(db, username="mdd-admin", role="admin")
