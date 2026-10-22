@@ -383,10 +383,13 @@ describe("D-31 批量维护容量", () => {
     await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ note: "仅修改备注" })));
   });
 
-  it("容量 409 原文显示且不冒充版本冲突", async () => {
+  it.each([
+    ["return_capacity_exceeded", "不能保存该关联收货数量：需求单 WBDD-1 下单量 10，已收 9，本次最多还能录入 1，当前提交 3"],
+    ["return_capacity_unknown", "这条记录的历史数量无法识别，不能直接修改关联收货数量；可以在页面修改备注等其他字段，或作废后重新录入"],
+    ["return_capacity_unknown", "不能保存该关联收货数量：需求单数量基数不完整、已失效或归属异常，请先核对"],
+  ])("容量 409 %s 原文显示且不冒充版本冲突", async (code, message) => {
     mocks.update.mockReset();
-    const message = "需求单 WBDD-1 下单量 10，已收 9，本次最多还能录入 1，当前提交 3";
-    mocks.update.mockRejectedValue({ response: { status: 409, data: { detail: { code: "return_capacity_exceeded", message } } } });
+    mocks.update.mockRejectedValue({ response: { status: 409, data: { detail: { code, message } } } });
     const dialog = await openUpdate([r1]);
     setText(noteArea(dialog), "触发服务器校验");
     setText(reasonArea(dialog), "清点");

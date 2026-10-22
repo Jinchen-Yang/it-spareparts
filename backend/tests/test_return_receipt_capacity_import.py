@@ -226,6 +226,10 @@ def test_import_historical_nan_is_per_row_unknown_and_void_preserves_evidence(db
     assert correction["rows"][0]["action"] == "invalid"
     assert correction["rows"][0]["error"]["code"] == "return_capacity_unknown"
     assert correction["rows"][0]["error"]["details"]["R"] is None
+    assert correction["rows"][0]["error"]["message"] == (
+        "这条记录的历史数量无法识别，不能直接修改关联收货数量；"
+        "可以在页面修改备注等其他字段，或作废后重新录入"
+    )
     assert apply(client, correction, confirm_changes=True, reason="核对数量").status_code == 422
     assert receipts(client, project)[0]["qty"] == "NaN"
 

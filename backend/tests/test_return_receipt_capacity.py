@@ -266,6 +266,87 @@ def test_candidate_filters_before_pagination_and_keeps_site_issue_query(db):
     assert order.raw_order_id in {item['source_order_id'] for item in response.json()['rows']}
 
 
+@pytest.mark.parametrize("count", [7, 1007])
+def test_many_mostly_full_candidates_have_exact_pages_and_bounded_queries(db, count):
+    from sqlalchemy import event
+    from app.db import engine
+    from app.models.maintenance import FMaintenanceOrder
+    from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+
+    project, current_order, client = _setup(db)
+    current = _historical(db, project, current_order, 10)
+    part_id = db.query(FMaintenanceLine).filter_by(order_id=current_order.id).one().part_id
+    # Three batches, with available rows on both sides of batch boundaries.
+    # Repeated display numbers require the stable identity as a tie-breaker.
+    available = {i for i in (0, 499, 500, 999, 1000, 1006) if i < count}
+    orders = [
+        FMaintenanceOrder(
+            raw_order_id=f'batch-demand-{i:04d}', order_no=f'BATCH-{i // 2:04d}',
+            data_status='已生效', import_batch_id=current_order.import_batch_id,
+        )
+        for i in range(count)
+    ]
+    db.add_all(orders)
+    db.flush()
+    for i, order in enumerate(orders):
+        db.add_all([
+            MaintenanceSourceOrderAssignment(
+                assignment_id=str(uuid4()), project_id=project.project_id,
+                source_order_id=order.raw_order_id, is_active=True, created_by='synthetic',
+            ),
+            FMaintenanceLine(
+                raw_line_id=str(uuid4()), order_id=order.id, part_id=part_id,
+                import_batch_id=order.import_batch_id, qty=10, is_active=True,
+            ),
+            MaintenanceRkdReturnLine(
+                rkd_line_id=str(uuid4()), project_id=project.project_id,
+                source_order_id=order.raw_order_id, source='manual', head_no='历史合成',
+                source_ref=f'manual:{uuid4()}', pn='OTHER-PN',
+                qty=9 if i in available else 10, line_status='active',
+                version=1, created_by='synthetic',
+            ),
+        ])
+    db.commit()
+    measurements = []
+
+    def measure(_conn, cursor, _statement, _parameters, _context, _many):
+        if cursor.description:
+            measurements.append(([column.name for column in cursor.description], cursor.rowcount))
+
+    expected = [f'batch-demand-{i:04d}' for i in sorted(available)]
+    endpoint = f'{_base(project)}/return-receipt-demands'  # resolve expired fixture before measuring HTTP
+    for editing in (False, True):
+        ids = ([current_order.raw_order_id] if editing else []) + expected
+        for page in (1, 2, 3, 4, 8):
+            params = {'page': page, 'page_size': 2}
+            if editing:
+                params['receipt_id'] = current.rkd_line_id
+            measurements.clear()
+            event.listen(engine, 'after_cursor_execute', measure)
+            try:
+                response = client.get(endpoint, params=params)
+            finally:
+                event.remove(engine, 'after_cursor_execute', measure)
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert (payload['total'], payload['page'], payload['page_size']) == (len(ids), page, 2)
+            assert [item['source_order_id'] for item in payload['rows']] == ids[(page - 1) * 2:page * 2]
+            for item in payload['rows']:
+                is_current = item['source_order_id'] == current_order.raw_order_id
+                assert item['is_current'] is is_current
+                assert item['received_qty'] == ('10.000' if is_current else '9.000')
+                assert item['max_qty'] == ('10.000' if is_current else '1.000')
+            # The query returning candidates must return only the requested page,
+            # never the complete candidate set or batches of 500 summaries.
+            candidate_reads = [size for columns, size in measurements
+                               if 'raw_order_id' in columns and 'order_date' in columns]
+            assert candidate_reads == [len(payload['rows'])], measurements
+            assert all(size <= 2 for _, size in measurements), measurements
+            # Project/auth/permission reads + count + page (+ current receipt).
+            # This bound is identical for 7 and 1007 candidates.
+            assert len(measurements) == (6 if editing else 5), measurements
+
+
 def test_edit_context_cannot_use_another_projects_receipt(db):
     project, order, client = _setup(db)
     other = _project(db, project_id=str(uuid4()))
@@ -348,6 +429,14 @@ def test_nonfinite_historical_receipt_is_unknown_and_never_turns_into_capacity(d
     assert client.get(f'{_base(project)}/return-receipt-demands').json()['total'] == 0
     current = client.get(f'{_base(project)}/return-receipt-demands', params={'receipt_id':row.rkd_line_id})
     assert current.status_code == 200 and current.json()['rows'][0]['max_qty'] is None
+    correction = _edit(client, row, qty=1)
+    assert correction.status_code == 409, correction.text
+    assert correction.json()['detail'] == {
+        'code': 'return_capacity_unknown',
+        'message': '这条记录的历史数量无法识别，不能直接修改关联收货数量；可以在页面修改备注等其他字段，或作废后重新录入',
+        'details': dict(demand_order_id=order.raw_order_id, order_no=order.order_no,
+                        N='10.000', R=None, requested='1.000', remaining=None),
+    }
     assert _edit(client, row, note='历史非法数量待核对').status_code == 200
     db.refresh(row)
     response = client.post(f'/api/maintenance/return-receipts/{row.rkd_line_id}/void',
@@ -376,3 +465,67 @@ def test_invalid_existing_link_allows_note_but_blocks_increase_and_relink(db):
     db.refresh(unlinked)
     assert row.source_order_id == order.raw_order_id and row.qty == 3
     assert row.version == previous_version and unlinked.source_order_id is None
+
+
+def test_edit_capacity_excludes_exactly_self_with_other_same_project_occupancy(db):
+    project, order, client = _setup(db, qty=10)
+    row = _historical(db, project, order, 2)
+    _historical(db, project, order, 3)
+    path = f'{_base(project)}/return-receipt-demands'
+    candidate = client.get(path, params={'receipt_id': row.rkd_line_id}).json()['rows'][0]
+    assert candidate['received_qty'] == '5.000'
+    assert candidate['remaining_qty'] == '5.000'
+    assert candidate['max_qty'] == '7.000'  # 10 - the other row's 3, not 10-5 or 10
+    # HTTP quantities are positive integers: the smallest accepted unit is 1.
+    rejected = _edit(client, row, qty=8)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()['detail']['details'] == dict(
+        demand_order_id=order.raw_order_id, order_no=order.order_no,
+        N='10.000', R='3.000', requested='8.000', remaining='7.000',
+    )
+    accepted = _edit(client, row, qty=7)
+    assert accepted.status_code == 200, accepted.text
+    db.refresh(row)
+    assert row.qty == 7 and row.version == 2
+    candidate = client.get(path, params={'receipt_id': row.rkd_line_id}).json()['rows'][0]
+    assert candidate['remaining_qty'] == '0.000' and candidate['max_qty'] == '7.000'
+    rejected = _edit(client, row, qty=8)
+    assert rejected.status_code == 409
+    assert rejected.json()['detail']['details']['R'] == '3.000'
+    assert rejected.json()['detail']['details']['remaining'] == '7.000'
+
+
+def test_other_historical_nan_uses_generic_capacity_message(db):
+    project, order, client = _setup(db)
+    row = _historical(db, project, order, 2)
+    _historical(db, project, order, 'NaN')
+    response = _edit(client, row, qty=3)
+    assert response.status_code == 409
+    assert response.json()['detail']['code'] == 'return_capacity_unknown'
+    assert response.json()['detail']['message'] == (
+        '不能保存该关联收货数量：需求单数量基数不完整、已失效或归属异常，请先核对')
+    assert _edit(client, row, qty=1).status_code == 200
+
+
+@pytest.mark.parametrize('failing_select', [1, 2])
+def test_candidates_preserve_structured_summary_failure(db, failing_select):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.db import engine
+    project, order, client = _setup(db)
+    calls = 0
+
+    def fail_summary(_conn, _cursor, statement, _params, _context, _many):
+        nonlocal calls
+        if 'return_summary_demand' in statement:
+            calls += 1
+            if calls == failing_select:
+                raise SQLAlchemyError('synthetic summary read failure')
+
+    event.listen(engine, 'before_cursor_execute', fail_summary)
+    try:
+        response = client.get(f'{_base(project)}/return-receipt-demands')
+    finally:
+        event.remove(engine, 'before_cursor_execute', fail_summary)
+    assert response.status_code == 503
+    assert response.json()['detail'] == dict(code='summary_unavailable', message='返还汇总暂不可用，请重试')

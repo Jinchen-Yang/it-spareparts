@@ -17,7 +17,8 @@ from decimal import Decimal
 from hashlib import sha1
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, RKD_RETURN_CATEGORIES, RKD_RETURN_TEST_RESULTS
@@ -34,10 +35,16 @@ from app.models.maintenance_source_assignment import (
 from app.models.system import SysUser
 from app.services.query_filters import active_beta_maintenance_orders
 from app.services.maintenance_return_request_summary import (
-    MAX_BATCH_SIZE, ReturnSummaryError, summarize_demand_returns,
+    ReturnSummaryError, _summary, complete_demand_return_basis,
+    demand_return_summary_query, summarize_demand_returns,
 )
 
 MANUAL_CONDITIONS = ("成品", "坏品", "废品")
+
+INVALID_HISTORICAL_RECEIPT_QTY_MESSAGE = (
+    "这条记录的历史数量无法识别，不能直接修改关联收货数量；"
+    "可以在页面修改备注等其他字段，或作废后重新录入"
+)
 
 # 凭据字段上限（v1.36）：扫描多个 SN/快递单需要长文本；DB 列为 Text。
 _EVIDENCE_REF_MAX = 16384
@@ -146,7 +153,9 @@ def check_receipt_capacity(
     }
     if summary is None or summary.basis_state != "complete":
         raise ReturnReceiptCapacityConflict(
-            "return_capacity_unknown", "需求单数量基数不完整、已失效或归属异常，不能增加关联收货，请先核对",
+            "return_capacity_unknown",
+            INVALID_HISTORICAL_RECEIPT_QTY_MESSAGE if not old_qty.is_finite() else
+            "不能保存该关联收货数量：需求单数量基数不完整、已失效或归属异常，请先核对",
             details,
         )
     received = summary.received_qty + additional_qty - (old_qty if same_owner else Decimal(0))
@@ -158,7 +167,7 @@ def check_receipt_capacity(
             return format(value, "f").rstrip("0").rstrip(".") if "." in format(value, "f") else str(value)
         raise ReturnReceiptCapacityConflict(
             "return_capacity_exceeded",
-            f"需求单 {summary.order_no or source_order_id} 下单量 {display(summary.demand_qty)}，"
+            f"不能保存该关联收货数量：需求单 {summary.order_no or source_order_id} 下单量 {display(summary.demand_qty)}，"
             f"已收 {display(received)}，本次最多还能录入 {display(remaining)}，当前提交 {display(requested)}",
             details,
         )
@@ -603,30 +612,35 @@ def demand_candidates(
         ))
         if current is None:
             raise ReturnReceiptNotFound("返还记录不存在")
-    rows = db.execute(stmt.order_by(*ordering)).all()
-    # Keep the historical identity even when inactive, reassigned or outside
-    # the search/PN filter. Only the receipt's authorized identity is exposed;
-    # the scoped summary below still withholds another project's quantities.
-    if current and current.source_order_id not in {row.raw_order_id for row in rows}:
-        own_order = db.execute(select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.order_no,
-                                      FMaintenanceOrder.order_date)
-            .where(FMaintenanceOrder.raw_order_id == current.source_order_id)).first()
-        if own_order:
-            rows.append(own_order)
-    summaries = {}
-    ids = [row.raw_order_id for row in rows]
-    for start in range(0, len(ids), MAX_BATCH_SIZE):
-        summaries.update(summarize_demand_returns(
-            db, source_order_ids=ids[start:start + MAX_BATCH_SIZE],
-            allowed_project_ids=[project_id],
-        ))
+    # Retain only the authorized receipt's historical identity outside the
+    # normal filters. Summary scope still withholds any other project's data.
+    selected_ids = stmt.with_only_columns(FMaintenanceOrder.raw_order_id)
+    selected = FMaintenanceOrder.raw_order_id.in_(selected_ids)
+    current_id = current.source_order_id if current else None
+    if current_id:
+        selected = or_(selected, FMaintenanceOrder.raw_order_id == current_id)
+    orders = select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.order_no,
+                    FMaintenanceOrder.order_date).where(selected).cte("return_candidate_orders")
+    summary = demand_return_summary_query(
+        source_order_ids=select(orders.c.raw_order_id), allowed_project_ids=[project_id],
+    ).order_by(None).cte("return_candidate_summary")
+    is_current = (orders.c.raw_order_id == current_id) if current_id else False
+    remaining = func.greatest(summary.c.demand_qty
+                              - func.coalesce(summary.c.received_qty, Decimal(0)), Decimal(0))
+    eligible = select(orders, summary).outerjoin(
+        summary, summary.c.source_order_id == orders.c.raw_order_id,
+    ).where(or_(is_current, and_(complete_demand_return_basis(summary.c), remaining > 0)))
+    ordering = [(orders.c.raw_order_id == current_id).desc()] if current_id else []
+    try:
+        total = db.scalar(select(func.count()).select_from(eligible.subquery())) or 0
+        rows = db.execute(eligible.order_by(*ordering, orders.c.order_no, orders.c.raw_order_id)
+                          .offset((page - 1) * page_size).limit(page_size)).mappings().all()
+    except SQLAlchemyError as exc:
+        raise ReturnSummaryError("summary_unavailable") from exc
     candidates = []
     for row in rows:
-        summary = summaries.get(row.raw_order_id)
+        summary = _summary(row) if row["source_order_id"] is not None else None
         is_current = bool(current and current.source_order_id == row.raw_order_id)
-        if not is_current and (summary is None or summary.basis_state != "complete"
-                               or summary.remaining_qty <= 0):
-            continue
         maximum = None
         if summary and summary.basis_state == "complete":
             maximum = max(summary.demand_qty - summary.received_qty
@@ -643,11 +657,7 @@ def demand_candidates(
             "basis_state": summary.basis_state if summary else "incomplete",
             "is_current": is_current,
         })
-    # The edit selector must see its current order on the first page, even if
-    # its display number would otherwise sort after hundreds of alternatives.
-    candidates.sort(key=lambda item: not item["is_current"])
-    return {"rows": candidates[(page - 1) * page_size:page * page_size],
-            "total": len(candidates), "page": page, "page_size": page_size}
+    return {"rows": candidates, "total": total, "page": page, "page_size": page_size}
 
 
 def update_receipt(
