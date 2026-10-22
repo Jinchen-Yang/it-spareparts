@@ -1,2 +1,3 @@
-# main 的生产变更必须由杨金臣管理员审批。
+# 自 2026-10-21 17:06 起 main 不再要求 Code Owner 批准（见 docs/BRANCH_POLICY.md）；
+# 本文件仅用于自动请求 @Jinchen-Yang 关注 PR。
 * @Jinchen-Yang
