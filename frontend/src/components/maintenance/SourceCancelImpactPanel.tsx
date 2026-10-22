@@ -12,6 +12,7 @@ import {
   type SourceCancellationResult,
 } from "../../api/maintenanceSourceCancelCascade";
 import { readError, useLatestRead, type RegisterPanelRefresh } from "../../pages/maintenance/panel/panelUtils";
+import SourceCancelRestorationSection from "./SourceCancelRestorationSection";
 
 const PAGE_SIZE = 10;
 const wrapText = { overflowWrap: "anywhere" as const };
@@ -311,6 +312,9 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
         disabled={busy || retry || needsRefresh || loading} onChange={next => {
           currentPage.current = next; setPage(next); void loadList();
         }} />
+      {/* D-0022：误确认取消的恢复入口，与确认作废同权限；无权限时内部整体隐藏。 */}
+      <SourceCancelRestorationSection projectId={projectId} canConfirm={canConfirm}
+        sessionToken={sessionToken} onChanged={onChanged} />
     </Space>
     <Modal title={<span style={wrapText}>已取消影响 · {selected?.order_no}</span>} open={selected !== null}
       width={760} style={{ maxWidth: "calc(100vw - 24px)" }} maskClosable={false} onCancel={closeDetail}

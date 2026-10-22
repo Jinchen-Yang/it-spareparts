@@ -1,12 +1,18 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const api = vi.hoisted(() => ({ list: vi.fn(), detail: vi.fn(), confirm: vi.fn(), status: vi.fn() }));
+const api = vi.hoisted(() => ({
+  list: vi.fn(), detail: vi.fn(), confirm: vi.fn(), status: vi.fn(),
+  restoreList: vi.fn(), restorePreview: vi.fn(), restore: vi.fn(),
+}));
 vi.mock("../../../api/maintenanceSourceCancelCascade", () => ({
   listSourceCancellations: api.list,
   getSourceCancellation: api.detail,
   confirmSourceCancellation: api.confirm,
   getSourceCancellationStatus: api.status,
+  listSourceRestorations: api.restoreList,
+  getSourceRestoration: api.restorePreview,
+  restoreSourceCancellation: api.restore,
 }));
 import SourceCancelImpactPanel from "../SourceCancelImpactPanel";
 
@@ -35,6 +41,8 @@ beforeEach(() => {
   api.detail.mockResolvedValue({ data: detail });
   api.confirm.mockResolvedValue({ data: result });
   api.status.mockResolvedValue({ data: { result: null } });
+  // 恢复入口默认空清单：不影响确认作废用例的断言范围。
+  api.restoreList.mockResolvedValue({ data: { items: [], total: 0 } });
 });
 afterEach(cleanup);
 
