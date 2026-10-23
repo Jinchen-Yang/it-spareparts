@@ -127,6 +127,7 @@ _app_engine = engine
 _TABLES = [
     "sys_catalog_proof_nonce", "sys_catalog_subject_binding",
     # Include globally scoped resources: a NULL PN FK does not participate in CASCADE.
+    "pn_catalog_external_reference",
     "pn_catalog_legacy_record", "pn_catalog_migration_batch",
     "pn_catalog_job_event", "pn_catalog_job",
     "pn_media_inbox", "pn_media_inbox_group", "pn_media_multipart", "pn_media_upload",

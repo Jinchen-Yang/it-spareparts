@@ -164,6 +164,7 @@ def client_policy_version():
             {
                 "issuer": s.pn_shop_issuer,
                 "client": s.pn_shop_client_id,
+                "source_namespace": s.pn_shop_source_namespace,
                 "actions": sorted(set(s.pn_shop_allowed_actions)),
                 "fields": {
                     k: sorted(set(v)) for k, v in s.pn_shop_allowed_fields.items()

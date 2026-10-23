@@ -88,9 +88,17 @@ def get_part(db: Session, part_id: int, *, context: CommandContext, authorize: A
         "replayed": False}}
 
 
+def _command_payload(command, *, exclude=None):
+    payload = command.model_dump(mode="json", exclude=exclude)
+    # Additive optional references must preserve hashes of pre-reference commands.
+    if isinstance(command, CreatePart) and command.external_reference is None:
+        payload.pop("external_reference", None)
+    return payload
+
+
 def _payload_hash(operation: str, part_id: int | None, command, context: CommandContext) -> str:
     return _digest({"operation": operation, "part_id": part_id,
-        "command": command.model_dump(mode="json"), "if_match_revision": context.if_match_revision,
+        "command": _command_payload(command), "if_match_revision": context.if_match_revision,
         "reason": context.reason, "provenance": context.actor.provenance.model_dump(mode="json"),
         "confirmed_by": context.confirmed_by, "adopted_from_candidate_id": context.adopted_from_candidate_id})
 
@@ -402,7 +410,7 @@ def _candidates(db: Session, pn: str) -> list[dict]:
 
 def _confirmation_basis(command: CreatePart, context: CommandContext, candidates: list) -> dict:
     return {"principal_id": context.actor.principal_id, "client_id": context.actor.client_id,
-            "payload": _digest(command.model_dump(mode="json", exclude={"confirmation_token", "confirmation_reason"})),
+            "payload": _digest(_command_payload(command, exclude={"confirmation_token", "confirmation_reason"})),
             "candidates_hash": _digest(candidates)}
 
 
@@ -437,6 +445,9 @@ def create_part(db: Session, command: CreatePart, *, context: CommandContext,
         return replay
     if context.if_match_revision is not None:
         raise CatalogError("request.validation_failed", "新建不能指定已有资料的 If-Match", status_code=422)
+    if command.external_reference is not None:
+        from .references import prepare_new_reference
+        prepare_new_reference(db, command.external_reference, context=context)
     acquire_identity_lock(db, shared=True)
     acquire_creation_locks(db, [command.pn_std])
     if db.scalar(select(DimPart.id).where(DimPart.pn_std == command.pn_std)) is not None:
@@ -482,6 +493,10 @@ def create_part(db: Session, command: CreatePart, *, context: CommandContext,
         deleted_spec_keys=[k for k, v in specs.items() if v is None],
         restored_spec_keys=[k for k, v in specs.items() if v is not None], force_fields=changes,
         authorization=decision.metadata, payload_hash=digest)
+    if command.external_reference is not None:
+        from .references import bind_created_reference
+        bind_created_reference(db, command.external_reference, part_id=part.id,
+            identity_revision=state.identity_revision, context=context, authorization=decision.metadata)
     receipt = _save_receipt(db, part.id, context=context, operation="create", digest=digest,
                            audit_id=result["audit_id"], value=result["snapshot"])
     return _response(db, receipt, context=context, authorize=authorize, replayed=False)
