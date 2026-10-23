@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.excel_text_safety import has_illegal_excel_chars
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -18,7 +19,6 @@ from app.business_time import business_today
 from app.services import (
     maintenance_periods,
     maintenance_project_identity,
-    maintenance_project_operations as operations,
     project_names,
 )
 
@@ -122,7 +122,7 @@ def _lock_project_for_master_write(
     )
     if exists is None:
         return None, None
-    state = operations.get_or_create_workbook_state(
+    state = workbook_state_service.get_or_create_workbook_state(
         db,
         project_id=project_id,
         lock=True,
@@ -325,7 +325,7 @@ def update_project(
         reason=clean_reason,
         operated_by=operated_by,
     )
-    operations.bump_locked_workbook_revision(db, state=state)
+    workbook_state_service.bump_locked_workbook_revision(db, state=state)
     db.flush()
     return after
 
@@ -364,6 +364,6 @@ def set_project_active(
         reason=clean_reason,
         operated_by=operated_by,
     )
-    operations.bump_locked_workbook_revision(db, state=state)
+    workbook_state_service.bump_locked_workbook_revision(db, state=state)
     db.flush()
     return after

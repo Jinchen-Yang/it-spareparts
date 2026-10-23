@@ -28,7 +28,7 @@ from app.services.maintenance_migration_controls import (
     validate_historical_baseline_contract,
 )
 from app.services import maintenance_consumption_cost
-from app.services.maintenance_project_operations import get_or_create_workbook_state
+from app.services.maintenance_workbook_state import get_or_create_workbook_state
 
 
 class MaintenanceMigrationSourceError(ValueError):

@@ -40,10 +40,10 @@ from app.models.maintenance_project import (
 )
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_collection_evidence as collection_evidence
 from app.services import maintenance_periods
 from app.services import maintenance_project_assignments as assignments
-from app.services import maintenance_project_operations as operations
 
 # 提醒状态派生优先级（设计 §4.3）。
 _REMINDER_STATE_RANK = {
@@ -832,7 +832,7 @@ def follow_up_collection_milestone(
     )
     if exists is None:
         return None
-    state = operations.get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    state = workbook_state_service.get_or_create_workbook_state(db, project_id=project_id, lock=True)
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
@@ -966,5 +966,5 @@ def follow_up_collection_milestone(
     # The reminder fields are part of both project workbook projections.  The
     # idempotency replay returned before this lock/write block, so only the
     # first successful semantic action invalidates the workbook snapshot.
-    operations.bump_locked_workbook_revision(db, state=state)
+    workbook_state_service.bump_locked_workbook_revision(db, state=state)
     return payload

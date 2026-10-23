@@ -39,6 +39,7 @@ from app.models.maintenance import (
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import (
     maintenance_cost_invalidation,
     maintenance_cost_quality,
@@ -106,7 +107,7 @@ def _probe_assigned_project_ids(db: Session, source_order_ids) -> set[str]:
     """当前生效挂靠 probe（只读不加锁）：source_order_id → 稳定项目 ID 集合。
 
     与 etl.loader 的导入侧 probe 同一口径；锁/ bump 一律走
-    maintenance_project_operations 的公共 helper（lock_workbook_states /
+    maintenance_workbook_state 的公共 helper（lock_workbook_states /
     bump_locked_workbook_revision），本模块不另造锁序逻辑。
     """
     ids = sorted({str(s) for s in source_order_ids if s})
@@ -718,7 +719,7 @@ def recompute(
         )
         .distinct()
     ))
-    locked_states = maintenance_project_operations.lock_workbook_states(
+    locked_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids=(
             _probe_assigned_project_ids(db, physical_write_raw_ids)
@@ -770,7 +771,7 @@ def recompute(
     revision_project_ids = _probe_assigned_project_ids(db, changed_raw_ids)
     for project_id in sorted(revision_project_ids):
         state = locked_states[project_id]
-        maintenance_project_operations.bump_locked_workbook_revision(db, state=state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=state)
     stats["site_lines_repriced"] = site_lines_repriced
     stats["site_projects_repriced"] = site_projects_repriced
     stats["projects_workbook_bumped"] = sum(

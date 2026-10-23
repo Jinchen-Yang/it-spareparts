@@ -9,8 +9,8 @@ from app.models.maintenance import FMaintenanceLine as L, FMaintenanceOrder as O
 from app.models.maintenance_project_operations import MaintenanceSiteIssue as I, MaintenanceSiteIssueLine as IL
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment as A
 from app.models.system import SysAuditLog, SysImportBatch
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_demands as demands
-from app.services import maintenance_project_operations as operations
 from app.services import maintenance_site_return_requirements as requirements
 from app.services import maintenance_wbdd_reconciliation as reconciliation
 
@@ -110,7 +110,7 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
     project_ids = {row["assigned_project_id"] for row in
         [*(available_orders[key] for key in source_ids), *(available_lines[key] for key in selected_line_ids)]
         if row["assigned_project_id"]}
-    states = operations.lock_workbook_states(db, project_ids=project_ids)
+    states = workbook_state_service.lock_workbook_states(db, project_ids=project_ids)
     orders = list(db.scalars(select(O).where(O.raw_order_id.in_(parents)).order_by(O.id)
                             .with_for_update().execution_options(populate_existing=True)))
     assignments = list(db.scalars(select(A).where(A.source_order_id.in_(parents), A.is_active.is_(True))
@@ -199,7 +199,7 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
             operated_by=operated_by, allowed_project_ids=allowed_project_ids,
             idempotency_key=f"wbdd-sync:{replay_key}")
     for project_id, state in states.items():
-        operations.bump_locked_workbook_revision(db, state=state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=state)
     db.flush()
     result = {"batch_id": batch_id, "voided_orders": tombstone_result["voided"],
               "voided_lines": len(to_void), "voided_site_lines": site_void_count,

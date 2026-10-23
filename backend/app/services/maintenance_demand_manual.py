@@ -36,7 +36,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
 )
 from app.models.system import SysImportBatch
-from app.services import maintenance_project_operations as _project_ops
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.maintenance_cost import (
     MaintenanceCostRecomputeBusy,
     recompute as recompute_cost,
@@ -92,7 +92,7 @@ def _lock_data_change(db: Session) -> None:
 
 
 def _lock_workbook_states(db: Session, *, project_ids):
-    states = _project_ops.lock_workbook_states(db, project_ids=project_ids)
+    states = workbook_state_service.lock_workbook_states(db, project_ids=project_ids)
     # FOR UPDATE 不会自动替换身份映射里已存在的 ORM 值；取锁后、赋值前重读。
     for state in states.values():
         db.refresh(state)
@@ -415,7 +415,7 @@ def patch_demand_line(
     for pid in sorted(projects):
         state = prelocked.get(pid)
         if state is not None:
-            _project_ops.bump_locked_workbook_revision(db, state=state)
+            workbook_state_service.bump_locked_workbook_revision(db, state=state)
 
     # 数量/PN 变更 → 成本重算（同事务，全成或全败）
     if _REPRICE_COLUMNS & set(changed_columns):
@@ -600,7 +600,7 @@ def create_manual_demand_line(
     )
     state = prelocked.get(project_id)
     if state is not None:
-        _project_ops.bump_locked_workbook_revision(db, state=state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=state)
 
     db.flush()
     try:
@@ -720,7 +720,7 @@ def clear_override(
     for pid in sorted(projects):
         state = prelocked.get(pid)
         if state is not None:
-            _project_ops.bump_locked_workbook_revision(db, state=state)
+            workbook_state_service.bump_locked_workbook_revision(db, state=state)
     if _REPRICE_COLUMNS & restored_fields:
         db.flush()
         try:

@@ -20,6 +20,7 @@ from app.models.maintenance_project import (
 from app.models.system import SysAccessLog, SysUser
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.services import maintenance_project_operations as operations_service
+from app.services import maintenance_workbook_state as workbook_state_service
 
 
 _PASSWORD = "synthetic-password-123"
@@ -592,7 +593,7 @@ def test_salesperson_sync_and_manager_assignment_roll_back_together(db, monkeypa
         raise RuntimeError("synthetic workbook revision failure")
 
     monkeypatch.setattr(
-        operations_service,
+        workbook_state_service,
         "bump_locked_workbook_revision",
         fail_revision,
     )

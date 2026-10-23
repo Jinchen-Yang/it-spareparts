@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.excel_text_safety import has_illegal_excel_chars
 from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
@@ -25,7 +26,6 @@ from app.services import maintenance_business_type_backfill as business_type_bac
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_catalog as catalog
-from app.services import maintenance_project_operations as operations
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 
@@ -193,7 +193,7 @@ def patch_stable_project(
                 )
                 if exists is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
-                state = operations.lock_workbook_states(
+                state = workbook_state_service.lock_workbook_states(
                     db, project_ids=[project_id]
                 )[project_id]
                 project = db.scalar(
@@ -212,7 +212,7 @@ def patch_stable_project(
                 project = db.scalar(select(MaintenanceProject).where(
                     MaintenanceProject.project_id == project_id
                 ))
-                state = operations.get_or_create_workbook_state(
+                state = workbook_state_service.get_or_create_workbook_state(
                     db, project_id=project_id, lock=True
                 )
             viewers, viewers_changed = assignments.sync_project_viewers(
@@ -229,7 +229,7 @@ def patch_stable_project(
                 # catalog.update_project 已 bump 的路径在同一根事务内
                 # 会被 bump_locked_workbook_revision 去重；因此两类变更
                 # 无论如何组合都是真实变更 +1、全 no-op +0。
-                operations.bump_locked_workbook_revision(db, state=state)
+                workbook_state_service.bump_locked_workbook_revision(db, state=state)
                 db.flush()
             payload = {
                 **catalog.project_dict(project),

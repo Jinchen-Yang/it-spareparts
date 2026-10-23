@@ -5,7 +5,7 @@
 不再参与任何业务展示、筛选或任务规则计算。
 
 锁序约定：调用方必须先按 state → project 顺序持锁（见
-``maintenance_project_operations.lock_workbook_states`` 与 catalog 的
+``maintenance_workbook_state.lock_workbook_states`` 与 catalog 的
 ``_lock_project_for_master_write``），本模块只锁/写 projection 行，
 绝不 bump ``MaintenanceProject.version`` 或 workbook state revision
 （每事务一次由调用方负责）。

@@ -25,6 +25,7 @@ from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssig
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.business_time import business_today
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import (
     maintenance_project_assignments,
     maintenance_project_identity,
@@ -380,10 +381,9 @@ def assign_source_orders(
         ).all()
         if value
     )
-    from app.services import maintenance_project_operations as operations
 
     if _prelocked_states is None:
-        locked_states = operations.lock_workbook_states(
+        locked_states = workbook_state_service.lock_workbook_states(
             db,
             project_ids=probed_project_ids,
         )
@@ -565,7 +565,7 @@ def assign_source_orders(
         resulting[source_id] = assignment
     db.flush()
     for changed_project_id in sorted(changed_projects):
-        operations.bump_locked_workbook_revision(
+        workbook_state_service.bump_locked_workbook_revision(
             db,
             state=locked_states[changed_project_id],
         )
@@ -632,9 +632,8 @@ def unassign_source_orders(
             user_ctx=user_ctx,
         ):
             raise SourceAssignmentPermissionError("无权访问来源维保单当前所属项目")
-    from app.services import maintenance_project_operations as operations
 
-    locked_states = operations.lock_workbook_states(
+    locked_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids={project_id for _, _, project_id in probes},
     )
@@ -697,7 +696,7 @@ def unassign_source_orders(
         archived.append(row)
     db.flush()
     for project_id in sorted({row.project_id for row in archived}):
-        operations.bump_locked_workbook_revision(
+        workbook_state_service.bump_locked_workbook_revision(
             db,
             state=locked_states[project_id],
         )
@@ -845,14 +844,12 @@ def _backfill_project_owner(
         )
         db.flush()
         if not _skip_workbook_bump:
-            from app.services import maintenance_project_operations as operations
-
             state = _prelocked_state
             if state is None:
-                state = operations.lock_workbook_states(
+                state = workbook_state_service.lock_workbook_states(
                     db, project_ids=[project.project_id]
                 )[project.project_id]
-            operations.bump_locked_workbook_revision(db, state=state)
+            workbook_state_service.bump_locked_workbook_revision(db, state=state)
     # 账号级指派：仅当负责人文本就是销售（含刚回填）且当前无人负责
     if manager_text != (salesperson[:64]):
         return stats
@@ -940,10 +937,9 @@ def backfill_owner_fields(
     )
     if not candidate_ids:
         return stats
-    from app.services import maintenance_project_operations as operations
 
     if _prelocked_states is None:
-        locked_states = operations.lock_workbook_states(
+        locked_states = workbook_state_service.lock_workbook_states(
             db, project_ids=candidate_ids
         )
     else:
@@ -1268,7 +1264,6 @@ def _auto_assign_unassigned_core(
         ))
 
     # 4. 锁序铁律：state(sorted) → project(sorted) → 单据/指派行。
-    from app.services import maintenance_project_operations as operations
 
     union_ids = target_ids | backfill_candidate_ids
     if prelocked_states is not None or prelocked_projects is not None:
@@ -1287,7 +1282,7 @@ def _auto_assign_unassigned_core(
             for project_id in union_ids
         }
     else:
-        locked_states = operations.lock_workbook_states(db, project_ids=union_ids)
+        locked_states = workbook_state_service.lock_workbook_states(db, project_ids=union_ids)
         locked_projects: dict[str, MaintenanceProject] = {}
     if union_ids and prelocked_states is None:
         locked_projects = {}
@@ -1441,7 +1436,7 @@ def _auto_assign_unassigned_core(
     # 既有项目导出投影真实改变 → 同事务 revision 恰好 +1（bump 内部按根事务
     # 去重，与后续 owner 回填的 bump 合并）；新建项目首次成形保持 revision 0。
     for changed_project_id in sorted(changed_existing):
-        operations.bump_locked_workbook_revision(
+        workbook_state_service.bump_locked_workbook_revision(
             db,
             state=locked_states[changed_project_id],
         )
