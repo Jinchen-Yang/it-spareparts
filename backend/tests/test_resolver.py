@@ -1,11 +1,10 @@
-"""PN 近似解析器单测（对本地真库跑，临时数据进出有清理）。
+"""PN 近似解析器单测（真实 PostgreSQL，每个用例独立造数）。
 
 核心验收用例（用户指定）：库内只有 "4089-RT"，搜 "super 4089RT-x 准系统" 必须 top1 命中。
 """
 import pytest
 
 from app import config
-from app.db import SessionLocal
 from app.models.dimensions import DimPart, PartAlias
 from app.services import part_resolver
 
@@ -13,26 +12,39 @@ _PN = "4089-RT"
 _ALIAS_RAW = "TEST-ALIAS-4089X"
 
 
-@pytest.fixture(scope="module")
-def db():
-    s = SessionLocal()
-    # 造数：超微准系统 + 一条人工别名（teardown 清理；若已存在则不动）
-    created_part = created_alias = False
-    if s.query(DimPart).filter_by(pn_std=_PN).first() is None:
-        s.add(DimPart(pn_std=_PN, description="超微准系统 Supermicro 4U barebone",
-                      brand="超微", needs_review=False))
-        created_part = True
-    if s.query(PartAlias).filter_by(pn_raw=_ALIAS_RAW).first() is None:
-        s.add(PartAlias(pn_raw=_ALIAS_RAW, pn_std=_PN, source="manual"))
-        created_alias = True
-    s.commit()
-    yield s
-    if created_alias:
-        s.query(PartAlias).filter_by(pn_raw=_ALIAS_RAW).delete()
-    if created_part:
-        s.query(DimPart).filter_by(pn_std=_PN).delete()
-    s.commit()
-    s.close()
+@pytest.fixture(autouse=True)
+def resolver_parts(db):
+    # 复用 conftest 的逐用例隔离，不能覆盖 db 后继承前序文件留下的候选。
+    db.add(DimPart(pn_std=_PN, description="超微准系统 Supermicro 4U barebone",
+                   brand="超微", needs_review=False))
+    db.add(PartAlias(pn_raw=_ALIAS_RAW, pn_std=_PN, source="manual"))
+    db.commit()
+
+
+@pytest.fixture()
+def exact_and_variant(db):
+    db.add_all([
+        DimPart(pn_std="ST8000NM000A", description="Seagate 8TB SATA HDD"),
+        DimPart(pn_std="ST8000NM000A-NEW", description="Seagate 8TB SATA HDD variant"),
+    ])
+    db.commit()
+
+
+@pytest.fixture()
+def gpu_family(db):
+    pns = ("V100-16G-PCIE", "V100-32G-PCIE")
+    db.add_all([DimPart(pn_std=pn, description=f"NVIDIA Tesla 显卡 {pn}", brand="NVIDIA")
+                for pn in pns])
+    db.commit()
+    return pns
+
+
+@pytest.fixture()
+def weak_graphics_candidates(db):
+    pns = ("OTHER-A", "OTHER-B")
+    db.add_all([DimPart(pn_std=pn, description="普通显卡") for pn in pns])
+    db.commit()
+    return pns
 
 
 def _top1(db, q):
@@ -83,25 +95,47 @@ def test_gibberish_low_confidence(db, monkeypatch):
     assert r["low_confidence"]
 
 
-def test_exact_beats_variant(db):
-    """真库回归：完整 PN 查询时，精确命中必须排在包含变体之前。"""
-    r = part_resolver.resolve(db, "ST8000NM000A", limit=5)
-    if r["items"]:  # 依赖真库已导数据；空库跳过
-        assert r["items"][0]["pn_std"] == "ST8000NM000A"
+def test_exact_beats_variant(db, exact_and_variant):
+    """完整 PN 查询时，精确目标独占主结果，包含变体降级为相似项。"""
+    r = part_resolver.resolve(db, "ST8000NM000A", limit=5, include_similar=True)
+    assert [it["pn_std"] for it in r["items"]] == ["ST8000NM000A"]
+    assert "ST8000NM000A-NEW" in {it["pn_std"] for it in r["similar_items"]}
 
 
-def test_ambiguous_family(db):
+def test_ambiguous_family(db, gpu_family, weak_graphics_candidates):
     """口头型号对应多规格变体（V100 16G/32G/PCIE…）→ ambiguous=True 要求消歧。"""
     r = part_resolver.resolve(db, "V100显卡", limit=10)
-    if len(r["items"]) >= 2:  # 依赖真库 V100 系列
-        assert r["ambiguous"] is True
+    assert {it["pn_std"] for it in r["items"][:2]} == set(gpu_family)
+    assert all(it["score"] >= config.RESOLVE_LOW_CONFIDENCE for it in r["items"][:2])
+    assert r["low_confidence"] is False
+    assert r["ambiguous"] is True
 
 
-def test_exact_not_ambiguous(db):
+def test_exact_not_ambiguous(db, exact_and_variant):
     """敲了完整 PN 精确命中 → 不算歧义，不该反问用户。"""
     r = part_resolver.resolve(db, "ST8000NM000A", limit=5)
-    if r["items"] and "PN精确匹配" in r["items"][0]["match_reason"]:
-        assert r["ambiguous"] is False
+    assert r["exact"] is True
+    assert r["items"][0]["match_type"] == "exact_pn"
+    assert r["low_confidence"] is False
+    assert r["ambiguous"] is False
+
+
+@pytest.mark.parametrize("single_strong_candidate", [False, True])
+def test_weak_candidates_do_not_create_family_ambiguity(
+    db, weak_graphics_candidates, single_strong_candidate
+):
+    """多条品类弱召回不等于多个可选规格；单个强型号也无需消歧。"""
+    if single_strong_candidate:
+        db.add(DimPart(pn_std="V100-16G-PCIE", description="NVIDIA Tesla V100 显卡"))
+        db.commit()
+    r = part_resolver.resolve(db, "V100显卡", limit=10)
+    weak = [it for it in r["items"] if it["pn_std"] in weak_graphics_candidates]
+    assert len(weak) == 2
+    assert all(it["score"] < config.RESOLVE_LOW_CONFIDENCE for it in weak)
+    if single_strong_candidate:
+        assert r["items"][0]["pn_std"] == "V100-16G-PCIE"
+    assert r["low_confidence"] is (not single_strong_candidate)
+    assert r["ambiguous"] is False
 
 
 # ---------------- 描述全词命中车道（v1.2.12）----------------
