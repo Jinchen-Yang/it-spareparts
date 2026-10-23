@@ -201,6 +201,13 @@ def _reauthorize_site_workbook(
     require_page("page_maintenance")(current)
     _require_master_edit(plan.project_id, db=db, ctx=current)
     enforce_maintenance_project_access(db, project_id=plan.project_id, ctx=current)
+    if plan.assignment_changes:
+        from app.services import maintenance_source_assignments as assignments
+
+        try:
+            assignments._require_full_scope(current)
+        except assignments.SourceAssignmentPermissionError as exc:
+            raise ec.WorkbookError("assignment_permission_denied", str(exc)) from exc
     if plan.contract_amount_change is not None:
         _require_contract_amount_manage(current, ident, db=db, project_id=plan.project_id)
     if plan.project_note_change is not None:
