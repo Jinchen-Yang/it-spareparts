@@ -1,6 +1,6 @@
 # 共享 PN 与图库模块：架构设计候选
 
-状态：B0 设计候选，未实现、未迁移、未部署。跟踪：[itsp #463](https://github.com/Jinchen-Yang/it-spareparts/issues/463)。
+状态：设计基线已获准分阶段实施，B1 代码候选验证中；未切换、未迁移生产、未部署。跟踪：[itsp #463](https://github.com/Jinchen-Yang/it-spareparts/issues/463)。
 
 用户确认：两边维护同一份 PN 主数据和图库；通用商品描述按 PN × good/bad 分开；保留 shop 已好用的维护交互；权限接入 D-0026 / #455 的新框架。新目标取代 D-36 中图库只能由 shop 维护、itsp 只读的限制。本文其余工程选择为设计建议，不冒充用户逐条拍板。旧 catalog-v2 与 gallery-v1 草稿保留历史，不自动续做。
 

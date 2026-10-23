@@ -418,6 +418,10 @@ export interface MasterEditSnapshot {
     source: "auto" | "manual";
   }>;
   version_mode: "field_snapshot";
+  identity_revision?: number;
+  profile_revision?: number;
+  field_versions?: Record<string, number>;
+  deleted_specs?: string[];
 }
 export type MasterEditPayload = MasterFields & {
   part_id: number;

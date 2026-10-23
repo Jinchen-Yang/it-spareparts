@@ -1,6 +1,6 @@
 # 共享 PN 模块 HTTP 与审计契约（设计草案）
 
-状态：未实现。共同前缀 `/api/pn-catalog/v1`；itsp拥有权威端，shop BFF仅做认证/路由/旧响应适配。第一版发布OpenAPI 3.1并生成TypeScript client；本文不是可调用API。目标见[架构](architecture.md)，跟踪 itsp #463。
+状态：B1 主数据协议候选已实现并生成 [OpenAPI](openapi.json)，具体阶段边界见 [实现记录](implementation-status.md)；其余接口仍为后续阶段设计。共同前缀 `/api/pn-catalog/v1`；itsp拥有权威端，shop BFF仅做认证/路由/旧响应适配。第一版发布OpenAPI 3.1并生成TypeScript client；本文含后续阶段接口，不能据此认定全部 API 已可调用；当前实际接口以生成规范为准。目标见[架构](architecture.md)，跟踪 itsp #463。
 
 ## 1. 统一约定
 

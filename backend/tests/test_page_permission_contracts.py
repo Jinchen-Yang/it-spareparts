@@ -199,6 +199,14 @@ def test_page_import_runs_the_real_precheck_batch_and_history_flow(
     listed = client.get("/api/import/batches")
     assert listed.status_code == 200
     assert listed.json()[0]["uploaded_by"] == "王小环"
+    from app.pn_catalog.models import AuditEvent
+
+    actor = db.scalar(select(SysUser).where(SysUser.username == "王小环"))
+    assert db.get(SysImportJob, job_id).actor_user_id == actor.id
+    assert db.get(SysImportBatch, batch_id).actor_user_id == actor.id
+    event = db.scalar(select(AuditEvent).where(AuditEvent.action == "profile.ingest"))
+    assert event.principal_id == f"account:{actor.id}"
+
 
 
 def test_page_import_denial_still_blocks_read_and_write(db, admin_client):

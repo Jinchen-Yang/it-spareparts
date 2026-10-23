@@ -13,6 +13,9 @@ const baseline = {
     machine_or_part: null, unit: null,
   },
   specs: {},
+  identity_revision: 2,
+  profile_revision: 5,
+  field_versions: { description: 3, brand: 1, category_major: 2, category_minor: 2 },
   version_mode: "field_snapshot",
 };
 
@@ -34,7 +37,8 @@ afterEach(() => {
 it("内联编辑冲突后可采用当前基线并保留草稿，重新提交只包含人工修改", async () => {
   const patches: any[] = [];
   let loads = 0;
-  const latest = { ...baseline, fields: {
+  const latest = { ...baseline, profile_revision: 6,
+    field_versions: { ...baseline.field_versions, description: 4, category_major: 3, category_minor: 3 }, fields: {
     ...baseline.fields, description: "另一人描述", category_major: "内存", category_minor: "DDR4",
   } };
   api.defaults.adapter = async (config) => {

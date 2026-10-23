@@ -17,6 +17,7 @@ from app.models.maintenance import FProjectExpense
 from app.etl.reader import ReaderError
 from app.etl.transform import ErrorRec, TransformResult, transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
+from app.pn_catalog import api as catalog
 from app.services import data_quality_amount_mismatch
 
 _ARCHIVE_HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -460,7 +461,8 @@ def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
                import_job_id: int | None = None,
                auto_assign_maintenance_projects: bool = False, expected_void_fingerprint: str | None = None,
-               require_void_preview: bool = False) -> SysImportBatch:
+               require_void_preview: bool = False,
+               actor_user_id: int | None = None) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
@@ -474,12 +476,16 @@ def run_import(session: Session, file_path: str, original_name: str,
         {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
     )
 
+    # Stabilize PN topology before taking any project/workbook/fact locks.
+    catalog.acquire_identity_lock(session, shared=True)
+
     def new_batch(status: str) -> SysImportBatch:
         return SysImportBatch(
             filename=original_name,
             file_type="unknown",
             file_hash=file_hash,
             uploaded_by=uploaded_by,
+            actor_user_id=actor_user_id,
             import_job_id=import_job_id,
             status=status,
         )

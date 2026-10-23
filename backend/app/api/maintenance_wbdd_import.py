@@ -13,7 +13,7 @@ from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.api.imports import _save_upload_to_temp
+from app.api.imports import _save_upload_to_temp, _verified_import_actor_id
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.etl import loader, pipeline
@@ -63,6 +63,7 @@ def upload_wbdd(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY)),
     ctx: UserContext = Depends(get_current_user_context),
+    ident: dict = Depends(current_identity),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     name = file.filename or "wbdd.xlsx"
@@ -75,6 +76,7 @@ def upload_wbdd(
                 db, file_path=tmp, original_name=name,
                 operator=str(ctx.user_id or "unknown"),
                 idempotency_key=idempotency_key,
+                actor_user_id=_verified_import_actor_id(db, ident),
             )
         except wbdd.WbddImportError as exc:
             db.rollback()

@@ -128,7 +128,8 @@ def latest_missing(db: Session, *, allowed_project_ids: set[str] | None = None) 
 
 
 def import_wbdd(db: Session, *, file_path: str, original_name: str,
-                operator: str, idempotency_key: str) -> tuple[dict, bool]:
+                operator: str, idempotency_key: str,
+                actor_user_id: int | None = None) -> tuple[dict, bool]:
     """执行导入并返回 (报告, replayed)。调用方负责 HTTP 错误映射与临时文件清理。
 
     提交语义（2026-08-26 单事务化）：导入批次/事实、快照差异、回执与成本重算
@@ -167,6 +168,7 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
         file_path,
         original_name,
         uploaded_by=operator,
+        actor_user_id=actor_user_id,
         mode="upsert",
         auto_assign_maintenance_projects=True,
     )

@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app import config
+from app.pn_catalog import api as catalog
 from app.models.dimensions import DimPart, PartAlias
 from app.models.inventory import Inventory
 from app.models.master_data import (
@@ -34,9 +35,22 @@ _TRAILING_JUNK = re.compile(r"[\s0-9]+$")
 def acquire_master_write_lock(db: Session) -> None:
     """人工命令与全量 refresh 共用的事务锁，必须早于 PN/字典/规格写锁。
 
-    首期串行协调这两类写者；其他治理和 ETL 入口仍由后续适配收敛锁序。
+    保留旧入口兼容；新核心、导入与身份命令通过排序父锁/独立拓扑锁协调，
+    不将本锁扩展成全系统普通资料写入的大锁。
     """
     db.execute(text("SELECT pg_advisory_xact_lock(742031, 1)"))
+
+
+def _capture_all_parts(db: Session) -> dict:
+    """Bulk maintenance locks existing parents in the catalog's canonical order."""
+    catalog.acquire_identity_lock(db, shared=True)
+    return catalog.capture_states(db, list(db.scalars(select(DimPart.id).order_by(DimPart.id))))
+
+
+def _record_backfill(db: Session, before: dict, action: str) -> None:
+    catalog.record_legacy_changes(
+        db, before, context=catalog.legacy_context(source="upstream", entrypoint="maintenance_job"),
+        action=action)
 
 
 # ============================================================
@@ -80,8 +94,9 @@ def bind_part_dictionaries(db: Session, part: DimPart, fields) -> None:
                 ProductCategory.category_minor.is_not_distinct_from(part.category_minor)))
 
 
-def backfill_brands(db: Session) -> dict:
+def backfill_brands(db: Session, *, catalog_record: bool = True) -> dict:
     """distinct 品牌文本 → 归一 seed brands → 回填 dim_part.brand_id（只填 NULL）。"""
+    before = _capture_all_parts(db) if catalog_record else {}
     raw_brands = db.execute(
         select(DimPart.brand, func.count()).where(DimPart.brand.is_not(None))
         .group_by(DimPart.brand).order_by(func.count().desc())
@@ -112,6 +127,8 @@ def backfill_brands(db: Session) -> dict:
             .values(brand_id=bid)
         )
         updated += res.rowcount
+    if catalog_record:
+        _record_backfill(db, before, "profile.bind_brands")
     return {"brands": len(seeds), "parts_brand_filled": updated,
             "placeholder_brands": len(raw_brands) - len(norm_map)}
 
@@ -132,12 +149,15 @@ def classify_backfill(db: Session) -> dict:
 
     from app.services import classify as classify_svc
 
+    acquire_master_write_lock(db)
+    before = _capture_all_parts(db)
     rows = db.execute(
         select(DimPart.id, DimPart.pn_std, DimPart.description, DimPart.brand,
                DimPart.category_major, DimPart.category_minor)
         .where(DimPart.status == "active",
                or_(DimPart.category_source.is_(None), DimPart.category_source != "MANUAL"),
-               ~DimPart.locked_fields.contains(["category_major"]))
+               ~DimPart.locked_fields.contains(["category_major"]),
+               ~DimPart.locked_fields.contains(["category_minor"]))
     ).all()
 
     # 按 (一级,二级) 分组，每组一条 UPDATE ... WHERE id IN (...)（远快于逐行）
@@ -161,17 +181,23 @@ def classify_backfill(db: Session) -> dict:
     for (l1, l2), ids in groups.items():
         for i in range(0, len(ids), 1000):             # 分块控参数量
             updated += db.execute(
-                update(DimPart).where(DimPart.id.in_(ids[i:i + 1000]))
-                .values(category_major=l1, category_minor=l2, category_source="AUTO")
+                update(DimPart).where(
+                    DimPart.id.in_(ids[i:i + 1000]), DimPart.status == "active",
+                    or_(DimPart.category_source.is_(None), DimPart.category_source != "MANUAL"),
+                    ~DimPart.locked_fields.contains(["category_major"]),
+                    ~DimPart.locked_fields.contains(["category_minor"]))
+                .values(category_major=l1, category_minor=l2, category_source="AUTO",
+                        category_id=None)
             ).rowcount
-    db.commit()
-    cat = backfill_categories(db)                       # 干净品类后补 product_categories/category_id
+    cat = backfill_categories(db, catalog_record=False)                       # 干净品类后补 product_categories/category_id
+    _record_backfill(db, before, "profile.classify")
     return {"scanned": len(rows), "parts_reclassified": updated,
             "categories": cat["categories"]}
 
 
-def backfill_categories(db: Session) -> dict:
+def backfill_categories(db: Session, *, catalog_record: bool = True) -> dict:
     """distinct (大类,小类) → seed product_categories → 回填 category_id（只填 NULL）。"""
+    before = _capture_all_parts(db) if catalog_record else {}
     pairs = db.execute(
         select(DimPart.category_major, DimPart.category_minor)
         .where(DimPart.category_major.is_not(None)).distinct()
@@ -191,6 +217,8 @@ def backfill_categories(db: Session) -> dict:
                     DimPart.category_minor == mi if mi is not None else DimPart.category_minor.is_(None),
                     DimPart.category_id.is_(None))
         updated += db.execute(update(DimPart).where(cond).values(category_id=cid)).rowcount
+    if catalog_record:
+        _record_backfill(db, before, "profile.bind_categories")
     return {"categories": len(cat_id), "parts_category_filled": updated}
 
 
@@ -198,8 +226,9 @@ def backfill_categories(db: Session) -> dict:
 # 别名 / 询价 part_id 回填
 # ============================================================
 
-def backfill_aliases(db: Session) -> dict:
+def backfill_aliases(db: Session, *, catalog_record: bool = True) -> dict:
     """part_id 按 pn_std 关联回填（只填 NULL）；status 从 needs_review 派生（只填 NULL）。"""
+    before = _capture_all_parts(db) if catalog_record else {}
     linked = db.execute(text("""
         UPDATE part_alias a SET part_id = p.id
         FROM dim_part p
@@ -209,6 +238,8 @@ def backfill_aliases(db: Session) -> dict:
         UPDATE part_alias SET status = CASE WHEN needs_review THEN 'pending' ELSE 'active' END
         WHERE status IS NULL
     """)).rowcount
+    if catalog_record:
+        _record_backfill(db, before, "identity.backfill_aliases")
     return {"alias_part_linked": linked, "alias_status_filled": status_filled}
 
 
@@ -493,8 +524,8 @@ def list_aliases(db: Session, status: str, page: int, page_size: int) -> dict:
                        "created_at": a.created_at} for a in rows]}
 
 
-def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
-                 operated_by: str | None) -> dict:
+def review_alias_in_transaction(db: Session, alias_id: int, action: str, target_pn: str | None,
+                                operated_by: str | None, *, catalog_context=None) -> dict:
     """approve=确认映射；reject=否决；reassign=改指 target_pn 并重指既有事实行。
 
     身份别名（pn_raw==pn_std，即"这个型号其实是另一个型号"）的改指等价于合并，
@@ -502,9 +533,18 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
     """
     from app.models.system import SysAuditLog  # 局部导入避免环
 
-    a = db.get(PartAlias, alias_id)
+    catalog.acquire_identity_lock(db)
+    a = db.get(PartAlias, alias_id, populate_existing=True)
     if a is None:
         raise AliasError(f"别名不存在: {alias_id}")
+    parent_ids = {a.part_id} if a.part_id else set()
+    if target_pn:
+        target_id = db.scalar(select(DimPart.id).where(DimPart.pn_std == target_pn))
+        if target_id is not None:
+            parent_ids.add(target_id)
+    catalog_before = catalog.capture_states(db, parent_ids)
+    a = db.scalar(select(PartAlias).where(PartAlias.id == alias_id).with_for_update()
+                  .execution_options(populate_existing=True))
     before = {"pn_std": a.pn_std, "part_id": a.part_id, "status": a.status}
     repointed = {}
 
@@ -536,8 +576,23 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
                        after_json={"pn_std": a.pn_std, "part_id": a.part_id,
                                    "status": a.status, **repointed},
                        operated_by=operated_by))
-    db.commit()
+    catalog.record_legacy_changes(
+        db, catalog_before, context=catalog_context or catalog.legacy_context(operated_by=operated_by),
+        action=f"identity.alias_{action}")
+    db.flush()
     return {"alias_id": alias_id, "action": action, "repointed": repointed}
+
+
+def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
+                 operated_by: str | None, *, catalog_context=None) -> dict:
+    try:
+        result = review_alias_in_transaction(db, alias_id, action, target_pn, operated_by,
+                                            catalog_context=catalog_context)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ============================================================
@@ -547,13 +602,15 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
 def refresh(db: Session) -> dict:
     """字典回填 → 别名/询价关联 → 规格抽取 → 质量扫描 → 质量分。单事务提交。"""
     acquire_master_write_lock(db)
+    before = _capture_all_parts(db)
     stats = {}
-    stats["brands"] = backfill_brands(db)
-    stats["categories"] = backfill_categories(db)
-    stats["aliases"] = backfill_aliases(db)
+    stats["brands"] = backfill_brands(db, catalog_record=False)
+    stats["categories"] = backfill_categories(db, catalog_record=False)
+    stats["aliases"] = backfill_aliases(db, catalog_record=False)
     stats["inquiry"] = backfill_inquiry(db)
-    stats["specs"] = spec_extract.backfill_specs(db)
+    stats["specs"] = spec_extract.backfill_specs(db, catalog_record=False)
     stats["issues"] = scan_issues(db)
     stats["quality_scored"] = update_quality_scores(db)
+    _record_backfill(db, before, "master.refresh")
     db.commit()
     return stats

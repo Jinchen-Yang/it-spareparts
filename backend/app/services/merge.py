@@ -32,6 +32,7 @@ from app.models.master_data import (
 from app.models.purchase import FPurchaseLine
 from app.models.sales import FSalesLine
 from app.models.system import SysAuditLog
+from app.pn_catalog import api as catalog
 
 _log = logging.getLogger("merge")
 
@@ -42,6 +43,14 @@ _FILL_FIELDS = ("description", "brand", "brand_id", "category_major", "category_
 
 class MergeError(Exception):
     """合并前置条件不满足。"""
+
+
+def _field_protected(field: str, locked: set[str]) -> bool:
+    if field == "brand_id":
+        return "brand" in locked
+    if field in {"category_major", "category_minor", "category_id"}:
+        return bool({"category_major", "category_minor"} & locked)
+    return field in locked
 
 
 def _part_snapshot(p: DimPart) -> dict:
@@ -100,11 +109,12 @@ def _merge_substitutes(db: Session, source: DimPart, target: DimPart) -> dict:
     return {"moved": moved, "dropped": dropped}
 
 
-def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
-                operated_by: str | None) -> dict:
+def merge_parts_in_transaction(db: Session, source_pn: str, target_pn: str, reason: str | None,
+                               operated_by: str | None, *, catalog_context=None) -> dict:
     """执行合并（单事务）。返回 merge_log 摘要；调用方负责随后触发重算。"""
     if source_pn == target_pn:
         raise MergeError("源与目标是同一型号")
+    catalog.acquire_identity_lock(db)
     pre = db.execute(select(DimPart.id, DimPart.pn_std).where(
         DimPart.pn_std.in_([source_pn, target_pn]))).all()
     by_pn = {pn: pid for pid, pn in pre}
@@ -112,11 +122,15 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
     if missing:
         raise MergeError(f"型号不存在: {missing}")
 
-    # 按 id 升序锁行，防并发互合死锁/成环
+    # Include every compressed member before locking, not after modifying source.
+    compressed = list(db.scalars(select(DimPart.id).where(
+        DimPart.merged_into_id == by_pn[source_pn])))
+    before = catalog.capture_states(db, set(by_pn.values()) | set(compressed))
     locked = {}
     for pid in sorted(by_pn.values()):
         locked[pid] = db.execute(
             select(DimPart).where(DimPart.id == pid).with_for_update()
+            .execution_options(populate_existing=True)
         ).scalar_one()
     source, target = locked[by_pn[source_pn]], locked[by_pn[target_pn]]
     if source.status != "active":
@@ -131,7 +145,7 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
     locked_on_target = set(target.locked_fields or [])
     merged_fields = {}
     for f in _FILL_FIELDS:
-        if f in locked_on_target:
+        if _field_protected(f, locked_on_target):
             continue
         if getattr(target, f) is None and getattr(source, f) is not None:
             merged_fields[f] = {"before": None, "after": getattr(source, f)}
@@ -164,8 +178,10 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
     affected["identity_alias_inserted_id"] = inserted_alias
 
     # 4) 规格：目标缺的键迁过去，冲突的键保留目标值、删源行（删前存全行供回滚）
+    target_deleted_specs = catalog.blocked_spec_keys(db, [target.id]).get(target.id, set())
     spec_moved = db.execute(update(ProductSpec).where(
         ProductSpec.part_id == source.id,
+        ProductSpec.spec_key.not_in(target_deleted_specs),
         ~ProductSpec.spec_key.in_(select(ProductSpec.spec_key).where(
             ProductSpec.part_id == target.id).scalar_subquery()),
     ).values(part_id=target.id).returning(ProductSpec.id)).scalars().all()
@@ -220,13 +236,17 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         before_json=source_snapshot,
         after_json={"merged_into": target.pn_std, "target_part_id": target.id, **counts},
         reason=reason, operated_by=operated_by))
-    db.commit()
+    catalog.record_legacy_changes(
+        db, before, context=catalog_context or catalog.legacy_context(operated_by=operated_by),
+        action="identity.merge", force_identity_ids=[target.id])
+    db.flush()
     _log.info("merged part %s -> %s (%s)", source_pn, target_pn, counts)
     return {"source_pn": source_pn, "target_pn": target_pn,
             "merge_log_id": log_row.id, "affected_counts": counts}
 
 
-def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
+def unmerge_in_transaction(db: Session, merge_log_id: int, operated_by: str | None,
+                           *, catalog_context=None) -> dict:
     """回滚一次合并（人工 LIFO，审核说明 §4.8 可回滚要求）。
 
     安全前提（防误回滚链式/已变更状态）：
@@ -239,14 +259,18 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
     """
     from app.services import spec_extract  # 局部导入避免环
 
+    catalog.acquire_identity_lock(db)
     log_row = db.get(ProductMergeLog, merge_log_id)
     if log_row is None:
         raise MergeError(f"合并日志不存在: {merge_log_id}")
 
     # 锁源/目标（升序）
-    ids = sorted({log_row.source_part_id, log_row.target_part_id})
+    ids = sorted({log_row.source_part_id, log_row.target_part_id}
+                 | set((log_row.affected_records or {}).get("path_compressed_part_ids") or []))
+    before = catalog.capture_states(db, ids)
     locked = {pid: db.execute(
-        select(DimPart).where(DimPart.id == pid).with_for_update()).scalar_one_or_none()
+        select(DimPart).where(DimPart.id == pid).with_for_update()
+        .execution_options(populate_existing=True)).scalar_one_or_none()
         for pid in ids}
     source = locked.get(log_row.source_part_id)
     target = locked.get(log_row.target_part_id)
@@ -339,8 +363,9 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
 
     # 6) 目标 fill-if-empty 回补字段还原（仅当当前值仍等于合并时写入的值）
     restored = {}
+    locked_on_target = set(target.locked_fields or [])
     for f, ba in (log_row.merged_fields or {}).items():
-        if getattr(target, f) == ba["after"]:
+        if not _field_protected(f, locked_on_target) and getattr(target, f) == ba["after"]:
             setattr(target, f, ba["before"])
             restored[f] = ba["before"]
 
@@ -357,10 +382,36 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
                                         "inventory_ids", "f_part_inquiry_ids",
                                         "f_maintenance_line_ids")}},
         reason=f"回滚合并 #{merge_log_id}", operated_by=operated_by))
-    db.commit()
+    catalog.record_legacy_changes(
+        db, before, context=catalog_context or catalog.legacy_context(operated_by=operated_by),
+        action="identity.unmerge", force_identity_ids=[target.id])
+    db.flush()
     _log.info("unmerged %s <- %s (log #%s)", source.pn_std, target.pn_std, merge_log_id)
     return {"source_pn": source.pn_std, "target_pn": target.pn_std,
             "merge_log_id": merge_log_id, "restored_fields": list(restored)}
+
+
+
+def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
+                operated_by: str | None, *, catalog_context=None) -> dict:
+    try:
+        result = merge_parts_in_transaction(db, source_pn, target_pn, reason, operated_by,
+                                            catalog_context=catalog_context)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def unmerge(db: Session, merge_log_id: int, operated_by: str | None, *, catalog_context=None) -> dict:
+    try:
+        result = unmerge_in_transaction(db, merge_log_id, operated_by, catalog_context=catalog_context)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 def cost_source_distribution(db: Session, part_id: int) -> dict:

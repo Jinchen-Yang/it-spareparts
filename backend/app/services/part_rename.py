@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart, PartAlias
 from app.models.master_data import ProductMatchCandidate
 from app.models.system import SysAuditLog
+from app.pn_catalog import api as catalog
 
 _log = logging.getLogger("rename")
 
@@ -33,8 +34,8 @@ class RenameError(Exception):
     """改名前置条件不满足。"""
 
 
-def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
-                operated_by: str | None) -> dict:
+def rename_part_in_transaction(db: Session, part_id: int, new_pn_std: str, reason: str | None,
+                               operated_by: str | None, *, catalog_context=None) -> dict:
     """把 part_id 的 pn_std 改成 new_pn_std。
 
     返回 {"renamed": True, ...} 成功；{"renamed": False, "merge_candidate_id": ...}
@@ -46,8 +47,11 @@ def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
     if len(new_pn) > 128:
         raise RenameError(f"新 pn_std 超长({len(new_pn)}>128)")
 
+    catalog.acquire_identity_lock(db)
+    before = catalog.capture_state(db, part_id)
     part = db.execute(
         select(DimPart).where(DimPart.id == part_id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if part is None:
         raise RenameError(f"型号不存在: id={part_id}")
@@ -81,7 +85,7 @@ def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
             before_json={"pn_std": old_pn},
             after_json={"target": new_pn, "occupied_by_part_id": occ_id},
             reason=reason, operated_by=operated_by))
-        db.commit()
+        db.flush()
         return {"renamed": False, "part_id": part.id, "old_pn": old_pn,
                 "target_pn": new_pn, "occupied_by_part_id": occ_id,
                 "merge_candidate_id": cand_id,
@@ -109,7 +113,23 @@ def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
         entity_type="part", entity_id=part.id, action="rename",
         before_json={"pn_std": old_pn}, after_json={"pn_std": new_pn},
         reason=reason, operated_by=operated_by))
-    db.commit()
+    catalog.record_legacy_change(
+        db, part.id, before, context=catalog_context or catalog.legacy_context(operated_by=operated_by),
+        action="identity.rename")
+    db.flush()
     _log.info("renamed part %s: %r -> %r (aliases=%d)", part.id, old_pn, new_pn, len(alias_ids))
     return {"renamed": True, "part_id": part.id, "old_pn": old_pn, "new_pn": new_pn,
             "aliases_updated": len(alias_ids), "rename_alias_inserted": inserted is not None}
+
+
+def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
+                operated_by: str | None, *, catalog_context=None) -> dict:
+    """Legacy final commit point; compound commands use the transaction function."""
+    try:
+        result = rename_part_in_transaction(db, part_id, new_pn_std, reason, operated_by,
+                                            catalog_context=catalog_context)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise

@@ -147,6 +147,8 @@ class SysImportJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     created_by: Mapped[str | None] = mapped_column(String(64))
+    # Verified account ID at submission; historical jobs deliberately remain unknown.
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     # processing=进行中 / done=全成 / partial=部分成 / failed=全失败
@@ -156,6 +158,8 @@ class SysImportJob(Base):
     done_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     note: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (CheckConstraint(
+        "actor_user_id IS NULL OR actor_user_id > 0", name="ck_sys_import_job_actor_user_id"),)
 
 
 class SysImportBatch(Base):
@@ -166,6 +170,7 @@ class SysImportBatch(Base):
     file_type: Mapped[str] = mapped_column(String(16))  # purchase/sales/inventory/inquiry
     file_hash: Mapped[str] = mapped_column(String(64))
     uploaded_by: Mapped[str | None] = mapped_column(String(64))
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
     import_job_id: Mapped[int | None] = mapped_column(ForeignKey("sys_import_job.id"))  # 批量作业归组
     uploaded_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     rows_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -183,6 +188,8 @@ class SysImportBatch(Base):
     # maint_bulk（全项目批量传输）file_hash 保存原件 sha256，同一原件允许分次
     # 勾选提交多次（幂等由收款单台账 + report_json.selection_hash 保证），不入偏唯一索引。
     __table_args__ = (
+        CheckConstraint("actor_user_id IS NULL OR actor_user_id > 0",
+                        name="ck_sys_import_batch_actor_user_id"),
         Index(
             "ux_batch_success_hash",
             "file_type",

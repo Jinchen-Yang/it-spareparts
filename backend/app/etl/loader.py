@@ -12,6 +12,7 @@
 追溯与合并回滚归属判定的前提；商品身份只体现在 part_id。
 """
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -22,6 +23,8 @@ from sqlalchemy.orm import Session
 
 from app.etl import expense_void, mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
+from app.pn_catalog import api as catalog
+from app.pn_catalog.dto import Provenance
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
 from app.models.maintenance import (
@@ -42,7 +45,7 @@ from app.models.sales import (
     FSalesOrder,
     FSalesReconciliationSnapshot,
 )
-from app.models.system import SysAuditLog
+from app.models.system import SysAuditLog, SysImportBatch
 from app.services import maintenance_cost_invalidation
 from app.services import maintenance_project_operations as _project_ops
 from app.services.sales_reconciliation import (
@@ -254,7 +257,18 @@ def _merge_part_attrs(rows: list[dict], is_sales: bool) -> dict[str, dict]:
     return out
 
 
-def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool) -> dict[str, int]:
+
+def _lock_import_creation(session: Session, pns) -> None:
+    """Acquire creation keys before parent locks, only for currently missing PNs."""
+    names = set(pns)
+    catalog.acquire_identity_lock(session, shared=True)
+    catalog.acquire_creation_locks(session, [], ingest=True)
+    existing = set(session.scalars(select(DimPart.pn_std).where(DimPart.pn_std.in_(names)))) if names else set()
+    catalog.acquire_creation_locks(session, names - existing, ingest=True)
+
+
+def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool,
+                  *, catalog_context=None) -> dict[str, int]:
     """upsert dim_part；返回 pn_std -> id（未做合并重定向的原始 id）。
 
     字段优先级（§7.5）：描述/品牌/单位 fill-if-empty；品类仅销售可写（COALESCE 新值优先）；
@@ -264,13 +278,20 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool)
     if not part_attrs:
         return {}
 
+    _lock_import_creation(session, part_attrs)
+    ids = list(session.scalars(select(DimPart.id).where(
+        DimPart.pn_std.in_(sorted(part_attrs))).order_by(DimPart.id)))
+    before = catalog.capture_states(session, ids)
+
     def _respect_lock(field: str, normal):
         """采购人工维护过(locked_fields 含该字段)→ 一律保留人工值；否则走原优先级。
         "和氚云无 API、把服务器 PN 做成自治主数据"的地基：重导永不覆盖采购改过的字段。"""
-        return case((DimPart.locked_fields.contains([field]), getattr(DimPart, field)),
-                    else_=normal)
+        protected = (DimPart.locked_fields.overlap(["category_major", "category_minor"])
+                     if field in {"category_major", "category_minor"}
+                     else DimPart.locked_fields.contains([field]))
+        return case((protected, getattr(DimPart, field)), else_=normal)
 
-    for chunk in _chunks(list(part_attrs.values())):
+    for chunk in _chunks([part_attrs[pn] for pn in sorted(part_attrs)]):
         stmt = pg_insert(DimPart).values(chunk)
         # fill-if-empty：保留已有值，空则用新值（locked 字段则完全保留人工值）
         set_ = {
@@ -311,20 +332,35 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool)
             select(DimPart.pn_std, DimPart.id).where(DimPart.pn_std.in_(chunk))
         ).all():
             out[pn] = pid
+    catalog.record_legacy_changes(
+        session, before, part_ids=out.values(),
+        context=catalog_context or catalog.legacy_context(source="excel", entrypoint="import_job"),
+        action="profile.ingest")
     return out
 
 
 def _resolve_line_parts(session: Session, rows: list[dict],
-                        is_sales: bool) -> tuple[dict[str, tuple[int, str]], int]:
+                        is_sales: bool, *, catalog_context=None) -> tuple[dict[str, tuple[int, str]], int]:
     """对一批明细/库存行做完整商品身份解析。
 
     返回 (pn_raw → (最终 part_id, 该 part 的 pn_std), 参与建档的型号数)。
     别名重定向的行不参与 dim_part 建档/enrich（防复活已治理的重复建档）。
     """
+    _lock_import_creation(session, {r["pn_std"] for r in rows if r.get("pn_std")})
+    # Lock the complete existing identity set before enriching any parent. Alias
+    # targets can have lower IDs than the imported PN and must not be locked late.
     redirect = _alias_redirects(session, rows)
+    pns = {r["pn_std"] for r in rows if r.get("pn_std")}
+    ids = set(session.scalars(select(DimPart.id).where(DimPart.pn_std.in_(pns)))) | set(redirect.values())
+    if ids:
+        resolved_before = _resolve_merged(session, ids)
+        ids.update(pid for pid, _pn in resolved_before.values())
+        catalog.capture_states(session, ids)
+        # Alias/merge writers lock these same parents before changing the graph.
+        redirect = _alias_redirects(session, rows)
     create_rows = [r for r in rows if r.get("pn_raw") not in redirect]
     part_attrs = _merge_part_attrs(create_rows, is_sales)
-    pn_to_id = _upsert_parts(session, part_attrs, is_sales)
+    pn_to_id = _upsert_parts(session, part_attrs, is_sales, catalog_context=catalog_context)
 
     resolved = _resolve_merged(session, set(pn_to_id.values()) | set(redirect.values()))
     out: dict[str, tuple[int, str]] = {}
@@ -337,7 +373,7 @@ def _resolve_line_parts(session: Session, rows: list[dict],
 
 
 def _upsert_aliases(session: Session, rows: list[dict],
-                    resolution: dict[str, tuple[int, str]]) -> None:
+                    resolution: dict[str, tuple[int, str]], *, catalog_context=None) -> None:
     """别名落库：pn_raw → (归属 part_id, 该 part 的 pn_std)。
 
     status 与 needs_review 由同一处派生（待审=pending），防双真相源；
@@ -355,9 +391,16 @@ def _upsert_aliases(session: Session, rows: list[dict],
                      "status": "pending" if pending else "active"}
     if not seen:
         return
-    for chunk in _chunks(list(seen.values())):
+    catalog.acquire_identity_lock(session, shared=True)
+    catalog.acquire_creation_locks(session, [], ingest=True)
+    before = catalog.capture_states(session, {row["part_id"] for row in seen.values()})
+    for chunk in _chunks([seen[raw] for raw in sorted(seen)]):
         stmt = pg_insert(PartAlias).values(chunk)
         session.execute(stmt.on_conflict_do_nothing(index_elements=[PartAlias.pn_raw]))
+    catalog.record_legacy_changes(
+        session, before,
+        context=catalog_context or catalog.legacy_context(source="excel", entrypoint="import_job"),
+        action="identity.ingest_aliases")
 
 
 def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: list[str]) -> dict[str, int]:
@@ -690,13 +733,32 @@ _MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
                     *mapping.MAINTENANCE_LINE_DISPLAY_FIELDS]
 
 
+
+def _catalog_import_context(session: Session, batch_id: int, operated_by: str | None):
+    batch = session.get(SysImportBatch, batch_id)
+    actor_id = batch.actor_user_id if batch is not None else None
+    context = catalog.legacy_context(
+        operated_by=operated_by, principal_id=f"account:{actor_id}" if actor_id else None,
+        source="excel", entrypoint="import_job", evidence_id=f"import_batch:{batch_id}")
+    file_hash = batch.file_hash if batch is not None else None
+    provenance = Provenance(kind="excel", evidence_id=f"import_batch:{batch_id}",
+        file_sha256=file_hash if file_hash and re.fullmatch(r"[a-f0-9]{64}", file_hash) else None)
+    return context.model_copy(update={"actor": context.actor.model_copy(update={
+        "provenance": provenance, "executor_id": "itsp-import-worker"})})
+
+
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
          mode: str = "skip", operated_by: str | None = None,
          audit_overwrites: bool = False,
          maintenance_lock_envelope: MaintenanceImportLockEnvelope | None = None, expected_void_fingerprint: str | None = None) -> dict:
+    catalog_context = _catalog_import_context(session, batch_id, operated_by)
+    # Identity readers share this lock; topology changes wait for the whole fact
+    # import so aliases cannot redirect midway through the caller transaction.
+    rows = result.inventory if result.file_type == mapping.INVENTORY else result.lines
+    _lock_import_creation(session, {r["pn_std"] for r in rows if r.get("pn_std")})
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date,
-                               operated_by, audit_overwrites)
+                               operated_by, audit_overwrites, catalog_context=catalog_context)
     if result.file_type == mapping.MAINTENANCE:
         return _load_maintenance(
             session,
@@ -706,10 +768,12 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
             operated_by,
             audit_overwrites,
             maintenance_lock_envelope,
+            catalog_context=catalog_context,
         )
     if result.file_type == mapping.EXPENSE:
         return _load_expense(session, result, batch_id, mode, operated_by, audit_overwrites, expected_void_fingerprint=expected_void_fingerprint)
-    return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
+    return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites,
+                        catalog_context=catalog_context)
 
 
 def _wbdd_raw_ids_linked_to_sales(session: Session, sales_order_nos) -> list[str]:
@@ -787,7 +851,7 @@ def _write_sales_reconciliation_snapshots(session: Session, result: TransformRes
 
 def _load_orders(session: Session, result: TransformResult, batch_id: int,
                  mode: str = "skip", operated_by: str | None = None,
-                 audit_overwrites: bool = False) -> dict:
+                 audit_overwrites: bool = False, *, catalog_context=None) -> dict:
     upsert = (mode == "upsert")
     # 仅 upsert(覆盖)模式需留痕；skip 模式 ON CONFLICT DO NOTHING 不覆盖既有行
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
@@ -832,8 +896,10 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             session, candidate_order_nos)
         prelocked_states = _prelock_workbook_states(session, linked_wbdd_raw_ids)
     # 1) 商品身份解析（别名/合并重定向 + 建档）+ alias
-    resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales)
-    _upsert_aliases(session, result.lines, resolution)
+    catalog_context = catalog_context or _catalog_import_context(session, batch_id, operated_by)
+    resolution, new_parts = _resolve_line_parts(
+        session, result.lines, is_sales, catalog_context=catalog_context)
+    _upsert_aliases(session, result.lines, resolution, catalog_context=catalog_context)
 
     # 2) 供应商 / 客户
     orders = result.orders
@@ -1008,7 +1074,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
 def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
                       mode: str = "skip", operated_by: str | None = None,
                       audit_overwrites: bool = False,
-                      lock_envelope: MaintenanceImportLockEnvelope | None = None) -> dict:
+                      lock_envelope: MaintenanceImportLockEnvelope | None = None,
+                      *, catalog_context=None) -> dict:
     """维保出库（WBDD）入库：与订单路径同套路——商品身份解析 + 客户维度 + 头/行幂等 upsert。
 
     成本回填字段不在 upsert 白名单内（maintenance_cost.recompute 专属），重导不冲成本。
@@ -1070,8 +1137,10 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
             project.project_id: project for project in locked_projects
         }
     # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
-    resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
-    _upsert_aliases(session, result.lines, resolution)
+    catalog_context = catalog_context or _catalog_import_context(session, batch_id, operated_by)
+    resolution, new_parts = _resolve_line_parts(
+        session, result.lines, is_sales=False, catalog_context=catalog_context)
+    _upsert_aliases(session, result.lines, resolution, catalog_context=catalog_context)
 
     # 2) 客户维度（维保客户名实测混入联系人后缀，v1 原样入库，治理留二期）
     orders = result.orders
@@ -1918,13 +1987,15 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
 
 
 def _load_inventory(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
-                    operated_by: str | None = None, audit_overwrites: bool = False) -> dict:
+                    operated_by: str | None = None, audit_overwrites: bool = False, *, catalog_context=None) -> dict:
     # K3 核查：库存快照只进 inventory 表，不是任何项目工作簿（V2）可见事实——
     # 项目成本口径只由 maintenance_cost.recompute 从采购/销售事实派生，故本路径
     # 不挂 workbook revision 失效（写了也只是冗余 bump）。
     # 1) 商品身份解析（与订单路径同口径：别名/合并重定向）+ alias
-    resolution, new_parts = _resolve_line_parts(session, result.inventory, is_sales=False)
-    _upsert_aliases(session, result.inventory, resolution)
+    catalog_context = catalog_context or _catalog_import_context(session, batch_id, operated_by)
+    resolution, new_parts = _resolve_line_parts(
+        session, result.inventory, is_sales=False, catalog_context=catalog_context)
+    _upsert_aliases(session, result.inventory, resolution, catalog_context=catalog_context)
 
     # 2) 同 (pn_std, warehouse) 求和（实测 15 组重复，§摸底）。
     #    物理键是 pn_std+warehouse，每组只能落一个 part_id。身份选择规则（确定化，

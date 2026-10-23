@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
+from app.pn_catalog import api as catalog
 
 # spec_key → (中文名, 单位)。numeric_value 口径：capacity=GB、rpm=RPM、frequency=MHz、speed=Gbps、cache=MB
 SPEC_KEYS = {
@@ -233,22 +234,31 @@ def _spec_rows(db: Session, part_id: int) -> set[tuple]:
         .where(ProductSpec.part_id == part_id)).all())
 
 
-def refresh_part_specs(db: Session, part_id: int, description: str | None) -> None:
+def refresh_part_specs(db: Session, part_id: int, description: str | None,
+                       *, catalog_record: bool = True) -> None:
     """description 变更后同步该型号的派生规格：删 auto 行 + 按新描述重抽。
 
     specs 是 description 的纯派生缓存——描述变了缓存必须跟着变，包括新描述抽不出
     规格时清空旧行（否则静默陈旧，生产 6797 条已中招）。source='manual' 行不动，
     重插撞键时 on_conflict_do_nothing 让 manual 优先。不 commit，随调用方事务。
     """
+    catalog_before = catalog.capture_state(db, part_id) if catalog_record else None
+    blocked = catalog.blocked_spec_keys(db, [part_id]).get(part_id, set())
     before = _spec_rows(db, part_id)
     db.execute(delete(ProductSpec).where(ProductSpec.part_id == part_id,
                                          ProductSpec.source == "auto"))
-    rows = [{**s, "part_id": part_id, "source": "auto"} for s in extract(description)]
+    rows = [{**s, "part_id": part_id, "source": "auto"}
+            for s in extract(description) if s["spec_key"] not in blocked]
     if rows:
         db.execute(pg_insert(ProductSpec).values(rows).on_conflict_do_nothing(
             constraint="uq_spec_part_key"))
     if _spec_rows(db, part_id) != before:
         touch_parts(db, [part_id])
+    if catalog_record:
+        catalog.record_legacy_change(
+            db, part_id, catalog_before,
+            context=catalog.legacy_context(source="upstream", entrypoint="maintenance_job"),
+            action="specs.refresh")
 
 
 def validate_manual_specs(updates: dict) -> dict:
@@ -295,10 +305,13 @@ def validate_manual_specs(updates: dict) -> dict:
     return clean
 
 
-def apply_manual_specs(db: Session, part_id: int, updates: dict) -> None:
+def apply_manual_specs(db: Session, part_id: int, updates: dict,
+                       *, catalog_record: bool = True) -> None:
     """父 PN 已由调用方锁定；描述 auto 刷新之后应用本次 manual，不提交。"""
-    if updates:
-        touch_parts(db, [part_id])
+    if not updates:
+        return
+    catalog_before = catalog.capture_state(db, part_id) if catalog_record else None
+    touch_parts(db, [part_id])
     for key in sorted(updates):
         spec = updates[key]
         if spec is None:
@@ -308,13 +321,25 @@ def apply_manual_specs(db: Session, part_id: int, updates: dict) -> None:
             db.execute(pg_insert(ProductSpec).values(part_id=part_id, spec_key=key, **spec)
                        .on_conflict_do_update(constraint="uq_spec_part_key", set_=spec))
 
+    if catalog_record:
+        catalog.record_legacy_change(
+            db, part_id, catalog_before,
+            context=catalog.legacy_context(entrypoint="maintenance_job"), action="specs.edit",
+            deleted_spec_keys=[key for key, spec in updates.items() if spec is None],
+            restored_spec_keys=[key for key, spec in updates.items() if spec is not None])
 
-def backfill_specs(db: Session, rebuild: bool = False) -> dict:
+
+def backfill_specs(db: Session, rebuild: bool = False, *, catalog_record: bool = True) -> dict:
     """全量幂等回填：对每个 active 型号抽取规格，只补缺不覆盖。
 
     rebuild=True：先删全部 source='auto' 行再重插（=全量重建派生缓存），
     治历史陈旧；manual 行保留且撞键优先。
     """
+    # Lock parents before child deletes/inserts; manual edits use the same order.
+    # Include inactive parents when rebuilding, because old auto rows may remain there.
+    part_ids = list(db.scalars(select(DimPart.id).order_by(DimPart.id)))
+    catalog_before = catalog.capture_states(db, part_ids) if catalog_record else {}
+    blocked = catalog.blocked_spec_keys(db, part_ids)
     touched: set[int] = set()
     if rebuild:
         touched.update(db.execute(delete(ProductSpec).where(ProductSpec.source == "auto")
@@ -326,7 +351,7 @@ def backfill_specs(db: Session, rebuild: bool = False) -> dict:
     rows = []
     parts_hit = 0
     for pid, desc in parts:
-        specs = extract(desc)
+        specs = [s for s in extract(desc) if s["spec_key"] not in blocked.get(pid, set())]
         if specs:
             parts_hit += 1
             rows.extend({**s, "part_id": pid, "source": "auto"} for s in specs)
@@ -339,5 +364,10 @@ def backfill_specs(db: Session, rebuild: bool = False) -> dict:
         touched.update(hit)
     # rebuild 删后重插内容相同也推进：只多一次增量重读，商城幂等跳过。
     touch_parts(db, touched)
+    if catalog_record:
+        catalog.record_legacy_changes(
+            db, catalog_before, part_ids=touched,
+            context=catalog.legacy_context(source="upstream", entrypoint="maintenance_job"),
+            action="specs.backfill")
     return {"parts_scanned": len(parts), "parts_with_specs": parts_hit,
             "spec_rows": len(rows), "spec_inserted": inserted}

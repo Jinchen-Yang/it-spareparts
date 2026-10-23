@@ -146,7 +146,7 @@ def test_minor_edit_locks_both_category_levels(db):
     {"spec_updates": {"capacity": {"value": "2TB", "unit": "GB", "numeric_value": "2000.0000"}}},
     {"spec_updates": {"capacity": None}},
 ])
-def test_same_new_value_merges_despite_changed_baseline(db, updates):
+def test_same_new_value_requires_current_monotonic_baseline(db, updates):
     created = master_edit.create_part(db, pn_std="HTTP-CONVERGE", description="600GB SAS HDD",
                                      brand="旧品牌", category_major="硬盘", category_minor="SAS",
                                      force=True)
@@ -154,8 +154,9 @@ def test_same_new_value_merges_despite_changed_baseline(db, updates):
     first = patch(baseline, **updates)
     assert first.status_code == 200, first.text
     second = patch(baseline, **updates, unit="台")
-    assert second.status_code == 200, second.text
-    assert state(created["id"])["fields"]["unit"] == "台"
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "field_conflict"
+    assert state(created["id"])["fields"]["unit"] is None
 
 
 @pytest.mark.parametrize("operation", ["create", "edit"])
@@ -247,7 +248,7 @@ def test_create_rejects_unknown_fields(db):
     assert result.status_code == 422
 
 
-def test_equal_auto_spec_can_be_confirmed_manually_from_old_baseline(db):
+def test_auto_spec_confirmation_requires_current_baseline(db):
     created = master_edit.create_part(db, pn_std="HTTP-AUTO-CONVERGE", description="600GB SAS HDD",
                                      force=True)
     baseline = state(created["id"])
@@ -255,5 +256,10 @@ def test_equal_auto_spec_can_be_confirmed_manually_from_old_baseline(db):
     assert state(created["id"])["specs"]["capacity"]["source"] == "auto"
     result = patch(baseline, spec_updates={"capacity": {
         "value": "2TB", "unit": "GB", "numeric_value": "2000"}})
-    assert result.status_code == 200, result.text
+    assert result.status_code == 409, result.text
+    latest = state(created["id"])
+    assert latest["specs"]["capacity"]["source"] == "auto"
+    confirmed = patch(latest, spec_updates={"capacity": {
+        "value": "2TB", "unit": "GB", "numeric_value": "2000"}})
+    assert confirmed.status_code == 200, confirmed.text
     assert state(created["id"])["specs"]["capacity"]["source"] == "manual"

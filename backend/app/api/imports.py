@@ -13,7 +13,7 @@ from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
-from app.auth import current_role
+from app.auth import current_identity, current_role
 from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB, get_settings
 from app.db import SessionLocal, get_db
 from app.security import (
@@ -29,7 +29,7 @@ from app.etl import expense_void, loader, pipeline, precheck as import_precheck
 from app.services import import_void_preview
 from app.etl.reader import ReaderError
 from app.etl.transform import SOFT_ERROR_TYPES
-from app.models.system import SysImportBatch, SysImportError, SysImportJob
+from app.models.system import SysImportBatch, SysImportError, SysImportJob, SysUser
 
 router = APIRouter(
     prefix="/import",
@@ -44,6 +44,16 @@ _IMPORT_CONFLICT_ERROR = "导入期间数据归属发生并发变化，本次已
 _IMPORT_INTEGRITY_ERROR = "导入数据无法通过费用归属完整性校验，本次已整体回滚，请先修正数据"
 # Starlette 0.37.2 只有旧名称、新版又会对旧名称发弃用警告；数值 413 是稳定 HTTP 契约。
 _HTTP_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+
+def _verified_import_actor_id(db: Session, ident: dict) -> int | None:
+    """Capture a current account, never resolve an old display-name audit string."""
+    if not isinstance(ident, dict) or ident.get("authn") != "sys_user" or ident.get("fb"):
+        return None
+    user = db.scalar(select(SysUser).where(SysUser.username == ident.get("sub"),
+                                           SysUser.is_active.is_(True)))
+    return user.id if user is not None else None
 
 
 def _public_import_report(report: dict | None) -> dict | None:
@@ -200,6 +210,7 @@ def upload(
     preview_token: str | None = Form(None),   # 作废预演令牌（修复模式单合同报销页必需）
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
+    ident: dict = Depends(current_identity),
 ) -> dict:
     mode = mode if mode in ("skip", "upsert") else "skip"
     name = file.filename or "upload.xlsx"
@@ -216,6 +227,7 @@ def upload(
                 tmp,
                 name,
                 uploaded_by=ctx.user_id,
+                actor_user_id=_verified_import_actor_id(db, ident),
                 mode=mode,
                 auto_assign_maintenance_projects=True,
                 expected_void_fingerprint=expected_fp,
@@ -416,6 +428,8 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
     done = errored = 0
     did_ps = did_pi = False
     try:
+        job = db.get(SysImportJob, job_id)
+        actor_user_id = job.actor_user_id if job is not None else None
         for tmp, name in files:
             try:
                 batch = pipeline.run_import(
@@ -423,6 +437,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                     tmp,
                     name,
                     uploaded_by=created_by,
+                    actor_user_id=actor_user_id,
                     mode=mode,
                     import_job_id=job_id,
                     auto_assign_maintenance_projects=True,
@@ -450,10 +465,11 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
-            except loader.ImportIntegrityError:
+            except loader.ImportIntegrityError as exc:
                 db.rollback()
                 errored += 1
-                notes.append(f"完整性失败：{name}（{str(exc)[:300]}）")
+                _log.warning("import job=%s file=%s integrity failure: %s", job_id, name, exc)
+                notes.append(f"完整性失败：{name}（{_IMPORT_INTEGRITY_ERROR}）")
             except maintenance_cost.WorkbookInvalidationConflictError:
                 db.rollback()
                 errored += 1
@@ -540,6 +556,7 @@ def upload_batch(
     preview_tokens: list[str] = Form([]),   # 作废预演令牌（每个会作废的报销页一枚）
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
+    ident: dict = Depends(current_identity),
 ) -> dict:
     """批量上传：N 个 .xlsx 归一个作业，后台逐文件导入。立即返回 job_id，前端轮询进度。"""
     _enforce_import_file_limit(files)
@@ -564,7 +581,9 @@ def upload_batch(
             name = f.filename or "upload.xlsx"
             saved.append((_save_upload_to_temp(f, name), name))
         fingerprints = _fingerprints_by_file(payloads, saved)
-        job = SysImportJob(created_by=ctx.user_id, mode=mode, total_files=len(saved),
+        job = SysImportJob(created_by=ctx.user_id,
+                           actor_user_id=_verified_import_actor_id(db, ident),
+                           mode=mode, total_files=len(saved),
                            status="processing")
         db.add(job)
         db.commit()

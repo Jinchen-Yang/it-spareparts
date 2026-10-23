@@ -1,0 +1,14 @@
+# B1 core independent review by shop adapter owner
+
+Reviewed source: app/pn_catalog api/dto/persistence/models and e1a4c7d9f2b6 migration; legacy master_edit/master_data/spec_extract/merge/part_rename/ETL adapters. Mutable development candidate; findings sent to root/core before fixes.
+
+1. **P1 create protocol not shared across legacy/new paths.** Real PG deterministic interleaving pauses new `_candidates` after it sees no RACE-987-Z match; legacy `create_part_in_transaction(RACE987Z)` commits; release new command and it commits too. Both share pn_compact RACE987Z without explicit duplicate confirmation. New code locks pn-catalog-create compact while legacy uses master-pn raw key; shared topology advisory mode permits concurrent creation. Align compact guard across old/new interactive writers and recheck under guard.
+2. **Field grant does not cover derived spec mutations.** Real PG seed auto specs.capacity=1TB, authorize only readable/writable description, update description to SSD SATA 2TB. Request succeeds and hidden/unwritable capacity becomes2TB; returned specs is empty. Public `_apply_fields` refreshes auto specs beyond paths used for permission and CAS validation. Need declared derived-write dependency and corresponding grant or reject/prevent unauthorized derived change, keeping description/spec coherence. Repro not inferred from mocks.
+
+Reproduction harness `/tmp/shared-pn-review-repros.py`: `.venv/bin/python -m pytest -p tests.conftest /tmp/shared-pn-review-repros.py -q -s` with dedicated local PYTEST_DATABASE_BASE_URL. Both evidence tests passed in3.99s (they assert the undesired outcomes). Source not changed by reviewer; core owns regression tests/fixes.
+
+Explicit remaining scope: old governance merge/unmerge/reassign wrappers commit identity first then optionally recompute. The required host coordinator + same-transaction durable recompute acceptance is not delivered by merely adding in_transaction service variants. Current candidate must not claim completed B1/B3 cutover or production readiness.
+
+Positive checks: public same-key replay checks current permission first; response reconstructs current permitted data with applied_revision distinct data_revision; profile/spec/identity use parent row lock; append-only audit and receipt share caller transaction; baseline migration does not fabricate historical human events; populated downgrade refuses loss of receipts/provenance.
+
+Follow-up verification: core added shared `acquire_creation_locks` used by public/legacy create, and preflight effective derived-spec access checks. Independently reran `test_shared_and_legacy_creation_use_the_same_duplicate_gate`, `test_description_update_cannot_change_ungranted_derived_specs`, `test_create_cannot_publish_ungranted_auto_specs`: **3 passed in4.27s** on isolated PG. The two reproduced findings are closed for those covered behaviors; coordinator/cutover scope remains open.
