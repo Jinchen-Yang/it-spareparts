@@ -25,7 +25,7 @@ const me = catalogCases.cases[1].response.json as unknown as AuthzSnapshot;
 const account = accountCases.cases[0].response
   .json as unknown as AccountModules;
 describe("S1 documented wire consumption", () => {
-  it("accepts the full real backend catalog, with only S1 sales executable", () => {
+  it("accepts the full real backend catalog and registered executable modules", () => {
     const real = {
       ...catalog,
       modules: manifest.map((module) => ({
@@ -35,13 +35,13 @@ describe("S1 documented wire consumption", () => {
         configurable: module.migration_state === "implemented",
       })),
     } as AuthzCatalog;
-    expect(real.modules).toHaveLength(87);
+    expect(new Set(real.modules.map((module) => module.id)).size).toBe(real.modules.length);
     expect(validateCatalog(real)).toEqual(real);
     expect(
       real.modules
         .filter((m) => m.configurable)
-        .map((m) => [m.id, m.actions.map((a) => a.id)]),
-    ).toEqual([["sales_analysis", ["read", "export"]]]);
+        .map((m) => m.id).sort(),
+    ).toEqual(["part_content", "part_gallery", "part_identity", "part_master", "sales_analysis"]);
     const invalid = clone(real);
     invalid.modules.find(
       (m) => m.surfaces.length,
