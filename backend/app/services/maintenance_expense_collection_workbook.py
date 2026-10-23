@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
@@ -45,10 +44,22 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysImportBatch
 
-PROTOCOL_VERSION = "expense-collection-v1"
-SHEET_EXPENSE = "04_报销订单"
-SHEET_COLLECTION = "05_项目经理回款单"
-_META_SHEET = "99_元数据"
+
+# Compatibility exports keep standalone and embedded workbook callers aligned.
+from app.services.maintenance_workbook_protocol import (
+    EXPENSE_COLLECTION_PROTOCOL_VERSION as PROTOCOL_VERSION,
+    SHEET_EXPENSE,
+    SHEET_COLLECTION,
+    _META_SHEET,
+    _EXPENSE_HEADERS,
+    _COLLECTION_HEADERS,
+)
+from app.services.maintenance_workbook_plans import (
+    WorkbookError,
+    ExpenseUpdate,
+    CollectionOp,
+    WorkbookPlan,
+)
 
 # 与 ck_maintenance_collection_status 一致；状态列是自由文本，不校验就会在
 # flush 时撞 CHECK 约束变成 500（直连接口对同样输入是 422「回款确认状态无效」）
@@ -57,83 +68,9 @@ _COLLECTION_STATUSES = frozenset({"confirmed", "unconfirmed", "void"})
 # 与 f_project_expense 的 CHECK 约束一致（税率固定 13%，双口径保留原值）
 TAX_RATE = Decimal("0.13")
 
-_EXPENSE_HEADERS = ["报销单号", "报销日期", "报销人员", "报销类别", "费用分类",
-                    "支出事由", "合同编号", "未税金额", "含税金额(系统计算)",
-                    "流程状态", "备注"]
-_COLLECTION_HEADERS = ["操作", "合同编号", "报告月份", "累计回款金额(含税)",
-                       "回款凭证号", "状态(系统)", "备注"]
 
 _EDITABLE = PatternFill("solid", fgColor="FFF3C4")   # 黄底=可编辑
 _READONLY = PatternFill("solid", fgColor="EFEFEF")
-
-
-class WorkbookError(ValueError):
-    """回传给 API 层映射 422 的用户可读校验错误。"""
-
-    def __init__(
-        self, code: str, message: str, issues: list[dict] | None = None,
-        *, details: dict | None = None,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.issues = issues or []
-        self.details = details or {}
-
-
-@dataclass(frozen=True)
-class ExpenseUpdate:
-    raw_line_id: str
-    is_create: bool = False
-    bxd_no: str | None = None
-    line_no: int | None = None
-    # 2026-08-17 全面放开：所有事实列可改后回传覆盖
-    expense_date: date | None = None
-    person: str | None = None
-    expense_type: str | None = None
-    fee_category: str | None = None
-    reason: str | None = None
-    contract_no: str | None = None
-    amount_ex_tax: Decimal | None = None
-    amount_inc_tax: Decimal | None = None
-    # Source amount basis is read-only in workbooks but must be preserved when
-    # another field or the displayed ex-tax amount is updated.
-    tax_basis: str | None = None
-    data_status: str | None = None
-    remark: str | None = None
-
-
-@dataclass(frozen=True)
-class CollectionOp:
-    operation: str                       # CREATE | VOID | UPDATE
-    project_contract_id: str
-    contract_no: str
-    report_month: date
-    cumulative_amount: Decimal | None    # VOID 时为 None
-    receipt_reference: str | None
-    remark: str | None
-    # 2026-08-17 全面放开：非 VOID 时可覆盖状态
-    collection_status: str | None = None
-
-
-@dataclass(frozen=True)
-class WorkbookPlan:
-    project_id: str
-    expense_updates: tuple[ExpenseUpdate, ...]
-    collection_ops: tuple[CollectionOp, ...]
-
-    @property
-    def summary(self) -> dict:
-        creates = sum(1 for op in self.collection_ops if op.operation == "CREATE")
-        updates = sum(1 for op in self.collection_ops if op.operation == "UPDATE")
-        voids = sum(1 for op in self.collection_ops if op.operation == "VOID")
-        return {
-            "expense_creates": sum(item.is_create for item in self.expense_updates),
-            "expense_updates": sum(not item.is_create for item in self.expense_updates),
-            "collection_creates": creates,
-            "collection_updates": updates,
-            "collection_voids": voids,
-        }
 
 
 # ------------------------------------------------------------------ 导出
