@@ -12,7 +12,7 @@ from app.pn_catalog.http import router
 
 
 def export() -> str:
-    app = FastAPI(title="Shared PN Catalog", version="1.0.0-b2")
+    app = FastAPI(title="Shared PN Catalog", version="1.0.0-b3")
     app.include_router(router, prefix="/api")
     return json.dumps(app.openapi(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 

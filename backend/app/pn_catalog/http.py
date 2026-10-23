@@ -3,7 +3,7 @@ import logging
 import re
 from functools import partial
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -227,7 +227,7 @@ def audit_events(part_id: PartId, request: Request, db: DbDep, access: AccessDep
 
 
 def install_http(app, *, api_prefix="/api"):
-    """Install without changing the host's errors outside this versioned prefix."""
+    """Keep host HTTP errors; catalog domain errors also cover migrated legacy routes."""
     from fastapi.exception_handlers import http_exception_handler
     prefix = api_prefix.rstrip("/") + router.prefix
     previous = app.exception_handlers.get(StarletteHTTPException, http_exception_handler)
@@ -240,13 +240,23 @@ def install_http(app, *, api_prefix="/api"):
                     headers=exc.headers)
         return await previous(request, exc)
 
+    async def catalog_domain_error(request, exc):
+        request_id = getattr(request.state, "pn_catalog_request_id", None) or uuid4()
+        return JSONResponse(error_body(exc.code, exc.message, request_id,
+            details=exc.details, retryable=exc.retryable), status_code=exc.status_code,
+            headers={"Cache-Control": "no-store"})
+
+    app.add_exception_handler(CatalogError, catalog_domain_error)
     app.add_exception_handler(StarletteHTTPException, host_http_error)
     app.add_middleware(CatalogHttpControls, path_prefix=prefix)
     app.include_router(router, prefix=api_prefix)
+    app.include_router(_authority_routes.router, prefix=api_prefix)
 
 
 # Resource adapters attach to this single versioned router after boundary helpers exist.
-from . import http_content as _content_routes  # noqa: F401
-from . import http_enrichment as _enrichment_routes  # noqa: F401
-from . import http_jobs as _job_routes  # noqa: F401
-from . import http_media as _media_routes  # noqa: F401
+from . import http_content as _content_routes  # noqa: E402,F401
+from . import http_enrichment as _enrichment_routes  # noqa: E402,F401
+from . import http_jobs as _job_routes  # noqa: E402,F401
+from . import http_media as _media_routes  # noqa: E402,F401
+
+from . import http_authority as _authority_routes  # noqa: E402,F401

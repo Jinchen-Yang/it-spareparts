@@ -49,6 +49,7 @@ class CatalogJob(Base):
         Index("ix_pn_catalog_job_pending", "queue", "available_at", "created_at", postgresql_where=text("status = 'pending'")),
         Index("ix_pn_catalog_job_expired", "lease_expires_at", postgresql_where=text("status = 'running'")),
         Index("ix_pn_catalog_job_resource", "resource_type", "resource_id", "created_at"),
+        Index("ix_pn_catalog_job_owner_created", text("(context['actor'] ->> 'principal_id')"), "created_at", "id"),
     )
 
 

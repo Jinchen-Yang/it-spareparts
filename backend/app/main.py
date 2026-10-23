@@ -75,6 +75,7 @@ from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
 from app.pn_catalog.http import install_http as install_pn_catalog_http
 from app.services.pn_catalog_runtime import install_media_runtime
+from app.services.pn_catalog_access import resolve_catalog_access
 from app.maintenance_beta import require_maintenance_beta
 from app.maintenance_boss import require_maintenance_boss
 
@@ -100,6 +101,7 @@ async def lifespan(_app):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
+app.state.pn_catalog_access_resolver = resolve_catalog_access
 install_pn_catalog_http(app, api_prefix=settings.api_prefix)
 install_media_runtime(app)
 
