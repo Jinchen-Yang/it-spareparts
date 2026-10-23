@@ -44,6 +44,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
 )
 from app.models.system import SysImportBatch
+from app.services.maintenance_errors import WorkbookError
 
 PROTOCOL_VERSION = "expense-collection-v1"
 SHEET_EXPENSE = "04_报销订单"
@@ -65,20 +66,6 @@ _COLLECTION_HEADERS = ["操作", "合同编号", "报告月份", "累计回款�
 
 _EDITABLE = PatternFill("solid", fgColor="FFF3C4")   # 黄底=可编辑
 _READONLY = PatternFill("solid", fgColor="EFEFEF")
-
-
-class WorkbookError(ValueError):
-    """回传给 API 层映射 422 的用户可读校验错误。"""
-
-    def __init__(
-        self, code: str, message: str, issues: list[dict] | None = None,
-        *, details: dict | None = None,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.issues = issues or []
-        self.details = details or {}
 
 
 @dataclass(frozen=True)

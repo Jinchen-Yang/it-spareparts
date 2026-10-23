@@ -24,6 +24,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueReturnEvent,
 )
 from app.models.master_data import ProductCategory
+from app.services.maintenance_errors import WorkbookError
 
 SCHEMA = "maintenance-site-line-return-requirement-v1"
 REFERENCE = "maintenance-site-line-requirements:"
@@ -227,9 +228,6 @@ def record_corrections(
         db.add(event)
         if legacy_event:
             from app.services import maintenance_bad_returns
-            from app.services.maintenance_expense_collection_workbook import (
-                WorkbookError,
-            )
 
             db.flush()
             try:
