@@ -12,6 +12,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from app import permissions as permission_service
+from tests.legacy_catalog_fixtures import pre_catalog_snapshot
 from app.etl import loader
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -79,6 +80,7 @@ def _maintenance_line(db, suffix: str) -> tuple[SysImportBatch, FMaintenanceLine
         batch.id,
         date(2026, 7, 2),
     )
+    pre_catalog_snapshot(db)
     line = db.scalar(
         select(FMaintenanceLine).where(
             FMaintenanceLine.raw_line_id == f"ML-{suffix}",
