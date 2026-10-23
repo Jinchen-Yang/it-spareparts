@@ -63,6 +63,26 @@ class PartAccessResponse(WireModel):
     meta: PageMeta
 
 
+class CatalogAccessSnapshot(WireModel):
+    allowed_actions: list[str]
+    readable_fields: list[str]
+    writable_fields: list[str]
+
+
+class CatalogAccessResponse(WireModel):
+    data: CatalogAccessSnapshot
+    meta: PageMeta
+
+
+@business_router.get("/access", response_model=CatalogAccessResponse)
+def catalog_access(request: Request, db: DbDep, access: AccessDep):
+    context = _context(request, access)
+    value = get_part_access(db, access.actor, None)
+    value.pop("part_id")
+    return {"data": value, "meta": {"request_id": str(context.request_id),
+        "replayed": False, "next_cursor": None}}
+
+
 @business_router.get("/parts/{part_id}/access", response_model=PartAccessResponse)
 def part_access(part_id: PartId, request: Request, db: DbDep, access: AccessDep):
     context = _context(request, access)

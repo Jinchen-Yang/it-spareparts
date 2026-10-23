@@ -269,5 +269,5 @@ from . import http_media as _media_routes  # noqa: E402,F401
 from . import http_authority as _authority_routes  # noqa: E402,F401
 
 from . import http_references as _reference_routes  # noqa: E402,F401
-
 from . import http_attributes as _attribute_routes  # noqa: E402,F401
+from . import http_lookup as _lookup_routes  # noqa: E402,F401
