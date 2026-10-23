@@ -278,6 +278,7 @@ class InboxItem(Base):
         ForeignKey("pn_media_inbox_group.id"), index=True
     )
     position: Mapped[int] = mapped_column(default=0, server_default="0")
+    client_order: Mapped[int | None] = mapped_column()
     owner_principal_id: Mapped[str] = mapped_column(String(256), index=True)
     status: Mapped[str] = mapped_column(
         String(24), default="receiving", server_default="receiving"
@@ -296,6 +297,9 @@ class InboxItem(Base):
     entry_id: Mapped[UUID | None] = mapped_column(ForeignKey("pn_media_entry.id"))
     deleted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     __table_args__ = (
+        UniqueConstraint("group_id", "client_order", name="uq_pn_media_inbox_capture_order"),
+        CheckConstraint("client_order IS NULL OR (group_id IS NOT NULL AND client_order BETWEEN 0 AND 1999)",
+                        name="ck_pn_media_inbox_capture_order"),
         CheckConstraint(
             "status IN ('receiving','ready','assigned','failed','deleted')",
             name="ck_pn_media_inbox_status",

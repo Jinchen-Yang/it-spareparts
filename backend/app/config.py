@@ -10,7 +10,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     pn_shop_proof_secret: SecretStr = SecretStr("")
     pn_shop_issuer: str = "shop"
     pn_shop_client_id: str = "shop"
+    pn_shop_source_namespace: str = Field(default="shop", min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]*$")
     pn_shop_allowed_actions: list[str] = []
     pn_shop_allowed_fields: dict[str, list[str]] = {}
     pn_confirmation_secret: SecretStr = SecretStr("")

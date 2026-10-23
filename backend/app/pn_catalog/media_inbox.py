@@ -3,7 +3,8 @@
 from datetime import timedelta
 from uuid import uuid4
 
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import select, tuple_
 
 from .errors import CatalogError
 from .media_common import (
@@ -20,20 +21,76 @@ from .media_common import (
     revision,
 )
 from .media_gallery import attach_asset
-from .media_models import Asset, InboxGroup, InboxItem, UploadTicket
+from .media_models import Asset, Derivative, InboxGroup, InboxItem, UploadTicket
+from .job_models import CatalogJob
+from .enrichment_dto import RecognitionResult
 
 
-def inbox_data(item):
+def _inbox_metadata(db, items):
+    """Bounded joins, never per-item lazy loading or raw job/source payload projection."""
+    if not items:
+        return {}
+    rows = db.execute(select(InboxItem.id, UploadTicket, Asset)
+        .join(UploadTicket, InboxItem.upload_id == UploadTicket.id)
+        .outerjoin(Asset, InboxItem.asset_id == Asset.id)
+        .where(InboxItem.id.in_([item.id for item in items]))).all()
+    values = {identifier: {
+        "filename": ticket.filename,
+        "size_bytes": asset.size_bytes if asset else ticket.declared_bytes,
+        "content_type": asset.content_type if asset else ticket.content_type,
+        "uploaded_by": {"principal_id": ticket.owner_principal_id, "client_id": ticket.client_id},
+        "created_at": ticket.created_at.isoformat(),
+        # Existing rows do not have a persisted inbox-update timestamp. Unknown is explicit.
+        "updated_at": None,
+        "purpose": ticket.purpose,
+        "source": {"kind": "legacy" if asset and asset.verification_status == "legacy_metadata" else "upload",
+                   "client_id": ticket.client_id, "namespace": asset.source_namespace if asset else None,
+                   "source_id": asset.source_id if asset else None},
+        "width": asset.width if asset else None, "height": asset.height if asset else None,
+        "recognition": None,
+    } for identifier, ticket, asset in rows}
+    fences = [(str(item.id), item.generation) for item in items if item.status in ("ready", "assigned")]
+    if not fences:
+        return values
+    query = select(CatalogJob.resource_id, CatalogJob.status, CatalogJob.result, CatalogJob.finished_at).where(CatalogJob.kind == "enrichment.recognize",
+        CatalogJob.resource_type == "enrichment.recognize",
+        tuple_(CatalogJob.resource_id, CatalogJob.resource_generation).in_(fences))
+    latest = {row.resource_id: row for row in db.execute(query.distinct(CatalogJob.resource_id)
+        .order_by(CatalogJob.resource_id, CatalogJob.created_at.desc(), CatalogJob.id.desc()))}
+    successful = {row.resource_id: row for row in db.execute(query.where(CatalogJob.status == "succeeded")
+        .distinct(CatalogJob.resource_id).order_by(CatalogJob.resource_id, CatalogJob.created_at.desc(), CatalogJob.id.desc()))}
+    for item in items:
+        job = latest.get(str(item.id))
+        if job is None or item.id not in values:
+            continue
+        success = successful.get(str(item.id))
+        result = None
+        if success is not None:
+            try:
+                result = RecognitionResult.model_validate(success.result).model_dump(mode="json")
+            except ValidationError:
+                pass  # Historical or corrupt results must not expose arbitrary provider/job JSON.
+        values[item.id]["recognition"] = {"status": job.status, "result": result,
+            "completed_at": success.finished_at.isoformat() if success and success.finished_at else None}
+    return values
+
+
+def inbox_data(db, item, *, context, metadata=None):
+    metadata = _inbox_metadata(db, [item]) if metadata is None else metadata
     return {
+        **metadata[item.id],
         "inbox_id": str(item.id),
         "upload_id": str(item.upload_id),
         "asset_id": str(item.asset_id) if item.asset_id else None,
         "group_id": str(item.group_id) if item.group_id else None,
         "position": item.position,
+        "client_order": item.client_order,
         "status": item.status,
         "revision": item.revision,
         "generation": item.generation,
         "claimed_by": item.claimed_by,
+        "uploaded_by_me": item.owner_principal_id == context.actor.principal_id,
+        "claimed_by_me": item.claimed_by == context.actor.principal_id,
         "claim_revision": item.claim_revision,
         "claim_expires_at": item.claim_expires_at.isoformat()
         if item.claim_expires_at
@@ -74,7 +131,7 @@ def list_inbox(
 ):
     if (
         scope not in ("mine", "shared")
-        or status not in ("ready", "assigned", "deleted", "receiving", "failed")
+        or status not in ("all", "ready", "assigned", "deleted", "receiving", "failed")
         or not 1 <= limit <= 200
     ):
         raise CatalogError(
@@ -88,7 +145,11 @@ def list_inbox(
         None,
         field="inbox",
     )
-    query = select(InboxItem).where(InboxItem.status == status)
+    query = select(InboxItem)
+    if status != "all":
+        query = query.where(InboxItem.status == status)
+    elif scope == "shared":
+        query = query.where(InboxItem.status != "receiving")
     if scope == "mine":
         query = query.where(InboxItem.owner_principal_id == context.actor.principal_id)
     elif status == "receiving":
@@ -113,8 +174,9 @@ def list_inbox(
     items = list(db.scalars(query.order_by(InboxItem.id).limit(limit + 1)))
     has_more = len(items) > limit
     items = items[:limit]
+    metadata = _inbox_metadata(db, items)
     return {
-        "data": [inbox_data(item) for item in items],
+        "data": [inbox_data(db, item, context=context, metadata=metadata) for item in items],
         "meta": {
             "request_id": str(context.request_id),
             "replayed": False,
@@ -126,7 +188,26 @@ def list_inbox(
 def get_inbox(db, inbox_id, *, context, authorize):
     item = load(db, InboxItem, inbox_id)
     can_read(db, item, context, authorize)
-    return read_response(context, inbox_data(item))
+    return read_response(context, inbox_data(db, item, context=context))
+
+
+def inbox_links(db, inbox_id, *, context, authorize, signer):
+    """Issue fresh local signatures only after current inbox visibility and deletion checks."""
+    item = load(db, InboxItem, inbox_id)
+    can_read(db, item, context, authorize)
+    item = load(db, InboxItem, inbox_id, lock=True, shared=True)
+    can_read(db, item, context, authorize)
+    if item.status == "deleted":
+        raise CatalogError("request.not_found", "收件箱图片已删除", status_code=404)
+    if item.status not in ("ready", "assigned") or item.asset_id is None:
+        raise CatalogError("media.inbox_not_ready", "图片尚未验证完成，暂无预览", status_code=409)
+    asset = load(db, Asset, item.asset_id)
+    derivatives = db.scalars(select(Derivative).where(Derivative.asset_id == asset.id,
+        Derivative.status == "ready").order_by(Derivative.recipe_id).limit(20)).all()
+    return {"inbox_id": str(item.id), "asset_id": str(asset.id),
+        "url": signer.signed_get(asset.object_key, expires_in=300),
+        "derivatives": [{"recipe_id": row.recipe_id, "url": signer.signed_get(row.object_key, expires_in=300)} for row in derivatives],
+        "expires_at": (now() + timedelta(seconds=300)).isoformat()}
 
 
 def _begin_item(db, inbox_id, command, *, context, authorize, operation):
@@ -191,11 +272,13 @@ def claim_inbox(db, inbox_id, command, *, context, authorize):
         after=item.revision,
         changes={
             "claimed_by": item.claimed_by,
+        "uploaded_by_me": item.owner_principal_id == context.actor.principal_id,
+        "claimed_by_me": item.claimed_by == context.actor.principal_id,
             "claim_revision": item.claim_revision,
             "takeover_reason": command.takeover_reason,
         },
     )
-    return response(db, receipt, inbox_data(item), replayed=False)
+    return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
 def release_inbox(db, inbox_id, command, *, context, authorize):
@@ -245,7 +328,7 @@ def release_inbox(db, inbox_id, command, *, context, authorize):
             "reason": command.reason,
         },
     )
-    return response(db, receipt, inbox_data(item), replayed=False)
+    return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
 def assign_inbox(db, inbox_id, command, *, context, authorize):
@@ -324,7 +407,7 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
         },
         identity_revision=command.expected_identity_revision,
     )
-    return response(db, receipt, inbox_data(item), replayed=False)
+    return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
 def change_inbox(db, inbox_id, command, *, context, authorize, restore=False):
@@ -391,7 +474,7 @@ def change_inbox(db, inbox_id, command, *, context, authorize, restore=False):
             "reason": getattr(command, "reason", None),
         },
     )
-    return response(db, receipt, inbox_data(item), replayed=False)
+    return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
 def group_data(db, group):
@@ -524,6 +607,12 @@ def add_group_item(db, group_id, command, *, context, authorize):
         db.add(item)
     if item.status not in ("receiving", "ready"):
         raise CatalogError("inbox.group_conflict", "照片当前不可分组")
+    if (item.group_id == group.id and command.client_order is not None
+            and item.client_order == command.client_order):
+        receipt = finish(db, handle, part_id=None, identifier=group.id,
+            before=group.revision, after=group.revision,
+            changes={"inbox_id": str(item.id), "client_order": item.client_order, "already_grouped": True})
+        return response(db, receipt, group_data(db, group), replayed=False)
     existing = list(
         db.scalars(
             select(InboxItem)
@@ -532,11 +621,25 @@ def add_group_item(db, group_id, command, *, context, authorize):
             .with_for_update()
         )
     )
-    if command.position > len(existing) or len(existing) >= 2000:
+    if len(existing) >= 2000:
         raise CatalogError(
             "request.validation_failed", "分组位置无效或分组已满", status_code=422
         )
-    existing.insert(command.position, item)
+    if command.client_order is not None:
+        if item.client_order not in (None, command.client_order):
+            raise CatalogError("inbox.group_conflict", "照片的原始拍摄顺序不能改写")
+        if any(row.client_order == command.client_order for row in existing):
+            raise CatalogError("inbox.group_conflict", "该拍摄顺序已对应另一张照片")
+        item.client_order = command.client_order
+        # Late uploads insert relative to original capture order; existing manual
+        # relative order stays intact. Old rows without capture order remain where they are.
+        insertion = next((position for position, row in enumerate(existing)
+            if row.client_order is not None and row.client_order > command.client_order), len(existing))
+    else:
+        if command.position > len(existing):
+            raise CatalogError("request.validation_failed", "分组位置无效或分组已满", status_code=422)
+        insertion = command.position
+    existing.insert(insertion, item)
     for position, row in enumerate(existing):
         row.position = position
     item.group_id = group.id
@@ -551,7 +654,7 @@ def add_group_item(db, group_id, command, *, context, authorize):
         identifier=group.id,
         before=before,
         after=group.revision,
-        changes={"inbox_id": str(item.id), "position": command.position},
+        changes={"inbox_id": str(item.id), "position": item.position, "client_order": item.client_order},
     )
     return response(db, receipt, group_data(db, group), replayed=False)
 

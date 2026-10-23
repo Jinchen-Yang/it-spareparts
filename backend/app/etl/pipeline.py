@@ -462,12 +462,16 @@ def run_import(session: Session, file_path: str, original_name: str,
                import_job_id: int | None = None,
                auto_assign_maintenance_projects: bool = False, expected_void_fingerprint: str | None = None,
                require_void_preview: bool = False,
-               actor_user_id: int | None = None) -> SysImportBatch:
+               actor_user_id: int | None = None,
+               actor_authorization_epoch: int | None = None) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
     import_job_id：批量作业归组（单文件上传为 None）；成功/失败批次都带上，便于作业详情聚合。
     """
+    from app.services.pn_catalog_legacy_guard import prepare_import_actor, import_context
+    prepare_import_actor(session, import_context(actor_user_id=actor_user_id,
+        actor_epoch=actor_authorization_epoch, display_name=uploaded_by))
     file_hash = sha256_file(file_path)
 
     # 1) 应用级导入锁先行（同一时间仅一个导入；顺带消除"去重检查在加锁前"的并发竞态）
@@ -486,6 +490,7 @@ def run_import(session: Session, file_path: str, original_name: str,
             file_hash=file_hash,
             uploaded_by=uploaded_by,
             actor_user_id=actor_user_id,
+            actor_authorization_epoch=actor_authorization_epoch,
             import_job_id=import_job_id,
             status=status,
         )

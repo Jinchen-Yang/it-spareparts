@@ -204,3 +204,16 @@ def entry_links(db, entry_id, *, context, authorize, signer):
         ],
         "expires_at": (now() + timedelta(seconds=300)).isoformat(),
     }
+
+
+def get_entry(db, entry_id, *, context, authorize):
+    """Read one visible immutable-origin entry, including its current independent revision."""
+    from .media_gallery import entry_data
+    from .media_common import read_response
+    entry = load(db, GalleryEntry, entry_id, code="media.entry_not_found")
+    access(db, context, authorize, "gallery.read", entry.origin_part_id)
+    read_identity(db, [entry.origin_part_id])
+    entry = load(db, GalleryEntry, entry_id, lock=True, shared=True)
+    access(db, context, authorize, "gallery.read", entry.origin_part_id)
+    assert_visible(db, entry)
+    return read_response(context, entry_data(db, entry))

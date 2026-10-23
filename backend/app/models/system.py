@@ -163,6 +163,7 @@ class SysImportJob(Base):
     created_by: Mapped[str | None] = mapped_column(String(64))
     # Verified account ID at submission; historical jobs deliberately remain unknown.
     actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    actor_authorization_epoch: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     # processing=进行中 / done=全成 / partial=部分成 / failed=全失败
@@ -173,7 +174,9 @@ class SysImportJob(Base):
     error_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     note: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (CheckConstraint(
-        "actor_user_id IS NULL OR actor_user_id > 0", name="ck_sys_import_job_actor_user_id"),)
+        "actor_user_id IS NULL OR actor_user_id > 0", name="ck_sys_import_job_actor_user_id"), CheckConstraint(
+        "actor_authorization_epoch IS NULL OR (actor_user_id IS NOT NULL AND actor_authorization_epoch >= 0)",
+        name="ck_sys_import_job_actor_epoch"))
 
 
 class SysImportBatch(Base):
@@ -185,6 +188,7 @@ class SysImportBatch(Base):
     file_hash: Mapped[str] = mapped_column(String(64))
     uploaded_by: Mapped[str | None] = mapped_column(String(64))
     actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    actor_authorization_epoch: Mapped[int | None] = mapped_column(Integer)
     import_job_id: Mapped[int | None] = mapped_column(ForeignKey("sys_import_job.id"))  # 批量作业归组
     uploaded_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     rows_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -204,6 +208,8 @@ class SysImportBatch(Base):
     __table_args__ = (
         CheckConstraint("actor_user_id IS NULL OR actor_user_id > 0",
                         name="ck_sys_import_batch_actor_user_id"),
+        CheckConstraint("actor_authorization_epoch IS NULL OR (actor_user_id IS NOT NULL AND actor_authorization_epoch >= 0)",
+                        name="ck_sys_import_batch_actor_epoch"),
         Index(
             "ux_batch_success_hash",
             "file_type",

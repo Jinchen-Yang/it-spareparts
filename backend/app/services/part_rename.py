@@ -26,6 +26,7 @@ from app.models.dimensions import DimPart, PartAlias
 from app.models.master_data import ProductMatchCandidate
 from app.models.system import SysAuditLog
 from app.pn_catalog import api as catalog
+from app.services.pn_catalog_legacy_guard import require_authority_command
 
 _log = logging.getLogger("rename")
 
@@ -41,6 +42,7 @@ def rename_part_in_transaction(db: Session, part_id: int, new_pn_std: str, reaso
     返回 {"renamed": True, ...} 成功；{"renamed": False, "merge_candidate_id": ...}
     表示目标名被 active 型号占用，已转合并候选（未改名）。
     """
+    require_authority_command(db, context=catalog_context, resource="part_identity")
     new_pn = (new_pn_std or "").strip()
     if not new_pn:
         raise RenameError("新 pn_std 不能为空")

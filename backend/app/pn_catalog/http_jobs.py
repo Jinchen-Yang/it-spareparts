@@ -2,15 +2,16 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Body, Request
+from fastapi import Body, Query, Request
 
+from app.config import get_settings
 from app.services import pn_catalog_identity
 
 from . import jobs
 from .errors import CatalogError
 from .http import _WRITE_HEADERS, AccessDep, DbDep, _commit, _context, router
-from .job_dto import CancelJob, RetryJob
-from .wire_jobs import IdentityPreviewResponse, IdentityResponse, JobResponse
+from .job_dto import CancelJob, JobStatus, RetryJob
+from .wire_jobs import IdentityPreviewResponse, IdentityResponse, JobResponse, JobListResponse
 
 
 def require_job_authorizer(access):
@@ -26,6 +27,18 @@ def project_host_receipt(db, receipt, *, context, authorize, replayed, access):
         return jobs.project_receipt(db, receipt, context=context,
                                     authorize_job=require_job_authorizer(access), replayed=replayed)
     raise CatalogError("request.not_found", "此入口无法读取该资源回执", status_code=404)
+
+
+@router.get("/jobs", response_model=JobListResponse)
+def list_jobs(request: Request, db: DbDep, access: AccessDep,
+              part_id: Annotated[int | None, Query(gt=0)] = None,
+              inbox_id: UUID | None = None,
+              status: Annotated[list[JobStatus] | None, Query(max_length=6)] = None,
+              cursor: Annotated[str | None, Query(max_length=512)] = None,
+              limit: Annotated[int, Query(ge=1, le=50)] = 20):
+    return jobs.list_jobs_authorized(db, context=_context(request, access),
+        authorize_job=require_job_authorizer(access), cursor_secret=get_settings().secret_key.encode(),
+        part_id=part_id, inbox_id=inbox_id, statuses=status or (), cursor=cursor, limit=limit)
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse, response_model_exclude_unset=True)

@@ -46,7 +46,7 @@ vi.mock("../nav", async () => {
   const MaintenanceBetaPage = () => <div>维保 Beta 页面</div>;
   return {
     NAV_ITEMS: [
-      { key: "sales-analytics", authzResource: "sales_analysis", path: "/sales/analytics", perm: "page_sales_analysis",
+      { key: "sales-analytics", label: "销售分析", authzResource: "sales_analysis", path: "/sales/analytics", perm: "page_sales_analysis",
         visibleWhen: () => localStorage.getItem("role") === "boss", page: () => <div>销售分析页面</div> },
       { key: "parts", path: "/parts", perm: "page_parts", page: PartsPage },
       {

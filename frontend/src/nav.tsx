@@ -77,7 +77,7 @@ export interface NavGroup {
 const loadBossBoard = () => import("./pages/BossBoardPage");
 const loadPools = () => import("./pages/PoolsPage");
 const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
-const loadPartSearch = () => import("./pages/PartSearchPage");
+const loadPartSearch = () => import("./pages/PartSearchRoute");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadSalesAnalytics = () => import("./pages/sales/analytics/SalesAnalyticsPage");
@@ -96,7 +96,7 @@ const loadMaintenanceDemands = () =>
   import("./pages/maintenance/MaintenanceDemandsPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
-const loadMasterData = () => import("./pages/MasterDataPage");
+const loadMasterData = () => import("./pages/CatalogMasterRoute");
 const loadGovernance = () => import("./pages/GovernancePage");
 const loadPoolManagement = () => import("./pages/PoolManagementPage");
 const loadChat = () => import("./pages/ChatPage");
@@ -249,7 +249,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "数据中心",
     items: [
       { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
-      { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", page: MasterDataPage, load: loadMasterData },
+      { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", authzResource: "part_master", page: MasterDataPage, load: loadMasterData },
       { key: "governance", path: "/governance", label: "数据治理", icon: <ControlOutlined />, perm: "page_governance", page: GovernancePage, load: loadGovernance },
       // 池维护（action_pool_manage）与约束价设置（action_pool_set_policy）是两种独立授权：
       // 任一权限都必须能进页面（页面内再按各自权限开放对应操作区）

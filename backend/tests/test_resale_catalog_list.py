@@ -327,7 +327,7 @@ def test_default_limit_is_200_and_bounds_accepted(db, catalog_client):
     assert single.json()["hasMore"] is True
 
 
-def test_page_shape_and_exactly_two_queries(db, catalog_client):
+def test_page_shape_has_one_cutover_check_and_two_data_queries(db, catalog_client):
     p1, p2, p3 = _parts(db, 3, prefix="SHAPE")
     for part, key in ((p1, "capacity"), (p1, "rpm"), (p2, "interface")):
         db.add(ProductSpec(part_id=part.id, spec_key=key, spec_value="v", source="manual"))
@@ -346,7 +346,8 @@ def test_page_shape_and_exactly_two_queries(db, catalog_client):
 
     assert response.status_code == 200, response.text
     # 每页恰好一条 dim_part 页查询 + 一条 product_specs IN 查询，禁止逐行 db.get。
-    assert len(statements) == 2
+    assert len(statements) == 3
+    assert sum("sys_authorization_cutover" in statement for statement in statements) == 1
     assert sum(1 for s in statements if "from dim_part" in s.lower()) == 1
     assert sum(1 for s in statements if "product_specs" in s.lower()) == 1
     combined = " ".join(statements).lower()

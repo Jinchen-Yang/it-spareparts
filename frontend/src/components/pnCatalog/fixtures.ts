@@ -1,0 +1,2 @@
+import type { Part } from "../../api/pnCatalog";
+export const part: Part = { part_id: 42, pn_std: "PN-42", identity: { pn_std: "PN-42", status: "active", merged_into_id: null }, identity_revision: 2, profile_revision: 7, availability: "active", availability_revision: 0, profile: { brand: "旧品牌", description: "原描述", category_major: "硬盘", category_minor: "SAS" }, specs: {}, field_versions: { brand: 3, description: 2, category_major: 4, category_minor: 4, "specs.capacity": 5 }, locked_fields: [] };

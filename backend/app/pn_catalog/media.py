@@ -27,6 +27,7 @@ from .media_inbox import (
     get_inbox,
     group_data,
     inbox_data,
+    inbox_links,
     list_inbox,
     owned_group,
     release_inbox,
@@ -177,7 +178,7 @@ def render_receipt(db, receipt, *, context, authorize, replayed):
     elif resource == "media.inbox":
         item = load(db, InboxItem, identifier)
         can_read(db, item, context, authorize)
-        data = inbox_data(item)
+        data = inbox_data(db, item, context=context)
     elif resource == "media.inbox_group":
         data = group_data(db, owned_group(db, identifier, context, authorize))
     elif resource == "media.suppression":
@@ -234,6 +235,7 @@ __all__ = [
     "arrange_inbox_group",
     "list_inbox",
     "get_inbox",
+    "inbox_links",
     "claim_inbox",
     "release_inbox",
     "assign_inbox",

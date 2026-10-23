@@ -10,6 +10,7 @@ import {
 import { Alert, Button, Spin } from "antd";
 import {
   getAuthzSnapshot,
+  implementedResource,
   validateAuthzSnapshot,
   type AuthzSnapshot,
 } from "../api/authz";
@@ -147,7 +148,7 @@ export function resourceAllowed(
   resource: string,
   action: string,
 ): boolean {
-  if (snapshot?.schema_version !== 1 || resource !== "sales_analysis")
+  if (snapshot?.schema_version !== 1 || !implementedResource(resource))
     return false;
   const state = snapshot.resources[resource];
   return (

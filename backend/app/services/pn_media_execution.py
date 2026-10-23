@@ -136,4 +136,20 @@ class MediaTransport:
             db.commit()
         if not plan["upload_id"]:
             raise CatalogError("request.precondition_failed", "分片会话尚未就绪", status_code=412)
-        return self.storage.list_parts(plan["key"], plan["upload_id"])
+        parts = self.storage.list_parts(plan["key"], plan["upload_id"])
+        count = (plan["size_bytes"] + plan["part_size"] - 1) // plan["part_size"]
+        if len(parts) > count or len(parts) > 10000:
+            raise CatalogError("media.invalid_part", "存储分片数量无效", status_code=502)
+        seen = set()
+        for part in parts:
+            expected = min(plan["part_size"], plan["size_bytes"] - (part.part_number - 1) * plan["part_size"])
+            if (part.part_number in seen or part.part_number < 1 or part.part_number > count
+                    or part.size_bytes != expected or not part.etag or len(part.etag) > 256):
+                raise CatalogError("media.invalid_part", "存储分片数据无效", status_code=502)
+            seen.add(part.part_number)
+        with self.sessions() as db:
+            current = media.multipart_storage_plan(db, upload_id, context=context, authorize=self.authorize)
+            db.commit()
+        if current != plan:
+            raise CatalogError("media.upload_conflict", "核对期间上传会话已改变")
+        return sorted(parts, key=lambda part: part.part_number)

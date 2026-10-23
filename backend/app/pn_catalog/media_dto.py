@@ -103,6 +103,7 @@ class AddInboxGroupItem(StrictDTO):
     upload_id: MediaUUID
     position: int = Field(ge=0, le=1999)
     expected_group_revision: int = Field(ge=1)
+    client_order: int | None = Field(default=None, ge=0, le=1999)
 
 
 class ArrangeInboxGroup(ExpectedRevision):

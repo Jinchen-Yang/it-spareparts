@@ -1,7 +1,8 @@
+import CatalogPartPanel from "../components/pnCatalog/CatalogPartPanel";
 import PageSkeleton from "../components/PageSkeleton";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { App, Input, Card, Descriptions, Tag, Statistic, Tabs, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip } from "antd";
+import { App, Input, Card, Descriptions, Tag, Statistic, Tabs, Empty, Space, Button, Select, InputNumber, Alert, Table, Popconfirm, Tooltip, Modal } from "antd";
 import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -66,7 +67,7 @@ function readFilters(params: URLSearchParams): SearchFilters {
  *   /parts?pn=<PN>             兼容入口：按 PN 解析后自动改写成 part_id 深链
  * 精确命中（exact）唯一主结果自动打开全景，相似候选降级到"相似型号"独立区域。
  */
-export default function PartSearchPage() {
+export default function PartSearchPage({ catalog }: { catalog?: { mode: "legacy" | "shared"; canEdit: boolean } } = {}) {
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const urlQ = sp.get("q") || "";
@@ -77,7 +78,7 @@ export default function PartSearchPage() {
   const returnToPool = poolAnalysisReturnPath(sp);
   // 权限快照绑定当前登录周期；App 在 token 变化时重挂 Router/页面。
   // 组件存活期间不重读可变 localStorage，避免 DevTools 改值后借无关重渲染点亮入口。
-  const [{ canEditSubstitutes, canEditPartDetails }] = useState(() => {
+  const [{ canEditSubstitutes, canEditPartDetails: legacyCanEditPartDetails }] = useState(() => {
     const role = localStorage.getItem("role") || "";
     return {
       canEditSubstitutes: ["admin", "purchaser"].includes(role),
@@ -85,6 +86,8 @@ export default function PartSearchPage() {
       canEditPartDetails: canSee("page_master_data"),
     };
   });
+
+  const canEditPartDetails = catalog?.mode === "shared" ? catalog.canEdit : legacyCanEditPartDetails;
 
   const [qInput, setQInput] = useState(urlQ);
   const [queryError, setQueryError] = useState(false);
@@ -367,6 +370,7 @@ export default function PartSearchPage() {
 
   const exactItem = resp?.exact ? resp.items[0] : undefined;
   const similar = resp?.similar_items || [];
+  const sharedMaster = ov?.shared_master || resp?.shared_master;
 
   return (
     <div className="part-search-page">
@@ -408,6 +412,9 @@ export default function PartSearchPage() {
           </div>
         </form>
       </Card>
+
+      {sharedMaster?.status === "unavailable" && <Alert type="warning" showIcon message="共享主资料暂不可用" description="型号身份和经营记录仍可查询，当前描述、品牌、品类与规格已隐藏。" />}
+      {sharedMaster?.status === "restricted" && <Alert type="info" showIcon message="当前账号未获得共享主资料读取权限，型号身份和经营记录仍可查询。" />}
 
       {resp?.ambiguous && (
         <Alert
@@ -669,7 +676,7 @@ export default function PartSearchPage() {
         searching || loadingOv ? <PageSkeleton label="加载中…" /> : <Empty description="搜索并点击型号查看全景" />
       )}
 
-      <InlinePartEditModal
+      {catalog?.mode === "shared" ? <Modal open={inlineEditPn !== null && canEditPartDetails} onCancel={() => setInlineEditPn(null)} title="共享 PN 维护" width={1000} footer={null} destroyOnClose>{inlineEditPn && ov && canEditPartDetails && <CatalogPartPanel key={ov.part.id} partId={ov.part.id} onChanged={() => loadOverview({ part_id: ov.part.id })} />}</Modal> : <InlinePartEditModal
         open={inlineEditPn !== null}
         canEdit={canEditPartDetails}
         contextKey={`${urlPartId ?? ""}:${urlPn ?? ""}`}
@@ -677,7 +684,7 @@ export default function PartSearchPage() {
         pn={inlineEditPn}
         onClose={() => setInlineEditPn(null)}
         onSaved={() => ov ? loadOverview({ part_id: ov.part.id }) : undefined}
-      />
+      />}
     </div>
   );
 }

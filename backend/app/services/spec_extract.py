@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
 from app.pn_catalog import api as catalog
+from app.services.pn_catalog_legacy_guard import require_authority_command
 
 # spec_key → (中文名, 单位)。numeric_value 口径：capacity=GB、rpm=RPM、frequency=MHz、speed=Gbps、cache=MB
 SPEC_KEYS = {
@@ -242,6 +243,8 @@ def refresh_part_specs(db: Session, part_id: int, description: str | None,
     规格时清空旧行（否则静默陈旧，生产 6797 条已中招）。source='manual' 行不动，
     重插撞键时 on_conflict_do_nothing 让 manual 优先。不 commit，随调用方事务。
     """
+    if catalog_record:
+        require_authority_command(db)
     catalog_before = catalog.capture_state(db, part_id) if catalog_record else None
     blocked = catalog.blocked_spec_keys(db, [part_id]).get(part_id, set())
     before = _spec_rows(db, part_id)
@@ -310,6 +313,8 @@ def apply_manual_specs(db: Session, part_id: int, updates: dict,
     """父 PN 已由调用方锁定；描述 auto 刷新之后应用本次 manual，不提交。"""
     if not updates:
         return
+    if catalog_record:
+        require_authority_command(db)
     catalog_before = catalog.capture_state(db, part_id) if catalog_record else None
     touch_parts(db, [part_id])
     for key in sorted(updates):
@@ -337,6 +342,7 @@ def backfill_specs(db: Session, rebuild: bool = False, *, catalog_record: bool =
     """
     # Lock parents before child deletes/inserts; manual edits use the same order.
     # Include inactive parents when rebuilding, because old auto rows may remain there.
+    require_authority_command(db)
     part_ids = list(db.scalars(select(DimPart.id).order_by(DimPart.id)))
     catalog_before = catalog.capture_states(db, part_ids) if catalog_record else {}
     blocked = catalog.blocked_spec_keys(db, part_ids)

@@ -29,6 +29,7 @@ from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignmen
 from app.models.dimensions import DimCustomer
 from app.models.system import SysAuditLog, SysUser
 from tests.authz_pdp_helpers import cerbos_url  # noqa: F401
+from tests.authz_pdp_helpers import local_cerbos_config
 
 
 @pytest.fixture
@@ -409,9 +410,9 @@ resourcePolicy:
         for sock in sockets:
             sock.close()
     source = Path(__file__).resolve().parents[2] / "deploy/cerbos/config.yaml"
-    config = source.read_text().replace("0.0.0.0:3592", f"127.0.0.1:{http_port}")
-    config = config.replace("127.0.0.1:3593", f"127.0.0.1:{grpc_port}")
-    config = config.replace("directory: /policies", f"directory: {policies}")
+    config = local_cerbos_config(
+        source.read_text(), http_port=http_port, grpc_port=grpc_port, policies=policies,
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(config)
     url = f"http://127.0.0.1:{http_port}"
@@ -886,6 +887,8 @@ def test_downgrade_waits_for_uncommitted_canonical_origin_before_running_guards(
     config.set_main_option('script_location', str(backend / 'alembic'))
     db.rollback()
     engine = db.get_bind()
+    # Isolate S1's own guard from foreign-key locks in later PN revisions.
+    command.downgrade(config, 'a7c2e9f4b6d1')
     try:
         with ThreadPoolExecutor(max_workers=1) as executor, engine.connect() as writer:
             transaction = writer.begin()

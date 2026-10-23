@@ -34,6 +34,11 @@ class JobResponse(WireModel):
     meta: MediaMeta
 
 
+class JobListResponse(WireModel):
+    data: list[JobSnapshot]
+    meta: PageMeta
+
+
 class IdentityPart(WireModel):
     part_id: int = Field(gt=0)
     pn_std: str

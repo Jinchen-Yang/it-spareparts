@@ -309,6 +309,14 @@ def run_once(session_factory, *, worker_id: str, queues: Iterable[str],
 JobAuthorize = Callable[[Session, CommandContext, str, JobView], AuthorizationDecision]
 
 
+def list_jobs_authorized(db: Session, *, context: CommandContext, authorize_job: JobAuthorize,
+                         cursor_secret: bytes, part_id=None, inbox_id=None, statuses=(), cursor=None,
+                         limit=20) -> dict:
+    from .job_queries import list_jobs
+    return list_jobs(db, context=context, authorize_job=authorize_job, cursor_secret=cursor_secret,
+                     part_id=part_id, inbox_id=inbox_id, statuses=statuses, cursor=cursor, limit=limit)
+
+
 def _authorize_public(db, context, action, job, authorize_job):
     decision = authorize_job(db, context, action, job)
     if not isinstance(decision, AuthorizationDecision):

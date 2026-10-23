@@ -164,6 +164,7 @@ def client_policy_version():
             {
                 "issuer": s.pn_shop_issuer,
                 "client": s.pn_shop_client_id,
+                "source_namespace": s.pn_shop_source_namespace,
                 "actions": sorted(set(s.pn_shop_allowed_actions)),
                 "fields": {
                     k: sorted(set(v)) for k, v in s.pn_shop_allowed_fields.items()
@@ -716,3 +717,81 @@ def resolve_migration_access(db: Session, identity: VerifiedIdentity) -> Catalog
         update={"entrypoint": "migration", "provenance": Provenance(kind="migration")}
     )
     return _access(db, actor)
+
+
+def get_part_access(db: Session, actor: ActorContext, part_id: int | None) -> dict:
+    """Current grant capabilities, using the existing framework's batched PDP.
+
+    Current resources support all-PN scope. This does not claim ownership of an
+    inbox/upload/job, or replace a mutation's baseline and state checks.
+    """
+    from app.authz.service import my_snapshot
+    from app.models.dimensions import DimPart
+    from app.pn_catalog.dto import PROFILE_FIELDS
+
+    user = _recheck_actor(db, actor)
+    try:
+        snapshot = my_snapshot(db, _identity(user, actor.authorization_epoch))
+    except HTTPException as exc:
+        _translate(exc)
+    allowed, resource_fields = set(), {}
+    for action, (resource, registered) in CATALOG_ACTIONS.items():
+        if action in MIGRATION_ACTIONS:
+            continue
+        if (
+            actor.client_id != "itsp"
+            and action not in get_settings().pn_shop_allowed_actions
+        ):
+            continue
+        item = snapshot["resources"][resource]
+        if (
+            item["runtime_state"] != "enabled"
+            or item["scope_kind"] != "all"
+            or item["decisions"][registered]["effect"] != "allow"
+        ):
+            continue
+        allowed.add(action)
+        fields = set(item["field_permissions"])
+        if actor.client_id != "itsp":
+            fields &= set(get_settings().pn_shop_allowed_fields.get(resource, []))
+        resource_fields[resource] = fields - {"legacy_evidence"}
+    if not allowed & {"read", "read_content", "gallery.read", "identity.read"}:
+        _fail("auth.forbidden", "没有读取此型号资料的权限", status=403)
+    if part_id is not None and db.scalar(select(DimPart.id).where(DimPart.id == part_id)) is None:
+        _fail("catalog.part_not_found", "型号不存在", status=404)
+    readable, writable = set(), set()
+    master = resource_fields.get("part_master", set())
+    profile = set(PROFILE_FIELDS) | {f for f in master if f.startswith("specs.")}
+    if "read" in allowed:
+        readable |= master & (profile | {"availability"})
+    if "read_candidates" in allowed:
+        readable |= master & {"candidates"}
+    if allowed & {"update_profile", "create"}:
+        writable |= master & profile
+    if "set_availability" in allowed:
+        writable |= master & {"availability"}
+    if allowed & {"create_candidate", "adopt_candidate", "reject_candidate"}:
+        writable |= master & {"candidates"}
+    if "read_content" in allowed:
+        readable |= resource_fields.get("part_content", set())
+    if "update_content" in allowed:
+        writable |= resource_fields.get("part_content", set())
+    if "identity.read" in allowed:
+        readable |= resource_fields.get("part_identity", set())
+    if any(
+        action.startswith("identity.") and action != "identity.read"
+        for action in allowed
+    ):
+        writable |= resource_fields.get("part_identity", set())
+    gallery = resource_fields.get("part_gallery", set())
+    for field in ("gallery", "uploads", "inbox"):
+        if field + ".read" in allowed:
+            readable |= gallery & {field}
+        if any(a.startswith(field + ".") and a not in READ_ACTIONS for a in allowed):
+            writable |= gallery & {field}
+    return {
+        "part_id": part_id,
+        "allowed_actions": sorted(allowed),
+        "readable_fields": sorted(readable),
+        "writable_fields": sorted(writable & readable),
+    }

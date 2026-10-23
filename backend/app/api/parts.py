@@ -4,13 +4,20 @@
 """
 from datetime import date
 from typing import Literal
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security.utils import get_authorization_scheme_param
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse
 
 from app.auth import current_identity, current_role
+from app.authz.principal import current_verified_identity
+from app.authz.runtime import is_authoritative, runtime_states
 from app.api.query_bounds import PG_INT_MAX
 from app.db import get_db
 from app.models.dimensions import DimPart
@@ -20,8 +27,35 @@ from app.security import (
     record_access_log, require_page,
 )
 from app.services import batch_normalize, master_edit, part_overview, part_resolver, pool_price_analysis, standardize, taxonomy
+from app.pn_catalog import api as catalog
+from app.pn_catalog.authz import CatalogAccess
+from app.pn_catalog.dto import CommandContext, CreatePart, PatchProfile
+from app.pn_catalog.errors import CatalogError
+from app.pn_catalog.http import _commit, _context
+from app.pn_catalog.http_controls import error_body
+from app.services.pn_catalog_access import resolve_native_access
+from app.services.pn_catalog_projection import project_business_master
 
-router = APIRouter(prefix="/parts", tags=["parts"])
+class LegacyCatalogRoute(APIRoute):
+    """Retain legacy responses, but transport shared facade errors without leaking internals."""
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def wrapped(request):
+            try:
+                response = await handler(request)
+            except CatalogError as exc:
+                response = JSONResponse(error_body(exc.code, exc.message,
+                    getattr(request.state, "pn_catalog_request_id", uuid4()),
+                    details=exc.details, retryable=exc.retryable), status_code=exc.status_code)
+            if getattr(request.state, "pn_catalog_shared", False):
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["X-Request-ID"] = str(request.state.pn_catalog_request_id)
+            return response
+        return wrapped
+
+
+router = APIRouter(prefix="/parts", tags=["parts"], route_class=LegacyCatalogRoute)
 
 # 批量应用 kill-switch：确定性 standardize 引擎已接入并上线(v1.2.3)，已解冻(v1.2.4)。
 # 写回门槛在 apply_batch（仅 review_status=AUTO_OK 才写回，§17）。如线上发现问题，改回 True 即刻冻结。
@@ -30,6 +64,7 @@ BATCH_APPLY_FROZEN = False
 
 @router.get("/search")
 def search(
+    request: Request,
     q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -72,7 +107,7 @@ def search(
                                           part_type=part_type, interface=interface,
                                           capacity_min=capacity_min, capacity_max=capacity_max,
                                           category_major=category_major, category_minor=category_minor)
-    return apply_field_visibility(data, ctx)
+    return apply_field_visibility(_business_master_projection(request, db, data), ctx)
 
 
 @router.get("/categories")
@@ -95,6 +130,7 @@ def part_categories(db: Session = Depends(get_db), _: str = Depends(current_role
 
 @router.get("/overview")
 def overview(
+    request: Request,
     pn_std: str | None = Query(None, min_length=1),
     part_id: int | None = Query(None, ge=1, description="稳定深链主键（/parts?part_id=）；与 pn_std 二选一，同传时以 part_id 为准"),
     db: Session = Depends(get_db),
@@ -108,7 +144,7 @@ def overview(
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"型号不存在: {pn_std if part_id is None else f'part_id={part_id}'}")
-    return apply_field_visibility(data, ctx)
+    return apply_field_visibility(_business_master_projection(request, db, data), ctx)
 
 
 @router.get("/purchases")
@@ -190,7 +226,93 @@ def pool_references(
     return {"items": pool_price_analysis.apply_visibility(items, ctx)}
 
 
+def _verified_catalog_access(request: Request, db: Session) -> CatalogAccess:
+    scheme, token = get_authorization_scheme_param(request.headers.get("Authorization"))
+    credentials = HTTPAuthorizationCredentials(scheme=scheme, credentials=token) if scheme.lower() == "bearer" and token else None
+    return resolve_native_access(db, current_verified_identity(credentials, db))
+
+
+def _business_master_projection(request: Request, db: Session, data: dict) -> dict:
+    """Business facts retain their own access rules; live master fields use current grants."""
+    state = runtime_states(db)["part_master"].runtime_state
+    if state == "legacy":
+        return data
+    request.state.pn_catalog_shared = True
+    request.state.pn_catalog_request_id = uuid4()
+    readable = frozenset()
+    availability = "unavailable" if state == "suspended" else "restricted"
+    if state == "enabled":
+        try:
+            access = _verified_catalog_access(request, db)
+            decision = access.authorize(db, CommandContext(actor=access.actor,
+                request_id=request.state.pn_catalog_request_id), "read", None)
+            readable = decision.readable_fields
+            availability = "available" if readable else "restricted"
+        except (CatalogError, HTTPException) as exc:
+            # A missing master grant or unavailable PDP must not expose fallback
+            # master values, nor remove unrelated, already-authorized order facts.
+            if exc.status_code not in (403, 503):
+                raise
+            availability = "unavailable" if exc.status_code == 503 else "restricted"
+    return project_business_master(data, readable, runtime_state=state, availability=availability)
+
+
 # ---------------- 备件主数据自治（WP1，采购可新建/编辑） ----------------
+
+def _master_access(
+    request: Request,
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> CatalogAccess | None:
+    """Once cut over, neither the old page grant nor role can reopen a suspended module."""
+    if not is_authoritative(db, "part_master"):
+        require_page("page_master_data")(ctx)
+        return None
+    request.state.pn_catalog_shared = True
+    request.state.pn_catalog_request_id = uuid4()
+    for name in ("Idempotency-Key", "X-Request-ID", "If-Match"):
+        if len(request.headers.getlist(name)) > 1:
+            raise CatalogError("request.validation_failed", "请求前置条件不能重复", status_code=422)
+    identifiers = {}
+    for name in ("Idempotency-Key", "X-Request-ID"):
+        value = request.headers.get(name)
+        if value is not None:
+            try:
+                identifiers[name] = UUID(value)
+            except ValueError:
+                raise CatalogError("request.validation_failed", f"{name} 必须是 UUID", status_code=422) from None
+    if len(set(identifiers.values())) > 1:
+        raise CatalogError("request.validation_failed", "请求编号与幂等编号不一致", status_code=422)
+    if identifiers:
+        request.state.pn_catalog_request_id = next(iter(identifiers.values()))
+    return _verified_catalog_access(request, db)
+
+
+def _shared_state(value: dict) -> dict:
+    """Project the current facade snapshot into the old editor's baseline contract."""
+    return {
+        "version_mode": "field_snapshot", "part_id": value["part_id"], "pn_std": value["pn_std"],
+        "identity": {"part_id": value["part_id"], **value["identity"]},
+        "identity_revision": value["identity_revision"], "profile_revision": value["profile_revision"],
+        "field_versions": value["field_versions"], "fields": value["profile"],
+        "deleted_specs": [key for key, spec in value["specs"].items() if spec["deleted"]],
+        "specs": {key: {k: spec[k] for k in ("value", "unit", "numeric_value", "source")}
+                  for key, spec in value["specs"].items() if not spec["deleted"]},
+    }
+
+
+def _retired_master_entry() -> None:
+    raise CatalogError("catalog.legacy_writer_retired", "此入口已迁移，请使用共享 PN 维护页面", status_code=410,
+                       details={"replacement": "/api/pn-catalog/v1"})
+
+
+def _catalog_command(model, **values):
+    try:
+        return model(**values)
+    except ValidationError as exc:
+        raise CatalogError("request.validation_failed", "提交内容格式不正确", status_code=422,
+                           details={"fields": [{"path": "/" + "/".join(map(str, error["loc"])), "type": error["type"]}
+                                               for error in exc.errors()]}) from exc
 
 class PartCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -202,6 +324,8 @@ class PartCreate(BaseModel):
     machine_or_part: str | None = "备件"
     unit: str | None = None
     force: bool = False   # 确认无重复后强制新建（跳过近似提示）
+    confirmation_token: str | None = Field(default=None, max_length=4096)
+    confirmation_reason: str | None = Field(default=None, max_length=2000)
 
 
 class PartEditIdentity(BaseModel):
@@ -261,26 +385,47 @@ def _real_operator(db: Session, ident: dict) -> tuple[str, str]:
 
 @router.get("/master/check")
 def master_check_duplicates(
+    request: Request,
     pn_std: str = Query(..., min_length=1),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     ctx: UserContext = Depends(get_current_user_context),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
     """新建前查近似重复（前端实时提示）。"""
-    return {"near_duplicates": master_edit.find_near_duplicates(db, pn_std)}
+    rows = master_edit.find_near_duplicates(db, pn_std) if access is None else None
+    if access is not None:
+        decision = access.authorize(db, _context(request, access), "read", None)
+        rows = master_edit.find_near_duplicates(db, pn_std)
+        if "*" not in decision.readable_fields and "description" not in decision.readable_fields:
+            rows = [{k: v for k, v in row.items() if k != "description"} for row in rows]
+    return {"near_duplicates": rows}
 
 
 @router.post("/master")
 def master_create(
     body: PartCreate,
+    request: Request,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     ctx: UserContext = Depends(get_current_user_context),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
     ident: dict = Depends(current_identity),
 ) -> dict:
     """采购手工新建型号。near_duplicates 非空且未 force → 不建、返回候选待确认。"""
+    if access is not None:
+        context = _context(request, access, write=True)
+        if body.force and not body.confirmation_token:
+            raise CatalogError("request.precondition_required", "独立 PN 确认需要服务端签名，请从共享维护页面重新核对", status_code=428)
+        command = _catalog_command(CreatePart, pn_std=body.pn_std,
+            changes={**body.model_dump(exclude={"pn_std", "force", "confirmation_token", "confirmation_reason"}, exclude_unset=True),
+                     "machine_or_part": body.machine_or_part},
+            confirmation_token=body.confirmation_token, confirmation_reason=body.confirmation_reason)
+        result = _commit(db, lambda: catalog.create_part(db, command, context=context,
+                          authorize=access.authorize, confirmation_secret=access.confirmation_secret))
+        value = result["data"]
+        return {"id": value["part_id"], "pn_std": value["pn_std"], "created": True,
+                "near_duplicates": [], "locked_fields": value["locked_fields"], "request_id": str(context.request_id)}
     operated_by, principal_id = _real_operator(db, ident)
     try:
         res = master_edit.create_part(
@@ -298,13 +443,28 @@ def master_create(
 @router.patch("/master")
 def master_edit_part(
     body: PartEdit,
+    request: Request,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     ctx: UserContext = Depends(get_current_user_context),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
     ident: dict = Depends(current_identity),
 ) -> dict:
     """编辑任意型号的人工字段（描述/品类/品牌/单位/类型）；改过的字段重导不覆盖。"""
+    if access is not None:
+        context = _context(request, access, write=True)
+        baseline = body.base_snapshot
+        if baseline.part_id != body.part_id or baseline.pn_std != body.pn_std or baseline.identity.part_id != body.part_id:
+            raise CatalogError("catalog.identity_changed", "提交目标与编辑基线不一致")
+        if baseline.identity_revision is None or baseline.field_versions is None:
+            raise CatalogError("request.precondition_required", "需要共享资料的字段版本基线，请重新打开编辑器", status_code=428)
+        updates = body.model_dump(exclude={"pn_std", "part_id", "base_snapshot", "spec_updates"}, exclude_unset=True)
+        command = _catalog_command(PatchProfile, expected_identity_revision=baseline.identity_revision,
+            field_versions=baseline.field_versions, changes=updates, spec_updates=body.spec_updates or {})
+        result = _commit(db, lambda: catalog.patch_profile(db, body.part_id, command, context=context, authorize=access.authorize))
+        value = result["data"]
+        return {"id": value["part_id"], "pn_std": value["pn_std"], "updated": [*updates, *(f"specs.{key}" for key in command.spec_updates)],
+                "locked_fields": value["locked_fields"], "request_id": str(context.request_id)}
     operated_by, principal_id = _real_operator(db, ident)
     updates = body.model_dump(exclude={"pn_std", "part_id", "base_snapshot", "spec_updates"},
                               exclude_unset=True)
@@ -325,10 +485,13 @@ def master_edit_part(
 @router.get("/master/{part_id}/edit-state")
 def master_edit_state(
     part_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
+    if access is not None:
+        return _shared_state(catalog.get_part(db, part_id, context=_context(request, access), authorize=access.authorize)["data"])
     result = master_edit.get_part_edit_state(db, part_id)
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "型号不存在")
@@ -338,12 +501,16 @@ def master_edit_state(
 @router.get("/master/{part_id}/edit-history")
 def master_edit_history(
     part_id: str,
+    request: Request,
     limit: int = Query(20, ge=1, le=100),
     before_id: int | None = Query(None, gt=0),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
+    if access is not None:
+        access.authorize(db, _context(request, access), "read_audit", None)
+        _retired_master_entry()
     # 历史是型号的子资源：非法/不存在的身份不能冒充「尚无人工历史」。
     try:
         resolved_id = int(part_id)
@@ -360,10 +527,14 @@ def master_edit_history(
 
 @router.get("/master/categories")
 def master_categories(
+    request: Request,
+    db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
     """品类字典（两级树）供编辑页下拉。轻量 C：字典作为代码常量，采购可维护表是 WP3。"""
+    if access is not None:
+        access.authorize(db, _context(request, access), "read", None)
     tree = [
         {"code": code, "name": name,
          "children": [{"code": c, "name": n} for c, n in taxonomy.CATEGORY_NAMES.items()
@@ -376,15 +547,19 @@ def master_categories(
 
 @router.get("/master/suggest")
 def master_suggest(
+    request: Request,
     description: str = Query(""),
     pn: str = Query(""),
     brand: str = Query(""),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    db: Session = Depends(get_db),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
     """据描述给确定性标准化建议：先识别类型 → 按字段证据渲染标准描述 + 一级/二级分类 +
     品牌归一 + 每字段证据(source/evidence) + 校验 + 审核状态。无可靠证据的字段不猜，
     缺关键字段时 canonical_description=null、分类为 null、review_status=REVIEW_REQUIRED，交人工。"""
+    if access is not None:
+        access.authorize(db, _context(request, access), "normalize", None)
     s = standardize.standardize(pn, description, brand)
     return {"suggestion": {k: v for k, v in s.items() if not k.startswith("_")}}
 
@@ -396,26 +571,34 @@ class BatchApply(BaseModel):
 
 @router.get("/master/batch-preview")
 def master_batch_preview(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     only_changes: bool = Query(True),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
     """批量规范化预览：按近期销售额降序列出备件 + 标准化建议（高价值先清）。"""
+    if access is not None:
+        access.authorize(db, _context(request, access), "normalize", None)
+        _retired_master_entry()
     return batch_normalize.preview(db, page, page_size, only_changes)
 
 
 @router.post("/master/batch-apply")
 def master_batch_apply(
     body: BatchApply,
+    request: Request,
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
     _auth: str = Depends(current_role),
-    _: None = Depends(require_page("page_master_data")),
+    access: CatalogAccess | None = Depends(_master_access),
 ) -> dict:
     """批量应用标准化（服务端重算，锁定字段不动，应用后字段锁定防重导覆盖）。"""
+    if access is not None:
+        access.authorize(db, _context(request, access, write=True), "normalize", None)
+        _retired_master_entry()
     if BATCH_APPLY_FROZEN:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,

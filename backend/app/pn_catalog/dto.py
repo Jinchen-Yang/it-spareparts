@@ -91,7 +91,18 @@ class ManualSpec(StrictDTO):
     numeric_value: str | None = Field(max_length=64)
 
 
+class ExternalReferenceInput(StrictDTO):
+    namespace: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]*$")
+    source_id: UUID
+
+    @field_validator("source_id", mode="before")
+    @classmethod
+    def wire_uuid(cls, value):
+        return UUID(value) if type(value) is str else value
+
+
 class CreatePart(StrictDTO):
+    external_reference: ExternalReferenceInput | None = None
     pn_std: str = Field(min_length=1, max_length=128)
     changes: dict[str, str | None] = Field(default_factory=dict, max_length=8)
     spec_updates: dict[str, ManualSpec | None] = Field(default_factory=dict, max_length=20)

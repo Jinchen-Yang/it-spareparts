@@ -1,5 +1,6 @@
 """Public response schema. OpenAPI export and both clients consume this contract."""
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,6 +86,8 @@ class PartSummary(WireModel):
     category_major: str | None = None
     category_minor: str | None = None
 
+    has_image: bool | None = None
+    main_entry_id: UUID | None = None
 
 class PartListResponse(WireModel):
     data: list[PartSummary]

@@ -7,6 +7,7 @@ from pydantic import Field
 from typing_extensions import TypeAliasType
 
 from .wire import PageMeta, WireModel
+from .enrichment_dto import RecognitionResult
 
 # Pydantic's built-in JsonValue emits an unconstrained serialization schema.
 # An explicit recursive alias preserves the exact wire contract in OpenAPI.
@@ -189,12 +190,32 @@ class EntryLinksResponse(WireModel):
     meta: PageMeta
 
 
+class InboxLinks(WireModel):
+    inbox_id: str
+    asset_id: str
+    url: str
+    derivatives: list[DerivativeLink]
+    expires_at: str
+
+
+class InboxLinksResponse(WireModel):
+    data: InboxLinks
+    meta: PageMeta
+
+
+class InboxRecognition(WireModel):
+    status: Literal["pending", "running", "succeeded", "failed", "cancelled", "stale"]
+    result: RecognitionResult | None
+    completed_at: str | None
+
+
 class InboxSnapshot(WireModel):
     inbox_id: str
     upload_id: str
     asset_id: str | None
     group_id: str | None
     position: int = Field(ge=0)
+    client_order: int | None = Field(default=None, ge=0, le=1999)
     status: Literal["receiving", "ready", "assigned", "failed", "deleted"]
     revision: int = Field(ge=1)
     generation: int = Field(ge=1)
@@ -204,6 +225,19 @@ class InboxSnapshot(WireModel):
     part_id: int | None
     entry_id: str | None
     assignment_key: str | None
+    filename: str
+    size_bytes: int = Field(gt=0)
+    content_type: str
+    uploaded_by: dict[str, str]
+    uploaded_by_me: bool
+    claimed_by_me: bool
+    created_at: str
+    updated_at: str | None
+    purpose: Literal["common", "defect"]
+    source: dict[str, JsonValue]
+    width: int | None
+    height: int | None
+    recognition: InboxRecognition | None
 
 
 class InboxResponse(WireModel):
@@ -237,3 +271,8 @@ MediaReceiptResponse = (
     | InboxResponse
     | InboxGroupResponse
 )
+
+
+class MultipartPartsResponse(WireModel):
+    data: list[MultipartPartSnapshot] = Field(max_length=10000)
+    meta: PageMeta
