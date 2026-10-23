@@ -1,7 +1,7 @@
 """Agent runtime PR-2：run/run_stream 合一(RUNTIME-1) + cancel 一等参数(RUNTIME-4) +
 韧性配置(RUNTIME-3 max_tokens/max_retries、RUNTIME-6 extra_body 启动期校验)。
 
-用假 provider.chat_stream 驱动，不依赖 LLM key / DB。"""
+用假 provider.chat_stream 驱动，不依赖 LLM key；runtime 的持久 cutover 检查使用真实隔离 DB。"""
 import threading
 
 import pytest
@@ -32,7 +32,7 @@ def _two_round_stream():
     return fake
 
 
-def test_run_takes_final_answer_only(monkeypatch):
+def test_run_takes_final_answer_only(db, monkeypatch):
     monkeypatch.setattr(provider, "chat_stream", _two_round_stream())
     monkeypatch.setattr(tools, "dispatch", lambda db, n, a, c: {"ok": True})
     out = runtime.run(None, _MSGS, _CTX)
@@ -41,7 +41,7 @@ def test_run_takes_final_answer_only(monkeypatch):
     assert out["tool_calls"] == [{"name": "search_parts", "args": {"query": "x"}}]
 
 
-def test_run_stream_emits_event_sequence(monkeypatch):
+def test_run_stream_emits_event_sequence(db, monkeypatch):
     monkeypatch.setattr(provider, "chat_stream", _two_round_stream())
     monkeypatch.setattr(tools, "dispatch", lambda db, n, a, c: {"ok": True})
     evs = list(runtime.run_stream(None, _MSGS, _CTX))
@@ -52,7 +52,7 @@ def test_run_stream_emits_event_sequence(monkeypatch):
     assert done["answer"] == "最终答复" and done["tool_calls"] == [{"name": "search_parts", "args": {"query": "x"}}]
 
 
-def test_run_stream_cancel_stops_promptly(monkeypatch):
+def test_run_stream_cancel_stops_promptly(db, monkeypatch):
     """cancel 置位后，循环在 chunk 间收束并发 stopped done（不等整轮跑完）。"""
     cancel = threading.Event()
 
@@ -92,7 +92,7 @@ def test_default_extra_body_enables_thinking():
     assert Settings(llm_extra_body="").llm_extra_body_dict() == {"thinking": {"type": "enabled"}}
 
 
-def test_run_stream_forwards_reasoning_as_thinking(monkeypatch):
+def test_run_stream_forwards_reasoning_as_thinking(db, monkeypatch):
     def fake(messages, tools_=None):
         yield "reasoning", "先看一下最近采购价"
         yield "reasoning", "，再算个加点"
@@ -106,7 +106,7 @@ def test_run_stream_forwards_reasoning_as_thinking(monkeypatch):
     assert done["type"] == "done" and done["answer"] == "建议报 2200"
 
 
-def test_run_ignores_thinking_in_answer(monkeypatch):
+def test_run_ignores_thinking_in_answer(db, monkeypatch):
     def fake(messages, tools_=None):
         yield "reasoning", "内部思考不该进答复"
         yield "delta", "最终答复"

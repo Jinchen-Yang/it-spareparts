@@ -5,7 +5,7 @@
 """
 import datetime as dt
 
-from sqlalchemy import func, select
+from sqlalchemy import literal, func, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
@@ -45,13 +45,17 @@ def _value_subq():
             .group_by(FSalesLine.part_id).subquery())
 
 
-def preview(db: Session, page: int = 1, page_size: int = 20, only_changes: bool = True) -> dict:
+def preview(db: Session, page: int = 1, page_size: int = 20, only_changes: bool = True, *, include_financial: bool = True) -> dict:
     """按近期销售额降序列出备件 + 标准化建议。only_changes：只回会改动的（前向扫描翻页）。"""
-    val = _value_subq()
-    base = (select(DimPart, val.c.amt)
-            .outerjoin(val, val.c.part_id == DimPart.id)
-            .where(DimPart.status == "active", DimPart.machine_or_part == "备件")
-            .order_by(val.c.amt.desc().nullslast(), DimPart.id))
+    if include_financial:
+        val = _value_subq()
+        base = (select(DimPart, val.c.amt)
+                .outerjoin(val, val.c.part_id == DimPart.id)
+                .order_by(val.c.amt.desc().nullslast(), DimPart.id))
+    else:
+        # A masked amount must not continue selecting/reordering the result set.
+        base = select(DimPart, literal(None).label("amt")).order_by(DimPart.id)
+    base = base.where(DimPart.status == "active", DimPart.machine_or_part == "备件")
     total_beijian = db.scalar(
         select(func.count()).select_from(DimPart)
         .where(DimPart.status == "active", DimPart.machine_or_part == "备件"))
@@ -113,7 +117,7 @@ def _row(part: DimPart, amt) -> dict:
 
 
 def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
-                operated_by: str | None) -> dict:
+                operated_by: str | None, *, _commit: bool = True, _authorize=None) -> dict:
     """对每个 part 重算建议并应用选定字段（服务端重算，不信客户端传值）。
 
     fields ⊆ {description, category, brand}；缺省全应用。应用走 master_edit.edit_part：
@@ -124,16 +128,20 @@ def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
     for pid in part_ids:
         # 建议和人工锁必须来自锁后的现值；旧 Session 缓存不能决定本次写集。
         part = master_edit.lock_part(db, part_id=pid)
+        if _authorize is not None:
+            _authorize()
         if part is None or part.status != "active":
             skipped += 1
-            db.commit()
+            if _commit:
+                db.commit()
             continue
         prop = _proposed(part)
         # §17 服务端门槛：仅 AUTO_OK（类型/分类确定、无校验错、无猜测字段）才批量写回；
         # REVIEW_REQUIRED 交单条人工，绝不批量写低置信结果。
         if prop["suggestion"].get("review_status") != standardize.AUTO_OK:
             skipped += 1
-            db.commit()
+            if _commit:
+                db.commit()
             continue
         changes = prop["changes"]
         updates: dict = {}
@@ -146,8 +154,10 @@ def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
             updates["brand"] = changes["brand"]
         if not updates:
             skipped += 1
-            db.commit()
+            if _commit:
+                db.commit()
             continue
-        master_edit.edit_part(db, pn_std=part.pn_std, updates=updates, operated_by=operated_by)
+        edit = master_edit.edit_part if _commit else master_edit.edit_part_in_transaction
+        edit(db, pn_std=part.pn_std, updates=updates, operated_by=operated_by)
         applied += 1
     return {"applied": applied, "skipped": skipped}

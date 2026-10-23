@@ -1,12 +1,6 @@
-"""互通 PN 池独立接口（/api/pools*，互通PN池价格分析 §17）——脱离老板看板权限。
+"""池目录与价格策略 transport。两个资源独立授权，策略字段按其自身 Grant 投影。
 
-权限口径（§12）：
-- 读（清单/档案）：全员可读，但必须登录（require_login）；约束价字段随
-  data_pool_price_governance 过 apply_field_visibility 脱敏。
-- 池维护（建池/改名/成员/归档/恢复）：action_pool_manage（默认老板/管理员，可单独授权）。
-- 约束价设置：action_pool_set_policy（默认老板/管理员）。
-所有写操作携带 version（乐观锁）：他人先保存 → 409，前端提示重新加载，不静默覆盖。
-保存即生效，无提交/审核/批准环节（§11）。
+仅资源尚未切换时，protected service 的 legacy adapter 保留旧权限语义。
 """
 from decimal import Decimal
 
@@ -15,15 +9,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.security import (
-    UserContext,
-    apply_field_visibility,
-    get_current_user_context,
-    is_field_hidden,
-    record_access_log,
-    require_action,
-    require_login,
-)
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.services import pool_access
+from app.security import UserContext, get_current_user_context, record_access_log
 from app.services import pool_catalog as svc
 
 router = APIRouter(prefix="/pools", tags=["pools"])
@@ -75,33 +63,6 @@ class PoolLifecycle(BaseModel):
     note: str | None = None
 
 
-def _operated_by(ctx: UserContext) -> str | None:
-    # 真实用户名优先（审计勿记角色串——S-2 教训，见 services/master_edit.py）
-    return ctx.user_id or ctx.role
-
-
-def _price_restricted(ctx: UserContext) -> bool:
-    """约束价对该用户是否被权限隐藏（data_pool_price_governance=False）。
-
-    作为明确旗标随清单/详情返回（复审非阻塞 1）："未设置"（null + 不受限）与
-    "无权限"（受限）是两种状态，前端不允许都渲染成 "--" 让人猜。
-    旗标只表达"看不看得见"，不携带任何金额信息，不属于脱敏字段组。
-    """
-    return is_field_hidden(ctx, "purchase_ceiling_ex_tax")
-
-
-def _hide_price_policy_structure(data: dict, *, restricted: bool) -> None:
-    """价格治理受限时收敛详情结构，避免元数据侧漏。
-
-    通用字段脱敏只能把金额叶子置空；策略备注可能直接写出价格，changed_by、
-    录入口径和生效区间也属于价格策略信息。这里在 /api/pools 详情边界整体移除
-    当前策略与历史，同时保留稳定、前端可判定的响应形状。
-    """
-    if restricted:
-        data["price_policy"] = None
-        data["price_policy_history"] = []
-
-
 def _run(fn, **kwargs):
     """service 领域异常 → HTTP 语义：业务非法 400、并发/唯一性冲突 409、不存在 404。"""
     try:
@@ -127,64 +88,38 @@ def list_pools(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    ctx: UserContext = Depends(require_login),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    restricted = _price_restricted(ctx)
-    if restricted and policy_missing is not None:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "无池约束价查看权限，不能按约束价缺失状态筛选",
-        )
-    record_access_log(
-        ctx,
-        "pool_catalog_list",
-        "pools",
-        {"q": q, "status": status_, "policy_missing": policy_missing},
-    )
-    data = svc.list_pools(
-        db,
-        q=q,
-        status=status_,
-        policy_missing=policy_missing,
-        page=page,
-        page_size=page_size,
-    )
-    data["coverage_restricted"] = restricted
-    if restricted:
-        data["coverage"] = None
-    data["price_restricted"] = restricted
-    for item in data["items"]:
-        item["price_restricted"] = restricted
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'pool_catalog_list', 'pools', {'q': q, 'status': status_, 'policy_missing': policy_missing})
+    return pool_access.read_pool_catalog(db, identity, legacy_context=ctx, q=q,
+        status=status_, policy_missing=policy_missing, page=page, page_size=page_size)
 
 
 @router.get("/{group_id}")
 def get_pool(
     group_id: int,
     db: Session = Depends(get_db),
-    ctx: UserContext = Depends(require_login),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "pool_catalog_detail", "pools", {"group_id": group_id})
-    data = svc.get_pool(db, group_id)
+    record_access_log(ctx, 'pool_catalog_detail', 'pools', {'group_id': group_id})
+    data = pool_access.read_pool_catalog_detail(db, identity, group_id, legacy_context=ctx)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "池不存在")
-    restricted = _price_restricted(ctx)
-    data["price_restricted"] = restricted
-    _hide_price_policy_structure(data, restricted=restricted)
-    return apply_field_visibility(data, ctx)
+    return data
 
 
 @router.post("")
 def create_pool(
     body: PoolCreate,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_manage")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(svc.create_pool, db=db, name=body.name, description=body.description,
-                member_part_ids=body.member_part_ids, note=body.note,
-                operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.create_pool, db=db, identity=identity, legacy_context=ctx,
+        name=body.name, description=body.description, member_part_ids=body.member_part_ids,
+        note=body.note)
 
 
 @router.patch("/{group_id}")
@@ -192,13 +127,12 @@ def patch_pool(
     group_id: int,
     body: PoolPatch,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_manage")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     updates = body.model_dump(exclude_unset=True, exclude={"version", "note"})
-    data = _run(svc.update_pool, db=db, group_id=group_id, version=body.version,
-                updates=updates, note=body.note, operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.edit_pool, db=db, identity=identity, legacy_context=ctx,
+        group_id=group_id, version=body.version, updates=updates, note=body.note)
 
 
 @router.patch("/{group_id}/members")
@@ -206,13 +140,12 @@ def patch_members(
     group_id: int,
     body: PoolMembersPatch,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_manage")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(svc.update_members, db=db, group_id=group_id, version=body.version,
-                add_part_ids=body.add_part_ids, remove_part_ids=body.remove_part_ids,
-                note=body.note, operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.edit_pool_members, db=db, identity=identity, legacy_context=ctx,
+        group_id=group_id, version=body.version, add_part_ids=body.add_part_ids,
+        remove_part_ids=body.remove_part_ids, note=body.note)
 
 
 @router.put("/{group_id}/price-policy")
@@ -222,17 +155,15 @@ def put_price_policy(
     db: Session = Depends(get_db),
     # "能改必须能看"（复审阻塞 4）：设置约束价还必须持有约束价查看权限，
     # 否则会在看不见现值的情况下改写/清空另一侧
-    _act: None = Depends(require_action("action_pool_set_policy",
-                                        require_data="data_pool_price_governance")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(svc.set_price_policy, db=db, group_id=group_id, version=body.version,
-                purchase_op=("unset" if body.purchase_unset else None),
-                purchase_value=body.purchase_value, purchase_basis=body.purchase_basis,
-                sales_op=("unset" if body.sales_unset else None),
-                sales_value=body.sales_value, sales_basis=body.sales_basis,
-                note=body.note, operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.set_pool_price_policy, db=db, identity=identity, legacy_context=ctx,
+        group_id=group_id, version=body.version,
+        purchase_op=("unset" if body.purchase_unset else None),
+        purchase_value=body.purchase_value, purchase_basis=body.purchase_basis,
+        sales_op=("unset" if body.sales_unset else None),
+        sales_value=body.sales_value, sales_basis=body.sales_basis, note=body.note)
 
 
 @router.post("/{group_id}/archive")
@@ -240,12 +171,11 @@ def archive_pool(
     group_id: int,
     body: PoolLifecycle,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_manage")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(svc.archive_pool, db=db, group_id=group_id, version=body.version,
-                note=body.note, operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.archive_pool, db=db, identity=identity, legacy_context=ctx,
+        group_id=group_id, version=body.version, note=body.note)
 
 
 @router.post("/{group_id}/restore")
@@ -253,9 +183,8 @@ def restore_pool(
     group_id: int,
     body: PoolLifecycle,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_manage")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(svc.restore_pool, db=db, group_id=group_id, version=body.version,
-                note=body.note, operated_by=_operated_by(ctx))
-    return apply_field_visibility(data, ctx)
+    return _run(pool_access.restore_pool, db=db, identity=identity, legacy_context=ctx,
+        group_id=group_id, version=body.version, note=body.note)

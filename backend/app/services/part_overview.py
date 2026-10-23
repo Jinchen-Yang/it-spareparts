@@ -7,6 +7,7 @@
 查询已合并型号自动重定向到目标档案，并在返回中标注 redirected_from。
 """
 import logging
+from types import SimpleNamespace
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -87,6 +88,24 @@ def _follow_merge_chain(db: Session, part: DimPart | None,
         hops += 1
     return part, redirected_from
 
+
+
+def resolve_part_routing(db: Session, pn_std: str | None = None, *, part_id: int | None = None):
+    """Resolve only stable routing columns, without reading identity details."""
+    columns = (DimPart.id, DimPart.pn_std, DimPart.status, DimPart.merged_into_id)
+    condition = DimPart.id == part_id if part_id is not None else DimPart.pn_std == pn_std
+    row = db.execute(select(*columns).where(condition)).first()
+    if row is None and part_id is None and pn_std and pn_std.strip():
+        row = db.execute(select(*columns).where(func.lower(DimPart.pn_std) == pn_std.strip().lower()).order_by(DimPart.id)).first()
+    redirected = None
+    for _ in range(_MERGE_CHAIN_LIMIT + 1):
+        if row is None:
+            return None, None
+        if row.status != 'merged' or row.merged_into_id is None:
+            return SimpleNamespace(**dict(row._mapping)), redirected
+        redirected = redirected or row.pn_std
+        row = db.execute(select(*columns).where(DimPart.id == row.merged_into_id)).first()
+    return None, None
 
 def _spec_exists(key: str, value: str | None = None,
                  numeric_min=None, numeric_max=None):
@@ -233,7 +252,7 @@ def _empty_page(page: int, page_size: int) -> dict:
 
 def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
                    user_ctx: security.UserContext | None = None) -> dict:
-    part, redirected_from = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part_routing(db, pn_std)
     if part is None:
         out = _empty_page(page, page_size)
     else:
@@ -244,7 +263,7 @@ def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
 
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
-    part, redirected_from = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part_routing(db, pn_std)
     # 受限销售（2026-06-13 收紧）：逐单成交明细端点锁死——不查、返回空，销售只能用聚合。
     if part is None or security.is_scoped_sales(user_ctx):
         out = _empty_page(page, page_size)
@@ -335,7 +354,7 @@ _SUB_DEPTH_MAX = 4     # 互替闭包 BFS 深度上限（星型组一跳到齐�
 _SUB_GROUP_MAX = 60    # 组大小上限，防运行时爆炸
 
 
-def _substitutes(db: Session, part_id: int | None) -> list[dict]:
+def _substitutes(db: Session, part_id: int | None, *, include_inventory: bool = True) -> list[dict]:
     """已生效(status=active)替代关系 + 互替闭包 + 库存数（宋总 2026-07-03 两条诉求）：
 
     - 通用号成组自动互通：互替(both)边做 BFS 闭包——给 02311JRE 加 1~5 五个通用号后，
@@ -397,7 +416,7 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
     parts = {p.id: p for p in db.execute(
         select(DimPart).where(DimPart.id.in_(ids + [part_id]))).scalars()}
     # 库存口径切换（2026-07-04）：通用号库存 = 锚定动态（快照期初+单据流水），与库存页一致
-    dyn = inventory_service.dynamic_stock_map(db, ids)
+    dyn = inventory_service.dynamic_stock_map(db, ids) if include_inventory else {}
     stock = {pid: rec["dynamic_qty"] for pid, rec in dyn.items()}
     out = []
     for oid, meta in info.items():
@@ -409,7 +428,7 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
                     "source": meta["source"], "relation": meta["relation"],
                     "substitute_type": meta["substitute_type"],
                     "via": via.pn_std if via else None,
-                    "stock_qty": _d(stock.get(oid)) or 0.0})
+                    "stock_qty": (_d(stock.get(oid)) or 0.0) if include_inventory else None})
     # 直连在前、间接在后，组内按 PN 稳定排序
     out.sort(key=lambda x: (x["via"] is not None, x["pn_std"]))
     return out
@@ -484,7 +503,7 @@ def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
     }
 
 
-def quick_pricing(db: Session, pn_std: str) -> dict:
+def quick_pricing(db: Session, pn_std: str, *, financial: bool = True, market: bool = True, inventory: bool = True, identity_details: bool = True) -> dict:
     """轻量定价摘要（整机拆解/批量询价场景）：近N天采购价窗口 / 近90天均售价 / 库存合计。
 
     比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
@@ -494,7 +513,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
     "你查的 X 已重定向到 Y，下面价格属于 Y"——否则会用合并目标的价格冒充入参 PN。
     采购价只取计入成本的采购类型（与成本口径一致，排除维保等）。
     """
-    part, redirected_from = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std) if identity_details else resolve_part_routing(db, pn_std)
     if part is None:
         return {"pn_std": pn_std, "description": None, "redirected_from": None,
                 "last_purchase_price": None, "last_purchase_date": None,
@@ -513,7 +532,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
     lp = active_orders(lp, FPurchaseOrder)
-    last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first()
+    last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first() if financial else None
 
     # 近 N 天采购价窗口（客户要"最近15天采购价"）：均/低/高/笔数
     win_since = date.today() - timedelta(days=config.RECENT_PURCHASE_DAYS)
@@ -527,7 +546,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                FPurchaseOrder.order_date >= win_since)
     )
     rp = active_orders(rp, FPurchaseOrder)
-    r_avg, r_min, r_max, r_cnt = db.execute(rp).one()
+    r_avg, r_min, r_max, r_cnt = db.execute(rp).one() if financial else (None, None, None, None)
 
     since = date.today() - timedelta(days=90)
     sp = (
@@ -538,30 +557,30 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                FSalesOrder.order_date >= since)
     )
     sp = active_orders(sp, FSalesOrder)
-    samt, sqty = db.execute(sp).one()
+    samt, sqty = db.execute(sp).one() if financial else (None, None)
 
     # 库存口径切换（2026-07-04）：锚定动态（快照期初+单据流水），与库存页/替代料一致
-    _dyn = inventory_service.dynamic_stock_map(db, [pid]).get(pid)
+    _dyn = inventory_service.dynamic_stock_map(db, [pid]).get(pid) if inventory else None
     stock = _dyn["dynamic_qty"] if _dyn else Decimal(0)
     return {
         # 商品身份：用 resolve_part 解析后的 *规范* PN，而非入参 pn_std——
         # 入参可能是已合并墓碑，此处覆盖让智能体把价格挂在正确的商品上
-        "pn_std": part.pn_std,
-        "description": part.description,
-        "redirected_from": redirected_from,
+        "pn_std": part.pn_std if identity_details else pn_std,
+        "description": part.description if identity_details else None,
+        "redirected_from": redirected_from if identity_details else None,
         "last_purchase_price": _d(last[1]) if last else None,
         "last_purchase_date": last[0] if last else None,
         "last_purchase_type": last[2] if last else None,
         # 近 N 天采购价窗口；窗口内无采购时各值为 None，回退看 last_purchase_*
-        "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
+        "recent_purchase_days": config.RECENT_PURCHASE_DAYS if financial else None,
         "recent_purchase_avg": _d(r_avg.quantize(Decimal("0.01"))) if r_avg else None,
         "recent_purchase_min": _d(r_min) if r_min else None,
         "recent_purchase_max": _d(r_max) if r_max else None,
-        "recent_purchase_count": r_cnt or 0,
+        "recent_purchase_count": (r_cnt or 0) if financial else None,
         "avg_sale_price_90d": _d((samt / sqty).quantize(Decimal("0.01"))) if samt and sqty else None,
-        "stock_total": _d(stock),
+        "stock_total": _d(stock) if inventory else None,
         # 近期加权成交价参考（销售出价用，越近权重越高）
-        **_weighted_recent_sale_price(db, pid),
+        **(_weighted_recent_sale_price(db, pid) if market else {"ref_sale_price": None, "ref_sale_samples": None, "ref_window_days": None}),
     }
 
 
@@ -583,15 +602,20 @@ def _inquiry_ref(db: Session, part_id: int, pn_std: str) -> dict:
 
 def get_overview(db: Session, pn_std: str | None,
                  user_ctx: security.UserContext | None = None, *,
-                 part_id: int | None = None) -> dict | None:
+                 part_id: int | None = None, blocks: set[str] | None = None) -> dict | None:
     """pn_std 与 part_id 二选一（同传以 part_id 为准——数字主键是统一深链身份，
     pn_std 只是兼容入口）。返回的 part.id 供前端把 pn 深链改写成稳定 part_id 深链。"""
-    if part_id is not None:
+    identity_details = blocks is None or "identity" in blocks
+    if not identity_details:
+        part, redirected_from = resolve_part_routing(db, pn_std, part_id=part_id)
+    elif part_id is not None:
         part, redirected_from = resolve_part_by_id(db, part_id)
     else:
         part, redirected_from = resolve_part(db, pn_std)
     if part is None:
         return None
+    allowed = lambda name: blocks is None or name in blocks
+    sales_allowed = allowed("sales_recent") and (blocks is not None or not security.is_scoped_sales(user_ctx))
     return {
         "part": {
             "id": part.id,
@@ -600,22 +624,22 @@ def get_overview(db: Session, pn_std: str | None,
             "unit": part.unit, "needs_review": part.needs_review,
             "machine_or_part": part.machine_or_part, "locked_fields": part.locked_fields or [],
             "redirected_from": redirected_from,
-        },
-        "purchases_recent": _paginate(db, _purchases_query(part.id, user_ctx), 1, 20, _purchase_row)["items"],
+        } if identity_details else None,
+        "purchases_recent": _paginate(db, _purchases_query(part.id, user_ctx), 1, 20, _purchase_row)["items"] if allowed("purchases_recent") else [],
         # 受限销售（2026-06-13 收紧）：逐单成交明细完全不可见，短路为 []（不查、不加载
         # 同事数据入内存）；销售只看聚合（平均售价 + 近期加权成交参考价 sale_price_ref）。
         # AI 助手 get_part_overview 工具走同一函数，自动覆盖。其余角色保留近 20 单（去 salesperson）。
-        "sales_recent": [] if security.is_scoped_sales(user_ctx) else security.anonymize_sales_rows(
+        "sales_recent": [] if not sales_allowed else security.anonymize_sales_rows(
             _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
         # 区分"逐单明细按权限隐藏"与"本就没有成交"：前端据此显示"按权限不可见"提示而非空表。
         # 与后端唯一门控 is_scoped_sales 对齐（不再让前端用 canCost 等无关键自行猜测）。
-        "sales_recent_restricted": security.is_scoped_sales(user_ctx),
-        "inventory": _inventory(db, part.id),
-        "substitutes": _substitutes(db, part.id),
+        "sales_recent_restricted": not sales_allowed,
+        "inventory": _inventory(db, part.id) if allowed("inventory") else [],
+        "substitutes": _substitutes(db, part.id, include_inventory=allowed("inventory")) if allowed("substitutes") else [],
         # 锚定动态库存（型号级主口径）：快照期初 + 快照日后单据流水；分仓行(inventory)作参考
-        "stock_dynamic": _stock_dynamic(db, part.id),
-        "profit_summary": _profit_summary(db, part.id),
-        "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std),
-        "sales_velocity": _sales_velocity(db, part.id),
-        "sale_price_ref": _weighted_recent_sale_price(db, part.id),
+        "stock_dynamic": _stock_dynamic(db, part.id) if allowed("inventory") else None,
+        "profit_summary": _profit_summary(db, part.id) if allowed("profit_summary") else {key: None for key in ("avg_purchase_cost", "avg_sale_price", "avg_cost_moving", "avg_cost_fifo", "avg_margin_moving", "avg_margin_fifo", "total_qty_sold")},
+        "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std) if allowed("market_prices") else {key: None for key in ("min_money", "max_money", "last_money", "count")},
+        "sales_velocity": _sales_velocity(db, part.id) if allowed("inventory") else None,
+        "sale_price_ref": _weighted_recent_sale_price(db, part.id) if allowed("market_prices") else {key: None for key in ("ref_sale_price", "ref_sale_samples", "ref_window_days")},
     }

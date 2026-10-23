@@ -120,7 +120,7 @@ def backfill_brands(db: Session) -> dict:
 # 品类
 # ============================================================
 
-def classify_backfill(db: Session) -> dict:
+def classify_backfill(db: Session, *, _commit: bool = True) -> dict:
     """轻量分类引擎按（标准化）描述给型号打**干净品类**：category_major=一级名、
     category_minor=二级名（可空）、category_source='AUTO'。
 
@@ -164,7 +164,10 @@ def classify_backfill(db: Session) -> dict:
                 update(DimPart).where(DimPart.id.in_(ids[i:i + 1000]))
                 .values(category_major=l1, category_minor=l2, category_source="AUTO")
             ).rowcount
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     cat = backfill_categories(db)                       # 干净品类后补 product_categories/category_id
     return {"scanned": len(rows), "parts_reclassified": updated,
             "categories": cat["categories"]}
@@ -455,7 +458,7 @@ def list_issues(db: Session, issue_type: str | None, status: str,
 
 
 def resolve_issue(db: Session, issue_id: int, action: str, note: str | None,
-                  operated_by: str | None) -> dict | None:
+                  operated_by: str | None, *, _commit: bool = True) -> dict | None:
     from app.models.system import SysAuditLog  # 局部导入避免环
 
     if action not in ("resolved", "dismissed"):
@@ -470,7 +473,10 @@ def resolve_issue(db: Session, issue_id: int, action: str, note: str | None,
     db.add(SysAuditLog(entity_type="quality_issue", entity_id=issue_id, action=action,
                        after_json={"issue_type": issue.issue_type, "note": note},
                        operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"issue_id": issue_id, "status": action}
 
 
@@ -494,7 +500,7 @@ def list_aliases(db: Session, status: str, page: int, page_size: int) -> dict:
 
 
 def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
-                 operated_by: str | None) -> dict:
+                 operated_by: str | None, *, _commit: bool = True) -> dict:
     """approve=确认映射；reject=否决；reassign=改指 target_pn 并重指既有事实行。
 
     身份别名（pn_raw==pn_std，即"这个型号其实是另一个型号"）的改指等价于合并，
@@ -536,7 +542,10 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
                        after_json={"pn_std": a.pn_std, "part_id": a.part_id,
                                    "status": a.status, **repointed},
                        operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"alias_id": alias_id, "action": action, "repointed": repointed}
 
 
@@ -544,7 +553,7 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
 # 一键刷新（导入后/治理操作后调用，全程幂等）
 # ============================================================
 
-def refresh(db: Session) -> dict:
+def refresh(db: Session, *, _commit: bool = True) -> dict:
     """字典回填 → 别名/询价关联 → 规格抽取 → 质量扫描 → 质量分。单事务提交。"""
     acquire_master_write_lock(db)
     stats = {}
@@ -555,5 +564,8 @@ def refresh(db: Session) -> dict:
     stats["specs"] = spec_extract.backfill_specs(db)
     stats["issues"] = scan_issues(db)
     stats["quality_scored"] = update_quality_scores(db)
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return stats

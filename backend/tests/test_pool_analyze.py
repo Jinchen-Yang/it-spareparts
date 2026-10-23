@@ -13,7 +13,8 @@ from app.main import app
 from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
+from app.auth import _make_token
 from app.services import pool, pool_catalog, profit
 from app import config
 from tests import factories as f
@@ -305,8 +306,10 @@ def test_pools_endpoint_restricts_savings_ranking_and_masks_values(db):
     try:
         app.dependency_overrides[get_db] = lambda: db
         app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: unrestricted
-        app.dependency_overrides[dashboard_api.current_role] = lambda: "boss"
-        client = TestClient(app)
+        db.add(SysUser(username='u', role='boss', password_hash='unused', is_active=True))
+        db.commit()
+        token, _ = _make_token('boss', 'u', 'u', authn='sys_user', perms=unrestricted.permissions)
+        client = TestClient(app, headers={'Authorization': 'Bearer ' + token})
         full = client.get("/api/dashboard/pools", params={"sort": "savings", "page_size": 10})
         assert full.status_code == 200
         assert full.json()["effective_sort"] == "savings"

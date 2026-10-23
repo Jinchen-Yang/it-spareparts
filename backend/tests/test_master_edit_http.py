@@ -177,7 +177,7 @@ def test_manual_write_requires_real_system_user(db, operation, identity):
               if operation == "create" else client.patch("/api/parts/master", headers=auth, json={
                   "part_id": baseline["part_id"], "pn_std": baseline["pn_std"],
                   "base_snapshot": baseline, "brand": "不得写入"}))
-    assert result.status_code == (401 if identity == "inactive" else 403), result.text
+    assert result.status_code == (403 if identity == "fallback" else 401), result.text
     # 通过公共历史读取确认没有成功命令；未执行的操作不留下生效审计。
     history = client.get(f'/api/parts/master/{created["id"]}/edit-history', headers=headers("admin"))
     if identity != "inactive":

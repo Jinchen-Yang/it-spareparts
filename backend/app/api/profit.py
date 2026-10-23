@@ -1,109 +1,37 @@
-"""利润 API（§9）：page_profit 可读/导出，重算仅管理员。"""
+"""利润 HTTP 入口：维度读取、导出和重算分别调用受保护领域服务。"""
 import csv
 import io
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.auth import current_role, require_admin
+from app.auth import current_role
+from app.authz.principal import VerifiedIdentity, current_verified_identity
 from app.db import get_db
 from app.security import (
     UserContext,
-    apply_field_visibility,
     get_current_user_context,
-    is_field_hidden,
     record_access_log,
-    require_page,
 )
 from app.services import profit
 
 router = APIRouter(
     prefix="/profit",
     tags=["profit"],
-    dependencies=[Depends(current_role), Depends(require_page("page_profit"))],
+    dependencies=[Depends(current_role)],
 )
 
-_DIMS = ("part", "salesperson", "customer")
-_COUPLED_FINANCIAL_FIELDS = (
-    "revenue_costed",
-    "revenue_costed_ex",
-    "revenue_costed_inc",
-    "no_cost",
-    "cost_moving_avg",
-    "cost_moving_avg_ex",
-    "cost_moving_avg_inc",
-    "gross_profit_moving",
-    "gross_profit_moving_ex",
-    "gross_profit_moving_inc",
-    "gross_margin_moving",
-    "cost_fifo",
-    "cost_fifo_ex",
-    "cost_fifo_inc",
-    "gross_profit_fifo",
-    "gross_profit_fifo_ex",
-    "gross_profit_fifo_inc",
-    "gross_margin_fifo",
-)
-
-
-def _financial_visibility_restricted(ctx: UserContext) -> bool:
-    """成本和利润在该报表中可互推，任一数据组隐藏都必须按受限口径输出。"""
-    return (
-        is_field_hidden(ctx, "cost_moving_avg")
-        or is_field_hidden(ctx, "gross_profit_moving")
-    )
-
-
-def _visible_profit_data(data: dict, ctx: UserContext) -> dict:
-    """利润页的成本与毛利必须成组可见，防止通过公开营收做代数反推。
-
-    在这个报表里 ``毛利 = 已配成本营收 - 成本``；只隐藏等式一侧没有意义。只要
-    data_purchase_cost / data_profit 任一关闭，就把两组派生财务值一起置空。营收与
-    行数仍可见，页面权限不会变成菜单可见但接口 403。
-    """
-    visible = apply_field_visibility(data, ctx)
-    if _financial_visibility_restricted(ctx):
-        for row in visible.get("rows", []):
-            for field in _COUPLED_FINANCIAL_FIELDS:
-                row[field] = None
-    return visible
-
-
-def _aggregate_for_user(
-    db: Session,
-    dimension: str,
-    date_from: date | None,
-    date_to: date | None,
-    only_anomaly: bool,
-    ctx: UserContext,
-) -> dict:
-    """统一利润读边界：维度侧信道先拦截，再执行服务并做字段脱敏。
-
-    customer 的名称落在通用 ``dimension`` 键，递归字段脱敏无法从键名识别它，必须在
-    聚合前显式拒绝；受限销售的销售员/客户维度由服务层兜底抛 PermissionError，API
-    收敛为 403，不能把权限拒绝暴露成 500。
-    """
-    if dimension == "customer" and is_field_hidden(ctx, "customer_name"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无客户信息查看权限")
-    if only_anomaly and _financial_visibility_restricted(ctx):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "异常筛选需要同时具备采购成本和利润查看权限",
-        )
-    try:
-        data = profit.aggregate(db, dimension, date_from, date_to, only_anomaly, ctx)
-    except PermissionError as exc:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
-    return _visible_profit_data(data, ctx)
+from app.services.profit import _DIMS, _financial_visibility_restricted, _visible_profit_data, _aggregate_for_user
 
 
 @router.post("/recompute")
-def recompute(db: Session = Depends(get_db), _: str = Depends(require_admin),
-              ctx: UserContext = Depends(get_current_user_context)) -> dict:
+def recompute(db: Session = Depends(get_db),
+              ctx: UserContext = Depends(get_current_user_context),
+              identity: VerifiedIdentity = Depends(current_verified_identity)) -> dict:
     record_access_log(ctx, "recompute", "profit")
-    return profit.recompute(db)
+    return profit.recompute_authorized(db, identity, legacy_context=ctx)
 
 
 @router.get("")
@@ -114,10 +42,11 @@ def aggregate(
     only_anomaly: bool = Query(False),
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     dim = dimension if dimension in _DIMS else "part"
     record_access_log(ctx, "aggregate", "profit", {"dimension": dim})
-    return _aggregate_for_user(db, dim, date_from, date_to, only_anomaly, ctx)
+    return profit.read_profit(db, identity, legacy_context=ctx, dimension=dim, date_from=date_from, date_to=date_to, only_anomaly=only_anomaly)
 
 
 @router.get("/export")
@@ -128,11 +57,12 @@ def export(
     only_anomaly: bool = Query(False),
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> StreamingResponse:
     dim = dimension if dimension in _DIMS else "part"
     record_access_log(ctx, "export", "profit", {"dimension": dim})
     # 导出与页面共用同一准入/脱敏边界，避免 CSV 成为绕过通道。
-    data = _aggregate_for_user(db, dim, date_from, date_to, only_anomaly, ctx)
+    data = profit.read_profit(db, identity, legacy_context=ctx, dimension=dim, date_from=date_from, date_to=date_to, only_anomaly=only_anomaly, export=True)
     def _safe(v):
         # 防 CSV 公式注入：以 = + - @ 制表/回车开头的文本前置单引号
         if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):

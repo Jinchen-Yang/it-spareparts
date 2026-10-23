@@ -107,7 +107,7 @@ def list_parts(db: Session, kind: str, page: int, page_size: int) -> dict:
 
 
 def set_excluded(db: Session, pn_std: str, excluded: bool, reason: str | None,
-                 operated_by: str | None) -> dict | None:
+                 operated_by: str | None, *, _commit: bool = True) -> dict | None:
     p = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
     if p is None:
         return None
@@ -125,5 +125,8 @@ def set_excluded(db: Session, pn_std: str, excluded: bool, reason: str | None,
                        before_json=before,
                        after_json={"is_excluded": excluded, "exclude_reason": reason},
                        reason=reason, operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"pn_std": pn_std, "is_excluded": excluded}

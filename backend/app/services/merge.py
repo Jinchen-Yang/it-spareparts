@@ -101,7 +101,7 @@ def _merge_substitutes(db: Session, source: DimPart, target: DimPart) -> dict:
 
 
 def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
-                operated_by: str | None) -> dict:
+                operated_by: str | None, *, _commit: bool = True) -> dict:
     """执行合并（单事务）。返回 merge_log 摘要；调用方负责随后触发重算。"""
     if source_pn == target_pn:
         raise MergeError("源与目标是同一型号")
@@ -220,13 +220,16 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         before_json=source_snapshot,
         after_json={"merged_into": target.pn_std, "target_part_id": target.id, **counts},
         reason=reason, operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     _log.info("merged part %s -> %s (%s)", source_pn, target_pn, counts)
     return {"source_pn": source_pn, "target_pn": target_pn,
             "merge_log_id": log_row.id, "affected_counts": counts}
 
 
-def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
+def unmerge(db: Session, merge_log_id: int, operated_by: str | None, *, _commit: bool = True) -> dict:
     """回滚一次合并（人工 LIFO，审核说明 §4.8 可回滚要求）。
 
     安全前提（防误回滚链式/已变更状态）：
@@ -357,7 +360,10 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
                                         "inventory_ids", "f_part_inquiry_ids",
                                         "f_maintenance_line_ids")}},
         reason=f"回滚合并 #{merge_log_id}", operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     _log.info("unmerged %s <- %s (log #%s)", source.pn_std, target.pn_std, merge_log_id)
     return {"source_pn": source.pn_std, "target_pn": target.pn_std,
             "merge_log_id": merge_log_id, "restored_fields": list(restored)}

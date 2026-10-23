@@ -183,10 +183,11 @@ def _member_metrics(stats: dict | None, pool_avg: float | None, limit: float | N
 
 def _pool_sales_orders(db: Session, part_ids, date_from: date | None, upper: date,
                        page: int, page_size: int,
-                       user_ctx: security.UserContext | None) -> dict:
+                       user_ctx: security.UserContext | None, *,
+                       authorized: bool | None = None) -> dict:
     """池详情-销售订单板块（行粒度，分页返回 total，不静默截断）。
     受限销售 = 逐单成交明细整段不可见（anonymize_sales_rows 同一口径）→ restricted。"""
-    if user_ctx is not None and security.is_scoped_sales(user_ctx):
+    if authorized is False or (authorized is None and security.is_scoped_sales(user_ctx)):
         return {"restricted": True, "total": None, "page": page, "page_size": page_size, "items": []}
     sl, so = FSalesLine, FSalesOrder
     base = (
@@ -257,9 +258,35 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
             as_of: date | None = None, user_ctx: security.UserContext | None = None, *,
             with_v2: bool = False, purchase_page: int = 1, sales_page: int = 1,
             orders_page_size: int = 20,
-            purchase_source_type: str | None = None) -> dict | None:
+            purchase_source_type: str | None = None,
+            sales_authorized: bool | None = None,
+            cross_brand_authorized: bool | None = None,
+            summary_authorized: bool = True) -> dict | None:
     """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
     节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
+    if not summary_authorized:
+        from app.services.pool_catalog import pool_locator
+        locator = pool_locator(db, group_id)
+        if locator is None or locator['status'] != 'active':
+            return None
+        today = as_of or date.today()
+        upper = min(date_to, today) if date_to else today
+        part_ids = list(db.scalars(select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)))
+        return {**locator, 'description': None, 'member_count': None,
+                'needs_calibration': None, 'oversized': None,
+                'window': {'date_from': date_from.isoformat() if date_from else None,
+                           'date_to': date_to.isoformat() if date_to else None, 'as_of': today.isoformat()},
+                'supply_window': None, 'demand': None, 'benchmark': None, 'members': [], 'savings': None,
+                'purchase_metrics': None, 'sales_metrics': None,
+                'max_purchase_price': None, 'min_sale_price': None,
+                'purchase_violation_count': None, 'sale_violation_count': None,
+                'manual_reference_restricted': True,
+                'purchase_orders': {'restricted': True, 'total': None, 'page': purchase_page,
+                                    'page_size': orders_page_size, 'items': []},
+                'sales_orders': _pool_sales_orders(db, part_ids, date_from, upper,
+                    sales_page, orders_page_size, user_ctx, authorized=sales_authorized),
+                'customer_cross_brand': _customer_cross_brand(db, part_ids, date_from, upper,
+                    user_ctx, authorized=cross_brand_authorized)}
     pool = db.get(PartPool, group_id)
     if pool is None or pool.status != "active":
         # 归档池不是当前经营池（复审阻塞 2）：其成员可能已进新有效池，再分析会把同一
@@ -366,7 +393,8 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
                     "label": "潜在降本机会（只读）——所有替换均「待核实」兼容性/客户指定品牌/合同，"
                              "当前无可执行金额；金额仅为供应层面潜在上限",
                     "opportunities": opps},
-        "customer_cross_brand": _customer_cross_brand(db, part_ids, date_from, upper, user_ctx),
+        "customer_cross_brand": _customer_cross_brand(
+            db, part_ids, date_from, upper, user_ctx, authorized=cross_brand_authorized),
     }
     if not with_v2:
         return result
@@ -395,16 +423,20 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
                                                  purchase_page, orders_page_size,
                                                  purchase_source_type),
         "sales_orders": _pool_sales_orders(db, part_ids, date_from, upper,
-                                           sales_page, orders_page_size, user_ctx),
+                                           sales_page, orders_page_size, user_ctx,
+                                           authorized=sales_authorized),
     })
     return result
 
 
-def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10):
+def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10, *,
+                          authorized: bool | None = None):
     """池内客户的跨品牌购买（甲方④：跨品牌销量≠客户认功能，要看同一客户是否买过≥2品牌+集中度）。
     复审 P1-6：不能只靠"端点是 boss 页"——自定义把看板页开给无客户可见性的角色时也要挡。
     受限销售、或无客户信息可见性(data_customer=False → customer_info 被脱敏)一律 restricted。"""
-    if user_ctx is not None:
+    if authorized is False:
+        return {"restricted": True, "multi_brand_customers": None, "customers": []}
+    if authorized is None and user_ctx is not None:
         if security.is_scoped_sales(user_ctx) or security.is_field_hidden(user_ctx, "customer"):
             return {"restricted": True, "customers": []}
     sl, so = FSalesLine, FSalesOrder

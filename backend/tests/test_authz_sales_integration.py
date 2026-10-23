@@ -23,6 +23,7 @@ PREFIX = "/api/sales/analytics"
 FIELDS = ["data_supplier", "data_customer", "data_purchase_cost", "data_profit",
           "data_pool_price_governance", "data_reconciliation"]
 PASSWORD = "synthetic-authz-2026-only"
+READ_ACTIONS = ("read_options", "read_summary", "read_groups", "read_trend", "read_orders", "read_order_detail")
 
 
 @pytest.fixture(autouse=True)
@@ -35,13 +36,15 @@ def new_authority(db, monkeypatch, cerbos_url):
 
 
 def _client(db, *, customer_ids=(), scope="assigned_customers", fields=None,
-            actions=("read", "export"), role="maintenance_manager", username="service-sales"):
+            actions=None, role="maintenance_manager", username="service-sales"):
     # Old permission map deliberately denies the page and every field. New
     # authority must work without changing role or reusing stale token flags.
     user = SysUser(username=username, role=role, password_hash=hash_password(PASSWORD),
                    is_active=True, permissions={"page_sales_analysis": False})
     db.add(user)
     db.flush()
+    if actions is None:
+        actions = (*READ_ACTIONS, "export", *(("read_amount_histogram",) if fields is None or "data_purchase_cost" in fields else ()))
     grant = SysAuthorizationGrant(user_id=user.id, resource="sales_analysis",
                                   actions=list(actions), scope=scope,
                                   field_permissions=list(FIELDS if fields is None else fields),
@@ -170,7 +173,7 @@ def test_field_plan_overrides_admin_and_legacy_rbac_bypass(db, seeded, monkeypat
 
 
 def test_export_is_separate_capability_and_pdp_failure_never_falls_back(db, seeded, monkeypatch):
-    client, _, _ = _client(db, scope="all", role="admin", actions=("read",))
+    client, _, _ = _client(db, scope="all", role="admin", actions=READ_ACTIONS)
     assert _get(client, "/orders")["total"] == 6
     assert client.get(PREFIX + "/orders/export").status_code == 403
     monkeypatch.setattr(get_settings(), "cerbos_url", "http://127.0.0.1:1")
@@ -184,7 +187,7 @@ def test_new_assignment_replaces_scope_and_revocation_invalidates_old_token(db, 
     admin, _, _ = _client(db, username="authz-admin", role="admin", scope="all")
     payload = {"schema_version": 1, "catalog_version": CATALOG_VERSION, "expected_epoch": 0,
                "updates": [{"resource_id": "sales_analysis", "expected_version": 1, "operation": "replace_resource",
-                            "configuration": {"actions": ["read"], "scope": "assigned_customers", "field_permissions": FIELDS}}],
+                            "configuration": {"actions": list(READ_ACTIONS), "scope": "assigned_customers", "field_permissions": FIELDS}}],
                "customer_assignments": {"ids": [seeded["a"][0].customer_id]}}
     saved = admin.put("/api/authz/users/service-sales/modules", json=payload)
     assert saved.status_code == 200, saved.text

@@ -8,11 +8,15 @@
 import json
 import logging
 from datetime import date
+from fastapi import HTTPException
 
 from sqlalchemy.orm import Session
 
 from app import security
 from app.agent import skills
+from app.authz.provenance import current_access, AgentAccess, execution_access, unavailable
+from app.authz import runtime as authz_runtime
+from app.authz.errors import authz_error
 from app.services import (agent_files, inventory, maintenance_cost, part_overview,
                           part_resolver, profit, purchase_analysis, purchase_query)
 
@@ -485,6 +489,10 @@ def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
     否则需创建者==当前用户。防越权读他人上传的报价/合同（主要拦 sales 互看）。"""
     if not file_id:
         return True
+    access = current_access()
+    if access is not None and access.authoritative:
+        agent_files.owner_of(file_id)  # The primitive validates stable ownership and inherits lineage.
+        return True
     if ctx.role in security.FULL_SCOPE_ROLES:
         return True
     try:
@@ -700,7 +708,87 @@ _REGISTRY = {
 }
 
 
-def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> dict:
+def _dispatch_authoritative(db, name, args, ctx, access):
+    """Closed binding table. An unbound tool never means an empty safe dependency."""
+    identity = access.identity
+    business_resources = {
+        "search_parts": "part_lookup", "get_part_overview": "part_lookup", "lookup_prices_bulk": "part_lookup",
+        "get_profit_ranking": "profit_analysis", "list_recent_purchases": "purchase_records",
+        "get_purchase_analysis": "purchase_records", "get_cancellation_stats": "purchase_records",
+        "get_inventory": "inventory",
+    }
+    if name in business_resources:
+        state = authz_runtime.runtime_states(db)[business_resources[name]]
+        if state.runtime_state != "enabled":
+            # Never enter a facade's genuine legacy adapter from a unified Agent run.
+            raise authz_error(503, "AUTHZ_RESOURCE_UNAVAILABLE", "该工具的授权模块尚未启用或已暂停")
+    if name in {"get_maintenance_board", "get_maintenance_projects", "get_maintenance_lines"}:
+        return {"error": "该维保工具尚未迁移到统一授权", "kind": "unavailable", "code": "MODULE_NOT_MIGRATED"}
+    if name in {"inspect_file", "read_file_rows", "read_document", "write_excel", "write_report",
+                "list_skills", "get_skill"}:
+        return _REGISTRY[name](db, args, ctx)
+    if name in {"search_parts", "get_part_overview", "lookup_prices_bulk"}:
+        from app.services import part_access
+        if name == "search_parts":
+            q = str(args.get("query", "")).strip()
+            if not q:
+                return {"error": "query 不能为空"}
+            return part_access.read_part_search(db, identity, legacy_context=ctx, q=q,
+                page_size=max(1, min(int(args.get("limit") or 10), _SEARCH_LIMIT_MAX)))
+        if name == "get_part_overview":
+            return part_access.read_part_overview(db, identity, legacy_context=ctx,
+                pn_std=str(args.get("pn_std", "")).strip()) or {"error": "型号不存在"}
+        queries = args.get("queries")
+        if not isinstance(queries, list) or not 0 < len(queries) <= _BULK_MAX:
+            return {"error": f"queries 需为 1 至 {_BULK_MAX} 项"}
+        results, counts = [], {"ok": 0, "ambiguous": 0, "not_found": 0}
+        for raw in queries:
+            access.check()
+            q = str(raw).strip()
+            if not q:
+                continue
+            found = part_access.read_part_search(db, identity, legacy_context=ctx, q=q, page_size=3)
+            candidates = [{k: row.get(k) for k in ("pn_std", "description", "score")}
+                          for row in found["items"][:3]]
+            state = "not_found" if not candidates or found.get("low_confidence") else (
+                "ambiguous" if found.get("ambiguous") else "ok")
+            counts[state] += 1
+            item = {"query": q, "status": state, "candidates": candidates}
+            if state == "ok":
+                item.update(candidates[0])
+                item.update(part_access.read_quick_pricing(db, identity, legacy_context=ctx,
+                                                           pn_std=candidates[0]["pn_std"]))
+            results.append(item)
+        return {"results": results, "summary": counts}
+    if name == "get_profit_ranking":
+        dimension = args.get("dimension", "part")
+        if dimension not in ("part", "customer", "salesperson"):
+            dimension = "part"
+        data = profit.read_profit(db, identity, legacy_context=ctx, dimension=dimension,
+            date_from=_parse_date(args.get("date_from")), date_to=_parse_date(args.get("date_to")),
+            only_anomaly=False)
+        return {**data, "rows": data.get("rows", [])[:_RANK_ROWS]}
+    if name == "list_recent_purchases":
+        return purchase_query.read_recent_purchases(db, identity, legacy_context=ctx,
+            q=args.get("query"), days=max(1, min(int(args.get("days") or 30), _RECENT_DAYS_MAX)),
+            supplier=args.get("supplier"), page=1,
+            page_size=max(1, min(int(args.get("limit") or 20), _RECENT_LIMIT_MAX)))
+    if name == "get_purchase_analysis":
+        data = purchase_analysis.read_analysis(db, identity, legacy_context=ctx,
+            days=max(1, min(int(args.get("days") or 30), 365)),
+            exclude_designated=True if args.get("exclude_designated") is None else bool(args["exclude_designated"]),
+            q=args.get("q"), supplier=args.get("supplier"), top=max(1, min(int(args.get("top") or 20), 50)))
+        return {**data, "rows": [{k: v for k, v in r.items() if k != "daily"} for r in data.get("rows", [])]}
+    if name == "get_inventory":
+        return inventory.read_dynamic(db, identity, legacy_context=ctx, q=args.get("query"),
+            page=1, page_size=max(1, min(int(args.get("limit") or 20), 50)))
+    if name == "get_cancellation_stats":
+        return purchase_analysis.read_cancellation_stats(db, identity, legacy_context=ctx,
+            granularity=args.get("granularity") or "month", days=int(args["days"]) if args.get("days") else None)
+    return {"error": "工具尚未绑定统一授权", "kind": "unavailable", "code": "MODULE_NOT_MIGRATED"}
+
+
+def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext, *, identity=None) -> dict:
     """执行一次工具调用：审计 → 派发 → 内部异常脱敏后回灌（不让对话崩掉、也不泄实现细节）。
 
     业务错由各工具显式 return {"error": 文案}（如"型号不存在""query 不能为空"）——这些是给
@@ -708,12 +796,34 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
     会把 SQL 语句 + 表/列名带出）：原始 type+消息只 _log 到服务端，回灌给模型/用户的只有固定脱敏
     文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户（信息泄漏，PR-审计 TOOLS-1）。
     """
+    access = current_access()
+    if access is None:
+        from app.db import engine
+        access = AgentAccess(db.get_bind() if db is not None else engine, identity)
+        with execution_access(access):
+            return dispatch(db, name, args, ctx)
+    access.check()
     security.record_access_log(ctx, f"agent_tool:{name}", "agent", args)
     fn = _REGISTRY.get(name)
     if fn is None:
         return {"error": f"未知工具: {name}"}
     try:
+        if access.authoritative:
+            recorded_before = access.collector.record_count
+            result = _jsonable(_dispatch_authoritative(db, name, args, ctx, access))
+            business_tools = {"search_parts", "get_part_overview", "lookup_prices_bulk", "get_profit_ranking",
+                              "list_recent_purchases", "get_purchase_analysis", "get_inventory", "get_cancellation_stats"}
+            if name in business_tools and not (isinstance(result, dict) and result.get("error")) and access.collector.record_count == recorded_before:
+                raise unavailable()
+            db.rollback()  # All Agent business tools are reads; release actor SHARE before revalidation/network.
+            access.check()
+            return result
         return _jsonable(fn(db, args, ctx))
+    except HTTPException:
+        raise  # Revocation/invalid state/PDP errors terminate the run, never become retriable model input.
     except Exception:  # noqa: BLE001 —— 内部异常绝不外泄：原始信息只落服务端日志
         _log.exception("agent tool failed name=%s args=%s", name, args)
+        if access.authoritative:
+            db.rollback()
+            raise
         return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}

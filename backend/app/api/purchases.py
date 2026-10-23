@@ -1,11 +1,7 @@
-"""采购记录 API（合同重点：销售和采购都能直接看最近采购）。
+"""采购记录与采购分析的固定领域入口。
 
-页面级准入 require_page("page_purchases")：销售/采购/老板/只读/管理员均 page_purchases=True
-可达（甲方 2026-06-15 确认销售也要能查采购记录）。字段级仍过 apply_field_visibility：
-未授权角色的供应商等仍被遮（销售 data_supplier=False → 供应商列为空，但进价可见）。
-
-采购分析（D-39，客户需求 Round1）挂在独立页面键 page_purchase_analytics（模板仅 boss，
-admin 由 page_permission_allowed 恒放行），与上面的采购记录页共用本路由前缀。
+purchase_records 与 purchase_analysis 是独立资源，不因共用路由前缀互相授予权限。
+旧 page/role/scope 检查仅在资源尚未切换时执行；字段过滤来自当前资源的决定。
 """
 from datetime import date
 
@@ -15,9 +11,10 @@ from sqlalchemy.orm import Session
 from app.api.query_bounds import ANALYTICS_PAGE_MAX, ANALYTICS_PAGE_SIZE_MAX, PG_INT_MAX, DbId
 from app import config
 from app.auth import current_role
+from app.authz.principal import VerifiedIdentity, current_verified_identity
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
-                          is_field_hidden, is_scoped_sales, record_access_log, require_page)
+                          is_field_hidden, is_scoped_sales, record_access_log)
 from app.services import purchase_analysis, purchase_analytics, purchase_query
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
@@ -33,15 +30,15 @@ def recent(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchases")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     record_access_log(ctx, "recent", "purchases",
                       {"q": q, "days": days, "supplier": supplier, "status": status})
-    data = purchase_query.recent_purchases(db, ctx, q=q, days=days,
+    data = purchase_query.read_recent_purchases(db, identity, legacy_context=ctx, q=q, days=days,
                                            supplier=supplier, page=page,
                                            page_size=page_size, status=status)
-    return apply_field_visibility(data, ctx)
+    return data
 
 
 @router.get("/cancellation-stats")
@@ -50,14 +47,14 @@ def cancellation_stats(
     days: int | None = Query(None, ge=1, le=3660, description="仅统计近 N 天；留空=全部历史"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchases")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """采购单按期间×状态统计：多少单被取消/作废（采购未成功）。供宋总按月/季/年看趋势。"""
     record_access_log(ctx, "cancellation_stats", "purchases",
                       {"granularity": granularity, "days": days})
-    data = purchase_analysis.cancellation_stats(db, ctx, granularity=granularity, days=days)
-    return apply_field_visibility(data, ctx)
+    data = purchase_analysis.read_cancellation_stats(db, identity, legacy_context=ctx, granularity=granularity, days=days)
+    return data
 
 
 @router.get("/analysis")
@@ -70,15 +67,15 @@ def analysis(
     purchaser: str | None = Query(None),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchases")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """采购分析面板：逐型号频次/总量/逐日/价格/来源拆分 + KPI 概览 + 来源构成。"""
     record_access_log(ctx, "analysis", "purchases", {"days": days, "q": q})
-    data = purchase_analysis.analysis(
-        db, ctx, days=days, exclude_designated=exclude_designated,
+    data = purchase_analysis.read_analysis(
+        db, identity, legacy_context=ctx, days=days, exclude_designated=exclude_designated,
         freq_threshold=freq_threshold, q=q, supplier=supplier, purchaser=purchaser)
-    return apply_field_visibility(data, ctx)
+    return data
 
 
 @router.get("/analysis/part")
@@ -88,14 +85,14 @@ def analysis_part(
     exclude_designated: bool = Query(True, description="与主排行一致，默认排除指定采购"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchases")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """单型号逐笔采购（横向比价：谁采的/哪家/含税未税/多少钱）。"""
     record_access_log(ctx, "analysis_part", "purchases", {"part_id": part_id, "days": days})
-    data = purchase_analysis.part_purchases(
-        db, ctx, part_id=part_id, days=days, exclude_designated=exclude_designated)
-    return apply_field_visibility(data, ctx)
+    data = purchase_analysis.read_part_purchases(
+        db, identity, legacy_context=ctx, part_id=part_id, days=days, exclude_designated=exclude_designated)
+    return data
 
 
 # ------------------------------------------------------------------ 采购分析（D-39）
@@ -145,6 +142,15 @@ def _guard_scoped(ctx: UserContext) -> None:
         raise HTTPException(status_code=403, detail="采购分析为全公司口径页面，收紧账号不可访问")
 
 
+def _analytics_context(db, identity, ctx):
+    from app.services.business_access import read_context
+    ctx, access = read_context(db, identity, 'purchase_analysis', 'read', legacy_context=ctx,
+                               legacy_page='page_purchase_analytics')
+    if access is None:
+        _guard_scoped(ctx)
+    return ctx
+
+
 def _run(fn):
     """服务层 FilterValidationError（越过了 Query pattern 兜底的非法参数）→ 422。"""
     try:
@@ -162,14 +168,14 @@ def analytics_options(
     customer_page_size: int = Query(200, ge=1, le=ANALYTICS_PAGE_SIZE_MAX),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """采购分析筛选取值；客户按名称/id稳定排序，可搜索/分页，每页最多200项。
 
     客户候选沿用 summary 的身份规则与 data_customer 权限，不汇总金额。
     """
-    _guard_scoped(ctx)
+    ctx = _analytics_context(db, identity, ctx)
     record_access_log(ctx, "analytics_options", "purchases/analytics", {})
     data = purchase_analytics.options(
         db, ctx, customer_q=customer_q, customer_page=customer_page,
@@ -184,11 +190,11 @@ def analytics_summary(
                           description="分组维度；category 为行级口径"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """KPI + 分组汇总（三口径一次全返回；分组合计=KPI，供前端核对）。"""
-    _guard_scoped(ctx)
+    ctx = _analytics_context(db, identity, ctx)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_summary", "purchases/analytics", dict(filters))
     data = _run(lambda: purchase_analytics.summary(db, ctx, group_by=group_by, **filters))
@@ -207,11 +213,11 @@ def analytics_orders(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """分组下钻订单列表（分页+排序，同额/同日按 id 倒序稳定翻页）。"""
-    _guard_scoped(ctx)
+    ctx = _analytics_context(db, identity, ctx)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_orders", "purchases/analytics",
                       {**filters, "group_by": group_by, "group_key": group_key,
@@ -228,11 +234,11 @@ def analytics_order_detail(
     category: list[str] = Query([], description="传入时行按分类过滤并附 category_matched 汇总"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """订单明细（自有实现，不依赖 page_boss_board）：单头三口径 + 单头批次行。"""
-    _guard_scoped(ctx)
+    ctx = _analytics_context(db, identity, ctx)
     record_access_log(ctx, "analytics_order_detail", "purchases/analytics",
                       {"order_id": order_id, "category": category})
     data = purchase_analytics.order_detail(db, order_id, ctx, category=category)

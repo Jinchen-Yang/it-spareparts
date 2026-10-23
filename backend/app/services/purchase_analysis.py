@@ -473,3 +473,44 @@ def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None
             "cancelled_amount": _f(cancelled_amt_ex),
         },
     }
+
+
+def _read_context(db, identity, legacy_context, supplier=None):
+    from fastapi import HTTPException
+    from app.services.business_access import read_context
+    ctx, _ = read_context(db, identity, 'purchase_records', 'read', legacy_context=legacy_context,
+                          legacy_page='page_purchases')
+    if supplier and supplier.strip() and security.is_field_hidden(ctx, 'supplier'):
+        raise HTTPException(403, '无供应商信息权限，不能按供应商筛选')
+    return ctx
+
+
+def read_analysis(db, identity, *, legacy_context, days=None, exclude_designated=True,
+                  freq_threshold=None, q=None, supplier=None, purchaser=None, top=None, as_of=None):
+    ctx = _read_context(db, identity, legacy_context, supplier)
+    data = analysis(db, ctx, days=days, exclude_designated=exclude_designated, freq_threshold=freq_threshold,
+                    q=q, supplier=supplier, purchaser=purchaser, top=top, as_of=as_of)
+    data = security.apply_field_visibility(data, ctx)
+    if security.is_field_hidden(ctx, 'unit_price'):
+        for row in data['rows']:
+            row['price_trend'] = None; row['advice'] = None
+            for key in row:
+                if key.startswith(('price_ex_', 'price_inc_')): row[key] = None
+            for channel in row['channels']:
+                for key in ('amount','price_ex_last','price_inc_last'): channel[key] = None
+        for row in data['source_composition']:
+            for key in ('amount','amount_inc','amount_ex'): row[key] = None
+        data['source_composition'].sort(key=lambda row: row['channel'])
+        for key in ('total_amount','total_amount_inc','total_amount_ex'): data['kpi'][key] = None
+    return data
+
+
+def read_part_purchases(db, identity, *, legacy_context, part_id, days=None, exclude_designated=True, as_of=None):
+    ctx = _read_context(db, identity, legacy_context)
+    return security.apply_field_visibility(part_purchases(db, ctx, part_id=part_id, days=days,
+        exclude_designated=exclude_designated, as_of=as_of), ctx)
+
+
+def read_cancellation_stats(db, identity, *, legacy_context, granularity='month', days=None):
+    ctx = _read_context(db, identity, legacy_context)
+    return security.apply_field_visibility(cancellation_stats(db, ctx, granularity=granularity, days=days), ctx)

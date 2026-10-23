@@ -10,14 +10,15 @@ from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from app import permissions, security
 from app.api import dashboard as dashboard_api
 from app.db import engine, get_db
 from app.etl import loader
 from app.main import app
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
+from app.auth import _make_token
 from app.services import dashboard, profit
 from tests import factories as f
 
@@ -102,8 +103,15 @@ def _client(db, ctx):
     original = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: ctx
-    app.dependency_overrides[dashboard_api.current_role] = lambda: ctx.role
-    return TestClient(app), original
+    # Exercise the real typed token adapter; the injected context still expresses
+    # the legacy business-field/scoped predicate this regression isolates.
+    if db.scalar(select(SysUser).where(SysUser.username == ctx.user_id)) is None:
+        db.add(SysUser(username=ctx.user_id, role=ctx.role, password_hash="unused",
+                       permissions=ctx.permissions, is_active=True))
+        db.commit()
+    token, _ = _make_token(ctx.role, ctx.user_id, ctx.user_id,
+                           perms=ctx.permissions, authn="sys_user")
+    return TestClient(app, headers={"Authorization": "Bearer " + token}), original
 
 
 def _restore_overrides(original):

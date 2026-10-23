@@ -184,7 +184,7 @@ def _sales_page(ctx: UserContext = Depends(get_current_user_context), db: Sessio
         require_page("page_sales_analysis")(ctx)
 
 
-def _authorize(db: Session, ctx: UserContext, identity: VerifiedIdentity, action: str = "read"):
+def _authorize(db: Session, ctx: UserContext, identity: VerifiedIdentity, action: str):
     if not authorization.enabled(db):
         return ctx, None
     access = authorization.sales_access(db, identity, ctx, action)
@@ -256,7 +256,7 @@ def business_type_options(
 ) -> dict:
     """筛选候选：业务类型（全时间计数，验收对账用）+ D-44 新增的客户类型、销售人员、
     客户补全与当前筛选下的金额上限（拖动条右端）。无成本权限时金额上限全部 null。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_options")
     _guards(ctx, f)
     record_access_log(ctx, "sales_analytics_options", "sales_analytics", None)
     data = sales_analytics.business_type_options(db, authorization_predicate=predicate)
@@ -280,7 +280,7 @@ def summary(
 ) -> dict:
     """区间 KPI：订单数 + 三金额合计（含 amount_inc_tax 缺失单数）+ 客户数 / 销售人数 + 毛利
     + 新客 / 老客；compare=true 时附上月同期 KPI（区间长于一个月不提供）。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_summary")
     _guards(ctx, f)
     record_access_log(ctx, "sales_analytics_summary", "sales_analytics", {
         **f.log_echo(), "compare": compare})
@@ -325,7 +325,7 @@ def orders(
     identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """订单列表：任意可见列升降序 + 分页；每单挂最新对账快照块。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_orders")
     _guards(ctx, f)
     sort = effective_sort(ctx, sort)
     record_access_log(ctx, "sales_analytics_orders", "sales_analytics", {
@@ -362,7 +362,7 @@ def groups(
 ) -> dict:
     """分组排行（D-44 方案 §3.3）：客户 / 客户类型 / 城市 / 来源 / 销售 / 业务类型 / 仓库，
     以及行级的商品大类 / 品牌 / PN（D-44 §8）。缺失组 key=null + is_empty（A-AC06）。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_groups")
     _guards(ctx, f)
     # 客户类属分组：无客户权限 403（D-44 §11，组键本身就是客户信息）
     if group_by in sales_dashboard.CUSTOMER_DIMS and is_field_hidden(ctx, "customer"):
@@ -405,7 +405,7 @@ def trend(
 
     下钻日期取请求的 date_from/date_to 交集（前端下钻只收窄区间，不扩大）。
     无日期订单以 no_date_orders 显式计数（A-AC05）。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_trend")
     _guards(ctx, f)
     f = _public_basis(ctx, f)
     record_access_log(ctx, "sales_analytics_trend", "sales_analytics", {
@@ -430,7 +430,7 @@ def amount_histogram(
 ) -> dict:
     """金额拖动条上方的订单数分布（D-44 §7）。无成本权限时 403：分布本身就是金额
     信息，三口径一视同仁（Q-A-03/A-AC03 修订）。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_amount_histogram")
     _guards(ctx, f)
     if _cost_hidden(ctx) or is_field_hidden(ctx, f.amount_basis):
         raise HTTPException(status_code=403, detail="当前账号无成本权限，不能查看金额分布")
@@ -517,7 +517,7 @@ def order_detail(
 
     无 data_purchase_cost 时明细行金额组合（数量/单价/行金额/营收）服务层已置空
     （A-AC01：阻断 qty × 营收 重建成交单价）。"""
-    ctx, predicate = _authorize(db, ctx, identity)
+    ctx, predicate = _authorize(db, ctx, identity, "read_order_detail")
     _guards(ctx)
     record_access_log(ctx, "sales_analytics_order_detail", "sales_analytics", {
         "order_id": order_id, "include_returns": include_returns,

@@ -142,6 +142,7 @@ def test_master_endpoint_enforces_permission(db):
     """端点级安全边界：无凭证 401、销售 403、采购可建（后端实拦，不只是前端藏菜单）。"""
     db.add(SysUser(username="purchaser", role="purchaser", display_name="实名采购",
                    password_hash="unused", is_active=True))
+    db.add(SysUser(username="sales", role="sales", password_hash="unused", is_active=True))
     db.commit()
     assert _client.post("/api/parts/master", json={"pn_std": "NA"}).status_code == 401  # 硬鉴权
     r = _client.post("/api/parts/master", json={"pn_std": "API-X1"}, headers=_hdr("sales"))
@@ -174,9 +175,11 @@ def test_merge_honors_locked_field(db):
     assert tgt2.category_major is None, "合并回填覆盖了采购锁定的置空字段（跨路径锁失效）"
 
 
-def test_batch_apply_unfrozen():
+def test_batch_apply_unfrozen(db):
     """已解冻（v1.2.4）：批量「应用」端点正常可达（不再 503）；空集 → applied=0。
     写回门槛在 apply_batch（仅 AUTO_OK 写回，见 test_batch_normalize）。"""
+    db.add(SysUser(username="purchaser", role="purchaser", password_hash="unused", is_active=True))
+    db.commit()
     r = _client.post("/api/parts/master/batch-apply", json={"part_ids": []}, headers=_hdr("purchaser"))
     assert r.status_code == 200
     assert r.json() == {"applied": 0, "skipped": 0}

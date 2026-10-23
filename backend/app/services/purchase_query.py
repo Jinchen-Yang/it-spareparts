@@ -113,3 +113,15 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
         "total": total, "page": page, "page_size": page_size, "days": days,
         "items": items,
     }
+
+
+def read_recent_purchases(db, identity, *, legacy_context, q=None, days=30, supplier=None,
+                          page=1, page_size=50, status=None):
+    from fastapi import HTTPException
+    from app.services.business_access import read_context
+    ctx, _ = read_context(db, identity, 'purchase_records', 'read', legacy_context=legacy_context,
+                          legacy_page='page_purchases')
+    if supplier and supplier.strip() and security.is_field_hidden(ctx, 'supplier'):
+        raise HTTPException(403, '无供应商信息权限，不能按供应商筛选')
+    return security.apply_field_visibility(recent_purchases(db, ctx, q=q, days=days, supplier=supplier,
+        page=page, page_size=page_size, status=status), ctx)

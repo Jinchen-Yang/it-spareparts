@@ -183,7 +183,7 @@ def find_near_duplicates(db: Session, pn_std: str, exclude_id: int | None = None
 
 def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | None = None,
                                force: bool = False, spec_updates: dict | None = None,
-                               **fields) -> dict:
+                               _authorize=None, **fields) -> dict:
     """采购手工新建型号。fields ⊆ EDITABLE_FIELDS（machine_or_part 缺省 '备件'）。
 
     硬重名（同 pn_std 已存在，含墓碑）→ 报错引导改用编辑；近似重复 → 默认返回候选不建，
@@ -205,6 +205,8 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
     lock_key = int.from_bytes(hashlib.sha256(f"master-pn:{pn}".encode()).digest()[:8],
                               "big", signed=True)
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    if _authorize is not None:
+        _authorize()
     if db.scalar(select(DimPart.id).where(DimPart.pn_std == pn)) is not None:
         raise MasterEditError(f"型号已存在: {pn}（请改用编辑）")
 
@@ -271,9 +273,11 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
                               part_id: int | None = None,
                               base_snapshot: dict | None = None,
                               spec_updates: dict | None = None,
-                              operated_by: str | None = None) -> dict | None:
+                              operated_by: str | None = None, _authorize=None) -> dict | None:
     """编辑任意型号的人工字段。被改字段加入 locked_fields（重导不覆盖）。"""
     part = lock_part(db, part_id=part_id, pn_std=pn_std)
+    if _authorize is not None:
+        _authorize()
     if part is None:
         return None
     clean = _clean_fields(updates)

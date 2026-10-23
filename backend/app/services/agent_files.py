@@ -12,6 +12,8 @@
 import json
 import re
 import uuid
+from functools import wraps
+from app.authz.provenance import AgentAccess, current_access, execution_access, file_access, unavailable
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +41,20 @@ _ALLOWED_EXT = {"xlsx", "docx", "pdf"} | _TEXT_EXT | _IMG_EXT
 
 class FileError(Exception):
     """文件层业务错误（消息可直接回给模型/用户）。"""
+
+
+def _guarded_file(fn):
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        access = current_access()
+        if access is None:
+            from app.db import engine
+            access = AgentAccess(engine, None)
+        with execution_access(access):
+            result = fn(*args, **kwargs)
+            access.check()
+            return result
+    return guarded
 
 
 def _dir() -> Path:
@@ -74,13 +90,35 @@ def _load_meta(file_id: str) -> dict:
     if not p.exists():
         raise FileError(f"文件不存在或已清理: {file_id}")
     meta = json.loads(p.read_text(encoding="utf-8"))
+    access = file_access()
+    if access is not None:
+        if (type(meta) is not dict or type(meta.get("schema_version")) is not int or meta.get("schema_version") != 1
+                or type(meta.get("owner_user_id")) is not int
+                or meta["owner_user_id"] != access.snapshot()["principal_id"]
+                or meta.get("kind") not in ("upload", "generated")):
+            raise unavailable()
+        access.inherit(meta.get("authorization_provenance"))
     if not _data_path(file_id, meta.get("ext", "")).exists():
         raise FileError(f"文件不存在或已清理: {file_id}")
     return meta
 
 
 def _save_meta(file_id: str, meta: dict) -> None:
-    _meta_path(file_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    access = file_access()
+    if access is not None:
+        access.mark_used()
+        meta = {**meta, "schema_version": 1, "owner_user_id": access.snapshot()["principal_id"],
+                "authorization_provenance": access.snapshot()}
+    target = _meta_path(file_id)
+    temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        current = current_access()
+        if current is not None:
+            current.check()
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _cell_str(v) -> str:
@@ -90,6 +128,7 @@ def _cell_str(v) -> str:
     return s[:_CELL_TRUNC]
 
 
+@_guarded_file
 def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
     """保存上传文件（多格式），返回 file_id + 类型/概览（供注入对话上下文）。"""
     ext = _ext_of(filename)
@@ -134,6 +173,7 @@ def _require_xlsx(fid: str, meta: dict):
         raise FileError(f"该文件是 .{meta.get('ext')}，结构化读取仅限 Excel；请用 read_document 读取内容")
 
 
+@_guarded_file
 def inspect_file(file_id: str) -> dict:
     """看 Excel 结构：sheet 列表 + 每 sheet 前几行原样预览。"""
     fid = _check_id(file_id)
@@ -152,6 +192,7 @@ def inspect_file(file_id: str) -> dict:
             "note": "preview 为前几行原样数据(1-based 行号)；更多行用 read_file_rows"}
 
 
+@_guarded_file
 def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int) -> dict:
     """分页读取 Excel 行（1-based）。"""
     fid = _check_id(file_id)
@@ -175,6 +216,7 @@ def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int) ->
             "rows": rows, "total_rows": total}
 
 
+@_guarded_file
 def preview(file_id: str, max_rows: int = 200) -> dict:
     """文件预览（前端在线预览用）：xlsx 返回各 sheet 行数据（截断 max_rows×30列）；
     图片返回 kind=image（前端走下载端点取图）；其余 kind=other（仅可下载）。
@@ -241,12 +283,18 @@ def _read_image_or_scanned(path: Path, hint: str) -> str:
     """图片/扫描件 → Qwen-VL 识别（无 key 优雅降级）。"""
     from app.agent import provider
     try:
-        return provider.vision_extract([path], hint)
+        file_access()
+        access = current_access()
+        result = provider.vision_extract([path], hint)
+        if access is not None:
+            access.check()
+        return result
     except provider.VisionNotConfigured:
         return ("【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY（通义 Qwen-VL）"
                 "后才能识别。文字版 Word/Excel/PDF/txt 不受影响。")
 
 
+@_guarded_file
 def read_document(file_id: str) -> dict:
     """通用读取：把任意支持格式抽成文本喂给模型（拆件/解析由模型完成）。"""
     fid = _check_id(file_id)
@@ -314,6 +362,7 @@ def _new_file(meta_extra: dict, operated_by: str | None, name: str) -> tuple[str
     return file_id, meta
 
 
+@_guarded_file
 def write_excel(base_file_id: str | None, sheet: str | None,
                 cells: list[dict], output_name: str | None,
                 operated_by: str | None) -> dict:
@@ -386,6 +435,7 @@ _WARN_KW = ("需确认", "待确认", "确认")
 _BAD_KW = ("未找到", "无库存", "不存在", "未匹配")
 
 
+@_guarded_file
 def write_report(title: str | None, headers: list[str], rows: list[list],
                  output_name: str | None, operated_by: str | None,
                  money_cols: list[int] | None = None) -> dict:
@@ -452,11 +502,13 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
             "download_url": f"/api/agent/files/{file_id}"}
 
 
+@_guarded_file
 def owner_of(file_id: str) -> str | None:
     """文件创建者（save_upload/_new_file 时记的 operated_by）；文件不存在抛 FileError。归属校验用。"""
     return _load_meta(_check_id(file_id)).get("operated_by")
 
 
+@_guarded_file
 def get_download(file_id: str) -> tuple[Path, str]:
     """下载定位：返回 (路径, 文件名)。归属校验在 API 层（见 api/agent.download）。"""
     fid = _check_id(file_id)

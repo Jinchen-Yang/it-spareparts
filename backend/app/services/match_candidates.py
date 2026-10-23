@@ -71,7 +71,7 @@ def _insert_pending(db: Session, rows: list[dict]) -> int:
     return inserted
 
 
-def generate(db: Session) -> dict:
+def generate(db: Session, *, _commit: bool = True) -> dict:
     """生成候选队列（幂等）。返回统计。"""
     reviewed = _reviewed_pairs(db)
     rows: list[dict] = []
@@ -129,7 +129,10 @@ def generate(db: Session) -> dict:
         resolver_hits += 1 if n else 0
 
     inserted = _insert_pending(db, rows)
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"dup_groups": len(groups), "needs_review_parts": len(pending_parts),
             "parts_with_suggestion": resolver_hits, "candidates_inserted": inserted,
             "candidates_proposed": len(rows)}
@@ -175,7 +178,7 @@ def list_candidates(db: Session, status: str, page: int, page_size: int,
 
 
 def review(db: Session, candidate_id: int, action: str, reason: str | None,
-           operated_by: str | None) -> dict:
+           operated_by: str | None, *, _commit: bool = True) -> dict:
     cand = db.get(ProductMatchCandidate, candidate_id)
     if cand is None:
         raise CandidateError(f"候选不存在: {candidate_id}")
@@ -191,7 +194,7 @@ def review(db: Session, candidate_id: int, action: str, reason: str | None,
         if source is None or target is None:
             raise CandidateError("候选缺源/目标型号，无法合并")
         result = merge.merge_parts(db, source.pn_std, target.pn_std,
-                                   reason or f"接受候选#{candidate_id}", operated_by)
+                                   reason or f"接受候选#{candidate_id}", operated_by, _commit=_commit)
         out["merge"] = result
         cand = db.get(ProductMatchCandidate, candidate_id)  # merge 已 commit，重取
         cand.status, cand.review_action = "accepted", "merge"
@@ -210,7 +213,10 @@ def review(db: Session, candidate_id: int, action: str, reason: str | None,
                        action=f"review_{action}", before_json={"status": "pending"},
                        after_json={"status": cand.status, "review_action": cand.review_action},
                        reason=reason, operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return out
 
 

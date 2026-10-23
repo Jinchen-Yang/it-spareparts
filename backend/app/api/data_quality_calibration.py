@@ -1,32 +1,23 @@
-"""DEV-05B1 采购价规则校准预览 API（只读）。"""
+"""采购价校准预览 transport：独立 preview 动作及成本字段保护。
+
+仅资源尚未切换时，protected service 的 legacy adapter 保留旧权限语义。
+"""
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.auth import current_role
 from app.db import get_db
-from app.security import UserContext, get_current_user_context, is_field_hidden, require_page
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.services import governance_access
+from app.security import UserContext, get_current_user_context
 from app.services import data_quality_calibration as svc
 
 
 router = APIRouter(
     prefix="/data-quality/calibration",
     tags=["data-quality-calibration"],
-    dependencies=[Depends(current_role), Depends(require_page("page_governance"))],
 )
-
-
-def _require_purchase_cost(
-    ctx: UserContext = Depends(get_current_user_context),
-) -> UserContext:
-    # 不能只隐藏金额。倍率、排序和候选数本身就能反推采购价差异。
-    if is_field_hidden(ctx, "unit_price"):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "无权查看采购成本校准预览",
-        )
-    return ctx
 
 
 @router.get("/purchase-price")
@@ -36,7 +27,8 @@ def purchase_price_preview(
     purchase_type: str | None = Query(None, max_length=64),
     sample_limit: int = Query(5, ge=1, le=20),
     db: Session = Depends(get_db),
-    _ctx: UserContext = Depends(_require_purchase_cost),
+    _ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     today = date.today()
     effective_to = min(date_to or today, today)
@@ -47,8 +39,8 @@ def purchase_price_preview(
         )
     normalized_type = purchase_type.strip() if purchase_type else None
     try:
-        return svc.purchase_price_preview(
-            db,
+        return governance_access.preview_quality_calibration(
+            db, identity, legacy_context=_ctx,
             date_from=date_from,
             date_to=effective_to,
             purchase_type=normalized_type or None,

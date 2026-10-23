@@ -1,7 +1,6 @@
-"""老板经营看板 API（P1 第二阶段第一刀）。仅管理员/老板（page_boss_board）。
+"""公司经营分析 transport：company_access 按数据块具名动作授权，订单事实走独立资源。
 
-只读分析。金额未税口径（与利润引擎同源）。字段仍过 apply_field_visibility 统一脱敏
-（boss/admin 全可见；将来若给其它角色开需靠脱敏兜底）。
+仅资源尚未切换时，protected service 的 legacy adapter 保留旧权限语义。
 """
 from datetime import date
 from typing import Literal
@@ -12,11 +11,12 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 
 from app.api.date_validation import validate_date_query
-from app.auth import current_role, require_admin
+from app.auth import require_admin
 from app.db import get_db
-from app.security import (UserContext, apply_field_visibility, get_current_user_context,
-                          is_field_hidden, is_scoped_sales, record_access_log, require_page)
-from app.services import dashboard, pool, pool_price_analysis, price_discipline
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.services import company_access, pool_access
+from app.security import UserContext, get_current_user_context, record_access_log
+from app.services import pool_price_analysis
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -26,23 +26,15 @@ def price_discipline_summary(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """早会价格纪律摘要：仅复盘历史事实，不报价、不审批、不拦截业务。"""
-    record_access_log(ctx, "price_discipline_summary", "dashboard", {
-        "date_from": str(date_from), "date_to": str(date_to)})
+    record_access_log(ctx, 'price_discipline_summary', 'dashboard', {'date_from': str(date_from), 'date_to': str(date_to)})
     try:
-        # 治理关闭时必须在任何业务 SQL 前整体短路：次数、人员、排行、记录条数
-        # 同样会泄漏约束价存在性，不能只靠字段级置空。
-        if is_field_hidden(ctx, "purchase_ceiling_ex_tax"):
-            return price_discipline.restricted_summary(
-                date_from=date_from, date_to=date_to)
-        data = price_discipline.summary(db, date_from=date_from, date_to=date_to)
+        return company_access.read_price_discipline(db, identity, legacy_context=ctx,
+            date_from=date_from, date_to=date_to)
     except pool_price_analysis.WindowValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return apply_field_visibility(data, ctx)
 
 
 @router.get("/orders/{side}/{order_id}")
@@ -50,17 +42,15 @@ def order_detail(
     side: Literal["purchase", "sales"],
     order_id: int,
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """老板页按稳定主键下钻订单；不使用可能重复的显示单号定位。"""
-    record_access_log(ctx, "dashboard_order_detail", "order", {
-        "side": side, "order_id": order_id})
-    data = pool_price_analysis.order_detail(db, side, order_id)
+    record_access_log(ctx, 'dashboard_order_detail', 'order', {'side': side, 'order_id': order_id})
+    data = pool_access.read_company_pool_order_fact(db, identity, legacy_context=ctx,
+        side=side, order_id=order_id)
     if data is None:
         raise HTTPException(status_code=404, detail="订单不存在或不是已生效的有效池订单")
-    return pool_price_analysis.apply_visibility(data, ctx)
+    return data
 
 
 @router.get("/kpi", dependencies=[Depends(validate_date_query)])
@@ -68,13 +58,12 @@ def kpi(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "kpi", "dashboard", {"date_from": str(date_from), "date_to": str(date_to)})
-    data = dashboard.kpi(db, date_from, date_to, user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'kpi', 'dashboard', {'date_from': str(date_from), 'date_to': str(date_to)})
+    return company_access.read_company_kpi(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to)
 
 
 @router.get("/sales", dependencies=[Depends(validate_date_query)])
@@ -94,24 +83,14 @@ def sales(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     # 受限销售由服务层在任何 SQL 前返回稳定的“订单不可见”响应；除此之外，
     # 客户字段不可见的账号也不能用筛选结果数量探测客户名是否存在。
-    if customer and not is_scoped_sales(ctx) and is_field_hidden(ctx, "customer"):
-        raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户筛选")
-    record_access_log(ctx, "sales", "dashboard", {
-        "q": q, "order_no": order_no, "status": status, "sort": sort,
-        "part_id": part_id, "pool_group_id": pool_group_id,
-    })
-    data = dashboard.sales_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
-                                  order_no=order_no,
-                                  customer=customer, salesperson=salesperson, business_type=business_type,
-                                  part_id=part_id, pool_group_id=pool_group_id,
-                                  sort=sort, order=order, page=page, page_size=page_size, user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'sales', 'dashboard', {'q': q, 'order_no': order_no, 'status': status, 'sort': sort, 'part_id': part_id, 'pool_group_id': pool_group_id})
+    return company_access.read_company_sales(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, status=status, q=q, order_no=order_no, customer=customer, salesperson=salesperson, business_type=business_type, part_id=part_id, pool_group_id=pool_group_id, sort=sort, order=order, page=page, page_size=page_size)
 
 
 @router.get("/purchase-orders", dependencies=[Depends(validate_date_query)])
@@ -130,21 +109,12 @@ def purchase_orders(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "purchase_orders", "dashboard", {
-        "q": q, "order_no": order_no, "status": status, "sort": sort,
-        "part_id": part_id, "pool_group_id": pool_group_id,
-    })
-    data = dashboard.purchase_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
-                                     order_no=order_no,
-                                     source_type=source_type, purchaser=purchaser,
-                                     part_id=part_id, pool_group_id=pool_group_id,
-                                     sort=sort, order=order,
-                                     page=page, page_size=page_size, user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'purchase_orders', 'dashboard', {'q': q, 'order_no': order_no, 'status': status, 'sort': sort, 'part_id': part_id, 'pool_group_id': pool_group_id})
+    return company_access.read_company_purchase_orders(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, status=status, q=q, order_no=order_no, source_type=source_type, purchaser=purchaser, part_id=part_id, pool_group_id=pool_group_id, sort=sort, order=order, page=page, page_size=page_size)
 
 
 @router.get("/trend", dependencies=[Depends(validate_date_query)])
@@ -153,13 +123,12 @@ def trend(
     date_to: date | None = Query(None),
     granularity: str = Query("day", pattern="^(day|week|month)$"),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "trend", "dashboard", {"granularity": granularity})
-    data = dashboard.trend(db, date_from, date_to, granularity=granularity, user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'trend', 'dashboard', {'granularity': granularity})
+    return company_access.read_company_trend(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, granularity=granularity)
 
 
 @router.get("/part-ranking", dependencies=[Depends(validate_date_query)])
@@ -176,19 +145,12 @@ def part_ranking(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "part_ranking", "dashboard",
-                      {"date_from": str(date_from), "date_to": str(date_to),
-                       "cost_method": cost_method, "part_id": part_id, "pn": pn,
-                       "pool_group_id": pool_group_id, "sort": sort})
-    data = dashboard.part_ranking(db, date_from, date_to, cost_method=cost_method, top=top,
-                                  part_id=part_id, pn=pn, pool_group_id=pool_group_id,
-                                  sort=sort, order=order, page=page, page_size=page_size,
-                                  user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'part_ranking', 'dashboard', {'date_from': str(date_from), 'date_to': str(date_to), 'cost_method': cost_method, 'part_id': part_id, 'pn': pn, 'pool_group_id': pool_group_id, 'sort': sort})
+    return company_access.read_company_part_ranking(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, cost_method=cost_method, top=top, part_id=part_id, pn=pn, pool_group_id=pool_group_id, sort=sort, order=order, page=page, page_size=page_size)
 
 
 @router.post("/pool/rebuild")
@@ -216,14 +178,12 @@ def pools(
                               "|sales_total|sales_average|purchase_violation_count"
                               "|sale_violation_count)$"),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "pools", "dashboard", {"sort": sort})
-    data = pool.list_pools(db, date_from, date_to, page=page, page_size=page_size,
-                           sort=sort, user_ctx=ctx)
-    return apply_field_visibility(data, ctx)
+    record_access_log(ctx, 'pools', 'dashboard', {'sort': sort})
+    return company_access.read_company_pools(db, identity, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, page=page, page_size=page_size, sort=sort)
 
 
 @router.get("/pool/{group_id}", dependencies=[Depends(validate_date_query)])
@@ -235,21 +195,17 @@ def pool_detail(
     sales_page: int = Query(1, ge=1, description="销售订单板块页码"),
     orders_page_size: int = Query(20, ge=1, le=100, description="订单板块每页条数"),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_boss_board")),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "pool_detail", "dashboard", {"group_id": group_id})
-    data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx, with_v2=True,
-                        purchase_page=purchase_page, sales_page=sales_page,
-                        orders_page_size=orders_page_size)
+    record_access_log(ctx, 'pool_detail', 'dashboard', {'group_id': group_id})
+    data = company_access.read_company_pool(db, identity, group_id, legacy_context=ctx,
+        date_from=date_from, date_to=date_to, purchase_page=purchase_page,
+        sales_page=sales_page, orders_page_size=orders_page_size)
     if data is None:
-        # 归档池不参与当前经营分析（复审阻塞 2）：明确告知去向，而不是含糊的"不存在"
         from app.models.inventory import PartPool
         row = db.get(PartPool, group_id)
         if row is not None and row.status != "active":
-            raise HTTPException(
-                status_code=404,
-                detail="池已归档，不参与当前经营分析；档案见「互通PN池管理」（状态筛选：已归档），如需分析请先恢复")
+            raise HTTPException(status_code=404, detail="池已归档，不参与当前经营分析；档案见「互通PN池管理」（状态筛选：已归档），如需分析请先恢复")
         raise HTTPException(status_code=404, detail="池不存在")
-    return apply_field_visibility(data, ctx)
+    return data

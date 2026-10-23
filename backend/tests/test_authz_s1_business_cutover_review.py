@@ -82,7 +82,7 @@ def test_legacy_role_and_full_token_permissions_never_restore_sales_allow(
 
 def test_same_snapshot_fields_scope_and_export_deny_survive_legacy_admin_bypass(
         db, seeded, business_client, monkeypatch):
-    _, headers = _user(db, actions=["read"], fields=["data_customer"],
+    _, headers = _user(db, actions=["read_orders", "read_order_detail"], fields=["data_customer"],
                        customer_id=seeded["a"][2].customer_id)
     # Exercise the replacement context even when the legacy context is a
     # bypass-role placeholder and the old token asserts every sensitive field.

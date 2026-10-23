@@ -255,11 +255,11 @@ def test_import_and_governance_recompute_stats_follow_data_permissions(
     monkeypatch.setattr("app.api.governance.merge.merge_parts", lambda *_args, **_kwargs: {
         "source_pn": "SOURCE-PN", "target_pn": "TARGET-PN",
     })
-    monkeypatch.setattr("app.api.governance.profit_svc.recompute", lambda _db: dict(raw_stats))
-    monkeypatch.setattr("app.api.governance.inventory_svc.backfill_costs", lambda _db: {
+    monkeypatch.setattr("app.services.profit.recompute", lambda _db: dict(raw_stats))
+    monkeypatch.setattr("app.services.inventory.backfill_costs", lambda _db: {
         "updated": 0,
     })
-    monkeypatch.setattr("app.api.governance.maintenance_svc.recompute", lambda _db: {
+    monkeypatch.setattr("app.services.maintenance_cost.recompute", lambda _db: {
         "updated": 0,
     })
     merged = client.post("/api/governance/parts/merge", json={
@@ -327,7 +327,7 @@ def test_import_and_governance_never_return_internal_exception_details(
     monkeypatch.setattr("app.api.governance.merge.unmerge", lambda *_args, **_kwargs: {
         "merge_log_id": 1,
     })
-    monkeypatch.setattr("app.api.governance.profit_svc.recompute", raise_internal_error)
+    monkeypatch.setattr("app.services.profit.recompute", raise_internal_error)
     for path, payload in (
         ("/api/governance/parts/merge", {
             "source_pn": "SOURCE-PN", "target_pn": "TARGET-PN",

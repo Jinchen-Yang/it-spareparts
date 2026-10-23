@@ -17,6 +17,7 @@
 本模块只记录与配置，不做审批/拦截/自动重算（§1 产品边界）。
 """
 from decimal import Decimal, ROUND_HALF_UP
+from collections.abc import Callable
 
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -177,6 +178,21 @@ def _pool_dict(pool: PartPool, policy: PartPoolPricePolicy | None) -> dict:
     }
 
 
+
+def pool_locator(db: Session, group_id: int) -> dict | None:
+    """Stable object address carried by each independent pool read capability."""
+    row = db.execute(select(PartPool.group_id, PartPool.name, PartPool.version, PartPool.status)
+                     .where(PartPool.group_id == group_id)).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _locator_row(pool, policy=None):
+    return {key: getattr(pool, key) for key in ('group_id', 'name', 'version', 'status')} | {
+        key: None for key in ('description', 'source', 'member_count', 'created_by',
+                             'updated_by', 'created_at', 'updated_at')} | {
+        'purchase_ceiling_ex_tax': policy.purchase_ceiling_ex_tax if policy else None,
+        'sales_floor_ex_tax': policy.sales_floor_ex_tax if policy else None}
+
 def _policy_coverage(db: Session) -> dict[str, int]:
     """全局有效池约束价覆盖率（DEV-07）。
 
@@ -246,12 +262,16 @@ def _audit(db: Session, group_id: int, action: str, before: dict | None,
 
 def list_pools(db: Session, *, q: str | None = None, status: str = "active",
                policy_missing: str | None = None,
-               page: int = 1, page_size: int = 20) -> dict:
+               page: int = 1, page_size: int = 20,
+               include_policy: bool = True, include_catalog: bool = True) -> dict:
     """池清单（管理页）：搜索池名/描述/成员 PN/品牌，带当前约束价和全局覆盖率。"""
     if policy_missing is not None and policy_missing not in _POLICY_MISSING:
         raise PoolCatalogError("约束价缺失筛选必须是 purchase / sales / either / both")
+    if policy_missing is not None and not include_policy:
+        raise PoolCatalogError("无池约束价查看权限，不能按约束价缺失状态筛选")
 
-    stmt = select(PartPool)
+    stmt = select(PartPool) if include_catalog else select(
+        PartPool.group_id, PartPool.name, PartPool.version, PartPool.status)
     if status in ("active", "archived"):
         stmt = stmt.where(PartPool.status == status)
     if policy_missing is not None:
@@ -276,7 +296,9 @@ def list_pools(db: Session, *, q: str | None = None, status: str = "active",
         else:  # both
             stmt = stmt.where(and_(~purchase_set, ~sales_set))
     kw = (q or "").strip()
-    if kw:
+    if kw and not include_catalog:
+        stmt = stmt.where(PartPool.name.ilike(f"%{kw}%"))
+    elif kw:
         like = f"%{kw}%"
         member_hit = (
             select(PartPoolMember.group_id)
@@ -286,15 +308,14 @@ def list_pools(db: Session, *, q: str | None = None, status: str = "active",
         ).exists()
         stmt = stmt.where(or_(PartPool.name.ilike(like),
                               PartPool.description.ilike(like), member_hit))
-    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
-    pools = db.execute(
-        stmt.order_by(PartPool.updated_at.desc(), PartPool.group_id.desc())
-        .offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0) if include_catalog else None
+    ordering = (PartPool.updated_at.desc(), PartPool.group_id.desc()) if include_catalog else (PartPool.group_id.asc(),)
+    rows = db.execute(stmt.order_by(*ordering).offset((page - 1) * page_size).limit(page_size))
+    pools = rows.scalars().all() if include_catalog else rows.all()
 
     gids = [p.group_id for p in pools]
     policies: dict[int, PartPoolPricePolicy] = {}
-    if gids:
+    if gids and include_policy:
         for pol in db.execute(
             select(PartPoolPricePolicy)
             .where(PartPoolPricePolicy.group_id.in_(gids),
@@ -302,13 +323,15 @@ def list_pools(db: Session, *, q: str | None = None, status: str = "active",
         ).scalars():
             policies[pol.group_id] = pol
     return {"total": total, "page": page, "page_size": page_size,
-            "coverage": _policy_coverage(db),
-            "items": [_pool_dict(p, policies.get(p.group_id)) for p in pools]}
+            "coverage": _policy_coverage(db) if include_policy else None,
+            "items": [(_pool_dict if include_catalog else _locator_row)(p, policies.get(p.group_id)) for p in pools]}
 
 
-def get_pool(db: Session, group_id: int) -> dict | None:
+def get_pool(db: Session, group_id: int, *, include_policy: bool = True, include_catalog: bool = True) -> dict | None:
     """池档案：基本信息 + 成员（带 PN/描述/品牌）+ 当前约束 + 约束变更历史。"""
-    pool = db.scalar(select(PartPool).where(PartPool.group_id == group_id))
+    pool = (db.scalar(select(PartPool).where(PartPool.group_id == group_id)) if include_catalog else
+            db.execute(select(PartPool.group_id, PartPool.name, PartPool.version, PartPool.status)
+                       .where(PartPool.group_id == group_id)).first())
     if pool is None:
         return None
     members = [
@@ -321,7 +344,7 @@ def get_pool(db: Session, group_id: int) -> dict | None:
             .where(PartPoolMember.group_id == group_id)
             .order_by(DimPart.pn_std)
         ).all()
-    ]
+    ] if include_catalog else []
     history = [
         _policy_dict(p) for p in db.execute(
             select(PartPoolPricePolicy)
@@ -329,9 +352,9 @@ def get_pool(db: Session, group_id: int) -> dict | None:
             .order_by(PartPoolPricePolicy.valid_from.desc(), PartPoolPricePolicy.id.desc())
             .limit(_POLICY_HISTORY_LIMIT)
         ).scalars()
-    ]
+    ] if include_policy else []
     current = next((h for h in history if h["valid_to"] is None), None)
-    out = _pool_dict(pool, None)
+    out = (_pool_dict if include_catalog else _locator_row)(pool, None)
     out.update({
         "purchase_ceiling_ex_tax": current["purchase_ceiling_ex_tax"] if current else None,
         "sales_floor_ex_tax": current["sales_floor_ex_tax"] if current else None,
@@ -346,7 +369,8 @@ def get_pool(db: Session, group_id: int) -> dict | None:
 
 def create_pool(db: Session, *, name: str, description: str | None = None,
                 member_part_ids: list[int] | None = None, note: str | None = None,
-                operated_by: str | None = None) -> dict:
+                operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict:
     """人工新建池。group_id 取自持久序列（单调递增、退役 ID 永不复用）。"""
     clean_name = (name or "").strip()
     if not clean_name:
@@ -359,6 +383,8 @@ def create_pool(db: Session, *, name: str, description: str | None = None,
             f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN（当前 {len(part_ids)} 个）")
 
     _lock_parts(db, part_ids)
+    if _authorize is not None:
+        _authorize()
     id_to_pn = _validate_parts(db, part_ids)
     conflicts = _active_pool_conflicts(db, part_ids)
     if conflicts:
@@ -376,17 +402,23 @@ def create_pool(db: Session, *, name: str, description: str | None = None,
     _audit(db, group_id, "create", None,
            {"name": clean_name, "description": description,
             "members": sorted(id_to_pn.values())}, note, operated_by)
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return _pool_dict(pool, None)
 
 
 def update_pool(db: Session, *, group_id: int, version: int, updates: dict,
-                note: str | None = None, operated_by: str | None = None) -> dict | None:
+                note: str | None = None, operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict | None:
     """改名称/说明（乐观锁）。updates ⊆ {name, description}，PATCH 语义只改显式传入项。"""
     allowed = {k: v for k, v in updates.items() if k in ("name", "description")}
     if not allowed:
         raise PoolCatalogError("没有可修改的字段")
     pool = _pool_for_update(db, group_id)
+    if _authorize is not None:
+        _authorize()
     if pool is None:
         return None
     _require_active(pool, "编辑")
@@ -406,14 +438,18 @@ def update_pool(db: Session, *, group_id: int, version: int, updates: dict,
     pool.updated_by = operated_by
     _audit(db, group_id, "update", before,
            {"name": pool.name, "description": pool.description}, note, operated_by)
-    db.commit()
-    return _pool_dict(pool, _current_policy(db, group_id))
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
+    return _pool_dict(pool, _current_policy(db, group_id) if _commit else None)
 
 
 def update_members(db: Session, *, group_id: int, version: int,
                    add_part_ids: list[int] | None = None,
                    remove_part_ids: list[int] | None = None,
-                   note: str | None = None, operated_by: str | None = None) -> dict | None:
+                   note: str | None = None, operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict | None:
     """一次事务增删成员（乐观锁 + 有效池唯一性）。"""
     adds = _distinct_part_ids(add_part_ids, label="新增成员")
     removes = _distinct_part_ids(remove_part_ids, label="移除成员")
@@ -424,11 +460,13 @@ def update_members(db: Session, *, group_id: int, version: int,
         raise PoolCatalogError(f"同一 PN 不能同时增删: part_id={sorted(both)}")
 
     pool = _pool_for_update(db, group_id)
+    _lock_parts(db, adds)
+    if _authorize is not None:
+        _authorize()
     if pool is None:
         return None
     _require_active(pool, "调整成员")
     _check_version(pool, version)
-    _lock_parts(db, adds)
 
     current_ids = set(db.scalars(
         select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).all())
@@ -473,8 +511,11 @@ def update_members(db: Session, *, group_id: int, version: int,
            {"member_count": len(current_ids)},
            {"added": sorted(id_to_pn.values()), "removed": removed_pns,
             "member_count": pool.member_count}, note, operated_by)
-    db.commit()
-    return _pool_dict(pool, _current_policy(db, group_id))
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
+    return _pool_dict(pool, _current_policy(db, group_id) if _commit else None)
 
 
 _POLICY_OPS = ("set", "unset", "keep")
@@ -512,7 +553,8 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
                      purchase_value: Decimal | None = None, purchase_basis: str = "ex_tax",
                      sales_op: str | None = None,
                      sales_value: Decimal | None = None, sales_basis: str = "ex_tax",
-                     note: str | None = None, operated_by: str | None = None) -> dict | None:
+                     note: str | None = None, operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict | None:
     """设置采购最高价/销售最低价：关闭旧行 + 插入新行，不覆盖历史（§15.3）。
 
     单侧更新语义（复审阻塞 4）：每侧独立三态——set（给新值）/ unset（显式清空）/
@@ -522,6 +564,8 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
     越线判定属 Slice 2 分析侧，此处只管配置）。
     """
     pool = _pool_for_update(db, group_id)
+    if _authorize is not None:
+        _authorize()
     if pool is None:
         return None
     _require_active(pool, "设置约束价")
@@ -570,16 +614,22 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
             "purchase_input_value": p_in, "purchase_input_basis": p_basis,
             "sales_input_value": s_in, "sales_input_basis": s_basis},
            note, operated_by)
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     out = _pool_dict(pool, new_policy)
     out["price_policy"] = _policy_dict(new_policy)
     return out
 
 
 def archive_pool(db: Session, *, group_id: int, version: int, note: str | None = None,
-                 operated_by: str | None = None) -> dict | None:
+                 operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict | None:
     """归档（不硬删除）：成员集合与约束历史原样保留，成员从此可加入其他有效池。"""
     pool = _pool_for_update(db, group_id)
+    if _authorize is not None:
+        _authorize()
     if pool is None:
         return None
     if pool.status == "archived":
@@ -590,29 +640,35 @@ def archive_pool(db: Session, *, group_id: int, version: int, note: str | None =
     pool.updated_by = operated_by
     _audit(db, group_id, "archive", {"status": "active"}, {"status": "archived"},
            note, operated_by)
-    db.commit()
-    return _pool_dict(pool, _current_policy(db, group_id))
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
+    return _pool_dict(pool, _current_policy(db, group_id) if _commit else None)
 
 
 def restore_pool(db: Session, *, group_id: int, version: int, note: str | None = None,
-                 operated_by: str | None = None) -> dict | None:
+                 operated_by: str | None = None,
+                _authorize: Callable[[], None] | None = None, _commit: bool = True) -> dict | None:
     """恢复归档池。成员若已在归档期间加入其他有效池 → 409 冲突并列出占用池，
     先在成员维护里解决归属再恢复（不静默抢占）。"""
     pool = _pool_for_update(db, group_id)
+    member_ids = sorted(db.scalars(
+        select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).all())
+    _lock_parts(db, member_ids)
+    if _authorize is not None:
+        _authorize()
     if pool is None:
         return None
     if pool.status == "active":
         raise PoolCatalogError(f"池「{pool.name}」已是有效状态")
     _check_version(pool, version)
 
-    member_ids = sorted(db.scalars(
-        select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).all())
     if len(member_ids) < MIN_ACTIVE_POOL_MEMBERS:
         raise PoolCatalogError(
             f"池「{pool.name}」仅有 {len(member_ids)} 个 PN，有效池至少包含 "
             f"{MIN_ACTIVE_POOL_MEMBERS} 个 PN；请先补齐成员再恢复"
         )
-    _lock_parts(db, member_ids)
     conflicts = _active_pool_conflicts(db, member_ids, exclude_group_id=group_id)
     if conflicts:
         raise PoolConflictError(_conflict_message(conflicts, verb="恢复"))
@@ -622,5 +678,8 @@ def restore_pool(db: Session, *, group_id: int, version: int, note: str | None =
     pool.updated_by = operated_by
     _audit(db, group_id, "restore", {"status": "archived"}, {"status": "active"},
            note, operated_by)
-    db.commit()
-    return _pool_dict(pool, _current_policy(db, group_id))
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
+    return _pool_dict(pool, _current_policy(db, group_id) if _commit else None)

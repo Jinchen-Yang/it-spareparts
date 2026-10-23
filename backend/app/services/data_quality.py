@@ -175,7 +175,7 @@ def create_or_refresh_issue(
         FactDataQualityIssue.side == side,
         FactDataQualityIssue.line_id == line_id,
         FactDataQualityIssue.rule_code == rule_code,
-    ).with_for_update())
+    ).with_for_update().execution_options(populate_existing=True))
     if issue is None:
         issue = FactDataQualityIssue(
             side=side, line_id=line_id, part_id=source.part_id,
@@ -225,7 +225,7 @@ def mark_issue_source_changed(
         FactDataQualityIssue.side == side,
         FactDataQualityIssue.line_id == line_id,
         FactDataQualityIssue.rule_code == rule_code,
-    ).with_for_update())
+    ).with_for_update().execution_options(populate_existing=True))
     if issue is None:
         return None
     if detection_issue_is_current(
@@ -246,7 +246,7 @@ def _locked_issue(
 ) -> FactDataQualityIssue:
     issue = db.scalar(select(FactDataQualityIssue).where(
         FactDataQualityIssue.id == issue_id,
-    ).with_for_update())
+    ).with_for_update().execution_options(populate_existing=True))
     if issue is None:
         raise DataQualityNotFoundError("疑点不存在")
     if not allow_sales and issue.side == "sales":
@@ -257,12 +257,14 @@ def _locked_issue(
 
 
 def decide_issue(db: Session, *, issue_id: int, decision: str, version: int,
-                 note: str, operated_by: str, allow_sales: bool = True) -> dict:
+                 note: str, operated_by: str, allow_sales: bool = True, _authorize=None, _commit: bool = True) -> dict:
     note = _required(note, "核实原因")
     operated_by = _required(operated_by, "核实账号")
     if decision not in _DECISIONS:
         raise DataQualityValidationError("decision 非法")
     issue = _locked_issue(db, issue_id, allow_sales=allow_sales)
+    if _authorize is not None:
+        _authorize(issue)
     if issue.version != version:
         raise DataQualityConflictError("记录已被他人更新，请刷新后重试")
     if issue.status != "open":
@@ -276,16 +278,21 @@ def decide_issue(db: Session, *, issue_id: int, decision: str, version: int,
     issue.updated_at = _now()
     _add_audit(db, issue, action="decision", before=before,
                operated_by=operated_by, reason=note)
-    db.commit()
-    db.refresh(issue)
+    if _commit:
+        db.commit()
+        db.refresh(issue)
+    else:
+        db.flush()
     return _issue_dict(issue)
 
 
 def reopen_issue(db: Session, *, issue_id: int, version: int, note: str,
-                 operated_by: str, allow_sales: bool = True) -> dict:
+                 operated_by: str, allow_sales: bool = True, _authorize=None, _commit: bool = True) -> dict:
     note = _required(note, "重新打开原因")
     operated_by = _required(operated_by, "核实账号")
     issue = _locked_issue(db, issue_id, allow_sales=allow_sales)
+    if _authorize is not None:
+        _authorize(issue)
     if issue.version != version:
         raise DataQualityConflictError("记录已被他人更新，请刷新后重试")
     if issue.status not in _REOPENABLE:
@@ -299,8 +306,11 @@ def reopen_issue(db: Session, *, issue_id: int, version: int, note: str,
     issue.updated_at = _now()
     _add_audit(db, issue, action="reopen", before=before,
                operated_by=operated_by, reason=note)
-    db.commit()
-    db.refresh(issue)
+    if _commit:
+        db.commit()
+        db.refresh(issue)
+    else:
+        db.flush()
     return _issue_dict(issue)
 
 
@@ -385,10 +395,12 @@ def _search_condition(q: str):
 def list_issues(db: Session, *, status: str | None = None, side: str | None = None,
                 rule_code: str | None = None, q: str | None = None,
                 page: int = 1, page_size: int = 20,
-                allow_sales: bool = True) -> dict:
+                allow_sales: bool = True, allowed_sides: set[str] | None = None) -> dict:
     stmt = select(FactDataQualityIssue)
     count_stmt = select(func.count()).select_from(FactDataQualityIssue)
     conditions = []
+    if allowed_sides is not None:
+        conditions.append(FactDataQualityIssue.side.in_(sorted(allowed_sides)))
     if not allow_sales:
         conditions.append(FactDataQualityIssue.side != "sales")
     if status:
@@ -421,9 +433,12 @@ def list_issues(db: Session, *, status: str | None = None, side: str | None = No
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-def get_issue(db: Session, issue_id: int, *, allow_sales: bool = True) -> dict | None:
-    issue = db.get(FactDataQualityIssue, issue_id)
-    if issue is None or (not allow_sales and issue.side == "sales"):
+def get_issue(db: Session, issue_id: int, *, allow_sales: bool = True,
+              allowed_sides: set[str] | None = None) -> dict | None:
+    sides = allowed_sides if allowed_sides is not None else ({"purchase", "sales"} if allow_sales else {"purchase"})
+    issue = db.scalar(select(FactDataQualityIssue).where(
+        FactDataQualityIssue.id == issue_id, FactDataQualityIssue.side.in_(sides)))
+    if issue is None:
         return None
     data = _issue_dict(issue)
     data["fact"] = _fact_map(db, [issue]).get(issue.id)
