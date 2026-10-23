@@ -101,6 +101,8 @@ const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadPnIdentity = () => import("./pages/PnIdentityRoute");
 const PnIdentityPage = lazy(loadPnIdentity);
+const loadPnMigration = () => import("./pages/PnMigrationRoute");
+const PnMigrationPage = lazy(loadPnMigration);
 const loadPnInbox = () => import("./pages/PnInboxRoute");
 const loadPnGallery = () => import("./pages/PnGalleryRoute");
 const PnInboxPage = lazy(loadPnInbox);
@@ -259,6 +261,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
       { key: "pn-identity", path: "/pn-identity", label: "PN 身份治理", icon: <ControlOutlined />, authzResource: "part_identity", authzAction: "read", legacyAvailable: false, page: PnIdentityPage, load: loadPnIdentity },
+      { key: "pn-migration", path: "/pn-migration", label: "PN 迁移核对", icon: <FileSyncOutlined />, authzResource: "part_master", authzAction: "read_legacy", legacyAvailable: false, page: PnMigrationPage, load: loadPnMigration },
       { key: "pn-gallery", path: "/pn-gallery", label: "PN 图库", icon: <ProfileOutlined />, authzResource: "part_gallery", authzAction: "gallery.read", legacyAvailable: false, page: PnGalleryPage, load: loadPnGallery },
       { key: "pn-inbox", path: "/pn-inbox", label: "图片收件箱", icon: <InboxOutlined />, authzResource: "part_gallery", authzAction: "inbox.read", legacyAvailable: false, page: PnInboxPage, load: loadPnInbox },
       { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", authzResource: "part_master", page: MasterDataPage, load: loadMasterData },
