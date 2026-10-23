@@ -1,4 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_purchases": true, "page_pool_analysis": true}, "readonly");
+  return fixtureRender(...args);
+}
+import { cleanup, fireEvent, render as fixtureRender, screen, waitFor } from "../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { Grid } from "antd";

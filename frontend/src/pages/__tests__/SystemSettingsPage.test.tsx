@@ -1,8 +1,17 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({}, "admin");
+  return fixtureRender(...args);
+}
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
-  render,
+  render as fixtureRender,
   screen,
   waitFor,
   within,
@@ -73,7 +82,7 @@ describe("管理员统一税口径展示策略", () => {
       sales_display_basis: "ex",
       maintenance_display_basis: "inc",
       expected_version: 3,
-    }));
+    }, CAPTURED_REQUEST));
     await waitFor(() => expect(
       screen.getByText(/当前版本：v4/),
     ).toBeInTheDocument());

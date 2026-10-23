@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
+vi.mock("../../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: legacyAuthorizationState,
+}));
 /**
  * DemandLineCreate（v1.36 Phase E 页面直建手工需求行）专项：
  * - 面板模式固定 projectId / 全局模式项目与 PN 可读选择；
@@ -400,3 +405,6 @@ describe("DemandLineCreate 全局模式（项目可选可搜）", () => {
     await waitFor(() => expect(mocks.listProjects).toHaveBeenCalledTimes(2));
   });
 });
+
+// Explicit pre-cutover permission context for existing component behaviour tests.
+beforeEach(() => prepareLegacyPageFixture({page_parts: true}));

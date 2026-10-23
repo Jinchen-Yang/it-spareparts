@@ -29,6 +29,9 @@ export default function ModuleGrantEditor({
   disabled?: boolean;
 }) {
   return (
+    <Space direction="vertical" style={{ width: "100%" }}>
+    <Alert type="info" showIcon message="金额页面有独立的展示口径依赖"
+      description="访问金额页面还需要单独配置“全局展示与业务默认值（金额展示设置）”的“读取”权限。此编辑器不会自动授予该权限；仅配置业务模块时，页面会明确提示缺少金额展示设置的读取权限。" />
     <Collapse
       items={catalog.modules.map((m) => {
         const c = value[m.id],
@@ -135,5 +138,6 @@ export default function ModuleGrantEditor({
         };
       })}
     />
+    </Space>
   );
 }

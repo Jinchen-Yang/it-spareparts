@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck } from "../../authz/access";
+import { actionRule, allRule } from "../../authz/rules";
 /**
  * 赚钱榜 / 亏钱榜（下沉到页面后部）：受 时间/PN/池 筛选 + 成本法切换。
  * 无成本行不进正式排名；块内同时显示成本覆盖率与未配成本营收（毛利虚高防线）。
@@ -71,17 +73,18 @@ export default function RankingBlock({
   filters, dateRange, patch, kpi, scopeNote, localProfitRestricted, localCostRestricted,
 }: RankingBlockProps) {
   const { costMethod } = filters;
+  const access = useModuleAccess("company_summary");
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
   const { data, loading, error, reload } = useGuardedFetch<PartRankingResp>(
-    () => dashboardPartRanking({
+    context => dashboardPartRanking({
       ...dateRange, cost_method: costMethod, top: 10,
       part_id: filters.partId ?? undefined,
       pool_group_id: filters.poolId ?? undefined,
-    }),
-    [dateRange, costMethod, filters.partId, filters.poolId]);
+    }, context),
+    [dateRange, costMethod, filters.partId, filters.poolId], undefined, actionRule("company_summary", "read"));
 
-  const profitRestricted = localProfitRestricted || (data?.profit_restricted ?? false);
+  const profitRestricted = !access.field("data_profit", !localProfitRestricted) || (data?.profit_restricted ?? false);
   const fifo = costMethod === "fifo";
 
   const cols: ColumnsType<PartRankingRow> = [

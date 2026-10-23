@@ -1,8 +1,9 @@
+import { upgradeS1Fixture } from "../../test/s2WireFixtures";
 import { describe, expect, it } from "vitest";
 import manifest from "../../../../backend/app/authz/catalog_manifest.json";
-import catalogCases from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
-import accountCases from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
-import templateCases from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
+import catalogCasesHistorical from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
+import accountCasesHistorical from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
+import templateCasesHistorical from "../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
 import {
   configurationErrors,
   validateAccountModules,
@@ -19,13 +20,17 @@ import {
   resourceUsesLegacy,
   salesAccess,
 } from "../../authz/AuthzProvider";
+const catalogCases = upgradeS1Fixture(catalogCasesHistorical);
+const accountCases = upgradeS1Fixture(accountCasesHistorical);
+const templateCases = upgradeS1Fixture(templateCasesHistorical);
+
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const catalog = catalogCases.cases[0].response.json as unknown as AuthzCatalog;
 const me = catalogCases.cases[1].response.json as unknown as AuthzSnapshot;
 const account = accountCases.cases[0].response
   .json as unknown as AccountModules;
-describe("S1 documented wire consumption", () => {
-  it("accepts the full real backend catalog, with only S1 sales executable", () => {
+describe("S1 documented wire after explicit S2 migration", () => {
+  it("accepts the full real backend catalog, with all 23 S2 resources executable", () => {
     const real = {
       ...catalog,
       modules: manifest.map((module) => ({
@@ -37,11 +42,8 @@ describe("S1 documented wire consumption", () => {
     } as AuthzCatalog;
     expect(real.modules).toHaveLength(87);
     expect(validateCatalog(real)).toEqual(real);
-    expect(
-      real.modules
-        .filter((m) => m.configurable)
-        .map((m) => [m.id, m.actions.map((a) => a.id)]),
-    ).toEqual([["sales_analysis", ["read", "export"]]]);
+    expect(real.modules.filter(m => m.configurable)).toHaveLength(23);
+    expect(real.modules.find(m => m.id === "sales_analysis")!.actions.map(a => a.id)).not.toContain("read");
     const invalid = clone(real);
     invalid.modules.find(
       (m) => m.surfaces.length,
@@ -95,24 +97,19 @@ describe("S1 documented wire consumption", () => {
     unknown.modules[0].actions[0].requires_fields = ["unknown"];
     expect(() => validateCatalog(unknown)).toThrow();
     const c = clone(catalog);
-    c.modules[0].actions[1].requires_fields = ["data_purchase_cost"];
-    validateCatalog(c);
-    const grant = {
-      actions: ["read", "export"],
-      scope: "all",
-      field_permissions: [],
-    };
-    expect(configurationErrors(c.modules[0], grant)).toContain(
-      "导出需要字段「成本及销售金额」",
-    );
+    const sales = c.modules.find(m => m.id === "sales_analysis")!;
+    const histogram = sales.actions.find(a => a.id === "read_amount_histogram")!;
+    expect(histogram.requires_fields).toEqual(["data_purchase_cost"]);
+    const drift = clone(catalog);
+    drift.modules.find(m => m.id === "sales_analysis")!.actions.find(a => a.id === "export")!.requires_fields = ["data_purchase_cost"];
+    expect(() => validateCatalog(drift)).toThrow();
+    const grant = { actions: ["read_amount_histogram"], scope: "all", field_permissions: [] };
+    expect(configurationErrors(sales, grant)).toContain("读取金额分布需要字段「采购成本」");
     expect(grant.field_permissions).toEqual([]);
   });
   it("unified sales reads resources, never old compatibility allow", () => {
     const v = clone(me);
-    v.resources.sales_analysis.decisions.read = {
-      effect: "deny",
-      reason: null,
-    };
+    for (const decision of Object.values(v.resources.sales_analysis.decisions)) decision.effect = "deny";
     v.sales_analysis.read = true;
     expect(salesAccess(v)?.read).toBe(false);
     expect(resourceAllowed(v, "unknown", "read")).toBe(false);

@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
+vi.mock("../../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: legacyAuthorizationState,
+}));
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -231,3 +236,6 @@ describe("DemandLineBatchCreate", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 });
+
+// Explicit pre-cutover permission context for existing component behaviour tests.
+beforeEach(() => prepareLegacyPageFixture({page_parts: true}));

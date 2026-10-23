@@ -1,3 +1,5 @@
+import { useAuthorizedQuery, useModuleAccess, useRouteAccess, type AuthorizedRequest } from "../../authz/access";
+import { DENY_RULE, type Rule } from "../../authz/rules";
 /**
  * 老板经营看板 v2 共用层：全局筛选 URL 编解码、竞态守卫取数 hook、
  * 权限三态渲染（无权限 ≠ 暂无数据 ≠ 未设置）、价格参考状态标签。
@@ -145,47 +147,14 @@ interface ScopedBlockState<T> extends BlockState<T> {
  * 不让旧范围数据在新标题/筛选下继续可见或可操作。四态由调用方渲染。
  */
 export function useGuardedFetch<T>(
-  fetcher: () => Promise<{ data: T }>, deps: unknown[], scopeKey?: string,
+  fetcher: (context: AuthorizedRequest) => Promise<{ data: T }>, deps: unknown[], scopeKey?: string,
+  rule: Rule = DENY_RULE, enabled = true,
 ) {
-  const [state, setState] = useState<ScopedBlockState<T>>({
-    data: null, loading: true, error: null, scopeKey,
-  });
-  const gen = useRef(0);
-  const fetchRef = useRef(fetcher);
-  fetchRef.current = fetcher;
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const g = ++gen.current;
-    const requestScope = scopeKey;
-    setState((s) => ({
-      data: s.scopeKey === requestScope ? s.data : null,
-      loading: true,
-      error: null,
-      scopeKey: requestScope,
-    }));
-    fetchRef.current()
-      .then(({ data }) => {
-        if (g === gen.current) {
-          setState({ data, loading: false, error: null, scopeKey: requestScope });
-        }
-      })
-      .catch((e) => {
-        if (g === gen.current) {
-          const msg = e?.response?.status ? `接口错误（${e.response.status}）` : "网络错误";
-          setState({ data: null, loading: false, error: msg, scopeKey: requestScope });
-        }
-      });
-    return () => { gen.current += 1; };   // deps 变化/卸载即作废在途请求
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick, scopeKey]);
-
-  const reload = useCallback(() => setTick((t) => t + 1), []);
-  // effect 在 render 后执行；scope 变化的这一帧也必须立即隐藏旧数据/旧错误，不能等 loading。
-  if (state.scopeKey !== scopeKey) {
-    return { data: null, loading: true, error: null, reload };
-  }
-  return { data: state.data, loading: state.loading, error: state.error, reload };
+  const legacy = Object.fromEntries(rule.anyOf.flat().map(need => [need.resource_id, true]));
+  const query = useAuthorizedQuery({ rule, legacy, queryKey: [...deps, scopeKey], enabled,
+    query: async context => (await fetcher(context)).data });
+  const status = (query.error as { response?: { status?: number } })?.response?.status;
+  return { data: query.data, loading: query.loading, error: query.error ? status ? `接口错误（${status}）` : "网络错误" : null, reload: query.retry };
 }
 
 // ---------------------------------------------------------------- 权限三态渲染
@@ -206,17 +175,19 @@ export function readLocalPerms(): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
 }
 
-export function useLocalRestrictions() {
+export function useLocalRestrictions(resource = "company_summary") {
+  const access = useModuleAccess(resource);
+  const poolRoute = useRouteAccess("/pool-management");
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
   return {
     isAdmin,
-    poolManagement: isAdmin || !!perms.action_pool_manage || !!perms.action_pool_set_policy,
-    profit: !isAdmin && perms.data_profit === false,
-    cost: !isAdmin && perms.data_purchase_cost === false,
-    governance: !isAdmin && perms.data_pool_price_governance === false,
-    customer: !isAdmin && perms.data_customer === false,
-    supplier: !isAdmin && perms.data_supplier === false,
+    poolManagement: poolRoute.allowed,
+    profit: !access.field("data_profit", isAdmin || perms.data_profit !== false),
+    cost: !access.field("data_purchase_cost", isAdmin || perms.data_purchase_cost !== false),
+    governance: !access.field("data_pool_price_governance", isAdmin || perms.data_pool_price_governance !== false),
+    customer: !access.field("data_customer", isAdmin || perms.data_customer !== false),
+    supplier: !access.field("data_supplier", isAdmin || perms.data_supplier !== false),
   };
 }
 

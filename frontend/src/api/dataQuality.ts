@@ -1,15 +1,16 @@
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 import api from "../api";
 
 export type DataQualityIssueStatus =
-  | "open"
-  | "confirmed_valid"
-  | "confirmed_source_error"
-  | "source_changed";
+  "open" | "confirmed_valid" | "confirmed_source_error" | "source_changed";
 
 export type DataQualityIssueSide = "purchase" | "sales";
 export type DataQualityDecision = "confirmed_valid" | "confirmed_source_error";
 export type DataQualityEvidenceValue =
-  | string | number | boolean | null
+  | string
+  | number
+  | boolean
+  | null
   | DataQualityEvidenceValue[]
   | { [key: string]: DataQualityEvidenceValue };
 
@@ -286,7 +287,9 @@ interface PurchasePriceCalibrationWire {
 /**
  * 数据疑点接口的唯一适配层。页面不直接拼路径，也不依赖 AxiosResponse，后端契约若微调只改这里。
  */
-function nullableNumber(value: string | number | null | undefined): number | null {
+function nullableNumber(
+  value: string | number | null | undefined,
+): number | null {
   if (value == null || value === "") return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -310,10 +313,13 @@ function normalizeCalibrationThreshold(
   };
 }
 
-export async function getPurchasePriceCalibration(params: PurchasePriceCalibrationParams = {}) {
+export async function getPurchasePriceCalibration(
+  params: PurchasePriceCalibrationParams = {},
+  capture?: CapturedTransport,
+) {
   const { data } = await api.get<PurchasePriceCalibrationWire>(
     "/data-quality/calibration/purchase-price",
-    { params },
+    { params, ...transportConfig(capture) },
   );
   return {
     ...data,
@@ -350,7 +356,10 @@ export async function getPurchasePriceCalibration(params: PurchasePriceCalibrati
   } satisfies PurchasePriceCalibration;
 }
 
-function normalizeBase(wire: DataQualityWireIssue, pageRestricted = false): DataQualityIssueListItem {
+function normalizeBase(
+  wire: DataQualityWireIssue,
+  pageRestricted = false,
+): DataQualityIssueListItem {
   const fact = wire.fact;
   const priceRestricted = pageRestricted || wire.price_restricted === true;
   return {
@@ -391,8 +400,12 @@ function normalizeDetail(wire: DataQualityWireIssue): DataQualityIssueDetail {
       brand: null,
       quantity: nullableNumber(fact?.qty),
       unit: fact?.unit ?? null,
-      unit_price: base.price_restricted ? null : nullableNumber(fact?.unit_price),
-      line_amount: base.price_restricted ? null : nullableNumber(fact?.line_amount),
+      unit_price: base.price_restricted
+        ? null
+        : nullableNumber(fact?.unit_price),
+      line_amount: base.price_restricted
+        ? null
+        : nullableNumber(fact?.line_amount),
     },
     evidence: wire.evidence ?? {},
     evidence_restricted: wire.evidence_restricted === true,
@@ -403,12 +416,14 @@ function normalizeDetail(wire: DataQualityWireIssue): DataQualityIssueDetail {
       counterparty: null,
       data_status: null,
     },
-    batch: batch ? {
-      id: batch.id,
-      filename: batch.filename,
-      imported_by: batch.uploaded_by,
-      imported_at: batch.uploaded_at,
-    } : null,
+    batch: batch
+      ? {
+          id: batch.id,
+          filename: batch.filename,
+          imported_by: batch.uploaded_by,
+          imported_at: batch.uploaded_at,
+        }
+      : null,
     audits: (wire.audit ?? []).map((entry) => ({
       action: entry.action,
       username: entry.operated_by,
@@ -418,27 +433,57 @@ function normalizeDetail(wire: DataQualityWireIssue): DataQualityIssueDetail {
   };
 }
 
-export async function listDataQualityIssues(params: ListDataQualityIssuesParams) {
-  const { data } = await api.get<DataQualityWirePage>("/data-quality/issues", { params });
+export async function listDataQualityIssues(
+  params: ListDataQualityIssuesParams,
+  capture?: CapturedTransport,
+) {
+  const { data } = await api.get<DataQualityWirePage>("/data-quality/issues", {
+    params,
+    ...transportConfig(capture),
+  });
   return {
     total: data.total,
     page: data.page,
     page_size: data.page_size,
-    items: data.items.map((item) => normalizeBase(item, data.price_restricted === true)),
+    items: data.items.map((item) =>
+      normalizeBase(item, data.price_restricted === true),
+    ),
   } satisfies DataQualityIssuePage;
 }
 
-export async function getDataQualityIssue(id: number) {
-  const { data } = await api.get<DataQualityWireIssue>(`/data-quality/issues/${id}`);
+export async function getDataQualityIssue(
+  id: number,
+  capture?: CapturedTransport,
+) {
+  const { data } = await api.get<DataQualityWireIssue>(
+    `/data-quality/issues/${id}`,
+    transportConfig(capture),
+  );
   return normalizeDetail(data);
 }
 
-export async function decideDataQualityIssue(id: number, body: DecideDataQualityIssueBody) {
-  const { data } = await api.post<DataQualityWireIssue>(`/data-quality/issues/${id}/decision`, body);
+export async function decideDataQualityIssue(
+  id: number,
+  body: DecideDataQualityIssueBody,
+  capture?: CapturedTransport,
+) {
+  const { data } = await api.post<DataQualityWireIssue>(
+    `/data-quality/issues/${id}/decision`,
+    body,
+    transportConfig(capture),
+  );
   return normalizeDetail(data);
 }
 
-export async function reopenDataQualityIssue(id: number, body: ReopenDataQualityIssueBody) {
-  const { data } = await api.post<DataQualityWireIssue>(`/data-quality/issues/${id}/reopen`, body);
+export async function reopenDataQualityIssue(
+  id: number,
+  body: ReopenDataQualityIssueBody,
+  capture?: CapturedTransport,
+) {
+  const { data } = await api.post<DataQualityWireIssue>(
+    `/data-quality/issues/${id}/reopen`,
+    body,
+    transportConfig(capture),
+  );
   return normalizeDetail(data);
 }

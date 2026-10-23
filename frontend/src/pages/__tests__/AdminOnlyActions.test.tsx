@@ -1,7 +1,10 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState()}));
+function render(...args: Parameters<typeof fixtureRender>) {prepareLegacyPageFixture({"page_profit": true, "page_inventory": true, "page_governance": true}); return fixtureRender(...args);}
 import { MemoryRouter } from "react-router-dom";
 /** 页面可读不等于管理员写操作可用：前端不能向普通用户展示必然 403 的按钮。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
+import { cleanup, fireEvent, render as fixtureRender, screen, waitFor } from "../../test/antdRender";
 
 import type { ComponentType } from "react";
 

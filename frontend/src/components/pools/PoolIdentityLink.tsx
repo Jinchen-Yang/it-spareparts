@@ -1,3 +1,5 @@
+import { useAccess, legacyRouteAllowed } from "../../authz/access";
+import { routeRule } from "../../authz/rules";
 import { Tag } from "antd";
 import { Link } from "react-router-dom";
 import type { PoolAnalysisSide } from "../../api/poolAnalysis";
@@ -19,7 +21,10 @@ export default function PoolIdentityLink({
   dateTo?: string | null;
   side?: PoolAnalysisSide;
 }) {
-  if (!groupId || !name) return null;
+  const rule = routeRule("/pool-analysis/:groupId");
+  const allowed = legacyRouteAllowed("/pool-analysis/:groupId");
+  const access = useAccess(rule, {legacy: Object.fromEntries(rule.anyOf.flat().map(need => [need.resource_id, allowed]))});
+  if (!access.allowed || !groupId || !name) return null;
   const qs = new URLSearchParams({ range });
   if (range === "custom" && dateFrom && dateTo) {
     qs.set("from", dateFrom);

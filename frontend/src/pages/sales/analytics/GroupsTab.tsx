@@ -121,15 +121,16 @@ export default function GroupsTab({
   // lines 仅行级维度合法（契约 §6）：维度切到单头（或受限替换）时归一，防 422
   const requestSort = normalizeGroupSort(state.groupSort, dim);
   const { data, loading, error, retry } = useAsyncData<SalesGroupsResp>(
-    () => fetchSalesAnalyticsGroups({
+    (context) => fetchSalesAnalyticsGroups({
       ...apiFilters, group_by: dim, sort: requestSort, order: state.groupOrder,
       top: state.groupTop, compare: state.compare,
-    }),
+    }, context),
     [filterKey, dim, requestSort, state.groupOrder, state.groupTop, state.compare],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_groups",
   );
   const effectiveSort = data?.sort ?? requestSort;
   const effectiveOrder = data?.order ?? state.groupOrder;

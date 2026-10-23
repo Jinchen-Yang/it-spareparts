@@ -1,3 +1,4 @@
+import { upgradeS1Fixture } from "../../../test/s2WireFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   cleanup,
@@ -6,10 +7,14 @@ import {
   screen,
   waitFor,
 } from "../../../test/antdRender";
-import catalogCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
-import accountCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
-import templateCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
+import catalogCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
+import accountCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
+import templateCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
 import UnifiedPermissionCenter from "../UnifiedPermissionCenter";
+const catalogCases = upgradeS1Fixture(catalogCasesHistorical);
+const accountCases = upgradeS1Fixture(accountCasesHistorical);
+const templateCases = upgradeS1Fixture(templateCasesHistorical);
+
 const mocks = vi.hoisted(() => ({
   getAuthzCatalog: vi.fn(),
   getAccountModules: vi.fn(),

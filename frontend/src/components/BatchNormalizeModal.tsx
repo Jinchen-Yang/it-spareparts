@@ -1,9 +1,21 @@
+import {
+  useAuthorizedQuery,
+  useAuthorizedRunner,
+  useModuleAccess,
+  legacyRouteAllowed,
+  AuthorizationCancelled,
+  AuthorizedQueryError,
+} from "../authz/access";
+import { allRule, actionRule, surfaceRule } from "../authz/rules";
 import { useEffect, useState } from "react";
 import { App, Button, Checkbox, Modal, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  batchApply, batchPreview, SPEC_SOURCE_LABEL,
-  type BatchPreviewItem, type SpecField,
+  batchApply,
+  batchPreview,
+  SPEC_SOURCE_LABEL,
+  type BatchPreviewItem,
+  type SpecField,
 } from "../api";
 import { TaxMoney } from "../context/TaxBasis";
 import { splitFixed } from "../utils/format";
@@ -25,35 +37,56 @@ function EvidenceRows({ r }: { r: BatchPreviewItem }) {
     <div style={{ padding: "4px 8px", fontSize: 12.5 }}>
       <div style={{ marginBottom: 6, color: "#6b665e" }}>
         识别类型 <Tag>{r.suggestion.object_type || "—"}</Tag>
-        {isAuto(r)
-          ? <Tag color="green">自动通过</Tag>
-          : <Tag color="orange">需人工复核</Tag>}
-        {!keys.length && <span style={{ color: "#bbb" }}>（无可抽取字段 → 转人工）</span>}
+        {isAuto(r) ? (
+          <Tag color="green">自动通过</Tag>
+        ) : (
+          <Tag color="orange">需人工复核</Tag>
+        )}
+        {!keys.length && (
+          <span style={{ color: "#bbb" }}>（无可抽取字段 → 转人工）</span>
+        )}
       </div>
       {keys.length > 0 && (
-        <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 720 }}>
+        <table
+          style={{ borderCollapse: "collapse", width: "100%", maxWidth: 720 }}
+        >
           <thead>
             <tr style={{ color: "var(--mb-text-3)", textAlign: "left" }}>
-              <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>字段</th>
+              <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>
+                字段
+              </th>
               <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>值</th>
-              <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>来源</th>
+              <th style={{ padding: "2px 10px 2px 0", fontWeight: 400 }}>
+                来源
+              </th>
               <th style={{ padding: "2px 0", fontWeight: 400 }}>证据</th>
             </tr>
           </thead>
           <tbody>
             {keys.map((k) => {
               const f = specs[k] as SpecField;
-              const safe = f.source === "DESCRIPTION_EXPLICIT" || f.source === "MODEL_DICTIONARY";
+              const safe =
+                f.source === "DESCRIPTION_EXPLICIT" ||
+                f.source === "MODEL_DICTIONARY";
               return (
                 <tr key={k}>
-                  <td style={{ padding: "2px 10px 2px 0", color: "#6b665e" }}>{k}</td>
-                  <td style={{ padding: "2px 10px 2px 0", fontWeight: 500 }}>{f.value}</td>
+                  <td style={{ padding: "2px 10px 2px 0", color: "#6b665e" }}>
+                    {k}
+                  </td>
+                  <td style={{ padding: "2px 10px 2px 0", fontWeight: 500 }}>
+                    {f.value}
+                  </td>
                   <td style={{ padding: "2px 10px 2px 0" }}>
-                    <Tag color={safe ? "blue" : "gold"} style={{ marginInlineEnd: 0 }}>
+                    <Tag
+                      color={safe ? "blue" : "gold"}
+                      style={{ marginInlineEnd: 0 }}
+                    >
                       {SPEC_SOURCE_LABEL[f.source] || f.source}
                     </Tag>
                   </td>
-                  <td style={{ padding: "2px 0", color: "var(--mb-text-3)" }}>{f.evidence}</td>
+                  <td style={{ padding: "2px 0", color: "var(--mb-text-3)" }}>
+                    {f.evidence}
+                  </td>
                 </tr>
               );
             })}
@@ -61,48 +94,80 @@ function EvidenceRows({ r }: { r: BatchPreviewItem }) {
         </table>
       )}
       {errs.length > 0 && (
-        <div style={{ marginTop: 6, color: "#c0392b" }}>校验：{errs.join("；")}</div>
+        <div style={{ marginTop: 6, color: "#c0392b" }}>
+          校验：{errs.join("；")}
+        </div>
       )}
     </div>
   );
 }
 
 /** 批量规范化：按近期销售额降序列出会被规范化的备件；展开看字段证据，仅自动通过项默认勾选（§17）。 */
-export default function BatchNormalizeModal({ open, onClose, onApplied }: {
-  open: boolean; onClose: () => void; onApplied: () => void;
+export default function BatchNormalizeModal({
+  open,
+  onClose,
+  onApplied,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onApplied: () => void;
 }) {
   const { message } = App.useApp();
-  const [items, setItems] = useState<BatchPreviewItem[]>([]);
-  const [loading, setLoading] = useState(false);
+  const access = useModuleAccess("part_master");
+  const legacyAllowed = legacyRouteAllowed("/master");
+  const canPreview = access.surface("normalize", legacyAllowed);
+  const canApply = access.action("normalize_apply", legacyAllowed);
+  const run = useAuthorizedRunner();
+  const [attempt, setAttempt] = useState(0);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<number[]>([]);
-  const [fields, setFields] = useState<string[]>(["description", "category", "brand"]);
+  const [fields, setFields] = useState<string[]>([
+    "description",
+    "category",
+    "brand",
+  ]);
   const [applying, setApplying] = useState(false);
 
-  const load = async (p: number) => {
-    setLoading(true);
-    try {
-      const { data } = await batchPreview(p, 20, true);
-      setItems(data.items);
-      setSelected(data.items.filter(isAuto).map((i) => i.part_id));   // §17：仅自动通过项默认勾选
-      setPage(p);
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || "加载失败");
-    } finally {
-      setLoading(false);
-    }
+  const preview = useAuthorizedQuery({
+    rule: surfaceRule("part_master.normalize"),
+    legacy: { part_master: legacyAllowed },
+    queryKey: ["normalization", page, attempt],
+    enabled: open,
+    query: async (capture) =>
+      (await batchPreview(page, 20, true, capture)).data,
+  });
+  const items = preview.data?.items || [];
+  const loading = preview.loading;
+  const load = (next: number) => {
+    setPage(next);
+    setAttempt((value) => value + 1);
   };
-  useEffect(() => { if (open) load(1); }, [open]);
+  useEffect(() => {
+    setSelected(
+      (preview.data?.items || []).filter(isAuto).map((i) => i.part_id),
+    );
+  }, [preview.data]);
+  useEffect(() => {
+    if (open) load(1);
+  }, [open]);
 
   const apply = async () => {
-    if (!selected.length || !fields.length) return;
+    if (!canPreview || !canApply || !selected.length || !fields.length) return;
     setApplying(true);
     try {
-      const { data } = await batchApply(selected, fields);
+      const { data } = await run({
+        rule: allRule(
+          surfaceRule("part_master.normalize"),
+          actionRule("part_master", "normalize_apply"),
+        ),
+        legacy: { part_master: legacyAllowed },
+        request: (capture) => batchApply(selected, fields, capture),
+      });
       message.success(`已规范化 ${data.applied} 条（跳过 ${data.skipped}）`);
       onApplied();
       load(page);
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       message.error(e?.response?.data?.detail || "应用失败");
     } finally {
       setApplying(false);
@@ -117,37 +182,68 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
       title: "现描述 → 标准描述",
       render: (_, r) => (
         <div style={{ fontSize: 12.5 }}>
-          <div style={{ color: "var(--mb-text-3)", textDecoration: r.changes.includes("description") ? "line-through" : "none" }}>
+          <div
+            style={{
+              color: "var(--mb-text-3)",
+              textDecoration: r.changes.includes("description")
+                ? "line-through"
+                : "none",
+            }}
+          >
             {r.description || "—"}
           </div>
           {r.changes.includes("description") && (
-            <div style={{ fontWeight: 500, color: "#2a2722" }}>{r.suggestion.canonical_description}</div>
+            <div style={{ fontWeight: 500, color: "#2a2722" }}>
+              {r.suggestion.canonical_description}
+            </div>
           )}
         </div>
       ),
     },
     {
-      title: "建议分类", width: 140,
-      render: (_, r) => r.changes.includes("category")
-        ? <Tag color="blue">{r.suggestion.category_l1}{r.suggestion.category_l2 ? ` / ${r.suggestion.category_l2}` : ""}</Tag>
-        : <span style={{ color: "#ccc" }}>—</span>,
+      title: "建议分类",
+      width: 140,
+      render: (_, r) =>
+        r.changes.includes("category") ? (
+          <Tag color="blue">
+            {r.suggestion.category_l1}
+            {r.suggestion.category_l2 ? ` / ${r.suggestion.category_l2}` : ""}
+          </Tag>
+        ) : (
+          <span style={{ color: "#ccc" }}>—</span>
+        ),
     },
     {
-      title: "建议品牌", width: 100,
-      render: (_, r) => r.changes.includes("brand") ? <Tag>{r.suggestion.brand_norm}</Tag> : <span style={{ color: "#ccc" }}>—</span>,
+      title: "建议品牌",
+      width: 100,
+      render: (_, r) =>
+        r.changes.includes("brand") ? (
+          <Tag>{r.suggestion.brand_norm}</Tag>
+        ) : (
+          <span style={{ color: "#ccc" }}>—</span>
+        ),
     },
     {
-      title: "审核", width: 96,
-      render: (_, r) => isAuto(r)
-        ? <Tag color="green">自动通过</Tag>
-        : (
-          <Tooltip title={(r.suggestion.validation_errors || []).join("；") || "缺关键字段/证据不足，转人工"}>
+      title: "审核",
+      width: 96,
+      render: (_, r) =>
+        isAuto(r) ? (
+          <Tag color="green">自动通过</Tag>
+        ) : (
+          <Tooltip
+            title={
+              (r.suggestion.validation_errors || []).join("；") ||
+              "缺关键字段/证据不足，转人工"
+            }
+          >
             <Tag color="orange">需复核</Tag>
           </Tooltip>
         ),
     },
     {
-      title: "近期销售额", dataIndex: "recent_sales_amount", width: 100,
+      title: "近期销售额",
+      dataIndex: "recent_sales_amount",
+      width: 100,
       render: (v: number | null) => {
         const s = splitFixed(v == null ? null : Math.round(v), "inc");
         return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} />;
@@ -157,19 +253,46 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
 
   return (
     <Modal
-      open={open} onCancel={onClose} width={1040} title="批量规范化（按销售额优先 · 确定性引擎）"
+      open={open && canPreview}
+      onCancel={onClose}
+      width={1040}
+      title="批量规范化（按销售额优先 · 确定性引擎）"
       footer={
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
           <Space>
             <span style={{ fontSize: 12.5, color: "#6b665e" }}>应用字段</span>
-            <Checkbox.Group options={FIELD_OPTS} value={fields} onChange={(v) => setFields(v as string[])} />
+            <Checkbox.Group
+              options={FIELD_OPTS}
+              value={fields}
+              onChange={(v) => setFields(v as string[])}
+            />
           </Space>
           <Space>
-            <Button disabled={page <= 1 || loading} onClick={() => load(page - 1)}>上一批</Button>
-            <Button disabled={items.length < 20 || loading} onClick={() => load(page + 1)}>下一批</Button>
+            <Button
+              disabled={page <= 1 || loading}
+              onClick={() => load(page - 1)}
+            >
+              上一批
+            </Button>
+            <Button
+              disabled={items.length < 20 || loading}
+              onClick={() => load(page + 1)}
+            >
+              下一批
+            </Button>
             <Button onClick={onClose}>关闭</Button>
-            <Button type="primary" loading={applying}
-              disabled={!selected.length || !fields.length} onClick={apply}>
+            <Button
+              type="primary"
+              loading={applying}
+              disabled={!canApply || !selected.length || !fields.length}
+              onClick={apply}
+            >
               应用选中（{selected.length}）
             </Button>
           </Space>
@@ -178,19 +301,30 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
     >
       <div style={{ marginBottom: 8, color: "#888", fontSize: 12.5 }}>
         按近期销售额降序（高价值先清）。点行首 ▸ 展开看每个字段的值/来源/证据。
-        <b>仅「自动通过」项默认勾选</b>（类型与分类确定、无校验错、无猜测字段）；「需复核」项不自动写回，交单条人工。
+        <b>仅「自动通过」项默认勾选</b>
+        （类型与分类确定、无校验错、无猜测字段）；「需复核」项不自动写回，交单条人工。
         本批自动通过 {autoCount}/{items.length}。已人工锁定的字段不动。
       </div>
+      <AuthorizedQueryError error={preview.error} retry={preview.retry} />
       <Table
-        rowKey="part_id" size="small" loading={loading} columns={cols} dataSource={items}
+        rowKey="part_id"
+        size="small"
+        loading={loading}
+        columns={cols}
+        dataSource={items}
         rowSelection={{
           selectedRowKeys: selected,
           onChange: (k) => setSelected(k as number[]),
-          getCheckboxProps: (r) => ({ disabled: !isAuto(r) }),   // §17：仅自动通过项可批量勾选，需复核交单条
+          getCheckboxProps: (r) => ({ disabled: !isAuto(r) }), // §17：仅自动通过项可批量勾选，需复核交单条
         }}
         expandable={{ expandedRowRender: (r) => <EvidenceRows r={r} /> }}
-        pagination={false} scroll={{ y: 430 }}
-        locale={{ emptyText: loading ? "加载中…" : "本批没有需要规范化的备件（可点「下一批」）" }}
+        pagination={false}
+        scroll={{ y: 430 }}
+        locale={{
+          emptyText: loading
+            ? "加载中…"
+            : "本批没有需要规范化的备件（可点「下一批」）",
+        }}
       />
     </Modal>
   );

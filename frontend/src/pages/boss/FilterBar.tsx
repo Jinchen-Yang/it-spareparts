@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck } from "../../authz/access";
+import { actionRule, allRule } from "../../authz/rules";
 /**
  * 全局筛选栏：时间（今天/近7天/近30天/本月/自定义）+ PN 型号 + 互通池 + 采购员/销售员 + 清除。
  * 所有筛选写入 URL（push 进历史）：刷新/复制链接/前进后退均可恢复。
@@ -48,7 +50,7 @@ function PersonInput({ label, value, onCommit }: {
 export default function FilterBar({ filters, dateRange, patch, clearAll, hasFilter }: FilterBarProps) {
   // 池选项：v2 指标排序路径（固定 3 条 SQL，不逐池 analyze）；生产 ~40 池，100 封顶足够
   const pools = useGuardedFetch<PoolsResp>(
-    () => dashboardPools({ sort: "sales_total", page: 1, page_size: 100 }), []);
+    context => dashboardPools({ sort: "sales_total", page: 1, page_size: 100 }, context), [], undefined, actionRule("company_pool_analysis", "read_summary"));
   const poolOptions = useMemo(() => (pools.data?.items || []).map((p) => ({
     value: p.group_id,
     label: p.name ? `${p.name}（#${p.group_id}）` : `池 #${p.group_id}`,

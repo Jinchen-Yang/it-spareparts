@@ -1,3 +1,4 @@
+import { hasControlledRoute, routeRule, ruleAllowed, type Rule } from "./authz/rules";
 import { AuthzProvider, AuthorizationBoundary, AuthzUnavailable, actorAllowed, resourceAllowed, resourceUsesLegacy, useAuthz } from "./authz/AuthzProvider";
 import { AUTHZ_SESSION_INVALIDATED } from "./authz/events";
 import { useEffect, useMemo, useState } from "react";
@@ -104,6 +105,12 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     };
   }, [token]);
 
+  const allowedRoute = (rule: Rule, legacyPageAllowed: boolean) => {
+    // Legacy is considered per resource in each complete clause, never as an OR bypass.
+    const legacy = Object.fromEntries(rule.anyOf.flat().map(need => [need.resource_id, legacyPageAllowed]));
+    return ruleAllowed(authz.snapshot, rule, legacy);
+  };
+
   // 旧模块继续使用登录权限；已迁移模块由服务端刷新后的能力快照决定入口。
   const allowed = useMemo(() => {
     if (!token) return [];
@@ -112,9 +119,9 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     const perms = readPerms();
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
     return NAV_ITEMS.filter((it) => {
-      if (it.authzResource === "sales_analysis") {
-        if (authz.status !== "ready" || !authz.snapshot) return false;
-        if (!resourceUsesLegacy(authz.snapshot, "sales_analysis")) return resourceAllowed(authz.snapshot, "sales_analysis", "read");
+      if (hasControlledRoute(it.path)) {
+        const oldAllowed = isAdmin || (it.visibleWhen ? it.visibleWhen() : it.perm ? !!perms[it.perm] : it.anyPerm ? it.anyPerm.some(p => !!perms[p]) : false);
+        return authz.status === "ready" && allowedRoute(routeRule(it.path), oldAllowed);
       }
       if (it.key === "accounts") return authz.status === "ready" && actorAllowed(authz.snapshot, "read_accounts");
       return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
@@ -130,13 +137,12 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     if (!token) return [];
     const isAdmin = (localStorage.getItem("role") || "") === "admin";
     const perms = readPerms();
-    return DETAIL_ROUTES.filter((r) => (
-      !r.betaFeature || betaFeatures[r.betaFeature] === true
-    ) && (isAdmin
-      || (r.perm ? !!perms[r.perm]
-        : r.anyPerm ? r.anyPerm.some((p) => !!perms[p])
-          : false)));
-  }, [token, betaFeatures]);
+    return DETAIL_ROUTES.filter(r => {
+      if (r.betaFeature && betaFeatures[r.betaFeature] !== true) return false;
+      const legacy = isAdmin || (r.perm ? !!perms[r.perm] : r.anyPerm ? r.anyPerm.some(p => !!perms[p]) : false);
+      return hasControlledRoute(r.path) ? authz.status === "ready" && allowedRoute(routeRule(r.path), legacy) : legacy;
+    });
+  }, [token, betaFeatures, authz.status, authz.snapshot]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）
   if (!token) return <LoginPage onLogin={setToken} />;
@@ -180,16 +186,12 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
       <BrowserRouter key={token}>
         <Routes>
           <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
-            {NAV_ITEMS.filter(it => it.authzResource === "sales_analysis" && !allowed.includes(it)).map(it => (
+            {[...NAV_ITEMS, ...DETAIL_ROUTES].filter(it => (hasControlledRoute(it.path) || it.key === "accounts") && ![...allowed, ...allowedDetails].includes(it as never)).map(it => (
               <Route key={it.key} path={it.path} element={authz.status !== "ready" ? <AuthzUnavailable />
-                : <Result status="403" title="没有销售分析访问权限" subTitle={authz.snapshot?.sales_analysis.reason || "请联系管理员检查授权"} />} />
+                : <Result status="403" title="没有此页面访问权限" subTitle="请联系管理员检查模块授权" />} />
             ))}
-            {allowed.map((it) => (
-              <Route key={it.key} path={it.path} element={it.authzResource ? <AuthorizationBoundary resource={it.authzResource} action="read" legacy={<it.page />}><it.page /></AuthorizationBoundary> : <it.page />} />
-            ))}
-            {allowedDetails.map((r) => (
-              <Route key={r.key} path={r.path} element={<r.page />} />
-            ))}
+            {allowed.map(it => <Route key={it.key} path={it.path} element={<it.page key={hasControlledRoute(it.path) ? `${token}:${authz.generation}:${authz.snapshot?.version}` : "legacy"} />} />)}
+            {allowedDetails.map(r => <Route key={r.key} path={r.path} element={<r.page key={hasControlledRoute(r.path) ? `${token}:${authz.generation}:${authz.snapshot?.version}` : "legacy"} />} />)}
             {redirects.map((r) => (
               <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
             ))}

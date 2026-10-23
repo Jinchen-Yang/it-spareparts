@@ -1,7 +1,16 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
+vi.mock("../../../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_purchase_analytics": true}, "readonly");
+  return fixtureRender(...args);
+}
 // 采购分析页集成（D-39 PR-4a）：URL 单一真值 —— 默认今天零参数、直开链接恢复筛选与
 // 下钻层、切换口径不重新请求、脱敏账号（金额/客户）控件门控与「—」占位、
 // 排序保护回显（ranking_restricted 禁用金额排序）、错误与空态。
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
+import { act, cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -471,12 +480,12 @@ describe("采购分析页：URL 单一真值", () => {
   it("客户候选使用 options 并支持服务端名称搜索，不请求全历史客户金额汇总", async () => {
     renderPage();
     await screen.findByRole("row", { name: /备件采购/ });
-    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", []);
+    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", [], CAPTURED_REQUEST);
     expect(fetchPurchaseAnalyticsSummary.mock.calls.some(([q]) => q.group_by === "customer")).toBe(false);
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "客户" }));
     expect(await screen.findByText("客户甲", { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: "客户" }), { target: { value: "客户乙" } });
-    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", []));
+    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", [], CAPTURED_REQUEST));
   });
 
   it("分享链接的已选客户不在首批候选时通过 selected_customers 恢复名称", async () => {
@@ -488,7 +497,7 @@ describe("采购分析页：URL 单一真值", () => {
     renderPage("/purchases/analytics?customer=999");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "客户" }).closest(".ant-select"))
       .toHaveTextContent("首批之外客户"));
-    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", [999]);
+    expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledWith("", [999], CAPTURED_REQUEST);
   });
 
   it("已选客户在远程搜索返回其他候选后仍显示原客户名称", async () => {
@@ -503,7 +512,7 @@ describe("采购分析页：URL 单一真值", () => {
       .toHaveTextContent("客户甲"));
     fireEvent.mouseDown(input);
     fireEvent.change(input, { target: { value: "客户乙" } });
-    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", [12]));
+    await waitFor(() => expect(fetchPurchaseAnalyticsOptions).toHaveBeenLastCalledWith("客户乙", [12], CAPTURED_REQUEST));
     await waitFor(() => expect(screen.queryByText("客户甲", { selector: ".ant-select-item-option-content" })).toBeNull());
     expect(select.querySelector(".ant-select-selection-item-content")).toHaveTextContent("客户甲");
   });
@@ -545,7 +554,7 @@ describe("采购分析页：URL 单一真值", () => {
 
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/CG-2026-101/)).toBeInTheDocument());
-    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, []);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, [], CAPTURED_REQUEST);
     // 单头三口径 + 单头批次行说明
     expect(within(dialog).getByText(/只计单头所属批次/)).toBeInTheDocument();
     expect(within(dialog).getAllByText(/ST1000DM003/).length).toBeGreaterThan(0);
@@ -601,7 +610,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(row);
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/匹配分类行合计/)).toBeInTheDocument());
-    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, ["硬盘"]);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, ["硬盘"], CAPTURED_REQUEST);
     // 分类口径（行级）说明
     expect(screen.getByText(/分类口径：订单已拆到明细行/)).toBeInTheDocument();
   });
@@ -619,7 +628,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(row);
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/匹配分类行合计（硬盘）/)).toBeInTheDocument());
-    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, ["硬盘"]);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledWith(101, ["硬盘"], CAPTURED_REQUEST);
   });
 
   it("分类分组下钻、多选分类筛选：抽屉只带所在行分类，不带整组多选", async () => {
@@ -632,7 +641,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(row);
     await screen.findByRole("dialog");
     await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalled());
-    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘"]);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘"], CAPTURED_REQUEST);
     expect(fetchPurchaseAnalyticsOrderDetail).not.toHaveBeenCalledWith(101, ["硬盘", "内存"]);
   });
 
@@ -646,7 +655,7 @@ describe("采购分析页：URL 单一真值", () => {
     fireEvent.click(row);
     await screen.findByRole("dialog");
     await waitFor(() => expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalled());
-    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘", "内存"]);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenLastCalledWith(101, ["硬盘", "内存"], CAPTURED_REQUEST);
   });
 });
 
@@ -826,9 +835,9 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     localStorage.setItem("token", "account-b");
     fireEvent.click(screen.getByRole("row", { name: "查看采购单 CG-2026-101 明细" }));
     expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
-    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情；
-    // 行点击入口同时通知页级清旧上下文——主页面订单列表也让位（两处文案并存）
-    expect((await screen.findAllByText(SESSION_DEAD_TEXT)).length).toBeGreaterThanOrEqual(2);
+    // 请求前拒绝重新挂载抽屉；页面提示会话失效，并撤下旧数据。
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeVisible();
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
     expect(screen.queryByRole("row", { name: "查看采购单 CG-2026-101 明细" })).toBeNull();
   });
@@ -860,8 +869,9 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     expect(screen.queryByText("采购单 CG-2026-101")).toBeNull();
     expect(fetchPurchaseAnalyticsOptions).toHaveBeenCalledTimes(1);
     expect(fetchPurchaseAnalyticsOrders).toHaveBeenCalledTimes(1);
-    // 汇总端点：主汇总 + 趋势（day）各一次，之后不再重发
-    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(2);
+    // 下钻页不挂载趋势，因此只发汇总；迟到完成不能重发。
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
+    expect(fetchPurchaseAnalyticsSummary.mock.calls.some(call => call[0]?.group_by === "day")).toBe(false);
   });
 
   it("落地矩阵：明细抽屉在途换 token，迟到详情不落地并通知页级清主页面", async () => {

@@ -1,3 +1,4 @@
+import { upgradeS1Fixture } from "../../../test/s2WireFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   act,
@@ -8,10 +9,10 @@ import {
   waitFor,
   within,
 } from "../../../test/antdRender";
-import catalogCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
-import accountCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
-import commandCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/04-account-commands.json";
-import templateCases from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
+import catalogCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
+import accountCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
+import commandCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/04-account-commands.json";
+import templateCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json";
 import type {
   AuthzCatalog,
   AuthorizationPreview,
@@ -27,6 +28,11 @@ import ModuleBulkModal from "../ModuleBulkModal";
 import ModuleAccountDrawer from "../ModuleAccountDrawer";
 import ModuleTemplateDrawer from "../ModuleTemplateDrawer";
 import AccountCommandModal from "../AccountCommandModal";
+const catalogCases = upgradeS1Fixture(catalogCasesHistorical);
+const accountCases = upgradeS1Fixture(accountCasesHistorical);
+const commandCases = upgradeS1Fixture(commandCasesHistorical);
+const templateCases = upgradeS1Fixture(templateCasesHistorical);
+
 const mocks = vi.hoisted(() => ({
   authzCommand: vi.fn(),
   getAccountModules: vi.fn(),
@@ -97,7 +103,7 @@ it("planned resources cannot be configured; selecting export does not auto-add r
     scope: "all",
     field_permissions: [],
   });
-  fireEvent.click(screen.getByText("采购分析"));
+  fireEvent.click(screen.getByText(catalog.modules.find(m => m.id === "purchase_analysis")!.label));
   expect(screen.getByText("此资源当前只读，不能保存新授权。")).toBeVisible();
 });
 it("ordinary create sends one atomic body with authorization none, not an implicit readonly template", async () => {
@@ -315,6 +321,7 @@ it("template metadata and changed resource are saved atomically, with no account
     target: { value: "changed" },
   });
   fireEvent.click(screen.getByText("销售分析"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "订单导出" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "导出" }));
   fireEvent.click(screen.getByRole("button", { name: "仅保存模板" }));
   await waitFor(() => expect(mocks.authzCommand).toHaveBeenCalledOnce());
@@ -436,4 +443,19 @@ it("clearing a personal override without a saved template remains available and 
       operation: "clear_override",
     },
   ]);
+});
+
+it("OR dependencies are explained in Chinese and never silently add a more privileged action", () => {
+  const change = vi.fn();
+  const expanded = structuredClone(catalog);
+  const profit = expanded.modules.find(m => m.id === "profit_analysis")!;
+  profit.runtime_state = "enabled"; profit.configurable = true;
+  render(<ModuleGrantEditor catalog={expanded} value={{profit_analysis: {actions: ["show_summary"], scope: "all", field_permissions: []}}} onChange={change} />);
+  expect(screen.getByText("金额页面有独立的展示口径依赖")).toBeVisible();
+  expect(screen.getByText(/此编辑器不会自动授予该权限/)).toBeVisible();
+  fireEvent.click(screen.getByText("利润分析"));
+  expect(screen.getByText(/利润维度汇总与明细需要以下任一动作：按型号分析、按销售人员分析、按客户分析/)).toBeVisible();
+  expect(change).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox", {name: "按型号分析"}));
+  expect(change).toHaveBeenCalledWith("profit_analysis", {actions: ["read_part_analysis", "show_summary"], scope: "all", field_permissions: []});
 });

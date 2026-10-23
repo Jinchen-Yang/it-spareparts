@@ -74,12 +74,13 @@ export default function TrendTab({
 }: TrendTabProps) {
   const granularity = state.granularity ?? recommendGranularity(apiFilters.date_from, apiFilters.date_to);
   const { data, loading, error, retry } = useAsyncData<SalesTrendResp>(
-    () => fetchSalesAnalyticsTrend(apiFilters, granularity, state.compare),
+    (context) => fetchSalesAnalyticsTrend(apiFilters, granularity, state.compare, context),
     [filterKey, granularity, state.compare],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_trend",
   );
   const metricOptions: SalesChartMetric[] = [
     ...state.amounts.map((a) => AMOUNT_SORT_KEY[a] as SalesChartMetric)

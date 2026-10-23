@@ -36,12 +36,13 @@ export default function AmountHistogram({
 }) {
   const basis = apiFilters.amount_basis ?? "amount_ex_tax";
   const { data, loading, error, retry } = useAsyncData<SalesAmountHistogram>(
-    () => fetchSalesAmountHistogram(apiFilters),
+    (context) => fetchSalesAmountHistogram(apiFilters, context),
     [filterKey],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_amount_histogram",
   );
   const option = useMemo(() => buildHistogramOption(data?.bins ?? []), [data]);
 

@@ -44,7 +44,7 @@ afterEach(cleanup);
 function renderCard(value: PoolReference, props: {
   side?: "both" | "purchase" | "sales"; forceRestricted?: boolean; summary?: boolean;
 } = {}) {
-  render(<MemoryRouter><PoolReferenceCard reference={value} {...props} /></MemoryRouter>);
+  render(<MemoryRouter><PoolReferenceCard canOpenDetail reference={value} {...props} /></MemoryRouter>);
 }
 
 describe("PoolReferenceCard", () => {
@@ -133,7 +133,7 @@ describe("PoolReferenceCard", () => {
   });
 
   it("单侧参考卡把当前采购/销售方向带入详情；双侧卡不强加方向", () => {
-    const { unmount } = render(<MemoryRouter><PoolReferenceCard reference={reference()} side="purchase" /></MemoryRouter>);
+    const { unmount } = render(<MemoryRouter><PoolReferenceCard canOpenDetail reference={reference()} side="purchase" /></MemoryRouter>);
     expect(screen.getByRole("link", { name: "查看互通池详情" })).toHaveAttribute(
       "href", "/pool-analysis/12?range=90d&pn=ST4000NM0035&side=purchase",
     );

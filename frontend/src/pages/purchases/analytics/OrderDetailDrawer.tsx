@@ -1,3 +1,5 @@
+import { useAuthorizedQuery } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 订单明细抽屉：采购模块自己的明细接口（不依赖老板看板权限）。
 // 分类筛选活跃时把 category 随层传入：展示行按分类过滤并附「匹配分类行合计」。
 // 行级口径 = 只计单头所属批次的明细行（D-39 补充决策）。
@@ -71,52 +73,16 @@ function NominalAmountNote({ side, kind, amount }: {
 
 export default function OrderDetailDrawer({ orderId, category, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
   const { message } = App.useApp();
-  const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const seqRef = useRef(0);
-  // onClose 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const onOwnerStaleRef = useRef(onOwnerStale);
-  onOwnerStaleRef.current = onOwnerStale;
-  const categoryKey = category.join(",");
-
+  const stale = sessionStale(ownerToken);
+  const query = useAuthorizedQuery({ rule: actionRule("purchase_analysis", "read"), legacy: { purchase_analysis: true }, onStale: onOwnerStale,
+    queryKey: [orderId, category], enabled: orderId != null && !stale,
+    query: async context => (await fetchPurchaseAnalyticsOrderDetail(orderId!, category, context)).data });
+  const { data: detail, loading } = query;
+  const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
   useEffect(() => {
-    if (orderId == null) {
-      setDetail(null);
-      return;
-    }
-    const seq = ++seqRef.current;
-    // 所属会话失效（DL-010 返工）：拒发并清旧详情——旧会话的抽屉不以当前账号取数
-    if (sessionStale(ownerToken)) {
-      setLoading(false);
-      setDetail(null);
-      message.error(SESSION_EXPIRED_MESSAGE);
-      onOwnerStaleRef.current?.();
-      return;
-    }
-    const token = readSessionToken();
-    setLoading(true);
-    setDetail(null);
-    fetchPurchaseAnalyticsOrderDetail(orderId, categoryKey ? categoryKey.split(",") : [])
-      .then(({ data }) => {
-        if (seq !== seqRef.current) return;
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        setDetail(data);
-      })
-      .catch(() => {
-        if (seq !== seqRef.current) return;
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        message.error("订单明细加载失败");
-        onCloseRef.current();
-      })
-      .finally(() => {
-        // finally 也守卫：失效会话的收尾不触碰当前 UI 状态，并通知页级清旧上下文
-        if (seq !== seqRef.current) return;
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        setLoading(false);
-      });
-  }, [orderId, categoryKey, ownerToken]);
+    if (stale) onOwnerStale();
+    if (query.error) { message.error("订单明细加载失败"); onCloseRef.current(); }
+  }, [query.error, stale]);
 
   // 行金额只有一列，按含税标记解释；不能复用可能已因单头缺列翻转的 nominal_side。
   // 金额为 null 时不显示标签（包含权限遮蔽），0 则仍是可展示的金额。

@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_parts: true }); return legacyAuthorizationState(); },
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -61,8 +66,7 @@ describe("统一查询", () => {
     fireEvent.change(screen.getByPlaceholderText(/容量≥/), { target: { value: "8000" } });
     await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("ST8000", {
-      pageSize: 20, filters: { capacity_min: 8000 },
-    }));
+      pageSize: 20, filters: { capacity_min: 8000 }, capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     expect(unifiedSearch).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "按品类/规格筛选" })).toBeNull();
     expect(screen.getAllByText("GB")).toHaveLength(2);
@@ -71,12 +75,11 @@ describe("统一查询", () => {
 
   it("旧 q 链接保持可用，带全部规格的链接重放一次，后退恢复输入", async () => {
     renderAt("/parts?q=legacy&group_id=7&range=90d");
-    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("legacy", { pageSize: 20, filters: {} }));
+    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("legacy", { pageSize: 20, filters: {} , capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     act(() => navigate("/parts?q=disk&part_type=HDD&interface=SAS&capacity_min=0&capacity_max=8000&category_major=存储设备&category_minor=硬盘&group_id=7&range=90d"));
     await waitFor(() => expect(unifiedSearch).toHaveBeenLastCalledWith("disk", {
       pageSize: 20, filters: { part_type: "HDD", interface: "SAS", capacity_min: 0,
-        capacity_max: 8000, category_major: "存储设备", category_minor: "硬盘" },
-    }));
+        capacity_max: 8000, category_major: "存储设备", category_minor: "硬盘" }, capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     expect(screen.getByRole("spinbutton", { name: "最小容量" })).toHaveValue("0");
     expect(screen.getByRole("spinbutton", { name: "最大容量" })).toHaveValue("8000");
     expect(unifiedSearch).toHaveBeenCalledTimes(2);
@@ -91,7 +94,7 @@ describe("统一查询", () => {
     renderAt("/parts?group_id=7&range=90d");
     fireEvent.change(screen.getByRole("spinbutton", { name: "最小容量" }), { target: { value: "0" } });
     await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
-    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("", { pageSize: 20, filters: { capacity_min: 0 } }));
+    await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("", { pageSize: 20, filters: { capacity_min: 0 } , capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
     expect(unifiedSearch).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("请输入型号或关键词")).toBeNull();
@@ -111,8 +114,7 @@ describe("统一查询", () => {
     await user.click(screen.getByTitle("SAS"));
     await user.type(screen.getByRole("textbox", { name: "型号或关键词" }), "盘{Enter}");
     await waitFor(() => expect(unifiedSearch).toHaveBeenLastCalledWith("盘", {
-      pageSize: 20, filters: { part_type: "HDD", interface: "SAS", category_major: "服务器配件" },
-    }));
+      pageSize: 20, filters: { part_type: "HDD", interface: "SAS", category_major: "服务器配件" }, capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     expect(new URLSearchParams(location.search).has("category_minor")).toBe(false);
     expect(unifiedSearch).toHaveBeenCalledTimes(2);
   });
@@ -137,8 +139,7 @@ describe("统一查询", () => {
   it("URL 中负数或非数字容量被丢弃，其余规格照常查询", async () => {
     renderAt("/parts?capacity_min=-1&capacity_max=abc&part_type=HDD");
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith("", {
-      pageSize: 20, filters: { part_type: "HDD" },
-    }));
+      pageSize: 20, filters: { part_type: "HDD" }, capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })}));
     expect(screen.getByRole("spinbutton", { name: "最小容量" })).toHaveValue("");
     expect(screen.getByRole("spinbutton", { name: "最大容量" })).toHaveValue("");
   });
@@ -164,7 +165,7 @@ describe("统一查询", () => {
     await screen.findByText("加载失败");
     await userEvent.setup().click(screen.getByRole("button", { name: /重\s*试/ }));
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledTimes(2));
-    expect(unifiedSearch).toHaveBeenLastCalledWith("disk", { pageSize: 20, filters: { capacity_min: 8000 } });
+    expect(unifiedSearch).toHaveBeenLastCalledWith("disk", { pageSize: 20, filters: { capacity_min: 8000 } , capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })});
   });
 });
 
@@ -178,3 +179,6 @@ it("查询未完成时显示正规加载状态，完成后恢复空结果提示"
   expect(screen.queryByRole("status", { name: "加载中…" })).toBeNull();
   expect(screen.getByText("搜索并点击型号查看全景")).toBeVisible();
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_parts: true }));

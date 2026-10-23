@@ -1,3 +1,5 @@
+import { useAuthorizedQuery } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 销售分析筛选栏（D-41 + D-44）：日期预设（共用组件）+ 业务类型 / 客户 / 客户类型 /
 // 销售人员 / 商品大类 / 品牌多选（精确匹配；客户按规范名，候选随输入向后端补全）+
 // 金额区间拖动条（D-44 §7）+ 三金额多选（共用组件）+ 含已退货开关（D-40 §5）。
@@ -93,38 +95,19 @@ function CustomerSelect({
   ownerToken: string | null;
   onOwnerStale: () => void;
 }) {
-  const [found, setFound] = useState<SalesAnalyticsValueOption[] | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const seq = useRef(0);
-  // onOwnerStale 存 ref：父页每次渲染换新引用，timer 回调里经 ref 取最新
-  const onOwnerStaleRef = useRef(onOwnerStale);
-  onOwnerStaleRef.current = onOwnerStale;
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  const onSearch = (q: string) => {
-    if (timer.current) clearTimeout(timer.current);
-    if (!q.trim()) { setFound(null); return; }
-    timer.current = setTimeout(() => {
-      const mine = ++seq.current;
-      // 请求前 owner 守卫：失效即拒发 + 清旧候选 + 通知页级清理
-      if (sessionStale(ownerToken)) {
-        setFound(null);
-        onOwnerStaleRef.current?.();
-        return;
-      }
-      const token = readSessionToken();
-      fetchSalesAnalyticsOptions({}, q.trim())
-        .then(({ data }) => {
-          if (mine !== seq.current) return;
-          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
-          setFound(data.customers ?? []);
-        })
-        .catch(() => {
-          if (mine !== seq.current) return;
-          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
-          setFound([]);
-        });
-    }, 300);
-  };
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const stale = sessionStale(ownerToken);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+  useEffect(() => { if (stale) onOwnerStale(); }, [stale]);
+  const query = useAuthorizedQuery({ rule: actionRule("sales_analysis", "read_options"),
+    legacy: { sales_analysis: true }, onStale: onOwnerStale, queryKey: [debounced], enabled: !!debounced && !disabled && !stale,
+    query: async context => (await fetchSalesAnalyticsOptions({}, debounced, context)).data });
+  const found = search.trim() ? (query.data?.customers ?? []) : null;
+  const onSearch = setSearch;
   const base = found ?? initial ?? [];
   const known = new Set(base.map((o) => o.value));
   const options = [
@@ -144,7 +127,7 @@ function CustomerSelect({
       filterOption={false}
       onSearch={onSearch}
       options={options}
-      onChange={(v: string[]) => { setFound(null); onChange(v); }}
+      onChange={(v: string[]) => { setSearch(""); setDebounced(""); onChange(v); }}
     />
   );
   return disabled ? (

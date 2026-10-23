@@ -1,3 +1,5 @@
+import { withRouteAccess, useAuthorizedQuery, AuthorizedQueryError, useModuleAccess } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { App, Alert, Card, Grid, List, Segmented, Table } from "antd";
@@ -17,8 +19,10 @@ import { GRAN_OPTIONS, activatableProps } from "./shared";
 
 // 采购异常页：集中展示取消/作废/未成功。当前唯一有可靠数据的口径 = 取消单统计。
 // 其它异常（长期未完成等）后端暂无对应字段，不在前端伪造/推算——见页内说明。
-export default function PurchaseExceptionsPage() {
+function PurchaseExceptionsPage() {
   const { message } = App.useApp();
+  const access = useModuleAccess("purchase_records");
+  const hasCost = access.field("data_purchase_cost", true);
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const basis = useTaxBasis("purchase");
@@ -26,8 +30,7 @@ export default function PurchaseExceptionsPage() {
   const [sp, setSp] = useSearchParams();
   const gran = sp.get("granularity") || "month";
 
-  const [data, setData] = useState<CancellationStats | null>(null);
-  const [loading, setLoading] = useState(false);
+
   const [detail, setDetail] = useState<CancellationPeriodRow | null>(null);
   const seqRef = useRef(0);
 
@@ -38,20 +41,16 @@ export default function PurchaseExceptionsPage() {
     setSp(merged, { replace: true });
   };
 
-  useEffect(() => {
-    const seq = ++seqRef.current;
-    setLoading(true);
-    fetchCancellationStats({ granularity: gran })
-      .then(({ data }) => { if (seq === seqRef.current) setData(data); })
-      .catch(() => { if (seq === seqRef.current) message.error("取消单统计加载失败"); })
-      .finally(() => { if (seq === seqRef.current) setLoading(false); });
-  }, [gran]);
+  const query = useAuthorizedQuery({ rule: actionRule("purchase_records", "read"), legacy: { purchase_records: true },
+    queryKey: [gran], enabled: access.surface("exceptions", true),
+    query: async context => (await fetchCancellationStats({ granularity: gran }, context)).data });
+  const { data, loading } = query;
 
   const amountPair = (row: Pick<CancellationPeriodRow,
     "cancelled_amount" | "cancelled_amount_ex" | "cancelled_amount_inc">) =>
     completeTaxPair(
-      row.cancelled_amount_inc ?? null,
-      row.cancelled_amount_ex ?? row.cancelled_amount ?? null,
+      hasCost ? row.cancelled_amount_inc ?? null : null,
+      hasCost ? row.cancelled_amount_ex ?? row.cancelled_amount ?? null : null,
     );
 
   const columns: ColumnsType<CancellationPeriodRow> = [
@@ -62,7 +61,7 @@ export default function PurchaseExceptionsPage() {
     { title: "取消/作废", dataIndex: "cancelled", width: 98, align: "right",
       render: (v: number) => <span style={{ color: v > 0 ? "#c0524a" : undefined }}>{v}</span> },
     { title: "取消率", dataIndex: "cancel_rate", width: 88, align: "right", render: (v: number) => `${v}%` },
-    ...taxSidesForBasis(basis).map((taxSide) => ({
+    ...(hasCost ? taxSidesForBasis(basis) : []).map((taxSide) => ({
       title: `取消金额(${taxSide === "inc" ? "含税" : "不含税"})`,
       key: `cancelled_amount_${taxSide}`,
       width: 138,
@@ -81,7 +80,8 @@ export default function PurchaseExceptionsPage() {
         subtitle={`集中看采购取消 / 作废 / 未成功；取消金额按管理员采购${taxBasisCaption(basis)}口径展示`}
         extra={!isMobile ? <Segmented options={GRAN_OPTIONS} value={gran} onChange={(v) => setGran(v as string)} /> : undefined}
       />
-      <Card>
+      <AuthorizedQueryError error={query.error} retry={query.retry} />
+      {access.surface("exceptions", true) && <Card>
         {isMobile && (
           <div style={{ marginBottom: 14 }}>
             <Segmented options={GRAN_OPTIONS} value={gran} onChange={(v) => setGran(v as string)} block />
@@ -147,7 +147,7 @@ export default function PurchaseExceptionsPage() {
         <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
           含全部状态的采购单（含已取消/作废）。取消单仅用于此处统计，<b>不计入</b>成本/库存/利润——那些口径只算「已生效」。
         </div>
-      </Card>
+      </Card>}
 
       <MobileDetailDrawer
         open={detail != null}
@@ -168,3 +168,5 @@ export default function PurchaseExceptionsPage() {
     </>
   );
 }
+
+export default withRouteAccess(PurchaseExceptionsPage, "/purchases/exceptions");

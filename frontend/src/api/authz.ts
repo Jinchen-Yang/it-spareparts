@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { knownModules, vocabulary, surfaces as generatedSurfaces, type Rule } from "../authz/rules";
 
 export const AUTHZ_FIELDS = [
   { id: "data_supplier", label: "供应商信息" },
@@ -101,6 +102,8 @@ export function validateAuthzSnapshot(value: AuthzSnapshot): AuthzSnapshot {
     protocolError();
   for (const [id, r] of Object.entries(value.resources)) {
     if (
+      !(id in knownModules) ||
+      knownModules[id] !== r.migration_state ||
       !validResourceState(r) ||
       !safeVersion(r.grant_version) ||
       !record(r.decisions) ||
@@ -109,9 +112,10 @@ export function validateAuthzSnapshot(value: AuthzSnapshot): AuthzSnapshot {
       protocolError();
     if (
       r.migration_state === "implemented" &&
-      (id !== "sales_analysis" ||
-        Object.keys(r.decisions).some((a) => !["read", "export"].includes(a)) ||
-        r.field_permissions.some((f) => !AUTHZ_FIELDS.some((k) => k.id === f)))
+      (!vocabulary[id] ||
+        Object.keys(r.decisions).some((a) => !(a in vocabulary[id].actions)) ||
+        r.field_permissions.some((f) => !(f in vocabulary[id].fields)) ||
+        (r.scope_kind !== "none" && !(r.scope_kind in vocabulary[id].scopes)))
     )
       protocolError();
     for (const decision of Object.values(r.decisions))
@@ -194,6 +198,7 @@ export interface ResourceDescriptor extends ResourceState {
     label: string;
     kind: "data" | "display" | "mutation";
     requires_actions: string[];
+    requires_any_actions: string[];
     requires_fields: string[];
   }[];
   scopes: {
@@ -208,6 +213,9 @@ export interface ResourceDescriptor extends ResourceState {
     id: string;
     label: string;
     display_actions: string[];
+    page_routes: string[];
+    route_entry: boolean;
+    data_rule: Rule;
     data_requirements: { resource_id: string; actions: string[] }[];
   }[];
   legacy_sources: string[];
@@ -398,6 +406,17 @@ function validDecision(v: unknown): v is Decision {
         typeof v.reason.message === "string"))
   );
 }
+function ruleSignature(rule: Rule): string {
+  if (!rule || !Array.isArray(rule.anyOf)) return protocolError();
+  return JSON.stringify(rule.anyOf.map(clause => {
+    if (!Array.isArray(clause) || !clause.length) return protocolError();
+    return clause.map(need => {
+      if (!need || typeof need.resource_id !== "string" || !uniqueStrings(need.actions) || !need.actions.length || !uniqueStrings(need.field_permissions)) return protocolError();
+      return [need.resource_id, [...need.actions].sort(), [...need.field_permissions].sort()];
+    });
+  }));
+}
+const sameStrings = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(x => b.includes(x));
 export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
   validateEnvelope(v);
   if (
@@ -407,6 +426,8 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
     protocolError();
   for (const m of v.modules) {
     if (
+      !(m.id in knownModules) ||
+      knownModules[m.id] !== m.migration_state ||
       !validResourceState(m) ||
       typeof m.id !== "string" ||
       typeof m.label !== "string" ||
@@ -428,8 +449,10 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
       if (
         !["data", "display", "mutation"].includes(a.kind) ||
         !uniqueStrings(a.requires_actions) ||
+        !uniqueStrings(a.requires_any_actions) ||
         !uniqueStrings(a.requires_fields) ||
         a.requires_actions.some((id) => !actions.includes(id)) ||
+        a.requires_any_actions.some((id) => !actions.includes(id)) ||
         a.requires_fields.some((id) => !fields.includes(id))
       )
         protocolError();
@@ -441,8 +464,18 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
         protocolError();
     if (
       m.migration_state === "implemented" &&
-      (m.id !== "sales_analysis" ||
-        actions.some((a) => !["read", "export"].includes(a)))
+      (!vocabulary[m.id] ||
+        !sameStrings(actions, Object.keys(vocabulary[m.id].actions)) ||
+        !sameStrings(fields, Object.keys(vocabulary[m.id].fields)) ||
+        !sameStrings(scopes, Object.keys(vocabulary[m.id].scopes)) ||
+        m.denial_scope !== vocabulary[m.id].denial_scope ||
+        m.field_permissions.some(f => !sameStrings(f.requires_fields, vocabulary[m.id].fields[f.id])) ||
+        m.scopes.some(s => s.requires_context !== vocabulary[m.id].scopes[s.id].requires_context) ||
+        m.actions.some(a => {
+          const expected = vocabulary[m.id].actions[a.id];
+          return a.kind !== expected.kind || !sameStrings(a.requires_actions, expected.requires_actions) ||
+            !sameStrings(a.requires_any_actions, expected.requires_any_actions) || !sameStrings(a.requires_fields, expected.requires_fields);
+        }))
     )
       protocolError();
   }
@@ -454,6 +487,13 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
         !Array.isArray(s.data_requirements)
       )
         protocolError();
+      if (m.migration_state === "implemented") {
+        const expected = generatedSurfaces[s.id];
+        if (!expected || !uniqueStrings(s.page_routes) || typeof s.route_entry !== "boolean" ||
+            !sameStrings(s.page_routes, expected.page_routes) || s.route_entry !== expected.route_entry ||
+            !sameStrings(s.display_actions, expected.display_actions) ||
+            ruleSignature(s.data_rule) !== ruleSignature(expected.data_rule)) protocolError();
+      }
       for (const r of s.data_requirements) {
         const source = v.modules.find((x) => x.id === r.resource_id);
         if (
@@ -489,6 +529,8 @@ export function configurationErrors(
         errors.push(
           `${a.label}需要动作「${m.actions.find((x) => x.id === need)?.label || need}」`,
         );
+    if (a.requires_any_actions.length && !a.requires_any_actions.some(need => c.actions.includes(need)))
+      errors.push(`${a.label}需要以下任一动作：${a.requires_any_actions.map(need => m.actions.find(x => x.id === need)?.label || need).join("、")}`);
     for (const need of a.requires_fields)
       if (!c.field_permissions.includes(need))
         errors.push(

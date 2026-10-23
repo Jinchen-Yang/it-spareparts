@@ -1,3 +1,5 @@
+import { withRouteAccess, useAuthorizedQuery, AuthorizedQueryError, useModuleAccess } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { App, Card, Grid, Input, List, Segmented, Tag } from "antd";
@@ -14,13 +16,16 @@ import type { RecentPurchaseRow } from "../../api";
 import type { PoolAnalysisRange } from "../../api/poolAnalysis";
 import { useTaxBasis } from "../../context/TaxBasis";
 import {
-  DAY_OPTIONS, STATUS_FILTER, STATUS_COLOR, fmtMoney, byTax, readNum,
+  DAY_OPTIONS, STATUS_FILTER, STATUS_COLOR, fmtMoney as formatMoney, byTax, readNum,
   useUrlPatch, activatableProps, mobileUnitPrice,
 } from "./shared";
 
 // 逐笔采购明细页：按时间/型号/供应商/状态筛选、分页浏览。数据源 listRecentPurchases 原样复用。
-export default function PurchaseRecordsPage() {
+function PurchaseRecordsPage() {
   const { message } = App.useApp();
+  const access = useModuleAccess("purchase_records");
+  const hasCost = access.field("data_purchase_cost", true);
+  const fmtMoney: typeof formatMoney = value => hasCost ? formatMoney(value) : "—";
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const basis = useTaxBasis("purchase");
@@ -47,31 +52,15 @@ export default function PurchaseRecordsPage() {
   useEffect(() => { setQ(qParam); }, [qParam]);
   useEffect(() => { setSupplier(supplierParam); }, [supplierParam]);
 
-  const [total, setTotal] = useState(0);
-  const [rows, setRows] = useState<RecentPurchaseRow[]>([]);
-  const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<RecentPurchaseRow | null>(null);
-  const loadSeqRef = useRef(0);
-
-  useEffect(() => {
-    const seq = ++loadSeqRef.current;
-    setLoading(true);
-    listRecentPurchases({
-      q: qParam.trim() || undefined,
-      supplier: supplierParam.trim() || undefined,
-      days, page, page_size: pageSize, status,
-    })
-      .then(({ data }) => {
-        if (seq !== loadSeqRef.current) return;
-        setRows(data.items);
-        setTotal(data.total);
-      })
-      .catch(() => { if (seq === loadSeqRef.current) message.error("查询失败，请稍后重试"); })
-      .finally(() => { if (seq === loadSeqRef.current) setLoading(false); });
-  }, [days, status, qParam, supplierParam, page, pageSize]);
+  const query = useAuthorizedQuery({ rule: actionRule("purchase_records", "read"), legacy: { purchase_records: true },
+    queryKey: [days, status, qParam, supplierParam, page, pageSize], enabled: access.surface("records", true),
+    query: async context => (await listRecentPurchases({ q: qParam.trim() || undefined, supplier: supplierParam.trim() || undefined,
+      days, page, page_size: pageSize, status }, context)).data });
+  const rows = query.data?.items ?? [], total = query.data?.total ?? 0, loading = query.loading;
 
   // 单价/金额双列：按订单税口径解释原值，缺失侧统一按 13% 补齐。
-  const priceColumns: ColumnsType<RecentPurchaseRow> = [
+  const priceColumns: ColumnsType<RecentPurchaseRow> = hasCost ? [
     { title: "口径", key: "tax_basis", width: 74, align: "center",
       render: (_, r) => (r.is_tax_inclusive == null
         ? <Tag color="orange">未标注·按未税</Tag>
@@ -84,7 +73,7 @@ export default function PurchaseRecordsPage() {
       render: (_, r) => fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).inc) }] as ColumnsType<RecentPurchaseRow> : []),
     ...(basis !== "inc" ? [{ title: "金额(不含税)", key: "amt_ex", width: 120, align: "right",
       render: (_, r) => fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).ex) }] as ColumnsType<RecentPurchaseRow> : []),
-  ];
+  ] : [];
 
   const desktopColumns: ColumnsType<RecentPurchaseRow> = [
     { title: "采购日期", dataIndex: "order_date", width: 110, fixed: "left", render: (v) => v || "—" },
@@ -151,7 +140,8 @@ export default function PurchaseRecordsPage() {
   return (
     <>
       <PageHeader title="采购明细" subtitle="按时间 / 型号 / 供应商 / 状态查询逐笔采购记录" />
-      <Card>
+      <AuthorizedQueryError error={query.error} retry={query.retry} />
+      {access.surface("records", true) && <Card>
         <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
           <Segmented options={DAY_OPTIONS} value={days} onChange={(v) => patch({ days: v as number, page: 1 })} />
           <Input.Search
@@ -199,7 +189,7 @@ export default function PurchaseRecordsPage() {
                       range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} side="purchase" />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4, fontSize: 13 }}>
-                    <span>数量 {r.qty == null ? "—" : Number(r.qty)} · {mobileUnitPrice(r, basis)}</span>
+                    <span>数量 {r.qty == null ? "—" : Number(r.qty)}{hasCost && <> · {mobileUnitPrice(r, basis)}</>}</span>
                     {r.data_status && <Tag color={STATUS_COLOR[r.data_status] || "default"}>{r.data_status}</Tag>}
                   </div>
                 </div>
@@ -224,7 +214,7 @@ export default function PurchaseRecordsPage() {
             }}
           />
         )}
-      </Card>
+      </Card>}
 
       <MobileDetailDrawer
         open={detail != null}
@@ -239,3 +229,5 @@ export default function PurchaseRecordsPage() {
     </>
   );
 }
+
+export default withRouteAccess(PurchaseRecordsPage, "/purchases/records");

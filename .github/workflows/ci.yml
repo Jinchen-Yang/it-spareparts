@@ -173,6 +173,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: 校验前端授权词表与后端执行目录一致
+        run: |
+          python backend/scripts/generate_authz_frontend.py --check
+          python backend/scripts/generate_authz_policies.py --check
       - uses: actions/setup-node@v7
         with:
           # 22 LTS：Node 20 下 CollectionMilestoneFollowUpModal 的 antd

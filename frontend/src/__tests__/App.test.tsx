@@ -284,7 +284,7 @@ it("新授权拒绝管理员时不接受旧页面全通", async () => {
   getAuthzSnapshot.mockResolvedValue({ data: authzSnapshot({
     enabled: true, read: false, export: false, scope: "none", customer_count: 0, reason: "未分配授权", field_permissions: [] }, {version: "v2", canManage: true}) });
   render(<App />);
-  expect(await screen.findByText("没有销售分析访问权限")).toBeInTheDocument();
+  expect(await screen.findByText("没有此页面访问权限")).toBeInTheDocument();
   expect(screen.queryByText("销售分析页面")).not.toBeInTheDocument();
 });
 it("快照请求失败时销售分析 fail closed，不能回退老板旧权限", async () => {

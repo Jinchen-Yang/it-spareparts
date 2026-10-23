@@ -1,3 +1,5 @@
+import { withRouteAccess, useSurface, useAccess, useAuthorizedRunner, AuthorizationCancelled } from "../authz/access";
+import { actionRule, surfaceRule } from "../authz/rules";
 import { useCallback, useEffect, useState } from "react";
 import { App, Alert, Button, Card, Radio, Space, Spin, Typography } from "antd";
 import PageHeader from "../components/PageHeader";
@@ -56,8 +58,13 @@ function isConflict(error: unknown): boolean {
   );
 }
 
-export default function SystemSettingsPage() {
+function SystemSettingsPage() {
   const { message } = App.useApp();
+  const legacyAdmin = localStorage.getItem("role") === "admin";
+  const readAccess = useAccess(actionRule("display_policy", "read"), { legacy: { display_policy: legacyAdmin } });
+  const updateAccess = useSurface("display_policy.update", { legacy: { display_policy: legacyAdmin } });
+  const auditAccess = useAccess(actionRule("display_policy", "read_audit_identity"), { legacy: { display_policy: legacyAdmin } });
+  const run = useAuthorizedRunner();
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,42 +74,43 @@ export default function SystemSettingsPage() {
   const { refresh: refreshDisplayPolicy } = useTaxDisplayPolicy();
 
   const load = useCallback(async () => {
+    if (!readAccess.allowed) return;
     setLoading(true);
     setSettings(null);
     setDraft(null);
     setError(null);
     setConflict(false);
     try {
-      const { data } = await getSystemSettings();
+      const { data } = await run({ rule: actionRule("display_policy", "read"), legacy: { display_policy: legacyAdmin }, request: context => getSystemSettings(context) });
       setSettings(data);
       setDraft(toDraft(data));
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthorizationCancelled) return;
       setError("加载系统设置失败，请检查网络后重新加载。");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [run, readAccess.allowed, legacyAdmin]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const save = async () => {
-    if (!settings || !draft) return;
+    if (!settings || !draft || !updateAccess.allowed) return;
     setSaving(true);
     setError(null);
     setConflict(false);
     try {
-      const { data } = await updateSystemSettings({
-        ...draft,
-        expected_version: settings.version,
-      });
+      const { data } = await run({ rule: surfaceRule("display_policy.update"), legacy: { display_policy: legacyAdmin },
+        request: context => updateSystemSettings({ ...draft, expected_version: settings.version }, context) });
       setSettings(data);
       setDraft(toDraft(data));
       announceTaxDisplayPolicyChanged(data.version);
       await refreshDisplayPolicy(data.version);
       message.success("统一展示口径已保存并生效");
     } catch (requestError) {
+      if (requestError instanceof AuthorizationCancelled) return;
       if (isConflict(requestError)) {
         setConflict(true);
         setError(
@@ -147,7 +155,7 @@ export default function SystemSettingsPage() {
           <Radio.Group
             name={`system-settings-${key}`}
             value={draft?.[key]}
-            disabled={loading || saving || conflict}
+            disabled={!updateAccess.allowed || loading || saving || conflict}
             onChange={(event) => {
               updateBasis(key, event.target.value as TaxDisplayBasis);
             }}
@@ -213,9 +221,9 @@ export default function SystemSettingsPage() {
             )}
             <Text type="secondary">
               当前版本：v{settings.version}
-              {settings.updated_by ? ` · 最近由 ${settings.updated_by} 更新` : ""}
+              {auditAccess.allowed && settings.updated_by ? ` · 最近由 ${settings.updated_by} 更新` : ""}
             </Text>
-            <div>
+            {updateAccess.allowed && <div>
               <Button
                 type="primary"
                 loading={saving}
@@ -229,10 +237,12 @@ export default function SystemSettingsPage() {
               >
                 保存设置
               </Button>
-            </div>
+            </div>}
           </Space>
         ) : null}
       </Card>
     </>
   );
 }
+
+export default withRouteAccess(SystemSettingsPage, "/system-settings");

@@ -1,6 +1,11 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: legacyAuthorizationState,
+}));
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen } from "../../test/antdRender";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, AccountsMeta } from "../../api/accounts";
 
 vi.mock("../../api", () => ({ default: { get: async (url: string) => ({ data: url === "/governance/merges"
@@ -38,3 +43,6 @@ describe("补充扫描站点的北京时间展示", () => {
     expect(screen.getByText("2026-10-02 00:05")).toBeInTheDocument();
   });
 });
+
+// Explicit pre-cutover permission context for existing component behaviour tests.
+beforeEach(() => prepareLegacyPageFixture({page_governance: true}));

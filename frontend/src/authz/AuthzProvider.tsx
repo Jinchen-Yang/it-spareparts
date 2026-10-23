@@ -14,14 +14,28 @@ import {
   type AuthzSnapshot,
 } from "../api/authz";
 import { AUTHZ_SESSION_INVALIDATED } from "./events";
+import { actionAllowed, ruleAllowed, type Rule } from "./rules";
 
+export interface AuthorizationCapture {
+  token: string;
+  snapshotVersion: string;
+  generation: number;
+}
 interface AuthzState {
+  token: string | null;
+  generation: number;
+  signal?: AbortSignal;
+  isCurrent: (capture: AuthorizationCapture) => boolean;
+  invalidate: () => void;
   status: "loading" | "ready" | "error";
   snapshot: AuthzSnapshot | null;
   refresh: () => Promise<void>;
 }
-const AuthzContext = createContext<AuthzState & { token: string | null }>({
+const AuthzContext = createContext<AuthzState>({
   token: null,
+  generation: 0,
+  isCurrent: () => false,
+  invalidate: () => {},
   status: "loading",
   snapshot: null,
   refresh: async () => {},
@@ -32,7 +46,7 @@ export function useAuthz(): AuthzState {
   // lend the previous account's snapshot to a newly mounted route.
   return localStorage.getItem("token") === value.token
     ? value
-    : { status: "loading", snapshot: null, refresh: value.refresh };
+    : { ...value, status: "loading", snapshot: null };
 }
 
 export function AuthzProvider({
@@ -48,9 +62,13 @@ export function AuthzProvider({
     snapshot: AuthzSnapshot | null;
   }>({ token, status: "loading", snapshot: null });
   const sequence = useRef(0);
+  const active = useRef<AuthzSnapshot | null>(null);
+  const owner = useRef(token);
+  owner.current = token;
   const controller = useRef<AbortController>();
   const refresh = useCallback(async () => {
     const request = ++sequence.current;
+    active.current = null;
     controller.current?.abort();
     const abort = new AbortController();
     controller.current = abort;
@@ -64,6 +82,7 @@ export function AuthzProvider({
         localStorage.getItem("token") !== token
       )
         return;
+      active.current = snapshot;
       setState({ token, status: "ready", snapshot });
     } catch {
       if (
@@ -74,6 +93,16 @@ export function AuthzProvider({
       setState({ token, status: "error", snapshot: null });
     }
   }, [token]);
+  const invalidate = useCallback(() => {
+    ++sequence.current;
+    active.current = null;
+    controller.current?.abort();
+    setState({ token, status: "error", snapshot: null });
+  }, [token]);
+  const isCurrent = useCallback((capture: AuthorizationCapture) =>
+    capture.token === owner.current && capture.token === localStorage.getItem("token") &&
+    capture.generation === sequence.current && active.current?.version === capture.snapshotVersion &&
+    !controller.current?.signal.aborted, []);
   useEffect(() => {
     void refresh();
     const visible = () => {
@@ -84,27 +113,30 @@ export function AuthzProvider({
         (event as CustomEvent<{ token: string | null }>).detail.token !== token
       )
         return;
-      ++sequence.current;
-      controller.current?.abort();
-      setState({ token, status: "error", snapshot: null });
+      invalidate();
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", visible);
     window.addEventListener(AUTHZ_SESSION_INVALIDATED, invalidated);
     return () => {
       ++sequence.current;
+      active.current = null;
       controller.current?.abort();
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", visible);
       window.removeEventListener(AUTHZ_SESSION_INVALIDATED, invalidated);
     };
-  }, [refresh, token]);
+  }, [refresh, token, invalidate]);
   const current =
     state.token === token && localStorage.getItem("token") === token;
   return (
     <AuthzContext.Provider
       value={{
         token,
+        generation: sequence.current,
+        signal: controller.current?.signal,
+        isCurrent,
+        invalidate,
         status: current ? state.status : "loading",
         snapshot: current ? state.snapshot : null,
         refresh,
@@ -147,14 +179,7 @@ export function resourceAllowed(
   resource: string,
   action: string,
 ): boolean {
-  if (snapshot?.schema_version !== 1 || resource !== "sales_analysis")
-    return false;
-  const state = snapshot.resources[resource];
-  return (
-    state?.migration_state === "implemented" &&
-    state.runtime_state === "enabled" &&
-    state.decisions[action]?.effect === "allow"
-  );
+  return actionAllowed(snapshot, resource, action);
 }
 export function resourceUsesLegacy(
   snapshot: AuthzSnapshot | null,
@@ -182,33 +207,35 @@ export function salesAccess(
   if (!r) return null;
   return {
     enabled: !resourceUsesLegacy(snapshot, "sales_analysis"),
-    read: resourceAllowed(snapshot, "sales_analysis", "read"),
+    read: ["read_groups", "read_trend", "read_orders", "read_summary"].some(a => resourceAllowed(snapshot, "sales_analysis", a)),
     export: resourceAllowed(snapshot, "sales_analysis", "export"),
     scope:
       r.scope_kind === "all" || r.scope_kind === "assigned_customers"
         ? r.scope_kind
         : "none",
     customer_count: null,
-    reason: r.decisions.read?.reason?.message || "未获得销售分析权限",
+    reason: "未获得销售分析权限",
     field_permissions: r.field_permissions,
   };
 }
 export function AuthorizationBoundary({
   resource,
   action,
+  rule,
   children,
   legacy,
 }: {
-  resource: string;
-  action: string;
+  resource?: string;
+  action?: string;
+  rule?: Rule;
   children: ReactNode;
   legacy?: ReactNode;
 }) {
   const { snapshot, status } = useAuthz();
   if (status !== "ready") return <AuthzUnavailable />;
-  if (resourceUsesLegacy(snapshot, resource) && legacy !== undefined)
+  if (resource && resourceUsesLegacy(snapshot, resource) && legacy !== undefined)
     return <>{legacy}</>;
-  return resourceAllowed(snapshot, resource, action) ? (
+  return (rule ? ruleAllowed(snapshot, rule) : !!resource && !!action && resourceAllowed(snapshot, resource, action)) ? (
     <>{children}</>
   ) : (
     <Alert type="warning" showIcon message="没有此模块操作权限" />

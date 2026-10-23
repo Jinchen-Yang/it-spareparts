@@ -1,18 +1,54 @@
+import {
+  useAuthorizedRunner,
+  useModuleAccess,
+  legacyRouteAllowed,
+  AuthorizationCancelled,
+  AccessBoundary,
+} from "../../authz/access";
+import { actionRule, allRule, anyRule, surfaceRule } from "../../authz/rules";
 import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Alert, Button, Descriptions, Drawer, Empty, Grid, Input, List, Modal, Pagination, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import {
+  App,
+  Alert,
+  Button,
+  Descriptions,
+  Drawer,
+  Empty,
+  Grid,
+  Input,
+  List,
+  Modal,
+  Pagination,
+  Select,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  decideDataQualityIssue, getDataQualityIssue, listDataQualityIssues, reopenDataQualityIssue,
-  type DataQualityDecision, type DataQualityIssueDetail, type DataQualityIssueListItem,
-  type DataQualityIssueSide, type DataQualityIssueStatus, type DataQualityEvidenceValue,
+  decideDataQualityIssue,
+  getDataQualityIssue,
+  listDataQualityIssues,
+  reopenDataQualityIssue,
+  type DataQualityDecision,
+  type DataQualityIssueDetail,
+  type DataQualityIssueListItem,
+  type DataQualityIssueSide,
+  type DataQualityIssueStatus,
+  type DataQualityEvidenceValue,
 } from "../../api/dataQuality";
 import { activatableProps } from "../purchases/shared";
 
 const { Text } = Typography;
 const PAGE_SIZE = 20;
 
-const STATUS_META: Record<DataQualityIssueStatus, { label: string; color: string }> = {
+const STATUS_META: Record<
+  DataQualityIssueStatus,
+  { label: string; color: string }
+> = {
   open: { label: "待核实", color: "orange" },
   confirmed_valid: { label: "确认数据正确", color: "green" },
   confirmed_source_error: { label: "确认源数据错误", color: "magenta" },
@@ -29,7 +65,11 @@ const RULE_OPTIONS = [
 type PendingAction = DataQualityDecision | "reopen";
 
 function readPermissions(): Record<string, boolean> {
-  try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    return {};
+  }
 }
 
 function reviewPermissionState() {
@@ -37,12 +77,19 @@ function reviewPermissionState() {
     return { hasAction: true, hasPurchaseCost: true, canReview: true };
   }
   const p = readPermissions();
-  const hasAction = p.page_governance === true && p.action_data_quality_review === true;
+  const hasAction =
+    p.page_governance === true && p.action_data_quality_review === true;
   const hasPurchaseCost = p.data_purchase_cost === true;
-  return { hasAction, hasPurchaseCost, canReview: hasAction && hasPurchaseCost };
+  return {
+    hasAction,
+    hasPurchaseCost,
+    canReview: hasAction && hasPurchaseCost,
+  };
 }
 
-function issueLabel(row: Pick<DataQualityIssueListItem, "order_no" | "pn_std">) {
+function issueLabel(
+  row: Pick<DataQualityIssueListItem, "order_no" | "pn_std">,
+) {
   return `查看疑点 ${row.order_no || "无单号"} ${row.pn_std || "无型号"} 详情`;
 }
 
@@ -53,7 +100,9 @@ function formatQuantity(quantity: number | null, unit: string | null) {
 
 function formatPrice(value: number | null, restricted = false) {
   if (restricted) return "无价格权限";
-  return value == null ? "—" : `¥${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  return value == null
+    ? "—"
+    : `¥${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
 function statusTag(status: DataQualityIssueStatus) {
@@ -62,28 +111,66 @@ function statusTag(status: DataQualityIssueStatus) {
 }
 
 function sideTag(side: DataQualityIssueSide) {
-  return <Tag color={side === "purchase" ? "geekblue" : "purple"}>{side === "purchase" ? "采购" : "销售"}</Tag>;
+  return (
+    <Tag color={side === "purchase" ? "geekblue" : "purple"}>
+      {side === "purchase" ? "采购" : "销售"}
+    </Tag>
+  );
 }
 
-function ruleName(row: Pick<DataQualityIssueListItem, "rule_code" | "rule_label">) {
-  return row.rule_label || RULE_OPTIONS.find((item) => item.value === row.rule_code)?.label || row.rule_code;
+function ruleName(
+  row: Pick<DataQualityIssueListItem, "rule_code" | "rule_label">,
+) {
+  return (
+    row.rule_label ||
+    RULE_OPTIONS.find((item) => item.value === row.rule_code)?.label ||
+    row.rule_code
+  );
 }
 
-function evidenceValue(key: string, value: DataQualityEvidenceValue, priceRestricted: boolean) {
-  if (priceRestricted && /price|amount|cost|金额|价格|单价/i.test(key)) return "无价格权限";
+function evidenceValue(
+  key: string,
+  value: DataQualityEvidenceValue,
+  priceRestricted: boolean,
+) {
+  if (priceRestricted && /price|amount|cost|金额|价格|单价/i.test(key))
+    return "无价格权限";
   if (value == null || value === "") return "—";
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 
-export default function DataQualityIssuesPanel() {
+function DataQualityIssuesPanel() {
+  const access = useModuleAccess("data_quality");
+  const run = useAuthorizedRunner();
+  const legacy = { data_quality: legacyRouteAllowed("/governance") };
+  const canPurchase = access.action(
+    "read_purchase_issues",
+    legacy.data_quality,
+  );
+  const canSales = access.action("read_sales_issues", legacy.data_quality);
+  const sideRule = (side?: DataQualityIssueSide) =>
+    side
+      ? actionRule("data_quality", `read_${side}_issues`)
+      : anyRule(
+          actionRule("data_quality", "read_purchase_issues"),
+          actionRule("data_quality", "read_sales_issues"),
+        );
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const reviewPermission = reviewPermissionState();
-  const canReview = reviewPermission.canReview;
-  const [status, setStatus] = useState<DataQualityIssueStatus | undefined>("open");
+  const oldReview = reviewPermissionState();
+  const reviewPermission = {
+    hasAction: access.action("review", oldReview.hasAction),
+    hasPurchaseCost: access.field(
+      "data_purchase_cost",
+      oldReview.hasPurchaseCost,
+    ),
+  };
+  const [status, setStatus] = useState<DataQualityIssueStatus | undefined>(
+    "open",
+  );
   const [side, setSide] = useState<DataQualityIssueSide | undefined>();
   const [ruleCode, setRuleCode] = useState<string | undefined>();
   const [queryInput, setQueryInput] = useState("");
@@ -95,10 +182,16 @@ export default function DataQualityIssuesPanel() {
   const [loadError, setLoadError] = useState("");
   const [detail, setDetail] = useState<DataQualityIssueDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(
+    null,
+  );
   const [note, setNote] = useState("");
   const [noteError, setNoteError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const canReview =
+    access.action("review", oldReview.canReview) &&
+    !!detail &&
+    (detail.side === "purchase" ? canPurchase : canSales);
   const listRequestSeq = useRef(0);
   const detailRequestSeq = useRef(0);
 
@@ -106,52 +199,74 @@ export default function DataQualityIssuesPanel() {
     const byCode = new Map(RULE_OPTIONS.map((item) => [item.value, item]));
     for (const row of rows) {
       if (!byCode.has(row.rule_code)) {
-        byCode.set(row.rule_code, { value: row.rule_code, label: ruleName(row) });
+        byCode.set(row.rule_code, {
+          value: row.rule_code,
+          label: ruleName(row),
+        });
       }
     }
     return Array.from(byCode.values());
   }, [rows]);
 
-  const load = useCallback(async (targetPage = page) => {
-    const requestSeq = ++listRequestSeq.current;
-    setLoading(true);
-    setLoadError("");
-    try {
-      const data = await listDataQualityIssues({
-        ...(status ? { status } : {}),
-        ...(side ? { side } : {}),
-        ...(ruleCode ? { rule_code: ruleCode } : {}),
-        ...(query ? { q: query } : {}),
-        page: targetPage,
-        page_size: PAGE_SIZE,
-      });
-      if (requestSeq !== listRequestSeq.current) return;
-      setRows(data.items);
-      setTotal(data.total);
-      setPage(data.page || targetPage);
-    } catch {
-      if (requestSeq === listRequestSeq.current) {
-        setRows([]);
-        setTotal(0);
-        setLoadError("数据疑点加载失败，当前筛选结果未显示。");
-        message.error("数据疑点加载失败，请稍后重试");
+  const load = useCallback(
+    async (targetPage = page) => {
+      const requestSeq = ++listRequestSeq.current;
+      setLoading(true);
+      setLoadError("");
+      try {
+        const data = await run({
+          rule: allRule(surfaceRule("data_quality.issues"), sideRule(side)),
+          legacy,
+          request: (capture) =>
+            listDataQualityIssues(
+              {
+                ...(status ? { status } : {}),
+                ...(side ? { side } : {}),
+                ...(ruleCode ? { rule_code: ruleCode } : {}),
+                ...(query ? { q: query } : {}),
+                page: targetPage,
+                page_size: PAGE_SIZE,
+              },
+              capture,
+            ),
+        });
+        if (requestSeq !== listRequestSeq.current) return;
+        setRows(data.items);
+        setTotal(data.total);
+        setPage(data.page || targetPage);
+      } catch (error) {
+        if (error instanceof AuthorizationCancelled) return;
+        if (requestSeq === listRequestSeq.current) {
+          setRows([]);
+          setTotal(0);
+          setLoadError("数据疑点加载失败，当前筛选结果未显示。");
+          message.error("数据疑点加载失败，请稍后重试");
+        }
+      } finally {
+        if (requestSeq === listRequestSeq.current) setLoading(false);
       }
-    } finally {
-      if (requestSeq === listRequestSeq.current) setLoading(false);
-    }
-  }, [page, query, ruleCode, side, status]);
+    },
+    [page, query, ruleCode, side, status],
+  );
 
-  useEffect(() => { void load(1); }, [status, side, ruleCode, query]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void load(1);
+  }, [status, side, ruleCode, query]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openDetail = async (row: DataQualityIssueListItem) => {
     const requestSeq = ++detailRequestSeq.current;
     setDetail(null);
     setDetailLoading(true);
     try {
-      const loaded = await getDataQualityIssue(row.id);
+      const loaded = await run({
+        rule: sideRule(row.side),
+        legacy,
+        request: (capture) => getDataQualityIssue(row.id, capture),
+      });
       if (requestSeq !== detailRequestSeq.current) return;
       setDetail(loaded);
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthorizationCancelled) return;
       if (requestSeq === detailRequestSeq.current) {
         setDetail(null);
         message.error("疑点详情加载失败，请稍后重试");
@@ -163,7 +278,11 @@ export default function DataQualityIssuesPanel() {
 
   const refreshDetail = async (id: number) => {
     const requestSeq = ++detailRequestSeq.current;
-    const fresh = await getDataQualityIssue(id);
+    const fresh = await run({
+      rule: sideRule(detail?.side),
+      legacy,
+      request: (capture) => getDataQualityIssue(id, capture),
+    });
     if (requestSeq === detailRequestSeq.current) setDetail(fresh);
   };
 
@@ -174,7 +293,7 @@ export default function DataQualityIssuesPanel() {
   };
 
   const submitAction = async () => {
-    if (!detail || !pendingAction) return;
+    if (!detail || !pendingAction || !canReview) return;
     const cleanNote = note.trim();
     if (!cleanNote) {
       setNoteError("请填写核实原因");
@@ -182,18 +301,49 @@ export default function DataQualityIssuesPanel() {
     }
     setSubmitting(true);
     try {
-      const updated = pendingAction === "reopen"
-        ? await reopenDataQualityIssue(detail.id, { version: detail.version, note: cleanNote })
-        : await decideDataQualityIssue(detail.id, {
-          decision: pendingAction, version: detail.version, note: cleanNote,
-        });
+      const updated =
+        pendingAction === "reopen"
+          ? await run({
+              rule: allRule(
+                actionRule("data_quality", "review"),
+                sideRule(detail.side),
+              ),
+              legacy,
+              request: (capture) =>
+                reopenDataQualityIssue(
+                  detail.id,
+                  { version: detail.version, note: cleanNote },
+                  capture,
+                ),
+            })
+          : await run({
+              rule: allRule(
+                actionRule("data_quality", "review"),
+                sideRule(detail.side),
+              ),
+              legacy,
+              request: (capture) =>
+                decideDataQualityIssue(
+                  detail.id,
+                  {
+                    decision: pendingAction,
+                    version: detail.version,
+                    note: cleanNote,
+                  },
+                  capture,
+                ),
+            });
       setDetail(updated);
       setPendingAction(null);
       setNote("");
-      message.success(pendingAction === "reopen" ? "已重新打开，等待核实" : "核实结论已记录");
+      message.success(
+        pendingAction === "reopen" ? "已重新打开，等待核实" : "核实结论已记录",
+      );
       await load(page);
     } catch (error: unknown) {
-      const statusCode = (error as { response?: { status?: number } })?.response?.status;
+      if (error instanceof AuthorizationCancelled) return;
+      const statusCode = (error as { response?: { status?: number } })?.response
+        ?.status;
       if (statusCode === 409) {
         setPendingAction(null);
         message.warning("数据已被其他人更新，已刷新，请重新核实");
@@ -208,29 +358,95 @@ export default function DataQualityIssuesPanel() {
     }
   };
 
-  const columns = useMemo<ColumnsType<DataQualityIssueListItem>>(() => [
-    { title: "状态", dataIndex: "status", width: 116, render: statusTag },
-    { title: "方向", dataIndex: "side", width: 76, render: sideTag },
-    { title: "日期", dataIndex: "order_date", width: 108, render: (v) => v || "—" },
-    { title: "单号", dataIndex: "order_no", width: 180, render: (v) => v || "—" },
-    { title: "PN", dataIndex: "pn_std", width: 170, render: (v) => v || "—" },
-    { title: "经办人", dataIndex: "handler", width: 100, render: (v) => v || "—" },
-    { title: "数量/单位", key: "quantity", width: 110, align: "right", render: (_, row) => formatQuantity(row.quantity, row.unit) },
-    { title: "单价", dataIndex: "unit_price", width: 120, align: "right", render: (value, row) => formatPrice(value, row.price_restricted) },
-    { title: "规则", key: "rule", width: 190, render: (_, row) => ruleName(row) },
-    { title: "导入批次", key: "batch", width: 180, render: (_, row) => row.import_batch_name || (row.import_batch_id ? `#${row.import_batch_id}` : "—") },
-    { title: "更新时间", dataIndex: "updated_at", width: 150, render: formatBusinessDateTime },
-    { title: "操作", key: "action", width: 76, fixed: "right", render: (_, row) => (
-      <Button type="link" onClick={() => void openDetail(row)} aria-label={issueLabel(row)}>查看</Button>
-    ) },
-  ], []); // eslint-disable-line react-hooks/exhaustive-deps
+  const columns = useMemo<ColumnsType<DataQualityIssueListItem>>(
+    () => [
+      { title: "状态", dataIndex: "status", width: 116, render: statusTag },
+      { title: "方向", dataIndex: "side", width: 76, render: sideTag },
+      {
+        title: "日期",
+        dataIndex: "order_date",
+        width: 108,
+        render: (v) => v || "—",
+      },
+      {
+        title: "单号",
+        dataIndex: "order_no",
+        width: 180,
+        render: (v) => v || "—",
+      },
+      { title: "PN", dataIndex: "pn_std", width: 170, render: (v) => v || "—" },
+      {
+        title: "经办人",
+        dataIndex: "handler",
+        width: 100,
+        render: (v) => v || "—",
+      },
+      {
+        title: "数量/单位",
+        key: "quantity",
+        width: 110,
+        align: "right",
+        render: (_, row) => formatQuantity(row.quantity, row.unit),
+      },
+      {
+        title: "单价",
+        dataIndex: "unit_price",
+        width: 120,
+        align: "right",
+        render: (value, row) => formatPrice(value, row.price_restricted),
+      },
+      {
+        title: "规则",
+        key: "rule",
+        width: 190,
+        render: (_, row) => ruleName(row),
+      },
+      {
+        title: "导入批次",
+        key: "batch",
+        width: 180,
+        render: (_, row) =>
+          row.import_batch_name ||
+          (row.import_batch_id ? `#${row.import_batch_id}` : "—"),
+      },
+      {
+        title: "更新时间",
+        dataIndex: "updated_at",
+        width: 150,
+        render: formatBusinessDateTime,
+      },
+      {
+        title: "操作",
+        key: "action",
+        width: 76,
+        fixed: "right",
+        render: (_, row) => (
+          <Button
+            type="link"
+            onClick={() => void openDetail(row)}
+            aria-label={issueLabel(row)}
+          >
+            查看
+          </Button>
+        ),
+      },
+    ],
+    [],
+  ); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const actionTitle = pendingAction === "confirmed_valid" ? "确认数据正确"
-    : pendingAction === "confirmed_source_error" ? "确认源数据错误" : "重新打开";
+  const actionTitle =
+    pendingAction === "confirmed_valid"
+      ? "确认数据正确"
+      : pendingAction === "confirmed_source_error"
+        ? "确认源数据错误"
+        : "重新打开";
   const priceRestricted = detail?.price_restricted === true;
 
   return (
-    <div data-testid="data-quality-issues-panel" style={{ maxWidth: "100%", overflowX: "hidden" }}>
+    <div
+      data-testid="data-quality-issues-panel"
+      style={{ maxWidth: "100%", overflowX: "hidden" }}
+    >
       <Alert
         type="info"
         showIcon
@@ -239,32 +455,66 @@ export default function DataQualityIssuesPanel() {
         description="待核实记录仍参与现有价格、利润、库存和池分析；这里记录的结论不会在本阶段自动改变经营数字。"
       />
 
-      <Space direction={isMobile ? "vertical" : "horizontal"} wrap style={{ width: "100%", marginBottom: 16 }}>
+      <Space
+        direction={isMobile ? "vertical" : "horizontal"}
+        wrap
+        style={{ width: "100%", marginBottom: 16 }}
+      >
         <div aria-label="疑点状态" style={{ width: isMobile ? "100%" : 170 }}>
           <Select
-            allowClear value={status} placeholder="全部状态" style={{ width: "100%" }}
-            onChange={(value) => { setPage(1); setStatus(value); }}
-            options={Object.entries(STATUS_META).map(([value, meta]) => ({ value, label: meta.label }))}
+            allowClear
+            value={status}
+            placeholder="全部状态"
+            style={{ width: "100%" }}
+            onChange={(value) => {
+              setPage(1);
+              setStatus(value);
+            }}
+            options={Object.entries(STATUS_META).map(([value, meta]) => ({
+              value,
+              label: meta.label,
+            }))}
           />
         </div>
         <div aria-label="业务方向" style={{ width: isMobile ? "100%" : 130 }}>
           <Select
-            allowClear value={side} placeholder="采购/销售" style={{ width: "100%" }}
-            onChange={(value) => { setPage(1); setSide(value); }}
-            options={[{ value: "purchase", label: "采购" }, { value: "sales", label: "销售" }]}
+            allowClear
+            value={side}
+            placeholder="采购/销售"
+            style={{ width: "100%" }}
+            onChange={(value) => {
+              setPage(1);
+              setSide(value);
+            }}
+            options={[
+              { value: "purchase", label: "采购", disabled: !canPurchase },
+              { value: "sales", label: "销售", disabled: !canSales },
+            ]}
           />
         </div>
         <div aria-label="疑点规则" style={{ width: isMobile ? "100%" : 190 }}>
           <Select
-            allowClear value={ruleCode} placeholder="全部规则" style={{ width: "100%" }}
-            onChange={(value) => { setPage(1); setRuleCode(value); }} options={ruleOptions}
+            allowClear
+            value={ruleCode}
+            placeholder="全部规则"
+            style={{ width: "100%" }}
+            onChange={(value) => {
+              setPage(1);
+              setRuleCode(value);
+            }}
+            options={ruleOptions}
           />
         </div>
         <Input.Search
-          value={queryInput} placeholder="搜索 PN 或单号" allowClear
+          value={queryInput}
+          placeholder="搜索 PN 或单号"
+          allowClear
           style={{ width: isMobile ? "100%" : 260 }}
           onChange={(event) => setQueryInput(event.target.value)}
-          onSearch={(value) => { setPage(1); setQuery(value.trim()); }}
+          onSearch={(value) => {
+            setPage(1);
+            setQuery(value.trim());
+          }}
         />
       </Space>
 
@@ -274,7 +524,11 @@ export default function DataQualityIssuesPanel() {
           showIcon
           style={{ marginBottom: 16 }}
           message={loadError}
-          action={<Button size="small" onClick={() => void load(page)}>重试</Button>}
+          action={
+            <Button size="small" onClick={() => void load(page)}>
+              重试
+            </Button>
+          }
         />
       )}
 
@@ -285,34 +539,81 @@ export default function DataQualityIssuesPanel() {
               dataSource={rows}
               renderItem={(row) => (
                 <List.Item
-                  {...activatableProps(() => void openDetail(row), issueLabel(row))}
-                  style={{ display: "block", padding: "14px 4px", cursor: "pointer" }}
+                  {...activatableProps(
+                    () => void openDetail(row),
+                    issueLabel(row),
+                  )}
+                  style={{
+                    display: "block",
+                    padding: "14px 4px",
+                    cursor: "pointer",
+                  }}
                 >
-                  <Space direction="vertical" size={7} style={{ width: "100%" }}>
-                    <Space wrap>{statusTag(row.status)}{sideTag(row.side)}<Text strong>{row.pn_std || "无型号"}</Text></Space>
-                    <Text>{row.order_no || "无单号"} · {row.order_date || "无日期"}</Text>
-                    <Space wrap><Text type="secondary">{row.handler || "无经办人"}</Text><Text>{formatQuantity(row.quantity, row.unit)}</Text><Text>{formatPrice(row.unit_price, row.price_restricted)}</Text></Space>
+                  <Space
+                    direction="vertical"
+                    size={7}
+                    style={{ width: "100%" }}
+                  >
+                    <Space wrap>
+                      {statusTag(row.status)}
+                      {sideTag(row.side)}
+                      <Text strong>{row.pn_std || "无型号"}</Text>
+                    </Space>
+                    <Text>
+                      {row.order_no || "无单号"} · {row.order_date || "无日期"}
+                    </Text>
+                    <Space wrap>
+                      <Text type="secondary">{row.handler || "无经办人"}</Text>
+                      <Text>{formatQuantity(row.quantity, row.unit)}</Text>
+                      <Text>
+                        {formatPrice(row.unit_price, row.price_restricted)}
+                      </Text>
+                    </Space>
                     <Text type="secondary">{ruleName(row)}</Text>
                   </Space>
                 </List.Item>
               )}
             />
-          ) : !loading ? <QueueEmpty /> : null}
+          ) : !loading ? (
+            <QueueEmpty />
+          ) : null}
           {total > PAGE_SIZE && (
-            <Pagination simple current={page} pageSize={PAGE_SIZE} total={total} onChange={(next) => void load(next)} />
+            <Pagination
+              simple
+              current={page}
+              pageSize={PAGE_SIZE}
+              total={total}
+              onChange={(next) => void load(next)}
+            />
           )}
         </Spin>
       ) : rows.length || loading ? (
         <Table
-          rowKey="id" size="small" loading={loading} columns={columns} dataSource={rows}
+          rowKey="id"
+          size="small"
+          loading={loading}
+          columns={columns}
+          dataSource={rows}
           scroll={{ x: 1570 }}
-          pagination={{ current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false, onChange: (next) => void load(next) }}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total,
+            showSizeChanger: false,
+            onChange: (next) => void load(next),
+          }}
         />
-      ) : <QueueEmpty />}
+      ) : (
+        <QueueEmpty />
+      )}
 
       <Drawer
         open={!!detail || detailLoading}
-        title={detail ? `疑点详情 · ${detail.order_no || `#${detail.id}`}` : "疑点详情"}
+        title={
+          detail
+            ? `疑点详情 · ${detail.order_no || `#${detail.id}`}`
+            : "疑点详情"
+        }
         onClose={() => {
           detailRequestSeq.current += 1;
           setDetail(null);
@@ -322,30 +623,44 @@ export default function DataQualityIssuesPanel() {
         height={isMobile ? "100%" : undefined}
         width={isMobile ? undefined : 720}
         styles={{ body: { overflowY: "auto" } }}
-        footer={detail && canReview ? (
-          <Space wrap>
-            {detail.status === "open" ? <>
-              <Button type="primary" onClick={() => beginAction("confirmed_valid")}>确认数据正确</Button>
-              <Button onClick={() => beginAction("confirmed_source_error")}>确认源数据错误</Button>
-            </> : (
-              <Button onClick={() => beginAction("reopen")}>重新打开</Button>
-            )}
-          </Space>
-        ) : null}
+        footer={
+          detail && canReview ? (
+            <Space wrap>
+              {detail.status === "open" ? (
+                <>
+                  <Button
+                    type="primary"
+                    onClick={() => beginAction("confirmed_valid")}
+                  >
+                    确认数据正确
+                  </Button>
+                  <Button onClick={() => beginAction("confirmed_source_error")}>
+                    确认源数据错误
+                  </Button>
+                </>
+              ) : (
+                <Button onClick={() => beginAction("reopen")}>重新打开</Button>
+              )}
+            </Space>
+          ) : null
+        }
       >
         <Spin spinning={detailLoading}>
-          {detail && <>
-            {reviewPermission.hasAction && !reviewPermission.hasPurchaseCost && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 16 }}
-                message="无采购成本数据权限，不能确认"
-                description="你仍可查看已授权的信息；如需提交核实结论，请联系管理员补充采购成本数据权限。"
-              />
-            )}
-            <IssueDetail detail={detail} priceRestricted={priceRestricted} />
-          </>}
+          {detail && (
+            <>
+              {reviewPermission.hasAction &&
+                !reviewPermission.hasPurchaseCost && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="无采购成本数据权限，不能确认"
+                    description="你仍可查看已授权的信息；如需提交核实结论，请联系管理员补充采购成本数据权限。"
+                  />
+                )}
+              <IssueDetail detail={detail} priceRestricted={priceRestricted} />
+            </>
+          )}
         </Spin>
       </Drawer>
 
@@ -360,11 +675,20 @@ export default function DataQualityIssuesPanel() {
       >
         <p>该结论会实名写入审计记录。请再次确认，并说明你核实过的依据。</p>
         <Input.TextArea
-          rows={4} value={note} placeholder="必填：说明核实依据和结论"
+          rows={4}
+          value={note}
+          placeholder="必填：说明核实依据和结论"
           status={noteError ? "error" : undefined}
-          onChange={(event) => { setNote(event.target.value); if (event.target.value.trim()) setNoteError(""); }}
+          onChange={(event) => {
+            setNote(event.target.value);
+            if (event.target.value.trim()) setNoteError("");
+          }}
         />
-        {noteError && <div role="alert" style={{ color: "var(--mb-danger)", marginTop: 6 }}>{noteError}</div>}
+        {noteError && (
+          <div role="alert" style={{ color: "var(--mb-danger)", marginTop: 6 }}>
+            {noteError}
+          </div>
+        )}
       </Modal>
     </div>
   );
@@ -381,21 +705,45 @@ function QueueEmpty() {
   );
 }
 
-function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDetail; priceRestricted: boolean }) {
+function IssueDetail({
+  detail,
+  priceRestricted,
+}: {
+  detail: DataQualityIssueDetail;
+  priceRestricted: boolean;
+}) {
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <section>
         <Typography.Title level={5}>原始事实</Typography.Title>
         <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-          <Descriptions.Item label="状态">{statusTag(detail.status)}</Descriptions.Item>
-          <Descriptions.Item label="方向">{sideTag(detail.side)}</Descriptions.Item>
-          <Descriptions.Item label="PN">{detail.pn_std || "—"}</Descriptions.Item>
-          <Descriptions.Item label="描述">{detail.fact.description || "—"}</Descriptions.Item>
-          <Descriptions.Item label="品牌">{detail.fact.brand || "—"}</Descriptions.Item>
-          <Descriptions.Item label="经办人">{detail.handler || "—"}</Descriptions.Item>
-          <Descriptions.Item label="数量/单位">{formatQuantity(detail.fact.quantity, detail.fact.unit)}</Descriptions.Item>
-          <Descriptions.Item label="单价">{formatPrice(detail.fact.unit_price, priceRestricted)}</Descriptions.Item>
-          <Descriptions.Item label="行金额">{formatPrice(detail.fact.line_amount, priceRestricted)}</Descriptions.Item>
+          <Descriptions.Item label="状态">
+            {statusTag(detail.status)}
+          </Descriptions.Item>
+          <Descriptions.Item label="方向">
+            {sideTag(detail.side)}
+          </Descriptions.Item>
+          <Descriptions.Item label="PN">
+            {detail.pn_std || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="描述">
+            {detail.fact.description || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="品牌">
+            {detail.fact.brand || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="经办人">
+            {detail.handler || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="数量/单位">
+            {formatQuantity(detail.fact.quantity, detail.fact.unit)}
+          </Descriptions.Item>
+          <Descriptions.Item label="单价">
+            {formatPrice(detail.fact.unit_price, priceRestricted)}
+          </Descriptions.Item>
+          <Descriptions.Item label="行金额">
+            {formatPrice(detail.fact.line_amount, priceRestricted)}
+          </Descriptions.Item>
         </Descriptions>
       </section>
 
@@ -405,9 +753,13 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
           <Alert type="warning" showIcon message="无价格权限，规则证据已隐藏" />
         ) : (
           <Descriptions bordered size="small" column={1}>
-            <Descriptions.Item label="规则">{ruleName(detail)}</Descriptions.Item>
+            <Descriptions.Item label="规则">
+              {ruleName(detail)}
+            </Descriptions.Item>
             {Object.entries(detail.evidence || {}).map(([key, value]) => (
-              <Descriptions.Item key={key} label={key}>{evidenceValue(key, value, priceRestricted)}</Descriptions.Item>
+              <Descriptions.Item key={key} label={key}>
+                {evidenceValue(key, value, priceRestricted)}
+              </Descriptions.Item>
             ))}
           </Descriptions>
         )}
@@ -416,11 +768,21 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
       <section>
         <Typography.Title level={5}>订单定位</Typography.Title>
         <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-          <Descriptions.Item label="单号">{detail.order.order_no || detail.order_no || "—"}</Descriptions.Item>
-          <Descriptions.Item label="日期">{detail.order.order_date || detail.order_date || "—"}</Descriptions.Item>
-          <Descriptions.Item label="经办人">{detail.order.handler || detail.handler || "—"}</Descriptions.Item>
-          <Descriptions.Item label="往来单位">{detail.order.counterparty || "—"}</Descriptions.Item>
-          <Descriptions.Item label="数据状态">{detail.order.data_status || "—"}</Descriptions.Item>
+          <Descriptions.Item label="单号">
+            {detail.order.order_no || detail.order_no || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="日期">
+            {detail.order.order_date || detail.order_date || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="经办人">
+            {detail.order.handler || detail.handler || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="往来单位">
+            {detail.order.counterparty || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="数据状态">
+            {detail.order.data_status || "—"}
+          </Descriptions.Item>
         </Descriptions>
       </section>
 
@@ -428,31 +790,70 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
         <Typography.Title level={5}>导入批次定位</Typography.Title>
         {detail.batch ? (
           <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-            <Descriptions.Item label="批次">{detail.batch.filename || `#${detail.batch.id}`}</Descriptions.Item>
-            <Descriptions.Item label="导入人">{detail.batch.imported_by || "—"}</Descriptions.Item>
-            <Descriptions.Item label="导入时间">{formatBusinessDateTime(detail.batch.imported_at)}</Descriptions.Item>
+            <Descriptions.Item label="批次">
+              {detail.batch.filename || `#${detail.batch.id}`}
+            </Descriptions.Item>
+            <Descriptions.Item label="导入人">
+              {detail.batch.imported_by || "—"}
+            </Descriptions.Item>
+            <Descriptions.Item label="导入时间">
+              {formatBusinessDateTime(detail.batch.imported_at)}
+            </Descriptions.Item>
           </Descriptions>
-        ) : <Text type="secondary">该记录没有可用的导入批次定位。</Text>}
+        ) : (
+          <Text type="secondary">该记录没有可用的导入批次定位。</Text>
+        )}
       </section>
 
       <section>
         <Typography.Title level={5}>已有结论与审计摘要</Typography.Title>
         <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-          <Descriptions.Item label="发现人">{detail.detected_by || "—"}</Descriptions.Item>
-          <Descriptions.Item label="发现时间">{formatBusinessDateTime(detail.detected_at)}</Descriptions.Item>
-          <Descriptions.Item label="最近核实人">{detail.reviewed_by || "—"}</Descriptions.Item>
-          <Descriptions.Item label="核实时间">{formatBusinessDateTime(detail.reviewed_at)}</Descriptions.Item>
+          <Descriptions.Item label="发现人">
+            {detail.detected_by || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="发现时间">
+            {formatBusinessDateTime(detail.detected_at)}
+          </Descriptions.Item>
+          <Descriptions.Item label="最近核实人">
+            {detail.reviewed_by || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="核实时间">
+            {formatBusinessDateTime(detail.reviewed_at)}
+          </Descriptions.Item>
           <Descriptions.Item label="核实原因" span={2}>
-            {detail.review_note_restricted ? "无价格权限" : (detail.review_note || "尚无人工结论")}
+            {detail.review_note_restricted
+              ? "无价格权限"
+              : detail.review_note || "尚无人工结论"}
           </Descriptions.Item>
         </Descriptions>
         {!!detail.audits?.length && (
           <List
-            size="small" style={{ marginTop: 8 }} dataSource={detail.audits}
-            renderItem={(audit) => <List.Item>{formatBusinessDateTime(audit.created_at)} · {audit.username || "系统"} · {audit.note || audit.action}</List.Item>}
+            size="small"
+            style={{ marginTop: 8 }}
+            dataSource={detail.audits}
+            renderItem={(audit) => (
+              <List.Item>
+                {formatBusinessDateTime(audit.created_at)} ·{" "}
+                {audit.username || "系统"} · {audit.note || audit.action}
+              </List.Item>
+            )}
           />
         )}
       </section>
     </Space>
+  );
+}
+
+export default function ControlledIssues() {
+  const access = useModuleAccess("data_quality");
+  return (
+    <AccessBoundary
+      rule={surfaceRule("data_quality.issues")}
+      legacy={{ data_quality: legacyRouteAllowed("/governance") }}
+    >
+      <DataQualityIssuesPanel
+        key={`${access.token}:${access.snapshot?.version}:${access.generation}`}
+      />
+    </AccessBoundary>
   );
 }

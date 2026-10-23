@@ -15,6 +15,8 @@ export interface SummaryViewProps {
   basis: AmountBasis[];
   groupBy: string;
   onDrill: (key: string) => void;
+  showKpi?: boolean;
+  showGroups?: boolean;
 }
 
 const AMOUNT_FIELD: Record<AmountBasis, "amount_inc" | "amount_ex" | "amount_paid"> = {
@@ -58,7 +60,7 @@ function NominalShareNote({ side, share }: { side: "inc" | "ex"; share: number |
   );
 }
 
-export default function SummaryView({ summary, loading, basis, groupBy, onDrill }: SummaryViewProps) {
+export default function SummaryView({ summary, loading, basis, groupBy, onDrill, showKpi = true, showGroups = true }: SummaryViewProps) {
   const kpi = summary?.kpi;
   const columns: ColumnsType<PurchaseAnalyticsGroup> = [
     {
@@ -86,7 +88,7 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+      {showKpi && <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
         <KpiCard label="采购单数" value={kpi ? String(kpi.orders) : "—"} sub="已生效" />
         <KpiCard label="明细行数" value={kpi ? String(kpi.lines) : "—"} sub="单头所属批次的行" />
         {basis.includes("inc") && (
@@ -106,8 +108,8 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
         {basis.includes("paid") && (
           <KpiCard label="实付金额" value={fmtMoney(kpi?.amount_paid ?? null)} sub="原列「采购金额」" />
         )}
-      </div>
-      <Table<PurchaseAnalyticsGroup>
+      </div>}
+      {showGroups && <Table<PurchaseAnalyticsGroup>
         size="small"
         rowKey="key"
         loading={loading}
@@ -128,7 +130,7 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
             }
           },
         })}
-      />
+      />}
     </div>
   );
 }

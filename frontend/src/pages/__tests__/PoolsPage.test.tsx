@@ -1,4 +1,13 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_pool_analysis": true}, "readonly");
+  return fixtureRender(...args);
+}
+import { cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
@@ -52,7 +61,7 @@ describe("全员互通池价格分析页", () => {
     renderAt();
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenCalledWith({
       range: "90d", q: undefined, page: 1, page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
 
     const row = await screen.findByRole("row", { name: /硬盘互通池/ });
     expect(row).toHaveTextContent("含 ¥565 · 不含 ¥500");
@@ -70,18 +79,18 @@ describe("全员互通池价格分析页", () => {
     fireEvent.change(search, { target: { value: "SAS" } });
     fireEvent.keyDown(search, { key: "Enter" });
     await waitFor(() => expect(path).toContain("q=SAS"));
-    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({ q: "SAS" })));
+    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({ q: "SAS" }), CAPTURED_REQUEST));
 
     fireEvent.click(screen.getByText("近 365 天"));
     await waitFor(() => expect(path).toContain("range=365d"));
-    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({ range: "365d" })));
+    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({ range: "365d" }), CAPTURED_REQUEST));
   });
 
   it("采购类型从 URL 重放、下发接口并由池链接原样带入详情", async () => {
     renderAt("/pools?range=365d&purchase_type=委外维修");
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenCalledWith({
       range: "365d", purchase_type: "委外维修", q: undefined, page: 1, page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
     expect(screen.getByText("委外维修")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看硬盘互通池价格详情" })).toHaveAttribute(
       "href", "/pool-analysis/7?range=365d&purchase_type=%E5%A7%94%E5%A4%96%E7%BB%B4%E4%BF%AE",
@@ -97,7 +106,7 @@ describe("全员互通池价格分析页", () => {
     await waitFor(() => expect(path).toContain("purchase_type=%E4%B8%B4%E6%97%B6%E8%81%94%E5%90%88%E9%87%87%E8%B4%AD"));
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({
       purchase_type: "临时联合采购",
-    })));
+    }), CAPTURED_REQUEST));
 
     const clear = container.querySelector<HTMLElement>(".ant-select-clear");
     expect(clear).toBeTruthy();
@@ -106,7 +115,7 @@ describe("全员互通池价格分析页", () => {
     await waitFor(() => expect(path).not.toContain("purchase_type="));
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.not.objectContaining({
       purchase_type: expect.anything(),
-    })));
+    }), CAPTURED_REQUEST));
   });
 
   it("价格治理受限时明确显示无价格权限，不显示 0 或未设置", async () => {
@@ -167,7 +176,7 @@ describe("全员互通池价格分析页", () => {
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenCalledWith({
       range: "custom", date_from: "2026-05-01", date_to: "2026-05-20",
       q: undefined, page: 1, page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
     expect(screen.getByLabelText("自定义统计日期")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看硬盘互通池价格详情" })).toHaveAttribute(
       "href", "/pool-analysis/7?range=custom&from=2026-05-01&to=2026-05-20",

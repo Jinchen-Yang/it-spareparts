@@ -1,4 +1,4 @@
-import { authzSnapshot } from "../../../../test/authzFixtures";
+import { authzSnapshot, authzTestState } from "../../../../test/authzFixtures";
 // A3 独立 Chromium 对比度失败的返工回归（DL-025）：受限账号（data_purchase_cost /
 // data_customer / data_profit 全 false，对齐独立证据 restricted profile）下——
 // 1) 金额区间禁用口径「不含税」与 InputNumber「不限」值/占位、2) 分组维度弹层里
@@ -46,7 +46,7 @@ vi.mock("../../../../components/charts/EChartContainer", () => ({
 
 vi.mock("../../../../authz/AuthzProvider", async () => ({
   ...await vi.importActual<typeof import("../../../../authz/AuthzProvider")>("../../../../authz/AuthzProvider"),
-  useAuthz: () => ({ status: "ready", snapshot: authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, {version: "legacy", canManage: false}) }),
+  useAuthz: () => authzTestState(authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, {version: "legacy", canManage: false})),
   AuthzUnavailable: () => <div>权限尚未确认</div>,
 }));
 
@@ -97,6 +97,7 @@ const HOVER_LITERAL = "rgb(44, 86, 174)";
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("token", "sales-fixture-owner");
   localStorage.setItem("role", "boss");
   // 独立证据 restricted profile：三项数据权限全 false（金额区间整组禁用 +
   // 客户类控件禁用 + 分组维度弹层客户类选项禁用）

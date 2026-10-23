@@ -1,3 +1,6 @@
+import { withRouteAccess, useModuleAccess, useAuthorizedQuery, useAuthorizedRunner, AuthorizationCancelled } from "../authz/access";
+import { actionRule, surfaceRule } from "../authz/rules";
+import { transportConfig } from "../authz/transport";
 import { urlPageField, useUrlState } from "../hooks/useUrlState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App, Card, Input, Space, Button, Modal, InputNumber, Form, Tag, Alert, Table, Tooltip } from "antd";
@@ -7,7 +10,7 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import api from "../api";
 import { money, splitFixed } from "../utils/format";
-import { useTaxBasis } from "../context/TaxBasis";
+import { useTaxBasis, useTaxDisplayPolicy, TaxPolicyBoundary } from "../context/TaxBasis";
 
 // 分仓参考行（来自最近库存快照，仅参考；人工修正仍在此层做——修正即改期初）
 interface WhRow {
@@ -40,51 +43,29 @@ interface DynRow {
   match_terms?: number | null;  // 搜索时：查询总词数
 }
 
-export default function InventoryPage() {
+function InventoryPage() {
   const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
+  const access = useModuleAccess("inventory"), run = useAuthorizedRunner();
+  const canAdjust = access.surface("adjust", isAdmin);
   const [{ q, page: pageParam }, patchUrl] = useUrlState({ q: { defaultValue: "" }, page: urlPageField });
   const page = Number(pageParam);
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => { setSearchInput(q); }, [q]);
-  const requestSeq = useRef(0);
-  const [rows, setRows] = useState<DynRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [matchTerms, setMatchTerms] = useState<number | null>(null);  // >0 时显示匹配度列
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<{ message: string; page: number; query: string } | null>(null);
   const [editing, setEditing] = useState<(WhRow & { pn_std: string }) | null>(null);
   const [form] = Form.useForm();
   const basis = useTaxBasis("purchase");
+  const tax = useTaxDisplayPolicy();
+  const hasCost = access.field("data_purchase_cost", true);
+  const showMoney = hasCost && !tax.loading && !tax.loadFailed;
 
-  const load = useCallback(async (p = page, query = q) => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const { data } = await api.get("/inventory/dynamic", {
-        params: { q: query || undefined, page: p, page_size: 20 },
-      });
-      if (seq !== requestSeq.current) return;
-      setRows(data.items);
-      setTotal(data.total);
-      setMatchTerms(data.match_terms ?? null);
-    } catch (e: any) {
-      if (seq !== requestSeq.current) return;
-      const msg = !e?.response ? "无法连接服务器，请检查网络后重试"
-        : e?.response?.data?.detail || "库存加载失败，请稍后重试";
-      setRows([]);
-      setError({ message: msg, page: p, query });
-      message.error(msg);
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [page, q, message]);
-
-  useEffect(() => {
-    void load();
-    return () => { ++requestSeq.current; };
-  }, [load]);
+  const result = useAuthorizedQuery<{ items: DynRow[]; total: number; match_terms?: number | null }>({
+    rule: actionRule("inventory", "read"), legacy: { inventory: true }, enabled: access.surface("list", true), queryKey: [page, q],
+    query: async context => (await api.get("/inventory/dynamic", { params: { q: q || undefined, page, page_size: 20 }, ...transportConfig(context) })).data });
+  const rows = result.data?.items ?? [], total = result.data?.total ?? 0,
+    matchTerms = result.data?.match_terms ?? null, loading = result.loading;
+  const error = result.error ? { message: (result.error as any)?.response?.data?.detail || "库存加载失败，请检查网络或权限", page, query: q } : null;
+  const load = (_page = page, _query = q) => result.retry();
 
   const search = (raw: string) => {
     // URL 只保存规范化后的关键词，避免首尾空白产生不同链接。
@@ -95,32 +76,21 @@ export default function InventoryPage() {
   };
 
   const openEdit = (r: WhRow, pn: string) => {
+    if (!canAdjust) return;
     setEditing({ ...r, pn_std: pn });
     form.setFieldsValue({ manual_qty: r.manual_qty, safety_stock: r.safety_stock, reason: "" });
   };
 
-  const submitEdit = async () => {
-    const v = await form.validateFields();
+  const updateInventory = async (body: Record<string, unknown>) => {
+    if (!editing || !canAdjust) return;
     try {
-      await api.put(`/inventory/${editing!.id}`, {
-        manual_qty: v.manual_qty,
-        safety_stock: v.safety_stock,
-        reason: v.reason,
-      });
-      message.success("已修正并记录审计（期初随之更新）");
-      setEditing(null);
-      load();
-    } catch {
-      message.error("修正失败（需要管理员权限）");
-    }
+      await run({ rule: surfaceRule("inventory.adjust"), legacy: { inventory: isAdmin },
+        request: context => api.put(`/inventory/${editing.id}`, body, transportConfig(context)),
+        commit: () => { message.success("库存修正已保存并记录审计"); setEditing(null); result.retry(); } });
+    } catch (error) { if (!(error instanceof AuthorizationCancelled)) message.error("库存修正失败"); }
   };
-
-  const clearOverride = async () => {
-    await api.put(`/inventory/${editing!.id}`, { clear_override: true, reason: "撤销人工修正" });
-    message.success("已撤销人工修正，恢复源系统数量");
-    setEditing(null);
-    load();
-  };
+  const submitEdit = async () => { const v = await form.validateFields(); await updateInventory({ manual_qty: v.manual_qty, safety_stock: v.safety_stock, reason: v.reason }); };
+  const clearOverride = () => updateInventory({ clear_override: true, reason: "撤销人工修正" });
 
   const whCols = (pn: string): ColumnsType<WhRow> => [
     { title: "仓库", dataIndex: "warehouse", width: 130 },
@@ -128,17 +98,17 @@ export default function InventoryPage() {
       render: (v, r) => <span>{v}{r.is_qty_overridden && <Tag color="gold" style={{ marginLeft: 4 }}>人工</Tag>}</span> },
     { title: "安全库存", dataIndex: "safety_stock", width: 90, align: "right",
       render: (v) => v ?? "-" },
-    ...(basis !== "ex" ? [{ title: "单位成本(含税)", key: "uc_inc", width: 110, align: "right" as const,
+    ...(showMoney && basis !== "ex" ? [{ title: "单位成本(含税)", key: "uc_inc", width: 110, align: "right" as const,
       render: (_: unknown, r: WhRow) => money(splitFixed(r.unit_cost, "ex").inc) }] as ColumnsType<WhRow> : []),
-    ...(basis !== "inc" ? [{ title: "单位成本(不含税)", key: "uc_ex", width: 110, align: "right" as const,
+    ...(showMoney && basis !== "inc" ? [{ title: "单位成本(不含税)", key: "uc_ex", width: 110, align: "right" as const,
       render: (_: unknown, r: WhRow) => money(splitFixed(r.unit_cost, "ex").ex) }] as ColumnsType<WhRow> : []),
-    ...(basis !== "ex" ? [{ title: "库存金额(含税)", key: "iv_inc", width: 120, align: "right" as const,
+    ...(showMoney && basis !== "ex" ? [{ title: "库存金额(含税)", key: "iv_inc", width: 120, align: "right" as const,
       render: (_: unknown, r: WhRow) => money(splitFixed(r.inventory_value, "ex").inc) }] as ColumnsType<WhRow> : []),
-    ...(basis !== "inc" ? [{ title: "库存金额(不含税)", key: "iv_ex", width: 120, align: "right" as const,
+    ...(showMoney && basis !== "inc" ? [{ title: "库存金额(不含税)", key: "iv_ex", width: 120, align: "right" as const,
       render: (_: unknown, r: WhRow) => money(splitFixed(r.inventory_value, "ex").ex) }] as ColumnsType<WhRow> : []),
     { title: "快照日期", dataIndex: "snapshot_date", width: 100,
       render: (v) => v || "-" },
-    ...(isAdmin ? [{
+    ...(canAdjust ? [{
       title: "操作", width: 70,
       render: (_: unknown, r: WhRow) => <Button type="link" size="small" onClick={() => openEdit(r, pn)}>修正</Button>,
     }] as ColumnsType<WhRow> : []),
@@ -187,11 +157,12 @@ export default function InventoryPage() {
 
   return (
     <>
+      {hasCost && !showMoney && <TaxPolicyBoundary><></></TaxPolicyBoundary>}
       <PageHeader
         title="库存查询"
         subtitle="动态口径：期初（最近盘点/快照）+ 单据流水实时推算（型号级）；分仓分布为快照参考。8 月盘点导入后期初自动更新"
       />
-      <Card>
+      {access.surface("list", true) && <Card>
       <Space style={{ marginBottom: 16 }} wrap>
         <Input.Search
           placeholder="型号 / 描述 / 品牌" style={{ width: 300 }}
@@ -225,7 +196,7 @@ export default function InventoryPage() {
         }}
       />
 
-      {isAdmin && <Modal
+      {canAdjust && <Modal
         open={!!editing} title={`修正库存 · ${editing?.pn_std} @ ${editing?.warehouse}`}
         onCancel={() => setEditing(null)} onOk={submitEdit} okText="保存修正"
         footer={[
@@ -250,7 +221,9 @@ export default function InventoryPage() {
           </Form.Item>
         </Form>
       </Modal>}
-      </Card>
+      </Card>}
     </>
   );
 }
+
+export default withRouteAccess(InventoryPage, "/inventory");

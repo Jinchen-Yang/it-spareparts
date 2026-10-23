@@ -1,3 +1,5 @@
+import type { BlockAccess } from "../authz/rules";
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 // 互通 PN 池管理客户端（/api/pools*，互通PN池价格分析 §11/§17）。
 // 人工池是唯一真值，保存即生效；所有写操作携带 version（乐观锁）：
 // 409 = 他人先保存/成员冲突 → 提示后重新拉详情刷新 version，不静默覆盖。
@@ -63,13 +65,15 @@ export interface PricePolicy {
 }
 
 export interface PnPoolDetail extends PnPoolRow {
+  block_access?: BlockAccess<"catalog" | "price_policy" | "price_policy_history">;
   members: PoolMemberItem[];
   price_policy: PricePolicy | null;
   price_policy_history: PricePolicy[];
 }
 
 export interface PnPoolListResp {
-  total: number;
+  block_access?: BlockAccess<"catalog" | "price_policy" | "policy_coverage">;
+  total: number | null;
   page: number;
   page_size: number;
   items: PnPoolRow[];
@@ -82,21 +86,21 @@ export interface PnPoolListResp {
 export const listPnPools = (params: {
   q?: string; status?: "active" | "archived" | "all"; page?: number; page_size?: number;
   policy_missing?: PoolPolicyMissing;
-} = {}) => api.get<PnPoolListResp>("/pools", { params });
+} = {}, context?: CapturedTransport) => api.get<PnPoolListResp>("/pools", { ...transportConfig(context),  params });
 
-export const getPnPool = (groupId: number) => api.get<PnPoolDetail>(`/pools/${groupId}`);
+export const getPnPool = (groupId: number, context?: CapturedTransport) => api.get<PnPoolDetail>(`/pools/${groupId}`, transportConfig(context));
 
 export const createPnPool = (body: {
   name: string; description?: string | null; member_part_ids: number[]; note?: string | null;
-}) => api.post<PnPoolRow>("/pools", body);
+}, context?: CapturedTransport) => api.post<PnPoolRow>("/pools", body, transportConfig(context));
 
 export const updatePnPool = (groupId: number, body: {
   version: number; name?: string; description?: string | null; note?: string | null;
-}) => api.patch<PnPoolRow>(`/pools/${groupId}`, body);
+}, context?: CapturedTransport) => api.patch<PnPoolRow>(`/pools/${groupId}`, body, transportConfig(context));
 
 export const updatePnPoolMembers = (groupId: number, body: {
   version: number; add_part_ids: number[]; remove_part_ids: number[]; note?: string | null;
-}) => api.patch<PnPoolRow>(`/pools/${groupId}/members`, body);
+}, context?: CapturedTransport) => api.patch<PnPoolRow>(`/pools/${groupId}/members`, body, transportConfig(context));
 
 /** 约束价单侧更新语义：给 *_value = set 该侧；*_unset=true = 显式清空；
  * 两者都不给 = keep（该侧保持原值）。null 永远不是"清空"。 */
@@ -105,10 +109,10 @@ export const setPnPoolPolicy = (groupId: number, body: {
   purchase_value?: number | null; purchase_basis?: PriceBasis; purchase_unset?: boolean;
   sales_value?: number | null; sales_basis?: PriceBasis; sales_unset?: boolean;
   note?: string | null;
-}) => api.put<PnPoolRow & { price_policy: PricePolicy | null }>(`/pools/${groupId}/price-policy`, body);
+}, context?: CapturedTransport) => api.put<PnPoolRow & { price_policy: PricePolicy | null }>(`/pools/${groupId}/price-policy`, body, transportConfig(context));
 
-export const archivePnPool = (groupId: number, body: { version: number; note?: string | null }) =>
-  api.post<PnPoolRow>(`/pools/${groupId}/archive`, body);
+export const archivePnPool = (groupId: number, body: { version: number; note?: string | null }, context?: CapturedTransport) =>
+  api.post<PnPoolRow>(`/pools/${groupId}/archive`, body, transportConfig(context));
 
-export const restorePnPool = (groupId: number, body: { version: number; note?: string | null }) =>
-  api.post<PnPoolRow>(`/pools/${groupId}/restore`, body);
+export const restorePnPool = (groupId: number, body: { version: number; note?: string | null }, context?: CapturedTransport) =>
+  api.post<PnPoolRow>(`/pools/${groupId}/restore`, body, transportConfig(context));

@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_parts: true }); return legacyAuthorizationState(); },
+}));
 import { cleanupAntd, renderWithoutMotion as render } from "../../test/antdRender";
 /** 型号查询（统一搜索 + 稳定深链）的行为测试。
  *
@@ -76,7 +81,10 @@ const ovFix = (id = 42, pn = "02311DYQ") => ({
   sales_recent_restricted: false,
 });
 
-const editorState = (part: Overview["part"]) => ({
+const editorState = (input: Overview["part"]) => {
+  if (!input) throw new Error("editor fixture requires a real part");
+  const part = input;
+  return ({
   part_id: part.id, pn_std: part.pn_std,
   identity: { part_id: part.id, pn_std: part.pn_std, status: "active", merged_into_id: null },
   fields: {
@@ -86,6 +94,7 @@ const editorState = (part: Overview["part"]) => ({
   },
   specs: {}, version_mode: "field_snapshot",
 });
+};
 
 const emptyResp = { total: 0, page: 1, page_size: 20, exact: false, ambiguous: false,
                     low_confidence: true, items: [], similar_items: [] };
@@ -173,7 +182,7 @@ describe("稳定深链", () => {
 
   it("/parts?part_id=42 打开即自动加载并展示该型号全景（无需再点搜索）", async () => {
     renderAt("/parts?part_id=42");
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 42 }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 42 }, expect.any(String), expect.any(AbortSignal)));
     await screen.findByText("型号全景：");
     expect(screen.getAllByText("02311DYQ").length).toBeGreaterThan(0);
     expect(unifiedSearch).not.toHaveBeenCalled();   // 纯 part_id 深链不触发搜索
@@ -215,7 +224,7 @@ describe("稳定深链", () => {
 
   it("/parts?pn=<PN> 兼容入口：解析后 URL 自动改写成稳定 part_id 深链", async () => {
     renderAt("/parts?pn=02311DYQ");
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "02311DYQ" }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "02311DYQ" }, expect.any(String), expect.any(AbortSignal)));
     await waitFor(() => expect(curLoc.search).toContain("part_id=42"));
     expect(curLoc.search).not.toContain("pn=");
     await screen.findByText("型号全景：");
@@ -266,7 +275,7 @@ describe("精确即唯一", () => {
     });
     renderAt("/parts?part_id=42");
 
-    await waitFor(() => expect(fetchPoolReference).toHaveBeenCalledWith(42, { range: "90d" }));
+    await waitFor(() => expect(fetchPoolReference).toHaveBeenCalledWith(42, { range: "90d" }, expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })));
     expect(await screen.findByRole("region", { name: "02311DYQ 的池价格参考" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("池价格参考"));
     expect(screen.getByLabelText("采购参考"))
@@ -320,7 +329,7 @@ describe("精确即唯一", () => {
     const summary = screen.getByRole("region", { name: "型号摘要" });
     expect(similarRegion.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await clickAndFlush(within(similarRegion).getByRole("button", { name: "02311DYA" }));
-    expect(fetchOverview).toHaveBeenLastCalledWith({ part_id: 43 });
+    expect(fetchOverview).toHaveBeenLastCalledWith({ part_id: 43 }, expect.any(String), expect.any(AbortSignal));
   });
 
   it("歧义（同写法多个型号）：明确警示，不自动打开", async () => {
@@ -345,7 +354,7 @@ describe("摘要权限与空态", () => {
     { cost: true, profit: true },
   ])("成本 $cost / 利润 $profit：保持原权限组合，销售明细继续遮蔽", async ({ cost, profit }) => {
     localStorage.setItem("role", "sales");
-    localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: cost, data_profit: profit }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, data_purchase_cost: cost, data_profit: profit }));
     fetchOverview.mockResolvedValue({
       ...ovFix(),
       profit_summary: { ...ovFix().profit_summary, avg_cost_moving: 123, avg_margin_moving: 0.45 },
@@ -454,9 +463,9 @@ describe("浏览器历史", () => {
     renderAt("/parts?part_id=42");
     expect(await screen.findByText("父型号 A")).toBeInTheDocument();
     act(() => nav("/parts?part_id=77"));
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 77 }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 77 }, expect.any(String), expect.any(AbortSignal)));
     act(() => nav("/parts?part_id=42"));
-    expect(screen.getByText("父型号 A")).toBeInTheDocument();
+    expect(await screen.findByText("父型号 A")).toBeInTheDocument();
 
     delayedB.resolve(partB);
     await act(async () => { await delayedB.promise; });
@@ -494,7 +503,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
     await clickAndFlush(viewButton);
 
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }, expect.any(String), expect.any(AbortSignal)));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeInTheDocument();
@@ -536,7 +545,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     fireEvent.click(editButton);
 
     await screen.findByText("就地编辑备件 SUB-001");
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }, expect.any(String), expect.any(AbortSignal)));
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "新描述：2TB SAS 企业盘" } });
 
     fireEvent.mouseDown(within(screen.getByRole("dialog")).getByLabelText("一级品类"));
@@ -558,7 +567,7 @@ describe("通用号 PN 查看与详情编辑", () => {
       description: "新描述：2TB SAS 企业盘",
       category_major: "存储设备",
       category_minor: "硬盘",
-    }, "admin-token"));
+    }, "admin-token", expect.any(AbortSignal)));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull());
     expect(curLoc.search).toContain("part_id=99");
     expect(curLoc.search).not.toContain("pn=SUB-001");
@@ -567,7 +576,7 @@ describe("通用号 PN 查看与详情编辑", () => {
 
   it("采购账号有主数据编辑权限时，在详情描述旁看到同一修改入口", async () => {
     localStorage.setItem("role", "purchaser");
-    localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_master_data: true }));
     fetchOverview.mockImplementation(async (key: any) =>
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
 
@@ -576,7 +585,7 @@ describe("通用号 PN 查看与详情编辑", () => {
     expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
     await clickAndFlush(viewButton);
 
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }, expect.any(String), expect.any(AbortSignal)));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     expect(screen.getByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeInTheDocument();
     expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
@@ -585,7 +594,7 @@ describe("通用号 PN 查看与详情编辑", () => {
 
   it("没有主数据编辑权限的人可查看型号，但详情描述旁没有修改入口", async () => {
     localStorage.setItem("role", "sales");
-    localStorage.setItem("permissions", JSON.stringify({ page_master_data: false }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_master_data: false }));
     fetchOverview.mockImplementation(async (key: any) =>
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
 
@@ -599,14 +608,14 @@ describe("通用号 PN 查看与详情编辑", () => {
 
   it("当前登录周期无主数据权限时，篡改 localStorage 后重渲染也不会点亮修改入口", async () => {
     localStorage.setItem("role", "sales");
-    localStorage.setItem("permissions", JSON.stringify({ page_master_data: false }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_master_data: false }));
     fetchOverview.mockResolvedValue(targetOverview);
 
     renderAt("/parts?part_id=99");
     expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeNull();
 
-    localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_master_data: true }));
     fireEvent.change(screen.getByPlaceholderText(/输入型号/), {
       target: { value: "触发无关重渲染" },
     });
@@ -616,7 +625,7 @@ describe("通用号 PN 查看与详情编辑", () => {
 
   it("没有主数据编辑权限时，即使父级误传可编辑也不会加载或提交", () => {
     localStorage.setItem("role", "purchaser");
-    localStorage.setItem("permissions", JSON.stringify({ page_master_data: false }));
+    localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_master_data: false }));
 
     render(
       <InlinePartEditModal
@@ -793,3 +802,6 @@ describe("通用号 PN 查看与详情编辑", () => {
     expect(screen.queryByText("型号全景：")).toBeNull();
   });
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_parts: true }));

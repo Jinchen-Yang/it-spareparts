@@ -17,6 +17,8 @@ export interface SummaryViewProps {
   amounts: AmountKey[];
   /** data_profit=false：毛利卡不渲染（后端已置空）。 */
   profitRestricted?: boolean;
+  showCounts?: boolean;
+  showAmounts?: boolean;
 }
 
 /**
@@ -68,7 +70,7 @@ function ProfitSub({ kpi, prev }: { kpi: SalesKpi; prev: SalesKpi | undefined })
   );
 }
 
-export default function SummaryView({ summary, amounts, profitRestricted = false }: SummaryViewProps) {
+export default function SummaryView({ summary, amounts, profitRestricted = false, showCounts = true, showAmounts = true }: SummaryViewProps) {
   const kpi = summary?.kpi;
   const prev: SalesKpi | undefined = summary?.compare?.kpi;
   const noOrders = kpi != null && kpi.orders === 0;
@@ -85,19 +87,19 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
         </div>
       )}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <KpiCard
+        {showCounts && <KpiCard
           label="销售单数"
           value={kpi ? String(kpi.orders) : "—"}
           sub={sub("已生效", kpi?.orders, prev?.orders, false)}
-        />
-        {amounts.includes("ex") && (
+        />}
+        {showAmounts && amounts.includes("ex") && (
           <KpiCard
             label={lineMode ? "不含税金额（名义）" : "不含税金额"}
             value={fmtMoney(kpi?.amount_ex_tax_total ?? null)}
             sub={sub(noOrders ? "区间内无订单" : "区间合计", kpi?.amount_ex_tax_total, prev?.amount_ex_tax_total)}
           />
         )}
-        {amounts.includes("inc") && (
+        {showAmounts && amounts.includes("inc") && (
           <KpiCard
             label={
               <Tooltip title="含税订单金额缺失（无源值，不推算）的单数；其缺失不影响另外两个口径。">
@@ -112,7 +114,7 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
             )}
           />
         )}
-        {amounts.includes("revenue") && (
+        {showAmounts && amounts.includes("revenue") && (
           <KpiCard
             label="营收"
             value={fmtMoney(kpi?.revenue_total ?? null)}
@@ -137,7 +139,7 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
             sub={<ProfitSub kpi={kpi} prev={prev} />}
           />
         )}
-        {kpi?.customers != null && (
+        {showCounts && kpi?.customers != null && (
           <KpiCard
             label="成交客户"
             value={String(kpi.customers)}
@@ -156,7 +158,7 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
             }
           />
         )}
-        {kpi?.salespeople !== undefined && (
+        {showCounts && kpi?.salespeople !== undefined && (
           <KpiCard
             label="销售人数"
             value={String(kpi.salespeople)}

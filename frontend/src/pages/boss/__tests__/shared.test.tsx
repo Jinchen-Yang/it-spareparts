@@ -1,6 +1,10 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
+vi.mock("../../../authz/AuthzProvider", async importOriginal => ({...(await importOriginal<typeof import("../../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState()}));
+function render(...args: Parameters<typeof fixtureRender>) {prepareLegacyPageFixture({}); return fixtureRender(...args);}
+import { actionRule } from "../../../authz/rules";
 /** 看板共用层单测：竞态守卫（旧响应不得覆盖新筛选结果）的确定性证据 + 窗口/深链编解码。 */
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render as fixtureRender, screen, waitFor } from "@testing-library/react";
 import dayjs from "dayjs";
 import { poolAnalysisPath, rangeToDates, useGuardedFetch } from "../shared";
 import { isStrictIsoDate, strictIsoDateOrNull, strictIsoDateRange } from "../../../utils/date";
@@ -12,7 +16,7 @@ afterEach(cleanup);
 function Harness({ dep, fetcher, scoped = false }: { dep: string;
   fetcher: (dep: string) => Promise<{ data: string }>; scoped?: boolean }) {
   const { data, loading, error } = useGuardedFetch<string>(
-    () => fetcher(dep), [dep], scoped ? dep : undefined,
+    () => fetcher(dep), [dep], scoped ? dep : undefined, actionRule("company_summary", "read"),
   );
   return (
     <div>
@@ -34,6 +38,7 @@ describe("useGuardedFetch 代次守卫", () => {
     const { rerender } = render(<Harness dep="A" fetcher={fetcher} />);
     expect(screen.getByTestId("loading").textContent).toBe("true");
 
+    await waitFor(() => expect(resolveA).toEqual(expect.any(Function)));
     rerender(<Harness dep="B" fetcher={fetcher} />);                    // 快速切换筛选
     await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("B 的数据"));
 
@@ -62,6 +67,7 @@ describe("useGuardedFetch 代次守卫", () => {
     expect(screen.getByTestId("data")).toHaveTextContent("(null)");
     expect(screen.getByTestId("loading")).toHaveTextContent("true");
 
+    await waitFor(() => expect(resolveB).toEqual(expect.any(Function)));
     resolveB({ data: "B 的数据" });
     await waitFor(() => expect(screen.getByTestId("data")).toHaveTextContent("B 的数据"));
   });

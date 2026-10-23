@@ -1,4 +1,4 @@
-import { authzSnapshot } from "../../../../test/authzFixtures";
+import { authzSnapshot, authzTestState } from "../../../../test/authzFixtures";
 // 销售分析页集成（D-41 / D-40 PR-4b）：URL 单一真值 —— 默认今天零参数、直开链接恢复
 // 筛选与含退货、切换金额口径不重新请求、金额/客户/对账脱敏账号的控件门控与「—」/
 // 「无对账数据」占位、排序回退如实提示（sort 回显 ≠ 请求值）、错误与空态、详情抽屉。
@@ -12,7 +12,7 @@ const authorization = vi.hoisted(() => ({
 }));
 vi.mock("../../../../authz/AuthzProvider", async () => ({
   ...await vi.importActual<typeof import("../../../../authz/AuthzProvider")>("../../../../authz/AuthzProvider"),
-  useAuthz: () => ({...authorization, snapshot: authzSnapshot(authorization.snapshot.sales_analysis as import("../../../../api/authz").AuthzSnapshot["sales_analysis"], {version:authorization.snapshot.version,canManage:authorization.snapshot.can_manage})}),
+  useAuthz: () => ({...authzTestState(authzSnapshot(authorization.snapshot.sales_analysis as import("../../../../api/authz").AuthzSnapshot["sales_analysis"], {version:authorization.snapshot.version,canManage:authorization.snapshot.can_manage})), status: authorization.status}),
   AuthzUnavailable: () => <div>权限尚未确认</div>,
 }));
 
@@ -53,6 +53,7 @@ import SalesAnalyticsPage from "../SalesAnalyticsPage";
 
 // ---------------------------------------------------------------- 假数据（对齐 PR-3b 响应形态）
 
+const CAPTURED_REQUEST = expect.objectContaining({ token: expect.any(String), snapshotVersion: expect.any(String), generation: expect.any(Number), queryKey: expect.any(String), signal: expect.any(AbortSignal) });
 const TODAY = "2026-10-17";
 // 顶层 as_of 与后端一致是 date-only（today.isoformat()）；对账块/历史里的
 // reconciled_as_of / created_at 才是 datetime（后端存 UTC、带偏移输出；页面按 Asia/Shanghai 展示）
@@ -165,6 +166,7 @@ beforeEach(() => {
   authorization.snapshot.sales_analysis = { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] };
 
   localStorage.clear();
+  localStorage.setItem("token", "sales-fixture-owner");
   localStorage.setItem("role", "boss");
   localStorage.setItem("permissions", JSON.stringify({
     data_purchase_cost: true, data_reconciliation: true, data_customer: true,
@@ -205,7 +207,7 @@ describe("销售分析页：URL 单一真值", () => {
   it("默认渲染：零参数 URL，默认今天（date_from = date_to = 今天），三金额并排 + 不含税金额倒序", async () => {
     renderPage();
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY }, CAPTURED_REQUEST);
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toEqual({
       date_from: TODAY, date_to: TODAY,
       sort: "amount_ex_tax", order: "desc", page: 1, page_size: 50, include_returns: false,
@@ -228,7 +230,7 @@ describe("销售分析页：URL 单一真值", () => {
   it("「全部」预设不传任何日期参数（后端缺省 = 全部历史）", async () => {
     renderPage("/sales/analytics?preset=all");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({});
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({}, CAPTURED_REQUEST);
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({
       sort: "amount_ex_tax", page: 1,
     });
@@ -245,7 +247,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({
       business_type: ["备件销售", "服务"], customer: "客户甲",
-    });
+    }, CAPTURED_REQUEST);
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({
       business_type: ["备件销售", "服务"],
       customer: "客户甲",
@@ -346,7 +348,7 @@ describe("销售分析页：URL 单一真值", () => {
     // 客户与客户类型两个多选都禁用（后端对客户类属条件 fail-closed 403）
     expect(screen.getByRole("combobox", { name: "客户" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "客户类型" })).toBeDisabled();
-    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
+    expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY }, CAPTURED_REQUEST);
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).not.toHaveProperty("customer");
   });
 
@@ -454,7 +456,7 @@ describe("销售分析页：URL 单一真值", () => {
 
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/XS-2026-201/)).toBeInTheDocument());
-    expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false);
+    expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false, CAPTURED_REQUEST);
     // 最新对账块
     expect(within(dialog).getByText("对账快照（最新）")).toBeInTheDocument();
     expect(within(dialog).getByText(/110\.00/)).toBeInTheDocument(); // 含退货口径值
@@ -473,7 +475,7 @@ describe("销售分析页：URL 单一真值", () => {
     fireEvent.click(row);
 
     const dialog = await screen.findByRole("dialog");
-    await waitFor(() => expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, true));
+    await waitFor(() => expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, true, CAPTURED_REQUEST));
     expect(within(dialog).getByText("已对账金额（含退货）")).toBeInTheDocument();
   });
 
@@ -493,8 +495,7 @@ describe("销售分析页：URL 单一真值", () => {
       business_type: ["__empty__"],
     });
     expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith(
-      expect.objectContaining({ business_type: ["__empty__"], date_from: TODAY, date_to: TODAY }),
-    );
+      expect.objectContaining({ business_type: ["__empty__"], date_from: TODAY, date_to: TODAY }), CAPTURED_REQUEST);
     // URL 落哨兵值，刷新/分享后语义不变
     expect(locationSearch).toContain("business_type=__empty__");
   });
@@ -534,7 +535,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(q).toMatchObject({ page: 1 });
     expect(q).not.toHaveProperty("date_from");
     expect(q).not.toHaveProperty("date_to");
-    expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith({});
+    expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith({}, CAPTURED_REQUEST);
     expect(locationSearch).toContain("preset=all");
     expect(locationSearch).not.toContain("page=");
   });
@@ -544,7 +545,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({
       date_from: "2026-09-01", date_to: "2026-10-15",
-    });
+    }, CAPTURED_REQUEST);
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({
       date_from: "2026-09-01", date_to: "2026-10-15",
     });
@@ -590,8 +591,7 @@ describe("销售分析页：URL 单一真值", () => {
       salesperson_name: ["王五", "__empty__"], page: 1,
     }));
     expect(fetchSalesAnalyticsSummary).toHaveBeenLastCalledWith(
-      expect.objectContaining({ salesperson_name: ["王五", "__empty__"], date_from: TODAY, date_to: TODAY }),
-    );
+      expect.objectContaining({ salesperson_name: ["王五", "__empty__"], date_from: TODAY, date_to: TODAY }), CAPTURED_REQUEST);
     expect(new URLSearchParams(locationSearch).getAll("salesperson_name")).toEqual(["王五", "__empty__"]);
     expect(locationSearch).not.toContain("page=");
     expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(before[2] + 1);
@@ -635,7 +635,7 @@ describe("销售分析页：URL 单一真值", () => {
     renderPage("/sales/analytics?basis=revenue&order_id=201");
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(within(dialog).getByText(/XS-2026-201/)).toBeInTheDocument());
-    expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false);
+    expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false, CAPTURED_REQUEST);
     expect(within(dialog).getByText(/150\.00/)).toBeInTheDocument(); // 营收行
     expect(within(dialog).queryByText(/不含税金额/)).toBeNull();
     expect(within(dialog).queryByText(/含税订单金额/)).toBeNull();
@@ -682,7 +682,7 @@ describe("销售分析页：健壮性", () => {
   it("订单详情 404：提示「订单不存在（或非已生效单）」并自动关抽屉、URL 摘键", async () => {
     fetchSalesAnalyticsOrderDetail.mockRejectedValue({ response: { status: 404 } });
     renderPage("/sales/analytics?order_id=201");
-    await waitFor(() => expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false));
+    await waitFor(() => expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledWith(201, false, CAPTURED_REQUEST));
     expect(await screen.findByText("订单不存在（或非已生效单）")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(locationSearch).not.toContain("order_id=");
@@ -870,9 +870,10 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     const rowAgain = screen.getByRole("row", { name: /XS-2026-201/ });
     fireEvent.click(within(rowAgain).getByText("XS-2026-201"));
     expect(fetchSalesAnalyticsOrderDetail).toHaveBeenCalledTimes(1);
-    // 抽屉内就地提示会话失效（失败/未知/无权/会话失效分开），不显示旧会话详情；
-    // 行点击入口同时通知页级清旧上下文——主页面列表也让位给会话提示（两处文案并存）
-    expect((await screen.findAllByText(SESSION_DEAD_TEXT)).length).toBeGreaterThanOrEqual(2);
+    // S2 在入口拒绝旧会话点击，不再先挂一个无权抽屉；页面明确提示并清空数据。
+    expect(await screen.findByText(SESSION_DEAD_TEXT)).toBeVisible();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(locationSearch).not.toContain("order_id=");
     expect(screen.queryByText("采购单")).toBeNull();
     expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
   });
@@ -956,7 +957,7 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     fireEvent.change(box, { target: { value: "客" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(300); });
     // 防抖后精确以搜索词发起（挂载那次不带搜索词，不算）
-    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenLastCalledWith({}, "客"));
+    await waitFor(() => expect(fetchSalesAnalyticsOptions).toHaveBeenLastCalledWith({}, "客", CAPTURED_REQUEST));
     expect(await screen.findByText("客户乙（7）")).toBeInTheDocument();
   });
 

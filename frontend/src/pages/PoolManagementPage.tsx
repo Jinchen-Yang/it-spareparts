@@ -1,3 +1,5 @@
+import { useAuthorizedRunner, useModuleAccess, withRouteAccess, AuthorizationCancelled, type AuthorizedRequest } from "../authz/access";
+import { actionRule, anyRule, type Rule, validateBlockAccess, blockAllowed } from "../authz/rules";
 import { formatMoney } from "../utils/format";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
@@ -60,7 +62,7 @@ const memberLabel = (pn: string | null, desc: string | null) =>
  * 编辑抽屉拆成三个独立保存动作（基本信息 / 成员 / 约束价），每个按钮 = 恰好一个
  * HTTP 请求 = 后端一个事务——不存在"一个保存按钮伪装原子操作、前半成功后半 403"。
  * 归档池只读（显示档案与"先恢复"提示，不渲染必然 400 的可保存表单）。 */
-export default function PoolManagementPage() {
+function PoolManagementPage() {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
@@ -69,22 +71,35 @@ export default function PoolManagementPage() {
   const policyMissing = rawPolicyMissing && POLICY_MISSING_VALUES.includes(rawPolicyMissing)
     ? rawPolicyMissing : null;
 
-  // 权限快照随登录周期固定（改权限会踢重登），组件生命周期内读一次即可
-  const [{ canManage, canSetPolicy, localCoverageRestricted }] = useState(() => {
-    const isAdmin = localStorage.getItem("role") === "admin";
-    const perms = readLocalPerms();
-    return {
-      canManage: isAdmin || !!perms.action_pool_manage,
-      canSetPolicy: isAdmin || !!perms.action_pool_set_policy,
-      localCoverageRestricted: !isAdmin && perms.data_pool_price_governance === false,
-    };
+  const catalog = useModuleAccess("pool_catalog"), policyAccess = useModuleAccess("pool_price_policy");
+  const lookup = useModuleAccess("part_lookup");
+  const run = useAuthorizedRunner();
+  const perms = readLocalPerms(), isAdmin = localStorage.getItem("role") === "admin";
+  const oldManage = isAdmin || !!perms.action_pool_manage, oldPolicy = isAdmin || !!perms.action_pool_set_policy;
+  const canCreate = catalog.surface("identity_edit", oldManage) && catalog.action("create", oldManage);
+  const canEdit = catalog.surface("identity_edit", oldManage) && catalog.action("edit", oldManage);
+  const canMembers = catalog.surface("members_edit", oldManage);
+  const canArchive = catalog.surface("lifecycle", oldManage) && catalog.action("archive", oldManage);
+  const canRestore = catalog.surface("lifecycle", oldManage) && catalog.action("restore", oldManage);
+  const canManage = canCreate || canEdit || canMembers || canArchive || canRestore;
+  const canSetPolicy = policyAccess.surface("set", oldPolicy);
+  const canReadPolicy = policyAccess.surface("read", oldManage || oldPolicy) || canSetPolicy;
+  const canList = catalog.surface("list", oldManage || oldPolicy);
+  const localCoverageRestricted = !canReadPolicy || !policyAccess.field("data_pool_price_governance", isAdmin || perms.data_pool_price_governance !== false);
+  const readRule = anyRule(actionRule("pool_catalog", "read"), actionRule("pool_price_policy", "read"));
+  const call = <T,>(rule: Rule, request: (context: AuthorizedRequest) => Promise<T>) =>
+    run({rule, legacy: {pool_catalog: oldManage || oldPolicy, pool_price_policy: oldManage || oldPolicy, part_lookup: true}, request});
+  const readDetail = (id: number) => call(readRule, async context => {
+    const response = await getPnPool(id, context);
+    if (!catalog.legacy || !policyAccess.legacy) validateBlockAccess(response.data.block_access, ["catalog", "price_policy", "price_policy_history"]);
+    return response;
   });
 
   // ---- 列表 ----
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
   const [rows, setRows] = useState<PnPoolRow[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -102,23 +117,27 @@ export default function PoolManagementPage() {
     query = q, status = statusFilter, p = page,
     missing: PoolPolicyMissing | null = localCoverageRestricted ? null : policyMissing,
   ) => {
+    if (!canList && !canReadPolicy) return;
     const generation = ++listGeneration.current;
+    setRows([]); setTotal(0);
     listView.current = { query, status, page: p, policyMissing: missing };
     setLoading(true);
     setListError(null);
     try {
-      const { data } = await listPnPools({
+      const { data } = await call(readRule, context => listPnPools({
         q: query.trim() || undefined, status, page: p, page_size: PAGE_SIZE,
         ...(missing ? { policy_missing: missing } : {}),
-      });
+      }, context));
+      if (!catalog.legacy || !policyAccess.legacy) validateBlockAccess(data.block_access, ["catalog", "price_policy", "policy_coverage"]);
       if (generation !== listGeneration.current) return;
       setRows(data.items || []);
-      setTotal(data.total || 0);
+      setTotal(data.total);
       setPage(data.page || p);
       setListPriceRestricted(localCoverageRestricted || !!data.price_restricted);
-      setCoverageRestricted(!!data.coverage_restricted);
-      setCoverage(data.coverage_restricted ? null : (data.coverage ?? null));
+      setCoverageRestricted(localCoverageRestricted || !!data.coverage_restricted || (!policyAccess.legacy && !blockAllowed(data.block_access, "policy_coverage")));
+      setCoverage(data.coverage_restricted || localCoverageRestricted || (!policyAccess.legacy && !blockAllowed(data.block_access, "policy_coverage")) ? null : (data.coverage ?? null));
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       if (generation !== listGeneration.current) return;
       // 失败时绝不保留上一筛选的行；否则 URL/高亮已切换却仍展示旧数据。
       setRows([]);
@@ -236,7 +255,7 @@ export default function PoolManagementPage() {
     }));
     setMemberOptions(opts);
     setMemberIds(opts.map((o) => o.value));
-    const p = d.price_policy;
+    const p = canReadPolicy && (policyAccess.legacy || blockAllowed(d.block_access, "price_policy")) ? d.price_policy : null;
     setPurchaseValue(p?.purchase_input_value != null ? Number(p.purchase_input_value) : null);
     setPurchaseBasis(p?.purchase_input_basis ?? "ex_tax");
     setSalesValue(p?.sales_input_value != null ? Number(p.sales_input_value) : null);
@@ -246,6 +265,7 @@ export default function PoolManagementPage() {
   };
 
   const openCreate = () => {
+    if (!canCreate) return;
     beginDrawerContext("create", null);
     setDetail(null);
     setNameError(false);
@@ -262,10 +282,11 @@ export default function PoolManagementPage() {
     setDetail(null);
     setDetailLoading(true);
     try {
-      const { data } = await getPnPool(groupId);
+      const { data } = await readDetail(groupId);
       if (!isPoolResponseCurrent(ctx, data.group_id)) return;
       hydrate(data);
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       if (!isDrawerContextCurrent(ctx)) return;
       message.error(e?.response?.data?.detail || "池详情加载失败");
       beginDrawerContext(null, null);
@@ -287,11 +308,11 @@ export default function PoolManagementPage() {
     window.clearTimeout(searchTimer.current);
     const gen = ++searchGen.current;
     const key = kw.trim();
-    if (!key) { setSearchOptions([]); setFetching(false); return; }
+    if (!key || !lookup.action("read", true)) { setSearchOptions([]); setFetching(false); return; }
     searchTimer.current = window.setTimeout(async () => {
       setFetching(true);
       try {
-        const { data } = await searchParts(key, 1, 20, true);
+        const { data } = await call(actionRule("part_lookup", "read"), context => searchParts(key, 1, 20, true, context));
         if (gen !== searchGen.current) return;
         setSearchOptions((data.items || [])
           .filter((it) => it.id != null)
@@ -374,7 +395,7 @@ export default function PoolManagementPage() {
   const refreshBaseline = async (ctx: DrawerRequestContext, expectedVersion: number) => {
     if (ctx.groupId == null || !isDrawerContextCurrent(ctx)) return;
     try {
-      const { data } = await getPnPool(ctx.groupId);
+      const { data } = await readDetail(ctx.groupId);
       if (!isPoolResponseCurrent(ctx, data.group_id)) return;
       if (data.version !== expectedVersion || data.status !== "active") {
         hydrate(data);
@@ -388,6 +409,7 @@ export default function PoolManagementPage() {
   const handleSaveError = async (
     ctx: DrawerRequestContext, expectedVersion: number, e: any, fallback: string,
   ) => {
+    if (e instanceof AuthorizationCancelled) return;
     if (ctx.groupId == null || !isDrawerContextCurrent(ctx)) {
       await reloadCurrentList();
       return;
@@ -398,7 +420,7 @@ export default function PoolManagementPage() {
     if (isConflict) {
       // 409：他人已改，整表单回填最新值；跨池/已关闭时旧响应直接丢弃。
       try {
-        const { data } = await getPnPool(ctx.groupId);
+        const { data } = await readDetail(ctx.groupId);
         if (isPoolResponseCurrent(ctx, data.group_id)) hydrate(data);
       } catch { /* 拉不到就保持现状 */ }
     } else {
@@ -410,7 +432,7 @@ export default function PoolManagementPage() {
 
   // ---- 三个独立保存动作：每个按钮恰好一个请求，成功/失败独立呈现 ----
   const saveInfo = async () => {
-    if (!detail) return;
+    if (!canEdit || !detail) return;
     const ctx = currentEditContext(detail.group_id);
     if (!ctx) return;
     const expectedVersion = detail.version;
@@ -419,12 +441,12 @@ export default function PoolManagementPage() {
     try {
       const nameChanged = name.trim() !== detail.name;
       const descChanged = (description.trim() || null) !== (detail.description ?? null);
-      const { data } = await updatePnPool(detail.group_id, {
+      const { data } = await call(actionRule("pool_catalog", "edit"), context => updatePnPool(detail.group_id, {
         version: detail.version,
         ...(nameChanged ? { name: name.trim() } : {}),
         ...(descChanged ? { description: description.trim() || null } : {}),
         note: note.trim() || null,
-      });
+      }, context));
       if (!isPoolResponseCurrent(ctx, data.group_id)) {
         await reloadCurrentList();
         return;
@@ -433,6 +455,7 @@ export default function PoolManagementPage() {
       await refreshBaseline(ctx, data.version);
       await reloadCurrentList();
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       await handleSaveError(ctx, expectedVersion, e, "基本信息保存失败");
     } finally {
       if (isDrawerContextCurrent(ctx)) setSavingInfo(false);
@@ -440,7 +463,7 @@ export default function PoolManagementPage() {
   };
 
   const saveMembers = async () => {
-    if (!detail) return;
+    if (!canMembers || !detail) return;
     const ctx = currentEditContext(detail.group_id);
     if (!ctx) return;
     const expectedVersion = detail.version;
@@ -450,11 +473,11 @@ export default function PoolManagementPage() {
     }
     setSavingMembers(true);
     try {
-      const { data } = await updatePnPoolMembers(detail.group_id, {
+      const { data } = await call(actionRule("pool_catalog", "edit_members"), context => updatePnPoolMembers(detail.group_id, {
         version: detail.version,
         add_part_ids: memberDiff.add, remove_part_ids: memberDiff.remove,
         note: note.trim() || null,
-      });
+      }, context));
       if (!isPoolResponseCurrent(ctx, data.group_id)) {
         await reloadCurrentList();
         return;
@@ -463,6 +486,7 @@ export default function PoolManagementPage() {
       await refreshBaseline(ctx, data.version);
       await reloadCurrentList();
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       await handleSaveError(ctx, expectedVersion, e, "成员保存失败");
     } finally {
       if (isDrawerContextCurrent(ctx)) setSavingMembers(false);
@@ -470,13 +494,13 @@ export default function PoolManagementPage() {
   };
 
   const savePolicy = async () => {
-    if (!detail) return;
+    if (!canSetPolicy || !detail) return;
     const ctx = currentEditContext(detail.group_id);
     if (!ctx) return;
     const expectedVersion = detail.version;
     setSavingPolicy(true);
     try {
-      const { data } = await setPnPoolPolicy(detail.group_id, policyBody());
+      const { data } = await call(actionRule("pool_price_policy", "set"), context => setPnPoolPolicy(detail.group_id, policyBody(), context));
       if (!isPoolResponseCurrent(ctx, data.group_id)) {
         await reloadCurrentList();
         return;
@@ -485,6 +509,7 @@ export default function PoolManagementPage() {
       await refreshBaseline(ctx, data.version);
       await reloadCurrentList();
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       await handleSaveError(ctx, expectedVersion, e, "约束价保存失败");
     } finally {
       if (isDrawerContextCurrent(ctx)) setSavingPolicy(false);
@@ -493,6 +518,7 @@ export default function PoolManagementPage() {
 
   // 新建 = 单个 POST（名称/说明/成员一个事务）；约束价创建后在编辑抽屉里单独设置
   const create = async () => {
+    if (!canCreate) return;
     const ctx = { ...drawerContext.current };
     if (ctx.mode !== "create") return;
     if (!name.trim()) { setNameError(true); message.warning("请输入池名称"); return; }
@@ -502,10 +528,10 @@ export default function PoolManagementPage() {
     }
     setCreating(true);
     try {
-      const { data: created } = await createPnPool({
+      const { data: created } = await call(actionRule("pool_catalog", "create"), context => createPnPool({
         name: name.trim(), description: description.trim() || null,
         member_part_ids: memberIds, note: note.trim() || null,
-      });
+      }, context));
       await reloadCurrentList();
       if (!isDrawerContextCurrent(ctx)) return;
       message.success(canSetPolicy ? "池已创建；可继续设置约束价" : "池已创建");
@@ -515,6 +541,7 @@ export default function PoolManagementPage() {
         closeDrawer();
       }
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       if (!isDrawerContextCurrent(ctx)) {
         await reloadCurrentList();
         return;
@@ -528,11 +555,13 @@ export default function PoolManagementPage() {
 
   // ---- 归档 / 恢复（携带当前行 version）----
   const doLifecycle = async (r: PnPoolRow, action: "archive" | "restore") => {
+    if (action === "archive" ? !canArchive : !canRestore) return;
     try {
-      if (action === "archive") await archivePnPool(r.group_id, { version: r.version });
-      else await restorePnPool(r.group_id, { version: r.version });
+      if (action === "archive") await call(actionRule("pool_catalog", "archive"), context => archivePnPool(r.group_id, { version: r.version }, context));
+      else await call(actionRule("pool_catalog", "restore"), context => restorePnPool(r.group_id, { version: r.version }, context));
       message.success(action === "archive" ? "已归档" : "已恢复");
     } catch (e: any) {
+      if (e instanceof AuthorizationCancelled) return;
       message.error(e?.response?.data?.detail || (action === "archive" ? "归档失败" : "恢复失败"));
     }
     reloadCurrentList();   // 失败（含 409 版本冲突）也刷新，拿到最新 version
@@ -577,7 +606,7 @@ export default function PoolManagementPage() {
             onClick={() => openEdit(r.group_id)}>
             {r.status === "active" && (canManage || canSetPolicy) ? "编辑" : "查看"}
           </Button>
-          {canManage && (r.status === "active" ? (
+          {(r.status === "active" ? canArchive : canRestore) && (r.status === "active" ? (
             <Popconfirm title="归档该池？" description="归档后退出经营分析，可随时恢复。"
               onConfirm={() => doLifecycle(r, "archive")}>
               <Button type="link" size="small" danger style={{ paddingInline: 4 }}>归档</Button>
@@ -595,9 +624,10 @@ export default function PoolManagementPage() {
   ];
 
   // ---- 抽屉内容 ----
-  const policy = detail?.price_policy;
+  const policy = canReadPolicy && (policyAccess.legacy || blockAllowed(detail?.block_access, "price_policy")) ? detail?.price_policy : null;
+  const catalogDetails = catalog.legacy || blockAllowed(detail?.block_access, "catalog");
   const isArchived = mode === "edit" && detail?.status === "archived";
-  const priceRestricted = detail?.price_restricted ?? false;
+  const priceRestricted = localCoverageRestricted || (!policyAccess.legacy && !blockAllowed(detail?.block_access, "price_policy")) || (detail?.price_restricted ?? false);
   const sectionTitle = (t: string) => (
     <div style={{ fontWeight: 600, marginBottom: 8 }}>{t}</div>
   );
@@ -616,15 +646,15 @@ export default function PoolManagementPage() {
         <div style={{ fontWeight: 600 }}>{detail.name}</div>
         {detail.description && <div style={{ marginTop: 4, ...MUTED }}>{detail.description}</div>}
       </div>
-      <div>
+      {catalogDetails && <div>
         {sectionTitle(`PN 成员（${detail.members.length}）`)}
         <Space size={[6, 6]} wrap>
           {detail.members.map((m) => (
             <Tag key={m.part_id}>{memberLabel(m.pn_std, m.description)}</Tag>
           ))}
         </Space>
-      </div>
-      <div>
+      </div>}
+      {canReadPolicy && <div>
         {sectionTitle("约束价（归档时快照）")}
         {priceRestricted ? (
           <span style={MUTED}>无价格权限</span>
@@ -636,10 +666,10 @@ export default function PoolManagementPage() {
               ? formatMoney(policy.sales_floor_ex_tax, { mode: "fixed" }) : "未设置"}</div>
           </div>
         )}
-      </div>
-      <div style={{ fontSize: 12.5, ...MUTED }}>
+      </div>}
+      {catalogDetails && <div style={{ fontSize: 12.5, ...MUTED }}>
         最近变更：{detail.updated_by || "—"} · {fmtTime(detail.updated_at)}
-      </div>
+      </div>}
     </Space>
   );
 
@@ -652,7 +682,7 @@ export default function PoolManagementPage() {
         }]}>
           <Form.Item name="pool-name" label="池名称" required>
             <Input maxLength={128} placeholder="如 8TB 7.2K SATA 企业盘互通池"
-              disabled={!canManage}
+              disabled={mode === "create" ? !canCreate : !canEdit}
               onChange={(e) => { setName(e.target.value); setNameError(false); }} />
           </Form.Item>
         </Form>
@@ -660,15 +690,15 @@ export default function PoolManagementPage() {
           <label style={{ display: "block", marginBottom: 4 }}>用途 / 说明</label>
           <Input.TextArea value={description} rows={2}
             placeholder="这个池覆盖哪些场景、为什么互通（选填）"
-            disabled={!canManage}
+            disabled={mode === "create" ? !canCreate : !canEdit}
             onChange={(e) => setDescription(e.target.value)} />
         </div>
-        {mode === "edit" && canManage && (
+        {mode === "edit" && canEdit && (
           <Button type="primary" loading={savingInfo} disabled={!infoDirty} onClick={saveInfo}>
             保存基本信息
           </Button>
         )}
-        {mode === "edit" && !canManage && (
+        {mode === "edit" && !canEdit && (
           <span style={{ fontSize: 12, ...MUTED }}>无池维护权限，名称与说明只读。</span>
         )}
       </Space>
@@ -688,20 +718,20 @@ export default function PoolManagementPage() {
         options={mergedOptions}
         onSearch={onMemberSearch}
         onChange={onMembersChange}
-        disabled={!canManage}
+        disabled={(mode === "create" ? !canCreate : !canMembers) || !lookup.action("read", true)}
         notFoundContent={fetching ? <Spin size="small" /> : "输入关键词搜索型号"}
         maxTagCount={isMobile ? 6 : undefined}
       />
       <div style={{ marginTop: 4, fontSize: 12, ...MUTED }}>
         有效池至少 {MIN_MEMBERS} 个 PN；一个有效 PN 只能属于一个有效池；保存时按增删差异生效。
       </div>
-      {mode === "edit" && canManage && (
+      {mode === "edit" && canMembers && (
         <Button type="primary" style={{ marginTop: 8 }} loading={savingMembers}
           disabled={!membersDirty} onClick={saveMembers}>
           保存成员变更
         </Button>
       )}
-      {mode === "edit" && !canManage && (
+      {mode === "edit" && !canMembers && (
         <div style={{ marginTop: 4, fontSize: 12, ...MUTED }}>无池维护权限，成员只读。</div>
       )}
     </div>
@@ -757,7 +787,7 @@ export default function PoolManagementPage() {
     </div>
   );
 
-  const policySection = mode === "edit" && (
+  const policySection = mode === "edit" && canReadPolicy && (
     <div style={sectionBox}>
       {sectionTitle("约束价")}
       {!canSetPolicy ? (
@@ -787,8 +817,8 @@ export default function PoolManagementPage() {
 
   const editableView = (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
-      {infoSection}
-      {membersSection}
+      {(mode === "create" ? canCreate : canEdit || canList) && infoSection}
+      {(mode === "create" ? canCreate : canMembers || canList) && membersSection}
       {policySection}
       <div>
         <label style={{ display: "block", marginBottom: 4 }}>变更备注</label>
@@ -799,7 +829,7 @@ export default function PoolManagementPage() {
       {mode === "create" && (
         <Button type="primary" loading={creating} onClick={create}>创建池</Button>
       )}
-      {mode === "edit" && detail && (
+      {mode === "edit" && detail && catalogDetails && (
         <div style={{ fontSize: 12.5, ...MUTED }}>
           最近变更：{detail.updated_by || "—"} · {fmtTime(detail.updated_at)}
         </div>
@@ -812,22 +842,22 @@ export default function PoolManagementPage() {
       <PageHeader
         title="互通PN池管理"
         subtitle="人工维护的互通池是唯一真值：建池、调成员、设约束价（采购上限/销售下限，统一未税口径），保存即生效。"
-        extra={canManage
+        extra={canCreate
           ? <Button type="primary" onClick={openCreate}>新建池</Button>
           : undefined}
       />
 
-      <PoolPolicyCoverage
+      {canReadPolicy && <PoolPolicyCoverage
         coverage={coverage}
         restricted={coverageRestricted || localCoverageRestricted}
         selected={localCoverageRestricted ? null : policyMissing}
         onSelect={setPolicyMissing}
         onClear={policyMissing ? clearPolicyMissing : undefined}
-      />
+      />}
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
         <Input.Search
-          placeholder="搜索池名/成员PN/描述/品牌" allowClear enterButton
+          placeholder={canList ? "搜索池名/成员PN/描述/品牌" : "搜索池名"} allowClear enterButton
           style={{ maxWidth: 380, flex: "1 1 260px" }}
           value={q} onChange={(e) => setQ(e.target.value)}
           onSearch={(v) => load(v, statusFilter, 1,
@@ -862,15 +892,17 @@ export default function PoolManagementPage() {
       )}
 
       <Table<PnPoolRow>
-        rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
+        rowKey="group_id" size="small" columns={canList ? columns : columns.filter(c => ["name", "purchase_ceiling_ex_tax", "sales_floor_ex_tax", "op"].includes(String(c.key || ("dataIndex" in c ? c.dataIndex : ""))))} dataSource={rows} loading={loading}
         scroll={{ x: 1190 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
-        pagination={{
-          current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
-          showTotal: (t) => `共 ${t} 个池`,
+        pagination={total == null ? false : {
+          current: page, pageSize: PAGE_SIZE, total: total ?? undefined, showSizeChanger: false,
+          showTotal: total == null ? undefined : (t) => `共 ${t} 个池`,
           onChange: (p) => load(q, statusFilter, p,
             localCoverageRestricted ? null : policyMissing),
         }}
       />
+
+      {total == null && <Space><Button disabled={page <= 1} onClick={() => load(q, statusFilter, page - 1)}>上一页</Button><Button disabled={rows.length < PAGE_SIZE} onClick={() => load(q, statusFilter, page + 1)}>下一页</Button></Space>}
 
       <Drawer
         width={isMobile ? "100%" : 720}
@@ -886,3 +918,5 @@ export default function PoolManagementPage() {
     </div>
   );
 }
+
+export default withRouteAccess(PoolManagementPage, "/pool-management");

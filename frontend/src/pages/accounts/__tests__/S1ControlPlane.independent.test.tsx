@@ -1,11 +1,15 @@
+import { upgradeS1Fixture } from "../../../test/s2WireFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '../../../test/antdRender';
 import type { AccountModules, AuthzCatalog, AuthorizationPreview } from '../../../api/authz';
-import accountCases from '../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json';
+import accountCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json";
 import ModuleAccountDrawer from '../ModuleAccountDrawer';
 import AuthorizationDiff from '../AuthorizationDiff';
 import { useAuthorizationTask } from '../useAuthorizationTask';
-import catalogCases from '../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json';
+import catalogCasesHistorical from "../../../../../docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json";
+
+const accountCases = upgradeS1Fixture(accountCasesHistorical);
+const catalogCases = upgradeS1Fixture(catalogCasesHistorical);
 
 const apiMocks = vi.hoisted(() => ({ getAccountModules: vi.fn(), authzCommand: vi.fn() }));
 vi.mock('../../../api/authz', async importOriginal => ({

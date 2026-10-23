@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck } from "../../authz/access";
+import { actionRule, allRule } from "../../authz/rules";
 /**
  * 早会价格纪律摘要：只读回看所选时间范围内，严格越过人工池约束价的历史记录。
  * 只陈述次数、订单、池、经办人与金额差事实；不审批、不拦截，也不评价员工。
@@ -131,6 +133,8 @@ export default function MorningDisciplineSummary({ dateRange, localGovernanceRes
   localGovernanceRestricted: boolean;
 }) {
   const screens = Grid.useBreakpoint();
+  const access = useModuleAccess("price_discipline"), visible = useSurfaceCheck();
+  localGovernanceRestricted = !access.field("data_pool_price_governance", !localGovernanceRestricted);
   const mobile = screens.md === false;
   const [detail, setDetail] = useState<{ side: PriceDisciplineSide; orderId: number } | null>(null);
   const restrictedEnvelope: PriceDisciplineSummary = useMemo(() => ({
@@ -142,17 +146,17 @@ export default function MorningDisciplineSummary({ dateRange, localGovernanceRes
     recent_violations: [], missing_constraints: null,
   }), [dateRange.date_from, dateRange.date_to]);
   const request = useGuardedFetch<PriceDisciplineSummary>(
-    () => localGovernanceRestricted
+    context => localGovernanceRestricted
       ? Promise.resolve({ data: restrictedEnvelope })
-      : dashboardPriceDisciplineSummary(dateRange),
-    [dateRange, localGovernanceRestricted, restrictedEnvelope]);
+      : dashboardPriceDisciplineSummary(dateRange, context),
+    [dateRange, localGovernanceRestricted, restrictedEnvelope], undefined, actionRule("price_discipline", "read"));
 
   const data = request.data;
   const purchase = data?.purchase ?? ZERO_SIDE;
   const sales = data?.sales ?? ZERO_SIDE;
   const records = data?.recent_violations ?? [];
   const openOrder = (record: PriceDisciplineViolation) => {
-    setDetail({ side: record.side, orderId: record.order_id });
+    if (visible("company_pool_order_facts.order_detail", true)) setDetail({ side: record.side, orderId: record.order_id });
   };
 
   const columns: ColumnsType<PriceDisciplineViolation> = [
@@ -274,7 +278,8 @@ export default function MorningDisciplineSummary({ dateRange, localGovernanceRes
         range="custom"
         dateFrom={dateRange.date_from}
         dateTo={dateRange.date_to}
-        loadDetail={fetchDashboardOrderDetail}
+        resource="company_pool_order_facts"
+
         onClose={() => setDetail(null)}
       />
     </Card>

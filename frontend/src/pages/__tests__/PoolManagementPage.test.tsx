@@ -1,3 +1,12 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({}, "readonly");
+  return fixtureRender(...args);
+}
 /** 互通PN池管理页的权限行为测试（复审阻塞 3 / 非阻塞 1、2、3）。
  *
  * 真实断言口径：
@@ -10,7 +19,7 @@
  * - 归档池：只读档案 + "先恢复"提示，不渲染任何保存按钮。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
+import { act, cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "../../test/antdRender";
 
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
@@ -138,7 +147,7 @@ describe("约束价覆盖率与 URL 缺失筛选", () => {
 
     renderPage("/pool-management?policy_missing=purchase");
     await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledWith(
-      expect.objectContaining({ policy_missing: "purchase", status: "active", page: 1 })));
+      expect.objectContaining({ policy_missing: "purchase", status: "active", page: 1 }), CAPTURED_REQUEST));
 
     const purchase = await screen.findByRole("button", { name: "筛选未设采购上限的互通池" });
     expect(purchase).toHaveAttribute("aria-pressed", "true");
@@ -149,12 +158,12 @@ describe("约束价覆盖率与 URL 缺失筛选", () => {
     fireEvent.click(screen.getByRole("button", { name: "筛选未设销售下限的互通池" }));
     await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=sales"));
     await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
-      expect.objectContaining({ policy_missing: "sales", status: "active", page: 1 })));
+      expect.objectContaining({ policy_missing: "sales", status: "active", page: 1 }), CAPTURED_REQUEST));
 
     fireEvent.click(screen.getByRole("button", { name: "清除缺失筛选" }));
     await vi.waitFor(() => expect(curLoc.search).toBe(""));
     await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
-      expect.not.objectContaining({ policy_missing: expect.anything() })));
+      expect.not.objectContaining({ policy_missing: expect.anything() }), CAPTURED_REQUEST));
 
     act(() => nav(-1));
     await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=sales"));
@@ -176,19 +185,19 @@ describe("约束价覆盖率与 URL 缺失筛选", () => {
     mockList([row()]);
     renderPage("/pool-management?policy_missing=purchase");
     await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "active", policy_missing: "purchase" })));
+      expect.objectContaining({ status: "active", policy_missing: "purchase" }), CAPTURED_REQUEST));
 
     fireEvent.click(screen.getByText("已归档"));
     await vi.waitFor(() => expect(curLoc.search).toBe(""));
     await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: "archived" })));
+      expect.objectContaining({ status: "archived" }), CAPTURED_REQUEST));
     expect(listPnPools).toHaveBeenLastCalledWith(
-      expect.not.objectContaining({ policy_missing: expect.anything() }));
+      expect.not.objectContaining({ policy_missing: expect.anything() }), CAPTURED_REQUEST);
 
     act(() => nav(-1));
     await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=purchase"));
     await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: "active", policy_missing: "purchase" })));
+      expect.objectContaining({ status: "active", policy_missing: "purchase" }), CAPTURED_REQUEST));
     expect(screen.getByTitle("有效").closest("label")).toHaveClass("ant-segmented-item-selected");
   });
 
@@ -202,7 +211,7 @@ describe("约束价覆盖率与 URL 缺失筛选", () => {
     await screen.findByText("测试池");
     expect(screen.queryByTestId("pool-policy-coverage-grid")).toBeNull();
     expect(screen.queryByRole("button", { name: /筛选未设/ })).toBeNull();
-    expect(listPnPools).toHaveBeenCalledWith(expect.not.objectContaining({ policy_missing: "purchase" }));
+    expect(listPnPools).toHaveBeenCalledWith(expect.not.objectContaining({ policy_missing: "purchase" }), CAPTURED_REQUEST);
   });
 
   it("切换缺失筛选失败时清掉旧列表并保留可重试错误，不让新标签配旧数据", async () => {

@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck } from "../../authz/access";
+import { actionRule, allRule } from "../../authz/rules";
 /**
  * 订单内容弹窗（池分析详情页点单号打开）：
  * 复用订单列表端点的 order_no 全等召回，取回该单完整 parts 明细渲染。
@@ -25,15 +27,17 @@ export default function OrderDetailModal({
 }: OrderDetailModalProps) {
   const isPurchase = side === "purchase";
   const basis = useTaxBasis(side);
+  const access = useModuleAccess(isPurchase ? "company_purchase_orders" : "company_sales_orders");
+  localCostRestricted = !access.field("data_purchase_cost", !localCostRestricted);
   const { data, loading, error } = useGuardedFetch<OrdersResp<SalesOrderRow | PurchaseOrderRow>>(
-    () => {
+    context => {
       if (!orderNo) return Promise.resolve({ data: null as never });
       const params = { order_no: orderNo, status: "全部", page: 1, page_size: 20 };
       return isPurchase
-        ? dashboardPurchaseOrders(params) as Promise<{ data: OrdersResp<SalesOrderRow | PurchaseOrderRow> }>
-        : dashboardSales(params) as Promise<{ data: OrdersResp<SalesOrderRow | PurchaseOrderRow> }>;
+        ? dashboardPurchaseOrders(params, context) as Promise<{ data: OrdersResp<SalesOrderRow | PurchaseOrderRow> }>
+        : dashboardSales(params, context) as Promise<{ data: OrdersResp<SalesOrderRow | PurchaseOrderRow> }>;
     },
-    [orderNo, isPurchase]);
+    [orderNo, isPurchase], undefined, actionRule(isPurchase ? "company_purchase_orders" : "company_sales_orders", "read"), !!orderNo);
 
   const row = orderNo ? data?.items?.find((i) => i.order_no === orderNo) ?? null : null;
   const contractVersion = Number(String(data?.contract_version ?? "").replace(/^v/i, ""));

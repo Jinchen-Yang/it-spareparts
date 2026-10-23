@@ -1,3 +1,5 @@
+import { withRouteAccess, useAuthorizedQuery, useModuleAccess } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 采购分析页（D-39 客户需求 Round1，PR-4a）：日期区间 + 类型/采购员/销售/客户/分类多选，
 // 三口径（含税/不含税/实付）并排显示（本地选择，不动管理员 TaxBasis），分组 → 订单下钻 → 明细抽屉。
 // Q-A-01 补图表：日 / 月趋势柱图（同端点 group_by=day/month 二次请求）+ 当前分组维度
@@ -76,8 +78,10 @@ const METRIC_RADIO_LABELS: Record<PurchaseChartMetric, string> = {
   orders: "单数",
 };
 
-export default function PurchaseAnalyticsPage() {
+function PurchaseAnalyticsPage() {
   const { message } = App.useApp();
+  const access = useModuleAccess("purchase_analysis");
+  const visible = (surface: string) => access.surface(surface, true);
   const [sp, setSp] = useSearchParams();
   const state = parseAnalyticsUrl(sp);
   const patch = useAnalyticsPatch(sp, setSp);
@@ -93,17 +97,7 @@ export default function PurchaseAnalyticsPage() {
   const notifyOwnerStale = () => {
     if (!sessionStale(ownerToken)) return;
     setSessionDead(true);
-    setOptions(null);
-    setCustomerOptionsLoading(false);
-    setSummary(null);
-    setSummaryLoading(false);
-    setSummaryError(null);
-    setOrders(null);
-    setOrdersLoading(false);
-    setOrdersError(null);
-    setTrendSummary(null);
-    setTrendLoading(false);
-    setTrendError(null);
+
   };
   /** 所属会话失效：拒发请求并清旧会话上下文（筛选候选 / 汇总与图表 / 订单列表）。
    * 幂等；置死后数据面换专用提示，重试不再发请求。 */
@@ -116,8 +110,8 @@ export default function PurchaseAnalyticsPage() {
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
   // admin 恒全开；其余角色按登录快照（boss 模板默认双开，显式关掉的按受限处理）
-  const costRestricted = !isAdmin && perms.data_purchase_cost === false;
-  const customerRestricted = !isAdmin && perms.data_customer === false;
+  const costRestricted = !access.field("data_purchase_cost", isAdmin || perms.data_purchase_cost !== false);
+  const customerRestricted = !access.field("data_customer", isAdmin || perms.data_customer !== false);
 
   // 客户权限受限时：客户筛选/分组对后端是 403，其下钻层（group_key 是客户 id，
   // 换维度后必是空集）一并收敛——控件显示、渲染层、请求参数全部同源，
@@ -138,15 +132,7 @@ export default function PurchaseAnalyticsPage() {
       ? [effectiveState.groupKey]
       : state.category;
 
-  const [options, setOptions] = useState<PurchaseAnalyticsOptions | null>(null);
-  const [summary, setSummary] = useState<PurchaseAnalyticsSummary | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(true);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [orders, setOrders] = useState<PurchaseAnalyticsOrdersResp | null>(null);
-  const [ordersLoading, setOrdersLoading] = useState(false);
-  const [ordersError, setOrdersError] = useState<string | null>(null);
   const [customerQuery, setCustomerQuery] = useState("");
-  const [customerOptionsLoading, setCustomerOptionsLoading] = useState(false);
   // Q-A-01 趋势图状态：粒度与指标是图表视图开关（非筛选），不落 URL；初始粒度按区间
   // 推荐——日期要用预设解析后的实际区间（state.from/to 仅 preset=custom 才有值，
   // 「今天」等预设直接给 null 会错推成按月）
@@ -156,45 +142,18 @@ export default function PurchaseAnalyticsPage() {
   });
   const [chartMetric, setChartMetric] = useState<PurchaseChartMetric>(
     () => BASIS_TO_CHART_METRIC[state.basis[0]] ?? "orders");
-  const [trendSummary, setTrendSummary] = useState<PurchaseAnalyticsSummary | null>(null);
-  const [trendLoading, setTrendLoading] = useState(false);
-  const [trendError, setTrendError] = useState<string | null>(null);
   const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
-  const summarySeq = useRef(0);
-  const ordersSeq = useRef(0);
-  const trendSeq = useRef(0);
-
   // 客户已选ID额外补姓名最多200项；超出部分仍保留ID筛选，不扩大后端候选上限。
   const selectedCustomerKey = effectiveState.customerIds.slice(0, 200).join(",");
   // 客户候选直接来自 options 的有界只读查询；输入名称可搜索首批之外的客户。
   // 旧请求清理 alive 标志，快速输入时不让迟到响应覆盖新搜索；落地前比对
   // localStorage token（DL-010）：换账号后的迟到响应不进当前 UI。
-  useEffect(() => {
-    if (sessionExpired()) return;
-    let alive = true;
-    const token = readSessionToken();
-    setCustomerOptionsLoading(true);
-    fetchPurchaseAnalyticsOptions(customerRestricted ? "" : customerQuery,
-      selectedCustomerKey ? selectedCustomerKey.split(",").map(Number) : [])
-      .then(({ data }) => {
-        if (!alive) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setOptions(data);
-      })
-      .catch((err) => {
-        if (!alive) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        message.error(`筛选取值加载失败：${apiErrorMessage(err)}`);
-      })
-      // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态，并通知页级清旧上下文
-      .finally(() => {
-        if (!alive) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setCustomerOptionsLoading(false);
-      });
-    return () => { alive = false; };
-  }, [customerQuery, customerRestricted, selectedCustomerKey]);
+  const optionsQuery = useAuthorizedQuery({ rule: actionRule("purchase_analysis", "read"), legacy: { purchase_analysis: true }, onStale: notifyOwnerStale,
+    queryKey: [customerQuery, customerRestricted, selectedCustomerKey], enabled: !sessionDead,
+    query: async context => (await fetchPurchaseAnalyticsOptions(customerRestricted ? "" : customerQuery,
+      selectedCustomerKey ? selectedCustomerKey.split(",").map(Number) : [], context)).data });
+  const options = optionsQuery.data, customerOptionsLoading = optionsQuery.loading;
   const customerOptions = customerRestricted ? [] : [...new Map(
     [...(options?.selected_customers ?? []), ...(options?.customers ?? [])]
       .map(c => [c.customer_id, { value: c.customer_id, label: c.customer || String(c.customer_id) }]),
@@ -210,99 +169,21 @@ export default function PurchaseAnalyticsPage() {
   );
   const filterKey = JSON.stringify(apiFilters);
 
-  useEffect(() => {
-    if (sessionExpired()) return;
-    const seq = ++summarySeq.current;
-    const token = readSessionToken();
-    setSummaryLoading(true);
-    setSummaryError(null);
-    fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: effectiveGroupBy })
-      .then(({ data }) => {
-        if (seq !== summarySeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setSummary(data);
-      })
-      .catch((err) => {
-        if (seq !== summarySeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setSummary(null);
-        setSummaryError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        if (seq !== summarySeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setSummaryLoading(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, effectiveGroupBy, retryTick]);
-
-  // Q-A-01 趋势图数据：同一 summary 端点按 day / month 二次分组（不新增后端）；
-  // 与主汇总同一筛选键 + 粒度 + 重试驱动，令牌比对同 DL-010。
-  useEffect(() => {
-    if (sessionExpired()) return;
-    const seq = ++trendSeq.current;
-    const token = readSessionToken();
-    setTrendLoading(true);
-    setTrendError(null);
-    fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: trendGran })
-      .then(({ data }) => {
-        if (seq !== trendSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setTrendSummary(data);
-      })
-      .catch((err) => {
-        if (seq !== trendSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setTrendSummary(null);
-        setTrendError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        if (seq !== trendSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setTrendLoading(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, trendGran, retryTick]);
-
-  // 分组下钻订单列表（筛选随层传递）
-  useEffect(() => {
-    if (sessionExpired()) return;
-    if (effectiveState.groupKey == null) {
-      setOrders(null);
-      setOrdersError(null);
-      return;
-    }
-    const seq = ++ordersSeq.current;
-    const token = readSessionToken();
-    setOrdersLoading(true);
-    setOrdersError(null);
-    fetchPurchaseAnalyticsOrders({
-      ...apiFilters,
-      group_by: effectiveGroupBy,
-      group_key: effectiveState.groupKey,
-      sort: effectiveState.sort,
-      order: effectiveState.dir,
-      page: effectiveState.page,
-      page_size: pageSize,
-    })
-      .then(({ data }) => {
-        if (seq !== ordersSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setOrders(data);
-      })
-      .catch((err) => {
-        if (seq !== ordersSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setOrders(null);
-        setOrdersError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        if (seq !== ordersSeq.current) return;
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setOrdersLoading(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, effectiveGroupBy, effectiveState.groupKey, effectiveState.sort, effectiveState.dir, effectiveState.page, pageSize, retryTick]);
+  const summaryQuery = useAuthorizedQuery({ rule: actionRule("purchase_analysis", "read"), legacy: { purchase_analysis: true }, onStale: notifyOwnerStale,
+    queryKey: [filterKey, effectiveGroupBy, retryTick], enabled: !sessionDead && (visible("summary") || visible("groups")),
+    query: async context => (await fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: effectiveGroupBy }, context)).data });
+  const trendQuery = useAuthorizedQuery({ rule: actionRule("purchase_analysis", "read"), legacy: { purchase_analysis: true }, onStale: notifyOwnerStale,
+    queryKey: [filterKey, trendGran, retryTick], enabled: !sessionDead && visible("trend") && effectiveState.groupKey == null,
+    query: async context => (await fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: trendGran }, context)).data });
+  const ordersQuery = useAuthorizedQuery({ rule: actionRule("purchase_analysis", "read"), legacy: { purchase_analysis: true }, onStale: notifyOwnerStale,
+    queryKey: [filterKey, effectiveGroupBy, effectiveState.groupKey, effectiveState.sort, effectiveState.dir, effectiveState.page, pageSize, retryTick],
+    enabled: !sessionDead && visible("orders") && effectiveState.groupKey != null,
+    query: async context => (await fetchPurchaseAnalyticsOrders({ ...apiFilters, group_by: effectiveGroupBy,
+      group_key: effectiveState.groupKey!, sort: effectiveState.sort, order: effectiveState.dir, page: effectiveState.page, page_size: pageSize }, context)).data });
+  const summary = summaryQuery.data, summaryLoading = summaryQuery.loading, summaryError = summaryQuery.error ? apiErrorMessage(summaryQuery.error) : null;
+  const trendSummary = trendQuery.data, trendLoading = trendQuery.loading, trendError = trendQuery.error ? apiErrorMessage(trendQuery.error) : null;
+  const orders = ordersQuery.data, ordersLoading = ordersQuery.loading, ordersError = ordersQuery.error ? apiErrorMessage(ordersQuery.error) : null;
+  useEffect(() => { if (sessionStale(ownerToken)) notifyOwnerStale(); }, [sp.toString(), options, summary, orders]);
 
   const basis = state.basis;
   const lineMode = (effectiveState.groupKey == null ? summary?.basis_mode : orders?.basis_mode) === "line";
@@ -386,7 +267,7 @@ export default function PurchaseAnalyticsPage() {
           <>
             {/* Q-A-01：趋势（day/month）+ 排行（当前分组维度）图表，与表格同源同下钻 */}
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-              <Card
+              {visible("trend") && <Card
                 size="small"
                 title="采购趋势"
                 style={{ flex: "1 1 420px", minWidth: 0, maxWidth: "100%" }}
@@ -427,8 +308,8 @@ export default function PurchaseAnalyticsPage() {
                     }}
                   />
                 )}
-              </Card>
-              {RANKING_GROUP_BYS.includes(effectiveGroupBy) && (
+              </Card>}
+              {visible("groups") && RANKING_GROUP_BYS.includes(effectiveGroupBy) && (
                 <Card
                   size="small"
                   title={`分组排行（${groupByTitle(effectiveGroupBy)}）`}
@@ -445,14 +326,15 @@ export default function PurchaseAnalyticsPage() {
               )}
             </div>
             <SummaryView
+              showKpi={visible("summary")} showGroups={visible("groups")}
               summary={summary}
               loading={summaryLoading}
               basis={basis}
               groupBy={effectiveGroupBy}
-              onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
+              onDrill={(key) => { if (!visible("orders")) return; patch({ groupKey: key, page: 1 }, { history: "push" }); }}
             />
           </>
-        ) : ordersError ? (
+        ) : !visible("orders") ? null : ordersError ? (
           <Alert
             type="error"
             showIcon
@@ -476,7 +358,7 @@ export default function PurchaseAnalyticsPage() {
             onPageChange={(page, size) => {
               patch({ page, pageSize: size });
             }}
-            onOpenOrder={(orderId) => { notifyOwnerStale(); patch({ orderId }, { history: "push" }); }}
+            onOpenOrder={(orderId) => { if (!visible("order_detail") || sessionExpired()) return; notifyOwnerStale(); patch({ orderId }, { history: "push" }); }}
             onBack={() => patch({ groupKey: null, orderId: null, page: 1 }, { history: "push" })}
           />
         )}
@@ -484,14 +366,16 @@ export default function PurchaseAnalyticsPage() {
         )}
       </Card>
 
-      <OrderDetailDrawer
+      {visible("order_detail") && <OrderDetailDrawer
         orderId={effectiveState.orderId}
         category={drawerCategory}
         basis={basis}
         ownerToken={ownerToken}
         onOwnerStale={notifyOwnerStale}
         onClose={() => patch({ orderId: null })}
-      />
+      />}
     </ConfigProvider>
   );
 }
+
+export default withRouteAccess(PurchaseAnalyticsPage, "/purchases/analytics");

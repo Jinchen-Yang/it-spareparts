@@ -1,3 +1,12 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_pool_analysis": true}, "readonly");
+  return fixtureRender(...args);
+}
 /** 池分析详情页（/pool-analysis/:groupId 独立深链）行为测试。
  *
  * 断言口径：
@@ -7,7 +16,7 @@
  * - 治理受限：约束价显示「无权限」，与「未设置」分离。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { Grid } from "antd";
 import type { PoolPriceMapResponse } from "../../api/poolAnalysis";
@@ -261,7 +270,7 @@ describe("深链与取数", () => {
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       range: "365d",
       purchase_page: 1, sales_page: 1, orders_page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
   });
 
   it("完整 from/to 优先于 range，不把两套窗口同时发给后端", async () => {
@@ -269,7 +278,7 @@ describe("深链与取数", () => {
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       date_from: "2026-06-01", date_to: "2026-06-30",
       purchase_page: 1, sales_page: 1, orders_page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
   });
 
   it("side/pn 深链下发并定位当前方向与成员，不丢筛选", async () => {
@@ -277,7 +286,7 @@ describe("深链与取数", () => {
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       range: "90d", side: "sales", pn: "PN-B",
       purchase_page: 1, sales_page: 1, orders_page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
     expect(screen.getByLabelText("当前关注方向")).toHaveTextContent("销售");
     const rows = await screen.findAllByRole("row");
     const memberRows = rows.filter((row) => row.textContent?.includes("PN-A") || row.textContent?.includes("PN-B"));
@@ -291,7 +300,7 @@ describe("深链与取数", () => {
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       range: "365d", side: "sales", pn: "PN-B", purchase_type: "临时联合采购",
       purchase_page: 1, sales_page: 1, orders_page_size: 20,
-    }));
+    }, CAPTURED_REQUEST));
     expect(screen.getByText("临时联合采购")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回互通池" }));
     await screen.findByText("池列表桩");
@@ -310,7 +319,7 @@ describe("深链与取数", () => {
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenLastCalledWith(12, expect.objectContaining({
       purchase_type: "全新采购流程", purchase_page: 1, sales_page: 1,
-    })));
+    }), CAPTURED_REQUEST));
   });
 
   it("全员详情不再渲染旧推荐与节省语义", async () => {
@@ -335,7 +344,7 @@ describe("深链与取数", () => {
     renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30");
     await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       date_from: "2026-06-01", date_to: "2026-06-30",
-      purchase_page: 1, sales_page: 1, orders_page_size: 20 }));
+      purchase_page: 1, sales_page: 1, orders_page_size: 20 }, CAPTURED_REQUEST));
     await screen.findByText("内存互通池");
     expect(screen.getByText("人工最高采购价(未税)")).toBeInTheDocument();
     expect(screen.getByText("¥105")).toBeInTheDocument();
@@ -372,7 +381,7 @@ describe("股票式价格区间图", () => {
     await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenCalledWith(12, {
       side: "sales", range: "365d", purchase_type: "补库", employee: "张三",
       sort: "pn", order: "asc",
-    }));
+    }, CAPTURED_REQUEST));
     await expandPriceRange();
     expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
   });
@@ -446,6 +455,7 @@ describe("股票式价格区间图", () => {
     expect(screen.queryByTestId("price-map-selected")).toBeNull();
     expect(screen.getByText("正在加载价格区间…")).toBeInTheDocument();
 
+    await waitFor(() => expect(releaseSales).toEqual(expect.any(Function)));
     await act(async () => releaseSales?.({ ...PRICE_MAP, side: "sales" }));
     const salesMap = await screen.findByTestId("price-map-stub");
     expect(salesMap).toHaveAttribute("data-side", "sales");
@@ -458,10 +468,10 @@ describe("股票式价格区间图", () => {
     await screen.findByTestId("price-map-stub");
     fireEvent.click(within(screen.getByLabelText("价格图区间排序")).getByText("加权均价"));
     await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenLastCalledWith(12,
-      expect.objectContaining({ sort: "weighted_avg", order: "desc" })));
+      expect.objectContaining({ sort: "weighted_avg", order: "desc" }), CAPTURED_REQUEST));
     fireEvent.click(screen.getByRole("button", { name: "切换价格图排序方向" }));
     await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenLastCalledWith(12,
-      expect.objectContaining({ sort: "weighted_avg", order: "asc" })));
+      expect.objectContaining({ sort: "weighted_avg", order: "asc" }), CAPTURED_REQUEST));
   });
 });
 
@@ -471,7 +481,7 @@ describe("订单板块", () => {
     const link = await screen.findByRole("button", { name: "查看订单 CG-77 内容" });
     expect(link.tagName).toBe("BUTTON");
     fireEvent.click(link);
-    await waitFor(() => expect(fetchPoolAnalysisOrderDetail).toHaveBeenCalledWith("purchase", 77));
+    await waitFor(() => expect(fetchPoolAnalysisOrderDetail).toHaveBeenCalledWith("purchase", 77, CAPTURED_REQUEST));
     const dialog = await screen.findByRole("dialog");
     expect((dialog.closest(".ant-modal") ?? dialog).getAttribute("style"))
       .toContain("calc(100vw - 16px)");
