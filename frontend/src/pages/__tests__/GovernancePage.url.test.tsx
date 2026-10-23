@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, waitFor } from "../../test/antdRender";
 import { renderUrlPage } from "../../test/urlStateRender";
 import api from "../../api";
@@ -34,3 +34,6 @@ it("非法标签回退型号治理", async () => {
   expect(screen.getByRole("tab", { name: "型号治理" })).toHaveAttribute("aria-selected", "true");
   await act(async () => {});
 });
+
+// These fixtures exercise the retained legacy governance implementation.
+vi.mock("../../authz/AuthzProvider", async original => ({ ...await original<object>(), useAuthz: () => ({ status: "ready", snapshot: { schema_version: 1, resources: { part_identity: { runtime_state: "legacy", migration_state: "implemented" }, part_master: { runtime_state: "legacy", migration_state: "implemented" } } } }) }));

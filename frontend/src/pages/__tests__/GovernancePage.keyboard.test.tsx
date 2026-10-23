@@ -52,3 +52,6 @@ it("治理排除可用 Tab 和 Enter 打开原因确认，恢复可用空格触�
     pn_std: "KEYBOARD-PN", excluded: false,
   }));
 });
+
+// These fixtures exercise the retained legacy governance implementation.
+vi.mock("../../authz/AuthzProvider", async original => ({ ...await original<object>(), useAuthz: () => ({ status: "ready", snapshot: { schema_version: 1, resources: { part_identity: { runtime_state: "legacy", migration_state: "implemented" }, part_master: { runtime_state: "legacy", migration_state: "implemented" } } } }) }));

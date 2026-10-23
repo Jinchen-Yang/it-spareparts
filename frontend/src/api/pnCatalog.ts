@@ -38,14 +38,14 @@ export function catalogClient(token: string) {
 }
 export type CatalogClient = ReturnType<typeof catalogClient>;
 export function catalogError(error: unknown): { code: string; message: string; details: Record<string, unknown>; ambiguous: boolean } {
-  const e = error as { response?: { data?: { error?: { code?: string; message?: string; details?: Record<string, unknown> }; detail?: unknown } }; message?: string } | null;
+  const e = error as { response?: { status?: number; data?: { error?: { code?: string; message?: string; details?: Record<string, unknown> }; detail?: unknown } }; message?: string } | null;
   const data = e?.response?.data;
   const detail = data?.detail;
   const structured = detail && typeof detail === "object" && !Array.isArray(detail) ? detail as Record<string, unknown> : {};
   return {
     code: data?.error?.code || (typeof structured.code === "string" ? structured.code : ""),
     message: data?.error?.message || (typeof detail === "string" ? detail : typeof structured.message === "string" ? structured.message : "") || e?.message || "请求失败",
-    details: data?.error?.details || {}, ambiguous: !e?.response,
+    details: data?.error?.details || {}, ambiguous: !e?.response || (e.response.status ?? 0) >= 500,
   };
 }
 

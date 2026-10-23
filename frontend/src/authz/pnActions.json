@@ -35,6 +35,10 @@
     "part_master",
     "read_audit"
   ],
+  "read_legacy_history": [
+    "part_master",
+    "read_audit"
+  ],
   "read_candidates": [
     "part_master",
     "read_candidates"
@@ -285,6 +289,18 @@
   ],
   "research.job.retry": [
     "part_master",
+    "job.retry"
+  ],
+  "identity.job.read": [
+    "part_identity",
+    "job.read"
+  ],
+  "identity.job.cancel": [
+    "part_identity",
+    "job.cancel"
+  ],
+  "identity.job.retry": [
+    "part_identity",
     "job.retry"
   ],
   "stage_migration": [
