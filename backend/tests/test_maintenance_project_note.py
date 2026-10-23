@@ -211,6 +211,10 @@ def test_audit_failure_rolls_back_note_version_and_workbook_revision(db):
 
 def test_note_migration_single_head_roundtrip_and_nonempty_downgrade_guard(db):
     client, pid = _project(db)
+    # Model the legacy account present before this historical schema boundary.
+    account = db.scalar(select(SysUser).where(SysUser.username == "project_note_admin"))
+    account.authorization_legacy_seed_eligible = True
+    db.commit()
     db.close()
     cfg = _alembic_cfg()
     script = ScriptDirectory.from_config(cfg)
@@ -225,6 +229,12 @@ def test_note_migration_single_head_roundtrip_and_nonempty_downgrade_guard(db):
             assert "no_return_note" in columns
         command.upgrade(cfg, "head")
         command.check(cfg)
+        assert _patch(client, pid, project_note="旧会话不能写入").status_code == 401
+        login = client.post("/api/auth/login", json={
+            "username": "project_note_admin", "password": "synthetic-password-123",
+        })
+        assert login.status_code == 200, login.text
+        client.headers["Authorization"] = f"Bearer {login.json()['token']}"
         assert _patch(client, pid, project_note="有内容必须保留").status_code == 200
         with pytest.raises(DBAPIError, match="downgrade blocked.*project_note"):
             command.downgrade(cfg, "f307604fa4d7")

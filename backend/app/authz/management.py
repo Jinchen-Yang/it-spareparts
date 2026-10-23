@@ -401,7 +401,7 @@ def save_template(db, identity, body, *, code=None, state_action=None):
         bundle=module_bundle(db,src.authorization_bundle if src else spec['modules'],states)
         newcode=metadata.pop('code',None) or 'tpl-'+secrets.token_hex(4)
         if newcode=='admin':raise authz_error(400,'ACCOUNT_PROTECTION_VIOLATION','admin 模板保留')
-        tpl=SysRoleTemplate(code=newcode,base_role='readonly',permissions={},authorization_bundle=bundle,version=1,is_active=True,is_system=False,created_by=who.username,**metadata)
+        tpl=SysRoleTemplate(code=newcode,base_role='readonly',permissions={},authorization_bundle=bundle,authorization_legacy_seed_eligible=False,version=1,is_active=True,is_system=False,created_by=who.username,**metadata)
         db.add(tpl);db.flush();before=None
     else:
         base(body,{'expected_version'} if state_action else {'expected_version','metadata','updates'},{'expected_version'})
@@ -628,7 +628,7 @@ def create_account(db,identity,body):
         db.rollback();return {**envelope(),'dry_run':True,'committed':False,'fingerprint':fp,'command':command,'preview':preview}
     if secured:check_fingerprint(fp,body['fingerprint'])
     user=SysUser(username=username,password_hash=hash_password(pr['password']),role=security.get('role','readonly'),display_name=display,
-        salesperson_name=security.get('salesperson_name'),authorization_profile=source,token_version=epoch_after,is_active=True)
+        salesperson_name=security.get('salesperson_name'),authorization_profile=source,authorization_legacy_seed_eligible=False,token_version=epoch_after,is_active=True)
     db.add(user);db.flush()
     for r,c in bundle.items():put_grant(db,user,r,c,None)
     set_customers(db,user,ids);db.flush();result=_read_account(db,user)

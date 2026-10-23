@@ -4,7 +4,7 @@
 （及随 _full() 同步的 admin）为 true、其余角色 fail-closed；真实 downgrade→upgrade
 往返——boss 存量账号补 true 并清覆盖，其余账号回填 false 不动覆盖层。
 """
-from sqlalchemy import text
+from sqlalchemy import MetaData, Table, text
 
 from app import permissions
 
@@ -52,28 +52,32 @@ def test_upgrade_backfills_and_downgrade_removes_key(db):
 
     from app.auth import hash_password
     from app.db import engine
-    from app.models.system import SysUser
 
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option(
         "script_location", os.path.join(os.path.dirname(__file__), "..", "alembic"))
+    # 释放当前 schema 的 Session；历史阶段只使用当时实际存在的列。
+    db.close()
     try:
         alembic_command.downgrade(cfg, _PREV)
         # 存量账号形态：键尚不存在（pre-migration 模板快照不含该键）
         specs = [("boss", False), ("boss", True), ("readonly", True)]
-        for i, (role, override_val) in enumerate(specs):
-            base = permissions.effective(role, None)
-            base.pop(_KEY, None)                  # 模拟迁移前的快照
-            db.add(SysUser(
-                username=f"analytics-migration-{i}", role=role, display_name=role,
-                password_hash=hash_password("synthetic-migration-password"),
-                is_active=True, template_code=role, template_version=1,
-                template_perms=base,
-                perm_overrides={_KEY: override_val},
-                permissions=base,
-            ))
-        db.commit()
-        db.close()
+        # 反射旧 schema，而非使用会引用未来 authorization_* 列的当前 ORM。
+        # 账号确实创建于 S1 迁移之前；恢复 head 时由迁移记录 legacy 来源，
+        # 不修改来源标记或绕过 canonical-origin 的生产降级守卫。
+        with engine.begin() as conn:
+            legacy_users = Table("sys_user", MetaData(), autoload_with=conn)
+            for i, (role, override_val) in enumerate(specs):
+                base = permissions.effective(role, None)
+                base.pop(_KEY, None)             # 模拟迁移前的快照
+                conn.execute(legacy_users.insert().values(
+                    username=f"analytics-migration-{i}", role=role, display_name=role,
+                    password_hash=hash_password("synthetic-migration-password"),
+                    is_active=True, template_code=role, template_version=1,
+                    template_perms=base,
+                    perm_overrides={_KEY: override_val},
+                    permissions=base,
+                ))
         with engine.connect() as conn:
             # 降级后：模板表与账号快照（template_perms/permissions）均无该键；
             # 覆盖层是播种出来的"管理员先前的显式授予"，带着键进 upgrade。

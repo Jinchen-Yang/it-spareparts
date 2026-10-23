@@ -90,6 +90,7 @@ def _insert_atomic_draft_line(db, *, token: str, quantity: str) -> tuple[str, st
                 password_hash=hash_password("synthetic-password-123"),
                 role="sales",
                 display_name=f"补库 {token} 用户",
+                authorization_legacy_seed_eligible=True,
                 is_active=True,
             ),
         ]
@@ -165,6 +166,7 @@ def test_upgrade_preserves_submitted_history_as_explicit_unbound_legacy(db):
             password_hash=hash_password("synthetic-password-123"),
             role="sales",
             display_name="补库迁移历史用户",
+            authorization_legacy_seed_eligible=True,
             is_active=True,
         )
     )
@@ -501,6 +503,7 @@ def test_legacy_history_rejects_project_binding(db):
                 password_hash=hash_password("synthetic-password-123"),
                 role="sales",
                 display_name="补库历史绑定用户",
+                authorization_legacy_seed_eligible=True,
                 is_active=True,
             ),
         ]
@@ -553,6 +556,7 @@ def test_legacy_history_rejects_status_changes(db):
             password_hash=hash_password("synthetic-password-123"),
             role="sales",
             display_name="补库历史状态用户",
+            authorization_legacy_seed_eligible=True,
             is_active=True,
         )
     )
@@ -596,6 +600,7 @@ def test_legacy_history_rejects_nonidentity_updates(db, mutation):
             password_hash=hash_password("synthetic-password-123"),
             role="sales",
             display_name="补库历史只读用户",
+            authorization_legacy_seed_eligible=True,
             is_active=True,
         )
     )

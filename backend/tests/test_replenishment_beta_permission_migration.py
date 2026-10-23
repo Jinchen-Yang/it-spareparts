@@ -42,6 +42,8 @@ def test_upgrade_closes_page_for_existing_admin_but_keeps_admin_actions(db):
             template_perms=base,
             perm_overrides={_PAGE: True},
             permissions=base,
+            # 此夹具代表迁移前旧存量，非 S1 新建的 canonical 账号。
+            authorization_legacy_seed_eligible=True,
         )
     )
     db.commit()

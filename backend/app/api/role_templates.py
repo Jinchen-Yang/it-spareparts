@@ -171,6 +171,7 @@ def create_template(body: dict = Body(...), db: Session = Depends(get_db),
 
     t = SysRoleTemplate(code=code, name=name, description=body.description,
                         base_role=body.base_role, permissions=normalized,
+                        authorization_legacy_seed_eligible=True,
                         is_system=False, is_active=True, version=1,
                         created_by=ident["sub"])
     db.add(t)

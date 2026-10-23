@@ -210,8 +210,8 @@ def _reseed_templates(conn) -> None:
     for role in _BUILTIN_TEMPLATE_ROLES:
         conn.execute(text(
             "INSERT INTO sys_role_template"
-            " (code, name, base_role, permissions, is_system, is_active, version, created_by)"
-            " VALUES (:c, :n, :c, CAST(:p AS jsonb), true, true, 1, 'conftest')"),
+            " (code, name, base_role, permissions, is_system, is_active, version, created_by, authorization_legacy_seed_eligible)"
+            " VALUES (:c, :n, :c, CAST(:p AS jsonb), true, true, 1, 'conftest', true)"),
             {"c": role, "n": _BUILTIN_TEMPLATE_NAMES[role],
              "p": json.dumps(_perms.effective(role, None))})
 

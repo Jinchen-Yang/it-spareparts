@@ -370,3 +370,27 @@ S1执行目录继续只有`read/export`。S2可保留旧read为兼容说明，�
 按[独审S2无扩权矩阵](s2-seed-no-expansion-review.md)至少补：仅read_groups可查分组但不可查订单/趋势；关show_groups而保留概览与read_groups时概览继续工作；关read_groups时所有分组消费者停请求；深链未授详情不请求；cost=false无直方图请求但营收卡仍可读；候选debounce与迟到响应跨epoch不污染；公司池scoped只summary；利润scoped只part且CSV同门；疑点省略side/直接sales ID/reopen均不能旁路；设置普通read不返回审计身份。静态索引完成不等于这些运行反例已通过。
 
 S1目录action新增必填`requires_fields`，与requires_actions同样闭集校验，Editor展示缺失项但不自动授字段。S0read/export依赖数组为空；以上S2字段依赖和数据动作仍为planned。具体wire已由后端与独审确认，未因本清单提前实施业务迁移。
+
+### 13.4 S1冻结后的实施分工差异（仅准备，未改应用/测试）
+
+13.1–13.3已足够作为72面清单；不再重做目录。按实际共享文件收成一个公共包、三个业务包，计数互斥相加为23资源/72面。下表路径均相对`frontend/src/`：
+
+| 包 / 顺序 | 资源、面数 | 独占文件与共享接缝 |
+|---|---|---|
+| F0 公共接缝先行，并接全局税口径 | display_policy：1资源/2面 | `api/authz.ts`、`authz/AuthzProvider.tsx`、`authz/events.ts`、新增单一授权读取请求hook、`App.tsx`/`nav.tsx`/`AppShell.tsx`、公共`api.ts`、`api/systemSettings.ts`、`context/TaxBasis.tsx`、`pages/SystemSettingsPage.tsx`。其他包不改这些文件，向F0提交所需DTO/路由绑定。普通业务用户不得调用管理员catalog来渲染页面。 |
+| F1 交易与财务 | sales_analysis、purchase_analysis、purchase_records、profit_analysis、inventory：5资源/26面 | `pages/sales/analytics/*`、`pages/purchases/*`、`pages/ProfitPage.tsx`、`pages/InventoryPage.tsx`、`api/salesAnalytics.ts`、`api/purchaseAnalytics.ts`。统一接F0请求上下文；Profit按dimension选具名动作；sales存量动作显式转换完成后才开show。 |
+| F2 经营看板与池 | company_summary、company_sales_orders、company_purchase_orders、company_pool_analysis、price_discipline、company_pool_order_facts、pool_price_analysis、pool_order_facts、pool_catalog、pool_price_policy：10资源/24面 | `pages/BossBoardPage.tsx`、`pages/boss/*`、`pages/PoolsPage.tsx`、`pages/PoolAnalysisPage.tsx`、`pages/PoolManagementPage.tsx`、`components/pools/*`、`api/poolAnalysis.ts`、`api/pools.ts`。此包独占共用池详情Modal/引用组件；调用方显式传resource合同，不能默认loader与注入loader资格OR。 |
+| F3 型号、主数据与治理 | part_lookup、part_master、part_substitute、governance、part_identity、data_quality、data_quality_calibration：7资源/20面 | `pages/PartSearchPage.tsx`、`pages/MasterDataPage.tsx`、`pages/GovernancePage.tsx`、`components/parts/*`、`components/PartPicker.tsx`、`pages/governance/DataQualityIssuesPanel.tsx`/`DataQualityCalibrationPanel.tsx`、`api/search.ts`、`api/dataQuality.ts`。共享搜索只检查数据动作，不继承型号页show；overview逐块投影，inline edit不附送交易全景。 |
+
+F0统一提供纯读取`actionAllowed(resource, action)`、资源内`fieldAllowed(resource, field)`和展示面绑定读取；Boundary只负责是否挂载，数据hook独立接`requirements + queryKey + loader(capturedToken, signal)`。业务包不复制Provider、不推导role、不调用`/check`为每行做N+1。页面入口取“至少一个该页真实可用surface”的OR，单个surface再按自身display及必要data组合；不能把所有数据块扁平AND成整页门，也不能把兼容`read`当S2销售总开关。未知、缺项、suspended、requires_context均不当allow；未迁资源仅在服务器明确legacy状态走旧路径。跨页池引用、PartPicker和TaxBasis是独立消费者。
+
+代码核对新增两处必修接缝：`sales/analytics/useAsyncData.ts`当前`enabled=false`直接return，既不清旧数据也不作废在途响应；`pages/boss/shared.tsx:useGuardedFetch`只有查询scope/代次，没有授权enabled或epoch。S2不直接把show布尔塞进去就宣称安全：公共hook必须在权限失效首帧屏蔽旧结果、递增代次/abort，成功/失败落地都校验捕获token与snapshot.version、canonical queryKey；retry、debounce、export、点击后刷新也使用同一捕获上下文。旧两个hook可作薄适配，不各自维护第三份权限真值。
+
+响应/快照仅有以下差异需要后端对拍；后端代理确认尚无新的S2响应DTO冻结，以下不冒充已存在字段：
+
+- `/me`继续S1的`resources[id].decisions[action]`、`field_permissions`、`scope_kind`、epoch/catalog/version，不引入第二套全局canSeeCost。S1前端validator及`resourceAllowed`目前硬编码sales/read/export；F0需改成S2闭合词表，同时校验未知action/field失败关闭。展示动作逐项显式输出，缺show绝不从read补；`/catalog`planned元数据与运行执行词表仍分开。
+- **必须可表达复合块拒绝，而不是只有空数组**：`Overview`目前仅`sales_recent_restricted`不足以表达采购/库存/财务/市场/互替分别拒绝；`PoolAnalysisDetail`需表达成员价格合同与逐单事实分别拒绝；公司池详情需表达summary/sales_orders/customer_cross_brand分别拒绝；池管理list/detail需表达policy/history/coverage拒绝。优先复用已有明确restricted结构；缺处建议统一`block_access`（固定块ID→S1 `Decision`形状）而非每端点自造标志，字段名由根代理冻结。它只解释本次已裁决投影，不能变成新Grant或display门。拒绝块不运行查询，行=[]、total/财务汇总=null，不把0当无资格；实际空结果仍是allow+空结果。
+- 对返回`requires_context`的动作，现有对象读取响应须携带绑定稳定对象ID/对象version的`capabilities`及当前主体epoch/catalog；没有对象allow就不启用写按钮。不新增通用任意对象check，也不逐行请求。S2均可直接全局裁决的动作不强制添加无用对象DTO；项目关系版号属于S3再冻结，不能凭账号epoch替代。
+- `display_policy` GET和PUT都按`read_audit_identity`省略updated_by/updated_at；既有optional类型足够，无需新响应字段。TaxBasis读取依赖read，不依赖设置页show；拒绝时停止刷新/广播重取并保持口径不可用，不能用默认口径伪装已读成功。数据疑点现有side/对象version/restricted可复用，但省略side列表、total及直接ID必须先由后端按真实side裁决。
+
+分工可直接按F0→F1/F2/F3并行推进；公共`api.ts`仍单owner，域包只提交该文件的DTO/签名需求。展示门在父挂载/合法tab/深链层，数据门在共享请求hook与每个handler，后端再次以具名动作验权并按块查询；三者都要覆盖，show不进入后端查询授权。S1当前app/tests保持冻结。

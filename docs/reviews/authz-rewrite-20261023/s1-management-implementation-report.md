@@ -1,6 +1,6 @@
 # S1 管理编排实施与验证记录
 
-范围：`codex/authz-s1-control-plane` 工作树，S0 固定基线 `16c38c3063c2f971d3c0cce65f02924f1250e053`。本文是管理实现者的阶段记录，**不是独立审查结论**。依据为 D-0027、[总契约](../../plans/2026-10-23-authz-full-migration-contract.md)、[冻结 wire](s1-wire-contract.md) 与 [共享接口](s1-shared-interfaces.md)。S2 仍只存在设计草案；没有提交、推送或生产操作。
+范围：`codex/authz-s1-control-plane` 工作树，S0 固定基线 `16c38c3063c2f971d3c0cce65f02924f1250e053`。本文是管理实现者的阶段记录，**不是独立审查结论**。依据为 D-0027、[总契约](../../plans/2026-10-23-authz-full-migration-contract.md)、[冻结 wire](s1-wire-contract.md) 与 [共享接口](s1-shared-interfaces.md)。根已发布首轮 S1 候选 `bad69768ea63e9369fc62817bf7b12e510f671ff`，下述来源修订基于该候选；本实现者不提交/推送，不操作生产。S2 仍只存在设计草案。
 
 ## 实现边界
 
@@ -60,6 +60,35 @@
 测试清理加入无外键关联的 `sys_authorization_cutover`。`git diff --check` 对管理所属文件通过。旧 permission_center 测试仅把直接 handler 调用适配为新版 dict body、typed identity 与明确 db 参数，原名单并发断言未放宽。
 
 ## 他人证据与剩余阶段门
+
+### S1 来源修订（首轮候选之后）
+
+`SysUser` 与 `SysRoleTemplate` 新增内部 `authorization_legacy_seed_eligible`，NOT NULL、ORM/server default=false。同一未部署 S1 migration 将执行前现存行标 true；canonical create/copy 所有分支显式 false，legacy account/template 创建与 `seed_users` 新建显式 true。字段只记录未来迁移解释器可用的来源，不参与 runtime allow，不通过 wire 读写。缺 Grant/空 profile/空 bundle 不能再被猜作 legacy。
+
+修改文件：`app/models/system.py`、`alembic/versions/a7c2e9f4b6d1_canonical_authorization_profiles.py`、`app/authz/management.py`、`app/api/accounts.py`、`app/api/role_templates.py`、`app/seed_users.py`；测试为新 `test_authz_legacy_seed_origin.py`、既有管理迁移测试及 conftest 的历史内置模板重播。原 Grant/profile/快照/override、epoch、模板 version 均不因新来源标记改变。
+
+根与独审均指出无 marker 的 downgrade 来源擦除反例，独审原样得到两个失败：`/tmp/itsp-authz-s1-independent-origin-downgrade.log`。已修为任一 false 来源行即拒绝 downgrade，并在 guards 前对 cutover/template/user 按固定顺序取 ACCESS EXCLUSIVE 表锁，防止检查后并发激活/新建再被删列。只有无 marker、全 legacy true 的旧数据可 roundtrip。该限制是防止重放迁移扩权；不能靠将 canonical 对象来源改 true 绕过。
+
+| 修订批次 | 实际结果 | 证据 |
+| --- | --- | --- |
+| 来源 16 例 + 最终管理 66 例完整单批 | 82 passed，24.49s；最后的 downgrade 表锁加入之前 | `/tmp/itsp-authz-s1-origin-management.log` |
+| token_revocation 12 + accounts/Beta 18 + permission_center 61 | 91 passed，28.66s | `/tmp/itsp-authz-s1-origin-legacy-regression.log` |
+| 最后表锁之后的真实旧迁移/marker 拒绝定向回归 | 2 passed，64 deselected，3.90s | `/tmp/itsp-authz-s1-origin-locked-migration.log` |
+| 既有 replenishment_atomic_migration 完整文件 | 22 passed，15.60s | `/tmp/itsp-authz-s1-origin-replenishment-migration.log` |
+| maintenance_roundtrip_migration + contract_amount_remediation 两完整文件 | 44 passed，54.05s | `/tmp/itsp-authz-s1-roundtrip-remediation-final.log` |
+| 独立审查者原 36 + 来源 7 + 无 marker 降级 2 | 45 passed，22.83s；其并发锁补充另记 | `/tmp/itsp-authz-s1-independent-origin-final.log` |
+
+来源 16 例实际验证 ORM/raw SQL 默认 false 与拒绝 NULL、none/explicit 空/apply 空账号、显式空 actions Grant、空/拒绝模板 copy、legacy 两种账号创建、legacy 模板创建/复制、脚本新建及幂等、资料与模板修改保留来源和已存快照。管理真实旧数据迁移追加 old user/template=true 及 marker 阻断后列仍存在的断言。此批 82 例是首轮候选之后完整的管理 66 例证据，替代上文分批历史记录对当前管理用例完整性的限制；不与上文重复累计测试数。
+
+旧 `test_token_revocation.py` 的 7 处直接 handler 调用适配为 dict body + `VerifiedIdentity`，恢复与现有依赖入口相同参数类型。原密码重置、停用、改权、仅资料不撤权、销售映射撤权、并发 epoch 与登录等待锁断言全部保留；生产 principal 不接受 dict 的限制未放宽。S2/S3 seed 消费仍未实现，后续必须保留 canonical 资源存在性，包括空 actions。
+
+`test_replenishment_atomic_migration.py` 的 5 个历史用户构造点显式标记 true，模拟当时 legacy 来源，使测试抵达原有补货业务历史/只读/降级保护。原断言与 guard 均未放宽。修复前根历史迁移组合报该文件 7 个失败，修复后整文件 22 例通过。
+
+根扩大历史 downgrade 回归后，本实现者独立完整运行 `test_maintenance_roundtrip_migration.py` 与 `test_contract_amount_remediation.py`，稳定复现 **9 failed / 35 passed / 36.76s**（`/tmp/itsp-authz-s1-roundtrip-remediation-before.log`），并非只选子集造成的状态污染。九项均在到达原业务守卫前，被新来源保护拦住未分类历史用户。仅五处 raw SQL 历史用户 INSERT 补 `authorization_legacy_seed_eligible=true`；复跑两完整文件 **44 passed / 54.05s**。两文件分别 35 与 85 个 assert AST 节点和 HEAD 完全一致，非法 JSON payload、业务历史只读、append-only receipt 降级拒绝及 revision 回滚断言均未改，生产迁移守卫亦未改。
+
+独立审查者随后新增真实 PG 阻塞反例：writer 持有未提交 false 行，`pg_blocking_pids` 证明 downgrade 的表锁等待；writer 提交后 downgrade 看见该行并拒绝，来源列、false 值和 revision 都保留。该反例与其 45 例及三个历史修复文件组合 **84 passed / 41.69s**，日志 `/tmp/itsp-authz-s1-independent-lock-regressions.log`。这是独审证据；其组合与本表有重叠，不累计为不同用例数量。
+
+### 首轮独立证据及后续门槛
 
 独立审查者在来源诊断与 downgrade 保护完成后重跑其 36 个公开 HTTP/PG/PDP 反例：36 passed，19.19s，`/tmp/itsp-authz-s1-independent-all-final.log`，对应 [独立实施审查](s1-implementation-independent-review.md)。这是独立审查者提供的证据，不冒充本实现者独立测试。
 
