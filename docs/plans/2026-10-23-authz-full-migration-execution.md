@@ -96,3 +96,9 @@ S1 wire、5 份共 45 个 DTO 样例已完成前后端对拍和独立设计复�
 前端本地完整回归为 170 files / 2005 tests；最后组合修订另有真实 App/Shell/Provider 12 条及相关领域专项通过，最终 build 与两项生成物漂移检查通过。真实浏览器验证独立策略保存和无税口径权限的账号管理。详细证据与重叠计数边界在 `s2-root-cross-review.md`、`s2-b2-b3-implementation-review.md`、`s2-f3-implementation-and-cross-review.md`、`s2-agent-lineage-implementation.md` 及前端实施报告。
 
 当前等待最终精确提交完整 CI。S3 已进行入口与对象/文件合同的只读准备，没有实施；S4 未实施。没有生产操作，没有用户统一验收，尚无全模块可合并结论。
+
+### S2 完整 CI 的夹具接入修订
+
+`47fd3f2` 的 [CI 40017516780](https://github.com/Jinchen-Yang/it-spareparts/actions/runs/40017516780) 前端为 2,016 passed / 1 failed，构建与生成目录检查通过。唯一失败是 `BusinessTimestampSites.test.tsx` 的旧整模块 TaxBasis mock 未包含新 `useTaxDisplayPolicy` 导出。原样复现 1 failed / 1 passed 后，改为保留真实导出的部分 mock，并使用既有 hook 的合法 `ex` 值；两条日期输入及北京时间断言保持不变。作者原文件 2 passed、治理组合 4 文件 / 8 tests passed、TypeScript 检查通过；跨模型独审原文件 2 passed。未改生产代码、未跳过或削弱断言。该修订仍需新精确提交的完整 CI。
+
+根代理补做隔离浏览器的 trend-only 账号验证：仅授 `sales_analysis.read_trend/show_overview`，销售页面只出现概览/趋势；网络记录中销售业务请求只有 `/sales/analytics/trend` 且返回 200，未查询 options、summary、groups 或 orders。证据为 `output/playwright/s2-trend-only.png` 与 `/tmp/itsp-s2-browser-trend-requests.txt`。这是开发验证，不是用户验收或生产证据。

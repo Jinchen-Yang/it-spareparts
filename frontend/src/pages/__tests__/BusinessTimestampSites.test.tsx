@@ -11,7 +11,10 @@ import type { Account, AccountsMeta } from "../../api/accounts";
 vi.mock("../../api", () => ({ default: { get: async (url: string) => ({ data: url === "/governance/merges"
   ? { total: 1, items: [{ merge_log_id: 1, source_pn: "OLD", target_pn: "NEW", created_at: "2026-10-01T16:05:00Z", reverted: true }] }
   : url === "/governance/parts" ? { total: 0, items: [] } : null }) } }));
-vi.mock("../../context/TaxBasis", () => ({ useTaxBasis: () => "ex_tax" }));
+vi.mock("../../context/TaxBasis", async importOriginal => ({
+  ...await importOriginal<typeof import("../../context/TaxBasis")>(),
+  useTaxBasis: () => "ex",
+}));
 vi.mock("../governance/DataQualityIssuesPanel", () => ({ default: () => null }));
 vi.mock("../governance/DataQualityCalibrationPanel", () => ({ default: () => null }));
 vi.mock("../accounts/AccountDrawer", () => ({ default: () => null }));

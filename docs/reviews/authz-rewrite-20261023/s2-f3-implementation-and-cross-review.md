@@ -29,3 +29,5 @@ Master 列表同类手写状态收敛到共享 `useAuthorizedQuery`，以 q/page
 TaxBasis 作者增加 policyOwner 与当前 identity 不匹配时的同步 loading；先前独立 layout 红例原样 **1 passed**（`/tmp/itsp-authz-s2-tax-first-frame-green.log`）。首帧错误口径已闭合。legacy 草稿在 policy pending 期间的保留由前端作者另行验证，不以本用例代替。最后 `tsc --noEmit` 与本包 diff whitespace 检查通过；等待冻结版本全量回归。
 
 金额共享依赖补充：根审发现整页税口径门会拦合法数量-only 授权。Parts 改成金额列/块局部保护：采购和库存金额列要求本域 cost 字段与当前有效税口径，销售金额列要求有效口径；缺 shared read 只提示金额区域，库存数量、身份、替代关系不受阻断。真实 AuthzProvider + TaxBasisProvider 的两项反例覆盖 cost=false/true 且缺 shared read：数量行可见、金额不显示、不调用 settings。Provider 文件现 **15 passed**，原 PartSearch 两文件 **40 passed**，`tsc`/diff 检查通过（`/tmp/itsp-authz-s2-f3-local-tax-final.log`、`/tmp/itsp-authz-s2-f3-local-tax.log`）。这些局部计数有重叠，不相加作为全量结果。
+
+CI 夹具修订独立复核：`BusinessTimestampSites.test.tsx` 只将 TaxBasis 整模块 mock 改为 `importOriginal` 部分 mock，保留新增真实 hook 导出，并把旧非法 `ex_tax` 改为类型允许的 `ex`。治理历史和账号最近登录两条输入时间、预期北京时间 `2026-10-02 00:05`、查找/断言均未修改，也没有跳过用例或新增延时。独立原样复跑 **2 passed**，日志 `/tmp/itsp-authz-s2-business-timestamp-independent.log`。该最小测试修订可进入新 CI；不据此代替精确提交完整 CI 或用户验收。
