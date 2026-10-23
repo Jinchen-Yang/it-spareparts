@@ -61,6 +61,7 @@ READ_ACTIONS = frozenset(
         "inbox.shared.read",
         "job.read",
         "research.job.read",
+        "identity.job.read",
         "enrichment.bundle",
         "enrichment.bundle.read",
     }
