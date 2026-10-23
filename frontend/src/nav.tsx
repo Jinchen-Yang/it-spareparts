@@ -53,6 +53,9 @@ export interface NavItem {
   perm?: string;
   /** 模块启用新授权时，由服务端能力快照取代旧权限与角色门。 */
   authzResource?: string;
+  authzAction?: string;
+  /** 新增共享入口没有旧实现，legacy 状态下不注册入口。 */
+  legacyAvailable?: boolean;
   /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
    * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
   anyPerm?: string[];
@@ -96,6 +99,10 @@ const loadMaintenanceDemands = () =>
   import("./pages/maintenance/MaintenanceDemandsPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
+const loadPnInbox = () => import("./pages/PnInboxRoute");
+const loadPnGallery = () => import("./pages/PnGalleryRoute");
+const PnInboxPage = lazy(loadPnInbox);
+const PnGalleryPage = lazy(loadPnGallery);
 const loadMasterData = () => import("./pages/CatalogMasterRoute");
 const loadGovernance = () => import("./pages/GovernancePage");
 const loadPoolManagement = () => import("./pages/PoolManagementPage");
@@ -249,6 +256,8 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "数据中心",
     items: [
       { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
+      { key: "pn-gallery", path: "/pn-gallery", label: "PN 图库", icon: <ProfileOutlined />, authzResource: "part_gallery", authzAction: "gallery.read", legacyAvailable: false, page: PnGalleryPage, load: loadPnGallery },
+      { key: "pn-inbox", path: "/pn-inbox", label: "图片收件箱", icon: <InboxOutlined />, authzResource: "part_gallery", authzAction: "inbox.read", legacyAvailable: false, page: PnInboxPage, load: loadPnInbox },
       { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", authzResource: "part_master", page: MasterDataPage, load: loadMasterData },
       { key: "governance", path: "/governance", label: "数据治理", icon: <ControlOutlined />, perm: "page_governance", page: GovernancePage, load: loadGovernance },
       // 池维护（action_pool_manage）与约束价设置（action_pool_set_policy）是两种独立授权：

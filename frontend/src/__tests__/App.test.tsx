@@ -1,4 +1,5 @@
 import { authzSnapshot } from "../test/authzFixtures";
+import pnResources from "../authz/pnResources.json";
 import { beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../test/antdRender";
 
@@ -46,7 +47,9 @@ vi.mock("../nav", async () => {
   const MaintenanceBetaPage = () => <div>维保 Beta 页面</div>;
   return {
     NAV_ITEMS: [
-      { key: "sales-analytics", authzResource: "sales_analysis", path: "/sales/analytics", perm: "page_sales_analysis",
+      { key: "pn-inbox", authzResource: "part_gallery", authzAction: "inbox.read", legacyAvailable: false,
+        path: "/pn-inbox", label: "图片收件箱", page: () => <div>共享图片收件箱</div> },
+      { key: "sales-analytics", label: "销售分析", authzResource: "sales_analysis", path: "/sales/analytics", perm: "page_sales_analysis",
         visibleWhen: () => localStorage.getItem("role") === "boss", page: () => <div>销售分析页面</div> },
       { key: "parts", path: "/parts", perm: "page_parts", page: PartsPage },
       {
@@ -86,6 +89,17 @@ beforeEach(() => {
   getBetaFeatures.mockImplementation(() => Promise.resolve({
     data: JSON.parse(localStorage.getItem("beta_features") || "{}"),
   }));
+});
+
+it.each(["enabled", "legacy", "suspended"] as const)("共享收件箱以 inbox.read 决策准入，%s 不借旧管理员权限", async state => {
+  localStorage.setItem("role", "admin"); localStorage.setItem("token", "pn-nav");
+  window.history.replaceState({}, "", "/pn-inbox");
+  const snapshot = authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, { mode: "unified_modules" });
+  snapshot.resources.part_gallery = { migration_state: "implemented", runtime_state: state, configurable: state === "enabled", grant_version: 1, scope_kind: state === "enabled" ? "all" : "none", field_permissions: state === "enabled" ? ["inbox"] : [],
+    decisions: Object.fromEntries(pnResources.part_gallery.actions.map(action => [action, { effect: state === "enabled" && action === "inbox.read" ? "allow" : "deny", reason: null }])) };
+  getAuthzSnapshot.mockResolvedValue({ data: snapshot }); render(<App />);
+  if (state === "enabled") expect(await screen.findByText("共享图片收件箱")).toBeInTheDocument();
+  else { expect(await screen.findByText("没有图片收件箱访问权限")).toBeInTheDocument(); expect(screen.queryByText("共享图片收件箱")).not.toBeInTheDocument(); }
 });
 
 it("跨标签页 A→B→登出时，按 token 提交点重挂路由并切换完整权限快照", async () => {

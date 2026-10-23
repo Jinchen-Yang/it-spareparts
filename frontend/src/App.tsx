@@ -114,7 +114,8 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     return NAV_ITEMS.filter((it) => {
       if (it.authzResource) {
         if (authz.status !== "ready" || !authz.snapshot) return false;
-        if (!resourceUsesLegacy(authz.snapshot, it.authzResource)) return resourceAllowed(authz.snapshot, it.authzResource, "read");
+        if (!resourceUsesLegacy(authz.snapshot, it.authzResource)) return resourceAllowed(authz.snapshot, it.authzResource, it.authzAction || "read");
+        if (it.legacyAvailable === false) return false;
       }
       if (it.key === "accounts") return authz.status === "ready" && actorAllowed(authz.snapshot, "read_accounts");
       return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
@@ -182,10 +183,10 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
           <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
             {NAV_ITEMS.filter(it => it.authzResource && !allowed.includes(it)).map(it => (
               <Route key={it.key} path={it.path} element={authz.status !== "ready" ? <AuthzUnavailable />
-                : <Result status="403" title={`没有${it.label}访问权限`} subTitle={authz.snapshot?.resources[it.authzResource!]?.decisions.read?.reason?.message || "请联系管理员检查授权"} />} />
+                : <Result status="403" title={`没有${it.label}访问权限`} subTitle={authz.snapshot?.resources[it.authzResource!]?.decisions[it.authzAction || "read"]?.reason?.message || "请联系管理员检查授权"} />} />
             ))}
             {allowed.map((it) => (
-              <Route key={it.key} path={it.path} element={it.authzResource ? <AuthorizationBoundary resource={it.authzResource} action="read" legacy={<it.page />}><it.page /></AuthorizationBoundary> : <it.page />} />
+              <Route key={it.key} path={it.path} element={it.authzResource ? <AuthorizationBoundary resource={it.authzResource} action={it.authzAction || "read"} legacy={<it.page />}><it.page /></AuthorizationBoundary> : <it.page />} />
             ))}
             {allowedDetails.map((r) => (
               <Route key={r.key} path={r.path} element={<r.page />} />
