@@ -87,6 +87,8 @@ def snapshot(db: Session, part: DimPart, state=_UNLOADED,
         "profile_revision": state.profile_revision if state else 0,
         "availability": state.availability if state else "active",
         "availability_revision": state.availability_revision if state else 0,
+        "fill_status": state.fill_status if state else None,
+        "fill_status_revision": state.fill_status_revision if state else 0,
         "profile": {k: (state.manufacturer if state else None) if k == "manufacturer" else getattr(part, k)
                     for k in sorted(PROFILE_FIELDS)},
         "field_versions": versions, "specs": specs, "deleted_specs": deleted,
@@ -213,6 +215,17 @@ def _change_state(state: PartState, before: dict | None, after: dict, *,
         state.profile_revision += 1
         state.field_versions = versions
         state.field_provenance = provenance
+    if changed and context.actor.actor_kind == "human" and (
+        context.actor.provenance.kind == "manual" or context.confirmed_by
+    ):
+        from .profile_status import advance_fill_status
+        # A bare PN receives the system default machine type, not verified content.
+        populated = bool(after["specs"] or any(v is not None for k, v in after["profile"].items()
+                                              if k != "machine_or_part"))
+        status = "pending" if before is None and not populated else "confirmed"
+        status_change = advance_fill_status(state, status, context=context)
+        if status_change:
+            changes["fill_status"] = status_change
     if before is None or before["identity"] != after["identity"]:
         changes["identity"] = {"before": before["identity"] if before else None, "after": after["identity"]}
     if (before["aliases"] if before else []) != after["aliases"]:
@@ -226,6 +239,7 @@ def _change_state(state: PartState, before: dict | None, after: dict, *,
 
 def _state_snapshot(after: dict, state: PartState) -> dict:
     return {**after, "profile_revision": state.profile_revision,
+            "fill_status": state.fill_status, "fill_status_revision": state.fill_status_revision,
             "identity_revision": state.identity_revision,
             "field_versions": {**after["field_versions"], **state.field_versions},
             "field_provenance": dict(state.field_provenance), "deleted_specs": list(state.deleted_specs)}
@@ -234,6 +248,10 @@ def _state_snapshot(after: dict, state: PartState) -> dict:
 def revision_vector(before: dict | None, state: PartState, *, axis: str | None = None) -> dict:
     previous = {key: before[f"{key}_revision"] if before else 0 for key in ("identity", "profile", "availability")}
     current = {key: getattr(state, f"{key}_revision") for key in previous}
+    prior_fill = before.get("fill_status_revision", 0) if before else 0
+    if state.fill_status_revision != prior_fill:
+        previous["fill_status"] = prior_fill
+        current["fill_status"] = state.fill_status_revision
     if axis is None:
         axis = "profile" if current["profile"] != previous["profile"] else "identity"
     return {"axis": axis, "before": previous, "after": current}

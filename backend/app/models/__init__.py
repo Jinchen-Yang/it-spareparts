@@ -271,3 +271,5 @@ from app.pn_catalog.reference_models import ExternalReference  # noqa: F401
 from app.pn_catalog.migration_state_models import (  # noqa: F401
     MigrationSnapshotState, MigrationRecordApplication, MigrationRecoveryDecision,
 )
+
+from app.pn_catalog.attribute_models import AttributeState, AttributeValue  # noqa: F401

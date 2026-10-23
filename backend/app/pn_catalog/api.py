@@ -63,6 +63,9 @@ def _project(value: dict, decision: AuthorizationDecision) -> dict:
     fields = decision.readable_fields
     public = {k: value[k] for k in ("part_id", "pn_std", "identity", "identity_revision",
                                    "profile_revision", "availability", "availability_revision")}
+    if _allowed(fields, "fill_status"):
+        public["fill_status"] = value.get("fill_status")
+        public["fill_status_revision"] = value.get("fill_status_revision", 0)
     public["profile"] = {k: v for k, v in value["profile"].items() if _allowed(fields, k)}
     public["specs"] = {k: {**v, "version": value["field_versions"].get(f"specs.{k}", 0), "deleted": False}
                        for k, v in value["specs"].items() if _allowed(fields, f"specs.{k}")}
@@ -184,6 +187,9 @@ def _response(db: Session, receipt: CommandReceipt, *, context: CommandContext,
     resource = receipt.result["resource"]
     if resource in {"content", "candidate"}:
         from .content import render_receipt
+        return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
+    if resource == "attributes":
+        from .attributes import render_receipt
         return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
     if resource.startswith("media."):
         from .media import render_receipt
@@ -710,3 +716,16 @@ def migrate_effective_content(db, part_id, command, *, context, authorize):
 
 __all__ += ["get_content", "patch_content", "create_candidate", "get_candidate", "list_candidates",
             "adopt_candidate", "reject_candidate", "migrate_effective_content"]
+
+
+def get_attributes(db, part_id, *, context, authorize):
+    from .attributes import get_attributes as invoke
+    return invoke(db, part_id, context=context, authorize=authorize)
+
+
+def patch_attributes(db, part_id, command, *, context, authorize):
+    from .attributes import patch_attributes as invoke
+    return invoke(db, part_id, command, context=context, authorize=authorize)
+
+
+__all__ += ["get_attributes", "patch_attributes"]

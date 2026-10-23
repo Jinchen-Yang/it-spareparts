@@ -25,6 +25,8 @@ PN_RESOURCES = {
             "read_legacy",
         ],
         "fields": [
+            "attributes",
+            "fill_status",
             "availability",
             "brand",
             "candidates",
@@ -198,6 +200,8 @@ PN_RESOURCES = {
 }
 CATALOG_ACTIONS = {
     "read": ("part_master", "read"),
+    "read_attributes": ("part_master", "read"),
+    "update_attributes": ("part_master", "edit"),
     "create": ("part_master", "create"),
     "update_profile": ("part_master", "edit"),
     "normalize": ("part_master", "normalize"),

@@ -43,6 +43,8 @@ class PartSnapshot(WireModel):
     identity: PartIdentity
     identity_revision: int = Field(ge=0)
     profile_revision: int = Field(ge=0)
+    fill_status: Literal["pending", "ai_filled", "confirmed", "needs_review"] | None = None
+    fill_status_revision: int | None = Field(default=None, ge=0)
     availability: Literal["active", "inactive"]
     availability_revision: int = Field(ge=0)
     profile: dict[str, str | None]
