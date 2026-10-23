@@ -1,0 +1,122 @@
+{
+  "cerbos_binary_archive": {
+    "size": 49559605,
+    "sha256": "baec1b2b29a5f748528c16aa3cf1191a09ba6207add4e8e0d752e07cbffbf659"
+  },
+  "cerbos_executable_bytes": 105574560,
+  "cerbosctl_executable_bytes": 46440608,
+  "environments": {
+    "cerbos": {
+      "package_count": 33,
+      "packages": {
+        "SQLAlchemy": "2.0.49",
+        "setuptools": "84.2.1",
+        "greenlet": "3.5.6",
+        "grpcio-tools": "1.84.1",
+        "protobuf": "7.36.2",
+        "cerbos": "0.16.1",
+        "anyio": "4.15.1",
+        "dataclasses-json": "0.6.7",
+        "tenacity": "9.2.1",
+        "charset-normalizer": "3.5.2",
+        "hpack": "4.2.0",
+        "types-protobuf": "7.35.1.20260906",
+        "marshmallow": "3.26.2",
+        "packaging": "26.3",
+        "h2": "4.4.1",
+        "typing_extensions": "4.16.0",
+        "protoc-gen-openapiv2": "0.0.1",
+        "h11": "0.16.0",
+        "cerbos-sqlalchemy": "0.4.0",
+        "hyperframe": "6.1.0",
+        "httpx": "0.28.1",
+        "requests-toolbelt": "1.0.0",
+        "httpcore": "1.0.9",
+        "grpcio": "1.84.1",
+        "grpcio-status": "1.84.1",
+        "certifi": "2026.10.23",
+        "requests": "2.34.2",
+        "circuitbreaker": "2.1.3",
+        "mypy_extensions": "1.1.0",
+        "urllib3": "2.8.0",
+        "googleapis-common-protos": "1.76.0",
+        "idna": "3.20",
+        "typing-inspect": "0.9.0"
+      },
+      "package_names_absent_from_baseline_lock": [
+        "cerbos",
+        "cerbos-sqlalchemy",
+        "circuitbreaker",
+        "dataclasses-json",
+        "googleapis-common-protos",
+        "grpcio",
+        "grpcio-status",
+        "grpcio-tools",
+        "h2",
+        "hpack",
+        "hyperframe",
+        "marshmallow",
+        "mypy_extensions",
+        "protobuf",
+        "protoc-gen-openapiv2",
+        "requests",
+        "requests-toolbelt",
+        "setuptools",
+        "tenacity",
+        "types-protobuf",
+        "typing-inspect",
+        "urllib3"
+      ],
+      "site_packages_regular_file_bytes": 63406956
+    },
+    "casbin": {
+      "package_count": 5,
+      "packages": {
+        "SQLAlchemy": "2.0.49",
+        "greenlet": "3.5.6",
+        "typing_extensions": "4.16.0",
+        "casbin": "1.43.0",
+        "simpleeval": "1.0.8"
+      },
+      "package_names_absent_from_baseline_lock": [
+        "casbin",
+        "simpleeval"
+      ],
+      "site_packages_regular_file_bytes": 21425149
+    }
+  },
+  "downloaded_wheels": [
+    {
+      "package": "cerbos",
+      "version": "0.16.1",
+      "filename": "cerbos-0.16.1-py3-none-any.whl",
+      "bytes": 187468,
+      "sha256": "6824c9f394cdd77e76e22fc08243be4a4e802c63714f0402065add812f5ee68d",
+      "url": "https://files.pythonhosted.org/packages/9b/ac/2f09c293fcdd222ccc8ede94aa9eda33d9134fd68301dff824d19d43aa47/cerbos-0.16.1-py3-none-any.whl"
+    },
+    {
+      "package": "cerbos-sqlalchemy",
+      "version": "0.4.0",
+      "filename": "cerbos_sqlalchemy-0.4.0-py3-none-any.whl",
+      "bytes": 13094,
+      "sha256": "4ad89fca2dce57366f9ed0d3c99efa1b83ec36365f5368c74b7320deeb4dd504",
+      "url": "https://files.pythonhosted.org/packages/f5/d7/63b3fd9ef4e68c61a27db753ebd0953ef2fa62c8bc868cb8daecf35c78a6/cerbos_sqlalchemy-0.4.0-py3-none-any.whl"
+    },
+    {
+      "package": "casbin",
+      "version": "1.43.0",
+      "filename": "casbin-1.43.0-py3-none-any.whl",
+      "bytes": 475059,
+      "sha256": "63a3d1228870250e859ccd94133fe478821093f71dd37f05e0baa0c6fea26623",
+      "url": "https://files.pythonhosted.org/packages/08/07/facef6abd81378e6153b757dc1848621675d971fbc88ebb5d182ebc1c37f/casbin-1.43.0-py3-none-any.whl"
+    },
+    {
+      "package": "simpleeval",
+      "version": "1.0.8",
+      "filename": "simpleeval-1.0.8-py3-none-any.whl",
+      "bytes": 18925,
+      "sha256": "c9c4ff42879ebf0c05f6562cb81031869948916be343bcc950b81fcc081fe9ce",
+      "url": "https://files.pythonhosted.org/packages/12/33/d1ecd9f4f5f272b36ad7b268e307ba0a59c109d8ad134a231cda780baac9/simpleeval-1.0.8-py3-none-any.whl"
+    }
+  ]
+}

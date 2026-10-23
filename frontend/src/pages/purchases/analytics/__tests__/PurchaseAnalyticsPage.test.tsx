@@ -221,6 +221,78 @@ afterEach(() => {
 // ---------------------------------------------------------------- 用例
 
 describe("采购分析页：URL 单一真值", () => {
+  it("销售人员确认草稿前静默换账号：拒绝旧草稿提交，不改URL或以新身份请求", async () => {
+    localStorage.setItem("token", "account-a");
+    renderPage();
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "销售人员" }));
+    const panel = await screen.findByRole("dialog", { name: "销售人员筛选" });
+    fireEvent.click(within(panel).getByRole("checkbox", { name: "王五" }));
+    const requests = [fetchPurchaseAnalyticsOptions, fetchPurchaseAnalyticsSummary, fetchPurchaseAnalyticsOrders];
+    const before = requests.map((request) => request.mock.calls.length);
+    localStorage.setItem("token", "account-b");
+    fireEvent.click(within(panel).getByRole("button", { name: /确\s*定/ }));
+    expect(await screen.findByText("登录会话已变更（已切换账号或登出），请刷新页面后继续")).toBeInTheDocument();
+    expect(locationSearch).toBe("");
+    expect(requests.map((request) => request.mock.calls.length)).toEqual(before);
+    expect(screen.getByRole("button", { name: "销售人员" })).toBeDisabled();
+  });
+
+  it("销售人员面板：搜索、勾选与草稿重置不查询，确定保留逗号姓名并归一分页", async () => {
+    fetchPurchaseAnalyticsOptions.mockResolvedValue({ data: {
+      ...OPTIONS, salespersons: ["王五", "李,四"],
+    } });
+    renderPage("/purchases/analytics?page=2");
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    const requests = [fetchPurchaseAnalyticsOptions, fetchPurchaseAnalyticsSummary, fetchPurchaseAnalyticsOrders];
+    const before = requests.map((request) => request.mock.calls.length);
+    fireEvent.click(screen.getByRole("button", { name: "销售人员" }));
+    const panel = await screen.findByRole("dialog", { name: "销售人员筛选" });
+    fireEvent.click(within(panel).getByRole("checkbox", { name: "王五" }));
+    fireEvent.change(within(panel).getByRole("textbox", { name: "搜索销售人员" }), { target: { value: "李" } });
+    fireEvent.click(within(panel).getByRole("checkbox", { name: "李,四" }));
+    fireEvent.click(within(panel).getByRole("button", { name: /重\s*置/ }));
+    expect(within(panel).getByRole("textbox", { name: "搜索销售人员" })).toHaveValue("");
+    expect(within(panel).getByRole("checkbox", { name: "王五" })).not.toBeChecked();
+    fireEvent.click(within(panel).getByRole("checkbox", { name: "李,四" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(requests.map((request) => request.mock.calls.length)).toEqual(before);
+    expect(locationSearch).toBe("?page=2");
+    fireEvent.click(within(panel).getByRole("button", { name: /确\s*定/ }));
+    await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.lastCall?.[0]).toMatchObject({ salesperson: ["李,四"] }));
+    expect(viewSummaryCalls().slice(-1)[0]).toMatchObject({ salesperson: ["李,四"] });
+    expect(new URLSearchParams(locationSearch).getAll("salesperson")).toEqual(["李,四"]);
+    expect(locationSearch).not.toContain("page=");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "销售人员筛选" })).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: /重\s*置/ }));
+    await waitFor(() => expect(locationSearch).toBe(""));
+  });
+
+  it("销售人员面板：取消保留深链姓名，重置再确定才清除已应用筛选", async () => {
+    renderPage("/purchases/analytics?url_version=2&salesperson=王五");
+    expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "销售人员" });
+    expect(trigger).toHaveTextContent("王五");
+    const before = fetchPurchaseAnalyticsSummary.mock.calls.length;
+    const beforeUrl = locationSearch;
+    fireEvent.click(trigger);
+    let panel = await screen.findByRole("dialog", { name: "销售人员筛选" });
+    fireEvent.click(within(panel).getByRole("checkbox", { name: "王五" }));
+    expect(locationSearch).toBe(beforeUrl);
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(before);
+    fireEvent.keyDown(panel, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "销售人员筛选" })).toBeNull());
+    fireEvent.click(trigger);
+    panel = await screen.findByRole("dialog", { name: "销售人员筛选" });
+    expect(within(panel).getByRole("checkbox", { name: "王五" })).toBeChecked();
+    fireEvent.click(within(panel).getByRole("button", { name: /重\s*置/ }));
+    expect(locationSearch).toBe(beforeUrl);
+    fireEvent.click(within(panel).getByRole("button", { name: /确\s*定/ }));
+    await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.calls.length).toBeGreaterThan(before));
+    expect(viewSummaryCalls().slice(-1)[0]).not.toHaveProperty("salesperson");
+    expect(new URLSearchParams(locationSearch).has("salesperson")).toBe(false);
+  });
+
   it("默认渲染：零参数 URL，默认今天（date_from = date_to = 今天），采购类型分组", async () => {
     renderPage();
     // 分组表出现 = 汇总已回填

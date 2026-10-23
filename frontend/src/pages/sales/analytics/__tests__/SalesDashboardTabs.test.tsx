@@ -52,6 +52,12 @@ vi.mock("../../../../components/charts/EChartContainer", () => ({
     ),
 }));
 
+vi.mock("../../../../authz/AuthzProvider", () => ({
+  useAuthz: () => ({ status: "ready", snapshot: { version: "legacy", can_manage: false,
+    sales_analysis: { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] } } }),
+  AuthzUnavailable: () => <div>权限尚未确认</div>,
+}));
+
 import SalesAnalyticsPage from "../SalesAnalyticsPage";
 
 const TODAY = "2026-10-17";

@@ -51,6 +51,8 @@ export interface NavItem {
   icon: ReactNode;
   /** 后端 page_* 权限键；缺省且无 anyPerm 表示仅管理员可见（如账号管理） */
   perm?: string;
+  /** 模块启用新授权时，由服务端能力快照取代旧权限与角色门。 */
+  authzResource?: "sales_analysis";
   /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
    * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
   anyPerm?: string[];
@@ -164,7 +166,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
       // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
       // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
-      { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
+      { key: "sales-analytics", authzResource: "sales_analysis", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
     ],

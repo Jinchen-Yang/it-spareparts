@@ -42,6 +42,10 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: 校验 uv 版本
         run: test "$(uv --version)" = "uv 0.11.31 (x86_64-unknown-linux-gnu)"
+      - name: 安装真实权限引擎测试依赖（固定版本与校验和）
+        run: |
+          bash scripts/install_test_cerbos.sh "$RUNNER_TEMP/cerbos"
+          echo "CERBOS_BINARY=$RUNNER_TEMP/cerbos/cerbos" >> "$GITHUB_ENV"
       - name: 迁移与 ORM 零漂移（alembic upgrade head → alembic check）
         working-directory: backend
         env:

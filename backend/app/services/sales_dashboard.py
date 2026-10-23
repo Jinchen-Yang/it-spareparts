@@ -566,12 +566,18 @@ def customer_lifecycle(db: Session, **filters) -> dict:
         return {"available": False, "customers": total, "new_customers": None,
                 "returning_customers": None, "undetermined": None}
     norm = _norm_dim(DimCustomer.name_normalized)
-    first = active_orders(
+    first_query = active_orders(
         select(norm.label("name"), func.min(so.order_date).label("first_date"))
         .select_from(so).join(DimCustomer, so.customer_id == DimCustomer.id)
         .where(norm.is_not(None)),
         so,
-    ).group_by(DimCustomer.name_normalized).subquery()  # GROUP BY 原始列，表达式合法
+    )
+    # Even historical first-order dates may not inspect an unassigned customer
+    # with the same normalized name. Authorization is independent of UI filters.
+    predicate = filters.get("authorization_predicate")
+    if predicate is not None:
+        first_query = first_query.where(predicate)
+    first = first_query.group_by(DimCustomer.name_normalized).subquery()
     date_from = filters["date_from"]
     row = db.execute(
         select(func.count().filter(first.c.first_date >= date_from).label("new"),

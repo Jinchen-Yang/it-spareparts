@@ -13,9 +13,11 @@ interface LoginSessionData {
   beta_features?: Record<string, boolean> | null;
 }
 
-export function persistLoginSession(data: LoginSessionData) {
+export function persistLoginSession(data: LoginSessionData, username?: string) {
   // 个人口径是会话级临时偏好，绝不能由上一个账号继承。
   clearSessionScopedPreferences();
+  if (username) localStorage.setItem("username", username);
+  else localStorage.removeItem("username");
   localStorage.setItem("role", data.role);
   localStorage.setItem("name", data.name || data.role);
   localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));
@@ -35,7 +37,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
     setErr(null);
     try {
       const { data } = await api.post("/auth/login", v);
-      persistLoginSession(data);
+      persistLoginSession(data, v.username);
       onLogin(data.token);
     } catch (e: any) {
       const status = e?.response?.status;

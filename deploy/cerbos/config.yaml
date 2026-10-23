@@ -1,0 +1,19 @@
+# Container network only: Compose must not publish these ports publicly.
+server:
+  httpListenAddr: 0.0.0.0:3592
+  grpcListenAddr: 127.0.0.1:3593
+  logRequestPayloads: false
+  apiExplorerEnabled: false
+  adminAPI:
+    enabled: false
+  cors:
+    disabled: true
+engine:
+  strictEvaluation: true
+storage:
+  driver: disk
+  disk:
+    directory: /policies
+    watchForChanges: false
+telemetry:
+  disabled: true

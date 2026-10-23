@@ -1,0 +1,46 @@
+{
+  "checked_date": "2026-10-23",
+  "source": "GitHub connector GET repository metadata; dates indicate repository activity, not security or suitability certification",
+  "repositories": [
+    {
+      "repository": "cerbos/cerbos",
+      "url": "https://github.com/cerbos/cerbos",
+      "license": "Apache-2.0",
+      "archived": false,
+      "pushed_at": "2026-10-23T07:07:51Z",
+      "default_branch": "main"
+    },
+    {
+      "repository": "openfga/openfga",
+      "url": "https://github.com/openfga/openfga",
+      "license": "Apache-2.0",
+      "archived": false,
+      "pushed_at": "2026-10-22T19:45:09Z",
+      "default_branch": "main"
+    },
+    {
+      "repository": "stalniy/casl",
+      "url": "https://github.com/stalniy/casl",
+      "license": "MIT",
+      "archived": false,
+      "pushed_at": "2026-10-22T16:37:26Z",
+      "default_branch": "main"
+    },
+    {
+      "repository": "apache/casbin-pycasbin",
+      "url": "https://github.com/apache/casbin-pycasbin",
+      "license": "Apache-2.0",
+      "archived": false,
+      "pushed_at": "2026-10-20T17:49:24Z",
+      "default_branch": "master"
+    },
+    {
+      "repository": "cerbos/query-plan-adapters",
+      "url": "https://github.com/cerbos/query-plan-adapters",
+      "license": "Apache-2.0",
+      "archived": false,
+      "pushed_at": "2026-10-23T10:49:23Z",
+      "default_branch": "main"
+    }
+  ]
+}

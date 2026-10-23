@@ -1,3 +1,4 @@
+import { invalidateAuthzSession } from "./authz/events";
 import axios from "axios";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 
@@ -33,6 +34,7 @@ api.interceptors.response.use(
       if (!requestAuth || requestAuth === `Bearer ${currentToken}`) {
         clearSessionScopedPreferences();
         localStorage.removeItem("token");
+        invalidateAuthzSession(currentToken);
         location.reload();
       }
     }
