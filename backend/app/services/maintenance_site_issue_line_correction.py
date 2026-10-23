@@ -14,7 +14,8 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueCommand,
     MaintenanceSiteIssueLine,
 )
-from app.services import maintenance_project_operations as operations
+from app.services import maintenance_workbook_state as workbook_state
+from app.services import maintenance_site_issue_command_identity as command_identity
 from app.services.maintenance_site_issue_facts import (
     SiteIssueEditError,
     apply_locked_site_issue_edits,
@@ -104,8 +105,8 @@ def _correct_site_issue(
     if project_id is None:
         raise SiteIssueEditError("site_issue_edit_identity_conflict", "领用单不存在")
     authorize(project_id)
-    operations._lock_idempotency_key(db, idempotency_key)
-    project = operations._lock_project_for_fact_write(db, project_id)
+    command_identity.lock_site_issue_idempotency_key(db, idempotency_key)
+    project = workbook_state.lock_project_for_fact_write(db, project_id)
     if project is None:
         raise SiteIssueEditError("site_issue_edit_identity_conflict", "维保项目不存在")
     db.refresh(project)
@@ -116,7 +117,7 @@ def _correct_site_issue(
     if issue is None or issue.project_id != project_id:
         raise SiteIssueEditError("site_issue_edit_identity_conflict", "领用单归属已变化，请刷新后重试")
     operated_by = authorize(project_id)
-    fingerprint = operations._site_issue_request_fingerprint({
+    fingerprint = command_identity.site_issue_request_fingerprint({
         "entry_command": "site_issue_header_correction_v1" if is_header else "site_issue_line_correction_v1",
         "project_id": project_id, "issue_id": issue_id,
         "expected_issue_version": expected_issue_version,
@@ -166,7 +167,7 @@ def _correct_site_issue(
         header_changes=headers, operated_by=operated_by, reason=reason.strip(),
     )
     if result.changed:
-        operations.bump_locked_workbook_revision(db, state=state)
+        workbook_state.bump_locked_workbook_revision(db, state=state)
     response = {
         "issue_id": issue_id,
         "issue_version": result.issue_version,

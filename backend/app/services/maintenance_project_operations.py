@@ -18,7 +18,6 @@ import re
 from uuid import uuid4
 
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.models.maintenance import FMaintenanceOrder, FProjectExpense
@@ -61,6 +60,19 @@ from app.services import maintenance_project
 from app.services import maintenance_project_assignments
 from app.services import maintenance_project_identity
 from app.services import maintenance_warehouse_site_issue_bridge
+from app.services.maintenance_workbook_state import (
+    workbook_data_version as _workbook_data_version,
+    get_or_create_workbook_state,
+    lock_workbook_states,
+    bump_workbook_revision,
+    bump_locked_workbook_revision,
+    _project,
+    lock_project_for_fact_write as _lock_project_for_fact_write,
+)
+from app.services.maintenance_site_issue_command_identity import (
+    site_issue_request_fingerprint as _site_issue_request_fingerprint,
+    lock_site_issue_idempotency_key as _lock_idempotency_key,
+)
 from app.services.query_filters import active_beta_maintenance_orders
 
 
@@ -289,103 +301,6 @@ def _resolve_site_issue_costs(
         raise MaintenanceOperationError(str(exc)) from exc
 
 
-def _workbook_data_version(project_id: str, revision: int) -> str:
-    return hashlib.sha256(f"{project_id}:{revision}".encode("utf-8")).hexdigest()
-
-
-def get_or_create_workbook_state(
-    db: Session,
-    *,
-    project_id: str,
-    lock: bool = False,
-) -> MaintenanceProjectWorkbookState:
-    """Return the project concurrency row, creating revision zero idempotently."""
-
-    db.execute(
-        insert(MaintenanceProjectWorkbookState)
-        .values(
-            project_id=project_id,
-            revision=0,
-            data_version=_workbook_data_version(project_id, 0),
-        )
-        .on_conflict_do_nothing(index_elements=["project_id"])
-    )
-    statement = select(MaintenanceProjectWorkbookState).where(
-        MaintenanceProjectWorkbookState.project_id == project_id
-    )
-    if lock:
-        statement = statement.with_for_update()
-    return db.execute(statement).scalar_one()
-
-
-def lock_workbook_states(
-    db: Session,
-    *,
-    project_ids: Iterable[str | None],
-) -> dict[str, MaintenanceProjectWorkbookState]:
-    """Create and lock project workbook states in one canonical order.
-
-    Callers must invoke this before locking project/order/assignment/detail
-    facts.  Lock one row at a time: ``ORDER BY`` on a multi-row ``FOR UPDATE``
-    query does not itself guarantee the physical row-lock acquisition order.
-    """
-
-    states: dict[str, MaintenanceProjectWorkbookState] = {}
-    for project_id in sorted(
-        {str(value).strip() for value in project_ids if str(value or "").strip()}
-    ):
-        states[project_id] = get_or_create_workbook_state(
-            db,
-            project_id=project_id,
-            lock=True,
-        )
-    return states
-
-
-def bump_workbook_revision(
-    db: Session,
-    *,
-    project_id: str,
-) -> MaintenanceProjectWorkbookState:
-    """Bump once inside the caller's transaction after an operating-fact write."""
-
-    state = get_or_create_workbook_state(db, project_id=project_id, lock=True)
-    return bump_locked_workbook_revision(db, state=state)
-
-
-def bump_locked_workbook_revision(
-    db: Session,
-    *,
-    state: MaintenanceProjectWorkbookState,
-) -> MaintenanceProjectWorkbookState:
-    """Bump a locked state at most once per root Session transaction.
-
-    ``Session.info`` outlives a commit, so the registry is paired with the
-    actual root ``SessionTransaction`` object.  A later transaction receives a
-    fresh set even when the same Session instance is reused.
-    """
-
-    transaction = db.get_transaction()
-    registry_key = "_maintenance_workbook_revision_bumps"
-    registry = db.info.get(registry_key)
-    if (
-        not isinstance(registry, tuple)
-        or len(registry) != 2
-        or registry[0] is not transaction
-    ):
-        registry = (transaction, set())
-        db.info[registry_key] = registry
-    bumped_project_ids = registry[1]
-    if state.project_id in bumped_project_ids:
-        return state
-
-    state.revision += 1
-    state.data_version = _workbook_data_version(state.project_id, state.revision)
-    db.flush()
-    bumped_project_ids.add(state.project_id)
-    return state
-
-
 def contract_dict(row: MaintenanceProjectContract) -> dict:
     return {
         "project_contract_id": row.project_contract_id,
@@ -416,30 +331,6 @@ def _required(value: str | None, label: str, limit: int = 64) -> str:
     if len(cleaned) > limit:
         raise MaintenanceOperationError(f"{label}过长")
     return cleaned
-
-
-def _project(db: Session, project_id: str) -> MaintenanceProject | None:
-    return db.scalar(
-        select(MaintenanceProject)
-        .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
-    )
-
-
-def _lock_project_for_fact_write(
-    db: Session, project_id: str
-) -> MaintenanceProject | None:
-    """Use one global lock order: workbook state, then the concrete fact row."""
-
-    exists = db.scalar(
-        select(MaintenanceProject.project_id).where(
-            MaintenanceProject.project_id == project_id
-        )
-    )
-    if exists is None:
-        return None
-    get_or_create_workbook_state(db, project_id=project_id, lock=True)
-    return _project(db, project_id)
 
 
 def _audit_contract(
@@ -1177,28 +1068,6 @@ def _site_issue_lines(
     if lock:
         statement = statement.with_for_update()
     return list(db.scalars(statement))
-
-
-def _site_issue_request_fingerprint(payload: dict) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _lock_idempotency_key(db: Session, idempotency_key: str) -> None:
-    """Serialize one client command without persisting sensitive request content."""
-
-    db.execute(
-        select(
-            func.pg_advisory_xact_lock(
-                func.hashtextextended(idempotency_key, 0)
-            )
-        )
-    )
 
 
 def _site_issue_command_fingerprint(
