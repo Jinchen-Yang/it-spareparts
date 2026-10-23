@@ -886,6 +886,9 @@ def test_downgrade_waits_for_uncommitted_canonical_origin_before_running_guards(
     config.set_main_option('script_location', str(backend / 'alembic'))
     db.rollback()
     engine = db.get_bind()
+    # Exercise S1's own guard at its revision. Later PN foreign keys can legitimately
+    # block earlier while their tables are dropped, before this lock is reached.
+    command.downgrade(config, 'a7c2e9f4b6d1')
     try:
         with ThreadPoolExecutor(max_workers=1) as executor, engine.connect() as writer:
             transaction = writer.begin()
