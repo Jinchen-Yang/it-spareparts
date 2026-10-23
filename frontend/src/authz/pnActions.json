@@ -35,10 +35,6 @@
     "part_master",
     "read_audit"
   ],
-  "read_legacy_history": [
-    "part_master",
-    "read_audit"
-  ],
   "read_candidates": [
     "part_master",
     "read_candidates"
