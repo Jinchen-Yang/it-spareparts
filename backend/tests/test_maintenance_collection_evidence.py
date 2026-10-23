@@ -444,6 +444,9 @@ def test_upload_rejects_forged_or_active_collection_evidence(
         ("现场照片.jpg", _jpeg_bytes(), "image/jpeg"),
         ("现场照片.jpeg", _jpeg_bytes(), "image/jpeg"),
     ],
+    # ZIP fixtures include timestamps; explicit IDs keep cross-process collection
+    # identical without changing any input bytes or upload assertions.
+    ids=["pdf", "docx", "xlsx", "png", "jpg", "jpeg"],
 )
 def test_upload_accepts_documented_collection_evidence_types(
     db,

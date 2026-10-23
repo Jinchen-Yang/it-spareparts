@@ -13,13 +13,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  backend:
-    name: 后端测试（pytest + 迁移链验证）
-    # 2026-08-19：自建 runner（cloudlay-ts）到 github.com 的网络频繁被重置导致
-    # checkout 失败，切换 GitHub 托管 runner（用户拍板）。uv 用官方安装器钉版本。
+  backend_prepare:
+    name: 后端迁移与完整测试清单
     runs-on: ubuntu-latest
-    # 2026-08-22：免费 runner 性能波动大（同套件 30~75+ 分钟），90 分钟会掐慢机
-    timeout-minutes: 150
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:15
@@ -34,6 +31,8 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    env:
+      CI_SHARD_RUN_KEY: ${{ github.run_id }}:${{ github.run_attempt }}:${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
       - name: 安装 uv（钉 0.11.31）
@@ -42,39 +41,132 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: 校验 uv 版本
         run: test "$(uv --version)" = "uv 0.11.31 (x86_64-unknown-linux-gnu)"
+      - name: 安装真实权限引擎测试依赖（固定版本与校验和）
+        run: |
+          bash scripts/install_test_cerbos.sh "$RUNNER_TEMP/cerbos"
+          echo "CERBOS_BINARY=$RUNNER_TEMP/cerbos/cerbos" >> "$GITHUB_ENV"
       - name: 迁移与 ORM 零漂移（alembic upgrade head → alembic check）
-        working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
+        working-directory: backend
         run: |
-          uv run --extra dev alembic upgrade head
-          uv run --extra dev alembic check
-      # 2026-09-03（阶段 0 护栏）：历史上迁移链反复分叉（6 个 merge 迁移为证），
-      # 多头会让 `alembic upgrade head` 在部署时报错或漏跑一条链。卡死单头。
+          uv run --frozen --extra dev alembic upgrade head
+          uv run --frozen --extra dev alembic check
       - name: 迁移链单头卡口（alembic heads == 1）
-        working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
+        working-directory: backend
         run: |
-          heads="$(uv run --extra dev alembic heads | grep -c . || true)"
+          heads="$(uv run --frozen --extra dev alembic heads | grep -c .)"
           if [ "$heads" != "1" ]; then
             echo "::error::迁移链有 $heads 个头，必须收敛为 1 个再合并"
-            uv run --extra dev alembic heads
+            uv run --frozen --extra dev alembic heads
             exit 1
           fi
-      # 2026-09-03（阶段 0 护栏）：删除对 PR #251/#252 的硬编码豁免——那两个 PR
-      # 早已合并，留着等于给「按 PR 号跳过全量后端测试」留了一条可复用的口子。
-      - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
-        timeout-minutes: 140
-        working-directory: backend
+      - name: 全量收集并确定性按文件分四片
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
-        run: uv run --extra dev pytest -q
+        working-directory: backend
+        run: >-
+          uv run --frozen --extra dev python ../scripts/pytest_shard.py plan
+          --output ../ci-shards/manifest.json --run-key "$CI_SHARD_RUN_KEY"
       - name: 扫描后端生产依赖漏洞
         working-directory: backend
         run: |
           uv export --frozen --no-dev --no-hashes --no-emit-project |
             uvx pip-audit -r /dev/stdin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-manifest-${{ github.run_attempt }}
+          path: ci-shards/manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  backend_shards:
+    name: 后端测试分片 ${{ matrix.shard }}
+    needs: backend_prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: spareparts
+          POSTGRES_PASSWORD: spareparts
+          POSTGRES_DB: spareparts_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U spareparts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI_SHARD_RUN_KEY: ${{ github.run_id }}:${{ github.run_attempt }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 安装 uv（钉 0.11.31）
+        run: |
+          curl -LsSf https://astral.sh/uv/0.11.31/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: 校验 uv 版本
+        run: test "$(uv --version)" = "uv 0.11.31 (x86_64-unknown-linux-gnu)"
+      - name: 安装真实权限引擎测试依赖（固定版本与校验和）
+        run: |
+          bash scripts/install_test_cerbos.sh "$RUNNER_TEMP/cerbos"
+          echo "CERBOS_BINARY=$RUNNER_TEMP/cerbos/cerbos" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-manifest-${{ github.run_attempt }}
+          path: ci-shards
+      - name: 运行完整收集中的本片测试（单进程独占数据库）
+        env:
+          DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
+        timeout-minutes: 140
+        working-directory: backend
+        run: >-
+          uv run --frozen --extra dev python ../scripts/pytest_shard.py run
+          --manifest ../ci-shards/manifest.json --shard ${{ matrix.shard }}
+          --output ../ci-shards/results/shard-${{ matrix.shard }}.json
+          --run-key "$CI_SHARD_RUN_KEY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-shard-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ci-shards/results/
+          if-no-files-found: error
+          retention-days: 7
+
+  backend:
+    # 保留分支保护的原 required 名称。任何缺片、失败、取消或跳过都必须红灯。
+    # 清单/报告绑定 run_attempt；重跑使用 Re-run all jobs，不能拼接不同尝试的绿灯。
+    name: 后端测试（pytest + 迁移链验证）
+    needs: [backend_prepare, backend_shards]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CI_SHARD_RUN_KEY: ${{ github.run_id }}:${{ github.run_attempt }}:${{ github.sha }}
+      CI_BACKEND_NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-manifest-${{ github.run_attempt }}
+          path: ci-shards
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-${{ github.run_attempt }}
+          path: ci-shards/results
+      - name: 必需检查汇总（前置状态与逐用例 exactly once）
+        run: >-
+          python3 scripts/pytest_shard.py verify
+          --manifest ci-shards/manifest.json --reports ci-shards/results
+          --run-key "$CI_SHARD_RUN_KEY" --needs-env CI_BACKEND_NEEDS
 
   frontend:
     name: 前端类型检查 + 构建

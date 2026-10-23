@@ -403,9 +403,13 @@ def change_password(req: ChangePasswordRequest, request: Request,
         _ev("change_password_rejected", ident.get("role"), {"reason": "no_account_row"})
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "当前账号通过共享口令登录，无法自助改密；请联系管理员改用独立账号")
-    # current_identity 已校验 is_active/tv，此处仅防御性
-    if not user.is_active:
+    # Identity was checked before acquiring this row lock. A permission writer
+    # may have revoked that session while we waited; do not renew it via a
+    # successful password change after the authorization epoch advanced.
+    if not user.is_active or user.deleted_at is not None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
+    if int(ident.get("tv", 0)) != int(user.token_version or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
     # 当前密码尝试防爆破：与登录共用失败计数/锁定（安全审查 CP-1）。虽需先持有效会话才能
     # 到这里，但零成本复用可挡住会话被盗后的当前密码爆破。
     now = datetime.now(timezone.utc)

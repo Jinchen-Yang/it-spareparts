@@ -87,3 +87,12 @@ it("新账号登录时清除旧版本遗留的个人税口径", () => {
   expect(store.has("maintenance_project_profit_basis")).toBe(false);
   expect(store.has("tax_basis")).toBe(false);
 });
+
+it("登录用户名与权限在 token 前写入，供修改自身授权后立即退出使用", () => {
+  const { order, store } = withWriteRecorder(() => persistLoginSession({
+    token: "self-token", role: "admin", name: "管理员", permissions: {},
+  }, "real-admin"));
+  expect(store.get("username")).toBe("real-admin");
+  expect(order.indexOf("username")).toBeLessThan(order.indexOf("token"));
+  expect(order[order.length - 1]).toBe("token");
+});

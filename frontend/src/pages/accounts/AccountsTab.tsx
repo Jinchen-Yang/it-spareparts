@@ -10,6 +10,8 @@ import {
 } from "../../api/accounts";
 import AccountDrawer from "./AccountDrawer";
 import BulkModal from "./BulkModal";
+import SalesAuthorizationDrawer from "./SalesAuthorizationDrawer";
+import { useAuthz } from "../../authz/AuthzProvider";
 
 const ROLE_LABEL: Record<string, string> = {
   admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读", maintenance_manager: "维保负责人",
@@ -23,6 +25,10 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   onChanged: () => void;
 }) {
   const { message } = App.useApp();
+  const authz = useAuthz();
+  // S0 sales PUT is permanently retired after S1 source migration.
+  const canManageAuthz = false;
+  const [authorizationTarget, setAuthorizationTarget] = useState<Account | null>(null);
   const [fTpl, setFTpl] = useState<string>();
   const [fRole, setFRole] = useState<string>();
   const [fActive, setFActive] = useState<string>();
@@ -128,6 +134,9 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
     { title: "状态", dataIndex: "is_active",
       render: (v: boolean) => v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
     { title: "最近登录", dataIndex: "last_login_at", render: fmt },
+    ...(canManageAuthz ? [{ title: "销售分析授权", key: "sales_authz", render: (_: unknown, u: Account) => (
+      <Button type="link" size="small" onClick={() => setAuthorizationTarget(u)}>销售分析授权与客户归属</Button>
+    ) }] : []),
     { title: "操作", key: "op", render: (_: unknown, u: Account) => u.username === "admin"
       ? <span style={{ color: "#999" }}>系统账号</span>
       : (
@@ -225,6 +234,10 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
         onClose={() => setBulkOp(null)}
         onDone={() => { setSelected([]); onChanged(); }}
       />
+
+      {canManageAuthz && authorizationTarget && <SalesAuthorizationDrawer
+        key={`${localStorage.getItem("token")}:${authorizationTarget.username}`} username={authorizationTarget.username}
+        onClose={() => setAuthorizationTarget(null)} onSaved={onChanged} />}
 
       <AccountDrawer
         meta={meta}

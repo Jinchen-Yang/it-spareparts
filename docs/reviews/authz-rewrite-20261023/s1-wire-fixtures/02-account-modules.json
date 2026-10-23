@@ -1,0 +1,919 @@
+{
+  "fixture_format": 1,
+  "catalog_version": "authz-s1-v1",
+  "note": "Independent DTO examples only; not complete database seeds or reproducible server fingerprint vectors; no live data.",
+  "cases": [
+    {
+      "id": "same_as_template_override_stays_present",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/users/alice/modules"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "subject": {
+            "id": 41,
+            "username": "alice",
+            "display_name": "示例甲",
+            "role": "sales",
+            "salesperson_name": "示例销售",
+            "is_active": true
+          },
+          "authorization_epoch": 7,
+          "template": {
+            "code": "sales_team",
+            "version": 2,
+            "current_version": 3,
+            "stale": true
+          },
+          "customer_assignments": {
+            "ids": [
+              7001,
+              7002
+            ],
+            "customers": [
+              {
+                "id": 7001,
+                "name": "示例客户7001",
+                "raw_name": "示例客户7001"
+              },
+              {
+                "id": 7002,
+                "name": "示例客户7002",
+                "raw_name": "示例客户7002"
+              }
+            ]
+          },
+          "resources": {
+            "sales_analysis": {
+              "version": 3,
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              },
+              "source": "personal_override",
+              "template_snapshot": {
+                "code": "sales_team",
+                "version": 2,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                }
+              },
+              "personal_override": {
+                "present": true,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                }
+              }
+            },
+            "purchase_analysis": {
+              "version": 0,
+              "configuration": null,
+              "source": "none",
+              "template_snapshot": {
+                "code": "sales_team",
+                "version": 2,
+                "configuration": null
+              },
+              "personal_override": {
+                "present": false,
+                "configuration": null
+              }
+            },
+            "retired_pool_rebuild": {
+              "version": 0,
+              "configuration": null,
+              "source": "none",
+              "template_snapshot": {
+                "code": "sales_team",
+                "version": 2,
+                "configuration": null
+              },
+              "personal_override": {
+                "present": false,
+                "configuration": null
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "effective配置等于保存snapshot仍present=true。",
+        "template当前v3但账号保存v2。"
+      ]
+    },
+    {
+      "id": "same_value_replace_advances_epoch_and_version",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": {
+              "code": "sales_team",
+              "version": 2,
+              "current_version": 3,
+              "stale": true
+            },
+            "customer_assignments": {
+              "ids": [
+                7001,
+                7002
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                },
+                {
+                  "id": 7002,
+                  "name": "示例客户7002",
+                  "raw_name": "示例客户7002"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "personal_override",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                },
+                "personal_override": {
+                  "present": true,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "相同值replace也保留override并推进7→8及3→4。",
+        "客户未提供保持。"
+      ]
+    },
+    {
+      "id": "explicit_empty_actions_override",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "revoke_resource",
+              "configuration": {
+                "actions": [],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": {
+              "code": "sales_team",
+              "version": 2,
+              "current_version": 3,
+              "stale": true
+            },
+            "customer_assignments": {
+              "ids": [
+                7001,
+                7002
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                },
+                {
+                  "id": 7002,
+                  "name": "示例客户7002",
+                  "raw_name": "示例客户7002"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "personal_override",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                },
+                "personal_override": {
+                  "present": true,
+                  "configuration": {
+                    "actions": [],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "actions=[]仍configuration对象且override.present=true，Grant行不删除。"
+      ]
+    },
+    {
+      "id": "clear_override_restores_saved_v2_not_latest_v3",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "clear_override"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": {
+              "code": "sales_team",
+              "version": 2,
+              "current_version": 3,
+              "stale": true
+            },
+            "customer_assignments": {
+              "ids": [
+                7001,
+                7002
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                },
+                {
+                  "id": 7002,
+                  "name": "示例客户7002",
+                  "raw_name": "示例客户7002"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "template_snapshot",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "恢复v2的read/assigned_customers，不获得v3的export/all/profit。",
+        "clear数值相同也推进epoch和资源版本。"
+      ]
+    },
+    {
+      "id": "clear_override_without_snapshot_materializes_deny",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "clear_override"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": null,
+            "customer_assignments": {
+              "ids": [
+                7001,
+                7002
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                },
+                {
+                  "id": 7002,
+                  "name": "示例客户7002",
+                  "raw_name": "示例客户7002"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "source=none，configuration为拒绝tombstone，version=4不是0。",
+        "不回旧role或隐式模板。"
+      ],
+      "initial_state": {
+        "canonical_template_snapshot": null,
+        "override": {
+          "actions": [
+            "read"
+          ],
+          "scope": "assigned_customers",
+          "field_permissions": []
+        },
+        "resource_version": 3,
+        "epoch": 7
+      }
+    },
+    {
+      "id": "explicit_empty_customer_ids_clears_assignments",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ],
+          "customer_assignments": {
+            "ids": []
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": {
+              "code": "sales_team",
+              "version": 2,
+              "current_version": 3,
+              "stale": true
+            },
+            "customer_assignments": {
+              "ids": [],
+              "customers": []
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "personal_override",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                },
+                "personal_override": {
+                  "present": true,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "ids=[]明确清空，与字段缺省保持不同。",
+        "空客户集合永不变all。"
+      ]
+    },
+    {
+      "id": "self_grant_write_revokes_actor_session",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/operator/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "revoke_resource",
+              "configuration": {
+                "actions": [],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": true,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 1,
+              "username": "operator",
+              "display_name": "示例管理员",
+              "role": "admin",
+              "salesperson_name": null,
+              "is_active": true
+            },
+            "authorization_epoch": 8,
+            "template": {
+              "code": "sales_team",
+              "version": 2,
+              "current_version": 3,
+              "stale": true
+            },
+            "customer_assignments": {
+              "ids": [
+                7001,
+                7002
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                },
+                {
+                  "id": 7002,
+                  "name": "示例客户7002",
+                  "raw_name": "示例客户7002"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 4,
+                "configuration": {
+                  "actions": [],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "personal_override",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                },
+                "personal_override": {
+                  "present": true,
+                  "configuration": {
+                    "actions": [],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": {
+                  "code": "sales_team",
+                  "version": 2,
+                  "configuration": null
+                },
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "响应返回已提交结果，不用失效旧token再GET。",
+        "前端清理当前会话，不自动重放。"
+      ]
+    }
+  ]
+}

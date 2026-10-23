@@ -14,12 +14,13 @@
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import permissions
+from app.api.authz_route import AuthorizationRoute
 from app.api.accounts import (
     _acct_snapshot,
     _audit,
@@ -27,15 +28,20 @@ from app.api.accounts import (
     _dual_write_legacy,
     _fingerprint,
     _read_gate,
+    _write_gate,
 )
 from app.auth import current_identity
+from app.authz import management, principal, runtime
 from app.db import get_db
 from app.models.system import SysAuditLog, SysRoleTemplate, SysUser
 from app.security import require_action
 
-router = APIRouter(prefix="/role-templates", tags=["role-templates"])
+def _no_store(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
 
-_write_gate = require_action("action_account_manage")
+
+router = APIRouter(prefix="/role-templates", tags=["role-templates"], dependencies=[Depends(_no_store)], route_class=AuthorizationRoute)
+
 _BASE_ROLES = ["boss", "sales", "purchaser", "readonly", "maintenance_manager"]
 _CODE_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 
@@ -129,13 +135,19 @@ def list_templates(include_archived: bool = True, db: Session = Depends(get_db),
     q = select(SysRoleTemplate).order_by(SysRoleTemplate.is_system.desc(), SysRoleTemplate.id)
     if not include_archived:
         q = q.where(SysRoleTemplate.is_active.is_(True))
-    return [_tpl_view(db, t) for t in db.execute(q).scalars().all()]
+    rows = list(db.execute(q).scalars())
+    summaries = management.template_summaries(db, rows)
+    return [{**_tpl_view(db, t), **management.envelope(), "authorization_summary": summaries[t.code]} for t in rows]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_template(body: TemplateCreate, db: Session = Depends(get_db),
-                    ident: dict = Depends(current_identity),
+def create_template(body: dict = Body(...), db: Session = Depends(get_db),
+                    ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                     _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.save_template(db, ident, body)
+    body = TemplateCreate.model_validate(body)
+    ident = dict(ident.legacy_claims)
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "模板名称不能为空")
@@ -170,9 +182,13 @@ def create_template(body: TemplateCreate, db: Session = Depends(get_db),
 
 
 @router.put("/{code}")
-def update_template(code: str, body: TemplateUpdate, db: Session = Depends(get_db),
-                    ident: dict = Depends(current_identity),
+def update_template(code: str, body: dict = Body(...), db: Session = Depends(get_db),
+                    ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                     _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.save_template(db, ident, body, code=code)
+    body = TemplateUpdate.model_validate(body)
+    ident = dict(ident.legacy_claims)
     """「仅保存模板」：version+1，不动任何账号。要让已有账号跟上 → 另调 /sync。"""
     t = _get(db, code)
     if t.code == "admin":
@@ -206,9 +222,12 @@ def update_template(code: str, body: TemplateUpdate, db: Session = Depends(get_d
 
 
 @router.post("/{code}/archive")
-def archive_template(code: str, db: Session = Depends(get_db),
-                     ident: dict = Depends(current_identity),
+def archive_template(code: str, body: dict | None = Body(None), db: Session = Depends(get_db),
+                     ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                      _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or body is not None:
+        return management.save_template(db, ident, body or {}, code=code, state_action="archive")
+    ident = dict(ident.legacy_claims)
     t = _get(db, code)
     if t.is_system:
         raise HTTPException(400, "内置模板不可停用（它是角色兜底口径）")
@@ -226,9 +245,12 @@ def archive_template(code: str, db: Session = Depends(get_db),
 
 
 @router.post("/{code}/restore")
-def restore_template(code: str, db: Session = Depends(get_db),
-                     ident: dict = Depends(current_identity),
+def restore_template(code: str, body: dict | None = Body(None), db: Session = Depends(get_db),
+                     ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                      _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or body is not None:
+        return management.save_template(db, ident, body or {}, code=code, state_action="restore")
+    ident = dict(ident.legacy_claims)
     t = _get(db, code)
     if t.is_active:
         return _tpl_view(db, t)
@@ -243,8 +265,10 @@ def restore_template(code: str, db: Session = Depends(get_db),
 
 
 @router.get("/{code}/accounts")
-def template_accounts(code: str, db: Session = Depends(get_db),
+def template_accounts(code: str, ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity), db: Session = Depends(get_db),
                       _: None = Depends(_read_gate)) -> dict:
+    if runtime.authorization_mode() == 'unified_modules':
+        return management.template_accounts(db, ident, code)
     t = _get(db, code)
     users = db.execute(select(SysUser).where(SysUser.template_code == code)
                        .order_by(SysUser.id)).scalars().all()
@@ -261,9 +285,13 @@ def template_accounts(code: str, db: Session = Depends(get_db),
 
 
 @router.post("/{code}/sync")
-def sync_template(code: str, body: SyncBody, db: Session = Depends(get_db),
-                  ident: dict = Depends(current_identity),
+def sync_template(code: str, body: dict = Body(...), db: Session = Depends(get_db),
+                  ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                   _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.bulk_modules(db, ident, body, sync_code=code)
+    body = SyncBody.model_validate(body)
+    ident = dict(ident.legacy_claims)
     """「保存并同步账号」的同步半场：把模板当前权限刷进已套用账号的快照。
     dry_run 预览逐账号 diff → 带指纹执行。全成或全败：任一账号同步后组合非法
     （个别调整与新模板相抵触）→ 整体 400。"""
