@@ -8,12 +8,14 @@ import hashlib
 import hmac
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app.models.dimensions import DimPart
 from .dto import (Authorize, AuthorizationDecision, CATEGORY_FIELDS, CommandContext,
@@ -21,13 +23,14 @@ from .dto import (Authorize, AuthorizationDecision, CATEGORY_FIELDS, CommandCont
 from .errors import CatalogError
 from .models import AuditEvent, CommandReceipt, PartState
 from .persistence import (acquire_creation_locks, acquire_identity_lock, append_audit, blocked_spec_keys, capture_state, capture_states,
-                          legacy_context, lock_part, read_versions, record_legacy_change,
+                          legacy_context, lock_part, read_states, read_versions, record_legacy_change,
                           record_legacy_changes, revision_vector, snapshot, state_for_write)
 
 __all__ = ["get_part", "list_parts", "create_part", "patch_profile", "set_availability",
            "get_receipt", "list_audit_events", "capture_state", "capture_states",
            "record_legacy_change", "record_legacy_changes", "legacy_context",
-           "blocked_spec_keys", "read_versions", "acquire_identity_lock", "acquire_creation_locks"]
+           "blocked_spec_keys", "read_states", "read_versions", "acquire_identity_lock", "acquire_creation_locks",
+           "CommandHandle", "begin_command", "finish_command", "receipt_meta", "record_audit"]
 
 
 def _json(value) -> str:
@@ -102,8 +105,84 @@ def _lookup_receipt(db: Session, context: CommandContext) -> CommandReceipt | No
                   populate_existing=True)
 
 
+@dataclass(frozen=True)
+class CommandHandle:
+    context: CommandContext
+    operation: str
+    resource_type: str
+    payload_hash: str
+    decision: AuthorizationDecision
+    receipt: CommandReceipt | None
+
+
+def begin_command(db: Session, *, context: CommandContext, authorize: Authorize,
+                  operation: str, part_id: int | None, resource_type: str,
+                  resource_id: str | int | UUID | None, payload: BaseModel | dict) -> CommandHandle:
+    """Authenticate the action, then reserve the global intent key in this transaction.
+
+    Callers also enforce their field/source/target grants before returning a replay
+    or taking resource locks. A handle with a receipt must only be projected using
+    current permissions; it must never execute the mutation again.
+    """
+    decision = _authorize(db, context, authorize, operation, part_id)
+    body = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+    digest = _digest({"operation": operation, "part_id": part_id, "resource": resource_type,
+        "resource_id": str(resource_id) if resource_id is not None else None, "payload": body,
+        "if_match_revision": context.if_match_revision, "reason": context.reason,
+        "provenance": context.actor.provenance.model_dump(mode="json"),
+        "confirmed_by": context.confirmed_by, "adopted_from_candidate_id": context.adopted_from_candidate_id})
+    _receipt_lock(db, context)
+    receipt = _lookup_receipt(db, context)
+    if receipt is not None:
+        if not hmac.compare_digest(receipt.payload_hash, digest):
+            raise CatalogError("request.idempotency_mismatch", "同一请求编号的内容已改变")
+        _authorize(db, context, authorize, receipt.operation, receipt.part_id)
+    return CommandHandle(context, operation, resource_type, digest, decision, receipt)
+
+
+def finish_command(db: Session, handle: CommandHandle, *, part_id: int | None,
+                   applied_revision: int, audit_id: int, result: dict) -> CommandReceipt:
+    """Persist stable outcome references only; signed URLs and response caches do not belong here."""
+    if handle.receipt is not None:
+        raise RuntimeError("a replayed command cannot be executed again")
+    if result.get("resource") != handle.resource_type:
+        raise ValueError("receipt resource does not match the command")
+    receipt = CommandReceipt(principal_id=handle.context.actor.principal_id,
+        client_id=handle.context.actor.client_id, request_id=handle.context.request_id,
+        operation=handle.operation, part_id=part_id, payload_hash=handle.payload_hash,
+        applied_revision=applied_revision, audit_id=audit_id, result=result)
+    db.add(receipt)
+    db.flush()
+    return receipt
+
+
+def receipt_meta(receipt: CommandReceipt, *, data_revision: int,
+                 identity_revision: int | None, replayed: bool) -> dict:
+    return {"request_id": str(receipt.request_id), "resource_revision": receipt.applied_revision,
+            "applied_revision": receipt.applied_revision, "data_revision": data_revision,
+            "identity_revision": identity_revision,
+            "applied_identity_revision": receipt.result.get("identity_revision"),
+            "audit_id": receipt.audit_id, "replayed": replayed}
+
+
+def record_audit(db: Session, part_id: int | None, **kwargs):
+    """Append an audit in the caller transaction, including unassigned media resources."""
+    return append_audit(db, part_id, **kwargs)
+
+
 def _response(db: Session, receipt: CommandReceipt, *, context: CommandContext,
-              authorize: Authorize, replayed: bool) -> dict:
+              authorize: Authorize, replayed: bool, projector=None) -> dict:
+    resource = receipt.result["resource"]
+    if resource in {"content", "candidate"}:
+        from .content import render_receipt
+        return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
+    if resource.startswith("media."):
+        from .media import render_receipt
+        return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
+    if resource not in {"profile", "availability"}:
+        if projector is None:
+            raise CatalogError("request.not_found", "此回执需要注册的宿主投影器", status_code=404)
+        return projector(db, receipt, context=context, authorize=authorize, replayed=replayed)
     decision = _authorize(db, context, authorize, "read", receipt.part_id)
     part = lock_part(db, receipt.part_id, shared=True)
     value = snapshot(db, part)
@@ -251,6 +330,26 @@ def patch_profile(db: Session, part_id: int, command: PatchProfile, *,
     replay = _replay(db, context, digest, authorize)
     if replay is not None:
         return replay
+    result = _mutate_profile(db, part_id, command, context=context, decision=decision,
+                             read_decision=read_decision, digest=digest, action="update_profile")
+    receipt = _save_receipt(db, part_id, context=context, operation="update_profile", digest=digest,
+                           audit_id=result["audit_id"], value=result["snapshot"])
+    return _response(db, receipt, context=context, authorize=authorize, replayed=False)
+
+
+def _mutate_profile(db: Session, part_id: int, command: PatchProfile, *, context: CommandContext,
+                    decision: AuthorizationDecision, read_decision: AuthorizationDecision,
+                    digest: str, action: str) -> dict:
+    """Mutation-only primitive for the verified candidate adoption transaction.
+
+    It is deliberately private: public callers cannot bypass the AI candidate gate.
+    """
+    paths = set(command.changes) | {f"specs.{key}" for key in command.spec_updates}
+    if CATEGORY_FIELDS & paths:
+        paths.update(CATEGORY_FIELDS)
+    _check_fields(decision, paths)
+    if any(not _allowed(read_decision.readable_fields, path) for path in paths):
+        raise CatalogError("auth.forbidden", "需要读取所选字段的权限", status_code=403)
     part = lock_part(db, part_id)
     before = snapshot(db, part)
     _baseline(context, before, command.expected_identity_revision,
@@ -259,13 +358,11 @@ def patch_profile(db: Session, part_id: int, command: PatchProfile, *,
     _check_derived_access(before, command.changes, specs, decision, read_decision)
     state = state_for_write(db, part_id)
     _apply_fields(db, part, state, command.changes, specs)
-    result = record_legacy_change(db, part_id, before, context=context, action="update_profile",
+    result = record_legacy_change(db, part_id, before, context=context, action=action,
         deleted_spec_keys=[k for k, v in specs.items() if v is None],
         restored_spec_keys=[k for k, v in specs.items() if v is not None], force_fields=paths,
         authorization=decision.metadata, payload_hash=digest)
-    receipt = _save_receipt(db, part_id, context=context, operation="update_profile", digest=digest,
-                           audit_id=result["audit_id"], value=result["snapshot"])
-    return _response(db, receipt, context=context, authorize=authorize, replayed=False)
+    return result
 
 
 def _candidates(db: Session, pn: str) -> list[dict]:
@@ -407,12 +504,12 @@ def set_availability(db: Session, part_id: int, command: SetAvailability, *,
     return _response(db, receipt, context=context, authorize=authorize, replayed=False)
 
 
-def get_receipt(db: Session, request_id: UUID, *, context: CommandContext, authorize: Authorize) -> dict:
+def get_receipt(db: Session, request_id: UUID, *, context: CommandContext, authorize: Authorize, projector=None) -> dict:
     receipt = db.get(CommandReceipt, (context.actor.principal_id, context.actor.client_id, request_id))
     if receipt is None:
         raise CatalogError("request.not_found", "请求回执不存在", status_code=404)
     _authorize(db, context, authorize, receipt.operation, receipt.part_id)
-    return _response(db, receipt, context=context, authorize=authorize, replayed=True)
+    return _response(db, receipt, context=context, authorize=authorize, replayed=True, projector=projector)
 
 
 def _decode_cursor(cursor: str | None, fingerprint: str) -> int:
@@ -514,3 +611,48 @@ def list_audit_events(db: Session, part_id: int, *, context: CommandContext, aut
     more = len(rows) > len(items)
     return {"data": items, "meta": {"request_id": str(context.request_id), "replayed": False,
             "next_cursor": _encode_cursor(items[-1]["audit_id"], fingerprint) if more else None}}
+
+
+# Lazy public exports keep model registration independent of facade import order.
+def get_content(db, part_id, grade, *, context, authorize):
+    from .content import get_content as invoke
+    return invoke(db, part_id, grade, context=context, authorize=authorize)
+
+
+def patch_content(db, part_id, grade, command, *, context, authorize):
+    from .content import patch_content as invoke
+    return invoke(db, part_id, grade, command, context=context, authorize=authorize)
+
+
+def create_candidate(db, command, *, context, authorize):
+    from .content import create_candidate as invoke
+    return invoke(db, command, context=context, authorize=authorize)
+
+
+def get_candidate(db, candidate_id, *, context, authorize):
+    from .content import get_candidate as invoke
+    return invoke(db, candidate_id, context=context, authorize=authorize)
+
+
+def list_candidates(db, part_id, *, context, authorize, status=None, cursor=None, limit=50):
+    from .content import list_candidates as invoke
+    return invoke(db, part_id, context=context, authorize=authorize, status=status, cursor=cursor, limit=limit)
+
+
+def adopt_candidate(db, candidate_id, command, *, context, authorize):
+    from .content import adopt_candidate as invoke
+    return invoke(db, candidate_id, command, context=context, authorize=authorize)
+
+
+def reject_candidate(db, candidate_id, command, *, context, authorize):
+    from .content import reject_candidate as invoke
+    return invoke(db, candidate_id, command, context=context, authorize=authorize)
+
+
+def migrate_effective_content(db, part_id, command, *, context, authorize):
+    from .content import migrate_effective_content as invoke
+    return invoke(db, part_id, command, context=context, authorize=authorize)
+
+
+__all__ += ["get_content", "patch_content", "create_candidate", "get_candidate", "list_candidates",
+            "adopt_candidate", "reject_candidate", "migrate_effective_content"]

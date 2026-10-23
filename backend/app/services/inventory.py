@@ -63,7 +63,7 @@ def list_inventory(db: Session, warehouse: str | None, q: str | None,
             "items": [_row(inv) for inv in rows]}
 
 
-def backfill_costs(db: Session) -> dict:
+def backfill_costs(db: Session, *, commit: bool = True) -> dict:
     """按商品加权平均(不含税,口径同利润COGS)回填 inventory.unit_cost / inventory_value。
 
     单位成本 = Σ(采购量×不含税单价) / Σ采购量，仅取计入成本的采购类型、已生效、单价>0。
@@ -101,7 +101,10 @@ def backfill_costs(db: Session) -> dict:
             "tax_factor": tax_policy.TAX_FACTOR,
         },
     )
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     filled = db.scalar(select(func.count()).select_from(Inventory).where(Inventory.unit_cost.is_not(None)))
     total = db.scalar(select(func.count()).select_from(Inventory))
     return {"updated": res.rowcount, "filled": filled, "total": total,

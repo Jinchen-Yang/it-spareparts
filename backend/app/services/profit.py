@@ -74,7 +74,7 @@ def _load_purchase_events(db: Session):
     return events, fallback
 
 
-def recompute(db: Session) -> dict:
+def recompute(db: Session, *, commit: bool = True) -> dict:
     """重算所有已生效销售行的成本/利润,批量回填。返回统计。"""
     pur_events, fallback = _load_purchase_events(db)
 
@@ -161,7 +161,10 @@ def recompute(db: Session) -> dict:
 
     for i in range(0, len(updates), 1000):
         db.execute(update(FSalesLine), updates[i:i + 1000])
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     stats["cost_method"] = config.COST_METHOD
     return stats
 
