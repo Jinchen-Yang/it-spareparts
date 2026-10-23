@@ -24,29 +24,47 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app import permissions
+from app.api.authz_route import AuthorizationRoute
 from app.auth import current_identity, hash_password
+from app.authz import management, principal, runtime
 from app.db import get_db
 from app.models.system import SysAccessLog, SysAuditLog, SysRoleTemplate, SysUser
-from app.security import require_action, require_page
+from app.security import UserContext, get_current_user_context, require_action, require_page
 
-router = APIRouter(prefix="/accounts", tags=["accounts"])
+def _no_store(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+
+
+router = APIRouter(prefix="/accounts", tags=["accounts"], dependencies=[Depends(_no_store)], route_class=AuthorizationRoute)
 
 _ROLES = ["admin", "boss", "sales", "purchaser", "readonly", "maintenance_manager"]
 _page_gate = require_page("page_accounts")
-_write_gate = require_action("action_account_manage")
+_legacy_write_gate = require_action("action_account_manage")
 
 
-def _read_gate(ident: dict = Depends(current_identity),
-               _page: None = Depends(_page_gate)) -> dict:
-    """读接口门：先严格验 token（被吊销/停用 → 401 触发前端重登，而不是降级 guest 得 403），
-    再查 page_accounts 页面权限（403）。"""
-    return ident
+def _write_gate(ctx: UserContext = Depends(get_current_user_context), db: Session = Depends(get_db)):
+    if not runtime.canonical_management_required(db):
+        _legacy_write_gate(ctx)
+
+
+
+def _read_gate(ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
+               db: Session = Depends(get_db)) -> dict:
+    if runtime.canonical_management_required(db):
+        management.actor(db, ident, admin=False, capability='read_accounts')
+    else:
+        from app import config
+        claims = ident.legacy_claims
+        if config.ENABLE_RBAC and not permissions.page_permission_allowed(
+                role=claims.get('role'), permission_map=claims.get('perms'), page_key='page_accounts'):
+            raise HTTPException(403, '无权访问该页面')
+    return dict(ident.legacy_claims)
 
 
 # ---------- 请求体 ----------
@@ -275,7 +293,9 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
     tpls = db.execute(select(SysRoleTemplate).order_by(SysRoleTemplate.id)).scalars().all()
     usage = dict(db.execute(
         select(SysUser.template_code, func.count()).group_by(SysUser.template_code)).all())
+    canonical = management.template_summaries(db, tpls)
     return {
+        **management.envelope(),
         "roles": _ROLES,
         "data_keys": list(permissions.DATA_GROUPS),
         "page_keys": permissions.PAGE_KEYS,
@@ -304,6 +324,7 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
             "is_system": t.is_system, "is_active": t.is_active, "version": t.version,
             "usage_count": usage.get(t.code, 0),
             "locked": t.code == "admin",
+            **management.envelope(), "authorization_summary": canonical[t.code],
         } for t in tpls],
     }
 
@@ -314,14 +335,23 @@ def list_accounts(db: Session = Depends(get_db), _: None = Depends(_read_gate)) 
     users = db.execute(
         select(SysUser).where(SysUser.deleted_at.is_(None)).order_by(SysUser.id)
     ).scalars().all()
-    return [_view(u, tpls.get(u.template_code or "")) for u in users]
+    summaries = management.account_summaries(users, tpls)
+    return [{**_view(u, tpls.get(u.template_code or "")), "id": u.id,
+             "authorization_epoch": u.token_version, "authorization_summary": summaries[u.id]} for u in users]
 
 
 # ---------- 建号 ----------
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_account(body: CreateAccount, db: Session = Depends(get_db),
-                   ident: dict = Depends(current_identity),
+def create_account(response: Response, body: dict = Body(...), db: Session = Depends(get_db),
+                   ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                    _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        result = management.create_account(db, ident, body)
+        if result.get("dry_run") is True:
+            response.status_code = 200
+        return result
+    body = CreateAccount.model_validate(body)
+    ident = dict(ident.legacy_claims)
     uname = (body.username or "").strip()
     if not uname:
         raise HTTPException(400, "用户名不能为空")
@@ -334,6 +364,7 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
 
     u = SysUser(username=uname, role="readonly", display_name=body.display_name,
                 salesperson_name=body.salesperson_name,
+                authorization_legacy_seed_eligible=True,
                 password_hash=hash_password(body.password))
     if body.role == "admin":
         # 直接建管理员：仅 admin 操作者（模板层无 admin 套用路径）
@@ -371,9 +402,13 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
 
 # ---------- 单账号修改 ----------
 @router.put("/{username}")
-def update_account(username: str, body: UpdateAccount, db: Session = Depends(get_db),
-                   ident: dict = Depends(current_identity),
+def update_account(username: str, body: dict = Body(...), db: Session = Depends(get_db),
+                   ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                    _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.update_account(db, ident, username, body)
+    body = UpdateAccount.model_validate(body)
+    ident = dict(ident.legacy_claims)
     u = _get(db, username, lock=True)
     perm_change = (body.role is not None or body.template_code is not None
                    or body.overrides is not None or body.permissions is not None)
@@ -445,9 +480,13 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
 
 # ---------- 改密 / 停用 ----------
 @router.put("/{username}/password")
-def reset_password(username: str, body: PasswordReset, db: Session = Depends(get_db),
-                   ident: dict = Depends(current_identity),
+def reset_password(username: str, body: dict = Body(...), db: Session = Depends(get_db),
+                   ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                    _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.account_lifecycle(db, ident, username, body, operation='password')
+    body = PasswordReset.model_validate(body)
+    ident = dict(ident.legacy_claims)
     if len(body.password or "") < 6:
         raise HTTPException(400, "密码至少 6 位")
     u = _get(db, username, lock=True)
@@ -462,9 +501,13 @@ def reset_password(username: str, body: PasswordReset, db: Session = Depends(get
 
 
 @router.put("/{username}/active")
-def set_active(username: str, body: ActiveToggle, db: Session = Depends(get_db),
-               ident: dict = Depends(current_identity),
+def set_active(username: str, body: dict = Body(...), db: Session = Depends(get_db),
+               ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.account_lifecycle(db, ident, username, body, operation='active')
+    body = ActiveToggle.model_validate(body)
+    ident = dict(ident.legacy_claims)
     u = _get(db, username, lock=True)
     _guard_touch(ident, u)
     if not body.is_active:
@@ -615,9 +658,13 @@ def _plan_bulk(db: Session, ident: dict, body: BulkBody) -> tuple[list[dict], st
 
 
 @router.post("/bulk")
-def bulk_update(body: BulkBody, db: Session = Depends(get_db),
-                ident: dict = Depends(current_identity),
+def bulk_update(body: dict = Body(...), db: Session = Depends(get_db),
+                ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
                 _: None = Depends(_write_gate)) -> dict:
+    if runtime.canonical_management_required(db) or "schema_version" in body:
+        return management.bulk_modules(db, ident, body)
+    body = BulkBody.model_validate(body)
+    ident = dict(ident.legacy_claims)
     plan, fp = _plan_bulk(db, ident, body)
     preview = [{
         "username": p["user"].username, "display_name": p["user"].display_name,
@@ -683,10 +730,14 @@ def activity(username: str, limit: int = 50, db: Session = Depends(get_db),
 @router.delete("/{username}")
 def delete_account(
     username: str,
+    body: dict | None = Body(None),
     db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
+    ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
     _: None = Depends(_write_gate),
 ) -> dict:
+    if runtime.canonical_management_required(db) or body is not None:
+        return management.account_lifecycle(db, ident, username, body or {}, operation='delete')
+    ident = dict(ident.legacy_claims)
     """删除账号（软删除，仅管理员）。
 
     安全护栏：内置 admin 不可删；不能删自己；不能删最后一个启用管理员；

@@ -166,7 +166,7 @@ def test_http_edit_state_reads_one_read_only_snapshot_without_blocking_writer(db
                    display_name="快照读取人", is_active=True))
     db.commit()
     token, _ = _make_token("purchaser", "snapshot-reader", "快照读取人",
-                           perms=permissions.effective("purchaser", None))
+                           perms=permissions.effective("purchaser", None), authn="sys_user")
     observed = {}
 
     def interleave_writer(connection, _cursor, statement, _parameters, _context, _many):

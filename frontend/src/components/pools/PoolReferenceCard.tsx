@@ -19,6 +19,7 @@ export interface PoolReferenceCardProps {
   compact?: boolean;
   summary?: boolean;
   forceRestricted?: boolean;
+  canOpenDetail?: boolean;
 }
 
 function deltaLabel(value: number | null, target: "池均价" | "人工约束") {
@@ -33,6 +34,7 @@ function PriceSide({ kind, value, basis, forceRestricted = false }: {
   value: PoolReferenceSide;
   basis: TaxBasis;
   forceRestricted?: boolean;
+  canOpenDetail?: boolean;
 }) {
   const title = kind === "purchase" ? "采购参考" : "销售参考";
   const limitLabel = kind === "purchase" ? "人工上限" : "人工下限";
@@ -111,6 +113,7 @@ export default function PoolReferenceCard({
   compact = false,
   summary = false,
   forceRestricted = false,
+  canOpenDetail = false,
 }: PoolReferenceCardProps) {
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
@@ -152,9 +155,9 @@ export default function PoolReferenceCard({
   if (summary) {
     return (
       <section aria-label={label}>
-        <Link to={`/pool-analysis/${reference.pool.group_id}?${qs.toString()}`} aria-label="查看互通池详情">
+        {canOpenDetail ? <Link to={`/pool-analysis/${reference.pool.group_id}?${qs.toString()}`} aria-label="查看互通池详情">
           {reference.pool.name}
-        </Link>
+        </Link> : <span>{reference.pool.name}</span>}
         <div style={mutedStyle}>{reference.pool.member_count} 个 PN</div>
         <details>
           <summary style={{ cursor: "pointer" }}>池价格参考</summary>
@@ -183,9 +186,9 @@ export default function PoolReferenceCard({
           </span>
         )}
         extra={(
-          <Link to={`/pool-analysis/${reference.pool.group_id}?${qs.toString()}`} aria-label="查看互通池详情">
+          canOpenDetail ? <Link to={`/pool-analysis/${reference.pool.group_id}?${qs.toString()}`} aria-label="查看互通池详情">
             查看池详情
-          </Link>
+          </Link> : null
         )}
       >
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 10 }}>

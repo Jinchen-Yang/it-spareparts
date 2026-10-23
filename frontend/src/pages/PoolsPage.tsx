@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useAuthorizedQuery, useModuleAccess, withRouteAccess, useAccess, legacyRouteAllowed } from "../authz/access";
+import { actionRule, routeRule } from "../authz/rules";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, DatePicker, Input, Segmented, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
@@ -8,7 +10,6 @@ import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
 import {
   fetchPoolAnalysisList,
   type PoolAnalysisListItem,
-  type PoolAnalysisListResponse,
   type PoolAnalysisRange,
   type PoolReferenceSide,
 } from "../api/poolAnalysis";
@@ -71,8 +72,12 @@ function readPage(value: string | null): number {
  * 员工侧池价格分析入口。只读取已经发生的业务数据；不会提交价格、审批或拦截订单。
  * 筛选以 URL 为唯一真值源，复制链接、刷新、前进后退都会重放同一范围。
  */
-export default function PoolsPage() {
-  const local = useLocalRestrictions();
+function PoolsPage() {
+  const local = useLocalRestrictions("pool_price_analysis");
+  const access = useModuleAccess("pool_price_analysis");
+  const detailRule = routeRule("/pool-analysis/:groupId");
+  const detailOld = legacyRouteAllowed("/pool-analysis/:groupId");
+  const canDetail = useAccess(detailRule, {legacy: {pool_price_analysis: detailOld, pool_order_facts: detailOld}}).allowed;
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
   const [sp, setSp] = useSearchParams();
@@ -86,33 +91,14 @@ export default function PoolsPage() {
   const purchaseType = sp.get("purchase_type")?.trim() || "";
   const page = readPage(sp.get("page"));
   const [searchText, setSearchText] = useState(q);
-  const [data, setData] = useState<PoolAnalysisListResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const [reload, setReload] = useState(0);
-  const requestSeq = useRef(0);
-
   useEffect(() => setSearchText(q), [q]);
-
-  useEffect(() => {
-    if (invalidWindow || invalidRange) return;
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    setError(false);
-    fetchPoolAnalysisList({
-      range,
-      ...(parsedCustom ? { date_from: parsedCustom.from, date_to: parsedCustom.to } : {}),
-      ...(purchaseType ? { purchase_type: purchaseType } : {}),
-      q: q || undefined,
-      page,
-      page_size: 20,
-    })
-      .then((result) => { if (seq === requestSeq.current) setData(result); })
-      .catch(() => { if (seq === requestSeq.current) setError(true); })
-      .finally(() => { if (seq === requestSeq.current) setLoading(false); });
-    return () => { requestSeq.current += 1; };
-  }, [range, parsedCustom?.from, parsedCustom?.to, invalidWindow, invalidRange,
-    purchaseType, q, page, reload]);
+  const request = useAuthorizedQuery({rule: actionRule("pool_price_analysis", "read"), legacy: {pool_price_analysis: true},
+    queryKey: ["pool-list", range, parsedCustom?.from, parsedCustom?.to, purchaseType, q, page],
+    enabled: !invalidWindow && !invalidRange && access.surface("list", true),
+    query: context => fetchPoolAnalysisList({range,
+      ...(parsedCustom ? {date_from: parsedCustom.from, date_to: parsedCustom.to} : {}),
+      purchase_type: purchaseType || undefined, q: q || undefined, page, page_size: 20}, context)});
+  const {data, loading, error} = request;
 
   const patchUrl = (next: Record<string, string | number | undefined>) => {
     const merged = new URLSearchParams(sp);
@@ -138,13 +124,13 @@ export default function PoolsPage() {
       fixed: "left",
       render: (_, row) => (
         <div style={{ display: "grid", gap: 4 }}>
-          <Link
+          {canDetail ? <Link
             to={`/pool-analysis/${row.group_id}?${detailQuery.toString()}`}
             aria-label={`查看${row.name}价格详情`}
             style={{ fontWeight: 600 }}
           >
             {row.name}
-          </Link>
+          </Link> : <strong>{row.name}</strong>}
           {row.description && <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>{row.description}</span>}
         </div>
       ),
@@ -166,7 +152,7 @@ export default function PoolsPage() {
         basis={salesBasis}
         forceRestricted={local.governance} />,
     },
-  ], [detailQuery.toString(), local.governance, purchaseBasis, salesBasis]);
+  ], [detailQuery.toString(), canDetail, local.governance, purchaseBasis, salesBasis]);
 
   return (
     <div data-testid="pool-analysis-list-page"
@@ -238,7 +224,7 @@ export default function PoolsPage() {
             type="error"
             showIcon
             message="互通池价格加载失败"
-            action={<Button size="small" onClick={() => setReload((value) => value + 1)}>重试</Button>}
+            action={<Button size="small" onClick={request.retry}>重试</Button>}
           />
         ) : (
           <Table<PoolAnalysisListItem>
@@ -263,3 +249,5 @@ export default function PoolsPage() {
     </div>
   );
 }
+
+export default withRouteAccess(PoolsPage, "/pools");

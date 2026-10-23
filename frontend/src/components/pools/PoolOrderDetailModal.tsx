@@ -1,13 +1,14 @@
-import { Alert, Descriptions, Modal, Table, Tag } from "antd";
+import { Descriptions, Modal, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useRef, useState } from "react";
+import { useAuthorizedQuery, useModuleAccess, AuthorizedQueryError } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
 import {
-  fetchPoolAnalysisOrderDetail,
+  fetchPoolAnalysisOrderDetail, fetchDashboardOrderDetail,
   type PoolAnalysisOrderDetail,
   type PoolAnalysisRange,
   type PoolAnalysisSide,
 } from "../../api/poolAnalysis";
-import { taxSidesForBasis, useTaxBasis } from "../../context/TaxBasis";
+import { taxSidesForBasis, useTaxBasis, useTaxDisplayPolicy, TaxPolicyBoundary } from "../../context/TaxBasis";
 import { completeTaxPair, moneyExact, qty, splitFixed } from "../../utils/format";
 import PoolIdentityLink from "./PoolIdentityLink";
 
@@ -19,39 +20,31 @@ export type PoolOrderDetailLoader = (
   orderId: number,
 ) => Promise<PoolAnalysisOrderDetail>;
 
-export default function PoolOrderDetailModal({ side, orderId, range = "90d", dateFrom, dateTo,
-  forcePriceRestricted = false, loadDetail = fetchPoolAnalysisOrderDetail, onClose }: {
+export default function PoolOrderDetailModal({ resource, side, orderId, range = "90d", dateFrom, dateTo,
+  forcePriceRestricted = false, onClose }: {
+  resource: "pool_order_facts" | "company_pool_order_facts";
   side: PoolAnalysisSide;
   orderId: number | null;
   range?: PoolAnalysisRange;
   dateFrom?: string;
   dateTo?: string;
   forcePriceRestricted?: boolean;
-  loadDetail?: PoolOrderDetailLoader;
   onClose: () => void;
 }) {
   const basis = useTaxBasis(side);
-  const [detail, setDetail] = useState<PoolAnalysisOrderDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const seq = useRef(0);
-
-  useEffect(() => {
-    if (orderId == null) { setDetail(null); return; }
-    const request = ++seq.current;
-    setDetail(null);
-    setFailed(false);
-    setLoading(true);
-    loadDetail(side, orderId)
-      .then((data) => { if (request === seq.current) setDetail(data); })
-      .catch(() => { if (request === seq.current) setFailed(true); })
-      .finally(() => { if (request === seq.current) setLoading(false); });
-    return () => { seq.current += 1; };
-  }, [side, orderId, loadDetail]);
+  const tax = useTaxDisplayPolicy(), taxReady = !tax.loading && !tax.loadFailed;
+  const access = useModuleAccess(resource);
+  const visible = access.surface("order_detail", true);
+  const request = useAuthorizedQuery({rule: actionRule(resource, "read"), legacy: {[resource]: true},
+    queryKey: [resource, "order-detail", side, orderId], enabled: visible && orderId != null,
+    query: context => (resource === "company_pool_order_facts" ? fetchDashboardOrderDetail : fetchPoolAnalysisOrderDetail)(side, orderId!, context)});
+  const detail = request.data, loading = request.loading;
+  forcePriceRestricted = !access.field("data_pool_price_governance", !forcePriceRestricted);
 
   const price = (value: number | null | undefined, taxSide: "inc" | "ex") =>
     forcePriceRestricted || detail?.price_restricted
       ? <span style={muted}>无池价格权限</span>
+      : !taxReady ? <span style={muted}>金额口径不可用</span>
       : moneyExact(splitFixed(value, "ex")[taxSide]);
   const columns: ColumnsType<Item> = [
     { title: "PN", key: "pn", width: 190, render: (_, row) => (
@@ -101,14 +94,15 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
 
   return (
     <Modal
-      open={orderId != null}
+      open={visible && orderId != null}
       onCancel={onClose}
       footer={null}
       width="min(920px, calc(100vw - 16px))"
       title={`${side === "purchase" ? "采购" : "销售"}订单 ${order?.order_no || ""}`}
       destroyOnHidden
     >
-      {failed ? <Alert type="error" showIcon message="订单详情加载失败，请稍后重试" /> : (
+      {!forcePriceRestricted && !taxReady && <TaxPolicyBoundary><></></TaxPolicyBoundary>}
+      {request.error ? <AuthorizedQueryError message="订单详情加载失败，请稍后重试" error={request.error} retry={request.retry} /> : (
         <>
           <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }} style={{ marginBottom: 14 }}>
             <Descriptions.Item label="日期">{order?.order_date || "—"}</Descriptions.Item>
@@ -123,6 +117,7 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
               >
                 {forcePriceRestricted || detail?.price_restricted
                   ? <span style={muted}>无池价格权限</span>
+                  : !taxReady ? <span style={muted}>金额口径不可用</span>
                   : moneyExact(orderAmount[taxSide])}
               </Descriptions.Item>
             ))}

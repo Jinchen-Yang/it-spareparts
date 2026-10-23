@@ -4,6 +4,7 @@
 // 绝不当 0。对账块与历史条目字段集不同（历史无 has_data / reconciled_display），
 // 类型分开定义。
 import { api } from "../api";
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 
 /** 业务类型候选取值（value=null 是「未填写」组，筛选用哨兵 __empty__，契约 §0）。 */
 export interface SalesAnalyticsBusinessTypeOption {
@@ -273,19 +274,22 @@ export function toSalesAnalyticsParams(
 export const fetchSalesAnalyticsOptions = (
   filters: SalesAnalyticsFilters = {},
   customerQ = "",
+  context?: CapturedTransport,
 ) =>
   api.get<SalesAnalyticsOptions>("/sales/analytics/options", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(filters, customerQ ? { customer_q: customerQ } : {}),
   });
 
 /** 汇总恒带 compare=true：上月同期 KPI 一并返回（区间长于一个月时后端给 null），
  * 页面「对比上月」开关只决定是否展示，切换不重新请求。 */
-export const fetchSalesAnalyticsSummary = (filters: SalesAnalyticsFilters) =>
+export const fetchSalesAnalyticsSummary = (filters: SalesAnalyticsFilters, context?: CapturedTransport) =>
   api.get<SalesAnalyticsSummary>("/sales/analytics/summary", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(filters, { compare: true }),
   });
 
-export const fetchSalesAnalyticsOrders = (query: SalesAnalyticsOrdersQuery) => {
+export const fetchSalesAnalyticsOrders = (query: SalesAnalyticsOrdersQuery, context?: CapturedTransport) => {
   const extra: Record<string, string | number | boolean> = {};
   if (query.sort) extra.sort = query.sort;
   if (query.order && query.order !== "desc") extra.order = query.order;
@@ -293,6 +297,7 @@ export const fetchSalesAnalyticsOrders = (query: SalesAnalyticsOrdersQuery) => {
   if (query.page_size) extra.page_size = query.page_size;
   if (query.include_returns) extra.include_returns = true;
   return api.get<SalesAnalyticsOrdersResp>("/sales/analytics/orders", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(query, extra),
   });
 };
@@ -300,8 +305,10 @@ export const fetchSalesAnalyticsOrders = (query: SalesAnalyticsOrdersQuery) => {
 export const fetchSalesAnalyticsOrderDetail = (
   orderId: number,
   includeReturns: boolean,
+  context?: CapturedTransport,
 ) =>
   api.get<SalesAnalyticsOrderDetail>(`/sales/analytics/orders/${orderId}`, {
+    ...transportConfig(context),
     params: includeReturns ? { include_returns: true } : {},
   });
 
@@ -371,7 +378,7 @@ export interface SalesGroupsQuery extends SalesAnalyticsFilters {
   compare?: boolean;
 }
 
-export const fetchSalesAnalyticsGroups = (q: SalesGroupsQuery) => {
+export const fetchSalesAnalyticsGroups = (q: SalesGroupsQuery, context?: CapturedTransport) => {
   const extra: Record<string, string | number | boolean> = { group_by: q.group_by };
   if (q.sort) extra.sort = q.sort;
   if (q.order) extra.order = q.order;
@@ -379,7 +386,7 @@ export const fetchSalesAnalyticsGroups = (q: SalesGroupsQuery) => {
   const params = toSalesAnalyticsParams(q, extra);
   if (q.top != null) params.set("top", String(q.top));
   if (q.compare) params.set("compare", "true");
-  return api.get<SalesGroupsResp>("/sales/analytics/groups", { params });
+  return api.get<SalesGroupsResp>("/sales/analytics/groups", { params, ...transportConfig(context) });
 };
 
 export type SalesTrendGranularity = "day" | "week" | "month";
@@ -415,8 +422,10 @@ export const fetchSalesAnalyticsTrend = (
   filters: SalesAnalyticsFilters,
   granularity: SalesTrendGranularity,
   compare: boolean,
+  context?: CapturedTransport,
 ) =>
   api.get<SalesTrendResp>("/sales/analytics/trend", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(filters, {
       granularity, ...(compare ? { compare: true } : {}),
     }),
@@ -433,8 +442,9 @@ export interface SalesAmountHistogram {
   total?: number;
 }
 
-export const fetchSalesAmountHistogram = (filters: SalesAnalyticsFilters) =>
+export const fetchSalesAmountHistogram = (filters: SalesAnalyticsFilters, context?: CapturedTransport) =>
   api.get<SalesAmountHistogram>("/sales/analytics/amount-histogram", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(filters),
   });
 
@@ -443,8 +453,10 @@ export const downloadSalesOrdersCsv = (
   filters: SalesAnalyticsFilters,
   sort: SalesAnalyticsSortKey,
   order: SortOrder,
+  context?: CapturedTransport,
 ) =>
   api.get<Blob>("/sales/analytics/orders/export", {
+    ...transportConfig(context),
     params: toSalesAnalyticsParams(filters, { sort, ...(order !== "desc" ? { order } : {}) }),
     responseType: "blob",
   });

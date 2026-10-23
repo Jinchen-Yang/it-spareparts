@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "part_substitute",
+    "rules": [
+      {
+        "name": "explicit-manage",
+        "actions": [
+          "manage"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"manage\" in P.attr.grants.part_substitute.actions && P.attr.grants.part_substitute.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_substitute\", \"scope\": P.attr.grants.part_substitute.scope, \"version\": P.attr.grants.part_substitute.version, \"field_permissions\": P.attr.grants.part_substitute.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.part_substitute.actions && P.attr.grants.part_substitute.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_substitute\", \"scope\": P.attr.grants.part_substitute.scope, \"version\": P.attr.grants.part_substitute.version, \"field_permissions\": P.attr.grants.part_substitute.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-manage",
+        "actions": [
+          "show_manage"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_manage\" in P.attr.grants.part_substitute.actions && \"manage\" in P.attr.grants.part_substitute.actions && P.attr.grants.part_substitute.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_substitute\", \"scope\": P.attr.grants.part_substitute.scope, \"version\": P.attr.grants.part_substitute.version, \"field_permissions\": P.attr.grants.part_substitute.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-relations",
+        "actions": [
+          "show_relations"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_relations\" in P.attr.grants.part_substitute.actions && \"read\" in P.attr.grants.part_substitute.actions && P.attr.grants.part_substitute.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_substitute\", \"scope\": P.attr.grants.part_substitute.scope, \"version\": P.attr.grants.part_substitute.version, \"field_permissions\": P.attr.grants.part_substitute.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

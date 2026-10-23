@@ -1,3 +1,5 @@
+import { useAuthorizedQuery } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 销售分析筛选栏（D-41 + D-44）：日期预设（共用组件）+ 业务类型 / 客户 / 客户类型 /
 // 销售人员 / 商品大类 / 品牌多选（精确匹配；客户按规范名，候选随输入向后端补全）+
 // 金额区间拖动条（D-44 §7）+ 三金额多选（共用组件）+ 含已退货开关（D-40 §5）。
@@ -9,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button, Select, Switch, Tag, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
+import CheckboxMultiSelect from "../../../components/CheckboxMultiSelect";
 import { readSessionToken, sessionStale } from "../../../utils/session";
 import {
   EMPTY_FILTER_VALUE,
@@ -92,38 +95,19 @@ function CustomerSelect({
   ownerToken: string | null;
   onOwnerStale: () => void;
 }) {
-  const [found, setFound] = useState<SalesAnalyticsValueOption[] | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const seq = useRef(0);
-  // onOwnerStale 存 ref：父页每次渲染换新引用，timer 回调里经 ref 取最新
-  const onOwnerStaleRef = useRef(onOwnerStale);
-  onOwnerStaleRef.current = onOwnerStale;
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  const onSearch = (q: string) => {
-    if (timer.current) clearTimeout(timer.current);
-    if (!q.trim()) { setFound(null); return; }
-    timer.current = setTimeout(() => {
-      const mine = ++seq.current;
-      // 请求前 owner 守卫：失效即拒发 + 清旧候选 + 通知页级清理
-      if (sessionStale(ownerToken)) {
-        setFound(null);
-        onOwnerStaleRef.current?.();
-        return;
-      }
-      const token = readSessionToken();
-      fetchSalesAnalyticsOptions({}, q.trim())
-        .then(({ data }) => {
-          if (mine !== seq.current) return;
-          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
-          setFound(data.customers ?? []);
-        })
-        .catch(() => {
-          if (mine !== seq.current) return;
-          if (sessionStale(token)) { setFound(null); onOwnerStaleRef.current?.(); return; }
-          setFound([]);
-        });
-    }, 300);
-  };
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const stale = sessionStale(ownerToken);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+  useEffect(() => { if (stale) onOwnerStale(); }, [stale]);
+  const query = useAuthorizedQuery({ rule: actionRule("sales_analysis", "read_options"),
+    legacy: { sales_analysis: true }, onStale: onOwnerStale, queryKey: [debounced], enabled: !!debounced && !disabled && !stale,
+    query: async context => (await fetchSalesAnalyticsOptions({}, debounced, context)).data });
+  const found = search.trim() ? (query.data?.customers ?? []) : null;
+  const onSearch = setSearch;
   const base = found ?? initial ?? [];
   const known = new Set(base.map((o) => o.value));
   const options = [
@@ -143,7 +127,7 @@ function CustomerSelect({
       filterOption={false}
       onSearch={onSearch}
       options={options}
-      onChange={(v: string[]) => { setFound(null); onChange(v); }}
+      onChange={(v: string[]) => { setSearch(""); setDebounced(""); onChange(v); }}
     />
   );
   return disabled ? (
@@ -210,14 +194,21 @@ export default function FilterBar({
           options={valueOptions(options?.customer_types)}
           onChange={(v: string[]) => change({ customerTypes: v })}
         />
-        <Select
-          {...multiSelectProps}
-          aria-label="销售人员"
-          placeholder="销售人员（多选）"
+        <CheckboxMultiSelect<string>
+          label="销售人员"
           value={state.salespeople}
-          optionFilterProp="label"
-          options={valueOptions(options?.salespeople)}
-          onChange={(v: string[]) => change({ salespeople: v })}
+          options={(options?.salespeople ?? []).map((person) => ({
+            value: person.value ?? EMPTY_FILTER_VALUE,
+            label: person.value ?? "（未填）",
+            description: `${person.orders} 单`,
+          }))}
+          selectionUnit="人"
+          disabled={sessionStale(ownerToken)}
+          onChange={(v) => {
+            // 确认时重新读取会话，避免打开面板后静默换账号提交旧草稿。
+            if (sessionStale(ownerToken)) { onOwnerStale(); return; }
+            change({ salespeople: v });
+          }}
         />
         <Tooltip title="选了商品大类或品牌即进入行级口径（Q-A-02）：金额区间仍按原单头金额决定整单入选，行筛选只决定计入的明细行金额（整单入选、匹配行计额）；不含税为按 13% 推算的名义值">
           <Select

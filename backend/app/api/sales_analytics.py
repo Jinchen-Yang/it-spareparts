@@ -1,5 +1,5 @@
 """销售分析页 API（D-41 §1，PR-3b；D-44 销售看板扩展，2026-10-22 轮复审修订）：
-仅 admin/boss（页面键 page_sales_analysis）。
+D-0026 启用时由显式授权、客户归属和字段政策控制；关闭切换时沿用旧角色限制。
 
 D-44 起所有端点共用 ``sales_filters`` 依赖（客户规范名 / 客户类型 / 销售人员多选、
 金额区间与正负 / 空值开关），订单列表任意可见列升降序，详情带明细行，KPI 带毛利。
@@ -10,7 +10,8 @@ apply_field_visibility 统一置空（键名登记见 config.FIELD_GROUPS["sales
 且 orders/order_detail 的对账整块按「无快照」形态输出（has_data=False、history=[]、
 不查快照表，#397 (2)）——连 has_data/reconciled_as_of 这类非金额字段也不泄漏。
 
-准入附加规则（本页特有的硬界，本轮复审后）：
+准入附加规则（以下角色与受限销售规则仅用于尚未切换的 legacy 链路；
+D-0026 启用后由显式授权与 SQL 客户归属替代。字段用途保护两条链路均保留）：
 - **角色硬校验**：仅 admin/boss 可访问（RBAC 开启时在 API 层强制）。purchaser /
   readonly 即使被显式授予 ``page_sales_analysis`` 页面键也 403——页面键控制菜单，
   角色硬界控制数据面；PHASE1 旁路（ENABLE_RBAC=False）不受影响；
@@ -43,6 +44,8 @@ from sqlalchemy.orm import Session
 from app import config
 from app.api.query_bounds import ANALYTICS_PAGE_MAX, PG_INT_MAX
 from app.auth import current_role
+from app.authz import service as authorization
+from app.authz.principal import VerifiedIdentity, current_verified_identity
 from app.db import get_db
 from app.security import (
     UserContext,
@@ -138,9 +141,9 @@ def _guards(ctx: UserContext, f: SalesFilters | None = None) -> None:
     """前置硬界（在任何业务 SQL 前执行，防存在性侧信道）。所有端点统一调用。"""
     # 角色硬校验：页面键控制菜单，角色硬界控制数据面（本轮复审新增）。
     # ENABLE_RBAC=False（PHASE1 旁路）时放行，与全局开关语义一致。
-    if config.ENABLE_RBAC and ctx.role not in ("admin", "boss"):
+    if not ctx.explicit_field_policy and config.ENABLE_RBAC and ctx.role not in ("admin", "boss"):
         raise HTTPException(status_code=403, detail="销售分析仅限管理员与老板访问")
-    if is_scoped_sales(ctx):
+    if not ctx.explicit_field_policy and is_scoped_sales(ctx):
         raise HTTPException(
             status_code=403,
             detail="销售分析为全公司经营视角，受限销售账号不可访问",
@@ -172,8 +175,20 @@ def _guards(ctx: UserContext, f: SalesFilters | None = None) -> None:
         )
 
 
-def _service_filters(f: SalesFilters) -> dict:
-    return asdict(f)
+def _service_filters(f: SalesFilters, predicate=None) -> dict:
+    return {**asdict(f), "authorization_predicate": predicate}
+
+
+def _sales_page(ctx: UserContext = Depends(get_current_user_context), db: Session = Depends(get_db)) -> None:
+    if not authorization.enabled(db):
+        require_page("page_sales_analysis")(ctx)
+
+
+def _authorize(db: Session, ctx: UserContext, identity: VerifiedIdentity, action: str):
+    if not authorization.enabled(db):
+        return ctx, None
+    access = authorization.sales_access(db, identity, ctx, action)
+    return access.context, access.predicate
 
 
 def _cost_hidden(ctx: UserContext) -> bool:
@@ -235,18 +250,20 @@ def business_type_options(
     f: SalesFilters = Depends(sales_filters),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """筛选候选：业务类型（全时间计数，验收对账用）+ D-44 新增的客户类型、销售人员、
     客户补全与当前筛选下的金额上限（拖动条右端）。无成本权限时金额上限全部 null。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_options")
     _guards(ctx, f)
     record_access_log(ctx, "sales_analytics_options", "sales_analytics", None)
-    data = sales_analytics.business_type_options(db)
+    data = sales_analytics.business_type_options(db, authorization_predicate=predicate)
     data.update(sales_analytics.filter_options(
         db, customer_visible=not is_field_hidden(ctx, "customer"),
         amounts_visible=not _cost_hidden(ctx),
-        customer_q=customer_q, **_service_filters(f),
+        customer_q=customer_q, **_service_filters(f, predicate),
     ))
     return _finish(data, ctx)
 
@@ -257,15 +274,17 @@ def summary(
     compare: bool = Query(False, description="附上月同期 KPI（D-44 §9）"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """区间 KPI：订单数 + 三金额合计（含 amount_inc_tax 缺失单数）+ 客户数 / 销售人数 + 毛利
     + 新客 / 老客；compare=true 时附上月同期 KPI（区间长于一个月不提供）。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_summary")
     _guards(ctx, f)
     record_access_log(ctx, "sales_analytics_summary", "sales_analytics", {
         **f.log_echo(), "compare": compare})
-    filters = _service_filters(f)
+    filters = _service_filters(f, predicate)
     data = sales_analytics.summary(db, **filters)
     data["kpi"].update(sales_dashboard.customer_lifecycle(db, **filters))
     data["compare"] = sales_dashboard.summary_compare(db, **filters) if compare else None
@@ -301,10 +320,12 @@ def orders(
     ),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """订单列表：任意可见列升降序 + 分页；每单挂最新对账快照块。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_orders")
     _guards(ctx, f)
     sort = effective_sort(ctx, sort)
     record_access_log(ctx, "sales_analytics_orders", "sales_analytics", {
@@ -312,7 +333,7 @@ def orders(
     })
     data = sales_analytics.orders(
         db, ctx, sort=sort, order=order, page=page, page_size=page_size,
-        include_returns=include_returns, **_service_filters(f),
+        include_returns=include_returns, **_service_filters(f, predicate),
     )
     return _finish(data, ctx)
 
@@ -335,11 +356,13 @@ def groups(
     f: SalesFilters = Depends(sales_filters),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """分组排行（D-44 方案 §3.3）：客户 / 客户类型 / 城市 / 来源 / 销售 / 业务类型 / 仓库，
     以及行级的商品大类 / 品牌 / PN（D-44 §8）。缺失组 key=null + is_empty（A-AC06）。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_groups")
     _guards(ctx, f)
     # 客户类属分组：无客户权限 403（D-44 §11，组键本身就是客户信息）
     if group_by in sales_dashboard.CUSTOMER_DIMS and is_field_hidden(ctx, "customer"):
@@ -360,7 +383,7 @@ def groups(
     try:
         data = sales_dashboard.groups(
             db, user_ctx=ctx, group_by=group_by, sort=sort, order=order, top=top,
-            compare=compare, **_service_filters(f))
+            compare=compare, **_service_filters(f, predicate))
     except sales_dashboard.DashboardValidationError as exc:
         # 服务层组合校验（如 lines 排序只对行级维度有意义）→ 422，与 trend 同款
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -374,13 +397,15 @@ def trend(
     f: SalesFilters = Depends(sales_filters),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """时间趋势（D-44 方案 §3.4）：日 / 周 / 月完整桶序列、上月对比序列、星期分布。
 
     下钻日期取请求的 date_from/date_to 交集（前端下钻只收窄区间，不扩大）。
     无日期订单以 no_date_orders 显式计数（A-AC05）。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_trend")
     _guards(ctx, f)
     f = _public_basis(ctx, f)
     record_access_log(ctx, "sales_analytics_trend", "sales_analytics", {
@@ -388,7 +413,7 @@ def trend(
     })
     try:
         data = sales_dashboard.trend(
-            db, granularity=granularity, compare=compare, **_service_filters(f))
+            db, granularity=granularity, compare=compare, **_service_filters(f, predicate))
     except sales_dashboard.DashboardValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _finish(data, ctx)
@@ -399,16 +424,18 @@ def amount_histogram(
     f: SalesFilters = Depends(sales_filters),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """金额拖动条上方的订单数分布（D-44 §7）。无成本权限时 403：分布本身就是金额
     信息，三口径一视同仁（Q-A-03/A-AC03 修订）。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_amount_histogram")
     _guards(ctx, f)
     if _cost_hidden(ctx) or is_field_hidden(ctx, f.amount_basis):
         raise HTTPException(status_code=403, detail="当前账号无成本权限，不能查看金额分布")
     record_access_log(ctx, "sales_analytics_amount_histogram", "sales_analytics", f.log_echo())
-    return _finish(sales_dashboard.amount_histogram(db, **_service_filters(f)), ctx)
+    return _finish(sales_dashboard.amount_histogram(db, **_service_filters(f, predicate)), ctx)
 
 
 def _sales_csv_stream(header: list, rows) -> StreamingResponse:
@@ -446,8 +473,9 @@ def orders_export(
     order: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ):
     """订单 CSV 导出（D-44 方案 §3.6）：与列表同筛选、同排序、同脱敏；≤10,000 行。
 
@@ -455,13 +483,14 @@ def orders_export(
     sales_export_text.safe_formula_text（D-33：= / @ / +/- 公式形态转义，负数与负 PN
     不误伤；控制字符剔除；32,767 上限 413；超深括号按公式转义不 500）。
     """
+    ctx, predicate = _authorize(db, ctx, identity, "export")
     _guards(ctx, f)
     sort = effective_sort(ctx, sort)
     record_access_log(ctx, "sales_analytics_orders_export", "sales_analytics", {
         **f.log_echo(), "sort": sort, "order": order,
     })
     total, items = sales_dashboard.export_orders(
-        db, sort=sort, order=order, **_service_filters(f))
+        db, sort=sort, order=order, **_service_filters(f, predicate))
     if total > sales_dashboard.EXPORT_MAX_ROWS:
         raise HTTPException(
             status_code=413,
@@ -480,19 +509,21 @@ def order_detail(
     include_returns: bool = Query(False, description="对账展示含退货已对账"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-    _page: None = Depends(require_page("page_sales_analysis")),
+    _page: None = Depends(_sales_page),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """订单下钻：三金额 + 明细行 + 最新对账块 + 对账历史（每个快照一条）。
 
     无 data_purchase_cost 时明细行金额组合（数量/单价/行金额/营收）服务层已置空
     （A-AC01：阻断 qty × 营收 重建成交单价）。"""
+    ctx, predicate = _authorize(db, ctx, identity, "read_order_detail")
     _guards(ctx)
     record_access_log(ctx, "sales_analytics_order_detail", "sales_analytics", {
         "order_id": order_id, "include_returns": include_returns,
     })
     data = sales_analytics.order_detail(
-        db, order_id, ctx, include_returns=include_returns)
+        db, order_id, ctx, include_returns=include_returns, authorization_predicate=predicate)
     if data is None:
         raise HTTPException(status_code=404, detail="订单不存在")
     return _finish(data, ctx)

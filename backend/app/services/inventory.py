@@ -116,9 +116,12 @@ def warehouses(db: Session) -> list[str]:
 
 def update_inventory(db: Session, inv_id: int, manual_qty: Decimal | None,
                      safety_stock: Decimal | None, clear_override: bool,
-                     reason: str | None, operated_by: str | None) -> dict | None:
+                     reason: str | None, operated_by: str | None, *, _authorize=None, _commit=True) -> dict | None:
     """人工修正：写 manual_qty/safety_stock，不动 source_qty；写审计；重算库存金额。"""
-    inv = db.get(Inventory, inv_id)
+    inv = db.scalar(select(Inventory).where(Inventory.id == inv_id).with_for_update()
+                    .execution_options(populate_existing=True))
+    if _authorize is not None:
+        operated_by = _authorize()
     if inv is None:
         return None
     before = _row(inv)
@@ -141,7 +144,8 @@ def update_inventory(db: Session, inv_id: int, manual_qty: Decimal | None,
     db.add(SysAuditLog(entity_type="inventory", entity_id=inv.id, action="update",
                        before_json=_jsonable(before), after_json=_jsonable(after), reason=reason,
                        operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
     return after
 
 
@@ -286,3 +290,45 @@ def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
         })
     return {"total": total, "page": page, "page_size": page_size, "items": items,
             "match_terms": n_terms or None}
+
+
+def _read_context(db, identity, legacy_context):
+    from app.services.business_access import read_context
+    return read_context(db, identity, 'inventory', 'read', legacy_context=legacy_context,
+                        legacy_page='page_inventory')[0]
+
+
+def read_inventory(db, identity, *, legacy_context, warehouse=None, q=None, page=1, page_size=20):
+    ctx = _read_context(db, identity, legacy_context)
+    return security.apply_field_visibility(list_inventory(db, warehouse, q, page, page_size, ctx), ctx)
+
+
+def read_dynamic(db, identity, *, legacy_context, q=None, page=1, page_size=20):
+    ctx = _read_context(db, identity, legacy_context)
+    return security.apply_field_visibility(list_dynamic(db, q, page, page_size, ctx), ctx)
+
+
+def read_warehouses(db, identity, *, legacy_context):
+    _read_context(db, identity, legacy_context)
+    return warehouses(db)
+
+
+def adjust_inventory(db, identity, *, legacy_context, inv_id, manual_qty=None, safety_stock=None,
+                     clear_override=False, reason=None):
+    from app.auth import require_admin
+    from app.authz import runtime, service
+    if not runtime.is_authoritative(db, 'inventory'):
+        security.require_page('page_inventory')(legacy_context)
+        return update_inventory(db, inv_id, manual_qty, safety_stock, clear_override, reason,
+                                operated_by=require_admin(legacy_context.role))
+    access = None
+    def authorize():
+        nonlocal access
+        actor = service.lock_actor(db, identity)
+        access = service.resource_access(db, identity, 'inventory', 'adjust', locked_user=actor)
+        return access.principal.username
+    result = update_inventory(db, inv_id, manual_qty, safety_stock, clear_override, reason,
+                              operated_by=None, _authorize=authorize, _commit=False)
+    projected = security.apply_field_visibility(result, service.field_context(access, legacy_context))
+    if result is not None: db.commit()
+    return projected

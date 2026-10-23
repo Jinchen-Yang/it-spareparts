@@ -1,0 +1,115 @@
+{
+  "baseline": "7a9fd2098acb6be0009a59a84e7d7330bb960d6b",
+  "scope": "Local synthetic only; no production, network, external DB or LLM",
+  "SF-01_supplier_filter": {
+    "level": "E1",
+    "results": [
+      {
+        "filter": "合成供应商甲",
+        "total": 1,
+        "items": [
+          {
+            "order_no": "SYNTHETIC-ORDER",
+            "supplier": null,
+            "pn_std": "SYNTHETIC-PN"
+          }
+        ]
+      },
+      {
+        "filter": "合成供应商乙",
+        "total": 0,
+        "items": []
+      }
+    ],
+    "stub": "pool_metrics.active_pool_map only"
+  },
+  "SF-02_purchase_derived": {
+    "level": "E2",
+    "result": {
+      "price_ex_last": null,
+      "price_trend": "up",
+      "advice": "谈价",
+      "channels_in_hidden_amount_order": [
+        "渠道乙",
+        "渠道甲"
+      ],
+      "hidden_amounts": [
+        null,
+        null
+      ]
+    },
+    "stub": "_window_lines and pool_metrics.active_pool_map"
+  },
+  "SF-03_shared_file": {
+    "level": "E1",
+    "login_fb": [
+      true,
+      true
+    ],
+    "upload_status": 200,
+    "same_self_reported_name_download_status": 200,
+    "content_matches": true,
+    "stub": "get_db means absent SysUser; audit no-op; TemporaryDirectory file root",
+    "limit": "Does not impersonate existing SysUser; file_id is known in this synthetic scenario"
+  },
+  "SF-04_agent_page_gate": {
+    "level": "E2",
+    "page_inventory_status": 403,
+    "agent_calls_service": true,
+    "output": {
+      "total": 1,
+      "items": [
+        {
+          "pn_std": "SYNTHETIC-PN"
+        }
+      ]
+    },
+    "stub": "inventory.list_dynamic only"
+  },
+  "SF-04_agent_profit": {
+    "level": "E2",
+    "results": [
+      {
+        "data_customer": false,
+        "data_profit": false,
+        "data_purchase_cost": false,
+        "api_customer_status": 403,
+        "agent_fields": {
+          "dimension": "合成客户甲",
+          "revenue_costed": 900.0,
+          "cost_moving_avg": null,
+          "gross_profit_moving": null,
+          "no_cost": 1
+        },
+        "inferred_profit": null,
+        "api_financial_projection": {
+          "revenue_costed": null,
+          "cost_moving_avg": null,
+          "gross_profit_moving": null,
+          "no_cost": null
+        }
+      },
+      {
+        "data_customer": false,
+        "data_profit": false,
+        "data_purchase_cost": true,
+        "api_customer_status": 403,
+        "agent_fields": {
+          "dimension": "合成客户甲",
+          "revenue_costed": 900.0,
+          "cost_moving_avg": 500.0,
+          "gross_profit_moving": null,
+          "no_cost": 1
+        },
+        "inferred_profit": 400.0,
+        "api_financial_projection": {
+          "revenue_costed": null,
+          "cost_moving_avg": null,
+          "gross_profit_moving": null,
+          "no_cost": null
+        }
+      }
+    ],
+    "stub": "DB execute aggregate row only; real service, tool and both projections"
+  }
+}

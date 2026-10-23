@@ -1,4 +1,9 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_master_data: true }); return legacyAuthorizationState(); },
+}));
+import { afterEach, beforeEach, expect, it , vi } from "vitest";
 import { act, cleanup, fireEvent, screen, waitFor } from "../../test/antdRender";
 import { renderUrlPage } from "../../test/urlStateRender";
 import api from "../../api";
@@ -73,3 +78,6 @@ it("主数据提交关键词去掉首尾空白后再写入 URL 与请求，纯�
   await screen.findByText("合成 全部 1");
   expect(router.state.location.search).toBe("?origin=review");
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_master_data: true }));

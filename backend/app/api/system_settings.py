@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.auth import current_identity, require_admin
+from app.authz import runtime, service as authorization
+from app.authz.principal import VerifiedIdentity, current_verified_identity
 from app.db import get_db
 from app.models.system import SysBusinessSetting
 from app.services import system_settings
@@ -70,33 +72,51 @@ def get_system_settings(
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(_read_gate),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> SystemSettingsView:
     response.headers["Cache-Control"] = "no-store"
+    include_audit = ident.get('role') == 'admin'
+    if runtime.is_authoritative(db, 'display_policy'):
+        decisions = authorization.read_accesses(db, identity, {'display_policy': ['read', 'read_audit_identity']})
+        decisions.require('display_policy', 'read')
+        include_audit = decisions.get('display_policy', 'read_audit_identity') is not None
     return _view(
         system_settings.get_business_setting(db),
-        include_audit_identity=ident.get("role") == "admin",
+        include_audit_identity=include_audit,
     )
 
 
-@router.put("", response_model=SystemSettingsView)
+@router.put("", response_model=SystemSettingsView, response_model_exclude_none=True)
 def update_system_settings(
     body: SystemSettingsUpdate,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _: str = Depends(require_admin),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> SystemSettingsView:
     try:
+        include_audit = True
+        operated_by = ident['sub']
+        if runtime.is_authoritative(db, 'display_policy'):
+            system_settings.get_business_setting(db, for_update=True)
+            actor = authorization.lock_actor(db, identity)
+            decisions = authorization.read_accesses(db, identity,
+                {'display_policy': ['update', 'read_audit_identity']}, locked_user=actor)
+            access = decisions.require('display_policy', 'update')
+            include_audit = decisions.get('display_policy', 'read_audit_identity') is not None
+            operated_by = access.principal.username
+        else:
+            require_admin(ident['role'])
         setting = system_settings.update_business_settings(
             db,
             maintenance_basis=body.maintenance_display_basis,
             purchase_basis=body.purchase_display_basis,
             sales_basis=body.sales_display_basis,
             expected_version=body.expected_version,
-            operated_by=ident["sub"],
+            operated_by=operated_by,
         )
+        view = _view(setting, include_audit_identity=include_audit)
         db.commit()
-        db.refresh(setting)
-        return _view(setting)
+        return view
     except system_settings.BusinessSettingVersionConflict as exc:
         db.rollback()
         raise HTTPException(

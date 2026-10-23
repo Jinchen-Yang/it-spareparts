@@ -1,3 +1,5 @@
+import type { BlockAccess } from "../authz/rules";
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 import { api } from "../api";
 import type { PoolMetrics, PoolOrderLine, PoolOrdersBlock } from "../api";
 
@@ -129,6 +131,7 @@ export type PoolAnalysisOrdersBlock<T extends PoolAnalysisOrderLine> =
  * benchmark、savings、premium、customer_cross_brand 等旧经营派生语义已结构性移除。
  */
 export interface PoolAnalysisDetail {
+  block_access?: BlockAccess<"price_analysis" | "purchase_transactions" | "sales_transactions">;
   group_id: number;
   name: string | null;
   description: string | null;
@@ -227,27 +230,27 @@ export interface PoolPriceMapResponse {
 }
 
 export async function fetchPoolAnalysisList(
-  params: PoolAnalysisQuery = {},
+  params: PoolAnalysisQuery = {}, context?: CapturedTransport
 ): Promise<PoolAnalysisListResponse> {
-  const { data } = await api.get<PoolAnalysisListResponse>("/pool-analysis/pools", { params });
+  const { data } = await api.get<PoolAnalysisListResponse>("/pool-analysis/pools", { ...transportConfig(context),  params });
   return data;
 }
 
 export async function fetchPoolAnalysis(
   groupId: number,
-  params: PoolAnalysisQuery = {},
+  params: PoolAnalysisQuery = {}, context?: CapturedTransport
 ): Promise<PoolAnalysisDetail> {
-  const { data } = await api.get<PoolAnalysisDetail>(`/pool-analysis/pools/${groupId}`, { params });
+  const { data } = await api.get<PoolAnalysisDetail>(`/pool-analysis/pools/${groupId}`, { ...transportConfig(context),  params });
   return data;
 }
 
 export async function fetchPoolPriceMap(
   groupId: number,
   params: Pick<PoolAnalysisQuery,
-    "side" | "range" | "date_from" | "date_to" | "purchase_type" | "employee" | "sort" | "order"> = {},
+    "side" | "range" | "date_from" | "date_to" | "purchase_type" | "employee" | "sort" | "order"> = {}, context?: CapturedTransport
 ): Promise<PoolPriceMapResponse> {
   const { data } = await api.get<PoolPriceMapResponse>(
-    `/pool-analysis/pools/${groupId}/price-map`, { params },
+    `/pool-analysis/pools/${groupId}/price-map`, { ...transportConfig(context),  params },
   );
   return data;
 }
@@ -303,9 +306,9 @@ export interface PoolAnalysisOrderDetail {
 
 export async function fetchPoolAnalysisOrderDetail(
   side: PoolAnalysisSide,
-  orderId: number,
+  orderId: number, context?: CapturedTransport
 ): Promise<PoolAnalysisOrderDetail> {
-  const { data } = await api.get<PoolAnalysisOrderDetail>(`/pool-analysis/orders/${side}/${orderId}`);
+  const { data } = await api.get<PoolAnalysisOrderDetail>(`/pool-analysis/orders/${side}/${orderId}`, transportConfig(context));
   return data;
 }
 
@@ -315,29 +318,29 @@ export async function fetchPoolAnalysisOrderDetail(
  */
 export async function fetchDashboardOrderDetail(
   side: PoolAnalysisSide,
-  orderId: number,
+  orderId: number, context?: CapturedTransport
 ): Promise<PoolAnalysisOrderDetail> {
-  const { data } = await api.get<PoolAnalysisOrderDetail>(`/dashboard/orders/${side}/${orderId}`);
+  const { data } = await api.get<PoolAnalysisOrderDetail>(`/dashboard/orders/${side}/${orderId}`, transportConfig(context));
   return data;
 }
 
 export async function fetchPoolReference(
   partId: number,
-  params: Pick<PoolAnalysisQuery, "range" | "date_from" | "date_to" | "purchase_type"> = {},
+  params: Pick<PoolAnalysisQuery, "range" | "date_from" | "date_to" | "purchase_type"> = {}, context?: CapturedTransport
 ): Promise<PoolReference> {
-  const { data } = await api.get<PoolReference>(`/parts/${partId}/pool-reference`, { params });
+  const { data } = await api.get<PoolReference>(`/parts/${partId}/pool-reference`, { ...transportConfig(context),  params });
   return data;
 }
 
 export async function fetchPoolReferences(
   partIds: number[],
-  params: Pick<PoolAnalysisQuery, "range" | "date_from" | "date_to" | "purchase_type"> = {},
+  params: Pick<PoolAnalysisQuery, "range" | "date_from" | "date_to" | "purchase_type"> = {}, context?: CapturedTransport
 ): Promise<PoolReference[]> {
   const uniquePartIds = [...new Set(partIds)];
   if (uniquePartIds.length === 0) return [];
   const { data } = await api.post<{ items: PoolReference[] }>("/parts/pool-references", {
     part_ids: uniquePartIds,
     ...params,
-  });
+  }, transportConfig(context));
   return data.items;
 }

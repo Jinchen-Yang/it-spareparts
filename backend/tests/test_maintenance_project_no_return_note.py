@@ -281,6 +281,11 @@ def test_note_audit_failure_rolls_back_master_and_workbook_revision(db):
 
 def test_note_migration_roundtrip_check_and_nonempty_downgrade_guard(db):
     client, pid = _project(db)
+    # This is a pre-S1 legacy account fixture for a historical schema roundtrip,
+    # not a canonical account whose origin must survive a refused downgrade.
+    account = db.scalar(select(SysUser).where(SysUser.username == "note_contract_admin"))
+    account.authorization_legacy_seed_eligible = True
+    db.commit()
     db.close()
     cfg = _alembic_cfg()
     try:
@@ -289,6 +294,14 @@ def test_note_migration_roundtrip_check_and_nonempty_downgrade_guard(db):
             assert connection.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_name='maintenance_project' AND column_name='no_return_note'")) == 0
         command.upgrade(cfg, "head")
         command.check(cfg)
+        # Authorization backfill advances the login version. Retain that
+        # revocation check, then authenticate afresh for the note invariant.
+        assert _patch(client, pid, 1, no_return_note="旧会话不能写入").status_code == 401
+        login = client.post("/api/auth/login", json={
+            "username": "note_contract_admin", "password": "synthetic-password-123",
+        })
+        assert login.status_code == 200, login.text
+        client.headers["Authorization"] = f"Bearer {login.json()['token']}"
         assert _patch(client, pid, 1, no_return_note="已保存必须保留").status_code == 200
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             command.downgrade(cfg, "c8f3d1a7e2b9")

@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_governance: true }); return legacyAuthorizationState(); },
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { Grid } from "antd";
@@ -188,3 +193,6 @@ describe("规则校准预览", () => {
     expect(document.querySelector(".ant-table")).toBeNull();
   });
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_governance: true }));

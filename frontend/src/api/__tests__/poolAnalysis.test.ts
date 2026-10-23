@@ -15,6 +15,25 @@ import {
 beforeEach(() => vi.clearAllMocks());
 
 describe("互通池分析专用 API 契约", () => {
+  it("uses the captured owner and abort signal for detail and bulk requests, never a later local token", async () => {
+    const signal = new AbortController().signal;
+    const capture = { token: "captured-owner", signal };
+    localStorage.setItem("token", "later-owner");
+    get.mockResolvedValue({ data: {} }); post.mockResolvedValue({ data: {} });
+    await fetchPoolAnalysis(7, { range: "90d" }, capture);
+    await fetchDashboardOrderDetail("sales", 8, capture);
+    await fetchPoolReferences([2, 3], { range: "30d" }, capture);
+    expect(get).toHaveBeenNthCalledWith(1, "/pool-analysis/pools/7", {
+      params: { range: "90d" }, headers: { Authorization: "Bearer captured-owner" }, signal,
+    });
+    expect(get).toHaveBeenNthCalledWith(2, "/dashboard/orders/sales/8", {
+      headers: { Authorization: "Bearer captured-owner" }, signal,
+    });
+    expect(post).toHaveBeenCalledWith("/parts/pool-references", { part_ids: [2, 3], range: "30d" }, {
+      headers: { Authorization: "Bearer captured-owner" }, signal,
+    });
+    localStorage.removeItem("token");
+  });
   it("详情支持标准范围与自定义范围契约", async () => {
     get.mockResolvedValueOnce({ data: { group_id: 7 } });
     await fetchPoolAnalysis(7, {
@@ -32,13 +51,13 @@ describe("互通池分析专用 API 契约", () => {
     expect(get).toHaveBeenNthCalledWith(1, "/pool-analysis/pools", {
       params: { range: "90d", purchase_type: "销售订单" },
     });
-    expect(get).toHaveBeenNthCalledWith(2, "/pool-analysis/orders/purchase/77");
+    expect(get).toHaveBeenNthCalledWith(2, "/pool-analysis/orders/purchase/77", {});
   });
 
   it("老板摘要订单下钻使用 page_boss_board 的稳定 order_id 端点", async () => {
     get.mockResolvedValue({ data: { side: "sales", order: { order_id: 88 }, items: [] } });
     await fetchDashboardOrderDetail("sales", 88);
-    expect(get).toHaveBeenCalledWith("/dashboard/orders/sales/88");
+    expect(get).toHaveBeenCalledWith("/dashboard/orders/sales/88", {});
   });
 
   it("分析清单和详情只调用 /pool-analysis 读端点", async () => {
@@ -68,6 +87,6 @@ describe("互通池分析专用 API 契约", () => {
     expect(post).toHaveBeenCalledWith("/parts/pool-references", {
       part_ids: [42, 43],
       range: "90d",
-    });
+    }, {});
   });
 });

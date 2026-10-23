@@ -8,7 +8,7 @@
 {type:"tool",name,args} 工具开始 / {type:"tool_done",name,ok} 工具完成 /
 {type:"done",tool_calls,answer,stopped?} 结束。
 
-服务端无状态：对话历史由调用方持有并随请求带上。OpenAI 线格式装配下沉到 provider.append_*
+新权威只接受服务端验证过的助手历史；旧兼容实例保留原历史协议。OpenAI 线格式装配下沉到 provider.append_*
 （RUNTIME-2），此处只跟中性的 ChatResult/ToolCall 打交道。
 """
 import json
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app import security
 from app.agent import prompts, provider, tools
 from app.config import get_settings
+from app.authz.provenance import AgentAccess, execution_access
 
 _log = logging.getLogger("agent")
 
@@ -35,8 +36,8 @@ def _parse_args(raw: str | None) -> dict:
     return args if isinstance(args, dict) else {}
 
 
-def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
-                *, cancel: "threading.Event | None" = None):
+def _loop(db: Session, messages: list[dict], ctx: security.UserContext,
+                *, cancel: "threading.Event | None" = None, access=None):
     """单一 Agent 循环，yield 事件 dict。
 
     cancel（threading.Event）为一等入参（RUNTIME-4）：每次 LLM 调用前、流内 chunk 间检查，
@@ -52,8 +53,11 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
         if cancelled():
             yield {"type": "done", "tool_calls": trace, "answer": "", "stopped": True}
             return
+        access.check()
+        db.rollback() if db is not None else None
         res = None
         for kind, payload in provider.chat_stream(msgs, tools.TOOLS):
+            access.check()
             if kind == "delta":
                 yield {"type": "delta", "text": payload}
             elif kind == "reasoning":
@@ -72,9 +76,12 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
             yield {"type": "delta", "text": "\n\n"}
         provider.append_assistant_turn(msgs, res)
         for c in res.tool_calls:
+            access.check()
             args = _parse_args(c.arguments)
             yield {"type": "tool", "name": c.name, "args": args}
             result = tools.dispatch(db, c.name, args, ctx)
+            db.rollback() if db is not None else None
+            access.check()
             trace.append({"name": c.name, "args": args})
             _log.info("agent tool=%s args=%s", c.name, args)
             yield {"type": "tool_done", "name": c.name,
@@ -83,8 +90,11 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
 
     # 轮数上限：收尾作答仍走流式逐字（RUNTIME-5：不再退化为非流式整段，避免最长对话突兀静默）
     msgs.append({"role": "user", "content": _ITER_LIMIT_PROMPT})
+    access.check()
+    db.rollback() if db is not None else None
     final = None
     for kind, payload in provider.chat_stream(msgs):
+        access.check()
         if kind == "delta":
             yield {"type": "delta", "text": payload}
         elif kind == "reasoning":
@@ -98,13 +108,33 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
     yield {"type": "done", "tool_calls": trace, "answer": (final.content if final else "") or ""}
 
 
-def run(db: Session, messages: list[dict], ctx: security.UserContext) -> dict:
+def _agent_loop(db, messages, ctx, *, cancel=None, identity=None, access=None):
+    from app.db import engine
+    provided_access = access is not None
+    access = access or AgentAccess(db.get_bind() if db is not None else engine, identity)
+    if access.authoritative and not provided_access and any(m.get("role") != "user" for m in messages):
+        from app.authz.provenance import unavailable
+        raise unavailable()
+    iterator = _loop(db, messages, ctx, cancel=cancel, access=access)
+    while True:
+        # StreamingResponse may advance successive chunks in different copied
+        # thread contexts. Never keep a ContextVar token alive across a yield.
+        with execution_access(access):
+            try:
+                event = next(iterator)
+            except StopIteration:
+                return
+            access.check()
+        yield event
+
+
+def run(db: Session, messages: list[dict], ctx: security.UserContext, *, identity=None, access=None) -> dict:
     """非流式：跑完循环，返回 {answer, tool_calls}。
 
     answer 只取最终答复（done 事件的 answer），不含中间旁白——与旧实现口径一致。
     """
     answer, trace = "", []
-    for ev in _agent_loop(db, messages, ctx):
+    for ev in _agent_loop(db, messages, ctx, identity=identity, access=access):
         if ev["type"] == "done":
             answer = ev.get("answer", "")
             trace = ev.get("tool_calls", trace)
@@ -112,6 +142,6 @@ def run(db: Session, messages: list[dict], ctx: security.UserContext) -> dict:
 
 
 def run_stream(db: Session, messages: list[dict], ctx: security.UserContext,
-               cancel: "threading.Event | None" = None):
+               cancel: "threading.Event | None" = None, *, identity=None, access=None):
     """流式：把 _agent_loop 的事件原样转发供 SSE 推送。cancel 透传以便及时收束。"""
-    yield from _agent_loop(db, messages, ctx, cancel=cancel)
+    yield from _agent_loop(db, messages, ctx, cancel=cancel, identity=identity, access=access)

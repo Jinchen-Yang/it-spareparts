@@ -1,3 +1,5 @@
+import { useAccess } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 概览页签（D-44 方案 §3.2）：迷你趋势 + 客户 / 销售人员 / 业务类型三个 Top 5 小榜
 // （按页面首个已显示金额口径降序；金额不可见时后端按单数）。“更多”跳分组排行。
 // 无客户权限时不出客户榜（后端 403）。KPI 卡在页面顶部常驻，不在本页签重复。
@@ -37,12 +39,13 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
   dim: SalesGroupDim; sort: SalesGroupSort;
 } & Omit<OverviewTabProps, "costRestricted" | "customerRestricted">) {
   const { data, loading, error, retry } = useAsyncData<SalesGroupsResp>(
-    () => fetchSalesAnalyticsGroups({ ...apiFilters, group_by: dim, sort, order: "desc", top: 5 }),
+    (context) => fetchSalesAnalyticsGroups({ ...apiFilters, group_by: dim, sort, order: "desc", top: 5 }, context),
     [filterKey, dim, sort],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_groups",
   );
   const valueKey = (data?.sort ?? sort) as keyof SalesGroupsResp["groups"][number];
   return (
@@ -100,23 +103,26 @@ function TopList({ dim, sort, state, apiFilters, filterKey, patch, toMessage, ow
 
 export default function OverviewTab(props: OverviewTabProps) {
   const { state, apiFilters, filterKey, patch, costRestricted, customerRestricted, toMessage, ownerToken, onOwnerStale } = props;
+  const groupsAccess = useAccess(actionRule("sales_analysis", "read_groups"), { legacy: { sales_analysis: true } });
+  const trendAccess = useAccess(actionRule("sales_analysis", "read_trend"), { legacy: { sales_analysis: true } });
   const firstAmount = AMOUNT_SORT_KEY[state.amounts[0]];
   const sort: SalesGroupSort = costRestricted && firstAmount !== "revenue" ? "revenue" : firstAmount as SalesGroupSort;
   const granularity = recommendGranularity(apiFilters.date_from, apiFilters.date_to);
   const trend = useAsyncData<SalesTrendResp>(
-    () => fetchSalesAnalyticsTrend(apiFilters, granularity, state.compare),
+    (context) => fetchSalesAnalyticsTrend(apiFilters, granularity, state.compare, context),
     [filterKey, granularity, state.compare],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_trend",
   );
   const dims: SalesGroupDim[] = [
     ...(customerRestricted ? [] : ["customer" as const]), "salesperson", "business_type",
   ];
   return (
     <div style={{ display: "grid", gap: 12 }}>
-      <Card size="small" title="销售趋势" extra={<Button type="link" size="small" onClick={() => patch({ tab: "trend" })}>详细趋势</Button>}>
+      {trendAccess.allowed && <Card size="small" title="销售趋势" extra={<Button type="link" size="small" onClick={() => patch({ tab: "trend" })}>详细趋势</Button>}>
         {trend.error ? (
           <Alert type="error" showIcon message={trend.error} />
         ) : (
@@ -129,9 +135,9 @@ export default function OverviewTab(props: OverviewTabProps) {
             height={220}
           />
         )}
-      </Card>
+      </Card>}
       <Space style={{ display: "flex", flexWrap: "wrap" }} align="start" size={12}>
-        {dims.map((dim) => (
+        {groupsAccess.allowed && dims.map((dim) => (
           <TopList key={dim} dim={dim} sort={sort} state={state} apiFilters={apiFilters}
             filterKey={filterKey} patch={patch} toMessage={toMessage} ownerToken={ownerToken} onOwnerStale={onOwnerStale} />
         ))}

@@ -1,3 +1,6 @@
+import { withRouteAccess, useModuleAccess, useAuthorizedQuery, useAuthorizedRunner, AuthorizedQueryError, AuthorizationCancelled } from "../authz/access";
+import { actionRule, allRule, surfaceRule } from "../authz/rules";
+import { transportConfig } from "../authz/transport";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Card, Segmented, DatePicker, Switch, Button, Space, Tag, Statistic, Row, Col } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -58,11 +61,13 @@ function profitMoneyPair(row: ProfitRow, field: ProfitMoneyField): TaxSplit {
 
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
-export default function ProfitPage() {
+function ProfitPage() {
   const { message } = App.useApp();
   const basis = useTaxBasis("sales");
   const role = localStorage.getItem("role") || "";
   const isAdmin = role === "admin";
+  const access = useModuleAccess("profit_analysis");
+  const run = useAuthorizedRunner();
   let localPerms: Record<string, boolean> = {};
   try { localPerms = JSON.parse(localStorage.getItem("permissions") || "{}"); }
   catch { localPerms = {}; }
@@ -70,13 +75,14 @@ export default function ProfitPage() {
   // 收起这些必然 403 的选项。旧权限快照缺键时按 sales 角色模板回退为受限。
   const scopedSales = !isAdmin && (localPerms.own_customers_only === true
     || (localPerms.own_customers_only == null && role === "sales"));
-  const canCustomerDimension = !scopedSales && (isAdmin || localPerms.data_customer !== false);
-  const canUseFinancialAnomalies = isAdmin
-    || (localPerms.data_purchase_cost !== false && localPerms.data_profit !== false);
+  const canCustomerDimension = access.action("read_customer_analysis", !scopedSales && (isAdmin || localPerms.data_customer !== false));
+  const canSalesperson = access.action("read_salesperson_analysis", !scopedSales);
+  const canPart = access.action("read_part_analysis", true);
+  const canUseFinancialAnomalies = access.field("data_purchase_cost", isAdmin || localPerms.data_purchase_cost !== false) && access.field("data_profit", isAdmin || localPerms.data_profit !== false);
   const [urlState, patchUrl] = useUrlState({
     dimension: {
-      defaultValue: scopedSales ? "part" : "salesperson",
-      isValid: (value) => value === "part" || (value === "salesperson" && !scopedSales)
+      defaultValue: canSalesperson ? "salesperson" : canPart ? "part" : "customer",
+      isValid: (value) => (value === "part" && canPart) || (value === "salesperson" && canSalesperson)
         || (value === "customer" && canCustomerDimension),
     },
     only_anomaly: {
@@ -95,9 +101,6 @@ export default function ProfitPage() {
   const range = useMemo<[Dayjs, Dayjs] | null>(() => (
     dateFrom && dateTo ? [dayjs(dateFrom), dayjs(dateTo)] : null
   ), [dateFrom, dateTo]);
-  const requestSeq = useRef(0);
-  const [rows, setRows] = useState<ProfitRow[]>([]);
-  const [loading, setLoading] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
 
   const params = useMemo(() => ({
@@ -107,47 +110,26 @@ export default function ProfitPage() {
     date_to: dateTo,
   }), [dimension, onlyAnomaly, dateFrom, dateTo]);
 
-  const load = useCallback(async () => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    try {
-      const { data } = await api.get("/profit", { params });
-      if (seq === requestSeq.current) setRows(data.rows);
-    } catch {
-      if (seq !== requestSeq.current) return;
-      // 不再静默吞错：失败时明确提示，避免决策层把陈旧/空数据当真实利润（审计 U-2）
-      message.error("利润数据加载失败，请稍后重试或检查网络/权限");
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [params, message]);
-
-  useEffect(() => {
-    void load();
-    return () => { ++requestSeq.current; };
-  }, [load]);
-
+  const dimensionAction = `read_${dimension}_analysis`;
+  const query = useAuthorizedQuery<{ rows: ProfitRow[] }>({ rule: actionRule("profit_analysis", dimensionAction),
+    legacy: { profit_analysis: true }, enabled: access.surface("summary", true), queryKey: [params],
+    query: async context => (await api.get("/profit", { params, ...transportConfig(context) })).data });
+  const rows = query.data?.rows ?? [], loading = query.loading;
   const recompute = async () => {
     setRecomputing(true);
     try {
-      const { data } = await api.post("/profit/recompute");
-      message.success(`重算完成：${data.sales_lines} 行，无成本 ${data.no_cost}，负毛利 ${data.neg_margin}`);
-      load();
-    } catch {
-      message.error("重算失败（需要管理员权限）");
-    } finally {
-      setRecomputing(false);
-    }
+      await run({ rule: surfaceRule("profit_analysis.recompute"), legacy: { profit_analysis: isAdmin },
+        request: context => api.post("/profit/recompute", undefined, transportConfig(context)),
+        commit: ({ data }) => { message.success(`重算完成：${data.sales_lines} 行，无成本 ${data.no_cost}，负毛利 ${data.neg_margin}`); setRecomputing(false); query.retry(); } });
+    } catch (error) { if (!(error instanceof AuthorizationCancelled)) { setRecomputing(false); message.error("重算失败"); } }
   };
-
   const exportCsv = async () => {
-    const res = await api.get("/profit/export", { params, responseType: "blob" });
-    const url = URL.createObjectURL(res.data);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `profit_${dimension}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      await run({ rule: allRule(surfaceRule("profit_analysis.export"), actionRule("profit_analysis", dimensionAction)), legacy: { profit_analysis: true },
+        request: context => api.get("/profit/export", { params, responseType: "blob", ...transportConfig(context) }),
+        commit: res => { const url = URL.createObjectURL(res.data), a = document.createElement("a");
+          a.href = url; a.download = `profit_${dimension}.csv`; a.click(); URL.revokeObjectURL(url); } });
+    } catch (error) { if (!(error instanceof AuthorizationCancelled)) message.error("导出失败"); }
   };
 
   const pctCol = (v: number | null) => (
@@ -238,8 +220,8 @@ export default function ProfitPage() {
             value={dimension}
             onChange={(v) => patchUrl({ dimension: String(v) })}
             options={[
-              { label: "按型号", value: "part" },
-              ...(!scopedSales ? [{ label: "按销售员", value: "salesperson" }] : []),
+              ...(canPart ? [{ label: "按型号", value: "part" }] : []),
+              ...(canSalesperson ? [{ label: "按销售员", value: "salesperson" }] : []),
               ...(canCustomerDimension ? [{ label: "按客户", value: "customer" }] : []),
             ]}
           />
@@ -254,14 +236,15 @@ export default function ProfitPage() {
             </Space>
           )}
           <Tag color="blue">移动加权 + FIFO 并排</Tag>
-          {isAdmin && (
+          {access.surface("recompute", isAdmin) && (
             <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
           )}
-          <Button onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
+          {access.surface("export", true) && access.action(dimensionAction, true) && <Button onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>}
         </Space>
       </Card>
 
-      <Row gutter={16}>
+      <AuthorizedQueryError error={query.error} retry={query.retry} />
+      {access.surface("summary", true) && <><Row gutter={16}>
         <Col span={8}><Card size="small">
           <Statistic title="合计营收" value={0}
             formatter={() => <TaxMoney scope="sales" inc={totalRevPair.inc} ex={totalRevPair.ex} />} />
@@ -291,7 +274,9 @@ export default function ProfitPage() {
           scroll={{ x: basis === "both" ? 2100 : 1320 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
         />
-      </Card>
+      </Card></>}
     </Space>
   );
 }
+
+export default withRouteAccess(ProfitPage, "/profit");

@@ -630,7 +630,8 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
                  part_id: int | None = None, pool_group_id: int | None = None,
                  sort: str = "order_date", order: str = "desc",
                  page: int = 1, page_size: int = 50, as_of: date | None = None,
-                 user_ctx: security.UserContext | None = None) -> dict:
+                 user_ctx: security.UserContext | None = None,
+                 authorized: bool | None = None) -> dict:
     """订单拉通-销售侧：**一张销售订单一行**（复审 P1-4，此前是明细行粒度）。
     多型号聚合为 型号数/总量/总营收/总毛利。金额未税。status 留空=仅已生效、'全部'=不限。
     linked_purchase：是否有**已生效**采购单经 linked_sales_order_no 关联（复审：不再算取消单）。
@@ -640,7 +641,7 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
     成交信息。必须在任何过滤/计数 SQL 前短路，避免用 customer/salesperson/
     order_no 等条件猜测某单是否存在。"""
     today = as_of or date.today()
-    if security.is_scoped_sales(user_ctx):
+    if authorized is False or (authorized is None and security.is_scoped_sales(user_ctx)):
         # 稳定的受限响应：total=None 明确表示“不可见”，不用 0 伪装成
         # “查无数据”；且不随任何查询条件/排序改变，消除存在性侧信道。
         return {

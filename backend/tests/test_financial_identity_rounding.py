@@ -12,7 +12,8 @@ from app.api import profit as profit_api
 from app.db import get_db
 from app.etl import loader
 from app.main import app
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
+from app.auth import _make_token
 from app.services import dashboard, maintenance_margin, profit
 from tests import factories as f
 
@@ -179,12 +180,13 @@ def test_profit_and_dashboard_api_keep_small_value_inc_profit_identity(db):
     )
     original = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[profit_api.current_role] = lambda: ctx.role
     app.dependency_overrides[profit_api.get_current_user_context] = lambda: ctx
-    app.dependency_overrides[dashboard_api.current_role] = lambda: ctx.role
     app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: ctx
+    db.add(SysUser(username=ctx.user_id, role=ctx.role, password_hash='unused', is_active=True))
+    db.commit()
+    token, _ = _make_token(ctx.role, ctx.user_id, ctx.user_id, authn='sys_user', perms=ctx.permissions)
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers={'Authorization': 'Bearer ' + token})
         profit_response = client.get("/api/profit", params={"dimension": "part"})
         kpi_response = client.get("/api/dashboard/kpi")
         ranking_response = client.get(

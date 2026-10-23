@@ -1,3 +1,4 @@
+import { useRouteAccess } from "../../authz/access";
 /**
  * 订单行明细表（v2 嵌套 parts）：PN 深链、池归属、池均价、人工约束价、差额、价格参考状态。
  * 订单展开区与订单详情弹窗共用。权限三态：无权限 ≠ 暂无数据。
@@ -15,13 +16,9 @@ import {
 export type OrderSide = "purchase" | "sales";
 type AnyPart = SalesOrderPart | PurchaseOrderPart;
 
-export function canOpenPartDetail(): boolean {
-  return localStorage.getItem("role") === "admin" || readLocalPerms().page_parts === true;
-}
-
 export function PartLink({ partId, pn }: { partId: number | null; pn: string | null }) {
+  const canOpenPartPage = useRouteAccess("/parts").allowed;
   if (!pn) return <span style={MUTED}>{EMPTY}</span>;
-  const canOpenPartPage = canOpenPartDetail();
   if (!partId || !canOpenPartPage) {
     return <span style={{ fontFamily: "monospace", fontSize: 12.5 }}
       title={!canOpenPartPage ? "当前账号无型号查询页面权限" : undefined}>{pn}</span>;
@@ -35,6 +32,8 @@ export function PartLink({ partId, pn }: { partId: number | null; pn: string | n
 export function PoolLink({ groupId, name, dateRange }: {
   groupId: number | null; name: string | null; dateRange?: DateRange;
 }) {
+  const canOpen = useRouteAccess("/pool-analysis/:groupId").allowed;
+  if (!canOpen) return <span>{name || (groupId ? `池 #${groupId}` : "未入池")}</span>;
   if (!groupId) return <span style={MUTED}>未入池</span>;
   return (
     <Link to={poolAnalysisPath(groupId, dateRange)} aria-label={`进入池「${name || groupId}」分析详情`}>

@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "company_pool_order_facts",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.company_pool_order_facts.actions && P.attr.grants.company_pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_order_facts\", \"scope\": P.attr.grants.company_pool_order_facts.scope, \"version\": P.attr.grants.company_pool_order_facts.version, \"field_permissions\": P.attr.grants.company_pool_order_facts.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-order-detail",
+        "actions": [
+          "show_order_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_order_detail\" in P.attr.grants.company_pool_order_facts.actions && \"read\" in P.attr.grants.company_pool_order_facts.actions && P.attr.grants.company_pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_order_facts\", \"scope\": P.attr.grants.company_pool_order_facts.scope, \"version\": P.attr.grants.company_pool_order_facts.version, \"field_permissions\": P.attr.grants.company_pool_order_facts.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

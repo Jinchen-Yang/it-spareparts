@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_governance: true }); return legacyAuthorizationState(); },
+}));
 import { MemoryRouter } from "react-router-dom";
 import { App, ConfigProvider } from "antd";
 import { cleanup, render, screen, waitFor, within } from "../../test/antdRender";
@@ -45,10 +50,13 @@ it("治理排除可用 Tab 和 Enter 打开原因确认，恢复可用空格触�
   await user.keyboard("{Enter}");
   await waitFor(() => expect(api.put).toHaveBeenCalledWith("/governance/exclude", {
     pn_std: "KEYBOARD-PN", excluded: true, reason: "合成排除原因",
-  }));
+  }, expect.objectContaining({ headers: { Authorization: expect.stringMatching(/^Bearer /) }, signal: expect.any(AbortSignal) })));
   await tabTo(user, await screen.findByRole("button", { name: "恢复" }));
   await user.keyboard(" ");
   await waitFor(() => expect(api.put).toHaveBeenLastCalledWith("/governance/exclude", {
     pn_std: "KEYBOARD-PN", excluded: false,
-  }));
+  }, expect.objectContaining({ headers: { Authorization: expect.stringMatching(/^Bearer /) }, signal: expect.any(AbortSignal) })));
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_governance: true }));

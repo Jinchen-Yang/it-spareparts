@@ -1108,83 +1108,101 @@ def pool_detail(db: Session, group_id: int, date_from: date | None = None,
                 date_to: date | None = None, *, range_: str | None = None,
                 purchase_type: str | None = None,
                 purchase_page: int = 1, sales_page: int = 1,
-                page_size: int = 30) -> dict | None:
-    """复用现有丰富池详情，映射出新全员契约；``user_ctx=None`` 是显式池分析上下文，
-    仅绕开旧销售整段隐藏，真实权限在 API 边界结构化净化。"""
+                page_size: int = 30, include_transactions: bool = True, include_analysis: bool = True) -> dict | None:
+    """价格参考和逐单事实分别查询；拒绝事实时不执行其计数或明细 SQL。"""
     lower, upper, today, token = resolve_window(range_, date_from, date_to)
-    legacy = pool.analyze(db, group_id, lower, upper, user_ctx=None, with_v2=True,
-                          purchase_page=purchase_page, sales_page=sales_page,
-                          orders_page_size=page_size,
-                          purchase_source_type=purchase_type)
-    if legacy is None:
+    from app.services.pool_catalog import pool_locator
+    header = db.get(PartPool, group_id) if include_analysis else None
+    locator = ({key: getattr(header, key) for key in ('group_id', 'name', 'version', 'status')}
+               if header is not None else pool_locator(db, group_id))
+    if locator is None or locator['status'] != 'active':
         return None
-    member_ids = [m["part_id"] for m in legacy["members"]]
-    reference_window = ({"date_from": lower, "date_to": upper}
-                        if token == "custom" else {})
-    refs = references(db, member_ids, range_=token, as_of=today,
-                      purchase_type=purchase_type, **reference_window)
-    ref_by_part = {r["part_id"]: r for r in refs}
-    members = []
-    for legacy_member in legacy["members"]:
-        mapped = deepcopy(ref_by_part[legacy_member["part_id"]])
-        members.append({**mapped, "brand": legacy_member.get("brand"),
-                        "description": legacy_member.get("description")})
-    first = refs[0] if refs else None
-    pool_purchase = deepcopy((first or {}).get("purchase_reference")) or _reference_side(
-        "purchase", None, None, None)
-    pool_sales = deepcopy((first or {}).get("sales_reference")) or _reference_side(
-        "sales", None, None, None)
-    # 池级条目没有“当前 PN”，只保留池统计/约束；成员差额在 members 内。
-    for side in (pool_purchase, pool_sales):
-        side["part_stats"] = None
-        side["delta_to_pool_avg"] = None
-        side["delta_to_constraint"] = None
-        side["relation_to_constraint"] = side["constraint"]["status"] == "unset" and "unset" or None
-    purchase_pool_stats = pool_purchase.get("pool_stats")
-    sales_pool_stats = pool_sales.get("pool_stats")
-    purchase_pool_avg = (purchase_pool_stats or {}).get("weighted_avg")
-    sales_pool_avg = (sales_pool_stats or {}).get("weighted_avg")
-    purchase_limit = pool_purchase["constraint"].get("value")
-    sales_limit = pool_sales["constraint"].get("value")
-    for member in members:
-        member["purchase_metrics"] = _compat_member_metrics(
-            member["purchase_reference"].get("part_stats"), purchase_pool_avg, purchase_limit)
-        member["sales_metrics"] = _compat_member_metrics(
-            member["sales_reference"].get("part_stats"), sales_pool_avg, sales_limit)
+    if include_analysis:
+        member_rows = db.execute(select(DimPart.id, DimPart.brand, DimPart.description)
+            .join(PartPoolMember, PartPoolMember.part_id == DimPart.id)
+            .where(PartPoolMember.group_id == group_id)).all()
+        member_ids = [row.id for row in member_rows]
+        legacy_members = [{"part_id": row.id, "brand": row.brand, "description": row.description}
+                          for row in member_rows]
+        reference_window = ({"date_from": lower, "date_to": upper}
+                            if token == "custom" else {})
+        refs = references(db, member_ids, range_=token, as_of=today,
+                          purchase_type=purchase_type, **reference_window)
+        ref_by_part = {r["part_id"]: r for r in refs}
+        members = []
+        for legacy_member in legacy_members:
+            mapped = deepcopy(ref_by_part[legacy_member["part_id"]])
+            members.append({**mapped, "brand": legacy_member.get("brand"),
+                            "description": legacy_member.get("description")})
+        first = refs[0] if refs else None
+        pool_purchase = deepcopy((first or {}).get("purchase_reference")) or _reference_side(
+            "purchase", None, None, None)
+        pool_sales = deepcopy((first or {}).get("sales_reference")) or _reference_side(
+            "sales", None, None, None)
+        # 池级条目没有“当前 PN”，只保留池统计/约束；成员差额在 members 内。
+        for side in (pool_purchase, pool_sales):
+            side["part_stats"] = None
+            side["delta_to_pool_avg"] = None
+            side["delta_to_constraint"] = None
+            side["relation_to_constraint"] = side["constraint"]["status"] == "unset" and "unset" or None
+        purchase_pool_stats = pool_purchase.get("pool_stats")
+        sales_pool_stats = pool_sales.get("pool_stats")
+        purchase_pool_avg = (purchase_pool_stats or {}).get("weighted_avg")
+        sales_pool_avg = (sales_pool_stats or {}).get("weighted_avg")
+        purchase_limit = pool_purchase["constraint"].get("value")
+        sales_limit = pool_sales["constraint"].get("value")
+        for member in members:
+            member["purchase_metrics"] = _compat_member_metrics(
+                member["purchase_reference"].get("part_stats"), purchase_pool_avg, purchase_limit)
+            member["sales_metrics"] = _compat_member_metrics(
+                member["sales_reference"].get("part_stats"), sales_pool_avg, sales_limit)
+    else:
+        member_ids = list(db.scalars(select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)))
+        members, first = [], None
+        pool_purchase = pool_sales = None
+        purchase_pool_stats = sales_pool_stats = None
+        purchase_limit = sales_limit = None
+    purchase_orders = (pool._pool_purchase_orders(
+        db, member_ids, lower, upper, purchase_page, page_size, purchase_type)
+        if include_transactions else {"restricted": True, "total": None,
+                                      "page": purchase_page, "page_size": page_size, "items": []})
+    sales_orders = pool._pool_sales_orders(
+        db, member_ids, lower, upper, sales_page, page_size, None,
+        authorized=include_transactions)
     purchase_transactions = {
-        **legacy["purchase_orders"],
+        **purchase_orders,
         "items": [{
             **{k: v for k, v in row.items() if k not in {"unit_price_ex_tax", "amount"}},
             "purchase_unit_price_ex_tax": row.get("unit_price_ex_tax"),
             "purchase_line_value_ex_tax": row.get("amount"),
-        } for row in legacy["purchase_orders"]["items"]],
+        } for row in purchase_orders["items"]],
     }
     sales_transactions = {
-        **legacy["sales_orders"],
-        "restricted": False,
+        **sales_orders,
         "items": [{
             **{k: v for k, v in row.items() if k not in {"unit_price_ex_tax", "amount"}},
             "sale_unit_price_ex_tax": row.get("unit_price_ex_tax"),
             "sale_line_value_ex_tax": row.get("amount"),
-        } for row in legacy["sales_orders"]["items"]],
+        } for row in sales_orders["items"]],
     }
     return {
-        "group_id": group_id, "name": legacy.get("name"),
-        "description": legacy.get("description"), "member_count": legacy.get("member_count", 0),
-        "needs_calibration": bool(legacy.get("needs_calibration")),
-        "oversized": bool(legacy.get("oversized")),
+        **locator,
+        "description": header.description if include_analysis else None,
+        "member_count": header.member_count if include_analysis else None,
+        "needs_calibration": bool(header.needs_calibration) if include_analysis else None,
+        "oversized": bool(header.oversized) if include_analysis else None,
         "window": {"range": token, "date_from": lower.isoformat() if lower else None,
                    "date_to": upper.isoformat(), "as_of": today.isoformat()},
         "basis": "ex_tax", "purchase_type": purchase_type,
         "purchase_reference": pool_purchase,
         "sales_reference": pool_sales, "members": members,
-        "excluded": deepcopy((first or {}).get("excluded")) or {
+        "excluded": (deepcopy((first or {}).get("excluded")) or {
             "inactive_orders": 0, "nonpositive_price": 0, "nonpositive_qty": 0,
             "future_orders": 0,
-        },
+        }) if include_analysis else None,
         # 兼容既有详情图表，但数值来自本模块的全采购类型统一口径。
-        "purchase_metrics": _compat_pool_metrics(purchase_pool_stats),
-        "sales_metrics": _compat_pool_metrics(sales_pool_stats),
+        "purchase_metrics": _compat_pool_metrics(purchase_pool_stats) if include_analysis else None,
+        "sales_metrics": _compat_pool_metrics(sales_pool_stats) if include_analysis else None,
         "max_purchase_price": purchase_limit,
         "min_sale_price": sales_limit,
         "purchase_violation_count": (purchase_pool_stats or {}).get("violation_count"),

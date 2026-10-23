@@ -1,5 +1,13 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => {
+  const {useState} = await import("react");
+  return {...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+    // Like the real Provider, a mounted session does not adopt a silently replaced token.
+    useAuthz: () => useState(() => {prepareLegacyPageFixture({page_master_data: true}); return legacyAuthorizationState();})[0],
+  };
+});
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it , vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { api } from "../../api";
 import MasterDataPage from "../MasterDataPage";
@@ -279,8 +287,8 @@ it("初始类别和列表 GET 绑定原账号，换 token 后迟到结果不填�
   await act(async () => {});
   expect(requests).toEqual([
     { url: "/parts/master/categories", auth: "Bearer editor-token" },
-    { url: "/parts/search", auth: "Bearer editor-token" },
   ]);
+  // The deferred query sees the owner change before dispatch and sends no list request.
   expect(screen.queryByRole("row", { name: /PN-42/ })).toBeNull();
   expect(screen.queryByRole("row", { name: /PN-43/ })).toBeNull();
 });
@@ -401,3 +409,6 @@ it("新建 PN 标准必填标记及空白错误关联输入，保存启用条件
   expect(input).not.toHaveAttribute("aria-invalid");
   expect(within(dialog).getByRole("button", { name: /保\s*存/ })).toBeEnabled();
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_master_data: true }));

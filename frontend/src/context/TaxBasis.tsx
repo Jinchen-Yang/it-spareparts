@@ -1,3 +1,5 @@
+import { useAccess } from "../authz/access";
+import { actionRule } from "../authz/rules";
 // 管理员统一配置的三域税口径。普通页面只读，不提供本地 setter；
 // 本上下文只决定展示哪一侧，固定 13% 的缺失侧补齐集中在 utils/format.ts。
 import {
@@ -93,6 +95,7 @@ interface Ctx {
   basisFor: (scope: TaxScope) => TaxBasis;
   loading: boolean;
   loadFailed: boolean;
+  accessDenied: boolean;
   refresh: (minimumVersion?: number) => Promise<void>;
 }
 
@@ -101,12 +104,17 @@ const defaultContext: Ctx = {
   basisFor: (scope) => DEFAULT_TAX_DISPLAY_POLICY[scope],
   loading: false,
   loadFailed: false,
+  accessDenied: false,
   refresh: async () => undefined,
 };
 
 const TaxBasisContext = createContext<Ctx>(defaultContext);
 
 export function TaxBasisProvider({ children }: { children: ReactNode }) {
+  const access = useAccess(actionRule("display_policy", "read"), { legacy: { display_policy: true } });
+  const identity = `${access.token}:${access.generation}:${access.snapshot?.version}`;
+  const [policyOwner, setPolicyOwner] = useState("");
+  const activeAccess = useRef(access); activeAccess.current = access;
   const [policy, setPolicy] = useState<TaxDisplayPolicy>(DEFAULT_TAX_DISPLAY_POLICY);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -119,6 +127,12 @@ export function TaxBasisProvider({ children }: { children: ReactNode }) {
     blocking: boolean,
     minimumVersion = 0,
   ): Promise<void> => {
+    const currentAccess = activeAccess.current;
+    if (!currentAccess.allowed || !currentAccess.token || !currentAccess.snapshot) {
+      setPolicy(DEFAULT_TAX_DISPLAY_POLICY); setLoadFailed(currentAccess.status !== "loading"); setLoading(currentAccess.status === "loading"); return;
+    }
+    const capture = { token: currentAccess.token, snapshotVersion: currentAccess.snapshot.version, generation: currentAccess.generation };
+    const current = () => mountedRef.current && currentAccess.isCurrent(capture);
     if (Number.isInteger(minimumVersion) && minimumVersion > 0) {
       requiredVersionRef.current = Math.max(
         requiredVersionRef.current,
@@ -132,15 +146,16 @@ export function TaxBasisProvider({ children }: { children: ReactNode }) {
       while (mountedRef.current) {
         let request = inFlightRef.current;
         if (!request) {
-          request = getSystemSettings()
+          request = getSystemSettings({ token: capture.token, signal: currentAccess.signal! })
             .then(({ data }) => data)
             .finally(() => {
-              inFlightRef.current = null;
+              if (inFlightRef.current === request) inFlightRef.current = null;
             });
           inFlightRef.current = request;
         }
 
         const settings = await request;
+        if (!current()) return;
         const nextPolicy = policyFromSettings(settings);
         if (settings.version < requiredVersionRef.current) {
           if (staleRetries >= 1) {
@@ -152,20 +167,23 @@ export function TaxBasisProvider({ children }: { children: ReactNode }) {
         if (!mountedRef.current) return;
         if (settings.version >= currentVersionRef.current) {
           currentVersionRef.current = settings.version;
+          setPolicyOwner(identity);
           setPolicy(nextPolicy);
           setLoadFailed(false);
         }
         return;
       }
-    } catch {
-      if (!mountedRef.current) return;
+    } catch (error) {
+      if (!current()) return;
+      if ((error as { response?: { status?: number } })?.response?.status === 503) currentAccess.invalidate();
       // 读取失败、响应非法或已知版本尚未可见时都失败关闭；不使用本地旧口径。
+      setPolicyOwner(identity);
       setPolicy(DEFAULT_TAX_DISPLAY_POLICY);
       setLoadFailed(true);
     } finally {
-      if (blocking && mountedRef.current) setLoading(false);
+      if (blocking && current()) setLoading(false);
     }
-  }, []);
+  }, [identity, access.allowed]);
 
   const refresh = useCallback(
     (minimumVersion = 0) => loadPolicy(true, minimumVersion),
@@ -178,6 +196,9 @@ export function TaxBasisProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
+    inFlightRef.current = null;
+    requiredVersionRef.current = 0;
+    currentVersionRef.current = 0;
     void refresh();
     return () => {
       mountedRef.current = false;
@@ -225,13 +246,17 @@ export function TaxBasisProvider({ children }: { children: ReactNode }) {
     };
   }, [loadPolicy, refreshSilently]);
 
+  const visiblePolicy = access.allowed && policyOwner === identity ? policy : DEFAULT_TAX_DISPLAY_POLICY;
   const value = useMemo<Ctx>(() => ({
-    policy,
-    basisFor: (scope) => policy[scope],
-    loading,
-    loadFailed,
+    policy: visiblePolicy,
+    basisFor: (scope) => visiblePolicy[scope],
+    // Authorization can finish in the same batch as refresh. Effects have not
+    // started the policy request yet, so ownership must gate this very render.
+    loading: access.status === "loading" || loading || (access.allowed && policyOwner !== identity),
+    loadFailed: !access.allowed && access.status !== "loading" || loadFailed,
+    accessDenied: access.status === "ready" && !access.allowed,
     refresh,
-  }), [policy, loading, loadFailed, refresh]);
+  }), [visiblePolicy, loading, loadFailed, refresh, access.allowed, access.status, policyOwner, identity]);
 
   return (
     <TaxBasisContext.Provider value={value}>
@@ -263,7 +288,11 @@ export function taxBasisCaption(basis: TaxBasis): string {
  * 客户端默认值展示一套看似有效的金额。失败状态保留明确的重试入口。
  */
 export function TaxPolicyBoundary({ children }: { children: ReactNode }) {
-  const { loading, loadFailed, refresh } = useTaxDisplayPolicy();
+  const { loading, loadFailed, accessDenied, refresh } = useTaxDisplayPolicy();
+  if (accessDenied) {
+    return <Alert type="warning" showIcon message="缺少金额展示设置的读取权限"
+      description="此页面需要已授权的金额展示口径。请管理员单独配置“全局展示与业务默认值（金额展示设置）”的“读取”权限；业务模块权限不会自动授予此项权限。" />;
+  }
   if (loading) {
     return (
       <div
@@ -305,6 +334,8 @@ export function TaxMoneyByBasis({
   stack?: boolean;
   exact?: boolean;
 }) {
+  const { loading, loadFailed } = useTaxDisplayPolicy();
+  if (loading || loadFailed) return <>—</>;
   const format = exact ? moneyExact : money;
   if (basis === "inc") return <>{format(inc)}</>;
   if (basis === "ex") return <>{format(ex)}</>;

@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "purchase_records",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.purchase_records.actions && P.attr.grants.purchase_records.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_records\", \"scope\": P.attr.grants.purchase_records.scope, \"version\": P.attr.grants.purchase_records.version, \"field_permissions\": P.attr.grants.purchase_records.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-exceptions",
+        "actions": [
+          "show_exceptions"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_exceptions\" in P.attr.grants.purchase_records.actions && \"read\" in P.attr.grants.purchase_records.actions && P.attr.grants.purchase_records.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_records\", \"scope\": P.attr.grants.purchase_records.scope, \"version\": P.attr.grants.purchase_records.version, \"field_permissions\": P.attr.grants.purchase_records.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-model-analysis",
+        "actions": [
+          "show_model_analysis"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_model_analysis\" in P.attr.grants.purchase_records.actions && \"read\" in P.attr.grants.purchase_records.actions && P.attr.grants.purchase_records.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_records\", \"scope\": P.attr.grants.purchase_records.scope, \"version\": P.attr.grants.purchase_records.version, \"field_permissions\": P.attr.grants.purchase_records.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-price-trend-advice",
+        "actions": [
+          "show_price_trend_advice"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_price_trend_advice\" in P.attr.grants.purchase_records.actions && \"read\" in P.attr.grants.purchase_records.actions && P.attr.grants.purchase_records.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_records\", \"scope\": P.attr.grants.purchase_records.scope, \"version\": P.attr.grants.purchase_records.version, \"field_permissions\": P.attr.grants.purchase_records.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-records",
+        "actions": [
+          "show_records"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_records\" in P.attr.grants.purchase_records.actions && \"read\" in P.attr.grants.purchase_records.actions && P.attr.grants.purchase_records.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_records\", \"scope\": P.attr.grants.purchase_records.scope, \"version\": P.attr.grants.purchase_records.version, \"field_permissions\": P.attr.grants.purchase_records.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

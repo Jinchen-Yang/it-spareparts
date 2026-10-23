@@ -81,12 +81,13 @@ function CompactPanel({
   dim: SalesGroupDim; metric: CompactMetric; top: number; showShare: boolean;
 } & Pick<CompactTabProps, "state" | "apiFilters" | "filterKey" | "patch" | "toMessage" | "ownerToken" | "onOwnerStale">) {
   const { data, loading, error, retry } = useAsyncData<SalesGroupsResp>(
-    () => fetchSalesAnalyticsGroups({ ...apiFilters, group_by: dim, sort: metric, order: "desc", top }),
+    (context) => fetchSalesAnalyticsGroups({ ...apiFilters, group_by: dim, sort: metric, order: "desc", top }, context),
     [filterKey, dim, metric, top],
     toMessage,
     true,
     ownerToken,
     onOwnerStale,
+    "read_groups",
   );
   const rows = data?.groups ?? [];
   const values = rows.map((row) => metricValue(row, metric));

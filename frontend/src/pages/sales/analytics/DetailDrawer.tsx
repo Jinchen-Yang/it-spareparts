@@ -1,3 +1,5 @@
+import { useAuthorizedQuery } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
 // 订单详情抽屉：三金额 + 最新对账块 + 对账历史（每个快照一条，D-40 §3 只追加、
 // 旧→新排序，末条与最新块一致）。include_returns 随层透传，reconciled_display 与
 // 列表同口径；对账权限受限或无快照时按「无对账数据」展示，不显示 0。
@@ -35,6 +37,7 @@ export interface DetailDrawerProps {
   amounts: AmountKey[];
   /** data_reconciliation=false：对账块与历史按「无对账数据」/「—」展示。 */
   reconRestricted: boolean;
+  showReconciliation?: boolean;
   /** data_purchase_cost=false：明细行数量/单价/行金额被后端置空（A-AC01 防重建
    * 成交价），行级表上方给出说明而非裸「—」。 */
   costRestricted: boolean;
@@ -56,74 +59,26 @@ export default function DetailDrawer({
   includeReturns,
   amounts,
   reconRestricted,
+  showReconciliation = true,
   costRestricted,
   ownerToken,
   onOwnerStale,
   onClose,
 }: DetailDrawerProps) {
   const { message } = App.useApp();
-  const [detail, setDetail] = useState<SalesAnalyticsOrderDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  // 重试只针对非 404 失败：自增触发 effect 重发，不动 orderId
-  const [retryTick, setRetryTick] = useState(0);
-  const seqRef = useRef(0);
-  // onClose / onOwnerStale 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const onOwnerStaleRef = useRef(onOwnerStale);
-  onOwnerStaleRef.current = onOwnerStale;
-
+  const stale = sessionStale(ownerToken);
+  const query = useAuthorizedQuery({ rule: actionRule("sales_analysis", "read_order_detail"),
+    legacy: { sales_analysis: true }, onStale: onOwnerStale, queryKey: [orderId, includeReturns], enabled: orderId != null && !stale,
+    query: async context => (await fetchSalesAnalyticsOrderDetail(orderId!, includeReturns, context)).data });
+  const { data: detail, loading } = query;
+  const loadError = stale ? SESSION_EXPIRED_MESSAGE : query.error ? apiErrorMessage(query.error) : null;
+  const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
   useEffect(() => {
-    if (orderId == null) {
-      // 关闭抽屉同样作废在途请求（seq 自增）：迟到的成功/失败不再写状态、不再弹
-      // 提示，也不会触发多余的 onClose——与换单/切含退货时的防竞态同一套语义
-      seqRef.current++;
-      setLoading(false);
-      setDetail(null);
-      setLoadError(null);
-      return;
+    if (stale) onOwnerStale();
+    if ((query.error as { response?: { status?: number } })?.response?.status === 404) {
+      message.error("订单不存在（或非已生效单）"); onCloseRef.current();
     }
-    const seq = ++seqRef.current;
-    // 所属会话失效（DL-010 返工）：拒发并清旧详情——旧会话的抽屉不以当前账号取数；
-    // 同时通知页级清主页面旧上下文（落地矩阵：旧行点击路径主页面数据也要清）
-    if (sessionStale(ownerToken)) {
-      setLoading(false);
-      setDetail(null);
-      setLoadError(SESSION_EXPIRED_MESSAGE);
-      onOwnerStaleRef.current?.();
-      return;
-    }
-    const token = readSessionToken();
-    setLoading(true);
-    setDetail(null);
-    setLoadError(null);
-    fetchSalesAnalyticsOrderDetail(orderId, includeReturns)
-      .then(({ data }) => {
-        if (seq !== seqRef.current) return;
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        setDetail(data);
-      })
-      .catch((err) => {
-        if (seq !== seqRef.current) return;
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        const status = (err as { response?: { status?: number } })?.response?.status;
-        if (status === 404) {
-          // 404 = 不存在或非已生效（下钻口径）：关抽屉回列表
-          message.error("订单不存在（或非已生效单）");
-          onCloseRef.current();
-          return;
-        }
-        // 其余失败（网络 / 5xx / 未知）：抽屉保留，就地重试（不丢所查单号）
-        setLoadError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        // finally 也守卫（DL-010 返工）：失效会话的收尾不触碰当前 UI 状态，并通知页级
-        if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
-        if (seq === seqRef.current) setLoading(false);
-      });
-  }, [orderId, includeReturns, retryTick, ownerToken]);
-
+  }, [stale, query.error]);
   const recon = detail?.reconciliation;
   const reconNoData = !recon || reconRestricted || isReconBlockEmpty(recon);
 
@@ -174,7 +129,7 @@ export default function DetailDrawer({
           showIcon
           message={`销售单 #${orderId} 详情加载失败`}
           description={loadError}
-          action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
+          action={<Button type="link" size="small" onClick={query.retry}>重试</Button>}
         />
       )}
       {!loading && detail && (
@@ -237,7 +192,7 @@ export default function DetailDrawer({
             </>
           )}
 
-          {reconRestricted ? (
+          {!showReconciliation ? null : reconRestricted ? (
             <Alert type="info" showIcon message="无对账数据（当前账号无销售单对账数据权限）" />
           ) : reconNoData ? (
             <Alert
@@ -271,7 +226,7 @@ export default function DetailDrawer({
             />
           )}
 
-          {reconRestricted ? null : (
+          {!showReconciliation || reconRestricted ? null : (
             <Table
               size="small"
               rowKey={(r) => `${r.import_batch_id}-${r.reconciled_as_of ?? ""}-${r.created_at ?? ""}`}

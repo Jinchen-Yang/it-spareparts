@@ -21,7 +21,7 @@ beforeEach(() => {
 
 it("loads the typed singleton endpoint", () => {
   getSystemSettings();
-  expect(get).toHaveBeenCalledWith("/system-settings");
+  expect(get).toHaveBeenCalledWith("/system-settings", {});
 });
 
 it("sends all three administrator-controlled bases atomically with the expected version", () => {
@@ -36,5 +36,5 @@ it("sends all three administrator-controlled bases atomically with the expected 
     sales_display_basis: "ex",
     maintenance_display_basis: "inc",
     expected_version: 7,
-  });
+  }, {});
 });

@@ -1,3 +1,5 @@
+import { withRouteAccess, useAuthorizedQuery, AuthorizedQueryError, useModuleAccess } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { App, Card, Checkbox, Grid, List, Segmented, Spin, Table, Tag, Tooltip, theme } from "antd";
@@ -21,7 +23,7 @@ import {
 } from "./shared";
 
 // 逐笔比价下钻的列定义 + 拉取（桌面展开行、移动端抽屉共用同一数据源 fetchPurchaseDrill）
-function drillColumns(basis: TaxBasis): ColumnsType<PurchaseDrillItem> {
+function drillColumns(basis: TaxBasis, hasCost: boolean): ColumnsType<PurchaseDrillItem> {
   return [
   { title: "日期", dataIndex: "order_date", width: 100, render: (v) => v || "—" },
   { title: "采购员", dataIndex: "purchaser", width: 90, render: (v) => v || "—" },
@@ -31,26 +33,20 @@ function drillColumns(basis: TaxBasis): ColumnsType<PurchaseDrillItem> {
     render: (v) => <Tag color={v == null ? "orange" : v ? "default" : "blue"}>
       {v == null ? "未标注·按未税" : v ? "含税" : "未税"}
     </Tag> },
-  ...(basis !== "inc" ? [{ title: "未税价", key: "price_ex", width: 90, align: "right" as const,
+  ...(hasCost && basis !== "inc" ? [{ title: "未税价", key: "price_ex", width: 90, align: "right" as const,
     render: (_: unknown, row: PurchaseDrillItem) => fmt(completeTaxPair(row.price_inc, row.price_ex).ex) }] : []),
-  ...(basis !== "ex" ? [{ title: "含税价", key: "price_inc", width: 90, align: "right" as const,
+  ...(hasCost && basis !== "ex" ? [{ title: "含税价", key: "price_inc", width: 90, align: "right" as const,
     render: (_: unknown, row: PurchaseDrillItem) => fmt(completeTaxPair(row.price_inc, row.price_ex).inc) }] : []),
   { title: "数量", dataIndex: "qty", width: 70, align: "right", render: (v) => (v == null ? "—" : Number(v)) },
   ];
 }
 
 function useDrill(partId: number | null, days: number, excludeDesignated: boolean) {
-  const [items, setItems] = useState<PurchaseDrillItem[] | null>(null);
-  useEffect(() => {
-    if (partId == null) { setItems(null); return; }
-    let alive = true;
-    setItems(null);
-    fetchPurchaseDrill({ part_id: partId, days, exclude_designated: excludeDesignated })
-      .then(({ data }) => { if (alive) setItems(data.items); })
-      .catch(() => { if (alive) setItems([]); });
-    return () => { alive = false; };
-  }, [partId, days, excludeDesignated]);
-  return items;
+  const query = useAuthorizedQuery({ rule: actionRule("purchase_records", "read"), legacy: { purchase_records: true },
+    queryKey: [partId, days, excludeDesignated], enabled: partId != null,
+    query: async context => (await fetchPurchaseDrill({ part_id: partId!, days, exclude_designated: excludeDesignated }, context)).data });
+  return query.loading ? null : query.data?.items ?? [];
+
 }
 
 // 桌面展开行下钻表
@@ -61,6 +57,7 @@ function DrillTable({ partId, days, excludeDesignated, basis }: {
   basis: TaxBasis;
 }) {
   const items = useDrill(partId, days, excludeDesignated);
+  const hasCost = useModuleAccess("purchase_records").field("data_purchase_cost", true);
   return (
     <Table<PurchaseDrillItem>
       size="small"
@@ -68,7 +65,7 @@ function DrillTable({ partId, days, excludeDesignated, basis }: {
       loading={items === null}
       dataSource={items || []}
       pagination={false}
-      columns={drillColumns(basis)}
+      columns={drillColumns(basis, hasCost)}
     />
   );
 }
@@ -94,6 +91,7 @@ function MobileDrill({ partId, days, excludeDesignated, basis }: {
   basis: TaxBasis;
 }) {
   const items = useDrill(partId, days, excludeDesignated);
+  const hasCost = useModuleAccess("purchase_records").field("data_purchase_cost", true);
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 500, margin: "8px 0" }}>逐笔比价</div>
@@ -119,7 +117,7 @@ function MobileDrill({ partId, days, excludeDesignated, basis }: {
             <div style={{ fontSize: 13, color: "var(--mb-text-2)", marginTop: 2 }}>
               {(() => {
                 const pair = completeTaxPair(it.price_inc, it.price_ex);
-                const price = basis === "both"
+                const price = !hasCost ? null : basis === "both"
                   ? <>未税 {fmt(pair.ex)} · 含税 {fmt(pair.inc)}</>
                   : basis === "ex"
                     ? <>未税 {fmt(pair.ex)}</>
@@ -163,8 +161,11 @@ function SourceComposition({ comp, accent }: {
   );
 }
 
-export default function PurchaseAnalysisPage() {
+function PurchaseAnalysisPage() {
   const { message } = App.useApp();
+  const access = useModuleAccess("purchase_records");
+  const hasCost = access.field("data_purchase_cost", true);
+  const canModel = access.surface("model_analysis", true), canPrice = access.surface("price_trend_advice", true);
   const { token } = theme.useToken();
   const accent = token.colorPrimary;
   const screens = Grid.useBreakpoint();
@@ -176,21 +177,13 @@ export default function PurchaseAnalysisPage() {
   const days = readNum(sp, "days", 7);
   const excludeDesignated = sp.get("exclude_designated") !== "0"; // 默认 true
 
-  const [data, setData] = useState<PurchaseAnalysis | null>(null);
-  const [loading, setLoading] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<number[]>([]);
   const [detail, setDetail] = useState<PurchaseAnalysisRow | null>(null);
-  const seqRef = useRef(0);
-
-  useEffect(() => {
-    const seq = ++seqRef.current;
-    setLoading(true);
-    setExpandedKeys([]);   // 切窗口/口径时收起所有展开行，避免一批下钻并发重拉
-    fetchPurchaseAnalysis({ days, exclude_designated: excludeDesignated })
-      .then(({ data }) => { if (seq === seqRef.current) setData(data); })
-      .catch(() => { if (seq === seqRef.current) message.error("采购分析加载失败"); })
-      .finally(() => { if (seq === seqRef.current) setLoading(false); });
-  }, [days, excludeDesignated]);
+  const query = useAuthorizedQuery({ rule: actionRule("purchase_records", "read"), legacy: { purchase_records: true },
+    queryKey: [days, excludeDesignated], enabled: canModel || canPrice,
+    query: async context => (await fetchPurchaseAnalysis({ days, exclude_designated: excludeDesignated }, context)).data });
+  const { data, loading } = query;
+  useEffect(() => { setExpandedKeys([]); setDetail(null); }, [days, excludeDesignated]);
 
   const kpi = data?.kpi;
   const bySrc = kpi ? Object.entries(kpi.order_count_by_source).map(([k, v]) => `${k} ${v}`).join(" · ") : "";
@@ -212,7 +205,7 @@ export default function PurchaseAnalysisPage() {
     { title: "总量", dataIndex: "total_qty", width: 64, align: "center", render: (v) => (v == null ? "—" : Number(v)) },
     { title: `${days} 天分布`, dataIndex: "daily", width: 86, render: (v) => <Sparkline data={v} accent={accent} /> },
     { title: basis === "ex" ? "采购价(不含税)·最近" : basis === "both" ? "采购价 含/不含·最近" : "采购价(含税)·最近",
-      key: "price", width: 200, render: (_, r) => <PriceCell row={r} basis={basis} /> },
+      key: "price", width: 200, render: (_, r) => hasCost ? <PriceCell row={r} basis={basis} /> : "—" },
     { title: "来源拆分", key: "channels", width: 200,
       render: (_, r) => (
         <span>
@@ -243,17 +236,18 @@ export default function PurchaseAnalysisPage() {
         subtitle="最近采购了哪些型号、哪些频率高、主要来自哪些业务类型——早会先看这里找频发待计划（D-39 起采购金额分析在新「采购分析」页）"
         extra={!isMobile ? filters : undefined}
       />
-      <Card>
+      <AuthorizedQueryError error={query.error} retry={query.retry} />
+      {(canModel || canPrice) && <Card>
         {isMobile && <div style={{ marginBottom: 14 }}>{filters}</div>}
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        {canModel && <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
           <KpiCard label={`近 ${days} 天采购额`} value={<TaxMoney scope="purchase" inc={kpi?.total_amount_inc ?? null} ex={kpi?.total_amount_ex ?? null} stack />} sub="订单总额（含税 / 未税）" />
           <KpiCard label="采购单数" value={kpi ? String(kpi.order_count) : "—"} sub={bySrc} />
           <KpiCard label="涉及型号" value={kpi ? String(kpi.part_count) : "—"} sub={kpi?.truncated ? `仅显示前 ${kpi.shown}` : undefined} />
           <KpiCard label="频发待计划" value={kpi ? String(kpi.frequent_count) : "—"} sub={`≥ ${data?.window.freq_threshold ?? 3} 次 / 窗口`} highlight />
-        </div>
+        </div>}
 
-        {data && data.source_composition.length > 0 && <SourceComposition comp={data.source_composition} accent={accent} />}
+        {canModel && data && data.source_composition.length > 0 && <SourceComposition comp={data.source_composition} accent={accent} />}
 
         {isMobile ? (
           <List
@@ -270,15 +264,15 @@ export default function PurchaseAnalysisPage() {
                 <div style={{ width: "100%" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <span style={{ fontFamily: "monospace", fontWeight: r.is_frequent ? 500 : 400 }}>{r.pn_std}</span>
-                    {r.advice && r.advice !== "普通" && <Tag color={ADVICE_COLOR[r.advice]}>{r.advice}</Tag>}
+                    {canPrice && r.advice && r.advice !== "普通" && <Tag color={ADVICE_COLOR[r.advice]}>{r.advice}</Tag>}
                   </div>
                   <div style={{ marginTop: 4 }}>
                     <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
                       range="custom" dateFrom={data?.window.since} dateTo={data?.window.until} side="purchase" />
                   </div>
-                  <div style={{ marginTop: 4, fontSize: 13, color: "var(--mb-text-2)" }}>
+                  {canModel && <div style={{ marginTop: 4, fontSize: 13, color: "var(--mb-text-2)" }}>
                     采购 {r.buy_times} 次 · 总量 {r.total_qty == null ? "—" : Number(r.total_qty)} · 库存 <span style={{ color: "var(--mb-text-3)" }}>未启用</span>
-                  </div>
+                  </div>}
                 </div>
               </List.Item>
             )}
@@ -291,25 +285,28 @@ export default function PurchaseAnalysisPage() {
             dataSource={data?.rows || []}
             scroll={{ x: 1000 }}
             pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个型号` }}
-            columns={columns}
+            columns={columns.filter(c => {
+              const id = String(c.key || ("dataIndex" in c ? c.dataIndex : ""));
+              return id === "pn_std" || (["price", "advice"].includes(id) ? canPrice : canModel);
+            })}
             expandable={{
               expandedRowKeys: expandedKeys,
               onExpandedRowsChange: (keys) => setExpandedKeys(keys as number[]),
-              expandedRowRender: (r) => <ExpandedAnalysis partId={r.part_id} days={days}
+              expandedRowRender: (r) => canPrice ? <ExpandedAnalysis partId={r.part_id} days={days}
                 excludeDesignated={excludeDesignated}
-                dateFrom={data?.window.since} dateTo={data?.window.until} basis={basis} />,
-              rowExpandable: () => true,
+                dateFrom={data?.window.since} dateTo={data?.window.until} basis={basis} /> : null,
+              rowExpandable: () => canPrice,
             }}
           />
         )}
 
-        <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
+        {canPrice && <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
           {isMobile ? "点型号看逐笔比价与建议。" : "点开型号看逐笔比价（谁采的 / 哪家 / 含税未税）。"}建议：
           <Tag color="gold">批量补库</Tag>频发应急→早会谈量 ·
           <Tag color="blue">谈价</Tag>价格在涨→压价 ·
           <Tag>偶发</Tag>一次性→跳过
-        </div>
-      </Card>
+        </div>}
+      </Card>}
 
       <MobileDetailDrawer
         open={detail != null}
@@ -318,14 +315,14 @@ export default function PurchaseAnalysisPage() {
           { label: "描述", value: detail.description || detail.brand },
           { label: "采购次数", value: String(detail.buy_times) },
           { label: "总量", value: detail.total_qty == null ? null : String(detail.total_qty) },
-          { label: "采购价", value: <PriceCell row={detail} basis={basis} /> },
+          { label: "采购价", value: hasCost ? <PriceCell row={detail} basis={basis} /> : "—" },
           { label: "来源拆分", value: detail.channels.map((c) => `${c.channel} ${c.times}次`).join("，") },
           { label: "库存", value: "未启用" },
           { label: "建议", value: detail.advice && detail.advice !== "普通" ? <Tag color={ADVICE_COLOR[detail.advice]}>{detail.advice}</Tag> : "—" },
-        ] : []}
+        ].filter(field => ["采购价", "建议"].includes(field.label) ? canPrice : canModel || field.label === "描述") : []}
         onClose={() => setDetail(null)}
       >
-        {detail && (
+        {detail && canPrice && (
           <div style={{ display: "grid", gap: 12 }}>
             <PoolReferencePanel partId={detail.part_id} side="purchase" range="custom"
               dateFrom={data?.window.since} dateTo={data?.window.until} compact />
@@ -337,3 +334,5 @@ export default function PurchaseAnalysisPage() {
     </>
   );
 }
+
+export default withRouteAccess(PurchaseAnalysisPage, "/purchases/analysis");

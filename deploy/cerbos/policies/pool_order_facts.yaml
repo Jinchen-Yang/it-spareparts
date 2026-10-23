@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "pool_order_facts",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.pool_order_facts.actions && P.attr.grants.pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_order_facts\", \"scope\": P.attr.grants.pool_order_facts.scope, \"version\": P.attr.grants.pool_order_facts.version, \"field_permissions\": P.attr.grants.pool_order_facts.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-order-detail",
+        "actions": [
+          "show_order_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_order_detail\" in P.attr.grants.pool_order_facts.actions && \"read\" in P.attr.grants.pool_order_facts.actions && P.attr.grants.pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_order_facts\", \"scope\": P.attr.grants.pool_order_facts.scope, \"version\": P.attr.grants.pool_order_facts.version, \"field_permissions\": P.attr.grants.pool_order_facts.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-purchase-facts",
+        "actions": [
+          "show_purchase_facts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_purchase_facts\" in P.attr.grants.pool_order_facts.actions && \"read\" in P.attr.grants.pool_order_facts.actions && P.attr.grants.pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_order_facts\", \"scope\": P.attr.grants.pool_order_facts.scope, \"version\": P.attr.grants.pool_order_facts.version, \"field_permissions\": P.attr.grants.pool_order_facts.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-sales-facts",
+        "actions": [
+          "show_sales_facts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_sales_facts\" in P.attr.grants.pool_order_facts.actions && \"read\" in P.attr.grants.pool_order_facts.actions && P.attr.grants.pool_order_facts.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_order_facts\", \"scope\": P.attr.grants.pool_order_facts.scope, \"version\": P.attr.grants.pool_order_facts.version, \"field_permissions\": P.attr.grants.pool_order_facts.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+import { authzSnapshot, authzTestState } from "../../../../test/authzFixtures";
 // 销售看板页签（D-44）：页签落 URL、分组排行升降序与下钻、无客户权限的维度门控、
 // 趋势粒度推荐与桶下钻、KPI 上月对比与新老客、订单导出、金额区间口径门控。
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
@@ -52,8 +53,15 @@ vi.mock("../../../../components/charts/EChartContainer", () => ({
     ),
 }));
 
+vi.mock("../../../../authz/AuthzProvider", async () => ({
+  ...await vi.importActual<typeof import("../../../../authz/AuthzProvider")>("../../../../authz/AuthzProvider"),
+  useAuthz: () => authzTestState(authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, {version: "legacy", canManage: false})),
+  AuthzUnavailable: () => <div>权限尚未确认</div>,
+}));
+
 import SalesAnalyticsPage from "../SalesAnalyticsPage";
 
+const CAPTURED_REQUEST = expect.objectContaining({ token: expect.any(String), snapshotVersion: expect.any(String), generation: expect.any(Number), queryKey: expect.any(String), signal: expect.any(AbortSignal) });
 const TODAY = "2026-10-17";
 
 const KPI = {
@@ -112,6 +120,7 @@ function renderPage(initial = "/sales/analytics") {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("token", "sales-fixture-owner");
   localStorage.setItem("role", "boss");
   localStorage.setItem("permissions", JSON.stringify({
     data_purchase_cost: true, data_reconciliation: true, data_customer: true, data_profit: true,
@@ -307,7 +316,7 @@ describe("趋势页签", () => {
   it("今天预设按日；手动切按月落 URL", async () => {
     renderPage("/sales/analytics?tab=trend");
     await waitFor(() => expect(fetchSalesAnalyticsTrend).toHaveBeenCalled());
-    expect(fetchSalesAnalyticsTrend.mock.lastCall?.slice(1)).toEqual(["day", true]);
+    expect(fetchSalesAnalyticsTrend.mock.lastCall?.slice(1, -1)).toEqual(["day", true]);
     fireEvent.click(screen.getByRole("radio", { name: "按月" }));
     await waitFor(() => expect(fetchSalesAnalyticsTrend.mock.lastCall?.[1]).toBe("month"));
     expect(locationSearch).toContain("gran=month");
@@ -349,7 +358,7 @@ describe("订单明细：导出与金额区间", () => {
     renderPage("/sales/analytics?sort=order_date&order=asc");
     fireEvent.click(await screen.findByRole("button", { name: /导\s*出/ }));
     await waitFor(() => expect(downloadSalesOrdersCsv).toHaveBeenCalled());
-    expect(downloadSalesOrdersCsv.mock.lastCall?.slice(1)).toEqual(["order_date", "asc"]);
+    expect(downloadSalesOrdersCsv.mock.lastCall?.slice(1, -1)).toEqual(["order_date", "asc"]);
     await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
     expect(click).toHaveBeenCalled();
     click.mockRestore();
@@ -398,8 +407,7 @@ describe("多维紧凑图页签", () => {
     fireEvent.click(within(compact).getByText("毛利"));
     await waitFor(() => expect(locationSearch).toContain("cmetric=gross_profit"));
     await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledWith(
-      expect.objectContaining({ group_by: "customer", sort: "gross_profit" }),
-    ));
+      expect.objectContaining({ group_by: "customer", sort: "gross_profit" }), CAPTURED_REQUEST));
     // 指标 ≠ 区间口径 → 不显示占比
     await waitFor(() => expect(screen.getByTestId("compact-customer")).not.toHaveTextContent("70.0%"));
 

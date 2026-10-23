@@ -1,9 +1,9 @@
 """对话会话 API（平台化 P1：服务端持久化，对标扣子/DeepSeek 网页版）。
 
-- 会话/消息归属 token.sub，本人可见；管理员也不能看别人的对话（报价隐私）。
+- 统一授权下会话归属稳定用户 ID，旧兼容实例沿用 token.sub；管理员也不能看别人的对话。
 - /{id}/chat/stream：客户端只发新消息，历史由服务端取（窗口见 chat_store）。
   客户端中断（停止生成/断网）时，已生成的部分照样落库并标 stopped。
-- 旧的无状态 /agent/chat(/stream) 保留不动，供脚本/API 调用方使用。
+- 无状态 /agent/chat(/stream) 在新权威下仅接收用户输入，可信助手历史由会话服务加载。
 """
 import json
 import logging
@@ -21,6 +21,8 @@ from app.config import get_settings
 from app.db import get_db
 from app.security import UserContext, get_current_user_context, record_access_log, require_page
 from app.services import chat_store
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.authz.provenance import AgentAccess
 
 _log = logging.getLogger("agent")
 # 后端页面准入：page_chat=False 的角色连会话接口都进不来（PR-审计 HUB-1）。
@@ -59,9 +61,9 @@ def _require_real_identity(ident: dict) -> None:
             "AI 助手会话需要实名账号（请管理员在系统中为你创建用户）")
 
 
-def _owned_or_404(db: Session, ident: dict, session_id: int):
+def _owned_or_404(db: Session, ident: dict, session_id: int, *, access=None):
     _require_real_identity(ident)
-    s = chat_store.get_owned(db, ident["sub"], session_id)
+    s = chat_store.get_owned(db, ident["sub"], session_id, access=access)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     return s
@@ -71,9 +73,11 @@ def _owned_or_404(db: Session, ident: dict, session_id: int):
 def list_sessions(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     _require_real_identity(ident)
-    items = chat_store.list_sessions(db, ident["sub"])
+    access = AgentAccess(db.get_bind(), identity)
+    items = chat_store.list_sessions(db, ident["sub"], access=access)
     for it in items:   # 标出后台仍在生成的会话，前端给「生成中」角标
         it["generating"] = is_generating(it["id"])
     return {"items": items}
@@ -84,9 +88,11 @@ def create_session(
     req: CreateSessionRequest,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     _require_real_identity(ident)
-    s = chat_store.create_session(db, ident["sub"], req.title)
+    access = AgentAccess(db.get_bind(), identity)
+    s = chat_store.create_session(db, ident["sub"], req.title, access=access)
     return {"id": s.id, "title": s.title, "updated_at": s.updated_at}
 
 
@@ -96,9 +102,11 @@ def rename_session(
     req: RenameSessionRequest,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
-    s = _owned_or_404(db, ident, session_id)
-    chat_store.rename_session(db, s, req.title)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
+    chat_store.rename_session(db, s, req.title, access=access)
     return {"id": s.id, "title": s.title}
 
 
@@ -107,9 +115,11 @@ def delete_session(
     session_id: int,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
-    s = _owned_or_404(db, ident, session_id)
-    chat_store.delete_session(db, s)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
+    chat_store.delete_session(db, s, access=access)
     return {"ok": True}
 
 
@@ -118,10 +128,12 @@ def list_messages(
     session_id: int,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
-    s = _owned_or_404(db, ident, session_id)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
     return {"id": s.id, "title": s.title,
-            "items": chat_store.list_messages(db, s.id)}
+            "items": chat_store.list_messages(db, s.id, access=access)}
 
 
 # ---------- 会话级生成中枢（互斥 + 取消 + 可重连扇出）----------
@@ -142,6 +154,7 @@ class _RunHub:
     """一轮生成的事件中枢：缓冲 + 多订阅者扇出 + 取消信号。"""
 
     def __init__(self) -> None:
+        self.access = None
         self.cancel = threading.Event()
         self._lock = threading.Lock()
         self._buffer: list[dict] = []          # 本轮全部事件，供晚到订阅者回放
@@ -150,6 +163,8 @@ class _RunHub:
         self._done = False
 
     def publish(self, ev: dict) -> None:
+        if self.access is not None and ev.get("type") != "error":
+            self.access.check()
         with self._lock:
             if len(self._buffer) < _BUFFER_EVENT_CAP:
                 self._buffer.append(ev)
@@ -227,12 +242,21 @@ def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
 
 
-def _hub_event_stream(hub: _RunHub):
+def _hub_event_stream(hub: _RunHub, *, access=None):
     """订阅一个生成中枢：先回放已发生事件（切回会话补齐已生成部分），
     再续实时事件，直到结束哨兵。客户端断开则 finally 注销订阅。"""
+    def check():
+        if hub.access is not None:
+            hub.access.check()
+            if access is not None and access.authoritative:
+                access.inherit(hub.access.snapshot())
+        if access is not None:
+            access.check()
+    check()
     replay, sub_q = hub.subscribe()
     try:
         for ev in replay:
+            check()
             yield _sse(ev)
         if sub_q is None:          # 订阅时已结束：回放完即收
             return
@@ -243,7 +267,10 @@ def _hub_event_stream(hub: _RunHub):
                 return
             if ev is None:         # 结束哨兵
                 return
+            check()
             yield _sse(ev)
+    except HTTPException:
+        yield _sse({"type": "error", "message": "授权已失效，请重新生成", "code": "AUTHZ_ARTIFACT_STALE"})
     finally:
         if sub_q is not None:
             hub.unsubscribe(sub_q)
@@ -254,11 +281,13 @@ def chat_cancel(
     session_id: int,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """停止当前生成：worker 收到信号后把已生成部分以 stopped=True 落库——
     前端显示的"已中断"与库内状态一致。"""
-    s = _owned_or_404(db, ident, session_id)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
     record_access_log(ctx, "chat_cancel", "agent", {"session_id": s.id})
     return {"cancelled": request_cancel(s.id)}
 
@@ -269,6 +298,7 @@ def chat_stream(
     req: SendMessageRequest,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """会话内流式问答。SSE 事件与旧 /agent/chat/stream 一致，外加
@@ -278,7 +308,8 @@ def chat_stream(
     stopped=True 落库；②客户端断网/关页面（无 cancel）→ worker 跑到底，
     完整答案落库（重新打开会话可见全文）。"""
     _require_agent_enabled()
-    s = _owned_or_404(db, ident, session_id)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
     record_access_log(ctx, "chat_stream", "agent",
                       {"session_id": s.id, "q": req.message[:200]})
 
@@ -287,16 +318,17 @@ def chat_stream(
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "该会话上一轮回答还在生成中，请稍候或先停止")
 
+    hub.access = access
     sid = s.id  # 捕获纯标量：流式期间不再触碰请求级 ORM 对象/会话
     try:
         # 先落用户消息（即使后面中断，提问也不丢）；首条消息顺带定标题
         title_before = s.title
-        chat_store.append_message(db, s, "user", req.message)
-        history = chat_store.history_for_llm(db, s.id)
+        chat_store.append_message(db, s, "user", req.message, access=access)
+        history = chat_store.history_for_llm(db, s.id, access=access)
         new_title = s.title if s.title != title_before else None
         configured = provider.is_configured()
         if not configured:
-            chat_store.append_message(db, s, "assistant", _NOT_CONFIGURED_MSG)
+            chat_store.append_message(db, s, "assistant", _NOT_CONFIGURED_MSG, access=access)
     except BaseException:
         release_session(sid)
         raise
@@ -319,10 +351,11 @@ def chat_stream(
         msg_id: int | None = None
         since_ckpt = 0
         finalized = False
+        authorization_failed = False
 
         def _save(stopped: bool, final: bool = False) -> None:
             nonlocal msg_id, since_ckpt, finalized
-            if finalized:
+            if finalized or authorization_failed:
                 return
             if final:
                 finalized = True
@@ -331,16 +364,20 @@ def chat_stream(
                 return
             try:
                 msg_id = chat_store.save_assistant_progress(
-                    sid, msg_id, content or "(无内容)", trace, stopped)
+                    sid, msg_id, content or "(无内容)", trace, stopped, access=access)
                 since_ckpt = 0
+            except HTTPException:
+                raise
             except Exception:  # noqa: BLE001 —— 落库失败不能炸生成
                 _log.exception("checkpoint assistant message failed (session=%s)", sid)
+                if access.authoritative:
+                    raise
 
         wdb = SessionLocal()
         try:
             # cancel 透传给 runtime：除 worker 在事件间轮询外，runtime 也在 LLM 流内/调用前
             # 检查，点"停止"后能更快收束（含收尾作答，RUNTIME-4）。
-            for ev in runtime.run_stream(wdb, history, ctx, cancel=hub.cancel):
+            for ev in runtime.run_stream(wdb, history, ctx, cancel=hub.cancel, access=access):
                 if hub.cancel.is_set():  # 用户点了停止：收束并以"已中断"落库
                     _save(stopped=True, final=True)
                     hub.publish({"type": "done", "tool_calls": trace, "stopped": True})
@@ -358,14 +395,19 @@ def chat_stream(
                 elif ev.get("type") == "done":
                     _save(stopped=False, final=True)
                 hub.publish(ev)
+        except HTTPException:
+            authorization_failed = True
+            hub.publish({"type": "error", "message": "授权已失效，请重新生成", "code": "AUTHZ_ARTIFACT_STALE"})
         except Exception as exc:  # noqa: BLE001 —— 上游 LLM 错误：保留已生成部分
             _log.error("agent session stream failed: %r", exc)
             _save(stopped=True, final=True)
             hub.publish({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
         finally:
-            _save(stopped=True, final=True)
-            wdb.close()
-            release_session(sid)  # → hub.finish() 给所有订阅者发结束哨兵
+            try:
+                _save(stopped=True, final=True)
+            finally:
+                wdb.close()
+                release_session(sid)  # → hub.finish() 给所有订阅者发结束哨兵
 
     # worker 在 handler 里启动而非 gen 里：客户端若在响应体被拉取前断开，
     # gen 可能永远不被迭代——锁释放/落库必须不依赖 gen 跑起来。
@@ -380,16 +422,19 @@ def chat_stream(
         release_session(sid)
 
     def gen():
+        access.check()
         if new_title:
             yield _sse({"type": "title", "title": new_title})
         if not configured:
+            access.check()
             yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
+            access.check()
             yield _sse({"type": "done", "tool_calls": [], "configured": False})
             return
-        yield from _hub_event_stream(hub)
+        yield from _hub_event_stream(hub, access=access)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
+                             headers={"Cache-Control": "no-store",
                                       "X-Accel-Buffering": "no"})
 
 
@@ -398,22 +443,25 @@ def chat_attach(
     session_id: int,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """重新订阅会话进行中的生成（切回会话续看连续直播）：先回放已生成部分、再续实时。
     无进行中的生成 → 单个 {type:"no_active"} 事件，前端转为加载历史消息即可。"""
     _require_agent_enabled()
-    s = _owned_or_404(db, ident, session_id)
+    access = AgentAccess(db.get_bind(), identity)
+    s = _owned_or_404(db, ident, session_id, access=access)
     sid = s.id
     db.rollback()  # 释放请求连接：订阅期间不再触碰请求级会话
     hub = get_run(sid)
 
     def gen():
+        access.check()
         if hub is None:
             yield _sse({"type": "no_active"})
             return
-        yield from _hub_event_stream(hub)
+        yield from _hub_event_stream(hub, access=access)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
+                             headers={"Cache-Control": "no-store",
                                       "X-Accel-Buffering": "no"})

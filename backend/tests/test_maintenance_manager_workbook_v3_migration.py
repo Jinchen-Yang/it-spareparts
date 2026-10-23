@@ -372,10 +372,11 @@ def test_existing_manager_workbook_v3_rows_backfill_new_columns(db):
 
 
 def test_combined_downgrade_keeps_both_branches_when_assignment_history_exists(db):
+    # The guard under test protects legacy assignment facts, not a canonical account.
     user_id = db.execute(
         text(
-            "INSERT INTO sys_user (username, password_hash, role) "
-            "VALUES ('issue206-merge-guard', 'unused', 'readonly') RETURNING id"
+            "INSERT INTO sys_user (username, password_hash, role, authorization_legacy_seed_eligible) "
+            "VALUES ('issue206-merge-guard', 'unused', 'readonly', true) RETURNING id"
         )
     ).scalar_one()
     db.execute(

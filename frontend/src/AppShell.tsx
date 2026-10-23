@@ -13,6 +13,7 @@ import { NAV_GROUPS, matchDetailRoute, matchNavItem } from "./nav";
 import type { NavItem } from "./nav";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import { TaxPolicyBoundary } from "./context/TaxBasis";
+import { useAuthz } from "./authz/AuthzProvider";
 
 const { Header, Content, Sider } = Layout;
 
@@ -70,6 +71,7 @@ export default function AppShell({
   onToken: (token: string) => void;
 }) {
   const location = useLocation();
+  const { snapshot } = useAuthz();
   const navigate = useNavigate();
   const screens = Grid.useBreakpoint();
   // md 未计算完成(首帧 undefined)按桌面处理，避免闪抽屉
@@ -105,6 +107,9 @@ export default function AppShell({
   const detail = matchDetailRoute(location.pathname);
   const active = matchNavItem(location.pathname)
     ?? (detail ? allowed.find((it) => it.key === detail.menuKey) : undefined);
+  const taxDependency = detail?.requiresTaxPolicy ?? active?.requiresTaxPolicy ?? false;
+  const requiresTaxPolicy = typeof taxDependency === "function" ? taxDependency(snapshot) : taxDependency;
+  const routeContent = <Suspense key={location.pathname} fallback={<PageSkeleton />}><Outlet /></Suspense>;
 
   // 页面标题跟随路由：浏览器标签/收藏夹可辨识
   useEffect(() => {
@@ -375,14 +380,7 @@ export default function AppShell({
               }
             />
           )}
-          <TaxPolicyBoundary>
-            <Suspense
-              key={location.pathname}
-              fallback={<PageSkeleton />}
-            >
-              <Outlet />
-            </Suspense>
-          </TaxPolicyBoundary>
+          {requiresTaxPolicy ? <TaxPolicyBoundary>{routeContent}</TaxPolicyBoundary> : routeContent}
         </Content>
       </Layout>
 

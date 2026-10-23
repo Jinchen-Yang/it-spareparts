@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_governance: true }); return legacyAuthorizationState(); },
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { Grid } from "antd";
@@ -135,7 +140,7 @@ describe("价格与数量疑点队列", () => {
     await waitFor(() => expect(listDataQualityIssues).toHaveBeenLastCalledWith(expect.objectContaining({
       status: "confirmed_valid", side: "sales", rule_code: "quantity_unit_review",
       q: "XS-88", page: 1, page_size: 20,
-    })));
+    }), expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })));
   });
 
   it("新筛选响应先返回时，旧响应晚到不得覆盖新结果", async () => {
@@ -211,7 +216,7 @@ describe("价格与数量疑点队列", () => {
     await waitFor(() => expect(decideDataQualityIssue).toHaveBeenCalledWith(17, {
       decision: "confirmed_valid", version: 3,
       note: "已与原始采购单逐项核对，数据正确",
-    }));
+    }, expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })));
   });
 
   it("有审核动作但无采购成本权限时降为只读，并明确说明不能盲确认", async () => {
@@ -312,7 +317,7 @@ describe("价格与数量疑点队列", () => {
     fireEvent.click(within(confirmDialog).getByRole("button", { name: "确认提交" }));
     await waitFor(() => expect(reopenDataQualityIssue).toHaveBeenCalledWith(17, {
       version: 6, note: "收到新的纸质单据，需要重新核实",
-    }));
+    }, expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) })));
   });
 
   it("空队列明确说明自动阈值规则尚未启用，不宣称数据全部正确", async () => {
@@ -340,3 +345,6 @@ describe("价格与数量疑点队列", () => {
     expect(within(dialog).getByRole("button", { name: "确认数据正确" })).toBeInTheDocument();
   });
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_governance: true }));

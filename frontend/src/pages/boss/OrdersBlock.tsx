@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck } from "../../authz/access";
+import { actionRule, allRule } from "../../authz/rules";
 /**
  * 最近采购 / 最近销售 订单块（订单粒度一单一行 + 展开 PN 行明细）。
  * - PN 首屏直出（pn_preview ≤3 + 展开全部）
@@ -91,6 +93,8 @@ export default function OrdersBlock({
   localProfitRestricted, localCostRestricted,
 }: OrdersBlockProps) {
   const isPurchase = side === "purchase";
+  const resource = isPurchase ? "company_purchase_orders" : "company_sales_orders";
+  const access = useModuleAccess(resource);
   const basis = useTaxBasis(side);
   const [q, setQ] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string>("");
@@ -114,14 +118,14 @@ export default function OrdersBlock({
   }), [range, q, status, partId, poolId, person, isPurchase, sort, order, page, pageSize]);
 
   const { data, loading, error, reload } = useGuardedFetch<OrdersResp<AnyOrder>>(
-    () => (isPurchase
-      ? dashboardPurchaseOrders(query) as Promise<{ data: OrdersResp<AnyOrder> }>
-      : dashboardSales(query) as Promise<{ data: OrdersResp<AnyOrder> }>),
-    [query]);
+    context => (isPurchase
+      ? dashboardPurchaseOrders(query, context) as Promise<{ data: OrdersResp<AnyOrder> }>
+      : dashboardSales(query, context) as Promise<{ data: OrdersResp<AnyOrder> }>),
+    [query], undefined, actionRule(resource, "read"));
 
   // 权限旗标：本地先行 + 响应旗标并集（只收紧不放开）
-  const profitRestricted = localProfitRestricted || (data?.profit_restricted ?? false);
-  const costRestricted = localCostRestricted || (data?.cost_restricted ?? false);
+  const profitRestricted = !access.field("data_profit", !localProfitRestricted) || (data?.profit_restricted ?? false);
+  const costRestricted = !access.field("data_purchase_cost", !localCostRestricted) || (data?.cost_restricted ?? false);
   const partsRestricted = data?.parts_restricted ?? false;
   const manualRestricted = data?.manual_reference_restricted ?? false;
   const ordersRestricted = data?.orders_restricted ?? false;

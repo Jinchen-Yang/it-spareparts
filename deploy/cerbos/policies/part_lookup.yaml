@@ -1,0 +1,229 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "part_lookup",
+    "rules": [
+      {
+        "name": "explicit-financial-summary-read",
+        "actions": [
+          "financial_summary_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"financial_summary_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-inventory-read",
+        "actions": [
+          "inventory_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"inventory_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-market-prices-read",
+        "actions": [
+          "market_prices_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"market_prices_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-purchase-records-read",
+        "actions": [
+          "purchase_records_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"purchase_records_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-sales-records-read",
+        "actions": [
+          "sales_records_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"sales_records_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-inventory",
+        "actions": [
+          "show_inventory"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_inventory\" in P.attr.grants.part_lookup.actions && \"inventory_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-purchase-history",
+        "actions": [
+          "show_purchase_history"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_purchase_history\" in P.attr.grants.part_lookup.actions && \"purchase_records_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-quick-pricing",
+        "actions": [
+          "show_quick_pricing"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_quick_pricing\" in P.attr.grants.part_lookup.actions && (\"financial_summary_read\" in P.attr.grants.part_lookup.actions || \"market_prices_read\" in P.attr.grants.part_lookup.actions) && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-sales-history",
+        "actions": [
+          "show_sales_history"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_sales_history\" in P.attr.grants.part_lookup.actions && \"sales_records_read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-search",
+        "actions": [
+          "show_search"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_search\" in P.attr.grants.part_lookup.actions && \"read\" in P.attr.grants.part_lookup.actions && P.attr.grants.part_lookup.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_lookup\", \"scope\": P.attr.grants.part_lookup.scope, \"version\": P.attr.grants.part_lookup.version, \"field_permissions\": P.attr.grants.part_lookup.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

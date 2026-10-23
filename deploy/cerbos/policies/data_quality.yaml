@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "data_quality",
+    "rules": [
+      {
+        "name": "explicit-read-purchase-issues",
+        "actions": [
+          "read_purchase_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_purchase_issues\" in P.attr.grants.data_quality.actions && P.attr.grants.data_quality.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality\", \"scope\": P.attr.grants.data_quality.scope, \"version\": P.attr.grants.data_quality.version, \"field_permissions\": P.attr.grants.data_quality.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-sales-issues",
+        "actions": [
+          "read_sales_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_sales_issues\" in P.attr.grants.data_quality.actions && P.attr.grants.data_quality.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality\", \"scope\": P.attr.grants.data_quality.scope, \"version\": P.attr.grants.data_quality.version, \"field_permissions\": P.attr.grants.data_quality.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-review",
+        "actions": [
+          "review"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"review\" in P.attr.grants.data_quality.actions && (\"read_purchase_issues\" in P.attr.grants.data_quality.actions || \"read_sales_issues\" in P.attr.grants.data_quality.actions) && \"data_purchase_cost\" in P.attr.grants.data_quality.field_permissions && P.attr.grants.data_quality.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality\", \"scope\": P.attr.grants.data_quality.scope, \"version\": P.attr.grants.data_quality.version, \"field_permissions\": P.attr.grants.data_quality.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-issues",
+        "actions": [
+          "show_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_issues\" in P.attr.grants.data_quality.actions && (\"read_purchase_issues\" in P.attr.grants.data_quality.actions || \"read_sales_issues\" in P.attr.grants.data_quality.actions) && P.attr.grants.data_quality.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality\", \"scope\": P.attr.grants.data_quality.scope, \"version\": P.attr.grants.data_quality.version, \"field_permissions\": P.attr.grants.data_quality.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

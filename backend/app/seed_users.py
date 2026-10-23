@@ -6,6 +6,9 @@
 username 与 salesperson_name 对齐真实销售数据（防恶性竞争靠这个名字做行级匿名化）。
 口令：admin/boss 用 .env 的 ADMIN_PASSWORD；销售默认 'sales123'（首次登录应改）。
 真实上线请按企业花名册增删 _SALES，并改默认口令。
+
+这是旧 role 初始化入口：新行明确记录 legacy seed 来源；不会创建 canonical
+Grant，也不会改变已有账号的来源或配置。新授权账号应使用 canonical 管理 API。
 """
 from sqlalchemy import select
 
@@ -33,7 +36,8 @@ def _upsert(db, username, role, display_name, salesperson_name, password):
     u = db.scalar(select(SysUser).where(SysUser.username == username))
     if u is None:
         db.add(SysUser(username=username, role=role, display_name=display_name,
-                       salesperson_name=salesperson_name, password_hash=hash_password(password)))
+                       salesperson_name=salesperson_name, password_hash=hash_password(password),
+                       authorization_legacy_seed_eligible=True))
         return "created"
     return "exists"
 

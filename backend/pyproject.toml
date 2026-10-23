@@ -10,6 +10,8 @@ dependencies = [
     "anyio>=4.14.2,<5",
     "uvicorn[standard]>=0.32",
     "sqlalchemy>=2.0",
+    "cerbos==0.16.1",
+    "cerbos-sqlalchemy==0.4.0",
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "pydantic>=2.9",

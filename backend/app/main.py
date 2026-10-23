@@ -1,6 +1,7 @@
 """FastAPI 入口。"""
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from sqlalchemy import text
 from app import auth
 from app.api import (
     accounts,
+    authorization,
     agent,
     chat_sessions,
     dashboard,
@@ -87,7 +89,14 @@ if _sec_warns:
             "[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w
         )
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(_app):
+    from app.authz.runtime import activate_configured_resources
+    activate_configured_resources(engine)
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,6 +113,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(accounts.router, prefix=settings.api_prefix)
+app.include_router(authorization.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)

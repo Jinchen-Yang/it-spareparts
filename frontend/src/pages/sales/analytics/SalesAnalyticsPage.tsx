@@ -1,3 +1,7 @@
+import { useAuthorizedRunner, AuthorizationCancelled } from "../../../authz/access";
+import { actionRule, routeRule, ruleAllowed, surfaceRule } from "../../../authz/rules";
+import { useAsyncData } from "./useAsyncData";
+import { AuthzUnavailable, salesAccess, useAuthz } from "../../../authz/AuthzProvider";
 // 销售分析页（D-41 客户需求 Round1，PR-4b；D-44 销售看板扩展）：常驻区间 KPI 条
 // （单数 / 三金额 / 毛利 / 客户与新老客 / 上月对比）+ 五个页签：概览（迷你趋势 +
 // Top 5）、多维紧凑图（九维并列条形榜）、分组排行、趋势、订单明细（任意列升降序 +
@@ -67,9 +71,27 @@ function apiErrorMessage(err: unknown): string {
 }
 
 export default function SalesAnalyticsPage() {
+  const authz = useAuthz();
+  if (authz.status !== "ready" || !authz.snapshot) return <AuthzUnavailable />;
+  const access = salesAccess(authz.snapshot);
+  if (!access || !ruleAllowed(authz.snapshot, routeRule("/sales/analytics"), { sales_analysis: true }))
+    return <Alert type="warning" message="没有销售分析访问权限" description={access?.reason || "权限协议无效"} />;
+  return <SalesAnalyticsContent key={authz.snapshot.version} />;
+}
+
+function SalesAnalyticsContent() {
+  const authz = useAuthz();
+  const access = salesAccess(authz.snapshot);
+  const v2 = access?.enabled === true;
+  const visible = (id: string) => ruleAllowed(authz.snapshot, surfaceRule(`sales_analysis.${id}`), { sales_analysis: true });
+  const canExport = visible("export");
+  const runAuthorized = useAuthorizedRunner();
+
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
-  const state = parseSalesAnalyticsUrl(sp);
+  const parsed = parseSalesAnalyticsUrl(sp);
+  const availableTabs: SalesTab[] = (["overview", "compact", "groups", "trend", "orders"] as SalesTab[]).filter(tab => visible(tab));
+  const state = { ...parsed, tab: availableTabs.includes(parsed.tab) ? parsed.tab : availableTabs[0] || parsed.tab };
   const patch = useSalesAnalyticsPatch(sp, setSp);
   const today = businessToday();
 
@@ -93,24 +115,16 @@ export default function SalesAnalyticsPage() {
   const notifyOwnerStale = () => {
     if (!sessionStale(ownerToken)) return;
     setSessionDead(true);
-    setBusinessTypeOptions([]);
-    setOptions(null);
-    setSummary(null);
-    setSummaryLoading(false);
-    setSummaryError(null);
-    setOrders(null);
-    setOrdersLoading(false);
-    setOrdersError(null);
     setExporting(false);
   };
 
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
   // admin 恒全开；其余按登录快照（undefined = 未显式关闭，按不受限处理）
-  const costRestricted = !isAdmin && perms.data_purchase_cost === false;
-  const reconRestricted = !isAdmin && perms.data_reconciliation === false;
-  const customerRestricted = !isAdmin && perms.data_customer === false;
-  const profitRestricted = !isAdmin && perms.data_profit === false;
+  const costRestricted = v2 ? !access.field_permissions.includes("data_purchase_cost") : !isAdmin && perms.data_purchase_cost === false;
+  const reconRestricted = v2 ? !access.field_permissions.includes("data_reconciliation") : !isAdmin && perms.data_reconciliation === false;
+  const customerRestricted = v2 ? !access.field_permissions.includes("data_customer") : !isAdmin && perms.data_customer === false;
+  const profitRestricted = v2 ? !access.field_permissions.includes("data_profit") : !isAdmin && perms.data_profit === false;
   // 金额「显示」可见性：revenue 恒公开；不含税 / 含税随 data_purchase_cost（与后端同组）。
   // 金额「区间筛选」另按 costRestricted 整组门控——三口径一视同仁，营收无例外
   // （A-AC03 / Q-A-03 修订：区间结果的单数本身就泄漏金额分布）。
@@ -142,20 +156,9 @@ export default function SalesAnalyticsPage() {
       ? state.sort
       : AMOUNT_SORT_KEY[state.amounts[0]];
 
-  const [businessTypeOptions, setBusinessTypeOptions] = useState<SalesAnalyticsBusinessTypeOption[]>([]);
-  const [options, setOptions] = useState<SalesAnalyticsOptions | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [summary, setSummary] = useState<SalesAnalyticsSummary | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(true);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [orders, setOrders] = useState<SalesAnalyticsOrdersResp | null>(null);
-  const [ordersLoading, setOrdersLoading] = useState(true);
-  const [ordersError, setOrdersError] = useState<string | null>(null);
   const pageSize = state.pageSize;
   const [retryTick, setRetryTick] = useState(0);
-  const summarySeq = useRef(0);
-  const ordersSeq = useRef(0);
-
 
   // KPI。依赖是解析后的筛选键（金额口径多选不在内：切换口径是纯展示，不重新请求；
   // 含退货开关只影响列表 reconciled_display，也不触发 KPI 重拉）。todayKey 进依赖：
@@ -169,135 +172,55 @@ export default function SalesAnalyticsPage() {
   );
   const filterKey = JSON.stringify(apiFilters);
 
-  // 筛选候选：业务类型等计数为全时间口径（与筛选无关）；金额拖动条右端（amount_range）
-  // 随其他筛选变化，故按筛选键重拉（后端忽略金额区间本身，拖动不会改变右端）。
-  // 落地前比对 localStorage token（DL-010）：换账号后的迟到候选不进当前 UI，且
-  // 检测到失效要通知页级清旧上下文（DL-010 落地矩阵）；所属会话失效时请求前拒发。
+  const optionsQuery = useAsyncData<SalesAnalyticsOptions>(
+    context => fetchSalesAnalyticsOptions(apiFilters, "", context), [filterKey], apiErrorMessage,
+    !sessionDead, ownerToken, notifyOwnerStale, "read_options");
+  const options = optionsQuery.data;
+  const businessTypeOptions = options?.business_types ?? [];
+  const summaryVisible = visible("summary_counts") || visible("summary_amounts") || visible("summary_profit");
+  const summaryQuery = useAsyncData<SalesAnalyticsSummary>(
+    context => fetchSalesAnalyticsSummary(apiFilters, context), [filterKey, retryTick], apiErrorMessage,
+    summaryVisible && !sessionDead, ownerToken, notifyOwnerStale, "read_summary");
+  const { data: summary, loading: summaryLoading, error: summaryError } = summaryQuery;
+  const ordersQuery = useAsyncData<SalesAnalyticsOrdersResp>(
+    context => fetchSalesAnalyticsOrders({ ...apiFilters, sort: requestSort, order: state.order,
+      page: state.page, page_size: pageSize, include_returns: state.includeReturns }, context),
+    [filterKey, requestSort, state.order, state.page, state.includeReturns, pageSize, retryTick], apiErrorMessage,
+    visible("orders") && state.tab === "orders" && !sessionDead, ownerToken, notifyOwnerStale, "read_orders");
+  const { data: orders, loading: ordersLoading, error: ordersError } = ordersQuery;
   useEffect(() => {
-    if (sessionExpired()) return;
-    let alive = true;
-    const token = readSessionToken();
-    fetchSalesAnalyticsOptions(apiFilters)
-      .then(({ data }) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (!alive) return;
-        setBusinessTypeOptions(data.business_types ?? []);
-        setOptions(data);
-      })
-      .catch((err) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (alive) message.error(`筛选取值加载失败：${apiErrorMessage(err)}`);
-      });
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey]);
-
-  useEffect(() => {
-    if (sessionExpired()) return;
-    const seq = ++summarySeq.current;
-    const token = readSessionToken();
-    setSummaryLoading(true);
-    setSummaryError(null);
-    fetchSalesAnalyticsSummary(apiFilters)
-      .then(({ data }) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq !== summarySeq.current) return;
-        setSummary(data);
-      })
-      .catch((err) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq !== summarySeq.current) return;
-        setSummary(null);
-        setSummaryError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq === summarySeq.current) setSummaryLoading(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, retryTick]);
-
-  // 大单倒序列表：筛选 + 生效排序 + 分页 + 含退货。排序键看响应回显（被遮蔽时
-  // 后端已回退 order_date，Q-A-04），DrillTable 据此高亮列头并如实提示。
-  useEffect(() => {
-    // 所属会话失效时先拒发并清上下文（DL-010 返工），再看页签是否需要取数
-    if (sessionExpired()) return;
-    // 只在订单明细页签取数；切回时按当前筛选重拉（页签在依赖中）
-    if (state.tab !== "orders") return;
-    const seq = ++ordersSeq.current;
-    const token = readSessionToken();
-    setOrdersLoading(true);
-    setOrdersError(null);
-    fetchSalesAnalyticsOrders({
-      ...apiFilters,
-      sort: requestSort,
-      order: state.order,
-      page: state.page,
-      page_size: pageSize,
-      include_returns: state.includeReturns,
-    })
-      .then(({ data }) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq !== ordersSeq.current) return;
-        setOrders(data);
-        // 过期分享链的页码可能超出总页数（后端只校验 page≥1，不按 total 钳制）：
-        // 空态文案与分页高亮都会失真。按 total 收敛回末页；updater 形式取最新
-        // URL，避免迟到的响应用旧闭包覆盖用户刚改的其他键。state.page 变化自然
-        // 触发重拉（收敛后 page≤maxPage，不会循环）。
-        const maxPage = Math.max(1, Math.ceil(data.total / pageSize));
-        if (state.page > maxPage) {
-          setSp(
-            (prev) => {
-              const next = new URLSearchParams(prev);
-              if (maxPage > 1) next.set("page", String(maxPage));
-              else next.delete("page");
-              return next;
-            },
-            { replace: true },
-          );
-        }
-      })
-      .catch((err) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq !== ordersSeq.current) return;
-        setOrders(null);
-        setOrdersError(apiErrorMessage(err));
-      })
-      .finally(() => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        if (seq === ordersSeq.current) setOrdersLoading(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, requestSort, state.order, state.page, state.includeReturns, pageSize, retryTick, state.tab]);
+    if (!orders) return;
+    const maxPage = Math.max(1, Math.ceil(orders.total / pageSize));
+    if (state.page > maxPage) setSp(prev => {
+      const next = new URLSearchParams(prev);
+      if (maxPage > 1) next.set("page", String(maxPage)); else next.delete("page");
+      return next;
+    }, { replace: true });
+  }, [orders, pageSize, state.page, setSp]);
 
   const onExport = () => {
+    if (!canExport) return;
     // 所属会话失效（静默换 token / 登出）：拒发并以页面级提示替代旧会话数据——
     // 不让旧会话的导出按钮以当前账号身份发请求（DL-010 返工）
     if (sessionExpired()) return;
     setExporting(true);
-    const token = readSessionToken();
-    downloadSalesOrdersCsv(apiFilters, requestSort, state.order)
-      .then(({ data }) => {
-        // 下载触发前再校验会话（DL-010）：换账号后的迟到 blob 不落在当前会话，
-        // 并通知页级清旧上下文（落地矩阵）
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
+    void runAuthorized({
+      rule: surfaceRule("sales_analysis.export"), legacy: { sales_analysis: true },
+      queryKey: JSON.stringify([apiFilters, requestSort, state.order]),
+      request: context => downloadSalesOrdersCsv(apiFilters, requestSort, state.order, context),
+      commit: ({ data }) => {
         const url = URL.createObjectURL(data);
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `销售单-${today.format("YYYYMMDD")}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-      })
-      .catch((err) => {
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        const status = (err as { response?: { status?: number } })?.response?.status;
-        message.error(status === 413 ? "超过导出上限 10,000 单，请收窄区间或筛选" : `导出失败：${apiErrorMessage(err)}`);
-      })
-      .finally(() => {
-        // finally 也守卫：失效会话的收尾不再触碰当前 UI 状态；失效即通知页级清理
-        if (sessionStale(token)) { notifyOwnerStale(); return; }
-        setExporting(false);
-      });
+        a.href = url; a.download = `销售单-${today.format("YYYYMMDD")}.csv`;
+        a.click(); URL.revokeObjectURL(url); setExporting(false);
+      },
+    }).catch(err => {
+      if (err instanceof AuthorizationCancelled) { notifyOwnerStale(); return; }
+      if (sessionStale(ownerToken)) { notifyOwnerStale(); return; }
+      setExporting(false);
+      const status = err?.response?.status;
+      message.error(status === 413 ? "超过导出上限 10,000 单，请收窄区间或筛选" : `导出失败：${apiErrorMessage(err)}`);
+    });
   };
 
   const ordersPane = (
@@ -332,6 +255,7 @@ export default function SalesAnalyticsPage() {
               // 页级下钻入口（DL-010 旧行点击路径）：静默换 token 后点旧行，抽屉
               // 自身守卫会拒发并提示，但主页面旧数据也要一并清掉——不能只靠抽屉
               notifyOwnerStale();
+              if (!visible("order_detail") || sessionExpired()) return;
               patch({ orderId }, { history: "push" });
             }}
           />
@@ -355,6 +279,11 @@ export default function SalesAnalyticsPage() {
             : "销售单数与三金额（不含税 / 含税订单金额 / 营收）"
         }
       />
+      {v2 && <Alert style={{ marginBottom: 12 }} showIcon
+        type={access.scope === "assigned_customers" && access.customer_count === 0 ? "warning" : "info"}
+        message={access.scope === "all" ? "当前数据范围：全部客户" : access.customer_count === null ? "当前数据范围：负责客户" : `当前数据范围：负责的 ${access.customer_count} 个客户`}
+        description={access.scope === "assigned_customers" && access.customer_count === 0
+          ? "尚未分配客户，当前没有可见订单。请联系管理员设置客户归属。" : undefined} />}
       <Card>
         <FilterBar
           state={effectiveState}
@@ -370,7 +299,7 @@ export default function SalesAnalyticsPage() {
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
         />
 
-        {!amountRangeHidden && !sessionDead && (
+        {visible("amount_histogram") && !amountRangeHidden && !sessionDead && (
           <AmountHistogram apiFilters={apiFilters} filterKey={filterKey} toMessage={apiErrorMessage}
             ownerToken={ownerToken} onOwnerStale={notifyOwnerStale} />
         )}
@@ -394,12 +323,13 @@ export default function SalesAnalyticsPage() {
             description={summaryError}
             action={<Button type="link" size="small" onClick={() => setRetryTick((t) => t + 1)}>重试</Button>}
           />
-        ) : (
+        ) : summaryVisible ? (
           <SummaryView
             summary={summaryLoading || !summary ? null : state.compare ? summary : { ...summary, compare: null, compare_available: undefined }}
             amounts={state.amounts}
-            profitRestricted={profitRestricted} />
-        )}
+            profitRestricted={profitRestricted || !visible("summary_profit")}
+            showCounts={visible("summary_counts")} showAmounts={visible("summary_amounts")} />
+        ) : null}
 
         {sessionDead ? null : (
         <Tabs
@@ -414,7 +344,7 @@ export default function SalesAnalyticsPage() {
                     onChange={(v) => patch({ compare: v })} />
                 </span>
               </Tooltip>
-              {state.tab === "orders" && (
+              {state.tab === "orders" && canExport && (
                 <Tooltip title="按当前筛选与排序导出订单 CSV（上限 10,000 单；看不到的字段整列不导出）">
                   <Button size="small" icon={<DownloadOutlined />} loading={exporting} onClick={onExport}>
                     导出
@@ -460,21 +390,22 @@ export default function SalesAnalyticsPage() {
               ),
             },
             { key: "orders", label: "订单明细", children: state.tab === "orders" && ordersPane },
-          ]}
+          ].filter(item => availableTabs.includes(item.key as SalesTab))}
         />
         )}
       </Card>
 
-      <DetailDrawer
+      {visible("order_detail") && <DetailDrawer
+        showReconciliation={visible("reconciliation")}
         orderId={state.orderId}
         includeReturns={state.includeReturns}
         amounts={state.amounts}
-        reconRestricted={reconRestricted}
+        reconRestricted={reconRestricted || !visible("reconciliation")}
         costRestricted={costRestricted}
         ownerToken={ownerToken}
         onOwnerStale={notifyOwnerStale}
         onClose={() => patch({ orderId: null })}
-      />
+      />}
     </ConfigProvider>
   );
 }

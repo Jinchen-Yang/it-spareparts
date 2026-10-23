@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "data_quality_calibration",
+    "rules": [
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.data_quality_calibration.actions && \"data_purchase_cost\" in P.attr.grants.data_quality_calibration.field_permissions && P.attr.grants.data_quality_calibration.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality_calibration\", \"scope\": P.attr.grants.data_quality_calibration.scope, \"version\": P.attr.grants.data_quality_calibration.version, \"field_permissions\": P.attr.grants.data_quality_calibration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-preview",
+        "actions": [
+          "show_preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_preview\" in P.attr.grants.data_quality_calibration.actions && \"preview\" in P.attr.grants.data_quality_calibration.actions && \"data_purchase_cost\" in P.attr.grants.data_quality_calibration.field_permissions && P.attr.grants.data_quality_calibration.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"data_quality_calibration\", \"scope\": P.attr.grants.data_quality_calibration.scope, \"version\": P.attr.grants.data_quality_calibration.version, \"field_permissions\": P.attr.grants.data_quality_calibration.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

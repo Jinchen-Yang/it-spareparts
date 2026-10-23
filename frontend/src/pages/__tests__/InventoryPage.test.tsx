@@ -1,7 +1,12 @@
+function renderWithoutMotion(...args: Parameters<typeof fixtureRenderWithoutMotion>) { prepareLegacyPageFixture({page_inventory:true}); return fixtureRenderWithoutMotion(...args); }
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
 import { MemoryRouter } from "react-router-dom";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanupAntd, renderWithoutMotion } from "../../test/antdRender";
+import { cleanupAntd, renderWithoutMotion as fixtureRenderWithoutMotion } from "../../test/antdRender";
 
 const get = vi.hoisted(() => vi.fn());
 vi.mock("../../api", () => ({ default: { get } }));
@@ -21,7 +26,7 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 it("库存加载失败可直接重试并恢复列表", async () => {
-  get.mockRejectedValueOnce({ response: { status: 503, data: { detail: "库存查询暂不可用" } } });
+  get.mockRejectedValueOnce({ response: { status: 500, data: { detail: "库存查询暂不可用" } } });
   get.mockResolvedValueOnce({
     data: {
       items: [row(1, "PN-RETRY")],
@@ -39,12 +44,13 @@ it("库存加载失败可直接重试并恢复列表", async () => {
   expect(get).toHaveBeenCalledTimes(2);
   expect(get).toHaveBeenLastCalledWith("/inventory/dynamic", {
     params: { q: undefined, page: 1, page_size: 20 },
+    headers: {Authorization: "Bearer legacy-page-fixture-owner"}, signal: expect.any(AbortSignal),
   });
 });
 
 it("翻页失败重试原页与原搜索条件，不使用未提交的搜索草稿", async () => {
   get.mockResolvedValueOnce({ data: { items: [row(1, "PN-FIRST")], total: 40 } });
-  get.mockRejectedValueOnce({ response: { status: 503, data: { detail: "库存查询暂不可用" } } });
+  get.mockRejectedValueOnce({ response: { status: 500, data: { detail: "库存查询暂不可用" } } });
   get.mockResolvedValueOnce({ data: { items: [row(2, "PN-SECOND")], total: 40 } });
   renderWithoutMotion(<MemoryRouter><InventoryPage /></MemoryRouter>);
   expect(await screen.findByText("PN-FIRST")).toBeInTheDocument();
@@ -60,5 +66,6 @@ it("翻页失败重试原页与原搜索条件，不使用未提交的搜索草�
   expect(get.mock.calls.map(([, config]) => config.params.page)).toEqual([1, 2, 2]);
   expect(get).toHaveBeenLastCalledWith("/inventory/dynamic", {
     params: { q: undefined, page: 2, page_size: 20 },
+    headers: {Authorization: "Bearer legacy-page-fixture-owner"}, signal: expect.any(AbortSignal),
   });
 });

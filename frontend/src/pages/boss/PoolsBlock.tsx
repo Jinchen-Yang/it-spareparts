@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck, useRouteAccess } from "../../authz/access";
+import { actionRule, anyRule, validateBlockAccess, blockAllowed } from "../../authz/rules";
 import { tokens } from "../../tokens";
 import "./PoolsBlock.css";
 /**
@@ -74,6 +76,12 @@ export default function PoolsBlock({
   dateRange, scopeNote, localCostRestricted, localGovernanceRestricted, canOpenPoolManagement,
 }: PoolsBlockProps) {
   const navigate = useNavigate();
+  const canDetail = useRouteAccess("/pool-analysis/:groupId").allowed;
+  const analysisAccess = useModuleAccess("company_pool_analysis");
+  const policyAccess = useModuleAccess("pool_price_policy");
+  localCostRestricted = !analysisAccess.field("data_purchase_cost", !localCostRestricted);
+  const policyRestricted = !policyAccess.field("data_pool_price_governance", !localGovernanceRestricted);
+  localGovernanceRestricted = !analysisAccess.field("data_pool_price_governance", !localGovernanceRestricted);
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
   const [pMode, setPMode] = useState<MetricMode>("total");
@@ -85,16 +93,16 @@ export default function PoolsBlock({
   useEffect(() => { setPage(1); }, [dateRange.date_from, dateRange.date_to, sort]);
 
   const { data, loading, error, reload } = useGuardedFetch<PoolsResp>(
-    () => dashboardPools({ ...dateRange, sort, page, page_size: pageSize }),
-    [dateRange, sort, page, pageSize]);
+    context => dashboardPools({ ...dateRange, sort, page, page_size: pageSize }, context),
+    [dateRange, sort, page, pageSize], undefined, actionRule("company_pool_analysis", "read_summary"));
   const coverage = useGuardedFetch<PnPoolListResp>(
-    () => localGovernanceRestricted
-      ? Promise.resolve({ data: {
-        total: 0, page: 1, page_size: 1, items: [], price_restricted: true,
-        coverage_restricted: true, coverage: null,
-      } })
-      : listPnPools({ status: "active", page: 1, page_size: 1 }),
-    [localGovernanceRestricted]);
+    async context => {
+      const response = await listPnPools({ status: "active", page: 1, page_size: 1 }, context);
+      if (!policyAccess.legacy) validateBlockAccess(response.data.block_access, ["catalog", "price_policy", "policy_coverage"]);
+      return response;
+    },
+    [policyRestricted], undefined, actionRule("pool_price_policy", "read"), !policyRestricted);
+
 
   // 表头切换（合计↔均价）时，若该列正是当前排序列 → 排序字段同步切换
   const togglePMode = () => {
@@ -112,6 +120,7 @@ export default function PoolsBlock({
     mode === "total" ? m?.total_amount : m?.weighted_avg_unit_price;
 
   const violationCell = (v: number | null, hasLimitLabel: string) => {
+    if (localGovernanceRestricted) return <span style={MUTED}>无权限</span>;
     if (v == null) {
       return localGovernanceRestricted
         ? <span style={MUTED}>无权限</span>
@@ -136,10 +145,10 @@ export default function PoolsBlock({
   const cols: ColumnsType<PoolListItem> = [
     { title: "池名", key: "name", width: 170, ellipsis: true,
       render: (_, r) => (
-        <Link to={poolAnalysisPath(r.group_id, dateRange)}
+        canDetail ? <Link to={poolAnalysisPath(r.group_id, dateRange)}
           aria-label={`进入池「${r.name || r.group_id}」分析详情`}>
           {r.name || `池 #${r.group_id}`}
-        </Link>) },
+        </Link> : <span>{r.name || `池 #${r.group_id}`}</span>) },
     { title: "成员", dataIndex: "member_count", key: "member_count", width: 68, align: "right",
       ...sortProps("member_count") },
     { title: <MetricHeaderToggle side="purchase" mode={pMode} basis={purchaseBasis}
@@ -210,14 +219,14 @@ export default function PoolsBlock({
   return (
     <Card size="small" style={{ marginBottom: 16 }} title="互通池列表"
       extra={<span style={MUTED}>{scopeNote}</span>}>
-      {!localGovernanceRestricted && coverage.error && (
+      {!policyRestricted && coverage.error && (
         <Alert type="warning" showIcon style={{ marginBottom: 10 }}
           message="约束价覆盖率暂时加载失败，不影响下方经营指标。"
           action={<Button size="small" onClick={coverage.reload}>重试</Button>} />
       )}
       <PoolPolicyCoverage
         coverage={coverage.data?.coverage}
-        restricted={localGovernanceRestricted || !!coverage.data?.coverage_restricted}
+        restricted={policyRestricted || (!policyAccess.legacy && !blockAllowed(coverage.data?.block_access, "policy_coverage")) || !!coverage.data?.coverage_restricted}
         scopeNote="全局有效池，不受当前时间范围影响"
         onSelect={canOpenPoolManagement
           ? (missing) => navigate(`/pool-management?policy_missing=${missing}`) : undefined}

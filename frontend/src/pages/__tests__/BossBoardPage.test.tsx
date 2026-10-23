@@ -1,3 +1,12 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_boss_board": true}, "readonly");
+  return fixtureRender(...args);
+}
 /** 老板经营看板 v2 行为测试。
  *
  * 断言口径：
@@ -8,7 +17,7 @@
  * - 池列表表头 合计↔均价 循环切换：aria-label 完整、排序字段同步切换。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { Location, NavigateFunction } from "react-router-dom";
 import dayjs from "dayjs";
@@ -189,13 +198,13 @@ describe("URL 深链与筛选下发", () => {
     const from = dayjs().subtract(6, "day").format(D);
     const to = dayjs().format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
-      expect.objectContaining({ date_from: from, date_to: to, part_id: 5, pool_group_id: 3, purchaser: "张" })));
+      expect.objectContaining({ date_from: from, date_to: to, part_id: 5, pool_group_id: 3, purchaser: "张" }), CAPTURED_REQUEST));
     await waitFor(() => expect(dashboardSales).toHaveBeenCalledWith(
-      expect.objectContaining({ part_id: 5, pool_group_id: 3, salesperson: "李" })));
+      expect.objectContaining({ part_id: 5, pool_group_id: 3, salesperson: "李" }), CAPTURED_REQUEST));
     await waitFor(() => expect(dashboardPartRanking).toHaveBeenCalledWith(
-      expect.objectContaining({ part_id: 5, pool_group_id: 3 })));
+      expect.objectContaining({ part_id: 5, pool_group_id: 3 }), CAPTURED_REQUEST));
     // KPI 仅时间口径，不带 PN/池
-    await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({ date_from: from, date_to: to }));
+    await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({ date_from: from, date_to: to }, CAPTURED_REQUEST));
   });
 
   it("切时间范围 push 进历史；后退恢复旧筛选", async () => {
@@ -205,13 +214,13 @@ describe("URL 深链与筛选下发", () => {
     await waitFor(() => expect(curLoc.search).toContain("range=today"));
     const today = dayjs().format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
-      expect.objectContaining({ date_from: today, date_to: today })));
+      expect.objectContaining({ date_from: today, date_to: today }), CAPTURED_REQUEST));
 
     act(() => nav(-1));   // 后退：回到默认近30天
     await waitFor(() => expect(curLoc.search).not.toContain("range=today"));
     const from30 = dayjs().subtract(29, "day").format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenLastCalledWith(
-      expect.objectContaining({ date_from: from30 })));
+      expect.objectContaining({ date_from: from30 }), CAPTURED_REQUEST));
   });
 
   it("仅选择时间范围也显示清除按钮，并可恢复默认近30天", async () => {
@@ -222,7 +231,7 @@ describe("URL 深链与筛选下发", () => {
     await waitFor(() => expect(curLoc.search).not.toContain("range=today"));
     const from30 = dayjs().subtract(29, "day").format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenLastCalledWith(
-      expect.objectContaining({ date_from: from30, date_to: dayjs().format(D) })));
+      expect.objectContaining({ date_from: from30, date_to: dayjs().format(D) }), CAPTURED_REQUEST));
   });
 
   it("URL 自定义时间 from>to 不下发反向窗口，退回默认30天且仍可清除", async () => {
@@ -230,7 +239,7 @@ describe("URL 深链与筛选下发", () => {
     const from30 = dayjs().subtract(29, "day").format(D);
     await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({
       date_from: from30, date_to: dayjs().format(D),
-    }));
+    }, CAPTURED_REQUEST));
     expect(screen.getByRole("button", { name: "清除全部筛选" })).toBeInTheDocument();
   });
 
@@ -239,7 +248,7 @@ describe("URL 深链与筛选下发", () => {
     const from30 = dayjs().subtract(29, "day").format(D);
     await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({
       date_from: from30, date_to: dayjs().format(D),
-    }));
+    }, CAPTURED_REQUEST));
   });
 
   it("旧趋势参数不再改变订单时间窗口，也不算当前筛选", async () => {
@@ -247,7 +256,7 @@ describe("URL 深链与筛选下发", () => {
     const from30 = dayjs().subtract(29, "day").format(D);
     const today = dayjs().format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
-      expect.objectContaining({ date_from: from30, date_to: today })));
+      expect.objectContaining({ date_from: from30, date_to: today }), CAPTURED_REQUEST));
     expect(dashboardPurchaseOrders).not.toHaveBeenCalledWith(
       expect.objectContaining({ date_from: "2026-07-01", date_to: "2026-07-20" }));
     expect(screen.queryByRole("button", { name: "清除全部筛选" })).toBeNull();
@@ -353,7 +362,7 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
   it("展示同源覆盖数字，点击缺失项进入池管理页对应筛选", async () => {
     renderAt("/boss");
     expect(await screen.findByText("约束价覆盖")).toBeInTheDocument();
-    expect(listPnPools).toHaveBeenCalledWith({ status: "active", page: 1, page_size: 1 });
+    expect(listPnPools).toHaveBeenCalledWith({ status: "active", page: 1, page_size: 1 }, CAPTURED_REQUEST);
 
     fireEvent.click(screen.getByRole("button", { name: "筛选未设采购上限的互通池" }));
     expect(await screen.findByText("池管理页桩")).toBeInTheDocument();
@@ -396,18 +405,18 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
     const th = toggle.closest("th")!;
     fireEvent.click(th);
     await waitFor(() => expect(dashboardPools).toHaveBeenCalledWith(
-      expect.objectContaining({ sort: "purchase_total" })));
+      expect.objectContaining({ sort: "purchase_total" }), CAPTURED_REQUEST));
     // 聚焦与键盘事件不能冒泡成列排序；随后点击仍只切换口径。
     toggle.focus();
     expect(toggle).toHaveFocus();
     fireEvent.keyDown(toggle, { key: "Enter" });
-    expect(dashboardPools).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "purchase_total" }));
+    expect(dashboardPools).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "purchase_total" }), CAPTURED_REQUEST);
     // 表头循环切换 → 显示口径与排序字段一起变
     fireEvent.click(toggle);
     await screen.findByRole("button",
       { name: "采购指标：当前显示平均单价(不含税)，点击切换为金额合计" });
     await waitFor(() => expect(dashboardPools).toHaveBeenCalledWith(
-      expect.objectContaining({ sort: "purchase_average" })));
+      expect.objectContaining({ sort: "purchase_average" }), CAPTURED_REQUEST));
   });
 
   it("采购/销售指标列宽固定 200，表格横滚宽度 1180（换行后的口径按钮不挤压金额）", async () => {

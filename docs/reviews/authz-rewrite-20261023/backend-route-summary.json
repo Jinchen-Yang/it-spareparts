@@ -1,0 +1,42 @@
+{
+  "baseline": "7a9fd2098acb6be0009a59a84e7d7330bb960d6b",
+  "route_objects": 382,
+  "method_path_rows": 386,
+  "route_class_counts": {
+    "Route": 4,
+    "APIRoute": 365,
+    "ReceiptAuditRoute": 13
+  },
+  "websocket_rows": 0,
+  "endpoint_modules": 63,
+  "method_counts": {
+    "GET": 192,
+    "POST": 156,
+    "DELETE": 6,
+    "PUT": 10,
+    "PATCH": 18,
+    "HEAD": 4
+  },
+  "classification_counts": {
+    "human business endpoint": 353,
+    "authentication bootstrap": 2,
+    "service integration": 7,
+    "context-dependent business endpoint": 14,
+    "framework documentation": 8,
+    "health probe": 2
+  },
+  "mutually_exclusive_section_counts": {
+    "human_business_excluding_auth": 365,
+    "authentication": 4,
+    "service_integration": 7,
+    "framework_documentation_method_path": 8,
+    "health": 2
+  },
+  "scope": "Every registered HTTP/WebSocket route in app.main runtime; current API prefix default /api; no endpoint invocation or database session",
+  "limitations": [
+    "Static call trace limited to depth 3 (dependency helper depth 2); dynamic dispatch and nested closures are not an authorization proof.",
+    "Observed keys can occur in masking or audit paths and are not automatically mandatory grants.",
+    "CORS and migration body-size/no-store middleware are not authorization gates.",
+    "Runtime dependency list includes router and app.include_router injected dependencies."
+  ]
+}

@@ -4,7 +4,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,8 @@ from app.security import (
     require_page,
 )
 from app.services import agent_files
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.authz.provenance import AgentAccess, execution_access, unavailable
 
 _log = logging.getLogger("agent")
 # 后端页面准入：page_chat=False 的角色连接口都进不来（前端藏菜单≠后端拦接口，PR-审计 HUB-1）。
@@ -48,7 +50,11 @@ def chat(
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
+    access = AgentAccess(db.get_bind(), identity)
+    if access.authoritative and any(m.role != "user" for m in req.messages):
+        raise unavailable()
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
@@ -56,7 +62,9 @@ def chat(
     if not provider.is_configured():
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     try:
-        out = runtime.run(db, [m.model_dump() for m in req.messages], ctx)
+        out = runtime.run(db, [m.model_dump() for m in req.messages], ctx, access=access)
+    except HTTPException:
+        raise
     except provider.LLMNotConfigured:
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     except Exception as exc:  # noqa: BLE001 —— 上游 LLM 网络/配额错误：不泄露细节
@@ -72,8 +80,12 @@ def chat_stream(
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> StreamingResponse:
     """SSE 流式问答：data: {type: delta|tool|tool_done|done|error, ...}\\n\\n"""
+    access = AgentAccess(db.get_bind(), identity)
+    if access.authoritative and any(m.role != "user" for m in req.messages):
+        raise unavailable()
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
@@ -83,34 +95,43 @@ def chat_stream(
         return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     def gen():
+        access.check()
         if not provider.is_configured():
             yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
+            access.check()
             yield _sse({"type": "done", "tool_calls": [], "configured": False})
             return
         try:
-            for ev in runtime.run_stream(db, [m.model_dump() for m in req.messages], ctx):
+            for ev in runtime.run_stream(db, [m.model_dump() for m in req.messages], ctx, access=access):
+                access.check()
                 yield _sse(ev)
+        except HTTPException:
+            yield _sse({"type": "error", "message": "授权已失效，请重新生成", "code": "AUTHZ_ARTIFACT_STALE"})
         except Exception as exc:  # noqa: BLE001 —— 流中途出错：发 error 事件而非半截断流
             _log.error("agent stream failed: %r", exc)
             yield _sse({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
 
     return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
+                             headers={"Cache-Control": "no-store",
                                       "X-Accel-Buffering": "no"})
 
 
 @router.post("/upload")
 async def upload(
+    db: Session = Depends(get_db),
     file: UploadFile = File(...),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """上传 xlsx（询价单/型号清单等），返回 file_id 供对话引用。"""
     record_access_log(ctx, "upload", "agent_file", {"filename": file.filename})
     content = await file.read()
     try:
         # 归属记真实身份(user_id)而非角色 → 下载/读取按人做越权校验
-        return agent_files.save_upload(content, file.filename or "上传.xlsx", ctx.user_id)
+        access = AgentAccess(db.get_bind(), identity)
+        with execution_access(access):
+            return agent_files.save_upload(content, file.filename or "上传.xlsx", ctx.user_id)
     except agent_files.FileError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -118,38 +139,57 @@ async def upload(
 @router.get("/files/{file_id}")
 def download(
     file_id: str,
+    db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
-) -> FileResponse:
-    """下载智能体生成/上传的文件（仅本人创建的；admin 例外）。"""
+    identity: VerifiedIdentity = Depends(current_verified_identity),
+) -> StreamingResponse:
+    """下载智能体生成/上传的文件；新权威只允许来源仍有效的本人产物。"""
     record_access_log(ctx, "download", "agent_file", {"file_id": file_id})
+    access = AgentAccess(db.get_bind(), identity)
     try:
-        owner = agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
+        with execution_access(access):
+            if not access.authoritative:
+                owner = agent_files.owner_of(file_id)
+                if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
+            path, name = agent_files.get_download(file_id)
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    # 防越权下载他人上传的报价/合同(IDOR)：全量角色放行，否则需本人创建
-    if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
-    try:
-        path, name = agent_files.get_download(file_id)
-    except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    return FileResponse(
-        path, filename=name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        # 含价格数据：禁止浏览器缓存（否则换人/过期 token 仍能命中缓存拿到文件）
-        headers={"Cache-Control": "no-store"},
-    )
+        raise HTTPException(404, "文件不存在或不可访问") from exc
+    db.rollback()
+
+    def chunks():
+        with path.open("rb") as source:
+            while True:
+                access.check()
+                chunk = source.read(64 * 1024)
+                if not chunk:
+                    return
+                access.check()
+                yield chunk
+
+    from urllib.parse import quote
+    return StreamingResponse(chunks(), media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store", "Content-Disposition": "attachment; filename*=utf-8''" + quote(name)})
 
 
 @router.get("/files/{file_id}/preview")
 def preview_file(
     file_id: str,
+    db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity = Depends(current_verified_identity),
 ) -> dict:
     """在线预览文件内容（仅本人创建的；admin 例外）——与 download 同一归属校验，防 IDOR。"""
     record_access_log(ctx, "preview", "agent_file", {"file_id": file_id})
+    access = AgentAccess(db.get_bind(), identity)
+    if access.authoritative:
+        try:
+            with execution_access(access):
+                return agent_files.preview(file_id)
+        except agent_files.FileError as exc:
+            raise HTTPException(404, "文件不存在或不可访问") from exc
     try:
         owner = agent_files.owner_of(file_id)
     except agent_files.FileError as exc:

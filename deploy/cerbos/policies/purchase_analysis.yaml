@@ -1,0 +1,129 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "purchase_analysis",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-groups",
+        "actions": [
+          "show_groups"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_groups\" in P.attr.grants.purchase_analysis.actions && \"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-order-detail",
+        "actions": [
+          "show_order_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_order_detail\" in P.attr.grants.purchase_analysis.actions && \"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-orders",
+        "actions": [
+          "show_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_orders\" in P.attr.grants.purchase_analysis.actions && \"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary",
+        "actions": [
+          "show_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary\" in P.attr.grants.purchase_analysis.actions && \"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-trend",
+        "actions": [
+          "show_trend"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_trend\" in P.attr.grants.purchase_analysis.actions && \"read\" in P.attr.grants.purchase_analysis.actions && P.attr.grants.purchase_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"purchase_analysis\", \"scope\": P.attr.grants.purchase_analysis.scope, \"version\": P.attr.grants.purchase_analysis.version, \"field_permissions\": P.attr.grants.purchase_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

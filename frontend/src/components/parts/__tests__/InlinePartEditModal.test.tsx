@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
+vi.mock("../../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_master_data: true }); return legacyAuthorizationState(); },
+}));
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
 import { api } from "../../../api";
@@ -296,3 +301,6 @@ it.each(["账号", "上下文"])("冲突基线慢加载期间切换%s，迟到�
   expect(screen.getByLabelText("描述")).toHaveValue(change === "账号" ? "原账号草稿" : "新上下文描述");
   expect(localStorage.getItem("token")).toBe(change === "账号" ? "new-account" : "editor-token");
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_master_data: true }));

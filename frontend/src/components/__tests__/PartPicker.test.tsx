@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({page_parts: true}); return legacyAuthorizationState(); },
+}));
 /** PartPicker（可复用型号选择器）：远程统一搜索 + 防抖 + onChange 只回传 part_id。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -35,7 +40,7 @@ describe("PartPicker", () => {
     // 防抖后才发请求
     expect(unifiedSearch).not.toHaveBeenCalled();
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith(
-      "02311DYQ", { pageSize: 20 }), { timeout: 3000 });
+      "02311DYQ", { pageSize: 20, capture: expect.objectContaining({ token: expect.any(String), signal: expect.any(AbortSignal) }) }), { timeout: 3000 });
     // 精确命中排第一并带"精确"徽标；相似候选在"相似型号（非精确）"分组
     await screen.findByText("精确匹配");
     await screen.findByText("相似型号（非精确）");
@@ -72,3 +77,6 @@ describe("PartPicker", () => {
     expect(screen.getAllByText("NEW-RESULT").length).toBeGreaterThan(0);
   });
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_parts: true }));

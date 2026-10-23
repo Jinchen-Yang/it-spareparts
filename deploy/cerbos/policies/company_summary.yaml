@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "company_summary",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-kpi-coverage",
+        "actions": [
+          "show_kpi_coverage"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_kpi_coverage\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-kpi-profit",
+        "actions": [
+          "show_kpi_profit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_kpi_profit\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-kpi-purchase",
+        "actions": [
+          "show_kpi_purchase"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_kpi_purchase\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-kpi-sales",
+        "actions": [
+          "show_kpi_sales"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_kpi_sales\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-order-health",
+        "actions": [
+          "show_order_health"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_order_health\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-profit-ranking",
+        "actions": [
+          "show_profit_ranking"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_profit_ranking\" in P.attr.grants.company_summary.actions && \"read\" in P.attr.grants.company_summary.actions && P.attr.grants.company_summary.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_summary\", \"scope\": P.attr.grants.company_summary.scope, \"version\": P.attr.grants.company_summary.version, \"field_permissions\": P.attr.grants.company_summary.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

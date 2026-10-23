@@ -74,7 +74,7 @@ def _load_purchase_events(db: Session):
     return events, fallback
 
 
-def recompute(db: Session) -> dict:
+def recompute(db: Session, *, _commit: bool = True) -> dict:
     """重算所有已生效销售行的成本/利润,批量回填。返回统计。"""
     pur_events, fallback = _load_purchase_events(db)
 
@@ -161,7 +161,8 @@ def recompute(db: Session) -> dict:
 
     for i in range(0, len(updates), 1000):
         db.execute(update(FSalesLine), updates[i:i + 1000])
-    db.commit()
+    if _commit:
+        db.commit()
     stats["cost_method"] = config.COST_METHOD
     return stats
 
@@ -304,3 +305,115 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
             "excluded_revenue_inc": _f(_inc_from_ex(excluded_revenue_ex)),
         })
     return {"dimension": dimension, "rows": rows}
+
+
+# Shared HTTP/Agent projection and parameter guards.
+from fastapi import HTTPException, status
+from app.security import UserContext, is_field_hidden, apply_field_visibility
+
+_DIMS = ("part", "salesperson", "customer")
+_COUPLED_FINANCIAL_FIELDS = (
+    "revenue_costed",
+    "revenue_costed_ex",
+    "revenue_costed_inc",
+    "no_cost",
+    "cost_moving_avg",
+    "cost_moving_avg_ex",
+    "cost_moving_avg_inc",
+    "gross_profit_moving",
+    "gross_profit_moving_ex",
+    "gross_profit_moving_inc",
+    "gross_margin_moving",
+    "cost_fifo",
+    "cost_fifo_ex",
+    "cost_fifo_inc",
+    "gross_profit_fifo",
+    "gross_profit_fifo_ex",
+    "gross_profit_fifo_inc",
+    "gross_margin_fifo",
+)
+
+
+def _financial_visibility_restricted(ctx: UserContext) -> bool:
+    """成本和利润在该报表中可互推，任一数据组隐藏都必须按受限口径输出。"""
+    return (
+        is_field_hidden(ctx, "cost_moving_avg")
+        or is_field_hidden(ctx, "gross_profit_moving")
+    )
+
+
+def _visible_profit_data(data: dict, ctx: UserContext) -> dict:
+    """利润页的成本与毛利必须成组可见，防止通过公开营收做代数反推。
+
+    在这个报表里 ``毛利 = 已配成本营收 - 成本``；只隐藏等式一侧没有意义。只要
+    data_purchase_cost / data_profit 任一关闭，就把两组派生财务值一起置空。营收与
+    行数仍可见，页面权限不会变成菜单可见但接口 403。
+    """
+    visible = apply_field_visibility(data, ctx)
+    if _financial_visibility_restricted(ctx):
+        for row in visible.get("rows", []):
+            for field in _COUPLED_FINANCIAL_FIELDS:
+                row[field] = None
+    return visible
+
+
+def _aggregate_for_user(
+    db: Session,
+    dimension: str,
+    date_from: date | None,
+    date_to: date | None,
+    only_anomaly: bool,
+    ctx: UserContext,
+) -> dict:
+    """统一利润读边界：维度侧信道先拦截，再执行服务并做字段脱敏。
+
+    customer 的名称落在通用 ``dimension`` 键，递归字段脱敏无法从键名识别它，必须在
+    聚合前显式拒绝；受限销售的销售员/客户维度由服务层兜底抛 PermissionError，API
+    收敛为 403，不能把权限拒绝暴露成 500。
+    """
+    if dimension == "customer" and is_field_hidden(ctx, "customer_name"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无客户信息查看权限")
+    if only_anomaly and _financial_visibility_restricted(ctx):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "异常筛选需要同时具备采购成本和利润查看权限",
+        )
+    try:
+        data = aggregate(db, dimension, date_from, date_to, only_anomaly, ctx)
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    return _visible_profit_data(data, ctx)
+
+
+
+
+def read_profit(db, identity, *, legacy_context, dimension='part', date_from=None, date_to=None,
+                only_anomaly=False, export=False):
+    from app.authz import service
+    from app.services.business_access import read_context
+    dim = dimension if dimension in _DIMS else 'part'
+    ctx, access = read_context(db, identity, 'profit_analysis', f'read_{dim}_analysis',
+                              legacy_context=legacy_context, legacy_page='page_profit')
+    if export and access is not None:
+        service.resource_access(db, identity, 'profit_analysis', 'export')
+    return _aggregate_for_user(db, dim, date_from, date_to, only_anomaly, ctx)
+
+
+def recompute_authorized(db, identity, *, legacy_context):
+    from app.auth import require_admin
+    from app.authz import runtime, service
+    from app.models.system import SysAuditLog
+    if not runtime.is_authoritative(db, 'profit_analysis'):
+        security.require_page('page_profit')(legacy_context)
+        require_admin(legacy_context.role)
+        return recompute(db)
+    access = service.resource_access(db, identity, 'profit_analysis', 'recompute')
+    ctx = service.field_context(access, legacy_context)
+    result = recompute(db, _commit=False)
+    db.add(SysAuditLog(entity_type='profit', entity_id=0, action='recompute', operated_by=access.principal.username,
+                       after_json=result))
+    projected = dict(result)
+    if _financial_visibility_restricted(ctx):
+        for field in ('no_cost','neg_margin','fallback'): projected[field] = None
+    db.commit()
+    return projected

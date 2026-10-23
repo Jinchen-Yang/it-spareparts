@@ -1,4 +1,7 @@
-import { cleanup, render, screen, within } from "../../../../test/antdRender";
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
+vi.mock("../../../../authz/AuthzProvider", async importOriginal => ({...(await importOriginal<typeof import("../../../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState()}));
+function render(...args: Parameters<typeof fixtureRender>) {prepareLegacyPageFixture({"page_purchase_analytics": true}); return fixtureRender(...args);}
+import { cleanup, render as fixtureRender, screen, within } from "../../../../test/antdRender";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PurchaseAnalyticsOrderDetail } from "../../../../api/purchaseAnalytics";
 import OrderDetailDrawer from "../OrderDetailDrawer";
@@ -31,13 +34,13 @@ const GAP_DETAIL: PurchaseAnalyticsOrderDetail = {
 
 async function openDrawer(detail: PurchaseAnalyticsOrderDetail, basis: ("inc" | "ex" | "paid")[] = ["inc", "ex", "paid"]) {
   fetchDetail.mockResolvedValue({ data: detail });
-  // ownerToken=null 与「localStorage 无 token」同侧：所属会话守卫不拦截（正向路径）
+  // 明确提供已认证legacy会话，金额展示测试不依赖缺失Provider。
   render(
     <OrderDetailDrawer
       orderId={101}
       category={["硬盘"]}
       basis={basis}
-      ownerToken={null}
+      ownerToken="legacy-page-fixture-owner"
       onOwnerStale={vi.fn()}
       onClose={vi.fn()}
     />,

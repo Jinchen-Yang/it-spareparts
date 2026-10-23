@@ -1,0 +1,775 @@
+{
+  "fixture_format": 1,
+  "catalog_version": "authz-s1-v1",
+  "note": "Independent DTO examples only; not complete database seeds or reproducible server fingerprint vectors; no live data.",
+  "cases": [
+    {
+      "id": "read_template_canonical_bundle",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/templates/sales_team/modules"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "template": {
+            "code": "sales_team",
+            "name": "销售组",
+            "description": "示例规范模板",
+            "base_role": "sales",
+            "is_system": false,
+            "is_active": true,
+            "locked": false,
+            "version": 3
+          },
+          "modules": {
+            "sales_analysis": {
+              "actions": [
+                "export",
+                "read"
+              ],
+              "scope": "all",
+              "field_permissions": [
+                "data_profit",
+                "data_purchase_cost"
+              ]
+            }
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "save_metadata_and_modules_atomically",
+      "request": {
+        "method": "PUT",
+        "path": "/api/role-templates/sales_team",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_version": 3,
+          "metadata": {
+            "name": "销售组（调整）",
+            "description": "示例规范模板"
+          },
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "template": {
+              "code": "sales_team",
+              "name": "销售组（调整）",
+              "description": "示例规范模板",
+              "base_role": "sales",
+              "is_system": false,
+              "is_active": true,
+              "locked": false,
+              "version": 4
+            },
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "模板version只推进一次，已套账号epoch/Grant完全不变。",
+        "base_role不是可写metadata。"
+      ]
+    },
+    {
+      "id": "explicit_template_resource_removal",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/templates/sales_team/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_version": 3,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "operation": "remove_resource"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "template": {
+              "code": "sales_team",
+              "name": "销售组",
+              "description": "示例规范模板",
+              "base_role": "sales",
+              "is_system": false,
+              "is_active": true,
+              "locked": false,
+              "version": 4
+            },
+            "modules": {}
+          }
+        }
+      },
+      "assertions": [
+        "只删除模板包key，不即时撤销账号；随后sync必须预览revoke。"
+      ]
+    },
+    {
+      "id": "create_template_with_atomic_bundle",
+      "request": {
+        "method": "POST",
+        "path": "/api/role-templates",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "metadata": {
+            "code": "report_team",
+            "name": "报表组",
+            "description": "示例规范模板"
+          },
+          "authorization": {
+            "kind": "explicit",
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "template": {
+              "code": "report_team",
+              "name": "报表组",
+              "description": "示例规范模板",
+              "base_role": "readonly",
+              "is_system": false,
+              "is_active": true,
+              "locked": false,
+              "version": 1
+            },
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "metadata+包一次commit，无账号赋权。"
+      ]
+    },
+    {
+      "id": "copy_template_is_version_bound",
+      "request": {
+        "method": "POST",
+        "path": "/api/role-templates",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "metadata": {
+            "code": "report_copy",
+            "name": "报表副本"
+          },
+          "authorization": {
+            "kind": "copy_template",
+            "code": "sales_team",
+            "expected_version": 3
+          }
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "template": {
+              "code": "report_copy",
+              "name": "报表副本",
+              "description": "示例规范模板",
+              "base_role": "readonly",
+              "is_system": false,
+              "is_active": true,
+              "locked": false,
+              "version": 1
+            },
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "export",
+                  "read"
+                ],
+                "scope": "all",
+                "field_permissions": [
+                  "data_profit",
+                  "data_purchase_cost"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "仅复制canonical模块包，不复制账号归属/客户关系/legacy角色来源。"
+      ]
+    },
+    {
+      "id": "archive_template_cas_no_account_mutation",
+      "request": {
+        "method": "POST",
+        "path": "/api/role-templates/sales_team/archive",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_version": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "result": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "template": {
+              "code": "sales_team",
+              "name": "销售组",
+              "description": "示例规范模板",
+              "base_role": "sales",
+              "is_system": false,
+              "is_active": false,
+              "locked": false,
+              "version": 4
+            },
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "export",
+                  "read"
+                ],
+                "scope": "all",
+                "field_permissions": [
+                  "data_profit",
+                  "data_purchase_cost"
+                ]
+              }
+            }
+          },
+          "changed": true
+        }
+      },
+      "assertions": [
+        "已套账号保持，禁止后续apply/sync/copy；同服务实时管理员及CAS。"
+      ]
+    },
+    {
+      "id": "sync_clear_moves_to_latest_saved_snapshot",
+      "request": {
+        "method": "POST",
+        "path": "/api/authz/templates/sales_team/sync",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7
+            }
+          ],
+          "operation": {
+            "kind": "sync_template",
+            "template_code": "sales_team",
+            "expected_template_version": 3,
+            "override_policy": "clear"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "committed": false,
+          "fingerprint": "b3d0a704145f2d10dddc86f85cf5dd3e863f207f81320fed060271653ea4c0f2",
+          "command": {
+            "schema_version": 1,
+            "catalog_version": "authz-s1-v1",
+            "targets": [
+              {
+                "user_id": 41,
+                "username": "alice",
+                "expected_epoch": 7,
+                "expected_resource_versions": {
+                  "sales_analysis": 3
+                }
+              }
+            ],
+            "operation": {
+              "kind": "sync_template",
+              "template_code": "sales_team",
+              "expected_template_version": 3,
+              "override_policy": "clear"
+            }
+          },
+          "affected": 1,
+          "preview": [
+            {
+              "subject": {
+                "id": 41,
+                "username": "alice",
+                "display_name": "示例甲",
+                "role": "sales",
+                "salesperson_name": "示例销售",
+                "is_active": true
+              },
+              "epoch_before": 7,
+              "epoch_after": 8,
+              "template_before": {
+                "code": "sales_team",
+                "version": 2
+              },
+              "template_after": {
+                "code": "sales_team",
+                "version": 3
+              },
+              "effective_changed": true,
+              "source_changed": true,
+              "session_revoked": true,
+              "resources": [
+                {
+                  "resource_id": "sales_analysis",
+                  "version_before": 3,
+                  "version_after": 4,
+                  "configuration_before": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "configuration_after": {
+                    "actions": [
+                      "export",
+                      "read"
+                    ],
+                    "scope": "all",
+                    "field_permissions": [
+                      "data_profit",
+                      "data_purchase_cost"
+                    ]
+                  },
+                  "override_before": {
+                    "present": true,
+                    "configuration": {
+                      "actions": [
+                        "read"
+                      ],
+                      "scope": "assigned_customers",
+                      "field_permissions": []
+                    }
+                  },
+                  "override_after": {
+                    "present": false,
+                    "configuration": null
+                  },
+                  "change": "inherit",
+                  "actions_added": [
+                    "export"
+                  ],
+                  "actions_removed": [],
+                  "scope_before": "assigned_customers",
+                  "scope_after": "all",
+                  "fields_added": [
+                    "data_profit",
+                    "data_purchase_cost"
+                  ],
+                  "fields_removed": []
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "clear_override是回账号旧snapshot；此sync明确换到当前v3。",
+        "clear显式选择，source变化推进版本。"
+      ]
+    },
+    {
+      "id": "sync_clear_execute",
+      "request": {
+        "method": "POST",
+        "path": "/api/authz/templates/sales_team/sync",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7,
+              "expected_resource_versions": {
+                "sales_analysis": 3
+              }
+            }
+          ],
+          "operation": {
+            "kind": "sync_template",
+            "template_code": "sales_team",
+            "expected_template_version": 3,
+            "override_policy": "clear"
+          },
+          "dry_run": false,
+          "fingerprint": "b3d0a704145f2d10dddc86f85cf5dd3e863f207f81320fed060271653ea4c0f2"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": false,
+          "committed": true,
+          "actor_session_revoked": false,
+          "applied": 1,
+          "results": [
+            {
+              "schema_version": 1,
+              "authorization_mode": "unified_modules",
+              "catalog_version": "authz-s1-v1",
+              "subject": {
+                "id": 41,
+                "username": "alice",
+                "display_name": "示例甲",
+                "role": "sales",
+                "salesperson_name": "示例销售",
+                "is_active": true
+              },
+              "authorization_epoch": 8,
+              "template": {
+                "code": "sales_team",
+                "version": 3,
+                "current_version": 3,
+                "stale": false
+              },
+              "customer_assignments": {
+                "ids": [
+                  7001,
+                  7002
+                ],
+                "customers": [
+                  {
+                    "id": 7001,
+                    "name": "示例客户7001",
+                    "raw_name": "示例客户7001"
+                  },
+                  {
+                    "id": 7002,
+                    "name": "示例客户7002",
+                    "raw_name": "示例客户7002"
+                  }
+                ]
+              },
+              "resources": {
+                "sales_analysis": {
+                  "version": 4,
+                  "configuration": {
+                    "actions": [
+                      "export",
+                      "read"
+                    ],
+                    "scope": "all",
+                    "field_permissions": [
+                      "data_profit",
+                      "data_purchase_cost"
+                    ]
+                  },
+                  "source": "template_snapshot",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": {
+                      "actions": [
+                        "export",
+                        "read"
+                      ],
+                      "scope": "all",
+                      "field_permissions": [
+                        "data_profit",
+                        "data_purchase_cost"
+                      ]
+                    }
+                  },
+                  "personal_override": {
+                    "present": false,
+                    "configuration": null
+                  }
+                },
+                "purchase_analysis": {
+                  "version": 0,
+                  "configuration": null,
+                  "source": "none",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": null
+                  },
+                  "personal_override": {
+                    "present": false,
+                    "configuration": null
+                  }
+                },
+                "retired_pool_rebuild": {
+                  "version": 0,
+                  "configuration": null,
+                  "source": "none",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": null
+                  },
+                  "personal_override": {
+                    "present": false,
+                    "configuration": null
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "role和所有legacy模板快照保持。",
+        "客户ids保持，不从模板复制。"
+      ]
+    },
+    {
+      "id": "sync_template_removal_previews_revoke",
+      "request": {
+        "method": "POST",
+        "path": "/api/authz/templates/sales_team/sync",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7
+            }
+          ],
+          "operation": {
+            "kind": "sync_template",
+            "template_code": "sales_team",
+            "expected_template_version": 4,
+            "override_policy": "preserve"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "committed": false,
+          "fingerprint": "a7b9f8fc5c77f846b70b9856c400b0f33d1f5a1a67c1976bed412251a95edfab",
+          "command": {
+            "schema_version": 1,
+            "catalog_version": "authz-s1-v1",
+            "targets": [
+              {
+                "user_id": 41,
+                "username": "alice",
+                "expected_epoch": 7,
+                "expected_resource_versions": {
+                  "sales_analysis": 3
+                }
+              }
+            ],
+            "operation": {
+              "kind": "sync_template",
+              "template_code": "sales_team",
+              "expected_template_version": 4,
+              "override_policy": "preserve"
+            }
+          },
+          "affected": 1,
+          "preview": [
+            {
+              "subject": {
+                "id": 41,
+                "username": "alice",
+                "display_name": "示例甲",
+                "role": "sales",
+                "salesperson_name": "示例销售",
+                "is_active": true
+              },
+              "epoch_before": 7,
+              "epoch_after": 8,
+              "template_before": {
+                "code": "sales_team",
+                "version": 2
+              },
+              "template_after": {
+                "code": "sales_team",
+                "version": 4
+              },
+              "effective_changed": true,
+              "source_changed": true,
+              "session_revoked": true,
+              "resources": [
+                {
+                  "resource_id": "sales_analysis",
+                  "version_before": 3,
+                  "version_after": 4,
+                  "configuration_before": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "configuration_after": {
+                    "actions": [],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "override_before": {
+                    "present": false,
+                    "configuration": null
+                  },
+                  "override_after": {
+                    "present": false,
+                    "configuration": null
+                  },
+                  "change": "revoke",
+                  "actions_added": [],
+                  "actions_removed": [
+                    "read"
+                  ],
+                  "scope_before": "assigned_customers",
+                  "scope_after": "assigned_customers",
+                  "fields_added": [],
+                  "fields_removed": []
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "无override目标失去模板资源时，after是拒绝配置、change=revoke。",
+        "不能缺key就保留旧继承允许。"
+      ]
+    }
+  ]
+}

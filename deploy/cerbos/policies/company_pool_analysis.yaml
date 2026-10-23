@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "company_pool_analysis",
+    "rules": [
+      {
+        "name": "explicit-read-customer-cross-brand",
+        "actions": [
+          "read_customer_cross_brand"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_customer_cross_brand\" in P.attr.grants.company_pool_analysis.actions && \"data_customer\" in P.attr.grants.company_pool_analysis.field_permissions && P.attr.grants.company_pool_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_analysis\", \"scope\": P.attr.grants.company_pool_analysis.scope, \"version\": P.attr.grants.company_pool_analysis.version, \"field_permissions\": P.attr.grants.company_pool_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-sales-transactions",
+        "actions": [
+          "read_sales_transactions"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_sales_transactions\" in P.attr.grants.company_pool_analysis.actions && P.attr.grants.company_pool_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_analysis\", \"scope\": P.attr.grants.company_pool_analysis.scope, \"version\": P.attr.grants.company_pool_analysis.version, \"field_permissions\": P.attr.grants.company_pool_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-summary",
+        "actions": [
+          "read_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_summary\" in P.attr.grants.company_pool_analysis.actions && P.attr.grants.company_pool_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_analysis\", \"scope\": P.attr.grants.company_pool_analysis.scope, \"version\": P.attr.grants.company_pool_analysis.version, \"field_permissions\": P.attr.grants.company_pool_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-pools",
+        "actions": [
+          "show_pools"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_pools\" in P.attr.grants.company_pool_analysis.actions && \"read_summary\" in P.attr.grants.company_pool_analysis.actions && P.attr.grants.company_pool_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_pool_analysis\", \"scope\": P.attr.grants.company_pool_analysis.scope, \"version\": P.attr.grants.company_pool_analysis.version, \"field_permissions\": P.attr.grants.company_pool_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

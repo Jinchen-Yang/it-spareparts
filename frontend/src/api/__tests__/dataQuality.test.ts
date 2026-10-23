@@ -110,19 +110,19 @@ describe("data quality API contract", () => {
       batch: { filename: "采购.xlsx", imported_by: "数据员" },
       audits: [{ username: "system", action: "create" }],
     });
-    expect(get).toHaveBeenCalledWith("/data-quality/issues/1");
+    expect(get).toHaveBeenCalledWith("/data-quality/issues/1", {});
 
     const decision = { decision: "confirmed_valid" as const, version: 1, note: "原单核实无误" };
     await expect(decideDataQualityIssue(1, decision)).resolves.toMatchObject({
       status: "confirmed_valid", version: 2, order_no: "CG-1",
     });
-    expect(post).toHaveBeenNthCalledWith(1, "/data-quality/issues/1/decision", decision);
+    expect(post).toHaveBeenNthCalledWith(1, "/data-quality/issues/1/decision", decision, {});
 
     const reopen = { version: 2, note: "收到新凭证" };
     await expect(reopenDataQualityIssue(1, reopen)).resolves.toMatchObject({
       status: "open", version: 3, order_no: "CG-1",
     });
-    expect(post).toHaveBeenNthCalledWith(2, "/data-quality/issues/1/reopen", reopen);
+    expect(post).toHaveBeenNthCalledWith(2, "/data-quality/issues/1/reopen", reopen, {});
     expect(get).toHaveBeenCalledTimes(1);
   });
 
@@ -153,4 +153,16 @@ describe("data quality API contract", () => {
     expect(detail.review_note_restricted).toBe(true);
     expect(detail.audits[0]).toMatchObject({ username: "复核员", note: null });
   });
+});
+
+// Captured credentials are never re-read from a different session for an in-flight command.
+it("preserves captured token and cancellation on issue read and decision", async () => {
+  get.mockResolvedValue({ data: wire }); post.mockResolvedValue({ data: wire });
+  const signal = new AbortController().signal;
+  const capture = { token: "captured-owner", signal };
+  const body = { decision: "confirmed_valid" as const, version: 1, note: "checked" };
+  await getDataQualityIssue(1, capture);
+  await decideDataQualityIssue(1, body, capture);
+  expect(get).toHaveBeenCalledWith("/data-quality/issues/1", { headers: { Authorization: "Bearer captured-owner" }, signal });
+  expect(post).toHaveBeenCalledWith("/data-quality/issues/1/decision", body, { headers: { Authorization: "Bearer captured-owner" }, signal });
 });

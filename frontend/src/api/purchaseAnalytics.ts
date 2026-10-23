@@ -2,6 +2,7 @@
 // 三口径（含税/不含税/实付）一次全部返回，前端切换口径不重新请求；
 // 金额键被 data_purchase_cost 遮蔽时后端置 null（键名保留），定型一律 number | null。
 import { api } from "../api";
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 
 /** 筛选取值：类型原值 / 采购员 / 关联销售人员 / 分类（未分类固定垫底）。 */
 export interface PurchaseAnalyticsOptions {
@@ -198,19 +199,20 @@ function appendList(p: URLSearchParams, key: string, values?: string[]): void {
 }
 
 /** 客户候选最多200项；额外补齐最多200个已选ID（分享链接恢复姓名）。 */
-export const fetchPurchaseAnalyticsOptions = (customerQuery = "", selectedIds: number[] = []) => {
+export const fetchPurchaseAnalyticsOptions = (customerQuery = "", selectedIds: number[] = [], context?: CapturedTransport) => {
   const params = new URLSearchParams({ customer_q: customerQuery });
   selectedIds.forEach(id => params.append("selected_customer_id", String(id)));
-  return api.get<PurchaseAnalyticsOptions>("/purchases/analytics/options", { params });
+  return api.get<PurchaseAnalyticsOptions>("/purchases/analytics/options", { params, ...transportConfig(context) });
 };
 
 export const fetchPurchaseAnalyticsSummary = (filters: PurchaseAnalyticsFilters & {
   group_by?: string;
-}) => api.get<PurchaseAnalyticsSummary>("/purchases/analytics/summary", {
+}, context?: CapturedTransport) => api.get<PurchaseAnalyticsSummary>("/purchases/analytics/summary", {
+  ...transportConfig(context),
   params: toAnalyticsParams(filters, filters.group_by ? { group_by: filters.group_by } : {}),
 });
 
-export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery) => {
+export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery, context?: CapturedTransport) => {
   const extra: Record<string, string | number> = {};
   if (query.group_by) extra.group_by = query.group_by;
   if (query.group_key) extra.group_key = query.group_key;
@@ -219,13 +221,15 @@ export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery
   if (query.page) extra.page = query.page;
   if (query.page_size) extra.page_size = query.page_size;
   return api.get<PurchaseAnalyticsOrdersResp>("/purchases/analytics/orders", {
-    params: toAnalyticsParams(query, extra),
+    ...transportConfig(context),
+  params: toAnalyticsParams(query, extra),
   });
 };
 
 export const fetchPurchaseAnalyticsOrderDetail = (
   orderId: number,
   category: string[] = [],
+  context?: CapturedTransport,
 ) => {
   const p = new URLSearchParams();
   for (const c of category) {
@@ -233,6 +237,6 @@ export const fetchPurchaseAnalyticsOrderDetail = (
   }
   return api.get<PurchaseAnalyticsOrderDetail>(
     `/purchases/analytics/orders/${orderId}`,
-    { params: p },
+    { params: p, ...transportConfig(context) },
   );
 };

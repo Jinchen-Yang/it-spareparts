@@ -1,3 +1,6 @@
+import type { BlockAccess } from "./authz/rules";
+import { transportConfig, type CapturedTransport } from "./authz/transport";
+import { invalidateAuthzSession } from "./authz/events";
 import axios from "axios";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 
@@ -33,6 +36,7 @@ api.interceptors.response.use(
       if (!requestAuth || requestAuth === `Bearer ${currentToken}`) {
         clearSessionScopedPreferences();
         localStorage.removeItem("token");
+        invalidateAuthzSession(currentToken);
         location.reload();
       }
     }
@@ -201,9 +205,9 @@ export interface RecentPurchaseRow {
 export const listRecentPurchases = (params: {
   q?: string; days?: number; supplier?: string; page?: number; page_size?: number;
   status?: string;
-}) =>
+}, context?: CapturedTransport) =>
   api.get<{ total: number; page: number; page_size: number; days: number; items: RecentPurchaseRow[] }>(
-    "/purchases/recent", { params },
+    "/purchases/recent", { params, ...transportConfig(context) },
   );
 
 // ===== 取消单统计（宋总：按月/季/年统计采购取消/作废）=====
@@ -238,8 +242,8 @@ export interface CancellationStats {
     cancelled_amount: number;
   };
 }
-export const fetchCancellationStats = (params: { granularity?: string; days?: number }) =>
-  api.get<CancellationStats>("/purchases/cancellation-stats", { params });
+export const fetchCancellationStats = (params: { granularity?: string; days?: number }, context?: CapturedTransport) =>
+  api.get<CancellationStats>("/purchases/cancellation-stats", { params, ...transportConfig(context) });
 
 // ===== 采购分析面板（早会/周会）=====
 export interface PurchaseChannelSplit {
@@ -295,10 +299,10 @@ export interface PurchaseDrillItem {
 export const fetchPurchaseAnalysis = (params: {
   days?: number; exclude_designated?: boolean; freq_threshold?: number;
   q?: string; supplier?: string; purchaser?: string;
-}) => api.get<PurchaseAnalysis>("/purchases/analysis", { params });
-export const fetchPurchaseDrill = (params: { part_id: number; days?: number; exclude_designated?: boolean }) =>
+}, context?: CapturedTransport) => api.get<PurchaseAnalysis>("/purchases/analysis", { params, ...transportConfig(context) });
+export const fetchPurchaseDrill = (params: { part_id: number; days?: number; exclude_designated?: boolean }, context?: CapturedTransport) =>
   api.get<{ part_id: number; days: number; items: PurchaseDrillItem[] }>(
-    "/purchases/analysis/part", { params },
+    "/purchases/analysis/part", { params, ...transportConfig(context) },
   );
 
 export interface AgentUploadResult {
@@ -424,7 +428,7 @@ export type MasterEditPayload = MasterFields & {
   pn_std: string;
   base_snapshot: MasterEditSnapshot;
 };
-export const searchParts = (q: string, page = 1, page_size = 20, browse = false) =>
+export const searchParts = (q: string, page = 1, page_size = 20, browse = false, context?: CapturedTransport) =>
   api.get<{ items: PartHit[]; total: number }>("/parts/search",
     { params: { q, page, page_size, ...(browse ? { browse: true } : {}) } });
 export const masterCategories = () =>
@@ -438,11 +442,11 @@ export const masterCheck = (pn_std: string) =>
 export const masterCreate = (body: MasterFields & { pn_std: string; force?: boolean }) =>
   api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string }>(
     "/parts/master", body);
-export const masterEdit = (body: MasterEditPayload, token?: string) =>
+export const masterEdit = (body: MasterEditPayload, token?: string, signal?: AbortSignal) =>
   api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[];
     audit_id: number; edit_state: MasterEditSnapshot }>(
     "/parts/master", body,
-    token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+    { ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}), signal });
 
 // 批量规范化（WP3）
 export interface BatchPreviewItem {
@@ -457,13 +461,15 @@ export interface BatchPreviewItem {
   changes: string[];
   review_status?: string;   // 行级：AUTO_OK 才默认勾选（§17）
 }
-export const batchPreview = (page = 1, page_size = 20, only_changes = true) =>
+export const batchPreview = (page = 1, page_size = 20, only_changes = true, context?: CapturedTransport) =>
   api.get<{ total_beijian: number; page: number; page_size: number; items: BatchPreviewItem[] }>(
-    "/parts/master/batch-preview", { params: { page, page_size, only_changes } });
-export const batchApply = (part_ids: number[], fields?: string[]) =>
-  api.post<{ applied: number; skipped: number }>("/parts/master/batch-apply", { part_ids, fields });
+    "/parts/master/batch-preview", { ...transportConfig(context), params: { page, page_size, only_changes } });
+export const batchApply = (part_ids: number[], fields?: string[], context?: CapturedTransport) =>
+  api.post<{ applied: number; skipped: number }>("/parts/master/batch-apply", { part_ids, fields }, transportConfig(context));
 
+export type OverviewBlock = "identity" | "purchases_recent" | "sales_recent" | "inventory" | "profit_summary" | "market_prices" | "substitutes" | "substitute_inventory";
 export interface Overview {
+  block_access?: BlockAccess<OverviewBlock>;
   part: {
     id: number;            // part_id：稳定深链主键（/parts?part_id=），前端据此回写 URL
     pn_std: string;
@@ -476,7 +482,7 @@ export interface Overview {
     machine_or_part?: string | null;
     locked_fields?: string[];
     redirected_from?: string | null;
-  };
+  } | null;
   purchases_recent: PurchaseRow[];
   sales_recent: SalesRow[];
   inventory: InventoryRow[];
@@ -493,24 +499,24 @@ export interface Overview {
     avg_cost_fifo: number | null;
     avg_margin_moving: number | null;
     avg_margin_fifo: number | null;
-    total_qty_sold: number;
+    total_qty_sold: number | null;
   };
   inquiry_ref: {
     min_money: number | null;
     max_money: number | null;
     last_money: number | null;
-    count: number;
+    count: number | null;
   };
   sales_velocity: {
     qty_sold_90d: number;
     monthly_avg_90d: number;
     last_sale_date: string | null;
-  };
+  } | null;
   // 近期加权成交参考价（销售出价用）。PR #1 后端 get_overview 已返回；仍按可空处理（防御旧响应）。
   sale_price_ref?: {
     ref_sale_price: number | null;   // 近期加权成交参考价
-    ref_sale_samples: number;        // 取样成交笔数（0 = 窗口内无成交）
-    ref_window_days: number;         // 取样窗口天数（30）
+    ref_sale_samples: number | null;        // 取样成交笔数（0 = 窗口内无成交）
+    ref_window_days: number | null;         // 取样窗口天数（30）
   };
   // 逐单销售成交明细是否按权限隐藏（与后端 is_scoped_sales 对齐）：true → sales_recent 必空
   sales_recent_restricted?: boolean;
@@ -518,7 +524,7 @@ export interface Overview {
   stock_dynamic?: {
     dynamic_qty: number | null; anchor_qty: number | null; anchor_date: string | null;
     in_qty: number | null; out_sales: number | null; out_maint: number | null;
-  };
+  } | null;
 }
 
 export interface PurchaseRow {
@@ -566,8 +572,8 @@ export interface DashboardKpi {
   orders_active: number; orders_in_progress: number; orders_cancelled: number;
   orders_future: number; anomaly_lines: number;
 }
-export const dashboardKpi = (params: { date_from?: string; date_to?: string } = {}) =>
-  api.get<DashboardKpi>("/dashboard/kpi", { params });
+export const dashboardKpi = (params: { date_from?: string; date_to?: string } = {}, context?: CapturedTransport) =>
+  api.get<DashboardKpi>("/dashboard/kpi", { ...transportConfig(context),  params });
 
 export type PriceDisciplineSide = "purchase" | "sales";
 
@@ -634,8 +640,8 @@ export interface PriceDisciplineSummary {
 }
 
 export const dashboardPriceDisciplineSummary = (
-  params: { date_from?: string; date_to?: string } = {},
-) => api.get<PriceDisciplineSummary>("/dashboard/price-discipline-summary", { params });
+  params: { date_from?: string; date_to?: string } = {}, context?: CapturedTransport
+) => api.get<PriceDisciplineSummary>("/dashboard/price-discipline-summary", { ...transportConfig(context),  params });
 
 /** 单行价格参考状态（pool_metrics.price_reference）。
  * within_pool_average / no_pool_average 仅出现在治理权限受限的降级口径。 */
@@ -689,8 +695,8 @@ export interface PartRankingQuery {
   part_id?: number; pn?: string; pool_group_id?: number;
   sort?: string; order?: "asc" | "desc"; page?: number; page_size?: number;
 }
-export const dashboardPartRanking = (params: PartRankingQuery = {}) =>
-  api.get<PartRankingResp>("/dashboard/part-ranking", { params });
+export const dashboardPartRanking = (params: PartRankingQuery = {}, context?: CapturedTransport) =>
+  api.get<PartRankingResp>("/dashboard/part-ranking", { ...transportConfig(context),  params });
 
 export interface OrdersQuery {
   date_from?: string; date_to?: string; q?: string; order_no?: string; status?: string;
@@ -759,11 +765,11 @@ export interface OrdersResp<T> {
   manual_reference_restricted?: boolean;
 }
 
-export const dashboardSales = (params: OrdersQuery = {}) =>
-  api.get<OrdersResp<SalesOrderRow>>("/dashboard/sales", { params });
+export const dashboardSales = (params: OrdersQuery = {}, context?: CapturedTransport) =>
+  api.get<OrdersResp<SalesOrderRow>>("/dashboard/sales", { ...transportConfig(context),  params });
 
-export const dashboardPurchaseOrders = (params: OrdersQuery = {}) =>
-  api.get<OrdersResp<PurchaseOrderRow>>("/dashboard/purchase-orders", { params });
+export const dashboardPurchaseOrders = (params: OrdersQuery = {}, context?: CapturedTransport) =>
+  api.get<OrdersResp<PurchaseOrderRow>>("/dashboard/purchase-orders", { ...transportConfig(context),  params });
 
 /** 池窗口指标（pool_metrics 单一口径源）：数量为 0 时加权均价= null，绝不用 0 冒充。 */
 export interface PoolMetrics {
@@ -791,8 +797,8 @@ export interface PoolsResp {
   sort: PoolSort; effective_sort: PoolSort;
   ranking_restricted: boolean; ranking_capped: boolean; items: PoolListItem[];
 }
-export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: PoolSort } = {}) =>
-  api.get<PoolsResp>("/dashboard/pools", { params });
+export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: PoolSort } = {}, context?: CapturedTransport) =>
+  api.get<PoolsResp>("/dashboard/pools", { ...transportConfig(context),  params });
 
 /** 成员窗口指标 = 池窗口指标 + 与池均值/人工约束价的差额（成员加权均价为比较基准）。 */
 export interface PoolMemberMetrics extends PoolMetrics {
@@ -829,6 +835,7 @@ export interface PoolOrdersBlock {
   items: PoolOrderLine[];
 }
 export interface PoolDetail {
+  block_access?: BlockAccess<"summary" | "sales_orders" | "customer_cross_brand">;
   group_id: number; member_count: number; needs_calibration?: boolean; oversized?: boolean;
   name: string | null; description: string | null;
   window: { date_from: string | null; date_to: string | null; as_of: string };
@@ -840,7 +847,7 @@ export interface PoolDetail {
   savings: { theoretical_max: number | null; supply_available_upper: number | null;
     executable: null; label?: string; opportunities: PoolOpportunity[] } | null;
   members: PoolMemberRow[];
-  customer_cross_brand?: { restricted: boolean; multi_brand_customers?: number;
+  customer_cross_brand?: { restricted: boolean; multi_brand_customers?: number | null;
     customers?: Array<{ customer: string; brand_count: number; concentration: number }> } | null;
   purchase_metrics: PoolMetrics | null; sales_metrics: PoolMetrics | null;
   max_purchase_price: number | null; min_sale_price: number | null;
@@ -851,5 +858,5 @@ export interface PoolDetail {
 export const dashboardPool = (groupId: number, params: {
   date_from?: string; date_to?: string;
   purchase_page?: number; sales_page?: number; orders_page_size?: number;
-} = {}) =>
-  api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { params });
+} = {}, context?: CapturedTransport) =>
+  api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { ...transportConfig(context),  params });

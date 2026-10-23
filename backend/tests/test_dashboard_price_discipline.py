@@ -18,7 +18,8 @@ from app.models.dimensions import DimPart
 from app.models.inventory import PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
+from app.auth import _make_token
 from app.services import dashboard, pool, pool_catalog, pool_price_analysis, price_discipline
 from tests import factories as f
 
@@ -245,8 +246,15 @@ def _api_client(db, ctx: security.UserContext):
     original = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: ctx
-    app.dependency_overrides[dashboard_api.current_role] = lambda: ctx.role
-    return TestClient(app), original
+    # Exercise the real typed token adapter; the injected context still expresses
+    # the legacy business-field/scoped predicate this regression isolates.
+    if db.scalar(select(SysUser).where(SysUser.username == ctx.user_id)) is None:
+        db.add(SysUser(username=ctx.user_id, role=ctx.role, password_hash="unused",
+                       permissions=ctx.permissions, is_active=True))
+        db.commit()
+    token, _ = _make_token(ctx.role, ctx.user_id, ctx.user_id,
+                           perms=ctx.permissions, authn="sys_user")
+    return TestClient(app, headers={"Authorization": "Bearer " + token}), original
 
 
 def _restore_overrides(original):

@@ -54,7 +54,7 @@ def list_substitutes(db: Session, pn_std: str) -> list[dict]:
 
 def add_substitute(db: Session, pn_a: str, pn_b: str, note: str | None,
                    operated_by: str | None, direction: str = "both",
-                   substitute_type: str | None = None) -> dict:
+                   substitute_type: str | None = None, *, _commit: bool = True) -> dict:
     """direction 入参语义：both=互替；one_way=「pn_b 可替代 pn_a」（b 是替代者）。"""
     if pn_a == pn_b:
         raise SubstituteError("不能把型号设为自己的替代料")
@@ -91,11 +91,14 @@ def add_substitute(db: Session, pn_a: str, pn_b: str, note: str | None,
                            after_json={"pn_a": pn_a, "pn_b": pn_b, "note": note,
                                        "direction": direction, "substitute_type": substitute_type},
                            reason=note, operated_by=operated_by))
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"created": created, "pn_a": pn_a, "pn_b": pn_b}
 
 
-def remove_substitute(db: Session, pn_a: str, pn_b: str, operated_by: str | None) -> dict:
+def remove_substitute(db: Session, pn_a: str, pn_b: str, operated_by: str | None, *, _commit: bool = True) -> dict:
     """解除两个型号间的**直连**替代关系（加错了纠正用）。删的是规范序 (a<b) 那一行整条边，
     不分方向。写审计（before=被删行快照）。成组互通是读时 BFS 闭包，删掉直连边后经它
     间接连通的其它号会自动重新计算——只影响这条直连，不误伤组内其它直连关系。
@@ -123,5 +126,8 @@ def remove_substitute(db: Session, pn_a: str, pn_b: str, operated_by: str | None
     db.add(SysAuditLog(entity_type="substitute", entity_id=row.id, action="delete",
                        before_json=before, after_json=None, operated_by=operated_by))
     db.delete(row)
-    db.commit()
+    if _commit:
+        db.commit()
+    else:
+        db.flush()
     return {"deleted": True, "pn_a": pn_a, "pn_b": pn_b}

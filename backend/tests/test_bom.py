@@ -6,19 +6,13 @@ from openpyxl import load_workbook
 
 from app import security
 from app.agent import tools
-from app.db import SessionLocal
 from app.services import agent_files as af
 
 
-@pytest.fixture(scope="module")
-def db():
-    s = SessionLocal()
-    yield s
-    s.close()
-
-
 @pytest.fixture()
-def ctx():
+def ctx(db):
+    # File-only cases also need the standard database fixture: a preceding
+    # canonical Agent test may have committed a permanent artifact marker.
     return security.UserContext(user_id=None, role="phase1_full_access")
 
 

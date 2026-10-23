@@ -25,6 +25,36 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
+import type { AuthzSnapshot } from "./api/authz";
+import { ruleAllowed, surfaceRule } from "./authz/rules";
+
+// This only decides whether a visible page interprets monetary values. It never
+// grants a route, action, field or request; those use the generated rules.
+function companyRequiresTaxPolicy(snapshot: AuthzSnapshot | null): boolean {
+  const visible = (id: string) => {
+    const rule = surfaceRule(id);
+    return ruleAllowed(snapshot, rule, Object.fromEntries(rule.anyOf.flat().map(n => [n.resource_id, true])));
+  };
+  const field = (id: string, key: string) => {
+    const resource = snapshot?.resources[id];
+    return resource?.runtime_state === "legacy" || resource?.runtime_state === "enabled" && resource.field_permissions.includes(key);
+  };
+  const cost = field("company_summary", "data_purchase_cost"), profit = field("company_summary", "data_profit");
+  return visible("company_summary.kpi_sales") ||
+    visible("company_summary.kpi_purchase") && cost ||
+    visible("company_summary.kpi_profit") && cost && profit ||
+    visible("company_summary.kpi_coverage") && cost ||
+    visible("company_summary.profit_ranking") && cost && profit ||
+    visible("company_sales_orders.recent_orders") ||
+    visible("company_purchase_orders.recent_orders") &&
+      (field("company_purchase_orders", "data_purchase_cost") || field("company_purchase_orders", "data_pool_price_governance")) ||
+    visible("company_pool_analysis.pools");
+}
+function purchaseRecordsRequireTaxPolicy(snapshot: AuthzSnapshot | null): boolean {
+  const resource = snapshot?.resources.purchase_records;
+  return resource?.runtime_state === "legacy" || resource?.runtime_state === "enabled" &&
+    resource.field_permissions.includes("data_purchase_cost");
+}
 
 /** 读登录时写入的权限快照（与 App.tsx readPerms 同源），供 visibleWhen 判断动作键。 */
 export function readPermissionMap(): Record<string, boolean> {
@@ -51,6 +81,10 @@ export interface NavItem {
   icon: ReactNode;
   /** 后端 page_* 权限键；缺省且无 anyPerm 表示仅管理员可见（如账号管理） */
   perm?: string;
+  /** 模块启用新授权时，由服务端能力快照取代旧权限与角色门。 */
+  authzResource?: string;
+  /** 展示依赖：本页直接按全局税口径解释金额；不是业务授权或自动赋权。 */
+  requiresTaxPolicy?: boolean | ((snapshot: AuthzSnapshot | null) => boolean);
   /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
    * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
   anyPerm?: string[];
@@ -140,7 +174,7 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-board",
     label: null,
     items: [
-      { key: "boss", path: "/boss", label: "经营看板", icon: <DashboardOutlined />, perm: "page_boss_board", page: BossBoardPage, load: loadBossBoard },
+      { key: "boss", requiresTaxPolicy: companyRequiresTaxPolicy, path: "/boss", label: "经营看板", icon: <DashboardOutlined />, perm: "page_boss_board", page: BossBoardPage, load: loadBossBoard },
     ],
   },
   {
@@ -154,7 +188,7 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-price-analysis",
     label: "价格分析",
     items: [
-      { key: "pools", path: "/pools", label: "互通池", icon: <DollarOutlined />, perm: "page_pool_analysis", page: PoolsPage, load: loadPools },
+      { key: "pools", requiresTaxPolicy: true, path: "/pools", label: "互通池", icon: <DollarOutlined />, perm: "page_pool_analysis", page: PoolsPage, load: loadPools },
     ],
   },
   {
@@ -164,9 +198,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
       // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
       // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
-      { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
+      { key: "sales-analytics", authzResource: "sales_analysis", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
-      { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
+      { key: "profit", requiresTaxPolicy: true, path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
     ],
   },
   {
@@ -178,9 +212,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // 日期/分类/三口径 + 分组下钻。
       { key: "purchases-analytics", path: "/purchases/analytics", label: "采购分析", icon: <BarChartOutlined />, perm: "page_purchase_analytics", visibleWhen: analyticsRoleGate("page_purchase_analytics"), page: PurchaseAnalyticsPage, load: loadPurchaseAnalytics },
       // 原「采购分析」逐型号频次页（D-39 前已存在）更名「型号分析」，页面与口径不变。
-      { key: "purchases-analysis", path: "/purchases/analysis", label: "型号分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
-      { key: "purchases-exceptions", path: "/purchases/exceptions", label: "采购异常", icon: <WarningOutlined />, perm: "page_purchases", page: PurchaseExceptionsPage, load: loadPurchaseExceptions },
-      { key: "purchases-records", path: "/purchases/records", label: "采购明细", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchaseRecordsPage, load: loadPurchaseRecords },
+      { key: "purchases-analysis", requiresTaxPolicy: purchaseRecordsRequireTaxPolicy, path: "/purchases/analysis", label: "型号分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
+      { key: "purchases-exceptions", requiresTaxPolicy: purchaseRecordsRequireTaxPolicy, path: "/purchases/exceptions", label: "采购异常", icon: <WarningOutlined />, perm: "page_purchases", page: PurchaseExceptionsPage, load: loadPurchaseExceptions },
+      { key: "purchases-records", requiresTaxPolicy: purchaseRecordsRequireTaxPolicy, path: "/purchases/records", label: "采购明细", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchaseRecordsPage, load: loadPurchaseRecords },
     ],
   },
   {
@@ -214,6 +248,7 @@ export const NAV_GROUPS: NavGroup[] = [
       {
         // 维保数据看板 MVP（D-0022/R33）：数量口径人人可见，金额随 data_profit。
         key: "maintenance-dashboard",
+        requiresTaxPolicy: true,
         path: "/maintenance/dashboard",
         label: "数据看板",
         icon: <FundOutlined />,
@@ -287,6 +322,7 @@ export interface DetailRoute {
   anyPerm?: string[];
   betaFeature?: "maintenance" | "replenishment" | "maintenance_boss";
   menuKey: string;
+  requiresTaxPolicy?: boolean;
   page: LazyExoticComponent<ComponentType>;
   load: () => Promise<{ default: ComponentType }>;
 }
@@ -305,6 +341,7 @@ export const DETAIL_ROUTES: DetailRoute[] = [
   },
   {
     key: "pool-analysis",
+    requiresTaxPolicy: true,
     path: "/pool-analysis/:groupId",
     pattern: /^\/pool-analysis\/\d+$/,
     label: "池分析详情",

@@ -1,0 +1,209 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "part_master",
+    "rules": [
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-edit",
+        "actions": [
+          "edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"edit\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-normalize-apply",
+        "actions": [
+          "normalize_apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"normalize_apply\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-normalize-preview",
+        "actions": [
+          "normalize_preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"normalize_preview\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-create",
+        "actions": [
+          "show_create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_create\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && \"create\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-edit",
+        "actions": [
+          "show_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_edit\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && \"edit\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-inline-edit",
+        "actions": [
+          "show_inline_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_inline_edit\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && \"edit\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-list",
+        "actions": [
+          "show_list"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_list\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-normalize",
+        "actions": [
+          "show_normalize"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_normalize\" in P.attr.grants.part_master.actions && \"read\" in P.attr.grants.part_master.actions && \"normalize_preview\" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"part_master\", \"scope\": P.attr.grants.part_master.scope, \"version\": P.attr.grants.part_master.version, \"field_permissions\": P.attr.grants.part_master.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

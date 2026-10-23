@@ -1,5 +1,9 @@
+const CAPTURED_REQUEST = expect.objectContaining({token: expect.any(String), snapshotVersion: expect.any(String), signal: expect.any(AbortSignal)});
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
+vi.mock("../../../authz/AuthzProvider", async importOriginal => ({...(await importOriginal<typeof import("../../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState()}));
+function render(...args: Parameters<typeof fixtureRender>) {prepareLegacyPageFixture({"page_parts": true, "page_pool_analysis": true, "page_boss_board": true}); return fixtureRender(...args);}
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "@testing-library/react";
 import { Grid } from "antd";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
@@ -97,7 +101,7 @@ describe("早会价格纪律摘要", () => {
     expect(screen.getByText("最近 10 条越线记录")).toBeInTheDocument();
     expect(dashboardPriceDisciplineSummary).toHaveBeenCalledWith({
       date_from: "2026-07-01", date_to: "2026-07-15",
-    });
+    }, CAPTURED_REQUEST);
   });
 
   it("经办人超过三人时可展开查看全部，不静默截断", async () => {
@@ -191,6 +195,7 @@ describe("早会价格纪律摘要", () => {
       .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
       .mockImplementationOnce(() => new Promise((resolve) => { resolveNew = resolve; }));
     const view = renderSummary();
+    await waitFor(() => expect(dashboardPriceDisciplineSummary).toHaveBeenCalledOnce());
     view.rerender(
       <MemoryRouter initialEntries={["/boss"]}>
         <MorningDisciplineSummary dateRange={{ date_from: "2026-07-15", date_to: "2026-07-15" }}
@@ -216,7 +221,7 @@ describe("早会价格纪律摘要", () => {
 
     const duplicateButtons = screen.getAllByRole("button", { name: /查看销售订单 DUP-001/ });
     fireEvent.click(duplicateButtons[0]);
-    await waitFor(() => expect(fetchDashboardOrderDetail).toHaveBeenCalledWith("sales", 202));
+    await waitFor(() => expect(fetchDashboardOrderDetail).toHaveBeenCalledWith("sales", 202, CAPTURED_REQUEST));
     expect(await screen.findByText("客户甲")).toBeInTheDocument();
   });
 

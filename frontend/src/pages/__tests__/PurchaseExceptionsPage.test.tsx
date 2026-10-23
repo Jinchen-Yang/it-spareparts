@@ -1,5 +1,13 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function render(...args: Parameters<typeof fixtureRender>) {
+  prepareLegacyPageFixture({"page_purchase_exceptions": true, "page_purchases": true}, "readonly");
+  return fixtureRender(...args);
+}
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
+import { cleanup, fireEvent, render as fixtureRender, screen, waitFor, within } from "../../test/antdRender";
 import { Grid } from "antd";
 import { MemoryRouter } from "react-router-dom";
 

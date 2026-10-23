@@ -25,7 +25,9 @@ def _cfg():
 
 
 @pytest.fixture()
-def preserve_pool_seq(migrated):
+def preserve_pool_seq(db):
+    # db 在每例前清理全部业务表；仅清池会继承前序测试已提交的维保历史，
+    # 使无关的生产降级守卫先阻断本文件的迁移。序列仍单独保存/恢复。
     with engine.begin() as conn:
         prev = conn.execute(text(
             "SELECT last_value, is_called FROM part_pool_group_id_seq")).one()

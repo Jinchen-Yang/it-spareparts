@@ -1,3 +1,5 @@
+import { useModuleAccess, useSurfaceCheck, withRouteAccess, useRouteAccess } from "../authz/access";
+import { actionRule, anyRule, validateBlockAccess, blockAllowed } from "../authz/rules";
 /**
  * 池分析详情页（独立深链 /pool-analysis/:groupId，可刷新/前进后退）：
  * 池信息 + 人工约束价 → 成员 PN 表 → 采购订单板块 + 销售订单板块（点单号看订单内容）
@@ -95,12 +97,22 @@ function isReferenceRestricted(reference: PoolReferenceSide | null | undefined, 
     && (reference.restricted || reference.constraint.status === "restricted");
 }
 
-export default function PoolAnalysisPage() {
+function PoolAnalysisPage() {
   const { groupId: rawId } = useParams<{ groupId: string }>();
   const groupId = Number(rawId);
   const navigate = useNavigate();
+  const canPart = useRouteAccess("/parts").allowed;
   const [sp, setSp] = useSearchParams();
-  const local = useLocalRestrictions();
+  const local = useLocalRestrictions("pool_price_analysis");
+  const access = useModuleAccess("pool_price_analysis");
+  const facts = useModuleAccess("pool_order_facts");
+  const surface = useSurfaceCheck();
+  const showMembers = surface("pool_price_analysis.members", true);
+  const showMap = surface("pool_price_analysis.price_map", true);
+  const showPurchaseFacts = surface("pool_order_facts.purchase_facts", true);
+  const showSalesFacts = surface("pool_order_facts.sales_facts", true);
+  const showDetail = surface("pool_order_facts.order_detail", true);
+  const factsPriceRestricted = !facts.field("data_pool_price_governance", !local.governance);
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
   const screens = Grid.useBreakpoint();
@@ -164,9 +176,15 @@ export default function PoolAnalysisPage() {
 
   const validId = Number.isInteger(groupId) && groupId > 0;
   const { data: d, loading, error, reload } = useGuardedFetch<PoolAnalysisDetail>(
-    () => (validId && !invalidWindow ? fetchPoolAnalysis(groupId, params).then((data) => ({ data }))
-      : Promise.resolve({ data: null as unknown as PoolAnalysisDetail })),   // 非法编号：走 404 空态，不发请求
-    [groupId, params, validId, invalidWindow]);
+    async context => {
+      const data = await fetchPoolAnalysis(groupId, params, context);
+      if (!access.legacy || !facts.legacy) validateBlockAccess(data.block_access, ["price_analysis", "purchase_transactions", "sales_transactions"]);
+      return {data};
+    }, [groupId, params], undefined,
+    anyRule(actionRule("pool_price_analysis", "read"), actionRule("pool_order_facts", "read")),
+    validId && !invalidWindow && (showMembers || showPurchaseFacts || showSalesFacts || showMap || showDetail));
+  const allowsBlock = (id: "price_analysis" | "purchase_transactions" | "sales_transactions") =>
+    (id === "price_analysis" ? access.legacy : facts.legacy) || blockAllowed(d?.block_access, id);
 
   const priceSortTokens: ReadonlySet<PriceMapSort> = PRICE_MAP_SORTS;
   const rawPriceSort = sp.get("price_sort") as PriceMapSort | null;
@@ -207,10 +225,10 @@ export default function PoolAnalysisPage() {
   }), [focusSide, from, to, range, purchaseType, employee, priceSort, priceOrder]);
   const { data: rawPriceMap, loading: priceMapLoading, error: priceMapError,
     reload: reloadPriceMap } = useGuardedFetch<PoolPriceMapResponse>(
-    () => (validId && !invalidWindow
-      ? fetchPoolPriceMap(groupId, priceMapParams).then((data) => ({ data }))
-      : Promise.resolve({ data: null as unknown as PoolPriceMapResponse })),
-    [currentPriceMapScopeKey, validId, invalidWindow], currentPriceMapScopeKey);
+    context => fetchPoolPriceMap(groupId, priceMapParams, context).then(data => ({data})),
+    [currentPriceMapScopeKey], currentPriceMapScopeKey, actionRule("pool_price_analysis", "read"),
+    validId && !invalidWindow && showMap);
+
   const scopedRawPriceMap = rawPriceMap
     && responseMatchesPriceMapScope(rawPriceMap, priceMapScope) ? rawPriceMap : null;
   const priceMapScopeMismatch = rawPriceMap != null && scopedRawPriceMap == null;
@@ -363,7 +381,7 @@ export default function PoolAnalysisPage() {
     return [
     { title: "日期", dataIndex: "order_date", width: 104, render: (v) => v || EMPTY },
     { title: "单号", dataIndex: "order_no", width: 140, render: (v, row) => (
-      <Button type="link" size="small" onClick={() => setOrderModal({ side, orderId: row.order_id })}
+      <Button type="link" size="small" disabled={!showDetail} onClick={() => { if (showDetail) setOrderModal({ side, orderId: row.order_id }); }}
         style={{ padding: 0, height: "auto", fontFamily: "monospace", fontSize: 12 }}
         aria-label={`查看订单 ${v} 内容`}>{v}</Button>) },
     ...(side === "purchase" ? [
@@ -395,7 +413,7 @@ export default function PoolAnalysisPage() {
         const value = side === "purchase"
           ? (row as PoolAnalysisPurchaseOrderLine).purchase_unit_price_ex_tax
           : (row as PoolAnalysisSaleOrderLine).sale_unit_price_ex_tax;
-        return sideRestricted(side)
+        return factsPriceRestricted
           ? <span style={MUTED}>无池价格权限</span>
           : moneyExact(splitFixed(value, "ex")[taxSide]);
       },
@@ -409,7 +427,7 @@ export default function PoolAnalysisPage() {
         const value = side === "purchase"
           ? (row as PoolAnalysisPurchaseOrderLine).purchase_line_value_ex_tax
           : (row as PoolAnalysisSaleOrderLine).sale_line_value_ex_tax;
-        return sideRestricted(side)
+        return factsPriceRestricted
           ? <span style={MUTED}>无池价格权限</span>
           : moneyExact(splitFixed(value, "ex")[taxSide]);
       },
@@ -448,7 +466,7 @@ export default function PoolAnalysisPage() {
           return (
             <List.Item key={row.line_id}
               {...activatableProps(
-                () => setOrderModal({ side, orderId: row.order_id }),
+                () => { if (showDetail) setOrderModal({ side, orderId: row.order_id }); },
                 `查看${side === "purchase" ? "采购" : "销售"}订单 ${row.order_no} 内容`,
               )}
               style={{ cursor: "pointer", paddingInline: 2 }}>
@@ -463,7 +481,7 @@ export default function PoolAnalysisPage() {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 5, fontSize: 13 }}>
                   <span>数量 {qty(row.quantity)}</span>
-                  {sideRestricted(side)
+                  {factsPriceRestricted
                     ? <span style={MUTED}>无池价格权限</span>
                     : <span>单价({taxBasisCaption(basisForSide(side))}) {taxValue(side, price)}</span>}
                 </div>
@@ -529,7 +547,7 @@ export default function PoolAnalysisPage() {
       ) : (
         <>
           {/* 池信息 + 人工约束价 */}
-          <Card size="small" style={{ marginBottom: 16 }} loading={loading && !d}>
+          {showMembers && allowsBlock("price_analysis") && <Card size="small" style={{ marginBottom: 16 }} loading={loading && !d}>
             {d && (
               <>
                 <div style={{ marginBottom: 8 }}>
@@ -586,10 +604,10 @@ export default function PoolAnalysisPage() {
                 <div style={{ ...MUTED, marginTop: 6 }}>{windowNote}</div>
               </>
             )}
-          </Card>
+          </Card>}
 
           {/* 成员 PN 表 */}
-          <section aria-label="成员型号">
+          {showMembers && allowsBlock("price_analysis") && <section aria-label="成员型号">
             <Card size="small" style={{ marginBottom: 16 }} title="成员型号（窗口指标）">
               {isMobile ? (
                 <List<PoolAnalysisMember>
@@ -627,10 +645,10 @@ export default function PoolAnalysisPage() {
                   locale={{ emptyText: "池内暂无成员" }} />
               )}
             </Card>
-          </section>
+          </section>}
 
           {/* 采购订单板块 */}
-          <section aria-label="采购订单">
+          {showPurchaseFacts && allowsBlock("purchase_transactions") && <section aria-label="采购订单">
             <Card size="small" style={{ marginBottom: 16 }} title="采购订单（池内成员，窗口内已生效）">
               {isMobile ? mobileOrders("purchase") : (
                 <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
@@ -639,10 +657,10 @@ export default function PoolAnalysisPage() {
                   pagination={orderPagination("purchase")} />
               )}
             </Card>
-          </section>
+          </section>}
 
           {/* 销售订单板块 */}
-          <section aria-label="销售订单">
+          {showSalesFacts && allowsBlock("sales_transactions") && <section aria-label="销售订单">
             <Card size="small" style={{ marginBottom: 16 }} title="销售订单（池内成员，窗口内已生效）">
               {d?.sales_orders?.restricted ? (
                 <Alert type="info" showIcon message="当前账号无逐单销售明细查看权限（仅聚合可见）。" />
@@ -655,10 +673,10 @@ export default function PoolAnalysisPage() {
                   pagination={orderPagination("sales")} />
               )}
             </Card>
-          </section>
+          </section>}
 
           {/* DEV-09A：低优先级价格区间置底并默认折叠；采购/销售仍由页头方向切换。 */}
-          <section aria-label={priceRangeTitle}>
+          {showMap && <section aria-label={priceRangeTitle}>
             <Card size="small" style={{ marginBottom: 16, minWidth: 0 }}
               title={<span>{priceRangeTitle}
                 <Tag color="processing" style={{ marginInlineStart: 8 }}>当前关注</Tag></span>}
@@ -699,22 +717,22 @@ export default function PoolAnalysisPage() {
                       data={priceMap} loading={priceMapLoading}
                       basis={basisForSide(priceMap.side)}
                       isMobile={isMobile}
-                      onPartOpen={(partId) => navigate(poolAnalysisPartPath(
+                      onPartOpen={canPart ? (partId) => navigate(poolAnalysisPartPath(
                         partId, partNavigationContext,
-                      ))} />
+                      )) : undefined} />
                       : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
                           {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
                         </div>}
                 </div>
               )}
             </Card>
-          </section>
+          </section>}
 
         </>
       )}
 
       <MobileDetailDrawer
-        open={memberDetail != null}
+        open={showMembers && allowsBlock("price_analysis") && memberDetail != null}
         title={memberDetail ? `成员 ${memberDetail.pn_std || `#${memberDetail.part_id}`} 详情` : "成员详情"}
         fields={memberDetail ? memberFields(memberDetail) : []}
         height="100%"
@@ -722,14 +740,17 @@ export default function PoolAnalysisPage() {
       />
 
       <PoolOrderDetailModal
+        resource="pool_order_facts"
         side={orderModal?.side ?? "purchase"}
         orderId={orderModal?.orderId ?? null}
         range={from && to ? "custom" : range ?? "90d"}
         dateFrom={from ?? undefined}
         dateTo={to ?? undefined}
-        forcePriceRestricted={sideRestricted(orderModal?.side ?? "purchase")}
+        forcePriceRestricted={factsPriceRestricted}
         onClose={() => setOrderModal(null)}
       />
     </div>
   );
 }
+
+export default withRouteAccess(PoolAnalysisPage, "/pool-analysis/:groupId");

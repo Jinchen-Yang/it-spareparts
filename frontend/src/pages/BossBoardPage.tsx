@@ -1,3 +1,5 @@
+import { withRouteAccess, useModuleAccess, useSurfaceCheck } from "../authz/access";
+import { actionRule } from "../authz/rules";
 /**
  * 老板经营看板 v2（UI 重排）：
  * ① 全局筛选栏（时间/PN/池/人员，URL 同步可深链可前进后退）
@@ -43,6 +45,7 @@ function explicitOrLegacyPair(
 }
 
 function KpiStrip({ k }: { k: DashboardKpi }) {
+  const access = useModuleAccess("company_summary");
   const purchaseBasis = useTaxBasis("purchase");
   const salesBasis = useTaxBasis("sales");
   const taxValue = (pair: TaxSplit, basis: typeof salesBasis) => (
@@ -93,7 +96,7 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
   ];
   return (
     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
-      {cards.map(([label, val, sub, warn]) => (
+      {cards.filter((_, index) => access.surface(["kpi_sales", "kpi_purchase", "kpi_profit", "kpi_profit", "kpi_coverage", "kpi_coverage"][index], true)).map(([label, val, sub, warn]) => (
         <Card key={label} size="small" style={{ flex: "1 1 160px", minWidth: 148,
           background: warn ? "var(--ant-color-warning-bg,#fdf3e3)" : undefined }}>
           <div style={{ fontSize: 12.5, color: warn ? "#9a7b43" : "var(--mb-text-3)" }}>{label}</div>
@@ -105,12 +108,14 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
   );
 }
 
-export default function BossBoardPage() {
+function BossBoardPage() {
+  const visible = useSurfaceCheck();
   const { filters, dateRange, patch, clearAll, hasFilter } = useBoardFilters();
   const local = useLocalRestrictions();
   const salesBasis = useTaxBasis("sales");
 
-  const kpi = useGuardedFetch<DashboardKpi>(() => dashboardKpi(dateRange), [dateRange]);
+  const kpi = useGuardedFetch<DashboardKpi>(context => dashboardKpi(dateRange, context), [dateRange], undefined, actionRule("company_summary", "read"),
+    ["kpi_sales", "kpi_purchase", "kpi_profit", "kpi_coverage", "order_health"].some(id => visible(`company_summary.${id}`, true)));
 
   // 各板块「当前统计范围」摘要：筛选只作用于声明的板块，绝不静默假装全局生效
   const filterBits = useMemo(() => {
@@ -151,12 +156,12 @@ export default function BossBoardPage() {
           action={<Button size="small" onClick={kpi.reload}>重试</Button>} />
       ) : (
         <>
-          {kpi.data && kpi.data.orders_future > 0 && (
+          {visible("company_summary.order_health", true) && kpi.data && kpi.data.orders_future > 0 && (
             <Alert type="warning" showIcon style={{ marginBottom: 12 }}
               message={`发现 ${kpi.data.orders_future} 张未来日期订单（已排除出经营 KPI，请核对是否录入错误）`} />
           )}
           {kpi.data && <KpiStrip k={kpi.data} />}
-          {kpi.data && (
+          {visible("company_summary.order_health", true) && kpi.data && (
             <div style={{ ...MUTED, marginBottom: 12 }}>
               KPI 统计范围：{dateRange.date_from} ~ {dateRange.date_to}（仅受时间筛选影响） ·
               订单健康：已生效 {kpi.data.orders_active} · 进行中 {kpi.data.orders_in_progress} ·
@@ -184,28 +189,30 @@ export default function BossBoardPage() {
       )}
 
       {/* 早会价格纪律：历史事实摘要，不审批、不拦截、不评价员工 */}
-      <MorningDisciplineSummary dateRange={dateRange}
-        localGovernanceRestricted={local.governance} />
+      {visible("price_discipline.summary", true) && <MorningDisciplineSummary dateRange={dateRange}
+        localGovernanceRestricted={local.governance} />}
 
       {/* ② 最近采购 / 最近销售（PN 明细前置） */}
-      <OrdersBlock side="purchase" range={dateRange}
+      {visible("company_purchase_orders.recent_orders", true) && <OrdersBlock side="purchase" range={dateRange}
         partId={filters.partId} poolId={filters.poolId} person={filters.purchaser}
         scopeNote={ordersScope}
-        localProfitRestricted={local.profit} localCostRestricted={local.cost} />
-      <OrdersBlock side="sales" range={dateRange}
+        localProfitRestricted={local.profit} localCostRestricted={local.cost} />}
+      {visible("company_sales_orders.recent_orders", true) && <OrdersBlock side="sales" range={dateRange}
         partId={filters.partId} poolId={filters.poolId} person={filters.salesperson}
         scopeNote={ordersScope}
-        localProfitRestricted={local.profit} localCostRestricted={local.cost} />
+        localProfitRestricted={local.profit} localCostRestricted={local.cost} />}
 
       {/* ③ 互通池列表（详情 → /pool-analysis/:groupId 独立深链页） */}
-      <PoolsBlock dateRange={dateRange} scopeNote={poolsScope}
+      {visible("company_pool_analysis.pools", true) && <PoolsBlock dateRange={dateRange} scopeNote={poolsScope}
         localCostRestricted={local.cost} localGovernanceRestricted={local.governance}
-        canOpenPoolManagement={local.poolManagement} />
+        canOpenPoolManagement={local.poolManagement} />}
 
       {/* ⑤ 赚钱榜 / 亏钱榜（下沉） */}
-      <RankingBlock filters={filters} dateRange={dateRange} patch={patch}
+      {visible("company_summary.profit_ranking", true) && <RankingBlock filters={filters} dateRange={dateRange} patch={patch}
         kpi={kpi.data} scopeNote={rankingScope}
-        localProfitRestricted={local.profit} localCostRestricted={local.cost} />
+        localProfitRestricted={local.profit} localCostRestricted={local.cost} />}
     </>
   );
 }
+
+export default withRouteAccess(BossBoardPage, "/boss");

@@ -22,10 +22,12 @@ def _cfg():
 
 
 @pytest.fixture()
-def preserve_pool_seq(migrated):
+def preserve_pool_seq(db):
     """保存并恢复 part_pool_group_id_seq 状态（复审五轮 Standards：Postgres 序列不随
     事务回滚，凡是直接操纵序列（ALTER/setval）或依赖其初始值的测试都必须挂本 fixture，
-    否则测试结束把序列留在任意水位 → 跨用例顺序依赖）。"""
+    否则测试结束把序列留在任意水位 → 跨用例顺序依赖）。
+    db 先清理全部业务表，避免前序用例已提交的维保台账触发无关降级守卫；
+    独立序列仍在本 fixture 中保存和恢复。"""
     with engine.begin() as conn:
         prev = conn.execute(text(
             "SELECT last_value, is_called FROM part_pool_group_id_seq")).one()

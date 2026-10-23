@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "pool_price_policy",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.pool_price_policy.actions && P.attr.grants.pool_price_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_policy\", \"scope\": P.attr.grants.pool_price_policy.scope, \"version\": P.attr.grants.pool_price_policy.version, \"field_permissions\": P.attr.grants.pool_price_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-set",
+        "actions": [
+          "set"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"set\" in P.attr.grants.pool_price_policy.actions && \"read\" in P.attr.grants.pool_price_policy.actions && \"data_pool_price_governance\" in P.attr.grants.pool_price_policy.field_permissions && P.attr.grants.pool_price_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_policy\", \"scope\": P.attr.grants.pool_price_policy.scope, \"version\": P.attr.grants.pool_price_policy.version, \"field_permissions\": P.attr.grants.pool_price_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-read",
+        "actions": [
+          "show_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_read\" in P.attr.grants.pool_price_policy.actions && \"read\" in P.attr.grants.pool_price_policy.actions && P.attr.grants.pool_price_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_policy\", \"scope\": P.attr.grants.pool_price_policy.scope, \"version\": P.attr.grants.pool_price_policy.version, \"field_permissions\": P.attr.grants.pool_price_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-set",
+        "actions": [
+          "show_set"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_set\" in P.attr.grants.pool_price_policy.actions && \"read\" in P.attr.grants.pool_price_policy.actions && \"set\" in P.attr.grants.pool_price_policy.actions && \"data_pool_price_governance\" in P.attr.grants.pool_price_policy.field_permissions && P.attr.grants.pool_price_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_policy\", \"scope\": P.attr.grants.pool_price_policy.scope, \"version\": P.attr.grants.pool_price_policy.version, \"field_permissions\": P.attr.grants.pool_price_policy.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

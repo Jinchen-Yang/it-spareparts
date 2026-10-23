@@ -1,6 +1,14 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../authz/AuthzProvider")>()), useAuthz: () => legacyAuthorizationState(),
+}));
+function renderUrlPage(...args: Parameters<typeof fixtureRenderurlpage>) {
+  prepareLegacyPageFixture({"page_inventory": true}, "readonly");
+  return fixtureRenderurlpage(...args);
+}
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, waitFor } from "../../test/antdRender";
-import { renderUrlPage } from "../../test/urlStateRender";
+import { renderUrlPage as fixtureRenderurlpage } from "../../test/urlStateRender";
 import api from "../../api";
 import InventoryPage from "../InventoryPage";
 

@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
+vi.mock("../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => { prepareLegacyPageFixture({ page_governance: true }); return legacyAuthorizationState(); },
+}));
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
@@ -24,5 +29,8 @@ it.each([
   expect(api.post).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: label }));
   fireEvent.click(await screen.findByRole("button", { name: /确\s*认/ }));
-  await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith(endpoint));
+  await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith(endpoint, undefined, expect.objectContaining({ headers: { Authorization: expect.stringMatching(/^Bearer /) }, signal: expect.any(AbortSignal) })));
 });
+
+// These cases exercise legacy page behavior; admission has an explicit fixture.
+beforeEach(() => prepareLegacyPageFixture({ page_governance: true }));

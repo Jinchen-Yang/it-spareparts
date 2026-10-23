@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { transportConfig, type CapturedTransport } from "../authz/transport";
 
 export type TaxDisplayBasis = "inc" | "ex" | "both";
 
@@ -18,8 +19,8 @@ export interface SystemSettingsUpdate {
   expected_version: number;
 }
 
-export const getSystemSettings = () =>
-  api.get<SystemSettings>("/system-settings");
+export const getSystemSettings = (context?: CapturedTransport) =>
+  api.get<SystemSettings>("/system-settings", transportConfig(context));
 
-export const updateSystemSettings = (body: SystemSettingsUpdate) =>
-  api.put<SystemSettings>("/system-settings", body);
+export const updateSystemSettings = (body: SystemSettingsUpdate, context?: CapturedTransport) =>
+  api.put<SystemSettings>("/system-settings", body, transportConfig(context));

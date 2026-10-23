@@ -1,6 +1,33 @@
+import {
+  useAuthorizedRunner,
+  useModuleAccess,
+  legacyRouteAllowed,
+  AuthorizationCancelled,
+  AccessBoundary,
+} from "../../authz/access";
+import { surfaceRule } from "../../authz/rules";
 import { formatBusinessDateTime } from "../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Alert, Button, Card, Col, Descriptions, Empty, Grid, Input, List, Row, Select, Space, Spin, Statistic, Table, Tag, Typography } from "antd";
+import {
+  App,
+  Alert,
+  Button,
+  Card,
+  Col,
+  Descriptions,
+  Empty,
+  Grid,
+  Input,
+  List,
+  Row,
+  Select,
+  Space,
+  Spin,
+  Statistic,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   getPurchasePriceCalibration,
@@ -17,11 +44,16 @@ const DEFAULT_SAMPLE_LIMIT = 6;
 const SAMPLE_PAGE_SIZE = 10;
 
 function readPermissions(): Record<string, boolean> {
-  try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    return {};
+  }
 }
 
 function permissionState() {
-  if (localStorage.getItem("role") === "admin") return { hasPage: true, hasCost: true };
+  if (localStorage.getItem("role") === "admin")
+    return { hasPage: true, hasCost: true };
   const permissions = readPermissions();
   return {
     hasPage: permissions.page_governance === true,
@@ -38,9 +70,11 @@ function formatRate(value: number) {
 }
 
 function directionTag(direction: PurchasePriceCalibrationSample["direction"]) {
-  return direction === "increase"
-    ? <Tag color="orange">本次变贵</Tag>
-    : <Tag color="blue">本次变便宜</Tag>;
+  return direction === "increase" ? (
+    <Tag color="orange">本次变贵</Tag>
+  ) : (
+    <Tag color="blue">本次变便宜</Tag>
+  );
 }
 
 function taxBasisLabel(value: string) {
@@ -51,11 +85,20 @@ function taxBasisLabel(value: string) {
   return value || "—";
 }
 
-export default function DataQualityCalibrationPanel() {
+function DataQualityCalibrationPanel() {
+  const access = useModuleAccess("data_quality_calibration");
+  const run = useAuthorizedRunner();
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const permission = permissionState();
+  const oldPermission = permissionState();
+  const permission = {
+    hasPage: access.surface("preview", oldPermission.hasPage),
+    hasCost: access.action(
+      "preview",
+      oldPermission.hasPage && oldPermission.hasCost,
+    ),
+  };
   const [preview, setPreview] = useState<PurchasePriceCalibration | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -77,10 +120,18 @@ export default function DataQualityCalibrationPanel() {
     setLoading(true);
     setLoadError("");
     try {
-      const result = await getPurchasePriceCalibration(params);
+      const result = await run({
+        rule: surfaceRule("data_quality_calibration.preview"),
+        legacy: {
+          data_quality_calibration:
+            oldPermission.hasPage && oldPermission.hasCost,
+        },
+        request: (capture) => getPurchasePriceCalibration(params, capture),
+      });
       if (seq !== requestSeq.current) return;
       setPreview(result);
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthorizationCancelled) return;
       if (seq !== requestSeq.current) return;
       setPreview(null);
       setLoadError("校准预览加载失败，旧结果已清空。");
@@ -88,20 +139,40 @@ export default function DataQualityCalibrationPanel() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [dateFrom, dateTo, permission.hasCost, permission.hasPage, purchaseType, sampleLimit]);
+  }, [
+    dateFrom,
+    dateTo,
+    permission.hasCost,
+    permission.hasPage,
+    purchaseType,
+    sampleLimit,
+  ]);
 
   useEffect(() => {
     void load();
-    return () => { requestSeq.current += 1; };
+    return () => {
+      requestSeq.current += 1;
+    };
   }, [load]);
 
-  const purchaseTypeOptions = useMemo(() => (preview?.purchase_types ?? []).map((row) => ({
-    value: row.purchase_type,
-    label: row.purchase_type,
-  })), [preview]);
+  const purchaseTypeOptions = useMemo(
+    () =>
+      (preview?.purchase_types ?? []).map((row) => ({
+        value: row.purchase_type,
+        label: row.purchase_type,
+      })),
+    [preview],
+  );
 
   if (!permission.hasPage) {
-    return <Alert type="warning" showIcon message="无数据治理页面权限" description="当前账号不能进入规则校准预览。" />;
+    return (
+      <Alert
+        type="warning"
+        showIcon
+        message="无数据治理页面权限"
+        description="当前账号不能进入规则校准预览。"
+      />
+    );
   }
   if (!permission.hasCost) {
     return (
@@ -115,7 +186,10 @@ export default function DataQualityCalibrationPanel() {
   }
 
   return (
-    <div data-testid="data-quality-calibration-panel" style={{ maxWidth: "100%", overflowX: "hidden" }}>
+    <div
+      data-testid="data-quality-calibration-panel"
+      style={{ maxWidth: "100%", overflowX: "hidden" }}
+    >
       <Alert
         type="info"
         showIcon
@@ -124,14 +198,26 @@ export default function DataQualityCalibrationPanel() {
         description="固定展示 2/3/5/10 倍四档的候选规模，帮助甲方校准未来规则；不会修改采购、利润、库存、池均价或员工排名。"
       />
 
-      <Space direction={isMobile ? "vertical" : "horizontal"} wrap style={{ width: "100%", marginBottom: 16 }}>
+      <Space
+        direction={isMobile ? "vertical" : "horizontal"}
+        wrap
+        style={{ width: "100%", marginBottom: 16 }}
+      >
         <label style={{ width: isMobile ? "100%" : 160 }}>
           <Text type="secondary">本次采购起始日</Text>
-          <Input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+          <Input
+            type="date"
+            value={dateFrom}
+            onChange={(event) => setDateFrom(event.target.value)}
+          />
         </label>
         <label style={{ width: isMobile ? "100%" : 160 }}>
           <Text type="secondary">本次采购截止日</Text>
-          <Input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+          <Input
+            type="date"
+            value={dateTo}
+            onChange={(event) => setDateTo(event.target.value)}
+          />
         </label>
         <label style={{ width: isMobile ? "100%" : 180 }}>
           <Text type="secondary">采购类型</Text>
@@ -149,11 +235,16 @@ export default function DataQualityCalibrationPanel() {
           <Select
             value={sampleLimit}
             style={{ width: "100%" }}
-            options={[3, 6, 10, 20].map((value) => ({ value, label: `${value} 条` }))}
+            options={[3, 6, 10, 20].map((value) => ({
+              value,
+              label: `${value} 条`,
+            }))}
             onChange={setSampleLimit}
           />
         </label>
-        <Button type="primary" loading={loading} onClick={() => void load()}>刷新模拟预览</Button>
+        <Button type="primary" loading={loading} onClick={() => void load()}>
+          刷新模拟预览
+        </Button>
       </Space>
 
       {loadError && (
@@ -162,36 +253,64 @@ export default function DataQualityCalibrationPanel() {
           showIcon
           style={{ marginBottom: 16 }}
           message={loadError}
-          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          action={
+            <Button size="small" onClick={() => void load()}>
+              重试
+            </Button>
+          }
         />
       )}
 
       <Spin spinning={loading}>
-        {preview ? <PreviewContent preview={preview} isMobile={isMobile} />
-          : !loading && !loadError ? <Empty description="当前筛选没有可比采购记录" /> : null}
+        {preview ? (
+          <PreviewContent preview={preview} isMobile={isMobile} />
+        ) : !loading && !loadError ? (
+          <Empty description="当前筛选没有可比采购记录" />
+        ) : null}
       </Spin>
     </div>
   );
 }
 
-function PreviewContent({ preview, isMobile }: { preview: PurchasePriceCalibration; isMobile: boolean }) {
-  const thresholdByValue = new Map(preview.thresholds.map((item) => [item.threshold, item]));
+function PreviewContent({
+  preview,
+  isMobile,
+}: {
+  preview: PurchasePriceCalibration;
+  isMobile: boolean;
+}) {
+  const thresholdByValue = new Map(
+    preview.thresholds.map((item) => [item.threshold, item]),
+  );
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Row gutter={[12, 12]}>
         <Col xs={12} sm={8} md={6}>
-          <Card size="small"><Statistic title="可比相邻对" value={preview.eligible_pairs} /></Card>
+          <Card size="small">
+            <Statistic title="可比相邻对" value={preview.eligible_pairs} />
+          </Card>
         </Col>
         <Col xs={12} sm={8} md={6}>
-          <Card size="small"><Statistic title="涉及 PN" value={preview.distinct_parts} /></Card>
+          <Card size="small">
+            <Statistic title="涉及 PN" value={preview.distinct_parts} />
+          </Card>
         </Col>
         <Col xs={24} sm={8} md={12}>
           <Card size="small">
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="规则版本">{preview.rule_version}</Descriptions.Item>
-              <Descriptions.Item label="数据截止">{preview.data_through || "暂无有效数据"}</Descriptions.Item>
-              <Descriptions.Item label="预览生成">{formatBusinessDateTime(preview.generated_at)}</Descriptions.Item>
-              <Descriptions.Item label="抽样边界">每档每方向最多 {preview.sample_boundary.limit_per_threshold_direction} 条</Descriptions.Item>
+              <Descriptions.Item label="规则版本">
+                {preview.rule_version}
+              </Descriptions.Item>
+              <Descriptions.Item label="数据截止">
+                {preview.data_through || "暂无有效数据"}
+              </Descriptions.Item>
+              <Descriptions.Item label="预览生成">
+                {formatBusinessDateTime(preview.generated_at)}
+              </Descriptions.Item>
+              <Descriptions.Item label="抽样边界">
+                每档每方向最多{" "}
+                {preview.sample_boundary.limit_per_threshold_direction} 条
+              </Descriptions.Item>
             </Descriptions>
           </Card>
         </Col>
@@ -203,21 +322,35 @@ function PreviewContent({ preview, isMobile }: { preview: PurchasePriceCalibrati
           data-testid="calibration-threshold-grid"
           style={{
             display: "grid",
-            gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))",
+            gridTemplateColumns: isMobile
+              ? "repeat(2, minmax(0, 1fr))"
+              : "repeat(4, minmax(0, 1fr))",
             gap: 12,
           }}
         >
           {FIXED_THRESHOLDS.map((threshold) => (
-            <ThresholdCard key={threshold} threshold={thresholdByValue.get(threshold)} value={threshold} />
+            <ThresholdCard
+              key={threshold}
+              threshold={thresholdByValue.get(threshold)}
+              value={threshold}
+            />
           ))}
         </div>
       </section>
 
       <section>
         <Title level={5}>采购类型分布</Title>
-        {preview.purchase_types.length
-          ? <PurchaseTypeDistribution rows={preview.purchase_types} isMobile={isMobile} />
-          : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选没有采购类型分布" />}
+        {preview.purchase_types.length ? (
+          <PurchaseTypeDistribution
+            rows={preview.purchase_types}
+            isMobile={isMobile}
+          />
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="当前筛选没有采购类型分布"
+          />
+        )}
       </section>
 
       <section aria-label="确定性抽样样本">
@@ -229,15 +362,23 @@ function PreviewContent({ preview, isMobile }: { preview: PurchasePriceCalibrati
           message="候选仅供业务校准，不代表采购记录有错"
           description="相同数据快照和筛选参数会返回相同样本顺序，请结合采购类型、单位、包装和紧急采购背景核实。"
         />
-        {preview.samples.length
-          ? <CalibrationSamples samples={preview.samples} isMobile={isMobile} />
-          : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前档位没有抽样候选" />}
+        {preview.samples.length ? (
+          <CalibrationSamples samples={preview.samples} isMobile={isMobile} />
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="当前档位没有抽样候选"
+          />
+        )}
       </section>
     </Space>
   );
 }
 
-function ThresholdCard({ threshold, value }: {
+function ThresholdCard({
+  threshold,
+  value,
+}: {
   threshold: PurchasePriceCalibrationThreshold | undefined;
   value: number;
 }) {
@@ -247,22 +388,28 @@ function ThresholdCard({ threshold, value }: {
         <Text strong>{threshold?.candidate_count ?? 0} 条候选</Text>
         <Text>{formatRate(threshold?.candidate_rate ?? 0)}</Text>
         <Text type="secondary">
-          变贵 {threshold?.increase_count ?? 0} · 变便宜 {threshold?.decrease_count ?? 0}
+          变贵 {threshold?.increase_count ?? 0} · 变便宜{" "}
+          {threshold?.decrease_count ?? 0}
         </Text>
       </Space>
     </Card>
   );
 }
 
-function PurchaseTypeDistribution({ rows, isMobile }: {
+function PurchaseTypeDistribution({
+  rows,
+  isMobile,
+}: {
   rows: PurchasePriceCalibrationTypeDistribution[];
   isMobile: boolean;
 }) {
-  const flattened = rows.flatMap((row) => row.thresholds.map((threshold) => ({
-    key: `${row.purchase_type}-${threshold.threshold}`,
-    purchase_type: row.purchase_type,
-    ...threshold,
-  })));
+  const flattened = rows.flatMap((row) =>
+    row.thresholds.map((threshold) => ({
+      key: `${row.purchase_type}-${threshold.threshold}`,
+      purchase_type: row.purchase_type,
+      ...threshold,
+    })),
+  );
   if (isMobile) {
     return (
       <List
@@ -271,9 +418,18 @@ function PurchaseTypeDistribution({ rows, isMobile }: {
           <List.Item style={{ paddingInline: 0 }}>
             <Card size="small" style={{ width: "100%" }}>
               <Space direction="vertical" size={3}>
-                <Space wrap><Text strong>{row.purchase_type}</Text><Tag>{row.threshold} 倍</Tag></Space>
-                <Text>可比 {row.eligible_pairs.toLocaleString()} · 候选 {row.candidate_count.toLocaleString()}（{formatRate(row.candidate_rate)}）</Text>
-                <Text type="secondary">变贵 {row.increase_count} · 变便宜 {row.decrease_count}</Text>
+                <Space wrap>
+                  <Text strong>{row.purchase_type}</Text>
+                  <Tag>{row.threshold} 倍</Tag>
+                </Space>
+                <Text>
+                  可比 {row.eligible_pairs.toLocaleString()} · 候选{" "}
+                  {row.candidate_count.toLocaleString()}（
+                  {formatRate(row.candidate_rate)}）
+                </Text>
+                <Text type="secondary">
+                  变贵 {row.increase_count} · 变便宜 {row.decrease_count}
+                </Text>
               </Space>
             </Card>
           </List.Item>
@@ -283,17 +439,37 @@ function PurchaseTypeDistribution({ rows, isMobile }: {
   }
   const columns: ColumnsType<(typeof flattened)[number]> = [
     { title: "采购类型", dataIndex: "purchase_type" },
-    { title: "倍率档", dataIndex: "threshold", render: (value) => `${value} 倍` },
+    {
+      title: "倍率档",
+      dataIndex: "threshold",
+      render: (value) => `${value} 倍`,
+    },
     { title: "可比对", dataIndex: "eligible_pairs", align: "right" },
     { title: "候选数", dataIndex: "candidate_count", align: "right" },
-    { title: "候选率", dataIndex: "candidate_rate", align: "right", render: formatRate },
+    {
+      title: "候选率",
+      dataIndex: "candidate_rate",
+      align: "right",
+      render: formatRate,
+    },
     { title: "本次变贵", dataIndex: "increase_count", align: "right" },
     { title: "本次变便宜", dataIndex: "decrease_count", align: "right" },
   ];
-  return <Table rowKey="key" size="small" pagination={false} columns={columns} dataSource={flattened} />;
+  return (
+    <Table
+      rowKey="key"
+      size="small"
+      pagination={false}
+      columns={columns}
+      dataSource={flattened}
+    />
+  );
 }
 
-function CalibrationSamples({ samples, isMobile }: {
+function CalibrationSamples({
+  samples,
+  isMobile,
+}: {
   samples: PurchasePriceCalibrationSample[];
   isMobile: boolean;
 }) {
@@ -302,15 +478,27 @@ function CalibrationSamples({ samples, isMobile }: {
       <List
         data-testid="calibration-mobile-samples"
         dataSource={samples}
-        pagination={samples.length > SAMPLE_PAGE_SIZE ? {
-          pageSize: SAMPLE_PAGE_SIZE, showSizeChanger: false, size: "small",
-        } : false}
+        pagination={
+          samples.length > SAMPLE_PAGE_SIZE
+            ? {
+                pageSize: SAMPLE_PAGE_SIZE,
+                showSizeChanger: false,
+                size: "small",
+              }
+            : false
+        }
         renderItem={(sample) => (
           <List.Item style={{ paddingInline: 0 }}>
             <Card size="small" style={{ width: "100%" }}>
               <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                <Space wrap><Text strong>{sample.pn_std || "无型号"}</Text>{directionTag(sample.direction)}<Tag>{sample.ratio.toFixed(2)} 倍</Tag></Space>
-                <Text type="secondary">{sample.purchase_type} · {sample.threshold} 倍档</Text>
+                <Space wrap>
+                  <Text strong>{sample.pn_std || "无型号"}</Text>
+                  {directionTag(sample.direction)}
+                  <Tag>{sample.ratio.toFixed(2)} 倍</Tag>
+                </Space>
+                <Text type="secondary">
+                  {sample.purchase_type} · {sample.threshold} 倍档
+                </Text>
                 <SampleLine title="前一笔" line={sample.previous} />
                 <SampleLine title="本次" line={sample.current} />
               </Space>
@@ -321,27 +509,59 @@ function CalibrationSamples({ samples, isMobile }: {
     );
   }
   const columns: ColumnsType<PurchasePriceCalibrationSample> = [
-    { title: "PN", dataIndex: "pn_std", width: 150, render: (value) => value || "无型号" },
-    { title: "类型", dataIndex: "purchase_type", width: 110 },
-    { title: "档位", dataIndex: "threshold", width: 76, render: (value) => `${value} 倍` },
-    { title: "方向", dataIndex: "direction", width: 110, render: directionTag },
-    { title: "倍率", dataIndex: "ratio", width: 90, align: "right", render: (value) => `${value.toFixed(2)} 倍` },
     {
-      title: "前一笔采购", key: "previous", width: 280,
-      render: (_, row) => <SampleLine title="前一笔" line={row.previous} hideTitle />,
+      title: "PN",
+      dataIndex: "pn_std",
+      width: 150,
+      render: (value) => value || "无型号",
+    },
+    { title: "类型", dataIndex: "purchase_type", width: 110 },
+    {
+      title: "档位",
+      dataIndex: "threshold",
+      width: 76,
+      render: (value) => `${value} 倍`,
+    },
+    { title: "方向", dataIndex: "direction", width: 110, render: directionTag },
+    {
+      title: "倍率",
+      dataIndex: "ratio",
+      width: 90,
+      align: "right",
+      render: (value) => `${value.toFixed(2)} 倍`,
     },
     {
-      title: "本次采购", key: "current", width: 280,
-      render: (_, row) => <SampleLine title="本次" line={row.current} hideTitle />,
+      title: "前一笔采购",
+      key: "previous",
+      width: 280,
+      render: (_, row) => (
+        <SampleLine title="前一笔" line={row.previous} hideTitle />
+      ),
+    },
+    {
+      title: "本次采购",
+      key: "current",
+      width: 280,
+      render: (_, row) => (
+        <SampleLine title="本次" line={row.current} hideTitle />
+      ),
     },
   ];
   return (
     <Table
-      rowKey={(row) => `${row.threshold}-${row.direction}-${row.current.line_id}-${row.previous.line_id}`}
+      rowKey={(row) =>
+        `${row.threshold}-${row.direction}-${row.current.line_id}-${row.previous.line_id}`
+      }
       size="small"
-      pagination={samples.length > SAMPLE_PAGE_SIZE ? {
-        pageSize: SAMPLE_PAGE_SIZE, showSizeChanger: false, size: "small",
-      } : false}
+      pagination={
+        samples.length > SAMPLE_PAGE_SIZE
+          ? {
+              pageSize: SAMPLE_PAGE_SIZE,
+              showSizeChanger: false,
+              size: "small",
+            }
+          : false
+      }
       columns={columns}
       dataSource={samples}
       scroll={{ x: 1100 }}
@@ -349,7 +569,11 @@ function CalibrationSamples({ samples, isMobile }: {
   );
 }
 
-function SampleLine({ title, line, hideTitle = false }: {
+function SampleLine({
+  title,
+  line,
+  hideTitle = false,
+}: {
   title: string;
   line: PurchasePriceCalibrationSample["current"];
   hideTitle?: boolean;
@@ -357,8 +581,28 @@ function SampleLine({ title, line, hideTitle = false }: {
   return (
     <div>
       {!hideTitle && <Text type="secondary">{title}</Text>}
-      <div>{line.order_no || "无单号"} · {line.order_date}</div>
-      <div>{formatMoney(line.unit_price_ex_tax)} · {line.quantity.toLocaleString()}{line.unit ? ` ${line.unit}` : ""} · {taxBasisLabel(line.tax_basis)}</div>
+      <div>
+        {line.order_no || "无单号"} · {line.order_date}
+      </div>
+      <div>
+        {formatMoney(line.unit_price_ex_tax)} · {line.quantity.toLocaleString()}
+        {line.unit ? ` ${line.unit}` : ""} · {taxBasisLabel(line.tax_basis)}
+      </div>
     </div>
+  );
+}
+
+export default function ControlledCalibration() {
+  const access = useModuleAccess("data_quality_calibration");
+  return (
+    <AccessBoundary
+      rule={surfaceRule("data_quality_calibration.preview")}
+      legacy={{ data_quality_calibration: legacyRouteAllowed("/governance") }}
+      fallback={<Alert type="warning" message="无数据治理页面权限" />}
+    >
+      <DataQualityCalibrationPanel
+        key={`${access.token}:${access.snapshot?.version}:${access.generation}`}
+      />
+    </AccessBoundary>
   );
 }

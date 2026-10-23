@@ -1,3 +1,8 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
+vi.mock("../../../../authz/AuthzProvider", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../../authz/AuthzProvider")>(),
+  useAuthz: legacyAuthorizationState,
+}));
 import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -282,3 +287,6 @@ describe("领用事实页内编辑", () => {
     expect(mocks.correctLine).toHaveBeenCalledTimes(1);
   });
 });
+
+// Explicit pre-cutover permission context for existing component behaviour tests.
+beforeEach(() => prepareLegacyPageFixture({page_parts: true}));
