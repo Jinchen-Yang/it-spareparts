@@ -185,6 +185,9 @@ def record_audit(db: Session, part_id: int | None, **kwargs):
 def _response(db: Session, receipt: CommandReceipt, *, context: CommandContext,
               authorize: Authorize, replayed: bool, projector=None) -> dict:
     resource = receipt.result["resource"]
+    if resource == "external_reference":
+        from .references import render_receipt
+        return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
     if resource in {"content", "candidate"}:
         from .content import render_receipt
         return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)

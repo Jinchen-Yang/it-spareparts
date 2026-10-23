@@ -28,3 +28,26 @@ def test_shop_create_reference_json_uuid_and_exact_recovery(http, authority):
     bulk = http.get(target, headers=headers)
     assert bulk.status_code == 200, bulk.text
     assert [row["state"] for row in bulk.json()["data"]] == ["bound", "unresolved"]
+
+
+def test_shop_binds_selected_existing_pn_and_recovers_typed_receipt(http, authority):
+    target = "/api/pn-catalog/v1/parts"
+    body = json.dumps({"pn_std": "SELECTED-EXISTING-PN"}).encode()
+    headers, _ = exchange(http, authority[2], "POST", target, body, key=uuid4())
+    created = http.post(target, content=body, headers={**headers, "content-type": "application/json"})
+    assert created.status_code == 201, created.text
+    value = created.json()["data"]
+    target = f'/api/pn-catalog/v1/parts/{value["part_id"]}/references'
+    key = uuid4()
+    body = json.dumps({"namespace": "shop", "source_id": str(uuid4()),
+                       "expected_identity_revision": value["identity_revision"]}).encode()
+    headers, _ = exchange(http, authority[2], "POST", target, body, key=key)
+    bound = http.post(target, content=body, headers={**headers, "content-type": "application/json"})
+    assert bound.status_code == 200, bound.text
+    assert bound.json()["data"]["part_id"] == value["part_id"]
+    target = f"/api/pn-catalog/v1/requests/{key}"
+    headers, _ = exchange(http, authority[2], "GET", target)
+    receipt = http.get(target, headers=headers)
+    assert receipt.status_code == 200, receipt.text
+    assert receipt.json()["data"] == bound.json()["data"]
+    assert receipt.json()["meta"]["replayed"]

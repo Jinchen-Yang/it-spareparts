@@ -4,9 +4,15 @@ from uuid import UUID
 from fastapi import Path, Query, Request
 
 from .errors import CatalogError
-from .http import AccessDep, DbDep, _context, router
-from .reference_dto import ReferenceListResponse, ReferenceResponse
-from .references import resolve_references
+from .http import AccessDep, DbDep, PartId, _commit, _context, _WRITE_HEADERS, router
+from .reference_dto import BindReference, ReferenceListResponse, ReferenceMutationResponse, ReferenceResponse
+from .references import bind_existing_reference, resolve_references
+
+
+@router.post("/parts/{part_id}/references", response_model=ReferenceMutationResponse, openapi_extra=_WRITE_HEADERS)
+def reference_bind(part_id: PartId, command: BindReference, request: Request, db: DbDep, access: AccessDep):
+    return _commit(db, lambda: bind_existing_reference(db, part_id, command,
+        context=_context(request, access, write=True), authorize=access.authorize))
 
 
 @router.get("/references", response_model=ReferenceListResponse)
