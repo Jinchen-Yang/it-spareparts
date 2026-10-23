@@ -454,8 +454,9 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
         protocolError();
     if (
       m.migration_state === "implemented" &&
-      (m.id !== "sales_analysis" ||
-        actions.some((a) => !["read", "export"].includes(a)))
+      (!IMPLEMENTED_RESOURCES[m.id] ||
+        actions.some((a) => !IMPLEMENTED_RESOURCES[m.id].actions.includes(a)) ||
+        fields.some((f) => !IMPLEMENTED_RESOURCES[m.id].fields.includes(f)))
     )
       protocolError();
   }

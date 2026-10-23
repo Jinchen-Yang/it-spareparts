@@ -10,7 +10,14 @@ from sqlalchemy import text
 
 def pre_catalog_snapshot(db):
     db.flush()
-    db.execute(text("TRUNCATE pn_catalog_receipt, pn_catalog_audit, pn_catalog_state"))
+    tables = sorted(name for name in db.scalars(text(
+        "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()"
+    )) if name.startswith("pn_catalog_"))
+    # Keep the whole catalog FK closure in the same TRUNCATE. Do not CASCADE into
+    # unrelated business history; this snapshot predates all catalog adoption.
+    quote = db.get_bind().dialect.identifier_preparer.quote
+    if tables:
+        db.execute(text("TRUNCATE " + ", ".join(quote(name) for name in tables)))
     db.expire_all()
 
 
