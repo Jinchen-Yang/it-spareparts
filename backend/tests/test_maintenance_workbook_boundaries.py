@@ -78,7 +78,7 @@ def test_shared_boundaries_do_not_depend_on_master_or_http_adapters():
     forbidden = ('app.api', 'app.main',
                  'app.services.maintenance_project_master_workbook',
                  'app.services.maintenance_boss_board',
-                 'app.services.maintenance_site_issue_manual')
+                 'app.services.maintenance_manual_site_issue')
     for module in _EXPORTS:
         paths = _local_dependency_paths([module.__name__])
         assert not {name: path for name, path in paths.items() if name.startswith(forbidden)}
