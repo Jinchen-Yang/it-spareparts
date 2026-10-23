@@ -116,6 +116,29 @@ def test_original_import_epoch_is_not_refreshed_when_account_reauthorized(
     assert db.scalar(select(func.count()).select_from(DimPart)) == 0
 
 
+@pytest.mark.parametrize("original_epoch", [None, 0])
+def test_incomplete_or_stale_import_identity_cannot_acquire_current_authority(
+    db, authority, original_epoch
+):
+    user, _, _ = authority
+    batch = SysImportBatch(
+        filename="historical.xlsx",
+        file_type="sales",
+        file_hash=str(uuid4()),
+        actor_user_id=user.id,
+        actor_authorization_epoch=original_epoch,
+    )
+    db.add(batch)
+    db.commit()
+    ctx = loader._catalog_import_context(db, batch.id, user.username)
+    assert ctx.actor.authorization_epoch == original_epoch
+    with pytest.raises(CatalogError) as denied:
+        loader._upsert_parts(db, attrs(), False, catalog_context=ctx)
+    assert denied.value.code == "auth.session_revoked"
+    assert db.scalar(select(func.count()).select_from(DimPart)) == 0
+    assert db.scalar(select(func.count()).select_from(AuditEvent)) == 0
+
+
 def test_source_import_cannot_write_hidden_fields(db, authority):
     user, _, _ = authority
     grant = db.scalar(
