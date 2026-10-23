@@ -166,6 +166,28 @@ from app.services.maintenance_workbook_values import (
     _decode_row_ids,
 )
 
+from app.services.maintenance_workbook_signatures import (
+    _global_cost_base_token,
+    _parse_global_cost_base_token,
+    _v2_row_base_token,
+    _parse_v2_row_base_token,
+    _v2_sign_meta_rows,
+)
+from app.services.maintenance_workbook_excel import (
+    _decimal,
+    _v2_date,
+    _v2_decimal,
+    _v2_meta,
+    _v2_readonly_sheet_hash,
+)
+from app.services.maintenance_workbook_rows import (
+    _v2_part_row_values,
+    _v2_expense_row_values,
+    _v2_receipt_row_values,
+    _v2_site_row_values,
+    _v2_site_identity_values,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -638,96 +660,6 @@ def build_project_master(db: Session, *, project_id: str,
     return buffer.getvalue()
 
 
-def _global_cost_base_token(
-    *,
-    line: FMaintenanceLine,
-    override: MaintenanceManualCostOverride | None,
-    display_unit_cost_ex_tax: Decimal | None,
-    display_unit_cost_inc_tax: Decimal | None,
-    visible_reason: str | None,
-) -> str:
-    """Signed base snapshot used to reject stale concurrent global uploads."""
-
-    payload = {
-        "line_id": int(line.id),
-        "override_version": override.version if override is not None else None,
-        "override_active": override.active if override is not None else None,
-        "unit_cost_ex_tax": _global_cost_decimal(display_unit_cost_ex_tax),
-        "unit_cost_inc_tax": _global_cost_decimal(display_unit_cost_inc_tax),
-        "reason": visible_reason or None,
-    }
-    payload_bytes = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    key_id, signing_key = get_settings().maintenance_manifest_signing_material()
-    signature = hmac.new(
-        signing_key,
-        _GLOBAL_COST_TOKEN_DOMAIN + payload_bytes,
-        hashlib.sha256,
-    ).hexdigest()
-    return json.dumps(
-        {"key_id": key_id, "payload": payload, "signature": signature},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _parse_global_cost_base_token(value, *, line_id: int, row_no: int) -> dict:
-    try:
-        envelope = json.loads(str(value))
-        key_id = str(envelope["key_id"])
-        payload = envelope["payload"]
-        signature = str(envelope["signature"])
-        if not isinstance(payload, dict) or int(payload["line_id"]) != line_id:
-            raise ValueError("line mismatch")
-        payload_bytes = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        verification_key = (
-            get_settings().maintenance_manifest_verification_keys().get(key_id)
-        )
-        if verification_key is None:
-            raise ValueError("unknown key")
-        expected = hmac.new(
-            verification_key,
-            _GLOBAL_COST_TOKEN_DOMAIN + payload_bytes,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            raise ValueError("bad signature")
-        raw_version = payload.get("override_version")
-        version = None if raw_version is None else int(raw_version)
-        if version is not None and version < 1:
-            raise ValueError("bad version")
-        raw_active = payload.get("override_active")
-        if raw_active is not None and not isinstance(raw_active, bool):
-            raise ValueError("bad active state")
-
-        def _money(key: str) -> Decimal | None:
-            raw = payload.get(key)
-            return None if raw is None else Decimal(str(raw)).quantize(Decimal("0.01"))
-
-        return {
-            "override_version": version,
-            "override_active": raw_active,
-            "unit_cost_ex_tax": _money("unit_cost_ex_tax"),
-            "unit_cost_inc_tax": _money("unit_cost_inc_tax"),
-            "reason": str(payload["reason"]) if payload.get("reason") is not None else None,
-        }
-    except (KeyError, TypeError, ValueError, InvalidOperation, json.JSONDecodeError) as exc:
-        raise WorkbookError(
-            "invalid_concurrency_token",
-            f"第 {row_no} 行并发校验信息无效，请重新下载全局备件表",
-        ) from exc
-
-
 def build_global_lines(
     db: Session,
     *,
@@ -814,15 +746,6 @@ def build_global_lines(
 
 
 # ------------------------------------------------------------------ 解析
-
-def _decimal(value, *, label: str, row_no: int) -> Decimal:
-    try:
-        parsed = Decimal(str(value).strip().replace(",", ""))
-    except (InvalidOperation, AttributeError, ValueError):
-        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
-    if parsed < 0:
-        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不能为负")
-    return parsed.quantize(Decimal("0.01"))
 
 
 def _global_line_in_scope(
@@ -1731,72 +1654,6 @@ def apply_global_lines(
 # ====================================================================== V2
 
 
-def _v2_row_base_token(
-    *, sheet: str, entity_id, values: dict[str, object]
-) -> str:
-    """行级签名基线（2.7.0）：该行可编辑字段的导出值快照 + HMAC。
-
-    与全局表 ``_global_cost_base_token`` 同一模式（域分隔 + 规范 JSON），
-    供上传侧三路合并区分「用户改的」与「文件里带出来的导出旧值」。
-    """
-    payload = {
-        "sheet": sheet,
-        "entity": str(entity_id),
-        "base": {
-            str(name): _v2_hash_value(values.get(name)) for name in sorted(values)
-        },
-    }
-    payload_bytes = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    key_id, signing_key = get_settings().maintenance_manifest_signing_material()
-    signature = hmac.new(
-        signing_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
-    ).hexdigest()
-    return json.dumps(
-        {"key_id": key_id, "payload": payload, "signature": signature},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-
-
-def _parse_v2_row_base_token(
-    value, *, sheet: str, entity_id, row_no: int
-) -> dict[str, str]:
-    try:
-        envelope = json.loads(str(value))
-        key_id = str(envelope["key_id"])
-        payload = envelope["payload"]
-        signature = str(envelope["signature"])
-        if (
-            not isinstance(payload, dict)
-            or payload.get("sheet") != sheet
-            or str(payload.get("entity")) != str(entity_id)
-        ):
-            raise ValueError("row mismatch")
-        payload_bytes = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        verification_key = (
-            get_settings().maintenance_manifest_verification_keys().get(key_id)
-        )
-        if verification_key is None:
-            raise ValueError("unknown key")
-        expected = hmac.new(
-            verification_key, _V2_ROW_BASE_DOMAIN + payload_bytes, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            raise ValueError("bad signature")
-        base = payload.get("base")
-        if not isinstance(base, dict):
-            raise ValueError("bad base")
-        return {str(k): ("" if v is None else str(v)) for k, v in base.items()}
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise WorkbookError(
-            "invalid_concurrency_token",
-            f"第 {row_no} 行基线令牌无效或与实体不匹配，请重新下载当前项目总表（2.7.0）",
-        ) from exc
-
-
 class _V2MergeContext:
     """validate 期间收集三路合并结果（冲突/变更/接管/PN 解析明细）。"""
 
@@ -2035,27 +1892,6 @@ def _v2_server_row_changed(
         _v2_hash_value(server_values.get(name)) != baseline.get(name, "")
         for name in fields
     )
-
-
-def _v2_sign_meta_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    key_id, signing_key = get_settings().maintenance_manifest_signing_material()
-    flat_rows: list[tuple[str, str]] = []
-    for key, value in rows:
-        flat_rows.extend(_chunk_meta_value(str(key), str(value)))
-    signed_rows = [
-        *flat_rows,
-        ("metadata_hmac_algorithm", V2_META_SIGNATURE_ALGORITHM),
-        ("metadata_hmac_key_id", key_id),
-    ]
-    # 签名覆盖「逻辑值（未分块）+ 算法/键ID」，与读取端合并后的全键一致。
-    # 教训：3cf4f53 曾误签 dict(rows)（缺 algorithm/key_id 两键）导致全量必炸，
-    # 由 test_v271 回归测试守住。
-    metadata = dict(rows) | {
-        "metadata_hmac_algorithm": V2_META_SIGNATURE_ALGORITHM,
-        "metadata_hmac_key_id": key_id,
-    }
-    signed_rows.append(("metadata_hmac", _v2_metadata_signature(metadata, signing_key)))
-    return signed_rows
 
 
 def _v2_finalize(ws, headers: list[str], *, hidden_from: int | None = None,
@@ -2384,48 +2220,6 @@ def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
                  editable={1, 2, 3, 4, 5, 6, 12}, operation_col=1)
 
 
-def _v2_part_row_values(line, order, override) -> dict[str, object]:
-    """03 一行的全部展示值（按表头名）。build/parse 共用，保证哈希口径一致。"""
-    has_cost = line.unit_cost_ex_tax is not None
-    return {
-        "操作": "",
-        "维保单号": order.order_no or "",
-        "制单日期": order.order_date,
-        "XSDD": order.linked_sales_order_no or "",
-        "需求类型": order.demand_type or "",
-        "仓库": order.warehouse or "",
-        "销售人员": order.salesperson or "",
-        "业务类型": order.business_type or "",
-        "PN": line.pn_std or line.pn_raw or "",
-        "描述": line.description or "",
-        "需求数量": line.qty,
-        "SN": line.serial_numbers or "",
-        "退货数量": line.return_qty,
-        "成本来源": line.cost_source or "",
-        "置信度": line.confidence or "none",
-        "系统未税单位成本": line.unit_cost_ex_tax,
-        "系统含税单位成本": line.unit_cost_inc_tax,
-        "人工未税单位成本": override.unit_cost_ex_tax if override else None,
-        "人工成本原因": override.reason if override else None,
-        "成本缺失类型": (
-            "out_of_scope" if line.cost_source is None and not has_cost
-            else ("none" if not has_cost else "")
-        ),
-        "可补价": "是" if line.cost_source in (None, "none") and not has_cost else "否",
-        "实体ID": line.id,
-        "备件主键": line.part_id,
-        "只读哈希": "",  # 占位，下方按锁定列回填
-        "备注": line.line_note or "",
-        # 三来源口径（v1.36）：workbook_manual→工作簿；page_manual→页面人工登记
-        # （新建手工需求行，不得谎报 WBDD）；其余（wbdd）→ WBDD 原口径。
-        "来源": (
-            "工作簿" if line.edited_source == "workbook_manual"
-            else "页面人工登记" if line.edited_source == "page_manual"
-            else "WBDD"
-        ),
-    }
-
-
 def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     ws = wb.create_sheet(V2_SHEET_PARTS)
     _v2_header(ws, V2_PART_HEADERS, editable=V2_PART_EDITABLE)
@@ -2471,30 +2265,6 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     return base_hashes
 
 
-def _v2_expense_row_values(expense, project_display: str) -> dict[str, object]:
-    """04 一行的展示值（按表头名）。build/parse 共用，保证基线口径一致。"""
-    return {
-        "操作": "",
-        "费用单号": expense.bxd_no or "",
-        "明细序号": expense.line_no,
-        "报销日期": expense.expense_date,
-        "报销人员": expense.person or "",
-        "报销类别": expense.expense_type or "",
-        "费用分类": expense.fee_category or "",
-        "支出事由": expense.reason or "",
-        "维保销售订单（归集键）": expense.linked_sales_order_no or "",
-        "项目名称": project_display,
-        "销售人员": "—",
-        "流程状态": expense.data_status or "",
-        "原始报销金额": expense.amount,
-        "金额口径": expense.tax_basis or "ex",
-        "未税金额": expense.amount_ex_tax,
-        "含税金额（系统）": expense.amount_inc_tax,
-        "备注": expense.remark or "",
-        "实体ID": expense.raw_line_id,
-    }
-
-
 def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_EXPENSE)
     # 金额口径 is source provenance and cannot be edited independently.  The
@@ -2532,23 +2302,6 @@ def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> dict[
     return base_hashes
 
 
-def _v2_receipt_row_values(snapshot, contract_no: str) -> dict[str, object]:
-    """05 一行的展示值（按表头名）。build/parse 共用。"""
-    month = snapshot.report_month
-    month_text = (
-        month.isoformat()[:7] if hasattr(month, "isoformat") else str(month or "")
-    )
-    return {
-        "合同编号": contract_no,
-        "报告月份": month_text,
-        "累计实收金额（含税）": snapshot.cumulative_amount,
-        "状态": snapshot.status,
-        "回款凭证号": snapshot.receipt_reference or "",
-        "备注": snapshot.remark or "",
-        "实体ID": snapshot.collection_id,
-    }
-
-
 def _v2_build_receipts(wb, db, project_id: str, contracts) -> dict[str, str]:
     ws = wb.create_sheet(V2_SHEET_RECEIPTS)
     _v2_header(ws, V2_RECEIPT_HEADERS)
@@ -2577,46 +2330,6 @@ def _v2_build_receipts(wb, db, project_id: str, contracts) -> dict[str, str]:
     })
     _v2_finalize(ws, V2_RECEIPT_HEADERS, hidden_from=7)
     return base_hashes
-
-
-def _v2_site_row_values(line, issue, details=None) -> dict[str, object]:
-    """06 一行的展示值（按表头名）。build/parse 共用。"""
-    requirement = (details or {}).get("return_requirement")
-    state = requirement["requirement_status"] if requirement else (
-        "exempt" if line.no_return is True else "required" if line.no_return is False else "pending_category")
-    return {
-        "领用单号": issue.display_no_effective,
-        "领用日期": issue.issue_date,
-        "PN": line.pn,
-        "SN": line.serial_number or "",
-        "领用数量": line.quantity,
-        "是否应返还": (
-            "" if line.no_return is None else ("否" if line.no_return else "是")
-        ),
-        "备注": line.remark or "",
-        "应返数量": (Decimal(requirement["required_quantity"]) if requirement and state != "pending_category"
-                      else line.quantity if state == "required" else 0 if state == "exempt" else "—"),
-        "返还状态": {"required": "应返；收货见项目返还台账", "exempt": "免返；收货记录保留",
-                     "pending_category": "按规则判断（品类待确认）"}[state],
-        "返还单号": "按项目/需求单汇总，不逐行分配",
-        "实体ID": line.issue_line_id,
-        "关联需求单号": line.demand_order_no or "",
-        "领用地址": issue.site_location or "",
-        "地址操作": "",
-    }
-
-
-def _v2_site_identity_values(line, issue, details=None) -> dict[str, object]:
-    """06 一行的**身份口径**值：领用单号恒取 issue_no（hash 身份）。
-
-    决策 0006：导出单元格展示可读号，但 replay 比对、99_元数据 base_hashes
-    与删行守卫必须钉在不可变身份上——否则旧版（hash 号）导出的在途文件一上传
-    就会因展示列变化被误判「服务端该行已变」。display_no 分配后永不变更，
-    身份口径下新旧文件同一把尺子。
-    """
-    values = _v2_site_row_values(line, issue, details)
-    values["领用单号"] = issue.issue_no
-    return values
 
 
 def _v2_site_void_audit(
@@ -2785,18 +2498,6 @@ def _v2_build_dictionary(wb) -> None:
     for row in rows:
         ws.append(row)
     _v2_finalize(ws, headers)
-
-
-def _v2_readonly_sheet_hash(ws) -> str:
-    rows = []
-    for cells in ws.iter_rows(values_only=True):
-        values = [_v2_hash_value(value) for value in cells]
-        while values and values[-1] == "":
-            values.pop()
-        rows.append(values)
-    while rows and not rows[-1]:
-        rows.pop()
-    return hashlib.sha256(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
 def _v2_build_return_ledger(wb, db, project_id) -> str:
@@ -2982,65 +2683,6 @@ def build_project_master_v2(
     return buffer.getvalue()
 
 
-def _v2_date(value, *, row_no: int, label: str, epoch: datetime = WINDOWS_EPOCH) -> date | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-        # WPS/Excel copy-paste can discard the date style while retaining the
-        # serial. Use the workbook's epoch, never Unix time or the current year.
-        try:
-            if not Decimal(str(value)).is_finite() or value < 1:
-                raise ValueError
-            converted = from_excel(float(value), epoch=epoch)
-            if isinstance(converted, datetime):
-                return converted.date()
-        except (ValueError, OverflowError, InvalidOperation):
-            pass
-        raise WorkbookError("invalid_date", f"第 {row_no} 行{label}日期序列值无效：{value!r}")
-    raw = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y-%m"):
-        try:
-            parsed = datetime.strptime(raw, fmt).date()
-            return parsed.replace(day=1) if fmt == "%Y-%m" else parsed
-        except ValueError:
-            continue
-    raise WorkbookError("invalid_date", f"第 {row_no} 行{label}日期格式无效")
-
-
-def _v2_decimal(
-    value,
-    *,
-    row_no: int,
-    label: str,
-    required: bool = False,
-    allow_negative: bool = False,
-    demand_quantity: bool = False,
-) -> Decimal | None:
-    if value in (None, ""):
-        if required:
-            raise WorkbookError("missing_amount", f"第 {row_no} 行{label}不能为空")
-        return None
-    try:
-        parsed = Decimal(str(value).replace(",", "").strip())
-    except (InvalidOperation, ValueError):
-        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}不是合法数字")
-    normalized = (
-        field_protection.normalized_value("qty", parsed) if demand_quantity
-        else parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    )
-    if (
-        not normalized.is_finite()
-        or abs(normalized) >= Decimal("1000000000000")
-        or (normalized < 0 and not allow_negative)
-    ):
-        raise WorkbookError("invalid_amount", f"第 {row_no} 行{label}超出允许范围")
-    return normalized
-
-
 def _exact_part_for_pn(db: Session, pn: str) -> DimPart | None:
     normalized = pn.strip().upper()
     part = db.scalar(select(DimPart).where(
@@ -3184,33 +2826,6 @@ def _cascade_void_site_lines(
     for sl in site_lines:
         sl.is_active = False
     return len(site_lines)
-
-
-def _v2_meta(wb) -> dict[str, str]:
-    if V2_SHEET_META not in wb.sheetnames:
-        raise WorkbookError("template_version_mismatch", "工作簿缺少 V2 元数据，请重新下载当前项目总表")
-    raw: dict[str, str] = {}
-    for row in wb[V2_SHEET_META].iter_rows(min_col=1, max_col=2):
-        if not row[0].value:
-            continue
-        key = str(row[0].value).strip()
-        raw[key] = str(row[1].value or "").strip()
-    # 合并 2.7.1 分块（key@2/key@3... 按数字序拼接——字典序会让 @10 排在 @2 前）；
-    # 签名在发射端按逻辑值计算，因此必须在任何使用/验签之前完成合并。
-    merged: dict[str, str] = {}
-    chunks: dict[str, list[tuple[int, str]]] = {}
-    for key, value in raw.items():
-        if (_META_CHUNK_SEP in key
-                and key.rsplit(_META_CHUNK_SEP, 1)[-1].isdigit()):
-            base, suffix = key.rsplit(_META_CHUNK_SEP, 1)
-            chunks.setdefault(base, []).append((int(suffix), value))
-        else:
-            merged[key] = value
-    for base, items in chunks.items():
-        if base not in merged:
-            merged[base] = ""
-        merged[base] += "".join(value for _n, value in sorted(items))
-    return merged
 
 
 def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
