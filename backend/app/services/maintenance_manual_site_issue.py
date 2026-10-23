@@ -36,6 +36,14 @@ from app.services.maintenance_site_issue_facts import (
     LegacySiteIssueEditContext,
     apply_locked_site_issue_edits,
 )
+from app.services.maintenance_workbook_state import (
+    lock_project_for_fact_write as _lock_project_for_fact_write,
+    bump_workbook_revision,
+)
+from app.services.maintenance_site_issue_command_identity import (
+    lock_site_issue_idempotency_key as _lock_idempotency_key,
+    site_issue_request_fingerprint as _site_issue_request_fingerprint,
+)
 from app.services.maintenance_project_operations import (
     MaintenanceOperationConflict,
     MaintenanceOperationError,
@@ -43,13 +51,9 @@ from app.services.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
     _fact_audit,
-    _lock_idempotency_key,
-    _lock_project_for_fact_write,
     _qty,
     _required,
-    _site_issue_request_fingerprint,
     site_issue_dict,
-    bump_workbook_revision,
 )
 
 SOURCE = "page_manual"
