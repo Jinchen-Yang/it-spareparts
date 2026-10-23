@@ -20,6 +20,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueReturnEvent,
 )
 from app.services import maintenance_project_master_workbook as master
+from app.services import maintenance_workbook_coordinator as coordinator
 from app.services import maintenance_project_operations as operations
 from tests.test_maintenance_expense_collection_workbook import _XLSX, uploader
 from tests.test_maintenance_project_master_v2_editable import (
@@ -1033,8 +1034,8 @@ def test_real_flush_integrity_errors_are_4xx_and_rollback_every_write(
     client = uploader(db, username="synthetic-flush-conflict") if entrypoint == "http" else None
     # Alembic's fileConfig disables already-imported application loggers while
     # building this test database. Restore this logger for the warning contract.
-    monkeypatch.setattr(master.logger, "disabled", False)
-    caplog.set_level("WARNING", logger=master.__name__)
+    monkeypatch.setattr(coordinator.logger, "disabled", False)
+    caplog.set_level("WARNING", logger=coordinator.__name__)
     original_flush = Session.flush
     injected = []
 
