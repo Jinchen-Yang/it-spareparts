@@ -19,7 +19,6 @@ from decimal import Decimal
 from sqlalchemy import and_, case, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
-from app import tax_policy
 from app.business_time import business_today
 from app.etl import mapping
 from app.models.maintenance import (
