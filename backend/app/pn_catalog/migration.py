@@ -81,6 +81,9 @@ def stage_manifest(db: Session, manifest: MigrationManifest, *, verified_source:
         finish_command(db, handle, part_id=None, applied_revision=1, audit_id=batch.audit_id,
                        result={"resource": "migration", "batch_id": str(batch.id)})
         return _batch_result(batch, replayed=True)
+    from .migration_state_models import MigrationSnapshotState
+    if db.get(MigrationSnapshotState, (manifest.namespace, manifest.snapshot_id)) is not None:
+        raise CatalogError("migration.snapshot_frozen", "快照已完成守恒核对，不能追加新来源页")
     keys = [(row.kind, row.source_id) for row in manifest.records]
     existing = {(row.kind, row.source_id): row for row in db.scalars(select(LegacySourceRecord).where(
         LegacySourceRecord.namespace == manifest.namespace,

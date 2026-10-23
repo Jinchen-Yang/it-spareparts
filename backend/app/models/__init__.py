@@ -268,3 +268,6 @@ from app.pn_catalog.media_models import (  # noqa: F401
 from app.pn_catalog.job_models import CatalogJob, CatalogJobEvent  # noqa: F401
 from app.pn_catalog.migration_models import LegacySourceRecord, MigrationBatch  # noqa: F401
 from app.pn_catalog.reference_models import ExternalReference  # noqa: F401
+from app.pn_catalog.migration_state_models import (  # noqa: F401
+    MigrationSnapshotState, MigrationRecordApplication, MigrationRecoveryDecision,
+)
