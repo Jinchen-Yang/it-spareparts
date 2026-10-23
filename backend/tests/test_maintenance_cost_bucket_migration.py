@@ -9,6 +9,7 @@ from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 
+from tests.legacy_catalog_fixtures import pre_catalog_snapshot
 from app.etl import loader
 from app.models.maintenance import FMaintenanceLine
 from app.models.system import SysImportBatch
@@ -56,6 +57,7 @@ def test_nonempty_cost_bucket_downgrade_and_reupgrade_is_lossless(db):
         batch.id,
         date(2026, 7, 2),
     )
+    pre_catalog_snapshot(db)
     line = db.execute(select(FMaintenanceLine)).scalar_one()
     line.cost_source = "trace_avg"
     line.cost_tax_basis = "inc"
@@ -125,6 +127,7 @@ def test_dual_cost_reference_migration_round_trip_preserves_legacy_facts(db):
         batch.id,
         date(2026, 7, 2),
     )
+    pre_catalog_snapshot(db)
     line = db.execute(select(FMaintenanceLine)).scalar_one()
     line.cost_source = "pool_purchase"
     line.cost_tax_basis = "ex"
