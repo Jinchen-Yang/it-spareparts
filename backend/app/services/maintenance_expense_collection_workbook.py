@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -75,123 +75,20 @@ _READONLY = PatternFill("solid", fgColor="EFEFEF")
 
 # ------------------------------------------------------------------ 导出
 
+
+# Compatibility exports for helpers with independent ownership.
+from app.services.maintenance_workbook_queries import (
+    _current_unique_contracts,
+    project_expenses,
+)
+
+
 def _contracts(db: Session, project_id: str) -> list[MaintenanceProjectContract]:
     return list(db.execute(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_id == project_id)
         .order_by(MaintenanceProjectContract.effective_from)
     ).scalars())
-
-
-def _current_unique_contracts(
-    db: Session,
-    project_id: str,
-    *,
-    contract_nos: set[str] | None = None,
-    lock: bool = False,
-) -> dict[str, MaintenanceProjectContract]:
-    """Return current contract identities owned by exactly one live relation.
-
-    ``linked_sales_order_no`` is not a foreign key.  Treating it as project
-    ownership leaked the same BXD row through every project that happened to
-    share a contract number.  Expense mutation is therefore allowed only when
-    the URL project owns one current relation and no other current relation in
-    any project uses that contract number.
-
-    During apply, all matching live relationship rows are locked in one global
-    order before uniqueness is recomputed.  This prevents two workbook applies
-    from observing different subsets or taking cross-project rows in reverse
-    order.
-    """
-
-    today = business_today()
-    current_condition = (
-        (MaintenanceProjectContract.effective_from <= today)
-        & (
-            MaintenanceProjectContract.effective_to.is_(None)
-            | (MaintenanceProjectContract.effective_to > today)
-        )
-    )
-    candidates = set(db.scalars(
-        select(MaintenanceProjectContract.contract_no)
-        .where(
-            MaintenanceProjectContract.project_id == project_id,
-            current_condition,
-        )
-        .order_by(
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.project_contract_id,
-        )
-    ).all())
-    if contract_nos is not None:
-        candidates &= {str(value) for value in contract_nos if value}
-    if not candidates:
-        return {}
-
-    statement = (
-        select(MaintenanceProjectContract)
-        .where(
-            MaintenanceProjectContract.contract_no.in_(sorted(candidates)),
-            current_condition,
-        )
-        .order_by(
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.project_id,
-            MaintenanceProjectContract.project_contract_id,
-        )
-    )
-    if lock:
-        statement = statement.with_for_update()
-    rows = list(db.scalars(statement).all())
-    by_no: dict[str, list[MaintenanceProjectContract]] = {}
-    for row in rows:
-        by_no.setdefault(row.contract_no, []).append(row)
-    return {
-        contract_no: matches[0]
-        for contract_no, matches in by_no.items()
-        if len(matches) == 1 and matches[0].project_id == project_id
-    }
-
-
-def project_expenses(db: Session, project_id: str) -> list[FProjectExpense]:
-    """Project-scoped editable expenses from canonical attribution.
-
-    作废行（data_status='已作废'）彻底不导出（#264/#267 读侧修复 3：
-    用户拍板 2026-08-19）——导出口径即回传口径，缺行=作废的对账语义
-    要求导出侧从源头剔除已作废行，否则作废行永远循环出现在往返文件里。
-    """
-    writable_contracts = _current_unique_contracts(db, project_id)
-    contract_nos = set(writable_contracts)
-    if not contract_nos:
-        return []
-    rows = list(db.execute(
-        select(FProjectExpense, MaintenanceProjectExpenseAttribution)
-        .join(
-            MaintenanceProjectExpenseAttribution,
-            MaintenanceProjectExpenseAttribution.raw_expense_line_id
-            == FProjectExpense.raw_line_id,
-        )
-        .where(
-            MaintenanceProjectExpenseAttribution.project_id == project_id,
-            MaintenanceProjectExpenseAttribution.project_contract_id.in_([
-                contract.project_contract_id
-                for contract in writable_contracts.values()
-            ]),
-            FProjectExpense.linked_sales_order_no.in_(contract_nos),
-            or_(FProjectExpense.data_status.is_(None),
-                FProjectExpense.data_status != "已作废"),
-        )
-        .order_by(FProjectExpense.expense_date, FProjectExpense.raw_line_id)
-    ).all())
-    return [
-        expense
-        for expense, attribution in rows
-        if (
-            expense.linked_sales_order_no in writable_contracts
-            and attribution.project_contract_id
-            == writable_contracts[expense.linked_sales_order_no].project_contract_id
-        )
-    ]
 
 
 def _expense_in_project(

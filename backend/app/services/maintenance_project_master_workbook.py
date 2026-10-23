@@ -37,7 +37,6 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -62,7 +61,6 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookOperation,
     MaintenanceSiteIssue,
-    MaintenanceSiteIssueDisplayCounter,
     MaintenanceSiteIssueLine,
 )
 from app.models.system import SysImportBatch
@@ -208,6 +206,38 @@ _SITE_REPLAY_FIX_HINT = (
 
 # ------------------------------------------------------------------ 取数
 
+
+# Compatibility exports for helpers with independent ownership.
+from app.services.maintenance_workbook_queries import (
+    _current_contracts,
+    _current_contract_by_no,
+    _v2_editable_contracts,
+)
+from app.services.maintenance_workbook_scope import (
+    _expected_expense_ids,
+    _expected_part_ids,
+    _expected_site_ids,
+    _v2_assert_entity_scope,
+    _v2_recheck_row_guards,
+)
+from app.services.maintenance_workbook_cost_writes import (
+    _merge_manual_cost_to_line,
+    _recompute_line_amounts,
+)
+from app.services.maintenance_workbook_audit import (
+    _write_audit,
+)
+from app.services.maintenance_workbook_site_identity import (
+    _v2_duplicate_issue_no,
+    _v2_check_site_issue_numbers,
+)
+from app.services.maintenance_workbook_fact_writes import (
+    _ensure_contract_for_xsdd_apply,
+    _cascade_void_site_lines,
+    _v2_allocate_site_display_no,
+)
+
+
 def project_sales_order_nos(db: Session, project_id: str) -> list[str]:
     """项目可用于费用归集的 XSDD：合同台账优先，并兼容已挂靠 WBDD 的销售订单。"""
     values = set(db.scalars(select(MaintenanceProjectContract.contract_no).where(
@@ -227,35 +257,6 @@ def project_sales_order_nos(db: Session, project_id: str) -> list[str]:
         )
     ).all())
     return sorted(value for value in values if value)
-
-
-def _current_contracts(
-    db: Session,
-    project_id: str,
-    *,
-    lock: bool = False,
-) -> list[MaintenanceProjectContract]:
-    """Only relationships effective at the current business date."""
-
-    today = business_today()
-    statement = (
-        select(MaintenanceProjectContract)
-        .where(
-            MaintenanceProjectContract.project_id == project_id,
-            MaintenanceProjectContract.effective_from <= today,
-            (
-                MaintenanceProjectContract.effective_to.is_(None)
-                | (MaintenanceProjectContract.effective_to > today)
-            ),
-        )
-        .order_by(
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.project_contract_id,
-        )
-    )
-    if lock:
-        statement = statement.with_for_update()
-    return list(db.scalars(statement).all())
 
 
 def _canonical_contract_read_model(db: Session, project_id: str) -> dict:
@@ -286,25 +287,6 @@ def _canonical_contract_read_model(db: Session, project_id: str) -> dict:
         "contract_shared": shared,
         "contract_incomplete": incomplete,
     }
-
-
-def _current_contract_by_no(
-    db: Session,
-    project_id: str,
-    contract_no: str,
-    *,
-    lock: bool = False,
-) -> MaintenanceProjectContract | None:
-    matches = [
-        contract for contract in _current_contracts(db, project_id, lock=lock)
-        if contract.contract_no == contract_no
-    ]
-    if len(matches) > 1:
-        raise WorkbookError(
-            "contract_ambiguous",
-            f"合同 {contract_no} 当前存在多条生效关系，请先消歧后重新下载",
-        )
-    return matches[0] if matches else None
 
 
 def _assigned_xsdd_nos(db: Session, project_id: str) -> set[str]:
@@ -2160,30 +2142,6 @@ def _v2_build_overview(wb, project, contracts, db, lines) -> None:
     ws.freeze_panes = "A2"
 
 
-def _v2_editable_contracts(
-    db: Session,
-    project_id: str,
-    contracts,
-) -> list[MaintenanceProjectContract]:
-    today = business_today()
-    included_current = [
-        contract for contract in contracts
-        if contract.included_in_total
-        and contract.effective_from <= today
-        and (contract.effective_to is None or contract.effective_to > today)
-    ]
-    # 2026-09-02 拍板：合同额对项目负责人/销售与管理员全量放开。
-    # 仍要求「当前计入的合同恰好一份」，保证项目总额能一一对应回写到唯一
-    # 合同事实；mapped/共享不再硬拒——共享合同可编辑，apply 侧以
-    # contract base_version CAS + 审计兜底，共享状态在导出侧提示。
-    if len(included_current) != 1:
-        return []
-    only = included_current[0]
-    if only.project_id != project_id:
-        return []
-    return [only]
-
-
 def _v2_build_plan(wb, db, project_id: str, contracts) -> None:
     ws = wb.create_sheet(V2_SHEET_PLAN)
     _v2_header(ws, V2_PLAN_HEADERS, editable={1, 2, 3, 4, 5, 6, 12})
@@ -2702,132 +2660,6 @@ def _exact_part_for_pn(db: Session, pn: str) -> DimPart | None:
     )
 
 
-def _merge_manual_cost_to_line(
-    db: Session, refill: "CostRefill", *, operated_by: str,
-) -> bool:
-    """人工成本合并到主表——写 override 表（审计/回滚）并同步 f_maintenance_line：
-    unit_cost_ex_tax/inc_tax + cost_source='manual' + cost_amount 字段。
-    面板/看板/概览读主表即得人工值，无需各处 merge。
-
-    仅当主表当前无自动成本（cost_source IN (NULL,'none')）时才合并到主表——已有
-    direct/window 等自动证据的行不被人工值覆盖；'manual' 行允许修正人工价。
-    override 表始终写入审计。
-    """
-    if refill.line_id is None:
-        raise WorkbookError("line_not_found", "备件行标识无效，请重新下载")
-    # Every caller uses the same row hierarchy.  Locking the parent line first
-    # also serializes the otherwise-unlockable "no override row yet" state, so
-    # concurrent first fills cannot both INSERT the unique line_id.
-    line = db.scalar(
-        select(FMaintenanceLine)
-        .where(FMaintenanceLine.id == refill.line_id)
-        .with_for_update()
-    )
-    if line is None:
-        raise WorkbookError("line_not_found", "备件行已不存在，请重新下载")
-    existing = db.scalar(
-        select(MaintenanceManualCostOverride)
-        .where(MaintenanceManualCostOverride.line_id == refill.line_id)
-        .with_for_update()
-    )
-    changed = False
-    if refill.unit_cost_ex_tax is not None:
-        if existing is None:
-            db.add(MaintenanceManualCostOverride(
-                line_id=refill.line_id,
-                unit_cost_ex_tax=refill.unit_cost_ex_tax,
-                unit_cost_inc_tax=refill.unit_cost_inc_tax,
-                reason=refill.reason, active=True, version=1,
-                updated_by=operated_by))
-            changed = True
-        else:
-            override_changed = (
-                existing.unit_cost_ex_tax != refill.unit_cost_ex_tax
-                or existing.unit_cost_inc_tax != refill.unit_cost_inc_tax
-                or existing.reason != refill.reason
-                or not existing.active
-            )
-            if override_changed:
-                existing.unit_cost_ex_tax = refill.unit_cost_ex_tax
-                existing.unit_cost_inc_tax = refill.unit_cost_inc_tax
-                existing.reason = refill.reason
-                existing.active = True
-                existing.version += 1
-                existing.updated_by = operated_by
-                changed = True
-        if line.cost_source in (None, "none", "manual"):
-            line_changed = (
-                line.unit_cost_ex_tax != refill.unit_cost_ex_tax
-                or line.unit_cost_inc_tax != refill.unit_cost_inc_tax
-                or line.cost_source != "manual"
-            )
-            _recompute_line_amounts(line, unit_cost_ex_tax=refill.unit_cost_ex_tax,
-                                    unit_cost_inc_tax=refill.unit_cost_inc_tax)
-            line.cost_source = "manual"
-            changed = line_changed or changed
-    elif refill.reason is not None:
-        if existing is not None and existing.reason != refill.reason:
-            existing.reason = refill.reason
-            existing.version += 1
-            existing.updated_by = operated_by
-            changed = True
-    return changed
-
-
-def _recompute_line_amounts(line: FMaintenanceLine, *,
-                            unit_cost_ex_tax: Decimal | None = None,
-                            unit_cost_inc_tax: Decimal | None = None) -> None:
-    """数量/退货数量/单价变更后重算两套成本金额（有效数量×单价）。
-    无成本的行（none/NULL）保持 NULL——不知道≠0（铁律 5）。"""
-    if unit_cost_ex_tax is not None:
-        line.unit_cost_ex_tax = unit_cost_ex_tax
-    if unit_cost_inc_tax is not None:
-        line.unit_cost_inc_tax = unit_cost_inc_tax
-    effective_qty = max((line.qty or Decimal(0)) - (line.return_qty or Decimal(0)),
-                        Decimal(0))
-    if line.unit_cost_ex_tax is not None:
-        line.cost_amount_ex_tax = (line.unit_cost_ex_tax * effective_qty).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if line.unit_cost_inc_tax is not None:
-        line.cost_amount_inc_tax = (line.unit_cost_inc_tax * effective_qty).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-def _write_audit(db: Session, *, project_id: str, entity_type: str,
-                 entity_id: str, action: str, operated_by: str,
-                 reason: str, before: dict | None = None,
-                 after: dict | None = None) -> None:
-    """行级审计（行级即可，不做字段级全量 diff）。"""
-    db.add(MaintenanceProjectOperationAudit(
-        project_id=project_id, entity_type=entity_type, entity_id=str(entity_id),
-        action=action, before_json=before, after_json=after,
-        reason=reason or "工作簿编辑", operated_by=operated_by,
-    ))
-
-
-def _cascade_void_site_lines(
-    db: Session,
-    line: FMaintenanceLine,
-    *,
-    project_id: str,
-) -> int:
-    """03 行作废时，按 source_line_id 文本匹配级联作废 06 领用返还行
-    （06↔03 无 FK，best-effort，匹配不到不报错）。返回级联条数。"""
-    if not line.raw_line_id:
-        return 0
-    site_lines = db.scalars(
-        select(MaintenanceSiteIssueLine)
-        .join(MaintenanceSiteIssue,
-              MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
-        .where(MaintenanceSiteIssue.project_id == project_id,
-               MaintenanceSiteIssueLine.source_line_id == line.raw_line_id,
-               MaintenanceSiteIssueLine.is_active.is_(True))
-    ).all()
-    for sl in site_lines:
-        sl.is_active = False
-    return len(site_lines)
-
-
 def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
     meta = _v2_meta(wb)
     if meta.get("protocol_id") != V2_PROTOCOL_ID or meta.get("template_version") != V2_TEMPLATE_VERSION:
@@ -3332,24 +3164,6 @@ def _v2_site_preflight(db: Session, ws, index, merge: _V2MergeContext) -> None:
         raise WorkbookError("invalid_site_rows", f"06_领用返还有 {len(errors)} 项待补正，本次未写入：" + "；".join(e.message for e in errors))
 
 
-def _v2_allocate_site_display_no(db: Session, issue_date: date) -> str:
-    """分配人类可读展示号 LY-YYYYMMDD-NNNN（决策 0006，仅在 apply 事务内调用）。
-
-    按日计数器行上的 INSERT .. ON CONFLICT DO UPDATE .. RETURNING 原子递增，
-    行锁 + display_no 部分唯一索引共同保证不重号；分配与领用单 INSERT 同事务，
-    整本回滚时一并撤销。apply 全程持有 DATA_CHANGE_ADVISORY_LOCK_KEY，天然串行；
-    将来若有其他分配路径，计数器行锁同样兜底。display_no 分配后永不变更。
-    """
-    stmt = pg_insert(MaintenanceSiteIssueDisplayCounter).values(
-        issue_date=issue_date, last_sequence=1,
-    ).on_conflict_do_update(
-        index_elements=[MaintenanceSiteIssueDisplayCounter.issue_date],
-        set_={"last_sequence": MaintenanceSiteIssueDisplayCounter.last_sequence + 1},
-    ).returning(MaintenanceSiteIssueDisplayCounter.last_sequence)
-    sequence = db.execute(stmt).scalar_one()
-    return f"LY-{issue_date:%Y%m%d}-{sequence:04d}"
-
-
 def _v2_site_address_patches(db, project_id, ws, index, merge):
     """D-26：先按单汇总地址意图，旧签名/空白不产生清空或回写。"""
     address_columns = [i for i, cell in enumerate(ws[1])
@@ -3475,66 +3289,6 @@ def _v2_site_address_patches(db, project_id, ws, index, merge):
         # 单头只写一次；其他同行依旧走原来的未触碰/三路合并规则。
         patches[rows[0]] = _SiteAddressPatch(action, value)
     return patches
-
-
-def _v2_duplicate_issue_no(issue_no: str, flags: list[SiteReturnFlag]) -> WorkbookError:
-    rows = sorted({flag.row_no for flag in flags if flag.row_no is not None})
-    location = f"第 {'、'.join(map(str, rows))} 行" if rows else "本次上传"
-    return WorkbookError(
-        "duplicate_issue_no",
-        f"06_领用返还 {location}的领用单号 {issue_no} 与本项目其他领用单重复，"
-        "同一项目内两张不同领用单的单号不能重复，请修改其中一张后重试",
-        details={"rows": [
-            {"row_no": flag.row_no, "issue_id": flag.issue_id, "issue_no": issue_no}
-            for flag in sorted(flags, key=lambda item: item.row_no or 0)
-            if flag.row_no is not None
-        ]},
-    )
-
-
-def _v2_check_site_issue_numbers(
-    db: Session, project_id: str, flags: list[SiteReturnFlag] | tuple[SiteReturnFlag, ...],
-) -> dict[str, tuple[str, date]]:
-    """收齐最终单头；既有同号交给合单计划，新建身份仍不能隐式合并。"""
-    issues = {issue.issue_id: issue for issue in db.scalars(
-        select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.project_id == project_id)
-    )}
-    headers: dict[str, tuple[str, date]] = {}
-    for flag in flags:
-        if flag.is_void or flag.issue_id is None:
-            continue
-        if flag.issue_id not in issues:
-            raise WorkbookError("project_mismatch", "领用单归属已变化，请重新下载")
-        # 新明细的日期不是改头意图，附加到本单的最终单头即可。
-        if flag.is_create or flag.issue_no is None or flag.issue_date is None:
-            continue
-        requested = (flag.issue_no, flag.issue_date)
-        if headers.setdefault(flag.issue_id, requested) != requested:
-            raise WorkbookError(
-                "conflicting_issue_header", "同一领用单的多行包含不同单号或日期，本次未写入",
-            )
-    owners: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    for issue_id, issue in issues.items():
-        final_no = headers.get(issue_id, (issue.issue_no, issue.issue_date))[0]
-        owners[final_no].add(("existing", issue_id))
-    flags_by_no: dict[str, list[SiteReturnFlag]] = defaultdict(list)
-    for flag in flags:
-        if flag.is_void or not flag.issue_no:
-            continue
-        flags_by_no[flag.issue_no].append(flag)
-        if flag.is_create:
-            if flag.issue_id is None:
-                # 同号新明细是一张新单；自动生成的新头不能隐式并入既有单。
-                owners[flag.issue_no].add(("new", flag.issue_no))
-            else:
-                issue = issues[flag.issue_id]
-                final_no = headers.get(flag.issue_id, (issue.issue_no, issue.issue_date))[0]
-                if flag.issue_no != final_no:
-                    raise _v2_duplicate_issue_no(flag.issue_no, flags_by_no[flag.issue_no])
-    for issue_no, identities in owners.items():
-        if len(identities) > 1 and any(kind == "new" for kind, _identity in identities):
-            raise _v2_duplicate_issue_no(issue_no, flags_by_no[issue_no])
-    return headers
 
 
 def _v2_collect_site_header_intents(db, project_id, ws, index, merge):
@@ -4253,151 +4007,6 @@ def _v2_parse_expenses(
     return out, voids, present_ids
 
 
-def _ensure_contract_for_xsdd_apply(
-    db: Session,
-    *,
-    project: MaintenanceProject,
-    contract_no: str,
-    operated_by: str,
-    assigned_xsdd_nos: set[str],
-) -> tuple[MaintenanceProjectContract, bool]:
-    """Create one current fallback relation inside the locked apply transaction."""
-
-    contract_id = f"xsdd-{contract_no}"
-    try:
-        maintenance_project_identity.claim_xsdd_project(
-            db,
-            value=contract_no,
-            project_id=project.project_id,
-            source="project_master_workbook",
-        )
-    except maintenance_project_identity.XsddProjectConflict as exc:
-        raise WorkbookError("contract_shared", str(exc)) from exc
-    # Serialize this stable identity across projects; project row locks alone do
-    # not protect two different projects from concurrently claiming one XSDD.
-    db.execute(select(func.pg_advisory_xact_lock(
-        func.hashtextextended(f"maintenance-contract:{contract_id}", 0)
-    )))
-    current = _current_contract_by_no(
-        db, project.project_id, contract_no, lock=True)
-    today = business_today()
-    shared = db.scalar(
-        select(MaintenanceProjectContract.project_contract_id)
-        .where(
-            (
-                (MaintenanceProjectContract.contract_no == contract_no)
-                | (
-                    MaintenanceProjectContract.contract_id
-                    == (current.contract_id if current is not None else contract_id)
-                )
-            ),
-            MaintenanceProjectContract.project_id != project.project_id,
-            MaintenanceProjectContract.effective_from <= today,
-            (
-                MaintenanceProjectContract.effective_to.is_(None)
-                | (MaintenanceProjectContract.effective_to > today)
-            ),
-        )
-        .limit(1)
-        .with_for_update()
-    )
-    if shared is not None:
-        raise WorkbookError(
-            "contract_shared",
-            f"合同 {contract_no} 已被其他项目当前使用，请先完成合同归属消歧",
-        )
-    if current is not None:
-        return current, False
-    # The caller took order -> active-assignment locks for every referenced
-    # XSDD before any detail row or contract lock.  Use that locked snapshot;
-    # do not reopen a TOCTOU window with an unlocked ownership query here.
-    if contract_no not in assigned_xsdd_nos:
-        raise WorkbookError(
-            "contract_not_found",
-            f"合同 {contract_no} 已不再由本项目当前 WBDD 挂靠，请重新下载",
-        )
-    if project.period_from is None:
-        raise WorkbookError(
-            "contract_effective_date_missing",
-            "项目缺少业务开始日期，无法建立 XSDD 合同关系；请先补齐项目日期",
-        )
-    sales_candidates = list(db.execute(
-        select(
-            FSalesOrder.id,
-            FSalesOrder.amount_ex_tax,
-            FSalesOrder.tax_rate,
-        )
-        .join(SysImportBatch, SysImportBatch.id == FSalesOrder.import_batch_id)
-        .where(
-            FSalesOrder.order_no == contract_no,
-            FSalesOrder.data_status == config.ACTIVE_STATUS,
-            FSalesOrder.amount_ex_tax.is_not(None),
-            SysImportBatch.file_type == "sales",
-            SysImportBatch.status == "success",
-        )
-        .order_by(
-            SysImportBatch.uploaded_at.desc().nullslast(),
-            FSalesOrder.created_at.desc().nullslast(),
-            FSalesOrder.import_batch_id.desc(),
-            FSalesOrder.id.desc(),
-        )
-        .with_for_update(of=FSalesOrder)
-    ).all())
-    economic_candidates = {
-        (
-            Decimal(str(row.amount_ex_tax)),
-            Decimal(str(row.tax_rate)) if row.tax_rate is not None else None,
-        )
-        for row in sales_candidates
-    }
-    if len(economic_candidates) > 1:
-        raise WorkbookError(
-            "sales_order_ambiguous",
-            f"销售订单 {contract_no} 存在多条有效且金额/税率冲突的成功导入记录，"
-            "无法自动建立合同关系，请先完成销售订单消歧。",
-        )
-    sale = sales_candidates[0] if sales_candidates else None
-    amount_ex_tax = (
-        Decimal(str(sale.amount_ex_tax)) if sale is not None else None
-    )
-    tax_rate = (
-        Decimal(str(sale.tax_rate))
-        if sale is not None and sale.tax_rate is not None else None
-    )
-    inc_tax = (
-        amount_ex_tax * (Decimal("1") + tax_rate)
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) \
-        if amount_ex_tax is not None and tax_rate is not None else None
-    contract = MaintenanceProjectContract(
-        project_contract_id=str(uuid4()),
-        project_id=project.project_id,
-        contract_id=contract_id,
-        contract_no=contract_no,
-        contract_amount=amount_ex_tax,
-        amount_inc_tax=inc_tax,
-        contract_status="正常",
-        status_mapping_state="mapped",
-        status_mapping_version="workbook-v2-xsdd",
-        included_in_total=True,
-        effective_from=max(project.period_from, today),
-        source="sales_fallback",
-        version=1,
-    )
-    db.add(contract)
-    db.flush()
-    _write_audit(
-        db,
-        project_id=project.project_id,
-        entity_type="project_contract",
-        entity_id=contract.project_contract_id,
-        action="CREATE",
-        operated_by=operated_by,
-        reason="项目总表应用时按当前 XSDD 建立合同关系",
-        after={"contract_no": contract_no, "source": "sales_fallback"},
-    )
-    return contract, True
-
-
 def _xsdd_contract_for_project(
     db: Session, project_id: str, row_no: int
 ) -> tuple[str, MaintenanceProjectContract | None]:
@@ -4534,413 +4143,6 @@ def _v2_parse_receipts(
             collection_status=str(row[index["状态"]] or "").strip() or None,
         ))
     return out
-
-
-def _expected_expense_ids(db: Session, project_id: str) -> list[str]:
-    # 与 _v2_build_expense 同口径：稳定 attribution + current/unshared XSDD。
-    return [expense.raw_line_id for expense in _project_expenses(db, project_id)]
-
-
-def _expected_part_ids(db: Session, project_id: str) -> set[int]:
-    """Active 03 entities whose current assignment belongs to this project."""
-
-    from app.services import maintenance_demands
-    from app.services.query_filters import active_orders
-
-    return set(db.scalars(active_orders(
-        select(FMaintenanceLine.id)
-        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
-        .join(
-            MaintenanceSourceOrderAssignment,
-            (MaintenanceSourceOrderAssignment.source_order_id
-             == FMaintenanceOrder.raw_order_id)
-            & MaintenanceSourceOrderAssignment.is_active.is_(True),
-        )
-        .where(
-            MaintenanceSourceOrderAssignment.project_id == project_id,
-            FMaintenanceLine.is_active.is_(True),
-            maintenance_demands.active_demand_condition(),
-        ),
-        FMaintenanceOrder,
-    )).all())
-
-
-def _expected_site_ids(db: Session, project_id: str) -> set[str]:
-    """Active 06 entities whose owning issue belongs to this project.
-
-    与 ``_v2_build_site`` 同一口径：行活跃且单头未作废。单头 void 的行不在
-    实体范围内——它们既不导出，也不允许被上传改动（D-01）。
-    """
-
-    return set(db.scalars(
-        select(MaintenanceSiteIssueLine.issue_line_id)
-        .join(
-            MaintenanceSiteIssue,
-            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
-        )
-        .where(
-            MaintenanceSiteIssue.project_id == project_id,
-            MaintenanceSiteIssue.normalized_status != "void",
-            MaintenanceSiteIssueLine.is_active.is_(True),
-        )
-    ).all())
-
-
-def _v2_assert_entity_scope(
-    db: Session,
-    *,
-    project_id: str,
-    part_ids: set[int] | None = None,
-    site_ids: set[str] | None = None,
-    expense_ids: set[str] | None = None,
-    linked_sales_order_nos: set[str] | None = None,
-    lock_rows: bool = False,
-    lock_site_merge_scope: bool = False,
-) -> set[str]:
-    """Fail the complete workbook before a foreign fact can be mutated.
-
-    Signed export metadata proves which rows the server exported, but it is not
-    an authorization cache: ownership can change between export, validation,
-    and apply.  Each boundary therefore rebuilds the three live project sets.
-    """
-
-    requested_parts = {int(value) for value in (part_ids or set())}
-    requested_sites = {str(value) for value in (site_ids or set())}
-    requested_expenses = {str(value) for value in (expense_ids or set())}
-    requested_contract_nos = {
-        str(value) for value in (linked_sales_order_nos or set()) if value
-    }
-    locked_project_xsdd_nos: set[str] = set()
-
-    if lock_rows and (requested_parts or requested_contract_nos):
-        # Canonical reassignment order: source order -> active assignment ->
-        # detail line.  Include every WBDD referenced by a deferred XSDD
-        # contract before locking *any* detail line, otherwise a plan-only
-        # apply can invert the assignment writer's project->order lock order.
-        line_edges = list(db.execute(
-            select(FMaintenanceLine.id, FMaintenanceLine.order_id)
-            .where(FMaintenanceLine.id.in_(requested_parts))
-            .order_by(FMaintenanceLine.id)
-        ).all()) if requested_parts else []
-        order_ids = {int(order_id) for _line_id, order_id in line_edges}
-        if requested_contract_nos:
-            order_ids.update(db.scalars(
-                select(FMaintenanceOrder.id).where(
-                    FMaintenanceOrder.linked_sales_order_no.in_(
-                        requested_contract_nos
-                    )
-                )
-            ).all())
-        locked_orders = list(db.scalars(
-            select(FMaintenanceOrder)
-            .where(FMaintenanceOrder.id.in_(sorted(order_ids)))
-            .order_by(FMaintenanceOrder.raw_order_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all()) if order_ids else []
-        source_ids = [order.raw_order_id for order in locked_orders]
-        locked_assignments: list[MaintenanceSourceOrderAssignment] = []
-        if source_ids:
-            locked_assignments = list(db.scalars(
-                select(MaintenanceSourceOrderAssignment)
-                .where(
-                    MaintenanceSourceOrderAssignment.source_order_id.in_(source_ids),
-                    MaintenanceSourceOrderAssignment.is_active.is_(True),
-                )
-                .order_by(MaintenanceSourceOrderAssignment.source_order_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            ).all())
-        project_sources = {
-            assignment.source_order_id
-            for assignment in locked_assignments
-            if assignment.project_id == project_id
-        }
-        locked_project_xsdd_nos = {
-            str(order.linked_sales_order_no)
-            for order in locked_orders
-            if (
-                order.raw_order_id in project_sources
-                and order.linked_sales_order_no
-            )
-        }
-        if requested_parts:
-            locked_lines = list(db.scalars(
-                select(FMaintenanceLine)
-                .where(FMaintenanceLine.id.in_(requested_parts))
-                .order_by(FMaintenanceLine.id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            ).all())
-            if {line.id for line in locked_lines} != requested_parts:
-                raise WorkbookError(
-                    "line_not_in_project",
-                    "工作簿包含已不存在、已作废或不属于本项目的备件事实，请重新下载",
-                )
-
-    foreign_parts = requested_parts - _expected_part_ids(db, project_id)
-    if foreign_parts:
-        raise WorkbookError(
-            "line_not_in_project",
-            "工作簿包含已不存在、已作废或不属于本项目的备件事实，请重新下载",
-        )
-    if lock_rows and (requested_sites or lock_site_merge_scope):
-        # Site writers use parent issue -> child line.  Resolve the edge first,
-        # lock parents in stable order, then lock children and re-read the live
-        # join; reversing that order deadlocks with an issue-level writer.
-        site_edges = list(db.execute(
-            select(
-                MaintenanceSiteIssueLine.issue_line_id,
-                MaintenanceSiteIssueLine.issue_id,
-            )
-            .where(MaintenanceSiteIssueLine.issue_line_id.in_(requested_sites))
-            .order_by(MaintenanceSiteIssueLine.issue_line_id)
-        ).all())
-        if {line_id for line_id, _issue_id in site_edges} != requested_sites:
-            raise WorkbookError(
-                "site_line_not_in_project",
-                "工作簿包含已不存在、已作废或不属于本项目的领用事实，请重新下载",
-            )
-        parent_issue_ids = sorted({issue_id for _line_id, issue_id in site_edges})
-        if lock_site_merge_scope:
-            parent_issue_ids = sorted(db.scalars(select(MaintenanceSiteIssue.issue_id).where(
-                MaintenanceSiteIssue.project_id == project_id,
-            )))
-        list(db.scalars(
-            select(MaintenanceSiteIssue)
-            .where(MaintenanceSiteIssue.issue_id.in_(parent_issue_ids))
-            .order_by(MaintenanceSiteIssue.issue_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all())
-        locked_site_lines = list(db.scalars(
-            select(MaintenanceSiteIssueLine)
-            .where(MaintenanceSiteIssueLine.issue_id.in_(parent_issue_ids)
-                   if lock_site_merge_scope else MaintenanceSiteIssueLine.issue_line_id.in_(requested_sites))
-            .order_by(MaintenanceSiteIssueLine.issue_line_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all())
-        if (
-            not requested_sites.issubset({line.issue_line_id for line in locked_site_lines})
-            or any(line.issue_id not in parent_issue_ids for line in locked_site_lines)
-        ):
-            raise WorkbookError(
-                "site_line_not_in_project",
-                "领用事实归属已变化，请重新下载当前项目总表",
-            )
-
-    foreign_sites = requested_sites - _expected_site_ids(db, project_id)
-    if foreign_sites:
-        raise WorkbookError(
-            "site_line_not_in_project",
-            "工作簿包含已不存在、已作废或不属于本项目的领用事实，请重新下载",
-        )
-    if lock_rows and requested_expenses:
-        expense_keys = {f"bxd:{raw_line_id}" for raw_line_id in requested_expenses}
-        locked_attributions = list(db.scalars(
-            select(MaintenanceProjectExpenseAttribution)
-            .where(
-                MaintenanceProjectExpenseAttribution.expense_id.in_(expense_keys)
-            )
-            .order_by(MaintenanceProjectExpenseAttribution.expense_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all())
-        if (
-            {attribution.expense_id for attribution in locked_attributions}
-            != expense_keys
-            or any(
-                attribution.project_id != project_id
-                for attribution in locked_attributions
-            )
-        ):
-            raise WorkbookError(
-                "expense_not_in_project",
-                "工作簿包含已不存在、已作废或不属于本项目的报销归因，请重新下载",
-            )
-        locked_expenses = list(db.scalars(
-            select(FProjectExpense)
-            .where(FProjectExpense.raw_line_id.in_(requested_expenses))
-            .order_by(FProjectExpense.raw_line_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).all())
-        if {expense.raw_line_id for expense in locked_expenses} != requested_expenses:
-            raise WorkbookError(
-                "expense_not_in_project",
-                "工作簿包含已不存在、已作废或不属于本项目的报销事实，请重新下载",
-            )
-    expected_expenses = set(_expected_expense_ids(db, project_id))
-    foreign_expenses = requested_expenses - expected_expenses
-    if foreign_expenses:
-        raise WorkbookError(
-            "expense_not_in_project",
-            "工作簿包含已不存在、已作废或不属于本项目的报销事实，请重新下载",
-        )
-    return locked_project_xsdd_nos
-
-
-def _v2_recheck_row_guards(db: Session, plan: MasterV2Plan) -> None:
-    """锁后复核：每个受保护实体的服务端指纹必须仍等于 validate 时刻的值。
-
-    调用位置必须在 _v2_assert_entity_scope(lock_rows=True) 之后、任何写之前。
-    那次调用已经把 03/04/06 三族的既有行 FOR UPDATE 锁住并读成新鲜的。
-    地址来自新增明细时，单头可能不在既有行锁集合中；本函数在项目 state 锁已持有
-    的前提下按 ID 顺序补锁地址单头。每族只发常数条批量查询，语句数与行数无关。
-
-    不等即整本 fail-closed：validate 的三路合并是拿「当时读到的服务端值」跟基线
-    比的，那个前提一旦失效，plan 里的每一个 delta 都不再可信。
-
-    05_实收回款的快照**不由** _v2_assert_entity_scope 加锁（真正的行锁在
-    maintenance_expense_collection_workbook 里，要到 ec.apply 才发生），但在这个
-    位置复核它依然权威，靠的是另外三把锁的合力：
-      - 新鲜性：apply 顶部的 db.expire_all()；05 分支还用列级标量读，直接绕开
-        identity map，不依赖「expire 之后没人加载过快照」这个无机制保证的前提。
-      - 稳定性：本事务此刻已持 DATA_CHANGE_ADVISORY_LOCK_KEY 全局锁、本项目的
-        workbook state 行锁、以及 maintenance_project 行锁。app/ 下能写快照的
-        五个点各自至少被其中一把挡住：
-          operations.create_collection / operations.update_collection（取 state 锁）、
-          maintenance_expense_collection_workbook.apply（取 state 锁）、
-          maintenance_project_identity 的归并（取同一把全局 advisory + states）、
-          maintenance_project_identity.apply_exact_collection_dedupe
-            （**不取 state 锁**，靠同一把全局 advisory + 项目行锁才被挡住）。
-    最后那条是这个不变量最脆的一环：日后若新增一个既不取 state 锁、也不取项目行
-    锁、也不取全局 advisory 的快照写者，本复核会静默失去权威性而不报任何错。
-    改这五个点的锁之前请先回来看这段。
-    """
-
-    if not plan.row_guards:
-        return
-
-    by_sheet: dict[str, list[V2RowGuard]] = defaultdict(list)
-    for guard in plan.row_guards:
-        by_sheet[guard.sheet].append(guard)
-
-    fresh_by_key: dict[tuple[str, str], tuple[dict, tuple[str, ...]] | None] = {}
-
-    part_guards = by_sheet.get(V2_SHEET_PARTS, [])
-    if part_guards:
-        line_ids = [int(g.entity_id) for g in part_guards]
-        lines = {
-            line.id: line for line in db.scalars(
-                select(FMaintenanceLine).where(FMaintenanceLine.id.in_(line_ids)))
-        }
-        orders = {
-            order.id: order for order in db.scalars(
-                select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(
-                    {line.order_id for line in lines.values()})))
-        } if lines else {}
-        overrides = {
-            override.line_id: override for override in db.scalars(
-                select(MaintenanceManualCostOverride).where(
-                    MaintenanceManualCostOverride.line_id.in_(line_ids),
-                    MaintenanceManualCostOverride.active.is_(True),
-                ))
-        }
-        for guard in part_guards:
-            line = lines.get(int(guard.entity_id))
-            fresh_by_key[(guard.sheet, guard.entity_id)] = None if line is None else (
-                _v2_part_row_values(
-                    line, orders.get(line.order_id), overrides.get(line.id)),
-                V2_PART_BASE_FIELDS,
-            )
-
-    expense_guards = by_sheet.get(V2_SHEET_EXPENSE, [])
-    if expense_guards:
-        raw_ids = [g.entity_id for g in expense_guards]
-        expenses = {
-            expense.raw_line_id: expense for expense in db.scalars(
-                select(FProjectExpense).where(
-                    FProjectExpense.raw_line_id.in_(raw_ids)))
-        }
-        for guard in expense_guards:
-            expense = expenses.get(guard.entity_id)
-            fresh_by_key[(guard.sheet, guard.entity_id)] = None if expense is None else (
-                _v2_expense_row_values(expense, ""), V2_EXPENSE_BASE_FIELDS,
-            )
-
-    all_site_guards = by_sheet.get(V2_SHEET_SITE, [])
-    header_guards = [guard for guard in all_site_guards if guard.entity_type == "site_issue"]
-    if header_guards:
-        issues = {issue.issue_id: issue for issue in db.scalars(
-            select(MaintenanceSiteIssue).where(
-                MaintenanceSiteIssue.issue_id.in_([g.entity_id for g in header_guards]),
-                MaintenanceSiteIssue.project_id == plan.project_id,
-                MaintenanceSiteIssue.normalized_status != "void",
-            ).order_by(MaintenanceSiteIssue.issue_id).with_for_update()
-            .execution_options(populate_existing=True))}
-        for guard in header_guards:
-            issue = issues.get(guard.entity_id)
-            fresh_by_key[(guard.sheet, guard.entity_id)] = (
-                ({"领用地址": issue.site_location or ""}, ("领用地址",)) if issue else None)
-    site_guards = [guard for guard in all_site_guards if guard.entity_type != "site_issue"]
-    if site_guards:
-        site_ids = [g.entity_id for g in site_guards]
-        site_lines = {
-            line.issue_line_id: line for line in db.scalars(
-                select(MaintenanceSiteIssueLine).where(
-                    MaintenanceSiteIssueLine.issue_line_id.in_(site_ids)))
-        }
-        issues = {
-            issue.issue_id: issue for issue in db.scalars(
-                select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.issue_id.in_(
-                    {line.issue_id for line in site_lines.values()})))
-        } if site_lines else {}
-        for guard in site_guards:
-            line = site_lines.get(guard.entity_id)
-            issue = issues.get(line.issue_id) if line is not None else None
-            fresh_by_key[(guard.sheet, guard.entity_id)] = (
-                None if line is None or issue is None
-                else (_v2_site_identity_values(line, issue), V2_SITE_BASE_FIELDS)
-            )
-
-    receipt_guards = by_sheet.get(V2_SHEET_RECEIPTS, [])
-    if receipt_guards:
-        collection_ids = [g.entity_id for g in receipt_guards]
-        # 列级标量读：不进 identity map，因此新鲜性不依赖调用顺序。
-        snapshot_rows = {
-            row.collection_id: row for row in db.execute(
-                select(
-                    MaintenanceCollectionSnapshot.collection_id,
-                    # report_month 不在基线字段里，但 _v2_receipt_row_values
-                    # 会读它；不选就 AttributeError。
-                    MaintenanceCollectionSnapshot.report_month,
-                    MaintenanceCollectionSnapshot.cumulative_amount,
-                    MaintenanceCollectionSnapshot.status,
-                    MaintenanceCollectionSnapshot.receipt_reference,
-                    MaintenanceCollectionSnapshot.remark,
-                ).where(
-                    MaintenanceCollectionSnapshot.collection_id.in_(collection_ids)
-                )
-            ).all()
-        }
-        for guard in receipt_guards:
-            row = snapshot_rows.get(guard.entity_id)
-            # 合同编号不在 V2_RECEIPT_BASE_FIELDS 里，传 "" 与采集侧一致。
-            fresh_by_key[(guard.sheet, guard.entity_id)] = None if row is None else (
-                _v2_receipt_row_values(row, ""), V2_RECEIPT_BASE_FIELDS,
-            )
-
-    drifted: list[dict] = []
-    for guard in plan.row_guards:
-        fresh = fresh_by_key.get((guard.sheet, guard.entity_id))
-        # fresh is None：行已消失/父单不见了。_v2_assert_entity_scope 通常已经
-        # 拦过，这里只兜底，同样按漂移处理，绝不放行。
-        if fresh is None or _v2_row_base_hash(fresh[0], guard.fields or fresh[1]) != guard.digest:
-            drifted.append({
-                "sheet": guard.sheet, "row": guard.row_label,
-                "entity_id": guard.entity_id, "field": "（整行）",
-                "old": "", "new": "", "base": "",
-                "reason": "server_changed_since_validate",
-            })
-    if drifted:
-        raise WorkbookError(
-            "row_conflicts",
-            "部分行在校验与写入之间被他人更新，本次上传未写入任何数据；"
-            "请重新下载项目总表后再试。",
-            issues=drifted,
-        )
 
 
 def _v2_parse_project_note(
