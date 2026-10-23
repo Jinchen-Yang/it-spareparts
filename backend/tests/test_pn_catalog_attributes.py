@@ -193,3 +193,17 @@ def test_empty_create_is_pending_and_b1_command_hash_stays_unchanged(db):
     assert "fill_status" not in _command_payload(cmd) and "attributes" not in _command_payload(cmd)
     result = api.create_part(db, cmd, context=context(), authorize=allow)
     assert result["data"]["fill_status"] == "pending"
+
+
+def test_generated_json_contract_is_recursive_in_both_directions():
+    import json
+    from scripts.export_pn_catalog_openapi import export
+    schemas = json.loads(export())["components"]["schemas"]
+    json_schemas = {name:value for name,value in schemas.items() if "JsonValue" in name}
+    assert json_schemas
+    for name,value in json_schemas.items():
+        assert {item.get("type") for item in value["anyOf"]} == {
+            "object","array","string","integer","number","boolean","null"}
+        reference = {"$ref":f"#/components/schemas/{name}"}
+        assert next(item for item in value["anyOf"] if item["type"]=="object")["additionalProperties"] == reference
+        assert next(item for item in value["anyOf"] if item["type"]=="array")["items"] == reference

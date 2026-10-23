@@ -3,8 +3,9 @@ import json
 import math
 from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from .json_types import JsonValue
 from .dto import StrictDTO
 
 MAX_KEYS = 256
