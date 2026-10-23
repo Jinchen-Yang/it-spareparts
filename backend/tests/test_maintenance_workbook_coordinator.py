@@ -46,8 +46,9 @@ def test_transaction_and_receipt_closures_cannot_reenter_master_or_http():
         paths = _local_dependency_paths([module.__name__])
         assert not {name: path for name, path in paths.items() if name.startswith((
             'app.api', 'app.main', 'app.services.maintenance_project_master_workbook',
-            'app.services.maintenance_site_issue_manual',
         ))}
+    # W2 still reaches the actual maintenance_manual_site_issue via facts.
+    # R2 removes that legacy edge in the combined candidate.
     # W2 is stacked independently from R1. R1 removes cost -> board via the
     # contract query seam; this legacy edge is not a route back to master.
     receipt_paths = _local_dependency_paths([receipts.__name__])
