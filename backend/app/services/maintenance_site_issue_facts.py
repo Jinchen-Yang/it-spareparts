@@ -26,6 +26,9 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
+from app.services.maintenance_demand_project_reference import demand_has_active_project_assignment
+from app.services.maintenance_operation_errors import MaintenanceOperationError
+from app.services.maintenance_site_issue_representation import site_issue_line_dict
 from app.services import maintenance_consumption_cost as costs
 from app.services import maintenance_site_return_requirements as requirements
 
@@ -103,8 +106,6 @@ def _header_snapshot(issue: MaintenanceSiteIssue) -> dict[str, Any]:
 
 def _line_snapshot(line: MaintenanceSiteIssueLine) -> dict[str, Any]:
     # Keep the shared read representation as the audit representation too.
-    from app.services.maintenance_project_operations import site_issue_line_dict
-
     return {**site_issue_line_dict(line), "is_active": line.is_active}
 
 
@@ -186,14 +187,12 @@ def _validated_changes(
         if demand_no is not None:
             if len(demand_no) > 64:
                 raise SiteIssueEditError("site_issue_edit_invalid_fields", "关联需求单号过长")
-            # Manual commands already use this authoritative assignment check.
-            # Import lazily because that adapter imports this shared primitive.
-            from app.services.maintenance_manual_site_issue import _resolve_demand_project
-            from app.services.maintenance_project_operations import MaintenanceOperationError
-
-            try:
-                _resolve_demand_project(db, project_id=project_id, demand_order_no=demand_no)
-            except MaintenanceOperationError as exc:
+            if not demand_has_active_project_assignment(
+                db, project_id=project_id, demand_order_no=demand_no,
+            ):
+                # Preserve the legacy wrapper's error type/message as the cause
+                # without coupling this primitive to the manual command adapter.
+                exc = MaintenanceOperationError("关联需求单不属于当前项目，请核对单号或留空")
                 raise SiteIssueEditError("site_issue_edit_demand_project_mismatch", str(exc)) from exc
         result["demand_order_no"] = demand_no
     return result

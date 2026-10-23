@@ -502,13 +502,13 @@ def test_projects_aggregate_hides_partial_amount_from_explicit_and_alias_fields(
     db, batch, monkeypatch,
 ):
     """已知小计不能伪装成完整合同总额；新旧字段保持同一失败关闭语义。"""
-    from app.services import maintenance_boss_board
+    from app.services import maintenance_contract_reference
 
     test_projects_aggregate_reads_live_current_contract_amount(db, batch)
     project = db.scalar(select(MaintenanceProject))
     monkeypatch.setattr(
-        maintenance_boss_board,
-        "_card_contracts",
+        maintenance_contract_reference,
+        "current_contract_references",
         lambda _db, _project_ids: {
             project.project_id: {
                 "contract_nos": ["XSDD-LIVE-CONTRACT"],

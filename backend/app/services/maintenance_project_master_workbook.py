@@ -75,7 +75,7 @@ from app.services import maintenance_periods
 from app.services import maintenance_field_protection as field_protection
 from app.services import maintenance_site_issue_merge as site_merges
 from app.services import maintenance_expense_collection_workbook as ec
-from app.services.maintenance_boss_board import _card_contracts
+from app.services.maintenance_contract_reference import current_contract_references
 from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_expense_collection_workbook import (
     TAX_RATE,
@@ -334,7 +334,7 @@ def _current_contracts(
 def _canonical_contract_read_model(db: Session, project_id: str) -> dict:
     """Workbook-safe current contract summary.
 
-    ``_card_contracts`` is the canonical read model shared with the project
+    ``current_contract_references`` is the canonical read model shared with the project
     cards.  It deliberately retains a known subtotal alongside
     ``contract_incomplete`` for diagnostic consumers.  A workbook cell labelled
     "contract total", however, must not expose that subtotal as if it were the
@@ -342,7 +342,7 @@ def _canonical_contract_read_model(db: Session, project_id: str) -> dict:
     is unresolved while preserving a real, complete zero.
     """
 
-    card = _card_contracts(db, [project_id]).get(project_id)
+    card = current_contract_references(db, [project_id]).get(project_id)
     if card is None:
         return {
             "contract_nos": [],
