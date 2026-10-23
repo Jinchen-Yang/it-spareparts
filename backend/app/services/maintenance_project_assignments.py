@@ -14,6 +14,7 @@ from app.models.maintenance_project import (
 )
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
+from app.services import maintenance_workbook_state as workbook_state_service
 
 if TYPE_CHECKING:
     from app.models.maintenance_project_operations import (
@@ -405,11 +406,10 @@ def assign_primary_manager(
         )
     ) is None:
         return None
-    from app.services import maintenance_project_operations as operations
 
     state = _prelocked_state
     if state is None and not _skip_workbook_bump:
-        state = operations.lock_workbook_states(
+        state = workbook_state_service.lock_workbook_states(
             db, project_ids=[project_id]
         )[project_id]
     project = db.scalar(
@@ -530,7 +530,7 @@ def assign_primary_manager(
     if state is not None:
         # primary_manager 是导出投影（旧 V2 task owner）的输入：真实变更抬高
         # 同一根事务 revision 恰好一次（bump 内部按事务去重）。
-        operations.bump_locked_workbook_revision(db, state=state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=state)
     return after
 
 
@@ -555,9 +555,8 @@ def archive_primary_manager(
     if assignment is None:
         return None
     project_id = assignment.project_id
-    from app.services import maintenance_project_operations as operations
 
-    state = operations.lock_workbook_states(db, project_ids=[project_id])[
+    state = workbook_state_service.lock_workbook_states(db, project_ids=[project_id])[
         project_id
     ]
     project = db.scalar(
@@ -604,7 +603,7 @@ def archive_primary_manager(
         )
     )
     db.flush()
-    operations.bump_locked_workbook_revision(db, state=state)
+    workbook_state_service.bump_locked_workbook_revision(db, state=state)
     return after
 
 

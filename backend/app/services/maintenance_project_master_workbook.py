@@ -42,6 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import config
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.excel_text_safety import SafeTextWorkbook, has_illegal_excel_upload_text
 from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
@@ -1386,12 +1387,8 @@ def apply(
             or operating_fact_changed
         )
     if workbook_state is not None and operating_fact_changed:
-        from app.services import maintenance_project_operations as operations
-
-        operations.bump_locked_workbook_revision(db, state=workbook_state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=workbook_state)
     elif changed_project_ids:
-        from app.services import maintenance_project_operations as operations
-
         if _prelocked_workbook_states is None:
             raise WorkbookError(
                 "invalid_plan", "全局备件工作簿缺少项目并发上下文"
@@ -1403,7 +1400,7 @@ def apply(
                     "project_scope_denied",
                     "工作簿包含未预锁的项目备件行，请重新下载",
                 )
-            operations.bump_locked_workbook_revision(db, state=state)
+            workbook_state_service.bump_locked_workbook_revision(db, state=state)
     db.commit()
     return {"applied_by": operated_by, "import_batch_id": import_batch_id,
             "sheets": list(plan.sheets), **plan.summary}
@@ -1745,9 +1742,8 @@ def apply_global_lines(
             "project_scope_denied",
             "工作簿包含已改派或不在当前可见项目范围的备件行，请重新下载",
         )
-    from app.services import maintenance_project_operations as operations
 
-    workbook_states = operations.lock_workbook_states(
+    workbook_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids=probed_project_ids,
     )
@@ -3166,9 +3162,8 @@ def build_project_master_v2(
     # Every V2-visible writer takes this state row before project/fact rows, so
     # holding it through workbook serialization prevents a mixed-sheet download
     # instead of merely making that freshly downloaded file immediately stale.
-    from app.services import maintenance_project_operations as operations
 
-    workbook_state = operations.lock_workbook_states(
+    workbook_state = workbook_state_service.lock_workbook_states(
         db,
         project_ids={project_id},
     )[project_id]
@@ -6529,7 +6524,7 @@ def _apply_project_master_v2(
             ).all()
             if value
         )
-    workbook_states = operations.lock_workbook_states(
+    workbook_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids=state_project_ids,
     )
@@ -7467,7 +7462,7 @@ def _apply_project_master_v2(
     if operating_fact_changed:
         # One successful workbook transaction invalidates every older V3/data
         # version exactly once, regardless of how many sheets it changed.
-        operations.bump_locked_workbook_revision(db, state=workbook_state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=workbook_state)
     result = _v2_apply_result(
         plan,
         operated_by=operated_by,

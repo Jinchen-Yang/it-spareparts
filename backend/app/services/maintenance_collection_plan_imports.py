@@ -58,7 +58,7 @@ from app.models.maintenance_project_operations import MaintenanceProjectOperatio
 from app.models.system import SysUser
 from app.schemas.maintenance_collection_reminders import ApplyBinding
 from app.security import UserContext, record_access_log
-from app.services import maintenance_project_operations as operations
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_collection_plan_xls import (
     CONTRACT_VERSION,
@@ -959,7 +959,7 @@ def apply_collection_plan_import(
     )
     if existing_project_ids != project_ids:
         raise CollectionPlanImportNotFound("项目不存在或不可见")
-    workbook_states = operations.lock_workbook_states(
+    workbook_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids=project_ids,
     )
@@ -1202,7 +1202,7 @@ def apply_collection_plan_import(
     batch.applied_at = now
     db.flush()
     for project_id in sorted(changed_project_ids):
-        operations.bump_locked_workbook_revision(
+        workbook_state_service.bump_locked_workbook_revision(
             db,
             state=workbook_states[project_id],
         )

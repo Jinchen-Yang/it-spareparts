@@ -34,9 +34,9 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysUser
 from app.security import UserContext, is_field_hidden
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_periods
 from app.services import maintenance_project_catalog as catalog
-from app.services import maintenance_project_operations as operations
 from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_manager_workbook_v3 import (
@@ -371,7 +371,7 @@ class MaintenanceManagerWorkbookAdapter:
                 "当前账号未分配任何有效维保项目，不能使用项目经理月度工作簿"
             )
         project_ids = sorted({project.project_id for _assignment, project in probe})
-        operations.lock_workbook_states(self.db, project_ids=project_ids)
+        workbook_state_service.lock_workbook_states(self.db, project_ids=project_ids)
         for project_id in project_ids:
             self.db.scalar(
                 select(MaintenanceProject)
@@ -972,12 +972,12 @@ class MaintenanceManagerWorkbookAdapter:
                     operated_by=self.operator,
                 )
             )
-            state = operations.get_or_create_workbook_state(
+            state = workbook_state_service.get_or_create_workbook_state(
                 self.db,
                 project_id=project_id,
                 lock=True,
             )
-            operations.bump_locked_workbook_revision(self.db, state=state)
+            workbook_state_service.bump_locked_workbook_revision(self.db, state=state)
 
         for project in plan.get("project_scope") or []:
             self.db.add(

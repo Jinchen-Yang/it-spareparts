@@ -36,6 +36,7 @@ from app.services import maintenance_project_assignments as pa
 from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_source_assignments as sa
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.maintenance_manager_workbook_adapter import (
     MaintenanceManagerWorkbookAdapter,
 )
@@ -438,7 +439,7 @@ def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
     orders = _load_orders(db, project="OCC并发归属项目", n=1)
     raw_id = orders[0].raw_order_id
 
-    real_lock = operations.lock_workbook_states
+    real_lock = workbook_state_service.lock_workbook_states
     injected = {"done": False}
 
     def racy_lock(session, *, project_ids):
@@ -458,7 +459,7 @@ def test_auto_assign_fails_closed_when_assignment_appears_concurrently(
                 other.close()
         return real_lock(session, project_ids=project_ids)
 
-    monkeypatch.setattr(operations, "lock_workbook_states", racy_lock)
+    monkeypatch.setattr(workbook_state_service, "lock_workbook_states", racy_lock)
 
     with pytest.raises(sa.SourceAssignmentConflict):
         sa.auto_assign_unassigned(

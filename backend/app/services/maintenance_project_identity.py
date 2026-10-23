@@ -38,8 +38,8 @@ from app.models.maintenance_project_operations import (
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.maintenance_warehouse import MaintenanceWarehouseDocumentLink
 from app.models.system import SysUser
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import project_names
-from app.services import maintenance_project_operations as operations
 
 
 class XsddProjectConflict(Exception):
@@ -1913,7 +1913,7 @@ def _apply_locked_project_merge(
             operated_by=operated_by[:64],
         ))
 
-    operations.bump_locked_workbook_revision(db, state=locked_states[canonical_id])
+    workbook_state_service.bump_locked_workbook_revision(db, state=locked_states[canonical_id])
     db.flush()
 
     active_source_assignment_count = int(db.scalar(
@@ -2117,7 +2117,7 @@ def apply_historical_project_merge_batch(
         all_project_ids,
     )
     lock_xsdd_identities(db, sorted(all_xsdd_identities))
-    locked_states = operations.lock_workbook_states(
+    locked_states = workbook_state_service.lock_workbook_states(
         db,
         project_ids=all_project_ids,
     )

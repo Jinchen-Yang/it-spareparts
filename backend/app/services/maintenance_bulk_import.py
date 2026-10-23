@@ -49,6 +49,7 @@ from app.models.maintenance_project_operations import (
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.sales import FSalesOrder
 from app.models.system import SysAuditLog, SysImportBatch, SysImportError, SysRawFile
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_identity
 from app.services import maintenance_project_operations as operations
@@ -1651,7 +1652,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     source="sales_order_import",
                 )
                 if alias_created:
-                    operations.bump_workbook_revision(
+                    workbook_state_service.bump_workbook_revision(
                         db, project_id=contract.project_id
                     )
                 project_ids.add(contract.project_id)
@@ -1811,7 +1812,7 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 # create/update contract already bumps in this transaction;
                 # the dedupe registry makes this exactly-once.  It is the sole
                 # bump for an amount-noop row that contributes a new peer name.
-                operations.bump_workbook_revision(db, project_id=project_id)
+                workbook_state_service.bump_workbook_revision(db, project_id=project_id)
 
             if sales is not None:
                 before = {
@@ -2797,7 +2798,7 @@ class ReceiptCollectionAdapter(HeaderAdapter):
         # 再按项目取工作簿并发状态锁（与 update_collection / create_collection / 05 表
         # 同一把、同一顺序），**然后**才读快照与台账：否则读完到第一次写入之间，
         # 走正规入口的并发改值能在窗口里提交，逐项 CAS 与指纹复算全部按旧值通过。
-        operations.lock_workbook_states(
+        workbook_state_service.lock_workbook_states(
             db, project_ids=[item["project_id"] for item in selected]
         )
         contracts = {

@@ -18,7 +18,7 @@ from app import config
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceProjectOperationAudit
-from app.services import maintenance_project_operations as operations
+from app.services import maintenance_workbook_state as workbook_state_service
 
 
 class MilestoneRestoreError(Exception):
@@ -112,7 +112,7 @@ def restore_collection_milestones(
     db.execute(
         select(func.pg_advisory_xact_lock(config.DATA_CHANGE_ADVISORY_LOCK_KEY))
     )
-    workbook_state = operations.lock_workbook_states(
+    workbook_state = workbook_state_service.lock_workbook_states(
         db, project_ids=[project_id]
     )[project_id]
     project = db.scalar(
@@ -243,7 +243,7 @@ def restore_collection_milestones(
         })
 
     if restored:
-        operations.bump_locked_workbook_revision(db, state=workbook_state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=workbook_state)
     db.flush()
     return {
         "project_id": project_id,

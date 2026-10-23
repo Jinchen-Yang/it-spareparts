@@ -43,6 +43,7 @@ from app.models.sales import (
     FSalesReconciliationSnapshot,
 )
 from app.models.system import SysAuditLog
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_cost_invalidation
 from app.services import maintenance_project_operations as _project_ops
 from app.services.sales_reconciliation import (
@@ -139,7 +140,7 @@ def _prelock_workbook_states(session: Session, source_order_ids) -> dict:
     全局锁序要求（K3 writer-side workbook revision invalidation）：workbook state
     必须先于任何 order/line 事实行锁获取；禁止在事实行锁之后再拿新 state 锁。
     """
-    return _project_ops.lock_workbook_states(
+    return workbook_state_service.lock_workbook_states(
         session,
         project_ids=_probe_assigned_project_ids(session, source_order_ids),
     )
@@ -170,7 +171,7 @@ def _bump_workbooks_for_changed_orders(
         state = prelocked.get(pid)
         if state is None:
             continue  # 不可能分支：changed ⊆ probe 范围，且上面已 fail closed
-        _project_ops.bump_locked_workbook_revision(session, state=state)
+        workbook_state_service.bump_locked_workbook_revision(session, state=state)
         bumped.append(pid)
     return bumped
 
@@ -1042,7 +1043,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     target_project_ids = set(
         lock_envelope.target_project_ids if lock_envelope is not None else ()
     )
-    prelocked_states = _project_ops.lock_workbook_states(
+    prelocked_states = workbook_state_service.lock_workbook_states(
         session,
         project_ids=current_project_ids | target_project_ids,
     )
@@ -1450,7 +1451,7 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
             else existing.expense_date if existing is not None else None
         )
         lock_project_ids.update(_candidate_project_ids(linked_no, expense_date))
-    states = _project_ops.lock_workbook_states(
+    states = workbook_state_service.lock_workbook_states(
         session, project_ids=lock_project_ids
     )
     for project_id in sorted(lock_project_ids):
@@ -1841,7 +1842,7 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
             reason=f"报销导入同步项目归因（batch {batch_id}）",
             operated_by=operated_by or "system",
         )
-        _project_ops.bump_locked_workbook_revision(
+        workbook_state_service.bump_locked_workbook_revision(
             session, state=states[project_id]
         )
 

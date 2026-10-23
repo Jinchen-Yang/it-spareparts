@@ -35,10 +35,10 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_front_stock as front_stock
 from app.services import maintenance_cost_quality
 from app.services import maintenance_periods
-from app.services import maintenance_project_operations as operations
 from app.services.maintenance_boss_board import _card_contracts
 from app.services.maintenance_workbook_export import safe_xlsx_text
 from app.services.query_filters import active_orders
@@ -608,7 +608,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         ws_dict.append([line])
     ws_dict.sheet_state = "hidden"
     ws_meta = wb.create_sheet("99_元数据")
-    state = operations.get_or_create_workbook_state(db, project_id=project_id)
+    state = workbook_state_service.get_or_create_workbook_state(db, project_id=project_id)
     ws_meta.append(["协议版本", WORKBOOK_PROTOCOL_VERSION])
     ws_meta.append(["导出ID", str(uuid4())])
     ws_meta.append(["项目编号", project.project_code])

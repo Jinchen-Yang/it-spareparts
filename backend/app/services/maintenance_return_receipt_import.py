@@ -42,6 +42,7 @@ from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment as Assignment,
 )
 from app.models.system import SysImportBatch, SysRawFile
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import import_safety
 from app.services import maintenance_return_receipts as ledger
 from app.services.date_loose import parse_date_loose
@@ -992,7 +993,7 @@ def apply(
     # Project editors and viewer/manager assignments use name -> workbook
     # state -> project, not DATA_CHANGE. Freeze that writer boundary too, before
     # the batch/receipt locks. Include original and proposed owners of transfers.
-    from app.services import maintenance_project_operations, project_names
+    from app.services import project_names
 
     source_names = list(
         db.scalars(
@@ -1015,7 +1016,7 @@ def apply(
             if project_id
         }
     )
-    maintenance_project_operations.lock_workbook_states(db, project_ids=project_ids)
+    workbook_state_service.lock_workbook_states(db, project_ids=project_ids)
     for project_id in project_ids:
         db.scalar(
             select(Project)

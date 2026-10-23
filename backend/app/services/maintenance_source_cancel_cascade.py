@@ -27,6 +27,7 @@ from app.models.maintenance_source_assignment import (
     MaintenanceSourceOrderAssignment as A,
 )
 from app.models.system import SysImportBatch
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.maintenance_field_protection import (
     is_manual_created,
     protected_fields,
@@ -227,7 +228,6 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
 
     from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY
     from app.services import maintenance_demands as demands
-    from app.services import maintenance_project_operations as operations
     from app.services import maintenance_site_return_requirements as requirements
     from app.services.maintenance_wbdd_sync import _audit
 
@@ -254,7 +254,7 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
         raise CancellationConflict("候选或相关数据已变化，本次未执行，请刷新影响清单后重新核对")
     if len(lines) > demands.MAX_DELETE_LINES:
         raise ValueError(f"一次最多涉及{demands.MAX_DELETE_LINES}行备件")
-    states = operations.lock_workbook_states(db, project_ids=[project_id])
+    states = workbook_state_service.lock_workbook_states(db, project_ids=[project_id])
     db.scalar(select(MaintenanceProject).where(MaintenanceProject.project_id == project_id)
               .with_for_update().execution_options(populate_existing=True))
     db.scalar(select(O).where(O.id == order.id).with_for_update().execution_options(populate_existing=True))
@@ -316,7 +316,7 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     # invert this command's global-first protocol. Our receipt is the sole replay.
     tombstone = demands.void_fast(db, source_order_ids=[source_order_id], reason=reason,
                                  operated_by=operated_by, allowed_project_ids={project_id})
-    operations.bump_locked_workbook_revision(db, state=states[project_id])
+    workbook_state_service.bump_locked_workbook_revision(db, state=states[project_id])
     result = {"batch_id": batch_id, "source_order_id": source_order_id,
               "voided_orders": tombstone["voided"], "voided_lines": len(active_lines),
               "voided_site_lines": len(exact), "voided_site_issues": voided_issues,

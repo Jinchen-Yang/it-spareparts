@@ -42,6 +42,7 @@ from app.models.maintenance_project import (
 )
 from app.models.sales import FSalesOrder
 from app.models.system import SysImportBatch
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services.date_loose import (
     parse_amount_loose,
     parse_date_loose,
@@ -765,7 +766,6 @@ def _lock_target_projects(
         )
     related = _related_project_ids_by_contract(db, contract_nos or set())
 
-    from app.services import maintenance_project_operations as operations
 
     existing: list[MaintenanceProject] = []
     if identities:
@@ -779,7 +779,7 @@ def _lock_target_projects(
         | {pid for pids in related.values() for pid in pids}
         | set(extra_project_ids or ())
     )
-    workbook_states = operations.lock_workbook_states(
+    workbook_states = workbook_state_service.lock_workbook_states(
         db, project_ids=all_project_ids
     )
     locked_project_ids: list[str] = []
@@ -2126,10 +2126,10 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                 )
             # 本批新建项目不在预锁集合内：其 state 行此刻才创建，并发事务在
             # 本项目提交前看不到该项目，不存在锁序竞争。
-            state = operations.get_or_create_workbook_state(
+            state = workbook_state_service.get_or_create_workbook_state(
                 db, project_id=project_id, lock=True
             )
-        operations.bump_locked_workbook_revision(db, state=state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=state)
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)

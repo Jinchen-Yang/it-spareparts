@@ -29,6 +29,7 @@ from app.models.maintenance import (
     MaintenanceDemandTombstone,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_cost_invalidation
 from app.security import UserContext
 from app.services.maintenance_order_contact import order_contact
@@ -789,10 +790,9 @@ def _lock_workbook_states_for_owners(
             ).all()
             if value
         }
-    from app.services import maintenance_project_operations as operations
 
     if prelocked_states is None:
-        locked_states = operations.lock_workbook_states(
+        locked_states = workbook_state_service.lock_workbook_states(
             db, project_ids=probed_owner_ids
         )
     else:
@@ -815,10 +815,9 @@ def _bump_workbook_revisions(
 
     if not changed_project_ids:
         return
-    from app.services import maintenance_project_operations as operations
 
     for project_id in sorted(changed_project_ids):
-        operations.bump_locked_workbook_revision(db, state=locked_states[project_id])
+        workbook_state_service.bump_locked_workbook_revision(db, state=locked_states[project_id])
 
 
 def execute_delete_intent(

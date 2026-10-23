@@ -34,6 +34,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
 )
 from app.security import UserContext
+from app.services import maintenance_workbook_state as workbook_state_service
 from app.services import maintenance_project_operations as operations
 from app.services.maintenance_project_workbook_v2 import (
     CollectionCreate,
@@ -357,7 +358,7 @@ class MaintenanceProjectWorkbookAdapter:
             return self._locked_state
         if self.db.get(MaintenanceProject, project_id) is None:
             raise ProjectWorkbookV2Error("维保项目不存在", status_code=404)
-        self._locked_state = operations.get_or_create_workbook_state(
+        self._locked_state = workbook_state_service.get_or_create_workbook_state(
             self.db, project_id=project_id, lock=True
         )
         return self._locked_state

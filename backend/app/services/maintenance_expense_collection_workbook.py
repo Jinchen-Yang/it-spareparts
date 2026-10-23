@@ -44,6 +44,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
 )
 from app.models.system import SysImportBatch
+from app.services import maintenance_workbook_state as workbook_state_service
 
 PROTOCOL_VERSION = "expense-collection-v1"
 SHEET_EXPENSE = "04_报销订单"
@@ -749,8 +750,6 @@ def _lock_project_apply_context(
     the complete transaction keeps one lock hierarchy and one revision bump.
     """
 
-    from app.services import maintenance_project_operations as operations
-
     project_exists = db.scalar(
         select(MaintenanceProject.project_id).where(
             MaintenanceProject.project_id == project_id
@@ -759,7 +758,7 @@ def _lock_project_apply_context(
     if project_exists is None:
         raise WorkbookError("project_not_editable", "项目已不存在，请重新下载")
     if workbook_state is None:
-        workbook_state = operations.get_or_create_workbook_state(
+        workbook_state = workbook_state_service.get_or_create_workbook_state(
             db, project_id=project_id, lock=True
         )
     elif workbook_state.project_id != project_id:
@@ -1377,7 +1376,7 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
     # 整体抬高、又放过新增月份的倒退。违规即整本不落。
     _validate_collection_end_state(db, touched)
     if bump_revision and operating_fact_changed:
-        operations.bump_locked_workbook_revision(db, state=workbook_state)
+        workbook_state_service.bump_locked_workbook_revision(db, state=workbook_state)
     if commit:
         db.commit()
     result = {"applied_by": operated_by, "import_batch_id": import_batch_id,
