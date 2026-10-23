@@ -3,6 +3,14 @@
     "part_master",
     "read"
   ],
+  "read_attributes": [
+    "part_master",
+    "read"
+  ],
+  "update_attributes": [
+    "part_master",
+    "edit"
+  ],
   "create": [
     "part_master",
     "create"
