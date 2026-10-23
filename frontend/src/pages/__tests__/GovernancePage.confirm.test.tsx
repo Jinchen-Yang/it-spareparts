@@ -26,3 +26,6 @@ it.each([
   fireEvent.click(await screen.findByRole("button", { name: /确\s*认/ }));
   await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith(endpoint));
 });
+
+// These fixtures exercise the retained legacy governance implementation.
+vi.mock("../../authz/AuthzProvider", async original => ({ ...await original<object>(), useAuthz: () => ({ status: "ready", snapshot: { schema_version: 1, resources: { part_identity: { runtime_state: "legacy", migration_state: "implemented" }, part_master: { runtime_state: "legacy", migration_state: "implemented" } } } }) }));

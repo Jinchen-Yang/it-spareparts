@@ -287,6 +287,18 @@
     "part_master",
     "job.retry"
   ],
+  "identity.job.read": [
+    "part_identity",
+    "job.read"
+  ],
+  "identity.job.cancel": [
+    "part_identity",
+    "job.cancel"
+  ],
+  "identity.job.retry": [
+    "part_identity",
+    "job.retry"
+  ],
   "stage_migration": [
     "part_master",
     "stage_migration"

@@ -2,7 +2,7 @@
 import logging
 import re
 from functools import partial
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
@@ -152,12 +152,13 @@ def list_parts(request: Request, db: DbDep, access: AccessDep, q: str | None = Q
                limit: int = Query(default=50, ge=1, le=200), include_inactive: bool = False,
                category_major: str | None = Query(default=None, max_length=128),
                part_ids: list[int] | None = Query(default=None, max_length=200),
-               include_gallery: bool = False, missing_image: bool | None = None):
+               include_gallery: bool = False, missing_image: bool | None = None,
+               fill_status: Literal["pending", "ai_filled", "confirmed", "needs_review", "unrecorded"] | None = None):
     from app.pn_catalog import api
     return api.list_parts(db, context=_context(request, access), authorize=access.authorize,
                           query=q or "", cursor=cursor, limit=limit, include_inactive=include_inactive,
                           category_major=category_major, part_ids=part_ids, include_gallery=include_gallery,
-                          missing_image=missing_image)
+                          missing_image=missing_image, fill_status=fill_status)
 
 
 @router.post("/parts", status_code=201, response_model=PartResponse, openapi_extra=_WRITE_HEADERS)
@@ -271,3 +272,6 @@ from . import http_authority as _authority_routes  # noqa: E402,F401
 from . import http_references as _reference_routes  # noqa: E402,F401
 from . import http_attributes as _attribute_routes  # noqa: E402,F401
 from . import http_lookup as _lookup_routes  # noqa: E402,F401
+from . import http_bulk as _bulk_routes  # noqa: E402,F401
+
+from . import http_identity_read as _identity_read_routes  # noqa: E402,F401

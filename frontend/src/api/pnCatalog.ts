@@ -7,7 +7,7 @@ export interface ManualSpec { value: string; unit: string | null; numeric_value:
 export interface Part extends PartSummary { identity: { pn_std: string; status: string; merged_into_id: number | null }; availability_revision: number; profile: Record<string, string | null>; specs: Record<string, ManualSpec & { source: string; version: number; deleted: boolean }>; field_versions: Record<string, number>; locked_fields: string[] }
 export interface Content { part_id: number; grade: Grade; identity_revision: number; revision: number; title?: string | null; description?: string | null; status?: string; field_versions: Record<string, number> }
 export interface Candidate { id: string; part_id: number; resource: "profile" | "content"; grade: Grade | null; identity_revision: number; base_revision: number; revision: number; status: string; proposal: { changes: Record<string, string | null>; spec_updates?: Record<string, ManualSpec | null> }; provenance: Record<string, unknown>; adopted_fields: string[]; created_at: string }
-export interface Entry { entry_id: string; asset_id: string; purpose: "common" | "defect"; status: "gallery" | "candidate" | "processing" | "deleted"; revision: number; generation: number; width: number; height: number; source: Record<string, unknown>; derivatives: { derivative_id: string; recipe_id: string; status: string }[] }
+export interface Entry { entry_id: string; asset_id: string; purpose: "common" | "defect"; status: "gallery" | "candidate" | "processing" | "deleted"; revision: number; generation: number; width: number; height: number; size_bytes: number; source: Record<string, unknown>; derivatives: { derivative_id: string; recipe_id: string; status: string }[] }
 export interface Gallery { group_id: string | null; part_id: number | null; revision: number; primary_entry_id: string | null; ordered_entry_ids: string[]; entries: Entry[] }
 export interface UploadForm { method: string; url: string; fields: Record<string, string>; headers: Record<string, string>; expires_at: string }
 export interface UploadTicket { upload_id: string; revision: number; generation: number; status: "issued" | "verifying" | "ready" | "committed" | "cancelled" | "failed"; filename: string; job_id: string | null; entry_id: string | null; error_code: string | null; upload_form?: UploadForm }
@@ -24,17 +24,29 @@ export function catalogClient(token: string) {
       check(); const result = await api.get<Envelope<T>>(`/pn-catalog/v1${path}`, { ...config, params }); check(); return result.data;
     },
     async write<T>(method: "post" | "patch" | "delete", path: string, body: unknown, requestId: string): Promise<Envelope<T>> {
-      check(); const result = await api.request<Envelope<T>>({ method, url: `/pn-catalog/v1${path}`, data: body, headers: { ...config.headers, "Idempotency-Key": requestId } }); check(); return result.data;
+      // Serialize before Axios config merging so JSON keys such as "constructor" stay data.
+      check(); const result = await api.request<Envelope<T>>({ method, url: `/pn-catalog/v1${path}`, data: JSON.stringify(body), headers: { ...config.headers, "Content-Type": "application/json", "Idempotency-Key": requestId } }); check(); return result.data;
     },
     async categories(): Promise<{ name: string; children: string[] }[]> {
       check(); const result = await api.get<{ categories: { name: string; children: { name: string }[] }[] }>("/parts/master/categories", config); check(); return result.data.categories.map(c => ({ name: c.name, children: c.children.map(child => child.name) }));
+    },
+    async identities(q: string): Promise<{ part_id: number; pn_std: string }[]> {
+      check(); const result = await api.get<{ items: { part_id: number; pn_std: string }[] }>("/parts/search", { ...config, params: { q, browse: true, page_size: 20 } }); check();
+      return result.data.items.map(({ part_id, pn_std }) => ({ part_id, pn_std }));
     },
   };
 }
 export type CatalogClient = ReturnType<typeof catalogClient>;
 export function catalogError(error: unknown): { code: string; message: string; details: Record<string, unknown>; ambiguous: boolean } {
-  const e = error as { response?: { data?: { error?: { code?: string; message?: string; details?: Record<string, unknown> }; detail?: string } }; message?: string };
-  return { code: e.response?.data?.error?.code || "", message: e.response?.data?.error?.message || e.response?.data?.detail || e.message || "请求失败", details: e.response?.data?.error?.details || {}, ambiguous: !e.response };
+  const e = error as { response?: { status?: number; data?: { error?: { code?: string; message?: string; details?: Record<string, unknown> }; detail?: unknown } }; message?: string } | null;
+  const data = e?.response?.data;
+  const detail = data?.detail;
+  const structured = detail && typeof detail === "object" && !Array.isArray(detail) ? detail as Record<string, unknown> : {};
+  return {
+    code: data?.error?.code || (typeof structured.code === "string" ? structured.code : ""),
+    message: data?.error?.message || (typeof detail === "string" ? detail : typeof structured.message === "string" ? structured.message : "") || e?.message || "请求失败",
+    details: data?.error?.details || {}, ambiguous: !e?.response || (e.response.status ?? 0) >= 500,
+  };
 }
 
 /** The same request body reuses its key after a lost response; a new intent gets a new key. */

@@ -12,6 +12,12 @@ from .migration_materialize import _arrange_imported, _content, _image
 from .migration_models import LegacySourceRecord, MigrationBatch
 from .media_models import GalleryEntry
 from .migration_profile import materialize_profile
+from .migration_media import (
+    materialize_upload,
+    materialize_multipart,
+    materialize_upload_intent,
+    materialize_inbox,
+)
 from .migration_state import _access, _namespace_lock, snapshot_report
 from .migration_state_dto import ApplySourceRecords
 from .migration_state_models import MigrationRecordApplication, MigrationSnapshotState
@@ -181,7 +187,11 @@ def apply_source_records(
         if fingerprint(row.payload) != row.payload_sha256:
             raise CatalogError("migration.source_changed", "原始证据与冻结指纹不一致")
         prior = db.get(MigrationRecordApplication, row.id, populate_existing=True)
-        if prior and prior.state in {"applied", "historical_terminal"}:
+        if prior and prior.state in {
+            "applied",
+            "historical_terminal",
+            "recovery_required",
+        }:
             last_audit = prior.audit_id
             continue
         target, state, reason = None, "applied", None
@@ -198,6 +208,14 @@ def apply_source_records(
                     target = materialize_profile(
                         db, row, pid, context=context, authorization=decision.metadata
                     )
+                elif row.kind == "upload":
+                    state, reason, target = materialize_upload(db, row, pid, identity)
+                elif row.kind == "multipart":
+                    state, reason, target = materialize_multipart(db, row)
+                elif row.kind == "upload_intent":
+                    state, reason, target = materialize_upload_intent(db, row)
+                elif row.kind == "inbox":
+                    state, reason, target = materialize_inbox(db, row, pid, identity)
                 elif row.kind in {"image", "content"}:
                     # The immutable archive's initial mapping never changes. This
                     # temporary projection carries the separately approved reference.
@@ -274,7 +292,12 @@ def apply_source_records(
             state = (
                 "dependency_blocked"
                 if reason
-                in {"migration.reference_required", "migration.converter_pending"}
+                in {
+                    "migration.reference_required",
+                    "migration.converter_pending",
+                    "migration.owner_binding_required",
+                    "migration.dependency_missing",
+                }
                 else "conflict"
             )
         application = _write_application(

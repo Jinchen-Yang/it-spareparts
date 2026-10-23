@@ -227,6 +227,7 @@ class MultipartUpload(Base):
         ForeignKey("pn_media_upload.id"), primary_key=True
     )
     storage_upload_id: Mapped[str | None] = mapped_column(String(1024))
+    storage_fingerprint: Mapped[str | None] = mapped_column(String(128))
     state: Mapped[str] = mapped_column(
         String(24), default="initializing", server_default="initializing"
     )
@@ -238,6 +239,10 @@ class MultipartUpload(Base):
     revision: Mapped[int] = mapped_column(BigInteger, default=1, server_default="1")
     aborted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     __table_args__ = (
+        CheckConstraint(
+            "storage_fingerprint IS NULL OR storage_fingerprint ~ '^[a-f0-9]{64}$'",
+            name="ck_pn_multipart_legacy_fingerprint",
+        ),
         CheckConstraint(
             "state IN ('initializing','uploading','completing','completed','cancelled')",
             name="ck_pn_media_multipart_state",

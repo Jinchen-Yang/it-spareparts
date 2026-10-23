@@ -130,6 +130,8 @@ def preview(db: Session, command: IdentityPreview, *, context: CommandContext,
     current, target = _scope(db, command)
     if current != initial:
         raise CatalogError("identity.scope_changed", "关联 PN 已变化，请重新预览", retryable=True)
+    if command.operation == "unmerge":
+        _check_unmerge_cycle(db, command.merge_log_id)
     expected, parts = {}, []
     states = api.read_states(db, current)
     if set(states) != current:
@@ -141,6 +143,16 @@ def preview(db: Session, command: IdentityPreview, *, context: CommandContext,
                       "merged_into_id": value["identity"]["merged_into_id"]})
     return {"operation": command.operation, "target_part_id": target,
             "expected": expected, "parts": parts}
+
+
+def _check_unmerge_cycle(db, merge_log_id):
+    log = db.get(ProductMergeLog, merge_log_id, populate_existing=True)
+    if log is None:
+        raise CatalogError("identity.merge_not_found", "合并记录不存在", status_code=404)
+    try:
+        merge.require_latest_merge_log(db, log)
+    except merge.MergeError as exc:
+        raise CatalogError("identity.undo_conflict", str(exc)) from exc
 
 
 def _check_unmerge_ownership(db, merge_log_id):
@@ -191,6 +203,8 @@ def execute(db: Session, command: IdentityCommand, *, context: CommandContext,
     scope, target_id = _scope(db, command)
     if scope != {int(key) for key in command.expected}:
         raise CatalogError("identity.scope_changed", "关联 PN 已变化，请重新预览")
+    if command.operation == "unmerge":
+        _check_unmerge_cycle(db, command.merge_log_id)
     before = api.capture_states(db, scope)
     if set(before) != scope:
         raise CatalogError("catalog.part_not_found", "型号不存在", status_code=404)

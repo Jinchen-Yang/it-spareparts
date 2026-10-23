@@ -8,6 +8,8 @@ import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 import { money, pct, splitFixed } from "../utils/format";
 import { useTaxBasis } from "../context/TaxBasis";
+import { resourceUsesLegacy, useAuthz } from "../authz/AuthzProvider";
+import IdentityPanel from "../components/pnCatalog/IdentityPanel";
 import DataQualityIssuesPanel from "./governance/DataQualityIssuesPanel";
 import DataQualityCalibrationPanel from "./governance/DataQualityCalibrationPanel";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
@@ -443,13 +445,16 @@ function MetricsTab({ metrics }: { metrics: any }) {
 }
 
 export default function GovernancePage() {
+  const authz = useAuthz();
+  const legacyIdentity = authz.status === "ready" && resourceUsesLegacy(authz.snapshot, "part_identity");
+  const legacyMaster = authz.status === "ready" && resourceUsesLegacy(authz.snapshot, "part_master");
   const { message } = App.useApp();
   const isAdmin = localStorage.getItem("role") === "admin";
   const [{ tab }, patchUrl] = useUrlState({
     tab: {
       defaultValue: "parts",
       isValid: (value) => ["parts", "fact-data-quality", "data-quality-calibration",
-        "candidates", "merges", "issues", "aliases", "metrics"].includes(value),
+        "candidates", "merges", "issues", "aliases", "metrics", "identity"].includes(value),
     },
   });
   const [sum, setSum] = useState<any>(null);
@@ -502,12 +507,12 @@ export default function GovernancePage() {
         extra={<>
           <Tooltip title="回填品牌/品类字典、别名、规格，扫描质量问题，生成合并候选（幂等，可随时重跑）">
             <Popconfirm title="刷新主数据？" description="将回填字典、别名与规格，并扫描质量问题和合并候选。" okText="确认" cancelText="取消" onConfirm={refresh}>
-              <Button loading={refreshing}>刷新主数据</Button>
+              <Button disabled={!legacyMaster} loading={refreshing}>刷新主数据</Button>
             </Popconfirm>
           </Tooltip>
           <Tooltip title="按标准描述给型号自动打上标准品类（人工设过/锁定的分类不动，幂等可重跑）——型号查询「按品类筛选」的数据来源">
             <Popconfirm title="自动分类？" description="将按标准描述更新型号品类，人工设置或锁定的分类保留。" okText="确认" cancelText="取消" onConfirm={autoClassify}>
-              <Button loading={classifying}>自动分类</Button>
+              <Button disabled={!legacyMaster} loading={classifying}>自动分类</Button>
             </Popconfirm>
           </Tooltip>
           {isAdmin && (
@@ -531,16 +536,18 @@ export default function GovernancePage() {
 
       <Card>
         <Tabs
-          activeKey={tab}
+          activeKey={!legacyIdentity && ["candidates", "merges", "aliases"].includes(tab) ? "identity" : tab}
           onChange={(value) => patchUrl({ tab: value })}
           items={[
             { key: "parts", label: "型号治理", children: <PartsTab /> },
             { key: "fact-data-quality", label: "价格与数量疑点", children: <DataQualityIssuesPanel /> },
             { key: "data-quality-calibration", label: "规则校准预览", children: <DataQualityCalibrationPanel /> },
-            { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
-            { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
+            ...(legacyIdentity ? [
+              { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
+              { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
+              { key: "aliases", label: "别名审核", children: <AliasesTab /> },
+            ] : [{ key: "identity", label: "共享身份治理", children: <IdentityPanel key={tab} initialOperation={tab === "aliases" ? "alias_reassign" : tab === "merges" ? "unmerge" : "merge"} /> }]),
             { key: "issues", label: "质量问题", children: <IssuesTab /> },
-            { key: "aliases", label: "别名审核", children: <AliasesTab /> },
             { key: "metrics", label: "主数据指标", children: <MetricsTab metrics={metrics} /> },
           ]}
         />

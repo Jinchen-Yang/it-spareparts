@@ -104,6 +104,29 @@ def test_directory_exact_ids_and_gallery_use_one_query_with_purpose_and_suppress
     )
 
 
+def test_fill_status_filter_keeps_unrecorded_distinct_and_checks_field_permission(db):
+    ids = []
+    for index, status in enumerate((None, "pending", "ai_filled", "confirmed", "needs_review")):
+        part = DimPart(pn_std=f"STATUS-{index}")
+        db.add(part)
+        db.flush()
+        ids.append(part.id)
+        if status:
+            db.add(PartState(part_id=part.id, fill_status=status))
+    db.commit()
+    for index, status in enumerate(("unrecorded", "pending", "ai_filled", "confirmed", "needs_review")):
+        result = api.list_parts(db, context=context(), authorize=allow, fill_status=status)
+        assert [row["part_id"] for row in result["data"]] == [ids[index]]
+    def hidden(*_args):
+        return AuthorizationDecision(readable_fields=frozenset({"description"}), metadata={"scope": "all"})
+    with pytest.raises(CatalogError) as error:
+        api.list_parts(db, context=context(), authorize=hidden, fill_status="pending")
+    assert error.value.status_code == 403
+    first = api.list_parts(db, context=context(), authorize=allow, limit=1)
+    with pytest.raises(CatalogError):
+        api.list_parts(db, context=context(), authorize=allow, fill_status="pending", cursor=first["meta"]["next_cursor"])
+
+
 def test_directory_filters_cannot_probe_hidden_fields_and_cursor_is_filter_bound(db):
     def limited(_db, _ctx, _action, _pid):
         return AuthorizationDecision(

@@ -528,3 +528,23 @@ def test_shop_cannot_open_legacy_evidence_even_if_cap_misconfigured(
     with pytest.raises(CatalogError) as exc:
         access.exchange_delegation(db, proof(authority[2], binding()))
     assert exc.value.status_code == 503
+
+
+def test_identity_job_capabilities_follow_identity_grant_not_gallery(db, authority):
+    user = authority[0]
+    gallery = db.scalar(select(SysAuthorizationGrant).where(
+        SysAuthorizationGrant.user_id == user.id, SysAuthorizationGrant.resource == 'part_gallery'))
+    gallery.actions = [action for action in gallery.actions if not action.startswith('job.')]
+    db.commit()
+    native = access.resolve_native_access(db, identity(user))
+    capabilities = access.get_part_access(db, native.actor, None)
+    assert {'identity.job.read', 'identity.job.cancel', 'identity.job.retry'} <= set(capabilities['allowed_actions'])
+    assert 'job.read' not in capabilities['allowed_actions']
+    read = native.authorize(db, CommandContext(request_id=uuid4(), actor=native.actor), 'identity.job.read', None)
+    assert not read.writable_fields
+    grant = db.scalar(select(SysAuthorizationGrant).where(
+        SysAuthorizationGrant.user_id == user.id, SysAuthorizationGrant.resource == 'part_identity'))
+    grant.actions = [action for action in grant.actions if not action.startswith('job.')]
+    grant.version += 1
+    db.commit()
+    assert not any(action.startswith('identity.job.') for action in access.get_part_access(db, native.actor, None)['allowed_actions'])

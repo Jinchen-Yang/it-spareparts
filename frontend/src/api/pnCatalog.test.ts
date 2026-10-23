@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import api from "../api";
-import { catalogClient, CommandIntent, sendUpload } from "./pnCatalog";
+import { catalogClient, catalogError, CommandIntent, sendUpload } from "./pnCatalog";
 const original = api.defaults.adapter;
 beforeEach(() => { localStorage.clear(); localStorage.setItem("token", "first"); });
 afterEach(() => { api.defaults.adapter = original; vi.unstubAllGlobals(); });
@@ -15,4 +15,10 @@ it("OSS 直传不使用 api 拦截器或应用 cookies，并禁止重定向", as
   await sendUpload({ method: "POST", url: "https://images.example.test/", fields: { policy: "signed" }, headers: {}, expires_at: "" }, new File(["image"], "test.png", { type: "image/png" }));
   expect(fetchMock).toHaveBeenCalledWith("https://images.example.test/", expect.objectContaining({ credentials: "omit", redirect: "error", headers: {} }));
   await expect(sendUpload({ method: "POST", url: "http://images.example.test", fields: {}, headers: {}, expires_at: "" }, new File(["x"], "x"))).rejects.toThrow("HTTPS");
+});
+
+it("新权限与校验错误始终转换成可显示文本，不将 detail 对象渲染到页面", () => {
+  expect(catalogError({ response: { data: { detail: { code: "authz.denied", message: "当前权限不足" } } } })).toMatchObject({ code: "authz.denied", message: "当前权限不足", ambiguous: false });
+  expect(catalogError({ response: { data: { detail: [{ loc: ["body"], msg: "invalid" }] } }, message: "请求校验失败" }).message).toBe("请求校验失败");
+  expect(catalogError(null).message).toBe("请求失败");
 });

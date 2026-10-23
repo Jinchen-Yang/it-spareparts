@@ -73,6 +73,55 @@ def test_merge_receipt_audit_job_and_facts_commit_together(db, parts):
     assert db.scalar(select(func.count()).select_from(ProductMergeLog)) == 1
 
 
+def test_unmerge_rejects_old_cycle_after_same_pair_is_merged_again(db, parts):
+    a, b = parts["PN-A"], parts["PN-B"]
+    first = identity.execute(db, command(db, a, b), context=context(), authorize=allow)
+    db.commit()
+    first_id = first["data"]["outcome"]["merge_log_id"]
+    preview = identity.preview(db, identity.IdentityPreview(operation="unmerge", merge_log_id=first_id),
+        context=context(), authorize=allow)
+    first_undo = identity.UnmergeIdentity(merge_log_id=first_id, expected=preview["expected"])
+    first_undo_context = context()
+    identity.execute(db, first_undo, context=first_undo_context, authorize=allow)
+    db.commit()
+    state = api.read_versions(db, a)
+    api.patch_profile(db, a, PatchProfile(expected_identity_revision=state["identity_revision"],
+        field_versions={"description": state["field_versions"].get("description", 0)},
+        changes={"description": "cycle two source"}), context=context(), authorize=allow)
+    db.commit()
+    second = identity.execute(db, command(db, a, b), context=context(), authorize=allow)
+    db.commit()
+    second_id = second["data"]["outcome"]["merge_log_id"]
+    assert second_id != first_id
+    latest = identity.preview(db, identity.IdentityPreview(operation="unmerge", merge_log_id=second_id),
+        context=context(), authorize=allow)
+    db.commit()
+    with pytest.raises(CatalogError) as old_preview:
+        identity.preview(db, identity.IdentityPreview(operation="unmerge", merge_log_id=first_id),
+            context=context(), authorize=allow)
+    assert old_preview.value.code == "identity.undo_conflict"
+    db.rollback()
+    counts = [db.scalar(select(func.count()).select_from(model)) for model in (CatalogJob, AuditEvent)]
+    with pytest.raises(CatalogError) as old_command:
+        identity.execute(db, identity.UnmergeIdentity(merge_log_id=first_id, expected=latest["expected"]),
+            context=context(), authorize=allow)
+    assert old_command.value.code == "identity.undo_conflict"
+    db.rollback()
+    assert [db.scalar(select(func.count()).select_from(model)) for model in (CatalogJob, AuditEvent)] == counts
+    assert db.get(DimPart, a).status == "merged"
+    assert db.scalar(select(FPurchaseLine.part_id).where(FPurchaseLine.pn_raw == "PN-A")) == b
+    with pytest.raises(identity.merge.MergeError, match="后续合并替代"):
+        identity.merge.unmerge_in_transaction(db, first_id, "tester")
+    db.rollback()
+    replay = identity.execute(db, first_undo, context=first_undo_context, authorize=allow)
+    assert replay["meta"]["replayed"] is True
+    identity.execute(db, identity.UnmergeIdentity(merge_log_id=second_id, expected=latest["expected"]),
+        context=context(), authorize=allow)
+    db.commit()
+    assert db.get(DimPart, a).description == "cycle two source"
+    assert db.get(DimPart, a).status == "active"
+
+
 def test_rollback_and_enqueue_failure_leave_no_partial_merge(db, parts, monkeypatch):
     a, b = parts["PN-A"], parts["PN-B"]
     cmd = command(db, a, b)
