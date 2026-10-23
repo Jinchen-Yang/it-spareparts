@@ -8,6 +8,7 @@ from app.pn_catalog import api
 from app.pn_catalog.dto import AuthorizationDecision
 from app.pn_catalog.errors import CatalogError
 from app.pn_catalog.media_models import GalleryEntry, GalleryGroup, GallerySuppression
+from app.pn_catalog.models import PartState
 from tests.test_pn_catalog_media import context
 from tests.test_pn_catalog_media_pagination import large_gallery
 
@@ -16,6 +17,22 @@ def allow(*_args):
     return AuthorizationDecision(
         readable_fields=frozenset({"*"}), metadata={"scope": "all"}
     )
+
+
+def test_profile_confirmation_status_is_independent_and_read_granted(db):
+    part = DimPart(pn_std="PROFILE-STATUS")
+    db.add(part)
+    db.flush()
+    db.add(PartState(part_id=part.id, fill_status="ai_filled", fill_status_revision=3))
+    db.commit()
+    result = api.list_parts(db, context=context(), authorize=allow)
+    assert result["data"][0]["fill_status"] == "ai_filled"
+    assert result["data"][0]["fill_status_revision"] == 3
+    def restricted(*_args):
+        return AuthorizationDecision(readable_fields=frozenset({"description"}), metadata={"scope": "all"})
+    hidden = api.list_parts(db, context=context(), authorize=restricted)
+    assert "fill_status" not in hidden["data"][0]
+    assert "fill_status_revision" not in hidden["data"][0]
 
 
 def test_directory_exact_ids_and_gallery_use_one_query_with_purpose_and_suppression(db):

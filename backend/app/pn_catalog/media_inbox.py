@@ -368,9 +368,21 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
     if other is not None and other.id != item.id:
         raise CatalogError("request.idempotency_mismatch", "归档编号已用于其他图片")
     before = item.revision
+    intent = {"part_id": command.part_id, "purpose": command.purpose,
+              "expected_identity_revision": command.expected_identity_revision,
+              "claim_revision": command.claim_revision}
     if item.assignment_key == command.assignment_key and item.status == "assigned":
-        if item.part_id != command.part_id:
-            raise CatalogError("request.idempotency_mismatch", "归档目标已改变")
+        recorded = item.assignment_intent or {}
+        if type(recorded.get("audit_id")) is not int or type(recorded.get("applied_revision")) is not int:
+            raise CatalogError("inbox.assignment_recovery_required", "原归档意图未留存，请用原请求编号恢复回执")
+        if {key: recorded.get(key) for key in intent} != intent:
+            raise CatalogError("request.idempotency_mismatch", "同一归档编号的目标、用途或确认基线已改变")
+        from . import api
+        receipt = api.finish_command(db, handle, part_id=command.part_id,
+            applied_revision=recorded["applied_revision"], audit_id=recorded["audit_id"],
+            result={"resource": "media.inbox", "id": str(item.id),
+                    "identity_revision": command.expected_identity_revision})
+        return response(db, receipt, inbox_data(db, item, context=context), replayed=True)
     else:
         if item.status != "ready" or upload.status == "cancelled":
             raise CatalogError("inbox.claim_conflict", "图片当前不可归档")
@@ -390,6 +402,7 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
         )
         item.status, item.part_id, item.entry_id = "assigned", command.part_id, entry.id
         item.assignment_key, item.claim_expires_at = command.assignment_key, None
+        item.assignment_intent = intent
         item.revision += 1
         upload.status, upload.entry_id = "committed", entry.id
         upload.revision += 1
@@ -404,9 +417,11 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
             "part_id": item.part_id,
             "entry_id": str(item.entry_id),
             "assignment_key": str(item.assignment_key),
+            "assignment_intent": item.assignment_intent,
         },
         identity_revision=command.expected_identity_revision,
     )
+    item.assignment_intent = {**intent, "audit_id": receipt.audit_id, "applied_revision": receipt.applied_revision}
     return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
@@ -449,6 +464,7 @@ def change_inbox(db, inbox_id, command, *, context, authorize, restore=False):
             upload.revision += 1
         item.status, item.deleted_at = "ready", None
         item.part_id, item.entry_id, item.assignment_key = None, None, None
+        item.assignment_intent = None
     else:
         if item.status == "assigned":
             raise CatalogError(
@@ -497,6 +513,14 @@ def owned_group(db, identifier, context, authorize, *, lock=False):
     group = load(db, InboxGroup, identifier, lock=lock)
     owner(db, group, context, authorize, admin_action="inbox.manage", field="inbox")
     return group
+
+
+def get_inbox_group(db, group_id, *, context, authorize):
+    """Current owner/manage group baseline; shared item visibility alone is insufficient."""
+    access(db, context, authorize, "inbox.read", None, field="inbox")
+    group = owned_group(db, group_id, context, authorize)
+    group = load(db, InboxGroup, group.id, lock=True, shared=True)
+    return read_response(context, group_data(db, group))
 
 
 def create_inbox_group(db, command, *, context, authorize):

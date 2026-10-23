@@ -293,10 +293,13 @@ class InboxItem(Base):
     assignment_key: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), unique=True
     )
+    assignment_intent: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     entry_id: Mapped[UUID | None] = mapped_column(ForeignKey("pn_media_entry.id"))
     deleted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     __table_args__ = (
+        CheckConstraint("assignment_intent IS NULL OR jsonb_typeof(assignment_intent) = 'object'",
+                        name="ck_pn_inbox_assignment_intent"),
         UniqueConstraint("group_id", "client_order", name="uq_pn_media_inbox_capture_order"),
         CheckConstraint("client_order IS NULL OR (group_id IS NOT NULL AND client_order BETWEEN 0 AND 1999)",
                         name="ck_pn_media_inbox_capture_order"),

@@ -49,6 +49,7 @@ READ_ACTIONS = frozenset(
         "read_legacy",
         "list",
         "read_content",
+        "read_attributes",
         "read_inactive",
         "read_audit",
         "read_candidates",
@@ -763,7 +764,11 @@ def get_part_access(db: Session, actor: ActorContext, part_id: int | None) -> di
     master = resource_fields.get("part_master", set())
     profile = set(PROFILE_FIELDS) | {f for f in master if f.startswith("specs.")}
     if "read" in allowed:
-        readable |= master & (profile | {"availability"})
+        readable |= master & (profile | {"availability", "fill_status"})
+    if "read_attributes" in allowed:
+        readable |= master & {"attributes"}
+    if "update_attributes" in allowed:
+        writable |= master & {"attributes"}
     if "read_candidates" in allowed:
         readable |= master & {"candidates"}
     if allowed & {"update_profile", "create"}:

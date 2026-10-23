@@ -128,7 +128,9 @@ def _arrange_imported(db, part_id):
             raise CatalogError("migration.gallery_conflict", "目标图库已发生合并，需重新核对")
         imported_revision = db.scalar(select(func.max(
             LegacySourceRecord.materialized_ref["gallery_revision"].as_string().cast(Integer))).where(
-            LegacySourceRecord.kind == "image", LegacySourceRecord.target_part_id == part_id)) or 0
+            LegacySourceRecord.kind == "image", LegacySourceRecord.id.in_(
+                select(GalleryEntry.source["legacy_record_id"].as_string().cast(Integer)).where(
+                    GalleryEntry.origin_part_id == part_id)))) or 0
         if group.revision != imported_revision:
             raise CatalogError("migration.gallery_conflict", "目标图库排序已变化，不能覆盖")
     all_entries = list(db.scalars(select(GalleryEntry).where(GalleryEntry.origin_part_id == part_id)))
@@ -154,6 +156,8 @@ def materialize_batch(db, batch_id: UUID, *, context, authorize):
         raise CatalogError("migration.batch_not_found", "迁移批次不存在", status_code=404)
     if handle.receipt:
         return _result(db, batch, replayed=True)
+    from .migration_state import _namespace_lock
+    _namespace_lock(db, batch.namespace)
     acquire_identity_lock(db, shared=True)
     rows = list(db.scalars(select(LegacySourceRecord).where(LegacySourceRecord.batch_id == batch_id)
                            .order_by(LegacySourceRecord.id)))

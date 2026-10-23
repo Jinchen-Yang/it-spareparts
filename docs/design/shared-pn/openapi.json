@@ -271,6 +271,93 @@
         "title": "AssignInbox",
         "type": "object"
       },
+      "AttributeSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "provenance": {
+            "additionalProperties": true,
+            "title": "Provenance",
+            "type": "object"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue-Output"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value",
+          "deleted",
+          "version",
+          "protected",
+          "provenance"
+        ],
+        "title": "AttributeSnapshot",
+        "type": "object"
+      },
+      "AttributesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AttributesSnapshot"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "AttributesResponse",
+        "type": "object"
+      },
+      "AttributesSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_revision": {
+            "minimum": 0.0,
+            "title": "Identity Revision",
+            "type": "integer"
+          },
+          "items": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AttributeSnapshot"
+            },
+            "title": "Items",
+            "type": "object"
+          },
+          "part_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Part Id",
+            "type": "integer"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "part_id",
+          "identity_revision",
+          "revision",
+          "items"
+        ],
+        "title": "AttributesSnapshot",
+        "type": "object"
+      },
       "AuditEvent": {
         "additionalProperties": false,
         "properties": {
@@ -1475,6 +1562,21 @@
         "title": "CreateUpload",
         "type": "object"
       },
+      "DeleteAttribute": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "const": "delete",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "DeleteAttribute",
+        "type": "object"
+      },
       "DerivativeLink": {
         "additionalProperties": false,
         "properties": {
@@ -1737,7 +1839,7 @@
           },
           "source": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/JsonValue-Output"
             },
             "title": "Source",
             "type": "object"
@@ -2210,7 +2312,7 @@
         "properties": {
           "outcome": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/JsonValue-Output"
             },
             "title": "Outcome",
             "type": "object"
@@ -2595,7 +2697,7 @@
           },
           "source": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/JsonValue-Output"
             },
             "title": "Source",
             "type": "object"
@@ -2807,7 +2909,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/JsonValue-Output"
                 },
                 "type": "object"
               },
@@ -2868,17 +2970,48 @@
         "title": "JobSnapshot",
         "type": "object"
       },
-      "JsonValue": {
+      "JsonValue-Input": {
         "anyOf": [
           {
             "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/JsonValue-Input"
             },
             "type": "object"
           },
           {
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/JsonValue-Input"
+            },
+            "type": "array"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "JsonValue-Output": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue-Output"
+            },
+            "type": "object"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue-Output"
             },
             "type": "array"
           },
@@ -3656,6 +3789,35 @@
             "title": "Field Versions",
             "type": "object"
           },
+          "fill_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "ai_filled",
+                  "confirmed",
+                  "needs_review"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Status"
+          },
+          "fill_status_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Status Revision"
+          },
           "identity": {
             "$ref": "#/components/schemas/PartIdentity"
           },
@@ -3780,6 +3942,35 @@
             ],
             "title": "Description Preview"
           },
+          "fill_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "ai_filled",
+                  "confirmed",
+                  "needs_review"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Status"
+          },
+          "fill_status_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fill Status Revision"
+          },
           "has_image": {
             "anyOf": [
               {
@@ -3842,6 +4033,55 @@
           "availability"
         ],
         "title": "PartSummary",
+        "type": "object"
+      },
+      "PatchAttributes": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "additionalProperties": {
+              "discriminator": {
+                "mapping": {
+                  "delete": "#/components/schemas/DeleteAttribute",
+                  "set": "#/components/schemas/SetAttribute"
+                },
+                "propertyName": "operation"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SetAttribute"
+                },
+                {
+                  "$ref": "#/components/schemas/DeleteAttribute"
+                }
+              ]
+            },
+            "maxProperties": 256,
+            "minProperties": 1,
+            "title": "Changes",
+            "type": "object"
+          },
+          "expected_identity_revision": {
+            "minimum": 0.0,
+            "title": "Expected Identity Revision",
+            "type": "integer"
+          },
+          "field_versions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "maxProperties": 256,
+            "minProperties": 1,
+            "title": "Field Versions",
+            "type": "object"
+          }
+        },
+        "required": [
+          "expected_identity_revision",
+          "field_versions",
+          "changes"
+        ],
+        "title": "PatchAttributes",
         "type": "object"
       },
       "PatchContent": {
@@ -4522,6 +4762,25 @@
           "expected_retry_count"
         ],
         "title": "RetryJob",
+        "type": "object"
+      },
+      "SetAttribute": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "const": "set",
+            "title": "Operation",
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue-Input"
+          }
+        },
+        "required": [
+          "operation",
+          "value"
+        ],
+        "title": "SetAttribute",
         "type": "object"
       },
       "SpecValue": {
@@ -7907,6 +8166,167 @@
       }
     },
     "/api/pn-catalog/v1/inbox-groups/{group_id}": {
+      "get": {
+        "operationId": "get_inbox_group_api_pn_catalog_v1_inbox_groups__group_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxGroupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Inbox Group",
+        "tags": [
+          "pn-catalog-v1"
+        ]
+      },
       "patch": {
         "operationId": "arrange_group_api_pn_catalog_v1_inbox_groups__group_id__patch",
         "parameters": [
@@ -11781,6 +12201,349 @@
         ]
       }
     },
+    "/api/pn-catalog/v1/parts/{part_id}/attributes": {
+      "get": {
+        "operationId": "get_attributes_api_pn_catalog_v1_parts__part_id__attributes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "part_id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Part Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttributesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Attributes",
+        "tags": [
+          "pn-catalog-v1"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_attributes_api_pn_catalog_v1_parts__part_id__attributes_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "part_id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Part Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchAttributes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttributesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Patch Attributes",
+        "tags": [
+          "pn-catalog-v1"
+        ]
+      }
+    },
     "/api/pn-catalog/v1/parts/{part_id}/audit-events": {
       "get": {
         "operationId": "audit_events_api_pn_catalog_v1_parts__part_id__audit_events_get",
@@ -14623,6 +15386,9 @@
               "application/json": {
                 "schema": {
                   "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AttributesResponse"
+                    },
                     {
                       "$ref": "#/components/schemas/PartResponse"
                     },

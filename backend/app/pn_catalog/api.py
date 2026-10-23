@@ -63,6 +63,9 @@ def _project(value: dict, decision: AuthorizationDecision) -> dict:
     fields = decision.readable_fields
     public = {k: value[k] for k in ("part_id", "pn_std", "identity", "identity_revision",
                                    "profile_revision", "availability", "availability_revision")}
+    if _allowed(fields, "fill_status"):
+        public["fill_status"] = value.get("fill_status")
+        public["fill_status_revision"] = value.get("fill_status_revision", 0)
     public["profile"] = {k: v for k, v in value["profile"].items() if _allowed(fields, k)}
     public["specs"] = {k: {**v, "version": value["field_versions"].get(f"specs.{k}", 0), "deleted": False}
                        for k, v in value["specs"].items() if _allowed(fields, f"specs.{k}")}
@@ -187,6 +190,9 @@ def _response(db: Session, receipt: CommandReceipt, *, context: CommandContext,
         return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
     if resource in {"content", "candidate"}:
         from .content import render_receipt
+        return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
+    if resource == "attributes":
+        from .attributes import render_receipt
         return render_receipt(db, receipt, context=context, authorize=authorize, replayed=replayed)
     if resource.startswith("media."):
         from .media import render_receipt
@@ -608,6 +614,9 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
             columns.append(getattr(DimPart, key))
     if _allowed(decision.readable_fields, "manufacturer"):
         columns.append(PartState.manufacturer)
+    if _allowed(decision.readable_fields, "fill_status"):
+        columns.extend([PartState.fill_status,
+                        func.coalesce(PartState.fill_status_revision, 0).label("fill_status_revision")])
     stmt = select(*columns, *gallery_columns).select_from(DimPart).outerjoin(PartState, PartState.part_id == DimPart.id).where(DimPart.id > after_id)
     if part_ids is not None:
         stmt = stmt.where(DimPart.id.in_(part_ids))
@@ -647,6 +656,8 @@ def list_audit_events(db: Session, part_id: int, *, context: CommandContext, aut
     if before_id:
         query = query.where(AuditEvent.id < before_id)
     rows = db.scalars(query.order_by(AuditEvent.id.desc()).limit(limit + 1)).all()
+    from .audit_projection import AuditProjection
+    projection = AuditProjection(db, context, authorize, part_id, decision)
     items = []
     remaining = 512 * 1024 - 2048  # Reserve envelope/cursor space; byte budget is UTF-8.
     for row in rows[:limit]:
@@ -655,8 +666,7 @@ def list_audit_events(db: Session, part_id: int, *, context: CommandContext, aut
                 "request_id": str(row.request_id), "occurred_at": row.occurred_at.isoformat(),
                 "before_revision": row.before_revision, "after_revision": row.after_revision,
                 "revisions": row.revisions,
-                "changes": {key: value for key, value in row.changes.items()
-                            if _allowed(decision.readable_fields, key)}}
+                "changes": projection.changes(row)}
         size = len(_json(item).encode()) + 1
         if size > remaining:
             if not items:
@@ -713,3 +723,16 @@ def migrate_effective_content(db, part_id, command, *, context, authorize):
 
 __all__ += ["get_content", "patch_content", "create_candidate", "get_candidate", "list_candidates",
             "adopt_candidate", "reject_candidate", "migrate_effective_content"]
+
+
+def get_attributes(db, part_id, *, context, authorize):
+    from .attributes import get_attributes as invoke
+    return invoke(db, part_id, context=context, authorize=authorize)
+
+
+def patch_attributes(db, part_id, command, *, context, authorize):
+    from .attributes import patch_attributes as invoke
+    return invoke(db, part_id, command, context=context, authorize=authorize)
+
+
+__all__ += ["get_attributes", "patch_attributes"]

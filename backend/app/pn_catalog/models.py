@@ -17,11 +17,15 @@ class PartState(Base):
     profile_revision: Mapped[int] = mapped_column(BigInteger, server_default="0", default=0)
     availability_revision: Mapped[int] = mapped_column(BigInteger, server_default="0", default=0)
     availability: Mapped[str] = mapped_column(String(16), server_default="active", default="active")
+    fill_status: Mapped[str | None] = mapped_column(String(32))
+    fill_status_revision: Mapped[int] = mapped_column(BigInteger, server_default="0", default=0)
     manufacturer: Mapped[str | None] = mapped_column(String(256))
     field_versions: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
     deleted_specs: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
     field_provenance: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
     __table_args__ = (
+        CheckConstraint("fill_status IS NULL OR fill_status IN ('pending','ai_filled','confirmed','needs_review')", name="ck_pn_fill_status"),
+        CheckConstraint("fill_status_revision >= 0", name="ck_pn_fill_status_revision"),
         CheckConstraint("availability IN ('active','inactive')", name="ck_pn_catalog_availability"),
         CheckConstraint("identity_revision >= 0 AND profile_revision >= 0 AND availability_revision >= 0",
                         name="ck_pn_catalog_revisions"),

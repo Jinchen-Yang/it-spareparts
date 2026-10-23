@@ -34,6 +34,7 @@ from app.pn_catalog.wire import (
     PartResponse,
     WireModel,
 )
+from app.pn_catalog.wire_attributes import AttributesResponse
 from app.pn_catalog.wire_content import CandidateResponse, ContentResponse
 from app.pn_catalog.reference_dto import ReferenceMutationResponse
 from app.pn_catalog.wire_jobs import IdentityResponse, JobResponse
@@ -212,7 +213,7 @@ def reactivate(part_id: PartId, command: AvailabilityCommand, request: Request,
     return _availability(part_id, command, request, db, access, "active")
 
 
-@router.get("/requests/{request_id}", response_model=PartResponse | ContentResponse | CandidateResponse | MediaReceiptResponse | JobResponse | IdentityResponse | ReferenceMutationResponse,
+@router.get("/requests/{request_id}", response_model=AttributesResponse | PartResponse | ContentResponse | CandidateResponse | MediaReceiptResponse | JobResponse | IdentityResponse | ReferenceMutationResponse,
             response_model_exclude_unset=True)
 def get_receipt(request_id: UUID, request: Request, db: DbDep,
                 access: AccessDep):
@@ -267,5 +268,6 @@ from . import http_media as _media_routes  # noqa: E402,F401
 
 from . import http_authority as _authority_routes  # noqa: E402,F401
 
-from . import http_references as _reference_routes  # noqa: F401
+from . import http_references as _reference_routes  # noqa: E402,F401
+from . import http_attributes as _attribute_routes  # noqa: E402,F401
 from . import http_lookup as _lookup_routes  # noqa: E402,F401
