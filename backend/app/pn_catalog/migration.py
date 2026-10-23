@@ -57,6 +57,9 @@ def stage_manifest(db: Session, manifest: MigrationManifest, *, verified_source:
         payload={"manifest_sha256": manifest.sha256, "writer_fence_ref": verified_source.writer_fence_ref})
     if handle.receipt is not None:
         return migration_receipt(db, handle.receipt, context=context, authorize=authorize)
+    # Migration-only serialization; ordinary PN commands never take this lock.
+    key = int.from_bytes(hashlib.sha256(f"pn-migration:{manifest.namespace}".encode()).digest()[:8], "big", signed=True)
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
     acquire_identity_lock(db, shared=True)
     by_source = {item.source_pn_id: item for item in manifest.mappings}
     baselines: dict[int, int] = {}
@@ -71,9 +74,6 @@ def stage_manifest(db: Session, manifest: MigrationManifest, *, verified_source:
         revision = state.identity_revision if state else 0
         if part.status != "active" or revision != expected:
             raise CatalogError("catalog.identity_changed", "迁移目标身份已变化，请重新核对映射")
-    # Migration-only serialization; ordinary PN commands never take this lock.
-    key = int.from_bytes(hashlib.sha256(f"pn-migration:{manifest.namespace}".encode()).digest()[:8], "big", signed=True)
-    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
     batch = db.get(MigrationBatch, manifest.batch_id, populate_existing=True)
     if batch is not None:
         if batch.namespace != manifest.namespace or batch.manifest_sha256 != manifest.sha256:
