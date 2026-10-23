@@ -1,4 +1,5 @@
 """Bound every catalog body before parsing; never cache catalog responses."""
+import hashlib
 from uuid import UUID, uuid4
 
 from starlette.responses import JSONResponse
@@ -76,6 +77,7 @@ class CatalogHttpControls:
             body.extend(chunk)
             if not message.get("more_body", False):
                 break
+        scope["state"]["pn_catalog_body_sha256"] = hashlib.sha256(body).hexdigest()
         sent = False
 
         async def replay_body():

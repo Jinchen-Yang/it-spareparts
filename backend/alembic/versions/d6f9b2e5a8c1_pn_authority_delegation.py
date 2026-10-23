@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "d6f9b2e5a8c1"
-down_revision = ("e1a4c7d9f2b6", "a7c2e9f4b6d1")
+down_revision = ("c5e8a1d4f7b0", "a7c2e9f4b6d1")
 branch_labels = None
 depends_on = None
 

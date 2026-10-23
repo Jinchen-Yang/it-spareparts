@@ -260,3 +260,10 @@ __all__ = [
 from app.pn_catalog.models import AuditEvent as PnCatalogAuditEvent, CommandReceipt as PnCatalogReceipt, PartState as PnCatalogState  # noqa: E501,F401
 
 from app.authz.pn_models import CatalogSubjectBinding, CatalogProofNonce  # noqa: F401
+from app.pn_catalog.content_models import ConditionContent, ContentCandidate  # noqa: F401
+from app.pn_catalog.media_models import (  # noqa: F401
+    Asset, GalleryGroup, GalleryMember, GalleryEntry, GallerySuppression, Derivative,
+    UploadTicket, MultipartUpload, InboxGroup, InboxItem,
+)
+from app.pn_catalog.job_models import CatalogJob, CatalogJobEvent  # noqa: F401
+from app.pn_catalog.migration_models import LegacySourceRecord, MigrationBatch  # noqa: F401

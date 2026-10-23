@@ -10,6 +10,65 @@ from app.pn_catalog.dto import ActorContext, AuthorizationDecision
 from app.pn_catalog.http import install_http
 
 
+def _job_access(application):
+    from dataclasses import replace
+    resolver = application.state.pn_catalog_access_resolver
+    application.state.pn_catalog_access_resolver = lambda request, db: replace(
+        resolver(request, db), authorize_job=lambda *args: AuthorizationDecision(
+            frozenset({"*"}), frozenset({"*"}), {"scope": "all"}))
+
+
+def test_job_http_requires_resource_authorizer_and_redacts_worker_inputs(client, catalog_app, db):
+    from app.pn_catalog import jobs
+    from app.pn_catalog.dto import CommandContext
+    from app.pn_catalog.job_dto import JobSpec
+    actor = ActorContext(principal_id="test:1", client_id="itsp", executor_id="test-http", entrypoint="itsp_ui")
+    job = jobs.enqueue(db, JobSpec(kind="test", resource_type="upload", resource_id=str(uuid4()),
+        resource_generation=1, input_revision=1, payload={"private": "worker-only"},
+        deduplication_key=str(uuid4())), context=CommandContext(actor=actor, request_id=uuid4()))
+    db.commit()
+    url = f"/api/pn-catalog/v1/jobs/{job.job_id}"
+    missing = client.get(url)
+    assert missing.status_code == 503
+    assert missing.json()["error"]["code"] == "auth.unavailable"
+    _job_access(catalog_app)
+    value = client.get(url)
+    assert value.status_code == 200, value.text
+    assert not {"payload", "context", "lease_token", "lease_owner"} & value.json()["data"].keys()
+    assert "worker-only" not in value.text
+    base = {"expected_revision": job.revision, "expected_attempt": 0, "expected_retry_count": 0}
+    key = str(uuid4())
+    cancelled = client.post(url + "/cancellation", headers={"Idempotency-Key": key}, json=base)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["data"]["status"] == "cancelled"
+    replay = client.get(f"/api/pn-catalog/v1/requests/{key}")
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["meta"]["replayed"]
+    stale = client.post(url + "/retry", headers={"Idempotency-Key": str(uuid4())}, json=base)
+    assert stale.status_code == 409, stale.text
+    base["expected_revision"] = cancelled.json()["data"]["revision"]
+    retried = client.post(url + "/retry", headers={"Idempotency-Key": str(uuid4())}, json=base)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["data"]["retry_count"] == 1
+
+
+def test_identity_http_preview_merge_and_receipt(client):
+    a, _ = _create(client, "HTTP-MERGE-A")
+    b, _ = _create(client, "HTTP-MERGE-B")
+    command = {"operation": "merge", "source_part_id": a["part_id"], "target_part_id": b["part_id"]}
+    preview = client.post("/api/pn-catalog/v1/identity/preview", json=command)
+    assert preview.status_code == 200, preview.text
+    command["expected"] = preview.json()["data"]["expected"]
+    key = str(uuid4())
+    result = client.post("/api/pn-catalog/v1/identity/commands", headers={"Idempotency-Key": key}, json=command)
+    assert result.status_code == 200, result.text
+    assert result.json()["data"]["recalculation_job"]["status"] == "pending"
+    receipt = client.get(f"/api/pn-catalog/v1/requests/{key}")
+    assert receipt.status_code == 200, receipt.text
+    assert receipt.json()["data"]["outcome"] == result.json()["data"]["outcome"]
+    assert receipt.json()["meta"]["replayed"]
+
+
 @pytest.fixture
 def catalog_app(db):
     application = FastAPI()
@@ -115,6 +174,22 @@ def test_conflicting_request_keys_cannot_change_receipt_identity(client):
     assert response.json()["error"]["code"] == "request.validation_failed"
 
 
+def test_delegation_receives_digest_of_actual_bounded_bytes(client, catalog_app):
+    import hashlib
+    resolver = catalog_app.state.pn_catalog_access_resolver
+    seen = []
+    def capturing(request, db):
+        seen.append(request.state.pn_catalog_body_sha256)
+        return resolver(request, db)
+    catalog_app.state.pn_catalog_access_resolver = capturing
+    raw = b'{ "pn_std" : "BODY-DIGEST-PN" }'
+    response = client.post("/api/pn-catalog/v1/parts", content=raw,
+        headers={"Content-Type": "application/json", "Idempotency-Key": str(uuid4()),
+                 "X-Body-SHA256": "spoofed"})
+    assert response.status_code == 201, response.text
+    assert seen == [hashlib.sha256(raw).hexdigest()]
+
+
 def test_read_trace_id_preserves_delegation_binding_and_write_ids_must_match(client):
     part, _ = _create(client)
     trace_id = str(uuid4())
@@ -152,3 +227,47 @@ def test_parts_audit_and_receipt_are_versioned_contracts(client):
     assert receipt.status_code == 200, receipt.text
     assert receipt.json()["meta"]["request_id"] == key
     assert receipt.json()["meta"]["replayed"] is True
+
+
+def test_grade_content_http_receipt_and_stale_edit(client):
+    part, _ = _create(client)
+    url = f'/api/pn-catalog/v1/parts/{part["part_id"]}/content'
+    key = str(uuid4())
+    payload = {"expected_identity_revision": part["identity_revision"], "expected_revision": 0,
+               "changes": {"description": "good description"}}
+    saved = client.patch(url + "/good", headers={"Idempotency-Key": key}, json=payload)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["status"] == "confirmed"
+    assert client.get(url + "/bad").json()["data"]["revision"] == 0
+    replay = client.get(f"/api/pn-catalog/v1/requests/{key}")
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["data"]["grade"] == "good"
+    conflict = client.patch(url + "/good", headers={"Idempotency-Key": str(uuid4())}, json=payload)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["error"]["code"] == "catalog.field_conflict"
+
+
+def test_ai_candidate_http_adoption_keeps_source_and_real_confirmer(client):
+    part, _ = _create(client)
+    candidate = client.post("/api/pn-catalog/v1/candidates", headers={"Idempotency-Key": str(uuid4())}, json={
+        "resource": "content", "part_id": part["part_id"], "grade": "bad",
+        "expected_identity_revision": part["identity_revision"], "base_revision": 0,
+        "changes": {"description": "proposed bad description"},
+        "provenance": {"kind": "ai", "provider": "offline", "model": "fixture", "run_id": "run-1", "template_version": "v1"}})
+    assert candidate.status_code == 201, candidate.text
+    data = candidate.json()["data"]
+    key = str(uuid4())
+    adopted = client.post(f'/api/pn-catalog/v1/candidates/{data["id"]}/adoption',
+        headers={"Idempotency-Key": key}, json={"expected_candidate_revision": 1,
+            "expected_identity_revision": part["identity_revision"], "expected_target_revision": 0,
+            "fields": ["description"]})
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["data"]["status"] == "adopted"
+    receipt = client.get(f"/api/pn-catalog/v1/requests/{key}")
+    assert receipt.status_code == 200 and receipt.json()["data"]["id"] == data["id"]
+    effective = client.get(f'/api/pn-catalog/v1/parts/{part["part_id"]}/content/bad').json()["data"]
+    provenance = effective["field_provenance"]["description"]
+    assert provenance["kind"] == "ai" and provenance["confirmed_by"] == "test:1"
+    listing = client.get(f'/api/pn-catalog/v1/parts/{part["part_id"]}/candidates')
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["data"][0]["id"] == data["id"]

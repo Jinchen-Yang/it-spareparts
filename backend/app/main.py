@@ -74,6 +74,7 @@ from app.config import check_security, get_settings
 from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
 from app.pn_catalog.http import install_http as install_pn_catalog_http
+from app.services.pn_catalog_runtime import install_media_runtime
 from app.maintenance_beta import require_maintenance_beta
 from app.maintenance_boss import require_maintenance_boss
 
@@ -100,6 +101,7 @@ async def lifespan(_app):
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 install_pn_catalog_http(app, api_prefix=settings.api_prefix)
+install_media_runtime(app)
 
 app.add_middleware(
     CORSMiddleware,
