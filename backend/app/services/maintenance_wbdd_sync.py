@@ -36,7 +36,7 @@ def _state_digest(db, source_ids, line_ids, site_ids):
 
 def _audit(db, *, project_id, entity_type, entity_id, before, after, reason, operated_by, action="VOID"):
     if project_id:
-        from app.services.maintenance_project_master_workbook import _write_audit
+        from app.services.maintenance_workbook_audit import _write_audit
         _write_audit(db, project_id=project_id, entity_type=entity_type,
                      entity_id=entity_id, action=action, before=before, after=after,
                      reason=reason, operated_by=operated_by)
