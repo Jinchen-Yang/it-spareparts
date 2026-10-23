@@ -2,12 +2,13 @@
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.pn_catalog import media
 from app.pn_catalog.errors import CatalogError
 from app.pn_catalog.media_dto import AssignInbox, ClaimInbox
 from app.pn_catalog.media_models import GalleryEntry, InboxItem
+from app.pn_catalog.models import AuditEvent
 from tests.test_pn_catalog_media import allow, context, create_ticket, seed
 
 
@@ -27,12 +28,17 @@ def test_assignment_retries_preserve_intent_even_after_gallery_purpose_changes(d
     original = context()
     result = media.assign_inbox(db, iid, command, context=original, authorize=allow)
     db.commit()
+    count = db.scalar(select(func.count()).select_from(AuditEvent))
     eid = UUID(result["data"]["entry_id"])
     db.get(GalleryEntry, eid).purpose = "defect"
     db.commit()
     retry = media.assign_inbox(db, iid, command, context=context(), authorize=allow)
     db.commit()
     assert retry["data"]["entry_id"] == str(eid)
+    assert retry["meta"]["replayed"]
+    assert retry["meta"]["audit_id"] == result["meta"]["audit_id"]
+    assert retry["meta"]["applied_revision"] == result["meta"]["applied_revision"]
+    assert db.scalar(select(func.count()).select_from(AuditEvent)) == count
     assert db.get(GalleryEntry, eid).purpose == "defect"
     with pytest.raises(CatalogError) as exc:
         media.assign_inbox(db, iid, command.model_copy(update={"purpose": "defect"}), context=context(), authorize=allow)
