@@ -39,8 +39,10 @@ from .wire_media import (
     GalleryResponse,
     InboxGroupResponse,
     InboxListResponse,
+    InboxLinksResponse,
     InboxResponse,
     MultipartResponse,
+    MultipartPartsResponse,
     PartSignaturesResponse,
     SuppressionResponse,
     UploadFormResponse,
@@ -552,7 +554,7 @@ def list_inbox(
     access: AccessDep,
     scope: Literal["mine", "shared"] = "mine",
     group_id: UUID | None = None,
-    status: Literal["ready", "assigned", "deleted", "receiving", "failed"] = "ready",
+    status: Literal["all", "ready", "assigned", "deleted", "receiving", "failed"] = "ready",
     cursor: UUID | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
@@ -573,6 +575,13 @@ def get_inbox(inbox_id: UUID, request: Request, db: DbDep, access: AccessDep):
     return media.get_inbox(
         db, inbox_id, context=_context(request, access), authorize=access.authorize
     )
+
+
+@router.get("/inbox-items/{inbox_id}/links", response_model=InboxLinksResponse)
+def inbox_links(inbox_id: UUID, request: Request, db: DbDep, access: AccessDep):
+    context = _context(request, access)
+    return {"data": media.inbox_links(db, inbox_id, context=context,
+        authorize=access.authorize, signer=_storage(request)), "meta": _read_meta(context)}
 
 
 @router.post(
@@ -735,3 +744,24 @@ def arrange_group(
             db, group_id, command, context=context, authorize=access.authorize
         ),
     )
+
+
+@router.get("/uploads/{upload_id}/multipart/parts", response_model=MultipartPartsResponse)
+def list_storage_parts(upload_id: UUID, request: Request, db: DbDep, access: AccessDep):
+    context = _context(request, access)
+    # The host opens and closes its own short read transactions around provider I/O.
+    db.commit()
+    parts = _transport(request, access).list_parts(upload_id, context=context)
+    return {"data": [asdict(part) for part in parts], "meta": _read_meta(context)}
+
+
+@router.get("/uploads/{upload_id}/inbox", response_model=InboxResponse)
+def upload_inbox(upload_id: UUID, request: Request, db: DbDep, access: AccessDep):
+    from .media_uploads import get_upload_inbox
+    return get_upload_inbox(db, upload_id, context=_context(request, access), authorize=access.authorize)
+
+
+@router.get("/gallery/entries/{entry_id}", response_model=EntryResponse)
+def get_entry(entry_id: UUID, request: Request, db: DbDep, access: AccessDep):
+    from .media_derivatives import get_entry as read_entry
+    return read_entry(db, entry_id, context=_context(request, access), authorize=access.authorize)

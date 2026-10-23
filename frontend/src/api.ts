@@ -469,7 +469,10 @@ export const batchPreview = (page = 1, page_size = 20, only_changes = true) =>
 export const batchApply = (part_ids: number[], fields?: string[]) =>
   api.post<{ applied: number; skipped: number }>("/parts/master/batch-apply", { part_ids, fields });
 
+export interface SharedMasterAvailability { runtime_state: "enabled" | "suspended"; status: "available" | "restricted" | "unavailable"; readable_fields: string[] }
+
 export interface Overview {
+  shared_master?: SharedMasterAvailability;
   part: {
     id: number;            // part_id：稳定深链主键（/parts?part_id=），前端据此回写 URL
     pn_std: string;

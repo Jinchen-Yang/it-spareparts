@@ -1,0 +1,128 @@
+{
+  "part_master": {
+    "actions": [
+      "adopt_candidate",
+      "create",
+      "create_candidate",
+      "edit",
+      "enrichment.research",
+      "enrichment.research.text",
+      "normalize",
+      "read",
+      "read_audit",
+      "read_candidates",
+      "read_inactive",
+      "reject_candidate",
+      "set_availability",
+      "confirm_distinct",
+      "job.read",
+      "job.cancel",
+      "job.retry",
+      "stage_migration",
+      "materialize_migration",
+      "read_legacy"
+    ],
+    "fields": [
+      "availability",
+      "brand",
+      "candidates",
+      "category_major",
+      "category_minor",
+      "description",
+      "machine_or_part",
+      "manufacturer",
+      "specs.cache",
+      "specs.capacity",
+      "specs.form_factor",
+      "specs.frequency",
+      "specs.generation",
+      "specs.interface",
+      "specs.part_type",
+      "specs.rank",
+      "specs.rpm",
+      "specs.speed",
+      "unit",
+      "legacy_evidence"
+    ]
+  },
+  "part_identity": {
+    "actions": [
+      "merge",
+      "read",
+      "rebind_facts",
+      "rename",
+      "review_alias",
+      "unmerge",
+      "job.read",
+      "job.cancel",
+      "job.retry"
+    ],
+    "fields": [
+      "aliases",
+      "identity"
+    ]
+  },
+  "part_content": {
+    "actions": [
+      "edit",
+      "migrate",
+      "read"
+    ],
+    "fields": [
+      "content.bad.description",
+      "content.bad.title",
+      "content.good.description",
+      "content.good.title"
+    ]
+  },
+  "part_gallery": {
+    "actions": [
+      "enrichment.bundle",
+      "enrichment.bundle.read",
+      "enrichment.recognize",
+      "enrichment.research.images",
+      "gallery.adopt",
+      "gallery.archive",
+      "gallery.arrange",
+      "gallery.bundle",
+      "gallery.change_purpose",
+      "gallery.delete",
+      "gallery.derive",
+      "gallery.edit",
+      "gallery.read",
+      "gallery.research",
+      "gallery.restore",
+      "gallery.reuse",
+      "gallery.suppress",
+      "gallery.unsuppress",
+      "inbox.assign",
+      "inbox.claim",
+      "inbox.delete",
+      "inbox.group.add",
+      "inbox.group.arrange",
+      "inbox.group.create",
+      "inbox.manage",
+      "inbox.read",
+      "inbox.release",
+      "inbox.restore",
+      "inbox.shared.read",
+      "inbox.takeover",
+      "job.cancel",
+      "job.read",
+      "job.retry",
+      "uploads.cancel",
+      "uploads.complete",
+      "uploads.create",
+      "uploads.manage",
+      "uploads.multipart.complete",
+      "uploads.multipart.part",
+      "uploads.multipart.start",
+      "uploads.read"
+    ],
+    "fields": [
+      "gallery",
+      "inbox",
+      "uploads"
+    ]
+  }
+}

@@ -112,9 +112,9 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     const perms = readPerms();
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
     return NAV_ITEMS.filter((it) => {
-      if (it.authzResource === "sales_analysis") {
+      if (it.authzResource) {
         if (authz.status !== "ready" || !authz.snapshot) return false;
-        if (!resourceUsesLegacy(authz.snapshot, "sales_analysis")) return resourceAllowed(authz.snapshot, "sales_analysis", "read");
+        if (!resourceUsesLegacy(authz.snapshot, it.authzResource)) return resourceAllowed(authz.snapshot, it.authzResource, "read");
       }
       if (it.key === "accounts") return authz.status === "ready" && actorAllowed(authz.snapshot, "read_accounts");
       return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
@@ -180,9 +180,9 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
       <BrowserRouter key={token}>
         <Routes>
           <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
-            {NAV_ITEMS.filter(it => it.authzResource === "sales_analysis" && !allowed.includes(it)).map(it => (
+            {NAV_ITEMS.filter(it => it.authzResource && !allowed.includes(it)).map(it => (
               <Route key={it.key} path={it.path} element={authz.status !== "ready" ? <AuthzUnavailable />
-                : <Result status="403" title="没有销售分析访问权限" subTitle={authz.snapshot?.sales_analysis.reason || "请联系管理员检查授权"} />} />
+                : <Result status="403" title={`没有${it.label}访问权限`} subTitle={authz.snapshot?.resources[it.authzResource!]?.decisions.read?.reason?.message || "请联系管理员检查授权"} />} />
             ))}
             {allowed.map((it) => (
               <Route key={it.key} path={it.path} element={it.authzResource ? <AuthorizationBoundary resource={it.authzResource} action="read" legacy={<it.page />}><it.page /></AuthorizationBoundary> : <it.page />} />

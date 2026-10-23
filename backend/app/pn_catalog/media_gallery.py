@@ -219,10 +219,11 @@ def get_gallery(
     ):
         raise CatalogError("request.validation_failed", "图库筛选无效", status_code=422)
     access(db, context, authorize, "gallery.read", part_id)
-    read_identity(db, [part_id])
+    states = read_identity(db, [part_id])
+    identity_revision = states[part_id].identity_revision if states[part_id] else 0
     member = db.get(GalleryMember, part_id)
     if member is None:
-        return read_response(
+        result = read_response(
             context,
             {
                 "part_id": part_id,
@@ -233,6 +234,8 @@ def get_gallery(
                 "entries": [],
             },
         )
+        result["meta"]["identity_revision"] = identity_revision
+        return result
     group = load(db, GalleryGroup, member.group_id, lock=True, shared=True)
     offset = 0
     if cursor:
@@ -335,6 +338,7 @@ def get_gallery(
         data["primary_entry_id"] = None
     count = len(data["entries"])
     result = read_response(context, data)
+    result["meta"]["identity_revision"] = identity_revision
     result["meta"]["next_cursor"] = (
         base64.urlsafe_b64encode(
             json.dumps(

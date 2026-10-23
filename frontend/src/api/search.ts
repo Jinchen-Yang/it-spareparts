@@ -7,7 +7,7 @@
  * 不要把用户展示文本回传后端再猜。
  */
 import { api, masterEdit } from "../api";
-import type { CategoryNode, MasterEditPayload, MasterEditSnapshot, MasterFields, Overview } from "../api";
+import type { CategoryNode, MasterEditPayload, MasterEditSnapshot, MasterFields, Overview, SharedMasterAvailability } from "../api";
 export type { MasterEditPayload, MasterEditSnapshot } from "../api";
 
 /** 后端 resolver 的匹配类型（按最强证据分类） */
@@ -30,15 +30,16 @@ export interface UnifiedSearchItem {
   needs_review: boolean;
   is_excluded: boolean;
   match_type?: MatchType;       // browse/结构化分支无匹配证据
-  matched_text?: string;
+  matched_text?: string | null;
   score?: number;
-  match_reason?: string;
+  match_reason?: string | null;
   pool_group_id: number | null; // 互通PN池身份（有效池；身份对登录用户全员可读）
   pool_name: string | null;
   specs?: Record<string, string>;
 }
 
 export interface UnifiedSearchResp {
+  shared_master?: SharedMasterAvailability;
   total: number;
   page: number;
   page_size: number;

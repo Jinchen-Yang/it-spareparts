@@ -1,4 +1,5 @@
 import { api } from "../api";
+import pnResources from "../authz/pnResources.json";
 
 export const AUTHZ_FIELDS = [
   { id: "data_supplier", label: "供应商信息" },
@@ -87,6 +88,20 @@ export const searchAuthzCustomers = (
     params: { q, limit: 50 },
   });
 
+const IMPLEMENTED_RESOURCES: Record<string, { actions: readonly string[]; fields: readonly string[] }> = {
+  sales_analysis: { actions: ["read", "export"], fields: AUTHZ_FIELDS.map(f => f.id) },
+  ...pnResources,
+};
+function validImplementedResource(id: string, resource: ResourceDecision): boolean {
+  const definition = IMPLEMENTED_RESOURCES[id];
+  return !!definition
+    && Object.keys(resource.decisions).every(action => definition.actions.includes(action))
+    && resource.field_permissions.every(field => definition.fields.includes(field));
+}
+export function implementedResource(id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(IMPLEMENTED_RESOURCES, id);
+}
+
 export function validateAuthzSnapshot(value: AuthzSnapshot): AuthzSnapshot {
   validateEnvelope(value);
   if (
@@ -109,9 +124,7 @@ export function validateAuthzSnapshot(value: AuthzSnapshot): AuthzSnapshot {
       protocolError();
     if (
       r.migration_state === "implemented" &&
-      (id !== "sales_analysis" ||
-        Object.keys(r.decisions).some((a) => !["read", "export"].includes(a)) ||
-        r.field_permissions.some((f) => !AUTHZ_FIELDS.some((k) => k.id === f)))
+      !validImplementedResource(id, r)
     )
       protocolError();
     for (const decision of Object.values(r.decisions))

@@ -612,15 +612,22 @@ def multipart_part_plan(db, upload_id, command, *, context, authorize):
 
 
 def multipart_storage_plan(db, upload_id, *, context, authorize):
-    """Owner-checked list_parts/head input; original OSS upload ID is never regenerated."""
+    """Live owner-checked ListParts input and epoch for the post-I/O authorization fence."""
     access(db, context, authorize, "uploads.read", None, field="uploads")
     ticket = owned_upload(db, upload_id, context, authorize)
+    check_live(ticket)
     multipart = load(db, MultipartUpload, upload_id)
+    if ticket.status != "issued" or multipart.state not in {"uploading", "completing"}:
+        raise CatalogError("request.precondition_failed", "分片会话已不允许核对", status_code=412)
     return {
         "key": ticket.staging_key,
         "upload_id": multipart.storage_upload_id,
         "state": multipart.state,
         "operation_token": multipart.operation_token,
+        "generation": ticket.generation,
+        "revision": ticket.revision,
+        "size_bytes": ticket.declared_bytes,
+        "part_size": multipart.part_size,
     }
 
 
@@ -842,3 +849,14 @@ def publish_multipart_aborted(db, lease, _prepared=None):
     multipart.aborted_at = now()
     multipart.revision += 1
     return {"upload_id": lease.resource_id, "multipart_aborted": True}
+
+
+def get_upload_inbox(db, upload_id, *, context, authorize):
+    """Exact receipt lookup for reconnecting intake clients; no PN or filename guessing."""
+    access(db, context, authorize, "uploads.read", None, field="uploads")
+    ticket = owned_upload(db, upload_id, context, authorize)
+    item_id = db.scalar(select(InboxItem.id).where(InboxItem.upload_id == ticket.id))
+    if item_id is None:
+        raise CatalogError("request.not_found", "该上传尚未进入收件箱", status_code=404)
+    from .media_inbox import get_inbox
+    return get_inbox(db, item_id, context=context, authorize=authorize)
