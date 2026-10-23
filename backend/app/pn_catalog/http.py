@@ -147,10 +147,15 @@ def capabilities(request: Request, access: AccessDep):
 @router.get("/parts", response_model=PartListResponse)
 def list_parts(request: Request, db: DbDep, access: AccessDep, q: str | None = Query(default=None, max_length=256),
                cursor: str | None = Query(default=None, max_length=2048),
-               limit: int = Query(default=50, ge=1, le=200), include_inactive: bool = False):
+               limit: int = Query(default=50, ge=1, le=200), include_inactive: bool = False,
+               category_major: str | None = Query(default=None, max_length=128),
+               part_ids: list[int] | None = Query(default=None, max_length=200),
+               include_gallery: bool = False, missing_image: bool | None = None):
     from app.pn_catalog import api
     return api.list_parts(db, context=_context(request, access), authorize=access.authorize,
-                          query=q or "", cursor=cursor, limit=limit, include_inactive=include_inactive)
+                          query=q or "", cursor=cursor, limit=limit, include_inactive=include_inactive,
+                          category_major=category_major, part_ids=part_ids, include_gallery=include_gallery,
+                          missing_image=missing_image)
 
 
 @router.post("/parts", status_code=201, response_model=PartResponse, openapi_extra=_WRITE_HEADERS)

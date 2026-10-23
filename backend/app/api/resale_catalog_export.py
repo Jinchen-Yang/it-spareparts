@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import SQLAlchemyError
@@ -50,7 +50,8 @@ _PG_BIGINT_MAX = 2**63 - 1
 _logger = logging.getLogger(__name__)
 
 
-def _catalog_key(authorization: Annotated[str | None, Header()] = None) -> None:
+def _catalog_key(request: Request, db: Annotated[Session, Depends(get_db)],
+                 authorization: Annotated[str | None, Header()] = None) -> None:
     expected = get_settings().resale_catalog_token_sha256.get_secret_value()
     if not expected:
         raise HTTPException(404, "PN 只读导出尚未启用")
@@ -59,6 +60,10 @@ def _catalog_key(authorization: Annotated[str | None, Header()] = None) -> None:
         raise HTTPException(401, "PN 只读凭据无效")
     if not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), expected):
         raise HTTPException(401, "PN 只读凭据无效")
+    from app.authz.runtime import is_authoritative
+    if request.url.path.rsplit("/", 1)[-1] in {"resolve", "snapshots", "list", "search"} and is_authoritative(db, "part_master"):
+        raise HTTPException(410, {"code": "catalog.legacy_reader_retired", "message": "请使用共享资料账号授权接口"})
+
 
 
 CatalogKey = Annotated[None, Depends(_catalog_key)]
