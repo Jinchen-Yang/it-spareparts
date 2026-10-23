@@ -719,7 +719,7 @@ def resolve_migration_access(db: Session, identity: VerifiedIdentity) -> Catalog
     return _access(db, actor)
 
 
-def get_part_access(db: Session, actor: ActorContext, part_id: int) -> dict:
+def get_part_access(db: Session, actor: ActorContext, part_id: int | None) -> dict:
     """Current grant capabilities, using the existing framework's batched PDP.
 
     Current resources support all-PN scope. This does not claim ownership of an
@@ -757,7 +757,7 @@ def get_part_access(db: Session, actor: ActorContext, part_id: int) -> dict:
         resource_fields[resource] = fields - {"legacy_evidence"}
     if not allowed & {"read", "read_content", "gallery.read", "identity.read"}:
         _fail("auth.forbidden", "没有读取此型号资料的权限", status=403)
-    if db.scalar(select(DimPart.id).where(DimPart.id == part_id)) is None:
+    if part_id is not None and db.scalar(select(DimPart.id).where(DimPart.id == part_id)) is None:
         _fail("catalog.part_not_found", "型号不存在", status=404)
     readable, writable = set(), set()
     master = resource_fields.get("part_master", set())
