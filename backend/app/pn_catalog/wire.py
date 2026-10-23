@@ -87,6 +87,8 @@ class PartSummary(WireModel):
     manufacturer: str | None = None
     category_major: str | None = None
     category_minor: str | None = None
+    fill_status: Literal["pending", "ai_filled", "confirmed", "needs_review"] | None = None
+    fill_status_revision: int | None = Field(default=None, ge=0)
 
     has_image: bool | None = None
     main_entry_id: UUID | None = None

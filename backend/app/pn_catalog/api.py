@@ -614,6 +614,9 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
             columns.append(getattr(DimPart, key))
     if _allowed(decision.readable_fields, "manufacturer"):
         columns.append(PartState.manufacturer)
+    if _allowed(decision.readable_fields, "fill_status"):
+        columns.extend([PartState.fill_status,
+                        func.coalesce(PartState.fill_status_revision, 0).label("fill_status_revision")])
     stmt = select(*columns, *gallery_columns).select_from(DimPart).outerjoin(PartState, PartState.part_id == DimPart.id).where(DimPart.id > after_id)
     if part_ids is not None:
         stmt = stmt.where(DimPart.id.in_(part_ids))
