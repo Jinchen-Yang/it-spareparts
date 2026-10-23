@@ -114,8 +114,10 @@ def _recompute_line_amounts(line: FMaintenanceLine, *,
     # Quantity-only edits must keep a materialized manual fact coherent too.
     # A partial historical price can carry a stale amount on its missing side;
     # do not turn that residue into valid legacy evidence. Real manual fills
-    # provide both normalized prices. Keep other sources and dirty bases as-is.
+    # provide both normalized prices. A missing quantity is still unknown,
+    # never a newly materialized zero. Keep other sources and dirty bases as-is.
     if (line.cost_source == "manual" and line.cost_tax_basis in ("ex", "inc")
+            and line.qty is not None
             and line.unit_cost_ex_tax is not None and line.unit_cost_inc_tax is not None):
         line.unit_cost = getattr(line, f"unit_cost_{line.cost_tax_basis}_tax")
         line.cost_amount = getattr(line, f"cost_amount_{line.cost_tax_basis}_tax")
