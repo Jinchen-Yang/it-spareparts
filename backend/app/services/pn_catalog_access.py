@@ -52,6 +52,7 @@ READ_ACTIONS = frozenset(
         "read_attributes",
         "read_inactive",
         "read_audit",
+        "read_legacy_history",
         "read_candidates",
         "manage_identity",
         "identity.read",

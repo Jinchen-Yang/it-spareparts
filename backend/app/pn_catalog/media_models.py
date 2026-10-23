@@ -306,7 +306,7 @@ class InboxItem(Base):
         CheckConstraint("assignment_intent IS NULL OR jsonb_typeof(assignment_intent) = 'object'",
                         name="ck_pn_inbox_assignment_intent"),
         UniqueConstraint("group_id", "client_order", name="uq_pn_media_inbox_capture_order"),
-        CheckConstraint("client_order IS NULL OR (group_id IS NOT NULL AND client_order BETWEEN 0 AND 1999)",
+        CheckConstraint("client_order IS NULL OR (group_id IS NOT NULL AND client_order BETWEEN 0 AND 2147483647)",
                         name="ck_pn_media_inbox_capture_order"),
         CheckConstraint(
             "status IN ('receiving','ready','assigned','failed','deleted')",

@@ -264,7 +264,9 @@ def _inbox_asset(db, row, source, owner):
 
 
 def materialize_inbox(db, row, part_id, identity_revision):
+    from .migration_artifacts import recognition_projection
     source = row.payload
+    recognition = recognition_projection(source)
     try:
         identifier, upload_id, group_id = (
             UUID(str(source[key])) for key in ("id", "upload_id", "group_id")
@@ -282,10 +284,10 @@ def materialize_inbox(db, row, part_id, identity_revision):
             "migration.resource_conflict", "收件箱与上传票据的所有者不一致"
         )
     client_order = source.get("client_order", 0)
-    if type(client_order) is not int or not 0 <= client_order <= 1999:
+    if type(client_order) is not int or not 0 <= client_order <= 2147483647:
         raise CatalogError(
             "migration.group_order_requires_review",
-            "旧组顺序超过当前组边界，需明确分组映射",
+            "旧捕获顺序超出原来源整数范围",
         )
     group = db.get(InboxGroup, group_id)
     if group is None:
@@ -397,6 +399,7 @@ def materialize_inbox(db, row, part_id, identity_revision):
             "claim_binding": claim_evidence,
             "legacy_state": status,
             "original_revision": source.get("revision"),
+            "recognition": recognition,
         },
     )
 

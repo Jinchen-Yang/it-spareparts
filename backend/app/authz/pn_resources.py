@@ -208,6 +208,7 @@ CATALOG_ACTIONS = {
     "read_inactive": ("part_master", "read_inactive"),
     "set_availability": ("part_master", "set_availability"),
     "read_audit": ("part_master", "read_audit"),
+    "read_legacy_history": ("part_master", "read_audit"),
     "read_candidates": ("part_master", "read_candidates"),
     "create_candidate": ("part_master", "create_candidate"),
     "adopt_candidate": ("part_master", "adopt_candidate"),

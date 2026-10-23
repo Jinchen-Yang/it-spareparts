@@ -209,7 +209,7 @@ def test_two_requests_apply_same_frozen_record_once(db):
     assert db.get(PartState, pid).profile_revision == 1
 
 
-def test_unimplemented_live_state_is_explicitly_blocked(db):
+def test_active_legacy_state_is_explicitly_fenced_for_recovery(db):
     payload = {"id": str(uuid4()), "status": "running", "lease_token": str(uuid4())}
     extra = LegacyRecord(
         kind="agent_job",
@@ -219,7 +219,7 @@ def test_unimplemented_live_state_is_explicitly_blocked(db):
     )
     _, value, cmd = prepared(db, extra_records=[extra])
     result = apply(db, value, cmd)
-    assert result["states"] == {"applied": 1, "dependency_blocked": 1}
+    assert result["states"] == {"applied": 1, "recovery_required": 1}
     assert not result["live_complete"] and not result["cutover_ready"]
 
 

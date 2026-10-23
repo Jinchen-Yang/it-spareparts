@@ -49,6 +49,10 @@ def _inbox_metadata(db, items):
         "width": asset.width if asset else None, "height": asset.height if asset else None,
         "recognition": None,
     } for identifier, ticket, asset in rows}
+    from .migration_artifacts import inbox_recognitions
+    for identifier, recognition in inbox_recognitions(db, items).items():
+        if identifier in values:
+            values[identifier]["recognition"] = recognition
     fences = [(str(item.id), item.generation) for item in items if item.status in ("ready", "assigned")]
     if not fences:
         return values
@@ -64,14 +68,15 @@ def _inbox_metadata(db, items):
         if job is None or item.id not in values:
             continue
         success = successful.get(str(item.id))
-        result = None
+        historic = values[item.id]["recognition"]
+        result = historic["result"] if historic else None
         if success is not None:
             try:
                 result = RecognitionResult.model_validate(success.result).model_dump(mode="json")
             except ValidationError:
                 pass  # Historical or corrupt results must not expose arbitrary provider/job JSON.
         values[item.id]["recognition"] = {"status": job.status, "result": result,
-            "completed_at": success.finished_at.isoformat() if success and success.finished_at else None}
+            "completed_at": success.finished_at.isoformat() if success and success.finished_at else historic["completed_at"] if historic else None}
     return values
 
 

@@ -275,3 +275,4 @@ from . import http_lookup as _lookup_routes  # noqa: E402,F401
 from . import http_bulk as _bulk_routes  # noqa: E402,F401
 
 from . import http_identity_read as _identity_read_routes  # noqa: E402,F401
+from . import http_migration as _migration_routes  # noqa: E402,F401
