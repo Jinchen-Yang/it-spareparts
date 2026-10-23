@@ -656,6 +656,8 @@ def list_audit_events(db: Session, part_id: int, *, context: CommandContext, aut
     if before_id:
         query = query.where(AuditEvent.id < before_id)
     rows = db.scalars(query.order_by(AuditEvent.id.desc()).limit(limit + 1)).all()
+    from .audit_projection import AuditProjection
+    projection = AuditProjection(db, context, authorize, part_id, decision)
     items = []
     remaining = 512 * 1024 - 2048  # Reserve envelope/cursor space; byte budget is UTF-8.
     for row in rows[:limit]:
@@ -664,8 +666,7 @@ def list_audit_events(db: Session, part_id: int, *, context: CommandContext, aut
                 "request_id": str(row.request_id), "occurred_at": row.occurred_at.isoformat(),
                 "before_revision": row.before_revision, "after_revision": row.after_revision,
                 "revisions": row.revisions,
-                "changes": {key: value for key, value in row.changes.items()
-                            if _allowed(decision.readable_fields, key)}}
+                "changes": projection.changes(row)}
         size = len(_json(item).encode()) + 1
         if size > remaining:
             if not items:
