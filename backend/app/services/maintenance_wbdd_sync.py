@@ -9,6 +9,7 @@ from app.models.maintenance import FMaintenanceLine as L, FMaintenanceOrder as O
 from app.models.maintenance_project_operations import MaintenanceSiteIssue as I, MaintenanceSiteIssueLine as IL
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment as A
 from app.models.system import SysAuditLog, SysImportBatch
+from app.services.maintenance_project_audit import write_project_audit
 from app.services import maintenance_demands as demands
 from app.services import maintenance_project_operations as operations
 from app.services import maintenance_site_return_requirements as requirements
@@ -36,8 +37,7 @@ def _state_digest(db, source_ids, line_ids, site_ids):
 
 def _audit(db, *, project_id, entity_type, entity_id, before, after, reason, operated_by, action="VOID"):
     if project_id:
-        from app.services.maintenance_project_master_workbook import _write_audit
-        _write_audit(db, project_id=project_id, entity_type=entity_type,
+        write_project_audit(db, project_id=project_id, entity_type=entity_type,
                      entity_id=entity_id, action=action, before=before, after=after,
                      reason=reason, operated_by=operated_by)
     else:

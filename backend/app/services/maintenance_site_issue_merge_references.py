@@ -26,7 +26,7 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseAuditEvent,
     MaintenanceWarehouseDocumentLink,
 )
-from app.services.maintenance_expense_collection_workbook import WorkbookError
+from app.services.maintenance_errors import WorkbookError
 
 _LEGACY_SCHEMA = "maintenance-return-obligation-interface-v1"
 _TARGET = "maintenance_site_issue"
