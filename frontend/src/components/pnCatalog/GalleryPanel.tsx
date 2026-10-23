@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, Empty, Image, Input, Popconfirm, Select, Space, Tag } from "antd";
 import { catalogError, CommandIntent, sendUpload, type Capabilities, type Entry, type Gallery, type UploadForm, type UploadTicket } from "../../api/pnCatalog";
 import { useCatalogAccess } from "./access";
+import SuppressionsPanel from "./SuppressionsPanel";
 
 function EntryImage({ entry }: { entry: Entry }) {
   const { client } = useCatalogAccess();
@@ -107,5 +108,6 @@ export default function GalleryPanel({ partId, capabilities }: { partId: number;
     </Card>)}</Space>
     {gallery && !gallery.entries.length && <Empty description="暂无图片" />}
     {cursor && <Button onClick={() => load(true)} disabled={busy}>加载更多图片</Button>}
+    {gallery?.group_id && <SuppressionsPanel key={`${partId}:${gallery.group_id}`} gallery={gallery} onChanged={() => load()} />}
   </Space>;
 }

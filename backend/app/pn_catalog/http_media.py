@@ -45,6 +45,7 @@ from .wire_media import (
     MultipartPartsResponse,
     PartSignaturesResponse,
     SuppressionResponse,
+    SuppressionListResponse,
     UploadFormResponse,
     UploadResponse,
 )
@@ -218,6 +219,14 @@ def entry_links(entry_id: UUID, request: Request, db: DbDep, access: AccessDep):
         ),
         "meta": _read_meta(context),
     }
+
+
+@router.get("/gallery-groups/{group_id}/suppressions", response_model=SuppressionListResponse)
+def suppressions(group_id: UUID, request: Request, db: DbDep, access: AccessDep,
+                 cursor: str | None = Query(default=None, max_length=512),
+                 limit: int = Query(default=20, ge=1, le=50)):
+    return media.list_suppressions(db, group_id, context=_context(request, access),
+                                  authorize=access.authorize, cursor=cursor, limit=limit)
 
 
 @router.post(

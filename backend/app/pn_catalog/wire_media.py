@@ -148,6 +148,11 @@ class SuppressionSnapshot(WireModel):
     reason: str
 
 
+class SuppressionListResponse(WireModel):
+    data: list[SuppressionSnapshot]
+    meta: PageMeta
+
+
 class SuppressionResponse(WireModel):
     data: SuppressionSnapshot
     meta: MediaMeta
