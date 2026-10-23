@@ -394,3 +394,14 @@ F0统一提供纯读取`actionAllowed(resource, action)`、资源内`fieldAllowe
 - `display_policy` GET和PUT都按`read_audit_identity`省略updated_by/updated_at；既有optional类型足够，无需新响应字段。TaxBasis读取依赖read，不依赖设置页show；拒绝时停止刷新/广播重取并保持口径不可用，不能用默认口径伪装已读成功。数据疑点现有side/对象version/restricted可复用，但省略side列表、total及直接ID必须先由后端按真实side裁决。
 
 分工可直接按F0→F1/F2/F3并行推进；公共`api.ts`仍单owner，域包只提交该文件的DTO/签名需求。展示门在父挂载/合法tab/深链层，数据门在共享请求hook与每个handler，后端再次以具名动作验权并按块查询；三者都要覆盖，show不进入后端查询授权。S1当前app/tests保持冻结。
+
+### S2 实施补充：共享金额展示口径
+
+`display_policy.read` 是解释全局税口径金额的独立展示依赖，不随任何业务 Grant 自动授予；编辑器明确提示其目录名称“全局展示与业务默认值（金额展示设置）”。缺权时显示“缺少金额展示设置的读取权限”，不伪装成网络故障，也不把 DEFAULT 当作已读取结果。`nav.requiresTaxPolicy` 只标注展示依赖，不决定业务 API 授权；其中命名谓词复用生成的 surface Rule 与同一主体字段快照。
+
+- 整页依赖：互通池、利润分析、维保数据看板、池分析详情。
+- 依据实际金额授权动态依赖：经营看板按可见面/本资源字段判断，health-only 数量可用、营收单元自己失败关闭；采购型号分析/异常/明细仅本域成本字段可见时要求整页口径。无成本时金额列/单元隐藏，数量保留。
+- 局部依赖：型号查询和库存保留身份/数量/关系，金额列与金额块按本域字段及 taxReady 拒显；数据治理仅 PartsTab 营收列受约束，其余队列与身份能力独立；跨页 PoolReferencePanel 独立边界，池逐单详情只在金额单元拒显。主数据批量规范化的 TaxMoney 单元自己失败关闭。
+- 不依赖：账号与权限中心、系统设置，以及其他没有全局口径消费者的路由。销售分析与采购分析使用本地/API 明确金额口径，池管理使用输入价自带税基，不额外绑定 display_policy.read。
+
+policy owner 变化时第一帧同步不可用，不等待 effect；整页边界会卸载 AntD portal，未用 display:none 冒充撤权。全局 Router 仍只按 token 重挂，已迁页面按自己的授权 generation/version 清理。真实 App/Shell/Provider 测试覆盖共享 read 缺失下的控制面、数量块、字段两态、局部金额拒显；独立 layout-effect 测试证明新授权快照第一帧不暴露 DEFAULT。最终实施与验证见 [S2 前端审查](s2-frontend-implementation-review.md)。
