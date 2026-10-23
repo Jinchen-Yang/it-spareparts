@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-env"  # token 签名密钥
     token_ttl_hours: int = 12
 
+    # D-0026: explicit module cutover, never per-request fallback on PDP failure.
+    authz_sales_analysis_enabled: bool = False
+    authz_sales_analysis_suspended: bool = False
+    cerbos_url: str = "http://127.0.0.1:3592"
+    cerbos_timeout_seconds: float = 2.0
+
     # CORS 允许来源（前端开发服务器）
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 

@@ -130,17 +130,25 @@ def _seed_project_facts(db):
     db.commit()
 
 
+_CURRENT_SNAPSHOT_DATE = object()
+
+
 def _build(
     db,
     *,
     historical_mode="approved_cost_baseline",
     warehouse_ready=True,
-    warehouse_ready_through=business_today(),
+    warehouse_ready_through=_CURRENT_SNAPSHOT_DATE,
     warehouse_ambiguities=(),
     as_of=None,
     legacy_business_as_of=None,
 ):
     frozen_as_of = as_of or migration_source.business_today()
+    # Resolve the default with this snapshot, not when pytest imports the file.
+    # A full CI run can cross Shanghai midnight between collection and execution.
+    # Explicit None must still represent a missing completeness watermark.
+    if warehouse_ready_through is _CURRENT_SNAPSHOT_DATE:
+        warehouse_ready_through = frozen_as_of
     baseline = {
         "amount_ex_tax": "100",
         "amount_inc_tax": "113",
@@ -295,11 +303,12 @@ def test_snapshot_binds_one_shanghai_business_date(monkeypatch, db):
 
     monkeypatch.setattr(migration_source, "business_today", fixed_business_today)
 
-    payload = _build(db, warehouse_ready_through=fixed_as_of)
+    payload = _build(db)
 
     assert calls == 1
     assert payload["as_of"] == "2026-08-09"
     assert payload["source_coverage"]["business_as_of"] == "2026-08-09"
+    assert payload["source_coverage"]["warehouse_ready_through"] == "2026-08-09"
     assert build_project_preview(payload)["as_of"] == "2026-08-09"
 
 
@@ -618,8 +627,9 @@ def test_archived_project_and_stale_part_identity_fail_closed(db):
 
 
 def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
+    snapshot_date = business_today()
     _seed_project_facts(db)
-    pending = _build(db)
+    pending = _build(db, as_of=snapshot_date, warehouse_ready_through=snapshot_date)
     pending["historical_baseline"]["approved"] = False
     pending["opening_balances"][0]["approved"] = False
 
@@ -632,7 +642,8 @@ def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
         opening_balances=pending["opening_balances"],
         inventory_movements=pending["inventory_movements"],
         warehouse_source_ready=True,
-        warehouse_ready_through=business_today(),
+        warehouse_ready_through=snapshot_date,
+        as_of=snapshot_date,
         legacy_truth={
             "cost_lines": pending["legacy_cost_lines"],
             "expenses": pending["legacy_expenses"],
@@ -642,7 +653,7 @@ def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
             "blockers": [],
         },
     )
-    approved = _build(db)
+    approved = _build(db, as_of=snapshot_date, warehouse_ready_through=snapshot_date)
 
     assert rebuilt_pending["source_snapshot_hash"] == approved["source_snapshot_hash"]
     assert (

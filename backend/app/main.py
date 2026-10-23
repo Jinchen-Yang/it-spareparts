@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app import auth
 from app.api import (
     accounts,
+    authorization,
     agent,
     chat_sessions,
     dashboard,
@@ -104,6 +105,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(accounts.router, prefix=settings.api_prefix)
+app.include_router(authorization.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)

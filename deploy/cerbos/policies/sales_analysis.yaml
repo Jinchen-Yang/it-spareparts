@@ -1,0 +1,37 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: sales_analysis
+  rules:
+    - name: explicit-sales-read
+      actions: [read]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read" in P.attr.grant.actions &&
+            (R.attr.module_probe || P.attr.grant.scope == "all" ||
+             (P.attr.grant.scope == "assigned_customers" &&
+              R.attr.customer_id in P.attr.customer_ids))
+      output:
+        when:
+          ruleActivated: >-
+            {"scope": P.attr.grant.scope, "version": P.attr.grant.version,
+             "field_permissions": P.attr.grant.field_permissions}
+    - name: explicit-sales-export
+      actions: [export]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read" in P.attr.grant.actions && "export" in P.attr.grant.actions &&
+            (R.attr.module_probe || P.attr.grant.scope == "all" ||
+             (P.attr.grant.scope == "assigned_customers" &&
+              R.attr.customer_id in P.attr.customer_ids))
+      output:
+        when:
+          ruleActivated: >-
+            {"scope": P.attr.grant.scope, "version": P.attr.grant.version,
+             "field_permissions": P.attr.grant.field_permissions}

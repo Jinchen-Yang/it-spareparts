@@ -1,3 +1,5 @@
+import { AuthzProvider, AuthzUnavailable, useAuthz } from "./authz/AuthzProvider";
+import { AUTHZ_SESSION_INVALIDATED } from "./authz/events";
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button, Result } from "antd";
@@ -27,7 +29,7 @@ function readBetaFeatures(): Record<string, boolean> {
 
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
-  const [betaFeatures, setBetaFeatures] = useState<Record<string, boolean>>(readBetaFeatures);
+
 
   useEffect(() => {
     const syncCrossTabSession = (event: StorageEvent) => {
@@ -39,6 +41,17 @@ export default function App() {
     return () => window.removeEventListener("storage", syncCrossTabSession);
   }, []);
 
+  useEffect(() => {
+    const invalidated = () => setToken(localStorage.getItem("token"));
+    window.addEventListener(AUTHZ_SESSION_INVALIDATED, invalidated);
+    return () => window.removeEventListener(AUTHZ_SESSION_INVALIDATED, invalidated);
+  }, []);
+  return <AuthzProvider token={token}><AppContent token={token} setToken={setToken} /></AuthzProvider>;
+}
+
+function AppContent({ token, setToken }: { token: string | null; setToken: (token: string | null) => void }) {
+  const authz = useAuthz();
+  const [betaFeatures, setBetaFeatures] = useState<Record<string, boolean>>(readBetaFeatures);
   useEffect(() => {
     if (!token) {
       setBetaFeatures({});
@@ -91,22 +104,25 @@ export default function App() {
     };
   }, [token]);
 
-  // 权限快照随登录周期固定：只在 token 变化（登录/登出/改密）时重算，
-  // 让 AppShell 收到的 allowed 引用稳定、下游 useMemo 可依赖
+  // 旧模块继续使用登录权限；已迁移模块由服务端刷新后的能力快照决定入口。
   const allowed = useMemo(() => {
     if (!token) return [];
     const role = localStorage.getItem("role") || "";
     const isAdmin = role === "admin";
     const perms = readPerms();
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
-    return NAV_ITEMS.filter((it) => (
-      !it.betaFeature || betaFeatures[it.betaFeature] === true
-    ) && (isAdmin
-      || (it.visibleWhen ? it.visibleWhen()
-        : it.perm ? !!perms[it.perm]
-        : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
-          : false)));
-  }, [token, betaFeatures]);
+    return NAV_ITEMS.filter((it) => {
+      if (it.authzResource === "sales_analysis") {
+        if (authz.status !== "ready" || !authz.snapshot) return false;
+        if (authz.snapshot.sales_analysis.enabled) return authz.snapshot.sales_analysis.read;
+      }
+      return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
+        || (it.visibleWhen ? it.visibleWhen()
+          : it.perm ? !!perms[it.perm]
+          : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
+            : false));
+    });
+  }, [token, betaFeatures, authz.status, authz.snapshot]);
 
   // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
   const allowedDetails = useMemo(() => {
@@ -129,6 +145,7 @@ export default function App() {
     localStorage.removeItem("token");
     localStorage.removeItem("role");
     localStorage.removeItem("name");
+    localStorage.removeItem("username");
     localStorage.removeItem("permissions");
     localStorage.removeItem("beta_features");
     setBetaFeatures({});
@@ -136,6 +153,10 @@ export default function App() {
   };
 
   // 一个页面权限都没有的账号：给明确提示而不是空壳白屏
+  if (allowed.length === 0 && authz.status !== "ready") return <div style={{ padding: 24 }}>
+    <AuthzUnavailable /><Button style={{ marginTop: 16 }} onClick={logout}>退出登录</Button>
+  </div>;
+
   if (allowed.length === 0) {
     return (
       <Result
@@ -158,6 +179,10 @@ export default function App() {
       <BrowserRouter key={token}>
         <Routes>
           <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
+            {NAV_ITEMS.filter(it => it.authzResource === "sales_analysis" && !allowed.includes(it)).map(it => (
+              <Route key={it.key} path={it.path} element={authz.status !== "ready" ? <AuthzUnavailable />
+                : <Result status="403" title="没有销售分析访问权限" subTitle={authz.snapshot?.sales_analysis.reason || "请联系管理员检查授权"} />} />
+            ))}
             {allowed.map((it) => (
               <Route key={it.key} path={it.path} element={<it.page />} />
             ))}

@@ -1,0 +1,14 @@
+[
+  {
+    "port": 53205,
+    "closed": true
+  },
+  {
+    "port": 53599,
+    "closed": true
+  },
+  {
+    "port": 60885,
+    "closed": true
+  }
+]

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button, Select, Switch, Tag, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
+import CheckboxMultiSelect from "../../../components/CheckboxMultiSelect";
 import { readSessionToken, sessionStale } from "../../../utils/session";
 import {
   EMPTY_FILTER_VALUE,
@@ -210,14 +211,21 @@ export default function FilterBar({
           options={valueOptions(options?.customer_types)}
           onChange={(v: string[]) => change({ customerTypes: v })}
         />
-        <Select
-          {...multiSelectProps}
-          aria-label="销售人员"
-          placeholder="销售人员（多选）"
+        <CheckboxMultiSelect<string>
+          label="销售人员"
           value={state.salespeople}
-          optionFilterProp="label"
-          options={valueOptions(options?.salespeople)}
-          onChange={(v: string[]) => change({ salespeople: v })}
+          options={(options?.salespeople ?? []).map((person) => ({
+            value: person.value ?? EMPTY_FILTER_VALUE,
+            label: person.value ?? "（未填）",
+            description: `${person.orders} 单`,
+          }))}
+          selectionUnit="人"
+          disabled={sessionStale(ownerToken)}
+          onChange={(v) => {
+            // 确认时重新读取会话，避免打开面板后静默换账号提交旧草稿。
+            if (sessionStale(ownerToken)) { onOwnerStale(); return; }
+            change({ salespeople: v });
+          }}
         />
         <Tooltip title="选了商品大类或品牌即进入行级口径（Q-A-02）：金额区间仍按原单头金额决定整单入选，行筛选只决定计入的明细行金额（整单入选、匹配行计额）；不含税为按 13% 推算的名义值">
           <Select

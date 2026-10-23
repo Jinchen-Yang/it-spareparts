@@ -1,3 +1,4 @@
+import { AuthzUnavailable, useAuthz } from "../../../authz/AuthzProvider";
 // 销售分析页（D-41 客户需求 Round1，PR-4b；D-44 销售看板扩展）：常驻区间 KPI 条
 // （单数 / 三金额 / 毛利 / 客户与新老客 / 上月对比）+ 五个页签：概览（迷你趋势 +
 // Top 5）、多维紧凑图（九维并列条形榜）、分组排行、趋势、订单明细（任意列升降序 +
@@ -67,6 +68,19 @@ function apiErrorMessage(err: unknown): string {
 }
 
 export default function SalesAnalyticsPage() {
+  const authz = useAuthz();
+  if (authz.status !== "ready" || !authz.snapshot) return <AuthzUnavailable />;
+  if (authz.snapshot.sales_analysis.enabled && !authz.snapshot.sales_analysis.read)
+    return <Alert type="warning" message="没有销售分析访问权限" description={authz.snapshot.sales_analysis.reason} />;
+  return <SalesAnalyticsContent key={authz.snapshot.version} />;
+}
+
+function SalesAnalyticsContent() {
+  const authz = useAuthz();
+  const access = authz.snapshot?.sales_analysis;
+  const v2 = access?.enabled === true;
+  const canExport = !v2 || access.export;
+
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
   const state = parseSalesAnalyticsUrl(sp);
@@ -107,10 +121,10 @@ export default function SalesAnalyticsPage() {
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const perms = useMemo(readLocalPerms, []);
   // admin 恒全开；其余按登录快照（undefined = 未显式关闭，按不受限处理）
-  const costRestricted = !isAdmin && perms.data_purchase_cost === false;
-  const reconRestricted = !isAdmin && perms.data_reconciliation === false;
-  const customerRestricted = !isAdmin && perms.data_customer === false;
-  const profitRestricted = !isAdmin && perms.data_profit === false;
+  const costRestricted = v2 ? !access.field_permissions.includes("data_purchase_cost") : !isAdmin && perms.data_purchase_cost === false;
+  const reconRestricted = v2 ? !access.field_permissions.includes("data_reconciliation") : !isAdmin && perms.data_reconciliation === false;
+  const customerRestricted = v2 ? !access.field_permissions.includes("data_customer") : !isAdmin && perms.data_customer === false;
+  const profitRestricted = v2 ? !access.field_permissions.includes("data_profit") : !isAdmin && perms.data_profit === false;
   // 金额「显示」可见性：revenue 恒公开；不含税 / 含税随 data_purchase_cost（与后端同组）。
   // 金额「区间筛选」另按 costRestricted 整组门控——三口径一视同仁，营收无例外
   // （A-AC03 / Q-A-03 修订：区间结果的单数本身就泄漏金额分布）。
@@ -271,6 +285,7 @@ export default function SalesAnalyticsPage() {
   }, [filterKey, requestSort, state.order, state.page, state.includeReturns, pageSize, retryTick, state.tab]);
 
   const onExport = () => {
+    if (!canExport) return;
     // 所属会话失效（静默换 token / 登出）：拒发并以页面级提示替代旧会话数据——
     // 不让旧会话的导出按钮以当前账号身份发请求（DL-010 返工）
     if (sessionExpired()) return;
@@ -355,6 +370,11 @@ export default function SalesAnalyticsPage() {
             : "销售单数与三金额（不含税 / 含税订单金额 / 营收）"
         }
       />
+      {v2 && <Alert style={{ marginBottom: 12 }} showIcon
+        type={access.scope === "assigned_customers" && access.customer_count === 0 ? "warning" : "info"}
+        message={access.scope === "all" ? "当前数据范围：全部客户" : `当前数据范围：负责的 ${access.customer_count} 个客户`}
+        description={access.scope === "assigned_customers" && access.customer_count === 0
+          ? "尚未分配客户，当前没有可见订单。请联系管理员设置客户归属。" : undefined} />}
       <Card>
         <FilterBar
           state={effectiveState}
@@ -414,7 +434,7 @@ export default function SalesAnalyticsPage() {
                     onChange={(v) => patch({ compare: v })} />
                 </span>
               </Tooltip>
-              {state.tab === "orders" && (
+              {state.tab === "orders" && canExport && (
                 <Tooltip title="按当前筛选与排序导出订单 CSV（上限 10,000 单；看不到的字段整列不导出）">
                   <Button size="small" icon={<DownloadOutlined />} loading={exporting} onClick={onExport}>
                     导出

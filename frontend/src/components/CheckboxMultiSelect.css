@@ -1,0 +1,125 @@
+.checkbox-multiselect-trigger.ant-btn {
+  display: inline-flex;
+  justify-content: space-between;
+  width: 190px;
+  max-width: calc(100vw - 32px);
+  min-height: 32px;
+  height: auto;
+  padding-block: 4px;
+  text-align: left;
+  white-space: normal;
+}
+
+.checkbox-multiselect-trigger-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.checkbox-multiselect-panel {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 96px));
+  max-height: min(560px, calc(100dvh - 96px));
+  padding: 12px;
+  gap: 10px;
+}
+
+.checkbox-multiselect-panel[hidden] {
+  display: none;
+}
+
+.checkbox-multiselect-heading {
+  font-weight: 600;
+}
+
+.checkbox-multiselect-selected {
+  flex-shrink: 0;
+}
+
+.checkbox-multiselect-count {
+  color: var(--mb-text-2);
+  font-size: 12px;
+}
+
+.checkbox-multiselect-selected-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 86px;
+  overflow-y: auto;
+  padding: 3px 1px;
+}
+
+.checkbox-multiselect-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--mb-accent-soft-border);
+  border-radius: 4px;
+  background: var(--mb-accent-soft);
+  color: var(--mb-accent-strong);
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.checkbox-multiselect-chip:disabled {
+  cursor: not-allowed;
+  color: var(--mb-text-4);
+  border-color: var(--mb-border);
+  background: var(--mb-inset);
+}
+
+.checkbox-multiselect-options {
+  min-height: 48px;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-block: 1px solid var(--mb-border-soft);
+  padding-block: 4px;
+}
+
+.checkbox-multiselect-option.ant-checkbox-wrapper {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin: 0;
+  padding: 7px 4px;
+  border-radius: 4px;
+}
+
+.checkbox-multiselect-option:hover {
+  background: var(--mb-hover);
+}
+
+.checkbox-multiselect-option .ant-checkbox-inner {
+  border-radius: 3px;
+}
+
+.checkbox-multiselect-option-label {
+  overflow-wrap: anywhere;
+}
+
+.checkbox-multiselect-description {
+  margin-left: 8px;
+  color: var(--mb-text-3);
+  font-size: 12px;
+}
+
+.checkbox-multiselect-empty {
+  padding: 16px 4px;
+  color: var(--mb-text-3);
+  text-align: center;
+}
+
+.checkbox-multiselect-actions {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: space-between;
+  gap: 12px;
+}
