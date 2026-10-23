@@ -1,3 +1,4 @@
+import { authzSnapshot } from "../../test/authzFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
 import { AuthzProvider, useAuthz } from "../AuthzProvider";
@@ -5,8 +6,7 @@ import { invalidateAuthzSession } from "../events";
 import type { AuthzSnapshot } from "../../api/authz";
 const { getAuthzSnapshot } = vi.hoisted(() => ({ getAuthzSnapshot: vi.fn() }));
 vi.mock("../../api/authz", async (importOriginal) => ({ ...await importOriginal<typeof import("../../api/authz")>(), getAuthzSnapshot }));
-const snapshot = (version: string, enabled = true): AuthzSnapshot => ({ version, can_manage: false,
-  sales_analysis: { enabled, read: true, export: false, scope: "assigned_customers", customer_count: 1, reason: "allowed", field_permissions: ["data_customer"] } });
+const snapshot = (version: string, enabled = true): AuthzSnapshot => authzSnapshot({ enabled, read: true, export: false, scope: "assigned_customers", customer_count: 1, reason: "allowed", field_permissions: ["data_customer"] }, {version});
 function Probe() {
   const authz = useAuthz();
   return <><div>{authz.status}:{authz.snapshot?.version || "empty"}</div><button onClick={() => void authz.refresh()}>刷新</button></>;

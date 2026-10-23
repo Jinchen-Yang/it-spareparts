@@ -1,6 +1,7 @@
 """FastAPI 入口。"""
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,7 +89,14 @@ if _sec_warns:
             "[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w
         )
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(_app):
+    from app.authz.runtime import activate_configured_resources
+    activate_configured_resources(engine)
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

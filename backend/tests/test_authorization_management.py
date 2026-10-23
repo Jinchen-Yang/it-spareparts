@@ -1,5 +1,6 @@
-"""Real PostgreSQL management transactions and frozen legacy migration boundaries."""
+"""Canonical command transactions and migration on real PostgreSQL."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime, timezone
 import importlib.util
 from pathlib import Path
@@ -12,376 +13,271 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import event, func, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import permissions
-from app.api import authorization as api
-from app.auth import _make_token
-from app.authz.catalog import SALES_FIELD_PERMISSIONS
+from app.api import authorization, accounts, role_templates
+from app.auth import _make_token, verify_password
+from app.authz import catalog, management, runtime
 from app.config import get_settings
 from app.db import SessionLocal
-from sqlalchemy.exc import OperationalError
-from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignment
+from app.models.authorization import SysAuthorizationCutover, SysAuthorizationGrant, SysCustomerAssignment
 from app.models.dimensions import DimCustomer
-from app.models.system import SysAuditLog, SysUser
+from app.models.system import SysAuditLog, SysRoleTemplate, SysUser
 
 
-@pytest.fixture()
+@pytest.fixture
 def client(db, monkeypatch):
-    monkeypatch.setattr(get_settings(), "authz_sales_analysis_enabled", False)
-    app = FastAPI()
-    app.include_router(api.router, prefix="/api")
-    with TestClient(app) as value:
-        yield value
+    settings=get_settings()
+    monkeypatch.setattr(settings,'authorization_mode','unified_modules')
+    monkeypatch.setattr(settings,'authz_enabled_resources',[])
+    monkeypatch.setattr(settings,'authz_suspended_resources',[])
+    monkeypatch.setattr(settings,'authz_sales_analysis_enabled',True)
+    monkeypatch.setattr(settings,'authz_sales_analysis_suspended',True)
+    runtime.activate_configured_resources(db.get_bind())
+    app=FastAPI()
+    for router in (authorization.router,accounts.router,role_templates.router):app.include_router(router,prefix='/api')
+    with TestClient(app) as value:yield value
 
 
-def _user(db, username, role="sales", **kwargs):
-    user = SysUser(username=username, role=role, password_hash="synthetic-no-password", **kwargs)
-    db.add(user)
-    db.commit()
-    return user
+def _user(db,username,role='sales',**kwargs):
+    row=SysUser(username=username,role=role,password_hash='synthetic-no-password',**kwargs)
+    db.add(row);db.commit();return row
 
 
-def _headers(user=None, *, sub=None, role=None, fallback=False, authn="sys_user", tv=None):
-    token, _ = _make_token(
-        role or (user.role if user else "admin"), sub or (user.username if user else "missing"), None,
-        fallback=fallback, authn=authn, token_version=(user.token_version if user else 0) if tv is None else tv,
-    )
-    return {"Authorization": f"Bearer {token}"}
+def _headers(user,**kwargs):
+    token,_=_make_token(kwargs.pop('role',user.role),kwargs.pop('sub',user.username),None,
+        authn=kwargs.pop('authn','sys_user'),token_version=kwargs.pop('tv',user.token_version),**kwargs)
+    return {'Authorization':'Bearer '+token}
 
 
-def _body(**kwargs):
-    return {"expected_version": 0, "actions": ["read", "export"], "scope": "assigned_customers",
-            "field_permissions": ["data_customer"], "customer_ids": [], **kwargs}
+def _body(**kwargs):return {'schema_version':1,'catalog_version':catalog.CATALOG_VERSION,**kwargs}
 
 
-def _customers(db):
-    rows = [DimCustomer(name_raw="old-A", name_normalized="客户甲"),
-            DimCustomer(name_raw="客户乙", name_normalized=None),
-            DimCustomer(name_raw="literal_100%", name_normalized="")]
-    db.add_all(rows)
-    db.commit()
-    return rows
+def _config(**kwargs):return {'actions':['read'],'scope':'assigned_customers','field_permissions':[],**kwargs}
 
 
-def test_full_replacement_audit_version_revocation_and_no_legacy_dual_write(db, client):
-    admin = _user(db, "admin", "admin")
-    sales = _user(db, "sales", template_perms={"page_sales_analysis": False}, permissions={"data_profit": False})
-    customers = _customers(db)
-    headers, old_sales_headers = _headers(admin), _headers(sales)
-    path = "/api/authz/users/sales"
-    empty = client.get(path, headers=headers)
-    assert empty.status_code == 200
-    assert empty.headers["cache-control"] == "no-store"
-    assert empty.json() == {"username": "sales", "version": 0, "actions": [], "scope": "assigned_customers",
-                            "field_permissions": [], "customer_ids": [], "customers": []}
-    first = client.put(path, headers=headers, json=_body(customer_ids=[customers[1].id, customers[0].id]))
-    assert first.status_code == 200, first.text
-    assert first.json()["version"] == 1
-    assert first.json()["customer_ids"] == sorted([customers[0].id, customers[1].id])
-    assert first.json()["customers"][0]["name"] == "客户甲"
-    assert client.get("/api/authz/me", headers=old_sales_headers).status_code == 401
-    second = client.put(path, headers=headers, json=_body(expected_version=1, actions=[], field_permissions=[],
-                                                         customer_ids=[customers[2].id]))
-    assert second.status_code == 200, second.text
-    assert second.json()["version"] == 2
-    assert second.json()["actions"] == []
-    assert second.json()["customer_ids"] == [customers[2].id]
-    db.expire_all()
-    assert sales.token_version == 2
-    assert admin.token_version == 0
-    assert sales.template_perms == {"page_sales_analysis": False}
-    assert sales.permissions == {"data_profit": False}
-    logs = list(db.scalars(select(SysAuditLog).order_by(SysAuditLog.id)))
-    assert len(logs) == 2
-    assert logs[1].operated_by == "admin"
-    assert logs[1].before_json == {"resource": "sales_analysis", **first.json()}
-    assert logs[1].after_json == {"resource": "sales_analysis", **second.json()}
+def _result(response,status=200):
+    assert response.status_code==status,response.text
+    assert response.headers['cache-control']=='no-store'
+    return response.json()
 
 
-def test_shared_customer_assignment_is_explicit_and_allowed(db, client):
-    admin = _user(db, "admin", "admin")
-    _user(db, "first")
-    _user(db, "second")
-    customers = _customers(db)
-    for username in ("first", "second"):
-        response = client.put(f"/api/authz/users/{username}", headers=_headers(admin),
-                              json=_body(customer_ids=[customers[0].id]))
-        assert response.status_code == 200, response.text
-    assert db.scalar(select(func.count()).select_from(SysCustomerAssignment)) == 2
+def _read(client,admin,user):return _result(client.get(f'/api/authz/users/{user.username}/modules',headers=_headers(admin)))
 
 
-@pytest.mark.parametrize("identity_case", ["ordinary", "delegated", "boss", "shared", "missing", "old_token", "demoted", "disabled", "deleted", "stale"])
-def test_only_live_named_admin_can_read_or_write_management(db, client, identity_case):
-    actor = _user(db, "actor", "admin")
-    _user(db, "target")
-    headers = _headers(actor)
-    if identity_case in {"ordinary", "delegated", "boss", "demoted"}:
-        actor.role = "boss" if identity_case == "boss" else "sales"
-        actor.permissions = {"action_account_manage": True, "page_accounts": True} if identity_case == "delegated" else {}
-    elif identity_case == "shared":
-        headers = _headers(actor, fallback=True)
-    elif identity_case == "missing":
-        headers = _headers(sub="no-real-account")
-    elif identity_case == "old_token":
-        headers = _headers(actor, authn=None)
-    elif identity_case == "disabled":
-        actor.is_active = False
-    elif identity_case == "deleted":
-        actor.deleted_at = datetime.now(timezone.utc)
-    elif identity_case == "stale":
-        actor.token_version += 1
-    db.commit()
-    for path in ("/api/authz/users/target", "/api/authz/customers", "/api/authz/catalog"):
-        assert client.get(path, headers=headers).status_code in (401, 403)
-    assert client.put("/api/authz/users/target", headers=headers, json=_body()).status_code in (401, 403)
-    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 0
+def _write(client,admin,user,*,epoch=0,version=0,config=None,operation='replace_resource',**kwargs):
+    u={'resource_id':'sales_analysis','expected_version':version,'operation':operation}
+    if operation!='clear_override':u['configuration']=_config() if config is None else config
+    return client.put(f'/api/authz/users/{user.username}/modules',headers=_headers(admin),json=_body(expected_epoch=epoch,updates=[u],**kwargs))
 
 
-@pytest.mark.parametrize("change", [
-    {"actions": ["export"]}, {"actions": ["read", "unregistered"]}, {"actions": ["read", "read"]},
-    {"scope": "team"}, {"field_permissions": ["data_profit"]}, {"field_permissions": ["data_reconciliation"]}, {"field_permissions": ["data_unknown"]},
-    {"field_permissions": ["data_customer", "data_customer"]}, {"actions": [1]},
-    {"customer_ids": [True]}, {"customer_ids": [-1]}, {"customer_ids": [1, 1]},
-    {"expected_version": True}, {"expected_version": -1}, {"role": "admin"},
-])
-def test_invalid_grant_is_rejected_without_mutation(db, client, change):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    response = client.put("/api/authz/users/target", headers=_headers(admin), json=_body(**change))
-    assert response.status_code == 422, response.text
-    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 0
-    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == 0
-    db.refresh(target)
-    assert target.token_version == 0
+def _tpl(client,admin,code='test_team',config=None):
+    return _result(client.post('/api/role-templates',headers=_headers(admin),json=_body(
+        metadata={'code':code,'name':'测试模板'},authorization={'kind':'explicit','modules':{'sales_analysis':_config() if config is None else config}})),201)['result']
 
 
-def test_missing_and_deleted_targets_and_missing_customer_are_not_partially_applied(db, client):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    _user(db, "deleted", deleted_at=datetime.now(timezone.utc))
-    for username, body in (("missing", _body()), ("deleted", _body()), ("target", _body(customer_ids=[9999]))):
-        response = client.put(f"/api/authz/users/{username}", headers=_headers(admin), json=body)
-        assert response.status_code == 404, response.text
-    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 0
-    db.refresh(target)
-    assert target.token_version == 0
+def _bulk(client,admin,users,operation):
+    preview=_result(client.post('/api/accounts/bulk',headers=_headers(admin),json=_body(dry_run=True,
+        targets=[{'user_id':u.id,'username':u.username,'expected_epoch':u.token_version} for u in users],operation=operation)))
+    return preview,client.post('/api/accounts/bulk',headers=_headers(admin),json={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']})
 
 
-def test_concurrent_first_save_has_one_winner_and_one_version_conflict(db, client, monkeypatch):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    headers = _headers(admin)
-    barrier = Barrier(2, timeout=10)
-    original = api._target
+def test_module_replacement_tombstone_audit_and_legacy_untouched(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target',template_perms={'page_sales_analysis':False},permissions={'data_profit':False})
+    customers=[DimCustomer(name_raw='first'),DimCustomer(name_raw='second')];db.add_all(customers);db.commit()
+    old_headers=_headers(user)
+    first=_result(_write(client,admin,user,customer_assignments={'ids':[customers[1].id,customers[0].id]}))['result']
+    assert first['resources']['sales_analysis']['personal_override']['present'] is True
+    second=_result(_write(client,admin,user,epoch=1,version=1,operation='revoke_resource',config=_config(actions=[])))['result']
+    assert second['resources']['sales_analysis']['version']==2
+    assert second['resources']['sales_analysis']['configuration']['actions']==[]
+    assert second['customer_assignments']['ids']==sorted(c.id for c in customers)
+    assert client.get('/api/authz/me',headers=old_headers).status_code==401
+    db.refresh(user);assert user.token_version==2 and user.template_perms=={'page_sales_analysis':False} and user.permissions=={'data_profit':False}
+    logs=list(db.scalars(select(SysAuditLog).order_by(SysAuditLog.id)))
+    assert len(logs)==2 and logs[1].before_json==first and logs[1].after_json==second
 
-    def synchronized_target(*args):
-        value = original(*args)
-        barrier.wait()
-        return value
 
-    monkeypatch.setattr(api, "_target", synchronized_target)
+@pytest.mark.parametrize('change',[{'actions':['export']},{'actions':['read','read']},{'scope':'mine'},
+    {'field_permissions':['data_profit']},{'field_permissions':['data_reconciliation']},{'field_permissions':['unknown']},
+    {'actions':'read'},{'scope':None},{'field_permissions':None}])
+def test_invalid_resource_is_atomic(db,client,change):
+    admin=_user(db,'operator','admin');user=_user(db,'target')
+    _result(_write(client,admin,user,config=_config(**change)),422)
+    db.refresh(user);assert user.token_version==0
+    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant))==0
+
+
+def test_single_write_stale_epoch_resource_and_missing_customer(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target')
+    _result(_write(client,admin,user))
+    _result(_write(client,admin,user,epoch=0,version=1),409)
+    _result(_write(client,admin,user,epoch=1,version=0),409)
+    _result(_write(client,admin,user,epoch=1,version=1,customer_assignments={'ids':[999999]}),404)
+    state=_read(client,admin,user);assert state['authorization_epoch']==1 and state['resources']['sales_analysis']['version']==1
+
+
+def test_concurrent_first_writes_have_exactly_one_commit(db,client,monkeypatch):
+    admin=_user(db,'operator','admin');user=_user(db,'target');barrier=Barrier(2,timeout=10)
+    original=management.target;headers=_headers(admin);path=f'/api/authz/users/{user.username}/modules'
+    bodies=[_body(expected_epoch=0,updates=[{'resource_id':'sales_analysis','expected_version':0,'operation':'replace_resource','configuration':_config(scope=scope)}]) for scope in ('all','assigned_customers')]
+    def simultaneous(*args):
+        found=original(*args);barrier.wait();return found
+    monkeypatch.setattr(management,'target',simultaneous)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(client.put, "/api/authz/users/target", headers=headers,
-                               json=_body(scope=scope)) for scope in ("all", "assigned_customers")]
-        responses = [future.result(timeout=20) for future in futures]
-    assert sorted(response.status_code for response in responses) == [200, 409]
-    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 1
-    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == 1
-    db.refresh(target)
-    assert target.token_version == 1
+        results=[f.result(timeout=20) for f in [pool.submit(client.put,path,headers=headers,json=body) for body in bodies]]
+    assert sorted(r.status_code for r in results)==[200,409]
+    assert db.scalar(select(func.count()).select_from(SysAuditLog))==1
 
 
-def test_actor_is_rechecked_after_account_lock(db, client, monkeypatch):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    headers, admin_id = _headers(admin), admin.id
-    original = api._target
-
-    def revoke_after_dependency(*args):
-        value = original(*args)
-        with SessionLocal() as other:
-            other.execute(update(SysUser).where(SysUser.id == admin_id).values(role="sales"))
-            other.commit()
-        return value
-
-    monkeypatch.setattr(api, "_target", revoke_after_dependency)
-    response = client.put("/api/authz/users/target", headers=headers, json=_body())
-    assert response.status_code == 403
-    db.refresh(target)
-    assert target.token_version == 0
-    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 0
+def test_actor_is_revalidated_under_final_lock(db,client,monkeypatch):
+    admin=_user(db,'operator','admin');user=_user(db,'target');uid=admin.id;original=management.target
+    def demote(*args):
+        found=original(*args)
+        with SessionLocal() as other:other.execute(update(SysUser).where(SysUser.id==uid).values(role='sales'));other.commit()
+        return found
+    monkeypatch.setattr(management,'target',demote)
+    _result(_write(client,admin,user),403)
+    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant))==0
 
 
-def test_audit_failure_rolls_back_grant_assignments_and_session_revocation(db, client):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    customers = _customers(db)
-    headers = _headers(admin)
-    first = client.put("/api/authz/users/target", headers=headers, json=_body(customer_ids=[customers[0].id]))
-    assert first.status_code == 200
-
-    def reject_audit(session, _context, _instances):
-        if any(isinstance(value, SysAuditLog) for value in session.new):
-            raise RuntimeError("synthetic audit storage failure")
-
-    event.listen(Session, "before_flush", reject_audit)
+def test_audit_failure_rolls_back_root_transaction(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target')
+    before=_result(_write(client,admin,user))['result']
+    def fail(session,*_):
+        if any(isinstance(x,SysAuditLog) for x in session.new):raise RuntimeError('audit failure')
+    event.listen(Session,'before_flush',fail)
     try:
-        with pytest.raises(RuntimeError, match="synthetic audit storage failure"):
-            client.put("/api/authz/users/target", headers=headers,
-                       json=_body(expected_version=1, scope="all", customer_ids=[customers[1].id]))
-    finally:
-        event.remove(Session, "before_flush", reject_audit)
-    assert client.get("/api/authz/users/target", headers=headers).json() == first.json()
-    db.refresh(target)
-    assert target.token_version == 1
-    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == 1
+        with pytest.raises(RuntimeError,match='audit failure'):_write(client,admin,user,epoch=1,version=1,config=_config(scope='all'))
+    finally:event.remove(Session,'before_flush',fail)
+    assert _read(client,admin,user)==before
 
 
-def test_self_edit_invalidates_own_session_after_successful_atomic_response(db, client):
-    admin = _user(db, "admin", "admin")
-    headers = _headers(admin)
-    before = client.get("/api/authz/me", headers=headers)
-    assert before.json()["username"] == "admin"
-    assert before.json()["can_manage"] is True
-    response = client.put("/api/authz/users/admin", headers=headers, json=_body(actions=[]))
-    assert response.status_code == 200
-    assert response.json()["version"] == 1
-    assert client.get("/api/authz/me", headers=headers).status_code == 401
+def test_self_write_returns_result_then_invalidates_session(db,client):
+    admin=_user(db,'operator','admin');headers=_headers(admin)
+    response=_result(_write(client,admin,admin))
+    assert response['actor_session_revoked'] and response['result']['authorization_epoch']==1
+    _result(client.get('/api/authz/me',headers=headers),401)
 
 
-@pytest.mark.parametrize("endpoint", ["me", "users/target"])
-def test_read_snapshot_and_version_hold_one_lock_until_concurrent_save_finishes(db, client, monkeypatch, endpoint):
-    admin = _user(db, "admin", "admin")
-    target = _user(db, "target")
-    customers = _customers(db)
-    admin_headers = _headers(admin)
-    initial = client.put("/api/authz/users/target", headers=admin_headers,
-                         json=_body(customer_ids=[customers[0].id]))
-    assert initial.status_code == 200
-    db.refresh(target)
-    target_id, old_customer_id, new_customer_id = target.id, customers[0].id, customers[1].id
-    read_headers = _headers(target) if endpoint == "me" else admin_headers
-    db.rollback()
-    snapshot_ready, release_snapshot = Event(), Event()
-    original = api._snapshot
-
-    def pause_snapshot(db_session, loaded_target, grant):
-        result = original(db_session, loaded_target, grant)
-        if not snapshot_ready.is_set():
-            snapshot_ready.set()
-            assert release_snapshot.wait(10), "snapshot release timed out"
-        return result
-
-    if endpoint == "me":
-        def service_snapshot(db_session, ctx):
-            user = db_session.scalar(select(SysUser).where(SysUser.username == ctx.user_id))
-            grant = api._grant(db_session, user.id)
-            result = pause_snapshot(db_session, user, grant)
-            return {"enabled": True, "read": True, "export": True, "scope": result["scope"],
-                    "customer_count": len(result["customer_ids"]), "field_permissions": result["field_permissions"],
-                    "reason": "synthetic snapshot under real database lock"}
-        monkeypatch.setattr(api.service, "sales_snapshot", service_snapshot)
-    else:
-        monkeypatch.setattr(api, "_snapshot", pause_snapshot)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        reader = pool.submit(client.get, f"/api/authz/{endpoint}", headers=read_headers)
-        writer = None
+def test_management_read_holds_shared_user_lock(db,client,monkeypatch):
+    admin=_user(db,'operator','admin');user=_user(db,'target');uid=user.id
+    _result(_write(client,admin,user));db.rollback();ready,release=Event(),Event();original=management._read_account
+    def paused(*args,**kwargs):
+        result=original(*args,**kwargs);ready.set();assert release.wait(10);return result
+    monkeypatch.setattr(management,'_read_account',paused)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future=pool.submit(_read,client,admin,user)
         try:
-            assert snapshot_ready.wait(10), "snapshot did not start"
-            # PostgreSQL itself proves the read holds a conflicting account
-            # lock; this is not inferred from timing or a mocked lock method.
-            with SessionLocal() as observer:
-                with pytest.raises(OperationalError) as blocked:
-                    observer.scalar(select(SysUser).where(SysUser.id == target_id).with_for_update(nowait=True))
-                assert blocked.value.orig.sqlstate == "55P03"
-                observer.rollback()
-            writer = pool.submit(client.put, "/api/authz/users/target", headers=admin_headers,
-                                 json=_body(expected_version=1, scope="all", customer_ids=[new_customer_id]))
-        finally:
-            release_snapshot.set()
-        read_response = reader.result(timeout=15)
-        assert read_response.status_code == 200, read_response.text
-        written = writer.result(timeout=15)
-        assert written.status_code == 200, written.text
-    if endpoint == "me":
-        assert read_response.json()["version"].endswith(":1:1")
-        assert read_response.json()["sales_analysis"]["scope"] == "assigned_customers"
-        assert read_response.json()["sales_analysis"]["customer_count"] == 1
-    else:
-        assert read_response.json()["version"] == 1
-        assert read_response.json()["customer_ids"] == [old_customer_id]
-    assert written.json()["version"] == 2
-    assert written.json()["scope"] == "all"
-    assert written.json()["customer_ids"] == [new_customer_id]
+            assert ready.wait(10)
+            with SessionLocal() as other:
+                with pytest.raises(OperationalError) as err:other.scalar(select(SysUser).where(SysUser.id==uid).with_for_update(nowait=True))
+                assert err.value.orig.sqlstate=='55P03'
+        finally:release.set()
+        assert future.result(timeout=15)['authorization_epoch']==1
 
 
-def test_me_distinguishes_shared_missing_and_real_identity_and_delegates_snapshot(db, client, monkeypatch):
-    admin = _user(db, "admin", "admin")
-    received = []
-    snapshot = {"enabled": True, "read": True, "export": False, "scope": "assigned_customers",
-                "customer_count": 2, "field_permissions": ["data_customer"], "reason": "synthetic service result"}
-
-    def capture(db_session, ctx):
-        received.append(ctx)
-        return snapshot
-
-    monkeypatch.setattr(api.service, "sales_snapshot", capture)
-    result = client.get("/api/authz/me", headers=_headers(admin))
-    assert result.headers["cache-control"] == "no-store"
-    assert result.json()["sales_analysis"] == snapshot
-    assert result.json()["can_manage"] is True
-    assert received[-1].authn == "sys_user"
-    assert received[-1].token_version == 0
-    for headers in (_headers(admin, fallback=True), _headers(sub="missing"), _headers(admin, authn=None)):
-        response = client.get("/api/authz/me", headers=headers)
-        assert response.status_code == 200
-        assert response.json()["username"] is None
-        assert response.json()["can_manage"] is False
-    assert client.get("/api/authz/me").status_code == 401
+def test_template_saved_snapshot_equal_override_clear_and_sync(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target');_tpl(client,admin)
+    _,applied=_bulk(client,admin,[user],{'kind':'apply_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'})
+    _result(applied);db.refresh(user)
+    _result(_write(client,admin,user,epoch=1,version=1))
+    saved=_result(client.put('/api/role-templates/test_team',headers=_headers(admin),json=_body(expected_version=1,metadata={'name':'v2'},updates=[{'resource_id':'sales_analysis','operation':'replace_resource','configuration':_config(scope='all')}])) )
+    assert saved['result']['template']['version']==2
+    cleared=_result(_write(client,admin,user,epoch=2,version=2,operation='clear_override'))['result']
+    assert cleared['resources']['sales_analysis']['configuration']['scope']=='assigned_customers'
+    assert cleared['resources']['sales_analysis']['personal_override']['present'] is False
+    db.refresh(user)
+    preview=_result(client.post('/api/authz/templates/test_team/sync',headers=_headers(admin),json=_body(dry_run=True,targets=[{'user_id':user.id,'username':user.username,'expected_epoch':user.token_version}],operation={'kind':'sync_template','template_code':'test_team','expected_template_version':2,'override_policy':'preserve'})))
+    result=_result(client.post('/api/authz/templates/test_team/sync',headers=_headers(admin),json={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']}))
+    assert result['results'][0]['resources']['sales_analysis']['configuration']['scope']=='all'
+    assert result['results'][0]['subject']['role']=='sales'
+    assert result['results'][0]['resources']['sales_analysis']['version']==4
 
 
-def test_catalog_and_customer_search_mark_legacy_and_preserve_literal_names(db, client):
-    admin = _user(db, "admin", "admin")
-    customers = _customers(db)
-    headers = _headers(admin)
-    catalog = client.get("/api/authz/catalog", headers=headers).json()
-    migrated = [item for item in catalog["modules"] if item["status"] == "migrated"]
-    assert len(migrated) == 1 and migrated[0]["id"] == "sales_analysis"
-    assert migrated[0]["enabled"] is False
-    assert "旧账号权限" in migrated[0]["notice"]
-    assert {item["id"] for item in migrated[0]["field_permissions"]} == SALES_FIELD_PERMISSIONS
-    assert {item["permission_key"] for item in catalog["modules"] if item["status"] == "legacy"} == set(permissions.PAGE_KEYS) - {"page_sales_analysis"}
-    for query, expected in (("客户甲", customers[0]), ("old-A", customers[0]), ("_100%", customers[2])):
-        response = client.get("/api/authz/customers", headers=headers, params={"q": query})
-        assert response.status_code == 200
-        assert response.json()["items"] == [{"id": expected.id, "name": expected.name_normalized or expected.name_raw,
-                                              "raw_name": expected.name_raw}]
-    assert len(client.get("/api/authz/customers", headers=headers, params={"limit": 1}).json()["items"]) == 1
-    assert client.get("/api/authz/customers", headers=headers, params={"limit": 101}).status_code == 422
+def test_template_resource_removal_revokes_but_saved_user_unchanged_until_sync(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target');_tpl(client,admin)
+    _,res=_bulk(client,admin,[user],{'kind':'apply_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'});_result(res)
+    _result(client.put('/api/role-templates/test_team',headers=_headers(admin),json=_body(expected_version=1,updates=[{'resource_id':'sales_analysis','operation':'remove_resource'}])))
+    assert _read(client,admin,user)['resources']['sales_analysis']['configuration']['actions']==['read']
+    db.refresh(user)
+    preview=_result(client.post('/api/authz/templates/test_team/sync',headers=_headers(admin),json=_body(dry_run=True,targets=[{'user_id':user.id,'username':user.username,'expected_epoch':1}],operation={'kind':'sync_template','template_code':'test_team','expected_template_version':2,'override_policy':'preserve'})))
+    assert preview['preview'][0]['resources'][0]['change']=='revoke'
+    result=_result(client.post('/api/authz/templates/test_team/sync',headers=_headers(admin),json={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']}))
+    assert result['results'][0]['resources']['sales_analysis']['configuration']['actions']==[]
 
 
-def test_customer_choices_and_assignments_disambiguate_same_normalized_name_by_raw_name_and_id(db, client):
-    admin = _user(db, "admin", "admin")
-    _user(db, "target")
-    customers = [DimCustomer(name_raw="客户甲-总公司", name_normalized="客户甲"),
-                 DimCustomer(name_raw="客户甲-分公司", name_normalized="客户甲")]
-    db.add_all(customers)
-    db.commit()
-    expected = [{"id": row.id, "name": "客户甲", "raw_name": row.name_raw} for row in customers]
-    headers = _headers(admin)
-    options = client.get("/api/authz/customers", headers=headers, params={"q": "客户甲"})
-    assert options.status_code == 200
-    assert options.json()["items"] == expected
-    saved = client.put("/api/authz/users/target", headers=headers,
-                       json=_body(customer_ids=[customers[1].id]))
-    assert saved.status_code == 200
-    assert saved.json()["customers"] == [expected[1]]
-    loaded = client.get("/api/authz/users/target", headers=headers)
-    assert loaded.json()["customers"] == [expected[1]]
+def test_template_copy_archive_cas_and_canonical_membership(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target',template_code='old_legacy');_tpl(client,admin)
+    _,res=_bulk(client,admin,[user],{'kind':'apply_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'});_result(res)
+    members=_result(client.get('/api/role-templates/test_team/accounts',headers=_headers(admin)))
+    assert [row['id'] for row in members['accounts']]==[user.id]
+    copy=_result(client.post('/api/role-templates',headers=_headers(admin),json=_body(metadata={'name':'复制','code':'copy_team'},authorization={'kind':'copy_template','code':'test_team','expected_version':1})),201)
+    assert copy['result']['modules']['sales_analysis']==_config()
+    _result(client.post('/api/role-templates/test_team/archive',headers=_headers(admin),json=_body(expected_version=0)),422)
+    archived=_result(client.post('/api/role-templates/test_team/archive',headers=_headers(admin),json=_body(expected_version=1)))
+    assert not archived['result']['template']['is_active']
+    assert _read(client,admin,user)['authorization_epoch']==1
+    _result(client.post('/api/role-templates/test_team/restore',headers=_headers(admin),json=_body(expected_version=1)),409)
 
 
+def test_new_account_atomic_authorization_security_and_password_do_not_leak(db,client):
+    admin=_user(db,'operator','admin')
+    body=_body(profile={'username':'new','password':'synthetic_password','display_name':'新账号'},authorization={'kind':'explicit','modules':{'sales_analysis':_config()}})
+    result=_result(client.post('/api/accounts',headers=_headers(admin),json=body),201)
+    assert result['account']['subject']['role']=='readonly' and result['account']['authorization_epoch']==1
+    assert 'synthetic_password' not in str(result)
+    new=db.scalar(select(SysUser).where(SysUser.username=='new'));assert verify_password('synthetic_password',new.password_hash)
+    bad=deepcopy(body);bad['profile']['username']='must_not_exist';bad['authorization']['modules']['purchase_analysis']=_config()
+    _result(client.post('/api/accounts',headers=_headers(admin),json=bad),422)
+    assert db.scalar(select(SysUser.id).where(SysUser.username=='must_not_exist')) is None
+    preview_body=_body(profile={'username':'new_admin'},authorization={'kind':'none'},security_change={'role':'admin'},dry_run=True)
+    preview=_result(client.post('/api/accounts',headers=_headers(admin),json=preview_body))
+    execute={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']};execute['profile']['password']='synthetic_admin_password'
+    created=_result(client.post('/api/accounts',headers=_headers(admin),json=execute),201)
+    assert created['account']['subject']['role']=='admin'
+    assert created['account']['resources']['sales_analysis']['configuration'] is None
+
+
+def test_profile_security_lifecycle_and_reset_password(db,client):
+    admin=_user(db,'operator','admin');user=_user(db,'target')
+    result=_result(client.put('/api/accounts/target',headers=_headers(admin),json=_body(profile={'display_name':'new name'})))
+    assert result['authorization_epoch']==0
+    preview=_result(client.put('/api/accounts/target',headers=_headers(admin),json=_body(expected_epoch=0,security_change={'salesperson_name':'映射甲'},dry_run=True)))
+    _result(client.put('/api/accounts/target',headers=_headers(admin),json={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']}))
+    _result(client.put('/api/accounts/target/password',headers=_headers(admin),json=_body(expected_epoch=1,password='synthetic_reset_password')))
+    db.refresh(user);assert user.salesperson_name=='映射甲' and verify_password('synthetic_reset_password',user.password_hash)
+    _result(client.put('/api/accounts/target/active',headers=_headers(admin),json=_body(expected_epoch=2,is_active=False)))
+    unchanged=_result(client.put('/api/accounts/target/active',headers=_headers(admin),json=_body(expected_epoch=3,is_active=False)))
+    assert unchanged['changed'] is False and unchanged['authorization_epoch']==3
+    _result(client.request('DELETE','/api/accounts/target',headers=_headers(admin),json=_body(expected_epoch=3)))
+    db.refresh(user);assert user.deleted_at is not None and user.token_version==4
+
+
+@pytest.mark.parametrize('legacy', [{'permissions':{}},{'overrides':{}},{'keys':[]},{'role':None},{'template_code':None}])
+def test_mixed_profile_legacy_fields_reject_whole_command(db,client,legacy):
+    admin=_user(db,'operator','admin');user=_user(db,'target')
+    _result(client.put('/api/accounts/target',headers=_headers(admin),json=_body(profile={'display_name':'must not write'},**legacy)),422)
+    db.refresh(user);assert user.display_name is None and user.token_version==0
+
+
+def test_old_s0_writer_permanently_retired(db,client,monkeypatch):
+    admin=_user(db,'operator','admin');_user(db,'target')
+    for mode in ('unified_modules','legacy_compat'):
+        monkeypatch.setattr(get_settings(),'authorization_mode',mode)
+        res=_result(client.put('/api/authz/users/target',headers=_headers(admin),json={}),409)
+        assert res['detail']['code']=='AUTHZ_LEGACY_ENDPOINT_RETIRED'
+
+
+def test_catalog_planned_and_customer_literal_search(db,client):
+    admin=_user(db,'operator','admin')
+    modules=_result(client.get('/api/authz/catalog',headers=_headers(admin)))['modules']
+    assert any(x['id']=='purchase_analysis' and not x['configurable'] for x in modules)
+    db.add_all([DimCustomer(name_raw='literal_100%'),DimCustomer(name_raw='literalX100Y')]);db.commit()
+    matches=_result(client.get('/api/authz/customers?q=literal_100%25',headers=_headers(admin)))['items']
+    assert len(matches)==1 and matches[0]['raw_name']=='literal_100%'
 def _migration():
     path = Path(__file__).parents[1] / "alembic/versions/f1a3c5e7b9d2_authorization_sales_customers.py"
     spec = importlib.util.spec_from_file_location("sales_authorization_migration", path)
@@ -401,40 +297,140 @@ def test_frozen_migration_projection_matches_current_legacy_semantics(role, snap
     assert migration._legacy_permissions(values) == {key: expected[key] for key in migration._KEYS}
 
 
-def test_real_postgres_migration_seeds_only_old_page_entitlement_and_never_guesses_ownership(db):
-    backend = Path(__file__).parents[1]
-    config = Config(str(backend / "alembic.ini"))
-    config.set_main_option("script_location", str(backend / "alembic"))
-    db.rollback()
-    command.downgrade(config, "d8f6a2c4b9e7")
+
+
+def test_real_postgres_s0_seed_and_s1_source_backfill_are_distinct(db):
+    """Old seed interprets legacy once; S1 copies actual Grant, including deny."""
+    backend=Path(__file__).parents[1];config=Config(str(backend/'alembic.ini'))
+    config.set_main_option('script_location',str(backend/'alembic'));db.rollback()
+    command.downgrade(config,'d8f6a2c4b9e7')
     try:
-        admin = _user(db, "admin", "admin", template_perms={"page_sales_analysis": False, "own_customers_only": True})
-        boss = _user(db, "boss", "boss", template_perms={"page_sales_analysis": True, "own_customers_only": True})
-        sales = _user(db, "sales", template_perms={"page_sales_analysis": True, "data_profit": True,
-                                                   "data_purchase_cost": False, "data_customer": True, "data_reconciliation": True},
-                      salesperson_name="甲")
-        _user(db, "blocked", "boss", template_perms={"page_sales_analysis": False})
-        _user(db, "deleted", "admin", deleted_at=datetime.now(timezone.utc))
-        inactive = _user(db, "inactive", "boss", is_active=False)
-        ids = {row.username: row.id for row in (admin, boss, sales, inactive)}
-        db.rollback()
-        command.upgrade(config, "f1a3c5e7b9d2")
-        grants = {row.user_id: row for row in db.scalars(select(SysAuthorizationGrant))}
-        assert set(grants) == set(ids.values())
-        assert grants[ids["admin"]].scope == "all"  # legacy effective admin ignores raw own=true
-        assert grants[ids["boss"]].scope == "assigned_customers"
-        assert grants[ids["sales"]].scope == "assigned_customers"
-        assert grants[ids["inactive"]].scope == "all"
-        assert grants[ids["sales"]].field_permissions == ["data_customer"]
-        assert all(set(row.actions) == {"read", "export"} and row.version == 1 for row in grants.values())
-        assert db.scalar(select(func.count()).select_from(SysCustomerAssignment)) == 0
-        assert db.scalar(select(func.sum(SysUser.token_version))) == 0
-        _user(db, "new-after-migration", "admin")
-        assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant)) == 4
-        db.rollback()
-        command.downgrade(config, "d8f6a2c4b9e7")
-        assert db.execute(text("SELECT to_regclass('sys_authorization_grant')")).scalar_one() is None
-        db.rollback()
+        import json
+        for name,role,snapshot in [('old-admin','admin',{'page_sales_analysis':False}),('old-sales','sales',{'page_sales_analysis':True,'own_customers_only':True}),('old-denied','boss',{'page_sales_analysis':False})]:
+            db.execute(text('INSERT INTO sys_user (username,password_hash,role,template_perms) VALUES (:n,:p,:r,CAST(:s AS jsonb))'),{'n':name,'p':'unused','r':role,'s':json.dumps(snapshot)})
+        db.commit();command.upgrade(config,'f1a3c5e7b9d2')
+        rows=db.execute(text('SELECT u.username,g.actions,g.scope,u.token_version FROM sys_user u JOIN sys_authorization_grant g ON g.user_id=u.id ORDER BY u.username')).all()
+        assert [r.username for r in rows]==['old-admin','old-sales']
+        assert rows[0].scope=='all' and rows[1].scope=='assigned_customers'
+        assert all(r.token_version==0 for r in rows)
+        db.execute(text("UPDATE sys_authorization_grant SET actions='[]'::jsonb WHERE user_id=(SELECT id FROM sys_user WHERE username='old-sales')"))
+        db.commit();command.upgrade(config,'head')
+        users={u.username:u for u in db.scalars(select(SysUser).where(SysUser.username.like('old-%')))}
+        assert users['old-sales'].authorization_profile['resource_overrides']['sales_analysis']['actions']==[]
+        assert users['old-sales'].authorization_profile['template_snapshot'] is None
+        assert users['old-sales'].token_version==1 and users['old-admin'].token_version==1
+        assert users['old-denied'].authorization_profile==management.empty_profile() and users['old-denied'].token_version==0
+        assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==0
+        assert db.scalar(select(func.count()).select_from(SysCustomerAssignment))==0
+        assert all(t.authorization_bundle=={} for t in db.scalars(select(SysRoleTemplate)))
     finally:
-        db.rollback()
-        command.upgrade(config, "head")
+        db.rollback();command.upgrade(config,'head')
+
+
+@pytest.mark.parametrize('method,path,kwargs,expected',[
+    ('put','/api/authz/users/target/modules',{'json':[]},422),
+    ('put','/api/accounts/target',{'content':'{broken json','headers':{'Content-Type':'application/json'}},422),
+    ('get','/api/authz/customers?limit=0',{},422),
+    ('get','/api/authz/catalog',{'without_auth':True},401),
+    ('post','/api/role-templates',{'json':[]},422),
+])
+def test_parser_and_query_errors_are_closed_wire(db,client,method,path,kwargs,expected):
+    admin=_user(db,'operator','admin');_user(db,'target');kwargs=deepcopy(kwargs)
+    headers={} if kwargs.pop('without_auth',False) else _headers(admin)
+    headers.update(kwargs.pop('headers',{}))
+    result=_result(getattr(client,method)(path,headers=headers,**kwargs),expected)
+    assert result['detail']['committed'] is False
+    assert set(result['detail'])=={'code','message','committed','conflicts','field_errors'}
+
+
+def test_two_admins_cross_edit_without_lock_upgrade_deadlock(db,client,monkeypatch):
+    first=_user(db,'admin-one','admin');second=_user(db,'admin-two','admin')
+    headers=[_headers(first),_headers(second)];paths=[f'/api/authz/users/{second.username}/modules',f'/api/authz/users/{first.username}/modules']
+    body=_body(expected_epoch=0,updates=[{'resource_id':'sales_analysis','expected_version':0,'operation':'replace_resource','configuration':_config()}])
+    barrier=Barrier(2,timeout=10);original=management.target
+    def simultaneous(*args):
+        found=original(*args);barrier.wait();return found
+    monkeypatch.setattr(management,'target',simultaneous)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(client.put,path,headers=header,json=body) for path,header in zip(paths,headers)]
+        results=[f.result(timeout=20) for f in futures]
+    assert sorted(r.status_code for r in results)==[200,401]
+    assert db.scalar(select(func.count()).select_from(SysAuthorizationGrant))==1
+    assert db.scalar(select(func.sum(SysUser.token_version)))==1
+
+
+def test_two_admins_cross_disable_leave_one_live_admin(db,client):
+    first=_user(db,'admin-one','admin');second=_user(db,'admin-two','admin')
+    headers=[_headers(first),_headers(second)];names=[second.username,first.username];barrier=Barrier(2,timeout=10)
+    def disable(header,name):
+        barrier.wait()
+        return client.put(f'/api/accounts/{name}/active',headers=header,json=_body(expected_epoch=0,is_active=False))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=[f.result(timeout=20) for f in [pool.submit(disable,h,n) for h,n in zip(headers,names)]]
+    assert sorted(r.status_code for r in results)==[200,401]
+    assert db.scalar(select(func.count()).select_from(SysUser).where(SysUser.role=='admin',SysUser.is_active.is_(True)))==1
+    survivor=db.scalar(select(SysUser).where(SysUser.is_active.is_(True)))
+    _result(client.put(f'/api/accounts/{survivor.username}/active',headers=_headers(survivor),json=_body(expected_epoch=survivor.token_version,is_active=False)),400)
+
+
+def test_archive_and_sync_serialize_on_template_before_user_locks(db,client,monkeypatch):
+    admin=_user(db,'operator','admin');user=_user(db,'target');_tpl(client,admin)
+    _,res=_bulk(client,admin,[user],{'kind':'apply_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'});_result(res)
+    headers=_headers(admin)
+    preview=_result(client.post('/api/authz/templates/test_team/sync',headers=headers,json=_body(dry_run=True,
+        targets=[{'user_id':user.id,'username':user.username,'expected_epoch':1}],operation={'kind':'sync_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'})))
+    execute={**preview['command'],'dry_run':False,'fingerprint':preview['fingerprint']}
+    barrier=Barrier(2,timeout=10);original=management.template_row
+    def simultaneous(*args,**kwargs):
+        if kwargs.get('lock'):barrier.wait()
+        return original(*args,**kwargs)
+    monkeypatch.setattr(management,'template_row',simultaneous)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        archive=pool.submit(client.post,'/api/role-templates/test_team/archive',headers=headers,json=_body(expected_version=1))
+        sync=pool.submit(client.post,'/api/authz/templates/test_team/sync',headers=headers,json=execute)
+        archived,synced=archive.result(timeout=20),sync.result(timeout=20)
+    _result(archived)
+    assert synced.status_code in (200,400),synced.text
+    db.refresh(user);assert user.token_version==(2 if synced.status_code==200 else 1)
+    tpl=db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code=='test_team'));assert not tpl.is_active and tpl.version==2
+
+
+@pytest.mark.parametrize('damage',['mixed_actions','mixed_fields','profile_shape','profile_value','source_mismatch','missing_materialization'])
+def test_corrupt_persisted_sources_are_diagnostic_not_500(db,client,damage):
+    admin=_user(db,'operator','admin');user=_user(db,'target');_result(_write(client,admin,user))
+    db.refresh(user);grant=db.scalar(select(SysAuthorizationGrant).where(SysAuthorizationGrant.user_id==user.id))
+    if damage=='mixed_actions':grant.actions=['read',3]
+    elif damage=='mixed_fields':grant.field_permissions=['data_customer',{}]
+    elif damage=='profile_shape':user.authorization_profile=[]
+    elif damage=='profile_value':user.authorization_profile={**management.empty_profile(),'resource_overrides':{'sales_analysis':{'actions':[3],'scope':'all','field_permissions':[]}}}
+    elif damage=='source_mismatch':grant.actions=[]
+    else:db.delete(grant)
+    db.commit()
+    response=_result(client.get('/api/authz/users/target/modules',headers=_headers(admin)),409)
+    assert response['detail']['code'] in {'AUTHZ_SOURCE_INVALID','AUTHZ_SOURCE_INCONSISTENT'}
+    assert response['detail']['committed'] is False
+
+
+def test_cutover_marker_prevents_schema_downgrade(db,client):
+    backend=Path(__file__).parents[1];config=Config(str(backend/'alembic.ini'))
+    config.set_main_option('script_location',str(backend/'alembic'));db.rollback()
+    with pytest.raises(RuntimeError,match='Cannot downgrade after authorization cutover'):
+        command.downgrade(config,'f1a3c5e7b9d2')
+    assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==1
+    assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one()=='a7c2e9f4b6d1'
+    assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name='sys_user' AND column_name='authorization_profile' AND table_schema=current_schema()" )).scalar_one()==1
+    db.rollback()
+
+
+def test_legacy_body_validation_still_returns_422_after_dispatch(db,monkeypatch):
+    settings=get_settings()
+    monkeypatch.setattr(settings,'authorization_mode','legacy_compat')
+    monkeypatch.setattr(settings,'authz_sales_analysis_enabled',False)
+    monkeypatch.setattr(settings,'authz_sales_analysis_suspended',False)
+    monkeypatch.setattr(settings,'authz_enabled_resources',[])
+    monkeypatch.setattr(settings,'authz_suspended_resources',[])
+    admin=_user(db,'operator','admin');app=FastAPI();app.include_router(accounts.router,prefix='/api')
+    with TestClient(app) as client:
+        result=_result(client.post('/api/accounts',headers=_headers(admin),json={'password':'not echoed'}),422)
+        assert result['detail']['field_errors'][0]['path']=='/username'
+        assert 'not echoed' not in str(result)

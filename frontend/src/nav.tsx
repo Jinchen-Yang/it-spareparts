@@ -52,7 +52,7 @@ export interface NavItem {
   /** 后端 page_* 权限键；缺省且无 anyPerm 表示仅管理员可见（如账号管理） */
   perm?: string;
   /** 模块启用新授权时，由服务端能力快照取代旧权限与角色门。 */
-  authzResource?: "sales_analysis";
+  authzResource?: string;
   /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
    * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
   anyPerm?: string[];

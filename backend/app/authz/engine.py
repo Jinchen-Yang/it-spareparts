@@ -8,7 +8,7 @@ import logging
 from types import MappingProxyType
 
 from cerbos.sdk.client import CerbosClient
-from cerbos.sdk.model import Principal, Resource, ResourceDesc, ResourceList
+from cerbos.sdk.model import Effect, Principal, Resource, ResourceDesc, ResourceList
 from cerbos_sqlalchemy import get_query
 from sqlalchemy import false, true
 
@@ -82,16 +82,24 @@ SalesPlan = Plan
 
 
 def _make_principal(user_id: int, grant: Grant, attributes: Mapping) -> Principal:
+    return _make_batch_principal(user_id, {grant.resource: grant}, {grant.resource: attributes})
+
+
+def _make_batch_principal(user_id: int, grants: Mapping[str, Grant], attributes: Mapping[str, Mapping]) -> Principal:
     if type(user_id) is not int or user_id < 1:
         raise ValueError("实名用户 ID 无效")
-    if "grant" in attributes:
-        raise ValueError("资源属性不能覆盖显式授权")
+    if set(attributes) != set(grants):
+        raise ValueError("资源属性必须与授权逐项配对")
+    for resource, grant in grants.items():
+        if resource != grant.resource or any(key in attributes[resource] for key in ("grant", "grants", "contexts")):
+            raise ValueError("资源属性不能覆盖显式授权")
     return Principal(
         id=str(user_id), roles={"registered_account"},
-        attr={"grant": {
+        attr={"grants": {resource: {
             "actions": list(grant.actions), "scope": grant.scope,
             "field_permissions": list(grant.field_permissions), "version": grant.version,
-        }, **attributes},
+        } for resource, grant in grants.items()},
+              "contexts": {resource: dict(values) for resource, values in attributes.items()}},
     )
 
 
@@ -105,28 +113,57 @@ def _client() -> CerbosClient:
 
 def _check(client: CerbosClient, principal: Principal, grant: Grant,
            actions: Sequence[str]) -> Decision:
-    definition = get_resource_definition(grant.resource)
-    if not actions or any(action not in definition.actions for action in actions):
-        raise AuthorizationDenied("未注册的资源动作")
-    module_id = f"{grant.resource.replace('_', '-')}-module"
-    response = client.check_resources(principal, ResourceList().add(
-        Resource(id=module_id, kind=grant.resource, attr={"module_probe": True}),
-        set(actions),
-    ))
+    return _check_batch(client, principal, {grant.resource: grant}, {grant.resource: actions})[grant.resource]
+
+
+def _module_id(resource: str) -> str:
+    return f"{resource.replace('_', '-')}-module"
+
+
+def _check_batch(client, principal, grants, requested) -> dict[str, Decision]:
+    if set(grants) != set(requested):
+        raise AuthorizationDenied("授权与请求资源不匹配")
+    resources = ResourceList()
+    for resource, grant in grants.items():
+        actions = requested[resource]
+        if (not actions or len(actions) != len(set(actions))
+                or not set(actions) <= get_resource_definition(resource).actions):
+            raise AuthorizationDenied("未注册的资源动作")
+        resources.add(Resource(id=_module_id(resource), kind=resource, attr={"module_probe": True}), set(actions))
+    response = client.check_resources(principal, resources)
     response.raise_if_failed()
-    result = response.get_resource(module_id)
-    if result is None or result.resource.kind != grant.resource or result.validation_errors:
+    results = response.results
+    expected = {_module_id(resource): resource for resource in grants}
+    if (not isinstance(results, list) or len(results) != len(expected)
+            or len({result.resource.id for result in results}) != len(expected)
+            or {result.resource.id for result in results} != set(expected)):
+        raise AuthorizationUnavailable("授权批量响应缺失、重复或包含额外资源")
+    decisions = {}
+    for result in results:
+        resource = expected[result.resource.id]
+        decisions[resource] = _decision(result, grants[resource], requested[resource])
+    return decisions
+
+
+def _decision(result, grant: Grant, actions: Sequence[str]) -> Decision:
+    if (result.resource.kind != grant.resource or result.validation_errors
+            or set(result.actions) != set(actions)
+            or any(effect not in (Effect.ALLOW, Effect.DENY) for effect in result.actions.values())):
         raise AuthorizationUnavailable("授权响应无效")
     allowed = frozenset(action for action in actions if result.is_allowed(action))
     if not allowed <= set(grant.actions):
         raise AuthorizationUnavailable("授权响应超出显式动作")
+    if any(entry.action not in allowed for entry in result.outputs or []):
+        raise AuthorizationUnavailable("授权输出包含未允许的动作")
     fields: frozenset[str] | None = None
     for action in allowed:
         outputs = [entry for entry in result.outputs or [] if entry.action == action]
         if len(outputs) != 1 or outputs[0].error:
             raise AuthorizationUnavailable("授权字段响应缺失")
         output = outputs[0].val
-        if not isinstance(output, dict) or output.get("scope") != grant.scope or output.get("version") != grant.version:
+        if (not isinstance(output, dict) or output.get("resource") != grant.resource
+                or output.get("scope") != grant.scope or isinstance(output.get("version"), bool)
+                or output.get("version") != grant.version):
             raise AuthorizationUnavailable("授权范围或版本响应不匹配")
         returned = output.get("field_permissions")
         validate_grant(grant.resource, grant.actions, grant.scope, returned)
@@ -135,6 +172,24 @@ def _check(client: CerbosClient, principal: Principal, grant: Grant,
             raise AuthorizationUnavailable("授权字段响应不匹配")
         fields = current
     return Decision(allowed, fields or frozenset())
+
+
+def check_resources(user_id: int, grants: Mapping[str, Grant],
+                    principal_attributes: Mapping[str, Mapping],
+                    actions: Mapping[str, Sequence[str]]) -> dict[str, Decision]:
+    """One connection and one CheckResources call for an entire snapshot."""
+    if not grants:
+        if principal_attributes or actions:
+            raise AuthorizationDenied("空授权请求不能携带额外资源")
+        return {}
+    try:
+        principal = _make_batch_principal(user_id, grants, principal_attributes)
+        with _client() as client:
+            return _check_batch(client, principal, grants, actions)
+    except (AuthorizationDenied, AuthorizationUnavailable):
+        raise
+    except Exception as exc:
+        raise _unavailable(exc) from exc
 
 
 def _unavailable(exc: Exception) -> AuthorizationUnavailable:

@@ -1,3 +1,4 @@
+import { authzSnapshot } from "../../../../test/authzFixtures";
 // 销售看板页签（D-44）：页签落 URL、分组排行升降序与下钻、无客户权限的维度门控、
 // 趋势粒度推荐与桶下钻、KPI 上月对比与新老客、订单导出、金额区间口径门控。
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
@@ -52,9 +53,9 @@ vi.mock("../../../../components/charts/EChartContainer", () => ({
     ),
 }));
 
-vi.mock("../../../../authz/AuthzProvider", () => ({
-  useAuthz: () => ({ status: "ready", snapshot: { version: "legacy", can_manage: false,
-    sales_analysis: { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] } } }),
+vi.mock("../../../../authz/AuthzProvider", async () => ({
+  ...await vi.importActual<typeof import("../../../../authz/AuthzProvider")>("../../../../authz/AuthzProvider"),
+  useAuthz: () => ({ status: "ready", snapshot: authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, {version: "legacy", canManage: false}) }),
   AuthzUnavailable: () => <div>权限尚未确认</div>,
 }));
 

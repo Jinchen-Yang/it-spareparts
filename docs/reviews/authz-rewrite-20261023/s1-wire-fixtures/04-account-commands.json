@@ -1,0 +1,808 @@
+{
+  "fixture_format": 1,
+  "catalog_version": "authz-s1-v1",
+  "note": "Independent DTO examples only; not complete database seeds or reproducible server fingerprint vectors; no live data.",
+  "cases": [
+    {
+      "id": "apply_single_target_preview_preserves_equal_override",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts/bulk",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7
+            }
+          ],
+          "operation": {
+            "kind": "apply_template",
+            "template_code": "sales_team",
+            "expected_template_version": 3,
+            "override_policy": "preserve"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "committed": false,
+          "fingerprint": "19a94ea6c069ba97368a6df102da5ea8f84e60f47e0d2f497e6370017e8d78aa",
+          "command": {
+            "schema_version": 1,
+            "catalog_version": "authz-s1-v1",
+            "targets": [
+              {
+                "user_id": 41,
+                "username": "alice",
+                "expected_epoch": 7,
+                "expected_resource_versions": {
+                  "sales_analysis": 3
+                }
+              }
+            ],
+            "operation": {
+              "kind": "apply_template",
+              "template_code": "sales_team",
+              "expected_template_version": 3,
+              "override_policy": "preserve"
+            }
+          },
+          "affected": 1,
+          "preview": [
+            {
+              "subject": {
+                "id": 41,
+                "username": "alice",
+                "display_name": "示例甲",
+                "role": "sales",
+                "salesperson_name": "示例销售",
+                "is_active": true
+              },
+              "epoch_before": 7,
+              "epoch_after": 8,
+              "template_before": {
+                "code": "sales_team",
+                "version": 2
+              },
+              "template_after": {
+                "code": "sales_team",
+                "version": 3
+              },
+              "effective_changed": false,
+              "source_changed": true,
+              "session_revoked": true,
+              "resources": [
+                {
+                  "resource_id": "sales_analysis",
+                  "version_before": 3,
+                  "version_after": 4,
+                  "configuration_before": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "configuration_after": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "override_before": {
+                    "present": true,
+                    "configuration": {
+                      "actions": [
+                        "read"
+                      ],
+                      "scope": "assigned_customers",
+                      "field_permissions": []
+                    }
+                  },
+                  "override_after": {
+                    "present": true,
+                    "configuration": {
+                      "actions": [
+                        "read"
+                      ],
+                      "scope": "assigned_customers",
+                      "field_permissions": []
+                    }
+                  },
+                  "change": "unchanged",
+                  "actions_added": [],
+                  "actions_removed": [],
+                  "scope_before": "assigned_customers",
+                  "scope_after": "assigned_customers",
+                  "fields_added": [],
+                  "fields_removed": []
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "单目标apply仍复用批量路由。",
+        "覆盖值虽等于旧模板，present不被压缩，source_changed=true。",
+        "操作不改变旧role/legacy模板列。"
+      ]
+    },
+    {
+      "id": "apply_exact_target_execute_new_member_not_added",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts/bulk",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7,
+              "expected_resource_versions": {
+                "sales_analysis": 3
+              }
+            }
+          ],
+          "operation": {
+            "kind": "apply_template",
+            "template_code": "sales_team",
+            "expected_template_version": 3,
+            "override_policy": "preserve"
+          },
+          "dry_run": false,
+          "fingerprint": "19a94ea6c069ba97368a6df102da5ea8f84e60f47e0d2f497e6370017e8d78aa"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": false,
+          "committed": true,
+          "actor_session_revoked": false,
+          "applied": 1,
+          "results": [
+            {
+              "schema_version": 1,
+              "authorization_mode": "unified_modules",
+              "catalog_version": "authz-s1-v1",
+              "subject": {
+                "id": 41,
+                "username": "alice",
+                "display_name": "示例甲",
+                "role": "sales",
+                "salesperson_name": "示例销售",
+                "is_active": true
+              },
+              "authorization_epoch": 8,
+              "template": {
+                "code": "sales_team",
+                "version": 3,
+                "current_version": 3,
+                "stale": false
+              },
+              "customer_assignments": {
+                "ids": [
+                  7001,
+                  7002
+                ],
+                "customers": [
+                  {
+                    "id": 7001,
+                    "name": "示例客户7001",
+                    "raw_name": "示例客户7001"
+                  },
+                  {
+                    "id": 7002,
+                    "name": "示例客户7002",
+                    "raw_name": "示例客户7002"
+                  }
+                ]
+              },
+              "resources": {
+                "sales_analysis": {
+                  "version": 4,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  },
+                  "source": "personal_override",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": {
+                      "actions": [
+                        "export",
+                        "read"
+                      ],
+                      "scope": "all",
+                      "field_permissions": [
+                        "data_profit",
+                        "data_purchase_cost"
+                      ]
+                    }
+                  },
+                  "personal_override": {
+                    "present": true,
+                    "configuration": {
+                      "actions": [
+                        "read"
+                      ],
+                      "scope": "assigned_customers",
+                      "field_permissions": []
+                    }
+                  }
+                },
+                "purchase_analysis": {
+                  "version": 0,
+                  "configuration": null,
+                  "source": "none",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": null
+                  },
+                  "personal_override": {
+                    "present": false,
+                    "configuration": null
+                  }
+                },
+                "retired_pool_rebuild": {
+                  "version": 0,
+                  "configuration": null,
+                  "source": "none",
+                  "template_snapshot": {
+                    "code": "sales_team",
+                    "version": 3,
+                    "configuration": null
+                  },
+                  "personal_override": {
+                    "present": false,
+                    "configuration": null
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "预览后新成员bob不进入targets，applied仍1。",
+        "targets不能由服务端执行时重新查询全组扩大。"
+      ],
+      "initial_state": {
+        "preview_target_ids": [
+          41
+        ],
+        "joined_after_preview": {
+          "id": 42,
+          "username": "bob"
+        }
+      }
+    },
+    {
+      "id": "create_without_implicit_template",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "username": "new_reader",
+            "password": "Fixture-only-password-01!",
+            "display_name": "示例新账号"
+          },
+          "authorization": {
+            "kind": "none"
+          }
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "account": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 43,
+              "username": "new_reader",
+              "display_name": "示例新账号",
+              "role": "readonly",
+              "salesperson_name": null,
+              "is_active": true
+            },
+            "authorization_epoch": 0,
+            "template": null,
+            "customer_assignments": {
+              "ids": [],
+              "customers": []
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "readonly仅初始分类，不产生canonical Grant；epoch0、version0。",
+        "响应无password/hash。"
+      ]
+    },
+    {
+      "id": "create_explicit_authorization_atomically",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "username": "new_reader",
+            "password": "Fixture-only-password-01!",
+            "display_name": "示例新账号"
+          },
+          "authorization": {
+            "kind": "explicit",
+            "modules": {
+              "sales_analysis": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          },
+          "customer_assignments": {
+            "ids": [
+              7001
+            ]
+          }
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "account": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 43,
+              "username": "new_reader",
+              "display_name": "示例新账号",
+              "role": "readonly",
+              "salesperson_name": null,
+              "is_active": true
+            },
+            "authorization_epoch": 1,
+            "template": null,
+            "customer_assignments": {
+              "ids": [
+                7001
+              ],
+              "customers": [
+                {
+                  "id": 7001,
+                  "name": "示例客户7001",
+                  "raw_name": "示例客户7001"
+                }
+              ]
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 1,
+                "configuration": {
+                  "actions": [
+                    "read"
+                  ],
+                  "scope": "assigned_customers",
+                  "field_permissions": []
+                },
+                "source": "personal_override",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": true,
+                  "configuration": {
+                    "actions": [
+                      "read"
+                    ],
+                    "scope": "assigned_customers",
+                    "field_permissions": []
+                  }
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "账号/Grant/source/客户关系一次提交；epoch1、resource version1。"
+      ]
+    },
+    {
+      "id": "profile_only_keeps_epoch",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "示例甲（显示名变更）"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "subject": {
+            "id": 41,
+            "username": "alice",
+            "display_name": "示例甲（显示名变更）",
+            "role": "sales",
+            "salesperson_name": "示例销售",
+            "is_active": true
+          },
+          "authorization_epoch": 7
+        }
+      },
+      "assertions": [
+        "普通资料保持现有并发语义，不宣传全资料CAS。",
+        "未触碰Grant/profile来源，epoch不变。"
+      ]
+    },
+    {
+      "id": "salesperson_mapping_requires_security_preview",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "security_change": {
+            "salesperson_name": "示例销售乙"
+          },
+          "dry_run": true
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "committed": false,
+          "fingerprint": "4694badf144c27f84c835b42d4f24e9bfdb7155b4a96ce49dd4010e5622d8420",
+          "command": {
+            "schema_version": 1,
+            "catalog_version": "authz-s1-v1",
+            "expected_epoch": 7,
+            "security_change": {
+              "salesperson_name": "示例销售乙"
+            }
+          },
+          "preview": {
+            "subject": {
+              "id": 41,
+              "username": "alice",
+              "display_name": "示例甲",
+              "role": "sales",
+              "salesperson_name": "示例销售",
+              "is_active": true
+            },
+            "epoch_before": 7,
+            "epoch_after": 8,
+            "security_before": {
+              "role": "sales",
+              "salesperson_name": "示例销售"
+            },
+            "security_after": {
+              "role": "sales",
+              "salesperson_name": "示例销售乙"
+            },
+            "legacy_role_behavior_may_change": false,
+            "session_revoked": true,
+            "canonical_configuration_unchanged": true
+          }
+        }
+      },
+      "assertions": [
+        "salesperson_name不是display_name资料。",
+        "非实名管理员不得进入此preview。"
+      ]
+    },
+    {
+      "id": "admin_create_preview_without_secret",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "username": "new_admin",
+            "display_name": "示例新管理员"
+          },
+          "authorization": {
+            "kind": "none"
+          },
+          "security_change": {
+            "role": "admin"
+          },
+          "dry_run": true
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "dry_run": true,
+          "committed": false,
+          "fingerprint": "e67ec69b5b693ea57974428b0df973ecf8e185a4aea9dde6a53a304d76af2f78",
+          "command": {
+            "schema_version": 1,
+            "catalog_version": "authz-s1-v1",
+            "profile": {
+              "username": "new_admin",
+              "display_name": "示例新管理员"
+            },
+            "authorization": {
+              "kind": "none"
+            },
+            "security_change": {
+              "role": "admin"
+            }
+          },
+          "preview": {
+            "username": "new_admin",
+            "username_must_be_absent": true,
+            "role_after": "admin",
+            "authorization_kind": "none",
+            "authorization_epoch_after": 1
+          }
+        }
+      },
+      "assertions": [
+        "preview/command/fingerprint输入没有口令或可离线猜解的口令摘要。"
+      ]
+    },
+    {
+      "id": "admin_create_execute_adds_password_locally",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "username": "new_admin",
+            "display_name": "示例新管理员",
+            "password": "Fixture-only-password-02!"
+          },
+          "authorization": {
+            "kind": "none"
+          },
+          "security_change": {
+            "role": "admin"
+          },
+          "dry_run": false,
+          "fingerprint": "e67ec69b5b693ea57974428b0df973ecf8e185a4aea9dde6a53a304d76af2f78"
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "account": {
+            "schema_version": 1,
+            "authorization_mode": "unified_modules",
+            "catalog_version": "authz-s1-v1",
+            "subject": {
+              "id": 44,
+              "username": "new_admin",
+              "display_name": "示例新管理员",
+              "role": "admin",
+              "salesperson_name": null,
+              "is_active": true
+            },
+            "authorization_epoch": 1,
+            "template": null,
+            "customer_assignments": {
+              "ids": [],
+              "customers": []
+            },
+            "resources": {
+              "sales_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "purchase_analysis": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              },
+              "retired_pool_rebuild": {
+                "version": 0,
+                "configuration": null,
+                "source": "none",
+                "template_snapshot": null,
+                "personal_override": {
+                  "present": false,
+                  "configuration": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "assertions": [
+        "execute口令仅输入，不回显；新admin没有隐式业务Grant。",
+        "一次事务，不先创建再升管理员。"
+      ]
+    },
+    {
+      "id": "admin_reset_password_direct_epoch_cas",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice/password",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "password": "Fixture-only-password-03!"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "committed": true,
+          "actor_session_revoked": false,
+          "subject": {
+            "id": 41,
+            "username": "alice"
+          },
+          "authorization_epoch": 8,
+          "reset": true
+        }
+      },
+      "assertions": [
+        "非管理员即使旧account_manage=true也403。",
+        "不套bulk preview echo协议；审计和响应无口令。"
+      ]
+    }
+  ]
+}

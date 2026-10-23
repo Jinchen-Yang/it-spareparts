@@ -1,3 +1,4 @@
+import { authzSnapshot } from "../../../../test/authzFixtures";
 // 销售分析页集成（D-41 / D-40 PR-4b）：URL 单一真值 —— 默认今天零参数、直开链接恢复
 // 筛选与含退货、切换金额口径不重新请求、金额/客户/对账脱敏账号的控件门控与「—」/
 // 「无对账数据」占位、排序回退如实提示（sort 回显 ≠ 请求值）、错误与空态、详情抽屉。
@@ -7,11 +8,11 @@ import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const authorization = vi.hoisted(() => ({
-  status: "ready", snapshot: { version: "legacy", can_manage: false,
-    sales_analysis: { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] as string[] } },
+  status: "ready", snapshot: { version: "legacy", can_manage: false, sales_analysis: { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] as string[] } },
 }));
-vi.mock("../../../../authz/AuthzProvider", () => ({
-  useAuthz: () => authorization,
+vi.mock("../../../../authz/AuthzProvider", async () => ({
+  ...await vi.importActual<typeof import("../../../../authz/AuthzProvider")>("../../../../authz/AuthzProvider"),
+  useAuthz: () => ({...authorization, snapshot: authzSnapshot(authorization.snapshot.sales_analysis as import("../../../../api/authz").AuthzSnapshot["sales_analysis"], {version:authorization.snapshot.version,canManage:authorization.snapshot.can_manage})}),
   AuthzUnavailable: () => <div>权限尚未确认</div>,
 }));
 

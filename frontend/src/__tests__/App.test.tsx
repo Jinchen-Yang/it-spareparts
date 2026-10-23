@@ -1,3 +1,4 @@
+import { authzSnapshot } from "../test/authzFixtures";
 import { beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../test/antdRender";
 
@@ -80,8 +81,7 @@ beforeEach(() => {
   localStorage.clear();
   window.history.replaceState({}, "", "/parts");
   getAuthzSnapshot.mockReset();
-  getAuthzSnapshot.mockResolvedValue({ data: { version: "legacy", can_manage: false,
-    sales_analysis: { enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] } } });
+  getAuthzSnapshot.mockResolvedValue({ data: authzSnapshot({ enabled: false, read: false, export: false, scope: "none", customer_count: 0, reason: "legacy", field_permissions: [] }, {version: "legacy", canManage: false}) });
   getBetaFeatures.mockReset();
   getBetaFeatures.mockImplementation(() => Promise.resolve({
     data: JSON.parse(localStorage.getItem("beta_features") || "{}"),
@@ -273,16 +273,16 @@ it("较早的 capability 响应迟到时不会重新点亮已关闭的 Beta", as
 it("新授权允许服务销售进入，旧角色门和页面键不再否决", async () => {
   localStorage.setItem("token", "sales-grant"); localStorage.setItem("role", "sales");
   window.history.replaceState({}, "", "/sales/analytics");
-  getAuthzSnapshot.mockResolvedValue({ data: { version: "v2", can_manage: false, sales_analysis: {
-    enabled: true, read: true, export: false, scope: "assigned_customers", customer_count: 1, reason: "allowed", field_permissions: [] } } });
+  getAuthzSnapshot.mockResolvedValue({ data: authzSnapshot({
+    enabled: true, read: true, export: false, scope: "assigned_customers", customer_count: 1, reason: "allowed", field_permissions: [] }, {version: "v2", canManage: false}) });
   render(<App />);
   expect(await screen.findByText("销售分析页面")).toBeInTheDocument();
 });
 it("新授权拒绝管理员时不接受旧页面全通", async () => {
   localStorage.setItem("token", "admin-denied"); localStorage.setItem("role", "admin");
   window.history.replaceState({}, "", "/sales/analytics");
-  getAuthzSnapshot.mockResolvedValue({ data: { version: "v2", can_manage: true, sales_analysis: {
-    enabled: true, read: false, export: false, scope: "none", customer_count: 0, reason: "未分配授权", field_permissions: [] } } });
+  getAuthzSnapshot.mockResolvedValue({ data: authzSnapshot({
+    enabled: true, read: false, export: false, scope: "none", customer_count: 0, reason: "未分配授权", field_permissions: [] }, {version: "v2", canManage: true}) });
   render(<App />);
   expect(await screen.findByText("没有销售分析访问权限")).toBeInTheDocument();
   expect(screen.queryByText("销售分析页面")).not.toBeInTheDocument();
@@ -292,6 +292,6 @@ it("快照请求失败时销售分析 fail closed，不能回退老板旧权限"
   window.history.replaceState({}, "", "/sales/analytics");
   getAuthzSnapshot.mockRejectedValue(new Error("unavailable"));
   render(<App />);
-  expect(await screen.findByText("销售分析权限暂不可用")).toBeInTheDocument();
+  expect(await screen.findByText("访问权限暂不可用")).toBeInTheDocument();
   expect(screen.queryByText("销售分析页面")).not.toBeInTheDocument();
 });

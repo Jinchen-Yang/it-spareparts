@@ -20,6 +20,7 @@ services:
 
   app:
     environment:
+      AUTHORIZATION_MODE: unified_modules
       AUTHZ_SALES_ANALYSIS_ENABLED: "true"
       AUTHZ_SALES_ANALYSIS_SUSPENDED: ${AUTHZ_SALES_ANALYSIS_SUSPENDED:-false}
       CERBOS_URL: http://cerbos:3592

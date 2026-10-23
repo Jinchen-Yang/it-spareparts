@@ -1,4 +1,4 @@
-import { AuthzProvider, AuthzUnavailable, useAuthz } from "./authz/AuthzProvider";
+import { AuthzProvider, AuthorizationBoundary, AuthzUnavailable, actorAllowed, resourceAllowed, resourceUsesLegacy, useAuthz } from "./authz/AuthzProvider";
 import { AUTHZ_SESSION_INVALIDATED } from "./authz/events";
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
@@ -114,8 +114,9 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     return NAV_ITEMS.filter((it) => {
       if (it.authzResource === "sales_analysis") {
         if (authz.status !== "ready" || !authz.snapshot) return false;
-        if (authz.snapshot.sales_analysis.enabled) return authz.snapshot.sales_analysis.read;
+        if (!resourceUsesLegacy(authz.snapshot, "sales_analysis")) return resourceAllowed(authz.snapshot, "sales_analysis", "read");
       }
+      if (it.key === "accounts") return authz.status === "ready" && actorAllowed(authz.snapshot, "read_accounts");
       return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
         || (it.visibleWhen ? it.visibleWhen()
           : it.perm ? !!perms[it.perm]
@@ -184,7 +185,7 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
                 : <Result status="403" title="没有销售分析访问权限" subTitle={authz.snapshot?.sales_analysis.reason || "请联系管理员检查授权"} />} />
             ))}
             {allowed.map((it) => (
-              <Route key={it.key} path={it.path} element={<it.page />} />
+              <Route key={it.key} path={it.path} element={it.authzResource ? <AuthorizationBoundary resource={it.authzResource} action="read" legacy={<it.page />}><it.page /></AuthorizationBoundary> : <it.page />} />
             ))}
             {allowedDetails.map((r) => (
               <Route key={r.key} path={r.path} element={<r.page />} />

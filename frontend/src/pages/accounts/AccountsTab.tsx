@@ -26,7 +26,8 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
 }) {
   const { message } = App.useApp();
   const authz = useAuthz();
-  const canManageAuthz = authz.status === "ready" && authz.snapshot?.can_manage === true;
+  // S0 sales PUT is permanently retired after S1 source migration.
+  const canManageAuthz = false;
   const [authorizationTarget, setAuthorizationTarget] = useState<Account | null>(null);
   const [fTpl, setFTpl] = useState<string>();
   const [fRole, setFRole] = useState<string>();

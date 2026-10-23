@@ -9,6 +9,8 @@ from sqlalchemy import select
 
 from app import config
 from app.auth import hash_password
+from app.authz import runtime
+from app.authz.catalog import CATALOG_VERSION
 from app.config import get_settings
 from app.main import app
 from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignment
@@ -24,9 +26,11 @@ PASSWORD = "synthetic-authz-2026-only"
 
 
 @pytest.fixture(autouse=True)
-def new_authority(monkeypatch, cerbos_url):
+def new_authority(db, monkeypatch, cerbos_url):
     monkeypatch.setattr(config, "ENABLE_RBAC", True)
     monkeypatch.setattr(get_settings(), "authz_sales_analysis_enabled", True)
+    monkeypatch.setattr(get_settings(), "authorization_mode", "unified_modules")
+    runtime.activate_configured_resources(db.get_bind())
     monkeypatch.setattr(get_settings(), "cerbos_url", cerbos_url)
 
 
@@ -43,6 +47,7 @@ def _client(db, *, customer_ids=(), scope="assigned_customers", fields=None,
                                   field_permissions=list(FIELDS if fields is None else fields),
                                   version=1)
     db.add(grant)
+    user.authorization_profile = {"schema_version": 1, "template_snapshot": None, "resource_overrides": {"sales_analysis": {"actions": grant.actions, "scope": grant.scope, "field_permissions": grant.field_permissions}}}
     db.add_all(SysCustomerAssignment(user_id=user.id, customer_id=cid) for cid in customer_ids)
     db.commit()
     client = TestClient(app)
@@ -177,9 +182,11 @@ def test_export_is_separate_capability_and_pdp_failure_never_falls_back(db, seed
 def test_new_assignment_replaces_scope_and_revocation_invalidates_old_token(db, seeded):
     client, user, grant = _client(db, customer_ids=[seeded["a"][2].customer_id])
     admin, _, _ = _client(db, username="authz-admin", role="admin", scope="all")
-    payload = {"expected_version": 1, "actions": ["read"], "scope": "assigned_customers",
-               "field_permissions": FIELDS, "customer_ids": [seeded["a"][0].customer_id]}
-    saved = admin.put("/api/authz/users/service-sales", json=payload)
+    payload = {"schema_version": 1, "catalog_version": CATALOG_VERSION, "expected_epoch": 0,
+               "updates": [{"resource_id": "sales_analysis", "expected_version": 1, "operation": "replace_resource",
+                            "configuration": {"actions": ["read"], "scope": "assigned_customers", "field_permissions": FIELDS}}],
+               "customer_assignments": {"ids": [seeded["a"][0].customer_id]}}
+    saved = admin.put("/api/authz/users/service-sales/modules", json=payload)
     assert saved.status_code == 200, saved.text
     assert client.get(PREFIX + "/orders").status_code in (401, 403)
     login = client.post("/api/auth/login", json={"username": user.username, "password": PASSWORD})

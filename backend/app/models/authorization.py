@@ -1,9 +1,22 @@
 """Explicit resource grants and customer ownership, independent of legacy role snapshots."""
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from datetime import datetime
+
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models._types import TZDateTime
+
+
+class SysAuthorizationCutover(Base):
+    """Persistent resource authority; only trusted startup initialization activates it."""
+
+    __tablename__ = "sys_authorization_cutover"
+
+    resource: Mapped[str] = mapped_column(String(64), primary_key=True)
+    activated_catalog_version: Mapped[str] = mapped_column(String(128))
+    activated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
 class SysAuthorizationGrant(Base):

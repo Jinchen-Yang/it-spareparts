@@ -1,5 +1,5 @@
 """导入所有模型，确保 Base.metadata 完整（供 Alembic autogenerate）。"""
-from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignment
+from app.models.authorization import SysAuthorizationCutover, SysAuthorizationGrant, SysCustomerAssignment
 from app.models.chat import ChatMessage, ChatSession
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
@@ -243,6 +243,7 @@ __all__ = [
     "SysBusinessSetting",
     "SysUser",
     "SysAuthorizationGrant",
+    "SysAuthorizationCutover",
     "SysCustomerAssignment",
     "SysRoleTemplate",
     "ReplenishmentApplication",

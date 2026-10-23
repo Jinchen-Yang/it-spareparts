@@ -247,3 +247,15 @@ export function explainApiError(e: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+/** Additive S1 list summaries; transport remains an array. No per-account read loop. */
+export interface CanonicalAccount extends Account {
+  id: number; authorization_epoch: number;
+  authorization_summary: { template_code: string | null; template_version: number | null; template_current_version: number | null; override_resources: string[] };
+}
+export interface CanonicalTemplate extends TemplateInfo {
+  schema_version: 1; authorization_mode: "legacy_compat" | "unified_modules"; catalog_version: string;
+  authorization_summary: { configured_resources: string[]; canonical_usage_count: number };
+}
+export const listCanonicalAccounts = (token: string, signal?: AbortSignal) => api.get<CanonicalAccount[]>("/accounts", {headers:{Authorization:`Bearer ${token}`},signal});
+export const listCanonicalTemplates = (token: string, signal?: AbortSignal) => api.get<CanonicalTemplate[]>("/role-templates", {headers:{Authorization:`Bearer ${token}`},signal});

@@ -1,4 +1,4 @@
-import { AuthzUnavailable, useAuthz } from "../../../authz/AuthzProvider";
+import { AuthzUnavailable, salesAccess, useAuthz } from "../../../authz/AuthzProvider";
 // 销售分析页（D-41 客户需求 Round1，PR-4b；D-44 销售看板扩展）：常驻区间 KPI 条
 // （单数 / 三金额 / 毛利 / 客户与新老客 / 上月对比）+ 五个页签：概览（迷你趋势 +
 // Top 5）、多维紧凑图（九维并列条形榜）、分组排行、趋势、订单明细（任意列升降序 +
@@ -70,14 +70,15 @@ function apiErrorMessage(err: unknown): string {
 export default function SalesAnalyticsPage() {
   const authz = useAuthz();
   if (authz.status !== "ready" || !authz.snapshot) return <AuthzUnavailable />;
-  if (authz.snapshot.sales_analysis.enabled && !authz.snapshot.sales_analysis.read)
-    return <Alert type="warning" message="没有销售分析访问权限" description={authz.snapshot.sales_analysis.reason} />;
+  const access = salesAccess(authz.snapshot);
+  if (!access || (access.enabled && !access.read))
+    return <Alert type="warning" message="没有销售分析访问权限" description={access?.reason || "权限协议无效"} />;
   return <SalesAnalyticsContent key={authz.snapshot.version} />;
 }
 
 function SalesAnalyticsContent() {
   const authz = useAuthz();
-  const access = authz.snapshot?.sales_analysis;
+  const access = salesAccess(authz.snapshot);
   const v2 = access?.enabled === true;
   const canExport = !v2 || access.export;
 
@@ -372,7 +373,7 @@ function SalesAnalyticsContent() {
       />
       {v2 && <Alert style={{ marginBottom: 12 }} showIcon
         type={access.scope === "assigned_customers" && access.customer_count === 0 ? "warning" : "info"}
-        message={access.scope === "all" ? "当前数据范围：全部客户" : `当前数据范围：负责的 ${access.customer_count} 个客户`}
+        message={access.scope === "all" ? "当前数据范围：全部客户" : access.customer_count === null ? "当前数据范围：负责客户" : `当前数据范围：负责的 ${access.customer_count} 个客户`}
         description={access.scope === "assigned_customers" && access.customer_count === 0
           ? "尚未分配客户，当前没有可见订单。请联系管理员设置客户归属。" : undefined} />}
       <Card>
