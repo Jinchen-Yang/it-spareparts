@@ -8,7 +8,6 @@
 - 改后搜索即时生效：search_doc 是 STORED 生成列，库自动重算，无需手动重建索引。
 """
 import re
-import hashlib
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text
@@ -18,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
 from app.models.system import SysAuditLog
+from app.pn_catalog import api as catalog
 from app.services import master_data, part_resolver, spec_extract
 
 # 采购可人工维护的字段（编辑这些 → 写进 locked_fields，重导不覆盖）
@@ -42,7 +42,8 @@ def _edit_state(db: Session, part: DimPart) -> dict:
         ProductSpec.numeric_value, ProductSpec.source
     ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
     return {
-        "version_mode": "field_snapshot",  # M2 前的现值基线，不能作为单调版本或发布水位。
+        "version_mode": "field_snapshot",
+        **catalog.read_versions(db, part.id),
         "part_id": part.id, "pn_std": part.pn_std,
         "identity": {"part_id": part.id, "pn_std": part.pn_std,
                      "status": part.status, "merged_into_id": part.merged_into_id},
@@ -79,6 +80,15 @@ def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: 
         raise MasterEditConflict("identity_conflict", "型号身份已变化，请重新打开编辑器", [{
             "field": "identity", "baseline": baseline.get("identity"),
             "current": current["identity"], "proposed": None}])
+    # Value-only baselines miss A -> B -> A and delete/recreate histories. A client
+    # that predates field versions must at least supply the whole profile revision.
+    expected_identity = baseline.get("identity_revision")
+    if expected_identity is None or expected_identity != current["identity_revision"]:
+        raise MasterEditConflict("identity_conflict", "型号身份版本已变化，请重新打开编辑器", [])
+    expected_fields = baseline.get("field_versions")
+    if not isinstance(expected_fields, dict):
+        if baseline.get("profile_revision") != current["profile_revision"]:
+            raise MasterEditConflict("field_conflict", "编辑基线已过期，请重新打开编辑器", [])
     conflicts = []
     checked_updates = dict(updates)
     if CATEGORY_FIELDS.intersection(updates):
@@ -90,7 +100,9 @@ def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: 
     for key, proposed in checked_updates.items():
         if key not in baseline["fields"]:
             raise MasterEditError(f"缺少字段基线: {key}")
-        if (baseline["fields"][key] != current["fields"][key]
+        version_changed = (isinstance(expected_fields, dict)
+                           and expected_fields.get(key, 0) != current["field_versions"].get(key, 0))
+        if version_changed or (baseline["fields"][key] != current["fields"][key]
                 and proposed != current["fields"][key]):
             conflicts.append({"field": key, "baseline": baseline["fields"][key],
                               "current": current["fields"][key], "proposed": proposed})
@@ -105,11 +117,16 @@ def _check_baseline(current: dict, baseline: dict, updates: dict, spec_updates: 
         # source 是人工确认后的落地属性；同值 auto 也允许被本次确认成 manual。
         current_value = ({k: v for k, v in current_spec.items() if k != "source"}
                          if current_spec is not None else None)
-        if (baseline["specs"].get(key) != current["specs"].get(key)
+        version_changed = (isinstance(expected_fields, dict)
+                           and expected_fields.get(f"specs.{key}", 0)
+                           != current["field_versions"].get(f"specs.{key}", 0))
+        if version_changed or (baseline["specs"].get(key) != current["specs"].get(key)
                 and effective != current_value):
             conflicts.append({"field": f"specs.{key}", "baseline": baseline["specs"].get(key),
                               "current": current["specs"].get(key), "proposed": proposed})
     if conflicts:
+        # Show actual changed values before the paired category version marker.
+        conflicts.sort(key=lambda c: c["baseline"] == c["current"])
         raise MasterEditConflict("field_conflict", "所选字段已变化，草稿已保留，请重新核对", conflicts)
 
 
@@ -183,6 +200,7 @@ def find_near_duplicates(db: Session, pn_std: str, exclude_id: int | None = None
 
 def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | None = None,
                                force: bool = False, spec_updates: dict | None = None,
+                               principal_id: str | None = None,
                                **fields) -> dict:
     """采购手工新建型号。fields ⊆ EDITABLE_FIELDS（machine_or_part 缺省 '备件'）。
 
@@ -201,10 +219,9 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
     except ValueError as exc:
         raise MasterEditError(str(exc)) from exc
     master_data.acquire_master_write_lock(db)
-    # 无父 ID 时以规范输入键协调本人工入口；唯一约束仍兜其他入口的竞态。
-    lock_key = int.from_bytes(hashlib.sha256(f"master-pn:{pn}".encode()).digest()[:8],
-                              "big", signed=True)
-    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    catalog.acquire_identity_lock(db, shared=True)
+    # The same creation gate covers this compatibility route and the new API.
+    catalog.acquire_creation_locks(db, [pn])
     if db.scalar(select(DimPart.id).where(DimPart.pn_std == pn)) is not None:
         raise MasterEditError(f"型号已存在: {pn}（请改用编辑）")
 
@@ -229,8 +246,14 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
             raise
         raise MasterEditError(f"型号已存在: {pn}（请改用编辑）") from exc
     master_data.bind_part_dictionaries(db, part, clean)
-    spec_extract.refresh_part_specs(db, part.id, part.description)
-    spec_extract.apply_manual_specs(db, part.id, manual_specs)
+    spec_extract.refresh_part_specs(db, part.id, part.description, catalog_record=False)
+    spec_extract.apply_manual_specs(db, part.id, manual_specs, catalog_record=False)
+    catalog.record_legacy_change(
+        db, part.id, None,
+        context=catalog.legacy_context(operated_by=operated_by, principal_id=principal_id),
+        action="part.create",
+        deleted_spec_keys=[key for key, spec in manual_specs.items() if spec is None],
+        restored_spec_keys=[key for key, spec in manual_specs.items() if spec is not None])
     audit = SysAuditLog(entity_type="part", entity_id=part.id, action="create",
                        before_json=None,
                        after_json={"pn_std": pn, "master_source": "manual", **clean,
@@ -271,7 +294,8 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
                               part_id: int | None = None,
                               base_snapshot: dict | None = None,
                               spec_updates: dict | None = None,
-                              operated_by: str | None = None) -> dict | None:
+                              operated_by: str | None = None,
+                              principal_id: str | None = None) -> dict | None:
     """编辑任意型号的人工字段。被改字段加入 locked_fields（重导不覆盖）。"""
     part = lock_part(db, part_id=part_id, pn_std=pn_std)
     if part is None:
@@ -291,6 +315,7 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
     if not clean and not manual_specs:
         raise MasterEditError("没有可编辑的字段")
 
+    catalog_before = catalog.capture_state(db, part.id)
     before = {k: getattr(part, k) for k in clean}
     snapshot_before = _audit_state(db, part)
     locked = set(part.locked_fields or [])
@@ -307,8 +332,14 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
     db.flush()
     # 描述变更 → 同事务重抽派生规格缓存（防 specs 陈旧：删 auto 行重插，manual 优先）
     if "description" in clean and part.description != before["description"]:
-        spec_extract.refresh_part_specs(db, part.id, part.description)
-    spec_extract.apply_manual_specs(db, part.id, manual_specs)
+        spec_extract.refresh_part_specs(db, part.id, part.description, catalog_record=False)
+    spec_extract.apply_manual_specs(db, part.id, manual_specs, catalog_record=False)
+    catalog.record_legacy_change(
+        db, part.id, catalog_before,
+        context=catalog.legacy_context(operated_by=operated_by, principal_id=principal_id),
+        action="profile.edit",
+        deleted_spec_keys=[key for key, spec in manual_specs.items() if spec is None],
+        restored_spec_keys=[key for key, spec in manual_specs.items() if spec is not None])
     audit = SysAuditLog(entity_type="part", entity_id=part.id, action="edit",
                        before_json={**before, "_snapshot": snapshot_before},
                        after_json={**clean, "_snapshot": _audit_state(db, part)},

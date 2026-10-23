@@ -14,6 +14,7 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 
 from app.db import engine
+from tests.legacy_catalog_fixtures import delete_baseline_parts
 
 _PREV = "b9e1f4a7c2d8"   # 人工池迁移 f2a7d9c3e6b1 的上一版
 
@@ -25,7 +26,7 @@ def _cfg():
 
 
 @pytest.fixture()
-def preserve_pool_seq(migrated):
+def preserve_pool_seq(db):
     with engine.begin() as conn:
         prev = conn.execute(text(
             "SELECT last_value, is_called FROM part_pool_group_id_seq")).one()
@@ -42,6 +43,7 @@ def _cleanup(conn):
         conn.execute(text("DELETE FROM part_pool_price_policy"))
     conn.execute(text("DELETE FROM part_pool_member"))
     conn.execute(text("DELETE FROM part_pool"))
+    delete_baseline_parts(conn, prefix="MIGPOOL-%")
     conn.execute(text("DELETE FROM dim_part WHERE pn_std LIKE 'MIGPOOL-%'"))
 
 
@@ -135,6 +137,7 @@ def test_upgrade_rejects_singleton_legacy_pool_before_schema_changes(preserve_po
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member WHERE group_id=77"))
             conn.execute(text("DELETE FROM part_pool WHERE group_id=77"))
+            delete_baseline_parts(conn, prefix="MIGPOOL-%")
             conn.execute(text("DELETE FROM dim_part WHERE pn_std='MIGPOOL-SINGLE'"))
         alembic_command.upgrade(cfg, "head")
 
@@ -173,6 +176,7 @@ def test_untouched_legacy_pool_can_downgrade_losslessly(preserve_pool_seq):
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member WHERE group_id=88"))
             conn.execute(text("DELETE FROM part_pool WHERE group_id=88"))
+            delete_baseline_parts(conn, prefix="MIGPOOL-%")
             conn.execute(text("DELETE FROM dim_part WHERE pn_std LIKE 'MIGPOOL-CLEAN-%'"))
         alembic_command.upgrade(cfg, "head")
 

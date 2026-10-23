@@ -223,6 +223,10 @@ class PartSpecBaseline(BaseModel):
 class PartEditBaseline(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version_mode: Literal["field_snapshot"]
+    identity_revision: int | None = Field(default=None, ge=0)
+    profile_revision: int | None = Field(default=None, ge=0)
+    field_versions: dict[str, int] | None = None
+    deleted_specs: list[str] = Field(default_factory=list)
     part_id: int = Field(gt=0)
     pn_std: str
     identity: PartEditIdentity
@@ -244,7 +248,7 @@ class PartEdit(BaseModel):
     spec_updates: dict | None = None
 
 
-def _real_operator(db: Session, ident: dict) -> str:
+def _real_operator(db: Session, ident: dict) -> tuple[str, str]:
     """人工主数据库写入拒绝共享回退/旧凭证和不存在的实名账号。"""
     username = str(ident.get("sub") or "").strip()
     if ident.get("authn") != "sys_user" or ident.get("fb") or not username:
@@ -252,7 +256,7 @@ def _real_operator(db: Session, ident: dict) -> str:
     user = db.scalar(select(SysUser).where(SysUser.username == username, SysUser.is_active.is_(True)))
     if user is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "主数据库编辑必须使用实名系统账号，请重新登录")
-    return username
+    return username, f"account:{user.id}"
 
 
 @router.get("/master/check")
@@ -277,13 +281,13 @@ def master_create(
     ident: dict = Depends(current_identity),
 ) -> dict:
     """采购手工新建型号。near_duplicates 非空且未 force → 不建、返回候选待确认。"""
-    operated_by = _real_operator(db, ident)
+    operated_by, principal_id = _real_operator(db, ident)
     try:
         res = master_edit.create_part(
             db, pn_std=body.pn_std, description=body.description, brand=body.brand,
             category_major=body.category_major, category_minor=body.category_minor,
             machine_or_part=body.machine_or_part, unit=body.unit,
-            force=body.force, operated_by=operated_by)
+            force=body.force, operated_by=operated_by, principal_id=principal_id)
     except master_edit.MasterEditConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:
@@ -301,14 +305,14 @@ def master_edit_part(
     ident: dict = Depends(current_identity),
 ) -> dict:
     """编辑任意型号的人工字段（描述/品类/品牌/单位/类型）；改过的字段重导不覆盖。"""
-    operated_by = _real_operator(db, ident)
+    operated_by, principal_id = _real_operator(db, ident)
     updates = body.model_dump(exclude={"pn_std", "part_id", "base_snapshot", "spec_updates"},
                               exclude_unset=True)
     try:
         res = master_edit.edit_part(db, pn_std=body.pn_std, part_id=body.part_id,
                                     base_snapshot=body.base_snapshot.model_dump(), updates=updates,
                                     spec_updates=body.spec_updates,
-                                    operated_by=operated_by)
+                                    operated_by=operated_by, principal_id=principal_id)
     except master_edit.MasterEditConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:

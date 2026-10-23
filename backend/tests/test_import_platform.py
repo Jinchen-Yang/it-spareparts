@@ -302,3 +302,70 @@ def test_excluded_warehouse_rows_skipped():
     assert res.rows_excluded_warehouse == 2
     assert [r["raw_inventory_id"] for r in res.inventory] == ["I1"]
     assert not res.errors
+
+
+def test_shared_catalog_import_audit_uses_verified_account_and_file_evidence(db, tmp_path):
+    from app.pn_catalog.models import AuditEvent
+
+    path = _inv_xlsx(tmp_path)
+    batch = pipeline.run_import(db, path, "inv.xlsx", uploaded_by="当前显示名", actor_user_id=731)
+    db.commit()
+    assert batch.actor_user_id == 731
+    events = list(db.scalars(select(AuditEvent).where(AuditEvent.action.in_(
+        ["profile.ingest", "identity.ingest_aliases"]))))
+    assert events
+    for event in events:
+        assert event.principal_id == "account:731"
+        assert event.actor["display_name"] == "当前显示名"
+        assert event.actor["executor_id"] == "itsp-import-worker"
+        assert event.actor["provenance"]["evidence_id"] == f"import_batch:{batch.id}"
+        assert event.actor["provenance"]["file_sha256"] == batch.file_hash
+
+
+def test_import_worker_preserves_persisted_actor_across_name_changes(db, tmp_path):
+    from app.pn_catalog.models import AuditEvent
+
+    path = _inv_xlsx(tmp_path)
+    job = SysImportJob(created_by="提交时名字", actor_user_id=732, total_files=1, mode="skip")
+    db.add(job)
+    db.commit()
+    job_id = job.id
+    _process_import_job(job_id, [(path, "inv.xlsx")], "skip", "当前执行显示名")
+    db.expire_all()
+    batch = db.scalar(select(SysImportBatch).where(SysImportBatch.import_job_id == job_id))
+    assert db.get(SysImportJob, job_id).status == "done"
+    assert batch.actor_user_id == 732
+    event = db.scalar(select(AuditEvent).where(AuditEvent.action == "profile.ingest"))
+    assert event.principal_id == "account:732"
+
+
+def test_historical_import_name_is_not_upgraded_to_canonical_actor(db, tmp_path):
+    from app.models.system import SysUser
+    from app.pn_catalog.models import AuditEvent
+
+    db.add(SysUser(username="旧导入名", display_name="看起来相同", role="admin", password_hash="unused"))
+    db.commit()
+    batch = pipeline.run_import(db, _inv_xlsx(tmp_path), "inv.xlsx", uploaded_by="旧导入名")
+    db.commit()
+    assert batch.actor_user_id is None
+    event = db.scalar(select(AuditEvent).where(AuditEvent.action == "profile.ingest"))
+    assert event.principal_id == "legacy:unknown"
+    assert event.actor["actor_kind"] == "unknown"
+
+
+def test_import_worker_records_integrity_failure_and_finishes_job(db, tmp_path, monkeypatch):
+    path = tmp_path / "invalid.xlsx"
+    path.write_bytes(b"integrity-test")
+    job_id = _new_job(db)
+
+    def rejected(*_args, **_kwargs):
+        raise loader.ImportIntegrityError("internal_secret_table")
+
+    monkeypatch.setattr(pipeline, "run_import", rejected)
+    _process_import_job(job_id, [(str(path), "invalid.xlsx")], "skip", "刘青青")
+    db.expire_all()
+    job = db.get(SysImportJob, job_id)
+    assert job.status == "failed" and job.error_files == 1 and job.finished_at is not None
+    assert "完整性失败" in job.note
+    assert "internal_secret_table" not in job.note
+    assert not path.exists()

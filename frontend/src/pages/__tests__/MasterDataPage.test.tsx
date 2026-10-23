@@ -14,6 +14,9 @@ const baseline = {
     machine_or_part: null, unit: null,
   },
   specs: {},
+  identity_revision: 2,
+  profile_revision: 5,
+  field_versions: { description: 3, brand: 1, category_major: 2, category_minor: 2 },
   version_mode: "field_snapshot",
 };
 
@@ -56,7 +59,9 @@ afterEach(() => {
 it("主数据库编辑冲突后保留品牌清空草稿，以当前基线重提时不覆盖他人描述", async () => {
   const patches: any[] = [];
   let loads = 0;
-  const latest = { ...baseline, fields: { ...baseline.fields, brand: "Other Brand", description: "他人新描述" } };
+  const latest = { ...baseline, profile_revision: 6,
+    field_versions: { ...baseline.field_versions, brand: 2, description: 4 },
+    fields: { ...baseline.fields, brand: "Other Brand", description: "他人新描述" } };
   api.defaults.adapter = async (config) => {
     if (config.method === "patch") {
       patches.push(JSON.parse(config.data));

@@ -9,6 +9,7 @@ const baseline: MasterEditSnapshot = {
   fields: { description: null, brand: null, category_major: null, category_minor: null,
     machine_or_part: null, unit: null },
   specs: {}, version_mode: "field_snapshot",
+  identity_revision: 2, profile_revision: 5, field_versions: { description: 3 },
 };
 const payload: MasterEditPayload = {
   part_id: 1, pn_std: "PN-1", base_snapshot: baseline, description: "新描述",

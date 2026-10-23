@@ -1,5 +1,7 @@
 # AGENTS.md — 本仓库对一切 AI 开发代理的工作协议
 
+> 共享 PN/图库新需求：见 [D-20261023-PN](docs/decisions/2026-10-23-shared-pn-module.md)。用户确认两站均可维护唯一共享资料与图库，替换旧底层但保留 shop 交互；旧“itsp 仅只读图库”的冲突约定以新需求为准。已获准按 B1–B4 分阶段实现，当前 B1 代码候选在隔离环境验证；两站尚未切换共享写入，生产禁止操作。权限对接指定会话的新框架，不另造权限中心；见 `docs/design/shared-pn/implementation-status.md`。
+
 > 适用对象：Claude Code / Codex / zcode / Cursor / OpenCode 等所有在本仓库工作的 AI 代理。
 > 目标：任何代理可以无缝接替，**口径落在仓库文件里，不落在某个会话的脑子里**。
 > 本文件是唯一协议入口；`CLAUDE.md` 只是指向本文件的指针。

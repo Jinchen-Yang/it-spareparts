@@ -176,7 +176,12 @@ def list_candidates(db: Session, status: str, page: int, page_size: int,
 
 def review(db: Session, candidate_id: int, action: str, reason: str | None,
            operated_by: str | None) -> dict:
-    cand = db.get(ProductMatchCandidate, candidate_id)
+    # Topology lock precedes candidate/PN locks; merge updates candidate rows too.
+    from app.pn_catalog import api as catalog
+
+    catalog.acquire_identity_lock(db)
+    cand = db.scalar(select(ProductMatchCandidate).where(ProductMatchCandidate.id == candidate_id)
+                     .with_for_update().execution_options(populate_existing=True))
     if cand is None:
         raise CandidateError(f"候选不存在: {candidate_id}")
     if cand.status != "pending":
@@ -190,10 +195,10 @@ def review(db: Session, candidate_id: int, action: str, reason: str | None,
         target = db.get(DimPart, cand.candidate_part_id) if cand.candidate_part_id else None
         if source is None or target is None:
             raise CandidateError("候选缺源/目标型号，无法合并")
-        result = merge.merge_parts(db, source.pn_std, target.pn_std,
+        result = merge.merge_parts_in_transaction(db, source.pn_std, target.pn_std,
                                    reason or f"接受候选#{candidate_id}", operated_by)
         out["merge"] = result
-        cand = db.get(ProductMatchCandidate, candidate_id)  # merge 已 commit，重取
+        cand = db.get(ProductMatchCandidate, candidate_id, populate_existing=True)
         cand.status, cand.review_action = "accepted", "merge"
     elif action == "reject":
         cand.status, cand.review_action = "rejected", "reject"
@@ -221,6 +226,12 @@ def confirm_independent(db: Session, part_ids: list[int], operated_by: str | Non
     针对实测 ~90% 待审型号没有可用合并候选的现实——必须有批量出口，
     否则 1078 个逐条点击不可运维。
     """
+    from app.pn_catalog import api as catalog
+
+    # review/merge update candidate rows under topology first; keep the same
+    # order here before parent locks, avoiding candidate -> parent inversion.
+    catalog.acquire_identity_lock(db)
+    catalog.capture_states(db, part_ids)
     now = _NOW()
     confirmed = db.execute(
         update(DimPart).where(DimPart.id.in_(part_ids), DimPart.status == "active")

@@ -251,3 +251,6 @@ __all__ = [
     "ReplenishmentCartDraft",
     "ReplenishmentCartDraftLine",
 ]
+
+# Shared PN module owns its persistence; import only for metadata registration.
+from app.pn_catalog.models import AuditEvent as PnCatalogAuditEvent, CommandReceipt as PnCatalogReceipt, PartState as PnCatalogState  # noqa: E501,F401

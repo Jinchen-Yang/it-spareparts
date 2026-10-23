@@ -108,7 +108,8 @@ def list_parts(db: Session, kind: str, page: int, page_size: int) -> dict:
 
 def set_excluded(db: Session, pn_std: str, excluded: bool, reason: str | None,
                  operated_by: str | None) -> dict | None:
-    p = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+    p = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std).with_for_update()
+                  .execution_options(populate_existing=True))
     if p is None:
         return None
     if p.status == "merged":
