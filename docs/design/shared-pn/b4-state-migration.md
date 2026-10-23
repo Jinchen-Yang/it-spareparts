@@ -111,3 +111,10 @@ prepared 上传意图和 receiving/assigning 状态也保留恢复要求。原�
 旧 multipart 指纹、旧已归档确认、int32 捕获序号、识别安全投影、bundle 当前权限与到期。
 原生管理路由另用真实 Cerbos 验证敏感字段撤权与 Shop 委托拒绝；前端覆盖仅读不写、证据按需读取和响应丢失固定请求重试。
 这些不构成真实 OSS 字节校验、生产冻结、外部成果人工复核或生产切换验收；cutover_ready 始终 false。
+
+同一上传可对应多条不明外部状态，例如 expired 票据的 completed 分片遗留 cleanup lease，且收件箱仍为 assigning。
+这些记录可以任意顺序或并发核对：首次退休把 UploadTicket 与 MultipartUpload 的完整持久化状态摘要写进不可变恢复决定，
+并绑定同 namespace/snapshot、原 upload SHA、当前 canonical owner binding 与 writer/lease fence 证据。
+后续关联记录仅在当前状态与该审计决定完全一致、application 仍指向原 audit 时接续，不再次递增共同票据/分片版本。
+用户或 worker 的新版本、任务、令牌/分片变化，以及账号映射变更，均不被当作“已退休”而放行；仅修改可变 ledger 摘要也不能伪造证据。
+若原票据已指向已归档图片，核对必须明确保留该外部成果；旧 completed 分片的清理执行可以结束，票据及图库图片保持原样。

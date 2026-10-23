@@ -8,7 +8,7 @@ from . import api
 from .dto import CommandContext, Provenance
 from .errors import CatalogError
 from .job_models import CatalogJob
-from .media_models import GalleryEntry, InboxItem, MultipartUpload, UploadTicket
+from .media_models import GalleryEntry, InboxItem, UploadTicket
 from .migration_apply import _resolved_rows, _write_application
 from .migration_dto import fingerprint
 from .migration_models import LegacySourceRecord
@@ -54,60 +54,6 @@ def render_receipt(db, receipt, *, context, authorize, replayed=True):
         authorize=authorize,
         replayed=replayed,
     )
-
-
-def _retire_media(db, row, target):
-    upload_id = target.get("upload_id")
-    if row.kind == "inbox":
-        item_id = target.get("inbox_id")
-        initial = db.get(InboxItem, UUID(item_id)) if item_id else None
-        if initial is None:
-            raise CatalogError("migration.dependency_missing", "旧收件箱尚未转入")
-        upload_id = str(initial.upload_id)
-    ticket = (
-        db.scalar(
-            select(UploadTicket)
-            .where(UploadTicket.id == UUID(upload_id))
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if upload_id
-        else None
-    )
-    if ticket and (ticket.revision != 1 or ticket.job_id):
-        raise CatalogError(
-            "migration.target_changed", "当前上传已被操作，不能按旧证据结束"
-        )
-    if row.kind == "inbox":
-        item = db.scalar(
-            select(InboxItem)
-            .where(InboxItem.id == initial.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if item.status == "assigned":
-            raise CatalogError(
-                "migration.assignment_confirmation_required",
-                "已归档图片需要确认归属，不能退回或作废",
-            )
-        if item.revision != max(1, row.payload.get("revision", 0)):
-            raise CatalogError("migration.target_changed", "收件箱已有新操作")
-        item.status, item.revision = "failed", item.revision + 1
-        item.claimed_by, item.claim_expires_at = None, None
-        item.claim_revision += 1
-    if ticket:
-        if ticket.status == "committed":
-            raise CatalogError("migration.target_changed", "已归档上传不能作废")
-        ticket.status, ticket.error_code = "cancelled", "migration.retired_after_review"
-        ticket.revision += 1
-        multipart = db.get(MultipartUpload, ticket.id)
-        if multipart:
-            multipart.state, multipart.revision = "cancelled", multipart.revision + 1
-    return {
-        **target,
-        "reviewed_terminal": "cancelled",
-        "remote_side_effect": "none_issued",
-    }
 
 
 def recover_record(db, record_id, command, *, context, authorize, restart_job=None):
@@ -288,7 +234,9 @@ def recover_record(db, record_id, command, *, context, authorize, restart_job=No
         }
     else:
         if row.kind in {"inbox", "multipart", "upload_intent", "upload"}:
-            target = _retire_media(db, row, target)
+            from .migration_retirement import retire_media
+
+            target = retire_media(db, row, target, snapshot=snapshot, command=command)
         elif row.kind not in {
             "inbox_job",
             "agent_job",
