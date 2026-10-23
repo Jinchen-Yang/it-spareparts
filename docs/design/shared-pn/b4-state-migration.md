@@ -54,3 +54,19 @@ attributes，不推测单位。历史完整 payload、未生效 AI 候选与其�
 图片/好坏件文案可使用已复核的 ExternalReference 转换，原 archive mapping 不修改。先前归档时未解析的
 图片可在精确绑定后归入目标；已被人工编辑或排序的图库不能被导入顺序覆盖。其他状态转换尚在实现，当前
 明确记为 dependency_blocked，不能把这些记录当作已完成的 live 功能。
+
+## 上传与收件箱的生效链
+
+`upload`、`multipart`、`upload_intent`、`inbox` 已接入同一 application ledger。
+账号必须通过当前配置的来源 namespace、issuer、UUID subject 与有效 canonical account 绑定，禁止按姓名猜测。
+保留上传 UUID、原对象位置、文件声明、分片编号、ETag、分组及捕获顺序；这些存储内部字段不出现在普通响应。
+迁入后的票据若已被当前用户操作，后续依赖转换检查 revision 并报告冲突，不能用旧状态覆盖。
+
+原 Shop 分片使用固定 `sha256("multipart:" + upload UUID)` 指纹；迁移仅保存这一已知算法的结果。
+新上传继续原有指纹协议。分片完成任务保存实际预期指纹，重试先核对已完成对象，因此原上传不因新指纹不同而重复合并。
+该指纹没有任何浏览器输入字段。初始化、合并、取消结果不明，或仍有旧 operation token 的会话不转交执行权，
+不产生新外呼任务、不发起 abort，记录为 recovery_required。
+
+已完成旧归档的收件箱可以显示其图片归属，但旧记录没有 authority identity/claim CAS 和原审计回执。
+因此 assignment_intent 保持空值，明确进入 assignment_receipt_recovery；不能凭后续可变图片用途伪造原成功请求。
+prepared 上传意图和 receiving/assigning 状态也保留恢复要求。原先确定的 ready、deleted 与上传终态按真实状态投影。

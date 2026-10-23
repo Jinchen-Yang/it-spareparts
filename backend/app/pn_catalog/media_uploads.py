@@ -490,7 +490,8 @@ def multipart_start_plan(db, upload_id, *, context, authorize):
         "state": multipart.state,
         "key": ticket.staging_key,
         "content_type": ticket.content_type,
-        "fingerprint": f"pn-upload:{ticket.id}:{ticket.generation}",
+        "fingerprint": multipart.storage_fingerprint
+        or f"pn-upload:{ticket.id}:{ticket.generation}",
     }
 
 
@@ -781,6 +782,8 @@ def complete_multipart(db, upload_id, command, *, server_parts, context, authori
                 "upload_id": str(ticket.id),
                 "key": ticket.staging_key,
                 "storage_upload_id": multipart.storage_upload_id,
+                "expected_fingerprint": multipart.storage_fingerprint
+                or f"pn-upload:{ticket.id}:{ticket.generation}",
                 "parts": multipart.parts,
                 "operation_token": str(multipart.operation_token),
             },

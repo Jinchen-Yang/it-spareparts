@@ -55,7 +55,9 @@ def media_handlers(*, storage, cloud, authorize, session_factory=None):
         provider, payload = task_storage(lease), lease.payload
         parts = [MultipartPart(**value) for value in payload["parts"]]
         expected_size = sum(part.size_bytes for part in parts)
-        fingerprint = f"pn-upload:{lease.resource_id}:{lease.resource_generation}"
+        fingerprint = payload.get("expected_fingerprint") or (
+            f"pn-upload:{lease.resource_id}:{lease.resource_generation}"
+        )
         def completed():
             try:
                 info = call(lease, provider.head, payload["key"])
