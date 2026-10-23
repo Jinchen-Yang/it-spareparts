@@ -29,6 +29,7 @@ from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignmen
 from app.models.dimensions import DimCustomer
 from app.models.system import SysAuditLog, SysUser
 from tests.authz_pdp_helpers import cerbos_url  # noqa: F401
+from tests.authz_pdp_helpers import local_cerbos_config
 
 
 @pytest.fixture
@@ -409,9 +410,9 @@ resourcePolicy:
         for sock in sockets:
             sock.close()
     source = Path(__file__).resolve().parents[2] / "deploy/cerbos/config.yaml"
-    config = source.read_text().replace("0.0.0.0:3592", f"127.0.0.1:{http_port}")
-    config = config.replace("127.0.0.1:3593", f"127.0.0.1:{grpc_port}")
-    config = config.replace("directory: /policies", f"directory: {policies}")
+    config = local_cerbos_config(
+        source.read_text(), http_port=http_port, grpc_port=grpc_port, policies=policies,
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(config)
     url = f"http://127.0.0.1:{http_port}"
@@ -715,3 +716,221 @@ def test_ordinary_account_cannot_reset_credentials_via_legacy_management_gate(db
     assert response["detail"]["code"] == "AUTHZ_NAMED_ADMIN_REQUIRED"
     assert response["detail"]["committed"] is False
     assert _persisted(db, target) == before
+
+
+def test_seed_eligibility_migration_labels_only_existing_rows_and_keeps_old_snapshots(db):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+    from app.models.system import SysRoleTemplate
+
+    backend = Path(__file__).parents[1]
+    config = Config(str(backend / 'alembic.ini'))
+    config.set_main_option('script_location', str(backend / 'alembic'))
+    db.rollback()
+    command.downgrade(config, 'f1a3c5e7b9d2')
+    try:
+        db.execute(text("""INSERT INTO sys_user
+            (username,password_hash,role,template_perms,perm_overrides)
+            VALUES ('eligibility-old-empty','unused','readonly',
+                    '{"page_profit": true}'::jsonb,'{"data_customer": false}'::jsonb)"""))
+        db.execute(text("""INSERT INTO sys_role_template
+            (code,name,base_role,permissions,is_system,is_active,version)
+            VALUES ('eligibility-old-template','Old empty canonical','readonly',
+                    '{"page_profit": true}'::jsonb,false,true,4)"""))
+        db.commit()
+        command.upgrade(config, 'head')
+        old = db.scalar(select(SysUser).where(SysUser.username == 'eligibility-old-empty'))
+        template = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == 'eligibility-old-template'))
+        assert old.authorization_legacy_seed_eligible is True
+        assert template.authorization_legacy_seed_eligible is True
+        assert old.template_perms == {'page_profit': True}
+        assert old.perm_overrides == {'data_customer': False}
+        assert old.token_version == 0
+        assert old.authorization_profile['resource_overrides'] == {}
+        assert template.permissions == {'page_profit': True}
+        assert template.authorization_bundle == {} and template.version == 4
+        db.execute(text("""INSERT INTO sys_user (username,password_hash,role)
+            VALUES ('eligibility-new-raw','unused','readonly')"""))
+        db.execute(text("""INSERT INTO sys_role_template
+            (code,name,base_role,permissions,is_system,is_active,version)
+            VALUES ('eligibility-new-raw','New raw','readonly','{}'::jsonb,false,true,1)"""))
+        db.commit()
+        assert db.scalar(select(SysUser.authorization_legacy_seed_eligible).where(
+            SysUser.username == 'eligibility-new-raw')) is False
+        assert db.scalar(select(SysRoleTemplate.authorization_legacy_seed_eligible).where(
+            SysRoleTemplate.code == 'eligibility-new-raw')) is False
+    finally:
+        db.rollback()
+        command.upgrade(config, 'head')
+
+
+def test_canonical_empty_creation_and_legacy_template_copy_never_inherit_seed_eligibility(db, s1_client):
+    from app.models.system import SysRoleTemplate
+
+    actor = _user(db, 'eligibility-admin', 'admin')
+    state = _read(s1_client, actor, actor)
+    common = {'schema_version': 1, 'catalog_version': state['catalog_version']}
+    created = _json(s1_client.post('/api/accounts', headers=_headers(actor), json={
+        **common, 'profile': {'username': 'canonical-empty', 'password': 'synthetic-password'},
+        'authorization': {'kind': 'none'}}), 201)
+    user = db.scalar(select(SysUser).where(SysUser.username == 'canonical-empty'))
+    assert user.authorization_legacy_seed_eligible is False
+    assert user.authorization_profile['resource_overrides'] == {}
+    old = SysRoleTemplate(code='legacy-eligible', name='Legacy', base_role='boss',
+                          permissions={'page_profit': True}, authorization_bundle={},
+                          authorization_legacy_seed_eligible=True, version=9)
+    db.add(old)
+    db.commit()
+    copied = _json(s1_client.post('/api/role-templates', headers=_headers(actor), json={
+        **common, 'metadata': {'code': 'canonical-copy', 'name': 'Canonical empty copy'},
+        'authorization': {'kind': 'copy_template', 'code': old.code, 'expected_version': 9}}), 201)
+    template = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == 'canonical-copy'))
+    assert template.authorization_legacy_seed_eligible is False
+    assert template.authorization_bundle == {}
+    assert template.permissions == {} and template.base_role == 'readonly'
+    assert 'authorization_legacy_seed_eligible' not in str(created)
+    assert 'authorization_legacy_seed_eligible' not in str(copied)
+    assert old.authorization_legacy_seed_eligible is True
+
+
+@pytest.mark.parametrize('eligible', [False, True])
+def test_seed_eligibility_is_neither_runtime_allow_nor_rewritten_by_canonical_updates(db, s1_client, eligible):
+    actor = _user(db, 'eligibility-runtime-admin', 'admin')
+    user = _user(db, 'eligibility-runtime-target', authorization_legacy_seed_eligible=eligible,
+                 template_perms={'page_sales_analysis': True})
+    snapshot = _json(s1_client.get('/api/authz/me', headers=_headers(user)))
+    assert snapshot['resources']['sales_analysis']['decisions']['read']['effect'] == 'deny'
+    state = _read(s1_client, actor, user)
+    _json(_write(s1_client, actor, user, _command(state)))
+    db.refresh(user)
+    assert user.authorization_legacy_seed_eligible is eligible
+    allowed = _json(s1_client.get('/api/authz/me', headers=_headers(user)))
+    assert allowed['resources']['sales_analysis']['decisions']['read']['effect'] == 'allow'
+
+
+@pytest.mark.parametrize('where', ['root', 'profile', 'template_metadata'])
+def test_canonical_client_cannot_choose_legacy_seed_eligibility(db, s1_client, where):
+    actor = _user(db, 'eligibility-injection-admin', 'admin')
+    state = _read(s1_client, actor, actor)
+    body = {'schema_version': 1, 'catalog_version': state['catalog_version'],
+            'profile': {'username': 'eligibility-injected', 'password': 'synthetic-password'},
+            'authorization': {'kind': 'none'}}
+    path = '/api/accounts'
+    if where == 'root':
+        body['authorization_legacy_seed_eligible'] = True
+    elif where == 'profile':
+        body['profile']['authorization_legacy_seed_eligible'] = True
+    else:
+        path = '/api/role-templates'
+        body.pop('profile')
+        body['metadata'] = {'code': 'eligibility-injected', 'name': 'Injected',
+                            'authorization_legacy_seed_eligible': True}
+        body['authorization'] = {'kind': 'explicit', 'modules': {}}
+    _json(s1_client.post(path, headers=_headers(actor), json=body), 422)
+    assert db.scalar(select(func.count()).select_from(SysUser).where(
+        SysUser.username == 'eligibility-injected')) == 0
+    from app.models.system import SysRoleTemplate
+    assert db.scalar(select(func.count()).select_from(SysRoleTemplate).where(
+        SysRoleTemplate.code == 'eligibility-injected')) == 0
+
+
+@pytest.mark.parametrize('kind', ['account', 'template'])
+def test_canonical_origin_without_cutover_cannot_be_erased_by_schema_downgrade(db, s1_client, monkeypatch, kind):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+    from app.models.authorization import SysAuthorizationCutover
+    from app.models.system import SysRoleTemplate
+
+    monkeypatch.setattr(get_settings(), 'authz_sales_analysis_enabled', False)
+    db.execute(delete(SysAuthorizationCutover))
+    db.commit()
+    actor = _user(db, 'eligibility-downgrade-admin', 'admin', authorization_legacy_seed_eligible=True)
+    state = _read(s1_client, actor, actor)
+    common = {'schema_version': 1, 'catalog_version': state['catalog_version']}
+    if kind == 'account':
+        _json(s1_client.post('/api/accounts', headers=_headers(actor), json={
+            **common, 'profile': {'username': 'downgrade-canonical', 'password': 'synthetic-password'},
+            'authorization': {'kind': 'none'}}), 201)
+        model, key = SysUser, SysUser.username == 'downgrade-canonical'
+    else:
+        _json(s1_client.post('/api/role-templates', headers=_headers(actor), json={
+            **common, 'metadata': {'code': 'downgrade-canonical', 'name': 'Empty canonical'},
+            'authorization': {'kind': 'explicit', 'modules': {}}}), 201)
+        model, key = SysRoleTemplate, SysRoleTemplate.code == 'downgrade-canonical'
+    assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover)) == 0
+    assert db.scalar(select(model.authorization_legacy_seed_eligible).where(key)) is False
+    backend = Path(__file__).parents[1]
+    config = Config(str(backend / 'alembic.ini'))
+    config.set_main_option('script_location', str(backend / 'alembic'))
+    db.rollback()
+    try:
+        with pytest.raises(RuntimeError):
+            command.downgrade(config, 'f1a3c5e7b9d2')
+        assert 'authorization_legacy_seed_eligible' in {
+            c['name'] for c in inspect(db.get_bind()).get_columns(model.__tablename__)}
+        assert db.scalar(select(model.authorization_legacy_seed_eligible).where(key)) is False
+    finally:
+        db.rollback()
+        command.upgrade(config, 'head')
+
+
+def test_downgrade_waits_for_uncommitted_canonical_origin_before_running_guards(db):
+    """A real writer commits while downgrade waits; the later guard sees false."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect, text
+
+    backend = Path(__file__).parents[1]
+    config = Config(str(backend / 'alembic.ini'))
+    config.set_main_option('script_location', str(backend / 'alembic'))
+    db.rollback()
+    engine = db.get_bind()
+    # Exercise S1's own guard at its revision. Later PN foreign keys can legitimately
+    # block earlier while their tables are dropped, before this lock is reached.
+    command.downgrade(config, 'a7c2e9f4b6d1')
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor, engine.connect() as writer:
+            transaction = writer.begin()
+            writer_pid = writer.scalar(text('SELECT pg_backend_pid()'))
+            starting_revision = writer.scalar(text('SELECT version_num FROM alembic_version'))
+            writer.execute(text("""INSERT INTO sys_user (username,password_hash,role,
+                authorization_legacy_seed_eligible) VALUES
+                ('concurrent-canonical-origin','unused','readonly',false)"""))
+            future = executor.submit(command.downgrade, config, 'f1a3c5e7b9d2')
+            try:
+                deadline = time.monotonic() + 10
+                blocked_query = None
+                while time.monotonic() < deadline:
+                    writer.execute(text('SELECT pg_stat_clear_snapshot()'))
+                    blocked_query = writer.scalar(text("""SELECT query FROM pg_stat_activity
+                        WHERE datname=current_database() AND pid <> pg_backend_pid()
+                          AND :writer_pid = ANY(pg_blocking_pids(pid))
+                          AND wait_event_type='Lock' LIMIT 1"""), {'writer_pid': writer_pid})
+                    if blocked_query:
+                        break
+                    if future.done():
+                        pytest.fail(f'Downgrade completed before waiting for origin writer: {future.exception()}')
+                    time.sleep(.01)
+                assert blocked_query is not None, 'No real PostgreSQL lock wait observed'
+                assert 'LOCK TABLE sys_authorization_cutover' in blocked_query
+                assert 'ACCESS EXCLUSIVE' in blocked_query
+                transaction.commit()
+                with pytest.raises(RuntimeError, match='non-legacy authorization origin'):
+                    future.result(timeout=10)
+            finally:
+                if transaction.is_active:
+                    transaction.rollback()
+                try:
+                    future.result(timeout=10)
+                except RuntimeError:
+                    pass
+        assert 'authorization_legacy_seed_eligible' in {
+            column['name'] for column in inspect(engine).get_columns('sys_user')}
+        assert db.scalar(text("SELECT authorization_legacy_seed_eligible FROM sys_user "
+                              "WHERE username='concurrent-canonical-origin'")) is False
+        assert db.scalar(text('SELECT version_num FROM alembic_version')) == starting_revision
+    finally:
+        db.rollback()
+        command.upgrade(config, 'head')

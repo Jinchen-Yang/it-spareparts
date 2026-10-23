@@ -33,6 +33,8 @@ def test_upgrade_backfills_templates_and_accounts_roundtrip(db):
             # 升级前不存在这两个键；预置 override 模拟同批误写，升级应剥离
             perm_overrides={k: not (role == "boss") for k in _KEYS},
             permissions=base,
+            # 此夹具代表迁移前旧存量，非 S1 新建的 canonical 账号。
+            authorization_legacy_seed_eligible=True,
         ))
     db.commit()
     db.close()

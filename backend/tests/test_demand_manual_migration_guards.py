@@ -19,6 +19,7 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 
+from tests.legacy_catalog_fixtures import pre_catalog_snapshot
 from app.etl import loader
 from app.models.maintenance_project import MaintenanceProject
 from tests import factories as f
@@ -53,6 +54,7 @@ def _seed_wbdd_line(db, *, order_raw, line_raw):
     lines = [f.maintenance_line(order_raw, line_raw, "PN-MIG")]
     loader.load(db, f.maintenance_result(orders, lines), _batch(db),
                 _d(2026, 8, 1), mode="skip")
+    pre_catalog_snapshot(db)
     db.commit()
 
 

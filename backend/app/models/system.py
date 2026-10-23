@@ -52,6 +52,11 @@ class SysUser(Base):
         JSONB, default=lambda: {"schema_version": 1, "template_snapshot": None, "resource_overrides": {}},
         server_default=text("'{\"schema_version\": 1,\"template_snapshot\": null,\"resource_overrides\": {}}'::jsonb"),
     )
+    # Migration origin only: never a runtime permission or a seed progress flag.
+    # Canonical creation stays false even when its explicit module bundle is empty.
+    authorization_legacy_seed_eligible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     last_login_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     # 登录暴力破解防护：连续失败计数 + 锁定到期时间（达阈值锁定一段时间）
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -82,6 +87,9 @@ class SysRoleTemplate(Base):
     base_role: Mapped[str] = mapped_column(String(32))
     permissions: Mapped[dict] = mapped_column(JSONB)   # 完整键→bool 图（保存时 normalize 补全）
     authorization_bundle: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    authorization_legacy_seed_eligible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")

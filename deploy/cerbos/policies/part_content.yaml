@@ -1,0 +1,44 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: part_content
+  rules:
+    - name: explicit-edit
+      actions: ["edit"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "edit" in P.attr.grants.part_content.actions && "read" in P.attr.grants.part_content.actions && P.attr.grants.part_content.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_content", "scope": P.attr.grants.part_content.scope, "version": P.attr.grants.part_content.version,
+             "field_permissions": P.attr.grants.part_content.field_permissions}
+    - name: explicit-migrate
+      actions: ["migrate"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "migrate" in P.attr.grants.part_content.actions && "read" in P.attr.grants.part_content.actions && P.attr.grants.part_content.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_content", "scope": P.attr.grants.part_content.scope, "version": P.attr.grants.part_content.version,
+             "field_permissions": P.attr.grants.part_content.field_permissions}
+    - name: explicit-read
+      actions: ["read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read" in P.attr.grants.part_content.actions && P.attr.grants.part_content.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_content", "scope": P.attr.grants.part_content.scope, "version": P.attr.grants.part_content.version,
+             "field_permissions": P.attr.grants.part_content.field_permissions}

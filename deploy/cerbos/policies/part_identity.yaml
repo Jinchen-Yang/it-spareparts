@@ -1,0 +1,122 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: part_identity
+  rules:
+    - name: explicit-merge
+      actions: ["merge"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "merge" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-read
+      actions: ["read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-rebind_facts
+      actions: ["rebind_facts"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "rebind_facts" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-rename
+      actions: ["rename"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "rename" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-review_alias
+      actions: ["review_alias"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "review_alias" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-unmerge
+      actions: ["unmerge"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "unmerge" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-job-read
+      actions: ["job.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.read" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-job-cancel
+      actions: ["job.cancel"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.cancel" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && "job.read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}
+    - name: explicit-job-retry
+      actions: ["job.retry"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.retry" in P.attr.grants.part_identity.actions && "read" in P.attr.grants.part_identity.actions && "job.read" in P.attr.grants.part_identity.actions && P.attr.grants.part_identity.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_identity", "scope": P.attr.grants.part_identity.scope, "version": P.attr.grants.part_identity.version,
+             "field_permissions": P.attr.grants.part_identity.field_permissions}

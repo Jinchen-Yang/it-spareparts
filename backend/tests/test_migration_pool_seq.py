@@ -13,6 +13,7 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 
 from app.db import engine
+from tests.legacy_catalog_fixtures import delete_baseline_parts
 
 
 def _cfg():
@@ -22,7 +23,7 @@ def _cfg():
 
 
 @pytest.fixture()
-def preserve_pool_seq(migrated):
+def preserve_pool_seq(db):
     """保存并恢复 part_pool_group_id_seq 状态（复审五轮 Standards：Postgres 序列不随
     事务回滚，凡是直接操纵序列（ALTER/setval）或依赖其初始值的测试都必须挂本 fixture，
     否则测试结束把序列留在任意水位 → 跨用例顺序依赖）。"""
@@ -78,6 +79,7 @@ def test_followup_migration_preserves_sequence_high_watermark(
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member"))
             conn.execute(text("DELETE FROM part_pool"))
+            delete_baseline_parts(conn, prefix="MIGSEQ-%")
             conn.execute(text("DELETE FROM dim_part WHERE pn_std LIKE 'MIGSEQ-%'"))
         alembic_command.upgrade(cfg, "head")          # 回到 head；序列状态由 preserve_pool_seq 恢复
 

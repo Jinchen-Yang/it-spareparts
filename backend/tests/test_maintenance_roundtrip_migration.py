@@ -12,6 +12,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from app import permissions as permission_service
+from tests.legacy_catalog_fixtures import pre_catalog_snapshot
 from app.etl import loader
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -79,6 +80,7 @@ def _maintenance_line(db, suffix: str) -> tuple[SysImportBatch, FMaintenanceLine
         batch.id,
         date(2026, 7, 2),
     )
+    pre_catalog_snapshot(db)
     line = db.scalar(
         select(FMaintenanceLine).where(
             FMaintenanceLine.raw_line_id == f"ML-{suffix}",
@@ -500,10 +502,10 @@ def test_dev15_upgrade_normalizes_legacy_json_null_permission_payloads(db):
             """
             INSERT INTO sys_user
                 (username, role, password_hash, template_perms,
-                 permissions, perm_overrides)
+                 permissions, perm_overrides, authorization_legacy_seed_eligible)
             VALUES
                 ('dev15-json-null-user', 'sales', 'not-used',
-                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, true)
             RETURNING id
             """
         )
@@ -594,12 +596,12 @@ def test_dev15_migration_preserves_legacy_template_fallback(
             """
             INSERT INTO sys_user
                 (username, role, password_hash, template_perms,
-                 permissions, perm_overrides)
+                 permissions, perm_overrides, authorization_legacy_seed_eligible)
             VALUES
                 (:username, 'sales', 'not-used',
                  '{}'::jsonb,
                  '{"page_inventory": false}'::jsonb,
-                 '{}'::jsonb)
+                 '{}'::jsonb, true)
             RETURNING id
             """
         ),
@@ -722,10 +724,10 @@ def test_dev15_upgrade_rejects_non_object_permission_payloads(
             """
             INSERT INTO sys_user
                 (username, role, password_hash, template_perms,
-                 permissions, perm_overrides)
+                 permissions, perm_overrides, authorization_legacy_seed_eligible)
             VALUES
                 ('dev15-json-array-user', 'sales', 'not-used',
-                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, true)
             RETURNING id
             """
         )
@@ -852,10 +854,10 @@ def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
             """
             INSERT INTO sys_user
                 (username, role, password_hash, template_perms,
-                 permissions, perm_overrides)
+                 permissions, perm_overrides, authorization_legacy_seed_eligible)
             VALUES
                 ('dev15-json-array-downgrade', 'sales', 'not-used',
-                 '{}'::jsonb, '{}'::jsonb, '[]'::jsonb)
+                 '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, true)
             RETURNING id
             """
         )

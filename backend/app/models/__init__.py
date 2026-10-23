@@ -258,3 +258,5 @@ __all__ = [
 
 # Shared PN module owns its persistence; import only for metadata registration.
 from app.pn_catalog.models import AuditEvent as PnCatalogAuditEvent, CommandReceipt as PnCatalogReceipt, PartState as PnCatalogState  # noqa: E501,F401
+
+from app.authz.pn_models import CatalogSubjectBinding, CatalogProofNonce  # noqa: F401

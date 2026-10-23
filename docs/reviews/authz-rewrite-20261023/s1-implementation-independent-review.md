@@ -67,3 +67,43 @@ CERBOS_BINARY=/tmp/itsp-authz-engine-feasibility-20261023/binary/cerbos \
 根代理新增目录与执行定义闭集/依赖一致性校验、已有 cutover 缺执行定义失败关闭后，再次执行独立后端 **36 passed in 15.66s**，日志 `/tmp/itsp-authz-s1-independent-registry.log`。两份 synthetic 测试定义均配完整 wire descriptor，包含动作及字段依赖、范围及上下文、denial scope；不绕过新校验，不改原断言。生产目录未增加测试资源。
 
 架构结论：S1 已把可信身份、持久切换、目录、运行决策与控制面写事务分开。运行 allow 只从 live Grant 经 PDP 产生，模板/profile 只解释配置来源；前端操作者能力与目标账号配置也已分离。通用编辑器使用同一目录依赖，单写/批量/模板都进入同一 canonical 管理服务，原旧入口不再是并行新授权写路径。保留的 sales adapter 与旧模块 bool 属于明示的迁移接缝；S1 并未完成其他业务模块改造，不能据此宣称全模块重构结束。
+
+## 本机隔离栈浏览器开发调试
+
+使用 Playwright skill 的 headless Chromium，真实登录 `http://127.0.0.1:15176`；API/PDP 为本机隔离端口，独有合成数据库。未访问生产，也不是最终用户验收。真实目录返回 87 资源。
+
+- 合成目标账号从无配置保存 sales `read/assigned_customers` 与客户 ID 1，同一 PUT 200，epoch 0→1，个人来源与客户归属正确。
+- 无模板清除个人覆盖：UI 可操作且提示撤销；PUT 200，epoch 1→2、资源 version 1→2、actions=[]、override absent、source=none，客户归属仍为 [1]。
+- 创建只读模板 POST 201；账号列表重新加载后目标仍 epoch=2、template=null，无隐式同步。
+- 显式应用模板 preview 200，界面显示拒绝→读取、保存模板版本及旧登录失效；执行请求与服务器 command 完全相同（仅加 dry_run=false/fingerprint），fingerprint 相同。执行 200，epoch 2→3、模板 v1、无个人覆盖、客户归属保留。
+- 截图：`output/playwright/s1-target-saved.png`、`output/playwright/s1-template-applied.png`。浏览器已关闭，服务器留给根代理清理。console 仅有既有 AntD destroyOnClose 弃用提醒及 favicon 404，无授权业务请求失败。npm CLI 曾等待包查询，改用已有缓存后继续；不作为产品失败。
+
+响应证据保存在本机 `/tmp/itsp-s1-browser-{catalog.txt,save.json,clear.json,post-template-accounts.json,preview.json,execute-body.json,apply.json}`，仅合成数据，不包含登录 token。未新增或修改 app/tests。
+
+## S1 来源资格补充独审
+
+补充原因成立：canonical 的空账号/空模板是明确授权结果，不能凭 JSON 为空推断其来自旧角色体系。两表 `authorization_legacy_seed_eligible` 仅保存迁移来源：ORM/SQL 默认 false；本次未部署 S1 migration 的已有行 true；canonical 创建/复制显式 false，legacy 创建及旧 seed_users 新行显式 true。现有账号的保存快照与版本不因增加来源列变化；正常 canonical 更新不重写来源标记。静态检查确认该字段未进入 wire 或运行 allow。
+
+独立新增 9 个真实 PG/PDP 反例：原有空数据与新建 SQL 默认来源分开；旧 snapshot/override/epoch/template version 保留；canonical none 与复制 legacy 空模板均 false；来源 true/false 本身均不能允许资源，合法 Grant 写入不改变来源；三处客户端字段注入 422 且不落库；无 marker 的 canonical 空账号/空模板均拒绝来源擦除式降级。
+
+最后两项独立复现了降级缺口：旧 guard 仅检查 cutover marker，两个反例均因未抛异常而失败（`/tmp/itsp-authz-s1-independent-origin-downgrade.log`，2 failed）。作者已在任何 DDL 前加入两表任一 false 来源即拒绝降级；原样完整重跑 **45 passed in 22.83s**，日志 `/tmp/itsp-authz-s1-independent-origin-final.log`。修复允许空库/全 legacy 且无 marker 的迁移往返；本独审真实 migration 测试也经过该路径。`git diff --check` 通过。
+
+结论：本补充审查无剩余阻断；未来 S2 seed 仍须显式读取此来源资格、逐资源记录迁移完成状态并遵守已冻结差分规则。当前测试不宣称尚未实施的 S2 seed 已验证，也不替代本次补充提交后的精确 SHA CI。
+
+### 降级事务锁与历史 CI 夹具适配
+
+检查条件与删除列之间需要同事务表锁：未提交 canonical insert 对普通 EXISTS 不可见，随后 DDL 才等待它，可能在该 insert 提交后继续删除来源。作者把三表 ACCESS EXCLUSIVE 锁移至所有检查之前。本独立新增真实双连接反例：writer 插入 false 来源但不提交；从 PostgreSQL `pg_blocking_pids` 与等待 SQL 确认 downgrade 正在 LOCK TABLE 处阻塞；writer 提交后 downgrade 抛来源保护异常，列、false 值与起始 Alembic revision 均保留。不是 sleep 猜时序，也未 mock migration/数据库结果。最终定向 **1 passed in 3.99s**，`/tmp/itsp-authz-s1-independent-origin-lock-final.log`。
+
+另对三个历史失败修复做独立 diff 审查与实跑：
+
+- `test_maintenance_project_no_return_note.py`：仅历史 schema 往返 fixture 标明 legacy 来源；升级后新增旧 token 401，真实登录取得新 token 后继续原非空备注降级拒绝、版本与数据保留断言。
+- `test_purchase_analytics_permissions_migration.py`：旧 schema 用反射 Table 插入当时存在的列，避免当前 ORM 引用未来列；boss/readonly 的快照、覆盖层及模板全部原断言保持。
+- `test_token_revocation.py`：直接 handler 测试改用 dict payload 与 typed identity 配合现签名；没有减少原撤权、显示名不撤权、并发递增及登录竞争断言。它仍不负责证明 HTTP 操作者认证，相关真实接口证据由 S1 独立测试提供。
+
+独立文件（现 46 项）与上述三文件组合 **84 passed in 41.69s**，日志 `/tmp/itsp-authz-s1-independent-lock-regressions.log`。未改业务作者代码，测试修复没有放宽原业务约束；当前独审无剩余阻断，精确 SHA CI 仍由根代理确认。
+
+### 其余历史迁移测试适配静态复核
+
+追加逐项审查 data_quality、collection_reminders、manager_workbook_v3、project_note、contract_amount_remediation、maintenance_roundtrip、replenishment_atomic，以及 maintenance_beta/boss、replenishment_beta、sales_analytics 四个 permission migration diff。改动仅把被测历史账号/模板声明为 legacy 来源；JSON null/array、快照回退、权限覆盖、历史事实与降级拒绝的原断言均未减少。project_note 同 no_return_note，新增旧 token 401 后真实重新登录，继续原非空备注保护验证。
+
+`test_migration_manual_pool.py::preserve_pool_seq` 从仅依赖 migrated 改为依赖标准 db 清理合理：清理发生在每个测试自己建立历史事实之前；同时使用 db 的测试复用同一个 fixture，不会再次清掉本例种入的数据。原池 metadata/policy/multi-pool/manual-source 降级保护及回滚断言全部保留，生产 guard 未修改。跨模块 assignment history 的保护仍由 manager_workbook_v3 用例在本例显式种入后验证，不依赖前序测试遗留数据。此处未重复运行；根代理负责完整 downgrade 节点组合证据，静态审查无新增阻断。

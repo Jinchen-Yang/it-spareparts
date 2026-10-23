@@ -42,6 +42,9 @@ class ActorContext(StrictDTO):
     display_name: str | None = Field(default=None, max_length=256)
     issuer: str | None = Field(default=None, max_length=256)
     subject: str | None = Field(default=None, max_length=256)
+    authorization_epoch: int | None = Field(default=None, ge=0)
+    mapping_version: int | None = Field(default=None, ge=1)
+    client_policy_version: str | None = Field(default=None, max_length=64)
     provenance: Provenance = Field(default_factory=Provenance)
 
 

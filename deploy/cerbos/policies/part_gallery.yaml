@@ -1,0 +1,538 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: part_gallery
+  rules:
+    - name: explicit-enrichment-bundle
+      actions: ["enrichment.bundle"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.bundle" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-enrichment-bundle-read
+      actions: ["enrichment.bundle.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.bundle.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-enrichment-recognize
+      actions: ["enrichment.recognize"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.recognize" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-enrichment-research-images
+      actions: ["enrichment.research.images"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.research.images" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-adopt
+      actions: ["gallery.adopt"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.adopt" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-archive
+      actions: ["gallery.archive"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.archive" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-arrange
+      actions: ["gallery.arrange"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.arrange" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-bundle
+      actions: ["gallery.bundle"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.bundle" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-change_purpose
+      actions: ["gallery.change_purpose"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.change_purpose" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-delete
+      actions: ["gallery.delete"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.delete" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-derive
+      actions: ["gallery.derive"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.derive" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-edit
+      actions: ["gallery.edit"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.edit" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-read
+      actions: ["gallery.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-research
+      actions: ["gallery.research"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.research" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-restore
+      actions: ["gallery.restore"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.restore" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-reuse
+      actions: ["gallery.reuse"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.reuse" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-suppress
+      actions: ["gallery.suppress"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.suppress" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-unsuppress
+      actions: ["gallery.unsuppress"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.unsuppress" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-assign
+      actions: ["inbox.assign"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.assign" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-claim
+      actions: ["inbox.claim"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.claim" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-delete
+      actions: ["inbox.delete"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.delete" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-group-add
+      actions: ["inbox.group.add"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.group.add" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-group-arrange
+      actions: ["inbox.group.arrange"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.group.arrange" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-group-create
+      actions: ["inbox.group.create"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.group.create" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-manage
+      actions: ["inbox.manage"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.manage" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-read
+      actions: ["inbox.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-release
+      actions: ["inbox.release"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.release" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-restore
+      actions: ["inbox.restore"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.restore" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-shared-read
+      actions: ["inbox.shared.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.shared.read" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-inbox-takeover
+      actions: ["inbox.takeover"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "inbox.takeover" in P.attr.grants.part_gallery.actions && "inbox.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-job-cancel
+      actions: ["job.cancel"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.cancel" in P.attr.grants.part_gallery.actions && "job.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-job-read
+      actions: ["job.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-job-retry
+      actions: ["job.retry"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.retry" in P.attr.grants.part_gallery.actions && "job.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-cancel
+      actions: ["uploads.cancel"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.cancel" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-complete
+      actions: ["uploads.complete"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.complete" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-create
+      actions: ["uploads.create"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.create" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-manage
+      actions: ["uploads.manage"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.manage" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-multipart-complete
+      actions: ["uploads.multipart.complete"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.multipart.complete" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-multipart-part
+      actions: ["uploads.multipart.part"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.multipart.part" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-multipart-start
+      actions: ["uploads.multipart.start"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.multipart.start" in P.attr.grants.part_gallery.actions && "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-uploads-read
+      actions: ["uploads.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "uploads.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}

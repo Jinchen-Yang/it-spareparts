@@ -31,11 +31,11 @@ def test_empty_downgrade_upgrade_preserves_existing_facts_and_permission_default
             table: conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
             for table in ("f_purchase_line", "f_sales_line", "inventory", "part_pool")
         }
-        # 自定义模板缺新键，验证升级失败关闭；admin 则默认打开。
+        # 旧存量自定义模板缺新键，验证升级失败关闭；admin 则默认打开。
         conn.execute(text(
             "INSERT INTO sys_role_template "
-            "(code,name,base_role,permissions,is_system,is_active,version) "
-            "VALUES ('custom_dq','数据维护自定义','readonly','{}'::jsonb,false,true,1)"
+            "(code,name,base_role,permissions,is_system,is_active,version,authorization_legacy_seed_eligible) "
+            "VALUES ('custom_dq','数据维护自定义','readonly','{}'::jsonb,false,true,1,true)"
         ))
 
     alembic_command.downgrade(cfg, _PREV)

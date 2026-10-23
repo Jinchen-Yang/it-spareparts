@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-env"  # token 签名密钥
     token_ttl_hours: int = 12
 
+    # Default-off PN transport trust. Neither key may equal the login token key.
+    pn_delegation_secret: SecretStr = SecretStr("")
+    pn_shop_proof_secret: SecretStr = SecretStr("")
+    pn_shop_issuer: str = "shop"
+    pn_shop_client_id: str = "shop"
+    pn_shop_allowed_actions: list[str] = []
+    pn_shop_allowed_fields: dict[str, list[str]] = {}
+    pn_confirmation_secret: SecretStr = SecretStr("")
+
     # D-0026: explicit module cutover, never per-request fallback on PDP failure.
     authz_sales_analysis_enabled: bool = False
     authz_sales_analysis_suspended: bool = False
