@@ -35,6 +35,7 @@ from app.api.maintenance_expense_collection_workbook import (
 )
 from app.api.maintenance_boss_board import contract_no_filter
 from app.api.maintenance_project_scope import (
+    enforce_maintenance_project_access,
     require_maintenance_project_access,
     resolve_visible_project_ids,
 )
@@ -42,6 +43,7 @@ from app import config
 from app.auth import current_identity, current_role, require_admin
 from app.config import get_settings
 from app.db import get_db
+from app.models.system import SysUser
 from app.models.maintenance import MaintenanceManualCostOverride
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.security import (
@@ -169,6 +171,41 @@ def _project_note_operator(db: Session, ident: dict, ctx: UserContext) -> str:
 
     require_action("action_maintenance_project_manage", require_data="data_profit")(ctx)
     return _real_operator(db, ident)
+
+
+def _reauthorize_site_workbook(
+    db: Session, *, ident: dict, plan: master.MasterV2Plan, operated_by: str,
+) -> UserContext:
+    """06 caller contract: re-read login, scope and field rights after waits.
+
+    Reuse workbook rights, including manager/sales exceptions; the separate
+    page site's action key is not required for workbook edits.
+    """
+    from app import permissions
+
+    if (ident.get("authn") != "sys_user" or ident.get("fb")
+            or not ident.get("sub") or ident.get("sub") != operated_by):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "领用编辑必须使用实名系统账号")
+    user = db.scalar(select(SysUser).where(
+        SysUser.username == operated_by,
+    ).execution_options(populate_existing=True))
+    if user is None or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已失效，请重新登录")
+    if int(ident.get("tv", 0)) != int(user.token_version or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
+    current = UserContext(
+        user_id=operated_by, role=user.role, salesperson_name=user.salesperson_name,
+        permissions=permissions.runtime_safe(permissions.effective_for_user(user)),
+        is_authenticated=True,
+    )
+    require_page("page_maintenance")(current)
+    _require_master_edit(plan.project_id, db=db, ctx=current)
+    enforce_maintenance_project_access(db, project_id=plan.project_id, ctx=current)
+    if plan.contract_amount_change is not None:
+        _require_contract_amount_manage(current, ident, db=db, project_id=plan.project_id)
+    if plan.project_note_change is not None:
+        _project_note_operator(db, ident, current)
+    return current
 
 
 def _xlsx(content: bytes, filename: str) -> StreamingResponse:
@@ -932,14 +969,26 @@ async def apply_project_master(
                         "conflicts": [dict(item) for item in plan.conflicts],
                     },
                 )
+            reauthorize = None
+            if plan.site_flags or plan.site_issue_merges:
+                def reauthorize():
+                    return _reauthorize_site_workbook(
+                        db, ident=ident, plan=plan, operated_by=operator,
+                    )
+                reauthorize()  # entrance qualification also requires a real account
             result = master.apply_project_master_v2(
                 db, plan, operated_by=operator, import_batch_id=str(uuid.uuid4()),
-                user_ctx=ctx,
+                user_ctx=ctx, reauthorize=reauthorize,
             )
         else:
             plan = master.validate(db, project_id=project_id, data=data)
             result = master.apply(db, plan, operated_by=_operator(ident),
                                   import_batch_id=str(uuid.uuid4()))
+    except HTTPException:
+        # A lock-time authorization failure must abort the complete workbook,
+        # including writes flushed by earlier sheets in the same transaction.
+        db.rollback()
+        raise
     except SiteIssueEditError as exc:
         db.rollback()
         record_access_log(
