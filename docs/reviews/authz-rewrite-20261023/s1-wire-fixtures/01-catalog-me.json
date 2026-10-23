@@ -1,0 +1,482 @@
+{
+  "fixture_format": 1,
+  "catalog_version": "authz-s1-v1",
+  "note": "Independent DTO examples only; not complete database seeds or reproducible server fingerprint vectors; no live data.",
+  "cases": [
+    {
+      "id": "catalog_live_planned_retired",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/catalog"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "modules": [
+            {
+              "id": "sales_analysis",
+              "label": "销售分析",
+              "migration_state": "implemented",
+              "runtime_state": "enabled",
+              "configurable": true,
+              "actions": [
+                {
+                  "id": "read",
+                  "label": "读取",
+                  "kind": "data",
+                  "requires_actions": [],
+                  "requires_fields": []
+                },
+                {
+                  "id": "export",
+                  "label": "导出",
+                  "kind": "data",
+                  "requires_actions": [
+                    "read"
+                  ],
+                  "requires_fields": []
+                }
+              ],
+              "scopes": [
+                {
+                  "id": "all",
+                  "label": "全部客户",
+                  "relationship_kind": null,
+                  "requires_context": false
+                },
+                {
+                  "id": "assigned_customers",
+                  "label": "负责客户",
+                  "relationship_kind": "customers",
+                  "requires_context": false
+                }
+              ],
+              "denial_scope": "assigned_customers",
+              "field_permissions": [
+                {
+                  "id": "data_supplier",
+                  "label": "供应商信息",
+                  "requires_fields": []
+                },
+                {
+                  "id": "data_customer",
+                  "label": "客户信息",
+                  "requires_fields": []
+                },
+                {
+                  "id": "data_purchase_cost",
+                  "label": "成本及销售金额",
+                  "requires_fields": []
+                },
+                {
+                  "id": "data_profit",
+                  "label": "利润与毛利率",
+                  "requires_fields": [
+                    "data_purchase_cost"
+                  ]
+                },
+                {
+                  "id": "data_pool_price_governance",
+                  "label": "池价格治理",
+                  "requires_fields": []
+                },
+                {
+                  "id": "data_reconciliation",
+                  "label": "销售对账信息",
+                  "requires_fields": [
+                    "data_purchase_cost"
+                  ]
+                }
+              ],
+              "surfaces": [
+                {
+                  "id": "sales_analysis.page",
+                  "label": "销售分析页面",
+                  "display_actions": [],
+                  "data_requirements": [
+                    {
+                      "resource_id": "sales_analysis",
+                      "actions": [
+                        "read"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "legacy_sources": [
+                "page_sales_analysis"
+              ],
+              "notice": "客户归属独立于模板；与本次配置原子保存，覆盖该客户全部历史及后续订单。"
+            },
+            {
+              "id": "purchase_analysis",
+              "label": "采购分析",
+              "migration_state": "planned",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "actions": [
+                {
+                  "id": "read",
+                  "label": "读取",
+                  "kind": "data",
+                  "requires_actions": [],
+                  "requires_fields": []
+                }
+              ],
+              "scopes": [
+                {
+                  "id": "all",
+                  "label": "全公司采购分析",
+                  "relationship_kind": null,
+                  "requires_context": false
+                }
+              ],
+              "denial_scope": null,
+              "field_permissions": [],
+              "surfaces": [],
+              "legacy_sources": [
+                "page_purchase_analytics"
+              ],
+              "notice": "仅为待实施合同描述，S1不可写规范Grant。"
+            },
+            {
+              "id": "retired_pool_rebuild",
+              "label": "已退役池重建",
+              "migration_state": "retired",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "actions": [],
+              "scopes": [],
+              "denial_scope": null,
+              "field_permissions": [],
+              "surfaces": [],
+              "legacy_sources": [],
+              "notice": "保留410，不重新开放。"
+            }
+          ]
+        }
+      },
+      "assertions": [
+        "planned与retired仅只读描述，不能写Grant。",
+        "此fixture仅含3个资源，不表示实际目录数量。"
+      ]
+    },
+    {
+      "id": "me_allow_in_assigned_scope",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/me"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "principal": {
+            "id": 41,
+            "username": "alice",
+            "display_name": "示例甲"
+          },
+          "authorization_epoch": 7,
+          "version": "authz-s1-v1:alice:7:cfg1:policy1:enabled",
+          "actor_capabilities": {
+            "read_accounts": {
+              "effect": "deny",
+              "reason": {
+                "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+                "message": "未获得账号资料读取或编辑能力"
+              }
+            },
+            "edit_account_profiles": {
+              "effect": "deny",
+              "reason": {
+                "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+                "message": "未获得账号资料读取或编辑能力"
+              }
+            },
+            "manage_authorization": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "manage_templates": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "create_accounts": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "reset_account_passwords": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "manage_account_lifecycle": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            }
+          },
+          "resources": {
+            "sales_analysis": {
+              "migration_state": "implemented",
+              "runtime_state": "enabled",
+              "configurable": true,
+              "grant_version": 3,
+              "decisions": {
+                "read": {
+                  "effect": "allow",
+                  "reason": null
+                },
+                "export": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "ACTION_NOT_GRANTED",
+                    "message": "未获得此动作"
+                  }
+                }
+              },
+              "scope_kind": "assigned_customers",
+              "field_permissions": []
+            },
+            "purchase_analysis": {
+              "migration_state": "planned",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "grant_version": 0,
+              "decisions": {
+                "read": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "RESOURCE_NOT_IMPLEMENTED",
+                    "message": "此资源尚未迁移"
+                  }
+                }
+              },
+              "scope_kind": "none",
+              "field_permissions": []
+            },
+            "retired_pool_rebuild": {
+              "migration_state": "retired",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "grant_version": 0,
+              "decisions": {},
+              "scope_kind": "none",
+              "field_permissions": []
+            }
+          },
+          "username": "alice",
+          "can_manage": false,
+          "sales_analysis": {
+            "enabled": true,
+            "read": true,
+            "export": false,
+            "scope": "assigned_customers",
+            "customer_count": 2,
+            "reason": "已获得显式授权",
+            "field_permissions": []
+          }
+        }
+      },
+      "assertions": [
+        "read允许只在assigned_customers范围，不是任意客户允许。",
+        "兼容顶层由同一结果派生；统一UI仅读resources。"
+      ]
+    },
+    {
+      "id": "me_suspended_never_legacy_fallback",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/me"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "schema_version": 1,
+          "authorization_mode": "unified_modules",
+          "catalog_version": "authz-s1-v1",
+          "principal": {
+            "id": 41,
+            "username": "alice",
+            "display_name": "示例甲"
+          },
+          "authorization_epoch": 7,
+          "version": "authz-s1-v1:alice:7:cfg1:policy1:suspended",
+          "actor_capabilities": {
+            "read_accounts": {
+              "effect": "deny",
+              "reason": {
+                "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+                "message": "未获得账号资料读取或编辑能力"
+              }
+            },
+            "edit_account_profiles": {
+              "effect": "deny",
+              "reason": {
+                "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+                "message": "未获得账号资料读取或编辑能力"
+              }
+            },
+            "manage_authorization": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "manage_templates": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "create_accounts": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "reset_account_passwords": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            },
+            "manage_account_lifecycle": {
+              "effect": "deny",
+              "reason": {
+                "code": "NAMED_ADMIN_REQUIRED",
+                "message": "仅有效实名管理员可执行"
+              }
+            }
+          },
+          "resources": {
+            "sales_analysis": {
+              "migration_state": "implemented",
+              "runtime_state": "suspended",
+              "configurable": true,
+              "grant_version": 3,
+              "decisions": {
+                "read": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "RESOURCE_SUSPENDED",
+                    "message": "此资源授权已暂停"
+                  }
+                },
+                "export": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "RESOURCE_SUSPENDED",
+                    "message": "此资源授权已暂停"
+                  }
+                }
+              },
+              "scope_kind": "none",
+              "field_permissions": []
+            },
+            "purchase_analysis": {
+              "migration_state": "planned",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "grant_version": 0,
+              "decisions": {
+                "read": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "RESOURCE_NOT_IMPLEMENTED",
+                    "message": "此资源尚未迁移"
+                  }
+                }
+              },
+              "scope_kind": "none",
+              "field_permissions": []
+            },
+            "retired_pool_rebuild": {
+              "migration_state": "retired",
+              "runtime_state": "legacy",
+              "configurable": false,
+              "grant_version": 0,
+              "decisions": {},
+              "scope_kind": "none",
+              "field_permissions": []
+            }
+          },
+          "username": "alice",
+          "can_manage": false,
+          "sales_analysis": {
+            "enabled": true,
+            "read": false,
+            "export": false,
+            "scope": "none",
+            "customer_count": 0,
+            "reason": "此资源授权已暂停",
+            "field_permissions": []
+          }
+        }
+      },
+      "assertions": [
+        "旧enabled仍为true且read=false；不得回退旧role/perms。",
+        "field_permissions为空。"
+      ]
+    },
+    {
+      "id": "customer_numeric_ids",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/customers?q=示例&limit=50"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "items": [
+            {
+              "id": 7001,
+              "name": "示例客户甲",
+              "raw_name": "示例客户甲"
+            },
+            {
+              "id": 7002,
+              "name": "示例客户乙",
+              "raw_name": "示例客户乙"
+            }
+          ]
+        }
+      },
+      "assertions": []
+    }
+  ]
+}

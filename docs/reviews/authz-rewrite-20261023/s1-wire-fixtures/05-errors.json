@@ -1,0 +1,682 @@
+{
+  "fixture_format": 1,
+  "catalog_version": "authz-s1-v1",
+  "note": "Independent DTO examples only; not complete database seeds or reproducible server fingerprint vectors; no live data.",
+  "cases": [
+    {
+      "id": "stale_epoch_zero_changes",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_EPOCH_CONFLICT",
+            "message": "账号授权已变化，请重新载入",
+            "committed": false,
+            "conflicts": [
+              {
+                "kind": "epoch",
+                "user_id": 41,
+                "expected": 7,
+                "actual": 8
+              }
+            ],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": [
+        "所有Grant/profile/客户关系不变。"
+      ]
+    },
+    {
+      "id": "stale_resource_version_zero_changes",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 2,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_RESOURCE_VERSION_CONFLICT",
+            "message": "资源授权版本已变化",
+            "committed": false,
+            "conflicts": [
+              {
+                "kind": "resource_version",
+                "user_id": 41,
+                "resource_id": "sales_analysis",
+                "expected": 2,
+                "actual": 3
+              }
+            ],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "stale_catalog",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s0-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_CATALOG_CONFLICT",
+            "message": "授权目录已变化",
+            "committed": false,
+            "conflicts": [
+              {
+                "kind": "catalog",
+                "expected": "authz-s0-v1",
+                "actual": "authz-s1-v1"
+              }
+            ],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "stale_template_atomic_metadata_and_module_failure",
+      "request": {
+        "method": "PUT",
+        "path": "/api/role-templates/sales_team",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_version": 2,
+          "metadata": {
+            "name": "不能部分写入"
+          },
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "assigned_customers",
+                "field_permissions": []
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "TEMPLATE_VERSION_CONFLICT",
+            "message": "模板已变化",
+            "committed": false,
+            "conflicts": [
+              {
+                "kind": "template_version",
+                "expected": 2,
+                "actual": 3
+              }
+            ],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": [
+        "metadata和canonical包均未变。"
+      ]
+    },
+    {
+      "id": "old_s0_put_is_retired_in_unified",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice",
+        "json": {
+          "expected_version": 3,
+          "actions": [
+            "read"
+          ],
+          "scope": "assigned_customers",
+          "field_permissions": [],
+          "customer_ids": []
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_LEGACY_ENDPOINT_RETIRED",
+            "message": "请改用 /api/authz/users/alice/modules 并提交账号epoch",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "planned_resource_rejects_entire_account_creation",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "username": "must_not_exist",
+            "password": "Fixture-only-password-04!"
+          },
+          "authorization": {
+            "kind": "explicit",
+            "modules": {
+              "purchase_analysis": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "all",
+                "field_permissions": []
+              }
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_RESOURCE_NOT_CONFIGURABLE",
+            "message": "待实施资源不能配置规范授权",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/authorization/modules/purchase_analysis",
+                "code": "RESOURCE_NOT_CONFIGURABLE",
+                "message": "此资源当前只读"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "username must_not_exist不落库。"
+      ]
+    },
+    {
+      "id": "mixed_profile_empty_legacy_permissions_is_not_ignored",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "不能部分写入"
+          },
+          "permissions": {}
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "LEGACY_AUTHORIZATION_PAYLOAD_UNSUPPORTED",
+            "message": "统一模式不接受旧布尔权限载荷",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/permissions",
+                "code": "LEGACY_FIELD_PRESENT",
+                "message": "出现空对象也不可提交"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "display_name未改；不自动删permissions重试。"
+      ]
+    },
+    {
+      "id": "empty_updates_not_delete_all",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": []
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_INVALID_CONFIGURATION",
+            "message": "updates不能为空",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/updates",
+                "code": "EMPTY_UPDATES",
+                "message": "必须明确至少一个资源命令"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "dependency_error_never_auto_add_cost",
+      "request": {
+        "method": "PUT",
+        "path": "/api/authz/users/alice/modules",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "updates": [
+            {
+              "resource_id": "sales_analysis",
+              "expected_version": 3,
+              "operation": "replace_resource",
+              "configuration": {
+                "actions": [
+                  "read"
+                ],
+                "scope": "all",
+                "field_permissions": [
+                  "data_profit"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_INVALID_CONFIGURATION",
+            "message": "字段依赖不满足",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/updates/0/configuration/field_permissions",
+                "code": "MISSING_FIELD_DEPENDENCY",
+                "message": "data_profit需要data_purchase_cost"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": []
+    },
+    {
+      "id": "bulk_late_target_epoch_conflict_no_partial_apply",
+      "request": {
+        "method": "POST",
+        "path": "/api/accounts/bulk",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "targets": [
+            {
+              "user_id": 41,
+              "username": "alice",
+              "expected_epoch": 7,
+              "expected_resource_versions": {
+                "sales_analysis": 3
+              }
+            }
+          ],
+          "operation": {
+            "kind": "apply_template",
+            "template_code": "sales_team",
+            "expected_template_version": 3,
+            "override_policy": "preserve"
+          },
+          "dry_run": false,
+          "fingerprint": "19a94ea6c069ba97368a6df102da5ea8f84e60f47e0d2f497e6370017e8d78aa"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_PREVIEW_CONFLICT",
+            "message": "预览后目标授权已变化，请重新预览",
+            "committed": false,
+            "conflicts": [
+              {
+                "kind": "epoch",
+                "user_id": 41,
+                "expected": 7,
+                "actual": 8
+              }
+            ],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": [
+        "旧指纹不可自动重算或自动重试。",
+        "全部targets零变化。"
+      ]
+    },
+    {
+      "id": "reset_password_non_admin_forbidden",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice/password",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "expected_epoch": 7,
+          "password": "Fixture-only-password-05!"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_NAMED_ADMIN_REQUIRED",
+            "message": "仅有效实名管理员可重置其他账号密码",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": [
+        "旧account_manage不授予该入口；password_hash/epoch都不变。"
+      ]
+    },
+    {
+      "id": "pdp_unavailable_no_partial_me",
+      "request": {
+        "method": "GET",
+        "path": "/api/authz/me"
+      },
+      "response": {
+        "status": 503,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "AUTHZ_ENGINE_UNAVAILABLE",
+            "message": "授权服务暂不可用",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": []
+          }
+        }
+      },
+      "assertions": [
+        "没有resources allow envelope；不可回退旧权限。"
+      ]
+    },
+    {
+      "id": "forbidden_field_presence_overrides",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "不能部分写入"
+          },
+          "overrides": {}
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "LEGACY_AUTHORIZATION_PAYLOAD_UNSUPPORTED",
+            "message": "该字段不能在普通资料命令中出现",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/overrides",
+                "code": "FIELD_FORBIDDEN",
+                "message": "空值仍视为字段出现"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "全事务零变化，不能按falsy忽略。"
+      ]
+    },
+    {
+      "id": "forbidden_field_presence_keys",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "不能部分写入"
+          },
+          "keys": []
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "LEGACY_AUTHORIZATION_PAYLOAD_UNSUPPORTED",
+            "message": "该字段不能在普通资料命令中出现",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/keys",
+                "code": "FIELD_FORBIDDEN",
+                "message": "空值仍视为字段出现"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "全事务零变化，不能按falsy忽略。"
+      ]
+    },
+    {
+      "id": "forbidden_field_presence_role",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "不能部分写入"
+          },
+          "role": null
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "ACCOUNT_SECURITY_FIELDS_FORBIDDEN",
+            "message": "该字段不能在普通资料命令中出现",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/role",
+                "code": "FIELD_FORBIDDEN",
+                "message": "空值仍视为字段出现"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "全事务零变化，不能按falsy忽略。"
+      ]
+    },
+    {
+      "id": "forbidden_field_presence_template_code",
+      "request": {
+        "method": "PUT",
+        "path": "/api/accounts/alice",
+        "json": {
+          "schema_version": 1,
+          "catalog_version": "authz-s1-v1",
+          "profile": {
+            "display_name": "不能部分写入"
+          },
+          "template_code": null
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Cache-Control": "no-store"
+        },
+        "json": {
+          "detail": {
+            "code": "ACCOUNT_SECURITY_FIELDS_FORBIDDEN",
+            "message": "该字段不能在普通资料命令中出现",
+            "committed": false,
+            "conflicts": [],
+            "field_errors": [
+              {
+                "path": "/template_code",
+                "code": "FIELD_FORBIDDEN",
+                "message": "空值仍视为字段出现"
+              }
+            ]
+          }
+        }
+      },
+      "assertions": [
+        "全事务零变化，不能按falsy忽略。"
+      ]
+    }
+  ]
+}

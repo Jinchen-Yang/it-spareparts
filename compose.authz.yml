@@ -1,0 +1,35 @@
+# D-0026 opt-in candidate stack: docker compose -f docker-compose.yml -f compose.authz.yml ...
+# No host port, ingress network, Hub account or policy database is needed.
+services:
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:0.57.0@sha256:e5e3b150b3cb0090975605254f255164567d67e233634199fb20972e3eaff300
+    command: ["server", "--config=/config/config.yaml"]
+    volumes:
+      - ./deploy/cerbos/config.yaml:/config/config.yaml:ro
+      - ./deploy/cerbos/policies:/policies:ro
+    networks: [authorization]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  app:
+    environment:
+      AUTHORIZATION_MODE: unified_modules
+      AUTHZ_SALES_ANALYSIS_ENABLED: "true"
+      AUTHZ_SALES_ANALYSIS_SUSPENDED: ${AUTHZ_SALES_ANALYSIS_SUSPENDED:-false}
+      CERBOS_URL: http://cerbos:3592
+      CERBOS_TIMEOUT_SECONDS: "2"
+    networks: [default, authorization]
+    depends_on:
+      cerbos:
+        condition: service_started
+
+networks:
+  authorization:
+    internal: true

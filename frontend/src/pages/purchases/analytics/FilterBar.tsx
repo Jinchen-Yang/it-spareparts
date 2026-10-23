@@ -3,6 +3,8 @@
 import { Button, Select, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
+import CheckboxMultiSelect from "../../../components/CheckboxMultiSelect";
+import { sessionStale } from "../../../utils/session";
 import {
   AMOUNT_BASIS_OPTIONS,
   DEFAULT_BASES,
@@ -31,6 +33,9 @@ export interface FilterBarProps {
   costRestricted: boolean;
   /** data_customer=false：客户筛选/分组不可用（后端 fail-closed 403）。 */
   customerRestricted: boolean;
+  /** 面板确认沿用页级所属会话，旧会话草稿不得改写当前 URL。 */
+  ownerToken: string | null;
+  onOwnerStale: () => void;
   onReset: () => void;
 }
 
@@ -55,6 +60,8 @@ export default function FilterBar({
   customersHasMore,
   costRestricted,
   customerRestricted,
+  ownerToken,
+  onOwnerStale,
   onReset,
 }: FilterBarProps) {
   const change = (next: Partial<AnalyticsUrlState>) => patch(next, { resetPage: true });
@@ -99,13 +106,16 @@ export default function FilterBar({
         options={purchasers.map((v) => ({ value: v, label: v }))}
         onChange={(v: string[]) => change({ purchaser: v })}
       />
-      <Select
-        {...multiSelectProps}
-        aria-label="销售人员"
-        placeholder="销售人员（多选）"
+      <CheckboxMultiSelect<string>
+        label="销售人员"
         value={state.salesperson}
         options={salespersons.map((v) => ({ value: v, label: v }))}
-        onChange={(v: string[]) => change({ salesperson: v })}
+        selectionUnit="人"
+        disabled={sessionStale(ownerToken)}
+        onChange={(v) => {
+          if (sessionStale(ownerToken)) { onOwnerStale(); return; }
+          change({ salesperson: v });
+        }}
       />
       {customerRestricted ? (
         <Tooltip title="当前账号无客户信息权限（data_customer），客户筛选不可用">

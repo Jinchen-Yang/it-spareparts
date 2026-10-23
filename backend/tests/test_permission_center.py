@@ -436,29 +436,32 @@ def test_concurrent_admin_removals_leave_one_active_admin(
     monkeypatch.setattr(accounts, "_active_admin_count", controlled_count)
 
     def remove_admin(target: str, actor: str) -> int:
+        from app.authz.principal import VerifiedIdentity
+        identity = VerifiedIdentity(actor, 0, False, "sys_user", {"sub": actor, "role": "admin"})
         with SessionLocal() as session:
             try:
                 if operation == "deactivate":
                     accounts.set_active(
                         target,
-                        accounts.ActiveToggle(is_active=False),
+                        {"is_active": False},
                         session,
-                        ident={"sub": actor, "role": "admin"},
+                        ident=identity,
                         _="admin",
                     )
                 elif operation == "demote":
                     accounts.update_account(
                         target,
-                        accounts.UpdateAccount(role="sales"),
+                        {"role": "sales"},
                         session,
-                        ident={"sub": actor, "role": "admin"},
+                        ident=identity,
                         _="admin",
                     )
                 else:
                     accounts.delete_account(
                         target,
-                        session,
-                        ident={"sub": actor, "role": "admin"},
+                        body=None,
+                        db=session,
+                        ident=identity,
                         _="admin",
                     )
             except HTTPException as exc:

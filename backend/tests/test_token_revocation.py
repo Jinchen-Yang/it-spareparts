@@ -12,9 +12,15 @@ from sqlalchemy import select
 from app import auth, permissions
 from app.api import accounts
 from app.auth import _make_token, _sign, hash_password, verify_token_db
+from app.authz.principal import VerifiedIdentity
 from app.db import SessionLocal
 from app.main import app
 from app.models.system import SysUser
+
+
+def _legacy_admin():
+    # Direct handler tests supply the type normally produced by token validation.
+    return VerifiedIdentity("admin", 0, False, "sys_user", {"sub": "admin", "role": "admin"})
 
 
 def _user(db, username="bob", pw="pw123456", role="sales", tv=0):
@@ -40,8 +46,8 @@ def test_password_reset_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
     assert verify_token_db(tok, db)["sub"] == "bob"          # 改密前有效
-    accounts.reset_password("bob", accounts.PasswordReset(password="newpw12345"), db,
-                            ident={"sub": "admin"}, _="admin")
+    accounts.reset_password("bob", {"password": "newpw12345"}, db,
+                            ident=_legacy_admin(), _="admin")
     db.expire_all()
     with pytest.raises(HTTPException) as e:
         verify_token_db(tok, db)                              # 改密后旧 token 失效
@@ -51,8 +57,8 @@ def test_password_reset_revokes_old_token(db):
 def test_disable_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
-    accounts.set_active("bob", accounts.ActiveToggle(is_active=False), db,
-                        ident={"sub": "admin"}, _="admin")
+    accounts.set_active("bob", {"is_active": False}, db,
+                        ident=_legacy_admin(), _="admin")
     db.expire_all()
     with pytest.raises(HTTPException) as e:
         verify_token_db(tok, db)                              # 停用后旧 token 失效
@@ -62,8 +68,8 @@ def test_disable_revokes_old_token(db):
 def test_permission_change_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
-    accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_profit": False}),
-                            db, ident={"sub": "admin"}, _="admin")
+    accounts.update_account("bob", {"permissions": {"data_profit": False}},
+                            db, ident=_legacy_admin(), _="admin")
     db.expire_all()
     with pytest.raises(HTTPException):
         verify_token_db(tok, db)                              # 改权限后旧 token 失效
@@ -72,8 +78,8 @@ def test_permission_change_revokes_old_token(db):
 def test_displayname_change_does_not_revoke(db):
     _user(db)
     tok = _token_for(db)
-    accounts.update_account("bob", accounts.UpdateAccount(display_name="Bob B"), db,
-                            ident={"sub": "admin"}, _="admin")
+    accounts.update_account("bob", {"display_name": "Bob B"}, db,
+                            ident=_legacy_admin(), _="admin")
     db.expire_all()
     assert verify_token_db(tok, db)["sub"] == "bob"           # 仅改显示名不踢线
 
@@ -86,9 +92,9 @@ def test_salesperson_mapping_change_revokes_old_token(db):
 
     accounts.update_account(
         "bob",
-        accounts.UpdateAccount(salesperson_name="新销售"),
+        {"salesperson_name": "新销售"},
         db,
-        ident={"sub": "admin"},
+        ident=_legacy_admin(),
         _="admin",
     )
 
@@ -127,9 +133,9 @@ def test_concurrent_scope_changes_preserve_every_token_version_increment(db, mon
             ) is not None
             accounts.update_account(
                 "concurrent_scope_user",
-                accounts.UpdateAccount(salesperson_name=value),
+                {"salesperson_name": value},
                 session,
-                ident={"sub": "admin"},
+                ident=_legacy_admin(),
                 _="admin",
             )
 
@@ -187,9 +193,9 @@ def test_concurrent_login_cannot_survive_password_reset_with_stale_claims(
         with SessionLocal() as session:
             accounts.reset_password(
                 "concurrent_login_user",
-                accounts.PasswordReset(password="login-new-password"),
+                {"password": "login-new-password"},
                 session,
-                ident={"sub": "admin", "role": "admin"},
+                ident=_legacy_admin(),
                 _="admin",
             )
 

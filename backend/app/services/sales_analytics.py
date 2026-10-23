@@ -163,6 +163,7 @@ def _order_query(
     brands: list[str] | None = None,
     with_recon_sort: bool = False,
     recon_returns: bool = False,
+    authorization_predicate=None,
 ):
     """销售分析订单基查询：一张销售订单一行（LEFT JOIN 明细聚营收/毛利，无明细行也保留）。
 
@@ -232,6 +233,8 @@ def _order_query(
     else:
         inner = inner.join(sl, sl.order_id == so.id, isouter=True)
     inner = active_orders(inner, so)
+    if authorization_predicate is not None:
+        inner = inner.where(authorization_predicate)
     if date_from is not None:
         inner = inner.where(so.order_date >= date_from)
     if date_to is not None:
@@ -338,7 +341,7 @@ def _latest_snapshot_subquery():
     )
 
 
-def business_type_options(db: Session) -> dict:
+def business_type_options(db: Session, *, authorization_predicate=None) -> dict:
     """业务类型筛选候选取值与计数（D-41 §4：原列「业务类型#」的 14 个原值，不映射）。
 
     只数已生效单；计数为全时间口径（与生产分布对账用）；NULL / 空白归一成 value=None
@@ -347,6 +350,8 @@ def business_type_options(db: Session) -> dict:
     so = FSalesOrder
     dim = _norm_dim(so.business_type)
     stmt = active_orders(select(dim.label("value"), func.count().label("orders")), so)
+    if authorization_predicate is not None:
+        stmt = stmt.where(authorization_predicate)
     # GROUP BY 原始列：SELECT 的归一表达式是分组列上的表达式（PG 合法）。
     stmt = stmt.group_by(so.business_type).order_by(
         func.count().desc(), dim.asc().nulls_last()
@@ -383,6 +388,10 @@ def filter_options(
       amount_*_max / revenue_max 已登记 purchase_cost 组双保险）。
     """
     so = FSalesOrder
+    authorization_predicate = filters.get("authorization_predicate")
+
+    def _scope(stmt):
+        return stmt.where(authorization_predicate) if authorization_predicate is not None else stmt
 
     def _counts(col, *joins):
         dim = _norm_dim(col)
@@ -391,7 +400,7 @@ def filter_options(
             stmt = stmt.join(target, cond, isouter=True)
         stmt = active_orders(stmt, so).group_by(col).order_by(  # GROUP BY 原始列，见上
             func.count().desc(), dim.asc().nulls_last())
-        return [{"value": r.value, "orders": r.orders} for r in db.execute(stmt)]
+        return [{"value": r.value, "orders": r.orders} for r in db.execute(_scope(stmt))]
 
     salespeople = _counts(so.salesperson)
     customer_types: list[dict] = []
@@ -413,7 +422,7 @@ def filter_options(
         stmt = active_orders(stmt, so).group_by(DimCustomer.name_normalized).order_by(
             func.count(so.id).desc(), name.asc()
         ).limit(OPTION_LIST_LIMIT)
-        customers = [{"value": r.value, "orders": r.orders} for r in db.execute(stmt)]
+        customers = [{"value": r.value, "orders": r.orders} for r in db.execute(_scope(stmt))]
 
     sl = FSalesLine
 
@@ -425,7 +434,7 @@ def filter_options(
         ).group_by(col).order_by(func.count(func.distinct(so.id)).desc(),
                                  dim.asc().nulls_last())
         return [{"value": (r.value if r.value is not None else empty_label),
-                 "orders": r.orders} for r in db.execute(stmt)]
+                 "orders": r.orders} for r in db.execute(_scope(stmt))]
 
     categories = _line_counts(sl.category_major, UNCATEGORIZED_LABEL)
     brands = [b for b in _line_counts(sl.brand) if b["value"] is not None]
@@ -751,6 +760,7 @@ def order_detail(
     *,
     include_returns: bool = False,
     as_of: date | None = None,
+    authorization_predicate=None,
 ) -> dict | None:
     """订单下钻：三金额 + 明细行 + 最新对账块 + 对账历史（每个快照一条，D-40 §3 只追加）。
 
@@ -761,7 +771,7 @@ def order_detail(
     无 data_purchase_cost 时明细行金额组合整体置空（见 _order_lines）。"""
 
     today = as_of or business_today()
-    base, cols = _order_query()
+    base, cols = _order_query(authorization_predicate=authorization_predicate)
     row = db.execute(base.where(cols["id"] == order_id)).one_or_none()
     if row is None:
         return None

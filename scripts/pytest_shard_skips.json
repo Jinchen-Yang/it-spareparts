@@ -1,0 +1,9 @@
+{
+  "tests/test_agent_tools.py::test_overview_roundtrip": "真库无该型号",
+  "tests/test_edge_release_control.py::test_mobile_runtime_contract_matches_this_control_host": "release-host binary pin verification is explicitly opt-in",
+  "tests/test_maintenance_collection_plan_xls.py::test_real_sample_read_only_parser_acceptance": "真实样例路径未配置，推迟到 Task 7 只读验收",
+  "tests/test_maintenance_cost_recompute_benchmark.py::test_production_scale_recompute_has_fixed_queries_and_bounded_runtime": "set RUN_MAINT_BENCHMARK=1 to run the production-scale benchmark",
+  "tests/test_redirect_labels.py::test_resolve_part_chain_broken_returns_none": "FK 约束阻止构造孤儿 merged_into_id；防御路径靠 logger 报警",
+  "tests/test_return_receipt_import.py::test_optional_real_standard_workbook_isolated_parse_and_apply": "Set RETURN_RECEIPT_SAMPLE for the local private standard export",
+  "tests/test_v120_release_control.py::test_mobile_probe_real_chrome_pipe_against_loopback_fixture": "release-host Chrome pipe smoke is explicitly opt-in"
+}

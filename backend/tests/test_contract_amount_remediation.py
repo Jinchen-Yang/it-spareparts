@@ -37,8 +37,8 @@ def _seed_contract(
     version: int = 1,
 ) -> None:
     db.execute(text(
-        "INSERT INTO sys_user (username, password_hash, role, is_active) "
-        "VALUES ('remediation-operator', 'not-a-login-secret', 'admin', true)"
+        "INSERT INTO sys_user (username, password_hash, role, is_active, authorization_legacy_seed_eligible) "
+        "VALUES ('remediation-operator', 'not-a-login-secret', 'admin', true, true)"
     ))
     db.execute(text(
         "INSERT INTO maintenance_project "

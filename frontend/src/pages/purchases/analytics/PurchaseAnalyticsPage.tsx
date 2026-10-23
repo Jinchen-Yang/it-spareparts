@@ -338,6 +338,8 @@ export default function PurchaseAnalyticsPage() {
           customersHasMore={options?.customers_has_more ?? false}
           costRestricted={costRestricted}
           customerRestricted={customerRestricted}
+          ownerToken={ownerToken}
+          onOwnerStale={notifyOwnerStale}
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
         />
 

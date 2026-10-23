@@ -189,7 +189,7 @@ _TABLES = [
     "maintenance_project_user_assignment",
     "maintenance_project_contract", "maintenance_project",
     "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
-    "sys_import_job", "sys_user",
+    "sys_import_job", "sys_customer_assignment", "sys_authorization_grant", "sys_authorization_cutover", "sys_user",
     "sys_business_setting",
     # 职位模板（权限中心 v2）：清掉用例改过/新建的模板后重播内置 5 条（下方 _reseed_templates），
     # 否则前一个用例编辑 sales 模板会污染后一个用例新建的账号快照
@@ -210,8 +210,8 @@ def _reseed_templates(conn) -> None:
     for role in _BUILTIN_TEMPLATE_ROLES:
         conn.execute(text(
             "INSERT INTO sys_role_template"
-            " (code, name, base_role, permissions, is_system, is_active, version, created_by)"
-            " VALUES (:c, :n, :c, CAST(:p AS jsonb), true, true, 1, 'conftest')"),
+            " (code, name, base_role, permissions, is_system, is_active, version, created_by, authorization_legacy_seed_eligible)"
+            " VALUES (:c, :n, :c, CAST(:p AS jsonb), true, true, 1, 'conftest', true)"),
             {"c": role, "n": _BUILTIN_TEMPLATE_NAMES[role],
              "p": json.dumps(_perms.effective(role, None))})
 

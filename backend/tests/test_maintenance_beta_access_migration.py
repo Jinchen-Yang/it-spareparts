@@ -41,6 +41,8 @@ def test_upgrade_backfills_every_account_closed_and_downgrade_removes_key(db):
                 template_perms=base,
                 perm_overrides={_KEY: True},
                 permissions=base,
+                # 此夹具代表迁移前旧存量，非 S1 新建的 canonical 账号。
+                authorization_legacy_seed_eligible=True,
             )
         )
     db.commit()

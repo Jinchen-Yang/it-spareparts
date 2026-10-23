@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app import config
 from app.db import get_db
 
@@ -37,6 +38,11 @@ class UserContext:
     department_id: str | None = None
     team_id: str | None = None
     is_authenticated: bool = False
+    authn: str | None = None
+    is_fallback: bool = False
+    token_version: int | None = None
+    # New module field policy remains authoritative even with legacy RBAC disabled.
+    explicit_field_policy: bool = False
 
 
 # 可访问任意上传文件（不受归属限制）的角色——仅 agent 文件 ACL 用（下载/预览）。
@@ -82,7 +88,9 @@ def get_current_user_context(
     鉴权本身仍由 auth.current_role/require_admin 各接口独立把关。
     token 经 verify_token_db 校验吊销（tv/停用）；被吊销/无效 → 兜底 GUEST（数据侧降权，不硬 401）。
     """
-    if not config.ENABLE_RBAC:
+    # Migrated authorization always needs a verified principal, independently of
+    # the legacy RBAC bypass used by non-migrated modules.
+    if not config.ENABLE_RBAC and not get_settings().authz_sales_analysis_enabled:
         return UserContext(user_id=None, role=config.PHASE1_BYPASS_ROLE, is_authenticated=False)
     # RBAC 开启：解析 token，失败/被吊销兜底 GUEST（绝不默认 admin）
     if creds is not None:
@@ -91,7 +99,9 @@ def get_current_user_context(
             data = verify_token_db(creds.credentials, db)
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
                                salesperson_name=data.get("name"),
-                               permissions=data.get("perms"), is_authenticated=True)
+                               permissions=data.get("perms"), is_authenticated=True,
+                               authn=data.get("authn"), is_fallback=bool(data.get("fb")),
+                               token_version=int(data.get("tv", 0)))
         except (DBAPIError, PoolTimeoutError):
             # 数据库不可用不是无效身份；交给 get_db 回滚并返回 504/503，
             # 不能把鉴权查询超时降级成 guest 后误报页面权限不足。
@@ -273,7 +283,7 @@ def is_field_hidden(user_ctx: UserContext | None, field: str) -> bool:
     """该字段对此用户是否被脱敏。供服务层做**结构性**收敛用——字段级 mask 只会把
     叶子值置空，但"型号落在赚钱榜还是亏损榜"这类归属本身就泄漏利润结论，需服务层据此
     决定不返回分类结构（复审三轮 P0：data_profit=false 仍能看出哪个型号赚/亏）。"""
-    if user_ctx is None or not config.ENABLE_RBAC:
+    if user_ctx is None or (not config.ENABLE_RBAC and not user_ctx.explicit_field_policy):
         return False
     return field in _hidden_fields(user_ctx)
 
@@ -284,7 +294,7 @@ def apply_field_visibility(payload: Any, user_ctx: UserContext) -> Any:
     RBAC 开启时递归处理 dict/list：把该用户不可见的字段值置为 MASK_VALUE。
     part overview/利润聚合返回含嵌套 list，必须递归。
     """
-    if not config.ENABLE_RBAC:
+    if not config.ENABLE_RBAC and not user_ctx.explicit_field_policy:
         return payload
     hidden = _hidden_fields(user_ctx)
     if not hidden:
@@ -298,7 +308,7 @@ def prepare_field_visibility(user_ctx: UserContext) -> Callable[[Any], Any]:
     只计算一次既有隐藏字段规则；每次调用仍走同一个递归 _mask。
     closure 只属于本次调用，不按账号、角色或权限对象做全局缓存。
     """
-    hidden = _hidden_fields(user_ctx) if config.ENABLE_RBAC else set()
+    hidden = _hidden_fields(user_ctx) if (config.ENABLE_RBAC or user_ctx.explicit_field_policy) else set()
 
     def apply(payload: Any) -> Any:
         return _mask(payload, hidden) if hidden else payload
