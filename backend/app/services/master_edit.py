@@ -18,6 +18,7 @@ from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
 from app.models.system import SysAuditLog
 from app.pn_catalog import api as catalog
+from app.services.pn_catalog_legacy_guard import require_authority_command
 from app.services import master_data, part_resolver, spec_extract
 
 # 采购可人工维护的字段（编辑这些 → 写进 locked_fields，重导不覆盖）
@@ -208,6 +209,7 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
     force=True 跳过近似仅挡硬重名。所填字段进 locked_fields，master_source=manual，
     reviewed_at=now（人工建档不进"待复核"）。
     """
+    require_authority_command(db, context=None, resource="part_master")
     pn = (pn_std or "").strip().upper()
     if not pn:
         raise MasterEditError("PN 不能为空")
@@ -297,6 +299,7 @@ def edit_part_in_transaction(db: Session, *, pn_std: str, updates: dict,
                               operated_by: str | None = None,
                               principal_id: str | None = None) -> dict | None:
     """编辑任意型号的人工字段。被改字段加入 locked_fields（重导不覆盖）。"""
+    require_authority_command(db, context=None, resource="part_master")
     part = lock_part(db, part_id=part_id, pn_std=pn_std)
     if part is None:
         return None

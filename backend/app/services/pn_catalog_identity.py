@@ -207,21 +207,23 @@ def execute(db: Session, command: IdentityCommand, *, context: CommandContext,
     if command.operation in {"merge", "unmerge"}:
         media.ensure_identity_gallery_members(db, scope)
     display = (context.actor.display_name or context.actor.principal_id)[:64]
+    from app.services.pn_catalog_legacy_guard import _checked_identity_command
     try:
-        if command.operation == "merge":
-            outcome = merge.merge_parts_in_transaction(db, by_id[command.source_part_id].pn_std,
-                by_id[target_id].pn_std, context.reason, display, catalog_context=context)
-            gallery_change = media.merge_gallery_groups(db, command.source_part_id, target_id)
-        elif command.operation == "unmerge":
-            _check_unmerge_ownership(db, command.merge_log_id)
-            merge_log = db.get(ProductMergeLog, command.merge_log_id)
-            source_id = merge_log.source_part_id
-            source_members = {source_id} | set((merge_log.affected_records or {}).get("path_compressed_part_ids") or [])
-            outcome = merge.unmerge_in_transaction(db, command.merge_log_id, display, catalog_context=context)
-            gallery_change = media.unmerge_gallery_groups(db, source_id, target_id, source_members)
-        else:
-            outcome = master_data.review_alias_in_transaction(db, command.alias_id, "reassign",
-                by_id[target_id].pn_std, display, catalog_context=context)
+        with _checked_identity_command(db, context):
+            if command.operation == "merge":
+                outcome = merge.merge_parts_in_transaction(db, by_id[command.source_part_id].pn_std,
+                    by_id[target_id].pn_std, context.reason, display, catalog_context=context)
+                gallery_change = media.merge_gallery_groups(db, command.source_part_id, target_id)
+            elif command.operation == "unmerge":
+                _check_unmerge_ownership(db, command.merge_log_id)
+                merge_log = db.get(ProductMergeLog, command.merge_log_id)
+                source_id = merge_log.source_part_id
+                source_members = {source_id} | set((merge_log.affected_records or {}).get("path_compressed_part_ids") or [])
+                outcome = merge.unmerge_in_transaction(db, command.merge_log_id, display, catalog_context=context)
+                gallery_change = media.unmerge_gallery_groups(db, source_id, target_id, source_members)
+            else:
+                outcome = master_data.review_alias_in_transaction(db, command.alias_id, "reassign",
+                    by_id[target_id].pn_std, display, catalog_context=context)
     except (merge.MergeError, master_data.AliasError) as exc:
         raise CatalogError("identity.invalid_state", str(exc)) from exc
     if gallery_change is not None:

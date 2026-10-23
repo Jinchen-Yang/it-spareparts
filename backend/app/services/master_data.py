@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.pn_catalog import api as catalog
+from app.services.pn_catalog_legacy_guard import require_authority_command
 from app.models.dimensions import DimPart, PartAlias
 from app.models.inventory import Inventory
 from app.models.master_data import (
@@ -43,6 +44,7 @@ def acquire_master_write_lock(db: Session) -> None:
 
 def _capture_all_parts(db: Session) -> dict:
     """Bulk maintenance locks existing parents in the catalog's canonical order."""
+    require_authority_command(db)
     catalog.acquire_identity_lock(db, shared=True)
     return catalog.capture_states(db, list(db.scalars(select(DimPart.id).order_by(DimPart.id))))
 
@@ -145,6 +147,7 @@ def classify_backfill(db: Session) -> dict:
     与锁定字段，绝不覆盖手工结果；分类不出（低置信/整机）的保持原值不动。幂等可重跑。
     产出即支撑「型号查询按品类筛选」：把 2 万多未分类型号打上标准品类。
     """
+    require_authority_command(db, context=None, resource="part_master")
     from collections import defaultdict
 
     from app.services import classify as classify_svc
@@ -531,6 +534,7 @@ def review_alias_in_transaction(db: Session, alias_id: int, action: str, target_
     身份别名（pn_raw==pn_std，即"这个型号其实是另一个型号"）的改指等价于合并，
     必须走合并流程，此处拒绝。
     """
+    require_authority_command(db, context=catalog_context, resource="part_identity")
     from app.models.system import SysAuditLog  # 局部导入避免环
 
     catalog.acquire_identity_lock(db)
@@ -601,6 +605,7 @@ def review_alias(db: Session, alias_id: int, action: str, target_pn: str | None,
 
 def refresh(db: Session) -> dict:
     """字典回填 → 别名/询价关联 → 规格抽取 → 质量扫描 → 质量分。单事务提交。"""
+    require_authority_command(db, context=None, resource="part_master")
     acquire_master_write_lock(db)
     before = _capture_all_parts(db)
     stats = {}

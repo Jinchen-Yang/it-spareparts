@@ -33,6 +33,7 @@ from app.models.purchase import FPurchaseLine
 from app.models.sales import FSalesLine
 from app.models.system import SysAuditLog
 from app.pn_catalog import api as catalog
+from app.services.pn_catalog_legacy_guard import require_authority_command
 
 _log = logging.getLogger("merge")
 
@@ -112,6 +113,7 @@ def _merge_substitutes(db: Session, source: DimPart, target: DimPart) -> dict:
 def merge_parts_in_transaction(db: Session, source_pn: str, target_pn: str, reason: str | None,
                                operated_by: str | None, *, catalog_context=None) -> dict:
     """执行合并（单事务）。返回 merge_log 摘要；调用方负责随后触发重算。"""
+    require_authority_command(db, context=catalog_context, resource="part_identity")
     if source_pn == target_pn:
         raise MergeError("源与目标是同一型号")
     catalog.acquire_identity_lock(db)
@@ -257,6 +259,7 @@ def unmerge_in_transaction(db: Session, merge_log_id: int, operated_by: str | No
     与后续其它合并的 id 集合不重叠，故无需全局 LIFO，只需上述状态前提。
     advisory 队列（候选/质量问题）不在此还原——调用方回滚后应重跑 refresh。
     """
+    require_authority_command(db, context=catalog_context, resource="part_identity")
     from app.services import spec_extract  # 局部导入避免环
 
     catalog.acquire_identity_lock(db)

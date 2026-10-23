@@ -52,8 +52,14 @@ def _verified_import_actor_id(db: Session, ident: dict) -> int | None:
     if not isinstance(ident, dict) or ident.get("authn") != "sys_user" or ident.get("fb"):
         return None
     user = db.scalar(select(SysUser).where(SysUser.username == ident.get("sub"),
-                                           SysUser.is_active.is_(True)))
+                                           SysUser.is_active.is_(True),
+                                           SysUser.deleted_at.is_(None),
+                                           SysUser.token_version == ident.get("tv")).with_for_update(read=True))
     return user.id if user is not None else None
+
+
+def _verified_import_epoch(db: Session, ident: dict) -> int | None:
+    return ident.get("tv") if _verified_import_actor_id(db, ident) is not None else None
 
 
 def _public_import_report(report: dict | None) -> dict | None:
@@ -138,7 +144,12 @@ def _post_import_refresh(
             _log.exception("post-import inventory cost backfill failed")
             db.rollback()
     try:
-        master_data.refresh(db)
+        from app.authz.runtime import is_authoritative
+        if not is_authoritative(db, "part_master"):
+            master_data.refresh(db)
+        else:
+            # Shared source ingestion maintains its own dictionaries/specs in TX.
+            db.rollback()
     except Exception:  # noqa: BLE001
         _log.exception("post-import master data refresh failed")
         db.rollback()
@@ -228,6 +239,7 @@ def upload(
                 name,
                 uploaded_by=ctx.user_id,
                 actor_user_id=_verified_import_actor_id(db, ident),
+                actor_authorization_epoch=_verified_import_epoch(db, ident),
                 mode=mode,
                 auto_assign_maintenance_projects=True,
                 expected_void_fingerprint=expected_fp,
@@ -430,6 +442,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
     try:
         job = db.get(SysImportJob, job_id)
         actor_user_id = job.actor_user_id if job is not None else None
+        actor_epoch = job.actor_authorization_epoch if job is not None else None
         for tmp, name in files:
             try:
                 batch = pipeline.run_import(
@@ -438,6 +451,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                     name,
                     uploaded_by=created_by,
                     actor_user_id=actor_user_id,
+                    actor_authorization_epoch=actor_epoch,
                     mode=mode,
                     import_job_id=job_id,
                     auto_assign_maintenance_projects=True,
@@ -583,6 +597,7 @@ def upload_batch(
         fingerprints = _fingerprints_by_file(payloads, saved)
         job = SysImportJob(created_by=ctx.user_id,
                            actor_user_id=_verified_import_actor_id(db, ident),
+                           actor_authorization_epoch=_verified_import_epoch(db, ident),
                            mode=mode, total_files=len(saved),
                            status="processing")
         db.add(job)

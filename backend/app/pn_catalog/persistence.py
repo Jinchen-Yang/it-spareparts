@@ -273,7 +273,8 @@ def record_legacy_change(db: Session, part_id: int, before: dict | None, *,
 def record_legacy_changes(db: Session, before_by_id: dict[int, dict], *,
                           context: CommandContext, action: str,
                           part_ids: Iterable[int] | None = None,
-                          force_identity_ids: Iterable[int] = ()) -> dict[int, dict]:
+                          force_identity_ids: Iterable[int] = (),
+                          authorization: dict | None = None) -> dict[int, dict]:
     """Batch snapshots and persistence; no per-PN SELECT/flush loop for full refresh."""
     ids = sorted(set(part_ids if part_ids is not None else before_by_id))
     db.flush()
@@ -299,7 +300,7 @@ def record_legacy_changes(db: Session, before_by_id: dict[int, dict], *,
             client_id=context.actor.client_id, request_id=context.request_id,
             actor=context.actor.model_dump(mode="json"),
             context=context.model_dump(mode="json", exclude={"actor", "request_id"}),
-            authorization={}, payload_hash=None, before_revision=revisions["before"][revisions["axis"]],
+            authorization=authorization or {}, payload_hash=None, before_revision=revisions["before"][revisions["axis"]],
             after_revision=revisions["after"][revisions["axis"]], changes=changes, revisions=revisions)
         db.add(event)
         events[pid] = event
